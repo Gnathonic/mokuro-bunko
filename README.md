@@ -62,8 +62,10 @@ The installer manages Python packages only -- CUDA/ROCm drivers must be installe
 | Registered | yes | yes | -- | -- | -- | -- |
 | Uploader | yes | yes | yes | -- | own uploads | -- |
 | Inviter | yes | yes | yes | yes | own uploads | -- |
-| Editor | yes | yes | yes | yes | all | -- |
+| Editor | yes | yes | yes | -- | all | -- |
 | Admin | yes | yes | yes | yes | all | yes |
+
+Inviter and Editor are separate capability branches, not a strict hierarchy. Inviters can create invite codes but can only edit/delete their own uploads. Editors can edit/delete any file but cannot create invites.
 
 ## CLI reference
 
