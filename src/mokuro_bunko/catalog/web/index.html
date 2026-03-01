@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Catalog - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/catalog/styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="mokuro-header">
+        <a href="/" class="mokuro-header__brand">
+            <div class="mokuro-header__logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M8 12h8"/>
+                    <path d="M12 8v8"/>
+                </svg>
+            </div>
+            <span class="mokuro-header__title">Mokuro</span>
+        </a>
+        <nav class="mokuro-header__nav" id="header-nav" data-current="catalog">
+            <a href="/" class="btn btn--ghost btn--sm">Home</a>
+            <a href="/login" class="btn btn--secondary btn--sm">Login</a>
+            <a href="/register" class="btn btn--primary btn--sm">Register</a>
+        </nav>
+    </header>
+
+    <main class="catalog-page">
+        <!-- Breadcrumb -->
+        <nav id="breadcrumb" class="catalog-breadcrumb">
+            <span class="catalog-breadcrumb__item catalog-breadcrumb__item--active">Catalog</span>
+        </nav>
+
+        <div class="catalog-toolbar">
+            <div class="search-bar">
+                <span class="search-bar__icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="8"/>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                    </svg>
+                </span>
+                <input type="text" class="search-bar__input" id="search" placeholder="Search library...">
+            </div>
+        </div>
+
+        <div id="catalog-grid" class="volume-grid">
+            <div class="loading">Loading catalog...</div>
+        </div>
+
+        <div id="catalog-empty" class="empty-state" style="display: none;">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+            </svg>
+            <h3>No volumes found</h3>
+            <p>The library is empty or no matches found.</p>
+        </div>
+    </main>
+
+    <script src="/_static/nav.js"></script>
+    <script src="/catalog/catalog.js"></script>
+</body>
+</html>

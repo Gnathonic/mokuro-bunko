@@ -1,0 +1,45 @@
+# Caddy reverse proxy configuration for mokuro-bunko
+#
+# Caddy provides automatic HTTPS with Let's Encrypt by default.
+#
+# Usage:
+# 1. Copy to /etc/caddy/Caddyfile or ~/.config/caddy/Caddyfile
+# 2. Replace YOUR_DOMAIN with your actual domain
+# 3. Restart Caddy: systemctl restart caddy
+#
+# Note: Caddy will automatically obtain and renew SSL certificates.
+
+YOUR_DOMAIN {
+    # Reverse proxy to mokuro-bunko
+    reverse_proxy localhost:8080 {
+        # Health checks
+        health_uri /
+        health_interval 30s
+        health_timeout 10s
+
+        # Headers
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Increase max body size for manga uploads
+    request_body {
+        max_size 500MB
+    }
+
+    # Logging
+    log {
+        output file /var/log/caddy/mokuro-bunko.log {
+            roll_size 10mb
+            roll_keep 5
+            roll_keep_for 720h
+        }
+    }
+}
+
+# Alternative: Local development without HTTPS
+# localhost:8080 {
+#     reverse_proxy localhost:8081
+# }

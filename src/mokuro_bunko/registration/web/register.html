@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/register/styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="mokuro-header">
+        <a href="/" class="mokuro-header__brand">
+            <div class="mokuro-header__logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M8 12h8"/>
+                    <path d="M12 8v8"/>
+                </svg>
+            </div>
+            <span class="mokuro-header__title">Mokuro</span>
+        </a>
+        <nav class="mokuro-header__nav" id="header-nav" data-current="register">
+            <a href="/" class="btn btn--ghost btn--sm">Home</a>
+            <a href="/catalog" class="btn btn--ghost btn--sm">Catalog</a>
+            <a href="/login" class="btn btn--secondary btn--sm">Login</a>
+        </nav>
+    </header>
+
+    <main class="register-page">
+        <div class="register-card">
+            <div class="register-card__header">
+                <h1 class="register-card__title">Create Account</h1>
+                <p class="register-card__subtitle">Join the Mokuro Bunko community</p>
+            </div>
+
+            <!-- Registration disabled message -->
+            <div id="disabled-message" class="disabled-message">
+                <h2 class="disabled-message__title">Registration Closed</h2>
+                <p class="disabled-message__text">New user registration is currently disabled. Please contact the administrator for access.</p>
+            </div>
+
+            <!-- Pending approval message -->
+            <div id="pending-message" class="pending-message">
+                <h2 class="pending-message__title">Registration Submitted</h2>
+                <p class="pending-message__text">Your account is pending approval. You will be notified when an administrator approves your account.</p>
+            </div>
+
+            <!-- Success message -->
+            <div id="success-message" class="register-alert register-alert--success">
+                Account created successfully! You can now use your credentials with Mokuro Reader.
+            </div>
+
+            <!-- Error message -->
+            <div id="error-message" class="register-alert register-alert--error"></div>
+
+            <!-- Registration form -->
+            <form id="register-form" class="register-form">
+                <div class="form-group">
+                    <label for="username" class="form-label">Username</label>
+                    <input
+                        type="text"
+                        id="username"
+                        name="username"
+                        class="form-input"
+                        required
+                        pattern="[a-zA-Z0-9_-]{3,32}"
+                        autocomplete="username"
+                        placeholder="Choose a username"
+                    >
+                    <p class="form-hint">3-32 characters, letters, numbers, underscores, hyphens</p>
+                    <p id="username-error" class="error-message"></p>
+                </div>
+
+                <div class="form-group">
+                    <label for="password" class="form-label">Password</label>
+                    <input
+                        type="password"
+                        id="password"
+                        name="password"
+                        class="form-input"
+                        required
+                        minlength="8"
+                        autocomplete="new-password"
+                        placeholder="Choose a password"
+                    >
+                    <p class="form-hint">Minimum 8 characters</p>
+                    <p id="password-error" class="error-message"></p>
+                </div>
+
+                <div class="form-group">
+                    <label for="confirm-password" class="form-label">Confirm Password</label>
+                    <input
+                        type="password"
+                        id="confirm-password"
+                        name="confirm-password"
+                        class="form-input"
+                        required
+                        autocomplete="new-password"
+                        placeholder="Confirm your password"
+                    >
+                    <p id="confirm-error" class="error-message"></p>
+                </div>
+
+                <div id="invite-group" class="form-group invite-group">
+                    <label for="invite-code" class="form-label">Invite Code</label>
+                    <input
+                        type="text"
+                        id="invite-code"
+                        name="invite_code"
+                        class="form-input"
+                        placeholder="Enter your invite code"
+                    >
+                    <p id="invite-error" class="error-message"></p>
+                </div>
+
+                <button type="submit" id="submit-btn" class="btn btn--primary btn--full btn--lg">
+                    Create Account
+                </button>
+            </form>
+
+            <p class="login-link">
+                Already have an account? Use your WebDAV client with Basic Auth.
+            </p>
+        </div>
+    </main>
+
+    <script src="/_static/nav.js"></script>
+    <script src="/register/register.js"></script>
+</body>
+</html>

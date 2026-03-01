@@ -1,0 +1,83 @@
+# Mokuro Bunko Server Configuration
+# Copy this file to ~/.config/mokuro-bunko/config.yaml (Linux/macOS)
+# or %LOCALAPPDATA%\mokuro-bunko\config.yaml (Windows)
+
+server:
+  # Host to bind to (0.0.0.0 for all interfaces)
+  host: "0.0.0.0"
+  # Port to listen on
+  port: 8080
+
+storage:
+  # Base path for all data storage
+  # Default: ~/.local/share/mokuro-bunko (Linux/macOS)
+  #          %LOCALAPPDATA%\mokuro-bunko (Windows)
+  base_path: "/var/lib/mokuro-bunko"
+
+registration:
+  # Registration mode:
+  # - disabled: Admin creates all accounts
+  # - self: Open registration with default role
+  # - invite: Invite codes required
+  # - approval: Admin must approve new accounts
+  mode: "self"
+  # Default role for new users (registered, uploader, inviter, or editor)
+  default_role: "registered"
+  # Anonymous WebDAV access controls
+  # - browse: allow PROPFIND/listing without login
+  # - download: allow GET/HEAD file downloads without login
+  allow_anonymous_browse: true
+  allow_anonymous_download: true
+
+cors:
+  # Enable CORS headers
+  enabled: true
+  # Allowed origins (supports * wildcard for port)
+  allowed_origins:
+    - "https://reader.mokuro.app"
+    - "http://localhost:5173"
+    - "http://localhost:*"
+    - "http://127.0.0.1:*"
+  # Allow credentials (cookies, authorization headers)
+  allow_credentials: true
+
+ssl:
+  # Enable HTTPS
+  enabled: false
+  # Auto-generate self-signed certificate
+  auto_cert: false
+  # Path to SSL certificate (required if enabled and not auto_cert)
+  cert_file: ""
+  # Path to SSL private key (required if enabled and not auto_cert)
+  key_file: ""
+
+admin:
+  # Enable admin web panel
+  enabled: true
+  # URL path for admin panel
+  path: "/_admin"
+
+catalog:
+  # Enable public catalog at /catalog
+  enabled: false
+  # Where catalog volume links open for reading
+  reader_url: "https://reader.mokuro.app"
+  # If true, browser requests to / redirect to /catalog/
+  use_as_homepage: false
+
+queue:
+  # Show Queue button in the top navigation bar
+  show_in_nav: false
+  # If false, queue status API requires authenticated user credentials
+  public_access: true
+
+ocr:
+  # OCR backend:
+  # - auto: Detect best available
+  # - cuda: NVIDIA GPU
+  # - rocm: AMD GPU
+  # - cpu: CPU only
+  # - skip: No OCR, WebDAV server only
+  backend: auto
+  # Interval in seconds to check inbox for new files
+  poll_interval: 30

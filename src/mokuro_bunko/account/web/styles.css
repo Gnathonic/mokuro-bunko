@@ -1,0 +1,128 @@
+/* Account page styles */
+
+.account-page {
+    min-height: calc(100vh - 48px);
+    padding: 2rem 1rem;
+}
+
+.account-container {
+    max-width: 640px;
+    margin: 0 auto;
+}
+
+.account-title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 1.5rem;
+}
+
+.account-card {
+    margin-bottom: 1.25rem;
+}
+
+.account-card__title {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    color: var(--text-primary);
+}
+
+.account-card__title--danger {
+    color: var(--error);
+}
+
+.account-card__desc {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    margin-bottom: 1rem;
+}
+
+.account-card--danger {
+    border-color: rgba(248, 113, 113, 0.3);
+}
+
+/* Profile info */
+.profile-info__row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.profile-info__row:last-child {
+    border-bottom: none;
+}
+
+.profile-info__label {
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.profile-info__value {
+    font-size: 0.875rem;
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+/* Stats grid */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1rem;
+}
+
+.stat-item {
+    text-align: center;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-md);
+}
+
+.stat-item__value {
+    display: block;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--accent-primary);
+}
+
+.stat-item__label {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.25rem;
+}
+
+/* Connect field */
+.connect-field {
+    margin-bottom: 1rem;
+}
+
+.connect-field:last-child {
+    margin-bottom: 0;
+}
+
+.connect-field__row {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.connect-field__row .form-input {
+    flex: 1;
+}
+
+/* Responsive */
+@media (max-width: 480px) {
+    .account-page {
+        padding: 1rem 0.75rem;
+    }
+
+    .stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 0.75rem;
+    }
+
+    .connect-field__row {
+        flex-direction: column;
+    }
+}

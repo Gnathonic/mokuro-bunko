@@ -1,0 +1,49 @@
+version: "3.8"
+
+# Docker Compose with Cloudflare Tunnel for secure remote access
+#
+# Prerequisites:
+# 1. Create a Cloudflare tunnel: cloudflared tunnel create mokuro
+# 2. Get your tunnel credentials file
+# 3. Create config.yml for cloudflared
+#
+# Usage:
+#   docker compose -f docker-compose.cloudflared.yml up -d
+
+services:
+  mokuro-bunko:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: mokuro-bunko
+    restart: unless-stopped
+    volumes:
+      - mokuro-data:/data
+    environment:
+      - MOKURO_HOST=0.0.0.0
+      - MOKURO_PORT=8080
+      - MOKURO_STORAGE=/data
+      - MOKURO_REGISTRATION_MODE=invite
+    networks:
+      - mokuro-net
+    # No ports exposed - traffic goes through cloudflared
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: mokuro-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - mokuro-net
+    depends_on:
+      - mokuro-bunko
+
+networks:
+  mokuro-net:
+    driver: bridge
+
+volumes:
+  mokuro-data:
+    driver: local

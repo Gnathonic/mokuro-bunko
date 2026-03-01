@@ -1,0 +1,80 @@
+# Nginx reverse proxy configuration for mokuro-bunko
+#
+# This configuration provides:
+# - HTTPS termination with Let's Encrypt
+# - WebDAV method support
+# - WebSocket support for future features
+# - Proper CORS handling
+#
+# Usage:
+# 1. Copy to /etc/nginx/sites-available/mokuro-bunko
+# 2. Replace YOUR_DOMAIN with your actual domain
+# 3. Run certbot for SSL: certbot --nginx -d YOUR_DOMAIN
+# 4. ln -s /etc/nginx/sites-available/mokuro-bunko /etc/nginx/sites-enabled/
+# 5. nginx -t && systemctl reload nginx
+
+upstream mokuro_backend {
+    server 127.0.0.1:8080;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name YOUR_DOMAIN;
+
+    # Redirect HTTP to HTTPS
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name YOUR_DOMAIN;
+
+    # SSL configuration (will be managed by certbot)
+    ssl_certificate /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    # Increase max body size for manga uploads
+    client_max_body_size 500M;
+
+    # WebDAV methods
+    dav_methods PUT DELETE MKCOL COPY MOVE;
+    dav_ext_methods PROPFIND OPTIONS LOCK UNLOCK;
+
+    location / {
+        proxy_pass http://mokuro_backend;
+        proxy_http_version 1.1;
+
+        # Headers for WebDAV
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # WebSocket support
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+
+        # Buffer settings
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+
+    # Static assets caching
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff2?)$ {
+        proxy_pass http://mokuro_backend;
+        expires 7d;
+        add_header Cache-Control "public, no-transform";
+    }
+}

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Setup - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/setup/setup.css">
+</head>
+<body>
+    <div class="setup-container">
+        <div class="setup-card card">
+            <!-- Step 1: Welcome -->
+            <div class="setup-step active" id="step-welcome">
+                <div class="setup-logo">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="48" height="48">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M8 12h8"/>
+                        <path d="M12 8v8"/>
+                    </svg>
+                </div>
+                <h1 class="setup-title">Welcome to Mokuro Bunko</h1>
+                <p class="setup-description">A self-hosted manga library with OCR support and WebDAV access for Mokuro Reader.</p>
+                <p class="setup-description">Let's set up your server in a few quick steps.</p>
+                <div class="setup-actions">
+                    <button class="btn btn--primary btn--lg" onclick="nextStep()">Get Started</button>
+                </div>
+            </div>
+
+            <!-- Step 2: Create Admin -->
+            <div class="setup-step" id="step-admin">
+                <h2 class="setup-step-title">Create Admin Account</h2>
+                <p class="setup-description">This account will have full access to manage your server.</p>
+                <div class="form-group">
+                    <label for="admin-username" class="form-label">Username</label>
+                    <input type="text" id="admin-username" class="form-input" value="admin"
+                           pattern="[a-zA-Z0-9_-]{3,32}" required
+                           placeholder="admin">
+                    <p class="form-hint">3-32 characters, letters, numbers, underscores, hyphens</p>
+                </div>
+                <div class="form-group">
+                    <label for="admin-password" class="form-label">Password</label>
+                    <input type="password" id="admin-password" class="form-input" required minlength="4"
+                           placeholder="Enter a secure password">
+                </div>
+                <div class="form-group">
+                    <label for="admin-password-confirm" class="form-label">Confirm Password</label>
+                    <input type="password" id="admin-password-confirm" class="form-input" required minlength="4"
+                           placeholder="Confirm your password">
+                </div>
+                <div id="admin-error" class="form-error" style="display:none"></div>
+                <div class="setup-actions">
+                    <button class="btn btn--secondary" onclick="prevStep()">Back</button>
+                    <button class="btn btn--primary" onclick="validateAdmin()">Next</button>
+                </div>
+            </div>
+
+            <!-- Step 3: Registration Mode -->
+            <div class="setup-step" id="step-registration">
+                <h2 class="setup-step-title">Registration Mode</h2>
+                <p class="setup-description">How should new users join your server?</p>
+                <div class="radio-cards">
+                    <label class="radio-card">
+                        <input type="radio" name="reg-mode" value="disabled">
+                        <div class="radio-card__content">
+                            <strong>Disabled</strong>
+                            <p>Only admins can create accounts.</p>
+                        </div>
+                    </label>
+                    <label class="radio-card">
+                        <input type="radio" name="reg-mode" value="self" checked>
+                        <div class="radio-card__content">
+                            <strong>Self Registration</strong>
+                            <p>Anyone can create an account.</p>
+                        </div>
+                    </label>
+                    <label class="radio-card">
+                        <input type="radio" name="reg-mode" value="invite">
+                        <div class="radio-card__content">
+                            <strong>Invite Only</strong>
+                            <p>Users need an invite code from an admin.</p>
+                        </div>
+                    </label>
+                    <label class="radio-card">
+                        <input type="radio" name="reg-mode" value="approval">
+                        <div class="radio-card__content">
+                            <strong>Requires Approval</strong>
+                            <p>Users can sign up but need admin approval.</p>
+                        </div>
+                    </label>
+                </div>
+                <div class="setup-actions">
+                    <button class="btn btn--secondary" onclick="prevStep()">Back</button>
+                    <button class="btn btn--primary" onclick="completeSetup()">Complete Setup</button>
+                </div>
+            </div>
+
+            <!-- Step 4: Done -->
+            <div class="setup-step" id="step-done">
+                <div class="setup-logo setup-logo--success">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="48" height="48">
+                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                        <polyline points="22 4 12 14.01 9 11.01"/>
+                    </svg>
+                </div>
+                <h2 class="setup-step-title">Setup Complete!</h2>
+                <p class="setup-description">Your Mokuro Bunko server is ready to use.</p>
+                <div class="setup-links">
+                    <a href="/_admin" class="btn btn--primary btn--lg">Open Admin Panel</a>
+                    <a href="/" class="btn btn--secondary btn--lg">Go to Home</a>
+                </div>
+            </div>
+
+            <!-- Progress dots -->
+            <div class="setup-progress" id="setup-progress">
+                <span class="setup-dot active" data-step="0"></span>
+                <span class="setup-dot" data-step="1"></span>
+                <span class="setup-dot" data-step="2"></span>
+                <span class="setup-dot" data-step="3"></span>
+            </div>
+        </div>
+    </div>
+
+    <script src="/setup/setup.js"></script>
+</body>
+</html>

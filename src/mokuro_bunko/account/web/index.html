@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Account - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/account/styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="mokuro-header">
+        <a href="/" class="mokuro-header__brand">
+            <div class="mokuro-header__logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M8 12h8"/>
+                    <path d="M12 8v8"/>
+                </svg>
+            </div>
+            <span class="mokuro-header__title">Mokuro</span>
+        </a>
+        <nav class="mokuro-header__nav" id="header-nav" data-current="account">
+            <a href="/catalog" class="btn btn--ghost btn--sm">Catalog</a>
+            <a href="/" class="btn btn--ghost btn--sm">Home</a>
+            <button onclick="logout()" class="btn btn--secondary btn--sm">Logout</button>
+        </nav>
+    </header>
+
+    <main class="account-page">
+        <div class="account-container">
+            <h1 class="account-title">Account</h1>
+
+            <!-- Profile Card -->
+            <div class="card account-card">
+                <h2 class="account-card__title">Profile</h2>
+                <div class="profile-info">
+                    <div class="profile-info__row">
+                        <span class="profile-info__label">Username</span>
+                        <span class="profile-info__value" id="profile-username">-</span>
+                    </div>
+                    <div class="profile-info__row">
+                        <span class="profile-info__label">Role</span>
+                        <span id="profile-role-badge"></span>
+                    </div>
+                    <div class="profile-info__row">
+                        <span class="profile-info__label">Member since</span>
+                        <span class="profile-info__value" id="profile-created">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Reading Stats Card -->
+            <div class="card account-card">
+                <h2 class="account-card__title">Reading Stats</h2>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <span class="stat-item__value" id="stat-volumes">-</span>
+                        <span class="stat-item__label">Volumes</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-item__value" id="stat-pages">-</span>
+                        <span class="stat-item__label">Pages Read</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-item__value" id="stat-characters">-</span>
+                        <span class="stat-item__label">Characters</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-item__value" id="stat-time">-</span>
+                        <span class="stat-item__label">Reading Time</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Connect Reader Card -->
+            <div class="card account-card">
+                <h2 class="account-card__title">Connect Reader</h2>
+                <p class="account-card__desc">Connect Mokuro Reader to this server to start reading.</p>
+                <div class="connect-field">
+                    <label class="form-label">Server URL</label>
+                    <div class="connect-field__row">
+                        <input type="text" id="server-url" class="form-input" readonly>
+                        <button onclick="copyServerUrl()" class="btn btn--secondary" id="copy-btn">Copy</button>
+                    </div>
+                </div>
+                <div class="connect-field">
+                    <a id="deep-link" href="https://reader.mokuro.app" target="_blank" rel="noopener" class="btn btn--primary btn--full">Open in Mokuro Reader</a>
+                </div>
+            </div>
+
+            <!-- Change Password Card -->
+            <div class="card account-card">
+                <h2 class="account-card__title">Change Password</h2>
+                <div id="password-success" class="alert alert--success" style="display:none">Password updated successfully.</div>
+                <div id="password-error" class="alert alert--error" style="display:none"></div>
+                <form id="password-form">
+                    <div class="form-group">
+                        <label for="current-password" class="form-label">Current Password</label>
+                        <input type="password" id="current-password" class="form-input" required autocomplete="current-password" placeholder="Enter current password">
+                    </div>
+                    <div class="form-group">
+                        <label for="new-password" class="form-label">New Password</label>
+                        <input type="password" id="new-password" class="form-input" required minlength="4" autocomplete="new-password" placeholder="Enter new password">
+                    </div>
+                    <div class="form-group">
+                        <label for="confirm-password" class="form-label">Confirm New Password</label>
+                        <input type="password" id="confirm-password" class="form-input" required autocomplete="new-password" placeholder="Confirm new password">
+                    </div>
+                    <button type="submit" id="password-btn" class="btn btn--primary">Update Password</button>
+                </form>
+            </div>
+
+            <!-- Danger Zone Card -->
+            <div class="card account-card account-card--danger">
+                <h2 class="account-card__title account-card__title--danger">Danger Zone</h2>
+                <p class="account-card__desc">Permanently delete your account and all associated data. This action cannot be undone.</p>
+                <button onclick="showDeleteModal()" class="btn btn--danger">Delete Account</button>
+            </div>
+        </div>
+    </main>
+
+    <!-- Delete Account Modal -->
+    <div id="delete-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 class="modal__title">Delete Account</h3>
+                <button class="modal__close" onclick="hideDeleteModal()">&times;</button>
+            </div>
+            <div class="modal__body">
+                <p class="text-secondary mb-3">This will permanently delete your account and all reading data. Enter your password to confirm.</p>
+                <div class="form-group">
+                    <label for="delete-password" class="form-label">Password</label>
+                    <input type="password" id="delete-password" class="form-input" placeholder="Enter your password">
+                </div>
+                <div id="delete-error" class="alert alert--error" style="display:none"></div>
+            </div>
+            <div class="modal__footer">
+                <button class="btn btn--secondary" onclick="hideDeleteModal()">Cancel</button>
+                <button class="btn btn--danger" id="delete-confirm-btn" onclick="deleteAccount()">Delete Account</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/_static/nav.js"></script>
+    <script src="/account/account.js"></script>
+</body>
+</html>

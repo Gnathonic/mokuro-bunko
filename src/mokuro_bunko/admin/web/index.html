@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/_admin/styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="mokuro-header">
+        <a href="/" class="mokuro-header__brand">
+            <div class="mokuro-header__logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M8 12h8"/>
+                    <path d="M12 8v8"/>
+                </svg>
+            </div>
+            <span class="mokuro-header__title">Mokuro</span>
+        </a>
+        <nav class="mokuro-header__nav" id="header-nav" data-current="admin">
+            <a href="/catalog" class="btn btn--ghost btn--sm">Catalog</a>
+            <a href="/account" class="btn btn--ghost btn--sm">Account</a>
+            <button onclick="logout()" class="btn btn--secondary btn--sm">Logout</button>
+        </nav>
+    </header>
+
+    <div class="admin-container">
+        <nav class="tabs">
+            <button class="tab active" data-tab="users">Users</button>
+            <button class="tab" data-tab="invites">Invites</button>
+            <button class="tab" data-tab="audit">Audit</button>
+            <button class="tab" data-tab="settings">Settings</button>
+            <button class="tab" data-tab="status">Status</button>
+            <button class="tab" data-tab="connectivity">Connectivity</button>
+        </nav>
+
+        <main class="admin-main">
+            <!-- Users Tab -->
+            <section id="users-tab" class="tab-content active">
+                <div class="toolbar">
+                    <h2 class="toolbar__title">Users</h2>
+                    <button id="add-user-btn" class="btn btn--primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="12" y1="5" x2="12" y2="19"/>
+                            <line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                        Add User
+                    </button>
+                </div>
+
+                <div class="table-container">
+                    <table class="table" id="users-table">
+                        <thead>
+                            <tr>
+                                <th>Username</th>
+                                <th>Role</th>
+                                <th>Status</th>
+                                <th>Notes</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="users-body">
+                            <tr><td colspan="6" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Invites Tab -->
+            <section id="invites-tab" class="tab-content">
+                <div class="toolbar">
+                    <h2 class="toolbar__title">Invite Codes</h2>
+                    <button id="generate-invite-btn" class="btn btn--primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="12" y1="5" x2="12" y2="19"/>
+                            <line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                        Generate Invite
+                    </button>
+                </div>
+
+                <div class="table-container">
+                    <table class="table" id="invites-table">
+                        <thead>
+                            <tr>
+                                <th>Code</th>
+                                <th>Role</th>
+                                <th>Status</th>
+                                <th>Expires</th>
+                                <th>Used By</th>
+                                <th>Invited By</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="invites-body">
+                            <tr><td colspan="7" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Audit Tab -->
+            <section id="audit-tab" class="tab-content">
+                <div class="toolbar">
+                    <h2 class="toolbar__title">Audit Log</h2>
+                    <button class="btn btn--secondary btn--sm" onclick="loadAudit()">Refresh</button>
+                </div>
+
+                <div class="table-container">
+                    <table class="table" id="audit-table">
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Actor</th>
+                                <th>Action</th>
+                                <th>Target</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="audit-body">
+                            <tr><td colspan="5" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Settings Tab -->
+            <section id="settings-tab" class="tab-content">
+                <div class="toolbar">
+                    <h2 class="toolbar__title">Settings</h2>
+                </div>
+
+                <div class="settings-grid">
+                    <!-- Registration -->
+                    <div class="settings-section card">
+                        <h3 class="settings-section__title">Registration & Access</h3>
+                        <div class="form-group">
+                            <label for="settings-reg-mode" class="form-label">Mode</label>
+                            <select id="settings-reg-mode" class="form-select">
+                                <option value="disabled">Disabled</option>
+                                <option value="self">Self Registration</option>
+                                <option value="invite">Invite Only</option>
+                                <option value="approval">Requires Approval</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="settings-reg-role" class="form-label">Default Role</label>
+                            <select id="settings-reg-role" class="form-select">
+                                <option value="registered">Registered</option>
+                                <option value="uploader">Uploader</option>
+                                <option value="editor">Editor</option>
+                                <option value="inviter">Inviter</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" id="settings-anon-webdav"> Allow anonymous webdav browsing/downloads
+                            </label>
+                            <p class="form-hint">When disabled, login is required for WebDAV listing and file downloads.</p>
+                        </div>
+                        <button class="btn btn--primary" onclick="saveRegistrationSettings()">Save</button>
+                    </div>
+
+                    <!-- CORS -->
+                    <div class="settings-section card">
+                        <h3 class="settings-section__title">CORS</h3>
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" id="settings-cors-enabled"> Enabled
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Allowed Origins</label>
+                            <div id="cors-origins-list" class="origin-list"></div>
+                            <div class="origin-add">
+                                <input type="text" id="cors-new-origin" class="form-input" placeholder="https://example.com">
+                                <button class="btn btn--secondary btn--sm" onclick="addCorsOrigin()">Add</button>
+                            </div>
+                        </div>
+                        <button class="btn btn--primary" onclick="saveCorsSettings()">Save</button>
+                    </div>
+
+                    <!-- Catalog -->
+                    <div class="settings-section card">
+                        <h3 class="settings-section__title">Catalog</h3>
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" id="settings-catalog-enabled"> Public catalog enabled
+                            </label>
+                            <p class="form-hint">Show the /catalog web page with volume covers and titles. Does not affect WebDAV access.</p>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" id="settings-catalog-as-home"> Replace home page with catalog
+                            </label>
+                            <p class="form-hint">When enabled, browser requests to / go directly to /catalog/.</p>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Reader URL</label>
+                            <p class="form-hint">Where to open volumes for reading.</p>
+                            <div class="radio-group">
+                                <label class="radio-label">
+                                    <input type="radio" name="reader-url" value="https://reader.mokuro.app" id="reader-url-prod"> Production (reader.mokuro.app)
+                                </label>
+                                <label class="radio-label">
+                                    <input type="radio" name="reader-url" value="http://localhost:5173" id="reader-url-dev"> Development (localhost:5173)
+                                </label>
+                                <label class="radio-label">
+                                    <input type="radio" name="reader-url" value="https://mokuro-reader-tan.vercel.app" id="reader-url-beta"> Beta (mokuro-reader-tan.vercel.app)
+                                </label>
+                                <label class="radio-label">
+                                    <input type="radio" name="reader-url" value="custom" id="reader-url-custom"> Custom
+                                </label>
+                            </div>
+                            <input type="text" id="reader-url-custom-input" class="form-input mt-2" placeholder="https://my-reader.example.com" style="display:none">
+                        </div>
+                        <button class="btn btn--primary" onclick="saveCatalogSettings()">Save</button>
+                    </div>
+
+                    <!-- OCR -->
+                    <div class="settings-section card">
+                        <h3 class="settings-section__title">OCR</h3>
+                        <div class="form-group">
+                            <label class="form-label">Mode</label>
+                            <p class="form-hint">Backend selection is launch-only.</p>
+                            <div class="status-list">
+                                <div class="status-list__row"><span>Configured backend</span><strong id="ocr-configured-backend">-</strong></div>
+                                <div class="status-list__row"><span>Installed backend</span><strong id="ocr-installed-backend">-</strong></div>
+                                <div class="status-list__row"><span>OCR env path</span><strong id="ocr-env-path">-</strong></div>
+                                <div class="status-list__row"><span>Supported on this host</span><strong id="ocr-supported-backends">-</strong></div>
+                            </div>
+                            <p class="form-hint" id="ocr-cli-hint">Use CLI to change OCR backend.</p>
+                            <p class="form-hint" id="ocr-driver-hint"></p>
+                        </div>
+                        <div class="form-group">
+                            <label for="settings-ocr-interval" class="form-label">Poll Interval (seconds)</label>
+                            <input type="number" id="settings-ocr-interval" class="form-input" min="1" value="30">
+                        </div>
+                        <button class="btn btn--primary" onclick="saveOcrSettings()">Save Poll Interval</button>
+                    </div>
+
+                    <!-- Queue -->
+                    <div class="settings-section card">
+                        <h3 class="settings-section__title">Queue</h3>
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" id="settings-queue-show-nav"> Show Queue button in top navigation
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">
+                                <input type="checkbox" id="settings-queue-public"> Public queue status page/API
+                            </label>
+                            <p class="form-hint">When disabled, queue access requires authenticated user credentials.</p>
+                        </div>
+                        <button class="btn btn--primary" onclick="saveQueueSettings()">Save</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Status Tab -->
+            <section id="status-tab" class="tab-content">
+                <div class="toolbar">
+                    <h2 class="toolbar__title">Server Status</h2>
+                    <button class="btn btn--secondary btn--sm" onclick="loadStatus()">Refresh</button>
+                </div>
+
+                <div class="status-grid">
+                    <div class="status-card card">
+                        <div class="status-card__label">Uptime</div>
+                        <div class="status-card__value" id="status-uptime">-</div>
+                    </div>
+                    <div class="status-card card">
+                        <div class="status-card__label">Host</div>
+                        <div class="status-card__value" id="status-host">-</div>
+                    </div>
+                    <div class="status-card card">
+                        <div class="status-card__label">Users</div>
+                        <div class="status-card__value" id="status-users">-</div>
+                    </div>
+                    <div class="status-card card">
+                        <div class="status-card__label">Volumes</div>
+                        <div class="status-card__value" id="status-volumes">-</div>
+                    </div>
+                </div>
+
+                <div class="card mt-4">
+                    <h3 class="settings-section__title">Storage</h3>
+                    <div class="form-group">
+                        <div class="status-storage-path" id="status-storage-path">-</div>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="status-disk-bar">
+                            <div class="progress-bar__fill" id="status-disk-fill"></div>
+                        </div>
+                        <div class="progress-bar-labels">
+                            <span id="status-disk-used">-</span>
+                            <span id="status-disk-total">-</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Connectivity Tab -->
+            <section id="connectivity-tab" class="tab-content">
+                <div class="toolbar">
+                    <h2 class="toolbar__title">Connectivity</h2>
+                </div>
+
+                <!-- Cloudflare Tunnel -->
+                <div class="connectivity-section card">
+                    <div class="connectivity-section__header">
+                        <h3 class="settings-section__title">Cloudflare Tunnel</h3>
+                        <span class="status-indicator" id="tunnel-status-dot"></span>
+                    </div>
+                    <p class="form-hint mb-3">Create a temporary public URL for your server using Cloudflare's quick tunnel.</p>
+                    <div class="form-group" id="tunnel-url-group" style="display:none">
+                        <label class="form-label">Tunnel URL</label>
+                        <div class="invite-code-display">
+                            <input type="text" id="tunnel-url" class="form-input" readonly>
+                            <button class="btn btn--secondary btn--sm" onclick="copyTunnelUrl()">Copy</button>
+                        </div>
+                    </div>
+                    <div class="connectivity-section__actions">
+                        <button class="btn btn--primary" id="tunnel-start-btn" onclick="startTunnel()">Start Tunnel</button>
+                        <button class="btn btn--danger" id="tunnel-stop-btn" onclick="stopTunnel()" style="display:none">Stop Tunnel</button>
+                        <span class="text-muted" id="tunnel-unavailable" style="display:none">cloudflared not installed</span>
+                    </div>
+                </div>
+
+                <!-- DynDNS -->
+                <div class="connectivity-section card mt-4">
+                    <div class="connectivity-section__header">
+                        <h3 class="settings-section__title">Dynamic DNS</h3>
+                        <span class="status-indicator" id="dyndns-status-dot"></span>
+                    </div>
+                    <p class="form-hint mb-3">Keep a DNS record updated with your public IP address.</p>
+
+                    <div class="settings-grid">
+                        <div>
+                            <div class="form-group">
+                                <label for="dyndns-provider" class="form-label">Provider</label>
+                                <select id="dyndns-provider" class="form-select">
+                                    <option value="duckdns">DuckDNS</option>
+                                    <option value="generic">Generic</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="dyndns-domain" class="form-label">Domain</label>
+                                <input type="text" id="dyndns-domain" class="form-input" placeholder="myserver.duckdns.org">
+                            </div>
+                            <div class="form-group">
+                                <label for="dyndns-token" class="form-label">Token</label>
+                                <input type="password" id="dyndns-token" class="form-input" placeholder="API token">
+                            </div>
+                        </div>
+                        <div>
+                            <div class="form-group" id="dyndns-url-group">
+                                <label for="dyndns-update-url" class="form-label">Update URL (generic only)</label>
+                                <input type="text" id="dyndns-update-url" class="form-input" placeholder="https://provider.com/update?ip={ip}">
+                                <p class="form-hint">Use {ip}, {domain}, {token} as template variables.</p>
+                            </div>
+                            <div class="form-group">
+                                <label for="dyndns-interval" class="form-label">Update Interval (seconds)</label>
+                                <input type="number" id="dyndns-interval" class="form-input" min="30" value="300">
+                            </div>
+                            <div class="form-group" id="dyndns-last-status">
+                                <label class="form-label">Last Update</label>
+                                <div class="text-secondary" id="dyndns-last-update">-</div>
+                                <div class="text-secondary" id="dyndns-last-ip"></div>
+                                <div class="text-secondary" id="dyndns-last-error" style="color: var(--error)"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="connectivity-section__actions">
+                        <button class="btn btn--primary" onclick="saveDynDNSSettings()">Save Settings</button>
+                        <button class="btn btn--secondary" id="dyndns-start-btn" onclick="startDynDNS()">Start</button>
+                        <button class="btn btn--danger" id="dyndns-stop-btn" onclick="stopDynDNS()" style="display:none">Stop</button>
+                        <button class="btn btn--secondary" onclick="testDynDNS()">Test Update</button>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- Add User Modal -->
+    <div id="add-user-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 class="modal__title">Add User</h3>
+                <button type="button" class="modal__close" data-close-modal>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <form id="add-user-form">
+                <div class="modal__body">
+                    <div class="form-group">
+                        <label for="new-username" class="form-label">Username</label>
+                        <input type="text" id="new-username" name="username" class="form-input" required
+                               pattern="[a-zA-Z0-9_-]{3,32}"
+                               placeholder="Enter username">
+                        <p class="form-hint">3-32 characters, letters, numbers, underscores, hyphens</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="new-password" class="form-label">Password</label>
+                        <input type="password" id="new-password" name="password" class="form-input" required minlength="4"
+                               placeholder="Enter password">
+                    </div>
+                    <div class="form-group">
+                        <label for="new-role" class="form-label">Role</label>
+                        <select id="new-role" name="role" class="form-select">
+                            <option value="registered">Registered</option>
+                            <option value="uploader">Uploader</option>
+                            <option value="editor">Editor</option>
+                            <option value="inviter">Inviter</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal__footer">
+                    <button type="button" class="btn btn--secondary" data-close-modal>Cancel</button>
+                    <button type="submit" class="btn btn--primary">Create User</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Generate Invite Modal -->
+    <div id="generate-invite-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 class="modal__title">Generate Invite</h3>
+                <button type="button" class="modal__close" data-close-modal>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <form id="generate-invite-form">
+                <div class="modal__body">
+                    <div class="form-group">
+                        <label for="invite-role" class="form-label">Role</label>
+                        <select id="invite-role" name="role" class="form-select">
+                            <option value="registered">Registered</option>
+                            <option value="uploader">Uploader</option>
+                            <option value="editor">Editor</option>
+                            <option value="inviter">Inviter</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="invite-expires" class="form-label">Expires In</label>
+                        <select id="invite-expires" name="expires" class="form-select">
+                            <option value="1h">1 Hour</option>
+                            <option value="1d">1 Day</option>
+                            <option value="7d" selected>7 Days</option>
+                            <option value="30d">30 Days</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal__footer">
+                    <button type="button" class="btn btn--secondary" data-close-modal>Cancel</button>
+                    <button type="submit" class="btn btn--primary">Generate</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Invite Code Display Modal -->
+    <div id="invite-code-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 class="modal__title">Invite Code Generated</h3>
+                <button type="button" class="modal__close" data-close-modal>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal__body">
+                <div class="invite-code-display">
+                    <input type="text" id="invite-code-value" class="form-input" readonly>
+                    <button type="button" id="copy-invite-btn" class="btn btn--secondary">Copy</button>
+                </div>
+                <p class="form-hint mt-2">Share this code with the user. It can only be used once.</p>
+            </div>
+            <div class="modal__footer">
+                <button type="button" class="btn btn--primary" data-close-modal>Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Change Role Modal -->
+    <div id="change-role-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 class="modal__title">Change Role</h3>
+                <button type="button" class="modal__close" data-close-modal>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <form id="change-role-form">
+                <input type="hidden" id="change-role-username" name="username">
+                <div class="modal__body">
+                    <div class="form-group">
+                        <label class="form-label">User</label>
+                        <p class="text-secondary" id="change-role-user-display"></p>
+                    </div>
+                    <div class="form-group">
+                        <label for="change-role-select" class="form-label">New Role</label>
+                        <select id="change-role-select" name="role" class="form-select">
+                            <option value="registered">Registered</option>
+                            <option value="uploader">Uploader</option>
+                            <option value="editor">Editor</option>
+                            <option value="inviter">Inviter</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal__footer">
+                    <button type="button" class="btn btn--secondary" data-close-modal>Cancel</button>
+                    <button type="submit" class="btn btn--primary">Update Role</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Edit Notes Modal -->
+    <div id="edit-notes-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 class="modal__title">Edit User Notes</h3>
+                <button type="button" class="modal__close" data-close-modal>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <form id="edit-notes-form">
+                <input type="hidden" id="edit-notes-username" name="username">
+                <div class="modal__body">
+                    <div class="form-group">
+                        <label class="form-label">User</label>
+                        <p class="text-secondary" id="edit-notes-user-display"></p>
+                    </div>
+                    <div class="form-group">
+                        <label for="edit-notes-text" class="form-label">Notes</label>
+                        <textarea id="edit-notes-text" name="notes" class="form-input" rows="6" placeholder="Admin notes for this user"></textarea>
+                    </div>
+                </div>
+                <div class="modal__footer">
+                    <button type="button" class="btn btn--secondary" data-close-modal>Cancel</button>
+                    <button type="submit" class="btn btn--primary">Save Notes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Confirm Delete Modal -->
+    <div id="confirm-delete-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal__header">
+                <h3 class="modal__title">Confirm Delete</h3>
+                <button type="button" class="modal__close" data-close-modal>
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/>
+                        <line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal__body">
+                <p id="confirm-delete-message" class="text-secondary"></p>
+            </div>
+            <div class="modal__footer">
+                <button type="button" class="btn btn--secondary" data-close-modal>Cancel</button>
+                <button type="button" id="confirm-delete-btn" class="btn btn--danger">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast notification -->
+    <div class="toast-container">
+        <div id="toast" class="toast"></div>
+    </div>
+
+    <script src="/_static/nav.js"></script>
+    <script src="/_admin/admin.js"></script>
+</body>
+</html>

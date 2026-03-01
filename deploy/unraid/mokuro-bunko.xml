@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>mokuro-bunko</Name>
+  <Repository>ghcr.io/nathan/mokuro-bunko:unraid-cuda</Repository>
+  <Registry>https://ghcr.io</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/nathan/mokuro-bunko</Support>
+  <Project>https://github.com/nathan/mokuro-bunko</Project>
+  <Overview>Mokuro Bunko server for mokuro-reader with optional CUDA OCR. Unraid template with NVIDIA runtime support.</Overview>
+  <Category>Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/nathan/mokuro-bunko/main/deploy/unraid/mokuro-bunko.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/nathan/mokuro-bunko/main/docs/assets/icon.png</Icon>
+  <ExtraParams>--runtime=nvidia</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled>0</DateInstalled>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Unraid NVIDIA driver plugin when using CUDA OCR.</Requires>
+
+  <Config Name="Web UI Port" Target="8080" Default="8080" Mode="tcp" Description="HTTP port for mokuro-bunko" Type="Port" Display="always" Required="true" Mask="false"/>
+  <Config Name="Library Data" Target="/data" Default="/mnt/user/appdata/mokuro-bunko/data" Mode="rw" Description="Persistent library storage" Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Config Path" Target="/config" Default="/mnt/user/appdata/mokuro-bunko/config" Mode="rw" Description="Config directory (config.yaml lives here)" Type="Path" Display="always" Required="true" Mask="false"/>
+
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID to run as (Unraid nobody=99)" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID to run as (Unraid users=100)" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="UMASK" Target="UMASK" Default="002" Mode="" Description="Umask for created files" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="TAKE_OWNERSHIP" Target="TAKE_OWNERSHIP" Default="false" Mode="" Description="Set true to chown /data and /config on boot" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+
+  <Config Name="MOKURO_CONFIG" Target="MOKURO_CONFIG" Default="/config/config.yaml" Mode="" Description="Config file path" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="MOKURO_HOST" Target="MOKURO_HOST" Default="0.0.0.0" Mode="" Description="Bind host" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="MOKURO_PORT" Target="MOKURO_PORT" Default="8080" Mode="" Description="Bind port" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="MOKURO_STORAGE" Target="MOKURO_STORAGE" Default="/data" Mode="" Description="Storage base path inside container" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+
+  <Config Name="OCR Backend" Target="MOKURO_OCR_BACKEND" Default="auto" Mode="" Description="auto|cuda|rocm|cpu|skip" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="OCR Auto Install" Target="OCR_AUTO_INSTALL" Default="false" Mode="" Description="Set true to run install-ocr at startup" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OCR Env Path" Target="MOKURO_BUNKO_OCR_ENV" Default="/data/.ocr-env" Mode="" Description="Persistent OCR venv path" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+
+  <Config Name="NVIDIA_VISIBLE_DEVICES" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="GPU visibility for NVIDIA runtime" Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="NVIDIA_DRIVER_CAPABILITIES" Target="NVIDIA_DRIVER_CAPABILITIES" Default="compute,utility" Mode="" Description="NVIDIA driver capabilities" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+</Container>

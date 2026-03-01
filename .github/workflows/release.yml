@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          playwright install chromium
+
+      - name: Run all tests
+        run: pytest -v
+
+  build-binaries:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: macos-latest
+            platform: macos-arm64
+          - os: windows-latest
+            platform: windows-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install shiv build
+
+      - name: Build wheel
+        run: python -m build --wheel
+
+      - name: Build binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          pip wheel --no-deps --wheel-dir=build .
+          WHEEL=$(ls build/*.whl | head -1)
+          python -m shiv \
+            --compressed \
+            --python "/usr/bin/env python3" \
+            --output-file dist/mokuro-bunko-${{ matrix.platform }} \
+            --entry-point mokuro_bunko.__main__:main \
+            "$WHEEL" \
+            wsgidav cheroot pyyaml bcrypt watchdog cryptography click
+          chmod +x dist/mokuro-bunko-${{ matrix.platform }}
+
+      - name: Build binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          mkdir -p dist
+          pip wheel --no-deps --wheel-dir=build .
+          $wheel = Get-ChildItem build\*.whl | Select-Object -First 1
+          python -m shiv `
+            --compressed `
+            --python "python3" `
+            --output-file dist\mokuro-bunko-${{ matrix.platform }}.pyz `
+            --entry-point mokuro_bunko.__main__:main `
+            $wheel.FullName `
+            wsgidav cheroot pyyaml bcrypt watchdog cryptography click
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.platform }}
+          path: dist/mokuro-bunko-*
+
+  build-docker:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: false
+          tags: mokuro-bunko:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Save Docker image
+        run: |
+          docker save mokuro-bunko:${{ github.ref_name }} | gzip > docker-image.tar.gz
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: docker-image.tar.gz
+
+  create-release:
+    needs: [build-binaries, build-docker]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/binary-*/mokuro-bunko-*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

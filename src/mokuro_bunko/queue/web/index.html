@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR Queue - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/queue/styles.css">
+</head>
+<body>
+    <header class="mokuro-header">
+        <a href="/" class="mokuro-header__brand">
+            <div class="mokuro-header__logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M8 12h8"/>
+                    <path d="M12 8v8"/>
+                </svg>
+            </div>
+            <span class="mokuro-header__title">Mokuro</span>
+        </a>
+        <nav class="mokuro-header__nav" id="header-nav" data-current="queue">
+            <a href="/catalog" class="btn btn--ghost btn--sm">Catalog</a>
+        </nav>
+    </header>
+
+    <main class="queue-page">
+        <h1 class="queue-page__title">OCR Queue</h1>
+        <p class="queue-page__subtitle">
+            Backend: <span id="backend" class="badge">-</span>
+        </p>
+
+        <!-- Current Job -->
+        <section class="queue-section" id="current-section">
+            <h2 class="queue-section__title">Currently Processing</h2>
+            <div id="current-job" class="current-job current-job--empty">
+                <p class="current-job__idle">Idle - no active OCR job</p>
+            </div>
+        </section>
+
+        <!-- Pending OCR -->
+        <section class="queue-section">
+            <h2 class="queue-section__title">
+                Pending OCR
+                <span id="pending-ocr-count" class="badge badge--muted">0</span>
+            </h2>
+            <div id="pending-ocr-list" class="pending-list">
+                <p class="pending-list__empty">No volumes waiting for OCR</p>
+            </div>
+        </section>
+
+        <!-- Pending Thumbnails -->
+        <section class="queue-section">
+            <h2 class="queue-section__title">
+                Pending Thumbnails
+                <span id="pending-thumb-count" class="badge badge--muted">0</span>
+            </h2>
+            <p id="pending-thumb-text" class="queue-section__detail">No volumes waiting for thumbnails</p>
+        </section>
+    </main>
+
+    <script src="/_static/nav.js"></script>
+    <script src="/queue/queue.js"></script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+[Unit]
+Description=Mokuro Bunko Server
+Documentation=https://github.com/nathan/mokuro-bunko
+After=network.target
+
+[Service]
+Type=simple
+User=mokuro
+Group=mokuro
+WorkingDirectory=/var/lib/mokuro-bunko
+
+# Configuration
+Environment=MOKURO_HOST=127.0.0.1
+Environment=MOKURO_PORT=8080
+Environment=MOKURO_STORAGE=/var/lib/mokuro-bunko/storage
+
+# Start command
+ExecStart=/usr/local/bin/mokuro-bunko serve
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/mokuro-bunko
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

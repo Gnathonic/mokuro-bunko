@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  mokuro-bunko:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.unraid
+    image: mokuro-bunko:unraid-cuda
+    container_name: mokuro-bunko
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /mnt/user/appdata/mokuro-bunko/data:/data
+      - /mnt/user/appdata/mokuro-bunko/config:/config
+    environment:
+      - PUID=99
+      - PGID=100
+      - UMASK=002
+      - MOKURO_CONFIG=/config/config.yaml
+      - MOKURO_OCR_BACKEND=auto
+      - MOKURO_BUNKO_OCR_ENV=/data/.ocr-env
+      - OCR_AUTO_INSTALL=false
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    # For compose v2:
+    gpus: all
