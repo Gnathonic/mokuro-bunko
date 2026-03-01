@@ -331,9 +331,13 @@ class TestPermissionHierarchy:
         editor_perms = get_role_permissions("editor")
         assert uploader_perms.issubset(editor_perms)
 
-        # admin > editor
+        # inviter > editor
+        inviter_perms = get_role_permissions("inviter")
+        assert editor_perms.issubset(inviter_perms)
+
+        # admin > inviter
         admin_perms = get_role_permissions("admin")
-        assert editor_perms.issubset(admin_perms)
+        assert inviter_perms.issubset(admin_perms)
 
     def test_only_admin_has_admin_permission(self) -> None:
         """Test only admin role has ADMIN permission."""

@@ -56,16 +56,16 @@ The installer manages Python packages only -- CUDA/ROCm drivers must be installe
 
 ## User roles
 
-| Role | Browse | Download | Upload | Invite | Edit/Delete | Admin |
-|------|--------|----------|--------|--------|-------------|-------|
+| Role | Browse | Download | Upload | Edit/Delete | Invite | Admin |
+|------|--------|----------|--------|-------------|--------|-------|
 | Anonymous | configurable | configurable | -- | -- | -- | -- |
 | Registered | yes | yes | -- | -- | -- | -- |
-| Uploader | yes | yes | yes | -- | own uploads | -- |
-| Inviter | yes | yes | yes | yes | own uploads | -- |
-| Editor | yes | yes | yes | -- | all | -- |
-| Admin | yes | yes | yes | yes | all | yes |
+| Uploader | yes | yes | yes | own uploads | -- | -- |
+| Editor | yes | yes | yes | all | -- | -- |
+| Inviter | yes | yes | yes | all | yes | -- |
+| Admin | yes | yes | yes | all | yes | yes |
 
-Inviter and Editor are separate capability branches, not a strict hierarchy. Inviters can create invite codes but can only edit/delete their own uploads. Editors can edit/delete any file but cannot create invites.
+Roles are a strict hierarchy: Admin > Inviter > Editor > Uploader > Registered > Anonymous. Each role inherits all capabilities of the roles below it.
 
 ## CLI reference
 
