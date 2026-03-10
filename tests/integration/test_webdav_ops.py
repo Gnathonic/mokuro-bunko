@@ -53,6 +53,7 @@ class WSGITestClient:
             "SERVER_NAME": "localhost",
             "SERVER_PORT": "8080",
             "SERVER_PROTOCOL": "HTTP/1.1",
+            "HTTP_HOST": "localhost:8080",
             "wsgi.version": (1, 0),
             "wsgi.url_scheme": "http",
             "wsgi.input": io.BytesIO(content or b""),
@@ -479,6 +480,103 @@ class TestDelete:
         )
         assert response.status_code in (400, 403, 404, 409)
         assert outside.exists()
+
+
+class TestMove:
+    """Tests for MOVE (rename) operations."""
+
+    def test_move_library_file_as_admin_preserves_sidecars_and_owner(
+        self,
+        client: WSGITestClient,
+        test_storage: Path,
+        test_db: Database,
+    ) -> None:
+        """Admin can rename a volume file and keep its generated sidecars."""
+        upload = client.put(
+            "/mokuro-reader/rename-me.cbz",
+            content=make_valid_cbz_bytes(),
+            headers={"Authorization": make_auth_header("uploader", "pass1234")},
+        )
+        assert upload.status_code in (200, 201, 204)
+
+        base = test_storage / "library" / "rename-me"
+        (base.with_suffix(".mokuro")).write_text("{}", encoding="utf-8")
+        (Path(str(base) + ".mokuro.gz")).write_bytes(b"gz")
+        (base.with_suffix(".webp")).write_bytes(b"thumb")
+        (base.with_suffix(".nocover")).write_text("", encoding="utf-8")
+
+        response = client.request(
+            "MOVE",
+            "/mokuro-reader/rename-me.cbz",
+            headers={
+                "Authorization": make_auth_header("admin", "pass1234"),
+                "Destination": "http://localhost:8080/mokuro-reader/renamed.cbz",
+                "Overwrite": "T",
+            },
+        )
+        assert response.status_code in (200, 201, 204)
+
+        renamed = test_storage / "library" / "renamed"
+        assert not base.with_suffix(".cbz").exists()
+        assert not base.with_suffix(".mokuro").exists()
+        assert not (Path(str(base) + ".mokuro.gz")).exists()
+        assert not base.with_suffix(".webp").exists()
+        assert not base.with_suffix(".nocover").exists()
+
+        assert renamed.with_suffix(".cbz").exists()
+        assert renamed.with_suffix(".mokuro").exists()
+        assert (Path(str(renamed) + ".mokuro.gz")).exists()
+        assert renamed.with_suffix(".webp").exists()
+        assert renamed.with_suffix(".nocover").exists()
+
+        assert test_db.get_volume_owner("rename-me.cbz") is None
+        assert test_db.get_volume_owner("renamed.cbz") == "uploader"
+
+    def test_move_series_folder_as_admin_preserves_sidecars_and_owner(
+        self,
+        client: WSGITestClient,
+        test_storage: Path,
+        test_db: Database,
+    ) -> None:
+        """Admin can rename a series folder without losing OCR artifacts."""
+        base = test_storage / "library" / "series" / "vol1"
+        (base.with_suffix(".mokuro")).write_text("{}", encoding="utf-8")
+        (Path(str(base) + ".mokuro.gz")).write_bytes(b"gz")
+        (base.with_suffix(".webp")).write_bytes(b"thumb")
+        (base.with_suffix(".nocover")).write_text("", encoding="utf-8")
+        test_db.record_volume_upload("series/vol1.cbz", "uploader")
+
+        response = client.request(
+            "MOVE",
+            "/mokuro-reader/series",
+            headers={
+                "Authorization": make_auth_header("admin", "pass1234"),
+                "Destination": "http://localhost:8080/mokuro-reader/series-renamed",
+                "Overwrite": "T",
+                "Depth": "infinity",
+            },
+        )
+        assert response.status_code in (200, 201, 204)
+
+        old_base = test_storage / "library" / "series" / "vol1"
+        new_base = test_storage / "library" / "series-renamed" / "vol1"
+
+        assert not (test_storage / "library" / "series").exists()
+        assert (test_storage / "library" / "series-renamed").is_dir()
+        assert not old_base.with_suffix(".cbz").exists()
+        assert not old_base.with_suffix(".mokuro").exists()
+        assert not (Path(str(old_base) + ".mokuro.gz")).exists()
+        assert not old_base.with_suffix(".webp").exists()
+        assert not old_base.with_suffix(".nocover").exists()
+
+        assert new_base.with_suffix(".cbz").exists()
+        assert new_base.with_suffix(".mokuro").exists()
+        assert (Path(str(new_base) + ".mokuro.gz")).exists()
+        assert new_base.with_suffix(".webp").exists()
+        assert new_base.with_suffix(".nocover").exists()
+
+        assert test_db.get_volume_owner("series/vol1.cbz") is None
+        assert test_db.get_volume_owner("series-renamed/vol1.cbz") == "uploader"
 
 
 class TestMkcol:

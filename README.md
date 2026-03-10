@@ -13,21 +13,7 @@ A self-hosted manga library server with WebDAV, built-in OCR processing, and mul
 - Manages users with role-based permissions (anonymous browse, registered, uploader, editor, admin)
 - Provides a web catalog UI for browsing the library and an admin panel for user/config management
 
-## Changelog
-
-### 0.1.1
-
-- **Fix: 503 Service Unavailable on Windows.** Cheroot worker threads can die from unhandled Windows socket errors ([cheroot#375](https://github.com/cherrypy/cheroot/issues/375), [cheroot#710](https://github.com/cherrypy/cheroot/issues/710)), eventually leaving zero threads to process requests. Added a thread pool watchdog that detects dead threads and replaces them, plus a resilient serve loop that recovers from the interrupt flag a dying thread sets.
-- **Fix: Windows compatibility.** `os.rename()` replaced with `os.replace()` for atomic file moves (Windows fails if the destination exists). `os.umask()`/`os.chmod()` guarded on Windows where they have no effect on NTFS.
-- **Fix: SQLite concurrency.** Enabled WAL journal mode, `busy_timeout`, and longer connection timeout to prevent database locking under concurrent access.
-- **Audit logging for account self-deletion.** Deleting your own account now logs a `self_delete_account` audit event before removal.
-- **Soft-delete users.** Deleting a user sets status to `deleted` instead of removing the row, preserving audit trail and upload ownership records.
-- **30-day audit log retention.** Audit entries older than 30 days are automatically pruned.
-- **Debug request logging.** Set `MOKURO_DEBUG=1` to log every request with thread name, method, path, status code, and timing to stderr.
-
-### 0.1.0
-
-- Initial release.
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Quick start
 
