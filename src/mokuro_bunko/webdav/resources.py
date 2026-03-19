@@ -292,25 +292,6 @@ class MokuroFileResource(DAVNonCollection):
             return None
         return mapper.virtual_to_physical(dest_path, self._get_actor_username())
 
-    def _move_related_sidecars(self, dest_physical: Path) -> None:
-        """Move generated OCR sidecars alongside a renamed CBZ."""
-        if self.file_path.suffix.lower() != ".cbz":
-            return
-
-        source_base = self.file_path.with_suffix("")
-        dest_base = dest_physical.with_suffix("")
-        for suffix in self._VOLUME_SIDECAR_SUFFIXES:
-            source_sidecar = Path(f"{source_base}{suffix}")
-            if not source_sidecar.exists():
-                continue
-            dest_sidecar = Path(f"{dest_base}{suffix}")
-            dest_sidecar.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                dest_sidecar.unlink(missing_ok=True)
-            except OSError:
-                pass
-            os.replace(source_sidecar, dest_sidecar)
-
     def _audit(self, action: str, *, details: Optional[dict[str, Any]] = None) -> None:
         db = self._get_database()
         if db is None:
@@ -444,7 +425,7 @@ class MokuroFileResource(DAVNonCollection):
         lower = self.file_path.name.lower()
         if lower.endswith(".cbz"):
             base = self.file_path.with_suffix("")
-            for suffix in (".mokuro", ".mokuro.gz", ".webp", ".nocover"):
+            for suffix in self._VOLUME_SIDECAR_SUFFIXES:
                 sidecar = Path(f"{base}{suffix}")
                 try:
                     sidecar.unlink(missing_ok=True)
@@ -459,7 +440,7 @@ class MokuroFileResource(DAVNonCollection):
         self._audit("delete")
 
     def handle_move(self, dest_path: str) -> bool:
-        """Handle direct file moves natively, including OCR sidecars."""
+        """Handle direct file moves natively without touching sibling sidecars."""
         dest_physical = self._resolve_destination_path(dest_path)
         if dest_physical is None:
             return False
@@ -477,7 +458,6 @@ class MokuroFileResource(DAVNonCollection):
 
         dest_physical.parent.mkdir(parents=True, exist_ok=True)
         os.replace(self.file_path, dest_physical)
-        self._move_related_sidecars(dest_physical)
 
         db = self._get_database()
         if db is not None and old_rel is not None and new_rel is not None:

@@ -249,6 +249,52 @@ class TestPropfind:
         content = response.text
         assert "vol1.cbz" in content
 
+    def test_propfind_mokuro_reader_depth_infinity_authenticated_injects_progress(
+        self, client: WSGITestClient
+    ) -> None:
+        """Authenticated Depth: infinity should inject per-user JSON into shared cache."""
+        anonymous = client.request(
+            "PROPFIND",
+            "/mokuro-reader",
+            headers={"Depth": "infinity"},
+        )
+        assert anonymous.status_code == 207
+        assert "volume-data.json" not in anonymous.text
+
+        authenticated = client.request(
+            "PROPFIND",
+            "/mokuro-reader",
+            headers={
+                "Depth": "infinity",
+                "Authorization": make_auth_header("reader", "pass1234"),
+            },
+        )
+        assert authenticated.status_code == 207
+        assert "volume-data.json" in authenticated.text
+
+    def test_propfind_root_depth_infinity_authenticated_injects_progress(
+        self, client: WSGITestClient
+    ) -> None:
+        """Root Depth: infinity should include logged-in user's progress files."""
+        anonymous = client.request(
+            "PROPFIND",
+            "/",
+            headers={"Depth": "infinity"},
+        )
+        assert anonymous.status_code == 207
+        assert "volume-data.json" not in anonymous.text
+
+        authenticated = client.request(
+            "PROPFIND",
+            "/",
+            headers={
+                "Depth": "infinity",
+                "Authorization": make_auth_header("reader", "pass1234"),
+            },
+        )
+        assert authenticated.status_code == 207
+        assert "volume-data.json" in authenticated.text
+
     def test_propfind_inbox(self, client: WSGITestClient) -> None:
         """Test PROPFIND on inbox is not exposed."""
         response = client.request(
@@ -491,7 +537,7 @@ class TestMove:
         test_storage: Path,
         test_db: Database,
     ) -> None:
-        """Admin can rename a volume file and keep its generated sidecars."""
+        """Admin rename behaves like a plain filesystem move for a single file."""
         upload = client.put(
             "/mokuro-reader/rename-me.cbz",
             content=make_valid_cbz_bytes(),
@@ -518,16 +564,16 @@ class TestMove:
 
         renamed = test_storage / "library" / "renamed"
         assert not base.with_suffix(".cbz").exists()
-        assert not base.with_suffix(".mokuro").exists()
-        assert not (Path(str(base) + ".mokuro.gz")).exists()
-        assert not base.with_suffix(".webp").exists()
-        assert not base.with_suffix(".nocover").exists()
+        assert base.with_suffix(".mokuro").exists()
+        assert (Path(str(base) + ".mokuro.gz")).exists()
+        assert base.with_suffix(".webp").exists()
+        assert base.with_suffix(".nocover").exists()
 
         assert renamed.with_suffix(".cbz").exists()
-        assert renamed.with_suffix(".mokuro").exists()
-        assert (Path(str(renamed) + ".mokuro.gz")).exists()
-        assert renamed.with_suffix(".webp").exists()
-        assert renamed.with_suffix(".nocover").exists()
+        assert not renamed.with_suffix(".mokuro").exists()
+        assert not (Path(str(renamed) + ".mokuro.gz")).exists()
+        assert not renamed.with_suffix(".webp").exists()
+        assert not renamed.with_suffix(".nocover").exists()
 
         assert test_db.get_volume_owner("rename-me.cbz") is None
         assert test_db.get_volume_owner("renamed.cbz") == "uploader"

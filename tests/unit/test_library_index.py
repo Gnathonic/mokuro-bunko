@@ -79,3 +79,24 @@ def test_library_index_pending_ocr_is_fifo_by_created_time(tmp_path: Path) -> No
     index = LibraryIndexCache(library, ttl=60.0)
     snapshot = index.get_snapshot()
     assert snapshot.pending_ocr == (("Series D", "v01"), ("Series D", "v02"))
+
+
+def test_library_index_ignores_orphan_sidecars(tmp_path: Path) -> None:
+    """Sidecars without a matching CBZ should not create phantom catalog volumes."""
+    library = tmp_path / "library"
+    series = library / "Series E"
+    series.mkdir(parents=True)
+
+    (series / "renamed.cbz").write_bytes(b"cbz")
+    (series / "old-name.mokuro.gz").write_text("sidecar", encoding="utf-8")
+    (series / "old-name.webp").write_bytes(b"webp")
+    (series / "old-name.nocover").write_text("", encoding="utf-8")
+
+    index = LibraryIndexCache(library, ttl=60.0)
+    snapshot = index.get_snapshot()
+
+    assert len(snapshot.series) == 1
+    assert [v.name for v in snapshot.series[0].volumes] == ["renamed"]
+    assert snapshot.series[0].volumes[0].cover is None
+    assert snapshot.pending_ocr == (("Series E", "renamed"),)
+    assert snapshot.pending_thumbnails == 1
