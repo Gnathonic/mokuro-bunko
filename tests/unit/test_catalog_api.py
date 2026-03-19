@@ -51,8 +51,8 @@ def test_library_marks_ocr_pending(tmp_path: Path) -> None:
     assert vol2["ocr_pending"] is False
 
 
-def test_series_parses_mokuro_gz_volume_name(tmp_path: Path) -> None:
-    """`.mokuro.gz` files map to the correct logical volume name."""
+def test_series_ignores_sidecar_only_stems(tmp_path: Path) -> None:
+    """Sidecar-only stems should not appear as catalog volumes."""
     library = tmp_path / "library"
     series = library / "Series B"
     series.mkdir(parents=True)
@@ -67,12 +67,8 @@ def test_series_parses_mokuro_gz_volume_name(tmp_path: Path) -> None:
     state, start_response = _start_response_capture()
     body = _read_json_response(api._get_series(start_response, "Series B"))
 
-    assert state["status"] == "200 OK"
-    volumes = body["volumes"]
-    assert len(volumes) == 1
-    assert volumes[0]["name"] == "vol3"
-    # No CBZ present, so this should not be considered pending OCR.
-    assert volumes[0]["ocr_pending"] is False
+    assert state["status"] == "404 Not Found"
+    assert body["error"] == "Series not found"
 
 
 def test_unicode_series_lookup_via_query_string(tmp_path: Path) -> None:

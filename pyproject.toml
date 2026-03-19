@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mokuro-bunko"
-version = "0.1.1"
+version = "0.1.3"
 description = "A WebDAV server for Mokuro reader with shared manga library, per-user reading progress, and optional OCR processing"
 readme = "README.md"
 license = "MPL-2.0"

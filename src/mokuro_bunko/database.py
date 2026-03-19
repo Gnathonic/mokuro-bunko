@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -137,23 +138,25 @@ class Database:
         """
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(
+            self.db_path, timeout=30, check_same_thread=False
+        )
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._init_schema()
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        """Context manager for database connections."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        """Context manager providing serialised access to the persistent connection."""
+        with self._lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     @staticmethod
     def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:

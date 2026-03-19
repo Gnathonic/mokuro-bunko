@@ -99,19 +99,14 @@ class LibraryIndexCache:
                 if series_name.startswith("."):
                     continue
 
+                # Index logical volumes from CBZ files only, so sidecar-only stems
+                # left behind by plain filesystem operations do not become phantom volumes.
                 volume_names: set[str] = set()
-                standalone_cover: Optional[str] = None
 
                 for file_name in sorted(filenames):
                     lower_name = file_name.lower()
                     if lower_name.endswith(".cbz"):
                         volume_names.add(file_name[:-len(".cbz")])
-                    elif lower_name.endswith(".mokuro.gz"):
-                        volume_names.add(file_name[:-len(".mokuro.gz")])
-                    elif lower_name.endswith(".mokuro"):
-                        volume_names.add(file_name[:-len(".mokuro")])
-                    elif lower_name.endswith(".webp") and standalone_cover is None:
-                        standalone_cover = file_name
 
                 volumes: list[VolumeSnapshot] = []
                 series_cover: Optional[str] = None
@@ -141,9 +136,6 @@ class LibraryIndexCache:
                         pending_ocr.append((self._created_timestamp(cbz_path), series_name, volume_name))
                     if has_cbz and f"{volume_name}.webp" not in filenames and f"{volume_name}.nocover" not in filenames:
                         pending_thumbnails += 1
-
-                if series_cover is None and standalone_cover is not None:
-                    series_cover = f"{series_name}/{standalone_cover}"
 
                 if volumes:
                     series_items.append(

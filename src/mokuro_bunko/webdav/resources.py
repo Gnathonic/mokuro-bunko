@@ -12,6 +12,7 @@ files are shared and per-user data is isolated.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import zipfile
 from datetime import datetime
@@ -224,6 +225,8 @@ class PathMapper:
 class MokuroFileResource(DAVNonCollection):
     """WebDAV resource for files."""
 
+    _VOLUME_SIDECAR_SUFFIXES = (".mokuro", ".mokuro.gz", ".webp", ".nocover")
+
     # Static property list — avoids calling getters to probe existence (8 calls
     # × 33k resources = 264k method calls saved on a Depth:infinity PROPFIND).
     _PROP_NAMES = [
@@ -272,6 +275,22 @@ class MokuroFileResource(DAVNonCollection):
             return str(self.file_path.resolve().relative_to(mapper.library_path.resolve()))
         except ValueError:
             return None
+
+    def _get_mapper(self) -> Optional[PathMapper]:
+        provider = self.provider
+        if not hasattr(provider, "path_mapper"):
+            return None
+        return provider.path_mapper  # type: ignore[return-value]
+
+    def _resolve_destination_path(self, dest_path: str) -> Optional[Path]:
+        mapper = self._get_mapper()
+        if mapper is None:
+            return None
+        source_type = mapper.get_path_type(self.path)
+        dest_type = mapper.get_path_type(dest_path)
+        if source_type not in {"library", "progress"} or dest_type != source_type:
+            return None
+        return mapper.virtual_to_physical(dest_path, self._get_actor_username())
 
     def _audit(self, action: str, *, details: Optional[dict[str, Any]] = None) -> None:
         db = self._get_database()
@@ -406,7 +425,7 @@ class MokuroFileResource(DAVNonCollection):
         lower = self.file_path.name.lower()
         if lower.endswith(".cbz"):
             base = self.file_path.with_suffix("")
-            for suffix in (".mokuro", ".mokuro.gz", ".webp", ".nocover"):
+            for suffix in self._VOLUME_SIDECAR_SUFFIXES:
                 sidecar = Path(f"{base}{suffix}")
                 try:
                     sidecar.unlink(missing_ok=True)
@@ -420,42 +439,66 @@ class MokuroFileResource(DAVNonCollection):
             db.forget_volume_upload(rel)
         self._audit("delete")
 
+    def handle_move(self, dest_path: str) -> bool:
+        """Handle direct file moves natively without touching sibling sidecars."""
+        dest_physical = self._resolve_destination_path(dest_path)
+        if dest_physical is None:
+            return False
+
+        mapper = self._get_mapper()
+        old_rel = self._relative_under_library()
+        new_rel = None
+        if mapper is not None:
+            try:
+                new_rel = str(
+                    dest_physical.resolve().relative_to(mapper.library_path.resolve())
+                )
+            except ValueError:
+                new_rel = None
+
+        dest_physical.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(self.file_path, dest_physical)
+
+        db = self._get_database()
+        if db is not None and old_rel is not None and new_rel is not None:
+            db.rename_volume_upload(old_rel, new_rel)
+
+        self._audit("move", details={"destination": dest_path})
+        return True
+
+    def support_recursive_move(self, dest_path: str) -> bool:
+        return False
+
     def copy_move_single(
         self,
         dest_path: str,
         is_move: bool,
     ) -> bool:
         """Copy or move this resource."""
-        provider = self.provider
-        if hasattr(provider, "path_mapper"):
-            mapper: PathMapper = provider.path_mapper
-            username = None
-            user_data = self.environ.get("mokuro.user")
-            if user_data:
-                username = user_data.get("username")
-            dest_physical = mapper.virtual_to_physical(dest_path, username)
-
-            if dest_physical:
-                dest_physical.parent.mkdir(parents=True, exist_ok=True)
-                if is_move:
-                    os.replace(self.file_path, dest_physical)
-                else:
-                    import shutil
-                    shutil.copy2(self.file_path, dest_physical)
-                db = self._get_database()
-                if db is not None:
-                    old_rel = self._relative_under_library()
-                    try:
-                        new_rel = str(dest_physical.resolve().relative_to(mapper.library_path.resolve()))
-                    except ValueError:
-                        new_rel = None
-                    if is_move and old_rel is not None and new_rel is not None:
-                        db.rename_volume_upload(old_rel, new_rel)
-                self._audit(
-                    "move" if is_move else "copy",
-                    details={"destination": dest_path},
-                )
-                return True
+        mapper = self._get_mapper()
+        dest_physical = self._resolve_destination_path(dest_path)
+        if mapper is not None and dest_physical is not None:
+            dest_physical.parent.mkdir(parents=True, exist_ok=True)
+            if is_move:
+                os.replace(self.file_path, dest_physical)
+            else:
+                shutil.copy2(self.file_path, dest_physical)
+            db = self._get_database()
+            if db is not None:
+                old_rel = self._relative_under_library()
+                try:
+                    new_rel = str(
+                        dest_physical.resolve().relative_to(mapper.library_path.resolve())
+                    )
+                except ValueError:
+                    new_rel = None
+                if is_move and old_rel is not None and new_rel is not None:
+                    db.rename_volume_upload(old_rel, new_rel)
+            self._audit(
+                "move" if is_move else "copy",
+                details={"destination": dest_path},
+            )
+            return True
         return False
 
 
@@ -550,6 +593,27 @@ class MokuroFolderResource(DAVCollection):
         if self.folder_path is None:
             return None
         return safe_resolve_under(self.folder_path, name)
+
+    def _resolve_destination_path(self, dest_path: str) -> Optional[Path]:
+        if self.path_mapper.get_path_type(dest_path) != "library":
+            return None
+        return self.path_mapper.virtual_to_physical(dest_path, self._get_actor_username())
+
+    def _get_library_volume_paths(self) -> list[str]:
+        """Collect CBZ paths relative to the library root before a folder move."""
+        if self.folder_path is None:
+            return []
+
+        library_root = self.path_mapper.library_path.resolve()
+        volume_paths: list[str] = []
+        for candidate in self.folder_path.rglob("*"):
+            if candidate.suffix.lower() != ".cbz":
+                continue
+            try:
+                volume_paths.append(str(candidate.resolve().relative_to(library_root)))
+            except ValueError:
+                continue
+        return volume_paths
 
     def get_creation_date(self) -> Optional[float]:
         stat_result = self._get_stat()
@@ -802,6 +866,56 @@ class MokuroFolderResource(DAVCollection):
 
         raise ValueError(f"Cannot create collection at {member_path}")
 
+    def copy_move_single(
+        self,
+        dest_path: str,
+        is_move: bool,
+    ) -> bool:
+        """Create the destination collection for generic COPY/MOVE handling."""
+        dest_physical = self._resolve_destination_path(dest_path)
+        if dest_physical is None:
+            return False
+        dest_physical.mkdir(parents=True, exist_ok=True)
+        return True
+
+    def support_recursive_move(self, dest_path: str) -> bool:
+        return (
+            self.folder_path is not None
+            and self._resolve_destination_path(dest_path) is not None
+        )
+
+    def move_recursive(self, dest_path: str) -> list[tuple[str, DAVError]]:
+        """Move a folder tree atomically, preserving OCR sidecars and ownership."""
+        if self.folder_path is None:
+            raise DAVError(403, "Forbidden")
+
+        dest_physical = self._resolve_destination_path(dest_path)
+        if dest_physical is None:
+            raise DAVError(403, "Forbidden")
+
+        old_rel_prefix = self._relative_under_library()
+        new_rel_prefix = None
+        try:
+            new_rel_prefix = str(
+                dest_physical.resolve().relative_to(self.path_mapper.library_path.resolve())
+            )
+        except ValueError:
+            new_rel_prefix = None
+
+        volume_paths = self._get_library_volume_paths()
+        dest_physical.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(self.folder_path, dest_physical)
+
+        db = self._get_database()
+        if db is not None and old_rel_prefix is not None and new_rel_prefix is not None:
+            for old_rel in volume_paths:
+                suffix = old_rel[len(old_rel_prefix):].lstrip("/")
+                new_rel = f"{new_rel_prefix}/{suffix}" if suffix else new_rel_prefix
+                db.rename_volume_upload(old_rel, new_rel)
+
+        self._audit("move", details={"destination": dest_path})
+        return []
+
     def delete(self) -> None:
         """Delete this folder."""
         if self.folder_path and self.folder_path.exists():
@@ -809,7 +923,6 @@ class MokuroFolderResource(DAVCollection):
             rel = self._relative_under_library()
             if db is not None and rel:
                 db.forget_volume_uploads_under_prefix(rel)
-            import shutil
             shutil.rmtree(self.folder_path)
             self._audit("delete")
 
