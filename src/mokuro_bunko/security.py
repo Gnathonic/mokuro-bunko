@@ -7,7 +7,6 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Deque, Optional
 
 
 def is_within_path(path: Path, base: Path) -> bool:
@@ -18,7 +17,7 @@ def is_within_path(path: Path, base: Path) -> bool:
         return False
 
 
-def safe_resolve_under(base: Path, relative: str) -> Optional[Path]:
+def safe_resolve_under(base: Path, relative: str) -> Path | None:
     """Resolve a relative path under base, returning None on traversal escape."""
     try:
         candidate = (base / relative).resolve()
@@ -31,15 +30,34 @@ def safe_resolve_under(base: Path, relative: str) -> Optional[Path]:
 
 def get_client_ip(environ: dict[str, object]) -> str:
     """Extract best-effort client IP for throttling."""
-    xff = str(environ.get("HTTP_X_FORWARDED_FOR", "") or "").strip()
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
-    xreal = str(environ.get("HTTP_X_REAL_IP", "") or "").strip()
-    if xreal:
-        return xreal
-    return str(environ.get("REMOTE_ADDR", "") or "").strip()
+    remote_addr = str(environ.get("REMOTE_ADDR", "") or "").strip()
+    trust_forwarded = False
+    try:
+        parsed_remote = ipaddress.ip_address(remote_addr)
+        trust_forwarded = parsed_remote.is_loopback or parsed_remote.is_private
+    except ValueError:
+        trust_forwarded = False
+
+    if trust_forwarded:
+        xff = str(environ.get("HTTP_X_FORWARDED_FOR", "") or "").strip()
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first and _is_valid_ip(first):
+                return first
+        xreal = str(environ.get("HTTP_X_REAL_IP", "") or "").strip()
+        if xreal and _is_valid_ip(xreal):
+            return xreal
+
+    return remote_addr
+
+
+def _is_valid_ip(value: str) -> bool:
+    """Return True when value is a syntactically valid IP address."""
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
 
 
 def is_loopback_ip(value: str) -> bool:
@@ -62,14 +80,31 @@ class AuthAttemptLimiter:
         self.max_failures = max_failures
         self.window_seconds = window_seconds
         self.block_seconds = block_seconds
-        self._failures: dict[str, Deque[float]] = {}
+        self._failures: dict[str, deque[float]] = {}
         self._blocked_until: dict[str, float] = {}
         self._lock = threading.Lock()
+
+    def _cleanup(self, now: float) -> None:
+        """Prune stale entries to keep memory usage bounded."""
+        # Remove expired blocked entries
+        for key, expires in list(self._blocked_until.items()):
+            if expires <= now:
+                self._blocked_until.pop(key, None)
+
+        # Remove stale failure timestamps and keys
+        cutoff = now - self.window_seconds
+        for key, failures in list(self._failures.items()):
+            while failures and failures[0] < cutoff:
+                failures.popleft()
+            if not failures:
+                self._failures.pop(key, None)
 
     def allow_attempt(self, key: str) -> tuple[bool, int]:
         """Return whether an attempt is allowed and retry-after seconds."""
         now = time.monotonic()
         with self._lock:
+            self._cleanup(now)
+
             blocked_until = self._blocked_until.get(key, 0.0)
             if blocked_until > now:
                 return False, int(blocked_until - now) + 1
@@ -89,6 +124,13 @@ class AuthAttemptLimiter:
 
     def record_failure(self, key: str) -> None:
         """Record failed auth attempt for key."""
+        now = time.monotonic()
+        with self._lock:
+            failures = self._failures.setdefault(key, deque())
+            failures.append(now)
+
+    def record_attempt(self, key: str) -> None:
+        """Record any request attempt for key (used by registration and request throttling)."""
         now = time.monotonic()
         with self._lock:
             failures = self._failures.setdefault(key, deque())

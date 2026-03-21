@@ -15,9 +15,17 @@
     return sessionStorage.getItem('mokuro_auth');
   }
 
+  function logoutSession() {
+    sessionStorage.removeItem('mokuro_auth');
+    sessionStorage.removeItem('mokuro_user');
+    window.location.href = '/';
+  }
+
   function link(label, href, currentKey, key) {
-    const klass = key === currentKey ? 'btn btn--secondary btn--sm' : 'btn btn--ghost btn--sm';
-    return '<a href="' + href + '" class="' + klass + '">' + label + '</a>';
+    const isCurrent = key === currentKey;
+    const klass = isCurrent ? 'btn btn--secondary btn--sm is-active' : 'btn btn--ghost btn--sm';
+    const ariaCurrent = isCurrent ? ' aria-current="page"' : '';
+    return '<a href="' + href + '" class="' + klass + '"' + ariaCurrent + '>' + label + '</a>';
   }
 
   async function fetchNavConfig() {
@@ -59,7 +67,7 @@
         parts.push(link('Admin', '/_admin', currentKey, 'admin'));
       }
       parts.push(link('Account', '/account', currentKey, 'account'));
-      parts.push('<button onclick="logout()" class="btn btn--secondary btn--sm">Logout</button>');
+      parts.push('<button type="button" data-nav-action="logout" class="btn btn--secondary btn--sm">Logout</button>');
     } else {
       parts.push(link('Login', '/login', currentKey, 'login'));
       if (config.registration_enabled) {
@@ -68,6 +76,11 @@
     }
 
     nav.innerHTML = parts.join('');
+
+    const logoutBtn = nav.querySelector('[data-nav-action="logout"]');
+    if (logoutBtn) {
+      logoutBtn.addEventListener('click', logoutSession);
+    }
   }
 
   window.renderMokuroHeaderNav = renderMokuroHeaderNav;

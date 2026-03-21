@@ -2,26 +2,28 @@
 
 from __future__ import annotations
 
+import atexit
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from wsgidav.wsgidav_app import WsgiDAVApp
 
+from mokuro_bunko.account.api import AccountAPI
 from mokuro_bunko.admin.api import AdminAPI
 from mokuro_bunko.catalog.api import CatalogAPI
-from mokuro_bunko.queue.api import QueueAPI
 from mokuro_bunko.config import Config, get_default_config_path
 from mokuro_bunko.database import Database
 from mokuro_bunko.dyndns import DynDNSService
 from mokuro_bunko.home.api import HomePageAPI
-from mokuro_bunko.account.api import AccountAPI
-from mokuro_bunko.login.api import LoginAPI
 from mokuro_bunko.library_index import LibraryIndexCache
+from mokuro_bunko.login.api import LoginAPI
 from mokuro_bunko.middleware.auth import AuthMiddleware
 from mokuro_bunko.middleware.cors import CorsMiddleware
 from mokuro_bunko.middleware.fs_watcher import LibraryWatcher
 from mokuro_bunko.middleware.propfind_cache import PropfindCacheMiddleware
 from mokuro_bunko.middleware.request_log import RequestLogMiddleware
+from mokuro_bunko.queue.api import QueueAPI
 from mokuro_bunko.registration.api import RegistrationAPI
 from mokuro_bunko.setup.api import SetupWizardAPI
 from mokuro_bunko.static import StaticMiddleware
@@ -30,6 +32,61 @@ from mokuro_bunko.webdav.provider import MokuroDAVProvider
 
 if TYPE_CHECKING:
     pass
+
+
+def _assert_writable_dir(path: Path, label: str) -> None:
+    """Raise ValueError if directory cannot be created and written."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe_path = path / ".write-check"
+        with probe_path.open("wb") as handle:
+            handle.write(b"ok")
+        probe_path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ValueError(f"{label} is not writable: {path}") from exc
+
+
+def _validate_startup_environment(config: Config) -> None:
+    """Validate critical runtime prerequisites before starting the server."""
+    storage_base = config.storage.base_path
+    config.storage.ensure_directories()
+    _assert_writable_dir(storage_base, "storage.base_path")
+    _assert_writable_dir(config.storage.library_path, "storage.library_path")
+    _assert_writable_dir(config.storage.inbox_path, "storage.inbox_path")
+    _assert_writable_dir(config.storage.users_path, "storage.users_path")
+
+    if not config.ssl.enabled:
+        return
+
+    if config.ssl.auto_cert:
+        from mokuro_bunko.ssl import get_default_cert_paths
+
+        cert_path, key_path = get_default_cert_paths()
+        _assert_writable_dir(cert_path.parent, "ssl auto-cert directory")
+        _assert_writable_dir(key_path.parent, "ssl auto-key directory")
+        return
+
+    cert_path = Path(config.ssl.cert_file).expanduser()
+    key_path = Path(config.ssl.key_file).expanduser()
+
+    if not cert_path.exists() or not cert_path.is_file():
+        raise ValueError(f"SSL certificate file not found: {cert_path}")
+    if not key_path.exists() or not key_path.is_file():
+        raise ValueError(f"SSL private key file not found: {key_path}")
+
+    try:
+        with cert_path.open("rb"):
+            pass
+        with key_path.open("rb"):
+            pass
+    except OSError as exc:
+        raise ValueError("SSL certificate/key files are not readable") from exc
+
+    from mokuro_bunko.ssl import validate_certificate_pair
+
+    ssl_errors, _ssl_warnings = validate_certificate_pair(cert_path, key_path)
+    if ssl_errors:
+        raise ValueError(ssl_errors[0])
 
 
 def create_wsgidav_app(config: Config) -> WsgiDAVApp:
@@ -83,8 +140,8 @@ def create_wsgidav_app(config: Config) -> WsgiDAVApp:
 
 def create_app(
     config: Config,
-    config_path: Optional[Path] = None,
-    ocr_runtime: Optional[dict[str, Any]] = None,
+    config_path: Path | None = None,
+    ocr_runtime: dict[str, Any] | None = None,
 ) -> Callable[..., Any]:
     """Create the full WSGI application stack.
 
@@ -106,6 +163,12 @@ def create_app(
     # Create database
     db_path = config.storage.base_path / "mokuro.db"
     database = Database(db_path)
+    database.configure_connection(
+        connect_timeout_seconds=config.database.connect_timeout_seconds,
+        busy_timeout_ms=config.database.busy_timeout_ms,
+        connect_retries=config.database.connect_retries,
+        retry_initial_delay_seconds=config.database.retry_initial_delay_seconds,
+    )
 
     # Create tunnel and DynDNS services
     tunnel_service = TunnelService(config, config_path)
@@ -159,6 +222,8 @@ def create_app(
         database,
         realm="mokuro-bunko",
         registration_config=config.registration,
+        quota_config=config.quota,
+        admin_path=config.admin.path,
     )
 
     # Wrap with catalog API (public catalog page)
@@ -189,7 +254,12 @@ def create_app(
     app = AccountAPI(app, database, storage_path=config.storage.base_path)
 
     # Wrap with home page middleware (serves welcome page for browsers)
-    app = HomePageAPI(app, catalog_config=config.catalog)
+    app = HomePageAPI(
+        app,
+        catalog_config=config.catalog,
+        database=database,
+        library_index=library_index,
+    )
 
     # Wrap with setup wizard (intercepts / -> /setup when no admin exists)
     app = SetupWizardAPI(app, database, config, config_path)
@@ -214,7 +284,8 @@ def create_app(
 
     def on_library_change() -> None:
         library_index.invalidate()
-        propfind_cache.schedule_refresh(delay=5.0)
+        propfind_cache.invalidate()
+        propfind_cache.schedule_refresh(delay=1.0)
 
     # Start filesystem watcher for out-of-band changes (OCR sidecars, thumbnails)
     library_watcher = LibraryWatcher(
@@ -223,14 +294,32 @@ def create_app(
     )
     library_watcher.start()
     app._library_watcher = library_watcher  # type: ignore[attr-defined]
+    app._ocr_worker = None  # type: ignore[attr-defined]
+
+    def _cleanup_background_services() -> None:
+        watcher = getattr(app, "_library_watcher", None)
+        if watcher is not None:
+            try:
+                watcher.stop(skip_observer_shutdown=True)
+            except Exception:
+                pass
+        cache = getattr(app, "_propfind_cache", None)
+        if cache is not None:
+            try:
+                cache.stop()
+            except Exception:
+                pass
+
+    atexit.register(_cleanup_background_services)
+    app._cleanup_background_services = _cleanup_background_services  # type: ignore[attr-defined]
 
     return app
 
 
 def create_ssl_server(
     config: Config,
-    config_path: Optional[Path] = None,
-    ocr_runtime: Optional[dict[str, Any]] = None,
+    config_path: Path | None = None,
+    ocr_runtime: dict[str, Any] | None = None,
 ) -> Any:
     """Create an SSL-enabled server.
 
@@ -244,7 +333,8 @@ def create_ssl_server(
     """
     from cheroot.ssl.builtin import BuiltinSSLAdapter
     from cheroot.wsgi import Server as WSGIServer
-    from mokuro_bunko.ssl import get_default_cert_paths, generate_self_signed_cert
+
+    from mokuro_bunko.ssl import generate_self_signed_cert, get_default_cert_paths
 
     app = create_app(config, config_path, ocr_runtime=ocr_runtime)
 
@@ -317,14 +407,13 @@ def _start_server_resilient(server: Any) -> None:
             server.interrupt = None
 
 
-def run_server(config: Config, config_path: Optional[Path] = None) -> None:
+def run_server(config: Config, config_path: Path | None = None) -> None:
     """Run the WebDAV server.
 
     Args:
         config: Server configuration.
         config_path: Path to config file.
     """
-    from mokuro_bunko.ssl import get_ssl_info
     from mokuro_bunko.ocr.installer import (
         OCRBackend,
         OCRInstaller,
@@ -334,10 +423,17 @@ def run_server(config: Config, config_path: Optional[Path] = None) -> None:
         get_supported_backends,
     )
     from mokuro_bunko.ocr.watcher import OCRWorker
+    from mokuro_bunko.ssl import get_ssl_info
 
-    ocr_worker: Optional[OCRWorker] = None
+    try:
+        _validate_startup_environment(config)
+    except ValueError as exc:
+        print(f"Startup validation failed: {exc}")
+        raise SystemExit(2) from exc
+
+    ocr_worker: OCRWorker | None = None
     selected_backend = None
-    ocr_runtime: Optional[dict[str, Any]] = None
+    ocr_runtime: dict[str, Any] | None = None
 
     # Determine protocol for display
     protocol = "https" if config.ssl.enabled else "http"
@@ -401,12 +497,23 @@ def run_server(config: Config, config_path: Optional[Path] = None) -> None:
     watchdog.start()
 
     if config.ocr.backend != "skip" and selected_backend != OCRBackend.SKIP:
+        import mokuro_bunko.ocr.watcher as watcher
+
         ocr_worker = OCRWorker(
             storage_path=config.storage.base_path,
             poll_interval=float(config.ocr.poll_interval),
+            processor_timeouts={
+                "hard_timeout_seconds": int(config.ocr.hard_timeout_seconds),
+                "no_progress_timeout_seconds": int(config.ocr.no_progress_timeout_seconds),
+                "finalizing_timeout_seconds": int(config.ocr.finalizing_timeout_seconds),
+            },
             status_callback=lambda msg: print(f"[OCR] {msg}"),
         )
         ocr_worker.start(background=True)
+        watcher.CURRENT_OCR_WORKER = ocr_worker
+        # expose ocr worker for API / queue status control
+        if hasattr(server, "wsgi_app") and hasattr(server.wsgi_app, "_ocr_worker"):
+            server.wsgi_app._ocr_worker = ocr_worker  # type: ignore[attr-defined]
         print(
             "OCR worker enabled "
             f"(configured={config.ocr.backend}, active={selected_backend.value}, "
@@ -421,11 +528,26 @@ def run_server(config: Config, config_path: Optional[Path] = None) -> None:
     finally:
         watchdog.stop()
         if ocr_worker:
-            ocr_worker.stop()
+            try:
+                ocr_worker.stop()
+            except Exception:
+                pass
+        import mokuro_bunko.ocr.watcher as watcher
+
+        watcher.CURRENT_OCR_WORKER = None
         # Stop filesystem watcher and cancel pending cache refresh timers
         wsgi_app = server.wsgi_app  # type: ignore[attr-defined]
         if hasattr(wsgi_app, "_library_watcher"):
-            wsgi_app._library_watcher.stop()
+            try:
+                wsgi_app._library_watcher.stop()
+            except Exception:
+                pass
         if hasattr(wsgi_app, "_propfind_cache"):
-            wsgi_app._propfind_cache.stop()
-        server.stop()
+            try:
+                wsgi_app._propfind_cache.stop()
+            except Exception:
+                pass
+        try:
+            server.stop()
+        except Exception:
+            pass

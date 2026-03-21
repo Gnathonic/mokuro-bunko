@@ -8,8 +8,8 @@ debounced cache refresh.
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 try:
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -49,7 +49,7 @@ class LibraryWatcher:
     ) -> None:
         self.watch_path = watch_path
         self.on_change = on_change
-        self._observer: Optional[Observer] = None  # type: ignore
+        self._observer: Observer | None = None  # type: ignore
 
     def start(self) -> None:
         if not WATCHDOG_AVAILABLE:
@@ -59,25 +59,37 @@ class LibraryWatcher:
                 flush=True,
             )
             return
+        if self._observer is not None:
+            return
 
         self.watch_path.mkdir(parents=True, exist_ok=True)
 
         handler = _LibraryEventHandler(self.on_change)
-        self._observer = Observer()
-        self._observer.schedule(handler, str(self.watch_path), recursive=True)
-        self._observer.daemon = True
-        self._observer.start()
+        observer = Observer()
+        observer.schedule(handler, str(self.watch_path), recursive=True)
+        observer.daemon = True
+        observer.start()
+        self._observer = observer
         print(
             f"[FS-WATCHER] Watching {self.watch_path}",
             file=sys.stderr,
             flush=True,
         )
 
-    def stop(self) -> None:
-        if self._observer is not None:
-            self._observer.stop()
-            self._observer.join(timeout=5.0)
-            self._observer = None
+    def stop(self, *, skip_observer_shutdown: bool = False) -> None:
+        observer = self._observer
+        self._observer = None
+        if observer is None:
+            return
+
+        # During late process teardown on some Python/watchdog/Windows
+        # combinations, signaling watchdog threads can trigger a fatal semaphore
+        # error. Allow callers (atexit cleanup) to detach without signaling.
+        if skip_observer_shutdown or getattr(sys, "is_finalizing", lambda: False)():
+            return
+
+        observer.stop()
+        observer.join(timeout=5.0)
 
 
 if WATCHDOG_AVAILABLE:
@@ -86,6 +98,10 @@ if WATCHDOG_AVAILABLE:
         def __init__(self, on_change: Callable[[], None]) -> None:
             super().__init__()
             self._on_change = on_change
+
+        def on_modified(self, event: FileSystemEvent) -> None:  # type: ignore
+            if _is_relevant(event.src_path, event.is_directory):
+                self._on_change()
 
         def on_created(self, event: FileSystemEvent) -> None:  # type: ignore
             if _is_relevant(event.src_path, event.is_directory):

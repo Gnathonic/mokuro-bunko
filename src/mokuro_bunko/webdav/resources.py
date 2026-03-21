@@ -12,11 +12,14 @@ files are shared and per-user data is isolated.
 from __future__ import annotations
 
 import os
+import posixpath
 import tempfile
+import threading
 import zipfile
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Optional
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from wsgidav.dav_provider import DAVCollection, DAVError, DAVNonCollection
 from wsgidav.util import join_uri
@@ -24,8 +27,49 @@ from wsgidav.util import join_uri
 from mokuro_bunko.security import safe_resolve_under
 
 if TYPE_CHECKING:
+
     from mokuro_bunko.database import Database
-    from wsgidav.dav_provider import DAVProvider
+
+
+class _PathWriteLocks:
+    """Process-local per-path mutex registry for conflicting write operations."""
+
+    def __init__(self) -> None:
+        self._locks: set[tuple[str, ...]] = set()
+        self._guard = threading.Lock()
+
+    @staticmethod
+    def _parts(path: Path) -> tuple[str, ...]:
+        return tuple(part.casefold() for part in path.resolve().parts)
+
+    @staticmethod
+    def _is_prefix(prefix: tuple[str, ...], full: tuple[str, ...]) -> bool:
+        if len(prefix) > len(full):
+            return False
+        return full[: len(prefix)] == prefix
+
+    @classmethod
+    def _conflicts(cls, current: tuple[str, ...], candidate: tuple[str, ...]) -> bool:
+        return cls._is_prefix(current, candidate) or cls._is_prefix(candidate, current)
+
+    def acquire(self, path: Path, blocking: bool = False) -> bool:
+        key = self._parts(path)
+        if blocking:
+            raise ValueError("blocking path lock acquisition is not supported")
+        with self._guard:
+            for locked in self._locks:
+                if self._conflicts(locked, key):
+                    return False
+            self._locks.add(key)
+            return True
+
+    def release(self, path: Path) -> None:
+        key = self._parts(path)
+        with self._guard:
+            self._locks.discard(key)
+
+
+_PATH_WRITE_LOCKS = _PathWriteLocks()
 
 
 class PathMapper:
@@ -59,6 +103,19 @@ class PathMapper:
         self.inbox_path = self.storage_base / "inbox"
         self.users_path = self.storage_base / "users"
 
+    @staticmethod
+    def _normalize_virtual_path(virtual_path: str) -> str:
+        """Normalize a virtual WebDAV path to a canonical form."""
+        if not virtual_path:
+            return "/"
+        replaced = virtual_path.replace("\\", "/").strip()
+        normalized = posixpath.normpath(replaced)
+        if normalized == "." or normalized == "":
+            normalized = "/"
+        if not normalized.startswith("/"):
+            normalized = "/" + normalized
+        return normalized
+
     def ensure_directories(self) -> None:
         """Create storage directories if they don't exist."""
         self.library_path.mkdir(parents=True, exist_ok=True)
@@ -73,13 +130,15 @@ class PathMapper:
         user_dir.mkdir(parents=True, exist_ok=True)
         return user_dir
 
-    def get_user_file_path(self, username: str, filename: str) -> Optional[Path]:
+    def get_user_file_path(self, username: str, filename: str) -> Path | None:
         """Safely resolve a per-user file path under users/{username}/."""
+        if filename not in self.PER_USER_FILES:
+            return None
         user_dir = (self.users_path / username).resolve()
         users_root = self.users_path.resolve()
         if not user_dir.is_relative_to(users_root):
             return None
-        return user_dir / filename
+        return safe_resolve_under(user_dir, filename)
 
     def is_per_user_file(self, virtual_path: str) -> bool:
         """Check if path is a per-user file (volume-data.json or profiles.json).
@@ -87,7 +146,7 @@ class PathMapper:
         These files live directly under /mokuro-reader/ and are mapped
         to each user's private directory.
         """
-        virtual_path = "/" + virtual_path.strip("/")
+        virtual_path = self._normalize_virtual_path(virtual_path)
         prefix = f"/{self.READER_ROOT}/"
         if virtual_path.startswith(prefix):
             relative = virtual_path[len(prefix):]
@@ -96,7 +155,7 @@ class PathMapper:
 
     def is_reader_path(self, virtual_path: str) -> bool:
         """Check if path is under /mokuro-reader/."""
-        virtual_path = "/" + virtual_path.strip("/")
+        virtual_path = self._normalize_virtual_path(virtual_path)
         return (
             virtual_path == f"/{self.READER_ROOT}"
             or virtual_path.startswith(f"/{self.READER_ROOT}/")
@@ -104,14 +163,14 @@ class PathMapper:
 
     def is_inbox_path(self, virtual_path: str) -> bool:
         """Check if path is under /inbox/."""
-        virtual_path = "/" + virtual_path.strip("/")
+        virtual_path = self._normalize_virtual_path(virtual_path)
         return virtual_path == "/inbox" or virtual_path.startswith("/inbox/")
 
     def virtual_to_physical(
         self,
         virtual_path: str,
-        username: Optional[str] = None,
-    ) -> Optional[Path]:
+        username: str | None = None,
+    ) -> Path | None:
         """Convert virtual WebDAV path to physical filesystem path.
 
         Args:
@@ -128,6 +187,8 @@ class PathMapper:
             return None
         if virtual_path == f"/{self.READER_ROOT}":
             return None
+
+        virtual_path = self._normalize_virtual_path(virtual_path)
 
         # /mokuro-reader/* paths
         if virtual_path.startswith(f"/{self.READER_ROOT}/"):
@@ -154,8 +215,8 @@ class PathMapper:
     def physical_to_virtual(
         self,
         physical_path: Path,
-        username: Optional[str] = None,
-    ) -> Optional[str]:
+        username: str | None = None,
+    ) -> str | None:
         """Convert physical filesystem path to virtual WebDAV path.
 
         Args:
@@ -244,15 +305,15 @@ class MokuroFileResource(DAVNonCollection):
     ) -> None:
         super().__init__(path, environ)
         self.file_path = file_path
-        self._stat: Optional[os.stat_result] = None
+        self._stat: os.stat_result | None = None
 
-    def _get_database(self) -> Optional["Database"]:
+    def _get_database(self) -> Database | None:
         db = self.environ.get("mokuro.db")
         if db is None:
             return None
         return db  # type: ignore[return-value]
 
-    def _get_actor_username(self) -> Optional[str]:
+    def _get_actor_username(self) -> str | None:
         user_data = self.environ.get("mokuro.user")
         if isinstance(user_data, dict):
             username = user_data.get("username")
@@ -263,7 +324,7 @@ class MokuroFileResource(DAVNonCollection):
             return username
         return None
 
-    def _relative_under_library(self) -> Optional[str]:
+    def _relative_under_library(self) -> str | None:
         provider = self.provider
         if not hasattr(provider, "path_mapper"):
             return None
@@ -273,7 +334,7 @@ class MokuroFileResource(DAVNonCollection):
         except ValueError:
             return None
 
-    def _audit(self, action: str, *, details: Optional[dict[str, Any]] = None) -> None:
+    def _audit(self, action: str, *, details: dict[str, Any] | None = None) -> None:
         db = self._get_database()
         if db is None:
             return
@@ -292,6 +353,12 @@ class MokuroFileResource(DAVNonCollection):
             details=details,
         )
 
+    def _audit_lock_conflict(self, operation: str, *, details: dict[str, Any] | None = None) -> None:
+        payload = {"operation": operation}
+        if details:
+            payload.update(details)
+        self._audit("lock_conflict", details=payload)
+
     def _on_write_committed(self, existed_before: bool) -> None:
         db = self._get_database()
         actor = self._get_actor_username()
@@ -307,7 +374,7 @@ class MokuroFileResource(DAVNonCollection):
         """Return static property list (no getter probing needed)."""
         return list(self._PROP_NAMES)
 
-    def _get_stat(self) -> Optional[os.stat_result]:
+    def _get_stat(self) -> os.stat_result | None:
         """Get cached stat result."""
         if self._stat is None:
             try:
@@ -316,14 +383,14 @@ class MokuroFileResource(DAVNonCollection):
                 pass
         return self._stat
 
-    def get_content_length(self) -> Optional[int]:
+    def get_content_length(self) -> int | None:
         """Return file size."""
         stat_result = self._get_stat()
         if stat_result:
             return stat_result.st_size
         return None
 
-    def get_content_type(self) -> Optional[str]:
+    def get_content_type(self) -> str | None:
         """Return content type based on extension."""
         suffix = self.file_path.suffix.lower()
         content_types = {
@@ -346,7 +413,7 @@ class MokuroFileResource(DAVNonCollection):
             return "application/gzip"
         return content_types.get(suffix, "application/octet-stream")
 
-    def get_creation_date(self) -> Optional[float]:
+    def get_creation_date(self) -> float | None:
         """Return creation time."""
         stat_result = self._get_stat()
         if stat_result:
@@ -357,14 +424,14 @@ class MokuroFileResource(DAVNonCollection):
         """Return display name."""
         return self.file_path.name
 
-    def get_etag(self) -> Optional[str]:
+    def get_etag(self) -> str | None:
         """Return ETag based on mtime and size."""
         stat_result = self._get_stat()
         if stat_result:
             return f"{stat_result.st_mtime:.6f}-{stat_result.st_size}"
         return None
 
-    def get_last_modified(self) -> Optional[float]:
+    def get_last_modified(self) -> float | None:
         """Return last modified time."""
         stat_result = self._get_stat()
         if stat_result:
@@ -384,17 +451,25 @@ class MokuroFileResource(DAVNonCollection):
         except OSError as e:
             raise DAVError(500, f"Cannot read file: {e}") from e
 
-    def begin_write(self, content_type: Optional[str] = None) -> BinaryIO:
+    def begin_write(self, content_type: str | None = None) -> BinaryIO:
         """Begin writing to file, return file object."""
+        if not _PATH_WRITE_LOCKS.acquire(self.file_path, blocking=False):
+            self._audit_lock_conflict("write")
+            raise DAVError(423, "Resource is locked by another write operation")
+
         existed_before = self.file_path.exists()
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         if self.file_path.suffix.lower() == ".cbz":
             writer: BinaryIO = _ValidatedCbzWriter(self.file_path)
         else:
-            writer = open(self.file_path, "wb")
-        return _AuditedWriter(
+            writer = _AtomicFileWriter(self.file_path)
+        audited = _AuditedWriter(
             writer,
             on_commit=lambda: self._on_write_committed(existed_before),
+        )
+        return _LockedWriter(
+            audited,
+            on_release=lambda: _PATH_WRITE_LOCKS.release(self.file_path),
         )
 
     def delete(self) -> None:
@@ -402,23 +477,30 @@ class MokuroFileResource(DAVNonCollection):
         if not self.file_path.exists():
             return
 
-        rel = self._relative_under_library()
-        lower = self.file_path.name.lower()
-        if lower.endswith(".cbz"):
-            base = self.file_path.with_suffix("")
-            for suffix in (".mokuro", ".mokuro.gz", ".webp", ".nocover"):
-                sidecar = Path(f"{base}{suffix}")
-                try:
-                    sidecar.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        if not _PATH_WRITE_LOCKS.acquire(self.file_path, blocking=False):
+            self._audit_lock_conflict("delete")
+            raise DAVError(423, "Resource is locked by another write operation")
 
-        os.remove(self.file_path)
+        try:
+            rel = self._relative_under_library()
+            lower = self.file_path.name.lower()
+            if lower.endswith(".cbz"):
+                base = self.file_path.with_suffix("")
+                for suffix in (".mokuro", ".mokuro.gz", ".webp", ".nocover"):
+                    sidecar = Path(f"{base}{suffix}")
+                    try:
+                        sidecar.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
-        db = self._get_database()
-        if db is not None and rel is not None and lower.endswith(".cbz"):
-            db.forget_volume_upload(rel)
-        self._audit("delete")
+            os.remove(self.file_path)
+
+            db = self._get_database()
+            if db is not None and rel is not None and lower.endswith(".cbz"):
+                db.forget_volume_upload(rel)
+            self._audit("delete")
+        finally:
+            _PATH_WRITE_LOCKS.release(self.file_path)
 
     def copy_move_single(
         self,
@@ -437,25 +519,45 @@ class MokuroFileResource(DAVNonCollection):
 
             if dest_physical:
                 dest_physical.parent.mkdir(parents=True, exist_ok=True)
+                lock_paths = [self.file_path]
                 if is_move:
-                    os.replace(self.file_path, dest_physical)
-                else:
-                    import shutil
-                    shutil.copy2(self.file_path, dest_physical)
-                db = self._get_database()
-                if db is not None:
-                    old_rel = self._relative_under_library()
-                    try:
-                        new_rel = str(dest_physical.resolve().relative_to(mapper.library_path.resolve()))
-                    except ValueError:
-                        new_rel = None
-                    if is_move and old_rel is not None and new_rel is not None:
-                        db.rename_volume_upload(old_rel, new_rel)
-                self._audit(
-                    "move" if is_move else "copy",
-                    details={"destination": dest_path},
-                )
-                return True
+                    lock_paths.append(dest_physical)
+                # Acquire in deterministic order to avoid deadlocks.
+                lock_paths = sorted(lock_paths, key=lambda p: str(p.resolve()).casefold())
+
+                acquired: list[Path] = []
+                try:
+                    for lock_path in lock_paths:
+                        if not _PATH_WRITE_LOCKS.acquire(lock_path, blocking=False):
+                            self._audit_lock_conflict(
+                                "move" if is_move else "copy",
+                                details={"destination": dest_path},
+                            )
+                            raise DAVError(423, "Resource is locked by another write operation")
+                        acquired.append(lock_path)
+
+                    if is_move:
+                        os.replace(self.file_path, dest_physical)
+                    else:
+                        import shutil
+                        shutil.copy2(self.file_path, dest_physical)
+                    db = self._get_database()
+                    if db is not None:
+                        old_rel = self._relative_under_library()
+                        try:
+                            new_rel = str(dest_physical.resolve().relative_to(mapper.library_path.resolve()))
+                        except ValueError:
+                            new_rel = None
+                        if is_move and old_rel is not None and new_rel is not None:
+                            db.rename_volume_upload(old_rel, new_rel)
+                    self._audit(
+                        "move" if is_move else "copy",
+                        details={"destination": dest_path},
+                    )
+                    return True
+                finally:
+                    for lock_path in reversed(acquired):
+                        _PATH_WRITE_LOCKS.release(lock_path)
         return False
 
 
@@ -475,7 +577,7 @@ class MokuroFolderResource(DAVCollection):
         self,
         path: str,
         environ: dict[str, Any],
-        folder_path: Optional[Path],
+        folder_path: Path | None,
         path_mapper: PathMapper,
         is_virtual: bool = False,
     ) -> None:
@@ -483,14 +585,14 @@ class MokuroFolderResource(DAVCollection):
         self.folder_path = folder_path
         self.path_mapper = path_mapper
         self.is_virtual = is_virtual
-        self._stat: Optional[os.stat_result] = None
-        self._scandir_cache: Optional[dict[str, os.DirEntry[str]]] = None
+        self._stat: os.stat_result | None = None
+        self._scandir_cache: dict[str, os.DirEntry[str]] | None = None
 
     def get_property_names(self, *, is_allprop: bool) -> list[str]:
         """Return static property list (no getter probing needed)."""
         return list(self._PROP_NAMES)
 
-    def _get_stat(self) -> Optional[os.stat_result]:
+    def _get_stat(self) -> os.stat_result | None:
         """Get cached stat result."""
         if self._stat is None and self.folder_path:
             try:
@@ -499,20 +601,20 @@ class MokuroFolderResource(DAVCollection):
                 pass
         return self._stat
 
-    def _get_username(self) -> Optional[str]:
+    def _get_username(self) -> str | None:
         """Get current username from environ."""
         user_data = self.environ.get("mokuro.user")
         if user_data:
             return user_data.get("username")
         return None
 
-    def _get_database(self) -> Optional["Database"]:
+    def _get_database(self) -> Database | None:
         db = self.environ.get("mokuro.db")
         if db is None:
             return None
         return db  # type: ignore[return-value]
 
-    def _get_actor_username(self) -> Optional[str]:
+    def _get_actor_username(self) -> str | None:
         user_data = self.environ.get("mokuro.user")
         if isinstance(user_data, dict):
             username = user_data.get("username")
@@ -523,7 +625,7 @@ class MokuroFolderResource(DAVCollection):
             return username
         return None
 
-    def _relative_under_library(self) -> Optional[str]:
+    def _relative_under_library(self) -> str | None:
         if self.folder_path is None:
             return None
         try:
@@ -531,7 +633,7 @@ class MokuroFolderResource(DAVCollection):
         except ValueError:
             return None
 
-    def _audit(self, action: str, *, details: Optional[dict[str, Any]] = None) -> None:
+    def _audit(self, action: str, *, details: dict[str, Any] | None = None) -> None:
         db = self._get_database()
         if db is None:
             return
@@ -545,13 +647,19 @@ class MokuroFolderResource(DAVCollection):
             details=details,
         )
 
-    def _resolve_member_path(self, name: str) -> Optional[Path]:
+    def _audit_lock_conflict(self, operation: str, *, details: dict[str, Any] | None = None) -> None:
+        payload = {"operation": operation}
+        if details:
+            payload.update(details)
+        self._audit("lock_conflict", details=payload)
+
+    def _resolve_member_path(self, name: str) -> Path | None:
         """Resolve a child resource safely under this physical folder."""
         if self.folder_path is None:
             return None
         return safe_resolve_under(self.folder_path, name)
 
-    def get_creation_date(self) -> Optional[float]:
+    def get_creation_date(self) -> float | None:
         stat_result = self._get_stat()
         if stat_result:
             return stat_result.st_ctime
@@ -564,16 +672,16 @@ class MokuroFolderResource(DAVCollection):
             return self.folder_path.name
         return self.path.rstrip("/").split("/")[-1] or "root"
 
-    def get_directory_info(self) -> Optional[dict[str, Any]]:
+    def get_directory_info(self) -> dict[str, Any] | None:
         return None
 
-    def get_etag(self) -> Optional[str]:
+    def get_etag(self) -> str | None:
         stat_result = self._get_stat()
         if stat_result:
             return f"{stat_result.st_mtime:.6f}"
         return None
 
-    def get_last_modified(self) -> Optional[float]:
+    def get_last_modified(self) -> float | None:
         stat_result = self._get_stat()
         if stat_result:
             return stat_result.st_mtime
@@ -645,7 +753,7 @@ class MokuroFolderResource(DAVCollection):
             pass
         return res
 
-    def get_member(self, name: str) -> Optional[DAVCollection | DAVNonCollection]:
+    def get_member(self, name: str) -> DAVCollection | DAVNonCollection | None:
         """Get a member resource by name."""
         member_path = join_uri(self.path, name)
         normalized = self.path.rstrip("/") or "/"
@@ -805,13 +913,19 @@ class MokuroFolderResource(DAVCollection):
     def delete(self) -> None:
         """Delete this folder."""
         if self.folder_path and self.folder_path.exists():
+            if not _PATH_WRITE_LOCKS.acquire(self.folder_path, blocking=False):
+                self._audit_lock_conflict("delete_recursive")
+                raise DAVError(423, "Resource is locked by another write operation")
             db = self._get_database()
             rel = self._relative_under_library()
-            if db is not None and rel:
-                db.forget_volume_uploads_under_prefix(rel)
-            import shutil
-            shutil.rmtree(self.folder_path)
-            self._audit("delete")
+            try:
+                if db is not None and rel:
+                    db.forget_volume_uploads_under_prefix(rel)
+                import shutil
+                shutil.rmtree(self.folder_path)
+                self._audit("delete")
+            finally:
+                _PATH_WRITE_LOCKS.release(self.folder_path)
 
     def support_recursive_delete(self) -> bool:
         return True
@@ -848,7 +962,7 @@ class _ValidatedCbzWriter:
     def seek(self, offset: int, whence: int = 0) -> int:
         return self._file.seek(offset, whence)
 
-    def truncate(self, size: Optional[int] = None) -> int:
+    def truncate(self, size: int | None = None) -> int:
         if size is None:
             return self._file.truncate()
         return self._file.truncate(size)
@@ -876,7 +990,14 @@ class _ValidatedCbzWriter:
                 pass
             raise DAVError(400, "Invalid or corrupted CBZ upload")
 
-        os.replace(self.temp_path, self.destination)
+        try:
+            os.replace(self.temp_path, self.destination)
+        except OSError as e:
+            try:
+                self.temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise DAVError(500, f"Cannot finalize upload: {e}") from e
         # mkstemp creates with 0o600; apply umask-derived permissions instead.
         # On Windows, umask/chmod have no effect on NTFS permissions.
         if os.name != "nt":
@@ -887,7 +1008,7 @@ class _ValidatedCbzWriter:
     def writable(self) -> bool:
         return True
 
-    def __enter__(self) -> "_ValidatedCbzWriter":
+    def __enter__(self) -> _ValidatedCbzWriter:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -913,6 +1034,91 @@ class _ValidatedCbzWriter:
             return False
 
 
+class _AtomicFileWriter:
+    """Temporary file writer that atomically replaces destination on close."""
+
+    def __init__(self, destination: Path) -> None:
+        self.destination = destination
+        self.destination.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.upload-",
+            suffix=".tmp",
+            dir=str(destination.parent),
+        )
+        os.close(fd)
+        self.temp_path = Path(temp_name)
+        self._file = open(self.temp_path, "wb")
+        self._closed = False
+
+    def write(self, data: bytes) -> int:
+        return self._file.write(data)
+
+    def flush(self) -> None:
+        self._file.flush()
+
+    def fileno(self) -> int:
+        return self._file.fileno()
+
+    def tell(self) -> int:
+        return self._file.tell()
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self._file.seek(offset, whence)
+
+    def truncate(self, size: int | None = None) -> int:
+        if size is None:
+            return self._file.truncate()
+        return self._file.truncate(size)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._file.flush()
+            os.fsync(self._file.fileno())
+        except OSError:
+            pass
+        finally:
+            self._file.close()
+
+        try:
+            os.replace(self.temp_path, self.destination)
+        except OSError as e:
+            try:
+                self.temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise DAVError(500, f"Cannot finalize upload: {e}") from e
+        if os.name != "nt":
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(self.destination, 0o666 & ~umask)
+
+    def writable(self) -> bool:
+        return True
+
+    def __enter__(self) -> _AtomicFileWriter:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if exc_type is not None:
+            try:
+                self._file.close()
+            finally:
+                try:
+                    self.temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._closed = True
+            return
+        self.close()
+
+
 class _AuditedWriter:
     """File wrapper that triggers callback only after successful close."""
 
@@ -931,7 +1137,7 @@ class _AuditedWriter:
         self._committed = True
         self._on_commit()
 
-    def __enter__(self) -> "_AuditedWriter":
+    def __enter__(self) -> _AuditedWriter:
         self._inner.__enter__()
         return self
 
@@ -940,3 +1146,41 @@ class _AuditedWriter:
             self._inner.__exit__(exc_type, exc, tb)
             return
         self.close()
+
+
+class _LockedWriter:
+    """File wrapper that releases a path lock on close/exit."""
+
+    def __init__(self, inner: BinaryIO, on_release: Callable[[], None]) -> None:
+        self._inner = inner
+        self._on_release = on_release
+        self._released = False
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._inner, item)
+
+    def _release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._on_release()
+
+    def close(self) -> None:
+        try:
+            self._inner.close()
+        finally:
+            self._release()
+
+    def __enter__(self) -> _LockedWriter:
+        if hasattr(self._inner, "__enter__"):
+            self._inner.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        try:
+            if hasattr(self._inner, "__exit__"):
+                self._inner.__exit__(exc_type, exc, tb)
+            elif exc_type is None:
+                self._inner.close()
+        finally:
+            self._release()

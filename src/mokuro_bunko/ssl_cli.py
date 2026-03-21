@@ -52,7 +52,7 @@ def ssl_enable(
 
         cert_path, key_path = get_default_cert_paths()
         if not cert_path.exists():
-            click.echo(f"Generating self-signed certificate...")
+            click.echo("Generating self-signed certificate...")
             generate_self_signed_cert(cert_path, key_path)
             click.echo(f"Certificate: {cert_path}")
             click.echo(f"Key: {key_path}")
@@ -93,10 +93,10 @@ def ssl_status(ctx: click.Context) -> None:
 
     if config.ssl.auto_cert:
         cert_path, _ = get_default_cert_paths()
-        click.echo(f"Mode: auto-cert")
+        click.echo("Mode: auto-cert")
     else:
         cert_path = Path(config.ssl.cert_file)
-        click.echo(f"Mode: custom certificate")
+        click.echo("Mode: custom certificate")
 
     click.echo(f"Certificate: {cert_path}")
 
@@ -106,7 +106,6 @@ def ssl_status(ctx: click.Context) -> None:
 
     try:
         from cryptography import x509
-        from cryptography.hazmat.primitives.serialization import Encoding
 
         with open(cert_path, "rb") as f:
             cert = x509.load_pem_x509_certificate(f.read())

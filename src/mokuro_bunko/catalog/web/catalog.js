@@ -9,6 +9,8 @@ let currentView = 'root'; // 'root' or 'series'
 let currentSeries = null;
 let currentVolumes = [];
 let filteredVolumes = [];
+let sortMode = 'name-asc';
+let onlyPending = false;
 let readerUrl = 'https://reader.mokuro.app';
 let serverReaderUrl = 'https://reader.mokuro.app';
 let ocrStatus = { active: false };
@@ -22,6 +24,10 @@ const empty = document.getElementById('catalog-empty');
 const search = document.getElementById('search');
 const breadcrumb = document.getElementById('breadcrumb');
 const headerNav = document.getElementById('header-nav');
+const sortSelect = document.getElementById('sort-mode');
+const onlyPendingToggle = document.getElementById('only-pending');
+const resetFiltersBtn = document.getElementById('reset-filters');
+const catalogMeta = document.getElementById('catalog-meta');
 
 document.addEventListener('DOMContentLoaded', () => {
     updateNav();
@@ -29,13 +35,33 @@ document.addEventListener('DOMContentLoaded', () => {
     startOcrStatusPolling();
     startEtaTicker();
     search.addEventListener('input', () => {
-        const query = search.value.toLowerCase().trim();
-        if (currentView === 'root') {
-            filterSeries(query);
-        } else {
-            filterVolumes(query);
-        }
+        applyFilters();
     });
+
+    if (sortSelect) {
+        sortSelect.addEventListener('change', () => {
+            sortMode = sortSelect.value || 'name-asc';
+            applyFilters();
+        });
+    }
+
+    if (onlyPendingToggle) {
+        onlyPendingToggle.addEventListener('change', () => {
+            onlyPending = !!onlyPendingToggle.checked;
+            applyFilters();
+        });
+    }
+
+    if (resetFiltersBtn) {
+        resetFiltersBtn.addEventListener('click', () => {
+            search.value = '';
+            sortMode = 'name-asc';
+            onlyPending = false;
+            if (sortSelect) sortSelect.value = sortMode;
+            if (onlyPendingToggle) onlyPendingToggle.checked = false;
+            applyFilters();
+        });
+    }
 
     // Handle browser back/forward
     window.addEventListener('popstate', (e) => {
@@ -142,6 +168,7 @@ async function refreshOcrStatus() {
         if (currentView === 'series') {
             renderVolumes();
         }
+        updateMeta();
     } catch (_) {
         // Ignore transient polling errors.
     }
@@ -159,23 +186,62 @@ function getSeriesFromHash() {
 }
 
 // Filter series (root view)
-function filterSeries(query) {
-    if (!query) {
-        filtered = series;
-    } else {
-        filtered = series.filter(s => s.name.toLowerCase().includes(query));
+function applyFilters() {
+    const query = (search.value || '').toLowerCase().trim();
+
+    if (currentView === 'root') {
+        let items = series.slice();
+        if (query) {
+            items = items.filter(s => s.name.toLowerCase().includes(query));
+        }
+        if (onlyPending) {
+            items = items.filter(s => {
+                const vols = s.volumes || [];
+                return vols.some(v => !!v.ocr_pending);
+            });
+        }
+        filtered = sortItems(items, 'series');
+        renderRoot();
+        updateMeta();
+        return;
     }
-    renderRoot();
+
+    let volumes = currentVolumes.slice();
+    if (query) {
+        volumes = volumes.filter(v => v.name.toLowerCase().includes(query));
+    }
+    if (onlyPending) {
+        volumes = volumes.filter(v => !!v.ocr_pending);
+    }
+    filteredVolumes = sortItems(volumes, 'volume');
+    renderVolumes();
+    updateMeta();
 }
 
-// Filter volumes (series view)
-function filterVolumes(query) {
-    if (!query) {
-        filteredVolumes = currentVolumes;
-    } else {
-        filteredVolumes = currentVolumes.filter(v => v.name.toLowerCase().includes(query));
+function sortItems(items, kind) {
+    const sorted = items.slice();
+    if (sortMode === 'name-desc') {
+        sorted.sort((a, b) => b.name.localeCompare(a.name));
+        return sorted;
     }
-    renderVolumes();
+    if (sortMode === 'count-desc') {
+        if (kind === 'series') {
+            sorted.sort((a, b) => ((b.volumes || []).length - (a.volumes || []).length) || a.name.localeCompare(b.name));
+        } else {
+            sorted.sort((a, b) => b.name.localeCompare(a.name));
+        }
+        return sorted;
+    }
+    if (sortMode === 'count-asc') {
+        if (kind === 'series') {
+            sorted.sort((a, b) => ((a.volumes || []).length - (b.volumes || []).length) || a.name.localeCompare(b.name));
+        } else {
+            sorted.sort((a, b) => a.name.localeCompare(b.name));
+        }
+        return sorted;
+    }
+    sorted.sort((a, b) => a.name.localeCompare(b.name));
+    return sorted;
 }
 
 // Show root view
@@ -184,9 +250,10 @@ function showRoot(fromPopState) {
     currentSeries = null;
     search.value = '';
     search.placeholder = 'Search library...';
-    filtered = series;
+    filtered = sortItems(series.slice(), 'series');
     renderBreadcrumb();
     renderRoot();
+    updateMeta();
     if (!fromPopState) {
         history.pushState(null, '', '/catalog');
     }
@@ -208,10 +275,12 @@ async function openSeries(seriesName, fromPopState) {
         currentSeries = data;
         currentVolumes = data.volumes || [];
         filteredVolumes = currentVolumes;
+        filteredVolumes = sortItems(filteredVolumes, 'volume');
         search.value = '';
         search.placeholder = 'Search volumes...';
         renderBreadcrumb();
         renderVolumes();
+        updateMeta();
 
         if (!fromPopState) {
             history.pushState({ series: seriesName }, '', '/catalog#' + encodeURIComponent(seriesName));
@@ -311,6 +380,33 @@ function renderVolumes() {
             progressBadge + pendingBadge +
             '</div></div>';
     }).join('');
+}
+
+function updateMeta() {
+    if (!catalogMeta) return;
+
+    if (currentView === 'root') {
+        const totalSeries = series.length;
+        const shownSeries = filtered.length;
+        let pendingSeries = 0;
+        for (let i = 0; i < filtered.length; i++) {
+            const vols = filtered[i].volumes || [];
+            if (vols.some(v => !!v.ocr_pending)) {
+                pendingSeries += 1;
+            }
+        }
+        catalogMeta.textContent =
+            'Showing ' + shownSeries + ' of ' + totalSeries + ' series' +
+            (pendingSeries ? ' • ' + pendingSeries + ' with pending OCR' : '');
+        return;
+    }
+
+    const totalVolumes = currentVolumes.length;
+    const shownVolumes = filteredVolumes.length;
+    const pendingVolumes = filteredVolumes.filter(v => !!v.ocr_pending).length;
+    catalogMeta.textContent =
+        'Showing ' + shownVolumes + ' of ' + totalVolumes + ' volumes' +
+        (pendingVolumes ? ' • ' + pendingVolumes + ' pending OCR' : '');
 }
 
 function formatEta(seconds) {

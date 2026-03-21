@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import secrets
 import sqlite3
+import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, Literal, Optional, TypedDict
+from typing import Any, Literal, TypedDict
 
 import bcrypt
 
 from mokuro_bunko.validation import validate_password, validate_username
-
 
 UserStatus = Literal["active", "pending", "disabled", "deleted"]
 UserRole = Literal["anonymous", "registered", "uploader", "inviter", "editor", "admin"]
@@ -42,20 +43,20 @@ class InviteDict(TypedDict):
     role: UserRole
     created_at: str
     expires_at: str
-    used_by: Optional[str]
-    invited_by: Optional[str]
+    used_by: str | None
+    invited_by: str | None
 
 
 class AuditEventDict(TypedDict):
     """Type definition for audit event dictionary."""
 
     id: int
-    actor_username: Optional[str]
+    actor_username: str | None
     action: str
-    target_type: Optional[str]
-    target_path: Optional[str]
-    target_username: Optional[str]
-    details: Optional[str]
+    target_type: str | None
+    target_path: str | None
+    target_username: str | None
+    details: str | None
     created_at: str
 
 
@@ -87,8 +88,8 @@ def parse_duration(duration: str) -> timedelta:
     unit = duration[-1].lower()
     try:
         value = int(duration[:-1])
-    except ValueError:
-        raise ValueError(f"Invalid duration format: {duration}")
+    except ValueError as exc:
+        raise ValueError(f"Invalid duration format: {duration}") from exc
 
     if value <= 0:
         raise ValueError(f"Duration must be positive: {duration}")
@@ -104,7 +105,7 @@ def parse_duration(duration: str) -> timedelta:
             raise ValueError(f"Unknown duration unit: {unit}")
 
 
-def normalize_volume_key_from_library_relative(path: str) -> Optional[str]:
+def normalize_volume_key_from_library_relative(path: str) -> str | None:
     """Map a library-relative file path to its canonical volume key (*.cbz)."""
     cleaned = path.strip("/")
     if not cleaned:
@@ -128,6 +129,7 @@ class Database:
     """SQLite database for user and invite management."""
 
     SCHEMA_VERSION = 2
+    AUDIT_PRUNE_INTERVAL_SECONDS = 3600
 
     def __init__(self, db_path: Path | str) -> None:
         """Initialize database connection.
@@ -136,24 +138,62 @@ class Database:
             db_path: Path to SQLite database file.
         """
         self.db_path = Path(db_path)
+        self.connect_timeout_seconds = 30
+        self.busy_timeout_ms = 5000
+        self.connect_retries = 5
+        self.retry_initial_delay_seconds = 0.05
+        self._last_audit_prune_monotonic = 0.0
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
+    def configure_connection(
+        self,
+        *,
+        connect_timeout_seconds: int | None = None,
+        busy_timeout_ms: int | None = None,
+        connect_retries: int | None = None,
+        retry_initial_delay_seconds: float | None = None,
+    ) -> None:
+        """Apply runtime DB connection settings."""
+        if connect_timeout_seconds is not None:
+            self.connect_timeout_seconds = max(1, int(connect_timeout_seconds))
+        if busy_timeout_ms is not None:
+            self.busy_timeout_ms = max(100, int(busy_timeout_ms))
+        if connect_retries is not None:
+            self.connect_retries = max(1, int(connect_retries))
+        if retry_initial_delay_seconds is not None:
+            self.retry_initial_delay_seconds = max(0.001, float(retry_initial_delay_seconds))
+
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        """Context manager for database connections."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        """Context manager for database connections.
+
+        Retries on `sqlite3.OperationalError: database is locked` with
+        exponential backoff.
+        """
+        retries = self.connect_retries
+        delay = self.retry_initial_delay_seconds
+        for attempt in range(retries):
+            try:
+                conn = sqlite3.connect(self.db_path, timeout=self.connect_timeout_seconds)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
+                try:
+                    yield conn
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.close()
+                return
+            except sqlite3.OperationalError as exc:
+                if "database is locked" in str(exc).lower() and attempt < retries - 1:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                raise
 
     @staticmethod
     def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -314,10 +354,10 @@ class Database:
                     (username, password_hash, normalized_role, status, notes),
                 )
                 return cursor.lastrowid or 0
-            except sqlite3.IntegrityError:
-                raise ValueError(f"Username '{username}' already exists")
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"Username '{username}' already exists") from exc
 
-    def get_user(self, username: str) -> Optional[UserDict]:
+    def get_user(self, username: str) -> UserDict | None:
         """Get user by username.
 
         Args:
@@ -346,7 +386,7 @@ class Database:
                 )
             return None
 
-    def authenticate_user(self, username: str, password: str) -> Optional[UserDict]:
+    def authenticate_user(self, username: str, password: str) -> UserDict | None:
         """Authenticate user with username and password.
 
         Args:
@@ -378,7 +418,7 @@ class Database:
                     )
             return None
 
-    def list_users(self, status: Optional[UserStatus] = None) -> list[UserDict]:
+    def list_users(self, status: UserStatus | None = None) -> list[UserDict]:
         """List all users.
 
         Args:
@@ -537,7 +577,7 @@ class Database:
         self,
         role: UserRole = "registered",
         expires: str = "7d",
-        invited_by: Optional[str] = None,
+        invited_by: str | None = None,
     ) -> str:
         """Create an invite code.
 
@@ -560,7 +600,7 @@ class Database:
                 INSERT INTO invites (code, role, invited_by, expires_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (code, normalized_role, invited_by, expires_at.isoformat()),
+                (code, normalized_role, invited_by, expires_at.strftime("%Y-%m-%d %H:%M:%S")),
             )
 
         self.log_audit_event(
@@ -572,7 +612,7 @@ class Database:
         )
         return code
 
-    def get_invite(self, code: str) -> Optional[InviteDict]:
+    def get_invite(self, code: str) -> InviteDict | None:
         """Get invite by code.
 
         Args:
@@ -602,7 +642,7 @@ class Database:
                 )
             return None
 
-    def validate_invite(self, code: str) -> Optional[InviteDict]:
+    def validate_invite(self, code: str) -> InviteDict | None:
         """Validate an invite code.
 
         Args:
@@ -721,12 +761,28 @@ class Database:
         Returns:
             Number of deleted invites.
         """
+        # Use Python datetime comparison to avoid SQLite timezone/text format edge cases.
+        expired_ids: list[int] = []
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+
         with self._connection() as conn:
             cursor = conn.execute(
-                """
-                DELETE FROM invites
-                WHERE expires_at < datetime('now') AND used_by IS NULL
-                """
+                "SELECT id, expires_at FROM invites WHERE used_by IS NULL"
+            )
+            for row in cursor.fetchall():
+                try:
+                    expires_at = datetime.fromisoformat(row["expires_at"])
+                except (ValueError, TypeError):
+                    continue
+                if expires_at < now_utc:
+                    expired_ids.append(row["id"])
+
+            if not expired_ids:
+                return 0
+
+            cursor = conn.execute(
+                f"DELETE FROM invites WHERE id IN ({','.join('?' for _ in expired_ids)})",
+                tuple(expired_ids),
             )
             return cursor.rowcount
 
@@ -737,17 +793,20 @@ class Database:
     def log_audit_event(
         self,
         action: str,
-        actor_username: Optional[str] = None,
-        target_type: Optional[str] = None,
-        target_path: Optional[str] = None,
-        target_username: Optional[str] = None,
-        details: Optional[dict[str, Any]] = None,
+        actor_username: str | None = None,
+        target_type: str | None = None,
+        target_path: str | None = None,
+        target_username: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> int:
         """Append an audit event and prune entries older than retention period."""
         details_text = None
         if details is not None:
             import json
             details_text = json.dumps(details, separators=(",", ":"), ensure_ascii=True)
+
+        now = time.monotonic()
+        should_prune = (now - self._last_audit_prune_monotonic) >= self.AUDIT_PRUNE_INTERVAL_SECONDS
 
         with self._connection() as conn:
             cursor = conn.execute(
@@ -759,10 +818,12 @@ class Database:
                 """,
                 (actor_username, action, target_type, target_path, target_username, details_text),
             )
-            conn.execute(
-                "DELETE FROM audit_logs WHERE created_at < datetime('now', ?)",
-                (f"-{self.AUDIT_RETENTION_DAYS} days",),
-            )
+            if should_prune:
+                conn.execute(
+                    "DELETE FROM audit_logs WHERE created_at < datetime('now', ?)",
+                    (f"-{self.AUDIT_RETENTION_DAYS} days",),
+                )
+                self._last_audit_prune_monotonic = now
             return cursor.lastrowid or 0
 
     def list_audit_events(self, limit: int = 200) -> list[AuditEventDict]:
@@ -822,17 +883,29 @@ class Database:
             else:
                 conn.execute(
                     """
-                    INSERT INTO volume_uploads (
-                        volume_key, uploader_username, last_modified_by, last_modified_at
-                    ) VALUES (?, ?, ?, datetime('now'))
-                    ON CONFLICT(volume_key) DO UPDATE SET
-                        last_modified_by = excluded.last_modified_by,
-                        last_modified_at = datetime('now')
+                    UPDATE volume_uploads
+                    SET last_modified_by = ?, last_modified_at = datetime('now')
+                    WHERE volume_key = ?
                     """,
-                    (volume_key, uploader_username, uploader_username),
+                    (uploader_username, volume_key),
                 )
 
-    def get_volume_owner(self, library_relative_path: str) -> Optional[str]:
+    def count_user_uploads_last_24h(self, username: str) -> int:
+        """Return number of uploads a user created in the last 24 hours."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM volume_uploads
+                WHERE uploader_username = ?
+                  AND uploaded_at >= datetime('now', '-1 day')
+                """,
+                (username,),
+            )
+            row = cursor.fetchone()
+        return int(row["cnt"]) if row else 0
+
+    def get_volume_owner(self, library_relative_path: str) -> str | None:
         """Get uploader username for a volume or sidecar path."""
         volume_key = normalize_volume_key_from_library_relative(library_relative_path)
         if volume_key is None:

@@ -9,13 +9,13 @@ import os
 import ssl
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from mokuro_bunko.config import SslConfig
 
 
-def get_default_cert_paths() -> Tuple[Path, Path]:
+def get_default_cert_paths() -> tuple[Path, Path]:
     """Get default paths for SSL certificates.
 
     Returns:
@@ -122,7 +122,7 @@ def generate_self_signed_cert(
         )
 
 
-def ipaddress_from_string(addr: str) -> "x509.IPAddress":
+def ipaddress_from_string(addr: str) -> object:
     """Convert string IP address to x509.IPAddress.
 
     Args:
@@ -135,7 +135,7 @@ def ipaddress_from_string(addr: str) -> "x509.IPAddress":
     return ipaddress.ip_address(addr)
 
 
-def ensure_ssl_context(ssl_config: "SslConfig") -> Optional[ssl.SSLContext]:
+def ensure_ssl_context(ssl_config: SslConfig) -> ssl.SSLContext | None:
     """Ensure SSL context is available based on configuration.
 
     Args:
@@ -170,7 +170,7 @@ def ensure_ssl_context(ssl_config: "SslConfig") -> Optional[ssl.SSLContext]:
     return context
 
 
-def get_ssl_info(ssl_config: "SslConfig") -> str:
+def get_ssl_info(ssl_config: SslConfig) -> str:
     """Get human-readable SSL configuration info.
 
     Args:
@@ -187,3 +187,53 @@ def get_ssl_info(ssl_config: "SslConfig") -> str:
         return f"SSL enabled (auto-cert: {cert_path})"
 
     return f"SSL enabled (cert: {ssl_config.cert_file})"
+
+
+def validate_certificate_pair(
+    cert_path: Path,
+    key_path: Path,
+    *,
+    expiry_warning_days: int = 30,
+) -> tuple[list[str], list[str]]:
+    """Validate certificate/key integrity and return (errors, warnings)."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # Validate that certificate and key can be loaded together.
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(cert_path), str(key_path))
+    except Exception as exc:
+        errors.append(f"SSL certificate/key validation failed: {exc}")
+        return errors, warnings
+
+    # Parse certificate dates for expiration checks.
+    try:
+        from cryptography import x509
+    except Exception as exc:
+        warnings.append(f"Could not import cryptography for certificate date checks: {exc}")
+        return errors, warnings
+
+    try:
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    except Exception as exc:
+        errors.append(f"Failed to parse certificate file: {exc}")
+        return errors, warnings
+
+    now = datetime.now(timezone.utc)
+    if cert.not_valid_after_utc <= now:
+        errors.append(f"SSL certificate has expired: {cert.not_valid_after_utc.isoformat()}")
+        return errors, warnings
+
+    if cert.not_valid_before_utc > now:
+        errors.append(f"SSL certificate is not valid yet: {cert.not_valid_before_utc.isoformat()}")
+        return errors, warnings
+
+    remaining = cert.not_valid_after_utc - now
+    if remaining <= timedelta(days=expiry_warning_days):
+        warnings.append(
+            "SSL certificate expires soon "
+            f"({cert.not_valid_after_utc.isoformat()}, {remaining.days} days remaining)"
+        )
+
+    return errors, warnings

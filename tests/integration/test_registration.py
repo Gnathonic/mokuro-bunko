@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
-from mokuro_bunko.config import Config, RegistrationConfig, StorageConfig
+from mokuro_bunko.config import RegistrationConfig
 from mokuro_bunko.database import Database
 from mokuro_bunko.registration.api import RegistrationAPI
 from mokuro_bunko.registration.invites import InviteManager
@@ -27,7 +28,7 @@ class WSGITestClient:
         path: str,
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make a request to the WSGI app."""
         headers = headers or {}
         content = b""
@@ -80,7 +81,7 @@ class WSGITestClient:
         path: str,
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make a POST request."""
         return self.request("POST", path, headers, json_body)
 
@@ -88,7 +89,7 @@ class WSGITestClient:
         self,
         path: str,
         headers: dict[str, str] | None = None,
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make a GET request."""
         return self.request("GET", path, headers)
 
@@ -274,6 +275,20 @@ class TestSelfRegistration:
         )
         assert response.status_code == 400
         assert "Invalid JSON" in response.json()["error"]
+
+    def test_registration_rate_limit_enforced(self, client: WSGITestClient) -> None:
+        """Test excessive registration attempts are blocked with 429."""
+        for i in range(22):
+            response = client.post(
+                "/api/register",
+                json_body={"username": f"rluser{i}", "password": "securepass"},
+            )
+            if i < 20:
+                assert response.status_code in (201, 400, 409)
+            else:
+                assert response.status_code == 429
+                assert "Too many registration attempts" in response.json()["error"]
+                break
 
 
 class TestDisabledRegistration:

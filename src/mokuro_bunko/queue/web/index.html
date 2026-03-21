@@ -25,10 +25,49 @@
     </header>
 
     <main class="queue-page">
-        <h1 class="queue-page__title">OCR Queue</h1>
-        <p class="queue-page__subtitle">
-            Backend: <span id="backend" class="badge">-</span>
-        </p>
+        <section class="queue-hero">
+            <div>
+                <h1 class="queue-page__title">OCR Operations Center</h1>
+                <p class="queue-page__subtitle">
+                    Backend: <span id="backend" class="badge">-</span>
+                    <span class="queue-page__dot">•</span>
+                    <span id="worker-summary">Worker state unavailable</span>
+                </p>
+            </div>
+            <div class="queue-toolbar">
+                <button id="refresh-now" class="btn btn--secondary btn--sm" type="button">Refresh Now</button>
+                <label class="toggle" for="auto-refresh">
+                    <input id="auto-refresh" type="checkbox" checked>
+                    <span>Auto refresh</span>
+                </label>
+                <select id="refresh-interval" class="form-select form-select--sm" aria-label="Refresh interval">
+                    <option value="2000">2s</option>
+                    <option value="3000" selected>3s</option>
+                    <option value="5000">5s</option>
+                    <option value="10000">10s</option>
+                </select>
+                <span id="last-updated" class="queue-toolbar__stamp">Never updated</span>
+            </div>
+        </section>
+
+        <section class="queue-metrics" aria-live="polite">
+            <article class="metric-card metric-card--worker">
+                <div class="metric-card__label">Worker</div>
+                <div id="metric-worker" class="metric-card__value">Unknown</div>
+            </article>
+            <article class="metric-card metric-card--active">
+                <div class="metric-card__label">Active Job</div>
+                <div id="metric-active" class="metric-card__value">None</div>
+            </article>
+            <article class="metric-card metric-card--pending">
+                <div class="metric-card__label">Pending OCR</div>
+                <div id="metric-pending-ocr" class="metric-card__value">0</div>
+            </article>
+            <article class="metric-card metric-card--thumbs">
+                <div class="metric-card__label">Pending Thumbnails</div>
+                <div id="metric-pending-thumb" class="metric-card__value">0</div>
+            </article>
+        </section>
 
         <!-- Current Job -->
         <section class="queue-section" id="current-section">
@@ -36,14 +75,22 @@
             <div id="current-job" class="current-job current-job--empty">
                 <p class="current-job__idle">Idle - no active OCR job</p>
             </div>
+            <div class="queue-controls" id="queue-controls">
+                <button id="ocr-pause-btn" class="btn btn--secondary btn--sm" type="button">Pause OCR</button>
+                <button id="ocr-resume-btn" class="btn btn--secondary btn--sm" type="button">Resume OCR</button>
+                <span id="ocr-control-status" class="queue-controls__status">Worker state unknown</span>
+            </div>
         </section>
 
         <!-- Pending OCR -->
         <section class="queue-section">
-            <h2 class="queue-section__title">
-                Pending OCR
-                <span id="pending-ocr-count" class="badge badge--muted">0</span>
-            </h2>
+            <div class="queue-section__title-row">
+                <h2 class="queue-section__title">
+                    Pending OCR
+                    <span id="pending-ocr-count" class="badge badge--muted">0</span>
+                </h2>
+                <input id="pending-search" class="form-input form-input--sm" type="text" placeholder="Search series or volume">
+            </div>
             <div id="pending-ocr-list" class="pending-list">
                 <p class="pending-list__empty">No volumes waiting for OCR</p>
             </div>
@@ -57,6 +104,38 @@
             </h2>
             <p id="pending-thumb-text" class="queue-section__detail">No volumes waiting for thumbnails</p>
         </section>
+
+        <section class="queue-section">
+            <div class="queue-section__title-row">
+                <h2 class="queue-section__title">Recent OCR History</h2>
+                <div class="history-filters">
+                    <select id="history-status" class="form-select form-select--sm" aria-label="Filter by status">
+                        <option value="">All statuses</option>
+                        <option value="done">Done</option>
+                        <option value="error">Error</option>
+                    </select>
+                    <input id="history-series" class="form-input form-input--sm" type="text" placeholder="Filter series">
+                    <select id="history-since" class="form-select form-select--sm" aria-label="Time window">
+                        <option value="">All time</option>
+                        <option value="3600">Last 1h</option>
+                        <option value="86400">Last 24h</option>
+                        <option value="604800">Last 7d</option>
+                    </select>
+                    <select id="history-limit" class="form-select form-select--sm" aria-label="History item limit">
+                        <option value="10">10</option>
+                        <option value="25" selected>25</option>
+                        <option value="50">50</option>
+                    </select>
+                    <button id="history-clear" class="btn btn--ghost btn--sm" type="button">Reset</button>
+                </div>
+            </div>
+            <div id="history-list" class="history-list">
+                <p class="pending-list__empty">No OCR history yet</p>
+            </div>
+            <p class="queue-section__detail" id="history-meta">Showing newest first</p>
+        </section>
+
+        <div id="queue-toast" class="queue-toast" aria-live="polite"></div>
     </main>
 
     <script src="/_static/nav.js"></script>

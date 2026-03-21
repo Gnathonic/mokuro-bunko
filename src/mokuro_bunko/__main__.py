@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import click
 
@@ -27,7 +26,7 @@ from mokuro_bunko.tunnel_cli import tunnel_group
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 @click.version_option(version=__version__, prog_name="mokuro-bunko")
 @click.pass_context
-def cli(ctx: click.Context, config: Optional[Path], verbose: bool) -> None:
+def cli(ctx: click.Context, config: Path | None, verbose: bool) -> None:
     """Mokuro Bunko Server - Manga library with OCR support."""
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config

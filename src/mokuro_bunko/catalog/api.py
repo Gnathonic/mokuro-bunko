@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import urllib.parse
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
 from mokuro_bunko.library_index import LibraryIndexCache
 from mokuro_bunko.security import is_within_path
@@ -32,10 +33,10 @@ class CatalogAPI:
     def __init__(
         self,
         app: Callable[..., Any],
-        storage_base_path: Optional[str] = None,
+        storage_base_path: str | None = None,
         enabled: bool = False,
         catalog_config: Any = None,
-        library_index: Optional[LibraryIndexCache] = None,
+        library_index: LibraryIndexCache | None = None,
     ) -> None:
         """Initialize catalog API middleware.
 
@@ -69,11 +70,20 @@ class CatalogAPI:
         start_response: Callable[..., Any],
     ) -> Iterable[bytes]:
         """Handle WSGI request."""
-        if not self.enabled:
-            return self.app(environ, start_response)
-
         path = environ.get("PATH_INFO", "")
         method = environ.get("REQUEST_METHOD", "GET")
+        if not self.enabled:
+            if path in ("/catalog", "/catalog/") and method == "GET":
+                accept = environ.get("HTTP_ACCEPT", "")
+                if "text/html" in accept:
+                    start_response("302 Found", [("Location", "/")])
+                    return [b""]
+                return self._error_response(start_response, 404, "Not found")
+            if path.startswith("/catalog/api/"):
+                return self._json_response(start_response, 404, {"error": "Catalog disabled"})
+            if path.startswith("/catalog/"):
+                return self._error_response(start_response, 404, "Not found")
+            return self.app(environ, start_response)
 
         # Handle catalog routes
         if path == "/catalog" or path == "/catalog/":
@@ -236,16 +246,29 @@ class CatalogAPI:
             ]
             start_response("200 OK", headers)
             return [content]
-        except IOError:
+        except OSError:
             return self._error_response(start_response, 500, "Error")
 
-    def _read_ocr_progress(self) -> Optional[dict[str, Any]]:
+    def _read_ocr_progress(self) -> dict[str, Any] | None:
         """Load live OCR progress from sidecar state file."""
         if not self.storage_base_path:
             return None
-        progress_path = self.storage_base_path.parent / ".ocr-progress.json"
-        if not progress_path.exists():
+
+        # Accept either the library root location or the parent directory for legacy tests.
+        candidate_paths = [
+            self.storage_base_path / ".ocr-progress.json",
+            self.storage_base_path.parent / ".ocr-progress.json",
+        ]
+
+        progress_path = None
+        for candidate in candidate_paths:
+            if candidate.exists():
+                progress_path = candidate
+                break
+
+        if progress_path is None:
             return None
+
         try:
             data = json.loads(progress_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -258,7 +281,7 @@ class CatalogAPI:
 
     def _is_active_ocr_volume(
         self,
-        progress: Optional[dict[str, Any]],
+        progress: dict[str, Any] | None,
         series_name: str,
         volume_name: str,
     ) -> bool:
@@ -272,7 +295,7 @@ class CatalogAPI:
         return relative_cbz.casefold() == expected.casefold()
 
     @staticmethod
-    def _volume_progress(progress: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    def _volume_progress(progress: dict[str, Any] | None) -> dict[str, Any] | None:
         """Return compact progress payload for per-volume API fields."""
         if not progress:
             return None
@@ -344,7 +367,7 @@ class CatalogAPI:
             ]
             start_response("200 OK", headers)
             return [content]
-        except IOError:
+        except OSError:
             return self._error_response(start_response, 500, "Error")
 
     def _json_response(
@@ -358,8 +381,13 @@ class CatalogAPI:
         status = f"{status_code} {status_map.get(status_code, 'Error')}"
         body = json.dumps(data).encode("utf-8")
         headers = [
-            ("Content-Type", "application/json"),
+            ("Content-Type", "application/json; charset=utf-8"),
             ("Content-Length", str(len(body))),
+            ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
+            ("X-Frame-Options", "DENY"),
+            ("X-XSS-Protection", "1; mode=block"),
         ]
         start_response(status, headers)
         return [body]

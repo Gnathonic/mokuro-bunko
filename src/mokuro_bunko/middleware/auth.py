@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import posixpath
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from mokuro_bunko.security import AuthAttemptLimiter, get_client_ip
 from mokuro_bunko.webdav.resources import PathMapper
@@ -15,6 +17,7 @@ if TYPE_CHECKING:
 
 
 AUTH_RATE_LIMITER = AuthAttemptLimiter()
+REQUEST_RATE_LIMITER = AuthAttemptLimiter(max_failures=120, window_seconds=60, block_seconds=60)
 
 
 class Permission(Enum):
@@ -82,6 +85,21 @@ METHOD_PERMISSIONS: dict[str, Permission] = {
 }
 
 
+def normalize_virtual_path(path: str) -> str:
+    """Normalize WebDAV virtual path to stable '/...' format."""
+    if not path:
+        return "/"
+    safe_path = path.replace("\\", "/").strip()
+    normalized = posixpath.normpath(safe_path)
+    if normalized == "." or normalized == "":
+        normalized = "/"
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if normalized != "/" and normalized.endswith("/"):
+        normalized = normalized.rstrip("/")
+    return normalized
+
+
 def get_role_permissions(role: str) -> set[Permission]:
     """Get the set of permissions for a role."""
     return ROLE_PERMISSIONS.get(role, set())
@@ -98,7 +116,7 @@ def is_progress_file(path: str) -> bool:
     Per-user files are volume-data.json and profiles.json stored
     directly under /mokuro-reader/.
     """
-    path = "/" + path.strip("/")
+    path = normalize_virtual_path(path)
     prefix = f"/{PathMapper.READER_ROOT}/"
     if path.startswith(prefix):
         relative = path[len(prefix):]
@@ -122,7 +140,7 @@ def is_library_path(path: str) -> bool:
     Library paths are everything under /mokuro-reader/ that is NOT
     a per-user file.
     """
-    path = "/" + path.strip("/")
+    path = normalize_virtual_path(path)
     prefix = f"/{PathMapper.READER_ROOT}/"
     if path.startswith(prefix):
         relative = path[len(prefix):]
@@ -132,17 +150,24 @@ def is_library_path(path: str) -> bool:
 
 def is_inbox_path(path: str) -> bool:
     """Check if a path is in the OCR inbox."""
+    path = normalize_virtual_path(path)
     return path.startswith("/inbox/") or path == "/inbox"
 
 
 def is_admin_path(path: str) -> bool:
     """Check if a path is an admin endpoint."""
-    return path.startswith("/_admin")
+    path = normalize_virtual_path(path)
+    admin_root = "/_admin"
+    return path == admin_root or path.startswith(f"{admin_root}/")
 
 
 def is_invites_admin_api_path(path: str) -> bool:
     """Check if path is an invite management admin API endpoint."""
-    return path == "/_admin/api/invites" or path.startswith("/_admin/api/invites/")
+    normalized = normalize_virtual_path(path)
+    return (
+        normalized == "/_admin/api/invites"
+        or normalized.startswith("/_admin/api/invites/")
+    )
 
 
 @dataclass
@@ -150,12 +175,12 @@ class AuthResult:
     """Result of authentication attempt."""
 
     authenticated: bool
-    user: Optional["UserDict"] = None
+    user: UserDict | None = None
     role: str = "anonymous"
-    error: Optional[str] = None
+    error: str | None = None
 
     @property
-    def username(self) -> Optional[str]:
+    def username(self) -> str | None:
         """Get username if authenticated."""
         return self.user["username"] if self.user else None
 
@@ -166,10 +191,10 @@ class AuthorizationResult:
 
     authorized: bool
     status_code: int = 200
-    error: Optional[str] = None
+    error: str | None = None
 
 
-def parse_basic_auth(authorization_header: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+def parse_basic_auth(authorization_header: str | None) -> tuple[str | None, str | None]:
     """Parse Basic auth header.
 
     Returns:
@@ -193,8 +218,8 @@ def parse_basic_auth(authorization_header: Optional[str]) -> tuple[Optional[str]
 
 
 def authenticate_basic_header(
-    database: "Database",
-    authorization_header: Optional[str],
+    database: Database,
+    authorization_header: str | None,
 ) -> AuthResult:
     """Authenticate a user from a Basic auth header."""
     username, password = parse_basic_auth(authorization_header)
@@ -225,16 +250,20 @@ class AuthMiddleware:
     def __init__(
         self,
         app: Callable[..., Any],
-        database: "Database",
+        database: Database,
         realm: str = "mokuro-bunko",
         allow_anonymous: bool = True,
         registration_config: Any = None,
+        quota_config: Any = None,
+        admin_path: str = "/_admin",
     ) -> None:
         self.app = app
         self.database = database
         self.realm = realm
         self._allow_anonymous = allow_anonymous
         self._registration_config = registration_config
+        self.quota_config = quota_config
+        self.admin_path = normalize_virtual_path(admin_path)
 
     @property
     def allow_anonymous(self) -> bool:
@@ -270,6 +299,18 @@ class AuthMiddleware:
         start_response: Callable[..., Any],
     ) -> Any:
         """Handle WSGI request."""
+        client_ip = get_client_ip(environ)
+        rate_allowed, retry_after = REQUEST_RATE_LIMITER.allow_attempt(client_ip)
+        if not rate_allowed:
+            return self._error_response(
+                start_response,
+                429,
+                f"Too many requests. Retry in {retry_after}s",
+            )
+        # Request rate limiter is used as a generic request counter.
+        # Count allowed requests here so the IP can be blocked after the limit.
+        REQUEST_RATE_LIMITER.record_failure(client_ip)
+
         auth_result = self.authenticate(environ)
 
         environ["mokuro.auth"] = auth_result
@@ -328,6 +369,7 @@ class AuthMiddleware:
         """Check if request is authorized."""
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/")
+        normalized_path = normalize_virtual_path(path)
         role = auth_result.role
 
         # OPTIONS always allowed for CORS preflight
@@ -344,10 +386,11 @@ class AuthMiddleware:
             )
 
         # Admin paths require admin permission
-        if is_admin_path(path):
+        admin_path = self.admin_path
+        if normalized_path == admin_path or normalized_path.startswith(f"{admin_path}/"):
             # Allow GET requests to admin static files.
             # AdminAPI enforces role checks for /api/* endpoints.
-            if method in ("GET", "HEAD") and "/api/" not in path:
+            if method in ("GET", "HEAD") and "/api/" not in normalized_path:
                 return AuthorizationResult(authorized=True)
 
             required_permission = Permission.ADMIN
@@ -374,6 +417,22 @@ class AuthMiddleware:
 
         # Read operations
         if method in ("GET", "HEAD", "PROPFIND"):
+            # /inbox is not exposed over WebDAV
+            if is_inbox_path(normalized_path):
+                return AuthorizationResult(
+                    authorized=False,
+                    status_code=404,
+                    error="Not found",
+                )
+
+            if is_progress_file(normalized_path):
+                if not auth_result.authenticated:
+                    return AuthorizationResult(
+                        authorized=False,
+                        status_code=401,
+                        error="Authentication required",
+                    )
+
             if not auth_result.authenticated:
                 if method == "PROPFIND":
                     if not self.allow_anonymous_browse:
@@ -393,7 +452,7 @@ class AuthMiddleware:
 
                     # Directory/root reads are "browse" operations
                     if not is_library_path(path) and not self.allow_anonymous_browse:
-                        if path in ("/", f"/{PathMapper.READER_ROOT}"):
+                        if normalized_path in ("/", f"/{PathMapper.READER_ROOT}"):
                             return AuthorizationResult(
                                 authorized=False,
                                 status_code=401,
@@ -536,6 +595,22 @@ class AuthMiddleware:
                     status_code=403,
                     error="Permission denied: cannot add files",
                 )
+
+            if auth_result.username and self.quota_config is not None:
+                uploads_today = 0
+                try:
+                    uploads_today = self.database.count_user_uploads_last_24h(auth_result.username)
+                except Exception:
+                    # allow if DB query fails rather than blocking all uploads
+                    uploads_today = 0
+
+                if uploads_today >= getattr(self.quota_config, "uploads_per_day", 0):
+                    if self.quota_config.uploads_per_day > 0:
+                        return AuthorizationResult(
+                            authorized=False,
+                            status_code=429,
+                            error=f"Upload quota exceeded (limit {self.quota_config.uploads_per_day}/day)",
+                        )
             return AuthorizationResult(authorized=True)
 
         # Other PUT paths are not supported.

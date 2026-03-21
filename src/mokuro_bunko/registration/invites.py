@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, Optional, TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 if TYPE_CHECKING:
     from mokuro_bunko.database import Database, InviteDict, UserRole
@@ -20,14 +20,14 @@ class InviteInfo(TypedDict):
     status: InviteStatus
     created_at: str
     expires_at: str
-    used_by: Optional[str]
-    invited_by: Optional[str]
+    used_by: str | None
+    invited_by: str | None
 
 
 class InviteManager:
     """Manager for invite code operations."""
 
-    def __init__(self, database: "Database") -> None:
+    def __init__(self, database: Database) -> None:
         """Initialize invite manager.
 
         Args:
@@ -37,9 +37,9 @@ class InviteManager:
 
     def create_invite(
         self,
-        role: "UserRole" = "registered",
+        role: UserRole = "registered",
         expires: str = "7d",
-        invited_by: Optional[str] = None,
+        invited_by: str | None = None,
     ) -> str:
         """Create a new invite code.
 
@@ -52,7 +52,7 @@ class InviteManager:
         """
         return self.db.create_invite(role=role, expires=expires, invited_by=invited_by)
 
-    def validate(self, code: str) -> Optional["InviteDict"]:
+    def validate(self, code: str) -> InviteDict | None:
         """Validate an invite code.
 
         Args:
@@ -75,7 +75,7 @@ class InviteManager:
         """
         return self.db.use_invite(code, username)
 
-    def get_status(self, invite: "InviteDict") -> InviteStatus:
+    def get_status(self, invite: InviteDict) -> InviteStatus:
         """Get the status of an invite.
 
         Args:
@@ -93,7 +93,7 @@ class InviteManager:
 
         return "valid"
 
-    def get_info(self, code: str) -> Optional[InviteInfo]:
+    def get_info(self, code: str) -> InviteInfo | None:
         """Get extended invite information.
 
         Args:

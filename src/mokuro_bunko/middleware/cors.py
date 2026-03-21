@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 from mokuro_bunko.config import CorsConfig
-
 
 # WebDAV methods that need to be allowed
 WEBDAV_METHODS = [

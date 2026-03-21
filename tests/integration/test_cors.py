@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
 from mokuro_bunko.config import Config, CorsConfig, StorageConfig
 from mokuro_bunko.database import Database
-from mokuro_bunko.middleware.cors import CorsMiddleware, WEBDAV_METHODS
+from mokuro_bunko.middleware.cors import WEBDAV_METHODS
 from mokuro_bunko.server import create_app
 
 
@@ -26,7 +27,7 @@ class WSGITestClient:
         path: str,
         headers: dict[str, str] | None = None,
         content: bytes | None = None,
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make a request to the WSGI app."""
         headers = headers or {}
 
@@ -71,13 +72,13 @@ class WSGITestClient:
 
     def options(
         self, path: str, headers: dict[str, str] | None = None
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make an OPTIONS request."""
         return self.request("OPTIONS", path, headers)
 
     def get(
         self, path: str, headers: dict[str, str] | None = None
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make a GET request."""
         return self.request("GET", path, headers)
 

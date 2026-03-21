@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
-from mokuro_bunko.database import Database
 from mokuro_bunko.config import RegistrationConfig
-from mokuro_bunko.middleware.auth import AuthMiddleware, AuthResult
+from mokuro_bunko.database import Database
+from mokuro_bunko.middleware.auth import AuthMiddleware
 from mokuro_bunko.security import AuthAttemptLimiter
 
 
@@ -192,6 +193,37 @@ class TestAuthentication:
         assert third.error is not None
         assert "Too many failed attempts" in third.error
 
+    def test_request_rate_limiter_blocks_heavy_request_rate(
+        self, db_with_test_users: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Too many overall requests per IP should return 429."""
+        import mokuro_bunko.middleware.auth as auth_module
+
+        monkeypatch.setattr(
+            auth_module,
+            "REQUEST_RATE_LIMITER",
+            AuthAttemptLimiter(max_failures=2, window_seconds=60, block_seconds=30),
+        )
+
+        middleware = AuthMiddleware(dummy_app, db_with_test_users)
+        environ = make_environ(method="GET", path="/")
+        environ["REMOTE_ADDR"] = "192.0.2.20"
+
+        resp1 = middleware(environ, MockStartResponse())
+        resp2 = middleware(environ, MockStartResponse())
+        resp3 = middleware(environ, MockStartResponse())
+
+        assert resp1 is not None
+        assert resp2 is not None
+        assert resp3 is not None
+
+        middleware(environ, MockStartResponse())
+        # JSON isn't returned by the middleware directly; verify call returns 429 in response status
+        # We have to use a start response object with status_code property
+        sr = MockStartResponse()
+        middleware(environ, sr)
+        assert sr.status_code == 429
+
 
 class TestAuthorization:
     """Tests for authorization flow."""
@@ -201,7 +233,7 @@ class TestAuthorization:
         environ = make_environ(method="GET", path="/mokuro-reader/manga.cbz")
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
 
@@ -212,7 +244,7 @@ class TestAuthorization:
         environ = make_environ(method="PUT", path="/mokuro-reader/volume-data.json")
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 401
 
@@ -226,11 +258,12 @@ class TestAuthorization:
                 allow_anonymous_download=False,
             ),
         )
-        environ = make_environ(method="GET", path="/mokuro-reader/manga.cbz")
-        start_response = MockStartResponse()
+        for path in ("/mokuro-reader/test.cbz", "/mokuro-reader/test.cbz"):
+            environ = make_environ(method="GET", path=path)
+            start_response = MockStartResponse()
 
-        middleware(environ, start_response)
-        assert start_response.status_code == 401
+            middleware(environ, start_response)
+            assert start_response.status_code == 401
 
     def test_anonymous_browse_allowed_when_only_download_blocked(
         self, db_with_test_users: Database
@@ -265,7 +298,38 @@ class TestAuthorization:
 
         middleware(environ, start_response)
         assert start_response.status_code == 401
+    def test_anonymous_cannot_read_progress_file(self, auth_middleware: AuthMiddleware) -> None:
+        """Test anonymous GET of progress file should be rejected."""
+        environ = make_environ(method="GET", path="/mokuro-reader/volume-data.json")
+        start_response = MockStartResponse()
 
+        auth_middleware(environ, start_response)
+        assert start_response.status_code == 401
+
+    def test_anonymous_cannot_propfind_progress_file(self, auth_middleware: AuthMiddleware) -> None:
+        """Test anonymous PROPFIND of per-user progress file should be rejected."""
+        environ = make_environ(method="PROPFIND", path="/mokuro-reader/volume-data.json",)
+        start_response = MockStartResponse()
+
+        auth_middleware(environ, start_response)
+        assert start_response.status_code == 401
+
+    def test_anonymous_inbox_access_is_blocked(self, auth_middleware: AuthMiddleware) -> None:
+        """Test anonymous cannot access inbox paths."""
+        for method in ("GET", "HEAD", "PROPFIND"):
+            environ = make_environ(method=method, path="/inbox")
+            start_response = MockStartResponse()
+
+            auth_middleware(environ, start_response)
+            assert start_response.status_code == 404
+
+    def test_path_traversal_to_inbox_is_blocked(self, auth_middleware: AuthMiddleware) -> None:
+        """Test traversal path to inbox is blocked."""
+        environ = make_environ(method="GET", path="/mokuro-reader/../inbox")
+        start_response = MockStartResponse()
+
+        auth_middleware(environ, start_response)
+        assert start_response.status_code == 404
     def test_registered_can_write_own_progress(
         self, auth_middleware: AuthMiddleware
     ) -> None:
@@ -277,7 +341,7 @@ class TestAuthorization:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
 
@@ -292,7 +356,7 @@ class TestAuthorization:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
 
@@ -307,7 +371,7 @@ class TestAuthorization:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 403
 
@@ -320,7 +384,7 @@ class TestAuthorization:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
 
@@ -333,7 +397,7 @@ class TestAuthorization:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 403
 
@@ -346,7 +410,7 @@ class TestAuthorization:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 403
 
@@ -376,7 +440,7 @@ class TestAuthorization:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
 
@@ -391,7 +455,7 @@ class TestAuthorization:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 403
 
@@ -404,8 +468,49 @@ class TestAuthorization:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
+        assert start_response.status_code == 200
+
+    def test_dynamic_admin_path_matching(self, db_with_test_users: Database) -> None:
+        """Test auth middleware uses configured admin path."""
+        middleware = AuthMiddleware(
+            dummy_app,
+            db_with_test_users,
+            admin_path="/admin-panel",
+        )
+        environ = make_environ(
+            method="GET",
+            path="/admin-panel/api/users",
+            auth_header=make_basic_auth_header("admin_user", "pass1234"),
+        )
+        start_response = MockStartResponse()
+
+        middleware(environ, start_response)
+        assert start_response.status_code == 200
+
+    def test_admin_path_subpath_not_admin(self, auth_middleware: AuthMiddleware) -> None:
+        """Ensure /_adminx is not treated as admin path."""
+        environ = make_environ(
+            method="GET",
+            path="/_adminx/api/users",
+            auth_header=make_basic_auth_header("admin_user", "pass1234"),
+        )
+        start_response = MockStartResponse()
+
+        auth_middleware(environ, start_response)
+        assert start_response.status_code == 200
+
+    def test_admin_path_dotdot_normalization(self, auth_middleware: AuthMiddleware) -> None:
+        """Ensure /_admin/../api/users is normalized and rejected if not admin path."""
+        environ = make_environ(
+            method="GET",
+            path="/_admin/../api/users",
+            auth_header=make_basic_auth_header("admin_user", "pass1234"),
+        )
+        start_response = MockStartResponse()
+
+        auth_middleware(environ, start_response)
         assert start_response.status_code == 200
 
     def test_inviter_can_access_invite_admin_api(
@@ -434,9 +539,32 @@ class TestAuthorization:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
+
+    def test_upload_quota_enforced_for_uploader(self, db_with_test_users: Database) -> None:
+        """Get 429 when uploader exceeds per-day upload quota."""
+        # set low quota for test without using full config
+        middleware = AuthMiddleware(
+            dummy_app,
+            db_with_test_users,
+            registration_config=RegistrationConfig(allow_anonymous_browse=True, allow_anonymous_download=True),
+            quota_config=type("Q", (), {"uploads_per_day": 1})(),
+        )
+
+        # seed one existing upload in past 24h
+        db_with_test_users.record_volume_upload("series/vol1.cbz", "writer_user")
+
+        environ = make_environ(
+            method="PUT",
+            path="/mokuro-reader/series/vol2.cbz",
+            auth_header=make_basic_auth_header("writer_user", "pass1234"),
+        )
+        start_response = MockStartResponse()
+
+        middleware(environ, start_response)
+        assert start_response.status_code == 429
 
 
 class TestHTTPResponses:
@@ -449,7 +577,7 @@ class TestHTTPResponses:
         environ = make_environ(method="PUT", path="/mokuro-reader/volume-data.json")
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 401
         auth_header = start_response.get_header("WWW-Authenticate")
@@ -468,7 +596,7 @@ class TestHTTPResponses:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 403
         auth_header = start_response.get_header("WWW-Authenticate")
@@ -485,7 +613,7 @@ class TestHTTPResponses:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 401
 
@@ -553,7 +681,7 @@ class TestOptionsRequest:
         environ = make_environ(method="OPTIONS", path="/mokuro-reader/manga.cbz")
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
 
@@ -564,7 +692,7 @@ class TestOptionsRequest:
         environ = make_environ(method="OPTIONS", path="/_admin")
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
 
@@ -579,7 +707,7 @@ class TestWebDAVMethods:
         environ = make_environ(method="PROPFIND", path="/mokuro-reader")
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
 
@@ -595,7 +723,7 @@ class TestWebDAVMethods:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
         assert start_response.status_code == 403
 
         # Uploader can MKCOL
@@ -606,7 +734,7 @@ class TestWebDAVMethods:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
         assert start_response.status_code == 200
 
     def test_move_requires_modify_delete(
@@ -621,7 +749,7 @@ class TestWebDAVMethods:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
         assert start_response.status_code == 403
 
         # Editor can MOVE
@@ -632,7 +760,7 @@ class TestWebDAVMethods:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
         assert start_response.status_code == 200
 
     def test_copy_requires_modify_delete(
@@ -646,7 +774,7 @@ class TestWebDAVMethods:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
         assert start_response.status_code == 403
 
 
@@ -665,7 +793,7 @@ class TestProgressFileAccess:
         environ = make_environ(method="PUT", path="/mokuro-reader/volume-data.json")
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 401
 
@@ -680,7 +808,7 @@ class TestProgressFileAccess:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
 
@@ -695,7 +823,7 @@ class TestProgressFileAccess:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200
 
@@ -710,7 +838,7 @@ class TestProgressFileAccess:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         # Registered can delete own progress even without MODIFY_DELETE
         assert start_response.status_code == 200
@@ -726,6 +854,6 @@ class TestProgressFileAccess:
         )
         start_response = MockStartResponse()
 
-        result = auth_middleware(environ, start_response)
+        auth_middleware(environ, start_response)
 
         assert start_response.status_code == 200

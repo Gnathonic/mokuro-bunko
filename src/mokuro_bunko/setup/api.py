@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 import mimetypes
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
 from mokuro_bunko.config import Config, save_config
 from mokuro_bunko.database import Database
 from mokuro_bunko.security import get_client_ip, is_loopback_ip, is_within_path
 from mokuro_bunko.validation import validate_password, validate_username
-
 
 # Path to web static files
 WEB_DIR = Path(__file__).parent / "web"
@@ -38,13 +38,13 @@ class SetupWizardAPI:
         app: Callable[..., Any],
         database: Database,
         config: Config,
-        config_path: Optional[Path] = None,
+        config_path: Path | None = None,
     ) -> None:
         self.app = app
         self.db = database
         self.config = config
         self.config_path = config_path
-        self._setup_complete: Optional[bool] = None
+        self._setup_complete: bool | None = None
 
     def _needs_setup(self) -> bool:
         """Check if initial setup is needed (no admin users exist)."""
@@ -249,8 +249,13 @@ class SetupWizardAPI:
 
         body = json.dumps(data).encode("utf-8")
         headers = [
-            ("Content-Type", "application/json"),
+            ("Content-Type", "application/json; charset=utf-8"),
             ("Content-Length", str(len(body))),
+            ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
+            ("X-Frame-Options", "DENY"),
+            ("X-XSS-Protection", "1; mode=block"),
         ]
 
         start_response(status, headers)

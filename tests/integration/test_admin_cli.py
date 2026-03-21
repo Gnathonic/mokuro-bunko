@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Generator
 
 import pytest
 from click.testing import CliRunner
@@ -329,7 +328,7 @@ class TestListInvites:
     ) -> None:
         """Test listing shows active invites."""
         code1 = test_db.create_invite(role="registered")
-        code2 = test_db.create_invite(role="uploader")
+        test_db.create_invite(role="uploader")
 
         result = runner.invoke(
             cli,

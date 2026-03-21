@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import threading
 import time
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 from mokuro_bunko.cheroot_watchdog import ThreadPoolWatchdog
 

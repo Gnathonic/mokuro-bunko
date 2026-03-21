@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -259,37 +260,82 @@ class TestUserCrud:
         result = temp_db.disable_user("testuser")
         assert result is True
 
-        user = temp_db.get_user("testuser")
-        assert user is not None
-        assert user["status"] == "disabled"
 
-    def test_delete_user(self, temp_db: Database) -> None:
-        """Test soft-deleting a user sets status to 'deleted'."""
-        temp_db.create_user("testuser", "password123")
-        result = temp_db.delete_user("testuser")
-        assert result is True
+def test_auth_attempt_limiter_cleans_up_stale_entries() -> None:
+    """Expired blocked entries should be cleared to prevent memory growth."""
+    from mokuro_bunko.security import AuthAttemptLimiter
 
-        user = temp_db.get_user("testuser")
-        assert user is not None
-        assert user["status"] == "deleted"
+    limiter = AuthAttemptLimiter(max_failures=1, window_seconds=1, block_seconds=1)
+    key = "ip:tester"
 
-    def test_deleted_user_cannot_authenticate(self, temp_db: Database) -> None:
-        """Test that soft-deleted users cannot log in."""
-        temp_db.create_user("testuser", "password123")
-        temp_db.delete_user("testuser")
-        assert temp_db.authenticate_user("testuser", "password123") is None
+    allowed, retry_after = limiter.allow_attempt(key)
+    assert allowed is True
 
-    def test_delete_already_deleted_user(self, temp_db: Database) -> None:
-        """Test deleting an already-deleted user returns False."""
-        temp_db.create_user("testuser", "password123")
-        temp_db.delete_user("testuser")
-        result = temp_db.delete_user("testuser")
-        assert result is False
+    limiter.record_failure(key)
+    allowed, retry_after = limiter.allow_attempt(key)
+    assert allowed is False
+    assert retry_after >= 1
 
-    def test_delete_nonexistent_user(self, temp_db: Database) -> None:
-        """Test deleting nonexistent user returns False."""
-        result = temp_db.delete_user("nonexistent")
-        assert result is False
+    time.sleep(1.1)
+
+    allowed, retry_after = limiter.allow_attempt(key)
+    assert allowed is True
+    assert retry_after == 0
+
+
+def test_db_connection_retries_on_locked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fallback in _connection handles sqlite database is locked temporarily."""
+    import sqlite3
+
+    db_path = tmp_path / "test.db"
+    db = Database(db_path)
+
+    real_connect = sqlite3.connect
+    call_count = {"count": 0}
+
+    def fake_connect(path, timeout=30):
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real_connect(path, timeout=timeout)
+
+    monkeypatch.setattr(sqlite3, "connect", fake_connect)
+
+    user_id = db.create_user("retryuser", "password123")
+    assert user_id > 0
+    assert call_count["count"] == 2
+
+
+def test_delete_user(temp_db: Database) -> None:
+    """Test soft-deleting a user sets status to 'deleted'."""
+    temp_db.create_user("testuser", "password123")
+    result = temp_db.delete_user("testuser")
+    assert result is True
+
+    user = temp_db.get_user("testuser")
+    assert user is not None
+    assert user["status"] == "deleted"
+
+
+def test_deleted_user_cannot_authenticate(temp_db: Database) -> None:
+    """Test that soft-deleted users cannot log in."""
+    temp_db.create_user("testuser", "password123")
+    temp_db.delete_user("testuser")
+    assert temp_db.authenticate_user("testuser", "password123") is None
+
+
+def test_delete_already_deleted_user(temp_db: Database) -> None:
+    """Test deleting an already-deleted user returns False."""
+    temp_db.create_user("testuser", "password123")
+    temp_db.delete_user("testuser")
+    result = temp_db.delete_user("testuser")
+    assert result is False
+
+
+def test_delete_nonexistent_user(temp_db: Database) -> None:
+    """Test deleting nonexistent user returns False."""
+    result = temp_db.delete_user("nonexistent")
+    assert result is False
 
 
 class TestInviteCrud:

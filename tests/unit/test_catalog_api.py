@@ -190,6 +190,65 @@ def test_series_active_ocr_volume_clears_pending(tmp_path: Path) -> None:
     assert volume["ocr_progress"]["percent"] == 33
 
 
+def test_disabled_catalog_redirects_browser_catalog_page(tmp_path: Path) -> None:
+    """Disabled catalog should redirect browser navigation back home."""
+    library = tmp_path / "library"
+    library.mkdir(parents=True)
+
+    called = {"fallback": False}
+
+    def fallback_app(environ, start_response):
+        called["fallback"] = True
+        start_response("404 Not Found", [("Content-Type", "text/plain")])
+        return [b"fallback"]
+
+    api = CatalogAPI(
+        app=fallback_app,
+        storage_base_path=str(library),
+        enabled=False,
+    )
+    state, start_response = _start_response_capture()
+    environ = {
+        "PATH_INFO": "/catalog",
+        "REQUEST_METHOD": "GET",
+        "HTTP_ACCEPT": "text/html,application/xhtml+xml",
+    }
+
+    body = list(api(environ, start_response))
+    assert state["status"] == "302 Found"
+    assert ("Location", "/") in state["headers"]
+    assert body == [b""]
+    assert called["fallback"] is False
+
+def test_disabled_catalog_api_returns_json_error(tmp_path: Path) -> None:
+    """Disabled catalog API endpoint should return explicit JSON error."""
+    library = tmp_path / "library"
+    library.mkdir(parents=True)
+
+    called = {"fallback": False}
+
+    def fallback_app(environ, start_response):
+        called["fallback"] = True
+        start_response("404 Not Found", [("Content-Type", "text/plain")])
+        return [b"fallback"]
+
+    api = CatalogAPI(
+        app=fallback_app,
+        storage_base_path=str(library),
+        enabled=False,
+    )
+    state, start_response = _start_response_capture()
+    environ = {
+        "PATH_INFO": "/catalog/api/library",
+        "REQUEST_METHOD": "GET",
+        "HTTP_ACCEPT": "application/json",
+    }
+
+    body = _read_json_response(list(api(environ, start_response)))
+    assert state["status"] == "404 Not Found"
+    assert body["error"] == "Catalog disabled"
+    assert called["fallback"] is False
+
 def test_library_cache_not_mutated_by_ocr_overlay(tmp_path: Path) -> None:
     """OCR overlay should not mutate cached library payload between requests."""
     library = tmp_path / "library"

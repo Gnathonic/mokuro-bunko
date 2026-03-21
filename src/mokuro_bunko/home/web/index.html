@@ -41,6 +41,35 @@
             </div>
             <h1 class="hero__title">Mokuro Bunko</h1>
             <p class="hero__tagline">Your personal manga library with OCR-powered reading</p>
+            <div class="hero__actions">
+                <a href="/catalog" class="btn btn--primary">Open Catalog</a>
+                <button id="copy-server-url" class="btn btn--secondary" type="button">Copy Server URL</button>
+            </div>
+        </section>
+
+        <section class="section">
+            <div class="section__title-row">
+                <h2 class="section__title section__title--left">Server Health</h2>
+                <span id="health-last-updated" class="section__meta">Not yet updated</span>
+            </div>
+            <div class="health-grid">
+                <article class="health-card">
+                    <div class="health-card__label">Overall</div>
+                    <div id="health-status" class="health-card__value">Unknown</div>
+                </article>
+                <article class="health-card">
+                    <div class="health-card__label">Database</div>
+                    <div id="health-db" class="health-card__value">Unknown</div>
+                </article>
+                <article class="health-card">
+                    <div class="health-card__label">Library</div>
+                    <div id="health-library" class="health-card__value">Unknown</div>
+                </article>
+                <article class="health-card health-card--wide">
+                    <div class="health-card__label">Uptime</div>
+                    <div id="health-uptime" class="health-card__value">-</div>
+                </article>
+            </div>
         </section>
 
         <!-- Stats Section -->
@@ -137,6 +166,8 @@
     <footer class="footer">
         <p>Mokuro Bunko</p>
     </footer>
+
+    <div id="home-toast" class="home-toast" aria-live="polite"></div>
 
     <script src="/_static/nav.js"></script>
     <script src="/_home/home.js"></script>

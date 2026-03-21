@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from io import BytesIO
 import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import pytest

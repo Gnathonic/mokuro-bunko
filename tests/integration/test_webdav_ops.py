@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 import io
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Generator
+from typing import Any
 
 import pytest
 
@@ -41,7 +42,7 @@ class WSGITestClient:
         path: str,
         headers: dict[str, str] | None = None,
         content: bytes | None = None,
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make a request to the WSGI app."""
         headers = headers or {}
 
@@ -87,7 +88,7 @@ class WSGITestClient:
 
     def get(
         self, path: str, headers: dict[str, str] | None = None
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make a GET request."""
         return self.request("GET", path, headers)
 
@@ -96,13 +97,13 @@ class WSGITestClient:
         path: str,
         content: bytes,
         headers: dict[str, str] | None = None,
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make a PUT request."""
         return self.request("PUT", path, headers, content)
 
     def delete(
         self, path: str, headers: dict[str, str] | None = None
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make a DELETE request."""
         return self.request("DELETE", path, headers)
 

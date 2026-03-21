@@ -71,6 +71,22 @@ queue:
   # If false, queue status API requires authenticated user credentials
   public_access: true
 
+database:
+  # sqlite connect timeout in seconds
+  connect_timeout_seconds: 30
+  # sqlite busy timeout while waiting for locks
+  busy_timeout_ms: 5000
+  # retries for transient "database is locked" connect/open failures
+  connect_retries: 5
+  # initial exponential backoff delay before retrying locked DB operations
+  retry_initial_delay_seconds: 0.05
+
+quota:
+  # Maximum number of uploads per user per day
+  uploads_per_day: 20
+  # If non-zero, per-user download bytes per day, bytes. 0 = unlimited.
+  download_bytes_per_day: 0
+
 ocr:
   # OCR backend:
   # - auto: Detect best available
@@ -81,3 +97,9 @@ ocr:
   backend: auto
   # Interval in seconds to check inbox for new files
   poll_interval: 30
+  # Hard upper bound for a single mokuro run
+  hard_timeout_seconds: 3600
+  # Abort OCR when no page-level progress is observed for this long
+  no_progress_timeout_seconds: 600
+  # Maximum time allowed in finalizing state after page OCR completes
+  finalizing_timeout_seconds: 180

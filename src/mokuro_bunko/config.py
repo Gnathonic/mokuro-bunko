@@ -5,10 +5,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import yaml
-
 
 RegistrationMode = Literal["disabled", "self", "invite", "approval"]
 UserRole = Literal["anonymous", "registered", "uploader", "inviter", "editor", "admin"]
@@ -179,6 +178,12 @@ class AdminConfig:
     enabled: bool = True
     path: str = "/_admin"
 
+    def __post_init__(self) -> None:
+        if self.path and not self.path.startswith("/"):
+            self.path = "/" + self.path.strip("/")
+        # Remove trailing slash for consistency
+        self.path = self.path.rstrip("/") or "/"
+
 
 @dataclass
 class CatalogConfig:
@@ -200,11 +205,43 @@ class QueueConfig:
 
 
 @dataclass
+class DatabaseConfig:
+    """Database runtime tuning."""
+
+    connect_timeout_seconds: int = 30
+    busy_timeout_ms: int = 5000
+    connect_retries: int = 5
+    retry_initial_delay_seconds: float = 0.05
+
+    def __post_init__(self) -> None:
+        if self.connect_timeout_seconds < 1:
+            raise ValueError("Database connect timeout must be at least 1 second")
+        if self.busy_timeout_ms < 100:
+            raise ValueError("Database busy timeout must be at least 100 ms")
+        if self.connect_retries < 1:
+            raise ValueError("Database connect retries must be at least 1")
+        if self.retry_initial_delay_seconds <= 0:
+            raise ValueError("Database retry initial delay must be positive")
+
+
+@dataclass
+class QuotaConfig:
+    """Upload and access quotas."""
+
+    uploads_per_day: int = 20
+    # bytes per user download per day (0 = unlimited)
+    download_bytes_per_day: int = 0
+
+
+@dataclass
 class OcrConfig:
     """OCR configuration."""
 
     backend: OcrBackend = "auto"
     poll_interval: int = 30
+    hard_timeout_seconds: int = 3600
+    no_progress_timeout_seconds: int = 600
+    finalizing_timeout_seconds: int = 180
 
     def __post_init__(self) -> None:
         valid_backends = ("auto", "cuda", "rocm", "cpu", "skip")
@@ -212,6 +249,12 @@ class OcrConfig:
             raise ValueError(f"Invalid OCR backend: {self.backend}")
         if self.poll_interval < 1:
             raise ValueError(f"Invalid poll interval: {self.poll_interval}")
+        if self.hard_timeout_seconds < 60:
+            raise ValueError("OCR hard timeout must be at least 60 seconds")
+        if self.no_progress_timeout_seconds < 30:
+            raise ValueError("OCR no-progress timeout must be at least 30 seconds")
+        if self.finalizing_timeout_seconds < 10:
+            raise ValueError("OCR finalizing timeout must be at least 10 seconds")
 
 
 @dataclass
@@ -230,7 +273,7 @@ class DynDNSConfig:
         if self.provider not in valid_providers:
             raise ValueError(f"Invalid DynDNS provider: {self.provider}")
         if self.interval < 30:
-            raise ValueError(f"DynDNS interval must be at least 30 seconds")
+            raise ValueError("DynDNS interval must be at least 30 seconds")
 
 
 @dataclass
@@ -245,6 +288,8 @@ class Config:
     admin: AdminConfig = field(default_factory=AdminConfig)
     catalog: CatalogConfig = field(default_factory=CatalogConfig)
     queue: QueueConfig = field(default_factory=QueueConfig)
+    database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    quota: QuotaConfig = field(default_factory=QuotaConfig)
     ocr: OcrConfig = field(default_factory=OcrConfig)
     dyndns: DynDNSConfig = field(default_factory=DynDNSConfig)
 
@@ -293,9 +338,22 @@ class Config:
                 "show_in_nav": self.queue.show_in_nav,
                 "public_access": self.queue.public_access,
             },
+            "database": {
+                "connect_timeout_seconds": self.database.connect_timeout_seconds,
+                "busy_timeout_ms": self.database.busy_timeout_ms,
+                "connect_retries": self.database.connect_retries,
+                "retry_initial_delay_seconds": self.database.retry_initial_delay_seconds,
+            },
+            "quota": {
+                "uploads_per_day": self.quota.uploads_per_day,
+                "download_bytes_per_day": self.quota.download_bytes_per_day,
+            },
             "ocr": {
                 "backend": self.ocr.backend,
                 "poll_interval": self.ocr.poll_interval,
+                "hard_timeout_seconds": self.ocr.hard_timeout_seconds,
+                "no_progress_timeout_seconds": self.ocr.no_progress_timeout_seconds,
+                "finalizing_timeout_seconds": self.ocr.finalizing_timeout_seconds,
             },
             "dyndns": {
                 "enabled": self.dyndns.enabled,
@@ -330,12 +388,14 @@ class Config:
             admin=AdminConfig(**data.get("admin", {})),
             catalog=CatalogConfig(**data.get("catalog", {})),
             queue=QueueConfig(**data.get("queue", {})),
+            database=DatabaseConfig(**data.get("database", {})),
+            quota=QuotaConfig(**data.get("quota", {})),
             ocr=OcrConfig(**data.get("ocr", {})),
             dyndns=DynDNSConfig(**data.get("dyndns", {})),
         )
 
 
-def load_config(path: Optional[Path] = None) -> Config:
+def load_config(path: Path | None = None) -> Config:
     """Load configuration from YAML file.
 
     Args:
@@ -363,7 +423,7 @@ def load_config(path: Optional[Path] = None) -> Config:
     return config
 
 
-def save_config(config: Config, path: Optional[Path] = None) -> None:
+def save_config(config: Config, path: Path | None = None) -> None:
     """Save configuration to YAML file.
 
     Args:
