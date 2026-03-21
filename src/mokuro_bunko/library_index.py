@@ -7,7 +7,6 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -18,7 +17,7 @@ class VolumeSnapshot:
     has_cbz: bool
     has_mokuro: bool
     has_mokuro_gz: bool
-    cover: Optional[str]
+    cover: str | None
 
 
 @dataclass(frozen=True)
@@ -26,7 +25,7 @@ class SeriesSnapshot:
     """Indexed metadata for a single series folder."""
 
     name: str
-    cover: Optional[str]
+    cover: str | None
     volumes: tuple[VolumeSnapshot, ...]
 
 
@@ -38,7 +37,7 @@ class LibrarySnapshot:
     pending_ocr: tuple[tuple[str, str], ...]
     pending_thumbnails: int
 
-    def series_by_name(self, name: str) -> Optional[SeriesSnapshot]:
+    def series_by_name(self, name: str) -> SeriesSnapshot | None:
         """Return a named series snapshot when present."""
         for series in self.series:
             if series.name == name:
@@ -53,7 +52,7 @@ class LibraryIndexCache:
         self.library_path = library_path
         self.ttl = ttl
         self._lock = threading.Lock()
-        self._snapshot: Optional[LibrarySnapshot] = None
+        self._snapshot: LibrarySnapshot | None = None
         self._snapshot_time = 0.0
 
     def invalidate(self) -> None:
@@ -100,7 +99,7 @@ class LibraryIndexCache:
                     continue
 
                 volume_names: set[str] = set()
-                standalone_cover: Optional[str] = None
+                standalone_cover: str | None = None
 
                 for file_name in sorted(filenames):
                     lower_name = file_name.lower()
@@ -114,7 +113,7 @@ class LibraryIndexCache:
                         standalone_cover = file_name
 
                 volumes: list[VolumeSnapshot] = []
-                series_cover: Optional[str] = None
+                series_cover: str | None = None
 
                 for volume_name in sorted(volume_names):
                     has_cbz = f"{volume_name}.cbz" in filenames

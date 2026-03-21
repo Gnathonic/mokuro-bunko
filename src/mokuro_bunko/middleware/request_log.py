@@ -10,7 +10,8 @@ import os
 import sys
 import threading
 import time
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 
 def _is_enabled() -> bool:

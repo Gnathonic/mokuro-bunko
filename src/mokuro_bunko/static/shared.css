@@ -148,6 +148,11 @@ body {
     background: rgba(255, 255, 255, 0.1);
 }
 
+.mokuro-header__nav-btn:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 2px;
+}
+
 .mokuro-header__nav-btn svg {
     width: 20px;
     height: 20px;
@@ -219,6 +224,11 @@ body {
 .btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+
+.btn:focus-visible {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 2px;
 }
 
 .btn--primary {
@@ -349,15 +359,24 @@ body {
     font-size: 0.875rem;
     cursor: pointer;
     appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23707070' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-image:
+        linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+        linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
     background-repeat: no-repeat;
-    background-position: right 0.75rem center;
+    background-size: 0.35rem 0.35rem, 0.35rem 0.35rem;
+    background-position:
+        calc(100% - 0.95rem) calc(50% - 0.08rem),
+        calc(100% - 0.72rem) calc(50% - 0.08rem);
     transition: border-color var(--transition-fast);
 }
 
 .form-select:focus {
     outline: none;
     border-color: var(--accent-primary);
+}
+
+.form-select:focus-visible {
+    box-shadow: 0 0 0 3px var(--accent-primary-muted);
 }
 
 /* ============================================
@@ -803,6 +822,17 @@ body {
 /* ============================================
    RESPONSIVE
    ============================================ */
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
 
 @media (max-width: 768px) {
     .volume-grid {

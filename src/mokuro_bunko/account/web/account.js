@@ -84,6 +84,31 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Set up password form
     document.getElementById('password-form').addEventListener('submit', (e) => handlePasswordChange(e, session));
+
+    const copyBtn = document.getElementById('copy-btn');
+    if (copyBtn) {
+        copyBtn.addEventListener('click', copyServerUrl);
+    }
+
+    const showDeleteBtn = document.getElementById('show-delete-modal-btn');
+    if (showDeleteBtn) {
+        showDeleteBtn.addEventListener('click', showDeleteModal);
+    }
+
+    const hideDeleteBtn = document.getElementById('hide-delete-modal-btn');
+    if (hideDeleteBtn) {
+        hideDeleteBtn.addEventListener('click', hideDeleteModal);
+    }
+
+    const cancelDeleteBtn = document.getElementById('cancel-delete-btn');
+    if (cancelDeleteBtn) {
+        cancelDeleteBtn.addEventListener('click', hideDeleteModal);
+    }
+
+    const deleteConfirmBtn = document.getElementById('delete-confirm-btn');
+    if (deleteConfirmBtn) {
+        deleteConfirmBtn.addEventListener('click', deleteAccount);
+    }
 });
 
 async function loadStats(auth) {

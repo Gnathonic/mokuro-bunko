@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mokuro_bunko.middleware.auth import authenticate_basic_header
 from mokuro_bunko.security import is_within_path
@@ -66,8 +67,8 @@ class AccountAPI:
     def __init__(
         self,
         app: Callable[..., Any],
-        database: Optional["Database"] = None,
-        storage_path: Optional[Path] = None,
+        database: Database | None = None,
+        storage_path: Path | None = None,
     ) -> None:
         self.app = app
         self.db = database
@@ -84,6 +85,8 @@ class AccountAPI:
         # API endpoints
         if path == "/api/account/stats" and method == "GET":
             return self._handle_stats(environ, start_response)
+        if path == "/api/account/me" and method == "GET":
+            return self._handle_me(environ, start_response)
         if path == "/api/account/password" and method == "POST":
             return self._handle_change_password(environ, start_response)
         if path == "/api/account/delete" and method == "POST":
@@ -105,7 +108,7 @@ class AccountAPI:
 
         return self.app(environ, start_response)
 
-    def _authenticate_request(self, environ: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def _authenticate_request(self, environ: dict[str, Any]) -> dict[str, Any] | None:
         """Authenticate from Basic auth header and return user dict."""
         if not self.db:
             return None
@@ -123,6 +126,22 @@ class AccountAPI:
         if not user:
             return self._json_response(start_response, 401, {"error": "Authentication required"})
         return self._json_response(start_response, 200, PersonalStats().to_dict())
+
+    def _handle_me(
+        self,
+        environ: dict[str, Any],
+        start_response: Callable[..., Any],
+    ) -> list[bytes]:
+        user = self._authenticate_request(environ)
+        if not user:
+            return self._json_response(start_response, 401, {"error": "Authentication required"})
+
+        return self._json_response(start_response, 200, {
+            "username": user["username"],
+            "role": user["role"],
+            "status": user["status"],
+            "created_at": user["created_at"],
+        })
 
     def _handle_change_password(
         self,
@@ -236,8 +255,13 @@ class AccountAPI:
         status = f"{status_code} {status_map.get(status_code, 'Error')}"
         body = json.dumps(data).encode("utf-8")
         headers = [
-            ("Content-Type", "application/json"),
+            ("Content-Type", "application/json; charset=utf-8"),
             ("Content-Length", str(len(body))),
+            ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
+            ("X-Frame-Options", "DENY"),
+            ("X-XSS-Protection", "1; mode=block"),
         ]
         start_response(status, headers)
         return [body]
@@ -265,7 +289,7 @@ class AccountAPI:
             ]
             start_response("200 OK", headers)
             return [content]
-        except IOError:
+        except OSError:
             return self._error_response(start_response, 500, "Error")
 
     def _error_response(

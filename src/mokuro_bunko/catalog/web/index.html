@@ -43,7 +43,20 @@
                 </span>
                 <input type="text" class="search-bar__input" id="search" placeholder="Search library...">
             </div>
+            <select id="sort-mode" class="form-select form-select--sm" aria-label="Sort items">
+                <option value="name-asc" selected>Name A-Z</option>
+                <option value="name-desc">Name Z-A</option>
+                <option value="count-desc">Most volumes first</option>
+                <option value="count-asc">Fewest volumes first</option>
+            </select>
+            <label class="catalog-toggle" for="only-pending">
+                <input id="only-pending" type="checkbox">
+                <span>Only pending OCR</span>
+            </label>
+            <button id="reset-filters" class="btn btn--ghost btn--sm" type="button">Reset</button>
         </div>
+
+        <p id="catalog-meta" class="catalog-meta">Loading catalog...</p>
 
         <div id="catalog-grid" class="volume-grid">
             <div class="loading">Loading catalog...</div>

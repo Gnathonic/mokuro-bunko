@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import json
 import mimetypes
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, TypedDict
+from typing import Any, TypedDict
 
 from mokuro_bunko.config import RegistrationConfig
 from mokuro_bunko.database import Database
+from mokuro_bunko.middleware.auth import AuthAttemptLimiter
 from mokuro_bunko.registration.invites import InviteManager
+from mokuro_bunko.security import get_client_ip
 from mokuro_bunko.validation import validate_password, validate_username
+
+# Rate limiter for registration abuse
+REGISTRATION_RATE_LIMITER = AuthAttemptLimiter(max_failures=20, window_seconds=300, block_seconds=900)
 
 # Path to web static files
 WEB_DIR = Path(__file__).parent / "web"
@@ -22,7 +28,7 @@ class RegistrationRequest(TypedDict, total=False):
 
     username: str
     password: str
-    invite_code: Optional[str]
+    invite_code: str | None
 
 
 class RegistrationResponse(TypedDict, total=False):
@@ -30,8 +36,8 @@ class RegistrationResponse(TypedDict, total=False):
 
     success: bool
     message: str
-    username: Optional[str]
-    status: Optional[str]
+    username: str | None
+    status: str | None
 
 
 class RegistrationAPI:
@@ -42,6 +48,7 @@ class RegistrationAPI:
         app: Callable[..., Any],
         database: Database,
         config: RegistrationConfig,
+        rate_limiter: AuthAttemptLimiter | None = None,
     ) -> None:
         """Initialize registration API middleware.
 
@@ -49,11 +56,13 @@ class RegistrationAPI:
             app: WSGI application to wrap.
             database: Database instance.
             config: Registration configuration.
+            rate_limiter: Optional rate limiter (for easier testing or isolation).
         """
         self.app = app
         self.db = database
         self.config = config
         self.invites = InviteManager(database)
+        self.rate_limiter = rate_limiter or AuthAttemptLimiter(max_failures=20, window_seconds=300, block_seconds=900)
 
     def __call__(
         self,
@@ -114,6 +123,19 @@ class RegistrationAPI:
         start_response: Callable[..., Any],
     ) -> list[bytes]:
         """Handle POST /api/register."""
+        # Rate limit registration attempts per IP
+        client_ip = get_client_ip(environ)
+        key = f"register:{client_ip}"
+        allowed, retry_after = self.rate_limiter.allow_attempt(key)
+        if not allowed:
+            return self._json_response(
+                start_response,
+                429,
+                {"error": f"Too many registration attempts. Retry in {retry_after}s"},
+            )
+        # Count all registration attempts against the limit (success and failure).
+        self.rate_limiter.record_attempt(key)
+
         # Check if registration is enabled
         if self.config.mode == "disabled":
             return self._json_response(
@@ -163,19 +185,20 @@ class RegistrationAPI:
         # Handle different registration modes
         if self.config.mode == "self":
             return self._register_self(
-                start_response, username, password
+                start_response, username, password, key
             )
         elif self.config.mode == "invite":
             invite_code = data.get("invite_code", "")
             return self._register_with_invite(
-                start_response, username, password, invite_code
+                start_response, username, password, invite_code, key
             )
         elif self.config.mode == "approval":
             return self._register_approval(
-                start_response, username, password
+                start_response, username, password, key
             )
 
         # Should not reach here
+        self.rate_limiter.record_failure(key)
         return self._json_response(
             start_response,
             500,
@@ -187,6 +210,7 @@ class RegistrationAPI:
         start_response: Callable[..., Any],
         username: str,
         password: str,
+        rate_limit_key: str,
     ) -> list[bytes]:
         """Handle self-registration mode."""
         # Check if username exists
@@ -229,6 +253,7 @@ class RegistrationAPI:
         username: str,
         password: str,
         invite_code: str,
+        rate_limit_key: str,
     ) -> list[bytes]:
         """Handle invite-based registration."""
         if not invite_code:
@@ -289,6 +314,7 @@ class RegistrationAPI:
         start_response: Callable[..., Any],
         username: str,
         password: str,
+        rate_limit_key: str,
     ) -> list[bytes]:
         """Handle approval-based registration."""
         # Check if username exists
@@ -394,6 +420,11 @@ class RegistrationAPI:
         headers = [
             ("Content-Type", content_type),
             ("Content-Length", str(len(content))),
+            ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
+            ("X-Frame-Options", "DENY"),
+            ("X-XSS-Protection", "1; mode=block"),
         ]
 
         start_response("200 OK", headers)
@@ -431,8 +462,13 @@ class RegistrationAPI:
 
         body = json.dumps(data).encode("utf-8")
         headers = [
-            ("Content-Type", "application/json"),
+            ("Content-Type", "application/json; charset=utf-8"),
             ("Content-Length", str(len(body))),
+            ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
+            ("X-Frame-Options", "DENY"),
+            ("X-XSS-Protection", "1; mode=block"),
         ]
 
         start_response(status, headers)

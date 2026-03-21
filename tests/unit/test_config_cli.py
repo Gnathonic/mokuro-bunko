@@ -8,7 +8,8 @@ import yaml
 from click.testing import CliRunner
 
 from mokuro_bunko.__main__ import cli
-from mokuro_bunko.config import Config, ServerConfig, save_config
+from mokuro_bunko.config import Config, ServerConfig, SslConfig, save_config
+from mokuro_bunko.ssl import generate_self_signed_cert
 
 
 class TestConfigShow:
@@ -113,6 +114,65 @@ class TestConfigPath:
         assert result.exit_code == 0
         assert "Config file:" in result.output
         assert "Storage dir:" in result.output
+
+
+class TestConfigCheck:
+    """Tests for config check command."""
+
+    def test_check_valid_config(self, temp_dir: Path) -> None:
+        config_path = temp_dir / "config.yaml"
+        save_config(Config(), config_path)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["-c", str(config_path), "config", "check"])
+        assert result.exit_code == 0
+        assert "Config check passed" in result.output
+
+    def test_check_invalid_registration(self, temp_dir: Path) -> None:
+        config_path = temp_dir / "config.yaml"
+        c = Config()
+        c.registration.mode = "invalid"
+        save_config(c, config_path)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["-c", str(config_path), "config", "check"])
+        assert result.exit_code != 0
+        assert "Invalid registration mode" in result.output
+
+    def test_check_invalid_cors_origin_pattern(self, temp_dir: Path) -> None:
+        config_path = temp_dir / "config.yaml"
+        c = Config()
+        c.cors.allowed_origins = ["localhost:3000"]
+        save_config(c, config_path)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["-c", str(config_path), "config", "check"])
+        assert result.exit_code != 0
+        assert "Invalid CORS origin pattern" in result.output
+
+    def test_check_ssl_mismatched_key(self, temp_dir: Path) -> None:
+        config_path = temp_dir / "config.yaml"
+        cert_path = temp_dir / "cert.pem"
+        key_path = temp_dir / "key.pem"
+        other_cert_path = temp_dir / "other-cert.pem"
+        other_key_path = temp_dir / "other-key.pem"
+
+        generate_self_signed_cert(cert_path, key_path, hostname="one.local")
+        generate_self_signed_cert(other_cert_path, other_key_path, hostname="two.local")
+
+        c = Config(
+            ssl=SslConfig(
+                enabled=True,
+                cert_file=str(cert_path),
+                key_file=str(other_key_path),
+            )
+        )
+        save_config(c, config_path)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["-c", str(config_path), "config", "check"])
+        assert result.exit_code != 0
+        assert "SSL certificate/key validation failed" in result.output
 
 
 class TestConfigInit:

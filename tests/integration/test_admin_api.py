@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
@@ -27,7 +28,7 @@ class WSGITestClient:
         path: str,
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
-    ) -> "WSGIResponse":
+    ) -> WSGIResponse:
         """Make a request to the WSGI app."""
         headers = headers or {}
         content = b""
@@ -78,16 +79,16 @@ class WSGITestClient:
         response.content = b"".join(body_parts)
         return response
 
-    def get(self, path: str) -> "WSGIResponse":
+    def get(self, path: str) -> WSGIResponse:
         return self.request("GET", path)
 
-    def post(self, path: str, json_body: dict[str, Any] | None = None) -> "WSGIResponse":
+    def post(self, path: str, json_body: dict[str, Any] | None = None) -> WSGIResponse:
         return self.request("POST", path, json_body=json_body)
 
-    def put(self, path: str, json_body: dict[str, Any] | None = None) -> "WSGIResponse":
+    def put(self, path: str, json_body: dict[str, Any] | None = None) -> WSGIResponse:
         return self.request("PUT", path, json_body=json_body)
 
-    def delete(self, path: str) -> "WSGIResponse":
+    def delete(self, path: str) -> WSGIResponse:
         return self.request("DELETE", path)
 
 
@@ -556,6 +557,11 @@ class TestPassthrough:
     def test_non_admin_path_passthrough(self, client: WSGITestClient) -> None:
         """Test non-admin paths are passed through."""
         response = client.get("/other/path")
+        assert response.status_code == 404  # From dummy_app
+
+    def test_admin_like_path_not_admin(self, client: WSGITestClient) -> None:
+        """A path like /_adminx/ should not be treated as admin."""
+        response = client.get("/_adminx/api/users")
         assert response.status_code == 404  # From dummy_app
 
 

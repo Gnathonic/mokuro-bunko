@@ -11,6 +11,10 @@ You can also specify a custom config file path:
 mokuro-bunko serve --config /path/to/config.yaml
 ```
 
+Use `mokuro-bunko config check` before production deploys. It validates storage
+writeability, SSL prerequisites, cert/key integrity, timeout relationships,
+admin path safety, and CORS origin pattern syntax.
+
 ## Configuration Options
 
 ### Server
@@ -183,18 +187,41 @@ queue:
 | `show_in_nav` | boolean | `false` | Show an OCR Queue button in the top navigation bar. |
 | `public_access` | boolean | `true` | If `false`, queue status API access requires authenticated user credentials. |
 
+### Database
+
+```yaml
+database:
+  connect_timeout_seconds: 30
+  busy_timeout_ms: 5000
+  connect_retries: 5
+  retry_initial_delay_seconds: 0.05
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `connect_timeout_seconds` | integer | `30` | SQLite connect timeout for DB open operations. |
+| `busy_timeout_ms` | integer | `5000` | SQLite busy timeout while waiting for DB locks. |
+| `connect_retries` | integer | `5` | Retries for transient `database is locked` open failures. |
+| `retry_initial_delay_seconds` | float | `0.05` | Initial exponential backoff delay for DB retry logic. |
+
 ### OCR
 
 ```yaml
 ocr:
   backend: auto
   poll_interval: 30
+  hard_timeout_seconds: 3600
+  no_progress_timeout_seconds: 600
+  finalizing_timeout_seconds: 180
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `backend` | string | `"auto"` | OCR processing backend. |
 | `poll_interval` | integer | `30` | Seconds between library scans for missing OCR assets. |
+| `hard_timeout_seconds` | integer | `3600` | Maximum allowed runtime for one mokuro process. |
+| `no_progress_timeout_seconds` | integer | `600` | Abort OCR if no page progress is detected within this window. |
+| `finalizing_timeout_seconds` | integer | `180` | Abort prolonged post-processing/finalizing phase. |
 
 #### OCR Backends
 
@@ -217,6 +244,16 @@ Inspect which backends are valid on the current machine/runtime:
 ```bash
 mokuro-bunko install-ocr --list-backends
 ```
+
+Queue OCR APIs:
+- `GET /queue/api/ocr` returns current worker/progress state plus recent OCR history.
+  - `progress` may include `error`, `started_at`, and `updated_at` fields when available.
+  - Supports the same optional history query filters as `/queue/api/ocr/history`.
+- `GET /queue/api/ocr/history` returns recent OCR events persisted in storage.
+  - Optional query: `?limit=1..500` (default `50`).
+  - Optional filters: `status=done|error`, `series=<substring>`, `since=<unix_timestamp_seconds>`.
+  - History retention is bounded to the most recent 500 events on disk.
+- `POST /queue/api/ocr/control` supports `{ "action": "pause" }` and `{ "action": "resume" }` for admin users.
 
 ## Environment Variables
 
@@ -283,6 +320,10 @@ ocr:
   poll_interval: 60
 ```
 
+When using reverse proxy headers (`X-Forwarded-For`, `X-Real-IP`), run mokuro-bunko
+behind a local/private proxy hop (for example `127.0.0.1` or a private subnet).
+Forwarded client IP headers from untrusted public peers are ignored by default.
+
 ### Public Read-Only Server
 
 ```yaml
@@ -303,3 +344,7 @@ admin:
 ocr:
   backend: "skip"
 ```
+
+Note: `queue.public_access` only controls read access to queue status endpoints.
+OCR worker control endpoints (`/queue/api/ocr/control`) always require an
+authenticated admin user.

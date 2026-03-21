@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import mimetypes
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from mokuro_bunko.security import is_within_path
 
@@ -109,6 +110,10 @@ class StaticMiddleware:
             ("Content-Type", content_type),
             ("Content-Length", str(len(content))),
             ("Cache-Control", "public, max-age=3600"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
+            ("X-Frame-Options", "DENY"),
+            ("X-XSS-Protection", "1; mode=block"),
         ]
 
         start_response("200 OK", headers)

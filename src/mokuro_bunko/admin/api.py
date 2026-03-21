@@ -6,8 +6,10 @@ import json
 import shutil
 import threading
 import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
+from urllib.parse import urlparse
 
 from mokuro_bunko.config import AdminConfig, Config, save_config
 from mokuro_bunko.database import Database
@@ -18,9 +20,8 @@ from mokuro_bunko.ocr.installer import (
     get_supported_backends,
 )
 from mokuro_bunko.registration.invites import InviteManager
-from mokuro_bunko.security import is_within_path
+from mokuro_bunko.security import AuthAttemptLimiter, get_client_ip, is_within_path
 from mokuro_bunko.validation import validate_password, validate_username
-
 
 # Static files directory
 STATIC_DIR = Path(__file__).parent / "web"
@@ -40,9 +41,10 @@ MIME_TYPES = {
 }
 
 MAX_JSON_BODY_BYTES = 64 * 1024
+ADMIN_WRITE_RATE_LIMITER = AuthAttemptLimiter(max_failures=120, window_seconds=60, block_seconds=60)
 
 
-def build_ocr_runtime_status(full_config: Optional[Any]) -> dict[str, Any]:
+def build_ocr_runtime_status(full_config: Any | None) -> dict[str, Any]:
     """Build OCR runtime status dict (spawns subprocesses — call sparingly)."""
     if not full_config:
         return {"available": False}
@@ -77,11 +79,11 @@ class AdminAPI:
         app: Callable[..., Any],
         database: Database,
         config: AdminConfig,
-        full_config: Optional[Config] = None,
-        config_path: Optional[Path] = None,
-        tunnel_service: Optional[Any] = None,
-        dyndns_service: Optional[Any] = None,
-        ocr_runtime: Optional[dict[str, Any]] = None,
+        full_config: Config | None = None,
+        config_path: Path | None = None,
+        tunnel_service: Any | None = None,
+        dyndns_service: Any | None = None,
+        ocr_runtime: dict[str, Any] | None = None,
     ) -> None:
         self.app = app
         self.db = database
@@ -92,9 +94,10 @@ class AdminAPI:
         self.dyndns_service = dyndns_service
         self._ocr_runtime_cache = ocr_runtime or {"available": False}
         self.invites = InviteManager(database)
-        self.admin_path = config.path.rstrip("/")
+        self.admin_path = config.path.rstrip("/") or "/"
         self._config_lock = threading.Lock()
         self._start_time = time.time()
+        self._write_rate_limiter = ADMIN_WRITE_RATE_LIMITER
 
     def __call__(
         self,
@@ -108,12 +111,19 @@ class AdminAPI:
         path = environ.get("PATH_INFO", "")
         method = environ.get("REQUEST_METHOD", "GET")
 
+        normalized_path = "/" + path.strip("/")
+        if normalized_path == "":
+            normalized_path = "/"
+
         # Check if this is an admin path
-        if not path.startswith(self.admin_path):
+        if not (
+            normalized_path == self.admin_path
+            or normalized_path.startswith(f"{self.admin_path}/")
+        ):
             return self.app(environ, start_response)
 
         # Strip admin prefix from path
-        sub_path = path[len(self.admin_path):]
+        sub_path = normalized_path[len(self.admin_path):]
         if not sub_path:
             sub_path = "/"
 
@@ -133,6 +143,31 @@ class AdminAPI:
                 {"error": error},
             )
 
+        if method in ("POST", "PUT", "DELETE"):
+            client_ip = get_client_ip(environ)
+            allowed, retry_after = self._write_rate_limiter.allow_attempt(f"admin:{client_ip}")
+            if not allowed:
+                return self._json_response(
+                    start_response,
+                    429,
+                    {
+                        "error": f"Too many admin write requests. Retry in {retry_after}s",
+                        "rate_limit": {
+                            "limit": self._write_rate_limiter.max_failures,
+                            "window_seconds": self._write_rate_limiter.window_seconds,
+                            "block_seconds": self._write_rate_limiter.block_seconds,
+                            "retry_after_seconds": retry_after,
+                        },
+                    },
+                    extra_headers=[
+                        ("Retry-After", str(retry_after)),
+                        ("X-RateLimit-Limit", str(self._write_rate_limiter.max_failures)),
+                        ("X-RateLimit-Window", str(self._write_rate_limiter.window_seconds)),
+                        ("X-RateLimit-Block", str(self._write_rate_limiter.block_seconds)),
+                    ],
+                )
+            self._write_rate_limiter.record_attempt(f"admin:{client_ip}")
+
         # Route to appropriate API handler
         return self._handle_api(environ, start_response, sub_path, method)
 
@@ -144,7 +179,7 @@ class AdminAPI:
         return role == "admin"
 
     @staticmethod
-    def _actor_username(environ: dict[str, Any]) -> Optional[str]:
+    def _actor_username(environ: dict[str, Any]) -> str | None:
         user = environ.get("mokuro.user")
         if isinstance(user, dict):
             username = user.get("username")
@@ -163,6 +198,14 @@ class AdminAPI:
         method: str,
     ) -> Iterable[bytes]:
         """Handle API requests."""
+        if method in ("POST", "PUT", "DELETE"):
+            if not self._is_same_origin_request(environ):
+                return self._json_response(
+                    start_response,
+                    403,
+                    {"error": "Cross-origin state-changing request blocked"},
+                )
+
         # Users endpoints
         if path == "/api/users" and method == "GET":
             return self._list_users(environ, start_response)
@@ -273,10 +316,14 @@ class AdminAPI:
                 ("Content-Type", content_type),
                 ("Content-Length", str(len(content))),
                 ("Cache-Control", "no-cache"),
+                ("X-Content-Type-Options", "nosniff"),
+                ("Referrer-Policy", "no-referrer"),
+                ("X-Frame-Options", "DENY"),
+                ("X-XSS-Protection", "1; mode=block"),
             ]
             start_response("200 OK", headers)
             return [content]
-        except IOError:
+        except OSError:
             return self._error_response(start_response, 500, "Error reading file")
 
     # User API handlers
@@ -969,22 +1016,81 @@ class AdminAPI:
         """Parse JSON request body."""
         try:
             content_length = int(environ.get("CONTENT_LENGTH", 0) or 0)
+            if content_length < 0:
+                raise ValueError("Invalid Content-Length")
             if content_length == 0:
                 return {}
             if content_length > MAX_JSON_BODY_BYTES:
                 raise ValueError("Request body too large")
             body = environ["wsgi.input"].read(content_length)
             return json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError:
-            raise ValueError("Invalid JSON body")
-        except ValueError as e:
-            raise ValueError(str(e))
+        except json.JSONDecodeError as exc:
+            raise ValueError("Invalid JSON body") from exc
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def _is_same_origin_request(self, environ: dict[str, Any]) -> bool:
+        """Allow mutating requests only from same origin when origin hints are present."""
+        expected_host = str(environ.get("HTTP_X_FORWARDED_HOST", "") or "").split(",")[0].strip()
+        if not expected_host:
+            expected_host = str(environ.get("HTTP_HOST", "") or "").strip()
+        if not expected_host:
+            server_name = str(environ.get("SERVER_NAME", "") or "").strip()
+            server_port = str(environ.get("SERVER_PORT", "") or "").strip()
+            expected_host = f"{server_name}:{server_port}" if server_port else server_name
+
+        if not expected_host:
+            return True
+
+        origin = str(environ.get("HTTP_ORIGIN", "") or "").strip()
+        referer = str(environ.get("HTTP_REFERER", "") or "").strip()
+
+        if origin:
+            parsed = urlparse(origin)
+            if parsed.netloc and not self._hosts_equivalent(parsed.netloc, expected_host):
+                return False
+
+        if referer:
+            parsed = urlparse(referer)
+            if parsed.netloc and not self._hosts_equivalent(parsed.netloc, expected_host):
+                return False
+
+        return True
+
+    @staticmethod
+    def _hosts_equivalent(left: str, right: str) -> bool:
+        """Return True when two host headers represent the same origin host."""
+        def split_host_port(value: str) -> tuple[str, int | None]:
+            v = value.strip().lower()
+            if not v:
+                return "", None
+            if ":" not in v:
+                return v, None
+            host, port_text = v.rsplit(":", 1)
+            try:
+                return host, int(port_text)
+            except ValueError:
+                return v, None
+
+        l_host, l_port = split_host_port(left)
+        r_host, r_port = split_host_port(right)
+        if l_host != r_host:
+            return False
+        if l_port == r_port:
+            return True
+        # Treat default ports as equivalent when one side omits the explicit port.
+        if l_port is None and r_port in (80, 443):
+            return True
+        if r_port is None and l_port in (80, 443):
+            return True
+        return False
 
     def _json_response(
         self,
         start_response: Callable[..., Any],
         status_code: int,
         data: dict[str, Any],
+        extra_headers: list[tuple[str, str]] | None = None,
     ) -> list[bytes]:
         """Return a JSON response."""
         status_messages = {
@@ -994,15 +1100,24 @@ class AdminAPI:
             403: "Forbidden",
             404: "Not Found",
             409: "Conflict",
+            413: "Payload Too Large",
+            429: "Too Many Requests",
             500: "Internal Server Error",
         }
         status = f"{status_code} {status_messages.get(status_code, 'Unknown')}"
 
         body = json.dumps(data).encode("utf-8")
         headers = [
-            ("Content-Type", "application/json"),
+            ("Content-Type", "application/json; charset=utf-8"),
             ("Content-Length", str(len(body))),
+            ("Cache-Control", "no-store"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
+            ("X-Frame-Options", "DENY"),
+            ("X-XSS-Protection", "1; mode=block"),
         ]
+        if extra_headers:
+            headers.extend(extra_headers)
 
         start_response(status, headers)
         return [body]

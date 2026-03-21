@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import time
 from pathlib import Path
 
 from mokuro_bunko.ocr.processor import OCRProcessor
@@ -47,3 +48,28 @@ def test_worker_startup_removes_corrupt_sidecars(tmp_path: Path) -> None:
     assert removed == 1
     assert valid.exists()
     assert not invalid.exists()
+
+
+def test_worker_cleanup_old_processing(tmp_path: Path) -> None:
+    """Startup cleanup removes stale .processing entries"""
+    processing = tmp_path / ".processing"
+    processing.mkdir(parents=True)
+    old_dir = processing / "old"
+    old_dir.mkdir(parents=True)
+    (old_dir / "dummy.txt").write_text("stale")
+    # Set mtime in the past
+    old_mtime = time.time() - (48 * 3600)
+    import os
+
+    os.utime(old_dir, (old_mtime, old_mtime))
+
+    recent_dir = processing / "recent"
+    recent_dir.mkdir(parents=True)
+    (recent_dir / "dummy.txt").write_text("fresh")
+
+    worker = OCRWorker(storage_path=tmp_path, poll_interval=0.1)
+    removed = worker._cleanup_old_processing(max_age_hours=24)
+
+    assert removed == 1
+    assert not old_dir.exists()
+    assert recent_dir.exists()

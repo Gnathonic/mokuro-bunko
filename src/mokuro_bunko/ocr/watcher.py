@@ -7,10 +7,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
+import tempfile
 import threading
 import time
+from collections import deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional, Set
+from typing import Any
 
 try:
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -25,6 +30,9 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+# Global pointer to the running OCR worker for API introspection and control.
+CURRENT_OCR_WORKER: OCRWorker | None = None
 
 
 class InboxWatcher:
@@ -57,12 +65,12 @@ class InboxWatcher:
         self._running = False
         self._stop_event = threading.Event()
         self._pending_files: dict[Path, float] = {}
-        self._processed_files: Set[Path] = set()
+        self._processed_files: set[Path] = set()
         self._lock = threading.Lock()
 
         # Use watchdog if available, otherwise fall back to polling
         self._use_watchdog = WATCHDOG_AVAILABLE
-        self._observer: Optional[Observer] = None  # type: ignore
+        self._observer: Observer | None = None  # type: ignore
 
     def start(self) -> None:
         """Start watching the inbox directory.
@@ -120,7 +128,7 @@ class InboxWatcher:
 
     def _start_polling(self) -> None:
         """Start watching using polling fallback."""
-        known_files: Set[Path] = set()
+        known_files: set[Path] = set()
 
         while not self._stop_event.is_set():
             try:
@@ -233,7 +241,8 @@ class OCRWorker:
         self,
         storage_path: Path,
         poll_interval: float = 30.0,
-        status_callback: Optional[Callable[[str], None]] = None,
+        processor_timeouts: dict[str, int] | None = None,
+        status_callback: Callable[[str], None] | None = None,
     ) -> None:
         """Initialize the OCR worker.
 
@@ -248,21 +257,70 @@ class OCRWorker:
         self.poll_interval = poll_interval
         self.status_callback = status_callback or (lambda msg: None)
 
+        timeout_cfg = processor_timeouts or {}
         self.processor = OCRProcessor(
             storage_path=storage_path,
             status_callback=self.status_callback,
             progress_callback=self._on_progress,
+            hard_timeout_seconds=int(timeout_cfg.get("hard_timeout_seconds", 3600)),
+            no_progress_timeout_seconds=int(timeout_cfg.get("no_progress_timeout_seconds", 600)),
+            finalizing_timeout_seconds=int(timeout_cfg.get("finalizing_timeout_seconds", 180)),
         )
 
-        self.watcher: Optional[InboxWatcher] = None
-        self._ocr_thread: Optional[threading.Thread] = None
-        self._thumb_thread: Optional[threading.Thread] = None
+        self.watcher: InboxWatcher | None = None
+        self._ocr_thread: threading.Thread | None = None
+        self._thumb_thread: threading.Thread | None = None
         self._running = False
-        self._inflight_ocr: Set[Path] = set()
-        self._inflight_thumbs: Set[Path] = set()
+        self._paused = False
+        self._inflight_ocr: set[Path] = set()
+        self._inflight_thumbs: set[Path] = set()
         self._progress_path = self.storage_path / ".ocr-progress.json"
-        self._active_progress: Optional[dict[str, Any]] = None
+        self._history_path = self.storage_path / ".ocr-history.jsonl"
+        self._active_progress: dict[str, Any] | None = None
+        self._history_lock = threading.Lock()
         self._lock = threading.Lock()
+
+    def _append_history_event(self, event: dict[str, Any]) -> None:
+        """Append OCR event to on-disk history and keep a bounded tail."""
+        event_line = json.dumps(event, ensure_ascii=False)
+        with self._history_lock:
+            try:
+                self._history_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._history_path.open("a", encoding="utf-8") as handle:
+                    handle.write(event_line + "\n")
+            except OSError:
+                return
+            self._trim_history_tail_locked(max_events=500)
+
+    def _trim_history_tail_locked(self, max_events: int = 500) -> None:
+        """Rewrite history file with only the most recent max_events lines."""
+        try:
+            with self._history_path.open("r", encoding="utf-8") as handle:
+                tail = deque((line.rstrip("\n") for line in handle if line.strip()), maxlen=max_events)
+        except OSError:
+            return
+
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(self._history_path.parent),
+                delete=False,
+                prefix=".ocr-history.",
+                suffix=".tmp",
+            ) as handle:
+                temp_path = Path(handle.name)
+                if tail:
+                    handle.write("\n".join(tail))
+                    handle.write("\n")
+            os.replace(str(temp_path), str(self._history_path))
+        except OSError:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _log(self, message: str) -> None:
         """Log a status message."""
@@ -312,10 +370,27 @@ class OCRWorker:
     def _on_progress(self, data: dict[str, Any]) -> None:
         """Receive progress events from OCR processor."""
         if data.get("status") == "done":
+            self._append_history_event({
+                "timestamp": time.time(),
+                "status": "done",
+                "series": data.get("series"),
+                "volume": data.get("volume"),
+                "relative_cbz": data.get("relative_cbz"),
+                "percent": data.get("percent"),
+            })
             self._set_active_progress(data)
             self._clear_active_progress()
             return
         if data.get("status") == "error":
+            self._append_history_event({
+                "timestamp": time.time(),
+                "status": "error",
+                "series": data.get("series"),
+                "volume": data.get("volume"),
+                "relative_cbz": data.get("relative_cbz"),
+                "percent": data.get("percent"),
+                "error": data.get("error"),
+            })
             self._set_active_progress(data)
             # Keep last error snapshot briefly so UI can show failure.
             return
@@ -411,11 +486,34 @@ class OCRWorker:
         for _ in range(max(1, int(self.poll_interval * 10))):
             if not self._running:
                 break
+            if self._paused:
+                time.sleep(0.5)
+                continue
             time.sleep(0.1)
+
+    def pause(self) -> None:
+        """Pause OCR work loops."""
+        with self._lock:
+            self._paused = True
+        self._log("OCR worker paused")
+
+    def resume(self) -> None:
+        """Resume OCR work loops."""
+        with self._lock:
+            self._paused = False
+        self._log("OCR worker resumed")
+
+    def is_paused(self) -> bool:
+        """Check if OCR worker is paused."""
+        with self._lock:
+            return self._paused
 
     def _run_ocr_loop(self) -> None:
         """Background OCR sidecar loop."""
         while self._running:
+            if self.is_paused():
+                time.sleep(0.5)
+                continue
             try:
                 self._scan_ocr_once()
             except Exception as e:
@@ -425,11 +523,36 @@ class OCRWorker:
     def _run_thumbnail_loop(self) -> None:
         """Background thumbnail loop."""
         while self._running:
+            if self.is_paused():
+                time.sleep(0.5)
+                continue
             try:
                 self._scan_thumbnails_once()
             except Exception as e:
                 self._log(f"Thumbnail scan error: {e}")
             self._wait_poll_interval()
+
+    def _cleanup_old_processing(self, max_age_hours: int = 24) -> int:
+        """Remove stale .processing directories older than max_age_hours."""
+        processing_dir = self.storage_path / ".processing"
+        if not processing_dir.is_dir():
+            return 0
+
+        cutoff = time.time() - (max_age_hours * 3600)
+        removed = 0
+        for child in processing_dir.iterdir():
+            try:
+                mtime = child.stat().st_mtime
+                if mtime < cutoff:
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
+                    removed += 1
+                    self._log(f"Removed stale processing folder: {child}")
+            except (OSError, ValueError):
+                continue
+        return removed
 
     def _remove_corrupt_sidecars(self) -> int:
         """Remove invalid mokuro sidecar files from library and return count."""
@@ -465,6 +588,9 @@ class OCRWorker:
 
         self._running = True
         self._log("OCR worker starting...")
+
+        # Remove stale processing directories left by crashes or forced exits
+        self._cleanup_old_processing()
 
         if background:
             self._ocr_thread = threading.Thread(

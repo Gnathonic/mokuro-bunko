@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -25,7 +26,7 @@ def browser_context_args() -> dict:
 
 
 @pytest.fixture
-def page(request: pytest.FixtureRequest) -> Generator["Page", None, None]:
+def page(request: pytest.FixtureRequest) -> Generator[Page, None, None]:
     """Provide a Playwright page fixture."""
     try:
         from playwright.sync_api import sync_playwright

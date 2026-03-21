@@ -5,6 +5,7 @@ Tests the full pipeline: upload to inbox → OCR processing → library output.
 
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 import tempfile
@@ -12,9 +13,10 @@ import threading
 import time
 import uuid
 import zipfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import TYPE_CHECKING, Generator
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -91,7 +93,9 @@ class TestOCRProcessor:
         processor = OCRProcessor(storage_dir)
 
         def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
-            (output_dir / f"{input_path.stem}.mokuro.gz").write_bytes(b"mock")
+            sidecar = output_dir / f"{input_path.stem}.mokuro.gz"
+            with gzip.open(sidecar, "wt", encoding="utf-8") as f:
+                json.dump({"title": "test", "volume": input_path.stem}, f)
             return True
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run) as mock_mokuro:
@@ -114,7 +118,9 @@ class TestOCRProcessor:
         processor = OCRProcessor(storage_dir)
 
         def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
-            (output_dir / f"{input_path.stem}.mokuro.gz").write_bytes(b"mock")
+            sidecar = output_dir / f"{input_path.stem}.mokuro.gz"
+            with gzip.open(sidecar, "wt", encoding="utf-8") as f:
+                json.dump({"title": "test", "volume": input_path.stem}, f)
             return True
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
@@ -142,7 +148,8 @@ class TestOCRProcessor:
         def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
             # Simulate mokuro creating output
             mokuro_file = output_dir / f"{input_path.stem}.mokuro.gz"
-            mokuro_file.write_bytes(b"mock mokuro data")
+            with gzip.open(mokuro_file, "wt", encoding="utf-8") as f:
+                json.dump({"title": "test", "volume": input_path.stem}, f)
             return True
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
@@ -214,7 +221,9 @@ class TestOCRProcessor:
         def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
             assert ".processing" in str(input_path.parent)
             assert input_path != library_cbz
-            (output_dir / f"{input_path.stem}.mokuro.gz").write_bytes(b"mock")
+            sidecar = output_dir / f"{input_path.stem}.mokuro.gz"
+            with gzip.open(sidecar, "wt", encoding="utf-8") as f:
+                json.dump({"title": "test", "volume": input_path.stem}, f)
             return True
 
         with (
@@ -237,7 +246,9 @@ class TestOCRProcessor:
         shutil.copy(sample_cbz, inbox_path)
 
         def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
-            (output_dir / f"{input_path.stem}.mokuro.gz").write_bytes(b"mock")
+            sidecar = output_dir / f"{input_path.stem}.mokuro.gz"
+            with gzip.open(sidecar, "wt", encoding="utf-8") as f:
+                json.dump({"title": "test", "volume": input_path.stem}, f)
             return True
 
         with (
@@ -260,7 +271,7 @@ class TestOCRProcessor:
         shutil.copy(sample_cbz, library_cbz)
 
         def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
-            (output_dir / f"{input_path.stem}.mokuro").write_text("mock-sidecar", encoding="utf-8")
+            (output_dir / f"{input_path.stem}.mokuro").write_text(json.dumps({"title": "test", "volume": input_path.stem}), encoding="utf-8")
             return False
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
@@ -282,7 +293,7 @@ class TestOCRProcessor:
         def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
             nested = output_dir / input_path.stem
             nested.mkdir(parents=True, exist_ok=True)
-            (nested / f"{input_path.stem}.mokuro").write_text("mock-sidecar", encoding="utf-8")
+            (nested / f"{input_path.stem}.mokuro").write_text(json.dumps({"title": "test", "volume": input_path.stem}), encoding="utf-8")
             return False
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
@@ -477,7 +488,8 @@ class TestOCRWorkflow:
         # Mock mokuro to simulate success
         def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
             mokuro_file = output_dir / f"{input_path.stem}.mokuro.gz"
-            mokuro_file.write_bytes(b"mock mokuro output")
+            with gzip.open(mokuro_file, "wt", encoding="utf-8") as f:
+                json.dump({"title": "test", "volume": input_path.stem}, f)
             return True
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
@@ -528,7 +540,8 @@ class TestOCRWorkflow:
 
         def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
             mokuro_file = output_dir / f"{input_path.stem}.mokuro.gz"
-            mokuro_file.write_bytes(b"mock")
+            with gzip.open(mokuro_file, "wt", encoding="utf-8") as f:
+                json.dump({"title": "test", "volume": input_path.stem}, f)
             return True
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
@@ -578,7 +591,8 @@ class TestOCRWorkflow:
             if "fail" in input_path.name:
                 return False
             mokuro_file = output_dir / f"{input_path.stem}.mokuro.gz"
-            mokuro_file.write_bytes(b"mock")
+            with gzip.open(mokuro_file, "wt", encoding="utf-8") as f:
+                json.dump({"title": "test", "volume": input_path.stem}, f)
             return True
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):

@@ -11,26 +11,23 @@ pip install mokuro-bunko
 mokuro-bunko serve
 ```
 
-### Using Standalone Binary
-
-Download the appropriate binary for your platform from [GitHub Releases](https://github.com/Gnathonic/mokuro-bunko/releases):
-
-- `mokuro-bunko-linux-x64` - Linux (x86_64)
-- `mokuro-bunko-macos-arm64` - macOS (Apple Silicon)
-- `mokuro-bunko-windows-x64.exe` - Windows (x86_64)
+### Using source checkout
 
 ```bash
-chmod +x mokuro-bunko-linux-x64
-./mokuro-bunko-linux-x64 serve
+git clone https://github.com/Gnathonic/mokuro-bunko.git
+cd mokuro-bunko
+uv sync
+uv run mokuro-bunko serve
 ```
 
 ### Using Docker
 
 ```bash
+docker build -f deploy/Dockerfile -t mokuro-bunko:local .
 docker run -d \
   -p 8080:8080 \
   -v ./storage:/storage \
-  ghcr.io/xxx/mokuro-bunko
+  mokuro-bunko:local
 ```
 
 ## Deployment Scenarios
@@ -113,6 +110,16 @@ For production deployments with SSL termination:
        - "https://reader.mokuro.app"
    ```
 
+       Keep mokuro-bunko bound to loopback/private network behind the proxy. Client IP
+       forwarding headers are trusted only when requests come from local/private proxy
+       peers.
+  Admin API state-changing requests also enforce same-origin host checks using
+  `Origin`/`Referer`; ensure your proxy preserves the external host in `Host`
+  and/or `X-Forwarded-Host`.
+      Admin state-changing API requests are also rate-limited per client IP.
+      Rate-limit rejections return HTTP 429 with `Retry-After`,
+      `X-RateLimit-Limit`, `X-RateLimit-Window`, and `X-RateLimit-Block`.
+
 ### Behind Caddy (Reverse Proxy)
 
 Caddy automatically handles SSL certificates:
@@ -188,7 +195,9 @@ version: "3.8"
 
 services:
   mokuro-bunko:
-    image: ghcr.io/xxx/mokuro-bunko
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
     volumes:
       - ./storage:/storage
       - ./config.yaml:/etc/mokuro-bunko/config.yaml:ro

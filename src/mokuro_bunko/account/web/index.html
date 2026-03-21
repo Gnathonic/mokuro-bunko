@@ -23,7 +23,7 @@
         <nav class="mokuro-header__nav" id="header-nav" data-current="account">
             <a href="/catalog" class="btn btn--ghost btn--sm">Catalog</a>
             <a href="/" class="btn btn--ghost btn--sm">Home</a>
-            <button onclick="logout()" class="btn btn--secondary btn--sm">Logout</button>
+            <button type="button" data-nav-action="logout" class="btn btn--secondary btn--sm">Logout</button>
         </nav>
     </header>
 
@@ -81,7 +81,7 @@
                     <label class="form-label">Server URL</label>
                     <div class="connect-field__row">
                         <input type="text" id="server-url" class="form-input" readonly>
-                        <button onclick="copyServerUrl()" class="btn btn--secondary" id="copy-btn">Copy</button>
+                        <button type="button" class="btn btn--secondary" id="copy-btn">Copy</button>
                     </div>
                 </div>
                 <div class="connect-field">
@@ -115,7 +115,7 @@
             <div class="card account-card account-card--danger">
                 <h2 class="account-card__title account-card__title--danger">Danger Zone</h2>
                 <p class="account-card__desc">Permanently delete your account and all associated data. This action cannot be undone.</p>
-                <button onclick="showDeleteModal()" class="btn btn--danger">Delete Account</button>
+                <button type="button" id="show-delete-modal-btn" class="btn btn--danger">Delete Account</button>
             </div>
         </div>
     </main>
@@ -125,7 +125,7 @@
         <div class="modal">
             <div class="modal__header">
                 <h3 class="modal__title">Delete Account</h3>
-                <button class="modal__close" onclick="hideDeleteModal()">&times;</button>
+                <button type="button" class="modal__close" id="hide-delete-modal-btn" aria-label="Close delete account dialog">&times;</button>
             </div>
             <div class="modal__body">
                 <p class="text-secondary mb-3">This will permanently delete your account and all reading data. Enter your password to confirm.</p>
@@ -136,8 +136,8 @@
                 <div id="delete-error" class="alert alert--error" style="display:none"></div>
             </div>
             <div class="modal__footer">
-                <button class="btn btn--secondary" onclick="hideDeleteModal()">Cancel</button>
-                <button class="btn btn--danger" id="delete-confirm-btn" onclick="deleteAccount()">Delete Account</button>
+                <button type="button" class="btn btn--secondary" id="cancel-delete-btn">Cancel</button>
+                <button type="button" class="btn btn--danger" id="delete-confirm-btn">Delete Account</button>
             </div>
         </div>
     </div>

@@ -3,6 +3,7 @@
 import io
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -199,11 +200,34 @@ class TestWelcomePage:
         assert "403" in status or "404" in status
 
 
+class TestHealthAPI:
+    """Tests for health endpoint."""
+
+    def test_health_reports_uptime_and_db_status(self, app, config):
+        environ = make_environ(
+            method="GET",
+            path="/api/health",
+            headers={"Accept": "application/json"},
+        )
+
+        status, headers, body = call_app(app, environ)
+
+        assert "200" in status
+        data = json.loads(body)
+        assert data["status"] == "ok"
+        assert isinstance(data["uptime_seconds"], int)
+        assert data["db_status"] in ("ok", "error", "unavailable")
+
+        # security headers must be present
+        assert headers.get("X-Content-Type-Options") == "nosniff"
+        assert headers.get("Referrer-Policy") == "no-referrer"
+
+
 class TestStatsAPI:
     """Tests for stats API endpoint."""
 
     def test_get_stats_empty(self, app, config):
-        """Test stats API with no data."""
+        """Test stats API with no data except admin user."""
         environ = make_environ(
             method="GET",
             path="/api/stats",
@@ -214,12 +238,12 @@ class TestStatsAPI:
 
         assert "200" in status
         data = json.loads(body)
-        assert data["total_users"] == 0
+        assert data["total_users"] == 1
         assert data["total_volumes"] == 0
         assert data["total_pages_read"] == 0
 
     def test_get_stats_with_data(self, app, config):
-        """Stats endpoint always returns zeroed stats (scanning removed)."""
+        """Stats endpoint returns configured stats including users and volumes."""
         environ = make_environ(
             method="GET",
             path="/api/stats",
@@ -230,7 +254,7 @@ class TestStatsAPI:
 
         assert "200" in status
         data = json.loads(body)
-        assert data["total_users"] == 0
+        assert data["total_users"] == 1
         assert data["total_volumes"] == 0
         assert data["total_pages_read"] == 0
         assert data["total_characters_read"] == 0
@@ -248,6 +272,30 @@ class TestStatsAPI:
 
         assert "204" in status
 
+
+class TestHealthAndStatsMethods:
+    """Tests for additional health and stats endpoint behavior."""
+
+    def test_health_endpoint_reports_db_and_library(self, app, config):
+        environ = make_environ(
+            method="GET",
+            path="/api/health",
+            headers={"Accept": "application/json"},
+        )
+
+        status, headers, body = call_app(app, environ)
+
+        assert "200" in status
+        data = json.loads(body)
+        assert data["status"] in ("ok", "degraded")
+        assert isinstance(data["uptime_seconds"], int)
+        assert data["db_status"] in ("ok", "error", "unavailable")
+        assert data["library_status"] in ("ok", "error", "unavailable")
+        assert headers.get("X-Content-Type-Options") == "nosniff"
+        assert headers.get("Referrer-Policy") == "no-referrer"
+
+
+
     def test_stats_post_not_allowed(self, app, config):
         """Test POST to stats API returns 405."""
         environ = make_environ(
@@ -258,6 +306,19 @@ class TestStatsAPI:
         status, headers, body = call_app(app, environ)
 
         assert "405" in status
+
+    def test_health_endpoint(self, app, config):
+        """Test health endpoint returns OK and is always reachable."""
+        environ = make_environ(
+            method="GET",
+            path="/api/health",
+            headers={"Accept": "application/json"},
+        )
+
+        status, headers, body = call_app(app, environ)
+
+        assert "200" in status
+        assert json.loads(body)["status"] == "ok"
 
 
 class TestBrowserDetection:
@@ -333,3 +394,15 @@ class TestNavConfig:
         assert "200" in status
         data = json.loads(body)
         assert data["home_enabled"] is True
+
+    def test_cleanup_uses_safe_watcher_shutdown(self, app):
+        """Cleanup should detach watcher without signaling watchdog threads."""
+        watcher = Mock()
+        cache = Mock()
+        app._library_watcher = watcher  # type: ignore[attr-defined]
+        app._propfind_cache = cache  # type: ignore[attr-defined]
+
+        app._cleanup_background_services()  # type: ignore[attr-defined]
+
+        watcher.stop.assert_called_once_with(skip_observer_shutdown=True)
+        cache.stop.assert_called_once_with()

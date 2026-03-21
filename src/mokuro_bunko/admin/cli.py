@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 
@@ -12,7 +11,7 @@ from mokuro_bunko.config import load_config
 from mokuro_bunko.database import Database
 
 
-def get_database(config_path: Optional[Path]) -> Database:
+def get_database(config_path: Path | None) -> Database:
     """Get database instance from config.
 
     Args:
@@ -87,7 +86,7 @@ def delete_user(ctx: click.Context, username: str, yes: bool) -> None:
     help="Filter by status",
 )
 @click.pass_context
-def list_users(ctx: click.Context, status: Optional[str]) -> None:
+def list_users(ctx: click.Context, status: str | None) -> None:
     """List all users."""
     config_path = ctx.obj.get("config_path")
     db = get_database(config_path)

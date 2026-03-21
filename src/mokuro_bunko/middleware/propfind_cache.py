@@ -7,8 +7,9 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Callable, Iterable
 from io import BytesIO
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
 
 class PropfindCacheMiddleware:
@@ -37,7 +38,7 @@ class PropfindCacheMiddleware:
         self._cache: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._refreshing: set[str] = set()
-        self._debounce_timer: Optional[threading.Timer] = None
+        self._debounce_timer: threading.Timer | None = None
 
     def __call__(
         self,
@@ -46,9 +47,11 @@ class PropfindCacheMiddleware:
     ) -> Iterable[bytes]:
         method = environ.get("REQUEST_METHOD", "")
 
-        # Invalidate cache on write operations (serve stale, refresh in background)
-        if method in ("PUT", "DELETE", "MKCOL", "MOVE", "COPY"):
-            self.refresh_all()
+        # Invalidate cache on write operations to avoid serving stale entries.
+        # Then trigger a background refresh for warmed paths.
+        if method in ("PUT", "DELETE", "MKCOL", "MOVE", "COPY", "PROPPATCH"):
+            self.invalidate()
+            self.schedule_refresh(delay=1.0)
             return self.app(environ, start_response)
 
         # Only cache PROPFIND with Depth: infinity
@@ -103,7 +106,7 @@ class PropfindCacheMiddleware:
 
         return self._serve_cached(new_entry, accepts_gzip, start_response)
 
-    def _generate(self, environ: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def _generate(self, environ: dict[str, Any]) -> dict[str, Any] | None:
         """Call WsgiDAV and capture the full response."""
         captured: dict[str, Any] = {}
 
@@ -188,7 +191,7 @@ class PropfindCacheMiddleware:
                     )
                 else:
                     print(
-                        f"[PROPFIND-CACHE] Warm failed: _generate returned None",
+                        "[PROPFIND-CACHE] Warm failed: _generate returned None",
                         file=sys.stderr, flush=True,
                     )
             except Exception:

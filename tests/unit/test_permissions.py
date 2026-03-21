@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from mokuro_bunko.middleware.auth import (
-    Permission,
     ROLE_PERMISSIONS,
+    Permission,
     check_permission,
     get_role_permissions,
     is_admin_path,

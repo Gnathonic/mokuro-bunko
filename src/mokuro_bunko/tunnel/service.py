@@ -7,7 +7,6 @@ import re
 import shutil
 import subprocess
 import threading
-from typing import Optional
 
 from mokuro_bunko.config import Config
 
@@ -15,16 +14,16 @@ from mokuro_bunko.config import Config
 class TunnelService:
     """Manages cloudflared subprocess lifecycle."""
 
-    def __init__(self, config: Config, config_path: Optional[object] = None) -> None:
+    def __init__(self, config: Config, config_path: object | None = None) -> None:
         self._config = config
         self._config_path = config_path
-        self._process: Optional[subprocess.Popen[str]] = None
-        self._url: Optional[str] = None
+        self._process: subprocess.Popen[str] | None = None
+        self._url: str | None = None
         self._lock = threading.Lock()
-        self._reader_thread: Optional[threading.Thread] = None
+        self._reader_thread: threading.Thread | None = None
         atexit.register(self.stop)
 
-    def start(self, port: Optional[int] = None) -> None:
+    def start(self, port: int | None = None) -> None:
         """Start a cloudflare quick tunnel."""
         with self._lock:
             if self._process and self._process.poll() is None:
