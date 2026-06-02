@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -135,6 +136,20 @@ def create_app(
 
     app: Callable[..., Any] = dav_app
 
+    # When running behind nginx (MOKURO_NGINX_ACCEL=1), flag each request so
+    # MokuroFileResource offloads library downloads via X-Accel-Redirect
+    # instead of streaming bytes through a WSGI worker thread.
+    if os.environ.get("MOKURO_NGINX_ACCEL") == "1":
+        _inner = app
+
+        def _nginx_accel_flag(
+            environ: dict[str, Any], start_response: Callable[..., Any]
+        ) -> Any:
+            environ["mokuro.nginx_accel"] = True
+            return _inner(environ, start_response)
+
+        app = _nginx_accel_flag
+
     # Wrap with PROPFIND cache (caches Depth:infinity responses + gzip)
     propfind_cache = PropfindCacheMiddleware(app, ttl=120.0)
     app = propfind_cache
@@ -251,6 +266,7 @@ def create_ssl_server(
     server = WSGIServer(
         (config.server.host, config.server.port),
         app,
+        numthreads=int(os.environ.get("MOKURO_THREADS", "50")),
     )
 
     # Configure SSL
