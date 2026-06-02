@@ -11,6 +11,7 @@ files are shared and per-user data is isolated.
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import tempfile
@@ -18,11 +19,18 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Optional
+from urllib.parse import quote
 
 from wsgidav.dav_provider import DAVCollection, DAVError, DAVNonCollection
 from wsgidav.util import join_uri
 
 from mokuro_bunko.security import safe_resolve_under
+
+# Internal nginx location used for X-Accel-Redirect download offload. The nginx
+# config aliases this prefix to the library root, so the redirect path is the
+# requested file's path relative to the library, URL-encoded. See
+# deploy/nginx-internal.conf.template.
+_NGINX_INTERNAL_PREFIX = "/internal-library/"
 
 if TYPE_CHECKING:
     from mokuro_bunko.database import Database
@@ -248,6 +256,8 @@ class MokuroFileResource(DAVNonCollection):
         super().__init__(path, environ)
         self.file_path = file_path
         self._stat: Optional[os.stat_result] = None
+        self._accel_redirect: Optional[str] = None
+        self._accel_redirect_computed = False
 
     def _get_database(self) -> Optional["Database"]:
         db = self.environ.get("mokuro.db")
@@ -393,11 +403,65 @@ class MokuroFileResource(DAVNonCollection):
     def support_etag(self) -> bool:
         return True
 
+    def _compute_accel_redirect(self) -> Optional[str]:
+        """Internal nginx X-Accel-Redirect path, or None to stream normally.
+
+        Returns a path only when (a) the server runs behind nginx
+        (``mokuro.nginx_accel`` is set) and (b) ``file_path`` resolves *inside*
+        the library root. Per-user files and any path that escapes the library
+        are streamed through Python instead, so nginx is never asked to serve a
+        file outside the directory its internal location is aliased to.
+
+        The returned path is the file's location relative to the library root,
+        URL-encoded (preserving "/"), so spaces, unicode and reserved
+        characters cannot break out of the header or mis-resolve.
+        """
+        if not self.environ.get("mokuro.nginx_accel"):
+            return None
+        mapper = self._get_mapper()
+        if mapper is None:
+            return None
+        try:
+            rel = self.file_path.resolve().relative_to(mapper.library_path.resolve())
+        except ValueError:
+            return None  # Not under the library root -> do not offload.
+        encoded = quote(rel.as_posix(), safe="/")
+        return f"{_NGINX_INTERNAL_PREFIX}{encoded}"
+
+    def _accel_redirect_path(self) -> Optional[str]:
+        """Memoized accessor for the X-Accel-Redirect path (stable per request)."""
+        if not self._accel_redirect_computed:
+            self._accel_redirect = self._compute_accel_redirect()
+            self._accel_redirect_computed = True
+        return self._accel_redirect
+
     def support_ranges(self) -> bool:
+        # When offloading to nginx, let nginx satisfy Range requests against the
+        # real file; Python returns an empty body via X-Accel-Redirect, so it
+        # must not advertise/compute ranges itself.
+        if self._accel_redirect_path() is not None:
+            return False
         return True
+
+    def finalize_headers(
+        self, environ: dict[str, Any], response_headers: list[tuple[str, str]]
+    ) -> None:
+        """Inject X-Accel-Redirect for nginx-offloaded library downloads."""
+        accel = self._accel_redirect_path()
+        if accel is None:
+            return
+        # Drop Content-Length: the body we return is empty; nginx sets the real
+        # length (and Content-Range for partial requests) when it serves the file.
+        response_headers[:] = [
+            (k, v) for (k, v) in response_headers if k.lower() != "content-length"
+        ]
+        response_headers.append(("X-Accel-Redirect", accel))
 
     def get_content(self) -> BinaryIO:
         """Return file content as file object."""
+        if self._accel_redirect_path() is not None:
+            # nginx serves the bytes via X-Accel-Redirect; Python sends no body.
+            return io.BytesIO(b"")
         try:
             return open(self.file_path, "rb")
         except OSError as e:
