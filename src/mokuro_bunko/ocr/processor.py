@@ -595,16 +595,13 @@ class OCRProcessor:
         try:
             hard_timeout_seconds = 3600
             no_progress_timeout_seconds = 600
-            finalizing_timeout_seconds = 180
+            finalizing_timeout_seconds = 900
 
-            # Run mokuro with the OCR environment's Python
             cmd = [
                 str(self.python_path),
                 "-m",
                 "mokuro",
                 str(input_path),
-                "--output-dir",
-                str(output_dir),
                 "--disable_confirmation",
                 "--no_cache",
             ]
@@ -667,72 +664,6 @@ class OCRProcessor:
                 time.sleep(2.0)
 
             result_code = process.returncode
-
-            # Compatibility fallback for mokuro versions that do not support
-            # --output-dir and always write sidecars next to the input.
-            if result_code != 0:
-                fallback_cmd = [
-                    str(self.python_path),
-                    "-m",
-                    "mokuro",
-                    str(input_path),
-                    "--disable_confirmation",
-                    "--no_cache",
-                ]
-                self._log(f"Retrying without --output-dir: {' '.join(fallback_cmd)}")
-                process = subprocess.Popen(
-                    fallback_cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                start = time.time()
-                last_done = -1
-                last_progress_time = start
-                finalizing_since = None
-                while process.poll() is None:
-                    now = time.time()
-                    if now - start > hard_timeout_seconds:
-                        process.kill()
-                        self._log("Mokuro timed out")
-                        return False
-                    done = self._count_ocr_json_files(output_dir)
-                    if done != last_done:
-                        last_done = done
-                        last_progress_time = now
-                    percent, eta_seconds, progress_status = self._progress_metrics(
-                        done=done,
-                        total_images=total_images,
-                        elapsed=now - start,
-                    )
-                    if progress_status == "finalizing":
-                        if finalizing_since is None:
-                            finalizing_since = now
-                        if now - finalizing_since > finalizing_timeout_seconds:
-                            if self._collect_valid_workspace_sidecar(input_path, output_dir) is not None:
-                                process.kill()
-                                self._log("Mokuro finalizing exceeded timeout; valid sidecar found, continuing")
-                                return True
-                            process.kill()
-                            self._log("Mokuro stalled in finalizing phase")
-                            return False
-                    else:
-                        finalizing_since = None
-
-                    if now - last_progress_time > no_progress_timeout_seconds:
-                        process.kill()
-                        self._log("Mokuro stalled with no OCR progress")
-                        return False
-
-                    self._emit_progress({
-                        "active": True,
-                        "percent": percent,
-                        "eta_seconds": eta_seconds,
-                        "done_pages": done,
-                        "total_pages": total_images if total_images > 0 else None,
-                        "status": progress_status,
-                    })
-                    time.sleep(2.0)
-                result_code = process.returncode
 
             if result_code != 0:
                 self._log("Mokuro error: subprocess exited with non-zero status")
