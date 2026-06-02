@@ -1,0 +1,94 @@
+# In-container nginx config for the X-Accel-Redirect download offload.
+#
+# Templated by docker-entrypoint.sh (envsubst): ${MOKURO_PORT},
+# ${MOKURO_BACKEND_PORT} and ${MOKURO_LIBRARY} are substituted at start.
+#
+# Topology:   client -> [front proxy] -> nginx (this) -> Python (cheroot)
+#
+# Division of labour:
+#   nginx   - serves library file downloads via X-Accel-Redirect (sendfile;
+#             zero Python threads held for the transfer), Range requests,
+#             per-IP connection/rate limits, upload buffering.
+#   Python  - auth, PROPFIND, metadata, uploads, API endpoints. For a GET of a
+#             library file it returns an empty body plus
+#             "X-Accel-Redirect: /internal-library/<path>" and nginx streams
+#             the real bytes from the internal location below.
+#
+# SECURITY: the internal location is aliased to the library root ONLY (never
+# "/"), and it is marked `internal` so it can never be requested directly from
+# outside. Python additionally confines the redirect path to the library root
+# and URL-encodes it (see MokuroFileResource._compute_accel_redirect).
+
+worker_processes auto;
+error_log /dev/stderr warn;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+
+    # Temp paths writable by the non-root container user.
+    client_body_temp_path /tmp/nginx-client-body;
+    proxy_temp_path /tmp/nginx-proxy;
+    fastcgi_temp_path /tmp/nginx-fastcgi;
+    uwsgi_temp_path /tmp/nginx-uwsgi;
+    scgi_temp_path /tmp/nginx-scgi;
+
+    access_log /dev/stdout;
+
+    # Per-IP limits (front proxy should still keep its own).
+    limit_conn_zone $binary_remote_addr zone=per_ip_conn:10m;
+    limit_req_zone $binary_remote_addr zone=per_ip_req:10m rate=30r/s;
+
+    # Large manga volume uploads.
+    client_max_body_size 2048M;
+
+    upstream mokuro_backend {
+        server 127.0.0.1:${MOKURO_BACKEND_PORT};
+        keepalive 16;
+    }
+
+    server {
+        listen ${MOKURO_PORT};
+
+        limit_conn per_ip_conn 20;
+        limit_req zone=per_ip_req burst=50 nodelay;
+
+        location / {
+            proxy_pass http://mokuro_backend;
+            proxy_http_version 1.1;
+
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Connection "";
+
+            proxy_connect_timeout 10s;
+            proxy_send_timeout 300s;
+            proxy_read_timeout 300s;
+
+            # Stream uploads straight to Python; don't buffer the (normally
+            # empty, X-Accel-bearing) responses.
+            proxy_request_buffering off;
+            proxy_buffering off;
+        }
+
+        # Internal target for X-Accel-Redirect. Aliased to the LIBRARY ROOT
+        # only. Python emits: X-Accel-Redirect: /internal-library/<rel-path>
+        location /internal-library/ {
+            internal;
+            alias ${MOKURO_LIBRARY}/;
+            add_header X-Served-By nginx always;
+        }
+    }
+}
