@@ -17,8 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy project files
+# Copy project files (README.md is referenced by pyproject's readme field)
 COPY pyproject.toml .
+COPY README.md .
 COPY src/ src/
 
 # Build wheel
