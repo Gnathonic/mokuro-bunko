@@ -1,5 +1,13 @@
 // Setup Wizard JavaScript
 
+// UTF-8-safe base64 (btoa alone is Latin-1 and corrupts/throws on non-ASCII)
+function utf8ToBase64(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin);
+}
+
 const steps = ['step-welcome', 'step-admin', 'step-registration', 'step-done'];
 let currentStep = 0;
 
@@ -103,7 +111,7 @@ async function completeSetup() {
 
         if (resp.ok) {
             // Store auth for admin panel access
-            const auth = btoa(username + ':' + password);
+            const auth = utf8ToBase64(username + ':' + password);
             sessionStorage.setItem('mokuro_auth', auth);
             showStep(3); // Done step
         } else {

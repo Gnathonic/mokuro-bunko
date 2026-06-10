@@ -1,5 +1,13 @@
 // Login JavaScript
 
+// UTF-8-safe base64 (btoa alone is Latin-1 and corrupts/throws on non-ASCII)
+function utf8ToBase64(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin);
+}
+
 const form = document.getElementById('login-form');
 const errorMsg = document.getElementById('error-message');
 const submitBtn = document.getElementById('submit-btn');
@@ -56,7 +64,7 @@ form.addEventListener('submit', async (e) => {
         }
         
         // Store credentials for WebDAV requests
-        const credentials = btoa(username + ':' + password);
+        const credentials = utf8ToBase64(username + ':' + password);
         sessionStorage.setItem('mokuro_auth', credentials);
         sessionStorage.setItem('mokuro_user', JSON.stringify(data.user));
         

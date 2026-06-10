@@ -1,5 +1,13 @@
 // Account page JavaScript
 
+// UTF-8-safe base64 (btoa alone is Latin-1 and corrupts/throws on non-ASCII)
+function utf8ToBase64(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin);
+}
+
 function getAuth() {
     const auth = sessionStorage.getItem('mokuro_auth');
     const user = sessionStorage.getItem('mokuro_user');
@@ -151,7 +159,7 @@ async function handlePasswordChange(e, session) {
         }
 
         // Update stored credentials
-        const newAuth = btoa(session.user.username + ':' + newPassword);
+        const newAuth = utf8ToBase64(session.user.username + ':' + newPassword);
         sessionStorage.setItem('mokuro_auth', newAuth);
         session.auth = newAuth;
 
