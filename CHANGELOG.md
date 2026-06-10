@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.4] - 2026-06-10
+
+### Fixed
+- **Latin-1 Basic-auth dual-decode.** Legacy clients (browser `btoa`, the npm `base-64` package) encode `username:password` as Latin-1 bytes; such headers previously failed UTF-8 decoding and were silently served as anonymous read-only. The server now tries a UTF-8 interpretation first and falls back to Latin-1, so users with non-ASCII passwords (e.g. `pässwörd`) authenticate with both encodings. Existing browser sessions holding Latin-1-encoded stored auth strings keep working through this change.
+- A present-but-garbled `Authorization` header (invalid base64, missing colon) now returns 401 instead of being silently treated as anonymous. Requests without any `Authorization` header remain anonymous as before.
+- `WWW-Authenticate` challenges now advertise `charset="UTF-8"` (RFC 7617) so compliant clients encode credentials as UTF-8.
+- Login, account, and setup pages now build Basic-auth strings with a UTF-8-safe encoder instead of bare `btoa`.
+
+### Added
+- `/login/api/me` identity endpoint extended: reports `authenticated` (boolean, present in every response) and a `permissions` object (`canWriteProgress`, `canAddFiles`, `canModifyDelete`); returns `200` with `authenticated: false` for credential-less requests instead of 401, and is rate-limited against credential stuffing. Existing `username`/`role`/`created_at` keys are preserved.
+
 ## [0.1.2] - 2026-03-09
 
 ### Added
