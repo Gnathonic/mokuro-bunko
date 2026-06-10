@@ -430,3 +430,40 @@ class TestMeEndpointCors:
             response.get_header("Access-Control-Allow-Origin")
             == "https://reader.mokuro.app"
         )
+
+    def test_me_invalid_creds_401_full_stack_json_contract(
+        self, client: WSGITestClient
+    ) -> None:
+        """Full-stack /me 401 must be JSON (authenticated: false) without WWW-Authenticate.
+
+        Pins the LoginAPI-before-AuthMiddleware stack order in create_app: the
+        reader client recognizes auth failure only from the JSON body, and the
+        absence of WWW-Authenticate prevents browser Basic-auth popups. If a
+        middleware reordering ever let AuthMiddleware intercept /login/api/me,
+        the 401 would become text/plain with WWW-Authenticate and this test
+        would catch the regression.
+        """
+        import base64
+        import json
+
+        header = "Basic " + base64.b64encode(b"nobody:wrongpass").decode()
+        response = client.get(
+            "/login/api/me",
+            headers={
+                "Origin": "https://reader.mokuro.app",
+                "Authorization": header,
+            },
+        )
+        assert response.status_code == 401
+
+        # Body must be JSON with authenticated == False (client contract).
+        body = json.loads(response.content)
+        assert body["authenticated"] is False
+
+        content_type = response.get_header("Content-Type") or ""
+        assert content_type.startswith("application/json")
+
+        # No WWW-Authenticate: a Basic challenge here would trigger the
+        # browser's native credentials popup in the reader.
+        assert response.get_header("WWW-Authenticate") is None
+        assert response.get_all_headers("WWW-Authenticate") == []
