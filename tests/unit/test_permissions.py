@@ -15,6 +15,7 @@ from mokuro_bunko.middleware.auth import (
     is_progress_file,
     is_user_progress_path,
     parse_basic_auth,
+    parse_basic_auth_candidates,
 )
 
 
@@ -311,6 +312,87 @@ class TestParseBasicAuth:
         username, password = parse_basic_auth(header)
         assert username == "alice"
         assert password == ""
+
+
+class TestParseBasicAuthCandidates:
+    """Tests for parse_basic_auth_candidates dual-decode function.
+
+    Precomputed vectors (verified):
+    - 'user:päss' UTF-8 -> Basic dXNlcjpww6Rzcw==; Latin-1 -> Basic dXNlcjpw5HNz
+    - 'user:pässwörd' UTF-8 -> Basic dXNlcjpww6Rzc3fDtnJk; Latin-1 -> Basic dXNlcjpw5HNzd/ZyZA==
+    """
+
+    def test_none_and_empty_header(self) -> None:
+        """No header at all -> no candidates, no error (anonymous)."""
+        assert parse_basic_auth_candidates(None) == ([], None)
+        assert parse_basic_auth_candidates("") == ([], None)
+
+    def test_non_basic_scheme_is_anonymous(self) -> None:
+        """Non-Basic schemes are intentionally anonymous, not an error."""
+        assert parse_basic_auth_candidates("Bearer token123") == ([], None)
+
+    def test_ascii_single_candidate(self) -> None:
+        """Pure-ASCII credentials yield exactly one candidate."""
+        import base64
+
+        header = "Basic " + base64.b64encode(b"alice:password123").decode()
+        candidates, error = parse_basic_auth_candidates(header)
+        assert error is None
+        assert candidates == [("alice", "password123")]
+
+    def test_utf8_nonascii_two_candidates_utf8_first(self) -> None:
+        """Valid UTF-8 with non-ASCII bytes yields two candidates, UTF-8 first."""
+        candidates, error = parse_basic_auth_candidates("Basic dXNlcjpww6Rzcw==")
+        assert error is None
+        assert candidates == [("user", "päss"), ("user", "pÃ¤ss")]
+
+    def test_latin1_bytes_single_latin1_candidate(self) -> None:
+        """UTF-8-undecodable (Latin-1) bytes yield a single Latin-1 candidate."""
+        candidates, error = parse_basic_auth_candidates("Basic dXNlcjpw5HNz")
+        assert error is None
+        assert candidates == [("user", "päss")]
+
+    def test_invalid_base64_returns_error(self) -> None:
+        """Present-but-undecodable base64 is an error, not anonymous."""
+        candidates, error = parse_basic_auth_candidates("Basic !!!notb64!!!")
+        assert candidates == []
+        assert error == "Invalid authorization header"
+
+    def test_no_colon_returns_error(self) -> None:
+        """Decodable payload without a colon is an error."""
+        import base64
+
+        header = "Basic " + base64.b64encode(b"usernameonly").decode()
+        candidates, error = parse_basic_auth_candidates(header)
+        assert candidates == []
+        assert error == "Invalid authorization header"
+
+    def test_empty_payload_returns_error(self) -> None:
+        """'Basic ' with empty payload is an error."""
+        candidates, error = parse_basic_auth_candidates("Basic ")
+        assert candidates == []
+        assert error == "Invalid authorization header"
+
+    def test_colon_in_password_preserved(self) -> None:
+        """Only the first colon splits username from password."""
+        import base64
+
+        header = "Basic " + base64.b64encode(b"alice:pa:ss").decode()
+        candidates, error = parse_basic_auth_candidates(header)
+        assert error is None
+        assert candidates == [("alice", "pa:ss")]
+
+    def test_full_latin1_password_vector(self) -> None:
+        """'user:pässwörd' Latin-1 header yields the Latin-1 candidate."""
+        candidates, error = parse_basic_auth_candidates("Basic dXNlcjpw5HNzd/ZyZA==")
+        assert error is None
+        assert candidates == [("user", "pässwörd")]
+
+    def test_max_two_candidates(self) -> None:
+        """Never more than two candidates."""
+        candidates, _ = parse_basic_auth_candidates("Basic dXNlcjpww6Rzc3fDtnJk")
+        assert len(candidates) <= 2
+        assert candidates[0] == ("user", "pässwörd")
 
 
 class TestPermissionHierarchy:

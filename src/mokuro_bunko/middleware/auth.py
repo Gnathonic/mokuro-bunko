@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -169,53 +170,110 @@ class AuthorizationResult:
     error: Optional[str] = None
 
 
+def parse_basic_auth_candidates(
+    authorization_header: Optional[str],
+) -> tuple[list[tuple[str, str]], Optional[str]]:
+    """Parse a Basic auth header into credential candidates.
+
+    Legacy clients (browser btoa, the 'base-64' npm package) encode
+    'username:password' as Latin-1 bytes instead of UTF-8, so the decoded
+    bytes are interpreted in BOTH encodings: the UTF-8 interpretation is
+    always tried first; a Latin-1 interpretation is added when the bytes
+    are not valid UTF-8, or when they contain non-ASCII bytes and the two
+    interpretations differ. (0x3A ':' cannot be a UTF-8 continuation byte,
+    so the username/password split point is byte-identical in both.)
+
+    Returns:
+        (candidates, error) where:
+        ([], None)            -> no usable Basic header present; treat as anonymous
+        ([(u,p), ...], None)  -> 1-2 credential candidates, UTF-8 interpretation FIRST
+        ([], "Invalid authorization header") -> header present but unusable -> caller must 401
+
+    Non-Basic schemes (Bearer, Negotiate, ...) intentionally return
+    ([], None) = anonymous, to avoid breaking unknown clients (e.g. rclone,
+    Windows first-contact negotiation).
+    """
+    if not authorization_header:
+        return [], None
+    if not authorization_header.startswith("Basic "):
+        return [], None
+    try:
+        raw = base64.b64decode(authorization_header[6:])
+    except (ValueError, binascii.Error):
+        return [], "Invalid authorization header"
+
+    candidates: list[tuple[str, str]] = []
+    try:
+        utf8: Optional[str] = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        utf8 = None
+    latin1 = raw.decode("latin-1")  # never fails
+
+    if utf8 is not None and ":" in utf8:
+        username, password = utf8.split(":", 1)
+        candidates.append((username, password))
+    include_latin1 = (utf8 is None) or (utf8 != latin1 and any(b >= 0x80 for b in raw))
+    if include_latin1 and ":" in latin1:
+        username, password = latin1.split(":", 1)
+        candidates.append((username, password))
+
+    if not candidates:
+        # e.g. no colon in the payload, or empty "Basic " payload
+        return [], "Invalid authorization header"
+    return candidates, None
+
+
 def parse_basic_auth(authorization_header: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Parse Basic auth header.
+    """Parse Basic auth header (compat wrapper).
+
+    Returns only the PRIMARY credential candidate (UTF-8 interpretation if
+    decodable, else Latin-1). New code should use parse_basic_auth_candidates
+    to support legacy Latin-1-encoded headers.
 
     Returns:
         Tuple of (username, password) or (None, None) if invalid.
     """
-    if not authorization_header:
+    candidates, _error = parse_basic_auth_candidates(authorization_header)
+    if not candidates:
         return None, None
-
-    if not authorization_header.startswith("Basic "):
-        return None, None
-
-    try:
-        encoded = authorization_header[6:]
-        decoded = base64.b64decode(encoded).decode("utf-8")
-        if ":" not in decoded:
-            return None, None
-        username, password = decoded.split(":", 1)
-        return username, password
-    except (ValueError, UnicodeDecodeError):
-        return None, None
+    return candidates[0]
 
 
 def authenticate_basic_header(
     database: "Database",
     authorization_header: Optional[str],
 ) -> AuthResult:
-    """Authenticate a user from a Basic auth header."""
-    username, password = parse_basic_auth(authorization_header)
+    """Authenticate a user from a Basic auth header.
 
-    if username is None:
+    Tries each credential candidate (UTF-8 interpretation first, then
+    Latin-1 for legacy clients). No rate limiting here; callers that need
+    it apply their own.
+    """
+    candidates, parse_error = parse_basic_auth_candidates(authorization_header)
+    if parse_error:
+        return AuthResult(
+            authenticated=False,
+            role="anonymous",
+            error=parse_error,
+        )
+    if not candidates:
         return AuthResult(
             authenticated=False,
             role="anonymous",
         )
 
-    user = database.authenticate_user(username, password)
-    if user is None:
-        return AuthResult(
-            authenticated=False,
-            error="Invalid credentials",
-        )
+    for username, password in candidates:
+        user = database.authenticate_user(username, password)
+        if user is not None:
+            return AuthResult(
+                authenticated=True,
+                user=user,
+                role=user["role"],
+            )
 
     return AuthResult(
-        authenticated=True,
-        user=user,
-        role=user["role"],
+        authenticated=False,
+        error="Invalid credentials",
     )
 
 
@@ -291,13 +349,28 @@ class AuthMiddleware:
         return self.app(environ, start_response)
 
     def authenticate(self, environ: dict[str, Any]) -> AuthResult:
-        """Authenticate request from environ."""
+        """Authenticate request from environ.
+
+        Dual-decodes Basic credentials (UTF-8 first, then Latin-1 for
+        legacy clients): at most 2 bcrypt checks and at most ONE recorded
+        rate-limiter failure per request, keyed on the primary candidate's
+        username. Residual (accepted): a 2-candidate header tests two
+        (user, pass) pairs but records failure under the primary username's
+        key only; brute force is still blocked at the same threshold
+        because the key is constant per header-shape per IP.
+        """
         auth_header = environ.get("HTTP_AUTHORIZATION")
-        username, password = parse_basic_auth(auth_header)
-        if username is None:
+        candidates, parse_error = parse_basic_auth_candidates(auth_header)
+        if parse_error:
+            # Present-but-garbage header -> 401 via authorize()'s error gate.
+            # NO rate-limiter interaction (no reliable username to key on).
+            return AuthResult(authenticated=False, role="anonymous", error=parse_error)
+        if not candidates:
+            # No (Basic) Authorization header: anonymous, unchanged.
             return AuthResult(authenticated=False, role="anonymous")
 
-        key = f"{get_client_ip(environ)}:{username}"
+        limiter_username = candidates[0][0]  # primary = UTF-8 if decodable, else Latin-1
+        key = f"{get_client_ip(environ)}:{limiter_username}"
         allowed, retry_after = AUTH_RATE_LIMITER.allow_attempt(key)
         if not allowed:
             return AuthResult(
@@ -305,19 +378,20 @@ class AuthMiddleware:
                 error=f"Too many failed attempts. Retry in {retry_after}s",
             )
 
-        user = self.database.authenticate_user(username, password)
-        if user is None:
-            AUTH_RATE_LIMITER.record_failure(key)
-            return AuthResult(
-                authenticated=False,
-                error="Invalid credentials",
-            )
+        for username, password in candidates:  # at most 2 bcrypt checks
+            user = self.database.authenticate_user(username, password)
+            if user is not None:
+                AUTH_RATE_LIMITER.record_success(key)
+                return AuthResult(
+                    authenticated=True,
+                    user=user,
+                    role=user["role"],
+                )
 
-        AUTH_RATE_LIMITER.record_success(key)
+        AUTH_RATE_LIMITER.record_failure(key)  # exactly ONE failure per request
         return AuthResult(
-            authenticated=True,
-            user=user,
-            role=user["role"],
+            authenticated=False,
+            error="Invalid credentials",
         )
 
     def authorize(
@@ -598,7 +672,10 @@ class AuthMiddleware:
 
         headers = [("Content-Type", "text/plain; charset=utf-8")]
         if include_auth_header:
-            headers.append(("WWW-Authenticate", f'Basic realm="{self.realm}"'))
+            # charset="UTF-8" (RFC 7617) tells clients to UTF-8-encode credentials
+            headers.append(
+                ("WWW-Authenticate", f'Basic realm="{self.realm}", charset="UTF-8"')
+            )
 
         start_response(status, headers)
         return [message.encode("utf-8")]
