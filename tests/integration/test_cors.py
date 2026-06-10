@@ -376,3 +376,57 @@ class TestCredentialsDisabled:
         )
         assert response.get_header("Access-Control-Allow-Origin") == "https://example.com"
         assert response.get_header("Access-Control-Allow-Credentials") is None
+
+
+class TestMeEndpointCors:
+    """CORS regression tests for the /login/api/me identity endpoint (T5)."""
+
+    def test_me_no_creds_carries_cors_headers(self, client: WSGITestClient) -> None:
+        """Credential-less GET /login/api/me -> 200 anonymous with CORS headers."""
+        response = client.get(
+            "/login/api/me",
+            headers={"Origin": "https://reader.mokuro.app"},
+        )
+        assert response.status_code == 200
+        assert (
+            response.get_header("Access-Control-Allow-Origin")
+            == "https://reader.mokuro.app"
+        )
+
+    def test_me_preflight_allowed(self, client: WSGITestClient) -> None:
+        """OPTIONS preflight for /login/api/me with Authorization is allowed."""
+        response = client.options(
+            "/login/api/me",
+            headers={
+                "Origin": "https://reader.mokuro.app",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        assert response.status_code == 204
+        assert (
+            response.get_header("Access-Control-Allow-Origin")
+            == "https://reader.mokuro.app"
+        )
+        allow_headers = response.get_header("Access-Control-Allow-Headers") or ""
+        assert "authorization" in allow_headers.lower()
+
+    def test_me_invalid_creds_401_carries_cors_headers(
+        self, client: WSGITestClient
+    ) -> None:
+        """Invalid credentials still produce CORS headers on the 401."""
+        import base64
+
+        header = "Basic " + base64.b64encode(b"nobody:wrongpass").decode()
+        response = client.get(
+            "/login/api/me",
+            headers={
+                "Origin": "https://reader.mokuro.app",
+                "Authorization": header,
+            },
+        )
+        assert response.status_code == 401
+        assert (
+            response.get_header("Access-Control-Allow-Origin")
+            == "https://reader.mokuro.app"
+        )

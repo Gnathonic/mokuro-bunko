@@ -6,7 +6,11 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, TYPE_CHECKING
 
-from mokuro_bunko.middleware.auth import authenticate_basic_header
+from mokuro_bunko.middleware.auth import (
+    Permission,
+    check_permission,
+    parse_basic_auth_candidates,
+)
 from mokuro_bunko.security import AuthAttemptLimiter, get_client_ip, is_within_path
 
 if TYPE_CHECKING:
@@ -117,28 +121,79 @@ class LoginAPI:
         except (json.JSONDecodeError, ValueError):
             return self._json_response(start_response, 400, {"error": "Invalid request"})
 
+    @staticmethod
+    def _role_permissions(role: str) -> dict[str, bool]:
+        """Derive the client-facing permissions object from a role."""
+        return {
+            "canWriteProgress": check_permission(role, Permission.WRITE_PROGRESS),
+            "canAddFiles": check_permission(role, Permission.ADD_FILES),
+            "canModifyDelete": check_permission(role, Permission.MODIFY_DELETE),
+        }
+
     def _get_me(
         self,
         environ: dict[str, Any],
         start_response: Callable[..., Any],
     ) -> list[bytes]:
-        """Return user info from Basic auth header."""
+        """Identity endpoint: report auth state, role, and permissions.
+
+        Contract (consumed by mokuro-reader; the "authenticated" boolean is
+        load-bearing in EVERY response, including 401/429):
+        - valid Basic creds (UTF-8 or Latin-1 encoded) -> 200 authenticated:true
+          with username/role/created_at (legacy account.js keys) + permissions
+        - Basic header present but invalid/malformed -> 401 authenticated:false
+        - no Authorization header or non-Basic scheme -> 200 authenticated:false
+          (anonymous), never 401
+        - rate-limited -> 429 authenticated:false
+
+        No WWW-Authenticate header is emitted: this is a fetch()-consumed
+        JSON endpoint and a browser Basic-auth popup must be avoided.
+        """
         if not self.db:
             return self._json_response(start_response, 500, {"error": "Database not configured"})
 
         auth_header = environ.get("HTTP_AUTHORIZATION", "")
-        if not auth_header.startswith("Basic "):
-            return self._json_response(start_response, 401, {"error": "Authentication required"})
+        candidates, parse_error = parse_basic_auth_candidates(auth_header)
 
-        auth_result = authenticate_basic_header(self.db, auth_header)
-        if not auth_result.authenticated or not auth_result.user:
-            return self._json_response(start_response, 401, {"error": "Invalid credentials"})
-        user = auth_result.user
+        if parse_error:
+            # Garbled header: 401, but no rate-limiter interaction
+            return self._json_response(start_response, 401, {
+                "authenticated": False,
+                "error": "Invalid credentials",
+            })
 
-        return self._json_response(start_response, 200, {
-            "username": user["username"],
-            "role": user["role"],
-            "created_at": user["created_at"],
+        if not candidates:
+            # No header / non-Basic scheme: anonymous identity
+            return self._json_response(start_response, 200, {
+                "authenticated": False,
+                "role": "anonymous",
+                "permissions": self._role_permissions("anonymous"),
+            })
+
+        key = f"{get_client_ip(environ)}:{candidates[0][0]}"
+        allowed, retry_after = AUTH_RATE_LIMITER.allow_attempt(key)
+        if not allowed:
+            return self._json_response(start_response, 429, {
+                "authenticated": False,
+                "error": f"Too many failed attempts. Retry in {retry_after}s",
+            })
+
+        for username, password in candidates:
+            user = self.db.authenticate_user(username, password)
+            if user is not None:
+                AUTH_RATE_LIMITER.record_success(key)
+                return self._json_response(start_response, 200, {
+                    "authenticated": True,
+                    "username": user["username"],
+                    "role": user["role"],
+                    "created_at": user["created_at"],
+                    "permissions": self._role_permissions(user["role"]),
+                })
+
+        AUTH_RATE_LIMITER.record_failure(key)  # exactly ONE failure per request
+        return self._json_response(start_response, 401, {
+            "authenticated": False,
+            "error": "Invalid credentials",
         })
 
     def _get_nav_config(self, start_response: Callable[..., Any]) -> list[bytes]:
