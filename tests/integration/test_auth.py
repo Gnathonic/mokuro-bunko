@@ -731,12 +731,13 @@ class TestProgressFileAccess:
         assert start_response.status_code == 200
 
 
-class TestLatin1Migration:
-    """Migration tests for Latin-1 encoded Basic auth headers (M1/M2/M3).
+class TestUtf8BasicAuth:
+    """UTF-8-only Basic auth: non-UTF-8 headers are malformed -> 401.
 
-    Legacy clients (e.g. mokuro-reader <=1.6.1 via btoa) send 'user:pass'
-    encoded as Latin-1 bytes. The server now dual-decodes: UTF-8 candidate
-    first, Latin-1 candidate second.
+    Legacy clients (e.g. mokuro-reader <=1.6.1 via btoa) sent 'user:pass'
+    encoded as Latin-1 bytes. Those are NOT accepted: they fail loudly with
+    401 + charset="UTF-8" challenge instead of silently degrading to
+    anonymous (the original bug). The fixed reader (>=1.6.2) sends UTF-8.
     """
 
     @pytest.fixture(autouse=True)
@@ -777,28 +778,29 @@ class TestLatin1Migration:
         assert result.role == "registered"
         assert result.username == "umlaut"
 
-    def test_utf8_user_authenticates_with_latin1_header(
+    def test_latin1_header_is_rejected_as_malformed(
         self, middleware: AuthMiddleware
     ) -> None:
-        """M1b: same user authenticates with a Latin-1 encoded header."""
+        """A Latin-1 encoded header is malformed -> 401, never anonymous."""
         environ = make_environ(
-            auth_header=self.encoded_header("umlaut:pässwörd", "latin-1")
+            method="PROPFIND",
+            path="/mokuro-reader/",
+            auth_header=self.encoded_header("umlaut:pässwörd", "latin-1"),
         )
         result = middleware.authenticate(environ)
+        assert result.authenticated is False
+        assert result.error == "Invalid authorization header"
 
-        assert result.authenticated is True
-        assert result.role == "registered"
-        assert result.username == "umlaut"
+        start_response = MockStartResponse()
+        middleware(environ, start_response)
+        assert start_response.status_code == 401
+        www_auth = start_response.get_header("WWW-Authenticate")
+        assert www_auth is not None and 'charset="UTF-8"' in www_auth
 
-    def test_utf8_candidate_takes_precedence(
+    def test_exactly_one_password_check_per_request(
         self, middleware: AuthMiddleware, unicode_db: Database
     ) -> None:
-        """The UTF-8 interpretation is always attempted before Latin-1.
-
-        Note: the database rejects non-ASCII usernames, so two distinct
-        users cannot exist for the two decodings; precedence is asserted
-        via the order of authenticate_user attempts instead.
-        """
+        """Only the UTF-8 interpretation is ever attempted (no fallback)."""
         attempts: list[tuple[str, str]] = []
         original = unicode_db.authenticate_user
 
@@ -808,8 +810,6 @@ class TestLatin1Migration:
 
         unicode_db.authenticate_user = spy  # type: ignore[method-assign]
         try:
-            # UTF-8 bytes of 'umlaut:pässwörd'; Latin-1 reinterpretation
-            # of the same bytes is 'umlaut:pÃ¤sswÃ¶rd'
             environ = make_environ(
                 auth_header=self.encoded_header("umlaut:pässwörd", "utf-8")
             )
@@ -820,7 +820,6 @@ class TestLatin1Migration:
         assert result.authenticated is True
         assert result.user is not None
         assert result.user["username"] == "umlaut"
-        # UTF-8 candidate matched first; Latin-1 candidate never attempted
         assert attempts == [("umlaut", "pässwörd")]
 
     def test_ascii_credentials_regression(self, middleware: AuthMiddleware) -> None:
@@ -872,23 +871,23 @@ class TestLatin1Migration:
         middleware(environ, start_response)
         assert start_response.status_code == 200  # passthrough to dummy app
 
-    def test_wrong_password_both_encodings_fails(
+    def test_wrong_password_utf8_fails_with_invalid_credentials(
         self, middleware: AuthMiddleware
     ) -> None:
-        """Latin-1 encoded wrong password -> 401 Invalid credentials."""
+        """UTF-8 encoded wrong password -> Invalid credentials (not malformed)."""
         environ = make_environ(
-            auth_header=self.encoded_header("umlaut:wröng", "latin-1")
+            auth_header=self.encoded_header("umlaut:wröng", "utf-8")
         )
         result = middleware.authenticate(environ)
         assert result.authenticated is False
         assert result.error == "Invalid credentials"
 
-    def test_single_limiter_failure_per_dual_candidate_request(
+    def test_limiter_counts_one_failure_per_request(
         self,
         middleware: AuthMiddleware,
         fresh_rate_limiter: AuthAttemptLimiter,
     ) -> None:
-        """A dual-candidate header records exactly ONE limiter failure."""
+        """Each failing request records exactly ONE limiter failure."""
         environ = make_environ(
             auth_header=self.encoded_header("umlaut:wröng", "utf-8")
         )
@@ -916,18 +915,23 @@ class TestLatin1Migration:
         middleware: AuthMiddleware,
         fresh_rate_limiter: AuthAttemptLimiter,
     ) -> None:
-        """Garbage headers never count toward the rate limit."""
-        environ = make_environ(
-            method="PROPFIND",
-            path="/mokuro-reader/",
-            auth_header="Basic !!!notb64!!!",
-        )
-        environ["REMOTE_ADDR"] = "192.0.2.51"
+        """Malformed headers (garbage or Latin-1) never count toward the rate limit."""
+        malformed_headers = [
+            "Basic !!!notb64!!!",
+            self.encoded_header("umlaut:pässwörd", "latin-1"),
+        ]
+        for auth_header in malformed_headers:
+            environ = make_environ(
+                method="PROPFIND",
+                path="/mokuro-reader/",
+                auth_header=auth_header,
+            )
+            environ["REMOTE_ADDR"] = "192.0.2.51"
 
-        for _ in range(20):
-            start_response = MockStartResponse()
-            middleware(environ, start_response)
-            assert start_response.status_code == 401
+            for _ in range(20):
+                start_response = MockStartResponse()
+                middleware(environ, start_response)
+                assert start_response.status_code == 401
 
         assert fresh_rate_limiter._failures == {}
         assert fresh_rate_limiter._blocked_until == {}
@@ -955,12 +959,16 @@ class TestLatin1Migration:
 
         header = self.encoded_header("umlaut:pässwörd", "latin-1")
         result = authenticate_basic_header(unicode_db, header)
+        assert result.authenticated is False
+
+        header = self.encoded_header("umlaut:pässwörd", "utf-8")
+        result = authenticate_basic_header(unicode_db, header)
         assert result.authenticated is True
         assert result.role == "registered"
 
 
-class TestLatin1FullStack:
-    """Full create_app() stack tests for Latin-1 auth (L-2)."""
+class TestUtf8FullStack:
+    """Full create_app() stack tests for UTF-8 auth and Latin-1 rejection."""
 
     @pytest.fixture(autouse=True)
     def fresh_rate_limiter(self, monkeypatch: pytest.MonkeyPatch) -> AuthAttemptLimiter:
@@ -994,25 +1002,37 @@ class TestLatin1FullStack:
         return WSGITestClient(app)
 
     @staticmethod
-    def latin1_header(credentials: str) -> str:
-        return "Basic " + base64.b64encode(credentials.encode("latin-1")).decode("ascii")
+    def encoded_header(credentials: str, encoding: str) -> str:
+        return "Basic " + base64.b64encode(credentials.encode(encoding)).decode("ascii")
 
-    def test_full_stack_latin1_put_progress_file(
+    def test_full_stack_utf8_put_progress_file(
         self, full_client, full_storage: Path
     ) -> None:
-        """M1c: Latin-1 header authorizes the WRITE_PROGRESS PUT end-to-end."""
+        """UTF-8 header with non-ASCII password authorizes the PUT end-to-end."""
         response = full_client.put(
             "/mokuro-reader/volume-data.json",
             content=b"new progress data",
-            headers={"Authorization": self.latin1_header("umlaut:pässwörd")},
+            headers={"Authorization": self.encoded_header("umlaut:pässwörd", "utf-8")},
         )
         assert 200 <= response.status_code < 300
 
         created = full_storage / "users" / "umlaut" / "volume-data.json"
         assert created.read_bytes() == b"new progress data"
 
-    def test_latin1_user_gets_propfind_cache_injection(self, full_client) -> None:
-        """Latin-1 authenticated PROPFIND gets per-user progress injection."""
+    def test_full_stack_latin1_put_rejected(self, full_client, full_storage: Path) -> None:
+        """Latin-1 header (correct password, wrong encoding) -> 401, no write."""
+        response = full_client.put(
+            "/mokuro-reader/volume-data.json",
+            content=b"should not be written",
+            headers={"Authorization": self.encoded_header("umlaut:pässwörd", "latin-1")},
+        )
+        assert response.status_code == 401
+
+        existing = full_storage / "users" / "umlaut" / "volume-data.json"
+        assert existing.read_bytes() == b"umlaut progress"
+
+    def test_utf8_user_gets_propfind_cache_injection(self, full_client) -> None:
+        """UTF-8 authenticated PROPFIND gets per-user progress injection."""
         anonymous = full_client.request(
             "PROPFIND", "/mokuro-reader", headers={"Depth": "infinity"}
         )
@@ -1024,7 +1044,7 @@ class TestLatin1FullStack:
             "/mokuro-reader",
             headers={
                 "Depth": "infinity",
-                "Authorization": self.latin1_header("umlaut:pässwörd"),
+                "Authorization": self.encoded_header("umlaut:pässwörd", "utf-8"),
             },
         )
         assert authenticated.status_code == 207

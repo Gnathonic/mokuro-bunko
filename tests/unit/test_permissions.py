@@ -15,7 +15,7 @@ from mokuro_bunko.middleware.auth import (
     is_progress_file,
     is_user_progress_path,
     parse_basic_auth,
-    parse_basic_auth_candidates,
+    parse_basic_auth_checked,
 )
 
 
@@ -314,8 +314,8 @@ class TestParseBasicAuth:
         assert password == ""
 
 
-class TestParseBasicAuthCandidates:
-    """Tests for parse_basic_auth_candidates dual-decode function.
+class TestParseBasicAuthChecked:
+    """Tests for parse_basic_auth_checked (UTF-8-only, absent vs malformed).
 
     Precomputed vectors (verified):
     - 'user:päss' UTF-8 -> Basic dXNlcjpww6Rzcw==; Latin-1 -> Basic dXNlcjpw5HNz
@@ -323,39 +323,43 @@ class TestParseBasicAuthCandidates:
     """
 
     def test_none_and_empty_header(self) -> None:
-        """No header at all -> no candidates, no error (anonymous)."""
-        assert parse_basic_auth_candidates(None) == ([], None)
-        assert parse_basic_auth_candidates("") == ([], None)
+        """No header at all -> no creds, no error (anonymous)."""
+        assert parse_basic_auth_checked(None) == (None, None)
+        assert parse_basic_auth_checked("") == (None, None)
 
     def test_non_basic_scheme_is_anonymous(self) -> None:
         """Non-Basic schemes are intentionally anonymous, not an error."""
-        assert parse_basic_auth_candidates("Bearer token123") == ([], None)
+        assert parse_basic_auth_checked("Bearer token123") == (None, None)
 
-    def test_ascii_single_candidate(self) -> None:
-        """Pure-ASCII credentials yield exactly one candidate."""
+    def test_ascii_credentials(self) -> None:
+        """Pure-ASCII credentials parse."""
         import base64
 
         header = "Basic " + base64.b64encode(b"alice:password123").decode()
-        candidates, error = parse_basic_auth_candidates(header)
+        creds, error = parse_basic_auth_checked(header)
         assert error is None
-        assert candidates == [("alice", "password123")]
+        assert creds == ("alice", "password123")
 
-    def test_utf8_nonascii_two_candidates_utf8_first(self) -> None:
-        """Valid UTF-8 with non-ASCII bytes yields two candidates, UTF-8 first."""
-        candidates, error = parse_basic_auth_candidates("Basic dXNlcjpww6Rzcw==")
+    def test_utf8_nonascii_credentials(self) -> None:
+        """Valid UTF-8 with non-ASCII bytes parses as UTF-8 only."""
+        creds, error = parse_basic_auth_checked("Basic dXNlcjpww6Rzcw==")
         assert error is None
-        assert candidates == [("user", "päss"), ("user", "pÃ¤ss")]
+        assert creds == ("user", "päss")
 
-    def test_latin1_bytes_single_latin1_candidate(self) -> None:
-        """UTF-8-undecodable (Latin-1) bytes yield a single Latin-1 candidate."""
-        candidates, error = parse_basic_auth_candidates("Basic dXNlcjpw5HNz")
-        assert error is None
-        assert candidates == [("user", "päss")]
+    def test_latin1_bytes_are_an_error(self) -> None:
+        """UTF-8-undecodable (Latin-1) bytes are malformed -> error, not anonymous.
+
+        Legacy Latin-1 clients are NOT supported: they get a 401 with a
+        charset="UTF-8" challenge instead of silently degrading to anonymous.
+        """
+        creds, error = parse_basic_auth_checked("Basic dXNlcjpw5HNz")
+        assert creds is None
+        assert error == "Invalid authorization header"
 
     def test_invalid_base64_returns_error(self) -> None:
         """Present-but-undecodable base64 is an error, not anonymous."""
-        candidates, error = parse_basic_auth_candidates("Basic !!!notb64!!!")
-        assert candidates == []
+        creds, error = parse_basic_auth_checked("Basic !!!notb64!!!")
+        assert creds is None
         assert error == "Invalid authorization header"
 
     def test_no_colon_returns_error(self) -> None:
@@ -363,14 +367,14 @@ class TestParseBasicAuthCandidates:
         import base64
 
         header = "Basic " + base64.b64encode(b"usernameonly").decode()
-        candidates, error = parse_basic_auth_candidates(header)
-        assert candidates == []
+        creds, error = parse_basic_auth_checked(header)
+        assert creds is None
         assert error == "Invalid authorization header"
 
     def test_empty_payload_returns_error(self) -> None:
         """'Basic ' with empty payload is an error."""
-        candidates, error = parse_basic_auth_candidates("Basic ")
-        assert candidates == []
+        creds, error = parse_basic_auth_checked("Basic ")
+        assert creds is None
         assert error == "Invalid authorization header"
 
     def test_colon_in_password_preserved(self) -> None:
@@ -378,21 +382,21 @@ class TestParseBasicAuthCandidates:
         import base64
 
         header = "Basic " + base64.b64encode(b"alice:pa:ss").decode()
-        candidates, error = parse_basic_auth_candidates(header)
+        creds, error = parse_basic_auth_checked(header)
         assert error is None
-        assert candidates == [("alice", "pa:ss")]
+        assert creds == ("alice", "pa:ss")
 
-    def test_full_latin1_password_vector(self) -> None:
-        """'user:pässwörd' Latin-1 header yields the Latin-1 candidate."""
-        candidates, error = parse_basic_auth_candidates("Basic dXNlcjpw5HNzd/ZyZA==")
+    def test_full_latin1_password_vector_is_error(self) -> None:
+        """'user:pässwörd' Latin-1 header is malformed -> error."""
+        creds, error = parse_basic_auth_checked("Basic dXNlcjpw5HNzd/ZyZA==")
+        assert creds is None
+        assert error == "Invalid authorization header"
+
+    def test_full_utf8_password_vector(self) -> None:
+        """'user:pässwörd' UTF-8 header parses."""
+        creds, error = parse_basic_auth_checked("Basic dXNlcjpww6Rzc3fDtnJk")
         assert error is None
-        assert candidates == [("user", "pässwörd")]
-
-    def test_max_two_candidates(self) -> None:
-        """Never more than two candidates."""
-        candidates, _ = parse_basic_auth_candidates("Basic dXNlcjpww6Rzc3fDtnJk")
-        assert len(candidates) <= 2
-        assert candidates[0] == ("user", "pässwörd")
+        assert creds == ("user", "pässwörd")
 
 
 class TestPermissionHierarchy:

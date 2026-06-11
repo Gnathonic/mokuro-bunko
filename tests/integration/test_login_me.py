@@ -138,37 +138,18 @@ class TestMeEndpoint:
             "canModifyDelete": modify_delete,
         }
 
-    def test_me_latin1_header_authenticates(self, api: LoginAPI) -> None:
+    def test_me_utf8_nonascii_password_authenticates(self, api: LoginAPI) -> None:
+        status, body = call_me(api, encoded_header("umlaut:pässwörd", "utf-8"))
+        assert status == 200
+        assert body["authenticated"] is True
+        assert body["username"] == "umlaut"
+
+    def test_me_latin1_header_rejected(self, api: LoginAPI) -> None:
+        """Latin-1 encoded creds are malformed -> 401, not authenticated."""
         status, body = call_me(api, encoded_header("umlaut:pässwörd", "latin-1"))
-        assert status == 200
-        assert body["authenticated"] is True
-        assert body["username"] == "umlaut"
-
-    def test_me_utf8_candidate_precedence(self, api: LoginAPI, db: Database) -> None:
-        """The UTF-8 interpretation is attempted before Latin-1.
-
-        Note: the database rejects non-ASCII usernames, so two distinct
-        users cannot exist for the two decodings; precedence is asserted
-        via the order of authenticate_user attempts instead.
-        """
-        attempts: list[tuple[str, str]] = []
-        original = db.authenticate_user
-
-        def spy(username: str, password: str):
-            attempts.append((username, password))
-            return original(username, password)
-
-        db.authenticate_user = spy  # type: ignore[method-assign]
-        try:
-            status, body = call_me(api, encoded_header("umlaut:pässwörd", "utf-8"))
-        finally:
-            db.authenticate_user = original  # type: ignore[method-assign]
-
-        assert status == 200
-        assert body["authenticated"] is True
-        assert body["username"] == "umlaut"
-        # UTF-8 candidate matched first; Latin-1 candidate never attempted
-        assert attempts == [("umlaut", "pässwörd")]
+        assert status == 401
+        assert body["authenticated"] is False
+        assert body["error"] == "Invalid credentials"
 
     def test_me_invalid_creds_401(self, api: LoginAPI) -> None:
         status, body = call_me(api, encoded_header("reg:wrongpass"))

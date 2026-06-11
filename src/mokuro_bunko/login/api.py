@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterable, Optional, TYPE_CHECKING
 from mokuro_bunko.middleware.auth import (
     Permission,
     check_permission,
-    parse_basic_auth_candidates,
+    parse_basic_auth_checked,
 )
 from mokuro_bunko.security import AuthAttemptLimiter, get_client_ip, is_within_path
 
@@ -139,7 +139,7 @@ class LoginAPI:
 
         Contract (consumed by mokuro-reader; the "authenticated" boolean is
         load-bearing in EVERY response, including 401/429):
-        - valid Basic creds (UTF-8 or Latin-1 encoded) -> 200 authenticated:true
+        - valid Basic creds (UTF-8 encoded) -> 200 authenticated:true
           with username/role/created_at (legacy account.js keys) + permissions
         - Basic header present but invalid/malformed -> 401 authenticated:false
         - no Authorization header or non-Basic scheme -> 200 authenticated:false
@@ -153,7 +153,7 @@ class LoginAPI:
             return self._json_response(start_response, 500, {"error": "Database not configured"})
 
         auth_header = environ.get("HTTP_AUTHORIZATION", "")
-        candidates, parse_error = parse_basic_auth_candidates(auth_header)
+        creds, parse_error = parse_basic_auth_checked(auth_header)
 
         if parse_error:
             # Garbled header: 401, but no rate-limiter interaction
@@ -162,7 +162,7 @@ class LoginAPI:
                 "error": "Invalid credentials",
             })
 
-        if not candidates:
+        if creds is None:
             # No header / non-Basic scheme: anonymous identity
             return self._json_response(start_response, 200, {
                 "authenticated": False,
@@ -170,7 +170,8 @@ class LoginAPI:
                 "permissions": self._role_permissions("anonymous"),
             })
 
-        key = f"{get_client_ip(environ)}:{candidates[0][0]}"
+        username, password = creds
+        key = f"{get_client_ip(environ)}:{username}"
         allowed, retry_after = AUTH_RATE_LIMITER.allow_attempt(key)
         if not allowed:
             return self._json_response(start_response, 429, {
@@ -178,19 +179,18 @@ class LoginAPI:
                 "error": f"Too many failed attempts. Retry in {retry_after}s",
             })
 
-        for username, password in candidates:
-            user = self.db.authenticate_user(username, password)
-            if user is not None:
-                AUTH_RATE_LIMITER.record_success(key)
-                return self._json_response(start_response, 200, {
-                    "authenticated": True,
-                    "username": user["username"],
-                    "role": user["role"],
-                    "created_at": user["created_at"],
-                    "permissions": self._role_permissions(user["role"]),
-                })
+        user = self.db.authenticate_user(username, password)
+        if user is not None:
+            AUTH_RATE_LIMITER.record_success(key)
+            return self._json_response(start_response, 200, {
+                "authenticated": True,
+                "username": user["username"],
+                "role": user["role"],
+                "created_at": user["created_at"],
+                "permissions": self._role_permissions(user["role"]),
+            })
 
-        AUTH_RATE_LIMITER.record_failure(key)  # exactly ONE failure per request
+        AUTH_RATE_LIMITER.record_failure(key)
         return self._json_response(start_response, 401, {
             "authenticated": False,
             "error": "Invalid credentials",

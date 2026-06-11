@@ -1,10 +1,9 @@
 # Changelog
 
-## [0.1.4] - 2026-06-10
+## [0.1.4] - 2026-06-11
 
 ### Fixed
-- **Latin-1 Basic-auth dual-decode.** Legacy clients (browser `btoa`, the npm `base-64` package) encode `username:password` as Latin-1 bytes; such headers previously failed UTF-8 decoding and were silently served as anonymous read-only. The server now tries a UTF-8 interpretation first and falls back to Latin-1, so users with non-ASCII passwords (e.g. `pässwörd`) authenticate with both encodings. Existing browser sessions holding Latin-1-encoded stored auth strings keep working through this change.
-- A present-but-garbled `Authorization` header (invalid base64, missing colon) now returns 401 instead of being silently treated as anonymous. Requests without any `Authorization` header remain anonymous as before.
+- **Silent anonymous downgrade on non-UTF-8 Basic auth.** Legacy clients (browser `btoa`, the npm `base-64` package) encode `username:password` as Latin-1 bytes; such headers failed UTF-8 decoding and were silently served as anonymous read-only — users with non-ASCII passwords could browse but never sync or upload, with no error. Any present-but-undecodable `Authorization` header (Latin-1 bytes, invalid base64, missing colon) now returns 401 with a `charset="UTF-8"` challenge. Credentials must be UTF-8 encoded (mokuro-reader ≥1.6.2 complies); requests without any `Authorization` header remain anonymous as before.
 - `WWW-Authenticate` challenges now advertise `charset="UTF-8"` (RFC 7617) so compliant clients encode credentials as UTF-8.
 - Login, account, and setup pages now build Basic-auth strings with a UTF-8-safe encoder instead of bare `btoa`.
 
