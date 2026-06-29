@@ -45,7 +45,20 @@ http {
 
     access_log /dev/stdout;
 
-    # Per-IP limits (front proxy should still keep its own).
+    # Recover the real client IP. External traffic reaches this internal nginx
+    # only through a front proxy (e.g. Caddy) and docker NAT, so the direct peer
+    # is a single private address — without this, the per-IP limits below would
+    # apply to ALL clients in aggregate. Trust X-Forwarded-For from private
+    # ranges (clients can't reach the backend directly) and peel back to the
+    # originating client. If no front proxy sets XFF, $remote_addr is unchanged.
+    set_real_ip_from 10.0.0.0/8;
+    set_real_ip_from 172.16.0.0/12;
+    set_real_ip_from 192.168.0.0/16;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
+    # Per-IP limits (front proxy should still keep its own), keyed on the real
+    # client IP recovered above.
     limit_conn_zone $binary_remote_addr zone=per_ip_conn:10m;
     limit_req_zone $binary_remote_addr zone=per_ip_req:10m rate=30r/s;
 
