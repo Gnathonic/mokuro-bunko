@@ -58,6 +58,43 @@ if [ "${OCR_AUTO_INSTALL}" = "true" ] && [ "${MOKURO_OCR_BACKEND}" != "skip" ]; 
   gosu "${PUID}:${PGID}" mokuro-bunko install-ocr --backend "${MOKURO_OCR_BACKEND}" || true
 fi
 
+# Optional nginx X-Accel-Redirect download offload.
+#
+# When MOKURO_NGINX_ACCEL=1, run nginx (as ${PUID}:${PGID}) in front of the
+# Python/cheroot backend so large library downloads are served by nginx via
+# sendfile() instead of holding a cheroot worker thread for the whole transfer
+# (the main driver of the 503 / thread-pool-exhaustion issue under download
+# load, cf. commit 8d98297). Default is OFF, which preserves the original
+# single-process topology; enable it from the Unraid template once validated.
+# See deploy/nginx-internal.conf.template.
+if [ "${MOKURO_NGINX_ACCEL:-}" = "1" ] || [ "${MOKURO_NGINX_ACCEL:-}" = "true" ]; then
+  export MOKURO_NGINX_ACCEL="1"
+  export MOKURO_BACKEND_PORT="${MOKURO_BACKEND_PORT:-8081}"
+  export MOKURO_LIBRARY="${MOKURO_STORAGE}/library"
+
+  # nginx runs as the app user, so its temp/pid/log dirs must be writable by it.
+  mkdir -p "${MOKURO_LIBRARY}" \
+    /tmp/nginx-client-body /tmp/nginx-proxy /tmp/nginx-fastcgi \
+    /tmp/nginx-uwsgi /tmp/nginx-scgi
+  chown "${PUID}:${PGID}" "${MOKURO_LIBRARY}" \
+    /tmp/nginx-client-body /tmp/nginx-proxy /tmp/nginx-fastcgi \
+    /tmp/nginx-uwsgi /tmp/nginx-scgi 2>/dev/null || true
+  chown -R "${PUID}:${PGID}" /var/log/nginx /var/lib/nginx 2>/dev/null || true
+
+  # Render the nginx config (public ${MOKURO_PORT} -> backend ${MOKURO_BACKEND_PORT}).
+  envsubst '${MOKURO_PORT} ${MOKURO_BACKEND_PORT} ${MOKURO_LIBRARY}' \
+    < /etc/nginx/nginx-internal.conf.template \
+    > /tmp/nginx.conf
+
+  echo "[entrypoint] nginx X-Accel offload enabled: public :${MOKURO_PORT} -> backend 127.0.0.1:${MOKURO_BACKEND_PORT}"
+  gosu "${PUID}:${PGID}" nginx -c /tmp/nginx.conf
+
+  # Python now listens only on the internal backend port and emits
+  # X-Accel-Redirect for library downloads.
+  export MOKURO_HOST="127.0.0.1"
+  export MOKURO_PORT="${MOKURO_BACKEND_PORT}"
+fi
+
 if [ "$#" -eq 0 ]; then
   set -- serve
 fi

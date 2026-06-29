@@ -43,6 +43,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tini \
     gosu \
+    nginx \
+    gettext-base \
     p7zip-full \
     libxcb1 \
     libgl1-mesa-glx \
@@ -55,9 +57,14 @@ ENV PATH="/opt/venv/bin:${PATH}"
 COPY deploy/docker-entrypoint.unraid.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# nginx config template for the optional X-Accel-Redirect download offload.
+# Activated at runtime by MOKURO_NGINX_ACCEL=1 (see docker-entrypoint.unraid.sh).
+COPY deploy/nginx-internal.conf.template /etc/nginx/nginx-internal.conf.template
+
 ENV PYTHONUNBUFFERED="1" \
     MOKURO_HOST="0.0.0.0" \
     MOKURO_PORT="8080" \
+    MOKURO_BACKEND_PORT="8081" \
     MOKURO_STORAGE="/data" \
     MOKURO_CONFIG="/config/config.yaml" \
     MOKURO_OCR_BACKEND="auto" \
