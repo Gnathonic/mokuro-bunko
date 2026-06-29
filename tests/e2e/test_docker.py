@@ -163,6 +163,10 @@ class TestDockerIntegration:
                     "-d",
                     "--name", container_name,
                     "-p", "18080:8080",
+                    # Skip the first-run OCR env install (downloads PyTorch, minutes
+                    # long) so the container binds promptly — this test exercises the
+                    # HTTP/nginx path, not OCR provisioning.
+                    "-e", "MOKURO_OCR_BACKEND=skip",
                     docker_image,
                 ],
                 capture_output=True,
@@ -185,23 +189,31 @@ class TestDockerIntegration:
             )
             assert result.stdout.strip(), "Container not running"
 
-            # Test HTTP response
+            # Test HTTP response. nginx now fronts the Python (cheroot) backend,
+            # so during the first few seconds of startup nginx is already
+            # listening while the backend isn't bound yet — that surfaces as a
+            # 502/503 from nginx rather than a connection refusal, which the old
+            # ConnectError-only retry didn't cover. Poll until ready.
             import httpx
-            try:
-                response = httpx.get(
-                    "http://localhost:18080/",
-                    timeout=10,
-                )
-                # Should get response (200 or 207 for WebDAV, or 401 for auth required)
-                assert response.status_code in (200, 207, 401)
-            except httpx.ConnectError:
-                # Container might need more time
+
+            ready = (200, 207, 401)  # 207 = WebDAV, 401 = auth required
+            deadline = time.time() + 45
+            last = None
+            response = None
+            while time.time() < deadline:
+                try:
+                    response = httpx.get("http://localhost:18080/", timeout=10)
+                    last = response.status_code
+                    if response.status_code in ready:
+                        break
+                    # 502/503/504: nginx up, backend still starting — retry.
+                except httpx.ConnectError:
+                    last = "ConnectError"
                 time.sleep(2)
-                response = httpx.get(
-                    "http://localhost:18080/",
-                    timeout=10,
-                )
-                assert response.status_code in (200, 207, 401)
+
+            assert response is not None and response.status_code in ready, (
+                f"Container never became ready within 45s; last response: {last}"
+            )
 
         finally:
             # Cleanup container
