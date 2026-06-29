@@ -31,6 +31,9 @@ http {
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
 
+    # Don't advertise the nginx version in Server headers / error pages.
+    server_tokens off;
+
     sendfile on;
     tcp_nopush on;
     tcp_nodelay on;
@@ -101,7 +104,6 @@ http {
         location /internal-library/ {
             internal;
             alias ${MOKURO_LIBRARY}/;
-            add_header X-Served-By nginx always;
         }
     }
 }
