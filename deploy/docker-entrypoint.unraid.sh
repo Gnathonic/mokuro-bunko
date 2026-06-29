@@ -60,26 +60,26 @@ fi
 
 # Optional nginx X-Accel-Redirect download offload.
 #
-# When MOKURO_NGINX_ACCEL=1, run nginx (as ${PUID}:${PGID}) in front of the
-# Python/cheroot backend so large library downloads are served by nginx via
-# sendfile() instead of holding a cheroot worker thread for the whole transfer
-# (the main driver of the 503 / thread-pool-exhaustion issue under download
-# load, cf. commit 8d98297). Default is OFF, which preserves the original
-# single-process topology; enable it from the Unraid template once validated.
+# When MOKURO_NGINX_ACCEL=1, run nginx in front of the Python/cheroot backend
+# so large library downloads are served by nginx via sendfile() instead of
+# holding a cheroot worker thread for the whole transfer (the main driver of
+# the 503 / thread-pool-exhaustion issue under download load, cf. commit
+# 8d98297). Default is OFF, which preserves the original single-process
+# topology; enable it from the Unraid template once validated.
 # See deploy/nginx-internal.conf.template.
 if [ "${MOKURO_NGINX_ACCEL:-}" = "1" ] || [ "${MOKURO_NGINX_ACCEL:-}" = "true" ]; then
   export MOKURO_NGINX_ACCEL="1"
   export MOKURO_BACKEND_PORT="${MOKURO_BACKEND_PORT:-8081}"
   export MOKURO_LIBRARY="${MOKURO_STORAGE}/library"
 
-  # nginx runs as the app user, so its temp/pid/log dirs must be writable by it.
+  # nginx pid + temp paths live under /tmp (see the config template); the
+  # unprivileged workers must be able to write the temp dirs.
   mkdir -p "${MOKURO_LIBRARY}" \
     /tmp/nginx-client-body /tmp/nginx-proxy /tmp/nginx-fastcgi \
     /tmp/nginx-uwsgi /tmp/nginx-scgi
   chown "${PUID}:${PGID}" "${MOKURO_LIBRARY}" \
     /tmp/nginx-client-body /tmp/nginx-proxy /tmp/nginx-fastcgi \
     /tmp/nginx-uwsgi /tmp/nginx-scgi 2>/dev/null || true
-  chown -R "${PUID}:${PGID}" /var/log/nginx /var/lib/nginx 2>/dev/null || true
 
   # Render the nginx config (public ${MOKURO_PORT} -> backend ${MOKURO_BACKEND_PORT}).
   envsubst '${MOKURO_PORT} ${MOKURO_BACKEND_PORT} ${MOKURO_LIBRARY}' \
@@ -87,7 +87,17 @@ if [ "${MOKURO_NGINX_ACCEL:-}" = "1" ] || [ "${MOKURO_NGINX_ACCEL:-}" = "true" ]
     > /tmp/nginx.conf
 
   echo "[entrypoint] nginx X-Accel offload enabled: public :${MOKURO_PORT} -> backend 127.0.0.1:${MOKURO_BACKEND_PORT}"
-  gosu "${PUID}:${PGID}" nginx -c /tmp/nginx.conf
+  # Standard nginx privilege model: the master starts as root so it can open
+  # /dev/stdout|stderr for logging (fd 1/2 are owned by root in this
+  # root-launched container) and supervise, then drops the request-handling
+  # WORKERS to the unprivileged app user via the `user` directive. Launching the
+  # master itself via gosu fails with "open() /dev/stderr (13: Permission
+  # denied)". Workers run as ${PUID}:${PGID} (which owns the library files);
+  # access is further confined by the internal library-root-only alias and
+  # Python's path confinement + URL-encoding of the X-Accel-Redirect.
+  nginx_user="$(getent passwd "${PUID}" | cut -d: -f1)"
+  nginx_group="$(getent group "${PGID}" | cut -d: -f1)"
+  nginx -c /tmp/nginx.conf -g "user ${nginx_user} ${nginx_group};"
 
   # Python now listens only on the internal backend port and emits
   # X-Accel-Redirect for library downloads.
