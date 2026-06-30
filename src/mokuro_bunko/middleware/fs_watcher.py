@@ -7,9 +7,10 @@ debounced cache refresh.
 
 from __future__ import annotations
 
+import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 try:
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -49,7 +50,7 @@ class LibraryWatcher:
     ) -> None:
         self.watch_path = watch_path
         self.on_change = on_change
-        self._observer: Optional[Observer] = None  # type: ignore
+        self._observer: Observer | None = None  # type: ignore
 
     def start(self) -> None:
         if not WATCHDOG_AVAILABLE:
@@ -82,23 +83,23 @@ class LibraryWatcher:
 
 if WATCHDOG_AVAILABLE:
 
-    class _LibraryEventHandler(FileSystemEventHandler):  # type: ignore
+    class _LibraryEventHandler(FileSystemEventHandler):
         def __init__(self, on_change: Callable[[], None]) -> None:
             super().__init__()
             self._on_change = on_change
 
-        def on_created(self, event: FileSystemEvent) -> None:  # type: ignore
-            if _is_relevant(event.src_path, event.is_directory):
+        def on_created(self, event: FileSystemEvent) -> None:
+            if _is_relevant(os.fsdecode(event.src_path), event.is_directory):
                 self._on_change()
 
-        def on_deleted(self, event: FileSystemEvent) -> None:  # type: ignore
-            if _is_relevant(event.src_path, event.is_directory):
+        def on_deleted(self, event: FileSystemEvent) -> None:
+            if _is_relevant(os.fsdecode(event.src_path), event.is_directory):
                 self._on_change()
 
-        def on_moved(self, event: FileSystemEvent) -> None:  # type: ignore
-            src_relevant = _is_relevant(event.src_path, event.is_directory)
+        def on_moved(self, event: FileSystemEvent) -> None:
+            src_relevant = _is_relevant(os.fsdecode(event.src_path), event.is_directory)
             dest_relevant = _is_relevant(
-                getattr(event, "dest_path", event.src_path),
+                getattr(event, "dest_path", os.fsdecode(event.src_path)),
                 event.is_directory,
             )
             if src_relevant or dest_relevant:

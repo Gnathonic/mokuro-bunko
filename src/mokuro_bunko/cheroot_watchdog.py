@@ -20,8 +20,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
-import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cheroot.wsgi import Server as WSGIServer

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable
+from typing import Any, cast
 
 from mokuro_bunko.config import CorsConfig
-
 
 # WebDAV methods that need to be allowed
 WEBDAV_METHODS = [
@@ -170,7 +170,7 @@ class CorsMiddleware:
 
     def __init__(
         self,
-        app: Callable[..., Any],
+        app: Callable[..., Iterable[bytes]],
         config: CorsConfig,
     ) -> None:
         """Initialize CORS middleware.
@@ -204,7 +204,10 @@ class CorsMiddleware:
             # Add CORS headers if origin is allowed
             cors_headers = get_cors_headers(origin, self.config, is_preflight=False)
             all_headers = list(headers) + cors_headers
-            return start_response(status, all_headers, exc_info)
+            return cast(
+                "Callable[[bytes], None]",
+                start_response(status, all_headers, exc_info),
+            )
 
         return self.app(environ, cors_start_response)
 

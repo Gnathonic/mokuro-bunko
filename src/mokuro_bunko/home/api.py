@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import mimetypes
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
 from mokuro_bunko.security import is_within_path
 
@@ -73,8 +74,8 @@ class HomePageAPI:
 
     def __init__(
         self,
-        app: Callable[..., Any],
-        catalog_config: Optional[Any] = None,
+        app: Callable[..., Iterable[bytes]],
+        catalog_config: Any | None = None,
     ) -> None:
         self.app = app
         self._catalog_config = catalog_config

@@ -3,26 +3,27 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from wsgidav.wsgidav_app import WsgiDAVApp
 
+from mokuro_bunko.account.api import AccountAPI
 from mokuro_bunko.admin.api import AdminAPI
 from mokuro_bunko.catalog.api import CatalogAPI
-from mokuro_bunko.queue.api import QueueAPI
 from mokuro_bunko.config import Config, get_default_config_path
 from mokuro_bunko.database import Database
 from mokuro_bunko.dyndns import DynDNSService
 from mokuro_bunko.home.api import HomePageAPI
-from mokuro_bunko.account.api import AccountAPI
-from mokuro_bunko.login.api import LoginAPI
 from mokuro_bunko.library_index import LibraryIndexCache
+from mokuro_bunko.login.api import LoginAPI
 from mokuro_bunko.middleware.auth import AuthMiddleware
 from mokuro_bunko.middleware.cors import CorsMiddleware
 from mokuro_bunko.middleware.fs_watcher import LibraryWatcher
 from mokuro_bunko.middleware.propfind_cache import PropfindCacheMiddleware
 from mokuro_bunko.middleware.request_log import RequestLogMiddleware
+from mokuro_bunko.queue.api import QueueAPI
 from mokuro_bunko.registration.api import RegistrationAPI
 from mokuro_bunko.setup.api import SetupWizardAPI
 from mokuro_bunko.static import StaticMiddleware
@@ -84,8 +85,8 @@ def create_wsgidav_app(config: Config) -> WsgiDAVApp:
 
 def create_app(
     config: Config,
-    config_path: Optional[Path] = None,
-    ocr_runtime: Optional[dict[str, Any]] = None,
+    config_path: Path | None = None,
+    ocr_runtime: dict[str, Any] | None = None,
 ) -> Callable[..., Any]:
     """Create the full WSGI application stack.
 
@@ -134,7 +135,7 @@ def create_app(
     # 12. CorsMiddleware (handles CORS)
     # 13. RequestLogMiddleware (MOKURO_DEBUG=1, outermost)
 
-    app: Callable[..., Any] = dav_app
+    app: Callable[..., Iterable[bytes]] = dav_app
 
     # When running behind nginx (MOKURO_NGINX_ACCEL=1), flag each request so
     # MokuroFileResource offloads library downloads via X-Accel-Redirect
@@ -244,8 +245,8 @@ def create_app(
 
 def create_ssl_server(
     config: Config,
-    config_path: Optional[Path] = None,
-    ocr_runtime: Optional[dict[str, Any]] = None,
+    config_path: Path | None = None,
+    ocr_runtime: dict[str, Any] | None = None,
 ) -> Any:
     """Create an SSL-enabled server.
 
@@ -259,7 +260,8 @@ def create_ssl_server(
     """
     from cheroot.ssl.builtin import BuiltinSSLAdapter
     from cheroot.wsgi import Server as WSGIServer
-    from mokuro_bunko.ssl import get_default_cert_paths, generate_self_signed_cert
+
+    from mokuro_bunko.ssl import generate_self_signed_cert, get_default_cert_paths
 
     app = create_app(config, config_path, ocr_runtime=ocr_runtime)
 
@@ -333,14 +335,13 @@ def _start_server_resilient(server: Any) -> None:
             server.interrupt = None
 
 
-def run_server(config: Config, config_path: Optional[Path] = None) -> None:
+def run_server(config: Config, config_path: Path | None = None) -> None:
     """Run the WebDAV server.
 
     Args:
         config: Server configuration.
         config_path: Path to config file.
     """
-    from mokuro_bunko.ssl import get_ssl_info
     from mokuro_bunko.ocr.installer import (
         OCRBackend,
         OCRInstaller,
@@ -350,10 +351,11 @@ def run_server(config: Config, config_path: Optional[Path] = None) -> None:
         get_supported_backends,
     )
     from mokuro_bunko.ocr.watcher import OCRWorker
+    from mokuro_bunko.ssl import get_ssl_info
 
-    ocr_worker: Optional[OCRWorker] = None
+    ocr_worker: OCRWorker | None = None
     selected_backend = None
-    ocr_runtime: Optional[dict[str, Any]] = None
+    ocr_runtime: dict[str, Any] | None = None
 
     # Determine protocol for display
     protocol = "https" if config.ssl.enabled else "http"
@@ -416,7 +418,7 @@ def run_server(config: Config, config_path: Optional[Path] = None) -> None:
     watchdog = ThreadPoolWatchdog(server)
     watchdog.start()
 
-    if config.ocr.backend != "skip" and selected_backend != OCRBackend.SKIP:
+    if config.ocr.backend != "skip" and selected_backend is not None and selected_backend != OCRBackend.SKIP:
         ocr_worker = OCRWorker(
             storage_path=config.storage.base_path,
             poll_interval=float(config.ocr.poll_interval),
@@ -439,7 +441,7 @@ def run_server(config: Config, config_path: Optional[Path] = None) -> None:
         if ocr_worker:
             ocr_worker.stop()
         # Stop filesystem watcher and cancel pending cache refresh timers
-        wsgi_app = server.wsgi_app  # type: ignore[attr-defined]
+        wsgi_app = server.wsgi_app
         if hasattr(wsgi_app, "_library_watcher"):
             wsgi_app._library_watcher.stop()
         if hasattr(wsgi_app, "_propfind_cache"):
