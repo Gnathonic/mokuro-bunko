@@ -50,20 +50,34 @@ http {
 
     # Recover the real client IP. External traffic reaches this internal nginx
     # only through a front proxy (e.g. Caddy) and docker NAT, so the direct peer
-    # is a single private address — without this, the per-IP limits below would
-    # apply to ALL clients in aggregate. Trust X-Forwarded-For from private
-    # ranges (clients can't reach the backend directly) and peel back to the
-    # originating client. If no front proxy sets XFF, $remote_addr is unchanged.
+    # is a single private address. Trust X-Forwarded-For from private ranges
+    # (clients can't reach the backend directly) and peel back to the originating
+    # client so access logs and the X-Real-IP we forward to Python reflect the
+    # actual client. If no front proxy sets XFF, $remote_addr is unchanged.
     set_real_ip_from 10.0.0.0/8;
     set_real_ip_from 172.16.0.0/12;
     set_real_ip_from 192.168.0.0/16;
     real_ip_header X-Forwarded-For;
     real_ip_recursive on;
 
-    # Per-IP limits (front proxy should still keep its own), keyed on the real
-    # client IP recovered above.
-    limit_conn_zone $binary_remote_addr zone=per_ip_conn:10m;
-    limit_req_zone $binary_remote_addr zone=per_ip_req:10m rate=30r/s;
+    # No per-IP rate/connection limiting here: abuse control belongs to the front
+    # proxy (Caddy), and X-Accel-Redirect already keeps downloads off Python's
+    # thread pool (the thread-exhaustion these limits originally guarded against).
+    # A throttle at this layer instead rejected the reader's normal burst of
+    # concurrent thumbnail GETs with a CORS-less 503 — the very break this config
+    # now avoids.
+
+    # CORS for nginx-GENERATED responses only (e.g. the backend is down). On
+    # success, library downloads inherit Access-Control-Allow-Origin from Python
+    # across the X-Accel-Redirect, so we must NOT add it unconditionally here or
+    # the reader would see a duplicate header and reject the response. The map
+    # reflects the request Origin (empty -> header omitted for same-origin calls)
+    # and is applied only on error pages below. Error responses carry no library
+    # data, so reflecting any Origin there is safe.
+    map $http_origin $cors_origin {
+        default       "";
+        "~^https?://" $http_origin;
+    }
 
     # Large manga volume uploads.
     client_max_body_size 2048M;
@@ -76,8 +90,11 @@ http {
     server {
         listen ${MOKURO_PORT};
 
-        limit_conn per_ip_conn 20;
-        limit_req zone=per_ip_req burst=50 nodelay;
+        # Attach CORS to errors nginx generates itself (backend down/timeout) so
+        # the reader surfaces the real failure instead of an opaque cross-origin
+        # block. proxy_intercept_errors stays off (default), so Python's own
+        # error responses pass through untouched with their existing CORS.
+        error_page 500 502 503 504 @cors_error;
 
         location / {
             proxy_pass http://mokuro_backend;
@@ -104,6 +121,32 @@ http {
         location /internal-library/ {
             internal;
             alias ${MOKURO_LIBRARY}/;
+
+            # Re-attach CORS that the X-Accel internal redirect drops. nginx does
+            # NOT carry the upstream (Python) response headers onto the file it
+            # serves here, so the Access-Control-Allow-Origin that CorsMiddleware
+            # set on the redirecting response is lost. Only shared library files
+            # reach this location (per-user files stream through Python with their
+            # own CORS), and those files are served anonymously -- already public
+            # -- so reflecting the request Origin exposes nothing and avoids
+            # duplicating Python's allowlist here. $cors_origin is empty for
+            # non-CORS requests, so add_header then omits the header.
+            add_header Access-Control-Allow-Origin      $cors_origin always;
+            add_header Access-Control-Allow-Credentials true        always;
+            add_header Vary                             Origin       always;
+        }
+
+        # Re-emit nginx-generated failures with CORS so the reader can read the
+        # status (normalizes 5xx to a single 503; the body never carries library
+        # data). $cors_origin is empty for same-origin calls, so add_header omits
+        # the header rather than emitting an empty one.
+        location @cors_error {
+            internal;
+            add_header Access-Control-Allow-Origin      $cors_origin always;
+            add_header Access-Control-Allow-Credentials true        always;
+            add_header Vary                             Origin       always;
+            default_type text/plain;
+            return 503 "mokuro-bunko: backend temporarily unavailable\n";
         }
     }
 }
