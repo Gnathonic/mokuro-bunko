@@ -33,6 +33,57 @@ if TYPE_CHECKING:
     pass
 
 
+def _assert_writable_dir(path: Path, label: str) -> None:
+    """Raise ValueError unless ``path`` is an existing, writable directory."""
+    if not path.exists():
+        raise ValueError(f"Required directory does not exist ({label}): {path}")
+    if not path.is_dir():
+        raise ValueError(f"Required path is not a directory ({label}): {path}")
+    probe = path / ".mokuro-write-test"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        raise ValueError(f"Directory is not writable ({label}): {path}") from exc
+
+
+def _validate_startup_environment(config: Config) -> None:
+    """Validate critical runtime prerequisites before starting the server.
+
+    Raises ValueError if storage directories aren't writable or, when SSL is
+    enabled, the certificate/key are missing, unreadable, or invalid.
+    """
+    config.storage.ensure_directories()
+    _assert_writable_dir(config.storage.base_path, "storage.base_path")
+    _assert_writable_dir(config.storage.library_path, "storage.library_path")
+    _assert_writable_dir(config.storage.inbox_path, "storage.inbox_path")
+    _assert_writable_dir(config.storage.users_path, "storage.users_path")
+
+    if not config.ssl.enabled:
+        return
+
+    if config.ssl.auto_cert:
+        from mokuro_bunko.ssl import get_default_cert_paths
+
+        cert_path, key_path = get_default_cert_paths()
+        _assert_writable_dir(cert_path.parent, "ssl auto-cert directory")
+        _assert_writable_dir(key_path.parent, "ssl auto-key directory")
+        return
+
+    cert_path = Path(config.ssl.cert_file).expanduser()
+    key_path = Path(config.ssl.key_file).expanduser()
+    if not cert_path.is_file():
+        raise ValueError(f"SSL certificate file not found: {cert_path}")
+    if not key_path.is_file():
+        raise ValueError(f"SSL private key file not found: {key_path}")
+
+    from mokuro_bunko.ssl import validate_certificate_pair
+
+    errors, _warnings = validate_certificate_pair(cert_path, key_path)
+    if errors:
+        raise ValueError(errors[0])
+
+
 def create_wsgidav_app(config: Config) -> WsgiDAVApp:
     """Create the WsgiDAV application.
 
@@ -340,6 +391,14 @@ def run_server(config: Config, config_path: Optional[Path] = None) -> None:
         config: Server configuration.
         config_path: Path to config file.
     """
+    # Fail fast on a misconfigured environment (unwritable storage, missing or
+    # invalid SSL cert) before doing any expensive startup work.
+    try:
+        _validate_startup_environment(config)
+    except ValueError as exc:
+        print(f"Startup validation failed: {exc}")
+        raise SystemExit(2) from exc
+
     from mokuro_bunko.ssl import get_ssl_info
     from mokuro_bunko.ocr.installer import (
         OCRBackend,

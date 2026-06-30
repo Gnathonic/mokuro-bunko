@@ -187,3 +187,58 @@ def get_ssl_info(ssl_config: "SslConfig") -> str:
         return f"SSL enabled (auto-cert: {cert_path})"
 
     return f"SSL enabled (cert: {ssl_config.cert_file})"
+
+
+def validate_certificate_pair(
+    cert_path: Path,
+    key_path: Path,
+    *,
+    expiry_warning_days: int = 30,
+) -> tuple[list[str], list[str]]:
+    """Validate a certificate/key pair.
+
+    Returns ``(errors, warnings)``. A non-empty ``errors`` list means the pair
+    is unusable (mismatched, unreadable, expired, or not yet valid). ``warnings``
+    flags non-fatal issues such as imminent expiry.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # The cert and key must load together (this catches mismatches and bad files).
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(cert_path), str(key_path))
+    except Exception as exc:
+        errors.append(f"SSL certificate/key validation failed: {exc}")
+        return errors, warnings
+
+    try:
+        from cryptography import x509
+    except Exception as exc:  # pragma: no cover - cryptography is a hard dependency
+        warnings.append(f"Could not import cryptography for certificate date checks: {exc}")
+        return errors, warnings
+
+    try:
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+    except Exception as exc:
+        errors.append(f"Failed to parse certificate file: {exc}")
+        return errors, warnings
+
+    now = datetime.now(timezone.utc)
+    if cert.not_valid_after_utc <= now:
+        errors.append(f"SSL certificate has expired: {cert.not_valid_after_utc.isoformat()}")
+        return errors, warnings
+    if cert.not_valid_before_utc > now:
+        errors.append(
+            f"SSL certificate is not valid yet: {cert.not_valid_before_utc.isoformat()}"
+        )
+        return errors, warnings
+
+    remaining = cert.not_valid_after_utc - now
+    if remaining <= timedelta(days=expiry_warning_days):
+        warnings.append(
+            "SSL certificate expires soon "
+            f"({cert.not_valid_after_utc.isoformat()}, {remaining.days} days remaining)"
+        )
+
+    return errors, warnings
