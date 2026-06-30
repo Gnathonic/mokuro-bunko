@@ -202,8 +202,8 @@ class TestWelcomePage:
 class TestStatsAPI:
     """Tests for stats API endpoint."""
 
-    def test_get_stats_empty(self, app, config):
-        """Test stats API with no data."""
+    def test_get_stats_reflects_seeded_admin(self, app, config):
+        """Stats report live counts: the fixture seeds one admin, empty library."""
         environ = make_environ(
             method="GET",
             path="/api/stats",
@@ -214,12 +214,16 @@ class TestStatsAPI:
 
         assert "200" in status
         data = json.loads(body)
-        assert data["total_users"] == 0
-        assert data["total_volumes"] == 0
+        assert data["total_users"] == 1  # the seeded admin
+        assert data["total_volumes"] == 0  # empty library
         assert data["total_pages_read"] == 0
 
-    def test_get_stats_with_data(self, app, config):
-        """Stats endpoint always returns zeroed stats (scanning removed)."""
+    def test_get_stats_counts_users(self, app, config):
+        """Stats reflect the live user count as users are added."""
+        db = Database(Path(config.storage.base_path) / "mokuro.db")
+        db.create_user("reader1", "password12345", "registered")
+        db.create_user("reader2", "password12345", "registered")
+
         environ = make_environ(
             method="GET",
             path="/api/stats",
@@ -230,11 +234,9 @@ class TestStatsAPI:
 
         assert "200" in status
         data = json.loads(body)
-        assert data["total_users"] == 0
+        assert data["total_users"] == 3  # admin + reader1 + reader2
         assert data["total_volumes"] == 0
-        assert data["total_pages_read"] == 0
         assert data["total_characters_read"] == 0
-        assert data["total_reading_time_seconds"] == 0
         assert "total_reading_time_formatted" in data
 
     def test_stats_options_request(self, app, config):

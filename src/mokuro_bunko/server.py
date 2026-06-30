@@ -204,7 +204,12 @@ def create_app(
     app = AccountAPI(app, database, storage_path=config.storage.base_path)
 
     # Wrap with home page middleware (serves welcome page for browsers)
-    app = HomePageAPI(app, catalog_config=config.catalog)
+    app = HomePageAPI(
+        app,
+        catalog_config=config.catalog,
+        database=database,
+        library_index=library_index,
+    )
 
     # Wrap with setup wizard (intercepts / -> /setup when no admin exists)
     app = SetupWizardAPI(app, database, config, config_path)
