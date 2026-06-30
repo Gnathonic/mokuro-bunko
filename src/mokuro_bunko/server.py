@@ -23,6 +23,7 @@ from mokuro_bunko.middleware.cors import CorsMiddleware
 from mokuro_bunko.middleware.fs_watcher import LibraryWatcher
 from mokuro_bunko.middleware.propfind_cache import PropfindCacheMiddleware
 from mokuro_bunko.middleware.request_log import RequestLogMiddleware
+from mokuro_bunko.middleware.security_headers import SecurityHeadersMiddleware
 from mokuro_bunko.registration.api import RegistrationAPI
 from mokuro_bunko.setup.api import SetupWizardAPI
 from mokuro_bunko.static import StaticMiddleware
@@ -215,6 +216,9 @@ def create_app(
     # Wrap with CORS middleware (outermost to handle OPTIONS before auth)
     if config.cors.enabled:
         app = CorsMiddleware(app, config.cors)
+
+    # Wrap with security headers (outside CORS so it covers every response)
+    app = SecurityHeadersMiddleware(app)
 
     # Wrap with request logging (outermost; enabled by MOKURO_DEBUG=1)
     app = RequestLogMiddleware(app)
