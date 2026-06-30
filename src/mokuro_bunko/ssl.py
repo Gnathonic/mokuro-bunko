@@ -9,13 +9,15 @@ import os
 import ssl
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ipaddress import IPv4Address, IPv6Address
+
     from mokuro_bunko.config import SslConfig
 
 
-def get_default_cert_paths() -> Tuple[Path, Path]:
+def get_default_cert_paths() -> tuple[Path, Path]:
     """Get default paths for SSL certificates.
 
     Returns:
@@ -122,7 +124,7 @@ def generate_self_signed_cert(
         )
 
 
-def ipaddress_from_string(addr: str) -> "x509.IPAddress":
+def ipaddress_from_string(addr: str) -> IPv4Address | IPv6Address:
     """Convert string IP address to x509.IPAddress.
 
     Args:
@@ -135,7 +137,7 @@ def ipaddress_from_string(addr: str) -> "x509.IPAddress":
     return ipaddress.ip_address(addr)
 
 
-def ensure_ssl_context(ssl_config: "SslConfig") -> Optional[ssl.SSLContext]:
+def ensure_ssl_context(ssl_config: SslConfig) -> ssl.SSLContext | None:
     """Ensure SSL context is available based on configuration.
 
     Args:
@@ -170,7 +172,7 @@ def ensure_ssl_context(ssl_config: "SslConfig") -> Optional[ssl.SSLContext]:
     return context
 
 
-def get_ssl_info(ssl_config: "SslConfig") -> str:
+def get_ssl_info(ssl_config: SslConfig) -> str:
     """Get human-readable SSL configuration info.
 
     Args:

@@ -5,10 +5,9 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import yaml
-
 
 RegistrationMode = Literal["disabled", "self", "invite", "approval"]
 UserRole = Literal["anonymous", "registered", "uploader", "inviter", "editor", "admin"]
@@ -102,8 +101,8 @@ class RegistrationConfig:
         if self.mode not in valid_modes:
             raise ValueError(f"Invalid registration mode: {self.mode}")
 
-        if self.default_role == "writer":
-            self.default_role = "uploader"  # type: ignore[assignment]
+        if str(self.default_role) == "writer":
+            self.default_role = "uploader"
 
         valid_roles = ("registered", "uploader", "inviter", "editor")
         if self.default_role not in valid_roles:
@@ -230,7 +229,7 @@ class DynDNSConfig:
         if self.provider not in valid_providers:
             raise ValueError(f"Invalid DynDNS provider: {self.provider}")
         if self.interval < 30:
-            raise ValueError(f"DynDNS interval must be at least 30 seconds")
+            raise ValueError("DynDNS interval must be at least 30 seconds")
 
 
 @dataclass
@@ -335,7 +334,7 @@ class Config:
         )
 
 
-def load_config(path: Optional[Path] = None) -> Config:
+def load_config(path: Path | None = None) -> Config:
     """Load configuration from YAML file.
 
     Args:
@@ -363,7 +362,7 @@ def load_config(path: Optional[Path] = None) -> Config:
     return config
 
 
-def save_config(config: Config, path: Optional[Path] = None) -> None:
+def save_config(config: Config, path: Path | None = None) -> None:
     """Save configuration to YAML file.
 
     Args:

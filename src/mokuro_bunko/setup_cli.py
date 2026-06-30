@@ -106,7 +106,7 @@ def setup_command(ctx: click.Context, skip_if_exists: bool) -> None:
             dyndns_url = click.prompt("  Update URL")
         dyndns_config = DynDNSConfig(
             enabled=True,
-            provider=dyndns_provider,  # type: ignore[arg-type]
+            provider=dyndns_provider,
             token=dyndns_token,
             domain=dyndns_domain,
             update_url=dyndns_url,
@@ -129,7 +129,7 @@ def setup_command(ctx: click.Context, skip_if_exists: bool) -> None:
     config = Config(
         server=ServerConfig(host="0.0.0.0", port=port),
         storage=StorageConfig(base_path=Path(storage_path)),
-        registration=RegistrationConfig(mode=reg_mode),  # type: ignore[arg-type]
+        registration=RegistrationConfig(mode=reg_mode),
         cors=CorsConfig(allowed_origins=cors_origins),
         ssl=ssl_config,
         dyndns=dyndns_config,

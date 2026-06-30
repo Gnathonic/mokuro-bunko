@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional, Set
+from typing import Any
 
 try:
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -57,12 +59,12 @@ class InboxWatcher:
         self._running = False
         self._stop_event = threading.Event()
         self._pending_files: dict[Path, float] = {}
-        self._processed_files: Set[Path] = set()
+        self._processed_files: set[Path] = set()
         self._lock = threading.Lock()
 
         # Use watchdog if available, otherwise fall back to polling
         self._use_watchdog = WATCHDOG_AVAILABLE
-        self._observer: Optional[Observer] = None  # type: ignore
+        self._observer: Observer | None = None  # type: ignore
 
     def start(self) -> None:
         """Start watching the inbox directory.
@@ -120,7 +122,7 @@ class InboxWatcher:
 
     def _start_polling(self) -> None:
         """Start watching using polling fallback."""
-        known_files: Set[Path] = set()
+        known_files: set[Path] = set()
 
         while not self._stop_event.is_set():
             try:
@@ -189,39 +191,39 @@ class InboxWatcher:
 
 if WATCHDOG_AVAILABLE:
 
-    class _InboxEventHandler(FileSystemEventHandler):  # type: ignore
+    class _InboxEventHandler(FileSystemEventHandler):
         """Watchdog event handler for inbox directory."""
 
         def __init__(self, watcher: InboxWatcher) -> None:
             super().__init__()
             self.watcher = watcher
 
-        def on_created(self, event: FileSystemEvent) -> None:  # type: ignore
+        def on_created(self, event: FileSystemEvent) -> None:
             """Handle file creation event."""
             if event.is_directory:
                 return
 
-            path = Path(event.src_path)
+            path = Path(os.fsdecode(event.src_path))
             if not path.name.startswith("."):
                 self.watcher._on_file_created(path)
 
-        def on_modified(self, event: FileSystemEvent) -> None:  # type: ignore
+        def on_modified(self, event: FileSystemEvent) -> None:
             """Handle file modification event."""
             if event.is_directory:
                 return
 
-            path = Path(event.src_path)
+            path = Path(os.fsdecode(event.src_path))
             if not path.name.startswith("."):
                 self.watcher._on_file_modified(path)
 
-        def on_moved(self, event: FileSystemEvent) -> None:  # type: ignore
+        def on_moved(self, event: FileSystemEvent) -> None:
             """Handle file move event (rename)."""
             if event.is_directory:
                 return
 
             # Treat as new file at destination
             if hasattr(event, "dest_path"):
-                path = Path(event.dest_path)
+                path = Path(os.fsdecode(event.dest_path))
                 if not path.name.startswith("."):
                     self.watcher._on_file_created(path)
 
@@ -233,7 +235,7 @@ class OCRWorker:
         self,
         storage_path: Path,
         poll_interval: float = 30.0,
-        status_callback: Optional[Callable[[str], None]] = None,
+        status_callback: Callable[[str], None] | None = None,
     ) -> None:
         """Initialize the OCR worker.
 
@@ -254,14 +256,14 @@ class OCRWorker:
             progress_callback=self._on_progress,
         )
 
-        self.watcher: Optional[InboxWatcher] = None
-        self._ocr_thread: Optional[threading.Thread] = None
-        self._thumb_thread: Optional[threading.Thread] = None
+        self.watcher: InboxWatcher | None = None
+        self._ocr_thread: threading.Thread | None = None
+        self._thumb_thread: threading.Thread | None = None
         self._running = False
-        self._inflight_ocr: Set[Path] = set()
-        self._inflight_thumbs: Set[Path] = set()
+        self._inflight_ocr: set[Path] = set()
+        self._inflight_thumbs: set[Path] = set()
         self._progress_path = self.storage_path / ".ocr-progress.json"
-        self._active_progress: Optional[dict[str, Any]] = None
+        self._active_progress: dict[str, Any] | None = None
         self._lock = threading.Lock()
 
     def _log(self, message: str) -> None:

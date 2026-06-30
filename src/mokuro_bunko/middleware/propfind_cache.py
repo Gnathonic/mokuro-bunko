@@ -8,12 +8,12 @@ import threading
 import time
 import traceback
 import xml.etree.ElementTree as ET
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from io import BytesIO
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, cast
 
 from mokuro_bunko.webdav.resources import PathMapper
-
 
 DAV_NAMESPACE = "DAV:"
 ET.register_namespace("D", DAV_NAMESPACE)
@@ -33,7 +33,7 @@ class PropfindCacheMiddleware:
 
     def __init__(
         self,
-        app: Callable[..., Any],
+        app: Callable[..., Iterable[bytes]],
         ttl: float = 120.0,
         stale_ttl: float = 86400.0,
         max_entries: int = 10,
@@ -45,7 +45,7 @@ class PropfindCacheMiddleware:
         self._cache: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._refreshing: set[str] = set()
-        self._debounce_timer: Optional[threading.Timer] = None
+        self._debounce_timer: threading.Timer | None = None
 
     def __call__(
         self,
@@ -101,7 +101,7 @@ class PropfindCacheMiddleware:
         accepts_gzip: bool,
         response_environ: dict[str, Any],
         start_response: Callable[..., Any],
-    ) -> list[bytes]:
+    ) -> Iterable[bytes]:
         """Generate response from WsgiDAV, cache it, and serve."""
         new_entry = self._generate(cache_environ)
         if new_entry is None:
@@ -116,7 +116,7 @@ class PropfindCacheMiddleware:
 
         return self._serve_cached(new_entry, accepts_gzip, response_environ, start_response)
 
-    def _generate(self, environ: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def _generate(self, environ: dict[str, Any]) -> dict[str, Any] | None:
         """Call WsgiDAV and capture the full response."""
         captured: dict[str, Any] = {}
 
@@ -202,7 +202,7 @@ class PropfindCacheMiddleware:
                     )
                 else:
                     print(
-                        f"[PROPFIND-CACHE] Warm failed: _generate returned None",
+                        "[PROPFIND-CACHE] Warm failed: _generate returned None",
                         file=sys.stderr, flush=True,
                     )
             except Exception:
@@ -215,7 +215,7 @@ class PropfindCacheMiddleware:
     @staticmethod
     def _copy_environ(environ: dict[str, Any]) -> dict[str, Any]:
         """Copy the WSGI environ for use in a background thread."""
-        bg = {}
+        bg: dict[str, Any] = {}
         for key, value in environ.items():
             if isinstance(value, (str, int, bool, float, bytes)):
                 bg[key] = value
@@ -348,7 +348,7 @@ class PropfindCacheMiddleware:
 
         if not inserted:
             return raw_body
-        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        return cast("bytes", ET.tostring(root, encoding="utf-8", xml_declaration=True))
 
     def _load_progress_response_nodes(
         self,
@@ -371,9 +371,10 @@ class PropfindCacheMiddleware:
                 status: str,
                 headers: list[tuple[str, str]],
                 exc_info: Any = None,
+                _captured: dict[str, Any] = captured,
             ) -> Callable[[bytes], None]:
-                captured["status"] = status
-                captured["headers"] = headers
+                _captured["status"] = status
+                _captured["headers"] = headers
                 return lambda s: None
 
             body_iter = self.app(file_environ, buffer_start_response)

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import mimetypes
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, TypedDict
+from typing import Any, TypedDict
 
 from mokuro_bunko.config import RegistrationConfig
 from mokuro_bunko.database import Database
@@ -22,7 +23,7 @@ class RegistrationRequest(TypedDict, total=False):
 
     username: str
     password: str
-    invite_code: Optional[str]
+    invite_code: str | None
 
 
 class RegistrationResponse(TypedDict, total=False):
@@ -30,8 +31,8 @@ class RegistrationResponse(TypedDict, total=False):
 
     success: bool
     message: str
-    username: Optional[str]
-    status: Optional[str]
+    username: str | None
+    status: str | None
 
 
 class RegistrationAPI:
@@ -39,7 +40,7 @@ class RegistrationAPI:
 
     def __init__(
         self,
-        app: Callable[..., Any],
+        app: Callable[..., Iterable[bytes]],
         database: Database,
         config: RegistrationConfig,
     ) -> None:
@@ -166,7 +167,7 @@ class RegistrationAPI:
                 start_response, username, password
             )
         elif self.config.mode == "invite":
-            invite_code = data.get("invite_code", "")
+            invite_code = str(data.get("invite_code", ""))
             return self._register_with_invite(
                 start_response, username, password, invite_code
             )

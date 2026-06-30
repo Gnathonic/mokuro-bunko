@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import cast
 
 import click
 
 from mokuro_bunko.config import load_config
-from mokuro_bunko.database import Database
+from mokuro_bunko.database import Database, UserStatus, normalize_role
 
 
-def get_database(config_path: Optional[Path]) -> Database:
+def get_database(config_path: Path | None) -> Database:
     """Get database instance from config.
 
     Args:
@@ -54,7 +54,7 @@ def add_user(ctx: click.Context, username: str, role: str, password: str) -> Non
     db = get_database(config_path)
 
     try:
-        db.create_user(username, password, role)
+        db.create_user(username, password, normalize_role(role))
         click.echo(f"User '{username}' created with role '{role}'")
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
@@ -87,12 +87,12 @@ def delete_user(ctx: click.Context, username: str, yes: bool) -> None:
     help="Filter by status",
 )
 @click.pass_context
-def list_users(ctx: click.Context, status: Optional[str]) -> None:
+def list_users(ctx: click.Context, status: str | None) -> None:
     """List all users."""
     config_path = ctx.obj.get("config_path")
     db = get_database(config_path)
 
-    users = db.list_users(status=status)
+    users = db.list_users(status=cast("UserStatus | None", status))
 
     if not users:
         if status:
@@ -123,7 +123,7 @@ def change_role(ctx: click.Context, username: str, role: str) -> None:
     config_path = ctx.obj.get("config_path")
     db = get_database(config_path)
 
-    if db.update_user_role(username, role):
+    if db.update_user_role(username, normalize_role(role)):
         click.echo(f"User '{username}' role changed to '{role}'")
     else:
         click.echo(f"User '{username}' not found", err=True)
@@ -151,7 +151,7 @@ def generate_invite(ctx: click.Context, role: str, expires: str) -> None:
     db = get_database(config_path)
 
     try:
-        code = db.create_invite(role, expires)
+        code = db.create_invite(normalize_role(role), expires)
         click.echo(f"Invite code: {code}")
         click.echo(f"Role: {role}")
         click.echo(f"Expires in: {expires}")

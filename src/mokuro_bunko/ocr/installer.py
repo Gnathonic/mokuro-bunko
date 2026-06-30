@@ -12,9 +12,10 @@ import shutil
 import subprocess
 import sys
 import venv
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
-from typing import Callable, NamedTuple, Optional
+from typing import NamedTuple
 
 
 class OCRBackend(Enum):
@@ -47,13 +48,13 @@ class HardwareInfo(NamedTuple):
     has_cuda: bool
     has_rocm: bool
     has_mps: bool
-    cuda_version: Optional[str]
-    rocm_version: Optional[str]
+    cuda_version: str | None
+    rocm_version: str | None
 
 
 def get_backend_unavailable_reasons(
-    hardware: Optional[HardwareInfo] = None,
-    python_version: Optional[tuple[int, int]] = None,
+    hardware: HardwareInfo | None = None,
+    python_version: tuple[int, int] | None = None,
 ) -> dict[OCRBackend, str]:
     """Return reasons for backend unavailability on this host/runtime."""
     hw = hardware or detect_hardware()
@@ -81,8 +82,8 @@ def get_backend_unavailable_reasons(
 
 
 def get_supported_backends(
-    hardware: Optional[HardwareInfo] = None,
-    python_version: Optional[tuple[int, int]] = None,
+    hardware: HardwareInfo | None = None,
+    python_version: tuple[int, int] | None = None,
 ) -> list[OCRBackend]:
     """Return supported OCR backends for current host/runtime."""
     reasons = get_backend_unavailable_reasons(
@@ -93,7 +94,7 @@ def get_supported_backends(
     return [backend for backend in ordered if backend not in reasons or backend == OCRBackend.CPU]
 
 
-def detect_cuda() -> tuple[bool, Optional[str]]:
+def detect_cuda() -> tuple[bool, str | None]:
     """Detect CUDA availability and version.
 
     Returns:
@@ -133,13 +134,13 @@ def detect_cuda() -> tuple[bool, Optional[str]]:
     return False, None
 
 
-def detect_rocm() -> tuple[bool, Optional[str]]:
+def detect_rocm() -> tuple[bool, str | None]:
     """Detect ROCm availability and version.
 
     Returns:
         Tuple of (available, version).
     """
-    version: Optional[str] = None
+    version: str | None = None
 
     # Prefer /opt/rocm version file — it contains the real ROCm version
     # (rocm-smi --showdriverversion reports the kernel driver, not ROCm).
@@ -207,7 +208,7 @@ def detect_hardware() -> HardwareInfo:
 
 def get_recommended_backend(
     hardware: HardwareInfo,
-    supported_backends: Optional[list[OCRBackend]] = None,
+    supported_backends: list[OCRBackend] | None = None,
 ) -> OCRBackend:
     """Get the recommended backend based on hardware.
 
@@ -235,8 +236,8 @@ def get_recommended_backend(
 
 
 def _resolve_rocm_index_url(
-    rocm_version: Optional[str] = None,
-    python_version: Optional[tuple[int, int]] = None,
+    rocm_version: str | None = None,
+    python_version: tuple[int, int] | None = None,
 ) -> str:
     """Resolve the PyTorch index URL for a ROCm installation.
 
@@ -260,7 +261,7 @@ def _resolve_rocm_index_url(
 
 def get_torch_install_command(
     backend: OCRBackend,
-    hardware: Optional[HardwareInfo] = None,
+    hardware: HardwareInfo | None = None,
 ) -> list[str]:
     """Get the pip install command for PyTorch based on backend.
 
@@ -304,7 +305,7 @@ class OCRInstaller:
     """Installer for OCR dependencies."""
 
     @staticmethod
-    def _discover_project_root() -> Optional[Path]:
+    def _discover_project_root() -> Path | None:
         """Find the repository root when running from source."""
         current = Path(__file__).resolve()
         for parent in current.parents:
@@ -327,8 +328,8 @@ class OCRInstaller:
 
     def __init__(
         self,
-        env_path: Optional[Path] = None,
-        output_callback: Optional[Callable[[str], None]] = None,
+        env_path: Path | None = None,
+        output_callback: Callable[[str], None] | None = None,
     ) -> None:
         """Initialize OCR installer.
 
@@ -364,7 +365,7 @@ class OCRInstaller:
         except (subprocess.TimeoutExpired, subprocess.SubprocessError):
             return False
 
-    def get_installed_backend(self) -> Optional[OCRBackend]:
+    def get_installed_backend(self) -> OCRBackend | None:
         """Get the currently installed backend.
 
         Returns:
@@ -437,7 +438,7 @@ else:
     def install_torch(
         self,
         backend: OCRBackend,
-        hardware: Optional[HardwareInfo] = None,
+        hardware: HardwareInfo | None = None,
     ) -> bool:
         """Install PyTorch for the specified backend.
 
@@ -482,7 +483,7 @@ else:
         self,
         backend: OCRBackend,
         force: bool = False,
-        hardware: Optional[HardwareInfo] = None,
+        hardware: HardwareInfo | None = None,
     ) -> bool:
         """Perform full OCR installation.
 
@@ -522,7 +523,7 @@ else:
         self,
         backend: OCRBackend,
         force: bool = False,
-        hardware: Optional[HardwareInfo] = None,
+        hardware: HardwareInfo | None = None,
     ) -> bool:
         """Install OCR backend with automatic fallback to CPU when needed."""
         if backend == OCRBackend.SKIP:
@@ -557,7 +558,7 @@ else:
             self._log(f"Failed to remove environment: {e}")
             return False
 
-    def get_python_executable(self) -> Optional[Path]:
+    def get_python_executable(self) -> Path | None:
         """Get the Python executable in the OCR environment.
 
         Returns:
@@ -664,7 +665,7 @@ def prompt_for_backend(hardware: HardwareInfo) -> OCRBackend:
 
     while True:
         try:
-            choice = input(f"Choice [1]: ").strip()
+            choice = input("Choice [1]: ").strip()
             if not choice:
                 return recommended
 
