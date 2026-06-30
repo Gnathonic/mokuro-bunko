@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
-
 
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 128
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{3,32}$")
 
 
-def validate_username(username: str) -> Optional[str]:
+def validate_username(username: str) -> str | None:
     """Validate username format.
 
     Returns an error message when invalid, otherwise None.
@@ -26,7 +24,7 @@ def validate_username(username: str) -> Optional[str]:
     return None
 
 
-def validate_password(password: str) -> Optional[str]:
+def validate_password(password: str) -> str | None:
     """Validate password requirements.
 
     Returns an error message when invalid, otherwise None.

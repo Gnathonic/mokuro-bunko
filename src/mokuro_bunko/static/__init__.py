@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import mimetypes
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from mokuro_bunko.security import is_within_path
 
@@ -31,7 +32,7 @@ MIME_TYPES = {
 class StaticMiddleware:
     """WSGI middleware for serving shared static files."""
 
-    def __init__(self, app: Callable[..., Any]) -> None:
+    def __init__(self, app: Callable[..., Iterable[bytes]]) -> None:
         """Initialize static middleware.
 
         Args:

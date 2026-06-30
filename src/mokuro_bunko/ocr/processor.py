@@ -5,7 +5,6 @@ Handles running Mokuro on manga files and moving them to the library.
 
 from __future__ import annotations
 
-from io import BytesIO
 import gzip
 import json
 import shutil
@@ -15,11 +14,12 @@ import tempfile
 import time
 import uuid
 import zipfile
+from collections.abc import Callable
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from mokuro_bunko.ocr.installer import OCRInstaller
-
 
 # Supported manga file extensions
 SUPPORTED_EXTENSIONS = {".cbz", ".cbr", ".zip", ".rar"}
@@ -31,9 +31,9 @@ class OCRProcessor:
     def __init__(
         self,
         storage_path: Path,
-        python_path: Optional[Path] = None,
-        status_callback: Optional[Callable[[str], None]] = None,
-        progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+        python_path: Path | None = None,
+        status_callback: Callable[[str], None] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         """Initialize the OCR processor.
 
@@ -99,7 +99,7 @@ class OCRProcessor:
             return False
         return True
 
-    def _extract_cover_image_data(self, cbz_path: Path) -> Optional[bytes]:
+    def _extract_cover_image_data(self, cbz_path: Path) -> bytes | None:
         """Extract the first image (sorted by path) from a CBZ archive."""
         image_extensions = {
             ".jpg",
@@ -182,7 +182,7 @@ class OCRProcessor:
 
         return extract_dir
 
-    def _collect_workspace_sidecar(self, temp_cbz_path: Path, workspace: Path) -> Optional[Path]:
+    def _collect_workspace_sidecar(self, temp_cbz_path: Path, workspace: Path) -> Path | None:
         """Find generated sidecar in temporary workspace."""
         stem = temp_cbz_path.stem
         candidates = sorted(
@@ -214,7 +214,7 @@ class OCRProcessor:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, gzip.BadGzipFile):
             return False
 
-    def _collect_valid_workspace_sidecar(self, temp_cbz_path: Path, workspace: Path) -> Optional[Path]:
+    def _collect_valid_workspace_sidecar(self, temp_cbz_path: Path, workspace: Path) -> Path | None:
         """Find generated sidecar in temporary workspace that is valid JSON."""
         stem = temp_cbz_path.stem
         candidates = sorted(
@@ -300,7 +300,7 @@ class OCRProcessor:
         return sum(1 for _ in ocr_root.rglob("*.json"))
 
     @staticmethod
-    def _progress_metrics(done: int, total_images: int, elapsed: float) -> tuple[Optional[int], Optional[int], str]:
+    def _progress_metrics(done: int, total_images: int, elapsed: float) -> tuple[int | None, int | None, str]:
         """Compute OCR progress metrics.
 
         Returns:
@@ -313,7 +313,7 @@ class OCRProcessor:
             return 100, 0, "finalizing"
 
         percent = min(99, int((done / total_images) * 100))
-        eta_seconds: Optional[int] = None
+        eta_seconds: int | None = None
         if done > 0:
             rate = done / max(elapsed, 1e-6)
             if rate > 0:
@@ -511,7 +511,7 @@ class OCRProcessor:
                 "total_pages": total_images if total_images > 0 else None,
                 "status": "running",
             })
-            sidecar: Optional[Path] = None
+            sidecar: Path | None = None
             if not self._run_mokuro(extract_dir, workspace, total_images=total_images):
                 sidecar = self._collect_valid_workspace_sidecar(extract_dir, workspace)
                 if sidecar is None:
@@ -616,7 +616,7 @@ class OCRProcessor:
             start = time.time()
             last_done = -1
             last_progress_time = start
-            finalizing_since: Optional[float] = None
+            finalizing_since: float | None = None
 
             while process.poll() is None:
                 now = time.time()
@@ -707,7 +707,7 @@ class OCRProcessor:
 
 def create_processor_from_config(
     storage_path: Path,
-    status_callback: Optional[Callable[[str], None]] = None,
+    status_callback: Callable[[str], None] | None = None,
 ) -> OCRProcessor:
     """Create an OCR processor from configuration.
 

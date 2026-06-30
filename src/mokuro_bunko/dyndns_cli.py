@@ -50,7 +50,7 @@ def dyndns_setup(ctx: click.Context) -> None:
 
     config.dyndns = DynDNSConfig(
         enabled=enabled,
-        provider=provider,  # type: ignore[arg-type]
+        provider=provider,
         token=token,
         domain=domain,
         update_url=update_url,
