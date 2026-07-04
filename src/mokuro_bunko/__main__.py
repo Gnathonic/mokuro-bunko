@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import cast
 
 import click
 
 from mokuro_bunko import __version__
 from mokuro_bunko.admin.cli import admin_group
+from mokuro_bunko.config import OcrBackend
 from mokuro_bunko.config_cli import config_group
 from mokuro_bunko.dyndns_cli import dyndns_group
 from mokuro_bunko.setup_cli import setup_command
@@ -27,7 +28,7 @@ from mokuro_bunko.tunnel_cli import tunnel_group
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 @click.version_option(version=__version__, prog_name="mokuro-bunko")
 @click.pass_context
-def cli(ctx: click.Context, config: Optional[Path], verbose: bool) -> None:
+def cli(ctx: click.Context, config: Path | None, verbose: bool) -> None:
     """Mokuro Bunko Server - Manga library with OCR support."""
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config
@@ -75,7 +76,7 @@ def serve(ctx: click.Context, host: str, port: int, ocr: str) -> None:
     if port != 8080:
         config.server.port = port
     if ocr != "auto":
-        config.ocr.backend = ocr
+        config.ocr.backend = cast("OcrBackend", ocr)
 
     if verbose:
         click.echo("Verbose mode enabled")

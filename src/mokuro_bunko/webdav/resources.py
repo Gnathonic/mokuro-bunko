@@ -16,9 +16,10 @@ import os
 import shutil
 import tempfile
 import zipfile
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Optional
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 from urllib.parse import quote
 
 from wsgidav.dav_provider import DAVCollection, DAVError, DAVNonCollection
@@ -33,8 +34,8 @@ from mokuro_bunko.security import safe_resolve_under
 _NGINX_INTERNAL_PREFIX = "/internal-library/"
 
 if TYPE_CHECKING:
+
     from mokuro_bunko.database import Database
-    from wsgidav.dav_provider import DAVProvider
 
 
 class PathMapper:
@@ -82,7 +83,7 @@ class PathMapper:
         user_dir.mkdir(parents=True, exist_ok=True)
         return user_dir
 
-    def get_user_file_path(self, username: str, filename: str) -> Optional[Path]:
+    def get_user_file_path(self, username: str, filename: str) -> Path | None:
         """Safely resolve a per-user file path under users/{username}/."""
         user_dir = (self.users_path / username).resolve()
         users_root = self.users_path.resolve()
@@ -119,8 +120,8 @@ class PathMapper:
     def virtual_to_physical(
         self,
         virtual_path: str,
-        username: Optional[str] = None,
-    ) -> Optional[Path]:
+        username: str | None = None,
+    ) -> Path | None:
         """Convert virtual WebDAV path to physical filesystem path.
 
         Args:
@@ -163,8 +164,8 @@ class PathMapper:
     def physical_to_virtual(
         self,
         physical_path: Path,
-        username: Optional[str] = None,
-    ) -> Optional[str]:
+        username: str | None = None,
+    ) -> str | None:
         """Convert physical filesystem path to virtual WebDAV path.
 
         Args:
@@ -230,7 +231,7 @@ class PathMapper:
         return "unknown"
 
 
-class MokuroFileResource(DAVNonCollection):
+class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
     """WebDAV resource for files."""
 
     _VOLUME_SIDECAR_SUFFIXES = (".mokuro", ".mokuro.gz", ".webp", ".nocover")
@@ -255,17 +256,17 @@ class MokuroFileResource(DAVNonCollection):
     ) -> None:
         super().__init__(path, environ)
         self.file_path = file_path
-        self._stat: Optional[os.stat_result] = None
-        self._accel_redirect: Optional[str] = None
+        self._stat: os.stat_result | None = None
+        self._accel_redirect: str | None = None
         self._accel_redirect_computed = False
 
-    def _get_database(self) -> Optional["Database"]:
+    def _get_database(self) -> Database | None:
         db = self.environ.get("mokuro.db")
         if db is None:
             return None
-        return db  # type: ignore[return-value]
+        return cast("Database", db)
 
-    def _get_actor_username(self) -> Optional[str]:
+    def _get_actor_username(self) -> str | None:
         user_data = self.environ.get("mokuro.user")
         if isinstance(user_data, dict):
             username = user_data.get("username")
@@ -276,7 +277,7 @@ class MokuroFileResource(DAVNonCollection):
             return username
         return None
 
-    def _relative_under_library(self) -> Optional[str]:
+    def _relative_under_library(self) -> str | None:
         provider = self.provider
         if not hasattr(provider, "path_mapper"):
             return None
@@ -286,13 +287,13 @@ class MokuroFileResource(DAVNonCollection):
         except ValueError:
             return None
 
-    def _get_mapper(self) -> Optional[PathMapper]:
+    def _get_mapper(self) -> PathMapper | None:
         provider = self.provider
         if not hasattr(provider, "path_mapper"):
             return None
-        return provider.path_mapper  # type: ignore[return-value]
+        return cast("PathMapper", provider.path_mapper)
 
-    def _resolve_destination_path(self, dest_path: str) -> Optional[Path]:
+    def _resolve_destination_path(self, dest_path: str) -> Path | None:
         mapper = self._get_mapper()
         if mapper is None:
             return None
@@ -302,7 +303,7 @@ class MokuroFileResource(DAVNonCollection):
             return None
         return mapper.virtual_to_physical(dest_path, self._get_actor_username())
 
-    def _audit(self, action: str, *, details: Optional[dict[str, Any]] = None) -> None:
+    def _audit(self, action: str, *, details: dict[str, Any] | None = None) -> None:
         db = self._get_database()
         if db is None:
             return
@@ -336,7 +337,7 @@ class MokuroFileResource(DAVNonCollection):
         """Return static property list (no getter probing needed)."""
         return list(self._PROP_NAMES)
 
-    def _get_stat(self) -> Optional[os.stat_result]:
+    def _get_stat(self) -> os.stat_result | None:
         """Get cached stat result."""
         if self._stat is None:
             try:
@@ -345,14 +346,14 @@ class MokuroFileResource(DAVNonCollection):
                 pass
         return self._stat
 
-    def get_content_length(self) -> Optional[int]:
+    def get_content_length(self) -> int | None:
         """Return file size."""
         stat_result = self._get_stat()
         if stat_result:
             return stat_result.st_size
         return None
 
-    def get_content_type(self) -> Optional[str]:
+    def get_content_type(self) -> str | None:
         """Return content type based on extension."""
         suffix = self.file_path.suffix.lower()
         content_types = {
@@ -375,7 +376,7 @@ class MokuroFileResource(DAVNonCollection):
             return "application/gzip"
         return content_types.get(suffix, "application/octet-stream")
 
-    def get_creation_date(self) -> Optional[float]:
+    def get_creation_date(self) -> float | None:
         """Return creation time."""
         stat_result = self._get_stat()
         if stat_result:
@@ -386,14 +387,14 @@ class MokuroFileResource(DAVNonCollection):
         """Return display name."""
         return self.file_path.name
 
-    def get_etag(self) -> Optional[str]:
+    def get_etag(self) -> str | None:
         """Return ETag based on mtime and size."""
         stat_result = self._get_stat()
         if stat_result:
             return f"{stat_result.st_mtime:.6f}-{stat_result.st_size}"
         return None
 
-    def get_last_modified(self) -> Optional[float]:
+    def get_last_modified(self) -> float | None:
         """Return last modified time."""
         stat_result = self._get_stat()
         if stat_result:
@@ -403,7 +404,7 @@ class MokuroFileResource(DAVNonCollection):
     def support_etag(self) -> bool:
         return True
 
-    def _compute_accel_redirect(self) -> Optional[str]:
+    def _compute_accel_redirect(self) -> str | None:
         """Internal nginx X-Accel-Redirect path, or None to stream normally.
 
         Returns a path only when (a) the server runs behind nginx
@@ -428,7 +429,7 @@ class MokuroFileResource(DAVNonCollection):
         encoded = quote(rel.as_posix(), safe="/")
         return f"{_NGINX_INTERNAL_PREFIX}{encoded}"
 
-    def _accel_redirect_path(self) -> Optional[str]:
+    def _accel_redirect_path(self) -> str | None:
         """Memoized accessor for the X-Accel-Redirect path (stable per request)."""
         if not self._accel_redirect_computed:
             self._accel_redirect = self._compute_accel_redirect()
@@ -467,17 +468,20 @@ class MokuroFileResource(DAVNonCollection):
         except OSError as e:
             raise DAVError(500, f"Cannot read file: {e}") from e
 
-    def begin_write(self, content_type: Optional[str] = None) -> BinaryIO:
+    def begin_write(self, content_type: str | None = None) -> BinaryIO:
         """Begin writing to file, return file object."""
         existed_before = self.file_path.exists()
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         if self.file_path.suffix.lower() == ".cbz":
-            writer: BinaryIO = _ValidatedCbzWriter(self.file_path)
+            writer: BinaryIO = cast("BinaryIO", _ValidatedCbzWriter(self.file_path))
         else:
             writer = open(self.file_path, "wb")
-        return _AuditedWriter(
-            writer,
-            on_commit=lambda: self._on_write_committed(existed_before),
+        return cast(
+            "BinaryIO",
+            _AuditedWriter(
+                writer,
+                on_commit=lambda: self._on_write_committed(existed_before),
+            ),
         )
 
     def delete(self) -> None:
@@ -566,7 +570,7 @@ class MokuroFileResource(DAVNonCollection):
         return False
 
 
-class MokuroFolderResource(DAVCollection):
+class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
     """WebDAV resource for folders (both virtual and physical)."""
 
     # Static property list for folders (no getcontentlength).
@@ -582,7 +586,7 @@ class MokuroFolderResource(DAVCollection):
         self,
         path: str,
         environ: dict[str, Any],
-        folder_path: Optional[Path],
+        folder_path: Path | None,
         path_mapper: PathMapper,
         is_virtual: bool = False,
     ) -> None:
@@ -590,14 +594,14 @@ class MokuroFolderResource(DAVCollection):
         self.folder_path = folder_path
         self.path_mapper = path_mapper
         self.is_virtual = is_virtual
-        self._stat: Optional[os.stat_result] = None
-        self._scandir_cache: Optional[dict[str, os.DirEntry[str]]] = None
+        self._stat: os.stat_result | None = None
+        self._scandir_cache: dict[str, os.DirEntry[str]] | None = None
 
     def get_property_names(self, *, is_allprop: bool) -> list[str]:
         """Return static property list (no getter probing needed)."""
         return list(self._PROP_NAMES)
 
-    def _get_stat(self) -> Optional[os.stat_result]:
+    def _get_stat(self) -> os.stat_result | None:
         """Get cached stat result."""
         if self._stat is None and self.folder_path:
             try:
@@ -606,20 +610,20 @@ class MokuroFolderResource(DAVCollection):
                 pass
         return self._stat
 
-    def _get_username(self) -> Optional[str]:
+    def _get_username(self) -> str | None:
         """Get current username from environ."""
         user_data = self.environ.get("mokuro.user")
         if user_data:
-            return user_data.get("username")
+            return cast("str | None", user_data.get("username"))
         return None
 
-    def _get_database(self) -> Optional["Database"]:
+    def _get_database(self) -> Database | None:
         db = self.environ.get("mokuro.db")
         if db is None:
             return None
-        return db  # type: ignore[return-value]
+        return cast("Database", db)
 
-    def _get_actor_username(self) -> Optional[str]:
+    def _get_actor_username(self) -> str | None:
         user_data = self.environ.get("mokuro.user")
         if isinstance(user_data, dict):
             username = user_data.get("username")
@@ -630,7 +634,7 @@ class MokuroFolderResource(DAVCollection):
             return username
         return None
 
-    def _relative_under_library(self) -> Optional[str]:
+    def _relative_under_library(self) -> str | None:
         if self.folder_path is None:
             return None
         try:
@@ -638,7 +642,7 @@ class MokuroFolderResource(DAVCollection):
         except ValueError:
             return None
 
-    def _audit(self, action: str, *, details: Optional[dict[str, Any]] = None) -> None:
+    def _audit(self, action: str, *, details: dict[str, Any] | None = None) -> None:
         db = self._get_database()
         if db is None:
             return
@@ -652,13 +656,13 @@ class MokuroFolderResource(DAVCollection):
             details=details,
         )
 
-    def _resolve_member_path(self, name: str) -> Optional[Path]:
+    def _resolve_member_path(self, name: str) -> Path | None:
         """Resolve a child resource safely under this physical folder."""
         if self.folder_path is None:
             return None
         return safe_resolve_under(self.folder_path, name)
 
-    def _resolve_destination_path(self, dest_path: str) -> Optional[Path]:
+    def _resolve_destination_path(self, dest_path: str) -> Path | None:
         if self.path_mapper.get_path_type(dest_path) != "library":
             return None
         return self.path_mapper.virtual_to_physical(dest_path, self._get_actor_username())
@@ -679,7 +683,7 @@ class MokuroFolderResource(DAVCollection):
                 continue
         return volume_paths
 
-    def get_creation_date(self) -> Optional[float]:
+    def get_creation_date(self) -> float | None:
         stat_result = self._get_stat()
         if stat_result:
             return stat_result.st_ctime
@@ -692,16 +696,16 @@ class MokuroFolderResource(DAVCollection):
             return self.folder_path.name
         return self.path.rstrip("/").split("/")[-1] or "root"
 
-    def get_directory_info(self) -> Optional[dict[str, Any]]:
+    def get_directory_info(self) -> dict[str, Any] | None:
         return None
 
-    def get_etag(self) -> Optional[str]:
+    def get_etag(self) -> str | None:
         stat_result = self._get_stat()
         if stat_result:
             return f"{stat_result.st_mtime:.6f}"
         return None
 
-    def get_last_modified(self) -> Optional[float]:
+    def get_last_modified(self) -> float | None:
         stat_result = self._get_stat()
         if stat_result:
             return stat_result.st_mtime
@@ -773,7 +777,7 @@ class MokuroFolderResource(DAVCollection):
             pass
         return res
 
-    def get_member(self, name: str) -> Optional[DAVCollection | DAVNonCollection]:
+    def get_member(self, name: str) -> DAVCollection | DAVNonCollection | None:
         """Get a member resource by name."""
         member_path = join_uri(self.path, name)
         normalized = self.path.rstrip("/") or "/"
@@ -1025,7 +1029,7 @@ class _ValidatedCbzWriter:
     def seek(self, offset: int, whence: int = 0) -> int:
         return self._file.seek(offset, whence)
 
-    def truncate(self, size: Optional[int] = None) -> int:
+    def truncate(self, size: int | None = None) -> int:
         if size is None:
             return self._file.truncate()
         return self._file.truncate(size)
@@ -1064,7 +1068,7 @@ class _ValidatedCbzWriter:
     def writable(self) -> bool:
         return True
 
-    def __enter__(self) -> "_ValidatedCbzWriter":
+    def __enter__(self) -> _ValidatedCbzWriter:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -1108,7 +1112,7 @@ class _AuditedWriter:
         self._committed = True
         self._on_commit()
 
-    def __enter__(self) -> "_AuditedWriter":
+    def __enter__(self) -> _AuditedWriter:
         self._inner.__enter__()
         return self
 

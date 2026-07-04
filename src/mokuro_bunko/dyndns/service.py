@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import urllib.request
-from typing import Any, Optional
+from typing import Any
 
 from mokuro_bunko.config import DynDNSConfig
 
@@ -15,11 +15,11 @@ class DynDNSService:
 
     def __init__(self, config: DynDNSConfig) -> None:
         self._config = config
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._last_update: Optional[str] = None
-        self._last_ip: Optional[str] = None
-        self._last_error: Optional[str] = None
+        self._last_update: str | None = None
+        self._last_ip: str | None = None
+        self._last_error: str | None = None
         self._running = False
 
     def start(self) -> None:
@@ -93,7 +93,8 @@ class DynDNSService:
         """Get public IP via ipify."""
         req = urllib.request.Request("https://api.ipify.org", method="GET")
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.read().decode("utf-8").strip()
+            data: bytes = resp.read()
+        return data.decode("utf-8").strip()
 
     def _update_duckdns(self, ip: str) -> dict[str, Any]:
         """Update DuckDNS record."""

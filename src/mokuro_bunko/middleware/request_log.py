@@ -10,7 +10,8 @@ import os
 import sys
 import threading
 import time
-from typing import Any, Callable, Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 
 def _is_enabled() -> bool:
@@ -20,7 +21,7 @@ def _is_enabled() -> bool:
 class RequestLogMiddleware:
     """WSGI middleware that logs every request with timing and status."""
 
-    def __init__(self, app: Callable[..., Any]) -> None:
+    def __init__(self, app: Callable[..., Iterable[bytes]]) -> None:
         self.app = app
         self._enabled = _is_enabled()
 

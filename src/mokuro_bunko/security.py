@@ -7,7 +7,6 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Deque, Optional
 
 
 def is_within_path(path: Path, base: Path) -> bool:
@@ -18,7 +17,7 @@ def is_within_path(path: Path, base: Path) -> bool:
         return False
 
 
-def safe_resolve_under(base: Path, relative: str) -> Optional[Path]:
+def safe_resolve_under(base: Path, relative: str) -> Path | None:
     """Resolve a relative path under base, returning None on traversal escape."""
     try:
         candidate = (base / relative).resolve()
@@ -62,7 +61,7 @@ class AuthAttemptLimiter:
         self.max_failures = max_failures
         self.window_seconds = window_seconds
         self.block_seconds = block_seconds
-        self._failures: dict[str, Deque[float]] = {}
+        self._failures: dict[str, deque[float]] = {}
         self._blocked_until: dict[str, float] = {}
         self._lock = threading.Lock()
 

@@ -154,8 +154,9 @@ class TestAdminPanelUI:
 
     def test_admin_panel_loads(self, admin_page: Page) -> None:
         """Test admin panel loads correctly."""
-        # Check admin badge is visible (indicates admin panel loaded)
-        assert admin_page.locator(".admin-badge").text_content() == "Admin"
+        # Admin panel wrapper present (indicates the admin panel loaded)
+        assert admin_page.locator(".admin-container").is_visible()
+        assert admin_page.locator("nav[data-current='admin']").is_visible()
 
         # Check tabs exist (use more specific selectors)
         assert admin_page.locator(".tab:has-text('Users')").is_visible()
@@ -337,8 +338,8 @@ class TestAdminPanelResponsive:
         page.goto(f"{server_url}/_admin/")
         page.wait_for_load_state("networkidle")
 
-        # Check page still loads (admin badge visible)
-        assert page.locator(".admin-badge").is_visible()
+        # Check page still loads (admin panel wrapper visible)
+        assert page.locator(".admin-container").is_visible()
 
         # Check tabs are still accessible
         assert page.locator(".tab:has-text('Users')").is_visible()

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import urllib.parse
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
 from mokuro_bunko.library_index import LibraryIndexCache
 from mokuro_bunko.security import is_within_path
@@ -31,11 +32,11 @@ class CatalogAPI:
 
     def __init__(
         self,
-        app: Callable[..., Any],
-        storage_base_path: Optional[str] = None,
+        app: Callable[..., Iterable[bytes]],
+        storage_base_path: str | None = None,
         enabled: bool = False,
         catalog_config: Any = None,
-        library_index: Optional[LibraryIndexCache] = None,
+        library_index: LibraryIndexCache | None = None,
     ) -> None:
         """Initialize catalog API middleware.
 
@@ -50,7 +51,7 @@ class CatalogAPI:
         self._enabled = enabled
         self._catalog_config = catalog_config
         if library_index is not None:
-            self._library_index = library_index
+            self._library_index: LibraryIndexCache | None = library_index
         elif self.storage_base_path is not None:
             self._library_index = LibraryIndexCache(self.storage_base_path, ttl=30.0)
         else:
@@ -60,7 +61,7 @@ class CatalogAPI:
     def enabled(self) -> bool:
         """Check if catalog is enabled (reads live config)."""
         if self._catalog_config is not None:
-            return self._catalog_config.enabled
+            return bool(self._catalog_config.enabled)
         return self._enabled
 
     def __call__(
@@ -236,10 +237,10 @@ class CatalogAPI:
             ]
             start_response("200 OK", headers)
             return [content]
-        except IOError:
+        except OSError:
             return self._error_response(start_response, 500, "Error")
 
-    def _read_ocr_progress(self) -> Optional[dict[str, Any]]:
+    def _read_ocr_progress(self) -> dict[str, Any] | None:
         """Load live OCR progress from sidecar state file."""
         if not self.storage_base_path:
             return None
@@ -258,7 +259,7 @@ class CatalogAPI:
 
     def _is_active_ocr_volume(
         self,
-        progress: Optional[dict[str, Any]],
+        progress: dict[str, Any] | None,
         series_name: str,
         volume_name: str,
     ) -> bool:
@@ -272,7 +273,7 @@ class CatalogAPI:
         return relative_cbz.casefold() == expected.casefold()
 
     @staticmethod
-    def _volume_progress(progress: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    def _volume_progress(progress: dict[str, Any] | None) -> dict[str, Any] | None:
         """Return compact progress payload for per-volume API fields."""
         if not progress:
             return None
@@ -344,7 +345,7 @@ class CatalogAPI:
             ]
             start_response("200 OK", headers)
             return [content]
-        except IOError:
+        except OSError:
             return self._error_response(start_response, 500, "Error")
 
     def _json_response(

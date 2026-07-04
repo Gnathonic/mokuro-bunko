@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from mokuro_bunko.middleware.auth import authenticate_basic_header
 from mokuro_bunko.security import is_within_path
@@ -65,9 +66,9 @@ class AccountAPI:
 
     def __init__(
         self,
-        app: Callable[..., Any],
-        database: Optional["Database"] = None,
-        storage_path: Optional[Path] = None,
+        app: Callable[..., Iterable[bytes]],
+        database: Database | None = None,
+        storage_path: Path | None = None,
     ) -> None:
         self.app = app
         self.db = database
@@ -105,14 +106,14 @@ class AccountAPI:
 
         return self.app(environ, start_response)
 
-    def _authenticate_request(self, environ: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def _authenticate_request(self, environ: dict[str, Any]) -> dict[str, Any] | None:
         """Authenticate from Basic auth header and return user dict."""
         if not self.db:
             return None
         auth_result = authenticate_basic_header(self.db, environ.get("HTTP_AUTHORIZATION"))
         if not auth_result.authenticated or not auth_result.user:
             return None
-        return auth_result.user
+        return cast("dict[str, Any]", auth_result.user)
 
     def _handle_stats(
         self,
@@ -265,7 +266,7 @@ class AccountAPI:
             ]
             start_response("200 OK", headers)
             return [content]
-        except IOError:
+        except OSError:
             return self._error_response(start_response, 500, "Error")
 
     def _error_response(

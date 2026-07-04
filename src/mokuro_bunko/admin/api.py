@@ -6,8 +6,9 @@ import json
 import shutil
 import threading
 import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, cast
 
 from mokuro_bunko.config import AdminConfig, Config, save_config
 from mokuro_bunko.database import Database
@@ -20,7 +21,6 @@ from mokuro_bunko.ocr.installer import (
 from mokuro_bunko.registration.invites import InviteManager
 from mokuro_bunko.security import is_within_path
 from mokuro_bunko.validation import validate_password, validate_username
-
 
 # Static files directory
 STATIC_DIR = Path(__file__).parent / "web"
@@ -42,7 +42,7 @@ MIME_TYPES = {
 MAX_JSON_BODY_BYTES = 64 * 1024
 
 
-def build_ocr_runtime_status(full_config: Optional[Any]) -> dict[str, Any]:
+def build_ocr_runtime_status(full_config: Any | None) -> dict[str, Any]:
     """Build OCR runtime status dict (spawns subprocesses — call sparingly)."""
     if not full_config:
         return {"available": False}
@@ -74,14 +74,14 @@ class AdminAPI:
 
     def __init__(
         self,
-        app: Callable[..., Any],
+        app: Callable[..., Iterable[bytes]],
         database: Database,
         config: AdminConfig,
-        full_config: Optional[Config] = None,
-        config_path: Optional[Path] = None,
-        tunnel_service: Optional[Any] = None,
-        dyndns_service: Optional[Any] = None,
-        ocr_runtime: Optional[dict[str, Any]] = None,
+        full_config: Config | None = None,
+        config_path: Path | None = None,
+        tunnel_service: Any | None = None,
+        dyndns_service: Any | None = None,
+        ocr_runtime: dict[str, Any] | None = None,
     ) -> None:
         self.app = app
         self.db = database
@@ -144,7 +144,7 @@ class AdminAPI:
         return role == "admin"
 
     @staticmethod
-    def _actor_username(environ: dict[str, Any]) -> Optional[str]:
+    def _actor_username(environ: dict[str, Any]) -> str | None:
         user = environ.get("mokuro.user")
         if isinstance(user, dict):
             username = user.get("username")
@@ -276,7 +276,7 @@ class AdminAPI:
             ]
             start_response("200 OK", headers)
             return [content]
-        except IOError:
+        except OSError:
             return self._error_response(start_response, 500, "Error reading file")
 
     # User API handlers
@@ -974,11 +974,11 @@ class AdminAPI:
             if content_length > MAX_JSON_BODY_BYTES:
                 raise ValueError("Request body too large")
             body = environ["wsgi.input"].read(content_length)
-            return json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError:
-            raise ValueError("Invalid JSON body")
+            return cast("dict[str, Any]", json.loads(body.decode("utf-8")))
+        except json.JSONDecodeError as e:
+            raise ValueError("Invalid JSON body") from e
         except ValueError as e:
-            raise ValueError(str(e))
+            raise ValueError(str(e)) from e
 
     def _json_response(
         self,

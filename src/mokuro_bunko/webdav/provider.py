@@ -9,7 +9,7 @@ The reader expects a /mokuro-reader/ folder containing:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from wsgidav.dav_provider import DAVProvider
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from wsgidav.dav_provider import DAVCollection, DAVNonCollection
 
 
-class MokuroDAVProvider(DAVProvider):
+class MokuroDAVProvider(DAVProvider):  # type: ignore[misc]
     """WebDAV provider compatible with mokuro-reader.
 
     Provides a virtual filesystem where:
@@ -45,7 +45,7 @@ class MokuroDAVProvider(DAVProvider):
         self,
         path: str,
         environ: dict[str, Any],
-    ) -> Optional[DAVCollection | DAVNonCollection]:
+    ) -> DAVCollection | DAVNonCollection | None:
         """Get resource instance for a path.
 
         Args:
