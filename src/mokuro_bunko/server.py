@@ -164,6 +164,11 @@ def create_app(
     # Create database
     db_path = config.storage.base_path / "mokuro.db"
     database = Database(db_path)
+    database.configure_connection(
+        busy_timeout_ms=config.database.busy_timeout_ms,
+        lock_retries=config.database.lock_retries,
+        retry_initial_delay_seconds=config.database.retry_initial_delay_seconds,
+    )
 
     # Create tunnel and DynDNS services
     tunnel_service = TunnelService(config, config_path)
