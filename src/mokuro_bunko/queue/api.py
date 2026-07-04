@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
 from mokuro_bunko.library_index import LibraryIndexCache
 from mokuro_bunko.middleware.auth import authenticate_basic_header
@@ -24,12 +25,12 @@ class QueueAPI:
 
     def __init__(
         self,
-        app: Callable[..., Any],
+        app: Callable[..., Iterable[bytes]],
         storage_base_path: str,
         ocr_backend: str = "unknown",
-        database: Optional[Any] = None,
-        queue_config: Optional[Any] = None,
-        library_index: Optional[LibraryIndexCache] = None,
+        database: Any | None = None,
+        queue_config: Any | None = None,
+        library_index: LibraryIndexCache | None = None,
     ) -> None:
         self.app = app
         self.storage_base_path = Path(storage_base_path)
@@ -100,7 +101,7 @@ class QueueAPI:
         }
         return self._json_response(start_response, 200, data)
 
-    def _read_ocr_progress(self) -> Optional[dict[str, Any]]:
+    def _read_ocr_progress(self) -> dict[str, Any] | None:
         progress_path = self.storage_base_path / ".ocr-progress.json"
         if not progress_path.exists():
             return None
@@ -147,7 +148,7 @@ class QueueAPI:
                 ("Cache-Control", "no-cache"),
             ])
             return [content]
-        except IOError:
+        except OSError:
             return self._error_response(start_response, 500, "Error")
 
     @staticmethod

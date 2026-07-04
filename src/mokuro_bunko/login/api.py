@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mokuro_bunko.middleware.auth import (
     Permission,
@@ -33,9 +34,9 @@ class LoginAPI:
 
     def __init__(
         self,
-        app: Callable[..., Any],
-        database: Optional["Database"] = None,
-        nav_config: Optional[Any] = None,
+        app: Callable[..., Iterable[bytes]],
+        database: Database | None = None,
+        nav_config: Any | None = None,
     ) -> None:
         """Initialize login API middleware."""
         self.app = app
@@ -268,7 +269,7 @@ class LoginAPI:
             ]
             start_response("200 OK", headers)
             return [content]
-        except IOError:
+        except OSError:
             return self._error_response(start_response, 500, "Error")
 
     def _error_response(

@@ -89,17 +89,24 @@ class TestDetectRocm:
     """Tests for ROCm detection."""
 
     def test_rocm_available_via_smi(self) -> None:
-        """Test ROCm detection via rocm-smi."""
-        with patch("subprocess.run") as mock_run:
+        """rocm-smi detects ROCm but reports no version.
+
+        ``detect_rocm`` only returns a version from ``/opt/rocm/.info/version``
+        (rocm-smi reports the kernel driver, not the ROCm version), so the
+        rocm-smi fallback yields ``(True, None)``. ``Path.exists`` is forced
+        False so a real ``/opt/rocm`` on the test host can't leak in.
+        """
+        with patch("pathlib.Path.exists", return_value=False), patch(
+            "subprocess.run"
+        ) as mock_run:
             result = MagicMock()
             result.returncode = 0
-            result.stdout = "Driver Version: 5.7.0"
             mock_run.return_value = result
 
             available, version = detect_rocm()
 
             assert available is True
-            assert version == "5.7.0"
+            assert version is None
 
     def test_rocm_available_via_path(self) -> None:
         """Test ROCm detection via /opt/rocm path."""
@@ -249,8 +256,13 @@ class TestSupportedBackends:
         assert OCRBackend.CUDA in backends
         assert OCRBackend.CPU in backends
 
-    def test_filters_accelerated_backends_on_py313_plus(self) -> None:
-        """Test accelerated backends are filtered on newer Python runtimes."""
+    def test_filters_cuda_on_py313_plus(self) -> None:
+        """On Python 3.13+, CUDA wheels are unavailable but ROCm nightly works.
+
+        ``get_backend_unavailable_reasons`` deliberately blocks only CUDA on
+        3.13+ ("ROCm nightly wheels support Python 3.13+"), so ROCm and CPU
+        remain supported.
+        """
         hardware = HardwareInfo(
             has_cuda=True,
             has_rocm=True,
@@ -260,7 +272,7 @@ class TestSupportedBackends:
         )
         backends = get_supported_backends(hardware=hardware, python_version=(3, 13))
         assert OCRBackend.CUDA not in backends
-        assert OCRBackend.ROCM not in backends
+        assert OCRBackend.ROCM in backends
         assert OCRBackend.CPU in backends
 
     def test_unavailable_reason_contains_python_version(self) -> None:

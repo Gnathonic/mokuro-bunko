@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 
 from mokuro_bunko.security import AuthAttemptLimiter, get_client_ip
 from mokuro_bunko.webdav.resources import PathMapper
@@ -151,12 +152,12 @@ class AuthResult:
     """Result of authentication attempt."""
 
     authenticated: bool
-    user: Optional["UserDict"] = None
+    user: UserDict | None = None
     role: str = "anonymous"
-    error: Optional[str] = None
+    error: str | None = None
 
     @property
-    def username(self) -> Optional[str]:
+    def username(self) -> str | None:
         """Get username if authenticated."""
         return self.user["username"] if self.user else None
 
@@ -167,12 +168,12 @@ class AuthorizationResult:
 
     authorized: bool
     status_code: int = 200
-    error: Optional[str] = None
+    error: str | None = None
 
 
 def parse_basic_auth_checked(
-    authorization_header: Optional[str],
-) -> tuple[Optional[tuple[str, str]], Optional[str]]:
+    authorization_header: str | None,
+) -> tuple[tuple[str, str] | None, str | None]:
     """Parse a Basic auth header, distinguishing absent from malformed.
 
     Credentials must be UTF-8 encoded (RFC 7617; the WWW-Authenticate
@@ -204,7 +205,7 @@ def parse_basic_auth_checked(
     return (username, password), None
 
 
-def parse_basic_auth(authorization_header: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+def parse_basic_auth(authorization_header: str | None) -> tuple[str | None, str | None]:
     """Parse Basic auth header (compat wrapper).
 
     New code should use parse_basic_auth_checked, which distinguishes a
@@ -220,8 +221,8 @@ def parse_basic_auth(authorization_header: Optional[str]) -> tuple[Optional[str]
 
 
 def authenticate_basic_header(
-    database: "Database",
-    authorization_header: Optional[str],
+    database: Database,
+    authorization_header: str | None,
 ) -> AuthResult:
     """Authenticate a user from a Basic auth header.
 
@@ -260,8 +261,8 @@ class AuthMiddleware:
 
     def __init__(
         self,
-        app: Callable[..., Any],
-        database: "Database",
+        app: Callable[..., Iterable[bytes]],
+        database: Database,
         realm: str = "mokuro-bunko",
         allow_anonymous: bool = True,
         registration_config: Any = None,

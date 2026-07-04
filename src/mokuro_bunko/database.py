@@ -5,15 +5,15 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator, Literal, Optional, TypedDict
+from typing import Any, Literal, TypedDict
 
 import bcrypt
 
 from mokuro_bunko.validation import validate_password, validate_username
-
 
 UserStatus = Literal["active", "pending", "disabled", "deleted"]
 UserRole = Literal["anonymous", "registered", "uploader", "inviter", "editor", "admin"]
@@ -43,20 +43,20 @@ class InviteDict(TypedDict):
     role: UserRole
     created_at: str
     expires_at: str
-    used_by: Optional[str]
-    invited_by: Optional[str]
+    used_by: str | None
+    invited_by: str | None
 
 
 class AuditEventDict(TypedDict):
     """Type definition for audit event dictionary."""
 
     id: int
-    actor_username: Optional[str]
+    actor_username: str | None
     action: str
-    target_type: Optional[str]
-    target_path: Optional[str]
-    target_username: Optional[str]
-    details: Optional[str]
+    target_type: str | None
+    target_path: str | None
+    target_username: str | None
+    details: str | None
     created_at: str
 
 
@@ -88,8 +88,8 @@ def parse_duration(duration: str) -> timedelta:
     unit = duration[-1].lower()
     try:
         value = int(duration[:-1])
-    except ValueError:
-        raise ValueError(f"Invalid duration format: {duration}")
+    except ValueError as e:
+        raise ValueError(f"Invalid duration format: {duration}") from e
 
     if value <= 0:
         raise ValueError(f"Duration must be positive: {duration}")
@@ -105,7 +105,7 @@ def parse_duration(duration: str) -> timedelta:
             raise ValueError(f"Unknown duration unit: {unit}")
 
 
-def normalize_volume_key_from_library_relative(path: str) -> Optional[str]:
+def normalize_volume_key_from_library_relative(path: str) -> str | None:
     """Map a library-relative file path to its canonical volume key (*.cbz)."""
     cleaned = path.strip("/")
     if not cleaned:
@@ -317,10 +317,10 @@ class Database:
                     (username, password_hash, normalized_role, status, notes),
                 )
                 return cursor.lastrowid or 0
-            except sqlite3.IntegrityError:
-                raise ValueError(f"Username '{username}' already exists")
+            except sqlite3.IntegrityError as e:
+                raise ValueError(f"Username '{username}' already exists") from e
 
-    def get_user(self, username: str) -> Optional[UserDict]:
+    def get_user(self, username: str) -> UserDict | None:
         """Get user by username.
 
         Args:
@@ -349,7 +349,7 @@ class Database:
                 )
             return None
 
-    def authenticate_user(self, username: str, password: str) -> Optional[UserDict]:
+    def authenticate_user(self, username: str, password: str) -> UserDict | None:
         """Authenticate user with username and password.
 
         Args:
@@ -381,7 +381,7 @@ class Database:
                     )
             return None
 
-    def list_users(self, status: Optional[UserStatus] = None) -> list[UserDict]:
+    def list_users(self, status: UserStatus | None = None) -> list[UserDict]:
         """List all users.
 
         Args:
@@ -540,7 +540,7 @@ class Database:
         self,
         role: UserRole = "registered",
         expires: str = "7d",
-        invited_by: Optional[str] = None,
+        invited_by: str | None = None,
     ) -> str:
         """Create an invite code.
 
@@ -575,7 +575,7 @@ class Database:
         )
         return code
 
-    def get_invite(self, code: str) -> Optional[InviteDict]:
+    def get_invite(self, code: str) -> InviteDict | None:
         """Get invite by code.
 
         Args:
@@ -605,7 +605,7 @@ class Database:
                 )
             return None
 
-    def validate_invite(self, code: str) -> Optional[InviteDict]:
+    def validate_invite(self, code: str) -> InviteDict | None:
         """Validate an invite code.
 
         Args:
@@ -740,11 +740,11 @@ class Database:
     def log_audit_event(
         self,
         action: str,
-        actor_username: Optional[str] = None,
-        target_type: Optional[str] = None,
-        target_path: Optional[str] = None,
-        target_username: Optional[str] = None,
-        details: Optional[dict[str, Any]] = None,
+        actor_username: str | None = None,
+        target_type: str | None = None,
+        target_path: str | None = None,
+        target_username: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> int:
         """Append an audit event and prune entries older than retention period."""
         details_text = None
@@ -835,7 +835,7 @@ class Database:
                     (volume_key, uploader_username, uploader_username),
                 )
 
-    def get_volume_owner(self, library_relative_path: str) -> Optional[str]:
+    def get_volume_owner(self, library_relative_path: str) -> str | None:
         """Get uploader username for a volume or sidecar path."""
         volume_key = normalize_volume_key_from_library_relative(library_relative_path)
         if volume_key is None:
