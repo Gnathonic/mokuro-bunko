@@ -71,6 +71,14 @@ queue:
   # If false, queue status API requires authenticated user credentials
   public_access: true
 
+database:
+  # How long each SQLite statement blocks waiting on a lock (milliseconds)
+  busy_timeout_ms: 5000
+  # Retries when an external process (e.g. the admin CLI) holds the write lock
+  lock_retries: 5
+  # First retry backoff delay in seconds; doubles on each subsequent retry
+  retry_initial_delay_seconds: 0.05
+
 ocr:
   # OCR backend:
   # - auto: Detect best available
