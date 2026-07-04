@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -76,9 +77,14 @@ class HomePageAPI:
         self,
         app: Callable[..., Iterable[bytes]],
         catalog_config: Any | None = None,
+        database: Any | None = None,
+        library_index: Any | None = None,
     ) -> None:
         self.app = app
         self._catalog_config = catalog_config
+        self.database = database
+        self._library_index = library_index
+        self._start_time = time.time()
 
     def __call__(
         self,
@@ -88,6 +94,17 @@ class HomePageAPI:
         """Handle WSGI request."""
         path = environ.get("PATH_INFO", "")
         method = environ.get("REQUEST_METHOD", "GET")
+
+        # Handle health API endpoint
+        if path == "/api/health":
+            if method == "GET":
+                return self._handle_health(environ, start_response)
+            elif method == "OPTIONS":
+                return self._handle_options(environ, start_response)
+            else:
+                return self._json_response(
+                    start_response, 405, {"error": "Method not allowed"}
+                )
 
         # Handle stats API endpoint
         if path == "/api/stats":
@@ -130,15 +147,75 @@ class HomePageAPI:
         environ: dict[str, Any],
         start_response: Callable[..., Any],
     ) -> list[bytes]:
-        """Handle GET /api/stats — returns zeroed stats."""
+        """Handle GET /api/stats — returns live user/volume counts."""
+        # The home page is public; a locked DB or broken index degrades the
+        # counts to 0 rather than turning the stats fetch into a 500.
+        try:
+            total_users = self._count_users()
+        except Exception:
+            total_users = 0
+        try:
+            total_volumes = self._count_volumes()
+        except Exception:
+            total_volumes = 0
         return self._json_response(start_response, 200, {
-            "total_users": 0,
-            "total_volumes": 0,
+            "total_users": total_users,
+            "total_volumes": total_volumes,
             "total_pages_read": 0,
             "total_characters_read": 0,
             "total_reading_time_seconds": 0,
             "total_reading_time_formatted": "0s",
-            "last_updated": 0,
+            "last_updated": int(time.time()),
+        })
+
+    def _count_users(self) -> int:
+        """Count non-deleted users, or 0 if the database is unavailable."""
+        if self.database is None:
+            return 0
+        return sum(1 for u in self.database.list_users() if u["status"] != "deleted")
+
+    def _count_volumes(self) -> int:
+        """Count indexed library volumes, or 0 if the index is unavailable."""
+        if self._library_index is None:
+            return 0
+        snapshot = self._library_index.get_snapshot()
+        return sum(len(series.volumes) for series in snapshot.series)
+
+    def _handle_health(
+        self,
+        environ: dict[str, Any],
+        start_response: Callable[..., Any],
+    ) -> list[bytes]:
+        """Handle GET /api/health — readiness/liveness probe with counts."""
+        healthy = True
+
+        db_status = "unavailable"
+        total_users: int | None = None
+        if self.database is not None:
+            try:
+                total_users = self._count_users()
+                db_status = "ok"
+            except Exception:
+                db_status = "error"
+                healthy = False
+
+        library_status = "unavailable"
+        total_volumes: int | None = None
+        if self._library_index is not None:
+            try:
+                total_volumes = self._count_volumes()
+                library_status = "ok"
+            except Exception:
+                library_status = "error"
+                healthy = False
+
+        return self._json_response(start_response, 200, {
+            "status": "ok" if healthy else "degraded",
+            "uptime_seconds": int(time.time() - self._start_time),
+            "db_status": db_status,
+            "library_status": library_status,
+            "total_users": total_users,
+            "total_volumes": total_volumes,
         })
 
     def _handle_options(
