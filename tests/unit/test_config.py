@@ -11,6 +11,7 @@ from mokuro_bunko.config import (
     AdminConfig,
     Config,
     CorsConfig,
+    DatabaseConfig,
     OcrConfig,
     RegistrationConfig,
     ServerConfig,
@@ -233,6 +234,46 @@ class TestOcrConfig:
         """Test invalid poll interval."""
         with pytest.raises(ValueError, match="Invalid poll interval"):
             OcrConfig(poll_interval=0)
+
+
+class TestDatabaseConfig:
+    """Tests for DatabaseConfig."""
+
+    def test_defaults(self) -> None:
+        """Test default values."""
+        config = DatabaseConfig()
+        assert config.busy_timeout_ms == 5000
+        assert config.lock_retries == 5
+        assert config.retry_initial_delay_seconds == 0.05
+
+    def test_invalid_busy_timeout(self) -> None:
+        with pytest.raises(ValueError, match="busy timeout"):
+            DatabaseConfig(busy_timeout_ms=50)
+
+    def test_invalid_lock_retries(self) -> None:
+        with pytest.raises(ValueError, match="lock retries"):
+            DatabaseConfig(lock_retries=0)
+
+    def test_invalid_retry_delay(self) -> None:
+        with pytest.raises(ValueError, match="retry initial delay"):
+            DatabaseConfig(retry_initial_delay_seconds=0)
+
+    def test_from_dict_and_to_dict_round_trip(self) -> None:
+        data = {
+            "storage": {"base_path": "/tmp/x"},
+            "database": {
+                "busy_timeout_ms": 2500,
+                "lock_retries": 3,
+                "retry_initial_delay_seconds": 0.1,
+            },
+        }
+        config = Config.from_dict(data)
+        assert config.database.busy_timeout_ms == 2500
+        assert config.database.lock_retries == 3
+        assert config.database.retry_initial_delay_seconds == 0.1
+
+        out = config.to_dict()
+        assert out["database"] == data["database"]
 
 
 class TestConfig:

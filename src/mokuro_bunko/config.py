@@ -199,6 +199,26 @@ class QueueConfig:
 
 
 @dataclass
+class DatabaseConfig:
+    """Database runtime tuning (lock contention resilience)."""
+
+    # SQLite busy_timeout: how long each statement blocks on a lock (ms).
+    busy_timeout_ms: int = 5000
+    # Statement/commit retries when an external process holds the write lock.
+    lock_retries: int = 5
+    # First retry backoff delay; doubles on each subsequent retry (seconds).
+    retry_initial_delay_seconds: float = 0.05
+
+    def __post_init__(self) -> None:
+        if self.busy_timeout_ms < 100:
+            raise ValueError("Database busy timeout must be at least 100 ms")
+        if self.lock_retries < 1:
+            raise ValueError("Database lock retries must be at least 1")
+        if self.retry_initial_delay_seconds <= 0:
+            raise ValueError("Database retry initial delay must be positive")
+
+
+@dataclass
 class OcrConfig:
     """OCR configuration."""
 
@@ -244,6 +264,7 @@ class Config:
     admin: AdminConfig = field(default_factory=AdminConfig)
     catalog: CatalogConfig = field(default_factory=CatalogConfig)
     queue: QueueConfig = field(default_factory=QueueConfig)
+    database: DatabaseConfig = field(default_factory=DatabaseConfig)
     ocr: OcrConfig = field(default_factory=OcrConfig)
     dyndns: DynDNSConfig = field(default_factory=DynDNSConfig)
 
@@ -292,6 +313,11 @@ class Config:
                 "show_in_nav": self.queue.show_in_nav,
                 "public_access": self.queue.public_access,
             },
+            "database": {
+                "busy_timeout_ms": self.database.busy_timeout_ms,
+                "lock_retries": self.database.lock_retries,
+                "retry_initial_delay_seconds": self.database.retry_initial_delay_seconds,
+            },
             "ocr": {
                 "backend": self.ocr.backend,
                 "poll_interval": self.ocr.poll_interval,
@@ -329,6 +355,7 @@ class Config:
             admin=AdminConfig(**data.get("admin", {})),
             catalog=CatalogConfig(**data.get("catalog", {})),
             queue=QueueConfig(**data.get("queue", {})),
+            database=DatabaseConfig(**data.get("database", {})),
             ocr=OcrConfig(**data.get("ocr", {})),
             dyndns=DynDNSConfig(**data.get("dyndns", {})),
         )

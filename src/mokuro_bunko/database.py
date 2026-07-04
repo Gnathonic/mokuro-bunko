@@ -5,11 +5,12 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 import bcrypt
 
@@ -125,10 +126,46 @@ def normalize_volume_key_from_library_relative(path: str) -> str | None:
     return None
 
 
+class _RetryingConnection:
+    """Connection proxy that retries execute() while the DB is locked.
+
+    In WAL mode an external writer's lock surfaces at the first write
+    statement, so per-statement retry (not just commit retry) is needed.
+    Retrying a failed execute is safe: a statement that raised 'database is
+    locked' acquired no lock and had no effect.
+    """
+
+    def __init__(
+        self, conn: sqlite3.Connection, retries: int, initial_delay: float
+    ) -> None:
+        self._conn = conn
+        self._retries = retries
+        self._initial_delay = initial_delay
+
+    def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
+        delay = self._initial_delay
+        for attempt in range(self._retries):
+            try:
+                return self._conn.execute(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                if (
+                    "database is locked" not in str(exc).lower()
+                    or attempt >= self._retries - 1
+                ):
+                    raise
+                time.sleep(delay)
+                delay *= 2
+        raise AssertionError("unreachable")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
 class Database:
     """SQLite database for user and invite management."""
 
     SCHEMA_VERSION = 2
+    AUDIT_PRUNE_INTERVAL_SECONDS = 3600
 
     def __init__(self, db_path: Path | str) -> None:
         """Initialize database connection.
@@ -137,6 +174,10 @@ class Database:
             db_path: Path to SQLite database file.
         """
         self.db_path = Path(db_path)
+        self.busy_timeout_ms = 5000
+        self.lock_retries = 5
+        self.retry_initial_delay_seconds = 0.05
+        self._last_audit_prune_monotonic = 0.0
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(
@@ -144,19 +185,60 @@ class Database:
         )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
         self._init_schema()
+
+    def configure_connection(
+        self,
+        *,
+        busy_timeout_ms: int | None = None,
+        lock_retries: int | None = None,
+        retry_initial_delay_seconds: float | None = None,
+    ) -> None:
+        """Apply runtime DB tuning settings (values clamped to sane minimums)."""
+        if busy_timeout_ms is not None:
+            self.busy_timeout_ms = max(100, int(busy_timeout_ms))
+            with self._lock:
+                self._conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
+        if lock_retries is not None:
+            self.lock_retries = max(1, int(lock_retries))
+        if retry_initial_delay_seconds is not None:
+            self.retry_initial_delay_seconds = max(0.001, float(retry_initial_delay_seconds))
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         """Context manager providing serialised access to the persistent connection."""
         with self._lock:
+            proxy = _RetryingConnection(
+                self._conn, self.lock_retries, self.retry_initial_delay_seconds
+            )
             try:
-                yield self._conn
-                self._conn.commit()
+                yield cast("sqlite3.Connection", proxy)
+                self._commit_with_retry()
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def _commit_with_retry(self) -> None:
+        """Commit, retrying with exponential backoff while an external process
+        (e.g. the admin CLI run against a live server's DB) holds the write lock.
+
+        SQLite's busy_timeout already blocks each attempt; the Python-level
+        retries extend resilience across several such windows.
+        """
+        delay = self.retry_initial_delay_seconds
+        for attempt in range(self.lock_retries):
+            try:
+                self._conn.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                if (
+                    "database is locked" not in str(exc).lower()
+                    or attempt >= self.lock_retries - 1
+                ):
+                    raise
+                time.sleep(delay)
+                delay *= 2
 
     @staticmethod
     def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -721,15 +803,36 @@ class Database:
     def cleanup_expired_invites(self) -> int:
         """Delete expired invites.
 
+        Compares expiry in Python: invites store datetime.now().isoformat()
+        (local-naive, 'T' separator), which a TEXT comparison against SQLite's
+        UTC datetime('now') gets wrong both by timezone and lexicographically.
+        Uses the same local-naive clock as create_invite/validate_invite.
+
         Returns:
             Number of deleted invites.
         """
+        now = datetime.now()
+        expired_ids: list[int] = []
         with self._connection() as conn:
             cursor = conn.execute(
-                """
-                DELETE FROM invites
-                WHERE expires_at < datetime('now') AND used_by IS NULL
-                """
+                "SELECT id, expires_at FROM invites WHERE used_by IS NULL"
+            )
+            for row in cursor.fetchall():
+                try:
+                    expires_at = datetime.fromisoformat(row["expires_at"])
+                except (ValueError, TypeError):
+                    # Unparseable expiry: leave the row for manual inspection.
+                    continue
+                if expires_at < now:
+                    expired_ids.append(row["id"])
+
+            if not expired_ids:
+                return 0
+
+            placeholders = ",".join("?" for _ in expired_ids)
+            cursor = conn.execute(
+                f"DELETE FROM invites WHERE id IN ({placeholders})",  # noqa: S608
+                tuple(expired_ids),
             )
             return cursor.rowcount
 
@@ -752,6 +855,12 @@ class Database:
             import json
             details_text = json.dumps(details, separators=(",", ":"), ensure_ascii=True)
 
+        # Prune at most once per interval instead of on every audit write.
+        now = time.monotonic()
+        should_prune = (
+            now - self._last_audit_prune_monotonic
+        ) >= self.AUDIT_PRUNE_INTERVAL_SECONDS or self._last_audit_prune_monotonic == 0.0
+
         with self._connection() as conn:
             cursor = conn.execute(
                 """
@@ -762,10 +871,12 @@ class Database:
                 """,
                 (actor_username, action, target_type, target_path, target_username, details_text),
             )
-            conn.execute(
-                "DELETE FROM audit_logs WHERE created_at < datetime('now', ?)",
-                (f"-{self.AUDIT_RETENTION_DAYS} days",),
-            )
+            if should_prune:
+                conn.execute(
+                    "DELETE FROM audit_logs WHERE created_at < datetime('now', ?)",
+                    (f"-{self.AUDIT_RETENTION_DAYS} days",),
+                )
+                self._last_audit_prune_monotonic = now
             return cursor.lastrowid or 0
 
     def list_audit_events(self, limit: int = 200) -> list[AuditEventDict]:
