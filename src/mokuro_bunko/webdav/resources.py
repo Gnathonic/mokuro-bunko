@@ -451,11 +451,22 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
         accel = self._accel_redirect_path()
         if accel is None:
             return
-        # Drop Content-Length: the body we return is empty; nginx sets the real
-        # length (and Content-Range for partial requests) when it serves the file.
+        # Set Content-Length: 0 (not drop it). The body we return IS empty
+        # (get_content -> b""), so 0 is accurate; nginx serves the real bytes via
+        # the X-Accel-Redirect and overrides Content-Length (and Content-Range
+        # for ranges) with the real file size. Keeping a Content-Length is
+        # REQUIRED: WsgiDAV force-closes any keep-alive response that has a
+        # body-bearing status but no Content-Length (see wsgidav_app.py
+        # _start_response_wrapper). On the nginx-offload path that fired on every
+        # single library download, tearing down the upstream connection each time
+        # and churning nginx's `keepalive` pool — which surfaces as sporadic 502
+        # ("upstream prematurely closed connection") on unrelated requests such
+        # as renames. Verified: nginx serves the full file whether upstream sends
+        # Content-Length 0, the real size, or none.
         response_headers[:] = [
             (k, v) for (k, v) in response_headers if k.lower() != "content-length"
         ]
+        response_headers.append(("Content-Length", "0"))
         response_headers.append(("X-Accel-Redirect", accel))
 
     def get_content(self) -> BinaryIO:
