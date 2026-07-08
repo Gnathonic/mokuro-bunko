@@ -719,3 +719,53 @@ class TestAnonymousAccess:
         """Test anonymous cannot PUT files."""
         response = client.put("/mokuro-reader/anon.cbz", content=b"data")
         assert response.status_code == 401
+
+
+class TestNginxAccelContentLength:
+    """X-Accel-Redirect library downloads must carry a Content-Length.
+
+    WsgiDAV force-closes (adds ``Connection: close`` to) any keep-alive response
+    that has a body-bearing status but no Content-Length. On the nginx-offload
+    path that omission fired on every single library download, tearing down the
+    upstream connection each time and churning nginx's keepalive pool, which
+    surfaced as sporadic 502s on unrelated requests (e.g. renames). The offload
+    body is empty (nginx serves the real bytes), so Content-Length: 0 is
+    accurate and keeps the upstream connection reusable.
+    """
+
+    @pytest.fixture
+    def accel_client(
+        self,
+        test_config: Config,
+        test_db: Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> WSGITestClient:
+        # MOKURO_NGINX_ACCEL=1 makes create_app flag each request for offload.
+        monkeypatch.setenv("MOKURO_NGINX_ACCEL", "1")
+        return WSGITestClient(create_app(test_config))
+
+    def test_offloaded_download_sets_content_length_zero(
+        self, accel_client: WSGITestClient
+    ) -> None:
+        response = accel_client.get("/mokuro-reader/manga1.cbz")
+        assert response.status_code == 200
+
+        headers = {k.lower(): v for k, v in response.headers}
+        # Offloaded: empty Python body + redirect to nginx's internal location.
+        assert "x-accel-redirect" in headers
+        assert response.content == b""
+        # Regression guard: Content-Length is present and == 0 (matches the empty
+        # body), so WsgiDAV does NOT force the connection closed.
+        assert headers.get("content-length") == "0"
+        assert headers.get("connection", "").lower() != "close"
+
+    def test_non_offloaded_download_streams_real_bytes(
+        self, client: WSGITestClient
+    ) -> None:
+        # With offload OFF (default fixture) the file streams normally with its
+        # real length and body; the fix only touches the offload path.
+        response = client.get("/mokuro-reader/manga1.cbz")
+        assert response.status_code == 200
+        assert response.content == b"fake cbz content 1"
+        headers = {k.lower(): v for k, v in response.headers}
+        assert headers.get("content-length") == str(len(b"fake cbz content 1"))
