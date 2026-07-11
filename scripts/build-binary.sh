@@ -118,7 +118,9 @@ python -m shiv \
     pyyaml \
     bcrypt \
     watchdog \
-    cryptography
+    cryptography \
+    click \
+    Pillow
 
 # Make executable
 chmod +x "$OUTPUT_PATH"

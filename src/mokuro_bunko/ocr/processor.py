@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,14 +17,53 @@ import time
 import uuid
 import zipfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
+from mokuro_bunko.logging_setup import get_ocr_log_dir
 from mokuro_bunko.ocr.installer import OCRInstaller
 
 # Supported manga file extensions
 SUPPORTED_EXTENSIONS = {".cbz", ".cbr", ".zip", ".rar"}
+
+
+class MokuroRunResult(NamedTuple):
+    """Outcome of one mokuro subprocess run."""
+
+    ok: bool
+    error: str | None = None
+    log_path: Path | None = None
+
+    def __bool__(self) -> bool:
+        # A NamedTuple is always truthy; make `if not result:` mean failure.
+        return self.ok
+
+
+@dataclass
+class OcrFailure:
+    """Details of the most recent OCR failure, for callers to persist."""
+
+    error: str
+    log_file: str | None = None
+
+
+# Patterns used to pull a human-readable reason out of mokuro's output.
+# Final line of a Python traceback, e.g. "ValueError: Couldn't instantiate ..."
+_TRACEBACK_FINAL_RE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*(?:Error|Exception)|KeyboardInterrupt|SystemExit|MemoryError)"
+    r"(?::\s?.*)?$"
+)
+# Any "some.module.ExceptionClass: message" line — only trusted inside a
+# "Traceback (most recent call last):" block, so arbitrarily named
+# exceptions (e.g. mokuro's InvalidImage) are still caught. The exception
+# is the last such line in the block.
+_EXCEPTION_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*:\s?.*$")
+# loguru error lines, e.g. "2026-07-09 ... | ERROR | mokuro.run:run:142 - message"
+_LOGURU_ERROR_RE = re.compile(r"\|\s*ERROR\s*\|.*?-\s*(?P<msg>.+)$")
+# mokuro's per-run summary, e.g. "Processed successfully: 0/1"
+_PROCESSED_RE = re.compile(r"Processed successfully:\s*(?P<done>\d+)/(?P<total>\d+)")
 
 
 class OCRProcessor:
@@ -49,6 +90,9 @@ class OCRProcessor:
         self.library_path = storage_path / "library"
         self.status_callback = status_callback or (lambda msg: None)
         self.progress_callback = progress_callback or (lambda data: None)
+        # Details of the most recent failure (set by processing methods when
+        # they return False), so callers can persist/display the reason.
+        self.last_failure: OcrFailure | None = None
 
         if python_path:
             self.python_path = python_path
@@ -65,6 +109,13 @@ class OCRProcessor:
     def _emit_progress(self, data: dict[str, Any]) -> None:
         """Emit OCR progress update."""
         self.progress_callback(data)
+
+    def _record_failure(self, error: str | None, log_path: Path | None) -> None:
+        """Remember the most recent failure so callers can persist it."""
+        self.last_failure = OcrFailure(
+            error=error or "unknown error",
+            log_file=str(log_path) if log_path is not None else None,
+        )
 
     @staticmethod
     def get_mokuro_sidecar_paths(cbz_path: Path) -> tuple[Path, Path]:
@@ -380,12 +431,15 @@ class OCRProcessor:
             workspace = self._build_temp_workspace(input_path.stem)
             try:
                 extract_dir = self._extract_and_clean(input_path, workspace)
-                if not self._run_mokuro(extract_dir, workspace):
+                run = self._run_mokuro(extract_dir, workspace)
+                if not run.ok:
+                    self._record_failure(run.error, run.log_path)
                     self._log(f"Mokuro failed for: {input_path.name}")
                     return False
 
                 sidecar = self._collect_valid_workspace_sidecar(extract_dir, workspace)
                 if sidecar is None:
+                    self._record_failure("no valid .mokuro sidecar generated", run.log_path)
                     self._log(f"No valid mokuro sidecar generated for: {input_path.name}")
                     return False
                 self._normalize_mokuro_metadata(sidecar, input_path)
@@ -417,7 +471,9 @@ class OCRProcessor:
         temp_output.mkdir(parents=True, exist_ok=True)
         try:
             # Run mokuro
-            if not self._run_mokuro(input_path, temp_output):
+            run = self._run_mokuro(input_path, temp_output)
+            if not run.ok:
+                self._record_failure(run.error, run.log_path)
                 self._log(f"Mokuro failed for: {input_path.name}")
                 return False
 
@@ -512,9 +568,11 @@ class OCRProcessor:
                 "status": "running",
             })
             sidecar: Path | None = None
-            if not self._run_mokuro(extract_dir, workspace, total_images=total_images):
+            run = self._run_mokuro(extract_dir, workspace, total_images=total_images)
+            if not run.ok:
                 sidecar = self._collect_valid_workspace_sidecar(extract_dir, workspace)
                 if sidecar is None:
+                    self._record_failure(run.error, run.log_path)
                     self._log(f"Mokuro failed for: {cbz_path.name}")
                     self._emit_progress({
                         "active": True,
@@ -526,6 +584,7 @@ class OCRProcessor:
                         "done_pages": 0,
                         "total_pages": total_images if total_images > 0 else None,
                         "status": "error",
+                        "error": run.error,
                     })
                     return False
                 self._log(
@@ -534,6 +593,7 @@ class OCRProcessor:
             if sidecar is None:
                 sidecar = self._collect_valid_workspace_sidecar(extract_dir, workspace)
             if sidecar is None:
+                self._record_failure("no valid .mokuro sidecar generated", run.log_path)
                 self._log(f"No valid mokuro sidecar generated for: {cbz_path.name}")
                 self._emit_progress({
                     "active": True,
@@ -545,6 +605,7 @@ class OCRProcessor:
                     "done_pages": 0,
                     "total_pages": total_images if total_images > 0 else None,
                     "status": "error",
+                    "error": "no valid .mokuro sidecar generated",
                 })
                 return False
             self._normalize_mokuro_metadata(sidecar, cbz_path)
@@ -565,8 +626,10 @@ class OCRProcessor:
                 "total_pages": total_images if total_images > 0 else None,
                 "status": "done",
             })
+            self.last_failure = None
             return True
         except Exception as e:
+            self._record_failure(str(e), None)
             self._log(f"Error processing {cbz_path.name}: {e}")
             return False
         finally:
@@ -582,16 +645,89 @@ class OCRProcessor:
             return True
         return self.ensure_thumbnail(cbz_path)
 
-    def _run_mokuro(self, input_path: Path, output_dir: Path, total_images: int = 0) -> bool:
+    def _get_mokuro_log_path(self, input_path: Path) -> Path:
+        """Return the per-volume mokuro log path (parent dirs created)."""
+        log_dir = get_ocr_log_dir(self.storage_path)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        # Sanitize the stem so odd volume names can't escape the log dir.
+        safe_stem = re.sub(r'[<>:"/\\|?*]', "_", input_path.stem) or "volume"
+        return log_dir / f"{safe_stem}.log"
+
+    @staticmethod
+    def _extract_mokuro_error(log_path: Path) -> str | None:
+        """Pull a short human-readable failure reason from a mokuro log.
+
+        Prefers the final line of the last Python traceback, then the last
+        loguru ERROR line. Returns at most 300 characters.
+        """
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        traceback_final: str | None = None
+        loguru_error: str | None = None
+        module_error: str | None = None
+        in_traceback = False
+        for line in lines:
+            if line.startswith("Traceback (most recent call last)"):
+                in_traceback = True
+                continue
+            if in_traceback and _EXCEPTION_LINE_RE.match(line):
+                # Keep overwriting: the raised exception is the last
+                # "Exc.Class: message" line in the traceback block.
+                traceback_final = line
+                continue
+            if _TRACEBACK_FINAL_RE.match(line):
+                traceback_final = line
+            match = _LOGURU_ERROR_RE.search(line)
+            if match:
+                loguru_error = match.group("msg").strip()
+            # runpy's "python.exe: No module named mokuro" (broken OCR env)
+            if "No module named" in line:
+                module_error = line
+
+        best = traceback_final or loguru_error or module_error
+        if best is None:
+            return None
+        return best[:300]
+
+    @staticmethod
+    def _mokuro_reported_failure(log_path: Path) -> bool:
+        """Check whether mokuro's own summary reports zero processed volumes.
+
+        mokuro exits 0 even when every volume fails, so the exit code alone
+        cannot be trusted; the "Processed successfully: N/M" summary can.
+        """
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        matches = _PROCESSED_RE.findall(text)
+        if not matches:
+            return False
+        done, total = matches[-1]  # trust the last summary in the log
+        return int(done) < int(total)
+
+    def _run_mokuro(
+        self, input_path: Path, output_dir: Path, total_images: int = 0
+    ) -> MokuroRunResult:
         """Run mokuro on the input file.
+
+        The subprocess's combined stdout/stderr is captured to a per-volume
+        log file under ``<storage>/logs/ocr/`` so failures are diagnosable.
 
         Args:
             input_path: Path to manga file/folder.
             output_dir: Directory for mokuro output.
+            total_images: Expected page count for progress reporting.
 
         Returns:
-            True if mokuro succeeded.
+            MokuroRunResult with success flag, short error summary, and the
+            path of the captured log.
         """
+        log_path: Path | None = None
         try:
             hard_timeout_seconds = 3600
             no_progress_timeout_seconds = 600
@@ -608,78 +744,98 @@ class OCRProcessor:
 
             self._log(f"Running: {' '.join(cmd)}")
 
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            start = time.time()
-            last_done = -1
-            last_progress_time = start
-            finalizing_since: float | None = None
+            log_path = self._get_mokuro_log_path(input_path)
+            env = dict(os.environ)
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUNBUFFERED"] = "1"
 
-            while process.poll() is None:
-                now = time.time()
-                if now - start > hard_timeout_seconds:
-                    process.kill()
-                    self._log("Mokuro timed out")
-                    return False
-                done = self._count_ocr_json_files(output_dir)
-                if done != last_done:
-                    last_done = done
-                    last_progress_time = now
-
-                percent, eta_seconds, progress_status = self._progress_metrics(
-                    done=done,
-                    total_images=total_images,
-                    elapsed=now - start,
+            with log_path.open("w", encoding="utf-8", errors="replace") as log_file:
+                log_file.write(f"# mokuro run for: {input_path}\n# command: {' '.join(cmd)}\n\n")
+                log_file.flush()
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    env=env,
                 )
-                if progress_status == "finalizing":
-                    if finalizing_since is None:
-                        finalizing_since = now
-                    if now - finalizing_since > finalizing_timeout_seconds:
-                        if self._collect_valid_workspace_sidecar(input_path, output_dir) is not None:
-                            process.kill()
-                            self._log("Mokuro finalizing exceeded timeout; valid sidecar found, continuing")
-                            return True
+                start = time.time()
+                last_done = -1
+                last_progress_time = start
+                finalizing_since: float | None = None
+
+                while process.poll() is None:
+                    now = time.time()
+                    if now - start > hard_timeout_seconds:
                         process.kill()
-                        self._log("Mokuro stalled in finalizing phase")
-                        return False
-                else:
-                    finalizing_since = None
+                        return self._fail_run("Mokuro timed out", log_path)
+                    done = self._count_ocr_json_files(output_dir)
+                    if done != last_done:
+                        last_done = done
+                        last_progress_time = now
 
-                if now - last_progress_time > no_progress_timeout_seconds:
-                    process.kill()
-                    self._log("Mokuro stalled with no OCR progress")
-                    return False
+                    percent, eta_seconds, progress_status = self._progress_metrics(
+                        done=done,
+                        total_images=total_images,
+                        elapsed=now - start,
+                    )
+                    if progress_status == "finalizing":
+                        if finalizing_since is None:
+                            finalizing_since = now
+                        if now - finalizing_since > finalizing_timeout_seconds:
+                            if self._collect_valid_workspace_sidecar(input_path, output_dir) is not None:
+                                process.kill()
+                                self._log("Mokuro finalizing exceeded timeout; valid sidecar found, continuing")
+                                return MokuroRunResult(True, None, log_path)
+                            process.kill()
+                            return self._fail_run("Mokuro stalled in finalizing phase", log_path)
+                    else:
+                        finalizing_since = None
 
-                self._emit_progress({
-                    "active": True,
-                    "percent": percent,
-                    "eta_seconds": eta_seconds,
-                    "done_pages": done,
-                    "total_pages": total_images if total_images > 0 else None,
-                    "status": progress_status,
-                })
-                time.sleep(2.0)
+                    if now - last_progress_time > no_progress_timeout_seconds:
+                        process.kill()
+                        return self._fail_run("Mokuro stalled with no OCR progress", log_path)
 
-            result_code = process.returncode
+                    self._emit_progress({
+                        "active": True,
+                        "percent": percent,
+                        "eta_seconds": eta_seconds,
+                        "done_pages": done,
+                        "total_pages": total_images if total_images > 0 else None,
+                        "status": progress_status,
+                    })
+                    time.sleep(2.0)
+
+                result_code = process.returncode
 
             if result_code != 0:
-                self._log("Mokuro error: subprocess exited with non-zero status")
-                return False
+                detail = self._extract_mokuro_error(log_path)
+                return self._fail_run(
+                    detail or "subprocess exited with non-zero status", log_path
+                )
 
-            return True
+            # mokuro exits 0 even when a volume fails; trust its own summary.
+            if self._mokuro_reported_failure(log_path):
+                detail = self._extract_mokuro_error(log_path)
+                return self._fail_run(
+                    detail or "mokuro reported the volume was not processed", log_path
+                )
+
+            return MokuroRunResult(True, None, log_path)
 
         except subprocess.TimeoutExpired:
-            self._log("Mokuro timed out")
-            return False
+            return self._fail_run("Mokuro timed out", log_path)
         except FileNotFoundError:
-            self._log(f"Python not found: {self.python_path}")
-            return False
+            return self._fail_run(f"Python not found: {self.python_path}", log_path)
         except Exception as e:
-            self._log(f"Mokuro exception: {e}")
-            return False
+            return self._fail_run(f"Mokuro exception: {e}", log_path)
+
+    def _fail_run(self, error: str, log_path: Path | None) -> MokuroRunResult:
+        """Log a mokuro failure and build its result object."""
+        if log_path is not None:
+            self._log(f"Mokuro failed: {error} (full log: {log_path})")
+        else:
+            self._log(f"Mokuro failed: {error}")
+        return MokuroRunResult(False, error, log_path)
 
     def _get_unique_path(self, path: Path) -> Path:
         """Get a unique path by adding a counter suffix.
