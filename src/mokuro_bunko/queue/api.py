@@ -92,14 +92,49 @@ class QueueAPI:
     ) -> list[bytes]:
         current = self._read_ocr_progress()
         pending_ocr, pending_thumbs = self._scan_library()
+        failed = self._read_ocr_failures()
+
+        # Volumes with a failure record are shown in "failed", not "pending".
+        failed_keys = {(entry.get("series"), entry.get("volume")) for entry in failed}
+        pending_ocr = [
+            item for item in pending_ocr
+            if (item["series"], item["volume"]) not in failed_keys
+        ]
 
         data = {
             "current": current,
             "pending_ocr": pending_ocr,
             "pending_thumbnails": pending_thumbs,
+            "failed": failed,
             "backend": self.ocr_backend,
         }
         return self._json_response(start_response, 200, data)
+
+    def _read_ocr_failures(self) -> list[dict[str, Any]]:
+        """Read persisted OCR failure records written by the OCR worker."""
+        failures_path = self.storage_base_path / ".ocr-failures.json"
+        if not failures_path.exists():
+            return []
+        try:
+            data = json.loads(failures_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, dict):
+            return []
+        failed = []
+        for entry in data.values():
+            if not isinstance(entry, dict):
+                continue
+            failed.append({
+                "series": entry.get("series"),
+                "volume": entry.get("volume"),
+                "error": entry.get("error"),
+                "attempts": entry.get("attempts", 1),
+                "last_attempt_at": entry.get("last_attempt_at"),
+                "log_file": entry.get("log_file"),
+            })
+        failed.sort(key=lambda e: (e.get("series") or "", e.get("volume") or ""))
+        return failed
 
     def _read_ocr_progress(self) -> dict[str, Any] | None:
         progress_path = self.storage_base_path / ".ocr-progress.json"

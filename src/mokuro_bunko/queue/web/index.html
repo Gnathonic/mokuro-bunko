@@ -57,6 +57,19 @@
             </h2>
             <p id="pending-thumb-text" class="queue-section__detail">No volumes waiting for thumbnails</p>
         </section>
+
+        <!-- Failed OCR -->
+        <section class="queue-section" id="failed-section" hidden>
+            <h2 class="queue-section__title">
+                Failed
+                <span id="failed-count" class="badge badge--error">0</span>
+            </h2>
+            <p class="queue-section__detail">
+                These volumes failed OCR and are retried with increasing delays.
+                Check the log file for the full error, or replace the file to retry immediately.
+            </p>
+            <div id="failed-list" class="pending-list"></div>
+        </section>
     </main>
 
     <script src="/_static/nav.js"></script>

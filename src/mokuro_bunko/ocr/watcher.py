@@ -263,6 +263,8 @@ class OCRWorker:
         self._inflight_ocr: set[Path] = set()
         self._inflight_thumbs: set[Path] = set()
         self._progress_path = self.storage_path / ".ocr-progress.json"
+        self._failures_path = self.storage_path / ".ocr-failures.json"
+        self._heartbeat_path = self.storage_path / ".ocr-heartbeat"
         self._active_progress: dict[str, Any] | None = None
         self._lock = threading.Lock()
 
@@ -323,8 +325,99 @@ class OCRWorker:
             return
         self._set_active_progress(data)
 
+    # --- Persistent failure records -------------------------------------
+    #
+    # Volumes that fail OCR are recorded in <storage>/.ocr-failures.json so
+    # the Queue page can show them (with the reason and log path) and so the
+    # scan loop can back off instead of retrying a broken volume forever.
+
+    def _load_failures(self) -> dict[str, dict[str, Any]]:
+        """Read the persisted failure records (empty dict when none)."""
+        try:
+            data = json.loads(self._failures_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+    def _save_failures(self, failures: dict[str, dict[str, Any]]) -> None:
+        """Atomically persist failure records; delete the file when empty."""
+        try:
+            if not failures:
+                if self._failures_path.exists():
+                    self._failures_path.unlink()
+                return
+            tmp = self._failures_path.with_name(self._failures_path.name + ".tmp")
+            tmp.write_text(
+                json.dumps(failures, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            os.replace(tmp, self._failures_path)
+        except OSError as e:
+            logger.warning("Could not persist OCR failure records: %s", e)
+
+    def _rel_library_path(self, path: Path) -> str:
+        """Best-effort path relative to the library root."""
+        try:
+            return str(path.relative_to(self.storage_path / "library"))
+        except ValueError:
+            return str(path)
+
+    def _record_ocr_failure(self, path: Path) -> None:
+        """Persist the processor's last failure for this volume."""
+        rel_cbz = self._rel_library_path(path)
+        try:
+            rel_series = str(path.parent.relative_to(self.storage_path / "library"))
+        except ValueError:
+            rel_series = ""
+        failure = self.processor.last_failure
+        error = failure.error if failure else "unknown error"
+        log_file = failure.log_file if failure else None
+        with self._lock:
+            failures = self._load_failures()
+            previous = failures.get(rel_cbz, {})
+            attempts = int(previous.get("attempts", 0)) + 1
+            failures[rel_cbz] = {
+                "series": rel_series,
+                "volume": path.stem,
+                "error": error,
+                "attempts": attempts,
+                "last_attempt_at": time.time(),
+                "log_file": log_file,
+            }
+            self._save_failures(failures)
+        delay = int(self._retry_delay_seconds(attempts))
+        self._log(
+            f"OCR failed for {rel_cbz} (attempt {attempts}, next retry in ~{delay}s): {error}"
+        )
+
+    def _clear_ocr_failure(self, path: Path) -> None:
+        """Drop the failure record for a volume that succeeded."""
+        rel_cbz = self._rel_library_path(path)
+        with self._lock:
+            failures = self._load_failures()
+            if rel_cbz in failures:
+                del failures[rel_cbz]
+                self._save_failures(failures)
+
+    def _retry_delay_seconds(self, attempts: int) -> float:
+        """Exponential backoff delay before retrying a failed volume."""
+        return min(self.poll_interval * (4.0 ** max(0, attempts - 1)), 3600.0)
+
+    def _touch_heartbeat(self) -> None:
+        """Record OCR-loop liveness for the health endpoint."""
+        try:
+            self._heartbeat_path.write_text(str(time.time()), encoding="utf-8")
+        except OSError:
+            pass
+
     def _ocr_candidates(self) -> list[Path]:
-        """Find library CBZ files missing mokuro sidecars."""
+        """Find library CBZ files missing mokuro sidecars.
+
+        Volumes with persisted failure records are skipped until their
+        backoff delay has elapsed (or the file was replaced since the last
+        attempt, which resets the record).
+        """
         library_path = self.storage_path / "library"
         if not library_path.exists():
             return []
@@ -333,6 +426,41 @@ class OCRWorker:
             if p.is_file()
             and self.processor.needs_mokuro_sidecar(p)
         ]
+
+        failures = self._load_failures()
+        if failures:
+            now = time.time()
+            eligible: list[Path] = []
+            reset_records: list[str] = []
+            for path in candidates:
+                rel = self._rel_library_path(path)
+                entry = failures.get(rel)
+                if entry is None:
+                    eligible.append(path)
+                    continue
+                last_attempt = float(entry.get("last_attempt_at", 0.0))
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                # 1s epsilon: filesystem timestamps and time.time() don't
+                # share sub-second granularity on Windows.
+                if mtime > last_attempt + 1.0:
+                    # File replaced/updated since the failure: start fresh.
+                    reset_records.append(rel)
+                    eligible.append(path)
+                    continue
+                attempts = int(entry.get("attempts", 1))
+                if now >= last_attempt + self._retry_delay_seconds(attempts):
+                    eligible.append(path)
+            if reset_records:
+                with self._lock:
+                    current = self._load_failures()
+                    for rel in reset_records:
+                        current.pop(rel, None)
+                    self._save_failures(current)
+            candidates = eligible
+
         candidates.sort(key=lambda p: self._fifo_sort_key(p, library_path))
         return candidates
 
@@ -385,7 +513,10 @@ class OCRWorker:
                     "eta_seconds": None,
                     "status": "running",
                 })
-                self.processor.process_library_ocr(path)
+                if self.processor.process_library_ocr(path):
+                    self._clear_ocr_failure(path)
+                else:
+                    self._record_ocr_failure(path)
             finally:
                 with self._lock:
                     self._inflight_ocr.discard(path)
@@ -418,6 +549,7 @@ class OCRWorker:
     def _run_ocr_loop(self) -> None:
         """Background OCR sidecar loop."""
         while self._running:
+            self._touch_heartbeat()
             try:
                 self._scan_ocr_once()
             except Exception as e:
