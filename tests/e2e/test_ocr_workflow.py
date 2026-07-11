@@ -20,6 +20,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mokuro_bunko.ocr.processor import MokuroRunResult
+
 if TYPE_CHECKING:
     pass
 
@@ -100,9 +102,9 @@ class TestOCRProcessor:
 
         processor = OCRProcessor(storage_dir)
 
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             (output_dir / f"{input_path.stem}.mokuro.gz").write_bytes(_mock_mokuro_sidecar_bytes())
-            return True
+            return MokuroRunResult(True)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run) as mock_mokuro:
 
@@ -123,9 +125,9 @@ class TestOCRProcessor:
 
         processor = OCRProcessor(storage_dir)
 
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             (output_dir / f"{input_path.stem}.mokuro.gz").write_bytes(_mock_mokuro_sidecar_bytes())
-            return True
+            return MokuroRunResult(True)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
 
@@ -149,11 +151,11 @@ class TestOCRProcessor:
         processor = OCRProcessor(storage_dir)
 
         # Mock mokuro to create the output file
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             # Simulate mokuro creating output
             mokuro_file = output_dir / f"{input_path.stem}.mokuro.gz"
             mokuro_file.write_bytes(_mock_mokuro_sidecar_bytes())
-            return True
+            return MokuroRunResult(True)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
             inbox_path = storage_dir / "inbox" / sample_cbz.name
@@ -174,7 +176,7 @@ class TestOCRProcessor:
         processor = OCRProcessor(storage_dir)
 
         with patch.object(processor, "_run_mokuro") as mock_mokuro:
-            mock_mokuro.return_value = False
+            mock_mokuro.return_value = MokuroRunResult(False, "mocked failure", None)
 
             inbox_path = storage_dir / "inbox" / sample_cbz.name
             shutil.copy(sample_cbz, inbox_path)
@@ -198,9 +200,9 @@ class TestOCRProcessor:
 
         processor = OCRProcessor(storage_dir, status_callback=callback)
 
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             (output_dir / f"{input_path.stem}.mokuro.gz").write_bytes(_mock_mokuro_sidecar_bytes())
-            return True
+            return MokuroRunResult(True)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
 
@@ -221,11 +223,11 @@ class TestOCRProcessor:
         library_cbz = storage_dir / "library" / sample_cbz.name
         shutil.copy(sample_cbz, library_cbz)
 
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             assert ".processing" in str(input_path.parent)
             assert input_path != library_cbz
             (output_dir / f"{input_path.stem}.mokuro.gz").write_bytes(_mock_mokuro_sidecar_bytes())
-            return True
+            return MokuroRunResult(True)
 
         with (
             patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run),
@@ -246,9 +248,9 @@ class TestOCRProcessor:
         inbox_path = storage_dir / "inbox" / sample_cbz.name
         shutil.copy(sample_cbz, inbox_path)
 
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             (output_dir / f"{input_path.stem}.mokuro.gz").write_bytes(_mock_mokuro_sidecar_bytes())
-            return True
+            return MokuroRunResult(True)
 
         with (
             patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run),
@@ -269,9 +271,9 @@ class TestOCRProcessor:
         library_cbz = storage_dir / "library" / sample_cbz.name
         shutil.copy(sample_cbz, library_cbz)
 
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             (output_dir / f"{input_path.stem}.mokuro").write_text("{}", encoding="utf-8")
-            return False
+            return MokuroRunResult(False, "mocked failure", None)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
             result = processor.process_library_ocr(library_cbz)
@@ -289,11 +291,11 @@ class TestOCRProcessor:
         library_cbz = storage_dir / "library" / sample_cbz.name
         shutil.copy(sample_cbz, library_cbz)
 
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             nested = output_dir / input_path.stem
             nested.mkdir(parents=True, exist_ok=True)
             (nested / f"{input_path.stem}.mokuro").write_text("{}", encoding="utf-8")
-            return False
+            return MokuroRunResult(False, "mocked failure", None)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
             result = processor.process_library_ocr(library_cbz)
@@ -313,14 +315,14 @@ class TestOCRProcessor:
         library_cbz = series_dir / "Trigun 01.cbz"
         shutil.copy(sample_cbz, library_cbz)
 
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             sidecar = output_dir / f"{input_path.stem}.mokuro"
             sidecar.write_text(json.dumps({
                 "title": "Trigun 01_rn9c9swa",
                 "volume": "wrong",
                 "title_uuid": "junk",
             }), encoding="utf-8")
-            return True
+            return MokuroRunResult(True)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
             result = processor.process_library_ocr(library_cbz)
@@ -485,10 +487,10 @@ class TestOCRWorkflow:
         processor = OCRProcessor(storage_dir)
 
         # Mock mokuro to simulate success
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             mokuro_file = output_dir / f"{input_path.stem}.mokuro.gz"
             mokuro_file.write_bytes(_mock_mokuro_sidecar_bytes())
-            return True
+            return MokuroRunResult(True)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
 
@@ -536,10 +538,10 @@ class TestOCRWorkflow:
 
         processor = OCRProcessor(storage_dir)
 
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             mokuro_file = output_dir / f"{input_path.stem}.mokuro.gz"
             mokuro_file.write_bytes(_mock_mokuro_sidecar_bytes())
-            return True
+            return MokuroRunResult(True)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
 
@@ -583,13 +585,13 @@ class TestOCRWorkflow:
 
         processor = OCRProcessor(storage_dir)
 
-        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> bool:
+        def mock_mokuro_run(input_path: Path, output_dir: Path, **kwargs: object) -> MokuroRunResult:
             # First file fails, second succeeds
             if "fail" in input_path.name:
-                return False
+                return MokuroRunResult(False, "mocked failure", None)
             mokuro_file = output_dir / f"{input_path.stem}.mokuro.gz"
             mokuro_file.write_bytes(_mock_mokuro_sidecar_bytes())
-            return True
+            return MokuroRunResult(True)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
 

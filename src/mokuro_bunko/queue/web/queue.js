@@ -9,6 +9,9 @@
   const $pendingOcrList = document.getElementById("pending-ocr-list");
   const $pendingThumbCount = document.getElementById("pending-thumb-count");
   const $pendingThumbText = document.getElementById("pending-thumb-text");
+  const $failedSection = document.getElementById("failed-section");
+  const $failedCount = document.getElementById("failed-count");
+  const $failedList = document.getElementById("failed-list");
 
   let queueConfig = { show_in_nav: false, public_access: true };
 
@@ -115,6 +118,36 @@
         : count + " volume" + (count !== 1 ? "s" : "") + " waiting for thumbnail generation";
   }
 
+  function renderFailed(list) {
+    if (!list.length) {
+      $failedSection.hidden = true;
+      $failedList.innerHTML = "";
+      return;
+    }
+    $failedSection.hidden = false;
+    $failedCount.textContent = list.length;
+    var html = '<ul class="pending-list__items">';
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      html +=
+        '<li class="pending-list__item pending-list__item--failed">' +
+        '<div class="failed-item__header">' +
+        '<span class="pending-list__series">' + escapeHtml(item.series || "") + "</span>" +
+        '<span class="pending-list__volume">' + escapeHtml(item.volume || "") + "</span>" +
+        '<span class="badge badge--error">' +
+        (item.attempts || 1) + " attempt" + ((item.attempts || 1) !== 1 ? "s" : "") +
+        "</span>" +
+        "</div>" +
+        '<div class="failed-item__error">' + escapeHtml(item.error || "unknown error") + "</div>" +
+        (item.log_file
+          ? '<div class="failed-item__log">Log: <code>' + escapeHtml(item.log_file) + "</code></div>"
+          : "") +
+        "</li>";
+    }
+    html += "</ul>";
+    $failedList.innerHTML = html;
+  }
+
   function escapeHtml(s) {
     var d = document.createElement("div");
     d.textContent = s;
@@ -136,6 +169,7 @@
         renderCurrent(data.current);
         renderPendingOcr(data.pending_ocr || []);
         renderPendingThumbs(data.pending_thumbnails || 0);
+        renderFailed(data.failed || []);
       })
       .catch(function () {});
   }
