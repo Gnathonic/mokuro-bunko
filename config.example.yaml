@@ -89,3 +89,10 @@ ocr:
   backend: auto
   # Interval in seconds to check inbox for new files
   poll_interval: 30
+  # Reuse per-page OCR results from a previous attempt, so an interrupted or timed-out volume resumes instead of starting over. Set false to force a full re-OCR.
+  use_cache: false
+  # A volume is killed after max(timeout_minimum_seconds, timeout_per_page_seconds * pages). A flat timeout kills long volumes on slow backends regardless of how much progress they were making.
+  timeout_per_page_seconds: 60
+  timeout_minimum_seconds: 3600
+  # A failed volume's workspace is kept so the retry can resume. Abandoned workspaces are swept after this many days.
+  workspace_retention_days: 7

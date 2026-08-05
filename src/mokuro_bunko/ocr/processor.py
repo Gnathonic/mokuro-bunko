@@ -6,6 +6,7 @@ Handles running Mokuro on manga files and moving them to the library.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from mokuro_bunko.config import OcrConfig
 from mokuro_bunko.logging_setup import get_ocr_log_dir
 from mokuro_bunko.ocr.installer import OCRInstaller
 
@@ -75,6 +77,7 @@ class OCRProcessor:
         python_path: Path | None = None,
         status_callback: Callable[[str], None] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        ocr_config: OcrConfig | None = None,
     ) -> None:
         """Initialize the OCR processor.
 
@@ -84,12 +87,15 @@ class OCRProcessor:
                         If None, auto-detects from OCRInstaller.
             status_callback: Optional callback for status messages.
             progress_callback: Optional callback for OCR progress updates.
+            ocr_config: OCR settings. Defaults are used when omitted, so direct
+                       construction (tests, CLI) keeps working.
         """
         self.storage_path = storage_path
         self.inbox_path = storage_path / "inbox"
         self.library_path = storage_path / "library"
         self.status_callback = status_callback or (lambda msg: None)
         self.progress_callback = progress_callback or (lambda data: None)
+        self.ocr_config = ocr_config or OcrConfig()
         # Details of the most recent failure (set by processing methods when
         # they return False), so callers can persist/display the reason.
         self.last_failure: OcrFailure | None = None
@@ -210,6 +216,72 @@ class OCRProcessor:
         processing_root = self.storage_path / ".processing"
         processing_root.mkdir(parents=True, exist_ok=True)
         return Path(tempfile.mkdtemp(prefix=f"{name_hint}_", dir=str(processing_root)))
+
+    def _workspace_for_volume(self, cbz_path: Path) -> Path:
+        """Return the stable workspace directory for a library volume.
+
+        Deterministic so a retried run finds the previous attempt's ``_ocr``
+        cache and resumes rather than re-OCRing every page. Hashed rather than
+        derived from the path directly because series and volume names contain
+        spaces, separators and non-ASCII characters that do not survive being
+        used as a directory name across platforms.
+        """
+        try:
+            key = cbz_path.relative_to(self.library_path).as_posix()
+        except ValueError:
+            # Outside the library (direct call, tests): fall back to the full
+            # path so the key is still unique.
+            key = cbz_path.as_posix()
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+        processing_root = self.storage_path / ".processing"
+        processing_root.mkdir(parents=True, exist_ok=True)
+        workspace = processing_root / digest
+        workspace.mkdir(parents=True, exist_ok=True)
+        return workspace
+
+    def _release_workspace(self, workspace: Path, succeeded: bool) -> None:
+        """Reclaim a workspace after a run, unless it may still be useful.
+
+        A failed run's workspace holds the per-page OCR cache for the pages that
+        did complete. Deleting it would force the retry to start from page 1,
+        which is the whole problem this exists to avoid.
+        """
+        if not succeeded:
+            self._log(f"Retaining workspace for resume: {workspace}")
+            return
+        if workspace.exists():
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    def sweep_stale_workspaces(self) -> int:
+        """Remove retained workspaces older than the retention window.
+
+        Retaining a failed volume's workspace trades disk for time. This bounds
+        that trade: a volume abandoned by the operator (deleted, or permanently
+        failing) stops consuming disk after ``workspace_retention_days``.
+
+        Returns:
+            Number of workspaces removed.
+        """
+        processing_root = self.storage_path / ".processing"
+        if not processing_root.is_dir():
+            return 0
+
+        cutoff = time.time() - (self.ocr_config.workspace_retention_days * 86400)
+        removed = 0
+        for entry in processing_root.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                if entry.stat().st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            if not entry.exists():
+                removed += 1
+                self._log(f"Swept stale OCR workspace: {entry.name}")
+        return removed
 
     def _extract_and_clean(self, cbz_path: Path, workspace: Path) -> Path:
         """Extract a CBZ into the workspace and remove embedded thumbnails.
@@ -550,7 +622,8 @@ class OCRProcessor:
             return True
 
         self._log(f"Processing library CBZ in temp workspace: {cbz_path}")
-        workspace = self._build_temp_workspace(cbz_path.stem)
+        workspace = self._workspace_for_volume(cbz_path)
+        succeeded = False
         try:
             extract_dir = self._extract_and_clean(cbz_path, workspace)
             total_images = self._count_directory_images(extract_dir)
@@ -627,14 +700,14 @@ class OCRProcessor:
                 "status": "done",
             })
             self.last_failure = None
+            succeeded = True
             return True
         except Exception as e:
             self._record_failure(str(e), None)
             self._log(f"Error processing {cbz_path.name}: {e}")
             return False
         finally:
-            if workspace.exists():
-                shutil.rmtree(workspace, ignore_errors=True)
+            self._release_workspace(workspace, succeeded)
 
     def process_library_thumbnail(self, cbz_path: Path) -> bool:
         """Generate missing thumbnail for a library CBZ."""
@@ -710,6 +783,38 @@ class OCRProcessor:
         done, total = matches[-1]  # trust the last summary in the log
         return int(done) < int(total)
 
+    def _hard_timeout_seconds(self, total_images: int) -> int:
+        """Total time a volume is allowed before the run is killed.
+
+        A flat timeout scales inversely with need: the longer the volume, the
+        more certain the kill. On a CPU backend a 228-page volume can exceed an
+        hour comfortably, so the budget is derived from page count with a floor
+        for short volumes.
+
+        This is not the hang detector — ``no_progress_timeout_seconds`` catches a
+        wedged process within ten minutes regardless of volume length.
+        """
+        per_page = self.ocr_config.timeout_per_page_seconds * max(0, total_images)
+        return max(self.ocr_config.timeout_minimum_seconds, per_page)
+
+    def _build_mokuro_command(self, input_path: Path) -> list[str]:
+        """Build the mokuro subprocess command line.
+
+        ``--no_cache`` makes mokuro ignore the per-page results it wrote under
+        ``_ocr`` on a previous attempt, so it is passed only when the operator
+        explicitly wants a clean re-OCR.
+        """
+        cmd = [
+            str(self.python_path),
+            "-m",
+            "mokuro",
+            str(input_path),
+            "--disable_confirmation",
+        ]
+        if not self.ocr_config.use_cache:
+            cmd.append("--no_cache")
+        return cmd
+
     def _run_mokuro(
         self, input_path: Path, output_dir: Path, total_images: int = 0
     ) -> MokuroRunResult:
@@ -729,18 +834,11 @@ class OCRProcessor:
         """
         log_path: Path | None = None
         try:
-            hard_timeout_seconds = 3600
+            hard_timeout_seconds = self._hard_timeout_seconds(total_images)
             no_progress_timeout_seconds = 600
             finalizing_timeout_seconds = 900
 
-            cmd = [
-                str(self.python_path),
-                "-m",
-                "mokuro",
-                str(input_path),
-                "--disable_confirmation",
-                "--no_cache",
-            ]
+            cmd = self._build_mokuro_command(input_path)
 
             self._log(f"Running: {' '.join(cmd)}")
 

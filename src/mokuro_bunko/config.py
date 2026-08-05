@@ -224,6 +224,17 @@ class OcrConfig:
 
     backend: OcrBackend = "auto"
     poll_interval: int = 30
+    # Reuse per-page OCR from a previous attempt. mokuro caches each page's
+    # result under _ocr/ and skips pages already done; disabling this forces a
+    # full re-OCR, which is only wanted after a bad model or a corrupt cache.
+    use_cache: bool = False
+    # The hard timeout is derived from volume length rather than fixed, so long
+    # volumes are not killed mid-run on slow (CPU) backends.
+    timeout_per_page_seconds: int = 60
+    timeout_minimum_seconds: int = 3600
+    # A failed volume's workspace is retained so the retry can resume. Abandoned
+    # workspaces are swept after this many days.
+    workspace_retention_days: int = 7
 
     def __post_init__(self) -> None:
         valid_backends = ("auto", "cuda", "rocm", "cpu", "skip")
@@ -231,6 +242,18 @@ class OcrConfig:
             raise ValueError(f"Invalid OCR backend: {self.backend}")
         if self.poll_interval < 1:
             raise ValueError(f"Invalid poll interval: {self.poll_interval}")
+        if self.timeout_per_page_seconds < 1:
+            raise ValueError(
+                f"Invalid timeout_per_page_seconds: {self.timeout_per_page_seconds}"
+            )
+        if self.timeout_minimum_seconds < 1:
+            raise ValueError(
+                f"Invalid timeout_minimum_seconds: {self.timeout_minimum_seconds}"
+            )
+        if self.workspace_retention_days < 0:
+            raise ValueError(
+                f"Invalid workspace_retention_days: {self.workspace_retention_days}"
+            )
 
 
 @dataclass
@@ -321,6 +344,10 @@ class Config:
             "ocr": {
                 "backend": self.ocr.backend,
                 "poll_interval": self.ocr.poll_interval,
+                "use_cache": self.ocr.use_cache,
+                "timeout_per_page_seconds": self.ocr.timeout_per_page_seconds,
+                "timeout_minimum_seconds": self.ocr.timeout_minimum_seconds,
+                "workspace_retention_days": self.ocr.workspace_retention_days,
             },
             "dyndns": {
                 "enabled": self.dyndns.enabled,
@@ -432,6 +459,10 @@ _CONFIG_TYPES: dict[str, type] = {
     "queue.public_access": bool,
     "ocr.backend": str,
     "ocr.poll_interval": int,
+    "ocr.use_cache": bool,
+    "ocr.timeout_per_page_seconds": int,
+    "ocr.timeout_minimum_seconds": int,
+    "ocr.workspace_retention_days": int,
     "dyndns.enabled": bool,
     "dyndns.provider": str,
     "dyndns.token": str,

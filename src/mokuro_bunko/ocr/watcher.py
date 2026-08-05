@@ -14,6 +14,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from mokuro_bunko.config import OcrConfig
+
 try:
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
     from watchdog.observers import Observer
@@ -236,6 +238,7 @@ class OCRWorker:
         storage_path: Path,
         poll_interval: float = 30.0,
         status_callback: Callable[[str], None] | None = None,
+        ocr_config: OcrConfig | None = None,
     ) -> None:
         """Initialize the OCR worker.
 
@@ -243,6 +246,7 @@ class OCRWorker:
             storage_path: Base storage path.
             poll_interval: How often to poll for new files.
             status_callback: Optional callback for status messages.
+            ocr_config: OCR settings, forwarded to the processor.
         """
         from mokuro_bunko.ocr.processor import OCRProcessor
 
@@ -254,6 +258,7 @@ class OCRWorker:
             storage_path=storage_path,
             status_callback=self.status_callback,
             progress_callback=self._on_progress,
+            ocr_config=ocr_config,
         )
 
         self.watcher: InboxWatcher | None = None
@@ -596,6 +601,10 @@ class OCRWorker:
         removed = self._remove_corrupt_sidecars()
         if removed:
             self._log(f"Removed {removed} corrupt mokuro sidecar file(s) at startup")
+
+        swept = self.processor.sweep_stale_workspaces()
+        if swept:
+            self._log(f"Swept {swept} stale OCR workspace(s) at startup")
 
         self._running = True
         self._log("OCR worker starting...")

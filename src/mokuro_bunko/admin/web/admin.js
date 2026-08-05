@@ -458,6 +458,13 @@ async function loadSettings() {
         document.getElementById('settings-queue-public').checked = data.queue?.public_access ?? true;
         // OCR
         document.getElementById('settings-ocr-interval').value = data.ocr?.poll_interval || 30;
+        document.getElementById('settings-ocr-use-cache').checked = data.ocr?.use_cache !== false;
+        document.getElementById('settings-ocr-timeout-per-page').value =
+            data.ocr?.timeout_per_page_seconds || 60;
+        document.getElementById('settings-ocr-timeout-minimum').value =
+            data.ocr?.timeout_minimum_seconds || 3600;
+        document.getElementById('settings-ocr-retention').value =
+            data.ocr?.workspace_retention_days ?? 7;
         renderOcrRuntimeStatus(data.ocr_runtime || {}, data.ocr || {});
     } catch (err) {
         showToast('Failed to load settings: ' + err.message, 'error');
@@ -585,9 +592,16 @@ async function saveOcrSettings() {
     try {
         await apiPut('/settings/ocr', {
             poll_interval: parseInt(document.getElementById('settings-ocr-interval').value, 10),
+            use_cache: document.getElementById('settings-ocr-use-cache').checked,
+            timeout_per_page_seconds: parseInt(
+                document.getElementById('settings-ocr-timeout-per-page').value, 10),
+            timeout_minimum_seconds: parseInt(
+                document.getElementById('settings-ocr-timeout-minimum').value, 10),
+            workspace_retention_days: parseInt(
+                document.getElementById('settings-ocr-retention').value, 10),
         });
         await loadSettings();
-        showToast('OCR poll interval saved', 'success');
+        showToast('OCR settings saved', 'success');
     } catch (err) {
         showToast(err.message, 'error');
     }

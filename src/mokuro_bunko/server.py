@@ -529,6 +529,7 @@ def run_server(config: Config, config_path: Path | None = None, verbose: bool = 
             storage_path=config.storage.base_path,
             poll_interval=float(config.ocr.poll_interval),
             status_callback=ocr_logger.info,
+            ocr_config=config.ocr,
         )
         ocr_worker.start(background=True)
         logger.info(
