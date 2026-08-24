@@ -18,6 +18,8 @@ from mokuro_bunko.dyndns import DynDNSService
 from mokuro_bunko.home.api import HomePageAPI
 from mokuro_bunko.library_index import LibraryIndexCache
 from mokuro_bunko.login.api import LoginAPI
+from mokuro_bunko.metadata.middleware import MetadataAPI
+from mokuro_bunko.metadata.service import MetadataService
 from mokuro_bunko.middleware.auth import AuthMiddleware
 from mokuro_bunko.middleware.cors import CorsMiddleware
 from mokuro_bunko.middleware.fs_watcher import LibraryWatcher
@@ -185,16 +187,17 @@ def create_app(
     # 1. dav_app (innermost)
     # 2. PropfindCacheMiddleware (caches Depth:infinity + gzip)
     # 3. AdminAPI (handles /_admin, needs role from environ)
-    # 4. AuthMiddleware (sets mokuro.role in environ)
-    # 5. CatalogAPI (public catalog, no auth required)
-    # 6. RegistrationAPI (handles /api/register without auth)
-    # 7. LoginAPI (login page + /login/api/me)
-    # 8. AccountAPI (account page + /api/account/*)
-    # 9. HomePageAPI (serves welcome page at / for browsers)
-    # 10. SetupWizardAPI (intercepts / -> /setup on first run)
-    # 11. StaticMiddleware (serves shared CSS/JS)
-    # 12. CorsMiddleware (handles CORS)
-    # 13. RequestLogMiddleware (MOKURO_DEBUG=1, outermost)
+    # 4. MetadataAPI (intercepts series.json PUTs as update requests)
+    # 5. AuthMiddleware (sets mokuro.role in environ)
+    # 6. CatalogAPI (public catalog, no auth required)
+    # 7. RegistrationAPI (handles /api/register without auth)
+    # 8. LoginAPI (login page + /login/api/me)
+    # 9. AccountAPI (account page + /api/account/*)
+    # 10. HomePageAPI (serves welcome page at / for browsers)
+    # 11. SetupWizardAPI (intercepts / -> /setup on first run)
+    # 12. StaticMiddleware (serves shared CSS/JS)
+    # 13. CorsMiddleware (handles CORS)
+    # 14. RequestLogMiddleware (MOKURO_DEBUG=1, outermost)
 
     app: Callable[..., Iterable[bytes]] = dav_app
 
@@ -217,6 +220,22 @@ def create_app(
     app = propfind_cache
     library_index = LibraryIndexCache(config.storage.library_path, ttl=30.0)
 
+    def on_metadata_published() -> None:
+        """Compiled files changed on disk: refresh the listings that show them.
+
+        Deliberately does NOT schedule another regeneration — that would feed
+        itself forever. (The filesystem watcher ignores `.json` for the same
+        reason: `_RELEVANT_SUFFIXES` has no `.json` entry.)
+        """
+        library_index.invalidate()
+        propfind_cache.schedule_refresh(delay=5.0)
+
+    metadata_service = MetadataService(
+        config.storage.library_path,
+        database,
+        on_published=on_metadata_published,
+    )
+
     # Wrap with admin API (innermost, after dav_app)
     if config.admin.enabled:
         app = AdminAPI(
@@ -229,6 +248,11 @@ def create_app(
             dyndns_service=dyndns_service,
             ocr_runtime=ocr_runtime,
         )
+
+    # Wrap with metadata API (intercepts series.json PUTs as update requests).
+    # Inside AuthMiddleware so the actor is known; outside the DAV app so the
+    # PUT never opens a writer.
+    app = MetadataAPI(app, service=metadata_service)
 
     # Wrap with auth middleware (sets role for admin API to check)
     app = AuthMiddleware(
@@ -300,6 +324,7 @@ def create_app(
     def on_library_change() -> None:
         library_index.invalidate()
         propfind_cache.schedule_refresh(delay=5.0)
+        metadata_service.schedule_regeneration()
 
     # Start filesystem watcher for out-of-band changes (OCR sidecars, thumbnails)
     library_watcher = LibraryWatcher(
@@ -308,6 +333,11 @@ def create_app(
     )
     library_watcher.start()
     app._library_watcher = library_watcher  # type: ignore[attr-defined]
+
+    app._metadata_service = metadata_service  # type: ignore[attr-defined]
+    # First compilation runs after startup settles (PROPFIND warm on a large
+    # library is already competing for the disk).
+    metadata_service.schedule_regeneration(delay=20.0)
 
     return app
 
@@ -523,4 +553,6 @@ def run_server(config: Config, config_path: Path | None = None) -> None:
             wsgi_app._library_watcher.stop()
         if hasattr(wsgi_app, "_propfind_cache"):
             wsgi_app._propfind_cache.stop()
+        if hasattr(wsgi_app, "_metadata_service"):
+            wsgi_app._metadata_service.stop()
         server.stop()
