@@ -17,7 +17,8 @@ import shutil
 import tempfile
 import threading
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
@@ -104,6 +105,23 @@ def _try_acquire_all(paths: list[Path]) -> list[Path] | None:
             return None
         acquired.append(path)
     return acquired
+
+
+@contextmanager
+def path_write_lock(path: Path) -> Iterator[None]:
+    """Hold the per-path write lock for a non-DAV writer.
+
+    The compiled metadata files are written by the server itself, outside the
+    DAV request path, but they live in the same tree: taking the same lock is
+    what stops a regeneration from interleaving with an upload or a folder
+    MOVE. Raises `DAVError(423)` when the path (or an ancestor) is busy.
+    """
+    if not _PATH_WRITE_LOCKS.acquire(path):
+        raise DAVError(_HTTP_LOCKED, _LOCKED_MESSAGE)
+    try:
+        yield
+    finally:
+        _PATH_WRITE_LOCKS.release(path)
 
 
 class PathMapper:
