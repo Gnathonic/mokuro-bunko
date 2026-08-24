@@ -115,7 +115,34 @@ def deterministic_uuid(value: str) -> str:
 
 
 def normalize_series_key(title: str) -> str:
-    """Client: `normalizeSeriesKey` — trim, collapse whitespace, lowercase."""
+    """Client: `normalizeSeriesKey` — trim, collapse whitespace, lowercase.
+
+    Two known divergences from the client's `title.trim().replace(/\\s+/g, ' ')
+    .toLowerCase()`, both at the edges of the whitespace class:
+
+    - `{U+FEFF}` is whitespace to JS `trim()`/`\\s` but NOT to Python — a title
+      with a BOM in it folds to a different key here.
+    - `{U+001C, U+001D, U+001E, U+001F, U+0085}` are whitespace to Python's
+      `str.strip()`/`\\s` but NOT to JS.
+
+    This can only ever matter as ALIASING: two sibling entries whose titles
+    differ *only* in those codepoints, which one runtime folds together and the
+    other keeps apart. U+001C–U+001F cannot survive the trip anyway (they are
+    illegal in XML 1.0, so no WebDAV request carries them), leaving U+FEFF and
+    U+0085 in filenames as the theoretical case. No title from a filesystem
+    name or a `.mokuro` field has contained one; if that changes, fold both
+    sides here rather than letting the keys drift.
+
+    `deterministic_uuid` shares the divergence through its own
+    `.lower().strip()`, and adds one of its own: `lower()` itself. Python 3.12
+    (UCD 15.0.0) and Node 26 disagree on 55 codepoints (measured, e.g. U+A7CB,
+    U+A7D2), and that set MOVES when either runtime's Unicode data is upgraded.
+    Placeholder uuids are only derived from series/volume titles, which are
+    Latin/Japanese in practice, so no live uuid is affected — but a title
+    containing one of those codepoints would hash differently on the two sides
+    and strand its progress, and could start or stop doing so on a runtime
+    upgrade.
+    """
     return re.sub(r"\s+", " ", title.strip()).lower()
 
 
@@ -138,16 +165,34 @@ def natural_sort_key(title: str) -> tuple[tuple[int, object], ...]:
     The client sorts with `Intl.Collator(undefined, {numeric: true,
     sensitivity: 'base'})`. Full ICU parity is not reachable from the stdlib
     and is not needed: nothing downstream depends on the file's order (readers
-    re-sort on read). What IS required is that the order be TOTAL and STABLE,
-    so a rebuild that changed nothing produces the same bytes and therefore the
-    same size/mtime (contract §3/§4). Digit runs compare numerically and sort
-    before letters; text compares case- and accent-folded.
+    re-sort on read). Digit runs compare numerically and sort before letters;
+    text compares case- and accent-folded.
+
+    What this gives is a TOTAL PREORDER, not a total order: the fold is
+    deliberately lossy, so distinct titles can share a key (`VOL 1` / `vol 1`;
+    `Vol 1` / `Vol 01`, since a digit run compares by value). Byte determinism
+    across rebuilds (contract §3/§4) therefore does NOT rest on this key alone
+    — it rests on the caller feeding a deterministically ordered input to a
+    STABLE sort (Python's `sorted` is stable), which fixes the order of the
+    tied titles. A caller that sorts a set, a dict view built in nondeterministic
+    order, or the raw output of a directory scan can still produce different
+    bytes for an unchanged library.
+
+    Digit runs are keyed with `str.isdecimal()`, not `str.isdigit()`:
+    `isdigit()` is True for 128 codepoints `int()` refuses (circled `①`,
+    superscript `¹`, parenthesised `⑴`), and circled numerals are real Japanese
+    volume numbering — keying on `isdigit()` raised `ValueError` and one such
+    filename would abort publishing for the whole library. `isdecimal()` is
+    exactly the set `re`'s `\\d` matches (both 680 codepoints under UCD 15.0.0),
+    so every run this regex captures still keys numerically; anything else
+    falls through to the text branch, where NFKD maps most of them to their
+    digits anyway.
     """
     key: list[tuple[int, object]] = []
     for part in _DIGIT_RUN.split(title):
         if not part:
             continue
-        if part.isdigit():
+        if part.isdecimal():
             key.append((0, int(part)))
         else:
             folded = "".join(
@@ -166,6 +211,20 @@ def normalize_updated_at(value: object, now: float | None = None) -> str | None:
     string ("Aug 16 2020" sorts above every ISO date) or a far-future value
     would win against every honest timestamp forever. Unparsable -> None
     (caller drops the payload); more than five minutes ahead -> clamped.
+
+    This accepts a NARROWER grammar than the client's `Date.parse`, and for
+    one shared spelling it picks a DIFFERENT INSTANT — both deliberate:
+
+    - Grammar: `datetime.fromisoformat` (plus the `Z` rewrite above) takes ISO
+      8601 and nothing else. Every stamp that reaches bunko is `toISOString()`
+      output, and everything the narrower grammar rejects is exactly what the
+      contract wants rejected.
+    - Instant: an OFFSETLESS stamp (`2026-08-18T19:36:24`) is read as UTC here,
+      while `Date.parse` reads that same spelling as the parsing device's LOCAL
+      time — so the two disagree by that device's offset. UTC is the right
+      choice for a server compiling files that many devices merge: the instant a
+      stamp denotes must not depend on who read it. `toISOString()` always
+      writes the `Z`, so this only affects hand-written input.
     """
     if not isinstance(value, str):
         return None
