@@ -4,7 +4,7 @@
 
 **Goal:** mokuro-bunko compiles `<Series>/series.json` + root `catalog.json` server-side from the library's `.mokuro`/`.cbz` files plus a stored facts table, blocks raw writes to those compiled files, and accepts metadata updates by intercepting a scoped user's `series.json` PUT.
 
-**Architecture:** A new `src/mokuro_bunko/metadata/` package owns everything: byte-parity primitives ported from the reader client, the two document schemas and their compact serializers, an untrusted-payload validator, the newest-facts-stamp-wins merge, a stat-cached compiler that turns a series folder into volume entries, and a `MetadataService` that writes the compiled files to disk (only when the bytes changed) and regenerates on a debounce. Facts, shelf offsets and the per-volume entry cache live in the existing SQLite database (schema v3). Two request-path changes carry the contract: `AuthMiddleware` gains the policy (a `series.json` PUT is an update *request* needing only `WRITE_PROGRESS`; every other write to a compiled file is 403 for every role), and a thin `MetadataAPI` WSGI middleware — mounted inside `AuthMiddleware`, outside `PropfindCacheMiddleware` — intercepts the accepted PUT so the DAV layer never sees it.
+**Architecture:** A new `src/mokuro_bunko/metadata/` package owns everything: byte-parity primitives ported from the reader client, the two document schemas and their compact serializers, an untrusted-payload validator, the newest-facts-stamp-wins merge, a stat-cached compiler that turns a series folder into volume entries, and a `MetadataService` that writes the compiled files to disk (only when the bytes changed) and regenerates on a debounce. Facts, shelf offsets and the per-volume entry cache live in the existing SQLite database (schema v3). Two request-path changes carry the contract: `AuthMiddleware` gains the policy (a `series.json` PUT is an update *request*, authorized by ownership — `registered` never, `uploader` only for a series it owns, any `MODIFY_DELETE`-holding role for all of them; every other write to a compiled file stays 403 for every role), and a thin `MetadataAPI` WSGI middleware — mounted inside `AuthMiddleware`, outside `PropfindCacheMiddleware` — intercepts the accepted PUT so the DAV layer never sees it.
 
 **Tech Stack:** Python 3.10+ (target `py310`), `uv` for the venv/runner, wsgidav 4 + cheroot, sqlite3 via `mokuro_bunko.database.Database`, pytest, ruff, mypy (strict). No new runtime dependencies.
 
@@ -19,9 +19,9 @@ Copied verbatim from the contract (`2026-08-23-catalog-distribution-bunko.md`, "
 3. **Compiled `catalog.json`** — root, compact: `{version:1, updated_at, series:[{series_title, titles, synonyms, tag?, unit?, external_ids?, updated_at}]}` — one entry per series folder, facts subset identical to that series' `series.json`, factless series included with just `series_title` + epoch stamp. Name/mapping/search data only.
 4. **Serving.** Both files served with accurate `size`/`mtime` (clients version their caches on those). Regenerate on library change (archive add/remove/rename) and on every accepted update.
 5. **Write blocking (scoped users).** Archives, covers, `catalog.json`: rejected. The rejection must be an ordinary error the client can ignore — clients treat metadata-write failure as best-effort and stay read-write for everything else.
-6. **Intercepted `series.json` PUT.** A scoped user's PUT is an update REQUEST, not a file write:
+6. **Intercepted `series.json` PUT.** An authorized user's PUT is an update REQUEST, not a file write. (2026-08-24 ruling on who is authorized, superseding "within the user's permission scope" below: `registered` never; `uploader` only for a series it owns outright via the existing upload-ownership table — an untracked/unowned folder is a 403, not a free-for-all; any role holding the modify/delete permission for any series; `anonymous` is 401 — see bunko's auth task. A PUT body carrying only facts, with no `volumes` array and no offsets, is an equally legitimate update, not a malformed one.):
    - Parse; validate ONLY the facts fields (`external_ids` ints, `titles`/`synonyms` strings, `tag` string, `unit` ∈ {volumes, chapters}, `updated_at` ISO). Unknown keys are IGNORED, and so is everything in the `volumes` array EXCEPT each entry's `offset` (the client's index is unauthoritative; bunko's own compilation wins). The alignment fields — top-level `spine_offset` and per-entry `offset`, matched by `volume_uuid` — are stored as index data and re-emitted by the compiler; they are never facts, so they never move the facts stamp and a PUT carrying only offsets is still "factless". Bunko does NOT clamp or range-check them: it preserves whatever it was sent verbatim, and every reader clamps on parse (±50 % / ±500 px) — one side owns the range rule, so the two can never disagree about what a stored value means.
-   - Merge newest-facts-stamp-wins against bunko's stored facts for that series, within the user's permission scope. A factless PUT with epoch stamp never clears facts (mirror of the reader's factless rules); a factless PUT with a strictly newer stamp is an explicit unlink.
+   - Merge newest-facts-stamp-wins against bunko's stored facts for that series, once the actor is authorized per the rule above. A factless PUT with epoch stamp never clears facts (mirror of the reader's factless rules); a factless PUT with a strictly newer stamp is an explicit unlink.
    - On accept: persist facts, regenerate that `series.json` + `catalog.json`, respond success. On validation failure: reject; the client will silently retry later — idempotency required.
 7. **Compilation advertisement.** The identity endpoint (already consumed by the reader's `webdav/identity.ts`) is the signal that this server compiles metadata: any in-contract answer (`authenticated` or `anonymous`) makes the client set `serverCompilesMetadata` and disable its own `series.json`/`catalog.json` production. Generic WebDAV servers (no identity endpoint) keep client-side production.
 8. **Covers.** Per-volume cover sidecar (`<Series>/<Volume>.webp`) generated from the archive's first page when missing; scoped users cannot overwrite them.
@@ -41,7 +41,7 @@ These are resolved here so no task has to re-litigate them. Each is repeated in 
 - **Reuse vs supersede `catalog/`:** `src/mokuro_bunko/catalog/api.py` is the *public HTML catalog page* (`/catalog`, its own JSON API, cover proxy) and has nothing to do with the reader's `catalog.json`. It is **left untouched**; the new work lives in a separate `metadata/` package. `library_index.py` (`LibraryIndexCache`) is **not** reused by the compiler: it is a TTL cache that can be up to 30 s stale and indexes nested folders at any depth, whereas regeneration must see the filesystem as it is right now and only top-level series folders. The compiler does its own `os.scandir` walk.
 - **PUT interception point:** a new `MetadataAPI` WSGI middleware mounted **inside** `AuthMiddleware` and **outside** `AdminAPI`/`PropfindCacheMiddleware`. Inside auth so `environ["mokuro.user"]`/`mokuro.role` are populated; outside the DAV app so wsgidav never opens a writer for the path. `MokuroFileResource.begin_write` is deliberately *not* the hook: the request is not a file write at all, and the writer protocol would force the answer into wsgidav's PUT status handling.
 - **Interception is uniform across roles:** every authenticated user's `series.json` PUT is intercepted, including `uploader`/`editor`/`admin`. The contract allows either; uniform interception means bunko's compiled output can never disagree with the file on disk, and a raw write would be clobbered by the next regeneration anyway.
-- **"Within the user's permission scope" (§6)** = the `Permission.WRITE_PROGRESS` gate plus an audit-log entry naming the actor. bunko has no per-series ACL and this plan does not invent one (auth/permission changes beyond the gate are out of scope per the contract).
+- **"Within the user's permission scope" (§6)** = an ownership check, not a flat permission gate (2026-08-24 ruling, supersedes the `WRITE_PROGRESS` design this bullet originally described): `registered` never reaches `MetadataAPI`; `uploader` only for a series it owns outright, via a new `Database.can_user_edit_series` built on the existing `volume_uploads` ownership table (no schema change); any `MODIFY_DELETE`-holding role for every series. An audit-log entry still names the actor regardless of which branch authorized them. See Task 11.
 - **`catalog.json`'s own `updated_at`** is the MAX of its entries' facts stamps (epoch when every entry is factless), not `now`. The client documents it as informational ("the MERGE key is per entry"); a wall-clock stamp would change the bytes on every rebuild and defeat the size/mtime cache discipline of §4.
 - **An empty library still gets a `catalog.json`** (`{"version":1,"updated_at":"1970-01-01T00:00:00.000Z","series":[]}`). The client's `buildCatalogFile` returns `undefined` for an empty catalog because a client only ever knows part of a library; bunko knows all of it, so serving the truth beats serving a stale file.
 - **`updated_at` normalisation clamps the future** to `now + 5 min` exactly like the client's `normalizeUpdatedAt`, because the stamp decides merges by lexicographic comparison and a far-future value would otherwise win forever.
@@ -68,9 +68,10 @@ These are resolved here so no task has to re-litigate them. Each is repeated in 
 
 **Modified:**
 
-- `src/mokuro_bunko/database.py` — schema v3: `series_facts` + `series_entry_cache` tables and their accessors (new "Series metadata operations" section, mirroring "Upload ownership operations").
+- `src/mokuro_bunko/database.py` — schema v3: `series_facts` + `series_entry_cache` tables and their accessors (new "Series metadata operations" section, mirroring "Upload ownership operations"); plus `series_owners`/`can_user_edit_series`/`list_series_owned_by` in "Upload ownership operations" itself (Task 11 — no schema change).
 - `src/mokuro_bunko/webdav/resources.py` — expose the existing per-path write-lock registry as a public `path_write_lock(path)` context manager (the compiled-file writer must take the same lock as DAV writes).
-- `src/mokuro_bunko/middleware/auth.py` — §5/§6 policy: `series.json` PUT needs `WRITE_PROGRESS`; every other write verb on a compiled metadata file is 403 for every role.
+- `src/mokuro_bunko/middleware/auth.py` — §5/§6 policy: `series.json` PUT is ownership-gated (`registered` never, `uploader` only for a series it owns, any `MODIFY_DELETE`-holding role for all of them); every other write verb on a compiled metadata file is 403 for every role.
+- `src/mokuro_bunko/login/api.py` — identity endpoint gains a `metadata` scope object mirroring the `series.json` PUT gate (Task 11).
 - `src/mokuro_bunko/ocr/watcher.py` — `OCRWorker(thumbnails_only=True)` so covers are still generated when the OCR backend is `skip` (§8).
 - `src/mokuro_bunko/server.py` — build the service, mount `MetadataAPI`, wire the regeneration triggers, start the cover-only worker, shut everything down.
 - `CHANGELOG.md` — `[Unreleased]` entry.
@@ -3407,7 +3408,9 @@ git commit -m "feat(metadata): compile, publish and update service"
 
 The request-path half. `MetadataAPI` sits **inside** `AuthMiddleware` (so `environ["mokuro.username"]` is populated) and **outside** `AdminAPI`/`PropfindCacheMiddleware` (so wsgidav never opens a writer for the path). Interception is uniform across roles — an `uploader`'s raw write would be clobbered by the next regeneration anyway, and uniform handling means the file on disk can never disagree with what bunko compiled.
 
-At this point only roles that already hold `ADD_FILES` (uploader/editor/admin) reach the middleware; `AuthMiddleware` still rejects a `registered` user's PUT with 403. Task 11 opens that gate, so the tree stays green either way.
+A PUT body carrying only facts — no `volumes` array, no offsets — is an equally legitimate update, not a malformed one: Task 4's validator treats `volumes` as optional and Task 6's merge updates facts independently of index data, so a facts-only body still applies its facts and republishes both files; the compiler alone owns volume entries regardless of what the body did or didn't send.
+
+At this point only roles that already hold `ADD_FILES` (uploader/editor/admin) reach the middleware; `AuthMiddleware` still rejects a `registered` user's PUT with 403 — and that never changes: Task 11 adds an ownership check that lets `uploader` reach `MetadataAPI` only for a series it owns, and leaves every `MODIFY_DELETE`-holding role (inviter/editor/admin) unrestricted, but it does not open this gate for `registered`. The tree stays green either way.
 
 **Files:**
 - Create: `src/mokuro_bunko/metadata/middleware.py`
@@ -3805,25 +3808,154 @@ git commit -m "feat(metadata): intercept series.json PUTs and wire the service"
 
 ### Task 11: Authorization policy for compiled files (contract §5, §6)
 
-Two rules, both role-shaped, both in `AuthMiddleware`:
+**Rewritten 2026-08-24.** The user overturned this task's original design (a flat `WRITE_PROGRESS` gate that let `registered` submit updates) before any of it was implemented. The replacement is ownership-gated, and touches three files because the identity endpoint is folded into the same task — it is the same policy surface, just read-only.
 
-- a `series.json` PUT needs only `WRITE_PROGRESS` (it is a request about one's own metadata edits, not a write to the shared library), so `registered` — the scoped user the contract is about — can finally reach `MetadataAPI`;
-- every other write verb on a compiled file (`catalog.json` at all, `series.json` via DELETE/MOVE/COPY/PROPPATCH) is 403 for **every** role, because bunko is the sole producer. It must stay an ordinary 403: the client treats metadata-write failure as best-effort and stays read-write for everything else.
+**The new rule for a `series.json` PUT**, entirely in `AuthMiddleware`:
 
-Archives and covers need no new code — `registered` lacks `ADD_FILES`, so a `.cbz` or `.webp` PUT is already refused. Tests pin that so it cannot regress.
+- **`anonymous` is 401.** Unchanged.
+- **`registered` is 403, always.** It keeps exactly the `WRITE_PROGRESS` + `is_progress_file` carve-out it already has for its own `volume-data.json`/`profiles.json` (unchanged, untouched by this task) and gains nothing here — ownership is never even checked for this role, since a `registered` account cannot upload volumes in the first place and so can never own a series either. This is a permanent design decision, not a placeholder: a later task must not "finish the job" by opening this gate.
+- **`uploader` is authorized only for a series it owns outright.** Ownership is read from the `volume_uploads` table that already backs `record_volume_upload`/`get_volume_owner`/`can_user_delete_library_path` (`database.py` "Upload ownership operations", ~line 987) — no schema change. This task adds the series-level rule on top, as a new `Database.can_user_edit_series(username, series_title) -> bool`: an uploader owns a series when it owns **at least one** tracked volume in that folder **and no** tracked volume in that folder is owned by anyone else. A series with **no** tracked volumes at all — legacy content, or anything uploaded before ownership tracking existed — is a 403 for `uploader`, not a free-for-all: the user chose the safe default explicitly rather than let the first PUT silently claim an orphaned series.
+- **Any role holding `MODIFY_DELETE` is authorized for every series, unconditionally.** That set is `inviter`, `editor` and `admin` (see `ROLE_PERMISSIONS`, `src/mokuro_bunko/middleware/auth.py` line ~47) — "editor+" everywhere else in this plan means exactly this set, and `inviter` counts even though this plan otherwise never mentions that role.
+
+**Everything else is unchanged from the original design and remains correct:** every other write verb on a compiled file — `catalog.json` PUT/DELETE/MOVE/COPY/PROPPATCH, `series.json` DELETE/MOVE/COPY/PROPPATCH — is an ordinary 403 for **every** role, because bunko is the sole producer. It must stay an ordinary 403: the client treats metadata-write failure as best-effort and stays read-write for everything else. Archives and covers still need no new code — `registered` lacks `ADD_FILES`, so a `.cbz`/`.webp` PUT is already refused, and this task's series-ownership check does not extend `uploader`'s reach there either: a `.cbz`/`.webp` PUT is still gated by plain `ADD_FILES`, nothing about owning the series widens it. Tests pin all of this so it cannot regress.
+
+**Third deliverable, same policy surface.** The identity endpoint (`login/api.py`'s `/login/api/me`, already consumed by the reader's `webdav/identity.ts`) gains a `metadata` object that mirrors this exact gate read-only, so the reader can label or disable its own per-series edit UI without probing with a real PUT: `{"scope": "all"}` for a `MODIFY_DELETE` holder, `{"scope": "owned", "ownedSeries": [...]}` for `uploader` (the folder names `can_user_edit_series` would let it edit — derived from its own `volume_uploads` rows), `{"scope": "none"}` for `registered` and `anonymous`. `ownedSeries` is present only when `scope` is `"owned"`.
 
 **Files:**
-- Modify: `src/mokuro_bunko/middleware/auth.py` (imports; `authorize` around line 394; `_authorize_put` around line 561)
-- Test: `tests/unit/test_metadata_permissions.py`
+- Modify: `src/mokuro_bunko/database.py` (new methods immediately after `can_user_delete_library_path`, ~line 1053, before `forget_volume_upload`)
+- Modify: `src/mokuro_bunko/middleware/auth.py` (imports; a new block in `authorize` around line 394, before the read-operations block; the ownership-gated PUT block in `_authorize_put` around line 561 — neither exists yet, this task was never implemented before the 2026-08-24 ruling)
+- Modify: `src/mokuro_bunko/login/api.py` (`_role_permissions`/`_get_me`, ~lines 126–140)
+- Test: `tests/unit/test_database.py` (extend `TestAuditAndOwnership`), `tests/unit/test_metadata_permissions.py` (rewrite), `tests/integration/test_login_me.py` (extend)
 
 **Interfaces:**
-- Consumes: `paths.is_series_file_path`, `paths.is_compiled_metadata_path`.
-- Produces: no new names; changes the outcome of `AuthMiddleware.authorize` for compiled-metadata paths.
+- Consumes: `paths.is_series_file_path`, `paths.is_compiled_metadata_path`, `paths.series_title_from_series_file_path`, `middleware.auth.Permission.MODIFY_DELETE`, `middleware.auth.check_permission`.
+- Produces: `Database.series_owners(series_title: str) -> set[str]`, `Database.can_user_edit_series(username: str, series_title: str) -> bool`, `Database.list_series_owned_by(username: str) -> list[str]`; changes the outcome of `AuthMiddleware._authorize_put` for `series.json`; `LoginAPI._metadata_scope(role: str, username: str | None) -> dict[str, Any]`, wired into `_get_me`'s two 200 responses as a new `"metadata"` key.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test — ownership helpers**
+
+Append to `tests/unit/test_database.py`'s `TestAuditAndOwnership` class:
 
 ```python
-"""Contract §5/§6: who may write what under the compiled-metadata rules."""
+    def test_can_user_edit_series_sole_owner(self, temp_db: Database) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Dr Stone/Volume 02.cbz", "alice")
+        assert temp_db.can_user_edit_series("alice", "Dr Stone") is True
+        assert temp_db.can_user_edit_series("bob", "Dr Stone") is False
+
+    def test_can_user_edit_series_mixed_ownership_is_false_for_everyone(
+        self, temp_db: Database
+    ) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Dr Stone/Volume 02.cbz", "bob")
+        assert temp_db.can_user_edit_series("alice", "Dr Stone") is False
+        assert temp_db.can_user_edit_series("bob", "Dr Stone") is False
+
+    def test_can_user_edit_series_untracked_folder_is_false(
+        self, temp_db: Database
+    ) -> None:
+        """No volume_uploads rows at all: the safe default is 403, not a free-for-all."""
+        assert temp_db.can_user_edit_series("alice", "Legacy Series") is False
+
+    def test_list_series_owned_by_returns_only_fully_owned_folders(
+        self, temp_db: Database
+    ) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Aria/v1.cbz", "alice")
+        temp_db.record_volume_upload("Shared Series/v1.cbz", "alice")
+        temp_db.record_volume_upload("Shared Series/v2.cbz", "bob")
+
+        assert temp_db.list_series_owned_by("alice") == ["Aria", "Dr Stone"]
+        assert temp_db.list_series_owned_by("bob") == []
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/unit/test_database.py -k "can_user_edit_series or list_series_owned_by" -q`
+Expected: FAIL — `AttributeError: 'Database' object has no attribute 'can_user_edit_series'`
+
+- [ ] **Step 3: Add the ownership helpers**
+
+In `src/mokuro_bunko/database.py`, immediately after `can_user_delete_library_path` (ends ~line 1053) and before `forget_volume_upload`:
+
+```python
+    def series_owners(self, series_title: str) -> set[str]:
+        """Distinct uploader usernames among a series folder's tracked volumes.
+
+        `series_title` is the literal top-level library folder name — the
+        same string `metadata.paths.series_title_from_series_file_path`
+        returns. Matched the same way `forget_volume_uploads_under_prefix`
+        matches a folder prefix: a plain `LIKE '<title>/%'`, case-insensitive
+        for ASCII, NOT the lowercased `normalize_series_key` fold
+        `series_facts` uses — this table's keys are library-relative paths,
+        not folded series keys. A folder with no tracked volumes returns an
+        empty set; the `LIKE` pattern is not escaped (matching the existing
+        `forget_volume_uploads_under_prefix` precedent), but `can_user_edit_series`
+        below fails closed on any over-match, since an unescaped `%`/`_` in a
+        folder name can only ever pull in EXTRA owners, never remove the real
+        ones — so it can produce a false negative, never a false grant.
+        """
+        prefix = series_title.strip("/")
+        if not prefix:
+            return set()
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT DISTINCT uploader_username FROM volume_uploads WHERE volume_key LIKE ?",
+                (f"{prefix}/%",),
+            )
+            return {str(row["uploader_username"]) for row in cursor.fetchall()}
+
+    def can_user_edit_series(self, username: str, series_title: str) -> bool:
+        """True when `username` owns EVERY tracked volume in a series folder.
+
+        The safe default for a folder with no ownership records — legacy
+        content, or a series uploaded before ownership tracking existed — is
+        False: an uploader may not claim an untracked series just by being
+        the first to PUT its `series.json`. Only a role holding
+        `Permission.MODIFY_DELETE` may edit an unowned/untracked series
+        (enforced by the caller, `AuthMiddleware._authorize_put`).
+        """
+        owners = self.series_owners(series_title)
+        return bool(owners) and owners == {username}
+
+    def list_series_owned_by(self, username: str) -> list[str]:
+        """Series folder names `username` may edit, per `can_user_edit_series`.
+
+        Feeds the identity endpoint's `metadata.ownedSeries`. A folder where
+        this user owns some but not all tracked volumes is excluded — it is
+        not editable by them either, so it must not appear in their list.
+        """
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT DISTINCT volume_key FROM volume_uploads WHERE uploader_username = ?",
+                (username,),
+            )
+            folders = {
+                str(row["volume_key"]).split("/", 1)[0]
+                for row in cursor.fetchall()
+                if "/" in str(row["volume_key"])
+            }
+        return sorted(folder for folder in folders if self.can_user_edit_series(username, folder))
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/unit/test_database.py -q`
+Expected: PASS (all cases in `TestAuditAndOwnership`, including the 4 new ones)
+
+- [ ] **Step 5: Write the failing test — the PUT authorization policy**
+
+Replace `tests/unit/test_metadata_permissions.py` in full:
+
+```python
+"""Contract §5/§6: who may write what under the compiled-metadata rules.
+
+2026-08-24 ruling (overturns this task's original `WRITE_PROGRESS` design):
+`series.json` PUT authorization is ownership-gated, mirroring the DELETE-time
+precedent `can_user_delete_library_path` already sets for `uploader`.
+`registered` never reaches it; `uploader` reaches it only for a series it
+fully owns; any role holding `MODIFY_DELETE` (`inviter`/`editor`/`admin` —
+see `ROLE_PERMISSIONS`) reaches it for every series.
+"""
 
 from __future__ import annotations
 
@@ -3835,6 +3967,7 @@ from mokuro_bunko.database import Database
 from mokuro_bunko.middleware.auth import AuthMiddleware, AuthResult
 
 SERIES_FILE = "/mokuro-reader/Dr Stone/series.json"
+OTHER_SERIES_FILE = "/mokuro-reader/Aria/series.json"
 CATALOG_FILE = "/mokuro-reader/catalog.json"
 ARCHIVE = "/mokuro-reader/Dr Stone/Volume 01.cbz"
 COVER = "/mokuro-reader/Dr Stone/Volume 01.webp"
@@ -3872,19 +4005,74 @@ def authorize(middleware: AuthMiddleware, method: str, path: str, role: str) -> 
     return result.authorized, result.status_code
 
 
-class TestSeriesFilePut:
-    @pytest.mark.parametrize("role", ["registered", "uploader", "editor", "admin"])
-    def test_every_authenticated_role_may_submit_an_update(
-        self, middleware: AuthMiddleware, role: str
-    ) -> None:
-        assert authorize(middleware, "PUT", SERIES_FILE, role) == (True, 200)
-
+class TestSeriesFilePutAnonymousAndModifyDelete:
     def test_anonymous_may_not(self, middleware: AuthMiddleware) -> None:
         assert authorize(middleware, "PUT", SERIES_FILE, "anonymous") == (False, 401)
+
+    @pytest.mark.parametrize("role", ["inviter", "editor", "admin"])
+    def test_every_modify_delete_role_may_edit_any_series_unconditionally(
+        self, middleware: AuthMiddleware, role: str
+    ) -> None:
+        """`inviter` holds MODIFY_DELETE too (ROLE_PERMISSIONS) — it counts
+        here even though it never uploads. Neither folder has an ownership
+        row at all, and it is still authorized."""
+        assert authorize(middleware, "PUT", SERIES_FILE, role) == (True, 200)
+        assert authorize(middleware, "PUT", OTHER_SERIES_FILE, role) == (True, 200)
 
     def test_reading_it_is_unaffected(self, middleware: AuthMiddleware) -> None:
         assert authorize(middleware, "GET", SERIES_FILE, "anonymous")[0] is True
         assert authorize(middleware, "PROPFIND", SERIES_FILE, "anonymous")[0] is True
+
+
+class TestSeriesFilePutRegisteredNeverReaches:
+    def test_registered_is_403_for_an_untracked_series(
+        self, middleware: AuthMiddleware
+    ) -> None:
+        assert authorize(middleware, "PUT", SERIES_FILE, "registered") == (False, 403)
+
+    def test_registered_is_403_even_if_it_somehow_owns_the_series(
+        self, middleware: AuthMiddleware, temp_db: Database
+    ) -> None:
+        """Ownership alone is never sufficient for this role: ADD_FILES-tier
+        (uploader) or above is required before ownership is even checked."""
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "registered")
+        assert authorize(middleware, "PUT", SERIES_FILE, "registered") == (False, 403)
+
+
+class TestSeriesFilePutUploaderOwnership:
+    def test_an_untracked_series_is_403_not_a_free_for_all(
+        self, middleware: AuthMiddleware
+    ) -> None:
+        """No volume_uploads rows for the folder at all: the safe default."""
+        assert authorize(middleware, "PUT", SERIES_FILE, "uploader") == (False, 403)
+
+    def test_the_sole_owner_may_edit_its_series(
+        self, middleware: AuthMiddleware, temp_db: Database
+    ) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "uploader")
+        assert authorize(middleware, "PUT", SERIES_FILE, "uploader") == (True, 200)
+
+    def test_a_non_owner_uploader_is_403(
+        self, middleware: AuthMiddleware, temp_db: Database
+    ) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "someone-else")
+        assert authorize(middleware, "PUT", SERIES_FILE, "uploader") == (False, 403)
+
+    def test_ownership_is_per_series_not_global(
+        self, middleware: AuthMiddleware, temp_db: Database
+    ) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "uploader")
+        assert authorize(middleware, "PUT", SERIES_FILE, "uploader") == (True, 200)
+        assert authorize(middleware, "PUT", OTHER_SERIES_FILE, "uploader") == (False, 403)
+
+    def test_a_series_with_any_other_owner_is_403_for_this_uploader(
+        self, middleware: AuthMiddleware, temp_db: Database
+    ) -> None:
+        """One volume owned by another user in the same folder blocks the
+        whole series for this uploader — not a per-volume grant."""
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "uploader")
+        temp_db.record_volume_upload("Dr Stone/Volume 02.cbz", "someone-else")
+        assert authorize(middleware, "PUT", SERIES_FILE, "uploader") == (False, 403)
 
 
 class TestCompiledFilesAreServerOwned:
@@ -3933,20 +4121,26 @@ class TestScopedUsersStillCannotWriteContent:
         ) == (True, 200)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 6: Run test to verify it fails**
 
 Run: `uv run pytest tests/unit/test_metadata_permissions.py -q`
-Expected: FAIL — the `series.json` PUT cases return `(False, 403)` for `registered`, and the compiled-file DELETE/PUT cases return `(True, 200)`.
+Expected: FAIL — none of this task's `auth.py` code exists yet, so `series.json`/`catalog.json` PUT still falls through to the generic library-file `ADD_FILES` gate, and DELETE/MOVE/COPY/PROPPATCH still falls through to the generic `MODIFY_DELETE` gate. Concretely: every `TestSeriesFilePutUploaderOwnership` case that expects 403 currently returns 200 (any `uploader` may PUT any series, tracked or not); `test_nobody_may_put_the_catalog`'s `uploader`/`editor`/`admin` cases currently return 200 for the same reason; `test_nobody_may_delete_or_move_a_compiled_file` currently returns 200 for `admin` (plain `MODIFY_DELETE`, no compiled-file check yet). Everything that happens to already match the new rule via a generic gate — `anonymous`, `registered`, the `MODIFY_DELETE`-unconditional PUT cases, `test_nobody_may_put_the_catalog[registered]`, archives/covers, progress writes — passes even before this step; that is expected, not a bug in the test.
 
-- [ ] **Step 3: Add the policy**
+- [ ] **Step 7: Add the policy**
 
 In `src/mokuro_bunko/middleware/auth.py`, extend the imports:
 
 ```python
-from mokuro_bunko.metadata.paths import is_compiled_metadata_path, is_series_file_path
+from mokuro_bunko.metadata.paths import (
+    is_compiled_metadata_path,
+    is_series_file_path,
+    series_title_from_series_file_path,
+)
 ```
 
-In `authorize`, immediately after the `is_admin_path(path)` block and before the read-operations block, insert:
+Task 11 has not been implemented before this rewrite — nothing below exists in `auth.py` yet — so both insertions are new, not edits to prior Task 11 code.
+
+In `authorize`, immediately after the `is_admin_path(path)` block and before the read-operations block, insert (unchanged from the original design — contract §5, not touched by the 2026-08-24 ruling):
 
 ```python
         # Compiled metadata files are produced by this server (contract §5):
@@ -3962,14 +4156,19 @@ In `authorize`, immediately after the `is_admin_path(path)` block and before the
             )
 ```
 
-In `_authorize_put`, immediately after the `is_progress_file(path)` block:
+In `_authorize_put`, immediately after the `is_progress_file(path)` block, insert the ownership-gated PUT policy — this is the part the ruling actually changed:
 
 ```python
         # A `series.json` PUT is an update REQUEST, not a file write
-        # (contract §6): MetadataAPI validates and merges it, and the DAV layer
-        # never sees it. It therefore needs the permission to change one's own
-        # data, not the permission to add files to the shared library — which
-        # is the whole point of the scoped-user flow.
+        # (contract §6): MetadataAPI validates and merges it, and the DAV
+        # layer never sees it. Authorization is ownership-gated, NOT the
+        # WRITE_PROGRESS "edit your own data" gate that guards progress files
+        # above (2026-08-24 ruling, overturning this task's original design):
+        #   - anonymous -> 401
+        #   - a MODIFY_DELETE holder (inviter/editor/admin) -> every series
+        #   - uploader -> only a series it owns outright (Database.can_user_edit_series)
+        #   - registered -> always 403; it stays limited to the progress/
+        #     profile carve-out above and never gains series-metadata access
         if is_series_file_path(path):
             if not auth_result.authenticated:
                 return AuthorizationResult(
@@ -3977,13 +4176,22 @@ In `_authorize_put`, immediately after the `is_progress_file(path)` block:
                     status_code=401,
                     error="Authentication required",
                 )
-            if not check_permission(role, Permission.WRITE_PROGRESS):
-                return AuthorizationResult(
-                    authorized=False,
-                    status_code=403,
-                    error="Permission denied: cannot submit metadata updates",
-                )
-            return AuthorizationResult(authorized=True)
+            if check_permission(role, Permission.MODIFY_DELETE):
+                return AuthorizationResult(authorized=True)
+            if role == "uploader":
+                series_title = series_title_from_series_file_path(path)
+                username = auth_result.username
+                if (
+                    series_title is not None
+                    and username is not None
+                    and self.database.can_user_edit_series(username, series_title)
+                ):
+                    return AuthorizationResult(authorized=True)
+            return AuthorizationResult(
+                authorized=False,
+                status_code=403,
+                error="Permission denied: cannot submit metadata updates for this series",
+            )
 
         # Every other compiled file (the root catalog.json) is server-owned.
         if is_compiled_metadata_path(path):
@@ -3994,26 +4202,115 @@ In `_authorize_put`, immediately after the `is_progress_file(path)` block:
             )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 8: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/test_metadata_permissions.py -q`
-Expected: PASS (25 tests, counting the parametrized cases)
+Expected: PASS (31 tests, counting the parametrized cases)
 
-- [ ] **Step 5: Run the auth suites (no regressions)**
+- [ ] **Step 9: Write the failing test — identity endpoint metadata scope**
 
-Run: `uv run pytest tests/unit/test_permissions.py tests/integration/test_auth.py tests/integration/test_webdav_ops.py -q`
-Expected: PASS, unchanged
+In `tests/integration/test_login_me.py`, add `db.create_user("inv", "pass1234", "inviter")` to the `db` fixture (needed once, to exercise `inviter`'s `MODIFY_DELETE` membership through this endpoint too), then append a new class:
 
-- [ ] **Step 6: Check lint and types**
+```python
+class TestMeMetadataScope:
+    """The `metadata` object added 2026-08-24: gates the reader's per-series edit UI."""
+
+    @pytest.mark.parametrize(
+        "username,role", [("edi", "editor"), ("adm", "admin"), ("inv", "inviter")]
+    )
+    def test_modify_delete_holders_get_scope_all(
+        self, api: LoginAPI, username: str, role: str
+    ) -> None:
+        status, body = call_me(api, encoded_header(f"{username}:pass1234"))
+        assert status == 200
+        assert body["role"] == role
+        assert body["metadata"] == {"scope": "all"}
+
+    def test_registered_gets_scope_none(self, api: LoginAPI) -> None:
+        status, body = call_me(api, encoded_header("reg:pass1234"))
+        assert status == 200
+        assert body["metadata"] == {"scope": "none"}
+
+    def test_anonymous_gets_scope_none(self, api: LoginAPI) -> None:
+        status, body = call_me(api)
+        assert status == 200
+        assert body["authenticated"] is False
+        assert body["metadata"] == {"scope": "none"}
+
+    def test_uploader_with_no_owned_series_gets_an_empty_owned_list(
+        self, api: LoginAPI
+    ) -> None:
+        status, body = call_me(api, encoded_header("upl:pass1234"))
+        assert status == 200
+        assert body["metadata"] == {"scope": "owned", "ownedSeries": []}
+
+    def test_uploader_sees_exactly_the_folders_it_owns(
+        self, api: LoginAPI, db: Database
+    ) -> None:
+        db.record_volume_upload("Dr Stone/Volume 01.cbz", "upl")
+        db.record_volume_upload("Aria/v1.cbz", "upl")
+        # A folder `upl` only partly owns must not appear in its list.
+        db.record_volume_upload("Shared/v1.cbz", "upl")
+        db.record_volume_upload("Shared/v2.cbz", "edi")
+
+        status, body = call_me(api, encoded_header("upl:pass1234"))
+        assert status == 200
+        assert body["metadata"] == {"scope": "owned", "ownedSeries": ["Aria", "Dr Stone"]}
+```
+
+- [ ] **Step 10: Run test to verify it fails**
+
+Run: `uv run pytest tests/integration/test_login_me.py -q`
+Expected: FAIL — `KeyError: 'metadata'`
+
+- [ ] **Step 11: Add the identity endpoint scope**
+
+In `src/mokuro_bunko/login/api.py`, add a new method right after `_role_permissions`:
+
+```python
+    def _metadata_scope(self, role: str, username: str | None) -> dict[str, Any]:
+        """Contract-facing scope for the series.json/catalog.json write gate.
+
+        Mirrors `AuthMiddleware._authorize_put`'s Task 11 policy exactly, so
+        this endpoint can never advertise more (or less) than a real PUT would
+        actually be allowed to do: a MODIFY_DELETE holder may edit any series,
+        an uploader only the series it fully owns (`Database.can_user_edit_series`),
+        everyone else (`registered`, anonymous) none.
+        """
+        if check_permission(role, Permission.MODIFY_DELETE):
+            return {"scope": "all"}
+        if role == "uploader" and username and self.db is not None:
+            return {
+                "scope": "owned",
+                "ownedSeries": self.db.list_series_owned_by(username),
+            }
+        return {"scope": "none"}
+```
+
+In `_get_me`, add `"metadata": self._metadata_scope("anonymous", None)` to the anonymous 200 response, and `"metadata": self._metadata_scope(user["role"], user["username"])` to the authenticated 200 response — both alongside the existing `"permissions"` key, no other keys change.
+
+- [ ] **Step 12: Run test to verify it passes**
+
+Run: `uv run pytest tests/integration/test_login_me.py -q`
+Expected: PASS (all existing cases plus the new `TestMeMetadataScope` class)
+
+- [ ] **Step 13: Run the full regression suites**
+
+Run: `uv run pytest tests/unit/test_database.py tests/unit/test_permissions.py tests/unit/test_metadata_permissions.py tests/integration/test_auth.py tests/integration/test_webdav_ops.py tests/integration/test_login_me.py tests/integration/test_security_headers.py tests/integration/test_cors.py -q`
+Expected: PASS, unchanged outside the new/rewritten cases above
+
+- [ ] **Step 14: Check lint and types**
 
 Run: `uv run ruff check src/ && uv run mypy src/`
 Expected: no findings
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 15: Commit**
 
 ```bash
-git add src/mokuro_bunko/middleware/auth.py tests/unit/test_metadata_permissions.py
-git commit -m "feat(auth): scoped users may submit metadata; compiled files are server-owned"
+git add src/mokuro_bunko/database.py src/mokuro_bunko/middleware/auth.py \
+        src/mokuro_bunko/login/api.py tests/unit/test_database.py \
+        tests/unit/test_metadata_permissions.py tests/integration/test_login_me.py
+git commit -m "feat(auth): ownership-gated series.json updates; identity endpoint metadata scope"
 ```
 
 ---
@@ -4636,10 +4933,13 @@ cache them on size/mtime.
 Clients do not write these files. A `PUT` of `<Series>/series.json` is accepted as
 an update *request*: the facts are validated and merged (newest stamp wins), the
 volume list in the request is ignored in favour of the server's own compilation,
-and both files are regenerated. Writing `catalog.json`, or deleting/moving either
-file, is refused for every account. Any account that can save reading progress can
-submit metadata updates; the account that submitted one is recorded in the audit
-log.
+and both files are regenerated. A body carrying only facts, with no volume list at
+all, is an equally valid update. Writing `catalog.json`, or deleting/moving either
+file, is refused for every account. Submitting an update is ownership-gated, not a
+plain progress-write permission: an editor-tier account (or above) may update any
+series, an uploader account only a series it uploaded, and a registered-only
+account cannot submit updates at all. The account that submitted an accepted
+update is recorded in the audit log.
 ```
 
 - [ ] **Step 6: Commit**
@@ -4660,7 +4960,7 @@ Expected: all green. Do not report the feature complete without this output in h
 
 - **Deployment (contract task 9).** Rebuilding and redeploying the unraid container is deliberately NOT in this plan: the compose file and unraid template on that box diverge from the repo, so it must follow the recorded recipe (project memory `project_mokuro_bunko_deploy`: rsync source to a fresh build dir, `docker build -f deploy/Dockerfile.unraid`, verify the version inside the image, retag, recreate from the `runlike` command, wait for `health=healthy`). Bump `pyproject.toml`'s version and verify against a live scoped account plus a real reader client as part of that work.
 - **Facts do not follow a folder rename.** They are keyed by normalized series title; a renamed folder compiles factless until a client republishes. Carrying facts across a MOVE would mean hooking `move_recursive`, which is a separate change.
-- **No per-series ACL.** "Within the user's permission scope" is implemented as the `WRITE_PROGRESS` gate plus an audit entry. If per-series ownership is ever wanted, it belongs with the existing `volume_uploads` ownership model, not here.
+- **Per-series ACL added 2026-08-24 (Task 11).** "Within the user's permission scope" is an ownership check built on the existing `volume_uploads` model, not a flat permission gate: `uploader` may edit only a series it owns outright; any `MODIFY_DELETE`-holding role may edit any series; `registered` may never submit a metadata update. A series with no tracked volumes is 403 for `uploader` (safe default, not a free-for-all). `Database.can_user_edit_series`'s folder-prefix match is a plain unescaped `LIKE '<title>/%'` (same pattern `forget_volume_uploads_under_prefix` already uses) — a folder literally named with `%`/`_` could over-match, but the ownership check's AND-of-all-owners semantics fails closed on any mismatch (extra matched rows owned by someone else deny access rather than grant it), so this is a correctness sharp edge, not a privilege-escalation path.
 - **Progress-file handling** beyond the partitioning guarantee, and any reader-client work (see `2026-08-23-catalog-distribution-client.md`), stay out per the contract.
 
 ## Self-review
