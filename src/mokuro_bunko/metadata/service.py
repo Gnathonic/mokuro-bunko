@@ -193,21 +193,31 @@ class MetadataService:
     def regenerate_series(self, series_title: str) -> bool:
         """Recompile ONE series plus the catalog. Returns True when anything changed."""
         with self._pass_lock:
-            return self._regenerate_series_locked(series_title)
+            changed = self._regenerate_series_locked(series_title)
+        self._published(changed)
+        return changed > 0
 
-    def _regenerate_series_locked(self, series_title: str) -> bool:
+    def _regenerate_series_locked(self, series_title: str) -> int:
         """The guts of `regenerate_series`. Caller must hold `_pass_lock`.
 
         Split out so `apply_series_update` can run its read-merge-persist
         step and this republish inside the SAME critical section, without
         re-entering the (non-reentrant) `_pass_lock` that `regenerate_series`
         itself acquires.
+
+        Returns the changed-file count and deliberately does NOT fire
+        `on_published` — that must happen in the caller, AFTER `_pass_lock`
+        is released. `on_published` is the cache-invalidation seam a caller
+        can re-enter the service from (another regeneration, `stop()`), and
+        `_pass_lock` is not reentrant: firing the hook while still holding it
+        would wedge the calling thread permanently the moment such a hook
+        shows up.
         """
         folders = self._scan_folders()
         if folders is None:
             _log(f"library root unreadable, skipping pass: {self.library_path}")
             self.schedule_regeneration(delay=5.0)
-            return False
+            return 0
         key = normalize_series_key(series_title)
         changed = 0
         catalog_entries: list[tuple[str, SeriesFacts]] = []
@@ -232,8 +242,7 @@ class MetadataService:
         except MetadataWriteBusy:
             _log("skipped busy catalog.json")
             self.schedule_regeneration(delay=5.0)
-        self._published(changed)
-        return changed > 0
+        return changed
 
     def apply_series_update(self, series_title: str, payload: bytes, actor: str | None) -> bool:
         """Contract §6: a PUT is an update REQUEST. True = accepted.
@@ -258,6 +267,7 @@ class MetadataService:
         if update is None:
             return False
 
+        changed = 0
         with self._pass_lock:
             stored = self._stored(series_key)
             result = merge_series_update(stored, update)
@@ -280,12 +290,18 @@ class MetadataService:
                     )
                 )
             try:
-                self._regenerate_series_locked(series_title)
+                changed = self._regenerate_series_locked(series_title)
             except Exception as error:  # noqa: BLE001 - facts are already durable; the
                 # caller must never see an accepted, persisted update reported
                 # as a failure just because publishing itself blew up.
                 _log(f"republish failed after an accepted update: {error}")
                 self.schedule_regeneration(delay=5.0)
+        # Outside `_pass_lock` (matching `regenerate_all`/`regenerate_series`)
+        # AND outside the `try/except` above: a hook that re-enters the
+        # service (another regeneration, `stop()`) must not deadlock on the
+        # non-reentrant lock, and a hook's own exception must propagate as
+        # the hook's failure, not get logged and retried as a republish one.
+        self._published(changed)
         return True
 
     def schedule_regeneration(self, delay: float | None = None) -> None:
