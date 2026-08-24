@@ -81,6 +81,18 @@ class TestNaturalSort:
     def test_is_total_and_stable_for_equal_keys(self) -> None:
         assert natural_sort_key("VOL 1") == natural_sort_key("vol 1")
 
+    def test_non_decimal_digits_do_not_explode(self) -> None:
+        # `str.isdigit()` is True for 128 codepoints `int()` refuses — circled
+        # numerals (①), superscripts (¹), parenthesised forms (⑴). Circled
+        # numerals are real Japanese volume numbering, and one such filename
+        # must never abort publishing for the whole library.
+        assert natural_sort_key("①")
+        assert natural_sort_key("10①")
+
+    def test_sorts_a_mix_of_decimal_and_non_decimal_digits(self) -> None:
+        titles = ["Vol 10", "Vol 2", "Vol 1①"]
+        assert sorted(titles, key=natural_sort_key) == ["Vol 1①", "Vol 2", "Vol 10"]
+
 
 class TestNormalizeUpdatedAt:
     def test_normalises_to_iso_with_milliseconds(self) -> None:
