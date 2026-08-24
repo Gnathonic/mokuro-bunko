@@ -78,7 +78,7 @@ These are resolved here so no task has to re-litigate them. Each is repeated in 
 
 **Tests** (mirroring the existing split: pure logic in `tests/unit/`, WSGI-level behaviour in `tests/integration/`):
 
-`tests/unit/test_metadata_paths.py`, `test_metadata_reader_compat.py`, `test_metadata_schema.py`, `test_metadata_validate.py`, `test_metadata_merge.py`, `test_metadata_compiler.py`, `test_metadata_catalog.py`, `test_metadata_service.py`, `test_database_series_metadata.py`, `test_thumbnail_only_worker.py`; `tests/integration/test_metadata_distribution.py`.
+`tests/unit/test_metadata_paths.py`, `test_metadata_reader_compat.py`, `test_metadata_schema.py`, `test_metadata_validate.py`, `test_metadata_merge.py`, `test_metadata_compiler.py`, `test_metadata_catalog.py`, `test_metadata_service.py`, `test_database_series_metadata.py`, `test_metadata_permissions.py`, `test_thumbnail_only_worker.py`; `tests/integration/test_metadata_distribution.py`.
 
 ---
 
@@ -4519,7 +4519,7 @@ git commit -m "feat(covers): generate cover sidecars even when OCR is disabled"
 
 ### Task 13: End-to-end through the real WSGI stack
 
-Everything above is unit-level. This drives the assembled application — `create_app` with the real auth, metadata and DAV middleware — the way the reader client does: a scoped user PUTs a `series.json`, gets it validated/merged/regenerated, then reads `catalog.json` back; blocked writes come back as ordinary errors; the partitioning holds.
+Everything above is unit-level. This drives the assembled application — `create_app` with the real auth, metadata and DAV middleware — the way the reader client does: an authorized user PUTs a `series.json`, gets it validated/merged/regenerated, then reads `catalog.json` back; blocked writes come back as ordinary errors; the partitioning holds. (2026-08-24: "authorized" means the ownership-gated Task 11 rule, not "any scoped user" — see `TestAuthorizedUpdate` below, which exercises both the `uploader`-ownership path and the `MODIFY_DELETE` path, plus a dedicated `registered`-is-403 pin.)
 
 The fixture also **stops** the watcher, the PROPFIND cache timer and the metadata timer on teardown. The existing `app` fixture in `test_webdav_ops.py` does not, which is why a long combined run can exhaust inotify watches; the new file does not add to that.
 
@@ -4612,6 +4612,10 @@ def database(storage: Path) -> Database:
     db.create_user("uploader", "pass1234", "uploader")
     db.create_user("editor", "pass1234", "editor")
     db.create_user("admin", "pass1234", "admin")
+    # `uploader` legitimately owns "Dr Stone" (2026-08-24 ownership-gated PUT
+    # policy, Task 11): `TestAuthorizedUpdate` relies on this to exercise the
+    # uploader-ownership authorization path, not just the MODIFY_DELETE path.
+    db.record_volume_upload("Dr Stone/Volume 01.cbz", "uploader")
     return db
 
 
@@ -4656,7 +4660,12 @@ class TestServing:
         assert catalog["series"][0]["updated_at"] == "1970-01-01T00:00:00.000Z"
 
 
-class TestScopedUserUpdate:
+class TestAuthorizedUpdate:
+    """2026-08-24: authorization is ownership-gated (Task 11), not a plain
+    "any scoped user" gate. `UPLOADER` here owns "Dr Stone" via the
+    `database` fixture's `record_volume_upload` call; `READER` (`registered`)
+    never reaches `MetadataAPI` regardless of ownership."""
+
     def test_put_is_accepted_validated_merged_and_regenerated(
         self, client: WSGITestClient
     ) -> None:
@@ -4678,7 +4687,7 @@ class TestScopedUserUpdate:
                      "character_count": 1, "mokuro_version": ""},
                 ],
             ),
-            READER,
+            UPLOADER,
         )
         assert response.status_code == 204
         assert response.content == b""
@@ -4705,11 +4714,11 @@ class TestScopedUserUpdate:
     def test_retrying_the_same_put_is_accepted_and_touches_nothing(
         self, client: WSGITestClient, storage: Path
     ) -> None:
-        client.put(SERIES_PATH, update_payload(), READER)
+        client.put(SERIES_PATH, update_payload(), UPLOADER)
         compiled = storage / "library" / "Dr Stone" / "series.json"
         before = compiled.stat().st_mtime_ns
 
-        assert client.put(SERIES_PATH, update_payload(), READER).status_code == 204
+        assert client.put(SERIES_PATH, update_payload(), UPLOADER).status_code == 204
         assert compiled.stat().st_mtime_ns == before
 
     def test_an_invalid_payload_is_an_ordinary_400(
@@ -4718,17 +4727,33 @@ class TestScopedUserUpdate:
         compiled = storage / "library" / "Dr Stone" / "series.json"
         before = compiled.read_bytes()
 
-        response = client.put(SERIES_PATH, b"not json at all", READER)
+        response = client.put(SERIES_PATH, b"not json at all", UPLOADER)
         assert response.status_code == 400
         assert compiled.read_bytes() == before
 
     def test_an_anonymous_put_is_rejected(self, client: WSGITestClient) -> None:
         assert client.put(SERIES_PATH, update_payload(), {}).status_code == 401
 
-    def test_a_full_permission_user_is_intercepted_the_same_way(
+    def test_a_registered_user_is_rejected_end_to_end(
         self, client: WSGITestClient, storage: Path
     ) -> None:
-        assert client.put(SERIES_PATH, update_payload(), UPLOADER).status_code == 204
+        """2026-08-24 ruling: `registered` never reaches `MetadataAPI`,
+        ownership or not — pinned here at the full WSGI-stack level, not just
+        in the unit-level `test_metadata_permissions.py` policy tests."""
+        compiled = storage / "library" / "Dr Stone" / "series.json"
+        before = compiled.read_bytes()
+
+        response = client.put(SERIES_PATH, update_payload(), READER)
+        assert response.status_code == 403
+        assert compiled.read_bytes() == before
+
+    def test_an_editor_is_intercepted_without_needing_ownership(
+        self, client: WSGITestClient, storage: Path
+    ) -> None:
+        """A `MODIFY_DELETE`-holding role (`editor` here) needs no ownership
+        row at all — unlike the `UPLOADER` cases above, which rely on the
+        `database` fixture's ownership grant over "Dr Stone"."""
+        assert client.put(SERIES_PATH, update_payload(), EDITOR).status_code == 204
         compiled = json.loads(
             (storage / "library" / "Dr Stone" / "series.json").read_text("utf-8")
         )
@@ -4840,7 +4865,7 @@ class TestRegenerationTriggers:
 - [ ] **Step 2: Run it**
 
 Run: `uv run pytest tests/integration/test_metadata_distribution.py -q`
-Expected: PASS (15 tests). If the cross-module import of `WSGITestClient` fails because of pytest's import mode, copy the `WSGITestClient`/`WSGIResponse`/`make_auth_header` definitions into the new file instead — they are ~60 lines and test-only.
+Expected: PASS (16 tests). If the cross-module import of `WSGITestClient` fails because of pytest's import mode, copy the `WSGITestClient`/`WSGIResponse`/`make_auth_header` definitions into the new file instead — they are ~60 lines and test-only.
 
 - [ ] **Step 3: Commit**
 
