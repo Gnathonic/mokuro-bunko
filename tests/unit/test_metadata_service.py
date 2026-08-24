@@ -415,6 +415,32 @@ class TestApplyUpdate:
         sidecar = json.loads((library / "Dr Stone" / "series.json").read_text("utf-8"))
         assert sidecar["external_ids"] == {"anilist": 98416}
 
+    def test_a_republish_failure_after_a_persisted_accept_still_returns_true(
+        self, service: MetadataService, library: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F8: the facts are already durably stored by the time the republish
+        step runs, so a caller must never see that accepted update reported
+        as a failure just because publishing itself blew up — the exception
+        is caught, logged, a retry pass is scheduled, and `True` still comes
+        back (this was M23 in the re-review: implemented but untested)."""
+        write_volume(library, "Dr Stone", "Volume 01")
+
+        def boom(self: MetadataService, series_title: str) -> int:
+            raise RuntimeError("disk gone")
+
+        monkeypatch.setattr(MetadataService, "_regenerate_series_locked", boom)
+
+        assert service.apply_series_update("Dr Stone", series_update(), "alice") is True
+
+        row = service.database.get_series_facts("dr stone")
+        assert row is not None
+        assert row["external_ids"] == {"anilist": 98416}
+        assert not (library / "Dr Stone" / "series.json").exists()  # publish never happened
+
+        timer = service._timer
+        assert timer is not None  # a retry pass was scheduled
+        service.stop()
+
     def test_concurrent_puts_do_not_lose_the_newer_facts_or_an_offset(
         self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -588,3 +614,80 @@ class TestDebounce:
         # (written second) would still be missing here.
         assert (library / "Dr Stone" / "series.json").exists()
         assert (library / "catalog.json").exists()
+
+
+class TestReentrantPublishHook:
+    """N1: `on_published` is Task 10's cache-invalidation seam, and a hook is
+    free to re-enter the service (trigger another regeneration, call
+    `stop()`). `_pass_lock` is a plain `threading.Lock` — not reentrant, no
+    timeout — so the hook MUST fire only after the lock that guarded the
+    pass which triggered it has already been released. Every reproduction
+    here runs the risky call on a background thread and joins it with a
+    bounded timeout: if the fix regresses, the assertion fails cleanly
+    instead of hanging the whole test suite.
+    """
+
+    def test_a_hook_that_triggers_another_regeneration_does_not_deadlock(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+
+        def hook() -> None:
+            service.regenerate_series("Dr Stone")
+
+        service = MetadataService(library, Database(tmp_path / "test.db"), on_published=hook)
+
+        finished = threading.Event()
+
+        def run() -> None:
+            service.apply_series_update("Dr Stone", series_update(), "alice")
+            finished.set()
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=5.0)
+        assert finished.is_set(), "a re-entrant on_published hook deadlocked on _pass_lock"
+        service.stop()
+
+    def test_a_hook_that_calls_stop_does_not_deadlock(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+
+        def hook() -> None:
+            service.stop()
+
+        service = MetadataService(library, Database(tmp_path / "test.db"), on_published=hook)
+
+        finished = threading.Event()
+
+        def run() -> None:
+            service.regenerate_series("Dr Stone")
+            finished.set()
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=5.0)
+        assert finished.is_set(), "on_published calling stop() deadlocked on _pass_lock"
+
+    def test_a_hook_re_entering_via_apply_series_update_does_not_deadlock(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+
+        def hook() -> None:
+            service.apply_series_update("Dr Stone", series_update(tag="from hook"), "hook")
+
+        service = MetadataService(library, Database(tmp_path / "test.db"), on_published=hook)
+
+        finished = threading.Event()
+
+        def run() -> None:
+            service.regenerate_all()
+            finished.set()
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=5.0)
+        assert finished.is_set(), "a re-entrant on_published hook deadlocked on _pass_lock"
+        service.stop()
