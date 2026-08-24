@@ -152,6 +152,54 @@ class TestIndexFields:
         assert update.listed_uuids == frozenset({"u1", "u2"})
         assert update.volume_offsets == {"u2": 3}
 
+    def test_a_huge_integer_offset_cannot_crash_the_parse(self) -> None:
+        # 310 digits. `float()` raises OverflowError on this one (309 is fine),
+        # and the reader's `JSON.parse` turns it into `Infinity`, which its own
+        # finite check then drops. Same answer here: absent, not an exception.
+        huge = 10**309
+        update = parse_series_update(
+            payload(spine_offset=huge, volumes=[{"volume_uuid": "u1", "offset": huge}])
+        )
+        assert update is not None
+        assert update.spine_offset is None
+        assert update.spine_offset_present is False
+        assert update.listed_uuids == frozenset({"u1"})
+        assert update.volume_offsets == {}
+
+    def test_an_integer_spine_offset_stays_an_integer(self) -> None:
+        update = parse_series_update(payload(spine_offset=-40))
+        assert update is not None
+        assert update.spine_offset == -40
+        # Verbatim: a `float()` here would republish an untouched `-40` as
+        # `-40.0`, changing bytes the client versions its cache on.
+        assert not isinstance(update.spine_offset, float)
+
+    def test_a_zero_offset_is_absence_not_a_value(self) -> None:
+        # Both levels: `parseSeriesFile` and `parseVolumeEntry` each drop a
+        # falsy offset at the file boundary, so a reset arrives as "no value".
+        update = parse_series_update(
+            payload(spine_offset=0, volumes=[{"volume_uuid": "u1", "offset": 0}])
+        )
+        assert update is not None
+        assert update.spine_offset_present is False
+        assert update.spine_offset is None
+        assert update.listed_uuids == frozenset({"u1"})
+        assert update.volume_offsets == {}
+
+    def test_a_duplicate_volume_uuid_keeps_the_first_entry(self) -> None:
+        later_offset = parse_series_update(
+            payload(volumes=[{"volume_uuid": "u1"}, {"volume_uuid": "u1", "offset": 4}])
+        )
+        assert later_offset is not None
+        assert later_offset.listed_uuids == frozenset({"u1"})
+        assert later_offset.volume_offsets == {}
+
+        later_offsetless = parse_series_update(
+            payload(volumes=[{"volume_uuid": "u1", "offset": 4}, {"volume_uuid": "u1"}])
+        )
+        assert later_offsetless is not None
+        assert later_offsetless.volume_offsets == {"u1": 4}
+
     def test_a_non_list_volumes_key_is_not_fatal(self) -> None:
         update = parse_series_update(payload(volumes="nope"))
         assert update is not None

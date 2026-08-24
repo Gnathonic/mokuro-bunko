@@ -7,18 +7,34 @@ entry's `offset`, matched by `volume_uuid`. The body's `series_title` is
 ignored for the same reason: the request URL names the series folder, and that
 is the only name the interception acts on.
 
-The alignment numbers (`spine_offset`, per-entry `offset`) are stored VERBATIM.
-Bunko deliberately does not clamp or range-check them: every reader clamps on
-parse (±50 % / ±500 px), so one side owns the range rule and the two can never
-disagree about what a stored value means.
+The alignment numbers (`spine_offset`, per-entry `offset`) are stored VERBATIM
+— the value as JSON delivered it, not a coercion of it. Bunko deliberately does
+not clamp or range-check them either: every reader clamps on parse (±50 % /
+±500 px), so one side owns the range rule and the two can never disagree about
+what a stored value means. Verbatim also means an integer nudge republishes as
+`-40`, not `-40.0`; the compiled bytes are a cache key (contract §4), so a value
+nobody edited must not come back changed.
 
 Mirrors the client's `parseSeriesFile` (`src/lib/metadata/series-file.ts`) and
-the `sanitize*` helpers it calls, minus the fields bunko compiles itself.
+the `sanitize*` helpers it calls, minus the fields bunko compiles itself. Two
+places where the mirror is deliberately imperfect:
+
+- An `external_ids` value of `98416.0` is rejected here and accepted there
+  (`Number.isInteger` is true for a whole float). Unreachable from a real
+  client: `JSON.stringify` writes a whole number without a fractional part, so
+  only a hand-built body can hold that spelling, and this side is the stricter
+  one.
+- `0` at both offset levels is ABSENCE here, matching what `parseSeriesFile`
+  and `parseVolumeEntry` do at the file boundary (both drop a falsy offset).
+  The reader's "a `0` is a real value, the deliberate reset" rule lives one
+  layer further in, in its own store, and is none of bunko's business: a reset
+  reaches this side as an omitted field, which is exactly how it is read.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, TypeGuard
 
@@ -44,17 +60,31 @@ def _reject_constant(name: str) -> Any:
     raise ValueError(f"unsupported JSON constant: {name}")
 
 
-def _is_number(value: Any) -> TypeGuard[float]:
-    """A real, finite JSON number (`True` is an int in Python; exclude it).
+def _is_offset(value: Any) -> TypeGuard[float]:
+    """A usable alignment number: real, finite, and not the falsy reset.
 
-    A `TypeGuard` rather than a plain `bool` so the offset it vouches for can be
-    stored as it arrived. Narrowing is the only reason: coercing with `float()`
-    would turn an integer nudge into `-40.0` and the compiled bytes would stop
-    matching what the client itself would have written.
+    A `TypeGuard` rather than a plain `bool` so the value it vouches for can be
+    stored exactly as it arrived — narrowing is the only reason it exists, since
+    coercing with `float()` is precisely what must not happen here.
+
+    `math.isfinite` is what rules out `NaN`/`Infinity`, and it is called inside
+    a `try` because a large enough JSON *integer* literal has no float at all:
+    `{"spine_offset": 1e309-ish as 310 digits}` is legal JSON that Python parses
+    to an exact `int`, and converting it raises `OverflowError` rather than
+    returning `inf`. The reader's `JSON.parse` yields `Infinity` for that same
+    body and its finite check drops it, so dropping it is also the parity
+    answer — the point is that it must not escape as an exception from a
+    routine whose whole contract is "never raise on foreign input".
+
+    `True` is an `int` in Python and is excluded; `0` is excluded as absence
+    (see the module docstring).
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return value == value and value not in (float("inf"), float("-inf"))
+    try:
+        return math.isfinite(value) and value != 0
+    except OverflowError:
+        return False
 
 
 def _facts_from(raw: dict[str, Any], updated_at: str) -> SeriesFacts:
@@ -115,8 +145,9 @@ def parse_series_update(payload: bytes, *, now: float | None = None) -> SeriesUp
     if updated_at is None:
         return None
 
-    spine_offset_present = _is_number(decoded.get("spine_offset"))
-    spine_offset = float(decoded["spine_offset"]) if spine_offset_present else None
+    raw_spine = decoded.get("spine_offset")
+    spine_offset: float | None = raw_spine if _is_offset(raw_spine) else None
+    spine_offset_present = spine_offset is not None
 
     volume_offsets: dict[str, float] = {}
     listed: set[str] = set()
@@ -128,9 +159,14 @@ def parse_series_update(payload: bytes, *, now: float | None = None) -> SeriesUp
             uuid = raw_entry.get("volume_uuid")
             if not isinstance(uuid, str) or not uuid.strip():
                 continue
+            # First entry wins, exactly as `parseSeriesFile` dedupes: a repeated
+            # uuid is malformed either way, and the two sides must not disagree
+            # about which of the twins they kept.
+            if uuid in listed:
+                continue
             listed.add(uuid)
             offset = raw_entry.get("offset")
-            if _is_number(offset):
+            if _is_offset(offset):
                 volume_offsets[uuid] = offset
 
     return SeriesUpdate(
