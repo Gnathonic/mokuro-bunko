@@ -7,9 +7,31 @@ confused with the per-user progress files (`volume-data.json`,
 
 A stale root `series-metadata.json` written by an older reader is inert — an
 ordinary library file that nothing here looks at.
+
+Path normalization (Task 10 review F1): the real filesystem resolver
+(`security.safe_resolve_under`, built on `Path.resolve()`) collapses
+duplicate separators and `.`/`..` segments before it ever compares a virtual
+path to a physical one. This module used to compare the raw, un-normalized
+string instead, so `Dr Stone//series.json`, `Dr Stone/./series.json`,
+`./Dr Stone/series.json`, and `Dr Stone/../Dr Stone/series.json` all landed
+on the exact same physical file as `Dr Stone/series.json` while failing this
+module's naive match — an ordinary PUT to any of those spellings bypassed
+`MetadataAPI` entirely (verified empirically; see the review). `_library_relative`
+now performs the same lexical collapse (via `posixpath.normpath`, no
+filesystem access) so every consumer — `is_series_file_path`,
+`series_title_from_series_file_path`, `is_catalog_file_path`, and therefore
+`is_compiled_metadata_path` — agrees with the resolver on every alias. A
+path whose normalized form starts with `..` (escapes the library root) or
+`/` (a boundary double-slash that `Path.__truediv__` treats as an absolute
+override, discarding the library root entirely) matches nothing: those
+spellings are exactly the ones `safe_resolve_under` also refuses to resolve
+under the library, so they were never reachable as a bypass in the first
+place — rejecting them here is consistency, not a new plug.
 """
 
 from __future__ import annotations
+
+import posixpath
 
 from mokuro_bunko.webdav.resources import PathMapper
 
@@ -24,14 +46,23 @@ def _library_relative(virtual_path: str) -> str | None:
 
     Per-user files are excluded here, which is the partitioning rule itself:
     a path that maps into a user's private directory can never be metadata.
+    The result is lexically normalized (see module docstring) so this always
+    agrees with what the real path resolver would land the request on.
     """
     normalized = "/" + virtual_path.strip("/")
     if not normalized.startswith(_READER_PREFIX):
         return None
     relative = normalized[len(_READER_PREFIX):]
-    if not relative or relative in PathMapper.PER_USER_FILES:
+    if not relative:
         return None
-    return relative
+    collapsed = posixpath.normpath(relative)
+    if collapsed in (".", "") or collapsed == ".." or collapsed.startswith("../"):
+        return None  # escapes the library root: never resolvable, never metadata
+    if collapsed.startswith("/"):
+        return None  # boundary double-slash: an absolute-path override, not an alias
+    if collapsed in PathMapper.PER_USER_FILES:
+        return None
+    return collapsed
 
 
 def is_catalog_file_path(virtual_path: str) -> bool:

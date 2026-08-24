@@ -551,8 +551,15 @@ def run_server(config: Config, config_path: Path | None = None) -> None:
         wsgi_app = server.wsgi_app
         if hasattr(wsgi_app, "_library_watcher"):
             wsgi_app._library_watcher.stop()
-        if hasattr(wsgi_app, "_propfind_cache"):
-            wsgi_app._propfind_cache.stop()
+        # Stop the metadata service BEFORE the PROPFIND cache (Task 10 review
+        # F3): MetadataService.stop() does not wait for a just-finished
+        # pass's deferred on_published() call (it fires after _pass_lock is
+        # released, by design -- see service.py). Stopping propfind_cache
+        # first would guarantee any such late on_published -> schedule_refresh
+        # arms a timer nothing can ever cancel; stopping metadata_service
+        # first lets propfind_cache.stop() still catch it.
         if hasattr(wsgi_app, "_metadata_service"):
             wsgi_app._metadata_service.stop()
+        if hasattr(wsgi_app, "_propfind_cache"):
+            wsgi_app._propfind_cache.stop()
         server.stop()
