@@ -15,6 +15,7 @@ from mokuro_bunko.metadata.compiler import (
     compile_series_volumes,
     iter_series_folders,
 )
+from mokuro_bunko.metadata.schema import SeriesFacts, SeriesIndexData, dump_series_file
 
 
 def write_cbz(path: Path, pages: int = 2) -> None:
@@ -102,6 +103,27 @@ class TestCompileVolumes:
         [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
         assert entry.spine_width == 250.5
 
+    def test_integer_spine_width_is_not_widened_to_a_float(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(
+            json.dumps(mokuro_payload(spine_width=250)), encoding="utf-8"
+        )
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.spine_width == 250
+        assert type(entry.spine_width) is int  # noqa: E721 — widening to float is the bug
+
+        # The reader's JSON.stringify(250) is "250", never "250.0"; bunko must
+        # not republish a whole-number spine_width with a trailing float zero.
+        dumped = dump_series_file(
+            series_title="Dr Stone",
+            facts=SeriesFacts(),
+            index=SeriesIndexData(),
+            volumes=[entry],
+        )
+        assert b'"spine_width":250,' in dumped
+        assert b"250.0" not in dumped
+
     def test_reads_gzipped_sidecars(self, library: Path) -> None:
         series = library / "Dr Stone"
         write_cbz(series / "v1.cbz")
@@ -131,6 +153,57 @@ class TestCompileVolumes:
         assert entry.mokuro_version == ""
         assert entry.page_count == 3
         assert entry.volume_uuid == "38d6c0d6-1bef-4134-a339-a1e254c6"
+
+    def test_bad_gzip_bytes_degrade_to_image_only(self, library: Path) -> None:
+        # A `.mokuro.gz` that isn't gzip at all (not just bad JSON).
+        series = library / "Dr Stone"
+        write_cbz(series / "Volume 01.cbz", pages=3)
+        (series / "Volume 01.mokuro.gz").write_bytes(b"not gzip data at all")
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_version == ""
+        assert entry.page_count == 3
+        assert entry.character_count == 0
+        assert entry.volume_uuid == "38d6c0d6-1bef-4134-a339-a1e254c6"
+
+    def test_truncated_gzip_degrades_to_image_only(self, library: Path) -> None:
+        # A valid gzip header/stream cut off mid-body (not just bad bytes).
+        series = library / "Dr Stone"
+        write_cbz(series / "Volume 01.cbz", pages=3)
+        full = gzip.compress(json.dumps(mokuro_payload()).encode("utf-8"))
+        (series / "Volume 01.mokuro.gz").write_bytes(full[: len(full) // 2])
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_version == ""
+        assert entry.page_count == 3
+        assert entry.character_count == 0
+        assert entry.volume_uuid == "38d6c0d6-1bef-4134-a339-a1e254c6"
+
+    def test_non_list_pages_falls_back_to_archive_image_count(self, library: Path) -> None:
+        # Valid JSON, but `pages` isn't a list: version/uuid still come from
+        # the (otherwise well-formed) sidecar; page/char counts degrade.
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz", pages=3)
+        (series / "v1.mokuro").write_text(
+            json.dumps(mokuro_payload(pages="not a list")), encoding="utf-8"
+        )
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_version == "0.2.2"
+        assert entry.volume_uuid == "cfb5220c-57db-4008-9f44-e659d794e381"
+        assert entry.page_count == 3   # images in the archive, not len("not a list")
+        assert entry.character_count == 0
+
+    def test_list_of_junk_pages_counts_zero_chars_without_raising(self, library: Path) -> None:
+        # `pages` is a list (so its length is trusted for page_count), but its
+        # entries are not page objects: character counting must not crash.
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz", pages=3)
+        (series / "v1.mokuro").write_text(
+            json.dumps(mokuro_payload(pages=["junk", 123, None, "x", 4.5])), encoding="utf-8"
+        )
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_version == "0.2.2"
+        assert entry.volume_uuid == "cfb5220c-57db-4008-9f44-e659d794e381"
+        assert entry.page_count == 5   # len(pages), not the archive's image count
+        assert entry.character_count == 0
 
     def test_a_sidecar_without_an_archive_is_not_a_volume(self, library: Path) -> None:
         series = library / "Dr Stone"
