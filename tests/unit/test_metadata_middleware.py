@@ -35,6 +35,22 @@ class StubApp:
         return [b"downstream"]
 
 
+class _SpyInput(io.BytesIO):
+    """A `wsgi.input` stand-in that records whether `.read()` was ever called.
+
+    F2 regression: a rejected-before-read PUT (oversized, or missing
+    Content-Length) must never touch the body at all.
+    """
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.read_calls = 0
+
+    def read(self, *args: Any, **kwargs: Any) -> bytes:
+        self.read_calls += 1
+        return super().read(*args, **kwargs)
+
+
 def call(
     middleware: MetadataAPI,
     *,
@@ -43,6 +59,8 @@ def call(
     body: bytes = b'{"version":2}',
     username: str | None = "alice",
     content_length: str | None = None,
+    omit_content_length: bool = False,
+    wsgi_input: _SpyInput | None = None,
 ) -> tuple[str, list[tuple[str, str]], bytes]:
     captured: dict[str, Any] = {}
 
@@ -53,11 +71,12 @@ def call(
     environ: dict[str, Any] = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
-        "CONTENT_LENGTH": str(len(body)) if content_length is None else content_length,
-        "wsgi.input": io.BytesIO(body),
+        "wsgi.input": wsgi_input if wsgi_input is not None else _SpyInput(body),
         "mokuro.username": username,
         "mokuro.user": {"username": username} if username else None,
     }
+    if not omit_content_length:
+        environ["CONTENT_LENGTH"] = str(len(body)) if content_length is None else content_length
     result = b"".join(middleware(environ, start_response))
     return captured["status"], captured["headers"], result
 
@@ -123,12 +142,15 @@ class TestInterception:
 
     def test_an_oversized_body_is_413_and_is_not_read(self) -> None:
         service = StubService()
+        spy = _SpyInput(b"x" * (MAX_UPDATE_BODY_BYTES + 1))
         status, _headers, _body = call(
             MetadataAPI(StubApp(), service=service),  # type: ignore[arg-type]
             content_length=str(MAX_UPDATE_BODY_BYTES + 1),
+            wsgi_input=spy,
         )
         assert status.startswith("413")
         assert service.calls == []
+        assert spy.read_calls == 0
 
     def test_a_missing_content_length_is_400(self) -> None:
         service = StubService()
@@ -138,11 +160,77 @@ class TestInterception:
         assert status.startswith("400")
         assert service.calls == []
 
+    def test_an_absent_content_length_header_is_411_and_is_not_read(self) -> None:
+        """F2: a chunked-style PUT (`Transfer-Encoding: chunked`, no
+        `Content-Length` at all) must be rejected outright — never coerced
+        by `int(None or 0)` into a phantom zero-length body that silently
+        applies an empty update. 411 Length Required (RFC 9110 §15.5.12) is
+        the standards-precise status for "I refuse this request without a
+        declared length", and is kept distinct from the 400 just above
+        (header PRESENT but garbage) so the two failure classes never blur.
+        The body must never be touched either: on a real keep-alive cheroot
+        connection, `ChunkedRFile` is the only thing that knows how to
+        decode the chunked framing, and cheroot's own post-response drain
+        step explicitly skips chunked requests (`chunked_read`) — reading
+        a bounded/wrong amount here would desync the connection worse, not
+        better, so the correct move is to answer without reading at all.
+        """
+        service = StubService()
+        spy = _SpyInput(b'{"version":2}')
+        status, _headers, _body = call(
+            MetadataAPI(StubApp(), service=service),  # type: ignore[arg-type]
+            omit_content_length=True,
+            wsgi_input=spy,
+        )
+        assert status.startswith("411")
+        assert service.calls == []
+        assert spy.read_calls == 0
+
     def test_without_a_service_the_write_is_refused_not_written(self) -> None:
         downstream = StubApp()
         status, _headers, _body = call(MetadataAPI(downstream, service=None))
         assert status.startswith("403")
         assert downstream.calls == 0
+
+
+class TestPathAliasInterception:
+    """F1 regression: a legal alias spelling of `<Series>/series.json` — one
+    the real path resolver (`security.safe_resolve_under` ->
+    `Path.resolve()`) also lands on the same compiled file — must be
+    intercepted exactly like the canonical spelling: never reach the DAV
+    app, and go through the service like any other accepted update."""
+
+    ALIAS_PATHS = [
+        "/mokuro-reader/Dr Stone//series.json",
+        "/mokuro-reader/Dr Stone/./series.json",
+        "/mokuro-reader/./Dr Stone/series.json",
+        "/mokuro-reader/Dr Stone/../Dr Stone/series.json",
+    ]
+
+    def test_alias_spellings_are_intercepted_not_passed_through(self) -> None:
+        for path in self.ALIAS_PATHS:
+            downstream = StubApp()
+            service = StubService()
+            status, _headers, _body = call(
+                MetadataAPI(downstream, service=service),  # type: ignore[arg-type]
+                path=path,
+            )
+            assert downstream.calls == 0, f"{path!r} reached the DAV app"
+            assert status.startswith("204"), f"{path!r} was not accepted: {status}"
+            assert service.calls == [("Dr Stone", b'{"version":2}', "alice")], path
+
+    def test_a_traversal_escaping_the_library_root_is_never_intercepted(self) -> None:
+        """Not a bypass: `safe_resolve_under` independently refuses to
+        resolve this outside the library root either, so wsgidav never
+        opens a writer for it — it simply isn't a `series.json` alias at
+        all, and the matcher must agree by not intercepting it."""
+        downstream = StubApp()
+        status, _headers, _body = call(
+            MetadataAPI(downstream, service=StubService()),  # type: ignore[arg-type]
+            path="/mokuro-reader/../etc/series.json",
+        )
+        assert status == "200 OK"
+        assert downstream.calls == 1
 
 
 class TestOnPublishedIntegration:

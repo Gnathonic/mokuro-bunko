@@ -29,6 +29,7 @@ _STATUS_TEXT = {
     400: "400 Bad Request",
     401: "401 Unauthorized",
     403: "403 Forbidden",
+    411: "411 Length Required",
     413: "413 Payload Too Large",
 }
 
@@ -71,8 +72,23 @@ class MetadataAPI:
         if not isinstance(username, str) or not username:
             return self._text(start_response, 401, "Authentication required")
 
+        raw_content_length = environ.get("CONTENT_LENGTH")
+        if raw_content_length is None:
+            # A chunked-transfer PUT (HTTP/1.1 permits omitting Content-Length
+            # when using Transfer-Encoding: chunked) has no declared length at
+            # all. `int(None or 0)` used to coerce this to a phantom
+            # zero-length body — silently applying an empty update instead of
+            # rejecting the request. 411 is the RFC 9110 §15.5.12-precise
+            # status for "refused without a declared length", kept distinct
+            # from the 400 below (header PRESENT but garbage) so a client can
+            # tell the two failure classes apart. Answered without reading
+            # `wsgi.input` at all: cheroot's own post-response body drain
+            # explicitly skips chunked requests, so a bounded/best-effort read
+            # here would desync the connection rather than protect it — not
+            # reading is the only response that doesn't make that worse.
+            return self._text(start_response, 411, "Content-Length required")
         try:
-            length = int(environ.get("CONTENT_LENGTH") or 0)
+            length = int(raw_content_length)
         except (TypeError, ValueError):
             return self._text(start_response, 400, "Invalid Content-Length")
         if length < 0:

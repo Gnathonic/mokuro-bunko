@@ -43,6 +43,39 @@ class TestCatalogFilePaths:
         assert not is_catalog_file_path("/mokuro-reader/Dr Stone/catalog.json")
 
 
+class TestPathAliasNormalization:
+    """F1 regression: the matcher must recognize every legal alias spelling
+    the real resolver (`security.safe_resolve_under` -> `Path.resolve()`)
+    also lands on the same file, and must never match a spelling that
+    escapes the library root (which the resolver refuses to resolve at
+    all). Verified against the reviewer's empirical repro."""
+
+    ALIASES = [
+        "/mokuro-reader/Dr Stone//series.json",
+        "/mokuro-reader/Dr Stone/./series.json",
+        "/mokuro-reader/./Dr Stone/series.json",
+        "/mokuro-reader/Dr Stone/../Dr Stone/series.json",
+    ]
+
+    def test_alias_spellings_are_recognised(self) -> None:
+        for path in self.ALIASES:
+            assert is_series_file_path(path), path
+            assert series_title_from_series_file_path(path) == "Dr Stone", path
+
+    def test_a_catalog_alias_is_also_recognised(self) -> None:
+        assert is_catalog_file_path("/mokuro-reader/./catalog.json")
+        assert is_catalog_file_path("/mokuro-reader/Dr Stone/../catalog.json")
+
+    def test_traversal_escaping_the_library_root_never_matches(self) -> None:
+        assert not is_series_file_path("/mokuro-reader/../etc/series.json")
+        assert not is_compiled_metadata_path("/mokuro-reader/../catalog.json")
+        assert not is_compiled_metadata_path("/mokuro-reader/..")
+
+    def test_a_per_user_file_alias_is_still_excluded(self) -> None:
+        assert not is_compiled_metadata_path("/mokuro-reader/./volume-data.json")
+        assert not is_compiled_metadata_path("/mokuro-reader/Dr Stone/../volume-data.json")
+
+
 class TestPartitioning:
     """The regression the contract asks for: metadata is never progress."""
 
