@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import threading
+import time
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from mokuro_bunko.database import Database
+from mokuro_bunko.database import Database, SeriesFactsRow
+from mokuro_bunko.metadata import service as metadata_service
+from mokuro_bunko.metadata.compiler import volume_key_for
 from mokuro_bunko.metadata.service import MetadataService
 from mokuro_bunko.webdav.resources import _PATH_WRITE_LOCKS
 
@@ -167,6 +172,91 @@ class TestRegeneration:
         service.regenerate_all()
         assert calls == [1]
 
+    def test_prune_keeps_cache_rows_for_every_still_present_series(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        """Whole-library keep-set (contract carry-forward #4): a series that
+        published clean this pass (nothing about it changed) must not lose
+        its cache row just because a SIBLING series lost a volume."""
+        write_volume(library, "Dr Stone", "Volume 01")
+        write_volume(library, "Dr Stone", "Volume 02")
+        write_volume(library, "Aria", "v1")
+        service.regenerate_all()
+
+        def cache_keys() -> set[str]:
+            with service.database._connection() as conn:
+                rows = conn.execute("SELECT volume_key FROM series_entry_cache").fetchall()
+                return {str(row["volume_key"]) for row in rows}
+
+        assert cache_keys() == {
+            volume_key_for("Dr Stone", "Volume 01"),
+            volume_key_for("Dr Stone", "Volume 02"),
+            volume_key_for("Aria", "v1"),
+        }
+
+        (library / "Dr Stone" / "Volume 02.cbz").unlink()
+        (library / "Dr Stone" / "Volume 02.mokuro").unlink()
+        service.regenerate_all()
+
+        assert cache_keys() == {
+            volume_key_for("Dr Stone", "Volume 01"),
+            volume_key_for("Aria", "v1"),
+        }
+
+    def test_a_busy_skip_is_retried_by_the_next_scheduled_pass(
+        self, service: MetadataService, library: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_schedule = MetadataService.schedule_regeneration
+
+        def fast_schedule(self: MetadataService, delay: float | None = None) -> None:
+            real_schedule(self, 0.05 if delay is not None else delay)
+
+        monkeypatch.setattr(MetadataService, "schedule_regeneration", fast_schedule)
+
+        write_volume(library, "Dr Stone", "Volume 01")
+        assert _PATH_WRITE_LOCKS.acquire(library / "Dr Stone")
+        try:
+            service.regenerate_all()
+        finally:
+            _PATH_WRITE_LOCKS.release(library / "Dr Stone")
+        assert not (library / "Dr Stone" / "series.json").exists()
+
+        timer = service._timer
+        assert timer is not None
+        timer.join(timeout=10.0)
+        assert (library / "Dr Stone" / "series.json").exists()
+        service.stop()
+
+
+class TestUnreadableLibrary:
+    def test_a_removed_library_root_aborts_the_pass(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        calls: list[int] = []
+        service = MetadataService(
+            library, Database(tmp_path / "test.db"), on_published=lambda: calls.append(1)
+        )
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.regenerate_all()
+        assert calls == [1]
+
+        def cache_keys() -> set[str]:
+            with service.database._connection() as conn:
+                rows = conn.execute("SELECT volume_key FROM series_entry_cache").fetchall()
+                return {str(row["volume_key"]) for row in rows}
+
+        cached_before = cache_keys()
+        assert cached_before
+
+        shutil.rmtree(library)
+        assert not library.exists()
+
+        assert service.regenerate_all() == 0
+        assert not library.exists()  # not recreated
+        assert calls == [1]  # on_published did not fire for the aborted pass
+        assert cache_keys() == cached_before  # nothing pruned
+        service.stop()
+
 
 class TestApplyUpdate:
     def test_accepts_facts_and_republishes_both_files(
@@ -217,6 +307,58 @@ class TestApplyUpdate:
 
         assert service.apply_series_update("Dr Stone", series_update(), "alice") is True
         assert sidecar.stat().st_mtime == old
+
+    def test_reapplying_the_same_update_leaves_the_facts_row_untouched(
+        self, service: MetadataService, library: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MergeResult contract: nothing is persisted when nothing changed.
+
+        Reads the actual row (not just file mtimes) and, since SQLite's
+        `datetime('now')` bookkeeping stamp has only second resolution and
+        this whole test runs in well under a second, also spies on the write
+        call directly so a reintroduced unconditional write is still caught
+        even when it would not move `updated_at` far enough to notice.
+        """
+        write_volume(library, "Dr Stone", "Volume 01")
+        assert service.apply_series_update("Dr Stone", series_update(), "alice")
+        before = service.database.get_series_facts("dr stone")
+        assert before is not None
+
+        write_calls: list[SeriesFactsRow] = []
+        real_put = Database.put_series_facts
+
+        def spying_put(self: Database, row: SeriesFactsRow) -> None:
+            write_calls.append(row)
+            real_put(self, row)
+
+        monkeypatch.setattr(Database, "put_series_facts", spying_put)
+
+        assert service.apply_series_update("Dr Stone", series_update(), "alice") is True
+
+        assert write_calls == []
+        after = service.database.get_series_facts("dr stone")
+        assert after == before
+
+    def test_a_case_and_whitespace_variant_title_resolves_to_the_real_folder(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        assert service.apply_series_update("dr  STONE", series_update(tag="HD Scan"), "alice")
+        sidecar = json.loads((library / "Dr Stone" / "series.json").read_text("utf-8"))
+        assert sidecar["tag"] == "HD Scan"
+
+    def test_stored_series_title_uses_the_folders_spelling_not_the_puts(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        assert service.apply_series_update("dr  STONE", series_update(), "alice")
+        row = service.database.get_series_facts("dr stone")
+        assert row is not None
+        assert row["series_title"] == "Dr Stone"
+
+    def test_a_blank_title_is_rejected(self, service: MetadataService, library: Path) -> None:
+        assert service.apply_series_update("   ", series_update(), "alice") is False
+        assert service.database.list_series_facts() == []
 
     def test_older_facts_are_accepted_but_do_not_win(
         self, service: MetadataService, library: Path
@@ -273,6 +415,83 @@ class TestApplyUpdate:
         sidecar = json.loads((library / "Dr Stone" / "series.json").read_text("utf-8"))
         assert sidecar["external_ids"] == {"anilist": 98416}
 
+    def test_concurrent_puts_do_not_lose_the_newer_facts_or_an_offset(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reproduces the reviewer's F1 finding: without `_pass_lock` held
+        across the WHOLE read-merge-persist-republish sequence, two threads
+        PUTting concurrently interleave as read/read/write/write, and
+        whichever write lands last wins outright — even carrying an OLDER
+        facts stamp and dropping the other client's offset — while both
+        callers are told the update was accepted.
+
+        An artificial delay inside `_stored` (the read step), held under
+        `_pass_lock` when the fix is in place, forces genuine contention: an
+        unprotected implementation would let the second thread's read (and
+        therefore its write) race in underneath the first thread's sleep.
+        The two payloads target different volumes, so the correct outcome —
+        regardless of which thread's PUT actually lands first, since the
+        merge itself is order-independent — carries BOTH offsets.
+        """
+        service = MetadataService(library, Database(tmp_path / "test.db"))
+        write_volume(library, "Dr Stone", "Volume 01")
+        write_volume(library, "Dr Stone", "Volume 02")
+
+        real_stored = MetadataService._stored
+
+        def slow_stored(self: MetadataService, series_key: str) -> object:
+            result = real_stored(self, series_key)
+            time.sleep(0.05)
+            return result
+
+        monkeypatch.setattr(MetadataService, "_stored", slow_stored)
+
+        start = threading.Barrier(2)
+        results: dict[str, bool] = {}
+
+        def call(name: str, payload: bytes, actor: str) -> None:
+            start.wait(timeout=5.0)
+            results[name] = service.apply_series_update("Dr Stone", payload, actor)
+
+        older = threading.Thread(
+            target=call,
+            args=(
+                "bob",
+                series_update(
+                    external_ids={"anilist": 111},
+                    updated_at="2026-08-10T00:00:00.000Z",
+                    volumes=[{"volume_uuid": "uuid-Volume 01", "offset": -22}],
+                ),
+                "bob",
+            ),
+        )
+        newer = threading.Thread(
+            target=call,
+            args=(
+                "alice",
+                series_update(
+                    external_ids={"anilist": 999},
+                    updated_at="2026-08-20T00:00:00.000Z",
+                    volumes=[{"volume_uuid": "uuid-Volume 02", "offset": -33}],
+                ),
+                "alice",
+            ),
+        )
+        older.start()
+        newer.start()
+        older.join(timeout=5.0)
+        newer.join(timeout=5.0)
+
+        assert results == {"bob": True, "alice": True}
+        row = service.database.get_series_facts("dr stone")
+        assert row is not None
+        assert row["external_ids"] == {"anilist": 999}
+        assert row["facts_updated_at"] == "2026-08-20T00:00:00.000Z"
+        assert row["volume_offsets"] == {
+            "uuid-Volume 01": -22,
+            "uuid-Volume 02": -33,
+        }
+
 
 class TestDebounce:
     def test_scheduled_regeneration_runs_once_after_the_quiet_period(
@@ -290,6 +509,32 @@ class TestDebounce:
         assert (library / "Dr Stone" / "series.json").exists()
         service.stop()
 
+    def test_a_burst_of_schedule_calls_triggers_exactly_one_pass(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service = MetadataService(
+            library, Database(tmp_path / "test.db"), debounce_seconds=0.05
+        )
+        write_volume(library, "Dr Stone", "Volume 01")
+
+        calls: list[int] = []
+        real_regenerate_all = MetadataService.regenerate_all
+
+        def counting_regenerate_all(self: MetadataService) -> int:
+            calls.append(1)
+            return real_regenerate_all(self)
+
+        monkeypatch.setattr(MetadataService, "regenerate_all", counting_regenerate_all)
+
+        for _ in range(5):
+            service.schedule_regeneration()
+        timer = service._timer
+        assert timer is not None
+        timer.join(timeout=5.0)
+
+        assert calls == [1]
+        service.stop()
+
     def test_stop_cancels_a_pending_pass(self, library: Path, tmp_path: Path) -> None:
         service = MetadataService(library, Database(tmp_path / "test.db"), debounce_seconds=5.0)
         write_volume(library, "Dr Stone", "Volume 01")
@@ -297,3 +542,49 @@ class TestDebounce:
         service.stop()
         assert service._timer is None
         assert not (library / "Dr Stone" / "series.json").exists()
+
+    def test_schedule_after_stop_does_not_revive_the_timer(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        service = MetadataService(library, Database(tmp_path / "test.db"), debounce_seconds=5.0)
+        service.stop()
+        service.schedule_regeneration()
+        assert service._timer is None
+
+    def test_a_just_fired_timer_does_nothing_after_stop(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        """A timer whose wait already elapsed (`cancel()` cannot win that
+        race) must still no-op: `_fire` re-checks `_stopped` itself."""
+        service = MetadataService(library, Database(tmp_path / "test.db"), debounce_seconds=5.0)
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.schedule_regeneration()
+        service.stop()
+        service._fire()  # simulates the timer thread having already started
+        assert not (library / "Dr Stone" / "series.json").exists()
+
+    def test_stop_blocks_until_a_running_pass_finishes(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service = MetadataService(
+            library, Database(tmp_path / "test.db"), debounce_seconds=0.01
+        )
+        write_volume(library, "Dr Stone", "Volume 01")
+
+        real_write_if_changed = metadata_service.write_if_changed
+
+        def slow_write_if_changed(path: Path, data: bytes) -> bool:
+            time.sleep(0.15)
+            return real_write_if_changed(path, data)
+
+        monkeypatch.setattr(metadata_service, "write_if_changed", slow_write_if_changed)
+
+        service.schedule_regeneration()
+        time.sleep(0.1)  # let the debounce fire and enter the slow series.json write
+        service.stop()
+
+        # stop() must not return until the WHOLE in-flight pass (both files,
+        # written sequentially) is done: if it returned early, the catalog
+        # (written second) would still be missing here.
+        assert (library / "Dr Stone" / "series.json").exists()
+        assert (library / "catalog.json").exists()
