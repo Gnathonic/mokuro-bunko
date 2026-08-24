@@ -143,9 +143,19 @@ def _count_archive_images(cbz_path: Path) -> int:
 
 
 def _positive_number(value: Any) -> float | None:
+    """A usable positive `spine_width`, returned UNCOERCED.
+
+    Mirrors `validate.py`'s `_is_offset`: the reader passes `spine_width`
+    through untouched from whatever produced the `.mokuro` (it is not a
+    computed pixel measurement — see the type comment in the reader's
+    `src/lib/types/index.ts`), so a whole-number value must survive as a
+    Python `int` and serialize as `250`, never widened to `250.0` by a
+    `float()` call here. PEP 484's numeric tower keeps this `int | float`
+    compatible with the declared `float | None` return type.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value) if value > 0 else None
+    return value if value > 0 else None
 
 
 def _compile_volume(series_title: str, cbz_path: Path, sidecar: Path | None) -> VolumeEntry:
@@ -267,5 +277,10 @@ def compile_series_volumes(
                 )
         entries.append(entry)
 
-    entries.sort(key=lambda item: natural_sort_key(item.volume_title))
+    # Tiebreak on the raw title, matching `dump_series_file`'s own sort:
+    # `natural_sort_key` is a TOTAL PREORDER (its own docstring), so distinct
+    # titles can tie, and without a secondary key this function's own claimed
+    # order would rest only on `_archive_names`'s implicit tie-free input
+    # rather than being a self-contained guarantee.
+    entries.sort(key=lambda item: (natural_sort_key(item.volume_title), item.volume_title))
     return entries
