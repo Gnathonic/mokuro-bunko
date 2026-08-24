@@ -1,12 +1,14 @@
-"""SQLite database for user, invite, audit, and upload ownership management."""
+"""SQLite database for user, invite, audit, upload ownership and series metadata."""
 
 from __future__ import annotations
 
+import json
+import math
 import secrets
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -59,6 +61,38 @@ class AuditEventDict(TypedDict):
     target_username: str | None
     details: str | None
     created_at: str
+
+
+class SeriesFactsRow(TypedDict):
+    """One series' shareable facts plus its shelf alignment (index data).
+
+    `series_key` is the reader's own series fold —
+    `metadata.reader_compat.normalize_series_key`: trim, collapse whitespace,
+    lowercase, no NFC pass. It is NOT the case-sensitive matching this module
+    uses for volume keys (`normalize_volume_key_from_library_relative`), so two
+    folders differing only in case share one facts row by design. `database.py`
+    stays free of metadata imports (as it does of API imports), so callers fold
+    the title before calling in; nothing here re-folds what it is handed.
+
+    `facts_updated_at` is the FACTS clock — the value that decides merges. It
+    is not `updated_at`, which is this row's own bookkeeping stamp and moves
+    whenever anything (including an offset) is written. Both are stored as
+    given: the validator has already clamped the facts stamp, and the factless
+    epoch literal must survive unchanged.
+    """
+
+    series_key: str
+    series_title: str
+    external_ids: dict[str, int]
+    titles: dict[str, str]
+    synonyms: list[str]
+    tag: str | None
+    unit: str | None
+    facts_updated_at: str
+    spine_offset: float | None
+    volume_offsets: dict[str, float]
+    updated_by: str | None
+    updated_at: str
 
 
 def normalize_role(role: str) -> UserRole:
@@ -164,7 +198,7 @@ class _RetryingConnection:
 class Database:
     """SQLite database for user and invite management."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     AUDIT_PRUNE_INTERVAL_SECONDS = 3600
 
     def __init__(self, db_path: Path | str) -> None:
@@ -303,6 +337,45 @@ class Database:
                 )
             """)
 
+            # Schema v3: series facts + the compiled-entry cache. Both are
+            # CREATE TABLE IF NOT EXISTS like everything above, so a v2
+            # database gains them on the next open and a v3 one is untouched.
+            #
+            # `spine_offset` is NUMERIC, not REAL, deliberately: alignment
+            # numbers are preserved verbatim from a client PUT, and REAL
+            # affinity would widen the integer nudge `-40` to `-40.0`, so the
+            # republished bytes would stop matching what the client wrote.
+            # NUMERIC keeps an integer an integer (and folds `8.0` back to `8`,
+            # which is what JSON.stringify writes for that value anyway).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS series_facts (
+                    series_key TEXT PRIMARY KEY,
+                    series_title TEXT NOT NULL,
+                    external_ids TEXT NOT NULL DEFAULT '{}',
+                    titles TEXT NOT NULL DEFAULT '{}',
+                    synonyms TEXT NOT NULL DEFAULT '[]',
+                    tag TEXT,
+                    unit TEXT,
+                    facts_updated_at TEXT NOT NULL,
+                    spine_offset NUMERIC,
+                    volume_offsets TEXT NOT NULL DEFAULT '{}',
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS series_entry_cache (
+                    volume_key TEXT PRIMARY KEY,
+                    series_key TEXT NOT NULL,
+                    entry_json TEXT NOT NULL,
+                    cbz_size INTEGER NOT NULL,
+                    cbz_mtime REAL NOT NULL,
+                    sidecar_key TEXT NOT NULL DEFAULT '',
+                    computed_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+
             if not self._column_exists(conn, "users", "notes"):
                 conn.execute("ALTER TABLE users ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
 
@@ -328,6 +401,10 @@ class Database:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_volume_uploads_uploader
                 ON volume_uploads(uploader_username)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_series_entry_cache_series
+                ON series_entry_cache(series_key)
             """)
 
             # Role rename migration
@@ -1025,3 +1102,190 @@ class Database:
                 (new_key, row["uploader_username"], row["uploaded_at"], row["last_modified_by"]),
             )
             conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", (old_key,))
+
+    # Series metadata operations
+
+    @staticmethod
+    def _load_json_object(raw: Any, fallback: Any) -> Any:
+        """Decode a JSON column, degrading to *fallback* on corruption.
+
+        These columns are written by this class alone, but a half-written row
+        or a hand-edited database must not take the whole metadata compiler
+        down: a series whose facts cannot be read is a factless series.
+        """
+        if not isinstance(raw, str):
+            return fallback
+        try:
+            decoded = json.loads(raw)
+        except ValueError:
+            return fallback
+        return decoded if isinstance(decoded, type(fallback)) else fallback
+
+    @staticmethod
+    def _bindable_offset(value: Any) -> float | int | None:
+        """Reduce an alignment number to something SQLite can actually store.
+
+        `spine_offset` is index data preserved verbatim from a client PUT, so a
+        hostile payload can carry an integer wider than SQLite's 64 bits (which
+        sqlite3 refuses to bind) or a non-finite float. Neither is a shelf
+        nudge; both degrade to "no offset" rather than aborting a library-wide
+        publish at the write. Per-volume offsets need no such guard — they ride
+        in a JSON column, where any magnitude round-trips as written.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if isinstance(value, int):
+            return value if -(2**63) <= value < 2**63 else None
+        return value if math.isfinite(value) else None
+
+    def _series_facts_from_row(self, row: sqlite3.Row) -> SeriesFactsRow:
+        return SeriesFactsRow(
+            series_key=str(row["series_key"]),
+            series_title=str(row["series_title"]),
+            external_ids=self._load_json_object(row["external_ids"], {}),
+            titles=self._load_json_object(row["titles"], {}),
+            synonyms=self._load_json_object(row["synonyms"], []),
+            tag=row["tag"],
+            unit=row["unit"],
+            facts_updated_at=str(row["facts_updated_at"]),
+            spine_offset=row["spine_offset"],
+            volume_offsets=self._load_json_object(row["volume_offsets"], {}),
+            updated_by=row["updated_by"],
+            updated_at=str(row["updated_at"]),
+        )
+
+    def get_series_facts(self, series_key: str) -> SeriesFactsRow | None:
+        """Stored facts for one series, keyed by normalized series title."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM series_facts WHERE series_key = ?", (series_key,)
+            )
+            row = cursor.fetchone()
+            return self._series_facts_from_row(row) if row else None
+
+    def list_series_facts(self) -> list[SeriesFactsRow]:
+        """Every stored series, including ones whose folder is gone."""
+        with self._connection() as conn:
+            cursor = conn.execute("SELECT * FROM series_facts")
+            return [self._series_facts_from_row(row) for row in cursor.fetchall()]
+
+    def put_series_facts(self, row: SeriesFactsRow) -> None:
+        """Insert or replace one series' facts and shelf alignment."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO series_facts (
+                    series_key, series_title, external_ids, titles, synonyms,
+                    tag, unit, facts_updated_at, spine_offset, volume_offsets,
+                    updated_by, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(series_key) DO UPDATE SET
+                    series_title = excluded.series_title,
+                    external_ids = excluded.external_ids,
+                    titles = excluded.titles,
+                    synonyms = excluded.synonyms,
+                    tag = excluded.tag,
+                    unit = excluded.unit,
+                    facts_updated_at = excluded.facts_updated_at,
+                    spine_offset = excluded.spine_offset,
+                    volume_offsets = excluded.volume_offsets,
+                    updated_by = excluded.updated_by,
+                    updated_at = datetime('now')
+                """,
+                (
+                    row["series_key"],
+                    row["series_title"],
+                    json.dumps(row["external_ids"], ensure_ascii=False),
+                    json.dumps(row["titles"], ensure_ascii=False),
+                    json.dumps(row["synonyms"], ensure_ascii=False),
+                    row["tag"],
+                    row["unit"],
+                    row["facts_updated_at"],
+                    self._bindable_offset(row["spine_offset"]),
+                    json.dumps(row["volume_offsets"], ensure_ascii=False),
+                    row["updated_by"],
+                ),
+            )
+
+    def get_cached_volume_entry(
+        self,
+        volume_key: str,
+        cbz_size: int,
+        cbz_mtime: float,
+        sidecar_key: str,
+    ) -> dict[str, Any] | None:
+        """A previously compiled volume entry, if the sources are unchanged.
+
+        Every stat is compared in Python rather than in SQL: floats compare
+        exactly here (they round-trip through REAL unchanged) and a mismatch
+        must be a miss, never an approximate hit.
+        """
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM series_entry_cache WHERE volume_key = ?", (volume_key,)
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        if int(row["cbz_size"]) != cbz_size or float(row["cbz_mtime"]) != cbz_mtime:
+            return None
+        if str(row["sidecar_key"]) != sidecar_key:
+            return None
+        entry = self._load_json_object(row["entry_json"], {})
+        return cast("dict[str, Any]", entry) if entry else None
+
+    def put_cached_volume_entry(
+        self,
+        volume_key: str,
+        series_key: str,
+        entry: dict[str, Any],
+        cbz_size: int,
+        cbz_mtime: float,
+        sidecar_key: str,
+    ) -> None:
+        """Remember a compiled volume entry against its sources' stat."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO series_entry_cache (
+                    volume_key, series_key, entry_json, cbz_size, cbz_mtime,
+                    sidecar_key, computed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(volume_key) DO UPDATE SET
+                    series_key = excluded.series_key,
+                    entry_json = excluded.entry_json,
+                    cbz_size = excluded.cbz_size,
+                    cbz_mtime = excluded.cbz_mtime,
+                    sidecar_key = excluded.sidecar_key,
+                    computed_at = datetime('now')
+                """,
+                (
+                    volume_key,
+                    series_key,
+                    json.dumps(entry, ensure_ascii=False),
+                    cbz_size,
+                    cbz_mtime,
+                    sidecar_key,
+                ),
+            )
+
+    def prune_series_entry_cache(self, keep_volume_keys: Iterable[str]) -> int:
+        """Drop cache rows for volumes that no longer exist. Returns the count.
+
+        The scan and the deletes share one `_connection()` block, so the whole
+        prune takes the write lock once instead of once per stale row. The
+        deletes are issued one `execute()` at a time (not `executemany`)
+        because only `execute` goes through the lock-retry proxy, and a delete
+        by primary key is idempotent, so a retried one cannot double-apply.
+        """
+        keep = set(keep_volume_keys)
+        with self._connection() as conn:
+            cursor = conn.execute("SELECT volume_key FROM series_entry_cache")
+            stale = [
+                str(row["volume_key"])
+                for row in cursor.fetchall()
+                if str(row["volume_key"]) not in keep
+            ]
+            for volume_key in stale:
+                conn.execute("DELETE FROM series_entry_cache WHERE volume_key = ?", (volume_key,))
+            return len(stale)
