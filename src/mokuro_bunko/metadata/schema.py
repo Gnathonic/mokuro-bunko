@@ -11,6 +11,7 @@ and no wall-clock stamps anywhere.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,7 +41,19 @@ class SeriesFacts:
     updated_at: str = FACTLESS_UPDATED_AT
 
     def has_facts(self) -> bool:
-        """Does this say anything shareable? (client: `hasSeriesFacts`)"""
+        """Does this say anything shareable? (client: `hasSeriesFacts`)
+
+        Checks the RAW fields, not the allowlisted payload `_facts_payload`
+        writes: a record holding only an unrecognised external-id provider or
+        a non-canonical `unit` string is still factful here — it has an
+        opinion, so it must win a facts merge and carry a real `updated_at` —
+        even though `_facts_payload` drops those same values as unknown and
+        the file it produces can end up with every facts field empty. That
+        disagreement is intentional (pinned by
+        `test_has_facts_can_disagree_with_the_written_payload`): a merge rule
+        must key off `has_facts()` / `updated_at`, never off "does the
+        payload look non-empty".
+        """
         return bool(
             self.external_ids
             or self.titles
@@ -71,6 +84,26 @@ class VolumeEntry:
     archive_size: int | None = None
 
 
+def _is_spine_width(value: float | None) -> bool:
+    """A usable spine width: a positive finite number of pixels.
+
+    Port of the client's `isSpineWidth` (`series-file.ts`). A plain
+    truthiness check would keep a negative width or NaN — both are truthy in
+    Python — as a real measurement.
+    """
+    return value is not None and math.isfinite(value) and value > 0
+
+
+def _is_archive_size(value: int | None) -> bool:
+    """A usable archive size: a positive whole number of bytes.
+
+    Port of the client's `isArchiveSize` (`series-file.ts`). `archive_size`
+    is typed `int` here, so unlike the client (whose numbers are always
+    floats) there is no separate "is it a whole number" check to make.
+    """
+    return value is not None and value > 0
+
+
 def _facts_payload(facts: SeriesFacts) -> dict[str, Any]:
     """Facts in canonical key order, unknown providers/languages dropped."""
     payload: dict[str, Any] = {
@@ -89,8 +122,64 @@ def _facts_payload(facts: SeriesFacts) -> dict[str, Any]:
 
 
 def _dumps(payload: Any) -> bytes:
-    """Compact, UTF-8, unescaped — the client's `JSON.stringify` output."""
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    """Compact, UTF-8, unescaped — the client's `JSON.stringify` output.
+
+    `allow_nan=False`: JSON has no `NaN`/`Infinity`/`-Infinity` token, so a
+    non-finite number reaching this layer must fail loudly rather than
+    silently produce invalid JSON (Python's default encoder would otherwise
+    accept it and emit the literal identifier).
+
+    `backslashreplace` on encode: a lone surrogate — half a broken UTF-16
+    pair, as `os.scandir`'s `surrogateescape` error handler produces for a
+    non-UTF-8 folder name, or as an untrusted PUT body can carry — cannot be
+    encoded to strict UTF-8 and would otherwise abort compiling the whole
+    document. `backslashreplace` writes it as its literal `\\uXXXX` escape
+    instead, which is byte-identical to what a modern JS engine's
+    `JSON.stringify` emits for the same unpaired surrogate: ES2019's
+    "well-formed JSON.stringify" change replaced raw unpaired surrogates in
+    its output with exactly this escape sequence.
+    """
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return text.encode("utf-8", "backslashreplace")
+
+
+def _dedup_by_uuid(volumes: Sequence[VolumeEntry]) -> list[VolumeEntry]:
+    """First occurrence per `volume_uuid` wins.
+
+    Mirrors `parseSeriesFile`'s `seen.has(entry.volume_uuid)` skip, so a
+    document this writes never contains something the reader's own parser
+    would silently reduce further — bunko's output survives the reader's
+    parse unchanged. A backstop, not a merge decision: by the time entries
+    reach this dumb serializer, an upstream merge step should already have
+    resolved which copy of a duplicated volume wins.
+    """
+    seen: set[str] = set()
+    deduped: list[VolumeEntry] = []
+    for volume in volumes:
+        if volume.volume_uuid in seen:
+            continue
+        seen.add(volume.volume_uuid)
+        deduped.append(volume)
+    return deduped
+
+
+def _dedup_by_series_key(
+    entries: Sequence[tuple[str, SeriesFacts]],
+) -> list[tuple[str, SeriesFacts]]:
+    """First occurrence per normalized series key wins.
+
+    Mirrors `parseCatalogFile`'s `seen.has(key)` skip, for the same reason
+    `_dedup_by_uuid` mirrors `parseSeriesFile`'s.
+    """
+    seen: set[str] = set()
+    deduped: list[tuple[str, SeriesFacts]] = []
+    for series_title, facts in entries:
+        key = normalize_series_key(series_title)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((series_title, facts))
+    return deduped
 
 
 def dump_series_file(
@@ -109,7 +198,15 @@ def dump_series_file(
     payload["updated_at"] = facts.updated_at
 
     entries: list[dict[str, Any]] = []
-    for volume in sorted(volumes, key=lambda item: natural_sort_key(item.volume_title)):
+    # Tiebreak on the raw title: `natural_sort_key` folds case/accents, so
+    # distinct titles ("Volume 1" / "volume 1") can tie — without a secondary
+    # key, Python's stable sort would let whichever volume came first in the
+    # input come first in the file, making the bytes depend on input order.
+    ordered_volumes = sorted(
+        _dedup_by_uuid(volumes),
+        key=lambda item: (natural_sort_key(item.volume_title), item.volume_title),
+    )
+    for volume in ordered_volumes:
         entry: dict[str, Any] = {
             "volume_uuid": volume.volume_uuid,
             "volume_title": volume.volume_title,
@@ -117,9 +214,9 @@ def dump_series_file(
             "character_count": volume.character_count,
             "mokuro_version": volume.mokuro_version,
         }
-        if volume.spine_width:
+        if _is_spine_width(volume.spine_width):
             entry["spine_width"] = volume.spine_width
-        if volume.archive_size:
+        if _is_archive_size(volume.archive_size):
             entry["archive_size"] = volume.archive_size
         offset = index.volume_offsets.get(volume.volume_uuid)
         if offset:
@@ -137,7 +234,13 @@ def dump_catalog_file(entries: Sequence[tuple[str, SeriesFacts]]) -> bytes:
     change the bytes on every rebuild and have every client re-download a file
     that did not change.
     """
-    ordered = sorted(entries, key=lambda item: normalize_series_key(item[0]))
+    # Same tiebreak reasoning as `dump_series_file`'s volume order; dedup
+    # (below) collapses ties keyed on the normalized title down to one entry
+    # in practice, but the compound key keeps the sort itself total.
+    ordered = sorted(
+        _dedup_by_series_key(entries),
+        key=lambda item: (normalize_series_key(item[0]), item[0]),
+    )
     series: list[dict[str, Any]] = []
     newest = FACTLESS_UPDATED_AT
     for series_title, facts in ordered:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from mokuro_bunko.metadata.schema import (
     FACTLESS_UPDATED_AT,
     SeriesFacts,
@@ -37,6 +39,30 @@ class TestSeriesFacts:
     def test_blank_strings_are_not_facts(self) -> None:
         assert not SeriesFacts(tag="   ").has_facts()
         assert not SeriesFacts(synonyms=("", "  ")).has_facts()
+
+    def test_has_facts_can_disagree_with_the_written_payload(self) -> None:
+        """`has_facts()` checks the RAW fields; `_facts_payload` filters
+        through the ID_KEYS/TITLE_KEYS/TRACKING_UNITS allowlists. A record
+        holding only an unrecognised external-id provider and a
+        non-canonical `unit` string is factful here (it has an opinion, so
+        it must still win a facts merge and carry a real `updated_at`) even
+        though every field the FILE actually writes ends up empty. Pinned so
+        a later merge-rules task keys off `has_facts()` / `updated_at`,
+        never off "does the payload look non-empty".
+        """
+        facts = SeriesFacts(
+            external_ids={"kitsune": 7},
+            unit="chapters-ish",
+            updated_at="2026-08-18T19:36:24.324Z",
+        )
+        assert facts.has_facts()
+        data = dump_series_file(
+            series_title="S", facts=facts, index=SeriesIndexData(), volumes=[]
+        ).decode("utf-8")
+        assert data == (
+            '{"version":2,"series_title":"S","external_ids":{},"titles":{},'
+            '"synonyms":[],"updated_at":"2026-08-18T19:36:24.324Z","volumes":[]}'
+        )
 
 
 class TestDumpSeriesFile:
@@ -117,6 +143,99 @@ class TestDumpSeriesFile:
         }
         assert dump_series_file(**args) == dump_series_file(**args)  # type: ignore[arg-type]
 
+    def test_invalid_spine_width_and_archive_size_are_dropped(self) -> None:
+        # Ports the reader's `isSpineWidth`/`isArchiveSize`: a plain
+        # truthiness check would keep these (both are nonzero in Python),
+        # but neither is a usable measurement.
+        volume = VolumeEntry(
+            "u1", "Volume 1", 1, 1, "0.2.2", spine_width=-5.0, archive_size=-10
+        )
+        data = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(), volumes=[volume]
+        ).decode("utf-8")
+        assert "spine_width" not in data
+        assert "archive_size" not in data
+
+    def test_non_finite_spine_width_is_dropped(self) -> None:
+        volume = VolumeEntry("u1", "Volume 1", 1, 1, "0.2.2", spine_width=float("inf"))
+        data = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(), volumes=[volume]
+        ).decode("utf-8")
+        assert "spine_width" not in data
+
+    def test_non_finite_numbers_are_refused_not_silently_written(self) -> None:
+        # `allow_nan=False`: JSON has no NaN/Infinity token, so a value that
+        # reaches this layer must fail loudly rather than produce invalid JSON.
+        with pytest.raises(ValueError):
+            dump_series_file(
+                series_title="S",
+                facts=SeriesFacts(),
+                index=SeriesIndexData(spine_offset=float("nan")),
+                volumes=[],
+            )
+
+    def test_integral_float_spine_offset_keeps_the_decimal_point(self) -> None:
+        # Accepted divergence from `JSON.stringify`: callers (e.g. bunko's
+        # config layer, which coerces offsets through `float()`) will
+        # normally hand this an already-float value, so `12.0` ->
+        # `"spine_offset":12.0` is the NORMAL path, not an edge case.
+        # `JSON.stringify(12)` would write bare `12`, but both parse back to
+        # the same number, so the byte divergence is accepted.
+        data = dump_series_file(
+            series_title="S",
+            facts=SeriesFacts(),
+            index=SeriesIndexData(spine_offset=12.0),
+            volumes=[],
+        )
+        assert b'"spine_offset":12.0' in data
+
+    def test_lone_surrogates_are_backslash_escaped_not_fatal(self) -> None:
+        # Simulates a folder name that round-tripped through `os.scandir`
+        # with `surrogateescape` (a non-UTF-8 byte becomes a lone low
+        # surrogate in the resulting str), or an untrusted PUT body. Must
+        # not abort compiling the rest of the catalog.
+        name = "Dr\udcff"
+        data = dump_series_file(
+            series_title=name, facts=SeriesFacts(), index=SeriesIndexData(), volumes=[]
+        )
+        assert b"Dr\\udcff" in data
+
+
+class TestSeriesFileDeterminism:
+    def test_tied_natural_sort_keys_break_on_raw_title_text(self) -> None:
+        # "volume 1" / "Volume 1" fold to the identical `natural_sort_key`;
+        # only the compound (key, raw title) tiebreak makes the byte order
+        # independent of input order — a bare stable sort would let whichever
+        # one came first in `volumes` come first in the file.
+        lower = VolumeEntry("u-lower", "volume 1", 1, 1, "0.2.2")
+        upper = VolumeEntry("u-upper", "Volume 1", 1, 1, "0.2.2")
+        forward = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(),
+            volumes=[lower, upper],
+        )
+        backward = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(),
+            volumes=[upper, lower],
+        )
+        assert forward == backward
+        text = forward.decode("utf-8")
+        # "Volume 1" < "volume 1" byte-wise (uppercase sorts first).
+        assert text.index('"u-upper"') < text.index('"u-lower"')
+
+    def test_duplicate_volume_uuid_keeps_only_the_first_occurrence(self) -> None:
+        # Mirrors `parseSeriesFile`'s `seen.has(entry.volume_uuid)` skip, so
+        # a document this writes never contains something the reader's own
+        # parser would silently reduce further.
+        first = VolumeEntry("dup", "First Copy", 10, 100, "0.2.2")
+        second = VolumeEntry("dup", "Second Copy", 20, 200, "0.2.2")
+        data = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(),
+            volumes=[first, second],
+        ).decode("utf-8")
+        assert data.count('"volume_uuid":"dup"') == 1
+        assert "First Copy" in data
+        assert "Second Copy" not in data
+
 
 class TestDumpCatalogFile:
     def test_entries_sorted_by_key_with_factless_series_included(self) -> None:
@@ -148,3 +267,24 @@ class TestDumpCatalogFile:
         # `unit: "volumes"` fact value; assert on the array KEY instead.
         assert '"volumes":' not in text
         assert "spine_offset" not in text
+
+
+class TestCatalogFileDeterminism:
+    def test_reversed_input_order_produces_identical_bytes(self) -> None:
+        entries = [("Zeta", SeriesFacts()), ("Alpha", SeriesFacts())]
+        forward = dump_catalog_file(entries)
+        backward = dump_catalog_file(list(reversed(entries)))
+        assert forward == backward
+
+    def test_duplicate_normalized_series_key_keeps_only_the_first(self) -> None:
+        # Mirrors `parseCatalogFile`'s `seen.has(key)` skip, same reasoning
+        # as the series-file volume dedup.
+        first = ("Dr Stone", SeriesFacts(tag="First", updated_at="2026-08-18T19:36:24.324Z"))
+        second = (
+            "  dr   stone  ",
+            SeriesFacts(tag="Second", updated_at="2026-08-19T00:00:00.000Z"),
+        )
+        data = dump_catalog_file([first, second]).decode("utf-8")
+        assert data.count('"series_title"') == 1
+        assert '"tag":"First"' in data
+        assert "Second" not in data
