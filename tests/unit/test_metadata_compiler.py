@@ -251,6 +251,13 @@ class TestEntryCache:
                 "page_count": 999,
                 "character_count": 888,
                 "mokuro_version": "cached",
+                # A post-11b row shape: mokuro_size/mokuro_modified must be
+                # present (even a deliberately wrong value works) or this
+                # row reads as a pre-11b legacy row and MISSES instead of
+                # hitting — see TestFreshnessStamps's dedicated miss/restamp
+                # test for that path.
+                "mokuro_size": 111,
+                "mokuro_modified": 222,
             },
             cbz_stat.st_size,
             cbz_stat.st_mtime,
@@ -259,6 +266,8 @@ class TestEntryCache:
         [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
         assert entry.page_count == 999
         assert entry.mokuro_version == "cached"
+        assert entry.mokuro_size == 111
+        assert entry.mokuro_modified == 222
 
     def test_a_changed_sidecar_invalidates_the_cache_and_is_rewritten(
         self, library: Path, tmp_path: Path
@@ -389,3 +398,62 @@ class TestFreshnessStamps:
         [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
         assert entry.mokuro_size == sidecar_stat.st_size
         assert entry.mokuro_modified == int(sidecar_stat.st_mtime)
+
+    def test_a_pre_stamps_cache_row_misses_and_restamps_instead_of_hitting_as_none(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        # Review round 1, Finding 1: a `series_entry_cache` row written by a
+        # bunko binary that predates this feature has no `mokuro_size`/
+        # `mokuro_modified` keys in its `entry_json` at all — not present
+        # with a `None` value, simply absent, because `_entry_to_dict` at
+        # the time had never heard of them. `.get(...)` would silently
+        # accept that row as a "fresh" hit with both stamps `None`,
+        # indistinguishable from "no sidecar" even though the sidecar is
+        # present and unchanged on disk (the cache-validation key — archive
+        # + sidecar stat — still matches, since neither file was touched).
+        # That never self-heals: `_compile_volume` is never invoked again
+        # for this volume until something ELSE invalidates the cache key,
+        # which may be never for a completed series. Required-key access
+        # must instead raise `KeyError` on a legacy row -> `_entry_from_dict`
+        # returns `None` -> cache MISS -> `_compile_volume` runs -> the row
+        # is rewritten with real stamps, restamping exactly once.
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        database = Database(tmp_path / "test.db")
+        cbz_stat = (series / "v1.cbz").stat()
+        sidecar_stat = (series / "v1.mokuro").stat()
+        sidecar_key = f"v1.mokuro:{sidecar_stat.st_size}:{sidecar_stat.st_mtime}"
+
+        # A pre-11b row: the exact shape `_entry_to_dict` wrote before this
+        # task, missing `mokuro_size`/`mokuro_modified` entirely (not `None`
+        # values — the keys themselves are absent).
+        database.put_cached_volume_entry(
+            "Dr Stone/v1.cbz",
+            "dr stone",
+            {
+                "volume_uuid": "cfb5220c-57db-4008-9f44-e659d794e381",
+                "volume_title": "v1",
+                "page_count": 2,
+                "character_count": 4,
+                "mokuro_version": "0.2.2",
+                "spine_width": None,
+                "archive_size": cbz_stat.st_size,
+            },
+            cbz_stat.st_size,
+            cbz_stat.st_mtime,
+            sidecar_key,
+        )
+
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert entry.mokuro_size == sidecar_stat.st_size
+        assert entry.mokuro_modified == int(sidecar_stat.st_mtime)
+
+        # And the cache row itself is now restamped, so the very next
+        # compile is served from cache with real stamps too.
+        cached = database.get_cached_volume_entry(
+            "Dr Stone/v1.cbz", cbz_stat.st_size, cbz_stat.st_mtime, sidecar_key
+        )
+        assert cached is not None
+        assert cached["mokuro_size"] == sidecar_stat.st_size
+        assert cached["mokuro_modified"] == int(sidecar_stat.st_mtime)
