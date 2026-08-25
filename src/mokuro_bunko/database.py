@@ -68,13 +68,22 @@ class AuditEventDict(TypedDict):
 class SeriesFactsRow(TypedDict):
     """One series' shareable facts plus its shelf alignment (index data).
 
-    `series_key` is the reader's own series fold —
-    `metadata.reader_compat.normalize_series_key`: trim, collapse whitespace,
-    lowercase, no NFC pass. It is NOT the case-sensitive matching this module
-    uses for volume keys (`normalize_volume_key_from_library_relative`), so two
-    folders differing only in case share one facts row by design. `database.py`
-    stays free of metadata imports (as it does of API imports), so callers fold
-    the title before calling in; nothing here re-folds what it is handed.
+    `series_key` is the reader's series-identity fold —
+    `metadata.reader_compat.normalize_volume_title_key`: NFC-normalize,
+    THEN trim, collapse whitespace, lowercase (`normalize_series_key`'s
+    three steps applied to the NFC-normalized title, not to the raw one).
+    Task 11 review round 3 corrected this paragraph, which used to say "no
+    NFC pass" — true only before that round's fix; `metadata/service.py`,
+    the sole reader and writer of these rows, keys every `series_facts` row
+    with `normalize_volume_title_key` today, precisely so an NFD-spelled
+    and an NFC-spelled folder name (the common case for a name that
+    round-tripped through a filesystem) collapse onto ONE row instead of
+    silently diverging. It is NOT the case-sensitive matching this module
+    uses for volume keys (`normalize_volume_key_from_library_relative`), so
+    two folders differing only in case (or Unicode composition) share one
+    facts row by design. `database.py` stays free of metadata imports (as
+    it does of API imports), so callers fold the title before calling in;
+    nothing here re-folds what it is handed.
 
     `facts_updated_at` is the FACTS clock — the value that decides merges. It
     is not `updated_at`, which is this row's own bookkeeping stamp and moves

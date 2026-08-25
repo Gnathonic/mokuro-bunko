@@ -10,6 +10,7 @@ see `ROLE_PERMISSIONS`) reaches it for every series.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,29 @@ OTHER_SERIES_FILE = "/mokuro-reader/Aria/series.json"
 CATALOG_FILE = "/mokuro-reader/catalog.json"
 ARCHIVE = "/mokuro-reader/Dr Stone/Volume 01.cbz"
 COVER = "/mokuro-reader/Dr Stone/Volume 01.webp"
+
+
+def _valid_update_payload(series_title: str) -> bytes:
+    """A payload `parse_series_update` actually accepts.
+
+    Task 11 review round 3 (F13): `b'{"version":2,"series_title":...}'` has
+    no `updated_at`, so `parse_series_update` rejects it and
+    `apply_series_update` returns `False` at that check — several
+    statements before `_resolve_folder_title` is ever consulted. Tests that
+    want to pin the FOLDER-resolution refusal must use a payload that
+    clears validation first, or the refusal they observe is the wrong one.
+    """
+    return json.dumps(
+        {
+            "version": 2,
+            "series_title": series_title,
+            "external_ids": {},
+            "titles": {},
+            "synonyms": [],
+            "updated_at": "2026-08-18T19:36:24.324Z",
+            "volumes": [],
+        }
+    ).encode("utf-8")
 
 
 @pytest.fixture
@@ -312,8 +336,10 @@ class TestUnknownSeriesPutIsRefusedRegardlessOfWhichRoleAuthorized:
 
         # But no "No Such Series" folder exists, so the service — the layer
         # `MetadataAPI` actually calls once authorization clears — refuses.
+        # A VALID payload (F13): the refusal under test is the folder guard,
+        # not `parse_series_update` rejecting a malformed body first.
         accepted = service.apply_series_update(
-            "No Such Series", b'{"version":2,"series_title":"No Such Series"}', role
+            "No Such Series", _valid_update_payload("No Such Series"), role
         )
         assert accepted is False
         assert temp_db.get_series_facts("no such series") is None
@@ -335,7 +361,7 @@ class TestUnknownSeriesPutIsRefusedRegardlessOfWhichRoleAuthorized:
         assert authorize(middleware, "PUT", SERIES_FILE, "uploader") == (True, 200)
 
         accepted = service.apply_series_update(
-            "Dr Stone", b'{"version":2,"series_title":"Dr Stone"}', "uploader"
+            "Dr Stone", _valid_update_payload("Dr Stone"), "uploader"
         )
         assert accepted is False
         assert temp_db.get_series_facts("dr stone") is None
