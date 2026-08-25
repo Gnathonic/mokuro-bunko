@@ -277,8 +277,17 @@ def _entry_from_dict(raw: dict[str, Any]) -> VolumeEntry | None:
             mokuro_version=str(raw["mokuro_version"]),
             spine_width=raw.get("spine_width"),
             archive_size=raw.get("archive_size"),
-            mokuro_size=raw.get("mokuro_size"),
-            mokuro_modified=raw.get("mokuro_modified"),
+            # Required-key access, unlike spine_width/archive_size above: a
+            # `series_entry_cache` row written by a pre-11b bunko has NO
+            # mokuro_size/mokuro_modified keys at all (not `None` values —
+            # absent). `_entry_to_dict` has unconditionally written both
+            # keys since this feature landed, so a post-11b row always has
+            # them; a legacy row missing them must raise KeyError here and
+            # fall through to a cache MISS, so `_compile_volume` restamps it
+            # for real rather than this silently serving a "fresh" hit with
+            # both stamps `None` forever (review round 1, Finding 1).
+            mokuro_size=raw["mokuro_size"],
+            mokuro_modified=raw["mokuro_modified"],
         )
     except (KeyError, TypeError, ValueError):
         return None
