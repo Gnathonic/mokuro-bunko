@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from mokuro_bunko.middleware.security_headers import SecurityHeadersMiddleware
 
@@ -72,3 +73,27 @@ def test_does_not_clobber_header_a_handler_already_set() -> None:
         )
     )
     assert _values(headers, "X-Frame-Options") == ["SAMEORIGIN"]
+
+
+def test_cache_control_added_to_image_responses() -> None:
+    # Cover sidecars (.webp) and page scans (.jpg/.jpeg/.png/...) alike --
+    # keyed off Content-Type, not extension, so .jpg covers get it too.
+    for content_type in ("image/webp", "image/jpeg", "image/png"):
+        headers = _capture_headers(SecurityHeadersMiddleware(_fake_app(content_type)))
+        assert _values(headers, "Cache-Control") == ["private, max-age=86400"]
+
+
+def test_cache_control_not_forced_onto_json_responses() -> None:
+    # series.json/catalog.json must stay revalidated-fresh (no-store), never
+    # picking up the image cache-control value.
+    headers = _capture_headers(SecurityHeadersMiddleware(_fake_app("application/json")))
+    assert "private, max-age=86400" not in _values(headers, "Cache-Control")
+
+
+def test_image_cache_control_does_not_clobber_existing_header() -> None:
+    headers = _capture_headers(
+        SecurityHeadersMiddleware(
+            _fake_app("image/webp", extra=[("Cache-Control", "no-cache")])
+        )
+    )
+    assert _values(headers, "Cache-Control") == ["no-cache"]
