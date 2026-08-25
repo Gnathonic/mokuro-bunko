@@ -25,7 +25,7 @@ from mokuro_bunko.metadata.reader_compat import (
     count_page_chars,
     deterministic_uuid,
     natural_sort_key,
-    normalize_series_key,
+    normalize_volume_title_key,
 )
 from mokuro_bunko.metadata.schema import VolumeEntry
 
@@ -241,8 +241,19 @@ def compile_series_volumes(
     *,
     database: Database | None = None,
 ) -> list[VolumeEntry]:
-    """Every volume of one series, in natural title order."""
-    series_key = normalize_series_key(series.title)
+    """Every volume of one series, in natural title order.
+
+    `series_key` here feeds only `series_entry_cache.series_key` — an
+    informational column nothing currently queries by (every lookup filters
+    on `volume_key`), but it IS indexed (`database.py`'s
+    `idx_series_entry_cache_series`), and it is now the one remaining spot
+    that fed a `*_key`-named column with the bare fold. Task 11 review
+    round 3 (F16): aligned to `normalize_volume_title_key`, the same fold
+    `metadata/service.py` keys `series_facts` with, so a future query
+    against this column can't silently disagree with every other identity
+    site in the codebase.
+    """
+    series_key = normalize_volume_title_key(series.title)
     entries: list[VolumeEntry] = []
 
     for name in _archive_names(series.path):
