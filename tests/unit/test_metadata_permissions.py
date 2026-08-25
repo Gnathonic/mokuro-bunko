@@ -10,11 +10,13 @@ see `ROLE_PERMISSIONS`) reaches it for every series.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from mokuro_bunko.database import Database
+from mokuro_bunko.metadata.service import MetadataService
 from mokuro_bunko.middleware.auth import AuthMiddleware, AuthResult
 
 SERIES_FILE = "/mokuro-reader/Dr Stone/series.json"
@@ -278,3 +280,62 @@ class TestScopedUsersStillCannotWriteContent:
         assert authorize(
             middleware, "PUT", f"/mokuro-reader/{progress_path}", "registered"
         ) == (True, 200)
+
+
+class TestUnknownSeriesPutIsRefusedRegardlessOfWhichRoleAuthorized:
+    """Task 11 review round 3 (F9 / N2 residual, controller invariant):
+    authorization only decides WHO may REACH the metadata service — it has
+    no idea whether the series folder in the URL actually exists, and never
+    checks. The service itself is the layer that must refuse to create or
+    update a `series_facts` row for a title matching no real folder
+    (`MetadataService.apply_series_update`), and that refusal must hold no
+    matter which role's PUT got past authorization to reach it: a
+    MODIFY_DELETE holder's unconditional grant, or an uploader's ownership
+    grant, must not be able to conjure a row for a series that isn't there.
+    """
+
+    @pytest.mark.parametrize("role", ["inviter", "editor", "admin"])
+    def test_a_modify_delete_holders_put_is_authorized_but_the_service_refuses(
+        self, temp_db: Database, tmp_path: Path, role: str
+    ) -> None:
+        library = tmp_path / "library"
+        library.mkdir()
+        service = MetadataService(library, temp_db)
+
+        # Auth alone would let this role's PUT through — it never looks at
+        # the filesystem.
+        middleware = AuthMiddleware(lambda e, s: [b""], temp_db)
+        assert authorize(middleware, "PUT", "/mokuro-reader/No Such Series/series.json", role) == (
+            True,
+            200,
+        )
+
+        # But no "No Such Series" folder exists, so the service — the layer
+        # `MetadataAPI` actually calls once authorization clears — refuses.
+        accepted = service.apply_series_update(
+            "No Such Series", b'{"version":2,"series_title":"No Such Series"}', role
+        )
+        assert accepted is False
+        assert temp_db.get_series_facts("no such series") is None
+        assert temp_db.list_series_facts() == []
+
+    def test_an_uploaders_owned_but_deleted_series_is_also_refused(
+        self, temp_db: Database, tmp_path: Path
+    ) -> None:
+        """An uploader can be authorized via ownership (`can_user_edit_series`)
+        for a series whose FOLDER was since removed — ownership tracking in
+        `volume_uploads` outlives the folder, unlike a `series_facts` row's
+        right to be created. The grant is real; the write still isn't."""
+        library = tmp_path / "library"
+        library.mkdir()
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "uploader")
+        service = MetadataService(library, temp_db)
+
+        middleware = AuthMiddleware(lambda e, s: [b""], temp_db)
+        assert authorize(middleware, "PUT", SERIES_FILE, "uploader") == (True, 200)
+
+        accepted = service.apply_series_update(
+            "Dr Stone", b'{"version":2,"series_title":"Dr Stone"}', "uploader"
+        )
+        assert accepted is False
+        assert temp_db.get_series_facts("dr stone") is None

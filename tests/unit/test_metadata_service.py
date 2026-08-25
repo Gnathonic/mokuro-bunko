@@ -7,6 +7,7 @@ import os
 import shutil
 import threading
 import time
+import unicodedata
 import zipfile
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import pytest
 from mokuro_bunko.database import Database, SeriesFactsRow
 from mokuro_bunko.metadata import service as metadata_service
 from mokuro_bunko.metadata.compiler import volume_key_for
+from mokuro_bunko.metadata.reader_compat import normalize_volume_title_key
 from mokuro_bunko.metadata.service import MetadataService
 from mokuro_bunko.webdav.resources import _PATH_WRITE_LOCKS
 
@@ -456,16 +458,63 @@ class TestApplyUpdate:
         assert sidecar["spine_offset"] == 9999
         assert sidecar["volumes"][0]["offset"] == -12345.5
 
-    def test_an_update_for_an_unknown_folder_is_still_stored(
+    def test_an_update_for_an_unknown_folder_is_refused_and_never_stored(
         self, service: MetadataService, library: Path
     ) -> None:
-        """A series uploaded moments later must find its facts waiting."""
-        assert service.apply_series_update("Dr Stone", series_update(), "alice")
-        assert service.database.get_series_facts("dr stone") is not None
-        write_volume(library, "Dr Stone", "Volume 01")
+        """Task 11 review round 3 (F9 / N2 residual, controller invariant):
+        a `series_facts` row may only be created or updated for a title
+        that resolves to a REAL, currently-existing folder. Pre-provisioning
+        facts ahead of an upload (this test's old name and behavior, back
+        when the module docstring called it deliberate) is no longer
+        accepted — see the module docstring for the full account."""
+        assert service.apply_series_update("Dr Stone", series_update(), "alice") is False
+        assert service.database.get_series_facts("dr stone") is None
+        assert service.database.list_series_facts() == []
+        # No folder ever existed for it, so a later scan finds nothing either.
         service.regenerate_all()
-        sidecar = json.loads((library / "Dr Stone" / "series.json").read_text("utf-8"))
+        assert not (library / "Dr Stone").exists()
+
+    def test_an_nfd_spelled_put_resolves_onto_the_real_nfc_folder(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        """The reviewer's exact probe (Task 11 review round 3): a folder
+        named with NFC-composed Unicode ('Pokémon') and a PUT whose URL
+        segment happens to be NFD-decomposed (the same text to a human and
+        to the reader, byte-different on disk) must resolve onto the SAME
+        real folder — not create a second, orphaned identity no folder
+        shares, and not silently vanish without republishing the real
+        folder's sidecar."""
+        nfc_title = unicodedata.normalize("NFC", "Pokémon")
+        nfd_title = unicodedata.normalize("NFD", "Pokémon")
+        assert nfc_title != nfd_title  # sanity: genuinely different byte sequences
+
+        write_volume(library, nfc_title, "Volume 01")
+
+        assert service.apply_series_update(nfd_title, series_update(), "alice") is True
+
+        # Stored under the FOLDER's own (NFC) identity, not the NFD spelling.
+        key = normalize_volume_title_key(nfc_title)
+        row = service.database.get_series_facts(key)
+        assert row is not None
+        assert row["series_title"] == nfc_title
+        # And no separate orphan row exists under the raw NFD key either.
+        nfd_key = normalize_volume_title_key(nfd_title)
+        assert nfd_key == key  # sanity: the aligned fold treats them as one key
+
+        # And it was actually republished onto the real folder's sidecar —
+        # not silently accepted while nothing on disk changed.
+        sidecar = json.loads((library / nfc_title / "series.json").read_text("utf-8"))
         assert sidecar["external_ids"] == {"anilist": 98416}
+
+        # The auth-layer ownership grant (a separate identity: `volume_uploads`,
+        # not `series_facts`) is unaffected by any of this, and still
+        # advertises the folder's own NFC spelling — the full "ownedSeries
+        # unchanged" leg of the invariant, checked end to end rather than
+        # assumed from the fold matching in isolation.
+        service.database.record_volume_upload(f"{nfc_title}/Volume 01.cbz", "alice")
+        assert service.database.can_user_edit_series("alice", nfc_title) is True
+        assert service.database.can_user_edit_series("alice", nfd_title) is True
+        assert service.database.list_series_owned_by("alice") == [nfc_title]
 
     def test_a_republish_failure_after_a_persisted_accept_still_returns_true(
         self, service: MetadataService, library: Path, monkeypatch: pytest.MonkeyPatch

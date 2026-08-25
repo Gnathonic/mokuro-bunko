@@ -186,16 +186,31 @@ def _fold_series_title_key(title: str) -> str:
     Review round 2 (N2): an earlier version used `casefold()` here, which
     is STRICTER than both `normalize_series_key`'s plain `lower()` and the
     reader's JS `toLowerCase()` (`casefold()` folds `ß`→`ss`; neither of
-    the other two does). That let two folders the CATALOG COMPILER treats
-    as different series (`'Straße'` vs `'STRASSE'`: different
-    `normalize_series_key` output) share one ownership fold — reopening
-    the untracked-series 403 rule this fold exists to protect, since
-    ownership would then recognize an identity the compiler does not. The
-    invariant this fold must hold: it must never be COARSER than
-    `normalize_series_key`, the fold that decides what counts as "the same
-    series" everywhere else in this server. Plain `.lower()` restores
-    that: no narrower than the reader's fold, no wider than the
-    compiler's.
+    the other two does). That let two folders the catalog compiler treated
+    as different series (`'Straße'` vs `'STRASSE'`) share one ownership
+    fold. Plain `.lower()` fixed the case half.
+
+    Review round 3 (F9 / the N2 residual): round 2's fix here still left a
+    FALSE invariant in this docstring — "must never be coarser than
+    `normalize_series_key`" — while this function's very first line NFC-
+    normalizes and bare `normalize_series_key` does not, so this fold was
+    unconditionally coarser than that one by construction (an NFD/NFC pair
+    folds equal here, unequal there) and the claim was self-contradicting.
+    The actual defect that exposed: `metadata/service.py` used to key
+    `series_facts` rows with bare `normalize_series_key` too, so an
+    NFD-spelled `series.json` PUT for an NFC-spelled real folder folded
+    ownership-equal here while the service treated it as a DIFFERENT,
+    unmatched series — an authorized write that landed on an identity no
+    real folder shared. The fix was on the SERVICE side, not here:
+    `metadata/service.py` now keys `series_facts` rows with
+    `normalize_volume_title_key` (NFC + `normalize_series_key`) everywhere,
+    making THAT the actual system-wide series-identity fold, not bare
+    `normalize_series_key`. Against that corrected baseline, this
+    function's true invariant holds and is stronger than "no coarser than":
+    it is IDENTICAL, step for step, to `normalize_volume_title_key` — this
+    docstring's opening paragraph states the actual operations directly
+    rather than relying on an invariant claim like the one that was wrong
+    here before.
     """
     normalized = unicodedata.normalize("NFC", title)
     collapsed = _WHITESPACE_RUN_RE.sub(" ", normalized.strip())

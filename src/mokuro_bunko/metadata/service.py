@@ -4,11 +4,29 @@ This is the only stateful piece: it owns the debounce timer and the guarantee
 that two regeneration passes never overlap. Everything it calls is pure or
 filesystem-local.
 
-Facts rows outlive their folders on purpose. A series that disappears drops out
-of the compiled files but keeps its row, so a restore (or a client that
-publishes facts before uploading the archives) finds its link waiting. A folder
-RENAME does not carry facts across — they are keyed by normalized series title
-— and the client republishes them under the new name on its next fact edit.
+An existing `series_facts` row outlives its folder disappearing — nothing
+here ever deletes one — so a folder RENAMED back to a spelling an old row
+still matches, or a temporarily-removed folder simply reappearing, finds its
+facts waiting again with no extra step (a rename to a genuinely NEW name
+does not carry the old row across; the client republishes under the new
+name on its next fact edit).
+
+A row may only ever be CREATED or UPDATED through `apply_series_update` (a
+client's PUT) for a title that resolves, via the identity fold used
+throughout this module (`normalize_volume_title_key` — NFC-normalize, then
+`normalize_series_key`'s whitespace-collapse-and-lowercase), to a folder
+that exists RIGHT NOW. Task 11 review round 3 (the "F9"/N2-residual fix):
+this module used to accept a PUT for ANY title, real folder or not, so a
+client could pre-provision facts ahead of an upload — but the identity fold
+it used to decide "is this the same series as this real folder" was
+`normalize_series_key` alone, WITHOUT the NFC step, so an NFD-spelled PUT
+title and its NFC-spelled real folder (the common case for a name that
+round-tripped through a filesystem) were treated as two DIFFERENT series.
+The PUT still returned 200 "accepted", but the accepted row's identity
+matched no real folder, and the real folder's own sidecar was never
+republished with it — an update that looked successful and silently went
+nowhere. A title that resolves to no existing folder — under the aligned
+fold — is now refused (400) instead of silently parked.
 """
 
 from __future__ import annotations
@@ -29,7 +47,7 @@ from mokuro_bunko.metadata.compiler import (
 from mokuro_bunko.metadata.files import MetadataWriteBusy, write_if_changed
 from mokuro_bunko.metadata.merge import StoredSeries, merge_series_update
 from mokuro_bunko.metadata.paths import CATALOG_FILE_NAME, SERIES_FILE_NAME
-from mokuro_bunko.metadata.reader_compat import normalize_series_key
+from mokuro_bunko.metadata.reader_compat import normalize_volume_title_key
 from mokuro_bunko.metadata.schema import (
     FACTLESS_UPDATED_AT,
     SeriesFacts,
@@ -88,17 +106,23 @@ class MetadataService:
     def _resolve_folder_title(self, series_key: str) -> str | None:
         """The FOLDER's own spelling of *series_key*, if it exists right now.
 
-        A PUT's URL segment can be any case/whitespace variant that folds to
-        the same key — that spelling is the request's, not the library's, and
-        must not end up in a stored row that other code (a future facts
-        listing, in particular) reasonably expects to read as the folder's
-        real name.
+        A PUT's URL segment can be any case/whitespace/Unicode-composition
+        variant that folds to the same `normalize_volume_title_key` key —
+        that spelling is the request's, not the library's, and must not end
+        up in a stored row that other code (a future facts listing, in
+        particular) reasonably expects to read as the folder's real name.
+
+        `None` also when the library root can't be scanned right now (a
+        transient mount failure) — the caller cannot verify a folder exists
+        either way, and per the invariant this class enforces (module
+        docstring), "cannot verify" and "does not exist" get the same
+        answer: no row is created or updated on a guess.
         """
         folders = self._scan_folders()
         if folders is None:
             return None
         for folder in folders:
-            if normalize_series_key(folder.title) == series_key:
+            if normalize_volume_title_key(folder.title) == series_key:
                 return folder.title
         return None
 
@@ -158,7 +182,7 @@ class MetadataService:
             keep: set[str] = set()
             catalog_entries: list[tuple[str, SeriesFacts]] = []
             for folder in folders:
-                series_key = normalize_series_key(folder.title)
+                series_key = normalize_volume_title_key(folder.title)
                 facts, index = self._row_for(series_key)
                 catalog_entries.append((folder.title, facts))
                 # Compiled once here and reused for the sidecar below — this
@@ -243,11 +267,11 @@ class MetadataService:
             _log(f"library root unreadable, skipping pass: {self.library_path}")
             self.schedule_regeneration(delay=5.0)
             return 0
-        key = normalize_series_key(series_title)
+        key = normalize_volume_title_key(series_title)
         changed = 0
         catalog_entries: list[tuple[str, SeriesFacts]] = []
         for folder in folders:
-            series_key = normalize_series_key(folder.title)
+            series_key = normalize_volume_title_key(folder.title)
             facts, index = self._row_for(series_key)
             catalog_entries.append((folder.title, facts))
             if series_key != key:
@@ -276,7 +300,17 @@ class MetadataService:
         still a valid request, and the client must be able to retry the same
         bytes forever without side effects.
 
-        The whole read-merge-persist-republish sequence runs under
+        Refused (`False`, no side effects at all — no row created or
+        updated) when the payload is unparseable, OR when *series_title*
+        does not resolve, via `normalize_volume_title_key`, to a folder
+        that exists right now (module docstring; Task 11 review round 3):
+        a `series_facts` row may only be created or updated for a real
+        folder's own identity, never for a title no folder currently
+        shares — including while the library root itself can't be scanned,
+        since this method has no way to tell "doesn't exist" from "can't
+        check right now" apart in that case (`_resolve_folder_title`).
+
+        The whole resolve-read-merge-persist-republish sequence runs under
         `_pass_lock`. Without that, two concurrent PUTs for the same series —
         the same owner's several devices, in particular, syncing metadata at
         the same time — interleave as read/read/write/write: whichever write
@@ -285,7 +319,7 @@ class MetadataService:
         other's just-committed write. That defeats `merge.py`'s entire
         newest-stamp-wins contract while telling both callers they succeeded.
         """
-        series_key = normalize_series_key(series_title)
+        series_key = normalize_volume_title_key(series_title)
         if not series_key:
             return False
         update = parse_series_update(payload)
@@ -294,10 +328,12 @@ class MetadataService:
 
         changed = 0
         with self._pass_lock:
+            resolved_title = self._resolve_folder_title(series_key)
+            if resolved_title is None:
+                return False
             stored = self._stored(series_key)
             result = merge_series_update(stored, update)
             if stored is None or result.changed:
-                resolved_title = self._resolve_folder_title(series_key) or series_title
                 self.database.put_series_facts(
                     SeriesFactsRow(
                         series_key=series_key,
