@@ -6,6 +6,16 @@ JSON, HTML, WebDAV, and file downloads). ``Cache-Control: no-store`` is added
 only to JSON responses, so API payloads aren't cached while library file
 downloads and static assets remain cacheable. Any header a downstream handler
 has already set is left untouched.
+
+Image responses (page scans, `.webp`/`.jpg` cover sidecars) additionally get a
+``Cache-Control: private, max-age=...`` header. wsgidav already emits
+ETag/Last-Modified on these GET responses, so browsers revalidate correctly;
+the missing piece was permission to actually cache between revalidations.
+"private" because these are served behind per-user WebDAV auth and must never
+land in a shared/proxy cache. This deliberately does not special-case `.webp`
+covers versus other page images -- it keys off Content-Type, which covers
+both. Compiled metadata JSON (`series.json`/`catalog.json`) must stay
+revalidated-fresh, so it keeps the `no-store` behavior above instead.
 """
 
 from __future__ import annotations
@@ -20,6 +30,12 @@ _SAFE_HEADERS: list[tuple[str, str]] = [
     ("Referrer-Policy", "no-referrer"),
     ("X-XSS-Protection", "1; mode=block"),
 ]
+
+# One day: long enough for a real cache hit rate on manga page images and
+# cover thumbnails (both are effectively immutable once written), short
+# enough that a re-imported/re-processed volume's ETag change is noticed
+# again soon after.
+_IMAGE_CACHE_CONTROL = "private, max-age=86400"
 
 
 class SecurityHeadersMiddleware:
@@ -50,9 +66,14 @@ class SecurityHeadersMiddleware:
                 if name.lower() == "content-type":
                     content_type = value
                     break
-            is_json = content_type.split(";", 1)[0].strip().lower() == "application/json"
+            bare_content_type = content_type.split(";", 1)[0].strip().lower()
+            is_json = bare_content_type == "application/json"
             if is_json and "cache-control" not in present:
                 new_headers.append(("Cache-Control", "no-store"))
+
+            is_image = bare_content_type.startswith("image/")
+            if is_image and "cache-control" not in present:
+                new_headers.append(("Cache-Control", _IMAGE_CACHE_CONTROL))
 
             return cast(
                 "Callable[[bytes], None]",
