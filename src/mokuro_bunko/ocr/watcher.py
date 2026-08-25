@@ -236,6 +236,7 @@ class OCRWorker:
         storage_path: Path,
         poll_interval: float = 30.0,
         status_callback: Callable[[str], None] | None = None,
+        thumbnails_only: bool = False,
     ) -> None:
         """Initialize the OCR worker.
 
@@ -243,12 +244,17 @@ class OCRWorker:
             storage_path: Base storage path.
             poll_interval: How often to poll for new files.
             status_callback: Optional callback for status messages.
+            thumbnails_only: Run only the cover-generation loop. Cover
+                sidecars are part of the metadata contract and must exist even
+                on servers whose OCR backend is `skip`; generating them needs
+                Pillow, never the mokuro environment.
         """
         from mokuro_bunko.ocr.processor import OCRProcessor
 
         self.storage_path = storage_path
         self.poll_interval = poll_interval
         self.status_callback = status_callback or (lambda msg: None)
+        self.thumbnails_only = thumbnails_only
 
         self.processor = OCRProcessor(
             storage_path=storage_path,
@@ -461,12 +467,26 @@ class OCRWorker:
         library_path = self.storage_path / "library"
         library_path.mkdir(parents=True, exist_ok=True)
 
-        removed = self._remove_corrupt_sidecars()
-        if removed:
-            self._log(f"Removed {removed} corrupt mokuro sidecar file(s) at startup")
+        if not self.thumbnails_only:
+            removed = self._remove_corrupt_sidecars()
+            if removed:
+                self._log(f"Removed {removed} corrupt mokuro sidecar file(s) at startup")
 
         self._running = True
-        self._log("OCR worker starting...")
+        self._log(
+            "Cover worker starting..." if self.thumbnails_only else "OCR worker starting..."
+        )
+
+        self._thumb_thread = threading.Thread(
+            target=self._run_thumbnail_loop,
+            daemon=True,
+            name="ocr-thumbnail-worker",
+        )
+
+        if self.thumbnails_only:
+            self._thumb_thread.start()
+            self._log("Cover worker started in background (thumbnail loop only)")
+            return
 
         if background:
             self._ocr_thread = threading.Thread(
@@ -474,20 +494,10 @@ class OCRWorker:
                 daemon=True,
                 name="ocr-sidecar-worker",
             )
-            self._thumb_thread = threading.Thread(
-                target=self._run_thumbnail_loop,
-                daemon=True,
-                name="ocr-thumbnail-worker",
-            )
             self._ocr_thread.start()
             self._thumb_thread.start()
             self._log("OCR worker started in background (sidecar + thumbnail loops)")
         else:
-            self._thumb_thread = threading.Thread(
-                target=self._run_thumbnail_loop,
-                daemon=True,
-                name="ocr-thumbnail-worker",
-            )
             self._thumb_thread.start()
             self._run_ocr_loop()
 
