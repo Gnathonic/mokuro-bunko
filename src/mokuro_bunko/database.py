@@ -168,23 +168,38 @@ _WHITESPACE_RUN_RE = re.compile(r"\s+")
 def _fold_series_title_key(title: str) -> str:
     """Fold a series folder name for ownership comparison.
 
-    Mirrors the reader's `normalizeVolumeTitleKey`
-    (`src/lib/metadata/series-key.ts`): NFC-normalize, trim, collapse
-    internal whitespace runs, casefold. `database.py` deliberately stays
+    NFC-normalize, then collapse internal whitespace runs and lowercase —
+    exactly the two operations `metadata.reader_compat.normalize_volume_title_key`
+    performs (`normalize_series_key(NFC(title))`, itself mirroring the
+    reader's `normalizeVolumeTitleKey`). `database.py` deliberately stays
     free of `metadata` package imports (see the `series_facts` layering
     note elsewhere in this module), so this is an independent
-    reimplementation of the same contract, not a shared import — if the
-    reader's fold ever changes, this needs a matching update.
+    reimplementation of the same two operations, not a shared import — if
+    either fold ever changes, the other needs a matching update.
 
     NFC-first matters on its own: a folder name that round-tripped through a
     filesystem can come back NFD-decomposed while a PUT's `series.json`
     path segment stays composed — two byte-different, semantically
     identical strings that must compare equal here, exactly as the reader
     already treats them (Task 11 review round 1, F2/F5/F6).
+
+    Review round 2 (N2): an earlier version used `casefold()` here, which
+    is STRICTER than both `normalize_series_key`'s plain `lower()` and the
+    reader's JS `toLowerCase()` (`casefold()` folds `ß`→`ss`; neither of
+    the other two does). That let two folders the CATALOG COMPILER treats
+    as different series (`'Straße'` vs `'STRASSE'`: different
+    `normalize_series_key` output) share one ownership fold — reopening
+    the untracked-series 403 rule this fold exists to protect, since
+    ownership would then recognize an identity the compiler does not. The
+    invariant this fold must hold: it must never be COARSER than
+    `normalize_series_key`, the fold that decides what counts as "the same
+    series" everywhere else in this server. Plain `.lower()` restores
+    that: no narrower than the reader's fold, no wider than the
+    compiler's.
     """
     normalized = unicodedata.normalize("NFC", title)
     collapsed = _WHITESPACE_RUN_RE.sub(" ", normalized.strip())
-    return collapsed.casefold()
+    return collapsed.lower()
 
 
 class _RetryingConnection:
@@ -1067,7 +1082,19 @@ class Database:
             return str(row["uploader_username"])
 
     def can_user_delete_library_path(self, username: str, virtual_path: str) -> bool:
-        """Return True when user owns the library volume represented by virtual path."""
+        """Return True when user owns the library volume represented by virtual path.
+
+        Deliberately BYTE-EXACT (via `get_volume_owner` ->
+        `normalize_volume_key_from_library_relative`), unlike the
+        Unicode-folded series-edit ownership below (`can_user_edit_series`).
+        That is the safe direction, not an oversight (Task 11 review round
+        2, N5): a volume-level DELETE never gets MORE permissive by
+        loosening how its path is matched, so `'dr stone/Volume 01.cbz'` or
+        `'Dr  Stone/Volume 01.cbz'` do NOT resolve to the same row as
+        `'Dr Stone/Volume 01.cbz'` here even though they WOULD fold equal
+        for `can_user_edit_series`. The two are intentionally different
+        identities for two different rights.
+        """
         prefix = "/mokuro-reader/"
         if not virtual_path.startswith(prefix):
             return False
@@ -1079,6 +1106,31 @@ class Database:
         owner = self.get_volume_owner(relative)
         return owner == username
 
+    def _volume_upload_folder_owners(self) -> list[tuple[str, str]]:
+        """`(folder, uploader_username)` for every tracked `volume_uploads` row.
+
+        One query, no folding — the single scan `series_owners` and
+        `list_series_owned_by` both build on, so an ownership-matching fix
+        only ever needs to change in one place (Task 11 review round 2,
+        N3: `list_series_owned_by` used to call `can_user_edit_series`,
+        which itself re-queried and re-folded the WHOLE table, once per
+        CANDIDATE folder — O(series_count * rows), measured at 4.6s for
+        500 series / 10k rows on the identity endpoint every reader
+        connect hits). Rows whose `volume_key` has no `/` (a top-level
+        loose file, not a series folder) are dropped here so neither
+        caller has to re-check it.
+        """
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT DISTINCT uploader_username, volume_key FROM volume_uploads"
+            )
+            pairs: list[tuple[str, str]] = []
+            for row in cursor.fetchall():
+                folder, separator, _rest = str(row["volume_key"]).partition("/")
+                if separator:
+                    pairs.append((folder, str(row["uploader_username"])))
+            return pairs
+
     def series_owners(self, series_title: str) -> set[str]:
         """Distinct uploader usernames among a series folder's tracked volumes.
 
@@ -1086,9 +1138,8 @@ class Database:
         same string `metadata.paths.series_title_from_series_file_path`
         returns. Ownership is decided by FOLDED equality
         (`_fold_series_title_key`: NFC-normalize, collapse whitespace,
-        casefold — the reader's `normalizeVolumeTitleKey` semantics)
-        between `series_title` and the first path segment of each
-        `volume_uploads.volume_key`, not a SQL `LIKE`.
+        lowercase) between `series_title` and the first path segment of
+        each `volume_uploads.volume_key`, not a SQL `LIKE`.
 
         This replaces a prior unescaped-`LIKE` implementation whose safety
         argument (Task 11 review round 1, F2/F5/F6) was wrong for the exact
@@ -1109,16 +1160,11 @@ class Database:
         if not prefix:
             return set()
         target_key = _fold_series_title_key(prefix)
-        with self._connection() as conn:
-            cursor = conn.execute(
-                "SELECT DISTINCT uploader_username, volume_key FROM volume_uploads"
-            )
-            owners: set[str] = set()
-            for row in cursor.fetchall():
-                folder, separator, _rest = str(row["volume_key"]).partition("/")
-                if separator and _fold_series_title_key(folder) == target_key:
-                    owners.add(str(row["uploader_username"]))
-            return owners
+        return {
+            username
+            for folder, username in self._volume_upload_folder_owners()
+            if _fold_series_title_key(folder) == target_key
+        }
 
     def can_user_edit_series(self, username: str, series_title: str) -> bool:
         """True when `username` owns EVERY tracked volume in a series folder.
@@ -1136,21 +1182,28 @@ class Database:
     def list_series_owned_by(self, username: str) -> list[str]:
         """Series folder names `username` may edit, per `can_user_edit_series`.
 
-        Feeds the identity endpoint's `metadata.ownedSeries`. A folder where
-        this user owns some but not all tracked volumes is excluded — it is
-        not editable by them either, so it must not appear in their list.
+        Feeds the identity endpoint's `metadata.ownedSeries` — called on
+        every reader connect and login-page load, so this does ONE pass
+        over `_volume_upload_folder_owners()` (Task 11 review round 2, N3),
+        folding every row's folder ONCE into a `folded_key -> owners` map
+        and a parallel `folded_key -> raw folder spellings` map, rather
+        than the round-1 approach of calling `can_user_edit_series` (a
+        full re-scan) once per candidate folder. A folder where this user
+        owns some but not all tracked volumes is excluded — it is not
+        editable by them either, so it must not appear in their list.
         """
-        with self._connection() as conn:
-            cursor = conn.execute(
-                "SELECT DISTINCT volume_key FROM volume_uploads WHERE uploader_username = ?",
-                (username,),
-            )
-            folders = {
-                str(row["volume_key"]).split("/", 1)[0]
-                for row in cursor.fetchall()
-                if "/" in str(row["volume_key"])
-            }
-        return sorted(folder for folder in folders if self.can_user_edit_series(username, folder))
+        owners_by_key: dict[str, set[str]] = {}
+        folders_by_key: dict[str, set[str]] = {}
+        for folder, owner in self._volume_upload_folder_owners():
+            key = _fold_series_title_key(folder)
+            owners_by_key.setdefault(key, set()).add(owner)
+            folders_by_key.setdefault(key, set()).add(folder)
+
+        owned: set[str] = set()
+        for key, owners in owners_by_key.items():
+            if owners == {username}:
+                owned.update(folders_by_key[key])
+        return sorted(owned)
 
     def forget_volume_upload(self, library_relative_path: str) -> None:
         """Delete ownership metadata for a volume key."""

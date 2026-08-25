@@ -132,6 +132,26 @@ class TestRegeneration:
         ]
         assert changed == 2  # Zzz Series sidecar + catalog; Dr Stone's write failed
 
+    def test_a_directory_squatting_at_catalog_json_does_not_abort_the_pass(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        """Task 11 review round 2 (N4): the round-1 OSError hardening only
+        guarded the per-folder sidecar publish, leaving a directory
+        squatting at the ROOT `catalog.json` free to raise
+        `IsADirectoryError` and abort the pass AFTER every series sidecar
+        had already published successfully."""
+        write_volume(library, "Dr Stone", "Volume 01")
+        (library / "catalog.json").mkdir()
+
+        changed = service.regenerate_all()
+
+        # The poisoned catalog path didn't crash the pass and wasn't clobbered.
+        assert (library / "catalog.json").is_dir()
+        # The series sidecar, published before the catalog write, still landed.
+        sidecar = json.loads((library / "Dr Stone" / "series.json").read_text("utf-8"))
+        assert sidecar["series_title"] == "Dr Stone"
+        assert changed == 1  # Dr Stone sidecar only; the catalog write failed
+
     def test_image_only_series_still_gets_an_index(
         self, service: MetadataService, library: Path
     ) -> None:

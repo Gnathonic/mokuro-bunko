@@ -202,6 +202,16 @@ class MetadataService:
             except MetadataWriteBusy:
                 _log("skipped busy catalog.json")
                 self.schedule_regeneration(delay=5.0)
+            except OSError as error:
+                # Same defense in depth as the per-folder loop above (Task
+                # 11 review round 2, N4): the round-1 fix guarded only the
+                # per-series publish, leaving a directory squatting at the
+                # ROOT `catalog.json` free to raise `IsADirectoryError` and
+                # abort the pass after every series sidecar had already
+                # published successfully. Skip just the catalog write; the
+                # series sidecars this pass already wrote stand.
+                _log(f"skipped unwritable catalog.json: {error}")
+                self.schedule_regeneration(delay=5.0)
         self._published(changed)
         return changed
 

@@ -501,6 +501,55 @@ class TestAuditAndOwnership:
         temp_db.record_volume_upload(f"{nfc_title}/Volume 01.cbz", "alice")
         assert temp_db.can_user_edit_series("alice", nfd_title) is True
 
+    def test_can_user_edit_series_does_not_fold_ss_and_eszett_together(
+        self, temp_db: Database
+    ) -> None:
+        """Review round 2 (N2): the ownership fold must be no COARSER than
+        `normalize_series_key`, the fold that decides what counts as one
+        series for the catalog compiler. `casefold()` would fold 'Straße'
+        and 'STRASSE' together even though the compiler treats them as two
+        distinct series ('straße' != 'strasse' under plain `.lower()`);
+        ownership doing so would let a 'Straße' owner claim the untracked
+        'STRASSE' series outright, reopening the untracked-series 403
+        rule this fold exists to protect."""
+        temp_db.record_volume_upload("Straße/Volume 01.cbz", "alice")
+        assert temp_db.can_user_edit_series("alice", "Straße") is True
+        assert temp_db.can_user_edit_series("alice", "STRASSE") is False
+        assert temp_db.list_series_owned_by("alice") == ["Straße"]
+
+    def test_list_series_owned_by_matches_can_user_edit_series_at_scale(
+        self, temp_db: Database
+    ) -> None:
+        """Review round 2 (N3) correctness check (not a timing test): the
+        single-pass `list_series_owned_by` rewrite must produce EXACTLY the
+        same verdict as calling `can_user_edit_series` per folder, across
+        many folders and owners — sole owners, mixed owners, and
+        owner-only-elsewhere folders all mixed together."""
+        for i in range(30):
+            temp_db.record_volume_upload(f"Solo {i:02d}/Volume 01.cbz", "alice")
+            temp_db.record_volume_upload(f"Solo {i:02d}/Volume 02.cbz", "alice")
+        for i in range(10):
+            temp_db.record_volume_upload(f"Shared {i:02d}/Volume 01.cbz", "alice")
+            temp_db.record_volume_upload(f"Shared {i:02d}/Volume 02.cbz", "bob")
+        for i in range(5):
+            temp_db.record_volume_upload(f"Bob Only {i:02d}/Volume 01.cbz", "bob")
+
+        alice_expected = sorted(f"Solo {i:02d}" for i in range(30))
+        bob_expected = sorted(f"Bob Only {i:02d}" for i in range(5))
+        assert temp_db.list_series_owned_by("alice") == alice_expected
+        assert temp_db.list_series_owned_by("bob") == bob_expected
+
+        all_folders = (
+            [f"Solo {i:02d}" for i in range(30)]
+            + [f"Shared {i:02d}" for i in range(10)]
+            + [f"Bob Only {i:02d}" for i in range(5)]
+        )
+        for folder in all_folders:
+            assert temp_db.can_user_edit_series("alice", folder) == (
+                folder in alice_expected
+            )
+            assert temp_db.can_user_edit_series("bob", folder) == (folder in bob_expected)
+
 
 class TestPasswordHashing:
     """Tests for password hashing."""
