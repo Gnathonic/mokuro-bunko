@@ -218,6 +218,25 @@ class TestCompiledFileDestinationIsAlsoGated:
             "admin",
         ) == (False, 403)
 
+    def test_malformed_destination_header_does_not_crash_authorize(
+        self, middleware: AuthMiddleware
+    ) -> None:
+        """Review round 2 (N1): an unterminated IPv6 literal makes `urlparse`
+        raise `ValueError`. That must not escape `authorize()` as an
+        unhandled 500 — it sits above WsgiDAVApp's own error handling, so
+        the exception would reach an anonymous client directly. Failing
+        open at THIS layer (treat the Destination as unparseable, fall
+        through to the ordinary MOVE/COPY check) is safe: wsgidav parses
+        the identical header the identical way downstream and will itself
+        fail to resolve a real destination from it."""
+        assert authorize_move(
+            middleware,
+            "MOVE",
+            "/mokuro-reader/Dr Stone/evil.json",
+            "http://[::1/mokuro-reader/catalog.json",
+            "editor",
+        ) == (True, 200)
+
 
 class TestCompiledFileWritesRequireAuthNotJustPermission:
     """Review round 1 (F7): an anonymous write to a compiled path must 401

@@ -169,11 +169,25 @@ def destination_path_from_environ(environ: dict[str, Any]) -> str | None:
     validates scheme/host before the copy/move actually runs, so this layer
     only needs enough of the header to test against
     `metadata.paths.is_compiled_metadata_path`.
+
+    Review round 2 (N1): `urlparse` itself raises `ValueError` on a
+    malformed IPv6 host (e.g. an unterminated `http://[::1/...`), and
+    nothing upstream of `AuthMiddleware.authorize` catches it — it sits
+    *above* `WsgiDAVApp`'s own error handling, so the exception used to
+    escape as an unhandled 500, reachable by an anonymous client (this
+    check runs before any role test). Returning None here on the same
+    failure is safe, not merely convenient: wsgidav parses the identical
+    header the identical way downstream, so any input this layer fails to
+    parse is one wsgidav will also fail to resolve to a real destination —
+    it, not this auth gate, decides that request's actual fate.
     """
     header = environ.get("HTTP_DESTINATION")
     if not header:
         return None
-    return urlparse(unquote(header), allow_fragments=False).path or None
+    try:
+        return urlparse(unquote(header), allow_fragments=False).path or None
+    except ValueError:
+        return None
 
 
 @dataclass
