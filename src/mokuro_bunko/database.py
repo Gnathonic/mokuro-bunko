@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -158,6 +160,31 @@ def normalize_volume_key_from_library_relative(path: str) -> str | None:
     if lower.endswith(".nocover"):
         return cleaned[:-len(".nocover")] + ".cbz"
     return None
+
+
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _fold_series_title_key(title: str) -> str:
+    """Fold a series folder name for ownership comparison.
+
+    Mirrors the reader's `normalizeVolumeTitleKey`
+    (`src/lib/metadata/series-key.ts`): NFC-normalize, trim, collapse
+    internal whitespace runs, casefold. `database.py` deliberately stays
+    free of `metadata` package imports (see the `series_facts` layering
+    note elsewhere in this module), so this is an independent
+    reimplementation of the same contract, not a shared import — if the
+    reader's fold ever changes, this needs a matching update.
+
+    NFC-first matters on its own: a folder name that round-tripped through a
+    filesystem can come back NFD-decomposed while a PUT's `series.json`
+    path segment stays composed — two byte-different, semantically
+    identical strings that must compare equal here, exactly as the reader
+    already treats them (Task 11 review round 1, F2/F5/F6).
+    """
+    normalized = unicodedata.normalize("NFC", title)
+    collapsed = _WHITESPACE_RUN_RE.sub(" ", normalized.strip())
+    return collapsed.casefold()
 
 
 class _RetryingConnection:
@@ -1057,26 +1084,41 @@ class Database:
 
         `series_title` is the literal top-level library folder name — the
         same string `metadata.paths.series_title_from_series_file_path`
-        returns. Matched the same way `forget_volume_uploads_under_prefix`
-        matches a folder prefix: a plain `LIKE '<title>/%'`, case-insensitive
-        for ASCII, NOT the lowercased `normalize_series_key` fold
-        `series_facts` uses — this table's keys are library-relative paths,
-        not folded series keys. A folder with no tracked volumes returns an
-        empty set; the `LIKE` pattern is not escaped (matching the existing
-        `forget_volume_uploads_under_prefix` precedent), but `can_user_edit_series`
-        below fails closed on any over-match, since an unescaped `%`/`_` in a
-        folder name can only ever pull in EXTRA owners, never remove the real
-        ones — so it can produce a false negative, never a false grant.
+        returns. Ownership is decided by FOLDED equality
+        (`_fold_series_title_key`: NFC-normalize, collapse whitespace,
+        casefold — the reader's `normalizeVolumeTitleKey` semantics)
+        between `series_title` and the first path segment of each
+        `volume_uploads.volume_key`, not a SQL `LIKE`.
+
+        This replaces a prior unescaped-`LIKE` implementation whose safety
+        argument (Task 11 review round 1, F2/F5/F6) was wrong for the exact
+        case the brief singled out as load-bearing: an UNTRACKED folder
+        whose name happens to contain `%`/`_` could match a DIFFERENT,
+        tracked folder's rows and so be granted despite having zero
+        `volume_uploads` rows of its own — e.g. `'Dr_Stone'` (no rows)
+        matching `'Dr Stone'` (tracked), or `'%'`/`'A%'` (no rows) matching
+        anything — precisely the free-for-all the safe default exists to
+        prevent. The same unescaped pattern could also FALSELY DENY a
+        genuine sole owner of a `LIKE`-collidable name (`'A_ia'` vs
+        `'Aria'`). Folded-equality comparison has neither failure mode: no
+        wildcard character is special, and NFC/whitespace/case differences
+        the reader itself treats as the same title also compare equal here.
+        A folder with no tracked volumes returns an empty set.
         """
         prefix = series_title.strip("/")
         if not prefix:
             return set()
+        target_key = _fold_series_title_key(prefix)
         with self._connection() as conn:
             cursor = conn.execute(
-                "SELECT DISTINCT uploader_username FROM volume_uploads WHERE volume_key LIKE ?",
-                (f"{prefix}/%",),
+                "SELECT DISTINCT uploader_username, volume_key FROM volume_uploads"
             )
-            return {str(row["uploader_username"]) for row in cursor.fetchall()}
+            owners: set[str] = set()
+            for row in cursor.fetchall():
+                folder, separator, _rest = str(row["volume_key"]).partition("/")
+                if separator and _fold_series_title_key(folder) == target_key:
+                    owners.add(str(row["uploader_username"]))
+            return owners
 
     def can_user_edit_series(self, username: str, series_title: str) -> bool:
         """True when `username` owns EVERY tracked volume in a series folder.

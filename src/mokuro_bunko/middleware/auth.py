@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote, urlparse
 
 from mokuro_bunko.metadata.paths import (
     is_compiled_metadata_path,
@@ -150,6 +151,29 @@ def is_admin_path(path: str) -> bool:
 def is_invites_admin_api_path(path: str) -> bool:
     """Check if path is an invite management admin API endpoint."""
     return path == "/_admin/api/invites" or path.startswith("/_admin/api/invites/")
+
+
+def destination_path_from_environ(environ: dict[str, Any]) -> str | None:
+    """The request path a MOVE/COPY's `Destination` header points at, or None.
+
+    Task 11 review round 1 (F4): the auth gate used to check only the
+    request path (`PATH_INFO`) for MOVE/COPY, so a MODIFY_DELETE holder
+    could relocate anything ONTO a compiled path (`Destination: .../catalog.json`)
+    and clobber it with unvalidated bytes, bypassing `MetadataAPI` entirely.
+
+    Mirrors wsgidav's own `Destination` parsing
+    (`request_server.py`'s copy/move handler, which runs downstream of this
+    middleware): the header may be an absolute URI (`scheme://host/path`) or
+    a bare path, and may be percent-encoded. Only the path component is
+    used — bunko serves a single realm and wsgidav itself still separately
+    validates scheme/host before the copy/move actually runs, so this layer
+    only needs enough of the header to test against
+    `metadata.paths.is_compiled_metadata_path`.
+    """
+    header = environ.get("HTTP_DESTINATION")
+    if not header:
+        return None
+    return urlparse(unquote(header), allow_fragments=False).path or None
 
 
 @dataclass
@@ -426,16 +450,33 @@ class AuthMiddleware:
             return AuthorizationResult(authorized=True)
 
         # Compiled metadata files are produced by this server (contract §5):
-        # no role may delete, move, copy or PROPPATCH one. A plain 403 is what
-        # the client expects — it treats metadata writes as best-effort and
-        # stays read-write for everything else. Folder-level operations are
+        # no role may delete, move, copy, PROPPATCH or MKCOL-over one. A
+        # write is authenticated -> 401, else an ordinary 403 for every
+        # role — the client treats metadata writes as best-effort and stays
+        # read-write for everything else. Folder-level operations are
         # unaffected: the path tested here is the file itself.
-        if method in ("DELETE", "MOVE", "COPY", "PROPPATCH") and is_compiled_metadata_path(path):
-            return AuthorizationResult(
-                authorized=False,
-                status_code=403,
-                error="Permission denied: this file is compiled by the server",
-            )
+        #
+        # MKCOL was added in review round 1 (F3): it fell through to the
+        # generic ADD_FILES gate, so any uploader could MKCOL a directory
+        # where a sidecar belongs; `atomic_write_bytes`'s `os.replace` then
+        # raises `IsADirectoryError` on every future regeneration attempt
+        # for that folder (see the `regenerate_all` OSError hardening in
+        # `metadata/service.py`, added the same round as defense in depth).
+        if (
+            method in ("DELETE", "MOVE", "COPY", "PROPPATCH", "MKCOL")
+            and is_compiled_metadata_path(path)
+        ):
+            return self._compiled_metadata_denied(auth_result)
+
+        # MOVE/COPY are also gated on their `Destination` header (review
+        # round 1, F4): checking only the request path let a MODIFY_DELETE
+        # holder relocate anything ONTO `catalog.json` or a `series.json`,
+        # clobbering it with unvalidated bytes and bypassing `MetadataAPI`'s
+        # merge/validation/audit trail entirely.
+        if method in ("MOVE", "COPY"):
+            destination_path = destination_path_from_environ(environ)
+            if destination_path is not None and is_compiled_metadata_path(destination_path):
+                return self._compiled_metadata_denied(auth_result)
 
         # Read operations
         if method in ("GET", "HEAD", "PROPFIND"):
@@ -575,6 +616,32 @@ class AuthMiddleware:
         # Default: allow
         return AuthorizationResult(authorized=True)
 
+    @staticmethod
+    def _compiled_metadata_denied(auth_result: AuthResult) -> AuthorizationResult:
+        """Ordinary permission-denied for a write verb that targets — or,
+        for MOVE/COPY, would relocate something ONTO — a server-compiled
+        file (contract §5). Unauthenticated requests get 401, matching
+        every other unauthenticated-write branch in this middleware and
+        letting a DAV client retry with credentials (`WWW-Authenticate` is
+        added automatically by `__call__` for any 401). Authenticated
+        requests get a plain 403 regardless of role, including
+        MODIFY_DELETE holders: this is not a permission tier, it is "the
+        server, not any user, owns this file" (review round 1, F7 — a prior
+        version of this check fired before the authentication test and gave
+        anonymous a bare 403 with no retry signal).
+        """
+        if not auth_result.authenticated:
+            return AuthorizationResult(
+                authorized=False,
+                status_code=401,
+                error="Authentication required",
+            )
+        return AuthorizationResult(
+            authorized=False,
+            status_code=403,
+            error="Permission denied: this file is compiled by the server",
+        )
+
     def _authorize_put(
         self,
         path: str,
@@ -623,11 +690,7 @@ class AuthMiddleware:
 
         # Every other compiled file (the root catalog.json) is server-owned.
         if is_compiled_metadata_path(path):
-            return AuthorizationResult(
-                authorized=False,
-                status_code=403,
-                error="Permission denied: this file is compiled by the server",
-            )
+            return self._compiled_metadata_denied(auth_result)
 
         # Library files require ADD_FILES permission
         if is_library_path(path):

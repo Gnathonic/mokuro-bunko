@@ -149,6 +149,18 @@ class LoginAPI:
             }
         return {"scope": "none"}
 
+    def _permissions_payload(self, role: str, username: str | None) -> dict[str, Any]:
+        """The `permissions` object exactly as the reader's shipped parser
+        reads it (Task 11 review F1): `metadata` nests INSIDE `permissions`,
+        not as a body-level sibling. The reader's `identity.ts` calls
+        `normalizeMetadataPermissions(record.permissions.metadata)` — a
+        top-level `body.metadata` is never read, so publishing it there
+        instead leaves every account's per-series edit UI unrestricted.
+        """
+        payload: dict[str, Any] = dict(self._role_permissions(role))
+        payload["metadata"] = self._metadata_scope(role, username)
+        return payload
+
     def _get_me(
         self,
         environ: dict[str, Any],
@@ -186,8 +198,7 @@ class LoginAPI:
             return self._json_response(start_response, 200, {
                 "authenticated": False,
                 "role": "anonymous",
-                "permissions": self._role_permissions("anonymous"),
-                "metadata": self._metadata_scope("anonymous", None),
+                "permissions": self._permissions_payload("anonymous", None),
             })
 
         username, password = creds
@@ -207,8 +218,7 @@ class LoginAPI:
                 "username": user["username"],
                 "role": user["role"],
                 "created_at": user["created_at"],
-                "permissions": self._role_permissions(user["role"]),
-                "metadata": self._metadata_scope(user["role"], user["username"]),
+                "permissions": self._permissions_payload(user["role"], user["username"]),
             })
 
         AUTH_RATE_LIMITER.record_failure(key)
