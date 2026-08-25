@@ -155,7 +155,24 @@ class MetadataService:
         index: SeriesIndexData,
         volumes: Sequence[VolumeEntry],
     ) -> bool:
-        """Write one series' sidecar. Returns True when the file changed."""
+        """Write one series' sidecar. Returns True when the file changed.
+
+        Final review F3: `folder` came from an `iter_series_folders` scan
+        that ran earlier in this pass, and an ordinary DELETE of the whole
+        series folder can race the (up to 10s-debounced) publish that
+        follows -- routine under a bulk delete. `atomic_write_bytes`'s
+        `parents=True` mkdir would otherwise happily resurrect the folder
+        containing nothing but a freshly-written `series.json`: no `.cbz`,
+        so the next scan skips it forever, and nothing ever prunes the
+        ghost. Checked right here, immediately before the write, rather
+        than back when `folder` was scanned: there is nothing to publish
+        into a folder that is gone RIGHT NOW, so skip it (unlike
+        `_publish_catalog` below, whose parent is the library root, which
+        this class already treats as required to exist for a pass to run
+        at all -- see `_scan_folders`).
+        """
+        if not folder.path.is_dir():
+            return False
         data = dump_series_file(
             series_title=folder.title, facts=facts, index=index, volumes=volumes
         )
@@ -171,7 +188,22 @@ class MetadataService:
     # --- public API ------------------------------------------------------
 
     def regenerate_all(self) -> int:
-        """Recompile every series and the catalog. Returns files written."""
+        """Recompile every series and the catalog. Returns files written.
+
+        F5 (final review): a no-op after `stop()`. `schedule_regeneration`
+        was already gated on `_stopped`, but a DIRECT call to any of the
+        three public entry points here was not -- a caller (the filesystem
+        watcher's callback, a request already in flight) racing `stop()`
+        could still run a whole pass and fire `on_published` after `stop()`
+        had returned, arming a `PropfindCacheMiddleware` refresh nothing was
+        left to cancel. This narrows, rather than fully closes, that
+        window -- `stop()` does not hold `_pass_lock` while flipping
+        `_stopped`, so a caller that already read `_stopped` as `False`
+        can still slip through; the matching `PropfindCacheMiddleware`
+        stopped-gate is the belt-and-suspenders half of this fix.
+        """
+        if self._stopped:
+            return 0
         with self._pass_lock:
             folders = self._scan_folders()
             if folders is None:
@@ -240,7 +272,13 @@ class MetadataService:
         return changed
 
     def regenerate_series(self, series_title: str) -> bool:
-        """Recompile ONE series plus the catalog. Returns True when anything changed."""
+        """Recompile ONE series plus the catalog. Returns True when anything changed.
+
+        F5 (final review): a no-op after `stop()`, same reasoning as
+        `regenerate_all`.
+        """
+        if self._stopped:
+            return False
         with self._pass_lock:
             changed = self._regenerate_series_locked(series_title)
         self._published(changed)
@@ -286,10 +324,22 @@ class MetadataService:
             except MetadataWriteBusy:
                 _log(f"skipped busy series folder: {folder.title}")
                 self.schedule_regeneration(delay=5.0)
+            except OSError as error:
+                # F4 (final review): this helper used to catch only
+                # MetadataWriteBusy, unlike regenerate_all's identical loop
+                # above -- a directory squatting at THIS series' sidecar
+                # path raised IsADirectoryError straight out of
+                # regenerate_series/apply_series_update. Same hardening,
+                # same reasoning: skip only this folder.
+                _log(f"skipped unwritable series folder: {folder.title}: {error}")
+                self.schedule_regeneration(delay=5.0)
         try:
             changed += 1 if self._publish_catalog(catalog_entries) else 0
         except MetadataWriteBusy:
             _log("skipped busy catalog.json")
+            self.schedule_regeneration(delay=5.0)
+        except OSError as error:
+            _log(f"skipped unwritable catalog.json: {error}")
             self.schedule_regeneration(delay=5.0)
         return changed
 
@@ -318,7 +368,13 @@ class MetadataService:
         because it was merged against a stale snapshot rather than the
         other's just-committed write. That defeats `merge.py`'s entire
         newest-stamp-wins contract while telling both callers they succeeded.
+
+        F5 (final review): also a no-op after `stop()`, same reasoning as
+        `regenerate_all` -- a PUT that reaches this method after shutdown
+        has begun must not persist a row or schedule further work.
         """
+        if self._stopped:
+            return False
         series_key = normalize_volume_title_key(series_title)
         if not series_key:
             return False

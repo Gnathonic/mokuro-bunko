@@ -34,7 +34,7 @@ Additional project-wide constraints:
 - `mypy src/` runs in **strict** mode in CI — every new function needs full annotations.
 - No new entries in `[project.dependencies]`; the compiler and validator use only the stdlib.
 - Baseline before this plan: `uv run pytest tests/unit tests/integration -q` collects **726** tests, all green (worktree `feat/catalog-distribution`, HEAD `89bc29a`).
-- Never mention `mokuro.moe` (a third-party public deployment) in code, comments, tests, commits, or the changelog.
+- Never mention the public deployment domain (a third-party deployment of this project) in code, comments, tests, commits, or the changelog.
 
 ## Decisions taken in-repo (ambiguities the contract left open)
 

@@ -253,6 +253,15 @@ class TestBlockedWrites:
         assert client.delete(CATALOG_PATH, ADMIN).status_code == 403
         assert (storage / "library" / "Dr Stone" / "series.json").exists()
 
+    def test_nobody_may_lock_a_compiled_file(self, client: WSGITestClient) -> None:
+        """F6 (final review): LOCK used to fall through to the generic
+        MODIFY_DELETE gate, so an editor/admin got a real 200 -- an
+        unhonored promise of exclusivity, since the compiler ignores DAV
+        locks and will rewrite the file anyway."""
+        for headers in (READER, UPLOADER, EDITOR, ADMIN):
+            assert client.request("LOCK", SERIES_PATH, headers).status_code == 403
+            assert client.request("LOCK", CATALOG_PATH, headers).status_code == 403
+
     def test_a_scoped_user_may_not_write_archives_or_covers(
         self, client: WSGITestClient
     ) -> None:
@@ -272,6 +281,113 @@ class TestBlockedWrites:
         )
         assert response.status_code in (200, 201, 204)
         assert (storage / "users" / "reader" / "volume-data.json").exists()
+
+
+BOUNDARY_CATALOG_PATHS = [
+    "/mokuro-reader//catalog.json",
+    "/mokuro-reader///catalog.json",
+]
+BOUNDARY_SERIES_PATH = "/mokuro-reader//Dr Stone/series.json"
+
+
+class TestBoundarySlashBypass:
+    """Final whole-branch review, F1+F2: `PUT /mokuro-reader//catalog.json`
+    (a doubled slash right after the reader root, and its triple-slash
+    cousin) used to skip `_library_relative`'s prefix test entirely — the
+    library-relative tail began with `/`, which the old code refused on a
+    "never reachable" theory that was empirically false (wsgidav's own
+    resolver absorbs the extra slash via `"/" + path.strip("/")` before the
+    real filesystem resolver is ever asked). That let every ADD_FILES role
+    overwrite the raw compiled catalog with unvalidated bytes, bypassing
+    `MetadataAPI`, and turned the same spelling's MKCOL into an unhandled
+    500 and its MOVE `Destination` into a source-destroying no-op. These
+    are exactly the reviewer's reproduced spellings, end to end through the
+    real WSGI stack (auth -> metadata interception -> DAV)."""
+
+    @pytest.mark.parametrize("path", BOUNDARY_CATALOG_PATHS)
+    @pytest.mark.parametrize(
+        "headers,expected_status",
+        [
+            (UPLOADER, 403),
+            (EDITOR, 403),
+            (ADMIN, 403),
+            (READER, 403),
+            ({}, 401),
+        ],
+    )
+    def test_put_the_boundary_spelling_is_refused_not_written(
+        self,
+        client: WSGITestClient,
+        storage: Path,
+        path: str,
+        headers: dict[str, str],
+        expected_status: int,
+    ) -> None:
+        compiled = storage / "library" / "catalog.json"
+        before = compiled.read_bytes()
+
+        response = client.put(path, b'{"pwned":true}', headers)
+
+        assert response.status_code == expected_status
+        assert compiled.read_bytes() == before
+
+    @pytest.mark.parametrize("path", BOUNDARY_CATALOG_PATHS)
+    @pytest.mark.parametrize("headers", [UPLOADER, EDITOR, ADMIN])
+    def test_mkcol_the_boundary_spelling_403s_instead_of_500ing(
+        self, client: WSGITestClient, path: str, headers: dict[str, str]
+    ) -> None:
+        response = client.request("MKCOL", path, headers)
+        assert response.status_code == 403
+
+    def test_move_destination_onto_the_boundary_catalog_spelling_is_refused(
+        self, client: WSGITestClient, storage: Path
+    ) -> None:
+        decoy = storage / "library" / "Dr Stone" / "decoy.json"
+        decoy.write_text('{"decoy":true}', encoding="utf-8")
+        catalog = storage / "library" / "catalog.json"
+        before_catalog = catalog.read_bytes()
+
+        response = client.request(
+            "MOVE",
+            "/mokuro-reader/Dr Stone/decoy.json",
+            {**EDITOR, "Destination": "/mokuro-reader//catalog.json"},
+        )
+
+        assert response.status_code == 403
+        assert decoy.exists()  # source not destroyed
+        assert catalog.read_bytes() == before_catalog  # not clobbered
+
+    def test_move_destination_onto_the_boundary_series_spelling_is_refused(
+        self, client: WSGITestClient, storage: Path
+    ) -> None:
+        decoy = storage / "library" / "Dr Stone" / "decoy.json"
+        decoy.write_text('{"decoy":true}', encoding="utf-8")
+        series = storage / "library" / "Dr Stone" / "series.json"
+        before_series = series.read_bytes()
+
+        response = client.request(
+            "MOVE",
+            "/mokuro-reader/Dr Stone/decoy.json",
+            {**EDITOR, "Destination": BOUNDARY_SERIES_PATH},
+        )
+
+        assert response.status_code == 403
+        assert decoy.exists()
+        assert series.read_bytes() == before_series
+
+    def test_put_the_boundary_series_spelling_is_intercepted_like_the_ordinary_one(
+        self, client: WSGITestClient
+    ) -> None:
+        """The series sidecar's boundary spelling is a `MetadataAPI` update
+        request, not a bare-denied compiled write — pinned separately from
+        the catalog cases above, which ARE bare-denied for every role."""
+        response = client.put(
+            BOUNDARY_SERIES_PATH, update_payload(tag="from boundary"), UPLOADER
+        )
+        assert response.status_code == 204
+
+        document = json.loads(client.get(SERIES_PATH, READER).text)
+        assert document["tag"] == "from boundary"
 
 
 class TestPartitioning:
@@ -327,11 +443,18 @@ class TestRegenerationTriggers:
     def test_a_library_change_schedules_a_recompilation(
         self, app: Any, storage: Path
     ) -> None:
-        """The watcher's hook is wired to the service (contract §4)."""
+        """The watcher's hook is wired to the service (contract §4).
+
+        Forces a synchronous pass directly, rather than waiting out the
+        10s debounce, by calling `regenerate_all()` itself instead of
+        letting the already-scheduled timer fire. Deliberately does NOT
+        call `stop()` first (F5, final review: `stop()` now permanently
+        disables `regenerate_all` too, not just the debounce timer) — the
+        `app` fixture's teardown cancels the still-pending timer either way.
+        """
         write_volume(storage / "library", "Dr Stone", "Volume 02", "uuid-volume-02")
         app._library_watcher.on_change()
         assert app._metadata_service._timer is not None
-        app._metadata_service.stop()
 
         app._metadata_service.regenerate_all()
         document = json.loads(

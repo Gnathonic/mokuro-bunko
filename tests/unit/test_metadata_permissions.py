@@ -168,17 +168,23 @@ class TestCompiledFilesAreServerOwned:
     def test_nobody_may_put_the_catalog(self, middleware: AuthMiddleware, role: str) -> None:
         assert authorize(middleware, "PUT", CATALOG_FILE, role) == (False, 403)
 
-    @pytest.mark.parametrize("method", ["DELETE", "MOVE", "COPY", "PROPPATCH", "MKCOL"])
+    @pytest.mark.parametrize(
+        "method", ["DELETE", "MOVE", "COPY", "PROPPATCH", "MKCOL", "LOCK", "UNLOCK"]
+    )
     @pytest.mark.parametrize("path", [SERIES_FILE, CATALOG_FILE])
     @pytest.mark.parametrize("role", ["uploader", "editor", "admin"])
-    def test_nobody_may_delete_move_or_mkcol_a_compiled_file(
+    def test_nobody_may_delete_move_mkcol_or_lock_a_compiled_file(
         self, middleware: AuthMiddleware, method: str, path: str, role: str
     ) -> None:
         """Review round 1 (F3/F8): pinned for uploader (lacks MODIFY_DELETE
         entirely) and a NON-admin MODIFY_DELETE holder (`editor`) too, not
         just `admin` — and MKCOL now belongs in this same gate: it used to
         fall through to the generic ADD_FILES check, letting any uploader
-        plant a directory where a sidecar belongs."""
+        plant a directory where a sidecar belongs. LOCK/UNLOCK were added by
+        the final whole-branch review (F6): they used to fall through to the
+        generic MODIFY_DELETE branch, letting `editor`/`admin` successfully
+        LOCK a compiled file even though the compiler ignores DAV locks and
+        will silently rewrite it anyway."""
         assert authorize(middleware, method, path, role) == (False, 403)
 
     def test_deleting_the_series_folder_itself_is_still_allowed(
@@ -269,7 +275,9 @@ class TestCompiledFileWritesRequireAuthNotJustPermission:
     (with the WWW-Authenticate retry signal), same as every other
     unauthenticated-write branch in this middleware — not a bare 403."""
 
-    @pytest.mark.parametrize("method", ["DELETE", "MOVE", "COPY", "PROPPATCH", "MKCOL"])
+    @pytest.mark.parametrize(
+        "method", ["DELETE", "MOVE", "COPY", "PROPPATCH", "MKCOL", "LOCK", "UNLOCK"]
+    )
     def test_anonymous_gets_401_not_403(self, middleware: AuthMiddleware, method: str) -> None:
         assert authorize(middleware, method, SERIES_FILE, "anonymous") == (False, 401)
         assert authorize(middleware, method, CATALOG_FILE, "anonymous") == (False, 401)
