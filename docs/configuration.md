@@ -206,6 +206,11 @@ ocr:
 | `cpu` | CPU-only processing (slower). |
 | `skip` | Disable OCR, WebDAV server only. |
 
+Cover thumbnails (`<Volume>.webp`, generated from each archive's first page) are
+produced regardless of the backend — including `skip` — because readers use them
+for volumes they have not downloaded. Only the OCR sidecar generation follows the
+`backend` setting.
+
 Install OCR dependencies with:
 
 ```bash
@@ -217,6 +222,41 @@ Inspect which backends are valid on the current machine/runtime:
 ```bash
 mokuro-bunko install-ocr --list-backends
 ```
+
+## Compiled metadata files
+
+The server compiles two files into the shared library and keeps them current:
+
+| File | Contents |
+| --- | --- |
+| `<Series>/series.json` | The series' facts (external ids, titles, synonyms, tag, unit) plus an index of its volumes: uuid, title, page and character counts, mokuro version, spine width, archive size, freshness stamps and shelf offsets. |
+| `catalog.json` (library root) | One entry per series folder with the same facts — name, mapping and search data only. |
+
+Both are regenerated when the library changes and whenever a client submits an
+update, and are rewritten only when their content actually changed, so clients can
+cache them on size/mtime.
+
+Each volume entry may also carry `mokuro_size`/`mokuro_modified` and
+`cover_size`/`cover_modified`: the byte size and integer epoch-second mtime of the
+`.mokuro` sidecar and the cover `.webp`, taken from a plain filesystem stat when the
+entry is compiled. Either pair is omitted (never `null`) when its file doesn't
+exist. A client uses these to decide whether its own cached copy is stale without
+downloading anything: rebuild when the stamped size differs from what it has, or
+the stamped `_modified` is strictly newer than what it stored; an older-or-equal
+`_modified` at an equal size is fresh. Stamps are always whole seconds, never
+sub-second, because a generic WebDAV client only ever sees second-precision
+`Last-Modified` HTTP dates.
+
+Clients do not write these files. A `PUT` of `<Series>/series.json` is accepted as
+an update *request*: the facts are validated and merged (newest stamp wins), the
+volume list in the request is ignored in favour of the server's own compilation,
+and both files are regenerated. A body carrying only facts, with no volume list at
+all, is an equally valid update. Writing `catalog.json`, or deleting/moving either
+file, is refused for every account. Submitting an update is ownership-gated, not a
+plain progress-write permission: an editor-tier account (or above) may update any
+series, an uploader account only a series it uploaded, and a registered-only
+account cannot submit updates at all. The account that submitted an accepted
+update is recorded in the audit log.
 
 ## Environment Variables
 
