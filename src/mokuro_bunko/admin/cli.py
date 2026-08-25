@@ -192,7 +192,9 @@ def list_invites(ctx: click.Context, include_all: bool) -> None:
             click.echo(f"{invite['code']:<24} {invite['role']:<12} {expires:<20}")
 
 
-@admin_group.command("delete-invite")
+@admin_group.command(
+    "delete-invite", context_settings={"ignore_unknown_options": True}
+)
 @click.argument("code")
 @click.pass_context
 def delete_invite(ctx: click.Context, code: str) -> None:

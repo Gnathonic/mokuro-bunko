@@ -779,6 +779,11 @@ class Database:
         """
         normalized_role = normalize_role(role)
         code = secrets.token_urlsafe(16)
+        # token_urlsafe's alphabet includes '-' and '_'; a leading '-' is
+        # misread as an option by positional CLI argument parsing (Click),
+        # so regenerate rather than ship a code that breaks admin tooling.
+        while code[0] in ("-", "_"):
+            code = secrets.token_urlsafe(16)
         duration = parse_duration(expires)
         expires_at = datetime.now() + duration
 

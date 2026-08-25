@@ -330,6 +330,19 @@ class TestInviteCrud:
         invite = temp_db.get_invite("nonexistent")
         assert invite is None
 
+    def test_create_invite_never_starts_with_dash_or_underscore(
+        self, temp_db: Database
+    ) -> None:
+        """Generated codes must never start with '-' or '_'.
+
+        A leading '-' breaks positional CLI argument parsing (the code gets
+        read as an option). token_urlsafe's alphabet includes both '-' and
+        '_', so this is checked over a large sample to catch a generator
+        that only special-cases one of them.
+        """
+        codes = [temp_db.create_invite() for _ in range(500)]
+        assert all(code[0] not in ("-", "_") for code in codes)
+
     def test_validate_invite(self, temp_db: Database) -> None:
         """Test validating a valid invite."""
         code = temp_db.create_invite("registered", "7d")
