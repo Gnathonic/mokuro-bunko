@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mokuro_bunko.database import Database, parse_duration
+from mokuro_bunko.database import Database, _fold_series_title_key, parse_duration
+from mokuro_bunko.metadata.reader_compat import normalize_volume_title_key
 
 if TYPE_CHECKING:
     pass
@@ -549,6 +550,33 @@ class TestAuditAndOwnership:
                 folder in alice_expected
             )
             assert temp_db.can_user_edit_series("bob", folder) == (folder in bob_expected)
+
+
+class TestOwnershipFoldMatchesServiceIdentityFold:
+    """Task 11 review round 3 (F9 / N2 residual): the ownership fold here
+    and the series-identity fold `metadata/service.py` now uses
+    (`normalize_volume_title_key`) must be the SAME algorithm, not merely
+    "no coarser than" one another — `database.py` cannot import from
+    `metadata` (layering rule), so this is the test that keeps the two
+    independent reimplementations honest against drift."""
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "Dr Stone",
+            "dr  STONE",
+            "  Dr Stone  ",
+            "Straße",
+            "STRASSE",
+            unicodedata.normalize("NFC", "Pokémon"),
+            unicodedata.normalize("NFD", "Pokémon"),
+            "Dr\tStone",
+            "İstanbul",
+            "file",
+        ],
+    )
+    def test_identical_output_for_every_probed_title(self, title: str) -> None:
+        assert _fold_series_title_key(title) == normalize_volume_title_key(title)
 
 
 class TestPasswordHashing:
