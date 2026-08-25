@@ -525,7 +525,11 @@ def run_server(config: Config, config_path: Path | None = None) -> None:
     watchdog = ThreadPoolWatchdog(server)
     watchdog.start()
 
-    if config.ocr.backend != "skip" and selected_backend is not None and selected_backend != OCRBackend.SKIP:
+    if (
+        config.ocr.backend != "skip"
+        and selected_backend is not None
+        and selected_backend != OCRBackend.SKIP
+    ):
         ocr_worker = OCRWorker(
             storage_path=config.storage.base_path,
             poll_interval=float(config.ocr.poll_interval),
@@ -537,6 +541,17 @@ def run_server(config: Config, config_path: Path | None = None) -> None:
             f"(configured={config.ocr.backend}, active={selected_backend.value}, "
             f"interval={config.ocr.poll_interval}s)"
         )
+    else:
+        # Covers are part of the metadata contract, so they are generated even
+        # with OCR disabled: the thumbnail loop needs Pillow, not mokuro.
+        ocr_worker = OCRWorker(
+            storage_path=config.storage.base_path,
+            poll_interval=float(config.ocr.poll_interval),
+            status_callback=lambda msg: print(f"[COVERS] {msg}"),
+            thumbnails_only=True,
+        )
+        ocr_worker.start(background=True)
+        print("OCR disabled; cover generation worker enabled")
     print("Press Ctrl+C to stop")
 
     try:
