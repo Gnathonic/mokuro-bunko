@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import unicodedata
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -460,6 +461,45 @@ class TestAuditAndOwnership:
 
         assert temp_db.list_series_owned_by("alice") == ["Aria", "Dr Stone"]
         assert temp_db.list_series_owned_by("bob") == []
+
+    def test_can_user_edit_series_wildcard_characters_do_not_grant_untracked_series(
+        self, temp_db: Database
+    ) -> None:
+        """A LIKE-based match would let an untracked 'Dr_Stone'/'%'/'A%' ride
+        in on 'Dr Stone's or 'Aria's ownership despite having zero rows of
+        its own — the false grant Task 11 review round 1 (F2) found."""
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Aria/v1.cbz", "alice")
+        assert temp_db.can_user_edit_series("alice", "Dr_Stone") is False
+        assert temp_db.can_user_edit_series("alice", "%") is False
+        assert temp_db.can_user_edit_series("alice", "A%") is False
+
+    def test_can_user_edit_series_like_collidable_sole_owner_is_not_falsely_denied(
+        self, temp_db: Database
+    ) -> None:
+        """Mirror of the false-grant case in the deny direction (F5): a
+        genuine sole owner of a name containing a LIKE wildcard character
+        must not be denied, and must not leak into a different folder that
+        merely LIKE-collides with it."""
+        temp_db.record_volume_upload("A_ia/v1.cbz", "alice")
+        temp_db.record_volume_upload("Aria/v1.cbz", "bob")
+        assert temp_db.can_user_edit_series("alice", "A_ia") is True
+        assert temp_db.can_user_edit_series("alice", "Aria") is False
+        assert temp_db.list_series_owned_by("alice") == ["A_ia"]
+
+    def test_can_user_edit_series_folds_nfd_title_to_match_nfc_folder(
+        self, temp_db: Database
+    ) -> None:
+        """A folder name round-tripped through a filesystem can come back
+        NFD-decomposed while a PUT's series.json path segment stays
+        NFC-composed; both must resolve to the same series (F6) — this is
+        exactly the fold the reader's `normalizeVolumeTitleKey` performs."""
+        nfc_title = unicodedata.normalize("NFC", "Pokémon")
+        nfd_title = unicodedata.normalize("NFD", "Pokémon")
+        assert nfc_title != nfd_title  # sanity: genuinely different byte sequences
+
+        temp_db.record_volume_upload(f"{nfc_title}/Volume 01.cbz", "alice")
+        assert temp_db.can_user_edit_series("alice", nfd_title) is True
 
 
 class TestPasswordHashing:

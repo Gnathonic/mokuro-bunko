@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
@@ -109,15 +110,16 @@ class TestMeEndpoint:
             "canWriteProgress": True,
             "canAddFiles": False,
             "canModifyDelete": False,
+            "metadata": {"scope": "none"},
         }
 
     @pytest.mark.parametrize(
-        "username,role,write_progress,add_files,modify_delete",
+        "username,role,write_progress,add_files,modify_delete,metadata",
         [
-            ("reg", "registered", True, False, False),
-            ("upl", "uploader", True, True, False),
-            ("edi", "editor", True, True, True),
-            ("adm", "admin", True, True, True),
+            ("reg", "registered", True, False, False, {"scope": "none"}),
+            ("upl", "uploader", True, True, False, {"scope": "owned", "ownedSeries": []}),
+            ("edi", "editor", True, True, True, {"scope": "all"}),
+            ("adm", "admin", True, True, True, {"scope": "all"}),
         ],
     )
     def test_me_permissions_per_role(
@@ -128,6 +130,7 @@ class TestMeEndpoint:
         write_progress: bool,
         add_files: bool,
         modify_delete: bool,
+        metadata: dict[str, Any],
     ) -> None:
         status, body = call_me(api, encoded_header(f"{username}:pass1234"))
         assert status == 200
@@ -137,6 +140,7 @@ class TestMeEndpoint:
             "canWriteProgress": write_progress,
             "canAddFiles": add_files,
             "canModifyDelete": modify_delete,
+            "metadata": metadata,
         }
 
     def test_me_utf8_nonascii_password_authenticates(self, api: LoginAPI) -> None:
@@ -173,6 +177,7 @@ class TestMeEndpoint:
             "canWriteProgress": False,
             "canAddFiles": False,
             "canModifyDelete": False,
+            "metadata": {"scope": "none"},
         }
 
     def test_me_non_basic_scheme_200_anonymous(self, api: LoginAPI) -> None:
@@ -207,7 +212,13 @@ class TestMeEndpoint:
 
 
 class TestMeMetadataScope:
-    """The `metadata` object added 2026-08-24: gates the reader's per-series edit UI."""
+    """The `metadata` object added 2026-08-24: gates the reader's per-series edit UI.
+
+    Review round 1 finding F1: the reader's shipped `identity.ts` parser reads
+    this from `record.permissions.metadata`, NOT a body-level sibling of
+    `permissions` — so every assertion here digs through
+    `body["permissions"]["metadata"]`, the exact path the reader parses.
+    """
 
     @pytest.mark.parametrize(
         "username,role", [("edi", "editor"), ("adm", "admin"), ("inv", "inviter")]
@@ -218,25 +229,25 @@ class TestMeMetadataScope:
         status, body = call_me(api, encoded_header(f"{username}:pass1234"))
         assert status == 200
         assert body["role"] == role
-        assert body["metadata"] == {"scope": "all"}
+        assert body["permissions"]["metadata"] == {"scope": "all"}
 
     def test_registered_gets_scope_none(self, api: LoginAPI) -> None:
         status, body = call_me(api, encoded_header("reg:pass1234"))
         assert status == 200
-        assert body["metadata"] == {"scope": "none"}
+        assert body["permissions"]["metadata"] == {"scope": "none"}
 
     def test_anonymous_gets_scope_none(self, api: LoginAPI) -> None:
         status, body = call_me(api)
         assert status == 200
         assert body["authenticated"] is False
-        assert body["metadata"] == {"scope": "none"}
+        assert body["permissions"]["metadata"] == {"scope": "none"}
 
     def test_uploader_with_no_owned_series_gets_an_empty_owned_list(
         self, api: LoginAPI
     ) -> None:
         status, body = call_me(api, encoded_header("upl:pass1234"))
         assert status == 200
-        assert body["metadata"] == {"scope": "owned", "ownedSeries": []}
+        assert body["permissions"]["metadata"] == {"scope": "owned", "ownedSeries": []}
 
     def test_uploader_sees_exactly_the_folders_it_owns(
         self, api: LoginAPI, db: Database
@@ -249,4 +260,7 @@ class TestMeMetadataScope:
 
         status, body = call_me(api, encoded_header("upl:pass1234"))
         assert status == 200
-        assert body["metadata"] == {"scope": "owned", "ownedSeries": ["Aria", "Dr Stone"]}
+        assert body["permissions"]["metadata"] == {
+            "scope": "owned",
+            "ownedSeries": ["Aria", "Dr Stone"],
+        }

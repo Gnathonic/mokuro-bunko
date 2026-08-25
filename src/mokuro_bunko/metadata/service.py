@@ -178,6 +178,21 @@ class MetadataService:
                     # (or this pass's own reschedule) picks it up.
                     _log(f"skipped busy series folder: {folder.title}")
                     self.schedule_regeneration(delay=5.0)
+                except OSError as error:
+                    # Defense in depth (Task 11 review round 1, F3): the
+                    # auth layer now refuses MKCOL on a compiled path for
+                    # every role, but that closes the gate going forward —
+                    # it does not undo a directory already squatting where
+                    # a sidecar belongs (planted before this hardening
+                    # shipped, or by anything outside the DAV auth path).
+                    # Unguarded, `atomic_write_bytes`'s `os.replace` raises
+                    # `IsADirectoryError` here, which used to escape this
+                    # loop and abort the WHOLE pass — every series after the
+                    # poisoned one silently stopped publishing. Skip only
+                    # this folder; the pass continues and the catalog still
+                    # updates.
+                    _log(f"skipped unwritable series folder: {folder.title}: {error}")
+                    self.schedule_regeneration(delay=5.0)
             # Whole-library keep-set, gathered above regardless of whether
             # each series actually needed republishing — a series that
             # published clean this pass must not lose its cache row.

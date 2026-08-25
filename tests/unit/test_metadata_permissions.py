@@ -56,6 +56,17 @@ def authorize(middleware: AuthMiddleware, method: str, path: str, role: str) -> 
     return result.authorized, result.status_code
 
 
+def authorize_move(
+    middleware: AuthMiddleware, method: str, path: str, destination: str, role: str
+) -> tuple[bool, int]:
+    """Like `authorize`, but for a MOVE/COPY carrying a `Destination` header."""
+    result = middleware.authorize(
+        {"REQUEST_METHOD": method, "PATH_INFO": path, "HTTP_DESTINATION": destination},
+        as_role(role),
+    )
+    return result.authorized, result.status_code
+
+
 class TestSeriesFilePutAnonymousAndModifyDelete:
     def test_anonymous_may_not(self, middleware: AuthMiddleware) -> None:
         assert authorize(middleware, "PUT", SERIES_FILE, "anonymous") == (False, 401)
@@ -127,16 +138,22 @@ class TestSeriesFilePutUploaderOwnership:
 
 
 class TestCompiledFilesAreServerOwned:
-    @pytest.mark.parametrize("role", ["registered", "uploader", "editor", "admin"])
+    @pytest.mark.parametrize("role", ["registered", "uploader", "inviter", "editor", "admin"])
     def test_nobody_may_put_the_catalog(self, middleware: AuthMiddleware, role: str) -> None:
         assert authorize(middleware, "PUT", CATALOG_FILE, role) == (False, 403)
 
-    @pytest.mark.parametrize("method", ["DELETE", "MOVE", "COPY", "PROPPATCH"])
+    @pytest.mark.parametrize("method", ["DELETE", "MOVE", "COPY", "PROPPATCH", "MKCOL"])
     @pytest.mark.parametrize("path", [SERIES_FILE, CATALOG_FILE])
-    def test_nobody_may_delete_or_move_a_compiled_file(
-        self, middleware: AuthMiddleware, method: str, path: str
+    @pytest.mark.parametrize("role", ["uploader", "editor", "admin"])
+    def test_nobody_may_delete_move_or_mkcol_a_compiled_file(
+        self, middleware: AuthMiddleware, method: str, path: str, role: str
     ) -> None:
-        assert authorize(middleware, method, path, "admin") == (False, 403)
+        """Review round 1 (F3/F8): pinned for uploader (lacks MODIFY_DELETE
+        entirely) and a NON-admin MODIFY_DELETE holder (`editor`) too, not
+        just `admin` — and MKCOL now belongs in this same gate: it used to
+        fall through to the generic ADD_FILES check, letting any uploader
+        plant a directory where a sidecar belongs."""
+        assert authorize(middleware, method, path, role) == (False, 403)
 
     def test_deleting_the_series_folder_itself_is_still_allowed(
         self, middleware: AuthMiddleware
@@ -154,6 +171,75 @@ class TestCompiledFilesAreServerOwned:
         ) == (True, 200)
 
 
+class TestCompiledFileDestinationIsAlsoGated:
+    """Review round 1 (F4): the request path alone isn't enough — a
+    MOVE/COPY whose `Destination` header resolves to a compiled path must
+    be refused too, or a MODIFY_DELETE holder can clobber `catalog.json`/
+    `series.json` with unvalidated bytes and bypass MetadataAPI entirely."""
+
+    @pytest.mark.parametrize("method", ["MOVE", "COPY"])
+    @pytest.mark.parametrize("role", ["editor", "admin"])
+    def test_relocating_an_ordinary_file_onto_the_catalog_is_refused(
+        self, middleware: AuthMiddleware, method: str, role: str
+    ) -> None:
+        assert authorize_move(
+            middleware, method, "/mokuro-reader/Dr Stone/evil.json", CATALOG_FILE, role
+        ) == (False, 403)
+
+    @pytest.mark.parametrize("method", ["MOVE", "COPY"])
+    @pytest.mark.parametrize("role", ["editor", "admin"])
+    def test_relocating_an_ordinary_file_onto_a_series_file_is_refused(
+        self, middleware: AuthMiddleware, method: str, role: str
+    ) -> None:
+        assert authorize_move(
+            middleware, method, "/mokuro-reader/Dr Stone/evil.json", OTHER_SERIES_FILE, role
+        ) == (False, 403)
+
+    def test_an_ordinary_move_between_ordinary_paths_is_unaffected(
+        self, middleware: AuthMiddleware
+    ) -> None:
+        assert authorize_move(
+            middleware,
+            "MOVE",
+            "/mokuro-reader/Dr Stone/old.cbz",
+            "/mokuro-reader/Dr Stone/new.cbz",
+            "editor",
+        ) == (True, 200)
+
+    def test_absolute_uri_destination_is_parsed_the_same_way(
+        self, middleware: AuthMiddleware
+    ) -> None:
+        """A real DAV client typically sends a full URI, not a bare path."""
+        assert authorize_move(
+            middleware,
+            "MOVE",
+            "/mokuro-reader/Dr Stone/evil.json",
+            "http://example.com/mokuro-reader/catalog.json",
+            "admin",
+        ) == (False, 403)
+
+
+class TestCompiledFileWritesRequireAuthNotJustPermission:
+    """Review round 1 (F7): an anonymous write to a compiled path must 401
+    (with the WWW-Authenticate retry signal), same as every other
+    unauthenticated-write branch in this middleware — not a bare 403."""
+
+    @pytest.mark.parametrize("method", ["DELETE", "MOVE", "COPY", "PROPPATCH", "MKCOL"])
+    def test_anonymous_gets_401_not_403(self, middleware: AuthMiddleware, method: str) -> None:
+        assert authorize(middleware, method, SERIES_FILE, "anonymous") == (False, 401)
+        assert authorize(middleware, method, CATALOG_FILE, "anonymous") == (False, 401)
+
+    def test_anonymous_put_catalog_gets_401(self, middleware: AuthMiddleware) -> None:
+        assert authorize(middleware, "PUT", CATALOG_FILE, "anonymous") == (False, 401)
+
+    def test_anonymous_move_onto_a_compiled_destination_gets_401(
+        self, middleware: AuthMiddleware
+    ) -> None:
+        assert authorize_move(
+            middleware, "MOVE", "/mokuro-reader/Dr Stone/evil.json", CATALOG_FILE, "anonymous"
+        ) == (False, 401)
+
+
 class TestScopedUsersStillCannotWriteContent:
     @pytest.mark.parametrize("path", [ARCHIVE, COVER])
     def test_a_registered_user_may_not_upload_archives_or_covers(
@@ -166,7 +252,10 @@ class TestScopedUsersStillCannotWriteContent:
     def test_an_uploader_still_may(self, middleware: AuthMiddleware, path: str) -> None:
         assert authorize(middleware, "PUT", path, "uploader") == (True, 200)
 
-    def test_progress_writes_are_untouched(self, middleware: AuthMiddleware) -> None:
+    @pytest.mark.parametrize("progress_path", ["volume-data.json", "profiles.json"])
+    def test_progress_writes_are_untouched(
+        self, middleware: AuthMiddleware, progress_path: str
+    ) -> None:
         assert authorize(
-            middleware, "PUT", "/mokuro-reader/volume-data.json", "registered"
+            middleware, "PUT", f"/mokuro-reader/{progress_path}", "registered"
         ) == (True, 200)

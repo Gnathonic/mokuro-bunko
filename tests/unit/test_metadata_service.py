@@ -100,6 +100,38 @@ class TestRegeneration:
         assert [entry["series_title"] for entry in catalog["series"]] == ["Aria", "Dr Stone"]
         assert catalog["series"][0]["updated_at"] == "1970-01-01T00:00:00.000Z"
 
+    def test_a_directory_squatting_at_series_json_does_not_abort_the_whole_pass(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        """Task 11 review round 1 (F3), defense in depth: the auth layer now
+        refuses MKCOL on a compiled path for every role, but that only
+        closes the gate going forward — it does not undo a directory
+        already squatting where a sidecar belongs (planted before this
+        hardening shipped, or by anything outside the DAV auth path).
+        Unguarded, `IsADirectoryError` used to escape the per-folder loop
+        and abort the whole pass, so every series scanned AFTER the
+        poisoned one silently stopped publishing. 'Dr Stone' sorts before
+        'Zzz Series' so this actually exercises that ordering.
+        """
+        write_volume(library, "Dr Stone", "Volume 01")
+        write_volume(library, "Zzz Series", "v1", sidecar=False)
+        (library / "Dr Stone" / "series.json").mkdir()
+
+        changed = service.regenerate_all()
+
+        # The poisoned folder didn't crash the pass and wasn't clobbered.
+        assert (library / "Dr Stone" / "series.json").is_dir()
+        # The series scanned AFTER it still published.
+        zzz = json.loads((library / "Zzz Series" / "series.json").read_text("utf-8"))
+        assert zzz["series_title"] == "Zzz Series"
+        # And the catalog still covers both, including the poisoned one.
+        catalog = json.loads((library / "catalog.json").read_text("utf-8"))
+        assert [entry["series_title"] for entry in catalog["series"]] == [
+            "Dr Stone",
+            "Zzz Series",
+        ]
+        assert changed == 2  # Zzz Series sidecar + catalog; Dr Stone's write failed
+
     def test_image_only_series_still_gets_an_index(
         self, service: MetadataService, library: Path
     ) -> None:
