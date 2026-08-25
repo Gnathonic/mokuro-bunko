@@ -288,3 +288,104 @@ class TestEntryCache:
         )
         assert cached is not None
         assert cached["character_count"] == 500
+
+
+class TestFreshnessStamps:
+    def test_mokuro_stamps_come_from_the_sidecars_own_stat(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        sidecar_stat = (series / "v1.mokuro").stat()
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_size == sidecar_stat.st_size
+        assert entry.mokuro_modified == int(sidecar_stat.st_mtime)
+        assert isinstance(entry.mokuro_modified, int)  # truncated, not the raw float
+
+    def test_no_sidecar_means_no_mokuro_stamps(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "Volume 01.cbz", pages=3)   # image-only, no .mokuro at all
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_size is None
+        assert entry.mokuro_modified is None
+
+    def test_a_corrupt_but_present_sidecar_still_gets_stamped(self, library: Path) -> None:
+        # A stat is not a parse: a sidecar that fails to parse still has a
+        # real mtime/size on disk, and that is exactly the freshness
+        # information a client needs in order to know a retry is worthwhile.
+        series = library / "Dr Stone"
+        write_cbz(series / "Volume 01.cbz", pages=3)
+        (series / "Volume 01.mokuro").write_text("{ this is not json", encoding="utf-8")
+        sidecar_stat = (series / "Volume 01.mokuro").stat()
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_version == ""          # still degrades to image-only
+        assert entry.mokuro_size == sidecar_stat.st_size
+        assert entry.mokuro_modified == int(sidecar_stat.st_mtime)
+
+    def test_cover_stamps_come_from_the_webp_sidecar(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.webp").write_bytes(b"fake webp bytes")
+        cover_stat = (series / "v1.webp").stat()
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.cover_size == cover_stat.st_size
+        assert entry.cover_modified == int(cover_stat.st_mtime)
+
+    def test_no_cover_means_no_cover_stamps(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.nocover").touch()   # extraction was attempted and failed
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.cover_size is None
+        assert entry.cover_modified is None
+
+    def test_cover_stamp_is_fresh_even_on_a_cached_entry(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        # `cover_size`/`cover_modified` are deliberately OUTSIDE the entry
+        # cache (Decisions, 2026-08-24): the cache exists to skip re-parsing
+        # the `.mokuro`, not to skip a stat(). A cover that appears well
+        # after the entry was cached — exactly what happens when the cover
+        # worker (Task 12) runs on its own schedule — must show up on the
+        # very next compile, not wait for the archive or sidecar to change.
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        database = Database(tmp_path / "test.db")
+
+        first = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert first[0].cover_size is None   # no cover yet; entry gets cached
+
+        (series / "v1.webp").write_bytes(b"fake webp bytes")
+        cover_stat = (series / "v1.webp").stat()
+
+        second = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert second[0].cover_size == cover_stat.st_size
+        assert second[0].cover_modified == int(cover_stat.st_mtime)
+        # The rest of the (expensive) entry still came from the cache, not a
+        # re-parse — proving the split didn't quietly disable the cache.
+        assert second[0].mokuro_version == "0.2.2"
+
+    def test_mokuro_stamps_round_trip_through_the_entry_cache(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        database = Database(tmp_path / "test.db")
+        sidecar_stat = (series / "v1.mokuro").stat()
+
+        compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        cbz_stat = (series / "v1.cbz").stat()
+        cached = database.get_cached_volume_entry(
+            "Dr Stone/v1.cbz",
+            cbz_stat.st_size,
+            cbz_stat.st_mtime,
+            f"v1.mokuro:{sidecar_stat.st_size}:{sidecar_stat.st_mtime}",
+        )
+        assert cached is not None
+        assert cached["mokuro_size"] == sidecar_stat.st_size
+        assert cached["mokuro_modified"] == int(sidecar_stat.st_mtime)
+
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert entry.mokuro_size == sidecar_stat.st_size
+        assert entry.mokuro_modified == int(sidecar_stat.st_mtime)

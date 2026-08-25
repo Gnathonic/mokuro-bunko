@@ -82,6 +82,10 @@ class VolumeEntry:
     mokuro_version: str
     spine_width: float | None = None
     archive_size: int | None = None
+    mokuro_size: int | None = None
+    mokuro_modified: int | None = None
+    cover_size: int | None = None
+    cover_modified: int | None = None
 
 
 def _is_spine_width(value: float | None) -> bool:
@@ -218,6 +222,16 @@ def dump_series_file(
             entry["spine_width"] = volume.spine_width
         if _is_archive_size(volume.archive_size):
             entry["archive_size"] = volume.archive_size
+        # `is not None`, not truthy: 0 is a real (if practically impossible)
+        # stat value and must round-trip, unlike a missing spine_width/size.
+        if volume.mokuro_size is not None:
+            entry["mokuro_size"] = volume.mokuro_size
+        if volume.mokuro_modified is not None:
+            entry["mokuro_modified"] = volume.mokuro_modified
+        if volume.cover_size is not None:
+            entry["cover_size"] = volume.cover_size
+        if volume.cover_modified is not None:
+            entry["cover_modified"] = volume.cover_modified
         offset = index.volume_offsets.get(volume.volume_uuid)
         if offset:
             entry["offset"] = offset

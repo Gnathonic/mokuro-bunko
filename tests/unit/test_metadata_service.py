@@ -83,6 +83,7 @@ class TestRegeneration:
 
         assert service.regenerate_all() == 3  # two sidecars + the catalog
 
+        sidecar_stat = (library / "Dr Stone" / "Volume 01.mokuro").stat()
         dr_stone = json.loads((library / "Dr Stone" / "series.json").read_text("utf-8"))
         assert dr_stone["version"] == 2
         assert dr_stone["series_title"] == "Dr Stone"
@@ -95,6 +96,8 @@ class TestRegeneration:
                 "character_count": 2,
                 "mokuro_version": "0.2.2",
                 "archive_size": (library / "Dr Stone" / "Volume 01.cbz").stat().st_size,
+                "mokuro_size": sidecar_stat.st_size,
+                "mokuro_modified": int(sidecar_stat.st_mtime),
             }
         ]
 

@@ -17,7 +17,7 @@ import gzip
 import json
 import os
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +28,7 @@ from mokuro_bunko.metadata.reader_compat import (
     normalize_volume_title_key,
 )
 from mokuro_bunko.metadata.schema import VolumeEntry
+from mokuro_bunko.ocr.processor import OCRProcessor
 
 if TYPE_CHECKING:
     from mokuro_bunko.database import Database
@@ -104,15 +105,46 @@ def _sidecar_for(cbz_path: Path) -> Path | None:
     return None
 
 
-def _stat_key(path: Path | None) -> str:
-    """Compact identity of a sidecar for cache validation ("" = none)."""
+def _sidecar_stat(path: Path | None) -> os.stat_result | None:
+    """The one stat() of a sidecar, shared by the cache key and the entry.
+
+    Was inlined inside `_stat_key`; pulled out so `compile_series_volumes`
+    can stat the sidecar exactly once and use the SAME `stat_result` both to
+    build the cache-validation key and to stamp `mokuro_size`/
+    `mokuro_modified` on the compiled entry — never a second syscall.
+    """
     if path is None:
-        return ""
+        return None
     try:
-        stat_result = path.stat()
+        return path.stat()
     except OSError:
+        return None
+
+
+def _stat_key(path: Path | None, stat_result: os.stat_result | None) -> str:
+    """Compact identity of a sidecar for cache validation ("" = none)."""
+    if path is None or stat_result is None:
         return ""
     return f"{path.name}:{stat_result.st_size}:{stat_result.st_mtime}"
+
+
+def _cover_stat(cbz_path: Path) -> os.stat_result | None:
+    """Stat of this volume's cover sidecar, fresh on every call.
+
+    Deliberately UNCACHED, unlike the sidecar/archive stats above: the entry
+    cache exists to skip re-PARSING a `.mokuro` (the expensive part), not to
+    skip a stat() (cheap). The cover worker (Task 12) runs on its own
+    schedule and can produce a `.webp` well after this volume's entry was
+    cached — if the cover's freshness lived in the cache too, a newly
+    generated cover would never surface in `series.json` until the archive
+    or sidecar also changed. Always statting keeps `cover_size`/
+    `cover_modified` honest on every regeneration, cache hit or not.
+    """
+    cover_path = OCRProcessor.get_cover_path(cbz_path)
+    try:
+        return cover_path.stat()
+    except OSError:
+        return None
 
 
 def _read_sidecar(path: Path) -> dict[str, Any] | None:
@@ -158,7 +190,12 @@ def _positive_number(value: Any) -> float | None:
     return value if value > 0 else None
 
 
-def _compile_volume(series_title: str, cbz_path: Path, sidecar: Path | None) -> VolumeEntry:
+def _compile_volume(
+    series_title: str,
+    cbz_path: Path,
+    sidecar: Path | None,
+    sidecar_stat: os.stat_result | None,
+) -> VolumeEntry:
     volume_title = cbz_path.with_suffix("").name
     data = _read_sidecar(sidecar) if sidecar is not None else None
 
@@ -166,6 +203,9 @@ def _compile_volume(series_title: str, cbz_path: Path, sidecar: Path | None) -> 
         archive_size = cbz_path.stat().st_size
     except OSError:
         archive_size = 0
+
+    mokuro_size = sidecar_stat.st_size if sidecar_stat is not None else None
+    mokuro_modified = int(sidecar_stat.st_mtime) if sidecar_stat is not None else None
 
     if data is None:
         # Image-only (or an unreadable sidecar): the reader derives this uuid
@@ -178,6 +218,8 @@ def _compile_volume(series_title: str, cbz_path: Path, sidecar: Path | None) -> 
             character_count=0,
             mokuro_version="",
             archive_size=archive_size or None,
+            mokuro_size=mokuro_size,
+            mokuro_modified=mokuro_modified,
         )
 
     pages = data.get("pages")
@@ -206,6 +248,8 @@ def _compile_volume(series_title: str, cbz_path: Path, sidecar: Path | None) -> 
         mokuro_version=version,
         spine_width=_positive_number(data.get("spine_width")),
         archive_size=archive_size or None,
+        mokuro_size=mokuro_size,
+        mokuro_modified=mokuro_modified,
     )
 
 
@@ -218,6 +262,8 @@ def _entry_to_dict(entry: VolumeEntry) -> dict[str, Any]:
         "mokuro_version": entry.mokuro_version,
         "spine_width": entry.spine_width,
         "archive_size": entry.archive_size,
+        "mokuro_size": entry.mokuro_size,
+        "mokuro_modified": entry.mokuro_modified,
     }
 
 
@@ -231,6 +277,8 @@ def _entry_from_dict(raw: dict[str, Any]) -> VolumeEntry | None:
             mokuro_version=str(raw["mokuro_version"]),
             spine_width=raw.get("spine_width"),
             archive_size=raw.get("archive_size"),
+            mokuro_size=raw.get("mokuro_size"),
+            mokuro_modified=raw.get("mokuro_modified"),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -260,7 +308,8 @@ def compile_series_volumes(
         cbz_path = series.path / name
         volume_title = cbz_path.with_suffix("").name
         sidecar = _sidecar_for(cbz_path)
-        sidecar_key = _stat_key(sidecar)
+        sidecar_stat = _sidecar_stat(sidecar)
+        sidecar_key = _stat_key(sidecar, sidecar_stat)
         try:
             cbz_stat = cbz_path.stat()
         except OSError:
@@ -276,7 +325,7 @@ def compile_series_volumes(
                 entry = _entry_from_dict(cached)
 
         if entry is None:
-            entry = _compile_volume(series.title, cbz_path, sidecar)
+            entry = _compile_volume(series.title, cbz_path, sidecar, sidecar_stat)
             if database is not None:
                 database.put_cached_volume_entry(
                     key,
@@ -286,6 +335,14 @@ def compile_series_volumes(
                     cbz_stat.st_mtime,
                     sidecar_key,
                 )
+
+        # Cover stat is never cached — see `_cover_stat`'s docstring.
+        cover_stat = _cover_stat(cbz_path)
+        entry = replace(
+            entry,
+            cover_size=cover_stat.st_size if cover_stat is not None else None,
+            cover_modified=int(cover_stat.st_mtime) if cover_stat is not None else None,
+        )
         entries.append(entry)
 
     # Tiebreak on the raw title, matching `dump_series_file`'s own sort:
