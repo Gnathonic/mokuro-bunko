@@ -15,7 +15,9 @@
 Copied verbatim from the contract (`2026-08-23-catalog-distribution-bunko.md`, "Contract (binding for both sides)"). Every task's requirements implicitly include this section.
 
 1. **Partitioning** (owed): `<Series>/series.json` and root `catalog.json` are metadata files — never treated as user progress `.json`. (Root `series-metadata.json` no longer exists; a stale one may be ignored outright.)
-2. **Compiled `series.json`** — v2, compact JSON, exactly the reader's shape: `{version:2, series_title, external_ids, titles, synonyms, tag?, unit?, spine_offset?, updated_at, volumes:[{volume_uuid, volume_title, page_count, character_count, mokuro_version, spine_width?, archive_size?, offset?}]}`. `updated_at` = facts stamp (fact edits only); `1970-01-01T00:00:00.000Z` when bunko holds no facts for the series. Volume entries come from the `.mokuro` files (uuid/title/pages/chars/version; `spine_width` when known) plus `archive_size` (bytes of the `.cbz`, from a plain stat). `spine_offset` (percent, nominally ±50) and per-entry `offset` (px, nominally ±500) are the shelf alignment: INDEX fields, accepted and preserved verbatim from an intercepted PUT, never validated as facts and never allowed to move the facts stamp. The ranges are enforced by readers on parse, not by bunko (see §6). No per-page arrays. Readers ignore unknown keys; bunko must too.
+2. **Compiled `series.json`** — v2, compact JSON, exactly the reader's shape: `{version:2, series_title, external_ids, titles, synonyms, tag?, unit?, spine_offset?, updated_at, volumes:[{volume_uuid, volume_title, page_count, character_count, mokuro_version, spine_width?, archive_size?, mokuro_size?, mokuro_modified?, cover_size?, cover_modified?, offset?}]}`. `updated_at` = facts stamp (fact edits only); `1970-01-01T00:00:00.000Z` when bunko holds no facts for the series. Volume entries come from the `.mokuro` files (uuid/title/pages/chars/version; `spine_width` when known) plus `archive_size` (bytes of the `.cbz`, from a plain stat). `spine_offset` (percent, nominally ±50) and per-entry `offset` (px, nominally ±500) are the shelf alignment: INDEX fields, accepted and preserved verbatim from an intercepted PUT, never validated as facts and never allowed to move the facts stamp. The ranges are enforced by readers on parse, not by bunko (see §6). No per-page arrays. Readers ignore unknown keys; bunko must too.
+   - **Freshness stamps (2026-08-24 addendum).** Four more optional per-entry fields, all producer-computed and never accepted from a PUT (same rule as `archive_size` — see §6: "everything in the `volumes` array... is IGNORED" except `offset`): `mokuro_size` + `mokuro_modified` are the `.mokuro`/`.mokuro.gz` sidecar's `stat()` taken at entry-build time (bytes, and integer epoch SECONDS — `int(st_mtime)`, truncated, never rounded, never milliseconds); `cover_size` + `cover_modified` are the same pair for the volume's cover sidecar (`<Volume>.webp`). Each pair is omitted entirely (never written as `null`) when its sidecar doesn't exist or its stat is unavailable — never a fabricated `0`. Seconds, not a float or milliseconds, specifically because bunko's own filesystem stat is a float (`st_mtime`) while a generic WebDAV client only ever observes second-precision `Last-Modified` HTTP dates; comparing at finer-than-second precision would never agree between the two and every freshness check would read as stale forever. Byte-parity applies exactly as it does to every other field here (see Global Constraints): bunko emits these fields identically to the reader's own compact JSON — same key names, same integer truncation, same omit-not-null rule.
+   - **Staleness rule.** A client holding a previously-stored stamp for a volume's `.mokuro` (or its cover) rebuilds/re-fetches it when EITHER the entry's current size differs from the stored size, OR the entry's current `_modified` is strictly NEWER than the stored one. An older-or-equal `_modified` at an equal size is fresh and needs no action. An entry with no stamp at all (an older bunko, or a generic non-compiling WebDAV client) is treated as unconditionally stale exactly once — the resulting rebuild/re-fetch produces a real stamp, so a stampless entry self-heals to a stamped one on its own next compare.
 3. **Compiled `catalog.json`** — root, compact: `{version:1, updated_at, series:[{series_title, titles, synonyms, tag?, unit?, external_ids?, updated_at}]}` — one entry per series folder, facts subset identical to that series' `series.json`, factless series included with just `series_title` + epoch stamp. Name/mapping/search data only.
 4. **Serving.** Both files served with accurate `size`/`mtime` (clients version their caches on those). Regenerate on library change (archive add/remove/rename) and on every accepted update.
 5. **Write blocking (scoped users).** Archives, covers, `catalog.json`: rejected. The rejection must be an ordinary error the client can ignore — clients treat metadata-write failure as best-effort and stay read-write for everything else.
@@ -45,7 +47,9 @@ These are resolved here so no task has to re-litigate them. Each is repeated in 
 - **`catalog.json`'s own `updated_at`** is the MAX of its entries' facts stamps (epoch when every entry is factless), not `now`. The client documents it as informational ("the MERGE key is per entry"); a wall-clock stamp would change the bytes on every rebuild and defeat the size/mtime cache discipline of §4.
 - **An empty library still gets a `catalog.json`** (`{"version":1,"updated_at":"1970-01-01T00:00:00.000Z","series":[]}`). The client's `buildCatalogFile` returns `undefined` for an empty catalog because a client only ever knows part of a library; bunko knows all of it, so serving the truth beats serving a stale file.
 - **`updated_at` normalisation clamps the future** to `now + 5 min` exactly like the client's `normalizeUpdatedAt`, because the stamp decides merges by lexicographic comparison and a far-future value would otherwise win forever.
-- **Facts rows outlive their folders.** A series folder that disappears drops out of the compiled files but keeps its facts row, so a restore or a re-upload gets its link back. A folder RENAME does not carry facts across (facts are keyed by normalized series title); the client republishes them under the new name on its next fact edit. Recorded as a known limitation.
+- **Facts rows outlive their folders.** A series folder that disappears drops out of the compiled files but keeps its facts row, so a restore gets its link back. A folder RENAME does not carry facts across (facts are keyed by normalized series title); the client republishes them under the new name on its next fact edit. Recorded as a known limitation. **Amendment, 2026-08-24 (Task 11 review round 3, controller-accepted):** the "or a re-upload" / pre-provisioning half of this bullet is retired — `MetadataService.apply_series_update` now refuses (400) a PUT whose title does not resolve to a folder that exists right now, so facts can no longer be published ahead of the upload. The "restore" half (a row surviving its folder's temporary absence; nothing deletes a `series_facts` row) is unchanged. Full trace in the Task 11 report.
+- **Freshness-stamp field order (2026-08-24 addendum).** `mokuro_size`/`mokuro_modified`/`cover_size`/`cover_modified` sit in the volume entry directly after `archive_size` and before `offset`: grouped with the other file-stat facts (`spine_width`, `archive_size`), while `offset` stays the very last key — it is the one INDEX field in an otherwise all-facts entry, and keeping it last was already the existing convention. Pinned in the contract's §2 and in Task 11b's golden-byte tests.
+- **Cover stat is never cached (2026-08-24 addendum).** Unlike `mokuro_size`/`mokuro_modified` (free — the sidecar is already `stat()`-ed once for the entry cache's key, see Task 11b), `cover_size`/`cover_modified` are `stat()`-ed fresh on every `compile_series_volumes` call, cache hit or miss, and applied to the returned entry via `dataclasses.replace` after the cache lookup. The entry cache exists to skip re-parsing a `.mokuro` (the expensive part), not to skip a `stat()` (cheap); caching the cover stat too would let a `.webp` that Task 12's cover worker generates well after an entry was cached go unseen in `series.json` until the archive or sidecar also happened to change.
 
 ---
 
@@ -61,7 +65,7 @@ These are resolved here so no task has to re-litigate them. Each is repeated in 
 | `schema.py` | `SeriesFacts`, `VolumeEntry`, `SeriesIndexData`, `CatalogEntry` dataclasses + `dump_series_file` / `dump_catalog_file` (compact bytes, exact key order). Pure. |
 | `validate.py` | `parse_series_update(payload) -> SeriesUpdate | None` — the untrusted-PUT boundary (§6). Pure. |
 | `merge.py` | `merge_series_update(stored, update) -> MergeResult` — newest-facts-stamp-wins + factless/epoch rules + index-field rules. Pure. |
-| `compiler.py` | Filesystem → volume entries: `.mokuro`/`.mokuro.gz` parsing, image-only fallback, `archive_size`, the stat-keyed entry cache, `iter_series_folders`. |
+| `compiler.py` | Filesystem → volume entries: `.mokuro`/`.mokuro.gz` parsing, image-only fallback, `archive_size`, freshness stamps (`mokuro_size`/`mokuro_modified`/`cover_size`/`cover_modified`, Task 11b), the stat-keyed entry cache, `iter_series_folders`. |
 | `files.py` | `write_if_changed(path, data) -> bool` + `atomic_write_bytes` under the shared per-path write lock. |
 | `service.py` | `MetadataService`: apply an update, regenerate one series or all of them, debounce, post-write hook, shutdown. The only stateful object. |
 | `middleware.py` | `MetadataAPI` WSGI middleware: intercept the accepted `series.json` PUT, answer 204/400/413. |
@@ -676,6 +680,8 @@ The two output shapes, and the one place that turns them into bytes. Key order i
 **Interfaces:**
 - Consumes: `reader_compat.natural_sort_key`, `reader_compat.normalize_series_key`.
 - Produces: `FACTLESS_UPDATED_AT`, `ID_KEYS`, `TITLE_KEYS`, `TRACKING_UNITS`, `SeriesFacts` (frozen dataclass: `external_ids: dict[str, int]`, `titles: dict[str, str]`, `synonyms: tuple[str, ...]`, `tag: str | None`, `unit: str | None`, `updated_at: str`; method `has_facts() -> bool`), `SeriesIndexData` (`spine_offset: float | None`, `volume_offsets: dict[str, float]`), `VolumeEntry` (`volume_uuid`, `volume_title`, `page_count`, `character_count`, `mokuro_version`, `spine_width: float | None`, `archive_size: int | None`), `dump_series_file(*, series_title, facts, index, volumes) -> bytes`, `dump_catalog_file(entries: Sequence[tuple[str, SeriesFacts]]) -> bytes`.
+
+> Task 11b (2026-08-24, after this task shipped) extends `VolumeEntry` with four more optional fields — `mokuro_size`, `mokuro_modified`, `cover_size`, `cover_modified` — and the matching keys in `dump_series_file`'s entry shape. This line is left as originally drafted for historical accuracy; see Task 11b for the current field list.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3107,6 +3113,12 @@ class TestApplyUpdate:
         service.regenerate_all()
         sidecar = json.loads((library / "Dr Stone" / "series.json").read_text("utf-8"))
         assert sidecar["external_ids"] == {"anilist": 98416}
+        # AMENDMENT, 2026-08-24 (Task 11 review round 3, controller-accepted):
+        # this pre-provisioning test and the behavior it pinned are RETIRED.
+        # apply_series_update() now refuses a title matching no existing
+        # folder; the test above no longer reflects the shipped implementation
+        # (see test_metadata_service.py's
+        # test_an_update_for_an_unknown_folder_is_refused_and_never_stored).
 
 
 class TestDebounce:
@@ -3142,6 +3154,15 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'mokuro_bunko.metadata.
 - [ ] **Step 3: Write the implementation**
 
 `src/mokuro_bunko/metadata/service.py`:
+
+> **AMENDMENT, 2026-08-24 (Task 11 review round 3, controller-accepted):** the
+> module docstring below's "or a client that publishes facts before uploading
+> the archives" clause describes pre-provisioning, which is RETIRED —
+> `apply_series_update` now refuses a title matching no existing folder. The
+> "restore" half (a row surviving its folder's temporary absence) stands. The
+> shipped docstring in `src/mokuro_bunko/metadata/service.py` reflects the
+> current, amended behavior; the block below is the plan's original draft and
+> is left as drafted for historical accuracy.
 
 ```python
 """Compiling, publishing and updating the reader's metadata files.
@@ -4315,9 +4336,517 @@ git commit -m "feat(auth): ownership-gated series.json updates; identity endpoin
 
 ---
 
+### Task 11b: Entry freshness stamps (contract §2 freshness-stamp addendum, user ruling 2026-08-24)
+
+Four more optional fields on each compiled volume entry — `mokuro_size`/`mokuro_modified` (the `.mokuro`/`.mokuro.gz` sidecar's stat) and `cover_size`/`cover_modified` (the cover sidecar's stat) — so a client can tell whether its own cached copy of either file is stale without downloading it. This ruling landed after Tasks 1–11 shipped, so it extends the already-implemented `schema.py` (Task 3) and `compiler.py` (Task 7) in place rather than redoing them — the same pattern Task 11 itself used against Tasks 1–10. The mokuro stamp is free: `compile_series_volumes` already `stat()`s the sidecar once per volume, purely to build the entry cache's validation key (`_stat_key`, currently at `compiler.py:107`) — this task threads that SAME `os.stat_result` through to the compiled entry instead of discarding it, so no second syscall. The cover stamp has no existing stat to reuse (nothing in the compiler looks at cover files today) and is deliberately kept OUTSIDE the entry cache — see "Cover stat is never cached" in Decisions above.
+
+**Files:**
+- Modify: `src/mokuro_bunko/metadata/schema.py` (`VolumeEntry`, `dump_series_file`)
+- Modify: `src/mokuro_bunko/metadata/compiler.py` (`_stat_key`, `_compile_volume`, `_entry_to_dict`, `_entry_from_dict`, `compile_series_volumes`; new `_sidecar_stat`, `_cover_stat`)
+- Test: `tests/unit/test_metadata_schema.py` (extend), `tests/unit/test_metadata_compiler.py` (extend)
+
+**Interfaces:**
+- Consumes: `mokuro_bunko.ocr.processor.OCRProcessor.get_cover_path` (static, for the `<Volume>.webp` convention — no instance needed, no circular import: `ocr/` imports nothing from `metadata/`).
+- Produces: `VolumeEntry` gains `mokuro_size: int | None`, `mokuro_modified: int | None`, `cover_size: int | None`, `cover_modified: int | None` (all default `None`). `dump_series_file`'s entry shape gains the four keys, positioned after `archive_size` and before `offset` (Decisions above). No change to `validate.py` or `merge.py`: like `archive_size`, these are producer-only fields already covered by the existing "everything in `volumes` except `offset` is ignored" PUT rule (contract §6) — a client cannot inject or spoof them, so nothing at the untrusted boundary needs to change.
+
+- [ ] **Step 1: Write the failing schema tests**
+
+Append to `tests/unit/test_metadata_schema.py`, a new class placed directly after `TestDumpSeriesFile` (it extends that class's own fixtures):
+
+```python
+class TestFreshnessStamps:
+    def test_all_four_present_sit_after_archive_size(self) -> None:
+        data = dump_series_file(
+            series_title="Bakemonogatari",
+            facts=SeriesFacts(),
+            index=SeriesIndexData(),
+            volumes=[
+                VolumeEntry(
+                    volume_uuid="cfb5220c-57db-4008-9f44-e659d794e381",
+                    volume_title="v01",
+                    page_count=187,
+                    character_count=13247,
+                    mokuro_version="0.2.2",
+                    archive_size=1234,
+                    mokuro_size=45210,
+                    mokuro_modified=1723996800,
+                    cover_size=8192,
+                    cover_modified=1723996900,
+                )
+            ],
+        )
+        assert data.decode("utf-8") == (
+            '{"version":2,"series_title":"Bakemonogatari","external_ids":{},"titles":{},'
+            '"synonyms":[],"updated_at":"1970-01-01T00:00:00.000Z","volumes":['
+            '{"volume_uuid":"cfb5220c-57db-4008-9f44-e659d794e381","volume_title":"v01",'
+            '"page_count":187,"character_count":13247,"mokuro_version":"0.2.2",'
+            '"archive_size":1234,"mokuro_size":45210,"mokuro_modified":1723996800,'
+            '"cover_size":8192,"cover_modified":1723996900}]}'
+        )
+
+    def test_stamps_sit_after_archive_size_and_before_offset(self) -> None:
+        # Extends TestDumpSeriesFile.test_full_facts_offsets_and_natural_volume_order:
+        # same fixture, "u2" gains stamps, "u10" keeps its trailing `offset`.
+        data = dump_series_file(
+            series_title="Dr Stone",
+            facts=DR_STONE,
+            index=SeriesIndexData(spine_offset=12.5, volume_offsets={"u10": -40, "u2": 0}),
+            volumes=[
+                VolumeEntry("u10", "Volume 10", 200, 10000, ""),
+                VolumeEntry(
+                    "u2", "Volume 2", 180, 9000, "0.2.2", spine_width=250.5,
+                    archive_size=99, mokuro_size=15000, mokuro_modified=1700000100,
+                    cover_size=4096, cover_modified=1700000200,
+                ),
+            ],
+        )
+        assert data.decode("utf-8") == (
+            '{"version":2,"series_title":"Dr Stone",'
+            '"external_ids":{"anilist":98416,"mal":103897},'
+            '"titles":{"native":"Dr.STONE","romaji":"Dr. STONE"},'
+            '"synonyms":["ドクターストーン"],"tag":"HD Scan","unit":"volumes",'
+            '"spine_offset":12.5,"updated_at":"2026-08-18T19:36:24.324Z","volumes":['
+            '{"volume_uuid":"u2","volume_title":"Volume 2","page_count":180,'
+            '"character_count":9000,"mokuro_version":"0.2.2","spine_width":250.5,'
+            '"archive_size":99,"mokuro_size":15000,"mokuro_modified":1700000100,'
+            '"cover_size":4096,"cover_modified":1700000200},'
+            '{"volume_uuid":"u10","volume_title":"Volume 10","page_count":200,'
+            '"character_count":10000,"mokuro_version":"","offset":-40}]}'
+        )
+
+    def test_a_zero_stamp_is_written_not_omitted(self) -> None:
+        # Unlike spine_width/archive_size (truthy `> 0` checks), the four
+        # stamps use `is not None`: a literal epoch mtime or an empty-file
+        # size is 0, and a real (if practically impossible) stat value must
+        # round-trip rather than silently vanish like a missing one would.
+        volume = VolumeEntry(
+            "u1", "v1", 1, 0, "", mokuro_size=0, mokuro_modified=0,
+            cover_size=0, cover_modified=0,
+        )
+        text = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(), volumes=[volume]
+        ).decode("utf-8")
+        assert (
+            '"mokuro_size":0,"mokuro_modified":0,"cover_size":0,"cover_modified":0'
+        ) in text
+
+    def test_stamps_are_omitted_not_nulled_when_absent(self) -> None:
+        volume = VolumeEntry("u1", "Volume 1", 1, 1, "0.2.2")  # all four default None
+        text = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(), volumes=[volume]
+        ).decode("utf-8")
+        for key in ("mokuro_size", "mokuro_modified", "cover_size", "cover_modified"):
+            assert f'"{key}"' not in text
+        assert "null" not in text
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/unit/test_metadata_schema.py -q`
+Expected: FAIL — `TypeError: __init__() got an unexpected keyword argument 'mokuro_size'`
+
+- [ ] **Step 3: Extend `schema.py`**
+
+In `src/mokuro_bunko/metadata/schema.py`, extend `VolumeEntry`:
+
+```python
+@dataclass(frozen=True)
+class VolumeEntry:
+    """One compiled volume. Offsets are applied at dump time, by uuid."""
+
+    volume_uuid: str
+    volume_title: str
+    page_count: int
+    character_count: int
+    mokuro_version: str
+    spine_width: float | None = None
+    archive_size: int | None = None
+    mokuro_size: int | None = None
+    mokuro_modified: int | None = None
+    cover_size: int | None = None
+    cover_modified: int | None = None
+```
+
+and extend the entry-building loop in `dump_series_file` — insert right after the existing `archive_size` block and before the `offset` computation:
+
+```python
+        if _is_spine_width(volume.spine_width):
+            entry["spine_width"] = volume.spine_width
+        if _is_archive_size(volume.archive_size):
+            entry["archive_size"] = volume.archive_size
+        # `is not None`, not truthy: 0 is a real (if practically impossible)
+        # stat value and must round-trip, unlike a missing spine_width/size.
+        if volume.mokuro_size is not None:
+            entry["mokuro_size"] = volume.mokuro_size
+        if volume.mokuro_modified is not None:
+            entry["mokuro_modified"] = volume.mokuro_modified
+        if volume.cover_size is not None:
+            entry["cover_size"] = volume.cover_size
+        if volume.cover_modified is not None:
+            entry["cover_modified"] = volume.cover_modified
+        offset = index.volume_offsets.get(volume.volume_uuid)
+        if offset:
+            entry["offset"] = offset
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/unit/test_metadata_schema.py -q`
+Expected: PASS (26 tests: 22 existing + 4 new)
+
+- [ ] **Step 5: Write the failing compiler tests**
+
+Append to `tests/unit/test_metadata_compiler.py`, a new class after `TestEntryCache`:
+
+```python
+class TestFreshnessStamps:
+    def test_mokuro_stamps_come_from_the_sidecars_own_stat(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        sidecar_stat = (series / "v1.mokuro").stat()
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_size == sidecar_stat.st_size
+        assert entry.mokuro_modified == int(sidecar_stat.st_mtime)
+        assert isinstance(entry.mokuro_modified, int)  # truncated, not the raw float
+
+    def test_no_sidecar_means_no_mokuro_stamps(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "Volume 01.cbz", pages=3)   # image-only, no .mokuro at all
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_size is None
+        assert entry.mokuro_modified is None
+
+    def test_a_corrupt_but_present_sidecar_still_gets_stamped(self, library: Path) -> None:
+        # A stat is not a parse: a sidecar that fails to parse still has a
+        # real mtime/size on disk, and that is exactly the freshness
+        # information a client needs in order to know a retry is worthwhile.
+        series = library / "Dr Stone"
+        write_cbz(series / "Volume 01.cbz", pages=3)
+        (series / "Volume 01.mokuro").write_text("{ this is not json", encoding="utf-8")
+        sidecar_stat = (series / "Volume 01.mokuro").stat()
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_version == ""          # still degrades to image-only
+        assert entry.mokuro_size == sidecar_stat.st_size
+        assert entry.mokuro_modified == int(sidecar_stat.st_mtime)
+
+    def test_cover_stamps_come_from_the_webp_sidecar(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.webp").write_bytes(b"fake webp bytes")
+        cover_stat = (series / "v1.webp").stat()
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.cover_size == cover_stat.st_size
+        assert entry.cover_modified == int(cover_stat.st_mtime)
+
+    def test_no_cover_means_no_cover_stamps(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.nocover").touch()   # extraction was attempted and failed
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.cover_size is None
+        assert entry.cover_modified is None
+
+    def test_cover_stamp_is_fresh_even_on_a_cached_entry(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        # `cover_size`/`cover_modified` are deliberately OUTSIDE the entry
+        # cache (Decisions, 2026-08-24): the cache exists to skip re-parsing
+        # the `.mokuro`, not to skip a stat(). A cover that appears well
+        # after the entry was cached — exactly what happens when the cover
+        # worker (Task 12) runs on its own schedule — must show up on the
+        # very next compile, not wait for the archive or sidecar to change.
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        database = Database(tmp_path / "test.db")
+
+        first = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert first[0].cover_size is None   # no cover yet; entry gets cached
+
+        (series / "v1.webp").write_bytes(b"fake webp bytes")
+        cover_stat = (series / "v1.webp").stat()
+
+        second = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert second[0].cover_size == cover_stat.st_size
+        assert second[0].cover_modified == int(cover_stat.st_mtime)
+        # The rest of the (expensive) entry still came from the cache, not a
+        # re-parse — proving the split didn't quietly disable the cache.
+        assert second[0].mokuro_version == "0.2.2"
+
+    def test_mokuro_stamps_round_trip_through_the_entry_cache(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        database = Database(tmp_path / "test.db")
+        sidecar_stat = (series / "v1.mokuro").stat()
+
+        compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        cbz_stat = (series / "v1.cbz").stat()
+        cached = database.get_cached_volume_entry(
+            "Dr Stone/v1.cbz",
+            cbz_stat.st_size,
+            cbz_stat.st_mtime,
+            f"v1.mokuro:{sidecar_stat.st_size}:{sidecar_stat.st_mtime}",
+        )
+        assert cached is not None
+        assert cached["mokuro_size"] == sidecar_stat.st_size
+        assert cached["mokuro_modified"] == int(sidecar_stat.st_mtime)
+
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert entry.mokuro_size == sidecar_stat.st_size
+        assert entry.mokuro_modified == int(sidecar_stat.st_mtime)
+```
+
+- [ ] **Step 6: Run test to verify it fails**
+
+Run: `uv run pytest tests/unit/test_metadata_compiler.py -q`
+Expected: FAIL — once Step 3 has landed, `VolumeEntry(..., mokuro_size=...)` no longer raises `TypeError`, but `compile_series_volumes` never sets the field, so every `assert entry.mokuro_size == ...` fails with `AssertionError: None == <int>`.
+
+- [ ] **Step 7: Extend `compiler.py`**
+
+Pull the sidecar's `stat()` out of `_stat_key` so it can be reused, and thread it into `_compile_volume`:
+
+```python
+def _sidecar_stat(path: Path | None) -> os.stat_result | None:
+    """The one stat() of a sidecar, shared by the cache key and the entry.
+
+    Was inlined inside `_stat_key`; pulled out so `compile_series_volumes`
+    can stat the sidecar exactly once and use the SAME `stat_result` both to
+    build the cache-validation key and to stamp `mokuro_size`/
+    `mokuro_modified` on the compiled entry — never a second syscall.
+    """
+    if path is None:
+        return None
+    try:
+        return path.stat()
+    except OSError:
+        return None
+
+
+def _stat_key(path: Path | None, stat_result: os.stat_result | None) -> str:
+    """Compact identity of a sidecar for cache validation ("" = none)."""
+    if path is None or stat_result is None:
+        return ""
+    return f"{path.name}:{stat_result.st_size}:{stat_result.st_mtime}"
+```
+
+Add the cover-stat helper (new; nothing in the compiler looks at cover files today), and its import — `OCRProcessor` only for its `get_cover_path` staticmethod, no instance, no circular import (`mokuro_bunko.ocr.processor` imports nothing from `mokuro_bunko.metadata`):
+
+```python
+from mokuro_bunko.ocr.processor import OCRProcessor
+
+
+def _cover_stat(cbz_path: Path) -> os.stat_result | None:
+    """Stat of this volume's cover sidecar, fresh on every call.
+
+    Deliberately UNCACHED, unlike the sidecar/archive stats above: the entry
+    cache exists to skip re-PARSING a `.mokuro` (the expensive part), not to
+    skip a stat() (cheap). The cover worker (Task 12) runs on its own
+    schedule and can produce a `.webp` well after this volume's entry was
+    cached — if the cover's freshness lived in the cache too, a newly
+    generated cover would never surface in `series.json` until the archive
+    or sidecar also changed. Always statting keeps `cover_size`/
+    `cover_modified` honest on every regeneration, cache hit or not.
+    """
+    cover_path = OCRProcessor.get_cover_path(cbz_path)
+    try:
+        return cover_path.stat()
+    except OSError:
+        return None
+```
+
+Change the `dataclasses` import to also bring in `replace`:
+
+```python
+from dataclasses import dataclass, replace
+```
+
+Thread `sidecar_stat` into `_compile_volume` and stamp both return branches:
+
+```python
+def _compile_volume(
+    series_title: str,
+    cbz_path: Path,
+    sidecar: Path | None,
+    sidecar_stat: os.stat_result | None,
+) -> VolumeEntry:
+    volume_title = cbz_path.with_suffix("").name
+    data = _read_sidecar(sidecar) if sidecar is not None else None
+
+    try:
+        archive_size = cbz_path.stat().st_size
+    except OSError:
+        archive_size = 0
+
+    mokuro_size = sidecar_stat.st_size if sidecar_stat is not None else None
+    mokuro_modified = int(sidecar_stat.st_mtime) if sidecar_stat is not None else None
+
+    if data is None:
+        # Image-only (or an unreadable sidecar): the reader derives this uuid
+        # for its placeholder, so deriving the same one keeps synced progress
+        # attached when the index arrives.
+        return VolumeEntry(
+            volume_uuid=deterministic_uuid(f"{series_title}/{volume_title}"),
+            volume_title=volume_title,
+            page_count=_count_archive_images(cbz_path),
+            character_count=0,
+            mokuro_version="",
+            archive_size=archive_size or None,
+            mokuro_size=mokuro_size,
+            mokuro_modified=mokuro_modified,
+        )
+
+    pages = data.get("pages")
+    raw_uuid = data.get("volume_uuid")
+    uuid = (
+        raw_uuid
+        if isinstance(raw_uuid, str) and raw_uuid.strip()
+        else deterministic_uuid(f"{series_title}/{volume_title}")
+    )
+    raw_version = data.get("version")
+    version = raw_version if isinstance(raw_version, str) else ""
+
+    raw_chars = data.get("chars")
+    if isinstance(raw_chars, int) and not isinstance(raw_chars, bool) and raw_chars > 0:
+        character_count = raw_chars
+    else:
+        character_count = count_page_chars(pages)
+
+    return VolumeEntry(
+        volume_uuid=uuid,
+        volume_title=volume_title,
+        page_count=len(pages) if isinstance(pages, list) else _count_archive_images(cbz_path),
+        character_count=character_count,
+        mokuro_version=version,
+        spine_width=_positive_number(data.get("spine_width")),
+        archive_size=archive_size or None,
+        mokuro_size=mokuro_size,
+        mokuro_modified=mokuro_modified,
+    )
+```
+
+Extend the cache round-trip helpers so `mokuro_size`/`mokuro_modified` survive a cache hit (`cover_size`/`cover_modified` stay OUT of these — they are never cached, see `_cover_stat`):
+
+```python
+def _entry_to_dict(entry: VolumeEntry) -> dict[str, Any]:
+    return {
+        "volume_uuid": entry.volume_uuid,
+        "volume_title": entry.volume_title,
+        "page_count": entry.page_count,
+        "character_count": entry.character_count,
+        "mokuro_version": entry.mokuro_version,
+        "spine_width": entry.spine_width,
+        "archive_size": entry.archive_size,
+        "mokuro_size": entry.mokuro_size,
+        "mokuro_modified": entry.mokuro_modified,
+    }
+
+
+def _entry_from_dict(raw: dict[str, Any]) -> VolumeEntry | None:
+    try:
+        return VolumeEntry(
+            volume_uuid=str(raw["volume_uuid"]),
+            volume_title=str(raw["volume_title"]),
+            page_count=int(raw["page_count"]),
+            character_count=int(raw["character_count"]),
+            mokuro_version=str(raw["mokuro_version"]),
+            spine_width=raw.get("spine_width"),
+            archive_size=raw.get("archive_size"),
+            mokuro_size=raw.get("mokuro_size"),
+            mokuro_modified=raw.get("mokuro_modified"),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+```
+
+Finally, wire `compile_series_volumes` to stat the sidecar once, pass it through, and apply the (always-fresh) cover stat regardless of whether the entry came from cache:
+
+```python
+def compile_series_volumes(
+    series: SeriesFolder,
+    *,
+    database: Database | None = None,
+) -> list[VolumeEntry]:
+    """Every volume of one series, in natural title order."""
+    series_key = normalize_series_key(series.title)
+    entries: list[VolumeEntry] = []
+
+    for name in _archive_names(series.path):
+        cbz_path = series.path / name
+        volume_title = cbz_path.with_suffix("").name
+        sidecar = _sidecar_for(cbz_path)
+        sidecar_stat = _sidecar_stat(sidecar)
+        sidecar_key = _stat_key(sidecar, sidecar_stat)
+        try:
+            cbz_stat = cbz_path.stat()
+        except OSError:
+            continue
+
+        key = volume_key_for(series.title, volume_title)
+        entry: VolumeEntry | None = None
+        if database is not None:
+            cached = database.get_cached_volume_entry(
+                key, cbz_stat.st_size, cbz_stat.st_mtime, sidecar_key
+            )
+            if cached is not None:
+                entry = _entry_from_dict(cached)
+
+        if entry is None:
+            entry = _compile_volume(series.title, cbz_path, sidecar, sidecar_stat)
+            if database is not None:
+                database.put_cached_volume_entry(
+                    key,
+                    series_key,
+                    _entry_to_dict(entry),
+                    cbz_stat.st_size,
+                    cbz_stat.st_mtime,
+                    sidecar_key,
+                )
+
+        # Cover stat is never cached — see `_cover_stat`'s docstring.
+        cover_stat = _cover_stat(cbz_path)
+        entry = replace(
+            entry,
+            cover_size=cover_stat.st_size if cover_stat is not None else None,
+            cover_modified=int(cover_stat.st_mtime) if cover_stat is not None else None,
+        )
+        entries.append(entry)
+
+    entries.sort(key=lambda item: (natural_sort_key(item.volume_title), item.volume_title))
+    return entries
+```
+
+- [ ] **Step 8: Run test to verify it passes**
+
+Run: `uv run pytest tests/unit/test_metadata_compiler.py -q`
+Expected: PASS (26 tests: 19 existing + 7 new)
+
+- [ ] **Step 9: Run the full regression suites**
+
+Run: `uv run pytest tests/unit/test_metadata_schema.py tests/unit/test_metadata_compiler.py tests/unit/test_metadata_service.py tests/integration/test_metadata_distribution.py -q`
+Expected: PASS. `test_metadata_service.py`/`test_metadata_distribution.py`'s fixtures write real `.mokuro` files and exercise `compile_series_volumes` indirectly through `MetadataService.regenerate_all`/`regenerate_series`, so their compiled entries will now carry `mokuro_size`/`mokuro_modified`; none of their existing assertions pin an exact volume-entry key set, so this should not break anything — confirm rather than assume.
+
+- [ ] **Step 10: Check lint and types**
+
+Run: `uv run ruff check src/ && uv run mypy src/`
+Expected: no findings. `os.stat_result` is a real stdlib type; `_sidecar_stat`/`_cover_stat`'s `-> os.stat_result | None` annotations satisfy strict mode without a cast.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add src/mokuro_bunko/metadata/schema.py src/mokuro_bunko/metadata/compiler.py \
+        tests/unit/test_metadata_schema.py tests/unit/test_metadata_compiler.py
+git commit -m "feat(metadata): mokuro/cover freshness stamps on volume entries"
+```
+
+---
+
 ### Task 12: Covers when OCR is off (contract §8)
 
-Cover sidecars already exist: `OCRProcessor.ensure_thumbnail` extracts the archive's first image and writes a 250×350 WebP next to the `.cbz` (with a `.nocover` marker when there is no image), and `OCRWorker` runs a thumbnail loop beside its OCR loop. The gap is that `run_server` starts `OCRWorker` **only** when `config.ocr.backend != "skip"`, so a server with OCR disabled never generates a cover — and the contract makes covers unconditional, because the reader now installs them onto materialized rows. The scoped-user half of §8 needs no code (`registered` lacks `ADD_FILES`, pinned by Task 11's tests).
+Cover sidecars already exist: `OCRProcessor.ensure_thumbnail` extracts the archive's first image and writes a 250×350 WebP next to the `.cbz` (with a `.nocover` marker when there is no image), and `OCRWorker` runs a thumbnail loop beside its OCR loop. The gap is that `run_server` starts `OCRWorker` **only** when `config.ocr.backend != "skip"`, so a server with OCR disabled never generates a cover — and the contract makes covers unconditional, because the reader now installs them onto materialized rows. The scoped-user half of §8 needs no code (`registered` lacks `ADD_FILES`, pinned by Task 11's tests). This task is only about making sure the worker that PRODUCES a `<Volume>.webp` runs unconditionally; Task 11b (already landed if the plan is executed in order) is what makes `compile_series_volumes` STAT that `.webp` and stamp `cover_size`/`cover_modified` onto the entry — no further change to `compiler.py` is needed here.
 
 **Files:**
 - Modify: `src/mokuro_bunko/ocr/watcher.py` (`OCRWorker.__init__` around line 234, `start` around line 455)
@@ -4519,7 +5048,7 @@ git commit -m "feat(covers): generate cover sidecars even when OCR is disabled"
 
 ### Task 13: End-to-end through the real WSGI stack
 
-Everything above is unit-level. This drives the assembled application — `create_app` with the real auth, metadata and DAV middleware — the way the reader client does: an authorized user PUTs a `series.json`, gets it validated/merged/regenerated, then reads `catalog.json` back; blocked writes come back as ordinary errors; the partitioning holds. (2026-08-24: "authorized" means the ownership-gated Task 11 rule, not "any scoped user" — see `TestAuthorizedUpdate` below, which exercises both the `uploader`-ownership path and the `MODIFY_DELETE` path, plus a dedicated `registered`-is-403 pin.)
+Everything above is unit-level. This drives the assembled application — `create_app` with the real auth, metadata and DAV middleware — the way the reader client does: an authorized user PUTs a `series.json`, gets it validated/merged/regenerated, then reads `catalog.json` back; blocked writes come back as ordinary errors; the partitioning holds. (2026-08-24: "authorized" means the ownership-gated Task 11 rule, not "any scoped user" — see `TestAuthorizedUpdate` below, which exercises both the `uploader`-ownership path and the `MODIFY_DELETE` path, plus a dedicated `registered`-is-403 pin.) `TestServing.test_compiled_files_are_served_with_accurate_size` also pins that Task 11b's freshness stamps survive being served through the real WSGI stack, not just `compile_series_volumes` in isolation.
 
 The fixture also **stops** the watcher, the PROPFIND cache timer and the metadata timer on teardown. The existing `app` fixture in `test_webdav_ops.py` does not, which is why a long combined run can exhaust inotify watches; the new file does not add to that.
 
@@ -4649,6 +5178,15 @@ class TestServing:
         assert document["series_title"] == "Dr Stone"
         assert document["volumes"][0]["volume_uuid"] == "uuid-volume-01"
         assert document["volumes"][0]["character_count"] == 2
+        # Freshness stamps (Task 11b): `write_volume` puts a real `.mokuro`
+        # sidecar on disk, so its stat must come through into the compiled
+        # entry; no `.webp` exists in this fixture, so the cover pair is
+        # absent rather than nulled.
+        mokuro_stat = (storage / "library" / "Dr Stone" / "Volume 01.mokuro").stat()
+        assert document["volumes"][0]["mokuro_size"] == mokuro_stat.st_size
+        assert document["volumes"][0]["mokuro_modified"] == int(mokuro_stat.st_mtime)
+        assert "cover_size" not in document["volumes"][0]
+        assert "cover_modified" not in document["volumes"][0]
 
     def test_the_catalog_lists_every_series_by_folder_name(
         self, client: WSGITestClient
@@ -4885,7 +5423,7 @@ git commit -m "test: end-to-end metadata distribution through the WSGI stack"
 - [ ] **Step 1: Run the complete suite**
 
 Run: `uv run pytest tests/unit tests/integration -q`
-Expected: PASS. The 726 baseline tests must all still pass; the new files add about 170 more (11 + 15 + 12 + 16 + 10 + 18 + 14 + 7 + 17 + 9 + 25 + 3 + 15). Record the final count in the commit message.
+Expected: PASS. The 726 baseline tests must all still pass; the new/extended files add about 181 more (11 + 15 + 12 + 16 + 10 + 18 + 14 + 7 + 17 + 9 + 25 + 11 + 3 + 15 — the `11` is Task 11b's additions to the already-counted `test_metadata_schema.py`/`test_metadata_compiler.py`). Record the final count in the commit message.
 
 - [ ] **Step 2: Lint and type-check exactly as CI does**
 
@@ -4920,9 +5458,10 @@ At the top of `CHANGELOG.md`, above `## [0.1.8] - 2026-07-08`:
 ## [Unreleased]
 
 ### Added
-- **Server-side compilation of the reader's metadata files.** mokuro-bunko now compiles `<Series>/series.json` (v2: series facts plus an index of the series' volumes — uuid, title, page and character counts, mokuro version, spine width, archive size, shelf offsets) and a root `catalog.json` (name/mapping/search data for every series folder) from the library's own `.mokuro` and `.cbz` files. Both are regenerated when the library changes and served with accurate size/mtime, so clients can cache them; a rebuild that changes nothing rewrites nothing. Character counts are computed with the reader's own counting rules, and volumes with no OCR sidecar are indexed as image-only with the uuid the reader derives for them.
+- **Server-side compilation of the reader's metadata files.** mokuro-bunko now compiles `<Series>/series.json` (v2: series facts plus an index of the series' volumes — uuid, title, page and character counts, mokuro version, spine width, archive size, freshness stamps, shelf offsets) and a root `catalog.json` (name/mapping/search data for every series folder) from the library's own `.mokuro` and `.cbz` files. Both are regenerated when the library changes and served with accurate size/mtime, so clients can cache them; a rebuild that changes nothing rewrites nothing. Character counts are computed with the reader's own counting rules, and volumes with no OCR sidecar are indexed as image-only with the uuid the reader derives for them.
 - **Metadata updates from accounts that cannot write to the library.** A `series.json` PUT is treated as an update REQUEST: the facts fields are validated, merged newest-stamp-wins against the server's store (a factless payload never clears a link unless it is strictly newer — an explicit unlink), and both files are regenerated. Shelf offsets ride along as index data and never move the facts stamp. Repeating an identical update is a no-op, so a client can retry safely.
 - **Cover sidecars are generated even when OCR is disabled** (`backend: skip`), since the reader now installs them onto volumes it has not downloaded.
+- **Freshness stamps on each volume entry.** `series.json` volume entries optionally carry `mokuro_size`/`mokuro_modified` and `cover_size`/`cover_modified` — integer byte sizes and integer epoch seconds from a plain `stat()` of the `.mokuro` sidecar and the cover `.webp`, omitted (not `null`) when either doesn't exist. Clients use these to detect a stale local copy without downloading anything: a size mismatch, or a strictly newer `_modified` than what they have stored, means re-fetch.
 
 ### Changed
 - Compiled metadata files are owned by the server: `catalog.json` cannot be written by any account, and neither compiled file can be deleted, moved or copied. Rejections are ordinary 403s — a client that treats metadata writes as best-effort keeps full read/write access to everything else.
@@ -4948,12 +5487,23 @@ The server compiles two files into the shared library and keeps them current:
 
 | File | Contents |
 | --- | --- |
-| `<Series>/series.json` | The series' facts (external ids, titles, synonyms, tag, unit) plus an index of its volumes: uuid, title, page and character counts, mokuro version, spine width, archive size and shelf offsets. |
+| `<Series>/series.json` | The series' facts (external ids, titles, synonyms, tag, unit) plus an index of its volumes: uuid, title, page and character counts, mokuro version, spine width, archive size, freshness stamps and shelf offsets. |
 | `catalog.json` (library root) | One entry per series folder with the same facts — name, mapping and search data only. |
 
 Both are regenerated when the library changes and whenever a client submits an
 update, and are rewritten only when their content actually changed, so clients can
 cache them on size/mtime.
+
+Each volume entry may also carry `mokuro_size`/`mokuro_modified` and
+`cover_size`/`cover_modified`: the byte size and integer epoch-second mtime of the
+`.mokuro` sidecar and the cover `.webp`, taken from a plain filesystem stat when the
+entry is compiled. Either pair is omitted (never `null`) when its file doesn't
+exist. A client uses these to decide whether its own cached copy is stale without
+downloading anything: rebuild when the stamped size differs from what it has, or
+the stamped `_modified` is strictly newer than what it stored; an older-or-equal
+`_modified` at an equal size is fresh. Stamps are always whole seconds, never
+sub-second, because a generic WebDAV client only ever sees second-precision
+`Last-Modified` HTTP dates.
 
 Clients do not write these files. A `PUT` of `<Series>/series.json` is accepted as
 an update *request*: the facts are validated and merged (newest stamp wins), the
@@ -4997,13 +5547,14 @@ Checked after writing, against the contract and the spec's amendment sections.
 | Contract clause | Task(s) |
 | --- | --- |
 | §1 partitioning (+ stale `series-metadata.json`) | 1, 13 |
-| §2 compiled `series.json` shape, index fields verbatim | 3, 4, 7, 9 |
+| §2 compiled `series.json` shape, index fields verbatim | 3, 4, 7, 9, 11b |
+| §2 freshness stamps + staleness rule (2026-08-24 addendum) | 11b, 13 |
 | §3 compiled `catalog.json`, stable ordering, factless entries | 3, 9 |
 | §4 accurate size/mtime, regenerate on change and on update | 8, 9, 10, 13 |
 | §5 write blocking as an ordinary error | 11, 13 |
 | §6 intercepted PUT: validate / merge / regenerate / idempotent | 4, 6, 9, 10, 11, 13 |
 | §7 compilation advertisement (no code change; regression-tested) | 13 |
-| §8 cover sidecars, not overwritable by scoped users | 11, 12 |
+| §8 cover sidecars, not overwritable by scoped users | 11, 12, 11b |
 | Bunko tasks 1–8 of the contract's own list | 1 → 12 respectively |
 | Contract task 9 (deploy) | out of scope, recorded above |
 
