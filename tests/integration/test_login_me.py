@@ -77,6 +77,7 @@ def db(temp_dir: Path) -> Database:
     db.create_user("edi", "pass1234", "editor")
     db.create_user("adm", "pass1234", "admin")
     db.create_user("umlaut", "pässwörd", "registered")
+    db.create_user("inv", "pass1234", "inviter")
     return db
 
 
@@ -203,3 +204,49 @@ class TestMeEndpoint:
         status, body = call_me(api, encoded_header("reg:pass1234"))
         assert status == 200
         assert set(body) >= {"username", "role", "created_at"}
+
+
+class TestMeMetadataScope:
+    """The `metadata` object added 2026-08-24: gates the reader's per-series edit UI."""
+
+    @pytest.mark.parametrize(
+        "username,role", [("edi", "editor"), ("adm", "admin"), ("inv", "inviter")]
+    )
+    def test_modify_delete_holders_get_scope_all(
+        self, api: LoginAPI, username: str, role: str
+    ) -> None:
+        status, body = call_me(api, encoded_header(f"{username}:pass1234"))
+        assert status == 200
+        assert body["role"] == role
+        assert body["metadata"] == {"scope": "all"}
+
+    def test_registered_gets_scope_none(self, api: LoginAPI) -> None:
+        status, body = call_me(api, encoded_header("reg:pass1234"))
+        assert status == 200
+        assert body["metadata"] == {"scope": "none"}
+
+    def test_anonymous_gets_scope_none(self, api: LoginAPI) -> None:
+        status, body = call_me(api)
+        assert status == 200
+        assert body["authenticated"] is False
+        assert body["metadata"] == {"scope": "none"}
+
+    def test_uploader_with_no_owned_series_gets_an_empty_owned_list(
+        self, api: LoginAPI
+    ) -> None:
+        status, body = call_me(api, encoded_header("upl:pass1234"))
+        assert status == 200
+        assert body["metadata"] == {"scope": "owned", "ownedSeries": []}
+
+    def test_uploader_sees_exactly_the_folders_it_owns(
+        self, api: LoginAPI, db: Database
+    ) -> None:
+        db.record_volume_upload("Dr Stone/Volume 01.cbz", "upl")
+        db.record_volume_upload("Aria/v1.cbz", "upl")
+        # A folder `upl` only partly owns must not appear in its list.
+        db.record_volume_upload("Shared/v1.cbz", "upl")
+        db.record_volume_upload("Shared/v2.cbz", "edi")
+
+        status, body = call_me(api, encoded_header("upl:pass1234"))
+        assert status == 200
+        assert body["metadata"] == {"scope": "owned", "ownedSeries": ["Aria", "Dr Stone"]}

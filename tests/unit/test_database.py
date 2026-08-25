@@ -430,6 +430,37 @@ class TestAuditAndOwnership:
         assert temp_db.can_user_delete_library_path("alice", "/mokuro-reader/Series/Vol 01.cbz")
         assert not temp_db.can_user_delete_library_path("bob", "/mokuro-reader/Series/Vol 01.cbz")
 
+    def test_can_user_edit_series_sole_owner(self, temp_db: Database) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Dr Stone/Volume 02.cbz", "alice")
+        assert temp_db.can_user_edit_series("alice", "Dr Stone") is True
+        assert temp_db.can_user_edit_series("bob", "Dr Stone") is False
+
+    def test_can_user_edit_series_mixed_ownership_is_false_for_everyone(
+        self, temp_db: Database
+    ) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Dr Stone/Volume 02.cbz", "bob")
+        assert temp_db.can_user_edit_series("alice", "Dr Stone") is False
+        assert temp_db.can_user_edit_series("bob", "Dr Stone") is False
+
+    def test_can_user_edit_series_untracked_folder_is_false(
+        self, temp_db: Database
+    ) -> None:
+        """No volume_uploads rows at all: the safe default is 403, not a free-for-all."""
+        assert temp_db.can_user_edit_series("alice", "Legacy Series") is False
+
+    def test_list_series_owned_by_returns_only_fully_owned_folders(
+        self, temp_db: Database
+    ) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Aria/v1.cbz", "alice")
+        temp_db.record_volume_upload("Shared Series/v1.cbz", "alice")
+        temp_db.record_volume_upload("Shared Series/v2.cbz", "bob")
+
+        assert temp_db.list_series_owned_by("alice") == ["Aria", "Dr Stone"]
+        assert temp_db.list_series_owned_by("bob") == []
+
 
 class TestPasswordHashing:
     """Tests for password hashing."""

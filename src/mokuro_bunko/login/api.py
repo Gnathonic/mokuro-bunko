@@ -131,6 +131,24 @@ class LoginAPI:
             "canModifyDelete": check_permission(role, Permission.MODIFY_DELETE),
         }
 
+    def _metadata_scope(self, role: str, username: str | None) -> dict[str, Any]:
+        """Contract-facing scope for the series.json/catalog.json write gate.
+
+        Mirrors `AuthMiddleware._authorize_put`'s Task 11 policy exactly, so
+        this endpoint can never advertise more (or less) than a real PUT would
+        actually be allowed to do: a MODIFY_DELETE holder may edit any series,
+        an uploader only the series it fully owns (`Database.can_user_edit_series`),
+        everyone else (`registered`, anonymous) none.
+        """
+        if check_permission(role, Permission.MODIFY_DELETE):
+            return {"scope": "all"}
+        if role == "uploader" and username and self.db is not None:
+            return {
+                "scope": "owned",
+                "ownedSeries": self.db.list_series_owned_by(username),
+            }
+        return {"scope": "none"}
+
     def _get_me(
         self,
         environ: dict[str, Any],
@@ -169,6 +187,7 @@ class LoginAPI:
                 "authenticated": False,
                 "role": "anonymous",
                 "permissions": self._role_permissions("anonymous"),
+                "metadata": self._metadata_scope("anonymous", None),
             })
 
         username, password = creds
@@ -189,6 +208,7 @@ class LoginAPI:
                 "role": user["role"],
                 "created_at": user["created_at"],
                 "permissions": self._role_permissions(user["role"]),
+                "metadata": self._metadata_scope(user["role"], user["username"]),
             })
 
         AUTH_RATE_LIMITER.record_failure(key)
