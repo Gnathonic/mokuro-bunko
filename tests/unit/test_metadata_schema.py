@@ -201,6 +201,92 @@ class TestDumpSeriesFile:
         assert b"Dr\\udcff" in data
 
 
+class TestFreshnessStamps:
+    def test_all_four_present_sit_after_archive_size(self) -> None:
+        data = dump_series_file(
+            series_title="Bakemonogatari",
+            facts=SeriesFacts(),
+            index=SeriesIndexData(),
+            volumes=[
+                VolumeEntry(
+                    volume_uuid="cfb5220c-57db-4008-9f44-e659d794e381",
+                    volume_title="v01",
+                    page_count=187,
+                    character_count=13247,
+                    mokuro_version="0.2.2",
+                    archive_size=1234,
+                    mokuro_size=45210,
+                    mokuro_modified=1723996800,
+                    cover_size=8192,
+                    cover_modified=1723996900,
+                )
+            ],
+        )
+        assert data.decode("utf-8") == (
+            '{"version":2,"series_title":"Bakemonogatari","external_ids":{},"titles":{},'
+            '"synonyms":[],"updated_at":"1970-01-01T00:00:00.000Z","volumes":['
+            '{"volume_uuid":"cfb5220c-57db-4008-9f44-e659d794e381","volume_title":"v01",'
+            '"page_count":187,"character_count":13247,"mokuro_version":"0.2.2",'
+            '"archive_size":1234,"mokuro_size":45210,"mokuro_modified":1723996800,'
+            '"cover_size":8192,"cover_modified":1723996900}]}'
+        )
+
+    def test_stamps_sit_after_archive_size_and_before_offset(self) -> None:
+        # Extends TestDumpSeriesFile.test_full_facts_offsets_and_natural_volume_order:
+        # same fixture, "u2" gains stamps, "u10" keeps its trailing `offset`.
+        data = dump_series_file(
+            series_title="Dr Stone",
+            facts=DR_STONE,
+            index=SeriesIndexData(spine_offset=12.5, volume_offsets={"u10": -40, "u2": 0}),
+            volumes=[
+                VolumeEntry("u10", "Volume 10", 200, 10000, ""),
+                VolumeEntry(
+                    "u2", "Volume 2", 180, 9000, "0.2.2", spine_width=250.5,
+                    archive_size=99, mokuro_size=15000, mokuro_modified=1700000100,
+                    cover_size=4096, cover_modified=1700000200,
+                ),
+            ],
+        )
+        assert data.decode("utf-8") == (
+            '{"version":2,"series_title":"Dr Stone",'
+            '"external_ids":{"anilist":98416,"mal":103897},'
+            '"titles":{"native":"Dr.STONE","romaji":"Dr. STONE"},'
+            '"synonyms":["ドクターストーン"],"tag":"HD Scan","unit":"volumes",'
+            '"spine_offset":12.5,"updated_at":"2026-08-18T19:36:24.324Z","volumes":['
+            '{"volume_uuid":"u2","volume_title":"Volume 2","page_count":180,'
+            '"character_count":9000,"mokuro_version":"0.2.2","spine_width":250.5,'
+            '"archive_size":99,"mokuro_size":15000,"mokuro_modified":1700000100,'
+            '"cover_size":4096,"cover_modified":1700000200},'
+            '{"volume_uuid":"u10","volume_title":"Volume 10","page_count":200,'
+            '"character_count":10000,"mokuro_version":"","offset":-40}]}'
+        )
+
+    def test_a_zero_stamp_is_written_not_omitted(self) -> None:
+        # Unlike spine_width/archive_size (truthy `> 0` checks), the four
+        # stamps use `is not None`: a literal epoch mtime or an empty-file
+        # size is 0, and a real (if practically impossible) stat value must
+        # round-trip rather than silently vanish like a missing one would.
+        volume = VolumeEntry(
+            "u1", "v1", 1, 0, "", mokuro_size=0, mokuro_modified=0,
+            cover_size=0, cover_modified=0,
+        )
+        text = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(), volumes=[volume]
+        ).decode("utf-8")
+        assert (
+            '"mokuro_size":0,"mokuro_modified":0,"cover_size":0,"cover_modified":0'
+        ) in text
+
+    def test_stamps_are_omitted_not_nulled_when_absent(self) -> None:
+        volume = VolumeEntry("u1", "Volume 1", 1, 1, "0.2.2")  # all four default None
+        text = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(), volumes=[volume]
+        ).decode("utf-8")
+        for key in ("mokuro_size", "mokuro_modified", "cover_size", "cover_modified"):
+            assert f'"{key}"' not in text
+        assert "null" not in text
+
+
 class TestSeriesFileDeterminism:
     def test_tied_natural_sort_keys_break_on_raw_title_text(self) -> None:
         # "volume 1" / "Volume 1" fold to the identical `natural_sort_key`;
