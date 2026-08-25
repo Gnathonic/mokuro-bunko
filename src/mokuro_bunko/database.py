@@ -1052,6 +1052,64 @@ class Database:
         owner = self.get_volume_owner(relative)
         return owner == username
 
+    def series_owners(self, series_title: str) -> set[str]:
+        """Distinct uploader usernames among a series folder's tracked volumes.
+
+        `series_title` is the literal top-level library folder name — the
+        same string `metadata.paths.series_title_from_series_file_path`
+        returns. Matched the same way `forget_volume_uploads_under_prefix`
+        matches a folder prefix: a plain `LIKE '<title>/%'`, case-insensitive
+        for ASCII, NOT the lowercased `normalize_series_key` fold
+        `series_facts` uses — this table's keys are library-relative paths,
+        not folded series keys. A folder with no tracked volumes returns an
+        empty set; the `LIKE` pattern is not escaped (matching the existing
+        `forget_volume_uploads_under_prefix` precedent), but `can_user_edit_series`
+        below fails closed on any over-match, since an unescaped `%`/`_` in a
+        folder name can only ever pull in EXTRA owners, never remove the real
+        ones — so it can produce a false negative, never a false grant.
+        """
+        prefix = series_title.strip("/")
+        if not prefix:
+            return set()
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT DISTINCT uploader_username FROM volume_uploads WHERE volume_key LIKE ?",
+                (f"{prefix}/%",),
+            )
+            return {str(row["uploader_username"]) for row in cursor.fetchall()}
+
+    def can_user_edit_series(self, username: str, series_title: str) -> bool:
+        """True when `username` owns EVERY tracked volume in a series folder.
+
+        The safe default for a folder with no ownership records — legacy
+        content, or a series uploaded before ownership tracking existed — is
+        False: an uploader may not claim an untracked series just by being
+        the first to PUT its `series.json`. Only a role holding
+        `Permission.MODIFY_DELETE` may edit an unowned/untracked series
+        (enforced by the caller, `AuthMiddleware._authorize_put`).
+        """
+        owners = self.series_owners(series_title)
+        return bool(owners) and owners == {username}
+
+    def list_series_owned_by(self, username: str) -> list[str]:
+        """Series folder names `username` may edit, per `can_user_edit_series`.
+
+        Feeds the identity endpoint's `metadata.ownedSeries`. A folder where
+        this user owns some but not all tracked volumes is excluded — it is
+        not editable by them either, so it must not appear in their list.
+        """
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT DISTINCT volume_key FROM volume_uploads WHERE uploader_username = ?",
+                (username,),
+            )
+            folders = {
+                str(row["volume_key"]).split("/", 1)[0]
+                for row in cursor.fetchall()
+                if "/" in str(row["volume_key"])
+            }
+        return sorted(folder for folder in folders if self.can_user_edit_series(username, folder))
+
     def forget_volume_upload(self, library_relative_path: str) -> None:
         """Delete ownership metadata for a volume key."""
         volume_key = normalize_volume_key_from_library_relative(library_relative_path)

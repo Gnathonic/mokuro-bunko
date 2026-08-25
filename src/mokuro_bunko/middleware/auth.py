@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
+from mokuro_bunko.metadata.paths import (
+    is_compiled_metadata_path,
+    is_series_file_path,
+    series_title_from_series_file_path,
+)
 from mokuro_bunko.security import AuthAttemptLimiter, get_client_ip
 from mokuro_bunko.webdav.resources import PathMapper
 
@@ -420,6 +425,18 @@ class AuthMiddleware:
                 )
             return AuthorizationResult(authorized=True)
 
+        # Compiled metadata files are produced by this server (contract §5):
+        # no role may delete, move, copy or PROPPATCH one. A plain 403 is what
+        # the client expects — it treats metadata writes as best-effort and
+        # stays read-write for everything else. Folder-level operations are
+        # unaffected: the path tested here is the file itself.
+        if method in ("DELETE", "MOVE", "COPY", "PROPPATCH") and is_compiled_metadata_path(path):
+            return AuthorizationResult(
+                authorized=False,
+                status_code=403,
+                error="Permission denied: this file is compiled by the server",
+            )
+
         # Read operations
         if method in ("GET", "HEAD", "PROPFIND"):
             if not auth_result.authenticated:
@@ -569,6 +586,48 @@ class AuthMiddleware:
         # Per-user progress files
         if is_progress_file(path):
             return self._authorize_progress_write(path, auth_result)
+
+        # A `series.json` PUT is an update REQUEST, not a file write
+        # (contract §6): MetadataAPI validates and merges it, and the DAV
+        # layer never sees it. Authorization is ownership-gated, NOT the
+        # WRITE_PROGRESS "edit your own data" gate that guards progress files
+        # above (2026-08-24 ruling, overturning this task's original design):
+        #   - anonymous -> 401
+        #   - a MODIFY_DELETE holder (inviter/editor/admin) -> every series
+        #   - uploader -> only a series it owns outright (Database.can_user_edit_series)
+        #   - registered -> always 403; it stays limited to the progress/
+        #     profile carve-out above and never gains series-metadata access
+        if is_series_file_path(path):
+            if not auth_result.authenticated:
+                return AuthorizationResult(
+                    authorized=False,
+                    status_code=401,
+                    error="Authentication required",
+                )
+            if check_permission(role, Permission.MODIFY_DELETE):
+                return AuthorizationResult(authorized=True)
+            if role == "uploader":
+                series_title = series_title_from_series_file_path(path)
+                username = auth_result.username
+                if (
+                    series_title is not None
+                    and username is not None
+                    and self.database.can_user_edit_series(username, series_title)
+                ):
+                    return AuthorizationResult(authorized=True)
+            return AuthorizationResult(
+                authorized=False,
+                status_code=403,
+                error="Permission denied: cannot submit metadata updates for this series",
+            )
+
+        # Every other compiled file (the root catalog.json) is server-owned.
+        if is_compiled_metadata_path(path):
+            return AuthorizationResult(
+                authorized=False,
+                status_code=403,
+                error="Permission denied: this file is compiled by the server",
+            )
 
         # Library files require ADD_FILES permission
         if is_library_path(path):
