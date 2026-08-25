@@ -20,13 +20,31 @@ module's naive match — an ordinary PUT to any of those spellings bypassed
 now performs the same lexical collapse (via `posixpath.normpath`, no
 filesystem access) so every consumer — `is_series_file_path`,
 `series_title_from_series_file_path`, `is_catalog_file_path`, and therefore
-`is_compiled_metadata_path` — agrees with the resolver on every alias. A
-path whose normalized form starts with `..` (escapes the library root) or
-`/` (a boundary double-slash that `Path.__truediv__` treats as an absolute
-override, discarding the library root entirely) matches nothing: those
+`is_compiled_metadata_path` — agrees with the resolver on every alias.
+
+Final whole-branch review, F1: the Task 10 fix above normalized only the
+tail AFTER the `/mokuro-reader/` prefix test, not the whole path, on the
+theory that a library-relative part beginning with `/` (a boundary
+double-slash spelling, e.g. `/mokuro-reader//catalog.json`) was "never
+reachable as a bypass" because `safe_resolve_under` also refuses to resolve
+it. That theory was empirically false: wsgidav's own path resolution for a
+PUT to a non-existent resource (`get_uri_parent`/`get_uri_name`, then
+`PathMapper.get_resource_inst`) does `"/" + path.strip("/")` on the PARENT
+path before `safe_resolve_under` is ever consulted, which silently absorbs
+the extra slash and lands the write on the real, un-prefixed file —
+`safe_resolve_under` is never asked. Reproduced: `PUT
+/mokuro-reader//catalog.json` wrote the raw compiled catalog for every
+ADD_FILES role, bypassing `MetadataAPI` interception and the compiled-file
+verb gate entirely, with no merge, no validation and no audit event. The fix
+is to normalize the FULL virtual path (lexically, via `posixpath.normpath`)
+BEFORE the `/mokuro-reader/` prefix test, not only the relative remainder
+after it — so `//catalog.json`, `///catalog.json` and `//Dr Stone/series.json`
+now collapse onto the same real path the resolver would land on, and are
+recognized like any other alias. A path whose fully-normalized form still
+does not start with the reader prefix (a genuine `..`-escape past the
+library root, or a spelling that never reaches it) matches nothing — those
 spellings are exactly the ones `safe_resolve_under` also refuses to resolve
-under the library, so they were never reachable as a bypass in the first
-place — rejecting them here is consistency, not a new plug.
+under the library, so they remain unreachable as a bypass.
 """
 
 from __future__ import annotations
@@ -46,23 +64,19 @@ def _library_relative(virtual_path: str) -> str | None:
 
     Per-user files are excluded here, which is the partitioning rule itself:
     a path that maps into a user's private directory can never be metadata.
-    The result is lexically normalized (see module docstring) so this always
-    agrees with what the real path resolver would land the request on.
+    The FULL path is lexically normalized first (final review F1 — see the
+    module docstring) so a boundary double-slash like `/mokuro-reader//x`
+    collapses onto the same real path the resolver would land on, exactly
+    like every other alias, instead of being treated as an absolute-path
+    override that discards the reader prefix.
     """
-    normalized = "/" + virtual_path.strip("/")
+    normalized = posixpath.normpath("/" + virtual_path.strip("/"))
     if not normalized.startswith(_READER_PREFIX):
-        return None
+        return None  # includes any `..`-escape past the library root
     relative = normalized[len(_READER_PREFIX):]
-    if not relative:
+    if not relative or relative in PathMapper.PER_USER_FILES:
         return None
-    collapsed = posixpath.normpath(relative)
-    if collapsed in (".", "") or collapsed == ".." or collapsed.startswith("../"):
-        return None  # escapes the library root: never resolvable, never metadata
-    if collapsed.startswith("/"):
-        return None  # boundary double-slash: an absolute-path override, not an alias
-    if collapsed in PathMapper.PER_USER_FILES:
-        return None
-    return collapsed
+    return relative
 
 
 def is_catalog_file_path(virtual_path: str) -> bool:

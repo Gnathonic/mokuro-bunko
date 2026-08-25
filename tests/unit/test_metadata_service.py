@@ -260,6 +260,58 @@ class TestRegeneration:
             volume_key_for("Aria", "v1"),
         }
 
+    def test_publish_series_does_not_resurrect_a_folder_removed_before_the_write(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        """F3 (final whole-branch review): `_publish_series` must not
+        resurrect a series folder that vanished between the scan and the
+        write -- there is nothing left to publish into."""
+        from mokuro_bunko.metadata.compiler import SeriesFolder
+        from mokuro_bunko.metadata.schema import SeriesFacts, SeriesIndexData
+
+        folder = SeriesFolder(title="Dr Stone", path=library / "Dr Stone")
+        assert not folder.path.exists()
+
+        changed = service._publish_series(
+            folder, facts=SeriesFacts(), index=SeriesIndexData(), volumes=[]
+        )
+
+        assert changed is False
+        assert not folder.path.exists()
+
+    def test_a_series_folder_deleted_mid_pass_is_not_resurrected(
+        self, service: MetadataService, library: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F3, reproduced through the real `regenerate_all` pass: a DELETE of
+        the whole series folder racing an in-flight regeneration -- exactly
+        what a bulk delete during the debounce window produces. Before the
+        fix, the folder came back holding only `series.json`, was never
+        republished again (no `.cbz` -> skipped by the next scan) and
+        nothing pruned it."""
+        write_volume(library, "Dr Stone", "Volume 01")
+        write_volume(library, "Aria", "v1")
+
+        real_compile = metadata_service.compile_series_volumes
+
+        def compile_then_delete_dr_stone(folder: object, *, database: Database) -> object:
+            volumes = real_compile(folder, database=database)  # type: ignore[arg-type]
+            if getattr(folder, "title", None) == "Dr Stone":
+                shutil.rmtree(folder.path)  # type: ignore[union-attr]
+            return volumes
+
+        monkeypatch.setattr(
+            metadata_service, "compile_series_volumes", compile_then_delete_dr_stone
+        )
+
+        service.regenerate_all()
+
+        assert not (library / "Dr Stone").exists()  # not resurrected
+        catalog = json.loads((library / "catalog.json").read_text("utf-8"))
+        assert [entry["series_title"] for entry in catalog["series"]] == [
+            "Aria",
+            "Dr Stone",
+        ]
+
     def test_a_busy_skip_is_retried_by_the_next_scheduled_pass(
         self, service: MetadataService, library: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -519,6 +571,31 @@ class TestApplyUpdate:
         assert service.database.can_user_edit_series("alice", nfd_title) is True
         assert service.database.list_series_owned_by("alice") == [nfc_title]
 
+    def test_a_squatting_directory_at_the_target_series_does_not_abort_regenerate_series(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        """F4 (final review): `_regenerate_series_locked` used to catch only
+        `MetadataWriteBusy`, asymmetric with `regenerate_all`'s hardening
+        for the identical `IsADirectoryError` condition. `regenerate_series`
+        has no production caller today, but `apply_series_update` shares
+        this exact locked helper, so an update PUT for a series with a
+        squatted sidecar used to raise straight out of this method after
+        the facts row was already durably persisted."""
+        write_volume(library, "Dr Stone", "Volume 01")
+        (library / "Dr Stone" / "series.json").mkdir()
+
+        changed = service.regenerate_series("Dr Stone")  # must not raise
+
+        # The squatted series write itself failed (skipped, not clobbered),
+        # but the catalog is written for the first time in this same call
+        # and does count as a change -- `changed` is about the WHOLE call,
+        # not just the one squatted folder.
+        assert changed is True
+        assert (library / "Dr Stone" / "series.json").is_dir()  # not clobbered
+        catalog = json.loads((library / "catalog.json").read_text("utf-8"))
+        assert catalog["series"][0]["series_title"] == "Dr Stone"
+        service.stop()
+
     def test_a_republish_failure_after_a_persisted_accept_still_returns_true(
         self, service: MetadataService, library: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -718,6 +795,62 @@ class TestDebounce:
         # (written second) would still be missing here.
         assert (library / "Dr Stone" / "series.json").exists()
         assert (library / "catalog.json").exists()
+
+
+class TestStoppedGate:
+    """F5 (final review): the three public pass entry points must no-op
+    after `stop()` -- not just `schedule_regeneration`, which already had
+    this gate. Narrows (does not fully close -- see the docstrings in
+    service.py) the shutdown window where a request still in flight could
+    otherwise publish and fire `on_published` after `stop()` has returned."""
+
+    def test_regenerate_all_is_a_no_op_after_stop(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        calls: list[int] = []
+        service = MetadataService(
+            library, Database(tmp_path / "test.db"), on_published=lambda: calls.append(1)
+        )
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.stop()
+
+        assert service.regenerate_all() == 0
+
+        assert calls == []
+        assert not (library / "Dr Stone" / "series.json").exists()
+        assert not (library / "catalog.json").exists()
+
+    def test_regenerate_series_is_a_no_op_after_stop(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        calls: list[int] = []
+        service = MetadataService(
+            library, Database(tmp_path / "test.db"), on_published=lambda: calls.append(1)
+        )
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.stop()
+
+        assert service.regenerate_series("Dr Stone") is False
+
+        assert calls == []
+        assert not (library / "Dr Stone" / "series.json").exists()
+
+    def test_apply_series_update_is_a_no_op_after_stop(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        calls: list[int] = []
+        service = MetadataService(
+            library, Database(tmp_path / "test.db"), on_published=lambda: calls.append(1)
+        )
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.stop()
+
+        accepted = service.apply_series_update("Dr Stone", series_update(), "alice")
+
+        assert accepted is False
+        assert calls == []
+        assert service.database.get_series_facts("dr stone") is None
+        assert not (library / "Dr Stone" / "series.json").exists()
 
 
 class TestReentrantPublishHook:

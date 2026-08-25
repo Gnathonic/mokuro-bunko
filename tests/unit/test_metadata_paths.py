@@ -76,6 +76,65 @@ class TestPathAliasNormalization:
         assert not is_compiled_metadata_path("/mokuro-reader/Dr Stone/../volume-data.json")
 
 
+class TestBoundaryDoubleSlashBypass:
+    """Final whole-branch review, F1: `PUT /mokuro-reader//catalog.json` (and
+    the other boundary double-slash spellings) used to bypass every helper
+    here, because `_library_relative` only normalized the tail AFTER the
+    `/mokuro-reader/` prefix test — a library-relative part beginning with
+    `/` was refused outright on a "never reachable" theory that turned out
+    to be empirically false (wsgidav's own resolver absorbs the extra slash
+    via `"/" + path.strip("/")` before `safe_resolve_under` is ever asked).
+    These are the reviewer's differential: exactly the 3 boundary spellings
+    below flip from unmatched to matched; every `..`-escape, every per-user
+    file alias, and every already-matching alias (`TestPathAliasNormalization`
+    above) must keep its current answer — pinned together in
+    `test_the_rest_of_the_differential_is_unchanged` below.
+    """
+
+    def test_boundary_double_slash_after_the_reader_root_is_recognised(self) -> None:
+        assert is_catalog_file_path("/mokuro-reader//catalog.json")
+        assert is_compiled_metadata_path("/mokuro-reader//catalog.json")
+
+    def test_a_third_slash_is_also_recognised(self) -> None:
+        assert is_catalog_file_path("/mokuro-reader///catalog.json")
+
+    def test_boundary_double_slash_before_a_series_file_is_recognised(self) -> None:
+        assert is_series_file_path("/mokuro-reader//Dr Stone/series.json")
+        assert series_title_from_series_file_path(
+            "/mokuro-reader//Dr Stone/series.json"
+        ) == "Dr Stone"
+
+    def test_the_rest_of_the_differential_is_unchanged(self) -> None:
+        """Every spelling NOT in the 3-item flip set above keeps its old
+        answer. `False` means "does not match a compiled path", which is
+        the correct/refused answer for every one of these — a `..`-escape,
+        a per-user file alias, a depth violation, or a plain non-metadata
+        path."""
+        unaffected_non_matches = [
+            "/mokuro-reader/../etc/series.json",
+            "/mokuro-reader/../catalog.json",
+            "/mokuro-reader/..",
+            "/mokuro-reader/Dr Stone/../../catalog.json",
+            "/mokuro-reader/../../catalog.json",
+            "/mokuro-reader/./volume-data.json",
+            "/mokuro-reader/Dr Stone/../volume-data.json",
+            "/mokuro-reader/Dr Stone/extras//series.json",
+        ]
+        for path in unaffected_non_matches:
+            assert not is_compiled_metadata_path(path), path
+
+        unaffected_matches = [
+            "/mokuro-reader/Dr Stone//series.json",
+            "/mokuro-reader/Dr Stone/./series.json",
+            "/mokuro-reader/./Dr Stone/series.json",
+            "/mokuro-reader/Dr Stone/../Dr Stone/series.json",
+            "/mokuro-reader/./catalog.json",
+            "/mokuro-reader/Dr Stone/../catalog.json",
+        ]
+        for path in unaffected_matches:
+            assert is_compiled_metadata_path(path), path
+
+
 class TestPartitioning:
     """The regression the contract asks for: metadata is never progress."""
 

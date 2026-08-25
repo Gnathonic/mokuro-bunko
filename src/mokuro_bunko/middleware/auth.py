@@ -476,8 +476,15 @@ class AuthMiddleware:
         # raises `IsADirectoryError` on every future regeneration attempt
         # for that folder (see the `regenerate_all` OSError hardening in
         # `metadata/service.py`, added the same round as defense in depth).
+        #
+        # LOCK/UNLOCK were added in the final whole-branch review (F6): they
+        # used to fall through to the generic MODIFY_DELETE branch below, so
+        # any editor/admin could successfully LOCK a compiled file with a
+        # well-formed lockinfo body -- an unhonored promise of exclusivity,
+        # since the compiler ignores DAV locks entirely and will silently
+        # rewrite a "locked" file out from under the holder.
         if (
-            method in ("DELETE", "MOVE", "COPY", "PROPPATCH", "MKCOL")
+            method in ("DELETE", "MOVE", "COPY", "PROPPATCH", "MKCOL", "LOCK", "UNLOCK")
             and is_compiled_metadata_path(path)
         ):
             return self._compiled_metadata_denied(auth_result)
