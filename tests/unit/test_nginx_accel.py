@@ -80,12 +80,16 @@ class TestAccelLibraryFile:
         res.finalize_headers({}, headers)
         assert _xaccel(headers) == "/internal-library/Series/Vol%201.cbz"
 
-    def test_strips_content_length(self, temp_dir: Path) -> None:
+    def test_zeroes_content_length(self, temp_dir: Path) -> None:
+        # The X-Accel offload keeps a Content-Length of 0 (the body we return IS
+        # empty; nginx overrides it with the real size). Dropping the header
+        # entirely caused sporadic 502s on renames — see resources.py.
         f = _library_file(temp_dir)
         res = _make_resource(temp_dir, f, accel=True)
         headers = [("Content-Length", "7"), ("Content-Type", "application/x-cbz")]
         res.finalize_headers({}, headers)
-        assert all(k.lower() != "content-length" for k, _ in headers)
+        cl = [v for k, v in headers if k.lower() == "content-length"]
+        assert cl == ["0"]
 
     def test_support_ranges_delegated_to_nginx(self, temp_dir: Path) -> None:
         f = _library_file(temp_dir)
