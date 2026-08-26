@@ -57,6 +57,8 @@
     if (isAuthed) {
       if (user.role === 'admin') {
         parts.push(link('Admin', '/_admin', currentKey, 'admin'));
+      } else if (user.role === 'inviter') {
+        parts.push(link('Invites', '/_admin', currentKey, 'admin'));
       }
       parts.push(link('Account', '/account', currentKey, 'account'));
       parts.push('<button onclick="logout()" class="btn btn--secondary btn--sm">Logout</button>');
