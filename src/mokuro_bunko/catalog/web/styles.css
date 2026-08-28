@@ -50,6 +50,22 @@
     max-width: 400px;
 }
 
+/* Series title language selector */
+.title-lang-select {
+    background: none;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.65rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.85rem;
+}
+
+.title-lang-select:hover {
+    color: var(--text-primary);
+    border-color: var(--border-default);
+}
+
 /* Reader Settings Button */
 .reader-settings-btn {
     background: none;

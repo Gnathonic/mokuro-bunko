@@ -25,6 +25,7 @@ const headerNav = document.getElementById('header-nav');
 
 document.addEventListener('DOMContentLoaded', () => {
     updateNav();
+    initTitleLang();
     loadCatalog();
     startOcrStatusPolling();
     startEtaTicker();
@@ -64,6 +65,49 @@ document.addEventListener('DOMContentLoaded', () => {
         openSeries(hashSeries, true);
     });
 });
+
+// --- Series title language -------------------------------------------------
+
+const TITLE_PREF_KEY = 'mokuro_catalog_title_lang';
+const TITLE_LANGS = ['native', 'romaji', 'english'];
+const titleCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function getTitlePref() {
+    const value = localStorage.getItem(TITLE_PREF_KEY);
+    return TITLE_LANGS.includes(value) ? value : 'folder';
+}
+
+function displayTitle(s) {
+    const pref = getTitlePref();
+    if (pref !== 'folder' && s.titles && s.titles[pref]) return s.titles[pref];
+    return s.name;
+}
+
+function displayTitleForName(name) {
+    const entry = series.find(s => s.name === name);
+    return entry ? displayTitle(entry) : name;
+}
+
+function sortSeriesByDisplayTitle() {
+    series.sort((a, b) => titleCollator.compare(displayTitle(a), displayTitle(b)));
+}
+
+function initTitleLang() {
+    const select = document.getElementById('title-lang');
+    if (!select) return;
+    select.value = getTitlePref();
+    select.addEventListener('change', () => {
+        try {
+            localStorage.setItem(TITLE_PREF_KEY, select.value);
+        } catch (_) { /* private mode: preference just won't persist */ }
+        sortSeriesByDisplayTitle();
+        if (currentView === 'root') {
+            filterSeries(search.value.toLowerCase().trim());
+        } else {
+            renderBreadcrumb();
+        }
+    });
+}
 
 function getSessionUser() {
     const userStr = sessionStorage.getItem('mokuro_user');
@@ -106,6 +150,7 @@ async function loadCatalog() {
         const userOverride = localStorage.getItem('mokuro_reader_url');
         readerUrl = userOverride || serverReaderUrl;
         series = data.series || [];
+        sortSeriesByDisplayTitle();
         filtered = series;
         const hashSeries = getSeriesFromHash();
         if (hashSeries) {
@@ -158,12 +203,18 @@ function getSeriesFromHash() {
     }
 }
 
-// Filter series (root view)
+// Filter series (root view) — matches the folder name and every known title
 function filterSeries(query) {
     if (!query) {
         filtered = series;
     } else {
-        filtered = series.filter(s => s.name.toLowerCase().includes(query));
+        filtered = series.filter(s => {
+            if (s.name.toLowerCase().includes(query)) return true;
+            if (!s.titles) return false;
+            return Object.values(s.titles).some(
+                t => String(t).toLowerCase().includes(query)
+            );
+        });
     }
     renderRoot();
 }
@@ -230,7 +281,7 @@ function renderBreadcrumb() {
         breadcrumb.innerHTML =
             '<a href="#" class="catalog-breadcrumb__item catalog-breadcrumb__link" onclick="showRoot(); return false;">Catalog</a>' +
             '<span class="catalog-breadcrumb__sep">/</span>' +
-            '<span class="catalog-breadcrumb__item catalog-breadcrumb__item--active">' + escapeHtml(currentSeries.name) + '</span>';
+            '<span class="catalog-breadcrumb__item catalog-breadcrumb__item--active">' + escapeHtml(displayTitleForName(currentSeries.name)) + '</span>';
     }
 }
 
@@ -244,15 +295,16 @@ function renderRoot() {
 
     empty.style.display = 'none';
     grid.innerHTML = filtered.map(s => {
-        const volumeCount = s.volumes ? s.volumes.length : 0;
+        const volumeCount = s.volume_count || 0;
         const hasMultiple = volumeCount > 1;
         const coverUrl = s.cover ? (API_BASE + '/cover?path=' + encodeURIComponent(s.cover)) : null;
         const stackedClass = hasMultiple ? 'volume-card__cover--stacked' : '';
+        const title = displayTitle(s);
 
         return '<div class="volume-card" onclick="openSeries(\'' + escapeAttr(s.name) + '\')">' +
-            '<div class="volume-card__cover ' + stackedClass + '">' + coverImg(coverUrl, s.name) + '</div>' +
+            '<div class="volume-card__cover ' + stackedClass + '">' + coverImg(coverUrl, title) + '</div>' +
             '<div class="volume-card__info">' +
-            '<div class="volume-card__title">' + escapeHtml(s.name) + '</div>' +
+            '<div class="volume-card__title">' + escapeHtml(title) + '</div>' +
             '<div class="volume-card__count">' + volumeCount + ' volume' + (volumeCount !== 1 ? 's' : '') + '</div>' +
             '</div></div>';
     }).join('');
