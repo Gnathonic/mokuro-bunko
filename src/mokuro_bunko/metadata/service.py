@@ -491,8 +491,10 @@ class MetadataService:
             self._deadline = None
             if self._stopped:
                 return
+        _log("full pass fired")
         try:
-            self.regenerate_all()
+            changed = self.regenerate_all()
+            _log(f"full pass done (changed={changed})")
         except Exception as error:  # noqa: BLE001 - a background pass must not die
             _log(f"regeneration failed: {error}")
 
@@ -503,8 +505,10 @@ class MetadataService:
             title = self._series_titles.pop(key, None)
             if self._stopped or title is None:
                 return
+        _log(f"series regen fired: {title}")
         try:
-            self.regenerate_series(title)
+            changed = self.regenerate_series(title)
+            _log(f"series regen done: {title} (changed={changed})")
         except Exception as error:  # noqa: BLE001 - a background pass must not die
             _log(f"series regeneration failed: {title}: {error}")
 
