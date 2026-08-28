@@ -268,6 +268,7 @@ def create_app(
         storage_base_path=str(config.storage.library_path),
         catalog_config=config.catalog,
         library_index=library_index,
+        database=database,
     )
 
     # Wrap with queue status page (public)
