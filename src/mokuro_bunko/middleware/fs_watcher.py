@@ -40,13 +40,38 @@ def _is_relevant(path_str: str, is_directory: bool) -> bool:
     return False
 
 
+def classify_change(library_root: Path, path_str: str) -> tuple[str, str | None]:
+    """Route one filesystem change to the metadata work it implies.
+
+    Returns ``("series", <folder name>)`` for a file inside a series folder
+    (recompile just that series), ``("library", None)`` for anything at or
+    above the top level — a series folder appearing, disappearing or moving
+    needs the full pass, which is what prunes deleted series from the
+    catalog — and ``("ignore", None)`` for generated content that never
+    feeds compilation. Unclassifiable paths fall back to ``"library"``:
+    a needless full pass is cheap, a missed change is not.
+    """
+    try:
+        relative = Path(path_str).relative_to(library_root)
+    except ValueError:
+        return ("library", None)
+    parts = relative.parts
+    if len(parts) < 2:
+        return ("library", None)
+    # Generated per-series thumbnails live under library/thumbnails/; they
+    # are PROPFIND-visible but carry nothing the metadata compiler reads.
+    if parts[0] == "thumbnails":
+        return ("ignore", None)
+    return ("series", parts[0])
+
+
 class LibraryWatcher:
-    """Watch the library directory and call *on_change* for relevant filesystem events."""
+    """Watch the library directory and call *on_change* with each relevant changed path."""
 
     def __init__(
         self,
         watch_path: Path,
-        on_change: Callable[[], None],
+        on_change: Callable[[str], None],
     ) -> None:
         self.watch_path = watch_path
         self.on_change = on_change
@@ -84,23 +109,27 @@ class LibraryWatcher:
 if WATCHDOG_AVAILABLE:
 
     class _LibraryEventHandler(FileSystemEventHandler):
-        def __init__(self, on_change: Callable[[], None]) -> None:
+        def __init__(self, on_change: Callable[[str], None]) -> None:
             super().__init__()
             self._on_change = on_change
 
         def on_created(self, event: FileSystemEvent) -> None:
-            if _is_relevant(os.fsdecode(event.src_path), event.is_directory):
-                self._on_change()
+            path = os.fsdecode(event.src_path)
+            if _is_relevant(path, event.is_directory):
+                self._on_change(path)
 
         def on_deleted(self, event: FileSystemEvent) -> None:
-            if _is_relevant(os.fsdecode(event.src_path), event.is_directory):
-                self._on_change()
+            path = os.fsdecode(event.src_path)
+            if _is_relevant(path, event.is_directory):
+                self._on_change(path)
 
         def on_moved(self, event: FileSystemEvent) -> None:
-            src_relevant = _is_relevant(os.fsdecode(event.src_path), event.is_directory)
-            dest_relevant = _is_relevant(
-                getattr(event, "dest_path", os.fsdecode(event.src_path)),
-                event.is_directory,
-            )
-            if src_relevant or dest_relevant:
-                self._on_change()
+            # Each relevant side gets its own callback: a cross-series move
+            # changes two series; an atomic upload's tmp→final rename has an
+            # irrelevant source and delivers only the destination.
+            src = os.fsdecode(event.src_path)
+            dest = os.fsdecode(getattr(event, "dest_path", event.src_path))
+            if _is_relevant(src, event.is_directory):
+                self._on_change(src)
+            if dest != src and _is_relevant(dest, event.is_directory):
+                self._on_change(dest)

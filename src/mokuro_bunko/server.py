@@ -22,7 +22,7 @@ from mokuro_bunko.metadata.middleware import MetadataAPI
 from mokuro_bunko.metadata.service import MetadataService
 from mokuro_bunko.middleware.auth import AuthMiddleware
 from mokuro_bunko.middleware.cors import CorsMiddleware
-from mokuro_bunko.middleware.fs_watcher import LibraryWatcher
+from mokuro_bunko.middleware.fs_watcher import LibraryWatcher, classify_change
 from mokuro_bunko.middleware.propfind_cache import PropfindCacheMiddleware
 from mokuro_bunko.middleware.request_log import RequestLogMiddleware
 from mokuro_bunko.middleware.security_headers import SecurityHeadersMiddleware
@@ -321,10 +321,18 @@ def create_app(
     print("Warming PROPFIND cache...")
     propfind_cache.warm()
 
-    def on_library_change() -> None:
+    def on_library_change(path: str) -> None:
         library_index.invalidate()
         propfind_cache.schedule_refresh(delay=5.0)
-        metadata_service.schedule_regeneration()
+        # Route the metadata work by what changed: a file inside a series
+        # folder (a client uploading volumes, an OCR sidecar landing)
+        # recompiles just that series; folder-level changes take the full
+        # pass, which also prunes deleted series from the catalog.
+        kind, series_title = classify_change(config.storage.library_path, path)
+        if kind == "series" and series_title is not None:
+            metadata_service.schedule_series_regeneration(series_title)
+        elif kind == "library":
+            metadata_service.schedule_regeneration()
 
     # Start filesystem watcher for out-of-band changes (OCR sidecars, thumbnails)
     library_watcher = LibraryWatcher(

@@ -742,6 +742,108 @@ class TestDebounce:
         assert calls == [1]
         service.stop()
 
+    def test_series_schedule_regenerates_only_that_series(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        service = MetadataService(
+            library, Database(tmp_path / "test.db"), debounce_seconds=0.05
+        )
+        write_volume(library, "Dr Stone", "Volume 01")
+        write_volume(library, "Frieren", "Volume 01")
+        service.schedule_series_regeneration("Dr Stone")
+        key = normalize_volume_title_key("Dr Stone")
+        timer = service._series_timers[key]
+        timer.join(timeout=5.0)
+        assert (library / "Dr Stone" / "series.json").exists()
+        assert not (library / "Frieren" / "series.json").exists()
+        assert (library / "catalog.json").exists()
+        service.stop()
+
+    def test_a_burst_of_series_schedules_triggers_exactly_one_regen(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service = MetadataService(
+            library, Database(tmp_path / "test.db"), debounce_seconds=0.05
+        )
+        write_volume(library, "Dr Stone", "Volume 01")
+
+        calls: list[str] = []
+        real_regenerate_series = MetadataService.regenerate_series
+
+        def counting(self: MetadataService, series_title: str) -> bool:
+            calls.append(series_title)
+            return real_regenerate_series(self, series_title)
+
+        monkeypatch.setattr(MetadataService, "regenerate_series", counting)
+
+        for _ in range(5):
+            service.schedule_series_regeneration("Dr Stone")
+        timer = service._series_timers[normalize_volume_title_key("Dr Stone")]
+        timer.join(timeout=5.0)
+
+        assert calls == ["Dr Stone"]
+        service.stop()
+
+    def test_series_debounce_resets_are_capped(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Continuous rescheduling (a client uploading volume after volume)
+        must not starve the regen forever: the cap forces a fire."""
+        service = MetadataService(
+            library,
+            Database(tmp_path / "test.db"),
+            debounce_seconds=0.05,
+            max_debounce_seconds=0.2,
+        )
+        fired = threading.Event()
+        monkeypatch.setattr(
+            MetadataService, "regenerate_series", lambda self, title: fired.set() or True
+        )
+        deadline = time.monotonic() + 2.0
+        while not fired.is_set() and time.monotonic() < deadline:
+            service.schedule_series_regeneration("Dr Stone")
+            time.sleep(0.02)
+        assert fired.is_set(), "capped debounce never fired under continuous resets"
+        service.stop()
+
+    def test_full_pass_debounce_resets_are_capped(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service = MetadataService(
+            library,
+            Database(tmp_path / "test.db"),
+            debounce_seconds=0.05,
+            max_debounce_seconds=0.2,
+        )
+        fired = threading.Event()
+        monkeypatch.setattr(
+            MetadataService, "regenerate_all", lambda self: fired.set() or 0
+        )
+        deadline = time.monotonic() + 2.0
+        while not fired.is_set() and time.monotonic() < deadline:
+            service.schedule_regeneration()
+            time.sleep(0.02)
+        assert fired.is_set(), "capped debounce never fired under continuous resets"
+        service.stop()
+
+    def test_stop_cancels_pending_series_timers(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        service = MetadataService(library, Database(tmp_path / "test.db"), debounce_seconds=5.0)
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.schedule_series_regeneration("Dr Stone")
+        service.stop()
+        assert service._series_timers == {}
+        assert not (library / "Dr Stone" / "series.json").exists()
+
+    def test_series_schedule_after_stop_does_not_arm_a_timer(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        service = MetadataService(library, Database(tmp_path / "test.db"), debounce_seconds=5.0)
+        service.stop()
+        service.schedule_series_regeneration("Dr Stone")
+        assert service._series_timers == {}
+
     def test_stop_cancels_a_pending_pass(self, library: Path, tmp_path: Path) -> None:
         service = MetadataService(library, Database(tmp_path / "test.db"), debounce_seconds=5.0)
         write_volume(library, "Dr Stone", "Volume 01")
