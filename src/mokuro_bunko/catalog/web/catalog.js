@@ -69,17 +69,27 @@ document.addEventListener('DOMContentLoaded', () => {
 // --- Series title language -------------------------------------------------
 
 const TITLE_PREF_KEY = 'mokuro_catalog_title_lang';
-const TITLE_LANGS = ['native', 'romaji', 'english'];
+// Each option is a progression, not a single language: fall through the chain,
+// ending at the folder name. Default is the Native progression.
+const TITLE_PROGRESSIONS = {
+    native: ['native', 'romaji', 'english'],
+    english: ['english', 'romaji', 'native'],
+    folder: [],
+};
 const titleCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 function getTitlePref() {
     const value = localStorage.getItem(TITLE_PREF_KEY);
-    return TITLE_LANGS.includes(value) ? value : 'folder';
+    return Object.prototype.hasOwnProperty.call(TITLE_PROGRESSIONS, value) ? value : 'native';
 }
 
 function displayTitle(s) {
-    const pref = getTitlePref();
-    if (pref !== 'folder' && s.titles && s.titles[pref]) return s.titles[pref];
+    const chain = TITLE_PROGRESSIONS[getTitlePref()];
+    if (s.titles) {
+        for (const lang of chain) {
+            if (s.titles[lang]) return s.titles[lang];
+        }
+    }
     return s.name;
 }
 
