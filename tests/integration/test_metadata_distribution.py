@@ -453,8 +453,10 @@ class TestRegenerationTriggers:
         `app` fixture's teardown cancels the still-pending timer either way.
         """
         write_volume(storage / "library", "Dr Stone", "Volume 02", "uuid-volume-02")
-        app._library_watcher.on_change()
-        assert app._metadata_service._timer is not None
+        app._library_watcher.on_change(
+            str(storage / "library" / "Dr Stone" / "Volume 02.cbz")
+        )
+        assert app._metadata_service._series_timers != {}
 
         app._metadata_service.regenerate_all()
         document = json.loads(

@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -73,14 +74,24 @@ class MetadataService:
         *,
         on_published: Callable[[], None] | None = None,
         debounce_seconds: float = 10.0,
+        max_debounce_seconds: float = 60.0,
     ) -> None:
         self.library_path = Path(library_path)
         self.database = database
         self.debounce_seconds = debounce_seconds
+        # A debounce that resets on every call starves under a sustained
+        # stream of events (a client uploading volume after volume never
+        # leaves a quiet window). Resets extend a pending timer only up to
+        # this many seconds past its first scheduling; then it fires anyway.
+        self.max_debounce_seconds = max_debounce_seconds
         self._on_published = on_published
         self._pass_lock = threading.Lock()
         self._timer_lock = threading.Lock()
         self._timer: threading.Timer | None = None
+        self._deadline: float | None = None
+        self._series_timers: dict[str, threading.Timer] = {}
+        self._series_titles: dict[str, str] = {}
+        self._series_deadlines: dict[str, float] = {}
         self._stopped = False
 
     # --- state -----------------------------------------------------------
@@ -422,28 +433,80 @@ class MetadataService:
         return True
 
     def schedule_regeneration(self, delay: float | None = None) -> None:
-        """Debounced full pass: resets on each call, fires after the quiet period."""
+        """Debounced full pass: resets on each call, fires after the quiet period.
+
+        Resets are capped: the timer never drifts more than
+        `max_debounce_seconds` past the first scheduling since the last fire.
+        """
         with self._timer_lock:
             if self._stopped:
                 return
-            if self._timer is not None:
+            now = time.monotonic()
+            if self._timer is None or self._deadline is None:
+                self._deadline = now + self.max_debounce_seconds
+            else:
                 self._timer.cancel()
+            base = self.debounce_seconds if delay is None else delay
             timer = threading.Timer(
-                self.debounce_seconds if delay is None else delay, self._fire
+                min(base, max(0.0, self._deadline - now)), self._fire
             )
             timer.daemon = True
             self._timer = timer
             timer.start()
 
+    def schedule_series_regeneration(self, series_title: str, delay: float | None = None) -> None:
+        """Debounced single-series recompile — the volume-upload trigger.
+
+        A client PUTting volume files (`.cbz`, `.mokuro`, covers) never sends
+        a `series.json` for the DAV layer to intercept, so this is how those
+        uploads reach the compiler: each write reschedules its own series,
+        the burst coalesces, and `regenerate_series` republishes that series
+        plus the catalog. Timers are per series — one series' stream never
+        defers another's — and resets are capped like the full pass above.
+        """
+        key = normalize_volume_title_key(series_title)
+        with self._timer_lock:
+            if self._stopped:
+                return
+            now = time.monotonic()
+            pending = self._series_timers.get(key)
+            if pending is None or key not in self._series_deadlines:
+                self._series_deadlines[key] = now + self.max_debounce_seconds
+            else:
+                pending.cancel()
+            self._series_titles[key] = series_title
+            base = self.debounce_seconds if delay is None else delay
+            timer = threading.Timer(
+                min(base, max(0.0, self._series_deadlines[key] - now)),
+                self._fire_series,
+                args=(key,),
+            )
+            timer.daemon = True
+            self._series_timers[key] = timer
+            timer.start()
+
     def _fire(self) -> None:
         with self._timer_lock:
             self._timer = None
+            self._deadline = None
             if self._stopped:
                 return
         try:
             self.regenerate_all()
         except Exception as error:  # noqa: BLE001 - a background pass must not die
             _log(f"regeneration failed: {error}")
+
+    def _fire_series(self, key: str) -> None:
+        with self._timer_lock:
+            self._series_timers.pop(key, None)
+            self._series_deadlines.pop(key, None)
+            title = self._series_titles.pop(key, None)
+            if self._stopped or title is None:
+                return
+        try:
+            self.regenerate_series(title)
+        except Exception as error:  # noqa: BLE001 - a background pass must not die
+            _log(f"series regeneration failed: {title}: {error}")
 
     def stop(self) -> None:
         """Cancel a pending pass and wait for any pass already in flight.
@@ -464,9 +527,14 @@ class MetadataService:
         """
         with self._timer_lock:
             self._stopped = True
-            timer = self._timer
+            timers = [self._timer] if self._timer is not None else []
+            timers.extend(self._series_timers.values())
             self._timer = None
-        if timer is not None:
+            self._deadline = None
+            self._series_timers.clear()
+            self._series_titles.clear()
+            self._series_deadlines.clear()
+        for timer in timers:
             timer.cancel()
             timer.join()
         with self._pass_lock:
