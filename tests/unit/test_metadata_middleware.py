@@ -81,6 +81,62 @@ def call(
     return captured["status"], captured["headers"], result
 
 
+class TestWsgiPathEncoding:
+    """PEP 3333 delivers PATH_INFO as request bytes decoded latin-1; the DAV
+    app below re-encodes for itself (wsgidav's `re_encode_path_info` hotfix)
+    but this middleware sits ABOVE it and used to parse the mojibake — every
+    non-ASCII series title failed folder resolution and was refused (102
+    rejections in the first live upload session, `Ranma ½` retried 13×)."""
+
+    def test_a_wsgi_encoded_utf8_path_is_intercepted_with_the_real_title(self) -> None:
+        service = StubService()
+        wsgi_path = "/mokuro-reader/ベルセルク/series.json".encode().decode("iso-8859-1")
+        status, _headers, _body = call(
+            MetadataAPI(StubApp(), service=service),  # type: ignore[arg-type]
+            path=wsgi_path,
+        )
+        assert status == "204 No Content"
+        assert service.calls[0][0] == "ベルセルク"
+
+    def test_an_already_unicode_path_is_used_verbatim(self) -> None:
+        # A test harness (or a server that decoded for us) hands real unicode;
+        # the latin-1 round-trip is impossible there and must be a no-op.
+        service = StubService()
+        call(
+            MetadataAPI(StubApp(), service=service),  # type: ignore[arg-type]
+            path="/mokuro-reader/ベルセルク/series.json",
+        )
+        assert service.calls[0][0] == "ベルセルク"
+
+    def test_the_audit_path_is_the_decoded_spelling(self) -> None:
+        class _SpyDb:
+            def __init__(self) -> None:
+                self.events: list[dict[str, Any]] = []
+
+            def log_audit_event(self, **kwargs: Any) -> None:
+                self.events.append(kwargs)
+
+        db = _SpyDb()
+        middleware = MetadataAPI(StubApp(), service=StubService())  # type: ignore[arg-type]
+        wsgi_path = "/mokuro-reader/ベルセルク/series.json".encode().decode("iso-8859-1")
+        body = b'{"version":2}'
+
+        def start_response(status: str, headers: list[tuple[str, str]]) -> None:
+            pass
+
+        environ: dict[str, Any] = {
+            "REQUEST_METHOD": "PUT",
+            "PATH_INFO": wsgi_path,
+            "CONTENT_LENGTH": str(len(body)),
+            "wsgi.input": io.BytesIO(body),
+            "mokuro.username": "alice",
+            "mokuro.db": db,
+        }
+        b"".join(middleware(environ, start_response))
+        assert len(db.events) == 1
+        assert db.events[0]["target_path"] == "/mokuro-reader/ベルセルク/series.json"
+
+
 class TestPassthrough:
     def test_non_put_requests_pass_through(self) -> None:
         downstream = StubApp()

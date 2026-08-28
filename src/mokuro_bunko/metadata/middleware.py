@@ -34,6 +34,29 @@ _STATUS_TEXT = {
 }
 
 
+def _re_encode_wsgi_path(path: str) -> str:
+    """PEP 3333 delivers PATH_INFO as request bytes decoded latin-1.
+
+    The DAV app below re-encodes it to UTF-8 for itself (wsgidav's
+    `re_encode_path_info` hotfix runs INSIDE `WsgiDAVApp.__call__`), so this
+    middleware — which sits above it — must apply the same transform to see
+    the same path, or every non-ASCII series title fails folder resolution
+    and the update is refused. Applied to a local copy only: environ is
+    passed through untouched, the DAV app re-encodes for itself.
+
+    A path the round-trip cannot handle is returned unchanged: a
+    `UnicodeEncodeError` means it is already real unicode (a test harness,
+    or a server that decoded for us — the transform would be a no-op
+    anyway), and a `UnicodeDecodeError` means genuinely non-UTF-8 request
+    bytes, which the DAV layer's own (fallback-less) re-encode rejects for
+    every operation, so there is no folder such a spelling could name.
+    """
+    try:
+        return path.encode("iso-8859-1").decode("utf-8")
+    except UnicodeError:
+        return path
+
+
 class MetadataAPI:
     """Answers `PUT <Series>/series.json` instead of letting it write."""
 
@@ -52,7 +75,7 @@ class MetadataAPI:
     ) -> Iterable[bytes]:
         if environ.get("REQUEST_METHOD") != "PUT":
             return self.app(environ, start_response)
-        path = environ.get("PATH_INFO", "/")
+        path = _re_encode_wsgi_path(environ.get("PATH_INFO", "/"))
         if not is_series_file_path(path):
             return self.app(environ, start_response)
         return self._handle_update(environ, start_response, path)
