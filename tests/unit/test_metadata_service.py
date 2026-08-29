@@ -760,6 +760,42 @@ class TestCatalogMaterialization:
         service.stop()
 
 
+class TestExternalIdsHook:
+    def test_fires_when_a_put_introduces_or_changes_ids_and_not_otherwise(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        service = MetadataService(library, Database(tmp_path / "test.db"))
+        nudged: list[str] = []
+        service.on_external_ids_changed = nudged.append
+
+        linked = series_update(external_ids={"anilist": 98416})
+        assert service.apply_series_update("Dr Stone", linked, "alice") is True
+        assert nudged == ["dr stone"]
+
+        # The identical payload is a merge no-op: no second nudge.
+        assert service.apply_series_update("Dr Stone", linked, "alice") is True
+        assert nudged == ["dr stone"]
+
+        # A newer payload that changes only titles keeps the ids: no nudge.
+        retitled = series_update(
+            external_ids={"anilist": 98416},
+            titles={"english": "Dr. Stone"},
+            updated_at="2026-08-19T00:00:00.000Z",
+        )
+        assert service.apply_series_update("Dr Stone", retitled, "alice") is True
+        assert nudged == ["dr stone"]
+
+        # Relinking to a different id nudges again.
+        relinked = series_update(
+            external_ids={"anilist": 30013},
+            updated_at="2026-08-20T00:00:00.000Z",
+        )
+        assert service.apply_series_update("Dr Stone", relinked, "alice") is True
+        assert nudged == ["dr stone", "dr stone"]
+        service.stop()
+
+
 class TestPeriodicRescan:
     def test_periodic_rescan_rearms_and_keeps_scheduling_passes(
         self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

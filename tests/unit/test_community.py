@@ -171,3 +171,69 @@ class TestRequestIdentity:
         for request in (get, post):
             agent = request.get_header("User-agent", "")
             assert agent.startswith("mokuro-bunko/")
+
+
+class TestNudge:
+    def test_targeted_run_fetches_only_named_keys_and_ignores_freshness(
+        self, tmp_path: Path
+    ) -> None:
+        calls: list[Any] = []
+
+        def http(url: str, json_body: Any = None) -> dict[str, Any]:
+            ids = json_body["variables"]["ids"]
+            calls.append(ids)
+            return {
+                "data": {
+                    "Page": {
+                        "media": [
+                            {"id": i, "meanScore": 80, "genres": [], "tags": []} for i in ids
+                        ]
+                    }
+                }
+            }
+
+        db = Database(tmp_path / "test.db")
+        fetcher = CommunityFetcher(db, http=http, request_gap_seconds=0.0)
+        db.put_series_facts(facts_row("alpha", {"anilist": 111}))
+        db.put_series_facts(facts_row("beta", {"anilist": 222}))
+        # alpha already has a FRESH row: a plain cycle would skip it, but a
+        # nudge means its id may have just changed — force the refetch.
+        assert fetcher.run_once() == 2
+        calls.clear()
+
+        assert fetcher.run_once(only={"alpha"}, force=True) == 1
+        assert calls == [[111]]
+
+    def test_request_fetch_wakes_the_running_loop_promptly(self, tmp_path: Path) -> None:
+        import time as time_mod
+
+        def http(url: str, json_body: Any = None) -> dict[str, Any]:
+            return {
+                "data": {"Page": {"media": [{"id": 111, "meanScore": 80, "genres": [], "tags": []}]}}
+            }
+
+        db = Database(tmp_path / "test.db")
+        db.put_series_facts(facts_row("alpha", {"anilist": 111}))
+        fetcher = CommunityFetcher(db, http=http, poll_seconds=3600.0, request_gap_seconds=0.0)
+        fetcher.start()
+        try:
+            # The loop's first FULL cycle waits ~60s; a nudge must not.
+            fetcher.request_fetch("alpha")
+            deadline = time_mod.monotonic() + 5.0
+            while not db.list_community_details() and time_mod.monotonic() < deadline:
+                time_mod.sleep(0.05)
+            rows = db.list_community_details()
+            assert rows and rows[0]["series_key"] == "alpha"
+        finally:
+            fetcher.stop()
+
+    def test_stop_returns_promptly_while_the_loop_is_idle(self, tmp_path: Path) -> None:
+        import time as time_mod
+
+        fetcher = CommunityFetcher(
+            Database(tmp_path / "test.db"), http=lambda *a, **k: {}, poll_seconds=3600.0
+        )
+        fetcher.start()
+        started = time_mod.monotonic()
+        fetcher.stop()
+        assert time_mod.monotonic() - started < 5.0
