@@ -158,23 +158,42 @@ class CatalogAPI:
         the root response ~10x larger than anything the grid renders (about
         3 MB of JSON on a 1,000-series library).
         """
-        if self._library_index is None:
-            return self._json_response(start_response, 200, {"series": []})
-
         titles_by_key = self._titles_by_series_key()
-        snapshot = self._library_index.get_snapshot()
         series_list: list[dict[str, Any]] = []
-        for series in snapshot.series:
-            series_info: dict[str, Any] = {
-                "name": series.name,
-                "path": series.name,
-                "cover": series.cover,
-                "volume_count": len(series.volumes),
-            }
-            titles = titles_by_key.get(normalize_volume_title_key(series.name))
-            if titles:
-                series_info["titles"] = titles
-            series_list.append(series_info)
+
+        rows = self._database.list_catalog_series() if self._database is not None else []
+        if rows:
+            # The materialized table is the fast path: one DB read, no
+            # filesystem walk on the request thread. Passes keep it fresh.
+            for row in rows:
+                series_info = {
+                    "name": row["folder_name"],
+                    "path": row["folder_name"],
+                    "cover": row["cover_path"],
+                    "volume_count": row["volume_count"],
+                    "latest_volume_modified": row["latest_volume_modified"],
+                    "total_pages": row["total_pages"],
+                    "total_chars": row["total_chars"],
+                }
+                titles = titles_by_key.get(row["series_key"])
+                if titles:
+                    series_info["titles"] = titles
+                series_list.append(series_info)
+        elif self._library_index is not None:
+            # Empty table (first boot, before the startup pass): fall back to
+            # the scanning index so the catalog is never blank.
+            snapshot = self._library_index.get_snapshot()
+            for series in snapshot.series:
+                series_info = {
+                    "name": series.name,
+                    "path": series.name,
+                    "cover": series.cover,
+                    "volume_count": len(series.volumes),
+                }
+                titles = titles_by_key.get(normalize_volume_title_key(series.name))
+                if titles:
+                    series_info["titles"] = titles
+                series_list.append(series_info)
 
         return self._json_response(
             start_response, 200, {"series": series_list}, environ=environ

@@ -347,6 +347,9 @@ def create_app(
     # First compilation runs after startup settles (PROPFIND warm on a large
     # library is already competing for the disk).
     metadata_service.schedule_regeneration(delay=20.0)
+    # Periodic full re-sync: catches anything the watcher missed and keeps
+    # the materialized catalog honest even on a quiet server.
+    metadata_service.start_periodic_rescan(6 * 3600.0)
 
     return app
 
