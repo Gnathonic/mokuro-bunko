@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -297,6 +298,9 @@ def create_app(
         catalog_config=config.catalog,
         database=database,
         library_index=library_index,
+        storage_path=config.storage.base_path,
+        ocr_backend=config.ocr.backend,
+        ocr_poll_interval=config.ocr.poll_interval,
     )
 
     # Wrap with setup wizard (intercepts / -> /setup when no admin exists)
@@ -454,12 +458,13 @@ def _start_server_resilient(server: Any) -> None:
             server.interrupt = None
 
 
-def run_server(config: Config, config_path: Path | None = None) -> None:
+def run_server(config: Config, config_path: Path | None = None, verbose: bool = False) -> None:
     """Run the WebDAV server.
 
     Args:
         config: Server configuration.
         config_path: Path to config file.
+        verbose: Enable DEBUG console logging.
     """
     # Fail fast on a misconfigured environment (unwritable storage, missing or
     # invalid SSL cert) before doing any expensive startup work.
@@ -468,6 +473,13 @@ def run_server(config: Config, config_path: Path | None = None) -> None:
     except ValueError as exc:
         print(f"Startup validation failed: {exc}")
         raise SystemExit(2) from exc
+
+    # Storage is validated writable; persist logs there from here on.
+    from mokuro_bunko.logging_setup import setup_logging
+
+    log_file = setup_logging(config.storage.base_path, verbose=verbose)
+    logger = logging.getLogger("mokuro_bunko.server")
+    ocr_logger = logging.getLogger("mokuro_bunko.ocr")
 
     from mokuro_bunko.ocr.installer import (
         OCRBackend,
@@ -487,12 +499,21 @@ def run_server(config: Config, config_path: Path | None = None) -> None:
     # Determine protocol for display
     protocol = "https" if config.ssl.enabled else "http"
 
-    print(f"Starting mokuro-bunko server on {protocol}://{config.server.host}:{config.server.port}")
-    print(f"Storage path: {config.storage.base_path}")
+    logger.info(
+        "Starting mokuro-bunko server on %s://%s:%s",
+        protocol,
+        config.server.host,
+        config.server.port,
+    )
+    logger.info("Storage path: %s", config.storage.base_path)
+    if log_file is not None:
+        logger.info("Server log: %s", log_file)
     if config.ssl.enabled:
-        print(f"SSL: {get_ssl_info(config.ssl)}")
+        logger.info("SSL: %s", get_ssl_info(config.ssl))
     if config.ocr.backend != "skip":
-        installer = OCRInstaller(output_callback=lambda msg: print(f"[OCR-INSTALL] {msg}"))
+        installer = OCRInstaller(
+            output_callback=lambda msg: ocr_logger.info("[install] %s", msg)
+        )
         hardware = detect_hardware()
         supported_backends = get_supported_backends(hardware=hardware)
         unavailable = get_backend_unavailable_reasons(hardware=hardware)
@@ -503,23 +524,31 @@ def run_server(config: Config, config_path: Path | None = None) -> None:
                 hardware=hardware,
                 supported_backends=supported_backends,
             )
-            print(f"OCR backend auto-selected: {selected_backend.value}")
+            logger.info("OCR backend auto-selected: %s", selected_backend.value)
         else:
             selected_backend = OCRBackend(configured_backend)
             if selected_backend not in supported_backends:
                 reason = unavailable.get(selected_backend, "Unsupported backend")
-                print(f"OCR backend '{selected_backend.value}' unavailable: {reason}")
-                print("Falling back to CPU backend.")
+                logger.warning(
+                    "OCR backend '%s' unavailable: %s", selected_backend.value, reason
+                )
+                logger.warning("Falling back to CPU backend.")
                 selected_backend = OCRBackend.CPU
 
         if not installer.is_installed():
-            print(f"OCR environment not found. Installing backend={selected_backend.value}...")
+            logger.info(
+                "OCR environment not found. Installing backend=%s...",
+                selected_backend.value,
+            )
             ok = installer.install_with_fallback(selected_backend, force=False)
             if not ok:
-                print("OCR installation failed; OCR worker will be disabled.")
+                logger.error(
+                    "OCR installation failed; OCR worker will be disabled. "
+                    "Run 'mokuro-bunko doctor' to diagnose."
+                )
                 selected_backend = OCRBackend.SKIP
         else:
-            print(f"OCR environment found at {installer.env_path}")
+            logger.info("OCR environment found at %s", installer.env_path)
 
         # Build OCR runtime status from already-computed values (no extra subprocesses)
         installed_backend = installer.get_installed_backend()
@@ -553,13 +582,14 @@ def run_server(config: Config, config_path: Path | None = None) -> None:
         ocr_worker = OCRWorker(
             storage_path=config.storage.base_path,
             poll_interval=float(config.ocr.poll_interval),
-            status_callback=lambda msg: print(f"[OCR] {msg}"),
+            status_callback=ocr_logger.info,
         )
         ocr_worker.start(background=True)
-        print(
-            "OCR worker enabled "
-            f"(configured={config.ocr.backend}, active={selected_backend.value}, "
-            f"interval={config.ocr.poll_interval}s)"
+        logger.info(
+            "OCR worker enabled (configured=%s, active=%s, interval=%ss)",
+            config.ocr.backend,
+            selected_backend.value,
+            config.ocr.poll_interval,
         )
     else:
         # Covers are part of the metadata contract, so they are generated even

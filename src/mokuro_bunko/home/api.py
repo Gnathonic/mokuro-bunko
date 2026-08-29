@@ -79,11 +79,17 @@ class HomePageAPI:
         catalog_config: Any | None = None,
         database: Any | None = None,
         library_index: Any | None = None,
+        storage_path: Path | None = None,
+        ocr_backend: str | None = None,
+        ocr_poll_interval: int = 30,
     ) -> None:
         self.app = app
         self._catalog_config = catalog_config
         self.database = database
         self._library_index = library_index
+        self._storage_path = storage_path
+        self._ocr_backend = ocr_backend
+        self._ocr_poll_interval = ocr_poll_interval
         self._start_time = time.time()
 
     def __call__(
@@ -216,7 +222,49 @@ class HomePageAPI:
             "library_status": library_status,
             "total_users": total_users,
             "total_volumes": total_volumes,
+            "ocr": self._ocr_health(),
         })
+
+    def _ocr_health(self) -> dict[str, Any] | None:
+        """Summarize OCR worker state for the health endpoint."""
+        if self._storage_path is None:
+            return None
+        if self._ocr_backend == "skip":
+            return {"backend": "skip", "worker_alive": None, "pending": None, "failed": 0}
+
+        # Worker liveness from the heartbeat file the OCR loop touches.
+        worker_alive: bool | None = None
+        heartbeat = self._storage_path / ".ocr-heartbeat"
+        try:
+            beat = float(heartbeat.read_text(encoding="utf-8").strip())
+            # The loop touches the heartbeat every poll interval; allow slack
+            # for a long-running OCR job in between touches.
+            worker_alive = (time.time() - beat) < max(self._ocr_poll_interval * 4, 120)
+        except (OSError, ValueError):
+            worker_alive = None
+
+        failed = 0
+        failures_path = self._storage_path / ".ocr-failures.json"
+        try:
+            failures = json.loads(failures_path.read_text(encoding="utf-8"))
+            if isinstance(failures, dict):
+                failed = len(failures)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        pending: int | None = None
+        if self._library_index is not None:
+            try:
+                pending = len(self._library_index.get_snapshot().pending_ocr)
+            except Exception:
+                pending = None
+
+        return {
+            "backend": self._ocr_backend,
+            "worker_alive": worker_alive,
+            "pending": pending,
+            "failed": failed,
+        }
 
     def _handle_options(
         self,

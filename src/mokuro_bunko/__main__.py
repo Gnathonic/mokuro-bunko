@@ -11,6 +11,7 @@ from mokuro_bunko import __version__
 from mokuro_bunko.admin.cli import admin_group
 from mokuro_bunko.config import OcrBackend
 from mokuro_bunko.config_cli import config_group
+from mokuro_bunko.doctor_cli import doctor_command
 from mokuro_bunko.dyndns_cli import dyndns_group
 from mokuro_bunko.setup_cli import setup_command
 from mokuro_bunko.ssl_cli import ssl_group
@@ -83,7 +84,7 @@ def serve(ctx: click.Context, host: str, port: int, ocr: str) -> None:
         click.echo(f"Storage path: {config.storage.base_path}")
 
     # Start the server
-    run_server(config, config_path)
+    run_server(config, config_path, verbose=verbose)
 
 
 @cli.command()
@@ -165,6 +166,7 @@ def install_ocr(force: bool, backend: str, list_backends: bool) -> None:
 # Register command groups
 cli.add_command(admin_group, name="admin")
 cli.add_command(config_group, name="config")
+cli.add_command(doctor_command, name="doctor")
 cli.add_command(ssl_group, name="ssl")
 cli.add_command(setup_command, name="setup")
 cli.add_command(tunnel_group, name="tunnel")

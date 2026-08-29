@@ -70,7 +70,7 @@ jobs:
             --output-file dist/mokuro-bunko-${{ matrix.platform }} \
             --entry-point mokuro_bunko.__main__:main \
             "$WHEEL" \
-            wsgidav cheroot pyyaml bcrypt watchdog cryptography click
+            wsgidav cheroot pyyaml bcrypt watchdog cryptography click Pillow
           chmod +x dist/mokuro-bunko-${{ matrix.platform }}
 
       - name: Build binary (Windows)
@@ -86,7 +86,7 @@ jobs:
             --output-file dist\mokuro-bunko-${{ matrix.platform }}.pyz `
             --entry-point mokuro_bunko.__main__:main `
             $wheel.FullName `
-            wsgidav cheroot pyyaml bcrypt watchdog cryptography click
+            wsgidav cheroot pyyaml bcrypt watchdog cryptography click Pillow
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

@@ -27,6 +27,25 @@ function logout() {
     window.location.href = '/';
 }
 
+function getSessionRole() {
+    try {
+        const user = JSON.parse(sessionStorage.getItem('mokuro_user'));
+        return user && user.role ? user.role : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+// Inviters only get the invite API; reduce the panel to the Invites tab
+function trimToInvitesOnly() {
+    document.querySelectorAll('.tab').forEach(tab => {
+        if (tab.dataset.tab !== 'invites') tab.remove();
+    });
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    document.querySelector(".tab[data-tab='invites']").classList.add('active');
+    document.getElementById('invites-tab').classList.add('active');
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     const auth = sessionStorage.getItem('mokuro_auth');
@@ -34,10 +53,16 @@ document.addEventListener('DOMContentLoaded', () => {
         window.location.href = '/login';
         return;
     }
+    const isInviter = getSessionRole() === 'inviter';
+    if (isInviter) {
+        trimToInvitesOnly();
+    }
     initTabs();
     initModals();
     initForms();
-    loadUsers();
+    if (!isInviter) {
+        loadUsers();
+    }
     loadInvites();
 });
 

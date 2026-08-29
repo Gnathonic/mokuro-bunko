@@ -94,6 +94,8 @@ def server_url(tmp_path_factory: pytest.TempPathFactory) -> Generator[str, None,
 
     db = Database(storage / "mokuro.db")
     db.create_user("admin", "adminpass", role="admin")
+    db.create_user("inviter", "inviterpass", role="inviter")
+    db.create_user("viewer", "viewerpass", role="registered")
     # Database uses SQLite which auto-commits, no close needed
 
     port = find_free_port()
@@ -270,6 +272,84 @@ class TestAdminPanelUI:
 
         # Close the modal (use .first to avoid strict mode with multiple close buttons)
         admin_page.locator("#change-role-modal [data-close-modal]").first.click()
+
+
+def _auth_session(page: Page, username: str, password: str, role: str) -> None:
+    """Simulate a logged-in session the way login.js does (sessionStorage + Basic auth)."""
+    import base64
+    import json
+
+    credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
+    user_json = json.dumps({"username": username, "role": role})
+    page.add_init_script(
+        f"sessionStorage.setItem('mokuro_auth', '{credentials}');"
+        f"sessionStorage.setItem('mokuro_user', '{user_json}');"
+    )
+
+    def handle_route(route):
+        headers = {**route.request.headers, "Authorization": f"Basic {credentials}"}
+        route.continue_(headers=headers)
+
+    page.route("**/*", handle_route)
+
+
+@pytest.fixture
+def inviter_admin_page(server_url: str, page: Page) -> Page:
+    """Navigate to the admin panel as an inviter-role user."""
+    _auth_session(page, "inviter", "inviterpass", "inviter")
+    page.goto(f"{server_url}/_admin/")
+    page.wait_for_load_state("networkidle")
+    return page
+
+
+class TestInviterAccess:
+    """Inviter role: navigation to and use of the invite management screen."""
+
+    def test_nav_shows_invites_link_for_inviter(self, server_url: str, page: Page) -> None:
+        """Header nav offers inviters a link to the invite screen."""
+        _auth_session(page, "inviter", "inviterpass", "inviter")
+        page.goto(f"{server_url}/")
+        # Nav is rendered async; the logout button marks it as rendered
+        page.wait_for_selector("#header-nav button", timeout=5000)
+
+        link = page.locator("#header-nav a[href='/_admin']")
+        assert link.count() == 1
+        assert "Invite" in link.inner_text()
+
+    def test_nav_hides_admin_link_for_registered(self, server_url: str, page: Page) -> None:
+        """Registered users get no link to the admin panel."""
+        _auth_session(page, "viewer", "viewerpass", "registered")
+        page.goto(f"{server_url}/")
+        page.wait_for_selector("#header-nav button", timeout=5000)
+
+        assert page.locator("#header-nav a[href='/_admin']").count() == 0
+
+    def test_admin_panel_trimmed_for_inviter(self, inviter_admin_page: Page) -> None:
+        """Inviters land on the Invites tab; admin-only tabs are hidden."""
+        page = inviter_admin_page
+
+        # Invites tab visible and active, with its content shown
+        assert page.locator(".tab:has-text('Invites')").is_visible()
+        assert page.locator("#invites-tab").is_visible()
+        assert page.locator("#generate-invite-btn").is_visible()
+
+        # Admin-only tabs are not offered
+        for label in ("Users", "Audit", "Settings", "Status", "Connectivity"):
+            assert page.locator(f".tab:has-text('{label}')").count() == 0, (
+                f"{label} tab should be hidden for inviter"
+            )
+
+    def test_inviter_can_generate_invite(self, inviter_admin_page: Page) -> None:
+        """An inviter can generate an invite code end-to-end."""
+        page = inviter_admin_page
+
+        page.locator("#generate-invite-btn").click(timeout=5000)
+        page.wait_for_selector("#generate-invite-modal.open", timeout=5000)
+        page.locator("#generate-invite-modal button[type='submit']").click()
+
+        page.wait_for_selector("#invite-code-modal.open", timeout=5000)
+        code_value = page.locator("#invite-code-value").input_value()
+        assert len(code_value) > 10
 
 
 class TestAdminPanelAccessControl:

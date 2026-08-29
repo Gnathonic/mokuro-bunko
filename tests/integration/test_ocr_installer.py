@@ -114,8 +114,8 @@ class TestOCRInstallerInstallation:
         # Mock pip to avoid actual installation
         with patch.object(installer, "_run_pip") as mock_pip:
             mock_pip.return_value = True
-
-            installer.install(OCRBackend.CPU)
+            with patch.object(installer, "verify_installation", return_value=(True, [])):
+                installer.install(OCRBackend.CPU)
 
             assert installer.env_path.exists()
             # pip should be called for: upgrade, torch, mokuro
@@ -125,16 +125,16 @@ class TestOCRInstallerInstallation:
         """Test force install recreates environment."""
         with patch.object(installer, "_run_pip") as mock_pip:
             mock_pip.return_value = True
+            with patch.object(installer, "verify_installation", return_value=(True, [])):
+                # First install
+                installer.install(OCRBackend.CPU)
 
-            # First install
-            installer.install(OCRBackend.CPU)
+                # Create marker
+                marker = installer.env_path / "marker.txt"
+                marker.write_text("test")
 
-            # Create marker
-            marker = installer.env_path / "marker.txt"
-            marker.write_text("test")
-
-            # Force reinstall
-            installer.install(OCRBackend.CPU, force=True)
+                # Force reinstall
+                installer.install(OCRBackend.CPU, force=True)
 
             assert not marker.exists()
 
@@ -177,6 +177,36 @@ class TestOCRInstallerInstallation:
             call_args = mock_pip.call_args[0][0]
             assert "mokuro" in call_args
 
+    def test_install_mokuro_pins_tokenizer_stack(self, installer: OCRInstaller) -> None:
+        """Mokuro install must pin transformers<5 and include sentencepiece.
+
+        Regression guard: unpinned installs pull transformers 5.x, which
+        cannot load manga-ocr's tokenizer, breaking OCR silently.
+        """
+        installer.create_environment()
+
+        with patch.object(installer, "_run_pip") as mock_pip:
+            mock_pip.return_value = True
+
+            installer.install_mokuro()
+
+            call_args = mock_pip.call_args[0][0]
+            assert "transformers>=4.25,<5" in call_args
+            assert "sentencepiece" in call_args
+
+    def test_install_fails_if_verification_fails(self, installer: OCRInstaller) -> None:
+        """Install reports failure when the post-install smoke test fails."""
+        with patch.object(installer, "_run_pip") as mock_pip:
+            mock_pip.return_value = True
+            with patch.object(
+                installer,
+                "verify_installation",
+                return_value=(False, ["transformers 5.13.0 is incompatible"]),
+            ):
+                result = installer.install(OCRBackend.CPU)
+
+        assert result is False
+
     def test_install_fails_if_torch_fails(self, installer: OCRInstaller) -> None:
         """Test install fails if PyTorch installation fails."""
         installer.create_environment()
@@ -210,6 +240,67 @@ class TestOCRInstallerInstallation:
 
             assert result is False
             assert mock_install.call_count == 1
+
+
+class TestVerifyInstallation:
+    """Tests for the post-install environment smoke test."""
+
+    def test_verify_missing_env(self, installer: OCRInstaller) -> None:
+        """Verification fails cleanly when the env doesn't exist."""
+        ok, lines = installer.verify_installation()
+
+        assert ok is False
+        assert any("not found" in line for line in lines)
+
+    def test_verify_success(self, installer: OCRInstaller) -> None:
+        """Verification passes when the snippet reports no problems."""
+        installer.create_environment()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = (
+            "torch 2.13.0+cu130, cuda available: True (NVIDIA GeForce RTX 3070)\n"
+            "transformers 4.46.3\n"
+            "sentencepiece ok\nmanga_ocr ok\nmokuro ok\n"
+        )
+        with patch("mokuro_bunko.ocr.installer.subprocess.run", return_value=mock_result):
+            ok, lines = installer.verify_installation()
+
+        assert ok is True
+        assert any("transformers 4.46.3" in line for line in lines)
+
+    def test_verify_reports_problems(self, installer: OCRInstaller) -> None:
+        """Verification surfaces PROBLEM lines from the snippet."""
+        installer.create_environment()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = (
+            "torch 2.13.0+cu130, cuda available: True\n"
+            "transformers 5.13.0\n"
+            "PROBLEM: transformers 5.13.0 is incompatible with manga-ocr "
+            "(needs >=4.25,<5); reinstall with: mokuro-bunko install-ocr --force\n"
+        )
+        with patch("mokuro_bunko.ocr.installer.subprocess.run", return_value=mock_result):
+            ok, lines = installer.verify_installation()
+
+        assert ok is False
+        assert len(lines) == 1
+        assert "incompatible" in lines[0]
+
+    def test_verify_crash_reported(self, installer: OCRInstaller) -> None:
+        """A non-zero exit from the snippet is reported, not swallowed."""
+        installer.create_environment()
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = ""
+        mock_result.stderr = "Fatal Python error"
+        with patch("mokuro_bunko.ocr.installer.subprocess.run", return_value=mock_result):
+            ok, lines = installer.verify_installation()
+
+        assert ok is False
+        assert any("Fatal Python error" in line for line in lines)
 
 
 class TestOCRInstallerUninstall:
