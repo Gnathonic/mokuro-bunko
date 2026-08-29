@@ -85,17 +85,24 @@
 
 /* Series title language selector */
 .title-lang-select {
-    background: none;
+    /* A solid background matters twice over: `none` let the native option
+       list fall back to white while the options inherited light text —
+       white-on-white. */
+    background: var(--bg-tertiary);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     padding: 0.5rem 0.65rem;
-    color: var(--text-muted);
+    color: var(--text-primary);
     cursor: pointer;
     font-size: 0.85rem;
 }
 
-.title-lang-select:hover {
+.title-lang-select option {
+    background: var(--bg-elevated);
     color: var(--text-primary);
+}
+
+.title-lang-select:hover {
     border-color: var(--border-default);
 }
 
