@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 from mokuro_bunko.metadata.paths import is_series_file_path, series_title_from_series_file_path
+from mokuro_bunko.metadata.service import MetadataUpdateBusy
 
 if TYPE_CHECKING:
     from mokuro_bunko.metadata.service import MetadataService
@@ -31,6 +32,7 @@ _STATUS_TEXT = {
     403: "403 Forbidden",
     411: "411 Length Required",
     413: "413 Payload Too Large",
+    503: "503 Service Unavailable",
 }
 
 
@@ -124,7 +126,18 @@ class MetadataAPI:
         if series_title is None:  # pragma: no cover - guarded by is_series_file_path
             return self._text(start_response, 400, "Invalid metadata path")
 
-        accepted = self.service.apply_series_update(series_title, body, username)
+        try:
+            accepted = self.service.apply_series_update(series_title, body, username)
+        except MetadataUpdateBusy:
+            # A long compile pass owns the lock right now. Refusing beats
+            # pinning a worker thread: clients on this best-effort path retry,
+            # and heal-by-review catches anything they drop.
+            return self._text(
+                start_response,
+                503,
+                "Server is busy compiling metadata; retry shortly",
+                extra_headers=[("Retry-After", "30")],
+            )
         self._audit(environ, path, username, accepted)
         if not accepted:
             return self._text(start_response, 400, "Invalid metadata update")
@@ -152,12 +165,16 @@ class MetadataAPI:
 
     @staticmethod
     def _text(
-        start_response: Callable[..., Any], status_code: int, message: str
+        start_response: Callable[..., Any],
+        status_code: int,
+        message: str,
+        extra_headers: list[tuple[str, str]] | None = None,
     ) -> list[bytes]:
         body = message.encode("utf-8")
         start_response(
             _STATUS_TEXT[status_code],
-            [
+            (extra_headers or [])
+            + [
                 ("Content-Type", "text/plain; charset=utf-8"),
                 ("Content-Length", str(len(body))),
             ],

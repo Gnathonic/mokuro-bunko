@@ -17,7 +17,7 @@ from mokuro_bunko.database import Database, SeriesFactsRow
 from mokuro_bunko.metadata import service as metadata_service
 from mokuro_bunko.metadata.compiler import volume_key_for
 from mokuro_bunko.metadata.reader_compat import normalize_volume_title_key
-from mokuro_bunko.metadata.service import MetadataService
+from mokuro_bunko.metadata.service import MetadataService, MetadataUpdateBusy
 from mokuro_bunko.webdav.resources import _PATH_WRITE_LOCKS
 
 
@@ -760,6 +760,124 @@ class TestCatalogMaterialization:
         service.stop()
 
 
+class TestPassLockFairness:
+    """The full pass must never monopolize `_pass_lock`.
+
+    Observed in production: a cold-compile pass held the lock for minutes,
+    every incoming `series.json` PUT parked on it, cheroot's whole thread
+    pool jammed, and EVERY request — moves, covers, even OPTIONS — 502'd
+    at the proxy until the pass finished. The lock is therefore taken per
+    series, with full passes serialized by their own guard.
+    """
+
+    def _slow_service(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, delay: float
+    ) -> MetadataService:
+        for i in range(8):
+            write_volume(library, f"Series {i:02d}", "Volume 01")
+        service = MetadataService(library, Database(tmp_path / "test.db"))
+        real_compile = metadata_service.compile_series_volumes
+
+        def slow_compile(folder, **kwargs):  # type: ignore[no-untyped-def]
+            time.sleep(delay)
+            return real_compile(folder, **kwargs)
+
+        monkeypatch.setattr(metadata_service, "compile_series_volumes", slow_compile)
+        return service
+
+    def test_a_put_during_a_slow_full_pass_completes_quickly(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service = self._slow_service(library, tmp_path, monkeypatch, delay=0.15)
+        pass_thread = threading.Thread(target=service.regenerate_all)
+        pass_thread.start()
+        time.sleep(0.1)  # let the pass take its first per-series slot
+
+        started = time.monotonic()
+        accepted = service.apply_series_update("Series 00", series_update(), "alice")
+        waited = time.monotonic() - started
+        pass_thread.join(timeout=10.0)
+
+        assert accepted is True
+        # The pass runs ~1.2s in total; a PUT that had to wait for the WHOLE
+        # pass would take that long. Per-series locking bounds it to ~one slot.
+        assert waited < 0.6, f"PUT waited {waited:.2f}s — pass lock is being monopolized"
+        service.stop()
+
+    def test_full_passes_never_interleave(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for i in range(4):
+            write_volume(library, f"Series {i:02d}", "Volume 01")
+        service = MetadataService(library, Database(tmp_path / "test.db"))
+        active = 0
+        max_active = 0
+        gauge = threading.Lock()
+        real_compile = metadata_service.compile_series_volumes
+
+        def gauged_compile(folder, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal active, max_active
+            with gauge:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            try:
+                return real_compile(folder, **kwargs)
+            finally:
+                with gauge:
+                    active -= 1
+
+        monkeypatch.setattr(metadata_service, "compile_series_volumes", gauged_compile)
+        threads = [threading.Thread(target=service.regenerate_all) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        assert max_active == 1, "two full passes compiled concurrently"
+        service.stop()
+
+    def test_stop_aborts_a_running_pass_between_series(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service = self._slow_service(library, tmp_path, monkeypatch, delay=0.15)
+        pass_thread = threading.Thread(target=service.regenerate_all)
+        pass_thread.start()
+        time.sleep(0.2)
+
+        started = time.monotonic()
+        service.stop()
+        stopped_in = time.monotonic() - started
+        pass_thread.join(timeout=10.0)
+
+        # 8 series x 0.15s ≈ 1.2s of pass left; stop must not wait it out.
+        assert stopped_in < 0.6, f"stop() waited {stopped_in:.2f}s for the whole pass"
+
+    def test_a_put_blocked_past_the_timeout_raises_busy(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        service = MetadataService(
+            library, Database(tmp_path / "test.db"), update_lock_timeout_seconds=0.1
+        )
+        release = threading.Event()
+
+        def hold_lock() -> None:
+            with service._pass_lock:
+                release.wait(timeout=5.0)
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        time.sleep(0.05)
+        try:
+            with pytest.raises(MetadataUpdateBusy):
+                service.apply_series_update("Dr Stone", series_update(), "alice")
+        finally:
+            release.set()
+            holder.join(timeout=5.0)
+        service.stop()
+
+
 class TestExternalIdsHook:
     def test_fires_when_a_put_introduces_or_changes_ids_and_not_otherwise(
         self, library: Path, tmp_path: Path
@@ -1020,11 +1138,12 @@ class TestDebounce:
         time.sleep(0.1)  # let the debounce fire and enter the slow series.json write
         service.stop()
 
-        # stop() must not return until the WHOLE in-flight pass (both files,
-        # written sequentially) is done: if it returned early, the catalog
-        # (written second) would still be missing here.
+        # stop() waits for the IN-FLIGHT series step (the write that already
+        # started must land whole), but the pass then aborts between series —
+        # so the catalog, written at the end, is deliberately left for the
+        # next pass rather than holding shutdown for the rest of the crawl.
         assert (library / "Dr Stone" / "series.json").exists()
-        assert (library / "catalog.json").exists()
+        assert not (library / "catalog.json").exists()
 
 
 class TestStoppedGate:
