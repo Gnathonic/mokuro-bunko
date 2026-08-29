@@ -97,3 +97,17 @@ def test_image_cache_control_does_not_clobber_existing_header() -> None:
         )
     )
     assert _values(headers, "Cache-Control") == ["no-cache"]
+
+
+def test_noindex_robots_tag_on_every_response() -> None:
+    headers = _capture_headers(SecurityHeadersMiddleware(_fake_app("text/html")))
+    assert _values(headers, "X-Robots-Tag") == ["noindex, nofollow"]
+    headers = _capture_headers(SecurityHeadersMiddleware(_fake_app("application/json")))
+    assert _values(headers, "X-Robots-Tag") == ["noindex, nofollow"]
+
+
+def test_robots_tag_does_not_clobber_a_handler_that_set_one() -> None:
+    headers = _capture_headers(
+        SecurityHeadersMiddleware(_fake_app("text/html", [("X-Robots-Tag", "none")]))
+    )
+    assert _values(headers, "X-Robots-Tag") == ["none"]
