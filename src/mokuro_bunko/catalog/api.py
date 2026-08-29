@@ -165,6 +165,7 @@ class CatalogAPI:
         if rows:
             # The materialized table is the fast path: one DB read, no
             # filesystem walk on the request thread. Passes keep it fresh.
+            community_by_key = self._community_by_series_key()
             for row in rows:
                 series_info = {
                     "name": row["folder_name"],
@@ -178,6 +179,9 @@ class CatalogAPI:
                 titles = titles_by_key.get(row["series_key"])
                 if titles:
                     series_info["titles"] = titles
+                community = community_by_key.get(row["series_key"])
+                if community:
+                    series_info["community"] = community
                 series_list.append(series_info)
         elif self._library_index is not None:
             # Empty table (first boot, before the startup pass): fall back to
@@ -198,6 +202,24 @@ class CatalogAPI:
         return self._json_response(
             start_response, 200, {"series": series_list}, environ=environ
         )
+
+    def _community_by_series_key(self) -> dict[str, dict[str, Any]]:
+        """Fetched community details per series key, one DB read."""
+        if self._database is None:
+            return {}
+        try:
+            rows = self._database.list_community_details()
+        except Exception:  # noqa: BLE001 - the catalog renders without them
+            return {}
+        return {
+            row["series_key"]: {
+                "score": row["score"],
+                "tags": row["tags"],
+                "genres": row["genres"],
+                "source": row["source"],
+            }
+            for row in rows
+        }
 
     def _titles_by_series_key(self) -> dict[str, dict[str, str]]:
         """Merged display titles per series-identity key, one DB read."""

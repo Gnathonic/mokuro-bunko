@@ -154,6 +154,52 @@ def test_library_serves_from_the_materialized_table_when_populated(tmp_path: Pat
     assert entry["total_chars"] == 42000
 
 
+def test_library_joins_community_details(tmp_path: Path) -> None:
+    from mokuro_bunko.database import Database
+
+    library = tmp_path / "library"
+    library.mkdir()
+    db = Database(tmp_path / "test.db")
+    db.upsert_catalog_series(
+        {
+            "series_key": "dr stone",
+            "folder_name": "Dr Stone",
+            "cover_path": None,
+            "volume_count": 1,
+            "latest_volume_modified": 0.0,
+            "total_pages": 0,
+            "total_chars": 0,
+        }
+    )
+    db.upsert_community_details(
+        {
+            "series_key": "dr stone",
+            "score": 82.0,
+            "tags": ["Survival"],
+            "genres": ["Adventure"],
+            "source": "anilist",
+            "fetched_at": "2026-08-28T00:00:00Z",
+        }
+    )
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+        database=db,
+    )
+    state, start_response = _start_response_capture()
+    body = _read_json_response(api._list_library(start_response))
+
+    entry = body["series"][0]
+    assert entry["community"] == {
+        "score": 82.0,
+        "tags": ["Survival"],
+        "genres": ["Adventure"],
+        "source": "anilist",
+    }
+
+
 def test_library_falls_back_to_the_filesystem_when_the_table_is_empty(tmp_path: Path) -> None:
     from mokuro_bunko.database import Database
 

@@ -99,10 +99,45 @@ function displayTitleForName(name) {
     return entry ? displayTitle(entry) : name;
 }
 
+// --- Genre filter -----------------------------------------------------------
+
+let activeGenre = null;
+
+function seriesGenres(s) {
+    return (s.community && Array.isArray(s.community.genres)) ? s.community.genres : [];
+}
+
+function renderGenreChips() {
+    const host = document.getElementById('genre-chips');
+    if (!host) return;
+    const counts = new Map();
+    series.forEach(s => seriesGenres(s).forEach(g => counts.set(g, (counts.get(g) || 0) + 1)));
+    if (counts.size === 0) {
+        host.innerHTML = '';
+        host.style.display = 'none';
+        return;
+    }
+    host.style.display = '';
+    const genres = [...counts.keys()].sort((a, b) => (counts.get(b) - counts.get(a)) || a.localeCompare(b));
+    host.innerHTML = genres.map(g => {
+        const active = g === activeGenre ? ' genre-chip--active' : '';
+        return '<button class="genre-chip' + active + '" data-genre="' + escapeAttr(g) + '">'
+            + escapeHtml(g) + ' <span class="genre-chip__count">' + counts.get(g) + '</span></button>';
+    }).join('');
+    host.querySelectorAll('.genre-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+            const genre = chip.dataset.genre;
+            activeGenre = activeGenre === genre ? null : genre;
+            renderGenreChips();
+            filterSeries(search.value.toLowerCase().trim());
+        });
+    });
+}
+
 // --- Sorting ----------------------------------------------------------------
 
 const SORT_PREF_KEY = 'mokuro_catalog_sort';
-const SORT_MODES = ['title', 'newest', 'densest'];
+const SORT_MODES = ['title', 'newest', 'densest', 'rating'];
 
 function getSortPref() {
     const value = localStorage.getItem(SORT_PREF_KEY);
@@ -120,6 +155,9 @@ function sortSeries() {
     if (mode === 'newest') {
         series.sort((a, b) =>
             ((b.latest_volume_modified || 0) - (a.latest_volume_modified || 0)) || byTitle(a, b));
+    } else if (mode === 'rating') {
+        const score = s => (s.community && typeof s.community.score === 'number') ? s.community.score : -1;
+        series.sort((a, b) => (score(b) - score(a)) || byTitle(a, b));
     } else if (mode === 'densest') {
         series.sort((a, b) => (seriesDensity(b) - seriesDensity(a)) || byTitle(a, b));
     } else {
@@ -202,6 +240,7 @@ async function loadCatalog() {
         series = data.series || [];
         sortSeries();
         filtered = series;
+        renderGenreChips();
         const hashSeries = getSeriesFromHash();
         if (hashSeries) {
             await openSeries(hashSeries, true);
@@ -255,17 +294,16 @@ function getSeriesFromHash() {
 
 // Filter series (root view) — matches the folder name and every known title
 function filterSeries(query) {
-    if (!query) {
-        filtered = series;
-    } else {
-        filtered = series.filter(s => {
-            if (s.name.toLowerCase().includes(query)) return true;
-            if (!s.titles) return false;
-            return Object.values(s.titles).some(
-                t => String(t).toLowerCase().includes(query)
-            );
-        });
-    }
+    const matchesQuery = s => {
+        if (!query) return true;
+        if (s.name.toLowerCase().includes(query)) return true;
+        if (s.titles && Object.values(s.titles).some(t => String(t).toLowerCase().includes(query))) {
+            return true;
+        }
+        return seriesGenres(s).some(g => g.toLowerCase().includes(query));
+    };
+    const matchesGenre = s => !activeGenre || seriesGenres(s).includes(activeGenre);
+    filtered = series.filter(s => matchesQuery(s) && matchesGenre(s));
     renderRoot();
 }
 
@@ -350,12 +388,16 @@ function renderRoot() {
         const coverUrl = s.cover ? (API_BASE + '/cover?path=' + encodeURIComponent(s.cover)) : null;
         const stackedClass = hasMultiple ? 'volume-card__cover--stacked' : '';
         const title = displayTitle(s);
+        const score = (s.community && typeof s.community.score === 'number') ? s.community.score : null;
+        const scoreBadge = score !== null
+            ? ' · ★ ' + (Math.round(score) / 10).toFixed(1)
+            : '';
 
         return '<div class="volume-card" onclick="openSeries(\'' + escapeAttr(s.name) + '\')">' +
             '<div class="volume-card__cover ' + stackedClass + '">' + coverImg(coverUrl, title) + '</div>' +
             '<div class="volume-card__info">' +
             '<div class="volume-card__title">' + escapeHtml(title) + '</div>' +
-            '<div class="volume-card__count">' + volumeCount + ' volume' + (volumeCount !== 1 ? 's' : '') + '</div>' +
+            '<div class="volume-card__count">' + volumeCount + ' volume' + (volumeCount !== 1 ? 's' : '') + scoreBadge + '</div>' +
             '</div></div>';
     }).join('');
 }

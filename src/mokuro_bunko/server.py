@@ -12,6 +12,7 @@ from wsgidav.wsgidav_app import WsgiDAVApp
 from mokuro_bunko.account.api import AccountAPI
 from mokuro_bunko.admin.api import AdminAPI
 from mokuro_bunko.catalog.api import CatalogAPI
+from mokuro_bunko.catalog.community import CommunityFetcher
 from mokuro_bunko.config import Config, get_default_config_path
 from mokuro_bunko.database import Database
 from mokuro_bunko.dyndns import DynDNSService
@@ -351,6 +352,13 @@ def create_app(
     # the materialized catalog honest even on a quiet server.
     metadata_service.start_periodic_rescan(6 * 3600.0)
 
+    # Background AniList/MAL enrichment for linked series (ratings, tags,
+    # genres) — feeds the catalog's rating sort and tag filters.
+    if config.catalog.enabled and config.catalog.enrich_community:
+        community_fetcher = CommunityFetcher(database)
+        community_fetcher.start()
+        app._community_fetcher = community_fetcher  # type: ignore[attr-defined]
+
     return app
 
 
@@ -585,6 +593,8 @@ def run_server(config: Config, config_path: Path | None = None) -> None:
         # first would guarantee any such late on_published -> schedule_refresh
         # arms a timer nothing can ever cancel; stopping metadata_service
         # first lets propfind_cache.stop() still catch it.
+        if hasattr(wsgi_app, "_community_fetcher"):
+            wsgi_app._community_fetcher.stop()
         if hasattr(wsgi_app, "_metadata_service"):
             wsgi_app._metadata_service.stop()
         if hasattr(wsgi_app, "_propfind_cache"):
