@@ -87,11 +87,32 @@ function getTitlePref() {
     return Object.prototype.hasOwnProperty.call(TITLE_PROGRESSIONS, value) ? value : 'native';
 }
 
+// Mirrors the reader's tag rules: one pair of surrounding brackets is
+// stripped before wrapping, and the tag is appended ONLY when the base is an
+// alt title — folder names already carry the tag, so appending would double it.
+const BRACKET_PAIRS = [['(', ')'], ['[', ']'], ['（', '）'], ['【', '】']];
+
+function stripOuterBracketPair(value) {
+    for (const [open, close] of BRACKET_PAIRS) {
+        if (value.startsWith(open) && value.endsWith(close) && value.length > open.length) {
+            return value.slice(open.length, value.length - close.length).trim();
+        }
+    }
+    return value;
+}
+
+function withSeriesTag(base, tag) {
+    const raw = (tag || '').trim();
+    if (!raw) return base;
+    const stripped = stripOuterBracketPair(raw);
+    return stripped ? base + ' (' + stripped + ')' : base;
+}
+
 function displayTitle(s) {
     const chain = TITLE_PROGRESSIONS[getTitlePref()];
     if (s.titles) {
         for (const lang of chain) {
-            if (s.titles[lang]) return s.titles[lang];
+            if (s.titles[lang]) return withSeriesTag(s.titles[lang], s.tag);
         }
     }
     return s.name;
@@ -324,6 +345,7 @@ function filterSeries(query) {
         if (s.titles && Object.values(s.titles).some(t => String(t).toLowerCase().includes(query))) {
             return true;
         }
+        if (s.tag && s.tag.toLowerCase().includes(query)) return true;
         return seriesGenres(s).some(g => g.toLowerCase().includes(query));
     };
     const matchesGenre = s => !activeGenre || seriesGenres(s).includes(activeGenre);

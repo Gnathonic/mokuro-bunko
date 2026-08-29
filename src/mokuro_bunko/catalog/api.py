@@ -158,7 +158,7 @@ class CatalogAPI:
         the root response ~10x larger than anything the grid renders (about
         3 MB of JSON on a 1,000-series library).
         """
-        titles_by_key = self._titles_by_series_key()
+        facts_by_key = self._display_facts_by_series_key()
         series_list: list[dict[str, Any]] = []
 
         rows = self._database.list_catalog_series() if self._database is not None else []
@@ -176,9 +176,7 @@ class CatalogAPI:
                     "total_pages": row["total_pages"],
                     "total_chars": row["total_chars"],
                 }
-                titles = titles_by_key.get(row["series_key"])
-                if titles:
-                    series_info["titles"] = titles
+                series_info.update(facts_by_key.get(row["series_key"], {}))
                 community = community_by_key.get(row["series_key"])
                 if community:
                     series_info["community"] = community
@@ -194,9 +192,9 @@ class CatalogAPI:
                     "cover": series.cover,
                     "volume_count": len(series.volumes),
                 }
-                titles = titles_by_key.get(normalize_volume_title_key(series.name))
-                if titles:
-                    series_info["titles"] = titles
+                series_info.update(
+                    facts_by_key.get(normalize_volume_title_key(series.name), {})
+                )
                 series_list.append(series_info)
 
         return self._json_response(
@@ -221,19 +219,25 @@ class CatalogAPI:
             for row in rows
         }
 
-    def _titles_by_series_key(self) -> dict[str, dict[str, str]]:
-        """Merged display titles per series-identity key, one DB read."""
+    def _display_facts_by_series_key(self) -> dict[str, dict[str, Any]]:
+        """Display titles + the user's series tag per identity key, one DB read."""
         if self._database is None:
             return {}
         try:
             rows = self._database.list_series_facts()
         except Exception:  # noqa: BLE001 - the catalog renders without titles
             return {}
-        return {
-            row["series_key"]: row["titles"]
-            for row in rows
-            if isinstance(row.get("titles"), dict) and row["titles"]
-        }
+        facts: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entry: dict[str, Any] = {}
+            if isinstance(row.get("titles"), dict) and row["titles"]:
+                entry["titles"] = row["titles"]
+            tag = row.get("tag")
+            if isinstance(tag, str) and tag.strip():
+                entry["tag"] = tag
+            if entry:
+                facts[row["series_key"]] = entry
+        return facts
 
     def _get_series(self, start_response: Callable[..., Any], series_name: str) -> list[bytes]:
         """Get volumes for a specific series."""
