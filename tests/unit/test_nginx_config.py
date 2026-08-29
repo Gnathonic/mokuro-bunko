@@ -108,3 +108,13 @@ def test_cors_not_duplicated_on_proxy_path() -> None:
     ]
     # Exactly two: /internal-library/ (success) and @cors_error (failure).
     assert len(acao) == 2, f"expected exactly two ACAO add_headers, got: {acao}"
+
+
+def test_forwarded_proto_passes_through_from_the_edge() -> None:
+    """wsgidav validates a MOVE/COPY Destination's scheme against
+    X-Forwarded-Proto. Overwriting the edge proxy's value with this internal
+    nginx's own plain-http $scheme made every https rename 502 forever."""
+    text = _TEMPLATE.read_text(encoding="utf-8")
+    assert "map $http_x_forwarded_proto $forwarded_proto" in text
+    assert "proxy_set_header X-Forwarded-Proto $forwarded_proto;" in text
+    assert "proxy_set_header X-Forwarded-Proto $scheme;" not in text
