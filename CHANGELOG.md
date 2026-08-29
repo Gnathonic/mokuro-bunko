@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.3] - 2026-08-29
+
+### Fixed
+- **Long metadata passes no longer starve the whole server.** A full compile pass held the metadata lock for minutes on a cold library; every incoming `series.json` update parked on it, the worker thread pool jammed, and every request — renames, covers, even OPTIONS — failed at the proxy with 502 until the pass ended (observed live as failing renames and silently dropped link/title edits). The pass now takes the lock per series with an explicit fair handoff, full passes stay mutually exclusive, and an update that still cannot get the lock within 10s is answered `503 Retry-After` instead of pinning a thread. Shutdown aborts a running pass between series instead of waiting out the crawl.
+
 ## [0.3.2] - 2026-08-29
 
 ### Changed

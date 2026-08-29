@@ -64,6 +64,17 @@ def _log(message: str) -> None:
     print(f"[METADATA] {message}", file=sys.stderr, flush=True)
 
 
+class MetadataUpdateBusy(Exception):
+    """`apply_series_update` could not get the pass lock within its timeout.
+
+    Raised instead of waiting: a PUT parked minutes on `_pass_lock` holds a
+    whole cheroot worker thread, and enough of them starve the pool for every
+    request on the server (observed live as a 502 storm — moves, covers, even
+    OPTIONS). The middleware maps this to 503 + Retry-After; clients on the
+    best-effort metadata path retry, and heal-by-review catches the rest.
+    """
+
+
 class MetadataService:
     """Owns `<Series>/series.json` and the root `catalog.json`."""
 
@@ -75,6 +86,7 @@ class MetadataService:
         on_published: Callable[[], None] | None = None,
         debounce_seconds: float = 10.0,
         max_debounce_seconds: float = 60.0,
+        update_lock_timeout_seconds: float = 10.0,
     ) -> None:
         self.library_path = Path(library_path)
         self.database = database
@@ -84,12 +96,19 @@ class MetadataService:
         # leaves a quiet window). Resets extend a pending timer only up to
         # this many seconds past its first scheduling; then it fires anyway.
         self.max_debounce_seconds = max_debounce_seconds
+        #: How long a client metadata update may wait on the pass lock before
+        #: it is refused as busy instead of pinning a server thread.
+        self.update_lock_timeout_seconds = update_lock_timeout_seconds
         self._on_published = on_published
         #: Fired (outside `_pass_lock`, like `on_published`) with the series
         #: key when an accepted update INTRODUCES or CHANGES external ids —
         #: the community fetcher's nudge seam. Assigned post-construction.
         self.on_external_ids_changed: Callable[[str], None] | None = None
         self._pass_lock = threading.Lock()
+        #: Serializes FULL passes against each other. `_pass_lock` is taken
+        #: per series precisely so other callers can interleave; without this
+        #: guard two full passes would interleave with each other too.
+        self._full_pass_lock = threading.Lock()
         self._timer_lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._deadline: float | None = None
@@ -266,74 +285,86 @@ class MetadataService:
         """
         if self._stopped:
             return 0
-        with self._pass_lock:
+        changed = 0
+        with self._full_pass_lock:
+            if self._stopped:
+                return 0
             folders = self._scan_folders()
             if folders is None:
                 _log(f"library root unreadable, skipping pass: {self.library_path}")
                 self.schedule_regeneration(delay=5.0)
                 return 0
-            changed = 0
             keep: set[str] = set()
             catalog_entries: list[tuple[str, SeriesFacts]] = []
-            for folder in folders:
-                series_key = normalize_volume_title_key(folder.title)
-                facts, index = self._row_for(series_key)
-                catalog_entries.append((folder.title, facts))
-                # Compiled once here and reused for the sidecar below — this
-                # used to run twice per series per pass (once to build the
-                # keep-set, again inside the publish call).
-                volumes = compile_series_volumes(folder, database=self.database)
-                for volume in volumes:
-                    keep.add(volume_key_for(folder.title, volume.volume_title))
-                self._materialize_catalog_row(folder, volumes)
-                try:
-                    changed += (
-                        1
-                        if self._publish_series(folder, facts=facts, index=index, volumes=volumes)
-                        else 0
+            aborted = False
+            for index, folder in enumerate(folders):
+                if self._stopped:
+                    aborted = True
+                    break
+                if index:
+                    # `threading.Lock` has no fairness: releasing and
+                    # immediately re-acquiring lets this thread barge past a
+                    # parked waiter every time, which re-creates exactly the
+                    # whole-pass monopoly the per-series split exists to end.
+                    # One millisecond hands the lock to any waiting PUT; on a
+                    # thousand-series pass it adds a total of one second.
+                    time.sleep(0.001)
+                # PER SERIES, never around the whole pass: a client metadata
+                # PUT (`apply_series_update`) waits at most one series' compile
+                # for this lock. A whole-pass hold was observed starving the
+                # entire server thread pool for minutes on a cold library.
+                with self._pass_lock:
+                    if self._stopped:
+                        aborted = True
+                        break
+                    series_key = normalize_volume_title_key(folder.title)
+                    facts, index = self._row_for(series_key)
+                    catalog_entries.append((folder.title, facts))
+                    # Compiled once here and reused for the sidecar below — this
+                    # used to run twice per series per pass (once to build the
+                    # keep-set, again inside the publish call).
+                    volumes = compile_series_volumes(folder, database=self.database)
+                    for volume in volumes:
+                        keep.add(volume_key_for(folder.title, volume.volume_title))
+                    self._materialize_catalog_row(folder, volumes)
+                    try:
+                        changed += (
+                            1
+                            if self._publish_series(
+                                folder, facts=facts, index=index, volumes=volumes
+                            )
+                            else 0
+                        )
+                    except MetadataWriteBusy:
+                        # A DAV write owns the path right now; the next trigger
+                        # (or this pass's own reschedule) picks it up.
+                        _log(f"skipped busy series folder: {folder.title}")
+                        self.schedule_regeneration(delay=5.0)
+                    except OSError as error:
+                        # Defense in depth (Task 11 review round 1, F3): a
+                        # directory squatting where a sidecar belongs raises
+                        # IsADirectoryError from `atomic_write_bytes`. Skip only
+                        # this folder; the pass continues.
+                        _log(f"skipped unwritable series folder: {folder.title}: {error}")
+                        self.schedule_regeneration(delay=5.0)
+            if not aborted and not self._stopped:
+                with self._pass_lock:
+                    # Prunes and the catalog publish need the COMPLETE pass's
+                    # view: an aborted pass must never prune rows for series it
+                    # simply didn't reach, so both are skipped on abort — the
+                    # next full pass settles them.
+                    self.database.prune_series_entry_cache(keep)
+                    self.database.prune_catalog_series(
+                        normalize_volume_title_key(folder.title) for folder in folders
                     )
-                except MetadataWriteBusy:
-                    # A DAV write owns the path right now; the next trigger
-                    # (or this pass's own reschedule) picks it up.
-                    _log(f"skipped busy series folder: {folder.title}")
-                    self.schedule_regeneration(delay=5.0)
-                except OSError as error:
-                    # Defense in depth (Task 11 review round 1, F3): the
-                    # auth layer now refuses MKCOL on a compiled path for
-                    # every role, but that closes the gate going forward —
-                    # it does not undo a directory already squatting where
-                    # a sidecar belongs (planted before this hardening
-                    # shipped, or by anything outside the DAV auth path).
-                    # Unguarded, `atomic_write_bytes`'s `os.replace` raises
-                    # `IsADirectoryError` here, which used to escape this
-                    # loop and abort the WHOLE pass — every series after the
-                    # poisoned one silently stopped publishing. Skip only
-                    # this folder; the pass continues and the catalog still
-                    # updates.
-                    _log(f"skipped unwritable series folder: {folder.title}: {error}")
-                    self.schedule_regeneration(delay=5.0)
-            # Whole-library keep-set, gathered above regardless of whether
-            # each series actually needed republishing — a series that
-            # published clean this pass must not lose its cache row.
-            self.database.prune_series_entry_cache(keep)
-            self.database.prune_catalog_series(
-                normalize_volume_title_key(folder.title) for folder in folders
-            )
-            try:
-                changed += 1 if self._publish_catalog(catalog_entries) else 0
-            except MetadataWriteBusy:
-                _log("skipped busy catalog.json")
-                self.schedule_regeneration(delay=5.0)
-            except OSError as error:
-                # Same defense in depth as the per-folder loop above (Task
-                # 11 review round 2, N4): the round-1 fix guarded only the
-                # per-series publish, leaving a directory squatting at the
-                # ROOT `catalog.json` free to raise `IsADirectoryError` and
-                # abort the pass after every series sidecar had already
-                # published successfully. Skip just the catalog write; the
-                # series sidecars this pass already wrote stand.
-                _log(f"skipped unwritable catalog.json: {error}")
-                self.schedule_regeneration(delay=5.0)
+                    try:
+                        changed += 1 if self._publish_catalog(catalog_entries) else 0
+                    except MetadataWriteBusy:
+                        _log("skipped busy catalog.json")
+                        self.schedule_regeneration(delay=5.0)
+                    except OSError as error:
+                        _log(f"skipped unwritable catalog.json: {error}")
+                        self.schedule_regeneration(delay=5.0)
         self._published(changed)
         return changed
 
@@ -451,7 +482,11 @@ class MetadataService:
 
         changed = 0
         ids_changed = False
-        with self._pass_lock:
+        if not self._pass_lock.acquire(timeout=self.update_lock_timeout_seconds):
+            raise MetadataUpdateBusy(
+                f"pass lock not acquired within {self.update_lock_timeout_seconds}s"
+            )
+        try:
             resolved_title = self._resolve_folder_title(series_key)
             if resolved_title is None:
                 return False
@@ -485,6 +520,8 @@ class MetadataService:
                 # as a failure just because publishing itself blew up.
                 _log(f"republish failed after an accepted update: {error}")
                 self.schedule_regeneration(delay=5.0)
+        finally:
+            self._pass_lock.release()
         if ids_changed and self.on_external_ids_changed is not None:
             self.on_external_ids_changed(series_key)
         # Outside `_pass_lock` (matching `regenerate_all`/`regenerate_series`)
@@ -633,6 +670,10 @@ class MetadataService:
         for timer in timers:
             timer.cancel()
             timer.join()
+        # A chunked full pass re-checks `_stopped` between series, so this
+        # waits at most one series' compile — not the whole pass.
+        with self._full_pass_lock:
+            pass
         with self._pass_lock:
             pass
 

@@ -25,6 +25,13 @@ class StubService:
         return self.accepted
 
 
+class BusyService:
+    def apply_series_update(self, series_title: str, payload: bytes, actor: str | None) -> bool:
+        from mokuro_bunko.metadata.service import MetadataUpdateBusy
+
+        raise MetadataUpdateBusy("pass lock held")
+
+
 class StubApp:
     def __init__(self) -> None:
         self.calls = 0
@@ -341,3 +348,14 @@ class TestOnPublishedIntegration:
 
         sidecar = json.loads((folder / "series.json").read_text("utf-8"))
         assert sidecar["external_ids"] == {"anilist": 98416}
+
+
+def test_a_busy_pass_maps_to_503_with_retry_after() -> None:
+    """A PUT must never pin a worker thread behind a long compile pass — the
+    service raises busy past its lock timeout, and the middleware answers 503
+    so the client's best-effort path retries (heal catches any drop)."""
+    status, headers, _body = call(
+        MetadataAPI(StubApp(), service=BusyService())  # type: ignore[arg-type]
+    )
+    assert status == "503 Service Unavailable"
+    assert ("Retry-After", "30") in headers
