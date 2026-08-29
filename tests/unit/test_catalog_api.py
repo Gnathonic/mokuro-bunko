@@ -114,6 +114,68 @@ def test_library_includes_titles_from_series_facts(tmp_path: Path) -> None:
     assert "titles" not in by_name["Unlinked"]
 
 
+def test_library_serves_from_the_materialized_table_when_populated(tmp_path: Path) -> None:
+    """Once a pass has materialized `catalog_series`, the listing is a DB read —
+    the filesystem walk never runs on the request path."""
+    from mokuro_bunko.database import Database
+
+    library = tmp_path / "library"
+    library.mkdir()  # deliberately EMPTY: entries must come from the table
+
+    db = Database(tmp_path / "test.db")
+    db.upsert_catalog_series(
+        {
+            "series_key": "dr stone",
+            "folder_name": "Dr Stone",
+            "cover_path": "Dr Stone/v01.webp",
+            "volume_count": 3,
+            "latest_volume_modified": 1_756_400_000.0,
+            "total_pages": 570,
+            "total_chars": 42000,
+        }
+    )
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+        database=db,
+    )
+    state, start_response = _start_response_capture()
+    body = _read_json_response(api._list_library(start_response))
+
+    assert state["status"] == "200 OK"
+    entry = body["series"][0]
+    assert entry["name"] == "Dr Stone"
+    assert entry["cover"] == "Dr Stone/v01.webp"
+    assert entry["volume_count"] == 3
+    assert entry["latest_volume_modified"] == 1_756_400_000.0
+    assert entry["total_pages"] == 570
+    assert entry["total_chars"] == 42000
+
+
+def test_library_falls_back_to_the_filesystem_when_the_table_is_empty(tmp_path: Path) -> None:
+    from mokuro_bunko.database import Database
+
+    library = tmp_path / "library"
+    series = library / "Series A"
+    series.mkdir(parents=True)
+    (series / "vol1.cbz").write_bytes(b"cbz")
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+        database=Database(tmp_path / "test.db"),  # no pass has run yet
+    )
+    state, start_response = _start_response_capture()
+    body = _read_json_response(api._list_library(start_response))
+
+    assert state["status"] == "200 OK"
+    assert [s["name"] for s in body["series"]] == ["Series A"]
+    assert body["series"][0]["volume_count"] == 1
+
+
 def test_library_gzips_when_the_client_accepts_it(tmp_path: Path) -> None:
     import gzip as gzip_mod
 

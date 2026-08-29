@@ -38,7 +38,7 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from mokuro_bunko.database import Database, SeriesFactsRow
+from mokuro_bunko.database import CatalogSeriesRow, Database, SeriesFactsRow
 from mokuro_bunko.metadata.compiler import (
     SeriesFolder,
     compile_series_volumes,
@@ -89,6 +89,8 @@ class MetadataService:
         self._timer_lock = threading.Lock()
         self._timer: threading.Timer | None = None
         self._deadline: float | None = None
+        self._periodic_timer: threading.Timer | None = None
+        self._periodic_interval = 0.0
         self._series_timers: dict[str, threading.Timer] = {}
         self._series_titles: dict[str, str] = {}
         self._series_deadlines: dict[str, float] = {}
@@ -192,6 +194,51 @@ class MetadataService:
     def _publish_catalog(self, entries: Sequence[tuple[str, SeriesFacts]]) -> bool:
         return write_if_changed(self.library_path / CATALOG_FILE_NAME, dump_catalog_file(entries))
 
+    def _materialize_catalog_row(
+        self, folder: SeriesFolder, volumes: Sequence[VolumeEntry]
+    ) -> None:
+        """Upsert this series' render-ready row in `catalog_series`.
+
+        One scandir gathers what the compiled entries don't carry — archive
+        mtimes (freshness) and which cover sidecars exist. Everything else
+        (counts) comes from the volumes just compiled, so the row costs one
+        directory listing on top of work the pass already did.
+        """
+        latest = 0.0
+        covers: set[str] = set()
+        try:
+            with os.scandir(folder.path) as scan:
+                for item in scan:
+                    low = item.name.lower()
+                    try:
+                        if not item.is_file(follow_symlinks=True):
+                            continue
+                        if low.endswith(".cbz"):
+                            latest = max(latest, item.stat().st_mtime)
+                        elif low.endswith(".webp"):
+                            covers.add(item.name)
+                    except OSError:
+                        continue
+        except OSError:
+            return
+        cover_path: str | None = None
+        for volume in volumes:
+            candidate = f"{volume.volume_title}.webp"
+            if candidate in covers:
+                cover_path = f"{folder.title}/{candidate}"
+                break
+        self.database.upsert_catalog_series(
+            CatalogSeriesRow(
+                series_key=normalize_volume_title_key(folder.title),
+                folder_name=folder.title,
+                cover_path=cover_path,
+                volume_count=len(volumes),
+                latest_volume_modified=latest,
+                total_pages=sum(v.page_count for v in volumes),
+                total_chars=sum(v.character_count for v in volumes),
+            )
+        )
+
     def _published(self, changed: int) -> None:
         if changed and self._on_published is not None:
             self._on_published()
@@ -234,6 +281,7 @@ class MetadataService:
                 volumes = compile_series_volumes(folder, database=self.database)
                 for volume in volumes:
                     keep.add(volume_key_for(folder.title, volume.volume_title))
+                self._materialize_catalog_row(folder, volumes)
                 try:
                     changed += (
                         1
@@ -264,6 +312,9 @@ class MetadataService:
             # each series actually needed republishing — a series that
             # published clean this pass must not lose its cache row.
             self.database.prune_series_entry_cache(keep)
+            self.database.prune_catalog_series(
+                normalize_volume_title_key(folder.title) for folder in folders
+            )
             try:
                 changed += 1 if self._publish_catalog(catalog_entries) else 0
             except MetadataWriteBusy:
@@ -326,6 +377,7 @@ class MetadataService:
             if series_key != key:
                 continue
             volumes = compile_series_volumes(folder, database=self.database)
+            self._materialize_catalog_row(folder, volumes)
             try:
                 changed += (
                     1
@@ -485,6 +537,32 @@ class MetadataService:
             self._series_timers[key] = timer
             timer.start()
 
+    def start_periodic_rescan(self, interval_seconds: float) -> None:
+        """Arm a repeating full pass, so the library, the compiled files and
+        the materialized catalog re-sync even when no filesystem event fires
+        (an mtime-only change, a watcher outage, drift of any kind)."""
+        with self._timer_lock:
+            if self._stopped:
+                return
+            self._periodic_interval = interval_seconds
+            self._arm_periodic_locked()
+
+    def _arm_periodic_locked(self) -> None:
+        timer = threading.Timer(self._periodic_interval, self._fire_periodic)
+        timer.daemon = True
+        self._periodic_timer = timer
+        timer.start()
+
+    def _fire_periodic(self) -> None:
+        with self._timer_lock:
+            self._periodic_timer = None
+            if self._stopped:
+                return
+            self._arm_periodic_locked()
+        # Route through the normal debounced path so a periodic tick and a
+        # burst of real events coalesce instead of stacking passes.
+        self.schedule_regeneration()
+
     def _fire(self) -> None:
         with self._timer_lock:
             self._timer = None
@@ -533,8 +611,11 @@ class MetadataService:
             self._stopped = True
             timers = [self._timer] if self._timer is not None else []
             timers.extend(self._series_timers.values())
+            if self._periodic_timer is not None:
+                timers.append(self._periodic_timer)
             self._timer = None
             self._deadline = None
+            self._periodic_timer = None
             self._series_timers.clear()
             self._series_titles.clear()
             self._series_deadlines.clear()

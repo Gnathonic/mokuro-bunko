@@ -106,6 +106,24 @@ class SeriesFactsRow(TypedDict):
     updated_at: str
 
 
+class CatalogSeriesRow(TypedDict):
+    """One series' render-ready catalog entry, materialized from the library.
+
+    Filesystem-derived only: folder spelling, cover, counts and freshness.
+    Client-merged facts stay in `series_facts` and community details in their
+    own table — this row is rebuilt wholesale by every metadata pass, so
+    anything else stored here would be silently clobbered.
+    """
+
+    series_key: str
+    folder_name: str
+    cover_path: str | None
+    volume_count: int
+    latest_volume_modified: float
+    total_pages: int
+    total_chars: int
+
+
 def normalize_role(role: str) -> UserRole:
     """Normalize legacy role names and validate role values."""
     normalized = LEGACY_ROLE_ALIASES.get(role, role)
@@ -439,6 +457,19 @@ class Database:
                     cbz_mtime REAL NOT NULL,
                     sidecar_key TEXT NOT NULL DEFAULT '',
                     computed_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS catalog_series (
+                    series_key TEXT PRIMARY KEY,
+                    folder_name TEXT NOT NULL,
+                    cover_path TEXT,
+                    volume_count INTEGER NOT NULL,
+                    latest_volume_modified REAL NOT NULL DEFAULT 0,
+                    total_pages INTEGER NOT NULL DEFAULT 0,
+                    total_chars INTEGER NOT NULL DEFAULT 0,
+                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )
             """)
 
@@ -1470,4 +1501,71 @@ class Database:
             ]
             for volume_key in stale:
                 conn.execute("DELETE FROM series_entry_cache WHERE volume_key = ?", (volume_key,))
+            return len(stale)
+
+    # --- materialized catalog -------------------------------------------
+
+    def upsert_catalog_series(self, row: CatalogSeriesRow) -> None:
+        """Insert or replace one series' materialized catalog entry."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO catalog_series (
+                    series_key, folder_name, cover_path, volume_count,
+                    latest_volume_modified, total_pages, total_chars, scanned_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(series_key) DO UPDATE SET
+                    folder_name = excluded.folder_name,
+                    cover_path = excluded.cover_path,
+                    volume_count = excluded.volume_count,
+                    latest_volume_modified = excluded.latest_volume_modified,
+                    total_pages = excluded.total_pages,
+                    total_chars = excluded.total_chars,
+                    scanned_at = excluded.scanned_at
+                """,
+                (
+                    row["series_key"],
+                    row["folder_name"],
+                    row["cover_path"],
+                    row["volume_count"],
+                    row["latest_volume_modified"],
+                    row["total_pages"],
+                    row["total_chars"],
+                ),
+            )
+
+    def list_catalog_series(self) -> list[CatalogSeriesRow]:
+        """Every materialized catalog row, ordered by folder name."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM catalog_series ORDER BY folder_name"
+            )
+            return [
+                CatalogSeriesRow(
+                    series_key=str(raw["series_key"]),
+                    folder_name=str(raw["folder_name"]),
+                    cover_path=raw["cover_path"],
+                    volume_count=int(raw["volume_count"]),
+                    latest_volume_modified=float(raw["latest_volume_modified"]),
+                    total_pages=int(raw["total_pages"]),
+                    total_chars=int(raw["total_chars"]),
+                )
+                for raw in cursor.fetchall()
+            ]
+
+    def prune_catalog_series(self, keep_series_keys: Iterable[str]) -> int:
+        """Drop catalog rows for series that no longer exist. Returns the count.
+
+        Same one-lock scan-then-delete shape as `prune_series_entry_cache`.
+        """
+        keep = set(keep_series_keys)
+        with self._connection() as conn:
+            cursor = conn.execute("SELECT series_key FROM catalog_series")
+            stale = [
+                str(raw["series_key"])
+                for raw in cursor.fetchall()
+                if str(raw["series_key"]) not in keep
+            ]
+            for series_key in stale:
+                conn.execute("DELETE FROM catalog_series WHERE series_key = ?", (series_key,))
             return len(stale)

@@ -700,6 +700,98 @@ class TestApplyUpdate:
         }
 
 
+class TestCatalogMaterialization:
+    """Every pass keeps the `catalog_series` table in step with the library."""
+
+    def test_full_pass_materializes_counts_cover_and_freshness(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        write_volume(library, "Dr Stone", "Volume 02")
+        (library / "Dr Stone" / "Volume 01.webp").write_bytes(b"webp")
+        os.utime(library / "Dr Stone" / "Volume 01.cbz", (1_756_300_000, 1_756_300_000))
+        os.utime(library / "Dr Stone" / "Volume 02.cbz", (1_756_400_000, 1_756_400_000))
+
+        database = Database(tmp_path / "test.db")
+        service = MetadataService(library, database)
+        service.regenerate_all()
+
+        rows = database.list_catalog_series()
+        assert [r["folder_name"] for r in rows] == ["Dr Stone"]
+        stored = rows[0]
+        assert stored["series_key"] == normalize_volume_title_key("Dr Stone")
+        assert stored["volume_count"] == 2
+        assert stored["cover_path"] == "Dr Stone/Volume 01.webp"
+        # write_volume's mokuro has 2 pages, one line of 2 chars
+        assert stored["total_pages"] == 4
+        assert stored["total_chars"] == 4
+        assert stored["latest_volume_modified"] == pytest.approx(1_756_400_000)
+        service.stop()
+
+    def test_full_pass_prunes_series_whose_folder_is_gone(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        write_volume(library, "Frieren", "Volume 01")
+        database = Database(tmp_path / "test.db")
+        service = MetadataService(library, database)
+        service.regenerate_all()
+        assert len(database.list_catalog_series()) == 2
+
+        shutil.rmtree(library / "Frieren")
+        service.regenerate_all()
+        assert [r["folder_name"] for r in database.list_catalog_series()] == ["Dr Stone"]
+        service.stop()
+
+    def test_series_regen_updates_only_its_row(self, library: Path, tmp_path: Path) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        write_volume(library, "Frieren", "Volume 01")
+        database = Database(tmp_path / "test.db")
+        service = MetadataService(library, database)
+        service.regenerate_all()
+
+        write_volume(library, "Dr Stone", "Volume 02")
+        write_volume(library, "Frieren", "Volume 02")
+        service.regenerate_series("Dr Stone")
+
+        by_name = {r["folder_name"]: r for r in database.list_catalog_series()}
+        assert by_name["Dr Stone"]["volume_count"] == 2
+        assert by_name["Frieren"]["volume_count"] == 1  # untouched until its own regen
+        service.stop()
+
+
+class TestPeriodicRescan:
+    def test_periodic_rescan_rearms_and_keeps_scheduling_passes(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        service = MetadataService(
+            library, Database(tmp_path / "test.db"), debounce_seconds=0.01
+        )
+        calls: list[float] = []
+        monkeypatch.setattr(
+            MetadataService, "regenerate_all", lambda self: calls.append(time.monotonic()) or 0
+        )
+        service.start_periodic_rescan(0.05)
+        deadline = time.monotonic() + 3.0
+        while len(calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(calls) >= 2, "periodic rescan did not re-arm"
+        service.stop()
+
+    def test_stop_cancels_the_periodic_timer(self, library: Path, tmp_path: Path) -> None:
+        service = MetadataService(library, Database(tmp_path / "test.db"))
+        service.start_periodic_rescan(60.0)
+        assert service._periodic_timer is not None
+        service.stop()
+        assert service._periodic_timer is None
+
+    def test_start_after_stop_is_a_no_op(self, library: Path, tmp_path: Path) -> None:
+        service = MetadataService(library, Database(tmp_path / "test.db"))
+        service.stop()
+        service.start_periodic_rescan(60.0)
+        assert service._periodic_timer is None
+
+
 class TestDebounce:
     def test_scheduled_regeneration_runs_once_after_the_quiet_period(
         self, library: Path, tmp_path: Path
