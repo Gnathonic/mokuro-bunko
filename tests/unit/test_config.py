@@ -218,6 +218,10 @@ class TestOcrConfig:
         config = OcrConfig()
         assert config.backend == "auto"
         assert config.poll_interval == 30
+        assert config.use_cache is True
+        assert config.timeout_per_page_seconds == 60
+        assert config.timeout_minimum_seconds == 3600
+        assert config.workspace_retention_days == 7
 
     def test_all_valid_backends(self) -> None:
         """Test all valid OCR backends."""
@@ -234,6 +238,46 @@ class TestOcrConfig:
         """Test invalid poll interval."""
         with pytest.raises(ValueError, match="Invalid poll interval"):
             OcrConfig(poll_interval=0)
+
+    def test_custom_resumability_values(self) -> None:
+        """Test custom resumability values."""
+        config = OcrConfig(
+            use_cache=False,
+            timeout_per_page_seconds=30,
+            timeout_minimum_seconds=600,
+            workspace_retention_days=0,
+        )
+        assert config.use_cache is False
+        assert config.timeout_per_page_seconds == 30
+        assert config.timeout_minimum_seconds == 600
+        assert config.workspace_retention_days == 0
+
+    def test_invalid_timeout_per_page(self) -> None:
+        """Test invalid per-page timeout, which would kill every run instantly."""
+        with pytest.raises(ValueError, match="timeout_per_page_seconds"):
+            OcrConfig(timeout_per_page_seconds=0)
+
+    def test_invalid_timeout_minimum(self) -> None:
+        """Test invalid minimum timeout, which would kill short volumes instantly."""
+        with pytest.raises(ValueError, match="timeout_minimum_seconds"):
+            OcrConfig(timeout_minimum_seconds=0)
+
+    def test_invalid_workspace_retention(self) -> None:
+        """Test invalid retention; 0 means sweep immediately, negative is meaningless."""
+        with pytest.raises(ValueError, match="workspace_retention_days"):
+            OcrConfig(workspace_retention_days=-1)
+
+    def test_resumability_round_trips_through_dict(self) -> None:
+        """Test settings survive to_dict, which the admin panel and save_config use."""
+        config = Config()
+        config.ocr.use_cache = False
+        config.ocr.timeout_per_page_seconds = 45
+        data = config.to_dict()
+        assert data["ocr"]["use_cache"] is False
+        assert data["ocr"]["timeout_per_page_seconds"] == 45
+        restored = Config.from_dict(data)
+        assert restored.ocr.use_cache is False
+        assert restored.ocr.timeout_per_page_seconds == 45
 
 
 class TestDatabaseConfig:

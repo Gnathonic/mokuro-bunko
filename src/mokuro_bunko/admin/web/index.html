@@ -240,7 +240,26 @@
                             <label for="settings-ocr-interval" class="form-label">Poll Interval (seconds)</label>
                             <input type="number" id="settings-ocr-interval" class="form-input" min="1" value="30">
                         </div>
-                        <button class="btn btn--primary" onclick="saveOcrSettings()">Save Poll Interval</button>
+                        <div class="form-group">
+                            <label for="settings-ocr-use-cache" class="form-label">Resume interrupted volumes</label>
+                            <input type="checkbox" id="settings-ocr-use-cache" checked>
+                            <p class="form-hint">Reuse per-page OCR from a previous attempt. Turn off to force a full re-OCR.</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="settings-ocr-timeout-per-page" class="form-label">Timeout per page (seconds)</label>
+                            <input type="number" id="settings-ocr-timeout-per-page" class="form-input" min="1" value="60">
+                        </div>
+                        <div class="form-group">
+                            <label for="settings-ocr-timeout-minimum" class="form-label">Minimum timeout (seconds)</label>
+                            <input type="number" id="settings-ocr-timeout-minimum" class="form-input" min="1" value="3600">
+                            <p class="form-hint">A volume is killed after max(minimum, per-page &times; pages).</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="settings-ocr-retention" class="form-label">Workspace retention (days)</label>
+                            <input type="number" id="settings-ocr-retention" class="form-input" min="0" value="7">
+                            <p class="form-hint">Failed volumes keep their extracted pages so retries resume. Swept after this many days.</p>
+                        </div>
+                        <button class="btn btn--primary" onclick="saveOcrSettings()">Save OCR Settings</button>
                     </div>
 
                     <!-- Queue -->

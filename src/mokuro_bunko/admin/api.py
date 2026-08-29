@@ -748,6 +748,29 @@ class AdminAPI:
                     return self._json_response(
                         start_response, 400, {"error": "poll_interval must be a positive integer"}
                     )
+            if "use_cache" in data:
+                self.full_config.ocr.use_cache = bool(data["use_cache"])
+            for key in (
+                "timeout_per_page_seconds",
+                "timeout_minimum_seconds",
+                "workspace_retention_days",
+            ):
+                if key not in data:
+                    continue
+                # Retention of 0 is meaningful (sweep immediately); the timeouts
+                # would kill every run instantly at 0.
+                minimum = 0 if key == "workspace_retention_days" else 1
+                try:
+                    value = int(data[key])
+                    if value < minimum:
+                        raise ValueError
+                    setattr(self.full_config.ocr, key, value)
+                except (ValueError, TypeError):
+                    return self._json_response(
+                        start_response,
+                        400,
+                        {"error": f"{key} must be an integer >= {minimum}"},
+                    )
             self._save_config()
 
         return self._json_response(start_response, 200, {
@@ -755,6 +778,10 @@ class AdminAPI:
             "ocr": {
                 "backend": self.full_config.ocr.backend,
                 "poll_interval": self.full_config.ocr.poll_interval,
+                "use_cache": self.full_config.ocr.use_cache,
+                "timeout_per_page_seconds": self.full_config.ocr.timeout_per_page_seconds,
+                "timeout_minimum_seconds": self.full_config.ocr.timeout_minimum_seconds,
+                "workspace_retention_days": self.full_config.ocr.workspace_retention_days,
             },
             "ocr_runtime": self._refresh_ocr_runtime_cache(),
         })
