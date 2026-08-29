@@ -297,11 +297,11 @@ class MetadataService:
             keep: set[str] = set()
             catalog_entries: list[tuple[str, SeriesFacts]] = []
             aborted = False
-            for index, folder in enumerate(folders):
+            for position, folder in enumerate(folders):
                 if self._stopped:
                     aborted = True
                     break
-                if index:
+                if position:
                     # `threading.Lock` has no fairness: releasing and
                     # immediately re-acquiring lets this thread barge past a
                     # parked waiter every time, which re-creates exactly the
