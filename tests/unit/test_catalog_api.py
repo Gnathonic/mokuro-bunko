@@ -22,8 +22,8 @@ def _read_json_response(chunks: list[bytes]) -> dict[str, object]:
     return json.loads(b"".join(chunks).decode("utf-8"))
 
 
-def test_library_marks_ocr_pending(tmp_path: Path) -> None:
-    """Volumes with CBZ and no mokuro sidecar are marked pending."""
+def test_series_endpoint_marks_ocr_pending(tmp_path: Path) -> None:
+    """Volumes with CBZ and no mokuro sidecar are marked pending (series view)."""
     library = tmp_path / "library"
     series = library / "Series A"
     series.mkdir(parents=True)
@@ -38,17 +38,269 @@ def test_library_marks_ocr_pending(tmp_path: Path) -> None:
         enabled=True,
     )
     state, start_response = _start_response_capture()
-    body = _read_json_response(api._list_library(start_response))
+    body = _read_json_response(api._get_series(start_response, "Series A"))
 
     assert state["status"] == "200 OK"
-    series_list = body["series"]
-    assert isinstance(series_list, list)
-    volumes = series_list[0]["volumes"]
-
+    volumes = body["volumes"]
     vol1 = next(v for v in volumes if v["name"] == "vol1")
     vol2 = next(v for v in volumes if v["name"] == "vol2")
     assert vol1["ocr_pending"] is True
     assert vol2["ocr_pending"] is False
+
+
+def test_library_root_is_slim_counts_not_volume_lists(tmp_path: Path) -> None:
+    """The root listing carries per-series counts, never nested volumes —
+    at production scale the nested form was ~3 MB of JSON the root view
+    never rendered (it shows name, cover, count)."""
+    library = tmp_path / "library"
+    series = library / "Series A"
+    series.mkdir(parents=True)
+    (series / "vol1.cbz").write_bytes(b"cbz")
+    (series / "vol2.cbz").write_bytes(b"cbz")
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+    )
+    state, start_response = _start_response_capture()
+    body = _read_json_response(api._list_library(start_response))
+
+    assert state["status"] == "200 OK"
+    entry = body["series"][0]
+    assert entry["volume_count"] == 2
+    assert "volumes" not in entry
+
+
+def test_library_includes_titles_from_series_facts(tmp_path: Path) -> None:
+    from mokuro_bunko.database import Database
+
+    library = tmp_path / "library"
+    (library / "Dr Stone").mkdir(parents=True)
+    (library / "Dr Stone" / "v01.cbz").write_bytes(b"cbz")
+    (library / "Unlinked").mkdir()
+    (library / "Unlinked" / "v01.cbz").write_bytes(b"cbz")
+
+    db = Database(tmp_path / "test.db")
+    db.put_series_facts(
+        {
+            "series_key": "dr stone",
+            "series_title": "Dr Stone",
+            "external_ids": {"anilist": 98416},
+            "titles": {"native": "Dr.STONE", "english": "Dr. Stone"},
+            "synonyms": [],
+            "tag": None,
+            "unit": None,
+            "facts_updated_at": "2026-08-18T19:36:24.324Z",
+            "spine_offset": None,
+            "volume_offsets": {},
+            "updated_by": None,
+            "updated_at": "",
+        }
+    )
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+        database=db,
+    )
+    state, start_response = _start_response_capture()
+    body = _read_json_response(api._list_library(start_response))
+
+    assert state["status"] == "200 OK"
+    by_name = {s["name"]: s for s in body["series"]}
+    assert by_name["Dr Stone"]["titles"] == {"native": "Dr.STONE", "english": "Dr. Stone"}
+    assert "titles" not in by_name["Unlinked"]
+
+
+def test_library_carries_the_user_series_tag(tmp_path: Path) -> None:
+    """The tag rides along so alt-title cards can render "Title (Tag)" —
+    folder names already carry it, so the client only appends it there."""
+    from mokuro_bunko.database import Database
+
+    library = tmp_path / "library"
+    library.mkdir()
+    db = Database(tmp_path / "test.db")
+    db.upsert_catalog_series(
+        {
+            "series_key": "beastars",
+            "folder_name": "BEASTARS [Color]",
+            "cover_path": None,
+            "volume_count": 1,
+            "latest_volume_modified": 0.0,
+            "total_pages": 0,
+            "total_chars": 0,
+        }
+    )
+    db.put_series_facts(
+        {
+            "series_key": "beastars",
+            "series_title": "BEASTARS [Color]",
+            "external_ids": {},
+            "titles": {"native": "BEASTARS"},
+            "synonyms": [],
+            "tag": "[Color]",
+            "unit": None,
+            "facts_updated_at": "2026-08-18T19:36:24.324Z",
+            "spine_offset": None,
+            "volume_offsets": {},
+            "updated_by": None,
+            "updated_at": "",
+        }
+    )
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+        database=db,
+    )
+    _state, start_response = _start_response_capture()
+    body = _read_json_response(api._list_library(start_response))
+
+    entry = body["series"][0]
+    assert entry["tag"] == "[Color]"
+
+
+def test_library_serves_from_the_materialized_table_when_populated(tmp_path: Path) -> None:
+    """Once a pass has materialized `catalog_series`, the listing is a DB read —
+    the filesystem walk never runs on the request path."""
+    from mokuro_bunko.database import Database
+
+    library = tmp_path / "library"
+    library.mkdir()  # deliberately EMPTY: entries must come from the table
+
+    db = Database(tmp_path / "test.db")
+    db.upsert_catalog_series(
+        {
+            "series_key": "dr stone",
+            "folder_name": "Dr Stone",
+            "cover_path": "Dr Stone/v01.webp",
+            "volume_count": 3,
+            "latest_volume_modified": 1_756_400_000.0,
+            "total_pages": 570,
+            "total_chars": 42000,
+        }
+    )
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+        database=db,
+    )
+    state, start_response = _start_response_capture()
+    body = _read_json_response(api._list_library(start_response))
+
+    assert state["status"] == "200 OK"
+    entry = body["series"][0]
+    assert entry["name"] == "Dr Stone"
+    assert entry["cover"] == "Dr Stone/v01.webp"
+    assert entry["volume_count"] == 3
+    assert entry["latest_volume_modified"] == 1_756_400_000.0
+    assert entry["total_pages"] == 570
+    assert entry["total_chars"] == 42000
+
+
+def test_library_joins_community_details(tmp_path: Path) -> None:
+    from mokuro_bunko.database import Database
+
+    library = tmp_path / "library"
+    library.mkdir()
+    db = Database(tmp_path / "test.db")
+    db.upsert_catalog_series(
+        {
+            "series_key": "dr stone",
+            "folder_name": "Dr Stone",
+            "cover_path": None,
+            "volume_count": 1,
+            "latest_volume_modified": 0.0,
+            "total_pages": 0,
+            "total_chars": 0,
+        }
+    )
+    db.upsert_community_details(
+        {
+            "series_key": "dr stone",
+            "score": 82.0,
+            "tags": ["Survival"],
+            "genres": ["Adventure"],
+            "source": "anilist",
+            "fetched_at": "2026-08-28T00:00:00Z",
+        }
+    )
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+        database=db,
+    )
+    state, start_response = _start_response_capture()
+    body = _read_json_response(api._list_library(start_response))
+
+    entry = body["series"][0]
+    assert entry["community"] == {
+        "score": 82.0,
+        "tags": ["Survival"],
+        "genres": ["Adventure"],
+        "source": "anilist",
+    }
+
+
+def test_library_falls_back_to_the_filesystem_when_the_table_is_empty(tmp_path: Path) -> None:
+    from mokuro_bunko.database import Database
+
+    library = tmp_path / "library"
+    series = library / "Series A"
+    series.mkdir(parents=True)
+    (series / "vol1.cbz").write_bytes(b"cbz")
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+        database=Database(tmp_path / "test.db"),  # no pass has run yet
+    )
+    state, start_response = _start_response_capture()
+    body = _read_json_response(api._list_library(start_response))
+
+    assert state["status"] == "200 OK"
+    assert [s["name"] for s in body["series"]] == ["Series A"]
+    assert body["series"][0]["volume_count"] == 1
+
+
+def test_library_gzips_when_the_client_accepts_it(tmp_path: Path) -> None:
+    import gzip as gzip_mod
+
+    library = tmp_path / "library"
+    for i in range(40):  # enough series to clear the compression floor
+        folder = library / f"Series {i:02d}"
+        folder.mkdir(parents=True)
+        (folder / "v01.cbz").write_bytes(b"cbz")
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+    )
+
+    state, start_response = _start_response_capture()
+    chunks = api._list_library(
+        start_response, environ={"HTTP_ACCEPT_ENCODING": "gzip, deflate"}
+    )
+    raw = b"".join(chunks)
+    headers = dict(state["headers"])
+    assert headers.get("Content-Encoding") == "gzip"
+    body = json.loads(gzip_mod.decompress(raw).decode("utf-8"))
+    assert len(body["series"]) == 40
+
+    # Without the header the payload stays identity-encoded.
+    state2, start_response2 = _start_response_capture()
+    plain = b"".join(api._list_library(start_response2, environ={}))
+    assert dict(state2["headers"]).get("Content-Encoding") is None
+    assert json.loads(plain.decode("utf-8"))["series"] == body["series"]
 
 
 def test_series_ignores_sidecar_only_stems(tmp_path: Path) -> None:
@@ -186,38 +438,3 @@ def test_series_active_ocr_volume_clears_pending(tmp_path: Path) -> None:
     assert volume["ocr_progress"]["percent"] == 33
 
 
-def test_library_cache_not_mutated_by_ocr_overlay(tmp_path: Path) -> None:
-    """OCR overlay should not mutate cached library payload between requests."""
-    library = tmp_path / "library"
-    series = library / "Series E"
-    series.mkdir(parents=True)
-    (series / "v01.cbz").write_bytes(b"cbz")
-
-    progress = library.parent / ".ocr-progress.json"
-    progress.write_text(
-        json.dumps({
-            "active": True,
-            "relative_cbz": "Series E/v01.cbz",
-            "percent": 50,
-        }),
-        encoding="utf-8",
-    )
-
-    api = CatalogAPI(
-        app=lambda e, s: [],
-        storage_base_path=str(library),
-        enabled=True,
-    )
-
-    # Prime cache and apply overlay.
-    state1, start_response1 = _start_response_capture()
-    first = _read_json_response(api._list_library(start_response1))
-    assert state1["status"] == "200 OK"
-    assert first["series"][0]["volumes"][0]["ocr_active"] is True
-
-    # Remove progress file, then ensure cached base data isn't stuck active.
-    progress.unlink()
-    state2, start_response2 = _start_response_capture()
-    second = _read_json_response(api._list_library(start_response2))
-    assert state2["status"] == "200 OK"
-    assert second["series"][0]["volumes"][0]["ocr_active"] is False

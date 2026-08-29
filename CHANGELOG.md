@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.3.4] - 2026-08-29
+
+### Fixed
+- **Renames over HTTPS always failed with 502.** The internal nginx overwrote the front proxy's `X-Forwarded-Proto: https` with its own plain-http scheme, so wsgidav's MOVE/COPY destination check ("source and destination must have the same scheme") rejected every rename arriving through a TLS-terminating edge — deterministically, since the deployment's first day. The header now passes through, falling back to the local scheme only for direct connections.
+
+## [0.3.3] - 2026-08-29
+
+### Fixed
+- **Long metadata passes no longer starve the whole server.** A full compile pass held the metadata lock for minutes on a cold library; every incoming `series.json` update parked on it, the worker thread pool jammed, and every request — renames, covers, even OPTIONS — failed at the proxy with 502 until the pass ended (observed live as failing renames and silently dropped link/title edits). The pass now takes the lock per series with an explicit fair handoff, full passes stay mutually exclusive, and an update that still cannot get the lock within 10s is answered `503 Retry-After` instead of pinning a thread. Shutdown aborts a running pass between series instead of waiting out the crawl.
+
+## [0.3.2] - 2026-08-29
+
+### Changed
+- **JSON metadata is gzip-compressed for transport.** `catalog.json` and `series.json` downloads shrink ~10x; the reader refreshes the catalog on every listing by design, so this applies to every refresh. Archives and images are untouched.
+
+## [0.3.1] - 2026-08-29
+
+### Added
+- **Instant enrichment on link.** A metadata update that introduces or changes a series' AniList/MAL id fetches its rating, tags and genres within seconds, instead of waiting for the hourly sweep (which remains the refresh and catch-all).
+
+## [0.3.0] - 2026-08-28
+
+### Added
+- **Catalog page overhaul.** Series cards can render display titles as a language progression — Native (native → romaji → english → folder), English (english → romaji → native → folder), or plain folder names (default: Native) — with the user's series tag appended to alt-title renders ("よつばと！ (HD Scan)"). Sort by A–Z, Newest (latest archive mtime), Wordiest (characters per page), or Rating; filter by genre chips; search matches every title variant, tag and genre. Grid controls hide inside a series view, and backing out restores search, filter and scroll position.
+- **Community enrichment from AniList/MAL.** A background fetcher fills ratings, tags and genres for every series whose client-submitted facts carry an external id: AniList primary (batched GraphQL, no key needed), Jikan for MAL-only links, scores normalized to one 0–100 scale, refreshed weekly. `catalog.enrich_community` (default `true`) switches it off.
+- **Materialized catalog database.** Each series' render-ready row (folder, cover, volume count, latest archive mtime, page/character totals) is kept in a `catalog_series` table, upserted by the same passes that compile metadata and re-synced by a 6-hour periodic full pass. The catalog listing is now a single database read — no filesystem walk on the request path.
+- **Volume uploads trigger recompilation.** Client uploads of volume files (`.cbz`, `.mokuro`, covers) schedule a per-series recompile through the filesystem watcher, so `series.json` and `catalog.json` follow uploads within seconds instead of waiting for a quiet window. Both debounces are capped so a sustained upload stream can no longer starve compilation. Metadata passes log `[METADATA]` fire/done lines.
+- **Crawler opt-out.** Every response carries `X-Robots-Tag: noindex, nofollow`, and `/robots.txt` (served outside auth) disallows all compliant crawlers.
+- **Server-side compilation of the reader's metadata files.** mokuro-bunko now compiles `<Series>/series.json` (v2: series facts plus an index of the series' volumes — uuid, title, page and character counts, mokuro version, spine width, archive size, freshness stamps, shelf offsets) and a root `catalog.json` (name/mapping/search data for every series folder) from the library's own `.mokuro` and `.cbz` files. Both are regenerated when the library changes and served with accurate size/mtime, so clients can cache them; a rebuild that changes nothing rewrites nothing. Character counts are computed with the reader's own counting rules, and volumes with no OCR sidecar are indexed as image-only with the uuid the reader derives for them.
+- **Metadata updates from accounts that cannot write to the library.** A `series.json` PUT is treated as an update REQUEST: the facts fields are validated, merged newest-stamp-wins against the server's store (a factless payload never clears a link unless it is strictly newer — an explicit unlink), and both files are regenerated. Shelf offsets ride along as index data and never move the facts stamp. Repeating an identical update is a no-op, so a client can retry safely.
+- **Cover sidecars are generated even when OCR is disabled** (`backend: skip`), since the reader now installs them onto volumes it has not downloaded.
+- **Freshness stamps on each volume entry.** `series.json` volume entries optionally carry `mokuro_size`/`mokuro_modified` and `cover_size`/`cover_modified` — integer byte sizes and integer epoch seconds from a plain `stat()` of the `.mokuro` sidecar and the cover `.webp`, omitted (not `null`) when either doesn't exist. Clients use these to detect a stale local copy without downloading anything: a size mismatch, or a strictly newer `_modified` than what they have stored, means re-fetch.
+- **`/login/api/me` reports metadata write scope.** `permissions.metadata` is `all`, `owned` (with an `ownedSeries` list), or `none`, so the reader can show only the series.json edits an account may actually submit.
+
+### Fixed
+- **Metadata updates for non-ASCII series titles were always rejected.** PEP 3333 delivers `PATH_INFO` latin-1-encoded and wsgidav re-encodes it only inside the DAV app, beneath the interception middleware — which parsed the mojibake spelling, failed folder resolution, and answered 400 for every Japanese-titled `series.json` PUT (observed: 102 rejections in one upload session, with clients retrying up to 23 times per series). The middleware now applies the same re-encode to its own copy of the path.
+- **Sidecar uploads no longer create volume ownership.** A cover/mokuro PUT onto an untracked volume (legacy content, or anything predating ownership tracking) used to insert an ownership row — a blind sidecar backfill could hand an uploader edit and delete rights over series they never made. Ownership now comes only from uploading the archive.
+- **Catalog listing payload cut ~40×.** The root listing no longer nests every volume of every series (~3 MB of JSON at 1,000-series scale that the grid never rendered) and JSON API responses gzip when the client accepts it.
+
+### Changed
+- Compiled metadata files are owned by the server: `catalog.json` cannot be written by any account, and neither compiled file can be deleted, moved or copied. Rejections are ordinary 403s — a client that treats metadata writes as best-effort keeps full read/write access to everything else.
+- **Cache-Control on cover and page image responses.** Image GETs now send `Cache-Control: private, max-age=86400`, letting browsers cache them instead of re-fetching on every page turn; `series.json`/`catalog.json` keep `no-store`.
+
 ## [0.2.0] - 2026-07-11
 
 ### Fixed
@@ -16,6 +59,7 @@
 - **Queue page shows failures.** New "Failed" section listing each failing volume with its error, attempt count, and log path; failed volumes no longer masquerade as "pending". `/queue/api/status` gains a `failed` array.
 - `/api/health` gains an `ocr` section: backend, worker liveness (heartbeat file), pending and failed counts.
 - `docs/troubleshooting.md`; README quick-start rewritten around the new install paths.
+
 ## [0.1.8] - 2026-07-08
 
 ### Fixed

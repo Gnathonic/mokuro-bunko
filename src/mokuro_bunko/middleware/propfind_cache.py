@@ -46,6 +46,7 @@ class PropfindCacheMiddleware:
         self._lock = threading.Lock()
         self._refreshing: set[str] = set()
         self._debounce_timer: threading.Timer | None = None
+        self._stopped = False
 
     def __call__(
         self,
@@ -404,8 +405,19 @@ class PropfindCacheMiddleware:
             self._trigger_refresh(key, environ)
 
     def schedule_refresh(self, delay: float = 5.0) -> None:
-        """Debounced refresh: resets the timer on each call, fires after *delay* seconds of quiet."""
+        """Debounced refresh: resets the timer on each call, fires after *delay* seconds of quiet.
+
+        F5 (final review): a no-op after `stop()`. Before this flag, `stop()`
+        could only cancel a timer that already existed AT THAT MOMENT -- a
+        `schedule_refresh` call arriving afterward (a late
+        `MetadataService.on_published` hook firing after the service's own
+        `stop()` has already returned, in particular, since that stop does
+        not wait for a just-finished pass's deferred hook call) armed a
+        fresh timer nothing was left to ever cancel.
+        """
         with self._lock:
+            if self._stopped:
+                return
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
             self._debounce_timer = threading.Timer(delay, self._debounced_fire)
@@ -418,8 +430,9 @@ class PropfindCacheMiddleware:
         self.refresh_all()
 
     def stop(self) -> None:
-        """Cancel any pending debounce timer (for shutdown)."""
+        """Cancel any pending debounce timer (for shutdown) and refuse future ones."""
         with self._lock:
+            self._stopped = True
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
                 self._debounce_timer = None

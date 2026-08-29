@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import click
 
 from mokuro_bunko.config import (
     DynDNSConfig,
+    DynDNSProvider,
     get_default_config_path,
     load_config,
     save_config,
@@ -50,7 +53,7 @@ def dyndns_setup(ctx: click.Context) -> None:
 
     config.dyndns = DynDNSConfig(
         enabled=enabled,
-        provider=provider,
+        provider=cast("DynDNSProvider", provider),
         token=token,
         domain=domain,
         update_url=update_url,

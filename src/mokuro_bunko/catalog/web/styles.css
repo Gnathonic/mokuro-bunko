@@ -50,6 +50,62 @@
     max-width: 400px;
 }
 
+/* Genre filter chips */
+.genre-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 1.25rem;
+}
+
+.genre-chip {
+    background: none;
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    padding: 0.25rem 0.7rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+.genre-chip:hover {
+    color: var(--text-primary);
+    border-color: var(--border-default);
+}
+
+.genre-chip--active {
+    color: var(--text-primary);
+    border-color: var(--border-default);
+    background: var(--bg-subtle, rgba(127, 127, 127, 0.15));
+}
+
+.genre-chip__count {
+    opacity: 0.6;
+}
+
+/* Series title language selector */
+.title-lang-select {
+    /* A solid background matters twice over: `none` let the native option
+       list fall back to white while the options inherited light text —
+       white-on-white. */
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.65rem;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 0.85rem;
+}
+
+.title-lang-select option {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+}
+
+.title-lang-select:hover {
+    border-color: var(--border-default);
+}
+
 /* Reader Settings Button */
 .reader-settings-btn {
     background: none;

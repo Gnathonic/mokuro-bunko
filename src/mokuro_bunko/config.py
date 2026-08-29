@@ -186,6 +186,8 @@ class CatalogConfig:
     enabled: bool = False
     reader_url: str = "https://reader.mokuro.app"
     use_as_homepage: bool = False
+    # Background AniList/MAL enrichment (ratings, tags, genres) for linked series.
+    enrich_community: bool = True
 
 
 @dataclass
@@ -308,6 +310,7 @@ class Config:
                 "enabled": self.catalog.enabled,
                 "reader_url": self.catalog.reader_url,
                 "use_as_homepage": self.catalog.use_as_homepage,
+                "enrich_community": self.catalog.enrich_community,
             },
             "queue": {
                 "show_in_nav": self.queue.show_in_nav,
@@ -428,6 +431,7 @@ _CONFIG_TYPES: dict[str, type] = {
     "catalog.enabled": bool,
     "catalog.reader_url": str,
     "catalog.use_as_homepage": bool,
+    "catalog.enrich_community": bool,
     "queue.show_in_nav": bool,
     "queue.public_access": bool,
     "ocr.backend": str,
