@@ -55,6 +55,20 @@ class StaticMiddleware:
             if filename:
                 return self._serve_static_file(start_response, filename)
 
+        # A bunko instance is a personal library: ask every compliant crawler
+        # to stay out entirely. Served here, outside auth, because crawlers
+        # must be able to read it no matter how registration is configured.
+        if path == "/robots.txt" and method == "GET":
+            body = b"User-agent: *\nDisallow: /\n"
+            start_response(
+                "200 OK",
+                [
+                    ("Content-Type", "text/plain; charset=utf-8"),
+                    ("Content-Length", str(len(body))),
+                ],
+            )
+            return [body]
+
         return self.app(environ, start_response)
 
     def _serve_static_file(

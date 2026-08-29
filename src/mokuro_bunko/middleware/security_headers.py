@@ -29,6 +29,10 @@ _SAFE_HEADERS: list[tuple[str, str]] = [
     ("X-Frame-Options", "DENY"),
     ("Referrer-Policy", "no-referrer"),
     ("X-XSS-Protection", "1; mode=block"),
+    # A bunko instance is a personal library, not a website to index: tell
+    # search engines to keep every page and file out (robots.txt handles the
+    # polite-crawler half; this covers content they already fetched).
+    ("X-Robots-Tag", "noindex, nofollow"),
 ]
 
 # One day: long enough for a real cache hit rate on manga page images and
