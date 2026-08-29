@@ -58,14 +58,36 @@ def _log(message: str) -> None:
     print(f"[COMMUNITY] {message}", file=sys.stderr, flush=True)
 
 
-def _http_json(url: str, json_body: Any = None) -> dict[str, Any]:
-    """POST *json_body* (or GET when None) and parse the JSON response."""
+def _build_request(url: str, json_body: Any = None) -> urllib.request.Request:
+    """The one place request headers are set.
+
+    AniList sits behind Cloudflare, which answers urllib's default
+    `Python-urllib/…` User-Agent with 403 — a real product identity is
+    required (verified live: default UA 403, this UA 200).
+    """
     data = None
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": f"mokuro-bunko/{_version()}",
+    }
     if json_body is not None:
         data = json.dumps(json_body).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(url, data=data, headers=headers)
+    return urllib.request.Request(url, data=data, headers=headers)
+
+
+def _version() -> str:
+    try:
+        import importlib.metadata as metadata
+
+        return metadata.version("mokuro-bunko")
+    except Exception:  # noqa: BLE001 - identity only, any fallback works
+        return "dev"
+
+
+def _http_json(url: str, json_body: Any = None) -> dict[str, Any]:
+    """POST *json_body* (or GET when None) and parse the JSON response."""
+    request = _build_request(url, json_body)
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
