@@ -114,6 +114,55 @@ def test_library_includes_titles_from_series_facts(tmp_path: Path) -> None:
     assert "titles" not in by_name["Unlinked"]
 
 
+def test_library_carries_the_user_series_tag(tmp_path: Path) -> None:
+    """The tag rides along so alt-title cards can render "Title (Tag)" —
+    folder names already carry it, so the client only appends it there."""
+    from mokuro_bunko.database import Database
+
+    library = tmp_path / "library"
+    library.mkdir()
+    db = Database(tmp_path / "test.db")
+    db.upsert_catalog_series(
+        {
+            "series_key": "beastars",
+            "folder_name": "BEASTARS [Color]",
+            "cover_path": None,
+            "volume_count": 1,
+            "latest_volume_modified": 0.0,
+            "total_pages": 0,
+            "total_chars": 0,
+        }
+    )
+    db.put_series_facts(
+        {
+            "series_key": "beastars",
+            "series_title": "BEASTARS [Color]",
+            "external_ids": {},
+            "titles": {"native": "BEASTARS"},
+            "synonyms": [],
+            "tag": "[Color]",
+            "unit": None,
+            "facts_updated_at": "2026-08-18T19:36:24.324Z",
+            "spine_offset": None,
+            "volume_offsets": {},
+            "updated_by": None,
+            "updated_at": "",
+        }
+    )
+
+    api = CatalogAPI(
+        app=lambda e, s: [],
+        storage_base_path=str(library),
+        enabled=True,
+        database=db,
+    )
+    _state, start_response = _start_response_capture()
+    body = _read_json_response(api._list_library(start_response))
+
+    entry = body["series"][0]
+    assert entry["tag"] == "[Color]"
+
+
 def test_library_serves_from_the_materialized_table_when_populated(tmp_path: Path) -> None:
     """Once a pass has materialized `catalog_series`, the listing is a DB read —
     the filesystem walk never runs on the request path."""
