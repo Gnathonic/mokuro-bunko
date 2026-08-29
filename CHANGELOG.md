@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.1] - 2026-08-29
+
+### Added
+- **Instant enrichment on link.** A metadata update that introduces or changes a series' AniList/MAL id fetches its rating, tags and genres within seconds, instead of waiting for the hourly sweep (which remains the refresh and catch-all).
+
 ## [0.3.0] - 2026-08-28
 
 ### Added
