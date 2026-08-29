@@ -15,6 +15,9 @@ let ocrStatus = { active: false };
 let ocrStatusTimer = null;
 let ocrEtaTickTimer = null;
 let lastOcrStatusReceivedAtMs = 0;
+// Root-view state, preserved across a series visit and restored on the way back.
+let rootSearchQuery = '';
+let rootScrollY = 0;
 
 // DOM
 const grid = document.getElementById('catalog-grid');
@@ -99,6 +102,22 @@ function displayTitleForName(name) {
     return entry ? displayTitle(entry) : name;
 }
 
+// --- View-dependent toolbar ------------------------------------------------
+
+// Search, sort and the genre chips act on the SERIES GRID; inside a series
+// they are dead weight, so they hide there (the title-language select stays —
+// it drives the breadcrumb).
+function updateToolbarForView() {
+    const inRoot = currentView === 'root';
+    const searchBar = document.querySelector('.catalog-toolbar .search-bar');
+    if (searchBar) searchBar.style.display = inRoot ? '' : 'none';
+    const sort = document.getElementById('sort-mode');
+    if (sort) sort.style.display = inRoot ? '' : 'none';
+    const chips = document.getElementById('genre-chips');
+    if (chips && !inRoot) chips.style.display = 'none';
+    if (inRoot) renderGenreChips();
+}
+
 // --- Genre filter -----------------------------------------------------------
 
 let activeGenre = null;
@@ -110,6 +129,10 @@ function seriesGenres(s) {
 function renderGenreChips() {
     const host = document.getElementById('genre-chips');
     if (!host) return;
+    if (currentView !== 'root') {
+        host.style.display = 'none';
+        return;
+    }
     const counts = new Map();
     series.forEach(s => seriesGenres(s).forEach(g => counts.set(g, (counts.get(g) || 0) + 1)));
     if (counts.size === 0) {
@@ -245,6 +268,7 @@ async function loadCatalog() {
         if (hashSeries) {
             await openSeries(hashSeries, true);
         } else {
+            updateToolbarForView();
             renderRoot();
         }
         initReaderSettings();
@@ -317,15 +341,17 @@ function filterVolumes(query) {
     renderVolumes();
 }
 
-// Show root view
+// Show root view, restoring the search, active filter and scroll position
+// the user left behind when they opened a series.
 function showRoot(fromPopState) {
     currentView = 'root';
     currentSeries = null;
-    search.value = '';
+    search.value = rootSearchQuery;
     search.placeholder = 'Search library...';
-    filtered = series;
     renderBreadcrumb();
-    renderRoot();
+    updateToolbarForView();
+    filterSeries(rootSearchQuery.toLowerCase().trim());
+    window.scrollTo(0, rootScrollY);
     if (!fromPopState) {
         history.pushState(null, '', '/catalog');
     }
@@ -333,6 +359,10 @@ function showRoot(fromPopState) {
 
 // Open a series
 async function openSeries(seriesName, fromPopState) {
+    if (currentView === 'root') {
+        rootSearchQuery = search.value;
+        rootScrollY = window.scrollY;
+    }
     grid.innerHTML = '<div class="loading">Loading...</div>';
     empty.style.display = 'none';
 
@@ -347,9 +377,9 @@ async function openSeries(seriesName, fromPopState) {
         currentSeries = data;
         currentVolumes = data.volumes || [];
         filteredVolumes = currentVolumes;
-        search.value = '';
-        search.placeholder = 'Search volumes...';
         renderBreadcrumb();
+        updateToolbarForView();
+        window.scrollTo(0, 0);
         renderVolumes();
 
         if (!fromPopState) {
