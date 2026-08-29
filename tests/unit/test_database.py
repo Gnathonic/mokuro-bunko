@@ -445,6 +445,22 @@ class TestAuditAndOwnership:
         assert temp_db.can_user_delete_library_path("alice", "/mokuro-reader/Series/Vol 01.cbz")
         assert not temp_db.can_user_delete_library_path("bob", "/mokuro-reader/Series/Vol 01.cbz")
 
+    def test_a_sidecar_upload_never_creates_ownership(self, temp_db: Database) -> None:
+        """Ownership comes from uploading the ARCHIVE. A sidecar PUT onto an
+        untracked volume (a blind cover/mokuro backfill onto legacy content)
+        must not capture it — that would hand an uploader edit and delete
+        rights over series they never made."""
+        temp_db.record_volume_upload("Legacy/Vol 01.mokuro", "alice")
+        temp_db.record_volume_upload("Legacy/Vol 01.webp", "alice")
+        assert temp_db.get_volume_owner("Legacy/Vol 01.cbz") is None
+        assert temp_db.can_user_edit_series("alice", "Legacy") is False
+
+    def test_a_sidecar_upload_still_stamps_an_owned_volume(self, temp_db: Database) -> None:
+        temp_db.record_volume_upload("Series/Vol 01.cbz", "alice")
+        temp_db.record_volume_upload("Series/Vol 01.webp", "bob")
+        # bob's cover upload does not steal alice's volume
+        assert temp_db.get_volume_owner("Series/Vol 01.cbz") == "alice"
+
     def test_can_user_edit_series_sole_owner(self, temp_db: Database) -> None:
         temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
         temp_db.record_volume_upload("Dr Stone/Volume 02.cbz", "alice")
