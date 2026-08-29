@@ -1121,12 +1121,31 @@ class Database:
         uploader_username: str,
         existed_before: bool = False,
     ) -> None:
-        """Record upload/edit for a volume and preserve original uploader."""
+        """Record upload/edit for a volume and preserve original uploader.
+
+        Only the ARCHIVE establishes ownership: a sidecar path (cover,
+        mokuro) may stamp an existing row's last-modified but never creates
+        one. Otherwise a blind sidecar backfill onto untracked legacy
+        content would capture the volume — and with it, series edit and
+        delete rights the uploader never earned.
+        """
         volume_key = normalize_volume_key_from_library_relative(library_relative_path)
         if volume_key is None:
             return
+        is_archive = library_relative_path.strip("/").lower().endswith(".cbz")
 
         with self._connection() as conn:
+            if not is_archive:
+                conn.execute(
+                    """
+                    UPDATE volume_uploads SET
+                        last_modified_by = ?,
+                        last_modified_at = datetime('now')
+                    WHERE volume_key = ?
+                    """,
+                    (uploader_username, volume_key),
+                )
+                return
             if not existed_before:
                 conn.execute(
                     """
