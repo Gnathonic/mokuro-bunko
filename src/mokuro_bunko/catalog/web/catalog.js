@@ -26,6 +26,7 @@ const headerNav = document.getElementById('header-nav');
 document.addEventListener('DOMContentLoaded', () => {
     updateNav();
     initTitleLang();
+    initSortMode();
     loadCatalog();
     startOcrStatusPolling();
     startEtaTicker();
@@ -98,8 +99,32 @@ function displayTitleForName(name) {
     return entry ? displayTitle(entry) : name;
 }
 
-function sortSeriesByDisplayTitle() {
-    series.sort((a, b) => titleCollator.compare(displayTitle(a), displayTitle(b)));
+// --- Sorting ----------------------------------------------------------------
+
+const SORT_PREF_KEY = 'mokuro_catalog_sort';
+const SORT_MODES = ['title', 'newest', 'densest'];
+
+function getSortPref() {
+    const value = localStorage.getItem(SORT_PREF_KEY);
+    return SORT_MODES.includes(value) ? value : 'title';
+}
+
+function seriesDensity(s) {
+    if (!s.total_pages || !s.total_chars) return 0;
+    return s.total_chars / s.total_pages;
+}
+
+function sortSeries() {
+    const byTitle = (a, b) => titleCollator.compare(displayTitle(a), displayTitle(b));
+    const mode = getSortPref();
+    if (mode === 'newest') {
+        series.sort((a, b) =>
+            ((b.latest_volume_modified || 0) - (a.latest_volume_modified || 0)) || byTitle(a, b));
+    } else if (mode === 'densest') {
+        series.sort((a, b) => (seriesDensity(b) - seriesDensity(a)) || byTitle(a, b));
+    } else {
+        series.sort(byTitle);
+    }
 }
 
 function initTitleLang() {
@@ -110,11 +135,26 @@ function initTitleLang() {
         try {
             localStorage.setItem(TITLE_PREF_KEY, select.value);
         } catch (_) { /* private mode: preference just won't persist */ }
-        sortSeriesByDisplayTitle();
+        sortSeries();
         if (currentView === 'root') {
             filterSeries(search.value.toLowerCase().trim());
         } else {
             renderBreadcrumb();
+        }
+    });
+}
+
+function initSortMode() {
+    const select = document.getElementById('sort-mode');
+    if (!select) return;
+    select.value = getSortPref();
+    select.addEventListener('change', () => {
+        try {
+            localStorage.setItem(SORT_PREF_KEY, select.value);
+        } catch (_) { /* private mode: preference just won't persist */ }
+        sortSeries();
+        if (currentView === 'root') {
+            filterSeries(search.value.toLowerCase().trim());
         }
     });
 }
@@ -160,7 +200,7 @@ async function loadCatalog() {
         const userOverride = localStorage.getItem('mokuro_reader_url');
         readerUrl = userOverride || serverReaderUrl;
         series = data.series || [];
-        sortSeriesByDisplayTitle();
+        sortSeries();
         filtered = series;
         const hashSeries = getSeriesFromHash();
         if (hashSeries) {
