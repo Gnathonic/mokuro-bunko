@@ -30,6 +30,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateNav();
     initTitleLang();
     initSortMode();
+    initDamagedFilter();
     loadCatalog();
     startOcrStatusPolling();
     startEtaTicker();
@@ -137,11 +138,62 @@ function updateToolbarForView() {
     const chips = document.getElementById('genre-chips');
     if (chips && !inRoot) chips.style.display = 'none';
     if (inRoot) renderGenreChips();
+    renderDamagedFilter();
 }
 
 // --- Genre filter -----------------------------------------------------------
 
 let activeGenre = null;
+// Root-view toggle: show only series holding at least one damaged volume.
+let damagedOnly = false;
+
+// --- Damaged volumes -------------------------------------------------------
+
+// A volume is damaged when its `.mokuro` references pages the archive does not
+// contain (bunko compiles the count into series.json using the reader's own
+// matching rules). A volume bunko could not check carries no count at all and
+// is never reported here — "unknown" must not read as "broken".
+function seriesDamagedVolumes(s) {
+    return typeof s.damaged_volumes === 'number' ? s.damaged_volumes : 0;
+}
+
+function seriesMissingPages(s) {
+    return typeof s.missing_pages === 'number' ? s.missing_pages : 0;
+}
+
+function damagedSeriesCount() {
+    return series.filter(s => seriesDamagedVolumes(s) > 0).length;
+}
+
+function plural(count, noun) {
+    return count + ' ' + noun + (count === 1 ? '' : 's');
+}
+
+// The filter only appears when the library actually has damage: an always-on
+// control for a condition nobody has is just noise in the toolbar.
+function renderDamagedFilter() {
+    const host = document.getElementById('catalog-filters');
+    const button = document.getElementById('damaged-filter');
+    if (!host || !button) return;
+    const count = currentView === 'root' ? damagedSeriesCount() : 0;
+    if (count === 0) {
+        host.style.display = 'none';
+        return;
+    }
+    host.style.display = '';
+    button.className = 'genre-chip genre-chip--damage' + (damagedOnly ? ' genre-chip--active' : '');
+    button.innerHTML = '\u26a0 Missing pages <span class="genre-chip__count">' + count + '</span>';
+}
+
+function initDamagedFilter() {
+    const button = document.getElementById('damaged-filter');
+    if (!button) return;
+    button.addEventListener('click', () => {
+        damagedOnly = !damagedOnly;
+        renderDamagedFilter();
+        filterSeries(search.value.toLowerCase().trim());
+    });
+}
 
 function seriesGenres(s) {
     return (s.community && Array.isArray(s.community.genres)) ? s.community.genres : [];
@@ -349,7 +401,8 @@ function filterSeries(query) {
         return seriesGenres(s).some(g => g.toLowerCase().includes(query));
     };
     const matchesGenre = s => !activeGenre || seriesGenres(s).includes(activeGenre);
-    filtered = series.filter(s => matchesQuery(s) && matchesGenre(s));
+    const matchesDamage = s => !damagedOnly || seriesDamagedVolumes(s) > 0;
+    filtered = series.filter(s => matchesQuery(s) && matchesGenre(s) && matchesDamage(s));
     renderRoot();
 }
 
@@ -444,12 +497,19 @@ function renderRoot() {
         const scoreBadge = score !== null
             ? ' · ★ ' + (Math.round(score) / 10).toFixed(1)
             : '';
+        const damagedVolumes = seriesDamagedVolumes(s);
+        const damageBadge = damagedVolumes > 0
+            ? '<span class="volume-card__badge volume-card__badge--damage" title="'
+                + escapeAttr(plural(seriesMissingPages(s), 'page') + ' missing')
+                + '">\u26a0 ' + plural(damagedVolumes, 'volume') + ' incomplete</span>'
+            : '';
 
         return '<div class="volume-card" onclick="openSeries(\'' + escapeAttr(s.name) + '\')">' +
             '<div class="volume-card__cover ' + stackedClass + '">' + coverImg(coverUrl, title) + '</div>' +
             '<div class="volume-card__info">' +
             '<div class="volume-card__title">' + escapeHtml(title) + '</div>' +
             '<div class="volume-card__count">' + volumeCount + ' volume' + (volumeCount !== 1 ? 's' : '') + scoreBadge + '</div>' +
+            damageBadge +
             '</div></div>';
     }).join('');
 }
@@ -488,6 +548,13 @@ function renderVolumes() {
         const pendingBadge = (v.ocr_pending && !isActiveVolume)
             ? '<span class="volume-card__badge">OCR pending</span>'
             : '';
+        const missingPages = typeof v.missing_pages === 'number' ? v.missing_pages : 0;
+        const damageBadge = missingPages > 0
+            ? '<span class="volume-card__badge volume-card__badge--damage" title="'
+                + escapeAttr(missingPages + ' of ' + v.page_count
+                    + ' pages referenced by the .mokuro are not in the archive')
+                + '">\u26a0 ' + plural(missingPages, 'page') + ' missing</span>'
+            : '';
         const progressBadge = isActiveVolume
             ? (() => {
                 const liveEta = getLiveEtaSeconds();
@@ -504,7 +571,7 @@ function renderVolumes() {
             '<div class="volume-card__cover">' + coverImg(coverUrl, v.name) + '</div>' +
             '<div class="volume-card__info">' +
             '<div class="volume-card__title">' + escapeHtml(v.name) + '</div>' +
-            progressBadge + pendingBadge +
+            progressBadge + damageBadge + pendingBadge +
             '</div></div>';
     }).join('');
 }
