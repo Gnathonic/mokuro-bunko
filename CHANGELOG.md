@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.4] - 2026-08-29
+
+### Fixed
+- **Renames over HTTPS always failed with 502.** The internal nginx overwrote the front proxy's `X-Forwarded-Proto: https` with its own plain-http scheme, so wsgidav's MOVE/COPY destination check ("source and destination must have the same scheme") rejected every rename arriving through a TLS-terminating edge — deterministically, since the deployment's first day. The header now passes through, falling back to the local scheme only for direct connections.
+
 ## [0.3.3] - 2026-08-29
 
 ### Fixed
