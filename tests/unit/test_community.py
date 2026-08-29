@@ -159,3 +159,15 @@ class TestFetcher:
         db, fetcher = self._fetcher(tmp_path, http)
         db.put_series_facts(facts_row("alpha", {}))
         assert fetcher.run_once() == 0
+
+
+class TestRequestIdentity:
+    def test_requests_carry_a_product_user_agent(self) -> None:
+        # Cloudflare in front of AniList rejects urllib's default UA with 403.
+        from mokuro_bunko.catalog.community import _build_request
+
+        get = _build_request("https://api.jikan.moe/v4/manga/1")
+        post = _build_request("https://graphql.anilist.co", json_body={"query": "q"})
+        for request in (get, post):
+            agent = request.get_header("User-agent", "")
+            assert agent.startswith("mokuro-bunko/")
