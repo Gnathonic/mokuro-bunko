@@ -17,8 +17,9 @@ import sys
 import threading
 import time
 import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, cast
 
 from mokuro_bunko.database import CommunityDetailsRow, Database
 
@@ -89,7 +90,7 @@ def _http_json(url: str, json_body: Any = None) -> dict[str, Any]:
     """POST *json_body* (or GET when None) and parse the JSON response."""
     request = _build_request(url, json_body)
     with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+        return cast("dict[str, Any]", json.loads(response.read().decode("utf-8")))
 
 
 def normalize_anilist(media: dict[str, Any]) -> Normalized:

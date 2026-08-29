@@ -167,7 +167,7 @@ class CatalogAPI:
             # filesystem walk on the request thread. Passes keep it fresh.
             community_by_key = self._community_by_series_key()
             for row in rows:
-                series_info = {
+                series_info: dict[str, Any] = {
                     "name": row["folder_name"],
                     "path": row["folder_name"],
                     "cover": row["cover_path"],
