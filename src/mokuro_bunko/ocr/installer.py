@@ -28,6 +28,21 @@ class OCRBackend(Enum):
     SKIP = "skip"
 
 
+# Packages installed alongside mokuro into the OCR environment.
+#
+# transformers is pinned below 5.x: manga-ocr's `kha-white/manga-ocr-base`
+# tokenizer cannot be instantiated by the transformers 5.x tokenizer backend
+# (fails with "Couldn't instantiate the backend tokenizer"), and mokuro
+# swallows the per-volume error, so an unpinned install silently produces
+# thumbnails but no .mokuro files. sentencepiece is required by the
+# slow-to-fast tokenizer conversion path.
+MOKURO_INSTALL_PACKAGES: list[str] = [
+    "mokuro",
+    "transformers>=4.25,<5",
+    "sentencepiece",
+]
+
+
 # Map system ROCm major.minor to the best PyTorch wheel channel.
 # Falls back to the latest known channel if no exact match is found.
 _ROCM_WHEEL_CHANNELS: dict[str, str] = {
@@ -467,6 +482,10 @@ else:
     def install_mokuro(self) -> bool:
         """Install Mokuro and its dependencies.
 
+        Installs mokuro together with a version-pinned tokenizer stack
+        (see MOKURO_INSTALL_PACKAGES) so the OCR environment works out of
+        the box.
+
         Returns:
             True if installation succeeded.
         """
@@ -476,7 +495,7 @@ else:
             return False
 
         self._log("Installing Mokuro...")
-        cmd = [str(pip_path), "install", "mokuro"]
+        cmd = [str(pip_path), "install", *MOKURO_INSTALL_PACKAGES]
         return self._run_pip(cmd)
 
     def install(
@@ -516,8 +535,98 @@ else:
         if not self.install_mokuro():
             return False
 
+        # Smoke-test the environment so a broken install is caught here,
+        # loudly, instead of failing silently at OCR time.
+        ok, problems = self.verify_installation()
+        if not ok:
+            self._log("OCR environment verification FAILED:")
+            for problem in problems:
+                self._log(f"  - {problem}")
+            return False
+        for line in problems:
+            self._log(f"  {line}")
+
         self._log("OCR installation complete!")
         return True
+
+    # Snippet run inside the OCR env to validate the installed stack.
+    # Import-only (no model downloads). Prints one line per check;
+    # lines starting with "PROBLEM:" indicate failures.
+    _VERIFY_SNIPPET = """
+import importlib.metadata as md
+
+problems = []
+
+try:
+    import torch
+    line = f"torch {torch.__version__}, cuda available: {torch.cuda.is_available()}"
+    if torch.cuda.is_available():
+        line += f" ({torch.cuda.get_device_name(0)})"
+    print(line)
+except Exception as e:
+    problems.append(f"torch import failed: {e}")
+
+try:
+    version = md.version("transformers")
+    major = int(version.split(".")[0])
+    print(f"transformers {version}")
+    if major >= 5:
+        problems.append(
+            f"transformers {version} is incompatible with manga-ocr "
+            "(needs >=4.25,<5); reinstall with: mokuro-bunko install-ocr --force"
+        )
+except Exception as e:
+    problems.append(f"transformers check failed: {e}")
+
+for module in ("sentencepiece", "manga_ocr", "mokuro"):
+    try:
+        __import__(module)
+        print(f"{module} ok")
+    except Exception as e:
+        problems.append(f"{module} import failed: {e}")
+
+for problem in problems:
+    print(f"PROBLEM: {problem}")
+"""
+
+    def verify_installation(self) -> tuple[bool, list[str]]:
+        """Smoke-test the OCR environment without downloading models.
+
+        Imports the critical packages inside the OCR env and checks the
+        transformers version pin that manga-ocr requires.
+
+        Returns:
+            Tuple of (ok, lines). When ok is True, lines are informational
+            (installed versions, CUDA availability). When ok is False,
+            lines describe the problems found.
+        """
+        python_path = self._get_python_path()
+        if not python_path.exists():
+            return False, ["OCR environment python not found"]
+
+        try:
+            result = subprocess.run(
+                [str(python_path), "-c", self._VERIFY_SNIPPET],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+            return False, [f"verification subprocess failed: {e}"]
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            return False, [f"verification crashed: {detail[:500]}"]
+
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        problems = [line[len("PROBLEM: "):] for line in lines if line.startswith("PROBLEM: ")]
+        info = [line for line in lines if not line.startswith("PROBLEM: ")]
+
+        if problems:
+            return False, problems
+        return True, info
 
     def install_with_fallback(
         self,
