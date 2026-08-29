@@ -151,23 +151,44 @@ class CommunityFetcher:
         self._poll_seconds = poll_seconds
         self._request_gap = request_gap_seconds
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
+        self._nudge_lock = threading.Lock()
+        self._nudged: set[str] = set()
         self._thread: threading.Thread | None = None
 
     # --- candidates ------------------------------------------------------
 
-    def _candidates(self) -> tuple[dict[str, int], dict[str, int]]:
+    def request_fetch(self, series_key: str) -> None:
+        """Nudge: fetch this series' details soon, freshness be damned.
+
+        Called when a client's metadata PUT introduces or changes an external
+        id — the existing row (if any) may describe the OLD link, so the
+        7-day freshness window must not defer the correction. Thread-safe;
+        wakes the loop immediately, including during its start-up delay.
+        """
+        with self._nudge_lock:
+            self._nudged.add(series_key)
+        self._wake_event.set()
+
+    def _candidates(
+        self, only: set[str] | None = None, force: bool = False
+    ) -> tuple[dict[str, int], dict[str, int]]:
         """(anilist-linked, mal-only) series needing a fetch, key → external id."""
         now = datetime.now(timezone.utc)
-        fresh = {
-            row["series_key"]
-            for row in self.database.list_community_details()
-            if _is_fresh(row["fetched_at"], now)
-        }
+        fresh = (
+            set()
+            if force
+            else {
+                row["series_key"]
+                for row in self.database.list_community_details()
+                if _is_fresh(row["fetched_at"], now)
+            }
+        )
         anilist: dict[str, int] = {}
         mal_only: dict[str, int] = {}
         for facts in self.database.list_series_facts():
             key = facts["series_key"]
-            if key in fresh:
+            if key in fresh or (only is not None and key not in only):
                 continue
             ids = facts["external_ids"] or {}
             anilist_id = ids.get("anilist")
@@ -180,13 +201,15 @@ class CommunityFetcher:
 
     # --- one cycle -------------------------------------------------------
 
-    def run_once(self) -> int:
+    def run_once(self, only: set[str] | None = None, force: bool = False) -> int:
         """Fetch and store details for every stale/missing linked series.
 
+        `only` restricts the cycle to those series keys; `force` ignores the
+        freshness window (both together = a nudge's targeted mini-cycle).
         Returns the number of series updated. Network errors skip the batch
         or series and leave it for the next cycle.
         """
-        anilist, mal_only = self._candidates()
+        anilist, mal_only = self._candidates(only=only, force=force)
         updated = 0
 
         keys_by_id = {media_id: key for key, media_id in anilist.items()}
@@ -262,20 +285,34 @@ class CommunityFetcher:
         self._thread.start()
 
     def _loop(self) -> None:
-        # First cycle runs shortly after startup, once the initial metadata
-        # pass has had a chance to land client facts.
-        if self._stop_event.wait(60.0):
-            return
-        while not self._stop_event.is_set():
+        # The first FULL cycle waits for startup to settle (the initial
+        # metadata pass needs a chance to land client facts), but a nudge is
+        # served the moment it arrives — including during that delay.
+        next_full = time.monotonic() + 60.0
+        while True:
+            timeout = max(0.0, next_full - time.monotonic())
+            woke = self._wake_event.wait(timeout=timeout)
+            if self._stop_event.is_set():
+                return
+            if woke:
+                self._wake_event.clear()
+                with self._nudge_lock:
+                    keys, self._nudged = self._nudged, set()
+                if keys:
+                    try:
+                        self.run_once(only=keys, force=True)
+                    except Exception as error:  # noqa: BLE001 - the loop must survive
+                        _log(f"nudge cycle failed: {error}")
+                continue
             try:
                 self.run_once()
             except Exception as error:  # noqa: BLE001 - the loop must survive
                 _log(f"cycle failed: {error}")
-            if self._stop_event.wait(self._poll_seconds):
-                return
+            next_full = time.monotonic() + self._poll_seconds
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._wake_event.set()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None

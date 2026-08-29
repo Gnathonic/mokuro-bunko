@@ -85,6 +85,10 @@ class MetadataService:
         # this many seconds past its first scheduling; then it fires anyway.
         self.max_debounce_seconds = max_debounce_seconds
         self._on_published = on_published
+        #: Fired (outside `_pass_lock`, like `on_published`) with the series
+        #: key when an accepted update INTRODUCES or CHANGES external ids —
+        #: the community fetcher's nudge seam. Assigned post-construction.
+        self.on_external_ids_changed: Callable[[str], None] | None = None
         self._pass_lock = threading.Lock()
         self._timer_lock = threading.Lock()
         self._timer: threading.Timer | None = None
@@ -446,12 +450,17 @@ class MetadataService:
             return False
 
         changed = 0
+        ids_changed = False
         with self._pass_lock:
             resolved_title = self._resolve_folder_title(series_key)
             if resolved_title is None:
                 return False
             stored = self._stored(series_key)
             result = merge_series_update(stored, update)
+            ids_before = dict(stored.facts.external_ids) if stored is not None else {}
+            ids_after = dict(result.facts.external_ids)
+            # An unlink (ids emptied) is not a nudge: nothing left to fetch.
+            ids_changed = bool(ids_after) and ids_after != ids_before
             if stored is None or result.changed:
                 self.database.put_series_facts(
                     SeriesFactsRow(
@@ -476,6 +485,8 @@ class MetadataService:
                 # as a failure just because publishing itself blew up.
                 _log(f"republish failed after an accepted update: {error}")
                 self.schedule_regeneration(delay=5.0)
+        if ids_changed and self.on_external_ids_changed is not None:
+            self.on_external_ids_changed(series_key)
         # Outside `_pass_lock` (matching `regenerate_all`/`regenerate_series`)
         # AND outside the `try/except` above: a hook that re-enters the
         # service (another regeneration, `stop()`) must not deadlock on the

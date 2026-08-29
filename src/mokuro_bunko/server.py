@@ -360,6 +360,10 @@ def create_app(
     # genres) — feeds the catalog's rating sort and tag filters.
     if config.catalog.enabled and config.catalog.enrich_community:
         community_fetcher = CommunityFetcher(database)
+        # A metadata PUT that introduces/changes an external id fetches that
+        # series' details within seconds instead of waiting for the hourly
+        # sweep (which stays as the refresh/catch-all).
+        metadata_service.on_external_ids_changed = community_fetcher.request_fetch
         community_fetcher.start()
         app._community_fetcher = community_fetcher  # type: ignore[attr-defined]
 
