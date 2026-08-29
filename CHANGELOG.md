@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.2] - 2026-08-29
+
+### Changed
+- **JSON metadata is gzip-compressed for transport.** `catalog.json` and `series.json` downloads shrink ~10x; the reader refreshes the catalog on every listing by design, so this applies to every refresh. Archives and images are untouched.
+
 ## [0.3.1] - 2026-08-29
 
 ### Added

@@ -39,6 +39,19 @@ http {
     tcp_nodelay on;
     keepalive_timeout 65;
 
+    # Compress JSON metadata on the fly. The reader re-downloads catalog.json
+    # on every listing refresh by design (the heal-by-review contract), so the
+    # ~10x gzip saving applies on every refresh for every client. Applies to
+    # both the proxied path (gzip_proxied any: Python-served JSON) and the
+    # X-Accel internal location (mime.types maps .json -> application/json).
+    # Archives and images stay untouched: gzip_types lists JSON only.
+    gzip on;
+    gzip_types application/json;
+    gzip_min_length 1024;
+    gzip_comp_level 5;
+    gzip_vary on;
+    gzip_proxied any;
+
     # Temp paths writable by the non-root container user.
     client_body_temp_path /tmp/nginx-client-body;
     proxy_temp_path /tmp/nginx-proxy;
