@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import urllib.parse
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
+from mokuro_bunko.database import Database
 from mokuro_bunko.library_index import LibraryIndexCache
+from mokuro_bunko.metadata.reader_compat import normalize_volume_title_key
 from mokuro_bunko.security import is_within_path
+
+#: Bodies below this stay identity-encoded: gzip overhead beats the savings.
+_GZIP_MIN_BYTES = 512
 
 # Static files directory
 STATIC_DIR = Path(__file__).parent / "web"
@@ -37,6 +43,7 @@ class CatalogAPI:
         enabled: bool = False,
         catalog_config: Any = None,
         library_index: LibraryIndexCache | None = None,
+        database: Database | None = None,
     ) -> None:
         """Initialize catalog API middleware.
 
@@ -45,8 +52,10 @@ class CatalogAPI:
             storage_base_path: Base path for library storage.
             enabled: Whether the catalog is enabled.
             catalog_config: Live CatalogConfig reference for runtime toggling.
+            database: Source of merged series facts (display titles).
         """
         self.app = app
+        self._database = database
         self.storage_base_path = Path(storage_base_path) if storage_base_path else None
         self._enabled = enabled
         self._catalog_config = catalog_config
@@ -97,7 +106,7 @@ class CatalogAPI:
     ) -> Iterable[bytes]:
         """Handle API requests."""
         if path == "/catalog/api/library" and method == "GET":
-            return self._list_library(start_response)
+            return self._list_library(start_response, environ=environ)
         elif path == "/catalog/api/config" and method == "GET":
             return self._get_config(start_response)
         elif path == "/catalog/api/ocr-status" and method == "GET":
@@ -137,34 +146,98 @@ class CatalogAPI:
             reader_url = self._catalog_config.reader_url
         return self._json_response(start_response, 200, {"reader_url": reader_url})
 
-    def _list_library(self, start_response: Callable[..., Any]) -> list[bytes]:
-        """List all series in the library."""
-        if self._library_index is None:
-            return self._json_response(start_response, 200, {"series": []})
+    def _list_library(
+        self,
+        start_response: Callable[..., Any],
+        environ: dict[str, Any] | None = None,
+    ) -> list[bytes]:
+        """List all series in the library — the root view's one payload.
 
-        snapshot = self._library_index.get_snapshot()
+        Slim by design: name, cover, count, and display titles. The nested
+        per-volume form lives on the series endpoint; carrying it here made
+        the root response ~10x larger than anything the grid renders (about
+        3 MB of JSON on a 1,000-series library).
+        """
+        facts_by_key = self._display_facts_by_series_key()
         series_list: list[dict[str, Any]] = []
-        for series in snapshot.series:
-            series_info: dict[str, Any] = {
-                "name": series.name,
-                "path": series.name,
-                "cover": series.cover,
-                "volumes": [],
-            }
-            for volume in series.volumes:
-                vol_info: dict[str, Any] = {
-                    "name": volume.name,
-                    "ocr_pending": volume.has_cbz and not volume.has_mokuro and not volume.has_mokuro_gz,
-                    "ocr_active": False,
-                }
-                if volume.cover is not None:
-                    vol_info["cover"] = volume.cover
-                series_info["volumes"].append(vol_info)
-            series_list.append(series_info)
 
-        data: dict[str, Any] = {"series": series_list}
-        data = self._patch_ocr_progress(data)
-        return self._json_response(start_response, 200, data)
+        rows = self._database.list_catalog_series() if self._database is not None else []
+        if rows:
+            # The materialized table is the fast path: one DB read, no
+            # filesystem walk on the request thread. Passes keep it fresh.
+            community_by_key = self._community_by_series_key()
+            for row in rows:
+                series_info: dict[str, Any] = {
+                    "name": row["folder_name"],
+                    "path": row["folder_name"],
+                    "cover": row["cover_path"],
+                    "volume_count": row["volume_count"],
+                    "latest_volume_modified": row["latest_volume_modified"],
+                    "total_pages": row["total_pages"],
+                    "total_chars": row["total_chars"],
+                }
+                series_info.update(facts_by_key.get(row["series_key"], {}))
+                community = community_by_key.get(row["series_key"])
+                if community:
+                    series_info["community"] = community
+                series_list.append(series_info)
+        elif self._library_index is not None:
+            # Empty table (first boot, before the startup pass): fall back to
+            # the scanning index so the catalog is never blank.
+            snapshot = self._library_index.get_snapshot()
+            for series in snapshot.series:
+                series_info = {
+                    "name": series.name,
+                    "path": series.name,
+                    "cover": series.cover,
+                    "volume_count": len(series.volumes),
+                }
+                series_info.update(
+                    facts_by_key.get(normalize_volume_title_key(series.name), {})
+                )
+                series_list.append(series_info)
+
+        return self._json_response(
+            start_response, 200, {"series": series_list}, environ=environ
+        )
+
+    def _community_by_series_key(self) -> dict[str, dict[str, Any]]:
+        """Fetched community details per series key, one DB read."""
+        if self._database is None:
+            return {}
+        try:
+            rows = self._database.list_community_details()
+        except Exception:  # noqa: BLE001 - the catalog renders without them
+            return {}
+        return {
+            row["series_key"]: {
+                "score": row["score"],
+                "tags": row["tags"],
+                "genres": row["genres"],
+                "source": row["source"],
+            }
+            for row in rows
+        }
+
+    def _display_facts_by_series_key(self) -> dict[str, dict[str, Any]]:
+        """Display titles + the user's series tag per identity key, one DB read."""
+        if self._database is None:
+            return {}
+        try:
+            rows = self._database.list_series_facts()
+        except Exception:  # noqa: BLE001 - the catalog renders without titles
+            return {}
+        facts: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entry: dict[str, Any] = {}
+            if isinstance(row.get("titles"), dict) and row["titles"]:
+                entry["titles"] = row["titles"]
+            tag = row.get("tag")
+            if isinstance(tag, str) and tag.strip():
+                entry["tag"] = tag
+            if entry:
+                facts[row["series_key"]] = entry
+        return facts
 
     def _get_series(self, start_response: Callable[..., Any], series_name: str) -> list[bytes]:
         """Get volumes for a specific series."""
@@ -285,40 +358,6 @@ class CatalogAPI:
             "total_pages": progress.get("total_pages"),
         }
 
-    def _patch_ocr_progress(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Overlay live OCR progress without mutating cached base data."""
-        progress = self._read_ocr_progress()
-        if not progress:
-            return data
-        relative_cbz = progress.get("relative_cbz")
-        if not isinstance(relative_cbz, str):
-            return data
-        series_list = data.get("series", [])
-        if not isinstance(series_list, list):
-            return data
-        for series_idx, series in enumerate(series_list):
-            volumes = series.get("volumes", [])
-            if not isinstance(volumes, list):
-                continue
-            for vol_idx, vol in enumerate(volumes):
-                expected = f"{series['name']}/{vol['name']}.cbz"
-                if relative_cbz.casefold() == expected.casefold():
-                    # Copy only along the path that changes to keep cache hits cheap.
-                    out = dict(data)
-                    out_series = list(series_list)
-                    out["series"] = out_series
-                    out_series_item = dict(series)
-                    out_series[series_idx] = out_series_item
-                    out_volumes = list(volumes)
-                    out_series_item["volumes"] = out_volumes
-                    out_volume = dict(vol)
-                    out_volumes[vol_idx] = out_volume
-                    out_volume["ocr_active"] = True
-                    out_volume["ocr_pending"] = False
-                    out_volume["ocr_progress"] = self._volume_progress(progress)
-                    return out
-        return data
-
     def _serve_static(self, start_response: Callable[..., Any], filename: str) -> list[bytes]:
         """Serve static files."""
         if not filename or filename == "/":
@@ -353,12 +392,22 @@ class CatalogAPI:
         start_response: Callable[..., Any],
         status_code: int,
         data: dict[str, Any],
+        environ: dict[str, Any] | None = None,
     ) -> list[bytes]:
-        """Return a JSON response."""
+        """Return a JSON response, gzipped when the client accepts it."""
         status_map = {200: "OK", 404: "Not Found", 500: "Internal Server Error"}
         status = f"{status_code} {status_map.get(status_code, 'Error')}"
         body = json.dumps(data).encode("utf-8")
-        headers = [
+        encoding_headers: list[tuple[str, str]] = []
+        if environ is not None and len(body) >= _GZIP_MIN_BYTES:
+            accepted = environ.get("HTTP_ACCEPT_ENCODING", "")
+            if "gzip" in accepted.lower():
+                body = gzip.compress(body, compresslevel=6)
+                encoding_headers = [
+                    ("Content-Encoding", "gzip"),
+                    ("Vary", "Accept-Encoding"),
+                ]
+        headers = encoding_headers + [
             ("Content-Type", "application/json"),
             ("Content-Length", str(len(body))),
         ]

@@ -15,6 +15,9 @@ let ocrStatus = { active: false };
 let ocrStatusTimer = null;
 let ocrEtaTickTimer = null;
 let lastOcrStatusReceivedAtMs = 0;
+// Root-view state, preserved across a series visit and restored on the way back.
+let rootSearchQuery = '';
+let rootScrollY = 0;
 
 // DOM
 const grid = document.getElementById('catalog-grid');
@@ -25,6 +28,8 @@ const headerNav = document.getElementById('header-nav');
 
 document.addEventListener('DOMContentLoaded', () => {
     updateNav();
+    initTitleLang();
+    initSortMode();
     loadCatalog();
     startOcrStatusPolling();
     startEtaTicker();
@@ -64,6 +69,177 @@ document.addEventListener('DOMContentLoaded', () => {
         openSeries(hashSeries, true);
     });
 });
+
+// --- Series title language -------------------------------------------------
+
+const TITLE_PREF_KEY = 'mokuro_catalog_title_lang';
+// Each option is a progression, not a single language: fall through the chain,
+// ending at the folder name. Default is the Native progression.
+const TITLE_PROGRESSIONS = {
+    native: ['native', 'romaji', 'english'],
+    english: ['english', 'romaji', 'native'],
+    folder: [],
+};
+const titleCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function getTitlePref() {
+    const value = localStorage.getItem(TITLE_PREF_KEY);
+    return Object.prototype.hasOwnProperty.call(TITLE_PROGRESSIONS, value) ? value : 'native';
+}
+
+// Mirrors the reader's tag rules: one pair of surrounding brackets is
+// stripped before wrapping, and the tag is appended ONLY when the base is an
+// alt title — folder names already carry the tag, so appending would double it.
+const BRACKET_PAIRS = [['(', ')'], ['[', ']'], ['（', '）'], ['【', '】']];
+
+function stripOuterBracketPair(value) {
+    for (const [open, close] of BRACKET_PAIRS) {
+        if (value.startsWith(open) && value.endsWith(close) && value.length > open.length) {
+            return value.slice(open.length, value.length - close.length).trim();
+        }
+    }
+    return value;
+}
+
+function withSeriesTag(base, tag) {
+    const raw = (tag || '').trim();
+    if (!raw) return base;
+    const stripped = stripOuterBracketPair(raw);
+    return stripped ? base + ' (' + stripped + ')' : base;
+}
+
+function displayTitle(s) {
+    const chain = TITLE_PROGRESSIONS[getTitlePref()];
+    if (s.titles) {
+        for (const lang of chain) {
+            if (s.titles[lang]) return withSeriesTag(s.titles[lang], s.tag);
+        }
+    }
+    return s.name;
+}
+
+function displayTitleForName(name) {
+    const entry = series.find(s => s.name === name);
+    return entry ? displayTitle(entry) : name;
+}
+
+// --- View-dependent toolbar ------------------------------------------------
+
+// Search, sort and the genre chips act on the SERIES GRID; inside a series
+// they are dead weight, so they hide there (the title-language select stays —
+// it drives the breadcrumb).
+function updateToolbarForView() {
+    const inRoot = currentView === 'root';
+    const searchBar = document.querySelector('.catalog-toolbar .search-bar');
+    if (searchBar) searchBar.style.display = inRoot ? '' : 'none';
+    const sort = document.getElementById('sort-mode');
+    if (sort) sort.style.display = inRoot ? '' : 'none';
+    const chips = document.getElementById('genre-chips');
+    if (chips && !inRoot) chips.style.display = 'none';
+    if (inRoot) renderGenreChips();
+}
+
+// --- Genre filter -----------------------------------------------------------
+
+let activeGenre = null;
+
+function seriesGenres(s) {
+    return (s.community && Array.isArray(s.community.genres)) ? s.community.genres : [];
+}
+
+function renderGenreChips() {
+    const host = document.getElementById('genre-chips');
+    if (!host) return;
+    if (currentView !== 'root') {
+        host.style.display = 'none';
+        return;
+    }
+    const counts = new Map();
+    series.forEach(s => seriesGenres(s).forEach(g => counts.set(g, (counts.get(g) || 0) + 1)));
+    if (counts.size === 0) {
+        host.innerHTML = '';
+        host.style.display = 'none';
+        return;
+    }
+    host.style.display = '';
+    const genres = [...counts.keys()].sort((a, b) => (counts.get(b) - counts.get(a)) || a.localeCompare(b));
+    host.innerHTML = genres.map(g => {
+        const active = g === activeGenre ? ' genre-chip--active' : '';
+        return '<button class="genre-chip' + active + '" data-genre="' + escapeAttr(g) + '">'
+            + escapeHtml(g) + ' <span class="genre-chip__count">' + counts.get(g) + '</span></button>';
+    }).join('');
+    host.querySelectorAll('.genre-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+            const genre = chip.dataset.genre;
+            activeGenre = activeGenre === genre ? null : genre;
+            renderGenreChips();
+            filterSeries(search.value.toLowerCase().trim());
+        });
+    });
+}
+
+// --- Sorting ----------------------------------------------------------------
+
+const SORT_PREF_KEY = 'mokuro_catalog_sort';
+const SORT_MODES = ['title', 'newest', 'densest', 'rating'];
+
+function getSortPref() {
+    const value = localStorage.getItem(SORT_PREF_KEY);
+    return SORT_MODES.includes(value) ? value : 'title';
+}
+
+function seriesDensity(s) {
+    if (!s.total_pages || !s.total_chars) return 0;
+    return s.total_chars / s.total_pages;
+}
+
+function sortSeries() {
+    const byTitle = (a, b) => titleCollator.compare(displayTitle(a), displayTitle(b));
+    const mode = getSortPref();
+    if (mode === 'newest') {
+        series.sort((a, b) =>
+            ((b.latest_volume_modified || 0) - (a.latest_volume_modified || 0)) || byTitle(a, b));
+    } else if (mode === 'rating') {
+        const score = s => (s.community && typeof s.community.score === 'number') ? s.community.score : -1;
+        series.sort((a, b) => (score(b) - score(a)) || byTitle(a, b));
+    } else if (mode === 'densest') {
+        series.sort((a, b) => (seriesDensity(b) - seriesDensity(a)) || byTitle(a, b));
+    } else {
+        series.sort(byTitle);
+    }
+}
+
+function initTitleLang() {
+    const select = document.getElementById('title-lang');
+    if (!select) return;
+    select.value = getTitlePref();
+    select.addEventListener('change', () => {
+        try {
+            localStorage.setItem(TITLE_PREF_KEY, select.value);
+        } catch (_) { /* private mode: preference just won't persist */ }
+        sortSeries();
+        if (currentView === 'root') {
+            filterSeries(search.value.toLowerCase().trim());
+        } else {
+            renderBreadcrumb();
+        }
+    });
+}
+
+function initSortMode() {
+    const select = document.getElementById('sort-mode');
+    if (!select) return;
+    select.value = getSortPref();
+    select.addEventListener('change', () => {
+        try {
+            localStorage.setItem(SORT_PREF_KEY, select.value);
+        } catch (_) { /* private mode: preference just won't persist */ }
+        sortSeries();
+        if (currentView === 'root') {
+            filterSeries(search.value.toLowerCase().trim());
+        }
+    });
+}
 
 function getSessionUser() {
     const userStr = sessionStorage.getItem('mokuro_user');
@@ -106,11 +282,14 @@ async function loadCatalog() {
         const userOverride = localStorage.getItem('mokuro_reader_url');
         readerUrl = userOverride || serverReaderUrl;
         series = data.series || [];
+        sortSeries();
         filtered = series;
+        renderGenreChips();
         const hashSeries = getSeriesFromHash();
         if (hashSeries) {
             await openSeries(hashSeries, true);
         } else {
+            updateToolbarForView();
             renderRoot();
         }
         initReaderSettings();
@@ -158,13 +337,19 @@ function getSeriesFromHash() {
     }
 }
 
-// Filter series (root view)
+// Filter series (root view) — matches the folder name and every known title
 function filterSeries(query) {
-    if (!query) {
-        filtered = series;
-    } else {
-        filtered = series.filter(s => s.name.toLowerCase().includes(query));
-    }
+    const matchesQuery = s => {
+        if (!query) return true;
+        if (s.name.toLowerCase().includes(query)) return true;
+        if (s.titles && Object.values(s.titles).some(t => String(t).toLowerCase().includes(query))) {
+            return true;
+        }
+        if (s.tag && s.tag.toLowerCase().includes(query)) return true;
+        return seriesGenres(s).some(g => g.toLowerCase().includes(query));
+    };
+    const matchesGenre = s => !activeGenre || seriesGenres(s).includes(activeGenre);
+    filtered = series.filter(s => matchesQuery(s) && matchesGenre(s));
     renderRoot();
 }
 
@@ -178,15 +363,17 @@ function filterVolumes(query) {
     renderVolumes();
 }
 
-// Show root view
+// Show root view, restoring the search, active filter and scroll position
+// the user left behind when they opened a series.
 function showRoot(fromPopState) {
     currentView = 'root';
     currentSeries = null;
-    search.value = '';
+    search.value = rootSearchQuery;
     search.placeholder = 'Search library...';
-    filtered = series;
     renderBreadcrumb();
-    renderRoot();
+    updateToolbarForView();
+    filterSeries(rootSearchQuery.toLowerCase().trim());
+    window.scrollTo(0, rootScrollY);
     if (!fromPopState) {
         history.pushState(null, '', '/catalog');
     }
@@ -194,6 +381,10 @@ function showRoot(fromPopState) {
 
 // Open a series
 async function openSeries(seriesName, fromPopState) {
+    if (currentView === 'root') {
+        rootSearchQuery = search.value;
+        rootScrollY = window.scrollY;
+    }
     grid.innerHTML = '<div class="loading">Loading...</div>';
     empty.style.display = 'none';
 
@@ -208,9 +399,9 @@ async function openSeries(seriesName, fromPopState) {
         currentSeries = data;
         currentVolumes = data.volumes || [];
         filteredVolumes = currentVolumes;
-        search.value = '';
-        search.placeholder = 'Search volumes...';
         renderBreadcrumb();
+        updateToolbarForView();
+        window.scrollTo(0, 0);
         renderVolumes();
 
         if (!fromPopState) {
@@ -230,7 +421,7 @@ function renderBreadcrumb() {
         breadcrumb.innerHTML =
             '<a href="#" class="catalog-breadcrumb__item catalog-breadcrumb__link" onclick="showRoot(); return false;">Catalog</a>' +
             '<span class="catalog-breadcrumb__sep">/</span>' +
-            '<span class="catalog-breadcrumb__item catalog-breadcrumb__item--active">' + escapeHtml(currentSeries.name) + '</span>';
+            '<span class="catalog-breadcrumb__item catalog-breadcrumb__item--active">' + escapeHtml(displayTitleForName(currentSeries.name)) + '</span>';
     }
 }
 
@@ -244,16 +435,21 @@ function renderRoot() {
 
     empty.style.display = 'none';
     grid.innerHTML = filtered.map(s => {
-        const volumeCount = s.volumes ? s.volumes.length : 0;
+        const volumeCount = s.volume_count || 0;
         const hasMultiple = volumeCount > 1;
         const coverUrl = s.cover ? (API_BASE + '/cover?path=' + encodeURIComponent(s.cover)) : null;
         const stackedClass = hasMultiple ? 'volume-card__cover--stacked' : '';
+        const title = displayTitle(s);
+        const score = (s.community && typeof s.community.score === 'number') ? s.community.score : null;
+        const scoreBadge = score !== null
+            ? ' · ★ ' + (Math.round(score) / 10).toFixed(1)
+            : '';
 
         return '<div class="volume-card" onclick="openSeries(\'' + escapeAttr(s.name) + '\')">' +
-            '<div class="volume-card__cover ' + stackedClass + '">' + coverImg(coverUrl, s.name) + '</div>' +
+            '<div class="volume-card__cover ' + stackedClass + '">' + coverImg(coverUrl, title) + '</div>' +
             '<div class="volume-card__info">' +
-            '<div class="volume-card__title">' + escapeHtml(s.name) + '</div>' +
-            '<div class="volume-card__count">' + volumeCount + ' volume' + (volumeCount !== 1 ? 's' : '') + '</div>' +
+            '<div class="volume-card__title">' + escapeHtml(title) + '</div>' +
+            '<div class="volume-card__count">' + volumeCount + ' volume' + (volumeCount !== 1 ? 's' : '') + scoreBadge + '</div>' +
             '</div></div>';
     }).join('');
 }

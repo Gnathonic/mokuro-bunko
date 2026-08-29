@@ -15,8 +15,10 @@ import io
 import os
 import shutil
 import tempfile
+import threading
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
@@ -36,6 +38,90 @@ _NGINX_INTERNAL_PREFIX = "/internal-library/"
 if TYPE_CHECKING:
 
     from mokuro_bunko.database import Database
+
+
+class _PathWriteLocks:
+    """Process-local per-path mutex registry for conflicting write operations.
+
+    A path conflicts with itself and with any ancestor/descendant (so a
+    folder move blocks writes to files inside it, and vice versa). Keys are
+    casefolded resolved parts, matching case-insensitive filesystems.
+    """
+
+    def __init__(self) -> None:
+        self._locks: set[tuple[str, ...]] = set()
+        self._guard = threading.Lock()
+
+    @staticmethod
+    def _parts(path: Path) -> tuple[str, ...]:
+        return tuple(part.casefold() for part in path.resolve().parts)
+
+    @staticmethod
+    def _is_prefix(prefix: tuple[str, ...], full: tuple[str, ...]) -> bool:
+        if len(prefix) > len(full):
+            return False
+        return full[: len(prefix)] == prefix
+
+    @classmethod
+    def _conflicts(cls, current: tuple[str, ...], candidate: tuple[str, ...]) -> bool:
+        return cls._is_prefix(current, candidate) or cls._is_prefix(candidate, current)
+
+    def acquire(self, path: Path, blocking: bool = False) -> bool:
+        key = self._parts(path)
+        if blocking:
+            raise ValueError("blocking path lock acquisition is not supported")
+        with self._guard:
+            for locked in self._locks:
+                if self._conflicts(locked, key):
+                    return False
+            self._locks.add(key)
+            return True
+
+    def release(self, path: Path) -> None:
+        key = self._parts(path)
+        with self._guard:
+            self._locks.discard(key)
+
+
+_PATH_WRITE_LOCKS = _PathWriteLocks()
+
+_LOCKED_MESSAGE = "Resource is locked by another write operation"
+_HTTP_LOCKED = 423
+
+
+def _try_acquire_all(paths: list[Path]) -> list[Path] | None:
+    """Acquire write locks on all paths or none.
+
+    Returns the acquired paths (release in reverse order when done), or None
+    if any acquisition failed (already-acquired ones are rolled back).
+    Deterministic ordering keeps lock acquisition patterns predictable.
+    """
+    ordered = sorted(paths, key=lambda p: str(p.resolve()).casefold())
+    acquired: list[Path] = []
+    for path in ordered:
+        if not _PATH_WRITE_LOCKS.acquire(path):
+            for held in reversed(acquired):
+                _PATH_WRITE_LOCKS.release(held)
+            return None
+        acquired.append(path)
+    return acquired
+
+
+@contextmanager
+def path_write_lock(path: Path) -> Iterator[None]:
+    """Hold the per-path write lock for a non-DAV writer.
+
+    The compiled metadata files are written by the server itself, outside the
+    DAV request path, but they live in the same tree: taking the same lock is
+    what stops a regeneration from interleaving with an upload or a folder
+    MOVE. Raises `DAVError(423)` when the path (or an ancestor) is busy.
+    """
+    if not _PATH_WRITE_LOCKS.acquire(path):
+        raise DAVError(_HTTP_LOCKED, _LOCKED_MESSAGE)
+    try:
+        yield
+    finally:
+        _PATH_WRITE_LOCKS.release(path)
 
 
 class PathMapper:
@@ -259,6 +345,7 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
         self._stat: os.stat_result | None = None
         self._accel_redirect: str | None = None
         self._accel_redirect_computed = False
+        self._active_writer: _LockedWriter | None = None
 
     def _get_database(self) -> Database | None:
         db = self.environ.get("mokuro.db")
@@ -321,6 +408,14 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
             target_path=target_path,
             details=details,
         )
+
+    def _audit_lock_conflict(
+        self, operation: str, *, details: dict[str, Any] | None = None
+    ) -> None:
+        payload: dict[str, Any] = {"operation": operation}
+        if details:
+            payload.update(details)
+        self._audit("lock_conflict", details=payload)
 
     def _on_write_committed(self, existed_before: bool) -> None:
         db = self._get_database()
@@ -481,42 +576,69 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
 
     def begin_write(self, content_type: str | None = None) -> BinaryIO:
         """Begin writing to file, return file object."""
-        existed_before = self.file_path.exists()
-        self.file_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.file_path.suffix.lower() == ".cbz":
-            writer: BinaryIO = cast("BinaryIO", _ValidatedCbzWriter(self.file_path))
-        else:
-            writer = open(self.file_path, "wb")
-        return cast(
-            "BinaryIO",
-            _AuditedWriter(
+        if not _PATH_WRITE_LOCKS.acquire(self.file_path):
+            self._audit_lock_conflict("write")
+            raise DAVError(_HTTP_LOCKED, _LOCKED_MESSAGE)
+
+        try:
+            existed_before = self.file_path.exists()
+            self.file_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.file_path.suffix.lower() == ".cbz":
+                writer: BinaryIO = cast("BinaryIO", _ValidatedCbzWriter(self.file_path))
+            else:
+                writer = cast("BinaryIO", _AtomicFileWriter(self.file_path))
+            audited = _AuditedWriter(
                 writer,
                 on_commit=lambda: self._on_write_committed(existed_before),
-            ),
-        )
+            )
+            locked = _LockedWriter(
+                cast("BinaryIO", audited),
+                on_release=lambda: _PATH_WRITE_LOCKS.release(self.file_path),
+            )
+        except BaseException:
+            _PATH_WRITE_LOCKS.release(self.file_path)
+            raise
+
+        self._active_writer = locked
+        return cast("BinaryIO", locked)
+
+    def end_write(self, *, with_errors: bool) -> None:
+        """Finish a PUT. On error wsgidav never closes the file object, so
+        discard the temp file and release the path lock here."""
+        writer = self._active_writer
+        self._active_writer = None
+        if with_errors and writer is not None:
+            writer.abort()
 
     def delete(self) -> None:
         """Delete the file."""
         if not self.file_path.exists():
             return
 
-        rel = self._relative_under_library()
-        lower = self.file_path.name.lower()
-        if lower.endswith(".cbz"):
-            base = self.file_path.with_suffix("")
-            for suffix in self._VOLUME_SIDECAR_SUFFIXES:
-                sidecar = Path(f"{base}{suffix}")
-                try:
-                    sidecar.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        if not _PATH_WRITE_LOCKS.acquire(self.file_path):
+            self._audit_lock_conflict("delete")
+            raise DAVError(_HTTP_LOCKED, _LOCKED_MESSAGE)
 
-        os.remove(self.file_path)
+        try:
+            rel = self._relative_under_library()
+            lower = self.file_path.name.lower()
+            if lower.endswith(".cbz"):
+                base = self.file_path.with_suffix("")
+                for suffix in self._VOLUME_SIDECAR_SUFFIXES:
+                    sidecar = Path(f"{base}{suffix}")
+                    try:
+                        sidecar.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
-        db = self._get_database()
-        if db is not None and rel is not None and lower.endswith(".cbz"):
-            db.forget_volume_upload(rel)
-        self._audit("delete")
+            os.remove(self.file_path)
+
+            db = self._get_database()
+            if db is not None and rel is not None and lower.endswith(".cbz"):
+                db.forget_volume_upload(rel)
+            self._audit("delete")
+        finally:
+            _PATH_WRITE_LOCKS.release(self.file_path)
 
     def handle_move(self, dest_path: str) -> bool:
         """Handle direct file moves natively without touching sibling sidecars."""
@@ -524,26 +646,35 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
         if dest_physical is None:
             return False
 
-        mapper = self._get_mapper()
-        old_rel = self._relative_under_library()
-        new_rel = None
-        if mapper is not None:
-            try:
-                new_rel = str(
-                    dest_physical.resolve().relative_to(mapper.library_path.resolve())
-                )
-            except ValueError:
-                new_rel = None
+        acquired = _try_acquire_all([self.file_path, dest_physical])
+        if acquired is None:
+            self._audit_lock_conflict("move", details={"destination": dest_path})
+            raise DAVError(_HTTP_LOCKED, _LOCKED_MESSAGE)
 
-        dest_physical.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(self.file_path, dest_physical)
+        try:
+            mapper = self._get_mapper()
+            old_rel = self._relative_under_library()
+            new_rel = None
+            if mapper is not None:
+                try:
+                    new_rel = str(
+                        dest_physical.resolve().relative_to(mapper.library_path.resolve())
+                    )
+                except ValueError:
+                    new_rel = None
 
-        db = self._get_database()
-        if db is not None and old_rel is not None and new_rel is not None:
-            db.rename_volume_upload(old_rel, new_rel)
+            dest_physical.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(self.file_path, dest_physical)
 
-        self._audit("move", details={"destination": dest_path})
-        return True
+            db = self._get_database()
+            if db is not None and old_rel is not None and new_rel is not None:
+                db.rename_volume_upload(old_rel, new_rel)
+
+            self._audit("move", details={"destination": dest_path})
+            return True
+        finally:
+            for path in reversed(acquired):
+                _PATH_WRITE_LOCKS.release(path)
 
     def support_recursive_move(self, dest_path: str) -> bool:
         return False
@@ -557,27 +688,41 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
         mapper = self._get_mapper()
         dest_physical = self._resolve_destination_path(dest_path)
         if mapper is not None and dest_physical is not None:
-            dest_physical.parent.mkdir(parents=True, exist_ok=True)
-            if is_move:
-                os.replace(self.file_path, dest_physical)
-            else:
-                shutil.copy2(self.file_path, dest_physical)
-            db = self._get_database()
-            if db is not None:
-                old_rel = self._relative_under_library()
-                try:
-                    new_rel = str(
-                        dest_physical.resolve().relative_to(mapper.library_path.resolve())
-                    )
-                except ValueError:
-                    new_rel = None
-                if is_move and old_rel is not None and new_rel is not None:
-                    db.rename_volume_upload(old_rel, new_rel)
-            self._audit(
-                "move" if is_move else "copy",
-                details={"destination": dest_path},
-            )
-            return True
+            # A copy only writes the destination; a move also mutates source.
+            lock_paths = [self.file_path, dest_physical] if is_move else [dest_physical]
+            acquired = _try_acquire_all(lock_paths)
+            if acquired is None:
+                self._audit_lock_conflict(
+                    "move" if is_move else "copy",
+                    details={"destination": dest_path},
+                )
+                raise DAVError(_HTTP_LOCKED, _LOCKED_MESSAGE)
+
+            try:
+                dest_physical.parent.mkdir(parents=True, exist_ok=True)
+                if is_move:
+                    os.replace(self.file_path, dest_physical)
+                else:
+                    shutil.copy2(self.file_path, dest_physical)
+                db = self._get_database()
+                if db is not None:
+                    old_rel = self._relative_under_library()
+                    try:
+                        new_rel = str(
+                            dest_physical.resolve().relative_to(mapper.library_path.resolve())
+                        )
+                    except ValueError:
+                        new_rel = None
+                    if is_move and old_rel is not None and new_rel is not None:
+                        db.rename_volume_upload(old_rel, new_rel)
+                self._audit(
+                    "move" if is_move else "copy",
+                    details={"destination": dest_path},
+                )
+                return True
+            finally:
+                for path in reversed(acquired):
+                    _PATH_WRITE_LOCKS.release(path)
         return False
 
 
@@ -666,6 +811,14 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
             target_path=target_path,
             details=details,
         )
+
+    def _audit_lock_conflict(
+        self, operation: str, *, details: dict[str, Any] | None = None
+    ) -> None:
+        payload: dict[str, Any] = {"operation": operation}
+        if details:
+            payload.update(details)
+        self._audit("lock_conflict", details=payload)
 
     def _resolve_member_path(self, name: str) -> Path | None:
         """Resolve a child resource safely under this physical folder."""
@@ -972,45 +1125,65 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
         if dest_physical is None:
             raise DAVError(403, "Forbidden")
 
-        old_rel_prefix = self._relative_under_library()
-        new_rel_prefix = None
+        acquired = _try_acquire_all([self.folder_path, dest_physical])
+        if acquired is None:
+            self._audit_lock_conflict("move", details={"destination": dest_path})
+            raise DAVError(_HTTP_LOCKED, _LOCKED_MESSAGE)
+
         try:
-            new_rel_prefix = str(
-                dest_physical.resolve().relative_to(self.path_mapper.library_path.resolve())
-            )
-        except ValueError:
+            old_rel_prefix = self._relative_under_library()
             new_rel_prefix = None
+            try:
+                new_rel_prefix = str(
+                    dest_physical.resolve().relative_to(self.path_mapper.library_path.resolve())
+                )
+            except ValueError:
+                new_rel_prefix = None
 
-        volume_paths = self._get_library_volume_paths()
-        dest_physical.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(self.folder_path, dest_physical)
+            volume_paths = self._get_library_volume_paths()
+            dest_physical.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(self.folder_path, dest_physical)
 
-        db = self._get_database()
-        if db is not None and old_rel_prefix is not None and new_rel_prefix is not None:
-            for old_rel in volume_paths:
-                suffix = old_rel[len(old_rel_prefix):].lstrip("/")
-                new_rel = f"{new_rel_prefix}/{suffix}" if suffix else new_rel_prefix
-                db.rename_volume_upload(old_rel, new_rel)
+            db = self._get_database()
+            if db is not None and old_rel_prefix is not None and new_rel_prefix is not None:
+                for old_rel in volume_paths:
+                    suffix = old_rel[len(old_rel_prefix):].lstrip("/")
+                    new_rel = f"{new_rel_prefix}/{suffix}" if suffix else new_rel_prefix
+                    db.rename_volume_upload(old_rel, new_rel)
 
-        self._audit("move", details={"destination": dest_path})
-        return []
+            self._audit("move", details={"destination": dest_path})
+            return []
+        finally:
+            for path in reversed(acquired):
+                _PATH_WRITE_LOCKS.release(path)
 
     def delete(self) -> None:
         """Delete this folder."""
         if self.folder_path and self.folder_path.exists():
-            db = self._get_database()
-            rel = self._relative_under_library()
-            if db is not None and rel:
-                db.forget_volume_uploads_under_prefix(rel)
-            shutil.rmtree(self.folder_path)
-            self._audit("delete")
+            if not _PATH_WRITE_LOCKS.acquire(self.folder_path):
+                self._audit_lock_conflict("delete")
+                raise DAVError(_HTTP_LOCKED, _LOCKED_MESSAGE)
+            try:
+                db = self._get_database()
+                rel = self._relative_under_library()
+                if db is not None and rel:
+                    db.forget_volume_uploads_under_prefix(rel)
+                shutil.rmtree(self.folder_path)
+                self._audit("delete")
+            finally:
+                _PATH_WRITE_LOCKS.release(self.folder_path)
 
     def support_recursive_delete(self) -> bool:
         return True
 
 
-class _ValidatedCbzWriter:
-    """Temporary CBZ writer that validates archive integrity before committing."""
+class _AtomicFileWriter:
+    """Temporary file writer that atomically replaces the destination on close.
+
+    An interrupted or aborted upload never leaves a truncated file: bytes go
+    to a temp file in the destination directory and only a successful close()
+    publishes them via os.replace().
+    """
 
     def __init__(self, destination: Path) -> None:
         self.destination = destination
@@ -1049,10 +1222,8 @@ class _ValidatedCbzWriter:
     def closed(self) -> bool:
         return self._closed
 
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+    def _finalize_temp(self) -> None:
+        """Flush and close the temp file handle."""
         try:
             self._file.flush()
             os.fsync(self._file.fileno())
@@ -1061,14 +1232,16 @@ class _ValidatedCbzWriter:
         finally:
             self._file.close()
 
-        if not self._is_valid_cbz(self.temp_path):
+    def _commit(self) -> None:
+        """Atomically publish the temp file to the destination."""
+        try:
+            os.replace(self.temp_path, self.destination)
+        except OSError as e:
             try:
                 self.temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            raise DAVError(400, "Invalid or corrupted CBZ upload")
-
-        os.replace(self.temp_path, self.destination)
+            raise DAVError(500, f"Cannot finalize upload: {e}") from e
         # mkstemp creates with 0o600; apply umask-derived permissions instead.
         # On Windows, umask/chmod have no effect on NTFS permissions.
         if os.name != "nt":
@@ -1076,24 +1249,56 @@ class _ValidatedCbzWriter:
             os.umask(umask)
             os.chmod(self.destination, 0o666 & ~umask)
 
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._finalize_temp()
+        self._commit()
+
+    def abort(self) -> None:
+        """Discard the temp file without touching the destination."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._file.close()
+        finally:
+            try:
+                self.temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def writable(self) -> bool:
         return True
 
-    def __enter__(self) -> _ValidatedCbzWriter:
+    def __enter__(self) -> _AtomicFileWriter:
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         if exc_type is not None:
-            try:
-                self._file.close()
-            finally:
-                try:
-                    self.temp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            self._closed = True
+            self.abort()
             return
         self.close()
+
+
+class _ValidatedCbzWriter(_AtomicFileWriter):
+    """Atomic CBZ writer that validates archive integrity before committing."""
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._finalize_temp()
+
+        if not self._is_valid_cbz(self.temp_path):
+            try:
+                self.temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise DAVError(400, "Invalid or corrupted CBZ upload")
+
+        self._commit()
 
     @staticmethod
     def _is_valid_cbz(path: Path) -> bool:
@@ -1123,6 +1328,15 @@ class _AuditedWriter:
         self._committed = True
         self._on_commit()
 
+    def abort(self) -> None:
+        """Discard the underlying write without committing or auditing."""
+        self._committed = True
+        abort = getattr(self._inner, "abort", None)
+        if abort is not None:
+            abort()
+        else:
+            self._inner.close()
+
     def __enter__(self) -> _AuditedWriter:
         self._inner.__enter__()
         return self
@@ -1132,3 +1346,55 @@ class _AuditedWriter:
             self._inner.__exit__(exc_type, exc, tb)
             return
         self.close()
+
+
+class _LockedWriter:
+    """File wrapper that releases a path lock once the write finishes.
+
+    The lock is released on close() and on abort() — including the abort
+    driven by end_write(with_errors=True), where wsgidav never calls close.
+    """
+
+    def __init__(self, inner: BinaryIO, on_release: Callable[[], None]) -> None:
+        self._inner = inner
+        self._on_release = on_release
+        self._released = False
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._inner, item)
+
+    def _release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._on_release()
+
+    def close(self) -> None:
+        try:
+            self._inner.close()
+        finally:
+            self._release()
+
+    def abort(self) -> None:
+        try:
+            abort = getattr(self._inner, "abort", None)
+            if abort is not None:
+                abort()
+            else:
+                self._inner.close()
+        finally:
+            self._release()
+
+    def __enter__(self) -> _LockedWriter:
+        if hasattr(self._inner, "__enter__"):
+            self._inner.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        try:
+            if hasattr(self._inner, "__exit__"):
+                self._inner.__exit__(exc_type, exc, tb)
+            elif exc_type is None:
+                self._inner.close()
+        finally:
+            self._release()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Generator
 
 import pytest
 from click.testing import CliRunner
@@ -329,7 +328,7 @@ class TestListInvites:
     ) -> None:
         """Test listing shows active invites."""
         code1 = test_db.create_invite(role="registered")
-        code2 = test_db.create_invite(role="uploader")
+        test_db.create_invite(role="uploader")
 
         result = runner.invoke(
             cli,
@@ -370,6 +369,33 @@ class TestDeleteInvite:
         )
         assert result.exit_code == 1
         assert "not found" in result.output
+
+    def test_delete_invite_leading_dash_code(
+        self, runner: CliRunner, test_config: Path, test_db: Database
+    ) -> None:
+        """A leading-dash invite code must not be mistaken for a CLI option.
+
+        `create_invite` no longer generates such codes, but rows written
+        before that fix (or restored from a backup) can still contain one.
+        Forcing a leading dash via a direct DB update pins CLI-layer
+        tolerance independent of the generator fix.
+        """
+        code = test_db.create_invite()
+        dash_code = "-" + code[1:]
+        with test_db._connection() as conn:
+            conn.execute(
+                "UPDATE invites SET code = ? WHERE code = ?", (dash_code, code)
+            )
+
+        result = runner.invoke(
+            cli,
+            ["-c", str(test_config), "admin", "delete-invite", dash_code],
+        )
+        assert result.exit_code == 0
+        assert "deleted" in result.output
+
+        invite = test_db.get_invite(dash_code)
+        assert invite is None
 
 
 class TestApproveUser:

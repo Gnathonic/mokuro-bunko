@@ -1,12 +1,16 @@
-"""SQLite database for user, invite, audit, and upload ownership management."""
+"""SQLite database for user, invite, audit, upload ownership and series metadata."""
 
 from __future__ import annotations
 
+import json
+import math
+import re
 import secrets
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+import unicodedata
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -59,6 +63,81 @@ class AuditEventDict(TypedDict):
     target_username: str | None
     details: str | None
     created_at: str
+
+
+class SeriesFactsRow(TypedDict):
+    """One series' shareable facts plus its shelf alignment (index data).
+
+    `series_key` is the reader's series-identity fold —
+    `metadata.reader_compat.normalize_volume_title_key`: NFC-normalize,
+    THEN trim, collapse whitespace, lowercase (`normalize_series_key`'s
+    three steps applied to the NFC-normalized title, not to the raw one).
+    Task 11 review round 3 corrected this paragraph, which used to say "no
+    NFC pass" — true only before that round's fix; `metadata/service.py`,
+    the sole reader and writer of these rows, keys every `series_facts` row
+    with `normalize_volume_title_key` today, precisely so an NFD-spelled
+    and an NFC-spelled folder name (the common case for a name that
+    round-tripped through a filesystem) collapse onto ONE row instead of
+    silently diverging. It is NOT the case-sensitive matching this module
+    uses for volume keys (`normalize_volume_key_from_library_relative`), so
+    two folders differing only in case (or Unicode composition) share one
+    facts row by design. `database.py` stays free of metadata imports (as
+    it does of API imports), so callers fold the title before calling in;
+    nothing here re-folds what it is handed.
+
+    `facts_updated_at` is the FACTS clock — the value that decides merges. It
+    is not `updated_at`, which is this row's own bookkeeping stamp and moves
+    whenever anything (including an offset) is written. Both are stored as
+    given: the validator has already clamped the facts stamp, and the factless
+    epoch literal must survive unchanged.
+    """
+
+    series_key: str
+    series_title: str
+    external_ids: dict[str, int]
+    titles: dict[str, str]
+    synonyms: list[str]
+    tag: str | None
+    unit: str | None
+    facts_updated_at: str
+    spine_offset: float | None
+    volume_offsets: dict[str, float]
+    updated_by: str | None
+    updated_at: str
+
+
+class CatalogSeriesRow(TypedDict):
+    """One series' render-ready catalog entry, materialized from the library.
+
+    Filesystem-derived only: folder spelling, cover, counts and freshness.
+    Client-merged facts stay in `series_facts` and community details in their
+    own table — this row is rebuilt wholesale by every metadata pass, so
+    anything else stored here would be silently clobbered.
+    """
+
+    series_key: str
+    folder_name: str
+    cover_path: str | None
+    volume_count: int
+    latest_volume_modified: float
+    total_pages: int
+    total_chars: int
+
+
+class CommunityDetailsRow(TypedDict):
+    """Server-fetched community details (AniList/MAL) for one series.
+
+    Separate from `series_facts` (client-merged, client-clocked) and from
+    `catalog_series` (rebuilt wholesale by every pass): this row's lifecycle
+    is the enrichment fetcher's alone, keyed by the same series identity.
+    """
+
+    series_key: str
+    score: float | None
+    tags: list[str]
+    genres: list[str]
+    source: str
+    fetched_at: str
 
 
 def normalize_role(role: str) -> UserRole:
@@ -126,6 +205,61 @@ def normalize_volume_key_from_library_relative(path: str) -> str | None:
     return None
 
 
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _fold_series_title_key(title: str) -> str:
+    """Fold a series folder name for ownership comparison.
+
+    NFC-normalize, then collapse internal whitespace runs and lowercase —
+    exactly the two operations `metadata.reader_compat.normalize_volume_title_key`
+    performs (`normalize_series_key(NFC(title))`, itself mirroring the
+    reader's `normalizeVolumeTitleKey`). `database.py` deliberately stays
+    free of `metadata` package imports (see the `series_facts` layering
+    note elsewhere in this module), so this is an independent
+    reimplementation of the same two operations, not a shared import — if
+    either fold ever changes, the other needs a matching update.
+
+    NFC-first matters on its own: a folder name that round-tripped through a
+    filesystem can come back NFD-decomposed while a PUT's `series.json`
+    path segment stays composed — two byte-different, semantically
+    identical strings that must compare equal here, exactly as the reader
+    already treats them (Task 11 review round 1, F2/F5/F6).
+
+    Review round 2 (N2): an earlier version used `casefold()` here, which
+    is STRICTER than both `normalize_series_key`'s plain `lower()` and the
+    reader's JS `toLowerCase()` (`casefold()` folds `ß`→`ss`; neither of
+    the other two does). That let two folders the catalog compiler treated
+    as different series (`'Straße'` vs `'STRASSE'`) share one ownership
+    fold. Plain `.lower()` fixed the case half.
+
+    Review round 3 (F9 / the N2 residual): round 2's fix here still left a
+    FALSE invariant in this docstring — "must never be coarser than
+    `normalize_series_key`" — while this function's very first line NFC-
+    normalizes and bare `normalize_series_key` does not, so this fold was
+    unconditionally coarser than that one by construction (an NFD/NFC pair
+    folds equal here, unequal there) and the claim was self-contradicting.
+    The actual defect that exposed: `metadata/service.py` used to key
+    `series_facts` rows with bare `normalize_series_key` too, so an
+    NFD-spelled `series.json` PUT for an NFC-spelled real folder folded
+    ownership-equal here while the service treated it as a DIFFERENT,
+    unmatched series — an authorized write that landed on an identity no
+    real folder shared. The fix was on the SERVICE side, not here:
+    `metadata/service.py` now keys `series_facts` rows with
+    `normalize_volume_title_key` (NFC + `normalize_series_key`) everywhere,
+    making THAT the actual system-wide series-identity fold, not bare
+    `normalize_series_key`. Against that corrected baseline, this
+    function's true invariant holds and is stronger than "no coarser than":
+    it is IDENTICAL, step for step, to `normalize_volume_title_key` — this
+    docstring's opening paragraph states the actual operations directly
+    rather than relying on an invariant claim like the one that was wrong
+    here before.
+    """
+    normalized = unicodedata.normalize("NFC", title)
+    collapsed = _WHITESPACE_RUN_RE.sub(" ", normalized.strip())
+    return collapsed.lower()
+
+
 class _RetryingConnection:
     """Connection proxy that retries execute() while the DB is locked.
 
@@ -164,7 +298,7 @@ class _RetryingConnection:
 class Database:
     """SQLite database for user and invite management."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     AUDIT_PRUNE_INTERVAL_SECONDS = 3600
 
     def __init__(self, db_path: Path | str) -> None:
@@ -303,6 +437,69 @@ class Database:
                 )
             """)
 
+            # Schema v3: series facts + the compiled-entry cache. Both are
+            # CREATE TABLE IF NOT EXISTS like everything above, so a v2
+            # database gains them on the next open and a v3 one is untouched.
+            #
+            # `spine_offset` is NUMERIC, not REAL, deliberately: alignment
+            # numbers are preserved verbatim from a client PUT, and REAL
+            # affinity would widen the integer nudge `-40` to `-40.0`, so the
+            # republished bytes would stop matching what the client wrote.
+            # NUMERIC keeps an integer an integer (and folds `8.0` back to `8`,
+            # which is what JSON.stringify writes for that value anyway).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS series_facts (
+                    series_key TEXT PRIMARY KEY,
+                    series_title TEXT NOT NULL,
+                    external_ids TEXT NOT NULL DEFAULT '{}',
+                    titles TEXT NOT NULL DEFAULT '{}',
+                    synonyms TEXT NOT NULL DEFAULT '[]',
+                    tag TEXT,
+                    unit TEXT,
+                    facts_updated_at TEXT NOT NULL,
+                    spine_offset NUMERIC,
+                    volume_offsets TEXT NOT NULL DEFAULT '{}',
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS series_entry_cache (
+                    volume_key TEXT PRIMARY KEY,
+                    series_key TEXT NOT NULL,
+                    entry_json TEXT NOT NULL,
+                    cbz_size INTEGER NOT NULL,
+                    cbz_mtime REAL NOT NULL,
+                    sidecar_key TEXT NOT NULL DEFAULT '',
+                    computed_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS community_details (
+                    series_key TEXT PRIMARY KEY,
+                    score REAL,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    genres TEXT NOT NULL DEFAULT '[]',
+                    source TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS catalog_series (
+                    series_key TEXT PRIMARY KEY,
+                    folder_name TEXT NOT NULL,
+                    cover_path TEXT,
+                    volume_count INTEGER NOT NULL,
+                    latest_volume_modified REAL NOT NULL DEFAULT 0,
+                    total_pages INTEGER NOT NULL DEFAULT 0,
+                    total_chars INTEGER NOT NULL DEFAULT 0,
+                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+
             if not self._column_exists(conn, "users", "notes"):
                 conn.execute("ALTER TABLE users ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
 
@@ -328,6 +525,10 @@ class Database:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_volume_uploads_uploader
                 ON volume_uploads(uploader_username)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_series_entry_cache_series
+                ON series_entry_cache(series_key)
             """)
 
             # Role rename migration
@@ -636,6 +837,11 @@ class Database:
         """
         normalized_role = normalize_role(role)
         code = secrets.token_urlsafe(16)
+        # token_urlsafe's alphabet includes '-' and '_'; a leading '-' is
+        # misread as an option by positional CLI argument parsing (Click),
+        # so regenerate rather than ship a code that breaks admin tooling.
+        while code[0] in ("-", "_"):
+            code = secrets.token_urlsafe(16)
         duration = parse_duration(expires)
         expires_at = datetime.now() + duration
 
@@ -915,12 +1121,31 @@ class Database:
         uploader_username: str,
         existed_before: bool = False,
     ) -> None:
-        """Record upload/edit for a volume and preserve original uploader."""
+        """Record upload/edit for a volume and preserve original uploader.
+
+        Only the ARCHIVE establishes ownership: a sidecar path (cover,
+        mokuro) may stamp an existing row's last-modified but never creates
+        one. Otherwise a blind sidecar backfill onto untracked legacy
+        content would capture the volume — and with it, series edit and
+        delete rights the uploader never earned.
+        """
         volume_key = normalize_volume_key_from_library_relative(library_relative_path)
         if volume_key is None:
             return
+        is_archive = library_relative_path.strip("/").lower().endswith(".cbz")
 
         with self._connection() as conn:
+            if not is_archive:
+                conn.execute(
+                    """
+                    UPDATE volume_uploads SET
+                        last_modified_by = ?,
+                        last_modified_at = datetime('now')
+                    WHERE volume_key = ?
+                    """,
+                    (uploader_username, volume_key),
+                )
+                return
             if not existed_before:
                 conn.execute(
                     """
@@ -963,7 +1188,19 @@ class Database:
             return str(row["uploader_username"])
 
     def can_user_delete_library_path(self, username: str, virtual_path: str) -> bool:
-        """Return True when user owns the library volume represented by virtual path."""
+        """Return True when user owns the library volume represented by virtual path.
+
+        Deliberately BYTE-EXACT (via `get_volume_owner` ->
+        `normalize_volume_key_from_library_relative`), unlike the
+        Unicode-folded series-edit ownership below (`can_user_edit_series`).
+        That is the safe direction, not an oversight (Task 11 review round
+        2, N5): a volume-level DELETE never gets MORE permissive by
+        loosening how its path is matched, so `'dr stone/Volume 01.cbz'` or
+        `'Dr  Stone/Volume 01.cbz'` do NOT resolve to the same row as
+        `'Dr Stone/Volume 01.cbz'` here even though they WOULD fold equal
+        for `can_user_edit_series`. The two are intentionally different
+        identities for two different rights.
+        """
         prefix = "/mokuro-reader/"
         if not virtual_path.startswith(prefix):
             return False
@@ -974,6 +1211,105 @@ class Database:
 
         owner = self.get_volume_owner(relative)
         return owner == username
+
+    def _volume_upload_folder_owners(self) -> list[tuple[str, str]]:
+        """`(folder, uploader_username)` for every tracked `volume_uploads` row.
+
+        One query, no folding — the single scan `series_owners` and
+        `list_series_owned_by` both build on, so an ownership-matching fix
+        only ever needs to change in one place (Task 11 review round 2,
+        N3: `list_series_owned_by` used to call `can_user_edit_series`,
+        which itself re-queried and re-folded the WHOLE table, once per
+        CANDIDATE folder — O(series_count * rows), measured at 4.6s for
+        500 series / 10k rows on the identity endpoint every reader
+        connect hits). Rows whose `volume_key` has no `/` (a top-level
+        loose file, not a series folder) are dropped here so neither
+        caller has to re-check it.
+        """
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT DISTINCT uploader_username, volume_key FROM volume_uploads"
+            )
+            pairs: list[tuple[str, str]] = []
+            for row in cursor.fetchall():
+                folder, separator, _rest = str(row["volume_key"]).partition("/")
+                if separator:
+                    pairs.append((folder, str(row["uploader_username"])))
+            return pairs
+
+    def series_owners(self, series_title: str) -> set[str]:
+        """Distinct uploader usernames among a series folder's tracked volumes.
+
+        `series_title` is the literal top-level library folder name — the
+        same string `metadata.paths.series_title_from_series_file_path`
+        returns. Ownership is decided by FOLDED equality
+        (`_fold_series_title_key`: NFC-normalize, collapse whitespace,
+        lowercase) between `series_title` and the first path segment of
+        each `volume_uploads.volume_key`, not a SQL `LIKE`.
+
+        This replaces a prior unescaped-`LIKE` implementation whose safety
+        argument (Task 11 review round 1, F2/F5/F6) was wrong for the exact
+        case the brief singled out as load-bearing: an UNTRACKED folder
+        whose name happens to contain `%`/`_` could match a DIFFERENT,
+        tracked folder's rows and so be granted despite having zero
+        `volume_uploads` rows of its own — e.g. `'Dr_Stone'` (no rows)
+        matching `'Dr Stone'` (tracked), or `'%'`/`'A%'` (no rows) matching
+        anything — precisely the free-for-all the safe default exists to
+        prevent. The same unescaped pattern could also FALSELY DENY a
+        genuine sole owner of a `LIKE`-collidable name (`'A_ia'` vs
+        `'Aria'`). Folded-equality comparison has neither failure mode: no
+        wildcard character is special, and NFC/whitespace/case differences
+        the reader itself treats as the same title also compare equal here.
+        A folder with no tracked volumes returns an empty set.
+        """
+        prefix = series_title.strip("/")
+        if not prefix:
+            return set()
+        target_key = _fold_series_title_key(prefix)
+        return {
+            username
+            for folder, username in self._volume_upload_folder_owners()
+            if _fold_series_title_key(folder) == target_key
+        }
+
+    def can_user_edit_series(self, username: str, series_title: str) -> bool:
+        """True when `username` owns EVERY tracked volume in a series folder.
+
+        The safe default for a folder with no ownership records — legacy
+        content, or a series uploaded before ownership tracking existed — is
+        False: an uploader may not claim an untracked series just by being
+        the first to PUT its `series.json`. Only a role holding
+        `Permission.MODIFY_DELETE` may edit an unowned/untracked series
+        (enforced by the caller, `AuthMiddleware._authorize_put`).
+        """
+        owners = self.series_owners(series_title)
+        return bool(owners) and owners == {username}
+
+    def list_series_owned_by(self, username: str) -> list[str]:
+        """Series folder names `username` may edit, per `can_user_edit_series`.
+
+        Feeds the identity endpoint's `metadata.ownedSeries` — called on
+        every reader connect and login-page load, so this does ONE pass
+        over `_volume_upload_folder_owners()` (Task 11 review round 2, N3),
+        folding every row's folder ONCE into a `folded_key -> owners` map
+        and a parallel `folded_key -> raw folder spellings` map, rather
+        than the round-1 approach of calling `can_user_edit_series` (a
+        full re-scan) once per candidate folder. A folder where this user
+        owns some but not all tracked volumes is excluded — it is not
+        editable by them either, so it must not appear in their list.
+        """
+        owners_by_key: dict[str, set[str]] = {}
+        folders_by_key: dict[str, set[str]] = {}
+        for folder, owner in self._volume_upload_folder_owners():
+            key = _fold_series_title_key(folder)
+            owners_by_key.setdefault(key, set()).add(owner)
+            folders_by_key.setdefault(key, set()).add(folder)
+
+        owned: set[str] = set()
+        for key, owners in owners_by_key.items():
+            if owners == {username}:
+                owned.update(folders_by_key[key])
+        return sorted(owned)
 
     def forget_volume_upload(self, library_relative_path: str) -> None:
         """Delete ownership metadata for a volume key."""
@@ -1025,3 +1361,298 @@ class Database:
                 (new_key, row["uploader_username"], row["uploaded_at"], row["last_modified_by"]),
             )
             conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", (old_key,))
+
+    # Series metadata operations
+
+    @staticmethod
+    def _load_json_object(raw: Any, fallback: Any) -> Any:
+        """Decode a JSON column, degrading to *fallback* on corruption.
+
+        These columns are written by this class alone, but a half-written row
+        or a hand-edited database must not take the whole metadata compiler
+        down: a series whose facts cannot be read is a factless series.
+        """
+        if not isinstance(raw, str):
+            return fallback
+        try:
+            decoded = json.loads(raw)
+        except ValueError:
+            return fallback
+        return decoded if isinstance(decoded, type(fallback)) else fallback
+
+    @staticmethod
+    def _bindable_offset(value: Any) -> float | int | None:
+        """Reduce an alignment number to something SQLite can actually store.
+
+        `spine_offset` is index data preserved verbatim from a client PUT, so a
+        hostile payload can carry an integer wider than SQLite's 64 bits (which
+        sqlite3 refuses to bind) or a non-finite float. Neither is a shelf
+        nudge; both degrade to "no offset" rather than aborting a library-wide
+        publish at the write. Per-volume offsets need no such guard — they ride
+        in a JSON column, where any magnitude round-trips as written.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if isinstance(value, int):
+            return value if -(2**63) <= value < 2**63 else None
+        return value if math.isfinite(value) else None
+
+    def _series_facts_from_row(self, row: sqlite3.Row) -> SeriesFactsRow:
+        return SeriesFactsRow(
+            series_key=str(row["series_key"]),
+            series_title=str(row["series_title"]),
+            external_ids=self._load_json_object(row["external_ids"], {}),
+            titles=self._load_json_object(row["titles"], {}),
+            synonyms=self._load_json_object(row["synonyms"], []),
+            tag=row["tag"],
+            unit=row["unit"],
+            facts_updated_at=str(row["facts_updated_at"]),
+            spine_offset=row["spine_offset"],
+            volume_offsets=self._load_json_object(row["volume_offsets"], {}),
+            updated_by=row["updated_by"],
+            updated_at=str(row["updated_at"]),
+        )
+
+    def get_series_facts(self, series_key: str) -> SeriesFactsRow | None:
+        """Stored facts for one series, keyed by normalized series title."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM series_facts WHERE series_key = ?", (series_key,)
+            )
+            row = cursor.fetchone()
+            return self._series_facts_from_row(row) if row else None
+
+    def list_series_facts(self) -> list[SeriesFactsRow]:
+        """Every stored series, including ones whose folder is gone."""
+        with self._connection() as conn:
+            cursor = conn.execute("SELECT * FROM series_facts")
+            return [self._series_facts_from_row(row) for row in cursor.fetchall()]
+
+    def put_series_facts(self, row: SeriesFactsRow) -> None:
+        """Insert or replace one series' facts and shelf alignment."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO series_facts (
+                    series_key, series_title, external_ids, titles, synonyms,
+                    tag, unit, facts_updated_at, spine_offset, volume_offsets,
+                    updated_by, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(series_key) DO UPDATE SET
+                    series_title = excluded.series_title,
+                    external_ids = excluded.external_ids,
+                    titles = excluded.titles,
+                    synonyms = excluded.synonyms,
+                    tag = excluded.tag,
+                    unit = excluded.unit,
+                    facts_updated_at = excluded.facts_updated_at,
+                    spine_offset = excluded.spine_offset,
+                    volume_offsets = excluded.volume_offsets,
+                    updated_by = excluded.updated_by,
+                    updated_at = datetime('now')
+                """,
+                (
+                    row["series_key"],
+                    row["series_title"],
+                    json.dumps(row["external_ids"], ensure_ascii=False),
+                    json.dumps(row["titles"], ensure_ascii=False),
+                    json.dumps(row["synonyms"], ensure_ascii=False),
+                    row["tag"],
+                    row["unit"],
+                    row["facts_updated_at"],
+                    self._bindable_offset(row["spine_offset"]),
+                    json.dumps(row["volume_offsets"], ensure_ascii=False),
+                    row["updated_by"],
+                ),
+            )
+
+    def get_cached_volume_entry(
+        self,
+        volume_key: str,
+        cbz_size: int,
+        cbz_mtime: float,
+        sidecar_key: str,
+    ) -> dict[str, Any] | None:
+        """A previously compiled volume entry, if the sources are unchanged.
+
+        Every stat is compared in Python rather than in SQL: floats compare
+        exactly here (they round-trip through REAL unchanged) and a mismatch
+        must be a miss, never an approximate hit.
+        """
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM series_entry_cache WHERE volume_key = ?", (volume_key,)
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        if int(row["cbz_size"]) != cbz_size or float(row["cbz_mtime"]) != cbz_mtime:
+            return None
+        if str(row["sidecar_key"]) != sidecar_key:
+            return None
+        entry = self._load_json_object(row["entry_json"], {})
+        return cast("dict[str, Any]", entry) if entry else None
+
+    def put_cached_volume_entry(
+        self,
+        volume_key: str,
+        series_key: str,
+        entry: dict[str, Any],
+        cbz_size: int,
+        cbz_mtime: float,
+        sidecar_key: str,
+    ) -> None:
+        """Remember a compiled volume entry against its sources' stat."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO series_entry_cache (
+                    volume_key, series_key, entry_json, cbz_size, cbz_mtime,
+                    sidecar_key, computed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(volume_key) DO UPDATE SET
+                    series_key = excluded.series_key,
+                    entry_json = excluded.entry_json,
+                    cbz_size = excluded.cbz_size,
+                    cbz_mtime = excluded.cbz_mtime,
+                    sidecar_key = excluded.sidecar_key,
+                    computed_at = datetime('now')
+                """,
+                (
+                    volume_key,
+                    series_key,
+                    json.dumps(entry, ensure_ascii=False),
+                    cbz_size,
+                    cbz_mtime,
+                    sidecar_key,
+                ),
+            )
+
+    def prune_series_entry_cache(self, keep_volume_keys: Iterable[str]) -> int:
+        """Drop cache rows for volumes that no longer exist. Returns the count.
+
+        The scan and the deletes share one `_connection()` block, so the whole
+        prune takes the write lock once instead of once per stale row. The
+        deletes are issued one `execute()` at a time (not `executemany`)
+        because only `execute` goes through the lock-retry proxy, and a delete
+        by primary key is idempotent, so a retried one cannot double-apply.
+        """
+        keep = set(keep_volume_keys)
+        with self._connection() as conn:
+            cursor = conn.execute("SELECT volume_key FROM series_entry_cache")
+            stale = [
+                str(row["volume_key"])
+                for row in cursor.fetchall()
+                if str(row["volume_key"]) not in keep
+            ]
+            for volume_key in stale:
+                conn.execute("DELETE FROM series_entry_cache WHERE volume_key = ?", (volume_key,))
+            return len(stale)
+
+    # --- materialized catalog -------------------------------------------
+
+    def upsert_catalog_series(self, row: CatalogSeriesRow) -> None:
+        """Insert or replace one series' materialized catalog entry."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO catalog_series (
+                    series_key, folder_name, cover_path, volume_count,
+                    latest_volume_modified, total_pages, total_chars, scanned_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(series_key) DO UPDATE SET
+                    folder_name = excluded.folder_name,
+                    cover_path = excluded.cover_path,
+                    volume_count = excluded.volume_count,
+                    latest_volume_modified = excluded.latest_volume_modified,
+                    total_pages = excluded.total_pages,
+                    total_chars = excluded.total_chars,
+                    scanned_at = excluded.scanned_at
+                """,
+                (
+                    row["series_key"],
+                    row["folder_name"],
+                    row["cover_path"],
+                    row["volume_count"],
+                    row["latest_volume_modified"],
+                    row["total_pages"],
+                    row["total_chars"],
+                ),
+            )
+
+    def list_catalog_series(self) -> list[CatalogSeriesRow]:
+        """Every materialized catalog row, ordered by folder name."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM catalog_series ORDER BY folder_name"
+            )
+            return [
+                CatalogSeriesRow(
+                    series_key=str(raw["series_key"]),
+                    folder_name=str(raw["folder_name"]),
+                    cover_path=raw["cover_path"],
+                    volume_count=int(raw["volume_count"]),
+                    latest_volume_modified=float(raw["latest_volume_modified"]),
+                    total_pages=int(raw["total_pages"]),
+                    total_chars=int(raw["total_chars"]),
+                )
+                for raw in cursor.fetchall()
+            ]
+
+    def prune_catalog_series(self, keep_series_keys: Iterable[str]) -> int:
+        """Drop catalog rows for series that no longer exist. Returns the count.
+
+        Same one-lock scan-then-delete shape as `prune_series_entry_cache`.
+        """
+        keep = set(keep_series_keys)
+        with self._connection() as conn:
+            cursor = conn.execute("SELECT series_key FROM catalog_series")
+            stale = [
+                str(raw["series_key"])
+                for raw in cursor.fetchall()
+                if str(raw["series_key"]) not in keep
+            ]
+            for series_key in stale:
+                conn.execute("DELETE FROM catalog_series WHERE series_key = ?", (series_key,))
+            return len(stale)
+
+    def upsert_community_details(self, row: CommunityDetailsRow) -> None:
+        """Insert or replace one series' fetched community details."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO community_details (
+                    series_key, score, tags, genres, source, fetched_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(series_key) DO UPDATE SET
+                    score = excluded.score,
+                    tags = excluded.tags,
+                    genres = excluded.genres,
+                    source = excluded.source,
+                    fetched_at = excluded.fetched_at
+                """,
+                (
+                    row["series_key"],
+                    row["score"],
+                    json.dumps(row["tags"]),
+                    json.dumps(row["genres"]),
+                    row["source"],
+                    row["fetched_at"],
+                ),
+            )
+
+    def list_community_details(self) -> list[CommunityDetailsRow]:
+        """Every fetched community row."""
+        with self._connection() as conn:
+            cursor = conn.execute("SELECT * FROM community_details")
+            return [
+                CommunityDetailsRow(
+                    series_key=str(raw["series_key"]),
+                    score=raw["score"],
+                    tags=json.loads(raw["tags"]),
+                    genres=json.loads(raw["genres"]),
+                    source=str(raw["source"]),
+                    fetched_at=str(raw["fetched_at"]),
+                )
+                for raw in cursor.fetchall()
+            ]

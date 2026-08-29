@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import unicodedata
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
-from mokuro_bunko.database import Database, parse_duration
+from mokuro_bunko.database import Database, _fold_series_title_key, parse_duration
+from mokuro_bunko.metadata.reader_compat import normalize_volume_title_key
 
 if TYPE_CHECKING:
     pass
@@ -328,6 +330,19 @@ class TestInviteCrud:
         invite = temp_db.get_invite("nonexistent")
         assert invite is None
 
+    def test_create_invite_never_starts_with_dash_or_underscore(
+        self, temp_db: Database
+    ) -> None:
+        """Generated codes must never start with '-' or '_'.
+
+        A leading '-' breaks positional CLI argument parsing (the code gets
+        read as an option). token_urlsafe's alphabet includes both '-' and
+        '_', so this is checked over a large sample to catch a generator
+        that only special-cases one of them.
+        """
+        codes = [temp_db.create_invite() for _ in range(500)]
+        assert all(code[0] not in ("-", "_") for code in codes)
+
     def test_validate_invite(self, temp_db: Database) -> None:
         """Test validating a valid invite."""
         code = temp_db.create_invite("registered", "7d")
@@ -429,6 +444,168 @@ class TestAuditAndOwnership:
         assert temp_db.get_volume_owner("Series/Vol 01.webp") == "alice"
         assert temp_db.can_user_delete_library_path("alice", "/mokuro-reader/Series/Vol 01.cbz")
         assert not temp_db.can_user_delete_library_path("bob", "/mokuro-reader/Series/Vol 01.cbz")
+
+    def test_a_sidecar_upload_never_creates_ownership(self, temp_db: Database) -> None:
+        """Ownership comes from uploading the ARCHIVE. A sidecar PUT onto an
+        untracked volume (a blind cover/mokuro backfill onto legacy content)
+        must not capture it — that would hand an uploader edit and delete
+        rights over series they never made."""
+        temp_db.record_volume_upload("Legacy/Vol 01.mokuro", "alice")
+        temp_db.record_volume_upload("Legacy/Vol 01.webp", "alice")
+        assert temp_db.get_volume_owner("Legacy/Vol 01.cbz") is None
+        assert temp_db.can_user_edit_series("alice", "Legacy") is False
+
+    def test_a_sidecar_upload_still_stamps_an_owned_volume(self, temp_db: Database) -> None:
+        temp_db.record_volume_upload("Series/Vol 01.cbz", "alice")
+        temp_db.record_volume_upload("Series/Vol 01.webp", "bob")
+        # bob's cover upload does not steal alice's volume
+        assert temp_db.get_volume_owner("Series/Vol 01.cbz") == "alice"
+
+    def test_can_user_edit_series_sole_owner(self, temp_db: Database) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Dr Stone/Volume 02.cbz", "alice")
+        assert temp_db.can_user_edit_series("alice", "Dr Stone") is True
+        assert temp_db.can_user_edit_series("bob", "Dr Stone") is False
+
+    def test_can_user_edit_series_mixed_ownership_is_false_for_everyone(
+        self, temp_db: Database
+    ) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Dr Stone/Volume 02.cbz", "bob")
+        assert temp_db.can_user_edit_series("alice", "Dr Stone") is False
+        assert temp_db.can_user_edit_series("bob", "Dr Stone") is False
+
+    def test_can_user_edit_series_untracked_folder_is_false(
+        self, temp_db: Database
+    ) -> None:
+        """No volume_uploads rows at all: the safe default is 403, not a free-for-all."""
+        assert temp_db.can_user_edit_series("alice", "Legacy Series") is False
+
+    def test_list_series_owned_by_returns_only_fully_owned_folders(
+        self, temp_db: Database
+    ) -> None:
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Aria/v1.cbz", "alice")
+        temp_db.record_volume_upload("Shared Series/v1.cbz", "alice")
+        temp_db.record_volume_upload("Shared Series/v2.cbz", "bob")
+
+        assert temp_db.list_series_owned_by("alice") == ["Aria", "Dr Stone"]
+        assert temp_db.list_series_owned_by("bob") == []
+
+    def test_can_user_edit_series_wildcard_characters_do_not_grant_untracked_series(
+        self, temp_db: Database
+    ) -> None:
+        """A LIKE-based match would let an untracked 'Dr_Stone'/'%'/'A%' ride
+        in on 'Dr Stone's or 'Aria's ownership despite having zero rows of
+        its own — the false grant Task 11 review round 1 (F2) found."""
+        temp_db.record_volume_upload("Dr Stone/Volume 01.cbz", "alice")
+        temp_db.record_volume_upload("Aria/v1.cbz", "alice")
+        assert temp_db.can_user_edit_series("alice", "Dr_Stone") is False
+        assert temp_db.can_user_edit_series("alice", "%") is False
+        assert temp_db.can_user_edit_series("alice", "A%") is False
+
+    def test_can_user_edit_series_like_collidable_sole_owner_is_not_falsely_denied(
+        self, temp_db: Database
+    ) -> None:
+        """Mirror of the false-grant case in the deny direction (F5): a
+        genuine sole owner of a name containing a LIKE wildcard character
+        must not be denied, and must not leak into a different folder that
+        merely LIKE-collides with it."""
+        temp_db.record_volume_upload("A_ia/v1.cbz", "alice")
+        temp_db.record_volume_upload("Aria/v1.cbz", "bob")
+        assert temp_db.can_user_edit_series("alice", "A_ia") is True
+        assert temp_db.can_user_edit_series("alice", "Aria") is False
+        assert temp_db.list_series_owned_by("alice") == ["A_ia"]
+
+    def test_can_user_edit_series_folds_nfd_title_to_match_nfc_folder(
+        self, temp_db: Database
+    ) -> None:
+        """A folder name round-tripped through a filesystem can come back
+        NFD-decomposed while a PUT's series.json path segment stays
+        NFC-composed; both must resolve to the same series (F6) — this is
+        exactly the fold the reader's `normalizeVolumeTitleKey` performs."""
+        nfc_title = unicodedata.normalize("NFC", "Pokémon")
+        nfd_title = unicodedata.normalize("NFD", "Pokémon")
+        assert nfc_title != nfd_title  # sanity: genuinely different byte sequences
+
+        temp_db.record_volume_upload(f"{nfc_title}/Volume 01.cbz", "alice")
+        assert temp_db.can_user_edit_series("alice", nfd_title) is True
+
+    def test_can_user_edit_series_does_not_fold_ss_and_eszett_together(
+        self, temp_db: Database
+    ) -> None:
+        """Review round 2 (N2): the ownership fold must be no COARSER than
+        `normalize_series_key`, the fold that decides what counts as one
+        series for the catalog compiler. `casefold()` would fold 'Straße'
+        and 'STRASSE' together even though the compiler treats them as two
+        distinct series ('straße' != 'strasse' under plain `.lower()`);
+        ownership doing so would let a 'Straße' owner claim the untracked
+        'STRASSE' series outright, reopening the untracked-series 403
+        rule this fold exists to protect."""
+        temp_db.record_volume_upload("Straße/Volume 01.cbz", "alice")
+        assert temp_db.can_user_edit_series("alice", "Straße") is True
+        assert temp_db.can_user_edit_series("alice", "STRASSE") is False
+        assert temp_db.list_series_owned_by("alice") == ["Straße"]
+
+    def test_list_series_owned_by_matches_can_user_edit_series_at_scale(
+        self, temp_db: Database
+    ) -> None:
+        """Review round 2 (N3) correctness check (not a timing test): the
+        single-pass `list_series_owned_by` rewrite must produce EXACTLY the
+        same verdict as calling `can_user_edit_series` per folder, across
+        many folders and owners — sole owners, mixed owners, and
+        owner-only-elsewhere folders all mixed together."""
+        for i in range(30):
+            temp_db.record_volume_upload(f"Solo {i:02d}/Volume 01.cbz", "alice")
+            temp_db.record_volume_upload(f"Solo {i:02d}/Volume 02.cbz", "alice")
+        for i in range(10):
+            temp_db.record_volume_upload(f"Shared {i:02d}/Volume 01.cbz", "alice")
+            temp_db.record_volume_upload(f"Shared {i:02d}/Volume 02.cbz", "bob")
+        for i in range(5):
+            temp_db.record_volume_upload(f"Bob Only {i:02d}/Volume 01.cbz", "bob")
+
+        alice_expected = sorted(f"Solo {i:02d}" for i in range(30))
+        bob_expected = sorted(f"Bob Only {i:02d}" for i in range(5))
+        assert temp_db.list_series_owned_by("alice") == alice_expected
+        assert temp_db.list_series_owned_by("bob") == bob_expected
+
+        all_folders = (
+            [f"Solo {i:02d}" for i in range(30)]
+            + [f"Shared {i:02d}" for i in range(10)]
+            + [f"Bob Only {i:02d}" for i in range(5)]
+        )
+        for folder in all_folders:
+            assert temp_db.can_user_edit_series("alice", folder) == (
+                folder in alice_expected
+            )
+            assert temp_db.can_user_edit_series("bob", folder) == (folder in bob_expected)
+
+
+class TestOwnershipFoldMatchesServiceIdentityFold:
+    """Task 11 review round 3 (F9 / N2 residual): the ownership fold here
+    and the series-identity fold `metadata/service.py` now uses
+    (`normalize_volume_title_key`) must be the SAME algorithm, not merely
+    "no coarser than" one another — `database.py` cannot import from
+    `metadata` (layering rule), so this is the test that keeps the two
+    independent reimplementations honest against drift."""
+
+    @pytest.mark.parametrize(
+        "title",
+        [
+            "Dr Stone",
+            "dr  STONE",
+            "  Dr Stone  ",
+            "Straße",
+            "STRASSE",
+            unicodedata.normalize("NFC", "Pokémon"),
+            unicodedata.normalize("NFD", "Pokémon"),
+            "Dr\tStone",
+            "İstanbul",
+            "file",
+        ],
+    )
+    def test_identical_output_for_every_probed_title(self, title: str) -> None:
+        assert _fold_series_title_key(title) == normalize_volume_title_key(title)
 
 
 class TestPasswordHashing:
