@@ -3,15 +3,17 @@
 A self-hosted manga library server with WebDAV, built-in OCR processing, and multi-user support. Designed as a backend for [Mokuro Reader](https://reader.mokuro.app).
 
 > [!WARNING]
-> **v0.1 -- Early alpha.** Core functionality works but many features are untested or incomplete. Expect rough edges. No binary releases or Docker images are published yet -- run from source for now.
+> **v0.2 -- Early alpha.** Core functionality works but many features are untested or incomplete. Expect rough edges. No binary releases or Docker images are published yet -- run from source for now.
 
 ## What it does
 
 - Serves a shared manga library over WebDAV so Mokuro Reader can connect directly
 - Tracks per-user reading progress (each user gets their own progress files transparently)
+- Compiles the reader's metadata files (`series.json`, `catalog.json`) server-side from the library itself, merging in client-submitted series facts (titles, links, tags), and recompiles within seconds of an upload
 - Runs [mokuro](https://github.com/kha-white/mokuro) OCR automatically on uploaded manga (CUDA, ROCm, or CPU)
 - Manages users with role-based permissions (anonymous browse, registered, uploader, editor, admin)
-- Provides a web catalog UI for browsing the library and an admin panel for user/config management
+- Provides a web catalog for browsing the library — display-title language options, sorting (A–Z / newest / wordiest / rating), genre filters, and ratings/tags fetched from AniList/MAL for linked series (no API key required) — plus an admin panel for user/config management
+- Asks search engines and crawlers to stay out (`X-Robots-Tag: noindex` on every response, deny-all `robots.txt`)
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
@@ -40,6 +42,7 @@ Copy [`config.example.yaml`](config.example.yaml) for a documented starting poin
 | `registration.mode` | `self` | `disabled`, `self`, `invite`, or `approval` |
 | `ocr.backend` | `auto` | `auto`, `cuda`, `rocm`, `cpu`, or `skip` |
 | `catalog.enabled` | `false` | Web-based library browser |
+| `catalog.enrich_community` | `true` | Fetch ratings/tags/genres from AniList/MAL for linked series |
 
 Environment variable overrides: `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE`, `MOKURO_CONFIG`.
 
