@@ -124,6 +124,22 @@ class CatalogSeriesRow(TypedDict):
     total_chars: int
 
 
+class CommunityDetailsRow(TypedDict):
+    """Server-fetched community details (AniList/MAL) for one series.
+
+    Separate from `series_facts` (client-merged, client-clocked) and from
+    `catalog_series` (rebuilt wholesale by every pass): this row's lifecycle
+    is the enrichment fetcher's alone, keyed by the same series identity.
+    """
+
+    series_key: str
+    score: float | None
+    tags: list[str]
+    genres: list[str]
+    source: str
+    fetched_at: str
+
+
 def normalize_role(role: str) -> UserRole:
     """Normalize legacy role names and validate role values."""
     normalized = LEGACY_ROLE_ALIASES.get(role, role)
@@ -457,6 +473,17 @@ class Database:
                     cbz_mtime REAL NOT NULL,
                     sidecar_key TEXT NOT NULL DEFAULT '',
                     computed_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS community_details (
+                    series_key TEXT PRIMARY KEY,
+                    score REAL,
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    genres TEXT NOT NULL DEFAULT '[]',
+                    source TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL
                 )
             """)
 
@@ -1569,3 +1596,44 @@ class Database:
             for series_key in stale:
                 conn.execute("DELETE FROM catalog_series WHERE series_key = ?", (series_key,))
             return len(stale)
+
+    def upsert_community_details(self, row: CommunityDetailsRow) -> None:
+        """Insert or replace one series' fetched community details."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO community_details (
+                    series_key, score, tags, genres, source, fetched_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(series_key) DO UPDATE SET
+                    score = excluded.score,
+                    tags = excluded.tags,
+                    genres = excluded.genres,
+                    source = excluded.source,
+                    fetched_at = excluded.fetched_at
+                """,
+                (
+                    row["series_key"],
+                    row["score"],
+                    json.dumps(row["tags"]),
+                    json.dumps(row["genres"]),
+                    row["source"],
+                    row["fetched_at"],
+                ),
+            )
+
+    def list_community_details(self) -> list[CommunityDetailsRow]:
+        """Every fetched community row."""
+        with self._connection() as conn:
+            cursor = conn.execute("SELECT * FROM community_details")
+            return [
+                CommunityDetailsRow(
+                    series_key=str(raw["series_key"]),
+                    score=raw["score"],
+                    tags=json.loads(raw["tags"]),
+                    genres=json.loads(raw["genres"]),
+                    source=str(raw["source"]),
+                    fetched_at=str(raw["fetched_at"]),
+                )
+                for raw in cursor.fetchall()
+            ]

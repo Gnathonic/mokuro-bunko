@@ -50,6 +50,39 @@
     max-width: 400px;
 }
 
+/* Genre filter chips */
+.genre-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 1.25rem;
+}
+
+.genre-chip {
+    background: none;
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    padding: 0.25rem 0.7rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+.genre-chip:hover {
+    color: var(--text-primary);
+    border-color: var(--border-default);
+}
+
+.genre-chip--active {
+    color: var(--text-primary);
+    border-color: var(--border-default);
+    background: var(--bg-subtle, rgba(127, 127, 127, 0.15));
+}
+
+.genre-chip__count {
+    opacity: 0.6;
+}
+
 /* Series title language selector */
 .title-lang-select {
     background: none;

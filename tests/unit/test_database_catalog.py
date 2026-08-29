@@ -61,3 +61,42 @@ class TestCatalogSeries:
         removed = db.prune_catalog_series({"a"})
         assert removed == 1
         assert [r["series_key"] for r in db.list_catalog_series()] == ["a"]
+
+
+class TestCommunityDetails:
+    def test_round_trips_and_lists(self, db: Database) -> None:
+        db.upsert_community_details(
+            {
+                "series_key": "dr stone",
+                "score": 82.0,
+                "tags": ["Survival", "Science"],
+                "genres": ["Adventure", "Sci-Fi"],
+                "source": "anilist",
+                "fetched_at": "2026-08-28T00:00:00Z",
+            }
+        )
+        rows = db.list_community_details()
+        assert len(rows) == 1
+        stored = rows[0]
+        assert stored["series_key"] == "dr stone"
+        assert stored["score"] == 82.0
+        assert stored["tags"] == ["Survival", "Science"]
+        assert stored["genres"] == ["Adventure", "Sci-Fi"]
+        assert stored["source"] == "anilist"
+        assert stored["fetched_at"] == "2026-08-28T00:00:00Z"
+
+    def test_upsert_replaces_by_series_key(self, db: Database) -> None:
+        base = {
+            "series_key": "dr stone",
+            "score": 82.0,
+            "tags": [],
+            "genres": [],
+            "source": "anilist",
+            "fetched_at": "2026-08-28T00:00:00Z",
+        }
+        db.upsert_community_details(base)  # type: ignore[arg-type]
+        db.upsert_community_details({**base, "score": None, "source": "mal"})  # type: ignore[arg-type]
+        rows = db.list_community_details()
+        assert len(rows) == 1
+        assert rows[0]["score"] is None
+        assert rows[0]["source"] == "mal"
