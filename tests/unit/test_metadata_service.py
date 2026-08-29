@@ -26,12 +26,20 @@ def _clean_global_locks() -> None:
     _PATH_WRITE_LOCKS._locks.clear()
 
 
-def write_volume(library: Path, series: str, volume: str, *, sidecar: bool = True) -> None:
+def write_volume(
+    library: Path,
+    series: str,
+    volume: str,
+    *,
+    sidecar: bool = True,
+    archive_images: int = 2,
+) -> None:
+    """A two-page volume. `archive_images` short of 2 leaves it damaged."""
     folder = library / series
     folder.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(folder / f"{volume}.cbz", "w") as archive:
-        archive.writestr("000.jpg", b"fake image bytes")
-        archive.writestr("001.jpg", b"fake image bytes")
+        for index in range(archive_images):
+            archive.writestr(f"{index:03d}.jpg", b"fake image bytes")
     if sidecar:
         (folder / f"{volume}.mokuro").write_text(
             json.dumps(
@@ -41,7 +49,10 @@ def write_volume(library: Path, series: str, volume: str, *, sidecar: bool = Tru
                     "title_uuid": "t-uuid",
                     "volume": volume,
                     "volume_uuid": f"uuid-{volume}",
-                    "pages": [{"blocks": [{"lines": ["世界"]}]}, {"blocks": []}],
+                    "pages": [
+                        {"img_path": "000.jpg", "blocks": [{"lines": ["世界"]}]},
+                        {"img_path": "001.jpg", "blocks": []},
+                    ],
                 }
             ),
             encoding="utf-8",
@@ -93,6 +104,7 @@ class TestRegeneration:
                 "volume_uuid": "uuid-Volume 01",
                 "volume_title": "Volume 01",
                 "page_count": 2,
+                "matched_page_count": 2,
                 "character_count": 2,
                 "mokuro_version": "0.2.2",
                 "archive_size": (library / "Dr Stone" / "Volume 01.cbz").stat().st_size,
@@ -726,6 +738,41 @@ class TestCatalogMaterialization:
         assert stored["total_pages"] == 4
         assert stored["total_chars"] == 4
         assert stored["latest_volume_modified"] == pytest.approx(1_756_400_000)
+        assert stored["missing_pages"] == 0
+        assert stored["damaged_volumes"] == 0
+        service.stop()
+
+    def test_a_pass_totals_the_pages_the_archives_are_missing(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")                     # whole
+        write_volume(library, "Dr Stone", "Volume 02", archive_images=1)   # one short
+        write_volume(library, "Dr Stone", "Volume 03", archive_images=0)   # both gone
+        write_volume(library, "Frieren", "Volume 01")
+
+        database = Database(tmp_path / "test.db")
+        service = MetadataService(library, database)
+        service.regenerate_all()
+
+        by_name = {r["folder_name"]: r for r in database.list_catalog_series()}
+        assert by_name["Dr Stone"]["missing_pages"] == 3
+        assert by_name["Dr Stone"]["damaged_volumes"] == 2
+        assert by_name["Frieren"]["missing_pages"] == 0
+        assert by_name["Frieren"]["damaged_volumes"] == 0
+        service.stop()
+
+    def test_the_published_file_carries_the_matched_count(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01", archive_images=1)
+        database = Database(tmp_path / "test.db")
+        service = MetadataService(library, database)
+        service.regenerate_all()
+
+        published = json.loads((library / "Dr Stone" / "series.json").read_text("utf-8"))
+        [entry] = published["volumes"]
+        assert entry["page_count"] == 2
+        assert entry["matched_page_count"] == 1
         service.stop()
 
     def test_full_pass_prunes_series_whose_folder_is_gone(

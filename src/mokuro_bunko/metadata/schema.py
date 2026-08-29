@@ -80,12 +80,43 @@ class VolumeEntry:
     page_count: int
     character_count: int
     mokuro_version: str
+    #: How many of `page_count` pages actually have an image in the archive.
+    #: `None` = not determined (the archive could not be read, or the sidecar
+    #: names no images at all) and the key is omitted, never written as 0 —
+    #: "nothing was checked" and "nothing was found" are different facts and
+    #: only the second one means the volume is damaged.
+    matched_page_count: int | None = None
     spine_width: float | None = None
     archive_size: int | None = None
     mokuro_size: int | None = None
     mokuro_modified: int | None = None
     cover_size: int | None = None
     cover_modified: int | None = None
+
+    @property
+    def missing_pages(self) -> int:
+        """Pages this volume is short. See `missing_page_count`."""
+        return missing_page_count(self.page_count, self.matched_page_count)
+
+
+def missing_page_count(page_count: int, matched_page_count: int | None) -> int:
+    """Pages a `.mokuro` references that its archive does not contain.
+
+    Zero when `matched_page_count` is absent: the match was never determined,
+    which is not the same as "nothing is missing" but is the only safe thing to
+    report — an undetermined volume must not show up as damaged. Clamped at
+    zero because `matched_page_count` can legitimately EXCEED `page_count`: two
+    pages naming the same image both match (the client's exact-path branch does
+    not consume a file), so a sidecar with a duplicated `img_path` can match
+    more times than it has distinct pages.
+
+    Free-standing rather than only a property so the catalog can apply the same
+    rule to entries it read back out of a compiled `series.json`, where there is
+    no `VolumeEntry` to ask.
+    """
+    if matched_page_count is None:
+        return 0
+    return max(0, page_count - matched_page_count)
 
 
 def _is_spine_width(value: float | None) -> bool:
@@ -215,9 +246,14 @@ def dump_series_file(
             "volume_uuid": volume.volume_uuid,
             "volume_title": volume.volume_title,
             "page_count": volume.page_count,
-            "character_count": volume.character_count,
-            "mokuro_version": volume.mokuro_version,
         }
+        # Beside the total it qualifies, rather than appended with the file
+        # stats: a reader (or a human opening the file) compares the two
+        # numbers, and they are only legible as a pair.
+        if volume.matched_page_count is not None:
+            entry["matched_page_count"] = volume.matched_page_count
+        entry["character_count"] = volume.character_count
+        entry["mokuro_version"] = volume.mokuro_version
         if _is_spine_width(volume.spine_width):
             entry["spine_width"] = volume.spine_width
         if _is_archive_size(volume.archive_size):

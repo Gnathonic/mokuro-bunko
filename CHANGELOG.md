@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.5] - 2026-08-29
+
+### Added
+- **Incomplete volumes are counted and surfaced.** Each `series.json` volume entry now carries `matched_page_count`: how many of the pages its `.mokuro` references actually exist inside the `.cbz`. Matching is a port of the reader's own `matchImagesToPages` — exact path, then stem (an extension changed since OCR), then the whole-volume positional fallback for archives whose images were renamed — so the server and the reader agree on which pages are missing. The field is omitted, never zeroed, when the match could not be determined (an unreadable archive, or a sidecar that names no images at all); an unreadable archive is also left out of the entry cache so it is re-checked next pass instead of being remembered as broken.
+- **The catalog shows missing pages.** Volume cards badge how many pages are absent, series cards badge how many volumes are incomplete, and a "Missing pages" filter above the grid narrows the library to just those series. The filter appears only when the library actually has damage.
+
+### Changed
+- **Archive contents are read the way the reader reads them.** An archive's images are now listed with the reader's own filters — OS junk (`__MACOSX`, `._` forks, `Thumbs.db`, backup files) and the volume's embedded cover sidecar are excluded, and `.avif`/`.jxl` join the recognised image types. Page counts for image-only volumes shift accordingly, in the direction of what a reader would actually display.
+
 ## [0.3.4] - 2026-08-29
 
 ### Fixed

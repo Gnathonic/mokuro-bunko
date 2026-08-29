@@ -12,6 +12,7 @@ from typing import Any
 from mokuro_bunko.database import Database
 from mokuro_bunko.library_index import LibraryIndexCache
 from mokuro_bunko.metadata.reader_compat import normalize_volume_title_key
+from mokuro_bunko.metadata.schema import missing_page_count
 from mokuro_bunko.security import is_within_path
 
 #: Bodies below this stay identity-encoded: gzip overhead beats the savings.
@@ -175,6 +176,8 @@ class CatalogAPI:
                     "latest_volume_modified": row["latest_volume_modified"],
                     "total_pages": row["total_pages"],
                     "total_chars": row["total_chars"],
+                    "missing_pages": row["missing_pages"],
+                    "damaged_volumes": row["damaged_volumes"],
                 }
                 series_info.update(facts_by_key.get(row["series_key"], {}))
                 community = community_by_key.get(row["series_key"])
@@ -255,6 +258,7 @@ class CatalogAPI:
             return self._json_response(start_response, 404, {"error": "Series not found"})
 
         progress = self._read_ocr_progress()
+        damage = self._damage_by_volume_title(series_dir)
 
         volumes = []
         for volume in series.volumes:
@@ -265,6 +269,10 @@ class CatalogAPI:
             if is_active:
                 vol_info["ocr_pending"] = False
                 vol_info["ocr_progress"] = self._volume_progress(progress)
+            missing = damage.get(volume.name)
+            if missing is not None:
+                vol_info["page_count"] = missing[0]
+                vol_info["missing_pages"] = missing[1]
             volumes.append(vol_info)
 
         # Series cover is the first volume's cover
@@ -279,6 +287,37 @@ class CatalogAPI:
             "cover": series_cover,
             "volumes": volumes,
         })
+
+    def _damage_by_volume_title(self, series_dir: Path) -> dict[str, tuple[int, int]]:
+        """`{volume_title: (page_count, missing_pages)}` from the series file.
+
+        Read back out of the compiled `<Series>/series.json` rather than
+        recomputed or re-queried: that file is what the metadata pass just
+        published and what every reader client sees, so the catalog cannot
+        show a volume as whole that the file calls damaged. A series with no
+        compiled file yet (first boot, before the startup pass) simply
+        contributes no damage — the grid renders, without badges, instead of
+        failing.
+        """
+        try:
+            raw = json.loads((series_dir / "series.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(raw, dict) or not isinstance(raw.get("volumes"), list):
+            return {}
+        damage: dict[str, tuple[int, int]] = {}
+        for entry in raw["volumes"]:
+            if not isinstance(entry, dict):
+                continue
+            title = entry.get("volume_title")
+            pages = entry.get("page_count")
+            matched = entry.get("matched_page_count")
+            if not isinstance(title, str) or not isinstance(pages, int):
+                continue
+            if not isinstance(matched, int) or isinstance(matched, bool):
+                matched = None
+            damage[title] = (pages, missing_page_count(pages, matched))
+        return damage
 
     def _serve_cover(self, start_response: Callable[..., Any], cover_path: str) -> list[bytes]:
         """Serve a cover image."""

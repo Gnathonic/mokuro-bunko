@@ -122,6 +122,15 @@ class CatalogSeriesRow(TypedDict):
     latest_volume_modified: float
     total_pages: int
     total_chars: int
+    #: Pages the compiled entries say are referenced by a `.mokuro` but absent
+    #: from the archive, summed over the series. Volumes whose match could not
+    #: be determined contribute nothing.
+    missing_pages: int
+    #: How many volumes contribute to `missing_pages` at all — the catalog's
+    #: "damaged" filter keys off this, not off the page total, because one
+    #: volume short by 200 pages and 200 volumes short by one are the same
+    #: number and very different libraries.
+    damaged_volumes: int
 
 
 class CommunityDetailsRow(TypedDict):
@@ -496,9 +505,24 @@ class Database:
                     latest_volume_modified REAL NOT NULL DEFAULT 0,
                     total_pages INTEGER NOT NULL DEFAULT 0,
                     total_chars INTEGER NOT NULL DEFAULT 0,
+                    missing_pages INTEGER NOT NULL DEFAULT 0,
+                    damaged_volumes INTEGER NOT NULL DEFAULT 0,
                     scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )
             """)
+
+            # `catalog_series` predates these two columns on any database that
+            # ran an earlier build. Adding them with a 0 default reads as "no
+            # damage known yet", which is true until the next metadata pass
+            # rewrites every row wholesale -- and the pass recompiles every
+            # cached entry anyway (see `_entry_from_dict`), so the real numbers
+            # land on the first pass after startup, not eventually.
+            for column in ("missing_pages", "damaged_volumes"):
+                if not self._column_exists(conn, "catalog_series", column):
+                    conn.execute(
+                        f"ALTER TABLE catalog_series ADD COLUMN {column} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
 
             if not self._column_exists(conn, "users", "notes"):
                 conn.execute("ALTER TABLE users ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
@@ -1558,8 +1582,9 @@ class Database:
                 """
                 INSERT INTO catalog_series (
                     series_key, folder_name, cover_path, volume_count,
-                    latest_volume_modified, total_pages, total_chars, scanned_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    latest_volume_modified, total_pages, total_chars,
+                    missing_pages, damaged_volumes, scanned_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT(series_key) DO UPDATE SET
                     folder_name = excluded.folder_name,
                     cover_path = excluded.cover_path,
@@ -1567,6 +1592,8 @@ class Database:
                     latest_volume_modified = excluded.latest_volume_modified,
                     total_pages = excluded.total_pages,
                     total_chars = excluded.total_chars,
+                    missing_pages = excluded.missing_pages,
+                    damaged_volumes = excluded.damaged_volumes,
                     scanned_at = excluded.scanned_at
                 """,
                 (
@@ -1577,6 +1604,8 @@ class Database:
                     row["latest_volume_modified"],
                     row["total_pages"],
                     row["total_chars"],
+                    row["missing_pages"],
+                    row["damaged_volumes"],
                 ),
             )
 
@@ -1595,6 +1624,8 @@ class Database:
                     latest_volume_modified=float(raw["latest_volume_modified"]),
                     total_pages=int(raw["total_pages"]),
                     total_chars=int(raw["total_chars"]),
+                    missing_pages=int(raw["missing_pages"]),
+                    damaged_volumes=int(raw["damaged_volumes"]),
                 )
                 for raw in cursor.fetchall()
             ]

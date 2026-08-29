@@ -23,6 +23,8 @@ def row(**overrides: object) -> CatalogSeriesRow:
         "latest_volume_modified": 1756400000.5,
         "total_pages": 570,
         "total_chars": 42000,
+        "missing_pages": 7,
+        "damaged_volumes": 1,
     }
     base.update(overrides)  # type: ignore[typeddict-item]
     return base
@@ -41,6 +43,41 @@ class TestCatalogSeries:
         assert stored["latest_volume_modified"] == pytest.approx(1756400000.5)
         assert stored["total_pages"] == 570
         assert stored["total_chars"] == 42000
+        assert stored["missing_pages"] == 7
+        assert stored["damaged_volumes"] == 1
+
+    def test_a_table_from_before_the_damage_columns_reads_as_undamaged(
+        self, tmp_path: Path
+    ) -> None:
+        """The ALTER TABLE path: an older database opens, and its rows say
+        zero damage until the next pass rewrites them."""
+        path = tmp_path / "legacy.db"
+        legacy = Database(path)
+        with legacy._connection() as conn:  # noqa: SLF001 - exercising migration
+            conn.execute("DROP TABLE catalog_series")
+            conn.execute(
+                """
+                CREATE TABLE catalog_series (
+                    series_key TEXT PRIMARY KEY,
+                    folder_name TEXT NOT NULL,
+                    cover_path TEXT,
+                    volume_count INTEGER NOT NULL,
+                    latest_volume_modified REAL NOT NULL DEFAULT 0,
+                    total_pages INTEGER NOT NULL DEFAULT 0,
+                    total_chars INTEGER NOT NULL DEFAULT 0,
+                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO catalog_series (series_key, folder_name, volume_count) "
+                "VALUES ('dr stone', 'Dr Stone', 3)"
+            )
+
+        reopened = Database(path)
+        [stored] = reopened.list_catalog_series()
+        assert stored["missing_pages"] == 0
+        assert stored["damaged_volumes"] == 0
 
     def test_upsert_replaces_by_series_key(self, db: Database) -> None:
         db.upsert_catalog_series(row())

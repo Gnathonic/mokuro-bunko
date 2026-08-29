@@ -10,12 +10,16 @@ from __future__ import annotations
 
 from mokuro_bunko.metadata.reader_compat import (
     count_chars,
+    count_matched_pages,
     count_page_chars,
     deterministic_uuid,
+    is_image_extension,
+    is_system_file,
     natural_sort_key,
     normalize_series_key,
     normalize_updated_at,
     normalize_volume_title_key,
+    trailing_extension,
 )
 
 
@@ -113,3 +117,96 @@ class TestNormalizeUpdatedAt:
         now = 1_800_000_000.0
         just_ahead = normalize_updated_at("2027-01-15T08:01:00.000Z", now=now)
         assert just_ahead == "2027-01-15T08:01:00.000Z"
+
+
+class TestCountMatchedPages:
+    """Each case mirrors one of the client's own `matchImagesToPages` tests
+    (`src/lib/import/__tests__/processing.test.ts`), reduced to the count."""
+
+    def test_exact_matches(self) -> None:
+        assert count_matched_pages(
+            ["page001.jpg", "page002.jpg"], ["page001.jpg", "page002.jpg"]
+        ) == 2
+
+    def test_detects_missing_images(self) -> None:
+        assert count_matched_pages(
+            ["page001.jpg", "page002.jpg", "page003.jpg"], ["page001.jpg", "page002.jpg"]
+        ) == 2
+
+    def test_extra_images_do_not_inflate_the_count(self) -> None:
+        assert count_matched_pages(["page001.jpg"], ["page001.jpg", "bonus.jpg"]) == 1
+
+    def test_remaps_across_a_changed_extension(self) -> None:
+        assert count_matched_pages(
+            ["page001.png", "page002.png"], ["page001.webp", "page002.webp"]
+        ) == 2
+
+    def test_nested_paths(self) -> None:
+        assert count_matched_pages(
+            ["images/page001.jpg", "images/page002.jpg"],
+            ["images/page001.jpg", "images/page002.jpg"],
+        ) == 2
+
+    def test_case_insensitive(self) -> None:
+        assert count_matched_pages(["PAGE001.JPG"], ["page001.jpg"]) == 1
+
+    def test_backslashes_normalize_to_forward_slashes(self) -> None:
+        assert count_matched_pages(["images\\page001.jpg"], ["images/page001.jpg"]) == 1
+
+    def test_count_based_fallback_when_every_name_was_rewritten(self) -> None:
+        assert count_matched_pages(
+            ["001.png", "002.png", "003.png"],
+            ["001_result.webp", "002_result.webp", "003_result.webp"],
+        ) == 3
+
+    def test_no_fallback_when_most_names_already_match(self) -> None:
+        assert count_matched_pages(
+            ["page001.jpg", "page002.jpg", "page003.jpg", "page004.jpg"],
+            ["page001.jpg", "page002.jpg", "renamed.jpg", "page004.jpg"],
+        ) == 3
+
+    def test_no_fallback_when_the_counts_disagree(self) -> None:
+        assert count_matched_pages(
+            ["001.png", "002.png", "003.png"], ["001_result.webp", "002_result.webp"]
+        ) == 0
+
+    def test_one_file_cannot_back_two_pages_by_stem(self) -> None:
+        # `a.png` and `a.jpg` both stem to `a`; only the first claims the file.
+        assert count_matched_pages(["a.png", "a.jpg"], ["a.webp"]) == 1
+
+    def test_but_an_exact_match_is_never_consumed(self) -> None:
+        # The client's exact branch does not consult `usedFiles`, so two pages
+        # naming the same image both match.
+        assert count_matched_pages(["a.webp", "a.webp"], ["a.webp"]) == 2
+
+    def test_a_page_without_an_img_path_is_unmatched(self) -> None:
+        assert count_matched_pages(["a.jpg", None], ["a.jpg", "b.jpg"]) == 1
+
+    def test_no_pages_is_no_matches_and_no_division_by_zero(self) -> None:
+        assert count_matched_pages([], ["a.jpg"]) == 0
+
+    def test_duplicate_archive_entries_count_once(self) -> None:
+        # A Map keyed by path on the client side; one file either way.
+        assert count_matched_pages(["a.jpg", "b.jpg"], ["a.jpg", "a.jpg"]) == 1
+
+
+class TestArchiveEntryFilters:
+    def test_system_junk(self) -> None:
+        assert is_system_file("__MACOSX/._page001.jpg")
+        assert is_system_file("._page001.jpg")
+        assert is_system_file("Thumbs.db")
+        assert is_system_file("page001.jpg~")
+        assert is_system_file("page001.jpg.bak")
+        assert not is_system_file("images/page001.jpg")
+
+    def test_image_extensions_include_the_modern_pair(self) -> None:
+        assert is_image_extension("JPG")
+        assert is_image_extension("avif")
+        assert is_image_extension("jxl")
+        assert not is_image_extension("txt")
+
+    def test_extension_comes_off_the_whole_path_like_the_client(self) -> None:
+        assert trailing_extension("images/page001.JPG") == "jpg"
+        # The client's quirk: a dot in a directory name swallows the rest.
+        assert trailing_extension("chapter.1/page001") == "1/page001"
+        assert trailing_extension("page001") == "page001"
