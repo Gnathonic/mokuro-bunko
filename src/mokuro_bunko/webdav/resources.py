@@ -2,7 +2,7 @@
 
 Compatible with mokuro-reader's expected WebDAV structure.
 The reader creates a /mokuro-reader/ folder on the server and stores:
-  - volume-data.json and profiles.json (per-user progress/settings)
+  - volume-data.json, profiles.json and goals.json (per-user progress/settings)
   - {SeriesTitle}/{Volume}.cbz (manga files, shared across users)
 
 This module maps those virtual paths to a physical layout where manga
@@ -132,6 +132,7 @@ class PathMapper:
         /mokuro-reader/                  - Reader root (virtual, merged view)
         /mokuro-reader/volume-data.json  - Per-user progress data
         /mokuro-reader/profiles.json     - Per-user profile settings
+        /mokuro-reader/goals.json        - Per-user reading goals
         /mokuro-reader/{series}/         - Shared series folder
         /mokuro-reader/{series}/{file}   - Shared manga files (CBZ etc.)
 
@@ -142,7 +143,12 @@ class PathMapper:
     """
 
     READER_ROOT = "mokuro-reader"
-    PER_USER_FILES = frozenset({"volume-data.json", "profiles.json"})
+    # Root .json files that belong to ONE user and map into their private
+    # directory. Everything else under /mokuro-reader/ is the shared library,
+    # so a per-user file left off this set would be a single file shared by
+    # every account — each one overwriting the others — and would be rejected
+    # outright for any account without library write permission.
+    PER_USER_FILES = frozenset({"volume-data.json", "profiles.json", "goals.json"})
 
     def __init__(self, storage_base: Path) -> None:
         """Initialize path mapper.
@@ -178,7 +184,7 @@ class PathMapper:
         return user_dir / filename
 
     def is_per_user_file(self, virtual_path: str) -> bool:
-        """Check if path is a per-user file (volume-data.json or profiles.json).
+        """Check if path is a per-user file (see PER_USER_FILES).
 
         These files live directly under /mokuro-reader/ and are mapped
         to each user's private directory.
