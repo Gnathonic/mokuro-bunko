@@ -2,7 +2,7 @@
 
 Compatible with mokuro-reader's expected WebDAV structure.
 The reader expects a /mokuro-reader/ folder containing:
-  - volume-data.json, profiles.json (per-user, isolated)
+  - volume-data.json, profiles.json, goals.json (per-user, isolated)
   - {SeriesTitle}/{Volume}.cbz (shared library)
 """
 
@@ -88,7 +88,7 @@ class MokuroDAVProvider(DAVProvider):  # type: ignore[misc]
         if path.startswith(f"/{PathMapper.READER_ROOT}/"):
             relative = path[len(f"/{PathMapper.READER_ROOT}/"):]
 
-            # Per-user files (volume-data.json, profiles.json)
+            # Per-user files (volume-data.json, profiles.json, goals.json)
             if relative in PathMapper.PER_USER_FILES:
                 if username:
                     physical_path = self.path_mapper.get_user_file_path(username, relative)

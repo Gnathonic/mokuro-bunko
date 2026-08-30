@@ -103,7 +103,7 @@ def check_permission(role: str, permission: Permission) -> bool:
 def is_progress_file(path: str) -> bool:
     """Check if a path is a per-user progress/profile file.
 
-    Per-user files are volume-data.json and profiles.json stored
+    Per-user files (see PathMapper.PER_USER_FILES) are stored
     directly under /mokuro-reader/.
     """
     path = "/" + path.strip("/")
