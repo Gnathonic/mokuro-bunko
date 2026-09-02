@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.6] - 2026-09-02
+
+### Fixed
+- **goals.json is now a per-user file.** It joins volume-data.json and profiles.json, so mokuro-reader's reading goals sync per account instead of into the shared library.
+
 ## [0.3.5] - 2026-08-29
 
 ### Added
