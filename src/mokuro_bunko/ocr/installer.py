@@ -36,8 +36,16 @@ class OCRBackend(Enum):
 # swallows the per-volume error, so an unpinned install silently produces
 # thumbnails but no .mokuro files. sentencepiece is required by the
 # slow-to-fast tokenizer conversion path.
+# The OCR engine is the performance-optimized mokuro fork (fp32 by default,
+# output identical to upstream mokuro 0.2.5; 4-20x faster on GPUs and 2-4x on
+# CPUs thanks to a worker-process page pipeline). Override the spec with
+# MOKURO_BUNKO_MOKURO_SPEC (e.g. "mokuro" for the PyPI release) if needed.
+MOKURO_PACKAGE_SPEC: str = os.environ.get(
+    "MOKURO_BUNKO_MOKURO_SPEC",
+    "mokuro @ git+https://github.com/Gnathonic/mokuro.git@perf/worker-pipeline",
+)
 MOKURO_INSTALL_PACKAGES: list[str] = [
-    "mokuro",
+    MOKURO_PACKAGE_SPEC,
     "transformers>=4.25,<5",
     "sentencepiece",
 ]
