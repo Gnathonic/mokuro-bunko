@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **OCR engine switched to the performance-optimized mokuro fork** (`Gnathonic/mokuro`, branch `perf/worker-pipeline`, a rebuild of GolyBidoof/mokuro proposed upstream). `install-ocr` now installs `mokuro @ git+https://github.com/Gnathonic/mokuro.git@perf/worker-pipeline` (override with `MOKURO_BUNKO_MOKURO_SPEC`). It runs in fp32 by default, so `.mokuro` output is identical to upstream mokuro 0.2.5, while a worker-process page pipeline makes OCR 4-20x faster on GPUs (RTX 4090 0.416 -> 0.039 s/page, RX 6900 XT 0.718 -> 0.118, Apple M2 Pro 1.21 -> 0.34) and 2-4x faster on CPUs. The processor command is unchanged (no `--fp16`: half precision is opt-in in the fork and trades a small character-error rate for speed). Existing OCR environments: `mokuro-bunko install-ocr --force`.
+
+
 ## [0.3.4] - 2026-08-29
 
 ### Fixed
