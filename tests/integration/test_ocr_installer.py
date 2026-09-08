@@ -173,9 +173,10 @@ class TestOCRInstallerInstallation:
 
             installer.install_mokuro()
 
-            # Check pip was called with mokuro
+            # Check pip was called with the mokuro package spec (the optimized fork)
             call_args = mock_pip.call_args[0][0]
-            assert "mokuro" in call_args
+            assert any(arg.startswith("mokuro") for arg in call_args)
+            assert any("Gnathonic/mokuro" in arg for arg in call_args)
 
     def test_install_mokuro_pins_tokenizer_stack(self, installer: OCRInstaller) -> None:
         """Mokuro install must pin transformers<5 and include sentencepiece.
