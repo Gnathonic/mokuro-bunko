@@ -1,3 +1,5 @@
+
+
 # Mokuro Bunko
 
 A self-hosted manga library server with WebDAV, built-in OCR processing, and multi-user support. Designed as a backend for [Mokuro Reader](https://reader.mokuro.app).
@@ -49,7 +51,7 @@ Requires [uv](https://docs.astral.sh/uv/) (it provisions Python 3.12 itself):
 git clone https://github.com/Gnathonic/mokuro-bunko.git
 cd mokuro-bunko
 uv sync
-uv run mokuro-bunko serve   # first browser visit walks you through setup
+uv run mokuro-bunko-bunko serve   # first browser visit walks you through setup
 ```
 
 Optional: `uv run mokuro-bunko setup` for the interactive console wizard, and
@@ -80,7 +82,7 @@ Copy [`config.example.yaml`](config.example.yaml) for a documented starting poin
 | `catalog.enabled` | `false` | Web-based library browser |
 | `catalog.enrich_community` | `true` | Fetch ratings/tags/genres from AniList/MAL for linked series |
 
-Environment variable overrides: `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE`, `MOKURO_CONFIG`.
+Environment variable overrides: `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE`, `MOKURO_CONFIG`, `MOKURO_OCR_BACKEND`.
 
 ## OCR
 
