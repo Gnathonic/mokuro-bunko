@@ -47,3 +47,24 @@ def test_worker_startup_removes_corrupt_sidecars(tmp_path: Path) -> None:
     assert removed == 1
     assert valid.exists()
     assert not invalid.exists()
+
+
+def test_workspace_sidecar_found_for_glob_metacharacter_names(tmp_path: Path) -> None:
+    """Volume names with [brackets] etc. are matched literally, not as globs.
+
+    ``[荒木飛呂彦] ...`` used to be read as a one-character class, so the
+    sidecar mokuro had just written was never found.
+    """
+    processor = OCRProcessor(storage_path=tmp_path)
+    for stem in (
+        "[荒木飛呂彦] ジョジョの奇妙な冒険 ファントムブラッド カラー版 02",
+        "Vol*1?",
+    ):
+        workspace = tmp_path / f"ws-{len(stem)}"
+        extract_dir = workspace / stem
+        extract_dir.mkdir(parents=True)
+        sidecar = workspace / f"{stem}.mokuro"
+        sidecar.write_text(json.dumps({"ok": True}), encoding="utf-8")
+
+        assert processor._collect_valid_workspace_sidecar(extract_dir, workspace) == sidecar
+        assert processor._collect_workspace_sidecar(extract_dir, workspace) == sidecar
