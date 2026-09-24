@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import zipfile
@@ -86,6 +87,31 @@ class TestRetryBackoff:
         assert worker._retry_delay_seconds(2) == 120.0
         assert worker._retry_delay_seconds(3) == 480.0
         assert worker._retry_delay_seconds(10) == 3600.0
+
+    def test_retry_delay_survives_huge_attempt_counts(self, worker: OCRWorker) -> None:
+        # 4.0 ** 512 overflows a float; a volume failing hourly hits that
+        # after ~3 weeks and must not crash the scan.
+        assert worker._retry_delay_seconds(513) == 3600.0
+        assert worker._retry_delay_seconds(10**9) == 3600.0
+
+    def test_long_failing_volume_does_not_block_scan(
+        self, worker: OCRWorker, storage: Path
+    ) -> None:
+        stuck = _make_cbz(storage / "library" / "S" / "Stuck.cbz")
+        # Older than the failure record, so the backoff path (not the
+        # replaced-file reset) decides eligibility.
+        old = time.time() - 3 * 86400
+        os.utime(stuck, (old, old))
+        worker.processor.last_failure = OcrFailure("boom")
+        worker._record_ocr_failure(stuck)
+        failures = worker._load_failures()
+        key = next(iter(failures))
+        failures[key]["attempts"] = 513
+        failures[key]["last_attempt_at"] = time.time() - 7200.0
+        worker._save_failures(failures)
+        fresh = _make_cbz(storage / "library" / "S" / "Fresh.cbz")
+
+        assert sorted(worker._ocr_candidates()) == sorted([stuck, fresh])
 
     def test_recent_failure_is_skipped(self, worker: OCRWorker, storage: Path) -> None:
         cbz = _make_cbz(storage / "library" / "S" / "V.cbz")
