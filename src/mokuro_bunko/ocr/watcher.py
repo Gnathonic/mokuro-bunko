@@ -408,7 +408,10 @@ class OCRWorker:
 
     def _retry_delay_seconds(self, attempts: int) -> float:
         """Exponential backoff delay before retrying a failed volume."""
-        return min(self.poll_interval * (4.0 ** max(0, attempts - 1)), 3600.0)
+        # Clamp the exponent: 4.0 ** 512 overflows a float, and a volume
+        # that fails every hour reaches that attempt count in ~3 weeks.
+        exponent = min(max(0, attempts - 1), 16)
+        return min(self.poll_interval * (4.0 ** exponent), 3600.0)
 
     def _touch_heartbeat(self) -> None:
         """Record OCR-loop liveness for the health endpoint."""
