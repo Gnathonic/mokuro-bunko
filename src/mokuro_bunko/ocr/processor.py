@@ -5,6 +5,7 @@ Handles running Mokuro on manga files and moving them to the library.
 
 from __future__ import annotations
 
+import glob
 import gzip
 import json
 import os
@@ -237,7 +238,7 @@ class OCRProcessor:
         """Find generated sidecar in temporary workspace."""
         stem = temp_cbz_path.stem
         candidates = sorted(
-            p for p in workspace.rglob(f"{stem}.mokuro*")
+            p for p in workspace.rglob(f"{glob.escape(stem)}.mokuro*")
             if p.is_file()
         )
         if not candidates:
@@ -269,7 +270,7 @@ class OCRProcessor:
         """Find generated sidecar in temporary workspace that is valid JSON."""
         stem = temp_cbz_path.stem
         candidates = sorted(
-            p for p in workspace.rglob(f"{stem}.mokuro*")
+            p for p in workspace.rglob(f"{glob.escape(stem)}.mokuro*")
             if p.is_file()
         )
         if not candidates:
