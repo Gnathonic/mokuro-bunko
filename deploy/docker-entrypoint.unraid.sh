@@ -14,6 +14,9 @@ export MOKURO_STORAGE="${MOKURO_STORAGE:-/data}"
 export MOKURO_OCR_BACKEND="${MOKURO_OCR_BACKEND:-auto}"
 export MOKURO_CONFIG="${MOKURO_CONFIG:-/config/config.yaml}"
 export MOKURO_BUNKO_OCR_ENV="${MOKURO_BUNKO_OCR_ENV:-/opt/ocr-env}"
+# Second environment for the non-mokuro OCR engines (hayai-nova,
+# paddle-manga, ppocr-manga).
+export MOKURO_BUNKO_OCR_ENGINES_ENV="${MOKURO_BUNKO_OCR_ENGINES_ENV:-/opt/ocr-engines-env}"
 
 # Redirect pip temp/cache to the data volume so large downloads (e.g. CUDA
 # PyTorch ~4 GB) don't fill the container's root filesystem.
@@ -50,10 +53,17 @@ chown "${PUID}:${PGID}" "${ocr_env_parent}" 2>/dev/null || true
 if [ -d "${MOKURO_BUNKO_OCR_ENV}" ]; then
   chown "${PUID}:${PGID}" "${MOKURO_BUNKO_OCR_ENV}" 2>/dev/null || true
 fi
+engines_env_parent="$(dirname "${MOKURO_BUNKO_OCR_ENGINES_ENV}")"
+chown "${PUID}:${PGID}" "${engines_env_parent}" 2>/dev/null || true
+if [ -d "${MOKURO_BUNKO_OCR_ENGINES_ENV}" ]; then
+  chown "${PUID}:${PGID}" "${MOKURO_BUNKO_OCR_ENGINES_ENV}" 2>/dev/null || true
+fi
 
 umask "${UMASK}"
 
-# Optional one-shot OCR env setup at container start.
+# Optional one-shot OCR env setup at container start. Only the mokuro
+# environment: the server itself installs whatever else the configured OCR
+# generations need (MOKURO_OCR_GENERATIONS or config.yaml) when it starts.
 if [ "${OCR_AUTO_INSTALL}" = "true" ] && [ "${MOKURO_OCR_BACKEND}" != "skip" ]; then
   gosu "${PUID}:${PGID}" mokuro-bunko install-ocr --backend "${MOKURO_OCR_BACKEND}" || true
 fi

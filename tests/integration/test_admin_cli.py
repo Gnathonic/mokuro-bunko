@@ -155,6 +155,69 @@ class TestDeleteUser:
         assert user is not None
 
 
+class TestRestoreUser:
+    """A deleted account keeps its row (the audit trail needs it), so its name
+    cannot be taken again -- restore-user brings it back instead, and add-user
+    says so rather than "already exists"."""
+
+    def test_add_user_over_a_deleted_name_says_how_to_restore_it(
+        self, runner: CliRunner, test_config: Path, test_db: Database
+    ) -> None:
+        test_db.create_user("gpu-box", "pass1234", "processor")
+        test_db.delete_user("gpu-box")
+        result = runner.invoke(
+            cli,
+            ["-c", str(test_config), "admin", "add-user", "gpu-box", "--password", "pass5678"],
+        )
+        assert result.exit_code == 1
+        assert "deleted" in result.output
+        assert "restore-user gpu-box" in result.output
+
+    def test_restore_user_reactivates_with_a_new_password(
+        self, runner: CliRunner, test_config: Path, test_db: Database
+    ) -> None:
+        test_db.create_user("gpu-box", "pass1234", "processor")
+        test_db.delete_user("gpu-box")
+        result = runner.invoke(
+            cli,
+            ["-c", str(test_config), "admin", "restore-user", "gpu-box", "--password", "pass5678"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "restored" in result.output
+        user = test_db.get_user("gpu-box")
+        assert user is not None and user["status"] == "active" and user["role"] == "processor"
+        assert test_db.authenticate_user("gpu-box", "pass5678") is not None
+        assert test_db.authenticate_user("gpu-box", "pass1234") is None
+
+    def test_restore_user_can_change_the_role(
+        self, runner: CliRunner, test_config: Path, test_db: Database
+    ) -> None:
+        test_db.create_user("someone", "pass1234")
+        test_db.delete_user("someone")
+        result = runner.invoke(
+            cli,
+            ["-c", str(test_config), "admin", "restore-user", "someone",
+             "--password", "pass5678", "--role", "processor"],
+        )
+        assert result.exit_code == 0, result.output
+        user = test_db.get_user("someone")
+        assert user is not None and user["role"] == "processor"
+
+    def test_restore_user_refuses_an_active_or_unknown_account(
+        self, runner: CliRunner, test_config: Path, test_db: Database
+    ) -> None:
+        test_db.create_user("active1", "pass1234")
+        for name in ("active1", "nobody"):
+            result = runner.invoke(
+                cli,
+                ["-c", str(test_config), "admin", "restore-user", name, "--password", "pass5678"],
+            )
+            assert result.exit_code == 1
+            assert "not a deleted account" in result.output
+        user = test_db.get_user("active1")
+        assert user is not None and test_db.authenticate_user("active1", "pass1234") is not None
+
+
 class TestListUsers:
     """Tests for list-users command."""
 

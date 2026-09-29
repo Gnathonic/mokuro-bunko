@@ -2,7 +2,7 @@
 
 Compatible with mokuro-reader's expected WebDAV structure.
 The reader creates a /mokuro-reader/ folder on the server and stores:
-  - volume-data.json and profiles.json (per-user progress/settings)
+  - volume-data.json, profiles.json and goals.json (per-user progress/settings)
   - {SeriesTitle}/{Volume}.cbz (manga files, shared across users)
 
 This module maps those virtual paths to a physical layout where manga
@@ -11,14 +11,21 @@ files are shared and per-user data is isolated.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import errno
+import hashlib
 import io
 import os
+import re
 import shutil
 import tempfile
 import threading
-import zipfile
+import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
@@ -27,6 +34,8 @@ from urllib.parse import quote
 from wsgidav.dav_provider import DAVCollection, DAVError, DAVNonCollection
 from wsgidav.util import join_uri
 
+from mokuro_bunko.ocr.generations import sidecar_siblings
+from mokuro_bunko.processor.archives import InflateLimit, verify_archive
 from mokuro_bunko.security import safe_resolve_under
 
 # Internal nginx location used for X-Accel-Redirect download offload. The nginx
@@ -88,6 +97,166 @@ _PATH_WRITE_LOCKS = _PathWriteLocks()
 _LOCKED_MESSAGE = "Resource is locked by another write operation"
 _HTTP_LOCKED = 423
 
+#: Environ key a successful PUT/MOVE/COPY of a library ``.cbz`` sets to the
+#: archive's path (`MokuroFileResource._note_archive_written`); read by
+#: `middleware.upload.UploadMiddleware` once the request has succeeded.
+ARCHIVE_WRITTEN_KEY = "mokuro.archive_written"
+
+#: Environ key listing the library paths a successful DELETE or MOVE took
+#: away -- a ``.cbz``, or a whole folder -- for `UploadMiddleware` to cancel
+#: their OCR (`OcrControl.archive_removed`) once the request has succeeded.
+ARCHIVES_REMOVED_KEY = "mokuro.archives_removed"
+
+#: Environ key holding the `UploadOutcome` of a PUT's write, filled in by the
+#: writer; `middleware.upload.UploadMiddleware` turns it into the response's
+#: verdict headers or its JSON failure body.
+UPLOAD_OUTCOME_KEY = "mokuro.upload"
+
+# Errors that mean the disk (or the user's quota) is full: a 507, not a 500.
+_DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
+
+
+@dataclass
+class UploadOutcome:
+    """What became of one PUT body.
+
+    On success ``verdict`` is ``verified`` (an archive whose zip structure and
+    CRC-32s check out) or ``stored`` (any other file), ``size`` the bytes
+    now on disk, and ``digest_verified`` the `Content-Digest` algorithm the
+    body matched (None without one). On failure ``reason`` is one of
+    ``truncated``, ``corrupted-in-transit``, ``archive-damaged``,
+    ``not-an-archive``, ``disk-full`` or ``server-error``, with the HTTP
+    ``status``, a sentence for a person and whether sending the same file
+    again could succeed.
+    """
+
+    verdict: str | None = None
+    size: int | None = None
+    digest_verified: str | None = None
+    status: int | None = None
+    reason: str | None = None
+    detail: str | None = None
+    retry: bool = False
+
+
+# `Content-Digest` (RFC 9530) algorithms this server checks, in preference
+# order, with the digest length each must have.
+_DIGEST_ALGORITHMS: dict[str, tuple[str, int]] = {
+    "sha-256": ("sha256", 32),
+    "sha-512": ("sha512", 64),
+}
+# One dictionary member: `<key>=:<base64>:` (an RFC 8941 byte sequence). The
+# field defines no parameters, so a member carrying any is malformed.
+_DIGEST_MEMBER = re.compile(r"^([a-z*][a-z0-9_.*-]*)=:([A-Za-z0-9+/]*={0,2}):$")
+
+
+def parse_content_digest(header: str | None) -> tuple[str, bytes] | None:
+    """``(algorithm, digest)`` from a `Content-Digest` header, or None.
+
+    Strict: a header any member of which is not ``<key>=:<base64>:`` -- bad
+    base64, parameters, a bare token, a digest of the wrong length for a
+    known algorithm -- is ignored whole, as if absent. Members naming an
+    algorithm this server does not check are skipped. Of the rest, the first
+    in :data:`_DIGEST_ALGORITHMS` order is used; a repeated key keeps its
+    last value, as a structured-field dictionary does.
+    """
+    if header is None or not header.strip():
+        return None
+    members: dict[str, bytes] = {}
+    for raw in header.split(","):
+        match = _DIGEST_MEMBER.match(raw.strip())
+        if match is None:
+            return None
+        try:
+            value = base64.b64decode(match.group(2), validate=True)
+        except (binascii.Error, ValueError):
+            return None
+        algorithm = match.group(1)
+        known = _DIGEST_ALGORITHMS.get(algorithm)
+        if known is not None and len(value) != known[1]:
+            return None
+        members[algorithm] = value
+    for algorithm in _DIGEST_ALGORITHMS:
+        if algorithm in members:
+            return algorithm, members[algorithm]
+    return None
+
+
+class DamageMemory:
+    """Damage seen in archive PUTs that carried no digest, per destination.
+
+    Without a `Content-Digest` the server cannot tell damage in transit from
+    a damaged copy on the client. The same damage twice -- same size, same
+    damaged members -- to the same path says it is the source. Bounded
+    (least recently used out) and forgetful (``ttl`` seconds), in memory
+    only: a restart simply forgets, which costs at most one more retry.
+    """
+
+    def __init__(
+        self,
+        capacity: int = 256,
+        ttl: float = 3600.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._capacity = capacity
+        self._ttl = ttl
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._seen: OrderedDict[str, tuple[tuple[Any, ...], float]] = OrderedDict()
+
+    def seen_before(self, path: str, signature: tuple[Any, ...]) -> bool:
+        """Record this damage at ``path``; True when it is what was seen there last."""
+        now = self._clock()
+        with self._lock:
+            previous = self._seen.pop(path, None)
+            repeat = (
+                previous is not None
+                and previous[0] == signature
+                and now - previous[1] <= self._ttl
+            )
+            self._seen[path] = (signature, now)
+            while len(self._seen) > self._capacity:
+                self._seen.popitem(last=False)
+            return repeat
+
+    def forget(self, path: str) -> None:
+        with self._lock:
+            self._seen.pop(path, None)
+
+
+_DAMAGE_MEMORY = DamageMemory()
+
+
+def expected_upload_size(environ: dict[str, Any]) -> int | None:
+    """The body length a PUT announced, or None (chunked, or unparseable)."""
+    raw = environ.get("CONTENT_LENGTH")
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return None
+    return value if value >= 0 else None
+
+
+def _forget_ocr_records(db: Any, rel: str | None, *, archive_too: bool = True) -> None:
+    """A library file at ``rel`` left (or was overwritten): drop who wrote its OCR.
+
+    An archive takes every sidecar record of its volume (``archive_too``;
+    a PUT replacing an archive leaves its sidecars where they are, so it
+    passes False). A sidecar takes its own. The records are
+    `Database.record_ocr_sidecar`'s -- whoever writes a sidecar over WebDAV
+    is not the machine on record, so its row goes too.
+    """
+    if db is None or rel is None:
+        return
+    lower = rel.lower()
+    if lower.endswith(".cbz"):
+        if archive_too:
+            db.forget_ocr_sidecars_of_volume(rel)
+    elif lower.endswith(".mokuro") or lower.endswith(".mokuro.gz"):
+        db.forget_ocr_sidecar(rel)
+
 
 def _try_acquire_all(paths: list[Path]) -> list[Path] | None:
     """Acquire write locks on all paths or none.
@@ -132,6 +301,7 @@ class PathMapper:
         /mokuro-reader/                  - Reader root (virtual, merged view)
         /mokuro-reader/volume-data.json  - Per-user progress data
         /mokuro-reader/profiles.json     - Per-user profile settings
+        /mokuro-reader/goals.json        - Per-user reading goals
         /mokuro-reader/{series}/         - Shared series folder
         /mokuro-reader/{series}/{file}   - Shared manga files (CBZ etc.)
 
@@ -142,7 +312,12 @@ class PathMapper:
     """
 
     READER_ROOT = "mokuro-reader"
-    PER_USER_FILES = frozenset({"volume-data.json", "profiles.json"})
+    # Root .json files that belong to ONE user and map into their private
+    # directory. Everything else under /mokuro-reader/ is the shared library,
+    # so a per-user file left off this set would be a single file shared by
+    # every account — each one overwriting the others — and would be rejected
+    # outright for any account without library write permission.
+    PER_USER_FILES = frozenset({"volume-data.json", "profiles.json", "goals.json"})
 
     def __init__(self, storage_base: Path) -> None:
         """Initialize path mapper.
@@ -178,7 +353,7 @@ class PathMapper:
         return user_dir / filename
 
     def is_per_user_file(self, virtual_path: str) -> bool:
-        """Check if path is a per-user file (volume-data.json or profiles.json).
+        """Check if path is a per-user file (see PER_USER_FILES).
 
         These files live directly under /mokuro-reader/ and are mapped
         to each user's private directory.
@@ -320,8 +495,6 @@ class PathMapper:
 class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
     """WebDAV resource for files."""
 
-    _VOLUME_SIDECAR_SUFFIXES = (".mokuro", ".mokuro.gz", ".webp", ".nocover")
-
     # Static property list — avoids calling getters to probe existence (8 calls
     # × 33k resources = 264k method calls saved on a Depth:infinity PROPFIND).
     _PROP_NAMES = [
@@ -417,12 +590,35 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
             payload.update(details)
         self._audit("lock_conflict", details=payload)
 
+    def _note_archive_written(self, path: Path) -> None:
+        """Tell the upload middleware a library ``.cbz`` is now in place.
+
+        It queues the volume for OCR at once (`OcrControl.archive_arrived`)
+        once the request has succeeded, instead of leaving it for the poll.
+        """
+        mapper = self._get_mapper()
+        if mapper is None or path.suffix != ".cbz":
+            return
+        try:
+            path.resolve().relative_to(mapper.library_path.resolve())
+        except (OSError, ValueError):
+            return
+        self.environ[ARCHIVE_WRITTEN_KEY] = path
+
+    def _note_archive_removed(self, path: Path) -> None:
+        """Note that a library ``.cbz`` left its place (deleted, or moved away)."""
+        if path.suffix.lower() != ".cbz":
+            return
+        _note_removed(self.environ, self._get_mapper(), path)
+
     def _on_write_committed(self, existed_before: bool) -> None:
+        self._note_archive_written(self.file_path)
         db = self._get_database()
         actor = self._get_actor_username()
         rel = self._relative_under_library()
         if db is not None and rel is not None and actor:
             db.record_volume_upload(rel, actor, existed_before=existed_before)
+        _forget_ocr_records(db, rel, archive_too=False)
         self._audit(
             "edit" if existed_before else "upload",
             details={"existed_before": existed_before},
@@ -583,10 +779,24 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
         try:
             existed_before = self.file_path.exists()
             self.file_path.parent.mkdir(parents=True, exist_ok=True)
-            if self.file_path.suffix.lower() == ".cbz":
-                writer: BinaryIO = cast("BinaryIO", _ValidatedCbzWriter(self.file_path))
-            else:
-                writer = cast("BinaryIO", _AtomicFileWriter(self.file_path))
+            outcome = UploadOutcome()
+            self.environ[UPLOAD_OUTCOME_KEY] = outcome
+            writer_class = (
+                _ValidatedCbzWriter
+                if self.file_path.suffix.lower() == ".cbz"
+                else _AtomicFileWriter
+            )
+            writer = cast(
+                "BinaryIO",
+                writer_class(
+                    self.file_path,
+                    expected_size=expected_upload_size(self.environ),
+                    expected_digest=parse_content_digest(
+                        self.environ.get("HTTP_CONTENT_DIGEST")
+                    ),
+                    outcome=outcome,
+                ),
+            )
             audited = _AuditedWriter(
                 writer,
                 on_commit=lambda: self._on_write_committed(existed_before),
@@ -623,19 +833,25 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
             rel = self._relative_under_library()
             lower = self.file_path.name.lower()
             if lower.endswith(".cbz"):
-                base = self.file_path.with_suffix("")
-                for suffix in self._VOLUME_SIDECAR_SUFFIXES:
-                    sidecar = Path(f"{base}{suffix}")
+                # Every sidecar this archive has, LISTED from the directory
+                # rather than looked up in a registry of configured names: a
+                # generation that was renamed, disabled or deleted still has
+                # its files here, and so may a layer another server wrote or
+                # a reader pushed. All of them belong to this archive and
+                # all of them go with it (see `generations.sidecar_siblings`).
+                for sidecar in sidecar_siblings(self.file_path):
                     try:
                         sidecar.unlink(missing_ok=True)
                     except OSError:
                         pass
 
             os.remove(self.file_path)
+            self._note_archive_removed(self.file_path)
 
             db = self._get_database()
             if db is not None and rel is not None and lower.endswith(".cbz"):
                 db.forget_volume_upload(rel)
+            _forget_ocr_records(db, rel)
             self._audit("delete")
         finally:
             _PATH_WRITE_LOCKS.release(self.file_path)
@@ -665,10 +881,16 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
 
             dest_physical.parent.mkdir(parents=True, exist_ok=True)
             os.replace(self.file_path, dest_physical)
+            self._note_archive_removed(self.file_path)
+            self._note_archive_written(dest_physical)
 
             db = self._get_database()
             if db is not None and old_rel is not None and new_rel is not None:
                 db.rename_volume_upload(old_rel, new_rel)
+            # The archive's sidecars stay where they were: their records are
+            # of a volume that is not there any more.
+            _forget_ocr_records(db, old_rel)
+            _forget_ocr_records(db, new_rel, archive_too=False)
 
             self._audit("move", details={"destination": dest_path})
             return True
@@ -702,8 +924,10 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
                 dest_physical.parent.mkdir(parents=True, exist_ok=True)
                 if is_move:
                     os.replace(self.file_path, dest_physical)
+                    self._note_archive_removed(self.file_path)
                 else:
                     shutil.copy2(self.file_path, dest_physical)
+                self._note_archive_written(dest_physical)
                 db = self._get_database()
                 if db is not None:
                     old_rel = self._relative_under_library()
@@ -715,6 +939,9 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
                         new_rel = None
                     if is_move and old_rel is not None and new_rel is not None:
                         db.rename_volume_upload(old_rel, new_rel)
+                    if is_move:
+                        _forget_ocr_records(db, old_rel)
+                    _forget_ocr_records(db, new_rel, archive_too=False)
                 self._audit(
                     "move" if is_move else "copy",
                     details={"destination": dest_path},
@@ -895,11 +1122,20 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
                     if file_path and file_path.exists():
                         members.append(name)
 
-            # Shared library contents — use scandir to cache entry metadata
+            # Shared library contents — use scandir to cache entry metadata.
+            # A per-user file name found physically in the shared folder (a
+            # goals.json from before it became per-user, a stray upload) is
+            # NOT a member: every name listed here must resolve in
+            # `get_member`, which maps those names to the user's own copy and
+            # returns None when there is none -- and wsgidav asserts on a
+            # listed name that resolves to nothing, turning one stale file
+            # into a 500 on the root for every user.
             try:
                 cache: dict[str, os.DirEntry[str]] = {}
                 with os.scandir(self.path_mapper.library_path) as it:
                     for entry in it:
+                        if entry.name in PathMapper.PER_USER_FILES:
+                            continue
                         cache[entry.name] = entry
                 self._scandir_cache = cache
                 members.extend(sorted(cache.keys()))
@@ -1143,6 +1379,7 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
             volume_paths = self._get_library_volume_paths()
             dest_physical.parent.mkdir(parents=True, exist_ok=True)
             os.replace(self.folder_path, dest_physical)
+            _note_removed(self.environ, self.path_mapper, self.folder_path)
 
             db = self._get_database()
             if db is not None and old_rel_prefix is not None and new_rel_prefix is not None:
@@ -1150,6 +1387,10 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
                     suffix = old_rel[len(old_rel_prefix):].lstrip("/")
                     new_rel = f"{new_rel_prefix}/{suffix}" if suffix else new_rel_prefix
                     db.rename_volume_upload(old_rel, new_rel)
+                # The sidecars moved with the folder: so does who wrote them.
+                db.rename_ocr_sidecars_under_prefix(old_rel_prefix, new_rel_prefix)
+            elif db is not None and old_rel_prefix is not None:
+                db.forget_ocr_sidecars_under_prefix(old_rel_prefix)
 
             self._audit("move", details={"destination": dest_path})
             return []
@@ -1168,7 +1409,9 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
                 rel = self._relative_under_library()
                 if db is not None and rel:
                     db.forget_volume_uploads_under_prefix(rel)
+                    db.forget_ocr_sidecars_under_prefix(rel)
                 shutil.rmtree(self.folder_path)
+                _note_removed(self.environ, self.path_mapper, self.folder_path)
                 self._audit("delete")
             finally:
                 _PATH_WRITE_LOCKS.release(self.folder_path)
@@ -1177,16 +1420,48 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
         return True
 
 
+def _note_removed(environ: dict[str, Any], mapper: PathMapper | None, path: Path) -> None:
+    """Add ``path`` to the request's removed library paths (`ARCHIVES_REMOVED_KEY`)."""
+    if mapper is None:
+        return
+    try:
+        path.resolve().relative_to(mapper.library_path.resolve())
+    except (OSError, ValueError):
+        return
+    environ.setdefault(ARCHIVES_REMOVED_KEY, []).append(path)
+
+
 class _AtomicFileWriter:
     """Temporary file writer that atomically replaces the destination on close.
 
-    An interrupted or aborted upload never leaves a truncated file: bytes go
-    to a temp file in the destination directory and only a successful close()
-    publishes them via os.replace().
+    An interrupted, short or rejected upload never touches the destination:
+    bytes go to a temp file in the destination directory, and only a close()
+    that finds them whole -- as many as ``expected_size`` announced, and
+    passing the subclass's own check (`_verify`) -- publishes them via
+    os.replace(). Every way it ends is recorded in ``outcome``.
     """
 
-    def __init__(self, destination: Path) -> None:
+    #: What a successful write is called in ``UploadOutcome.verdict``.
+    VERDICT = "stored"
+
+    def __init__(
+        self,
+        destination: Path,
+        *,
+        expected_size: int | None = None,
+        expected_digest: tuple[str, bytes] | None = None,
+        outcome: UploadOutcome | None = None,
+    ) -> None:
         self.destination = destination
+        self.expected_size = expected_size
+        # The body is hashed as it streams to the temp file: no second read.
+        self.expected_digest = expected_digest
+        self._hasher = (
+            hashlib.new(_DIGEST_ALGORITHMS[expected_digest[0]][0])
+            if expected_digest is not None
+            else None
+        )
+        self.outcome = outcome if outcome is not None else UploadOutcome()
         self.destination.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(
             prefix=f".{destination.name}.upload-",
@@ -1199,7 +1474,17 @@ class _AtomicFileWriter:
         self._closed = False
 
     def write(self, data: bytes) -> int:
-        return self._file.write(data)
+        try:
+            return self._write(data)
+        except OSError as e:
+            self._fail_on_os_error(e, "writing the upload")
+            raise  # not reached: _fail_on_os_error raises
+
+    def _write(self, data: bytes) -> int:
+        written = self._file.write(data)
+        if self._hasher is not None:
+            self._hasher.update(data)
+        return written
 
     def flush(self) -> None:
         self._file.flush()
@@ -1222,26 +1507,103 @@ class _AtomicFileWriter:
     def closed(self) -> bool:
         return self._closed
 
-    def _finalize_temp(self) -> None:
-        """Flush and close the temp file handle."""
+    def _discard_temp(self) -> None:
         try:
-            self._file.flush()
-            os.fsync(self._file.fileno())
+            self._file.close()
         except OSError:
             pass
+        try:
+            self.temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _reject(self, status: int, reason: str, detail: str, *, retry: bool) -> None:
+        """Discard the staged bytes, record why, and fail the request."""
+        self._closed = True
+        self._discard_temp()
+        self.outcome.status = status
+        self.outcome.reason = reason
+        self.outcome.detail = detail
+        self.outcome.retry = retry
+        raise DAVError(status, detail)
+
+    def _fail_on_os_error(self, error: OSError, doing: str) -> None:
+        if error.errno in _DISK_FULL_ERRNOS:
+            self._reject(
+                507,
+                "disk-full",
+                "The server's disk is full; the upload was not stored.",
+                retry=False,
+            )
+        self._reject(
+            500,
+            "server-error",
+            f"The server failed {doing}: {error.strerror or error}.",
+            retry=True,
+        )
+
+    def _finalize_temp(self) -> None:
+        """Flush, sync and close the temp file handle.
+
+        A flush that fails (a full disk often surfaces only here, when the
+        filesystem allocates) fails the upload; an fsync the filesystem does
+        not support does not.
+        """
+        try:
+            self._file.flush()
+            try:
+                os.fsync(self._file.fileno())
+            except OSError as e:
+                if e.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EROFS):
+                    raise
+        except OSError as e:
+            self._fail_on_os_error(e, "saving the upload")
         finally:
             self._file.close()
+
+    def _check_size(self) -> int:
+        """The staged file's size; a short (or long) body is `truncated`."""
+        try:
+            size = self.temp_path.stat().st_size
+        except OSError as e:
+            self._fail_on_os_error(e, "checking the upload")
+            raise  # not reached
+        if self.expected_size is not None and size != self.expected_size:
+            self._reject(
+                422,
+                "truncated",
+                f"Received {size} of {self.expected_size} bytes; the upload was cut short.",
+                retry=True,
+            )
+        return size
+
+    def _check_digest(self) -> None:
+        """A body that does not match its `Content-Digest` was damaged on the way."""
+        if self.expected_digest is None or self._hasher is None:
+            return
+        algorithm, expected = self.expected_digest
+        if self._hasher.digest() != expected:
+            self._reject(
+                422,
+                "corrupted-in-transit",
+                f"The upload does not match its {algorithm} Content-Digest: it was "
+                "damaged on the way here. Sending it again should work.",
+                retry=True,
+            )
+        self.outcome.digest_verified = algorithm
+
+    def _verify(self) -> None:
+        """A subclass's check of the staged bytes; `_reject` to refuse them."""
+
+    def _publish(self) -> None:
+        os.replace(self.temp_path, self.destination)
 
     def _commit(self) -> None:
         """Atomically publish the temp file to the destination."""
         try:
-            os.replace(self.temp_path, self.destination)
+            self._publish()
         except OSError as e:
-            try:
-                self.temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise DAVError(500, f"Cannot finalize upload: {e}") from e
+            self._fail_on_os_error(e, "moving the upload into place")
         # mkstemp creates with 0o600; apply umask-derived permissions instead.
         # On Windows, umask/chmod have no effect on NTFS permissions.
         if os.name != "nt":
@@ -1254,20 +1616,20 @@ class _AtomicFileWriter:
             return
         self._closed = True
         self._finalize_temp()
+        size = self._check_size()
+        self._check_digest()
+        self._verify()
         self._commit()
+        _DAMAGE_MEMORY.forget(str(self.destination))
+        self.outcome.verdict = self.VERDICT
+        self.outcome.size = size
 
     def abort(self) -> None:
         """Discard the temp file without touching the destination."""
         if self._closed:
             return
         self._closed = True
-        try:
-            self._file.close()
-        finally:
-            try:
-                self.temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        self._discard_temp()
 
     def writable(self) -> bool:
         return True
@@ -1282,32 +1644,80 @@ class _AtomicFileWriter:
         self.close()
 
 
+# The first bytes of every zip: a local file header, or the end-of-central-
+# directory record of an empty archive.
+_ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06")
+
+
+# An upload is a stranger's archive: its inflation is bounded before a byte of
+# it is read, because verification holds a worker thread and the path's lock.
+_UPLOAD_INFLATE_LIMIT = InflateLimit()
+
+
 class _ValidatedCbzWriter(_AtomicFileWriter):
-    """Atomic CBZ writer that validates archive integrity before committing."""
+    """Atomic CBZ writer: publishes only an archive whose every CRC checks out.
 
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._finalize_temp()
+    The check is the processor's own (`processor.archives.verify_archive`):
+    the zip's structure, and every member a reader can reach read to its end
+    against its CRC-32.
+    """
 
-        if not self._is_valid_cbz(self.temp_path):
-            try:
-                self.temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise DAVError(400, "Invalid or corrupted CBZ upload")
+    VERDICT = "verified"
 
-        self._commit()
-
-    @staticmethod
-    def _is_valid_cbz(path: Path) -> bool:
+    def _verify(self) -> None:
         try:
-            with zipfile.ZipFile(path, "r") as zf:
-                # Ensure archive structure and entry CRCs are valid.
-                return zf.testzip() is None
-        except (zipfile.BadZipFile, OSError, EOFError):
-            return False
+            with open(self.temp_path, "rb") as staged:
+                head = staged.read(4)
+        except OSError as e:
+            self._fail_on_os_error(e, "reading the upload back")
+        result = verify_archive(self.temp_path, limit=_UPLOAD_INFLATE_LIMIT)
+        if result.ok:
+            return
+        if result.refused is not None:
+            self._reject(
+                422,
+                "archive-refused",
+                f"The archive was not accepted: {result.refused}.",
+                retry=False,
+            )
+        if result.structural is not None and head not in _ZIP_MAGIC:
+            self._reject(
+                422,
+                "not-an-archive",
+                "The upload is not a zip archive, so it cannot be a .cbz.",
+                retry=False,
+            )
+        damage = result.describe()
+        if self.outcome.digest_verified is not None:
+            # Received exactly as sent: the damage is in the client's copy.
+            self._reject(
+                422,
+                "archive-damaged",
+                f"The archive arrived intact ({self.outcome.digest_verified} matched) "
+                f"but is damaged: {damage}. Your copy of it is damaged; "
+                "re-import this volume.",
+                retry=False,
+            )
+        try:
+            size: int | None = self.temp_path.stat().st_size
+        except OSError:
+            size = self.expected_size
+        signature = (size, result.structural, tuple(sorted(result.damaged)))
+        if _DAMAGE_MEMORY.seen_before(str(self.destination), signature):
+            self._reject(
+                422,
+                "archive-damaged",
+                f"The archive is damaged: {damage}. The same damage arrived twice, "
+                "so your copy of it is damaged; re-import this volume.",
+                retry=False,
+            )
+        self._reject(
+            422,
+            "archive-damaged",
+            f"The archive is damaged: {damage}. It may have been damaged on the "
+            "way here; sending it again may work.",
+            retry=True,
+        )
 
 
 class _AuditedWriter:

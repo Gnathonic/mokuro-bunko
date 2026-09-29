@@ -34,8 +34,8 @@ def mokuro_payload(**overrides: object) -> dict[str, object]:
         "volume": "v01",
         "volume_uuid": "cfb5220c-57db-4008-9f44-e659d794e381",
         "pages": [
-            {"blocks": [{"lines": ["世界", "abc"]}]},
-            {"blocks": [{"lines": ["ねこ"]}]},
+            {"img_path": "000.jpg", "blocks": [{"lines": ["世界", "abc"]}]},
+            {"img_path": "001.jpg", "blocks": [{"lines": ["ねこ"]}]},
         ],
     }
     payload.update(overrides)
@@ -258,6 +258,9 @@ class TestEntryCache:
                 # test for that path.
                 "mokuro_size": 111,
                 "mokuro_modified": 222,
+                # Same rule for `matched_page_count`, added later still: a row
+                # without the key is a legacy row and must miss.
+                "matched_page_count": 777,
             },
             cbz_stat.st_size,
             cbz_stat.st_mtime,
@@ -265,6 +268,7 @@ class TestEntryCache:
         )
         [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
         assert entry.page_count == 999
+        assert entry.matched_page_count == 777
         assert entry.mokuro_version == "cached"
         assert entry.mokuro_size == 111
         assert entry.mokuro_modified == 222
@@ -457,3 +461,153 @@ class TestFreshnessStamps:
         assert cached is not None
         assert cached["mokuro_size"] == sidecar_stat.st_size
         assert cached["mokuro_modified"] == int(sidecar_stat.st_mtime)
+
+
+class TestMatchedPageCount:
+    """`matched_page_count`: how many of the sidecar's pages the archive has."""
+
+    def test_a_complete_volume_matches_every_page(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.page_count == 2
+        assert entry.matched_page_count == 2
+        assert entry.missing_pages == 0
+
+    def test_a_page_with_no_image_in_the_archive_is_missing(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz", pages=1)          # only 000.jpg
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.page_count == 2
+        assert entry.matched_page_count == 1
+        assert entry.missing_pages == 1
+
+    def test_a_changed_extension_still_matches(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        series.mkdir(parents=True)
+        with zipfile.ZipFile(series / "v1.cbz", "w") as archive:
+            archive.writestr("000.webp", b"image")
+            archive.writestr("001.webp", b"image")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.matched_page_count == 2
+
+    def test_os_junk_and_the_embedded_cover_are_not_pages(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        series.mkdir(parents=True)
+        with zipfile.ZipFile(series / "v1.cbz", "w") as archive:
+            archive.writestr("000.jpg", b"image")
+            archive.writestr("001.jpg", b"image")
+            archive.writestr("__MACOSX/._000.jpg", b"junk")
+            archive.writestr("v1.webp", b"the volume's own cover sidecar")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        # Both pages matched and neither excluded entry became an extra image
+        # that could have triggered the count-based fallback.
+        assert entry.matched_page_count == 2
+
+    def test_a_corrupt_archive_matches_nothing_and_is_damaged(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        series.mkdir(parents=True)
+        (series / "v1.cbz").write_bytes(b"this is not a zip file")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.page_count == 2
+        assert entry.matched_page_count == 0
+        assert entry.missing_pages == 2
+
+    def test_an_image_only_volume_is_never_damaged(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz", pages=5)
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.page_count == 5
+        assert entry.matched_page_count == 5
+        assert entry.missing_pages == 0
+
+    def test_a_sidecar_that_names_no_images_claims_nothing(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(
+            json.dumps(mokuro_payload(pages=[{"blocks": []}, {"blocks": []}])),
+            encoding="utf-8",
+        )
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.page_count == 2
+        assert entry.matched_page_count is None
+        assert entry.missing_pages == 0
+
+    def test_an_unreadable_archive_is_unknown_and_is_not_cached(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        """A permissions failure is not damage, and must not be remembered as
+        damage: the entry claims nothing AND no cache row is written, so the
+        next pass asks the filesystem again instead of serving the shrug."""
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        database = Database(tmp_path / "test.db")
+        cbz_stat = (series / "v1.cbz").stat()
+        sidecar_stat = (series / "v1.mokuro").stat()
+
+        (series / "v1.cbz").chmod(0o000)
+        try:
+            [entry] = compile_series_volumes(
+                SeriesFolder("Dr Stone", series), database=database
+            )
+        finally:
+            (series / "v1.cbz").chmod(0o644)
+        assert entry.matched_page_count is None
+        assert entry.missing_pages == 0
+        assert (
+            database.get_cached_volume_entry(
+                "Dr Stone/v1.cbz",
+                cbz_stat.st_size,
+                cbz_stat.st_mtime,
+                f"v1.mokuro:{sidecar_stat.st_size}:{sidecar_stat.st_mtime}",
+            )
+            is None
+        )
+
+        # Nothing was cached, so the recovered archive is seen on the next pass.
+        [healed] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert healed.matched_page_count == 2
+
+    def test_a_legacy_cache_row_is_backfilled_not_served(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        """The backfill: a row written before this field existed has no key for
+        it, so it misses and the volume is recompiled with a real count."""
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        database = Database(tmp_path / "test.db")
+        cbz_stat = (series / "v1.cbz").stat()
+        sidecar_stat = (series / "v1.mokuro").stat()
+        sidecar_key = f"v1.mokuro:{sidecar_stat.st_size}:{sidecar_stat.st_mtime}"
+        database.put_cached_volume_entry(
+            "Dr Stone/v1.cbz",
+            "dr stone",
+            {
+                "volume_uuid": "cached-uuid",
+                "volume_title": "v1",
+                "page_count": 999,
+                "character_count": 888,
+                "mokuro_version": "cached",
+                "spine_width": None,
+                "archive_size": 1,
+                "mokuro_size": 111,
+                "mokuro_modified": 222,
+                # No `matched_page_count` — this is the legacy shape.
+            },
+            cbz_stat.st_size,
+            cbz_stat.st_mtime,
+            sidecar_key,
+        )
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert entry.page_count == 2               # recompiled, not the cached 999
+        assert entry.matched_page_count == 2
+        assert database.get_cached_volume_entry(
+            "Dr Stone/v1.cbz", cbz_stat.st_size, cbz_stat.st_mtime, sidecar_key
+        )["matched_page_count"] == 2

@@ -28,6 +28,7 @@ WEBDAV_METHODS = [
 # Headers that clients may send
 ALLOWED_HEADERS = [
     "Authorization",
+    "Content-Digest",
     "Content-Type",
     "Content-Length",
     "Depth",
@@ -54,7 +55,35 @@ EXPOSED_HEADERS = [
     "Location",
     "Lock-Token",
     "WWW-Authenticate",
+    # A `.cbz` PUT that queued OCR: where the volume's manifest is, and when
+    # to read it again (`middleware.upload`).
+    "X-Mokuro-Manifest",
+    "X-Mokuro-Recheck-After",
+    # Every PUT's verdict: `verified`/`stored`, and the bytes stored.
+    "X-Mokuro-Upload",
+    "X-Mokuro-Size",
+    # This server stages and verifies a PUT before replacing anything, so a
+    # client need not delete the old copy first (`PUT_CAPABILITY`).
+    "X-Mokuro-Put",
+    # The `Content-Digest` algorithm a PUT body matched (RFC 9530).
+    "X-Mokuro-Digest-Verified",
 ]
+
+#: Advertised on every WebDAV OPTIONS answer and on every `.cbz` PUT answer:
+#: a PUT here is staged, checked and only then moved over the old file, so a
+#: failed one leaves the old file as it was. A client that deletes a remote
+#: file before re-uploading it (for servers that rename instead of
+#: overwriting) may skip that delete on this server.
+PUT_CAPABILITY = ("X-Mokuro-Put", "verified")
+
+
+def is_dav_path(path: str) -> bool:
+    """True for a path the WebDAV app serves: the root, the reader root, the inbox."""
+    return (
+        path in ("", "/", "/mokuro-reader", "/inbox")
+        or path.startswith("/mokuro-reader/")
+        or path.startswith("/inbox/")
+    )
 
 
 def compile_origin_pattern(pattern: str) -> re.Pattern[str]:
@@ -234,6 +263,15 @@ class CorsMiddleware:
             origin, self.config, is_preflight=True,
             private_network_requested=private_network,
         )
+
+        if is_dav_path(environ.get("PATH_INFO", "")):
+            # A preflight answers every OPTIONS that carries an Origin -- a
+            # script's own OPTIONS request included -- so the capability is
+            # said here too, and exposed so that script can read it.
+            allowed = bool(cors_headers)
+            cors_headers = [*cors_headers, PUT_CAPABILITY]
+            if allowed:
+                cors_headers.append(("Access-Control-Expose-Headers", ", ".join(EXPOSED_HEADERS)))
 
         if cors_headers:
             # Origin is allowed - return 204 with CORS headers

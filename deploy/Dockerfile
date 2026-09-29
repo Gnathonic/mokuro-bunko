@@ -6,6 +6,10 @@
 #   docker build -t mokuro-bunko .
 #   docker run -p 8080:8080 -v ./storage:/data mokuro-bunko
 #
+# OCR environments are installed on first start into /data (persisted with
+# the library). The image has no GPU runtime: for CUDA OCR use
+# Dockerfile.unraid, or run OCR on a remote processor.
+#
 
 FROM python:3.12-slim as builder
 
@@ -34,14 +38,15 @@ RUN pip install --no-cache-dir dist/*.whl
 
 FROM python:3.12-slim as runtime
 
-LABEL org.opencontainers.image.source="https://github.com/nathan/mokuro-bunko"
+LABEL org.opencontainers.image.source="https://github.com/Gnathonic/mokuro-bunko"
 LABEL org.opencontainers.image.title="Mokuro Bunko Server"
 LABEL org.opencontainers.image.description="WebDAV server for Mokuro reader with shared manga library"
 LABEL org.opencontainers.image.licenses="MIT"
 
-# Install nginx (download offload via X-Accel-Redirect) and envsubst.
+# Install nginx (download offload via X-Accel-Redirect) and envsubst, plus
+# git: the OCR installer installs the mokuro fork from GitHub.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    nginx gettext-base \
+    nginx gettext-base git \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -68,6 +73,10 @@ ENV MOKURO_HOST="0.0.0.0"
 ENV MOKURO_PORT="8080"
 ENV MOKURO_BACKEND_PORT="8081"
 ENV MOKURO_STORAGE="/data"
+ENV MOKURO_CONFIG="/data/config.yaml"
+# OCR environments live in the data volume, so they survive a new container.
+ENV MOKURO_BUNKO_OCR_ENV="/data/.ocr-env"
+ENV MOKURO_BUNKO_OCR_ENGINES_ENV="/data/.ocr-engines-env"
 ENV MOKURO_REGISTRATION_MODE="disabled"
 ENV MOKURO_SSL_ENABLED="false"
 # nginx fronts Python and serves downloads via X-Accel-Redirect

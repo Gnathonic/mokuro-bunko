@@ -9,7 +9,12 @@ from typing import cast
 import click
 
 from mokuro_bunko.config import load_config
-from mokuro_bunko.database import Database, UserStatus, normalize_role
+from mokuro_bunko.database import (
+    INVITABLE_ROLES,
+    Database,
+    UserStatus,
+    normalize_role,
+)
 
 
 def get_database(config_path: Path | None) -> Database:
@@ -35,7 +40,9 @@ def admin_group() -> None:
 @click.argument("username")
 @click.option(
     "--role",
-    type=click.Choice(["registered", "uploader", "inviter", "editor", "admin"]),
+    type=click.Choice(
+        ["registered", "uploader", "inviter", "editor", "admin", "processor"]
+    ),
     default="registered",
     help="User role",
     show_default=True,
@@ -115,7 +122,9 @@ def list_users(ctx: click.Context, status: str | None) -> None:
 @click.argument("username")
 @click.argument(
     "role",
-    type=click.Choice(["registered", "uploader", "inviter", "editor", "admin"]),
+    type=click.Choice(
+        ["registered", "uploader", "inviter", "editor", "admin", "processor"]
+    ),
 )
 @click.pass_context
 def change_role(ctx: click.Context, username: str, role: str) -> None:
@@ -133,7 +142,7 @@ def change_role(ctx: click.Context, username: str, role: str) -> None:
 @admin_group.command("generate-invite")
 @click.option(
     "--role",
-    type=click.Choice(["registered", "uploader", "inviter", "editor"]),
+    type=click.Choice(sorted(INVITABLE_ROLES)),
     default="registered",
     help="Role for invited user",
     show_default=True,
@@ -206,6 +215,39 @@ def delete_invite(ctx: click.Context, code: str) -> None:
         click.echo(f"Invite '{code}' deleted")
     else:
         click.echo(f"Invite '{code}' not found", err=True)
+        sys.exit(1)
+
+
+@admin_group.command("restore-user")
+@click.argument("username")
+@click.option(
+    "--role",
+    type=click.Choice(["registered", "uploader", "inviter", "editor", "admin", "processor"]),
+    default=None,
+    help="Give the restored account this role (default: the role it had)",
+)
+@click.option(
+    "--password",
+    prompt=True,
+    hide_input=True,
+    confirmation_prompt=True,
+    help="New password (asked for when left out)",
+)
+@click.pass_context
+def restore_user(ctx: click.Context, username: str, role: str | None, password: str) -> None:
+    """Bring a deleted account back, with a new password."""
+    config_path = ctx.obj.get("config_path")
+    db = get_database(config_path)
+
+    try:
+        restored = db.restore_user(username, password, normalize_role(role) if role else None)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    if restored:
+        click.echo(f"User '{username}' restored")
+    else:
+        click.echo(f"Error: '{username}' is not a deleted account", err=True)
         sys.exit(1)
 
 

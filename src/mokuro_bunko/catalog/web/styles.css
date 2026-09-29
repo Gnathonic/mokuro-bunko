@@ -83,6 +83,19 @@
     opacity: 0.6;
 }
 
+/* Damaged filter: the same chip, in the badge's warning colours, so the
+   control and the badges it selects for read as one thing. */
+.genre-chip--damage {
+    color: #8a4b08;
+    border-color: #f0c27b;
+}
+
+.genre-chip--damage.genre-chip--active {
+    color: #6b3a06;
+    background: #ffe7bf;
+    border-color: #e0ab5e;
+}
+
 /* Series title language selector */
 .title-lang-select {
     /* A solid background matters twice over: `none` let the native option
@@ -291,6 +304,15 @@
     color: #0b5e3b;
     background: #d6f5e7;
     border-color: #9edbbf;
+    margin-right: 0.35rem;
+}
+
+/* Missing pages: louder than the amber "pending" badge, because this one is
+   about content that will never arrive on its own. */
+.volume-card__badge--damage {
+    color: #8c1d18;
+    background: #fdd9d6;
+    border-color: #f0a9a3;
     margin-right: 0.35rem;
 }
 

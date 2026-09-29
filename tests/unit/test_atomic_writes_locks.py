@@ -185,7 +185,7 @@ class TestBeginWriteLocking:
             raise OSError("disk full")
 
         monkeypatch.setattr(resources_mod, "_AtomicFileWriter", boom)
-        with pytest.raises(Exception):
+        with pytest.raises(OSError, match="disk full"):
             res.begin_write()
         monkeypatch.undo()
 

@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 import io
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from mokuro_bunko.database import Database
 from mokuro_bunko.queue.api import QueueAPI
@@ -130,3 +131,161 @@ def test_public_queue_status_allows_anonymous(temp_dir: Path) -> None:
 
     response = client.get("/queue/api/status")
     assert response.status_code == 200
+
+
+# -- the running job's stage readout ---------------------------------------
+
+
+def _progress(storage: Path, job: dict[str, Any]) -> None:
+    (storage / ".ocr-progress.json").write_text(json.dumps(job), encoding="utf-8")
+
+
+def _running_job(**extra: Any) -> dict[str, Any]:
+    job = {
+        "active": True,
+        "series": "S",
+        "volume": "V 01",
+        "engine": "ppocr-manga",
+        "percent": 40,
+        "eta_seconds": 90,
+        "done_pages": 16,
+        "total_pages": 40,
+        "status": "running",
+    }
+    job.update(extra)
+    return job
+
+
+def _status(storage: Path, display: str = "detailed") -> dict[str, Any]:
+    queue_cfg = type(
+        "Cfg", (), {"show_in_nav": False, "public_access": True, "display": display}
+    )()
+    client = WSGITestClient(
+        QueueAPI(dummy_app, storage_base_path=str(storage), queue_config=queue_cfg)
+    )
+    return client.get("/queue/api/status").json()
+
+
+def test_status_carries_the_stage_readout(temp_dir: Path) -> None:
+    """What the worker wrote about the pipeline reaches the page intact."""
+    storage = temp_dir / "storage"
+    storage.mkdir(parents=True)
+    readout = {
+        "elapsed_seconds": 120.0,
+        "items": 16,
+        "stages": [
+            {
+                "key": "detect",
+                "name": "detect + CTC read",
+                "device": "cpu",
+                "workers": 2,
+                "fused": False,
+                "items": 16,
+                "busy_pct": 94.0,
+                "blocked_pct": 0.0,
+                "starved_pct": 1.0,
+                "queue": {
+                    "name": "detect->engine",
+                    "capacity": 4,
+                    "mean_depth": 0.1,
+                    "max_depth": 1,
+                    "fill_pct": 2.5,
+                },
+            }
+        ],
+        "bottleneck": "detect",
+        "verdict": "engine starved 38% waiting on detect — widen detect",
+    }
+    _progress(storage, _running_job(pipeline=readout))
+
+    data = _status(storage)
+
+    sent = data["machines"][0]["jobs"][0]["pipeline"]
+    # Rebuilt field by field: the readout's own fields, nothing else.
+    assert sent["verdict"] == readout["verdict"]
+    assert sent["bottleneck"] == "detect"
+    (stage,) = sent["stages"]
+    assert stage["busy_pct"] == 94.0 and stage["device"] == "cpu"
+    assert stage["queue"] == {"name": "detect->engine", "capacity": 4,
+                              "mean_depth": 0.1, "max_depth": 1}
+    assert "elapsed_seconds" not in sent and "items" not in stage
+
+
+def test_the_readout_is_a_detailed_level_field(temp_dir: Path) -> None:
+    """At `normal` the pipeline is not rendered, so it is not sent either."""
+    storage = temp_dir / "storage"
+    storage.mkdir(parents=True)
+    _progress(storage, _running_job(pipeline={"stages": [{"key": "detect"}]}))
+    for level in ("minimal", "normal"):
+        job = _status(storage, level)["machines"][0]["jobs"][0]
+        assert "pipeline" not in job
+
+
+def test_status_omits_the_readout_when_the_worker_sends_none(temp_dir: Path) -> None:
+    """An older worker, the mokuro engine, or a run too young to have numbers."""
+    storage = temp_dir / "storage"
+    storage.mkdir(parents=True)
+    _progress(storage, _running_job())
+
+    job = _status(storage)["machines"][0]["jobs"][0]
+
+    assert job["pipeline"] is None
+    assert job["percent"] == 40
+
+
+def test_status_drops_a_readout_that_is_not_one(temp_dir: Path) -> None:
+    """Junk in the progress file must not reach the page as a stage list."""
+    storage = temp_dir / "storage"
+    storage.mkdir(parents=True)
+    for junk in ("detect", [], {}, {"stages": []}, None):
+        _progress(storage, _running_job(pipeline=junk))
+        assert _status(storage)["machines"][0]["jobs"][0]["pipeline"] is None
+
+
+# -- paused for a benchmark -------------------------------------------------
+
+
+def test_paused_for_benchmark_is_null_without_an_ocr_control(temp_dir: Path) -> None:
+    storage = temp_dir / "storage"
+    storage.mkdir(parents=True)
+    assert _status(storage)["paused_for_benchmark"] is None
+
+
+def test_paused_for_benchmark_reads_through_the_shared_control_handle(
+    temp_dir: Path,
+) -> None:
+    """`QueueAPI` has no bench state of its own -- it reads the admin API's.
+
+    Uses the REAL `OcrControl` (with no worker, so `pending_jobs` etc. all
+    degrade the way they already do) and only stands in for the
+    `BenchService` it would otherwise lazily build, the same handle the
+    admin API sets on `ocr_control.bench` the first time it is asked for one.
+    """
+    from mokuro_bunko.ocr.control import OcrControl
+
+    storage = temp_dir / "storage"
+    storage.mkdir(parents=True)
+    queue_cfg = type("Cfg", (), {"show_in_nav": False, "public_access": True})()
+    control = OcrControl()
+    control.bench = type(  # type: ignore[assignment]
+        "FakeBench",
+        (),
+        {
+            "paused_for_benchmark": lambda self: {
+                "key": "g-2",
+                "generation": "hayai-nova",
+                "queued": 2,
+            }
+        },
+    )()
+    app = QueueAPI(
+        dummy_app, storage_base_path=str(storage), queue_config=queue_cfg, ocr_control=control
+    )
+    client = WSGITestClient(app)
+    data = client.get("/queue/api/status").json()
+    # A visitor's copy: picked field by field, and the bench key left out.
+    assert data["paused_for_benchmark"] == {
+        "generation": "hayai-nova",
+        "queued": 2,
+        "processor": None,
+    }

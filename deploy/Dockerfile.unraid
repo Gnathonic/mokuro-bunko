@@ -5,7 +5,9 @@
 # Build:
 #   docker build -f deploy/Dockerfile.unraid -t mokuro-bunko:unraid-cuda .
 #
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS builder
+# Ubuntu 24.04 = Python 3.12. The CUDA runtime here is only what the image
+# carries; the OCR environments' torch wheels bring their own (cu130).
+FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04 AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -23,14 +25,17 @@ WORKDIR /build
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-RUN python3 -m pip install --no-cache-dir --upgrade pip build
-RUN python3 -m build --wheel
+# 24.04's system Python is externally managed (PEP 668): build from a venv.
+RUN python3 -m venv /opt/build && \
+    /opt/build/bin/pip install --no-cache-dir --upgrade pip build && \
+    /opt/build/bin/python -m build --wheel
 RUN python3 -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
     /opt/venv/bin/pip install --no-cache-dir dist/*.whl
 
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04 AS runtime
 
+LABEL org.opencontainers.image.source="https://github.com/Gnathonic/mokuro-bunko"
 LABEL org.opencontainers.image.title="Mokuro Bunko Server (Unraid CUDA)"
 LABEL org.opencontainers.image.description="Mokuro Bunko with optional CUDA OCR for Unraid/NVIDIA runtime"
 LABEL org.opencontainers.image.licenses="MIT"
@@ -41,13 +46,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     python3-pip \
     ca-certificates \
+    git \
     tini \
     gosu \
     nginx \
     gettext-base \
     p7zip-full \
     libxcb1 \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -69,6 +75,7 @@ ENV PYTHONUNBUFFERED="1" \
     MOKURO_CONFIG="/config/config.yaml" \
     MOKURO_OCR_BACKEND="auto" \
     MOKURO_BUNKO_OCR_ENV="/opt/ocr-env" \
+    MOKURO_BUNKO_OCR_ENGINES_ENV="/opt/ocr-engines-env" \
     NVIDIA_VISIBLE_DEVICES="all" \
     NVIDIA_DRIVER_CAPABILITIES="compute,utility"
 

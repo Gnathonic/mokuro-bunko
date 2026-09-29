@@ -6,16 +6,20 @@ into an isolated virtual environment.
 
 from __future__ import annotations
 
+import inspect
 import os
 import platform
 import shutil
 import subprocess
 import sys
 import venv
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
+
+from mokuro_bunko.ocr import rocm_gfx as _rocm_gfx_module
+from mokuro_bunko.ocr.engines import DEFAULT_DETECTOR, get_detector
 
 
 class OCRBackend(Enum):
@@ -42,13 +46,62 @@ class OCRBackend(Enum):
 # MOKURO_BUNKO_MOKURO_SPEC (e.g. "mokuro" for the PyPI release) if needed.
 MOKURO_PACKAGE_SPEC: str = os.environ.get(
     "MOKURO_BUNKO_MOKURO_SPEC",
-    "mokuro @ git+https://github.com/Gnathonic/mokuro.git@perf/worker-pipeline",
+    "mokuro @ git+https://github.com/Gnathonic/mokuro.git@feat/serve-mode",
 )
 MOKURO_INSTALL_PACKAGES: list[str] = [
     MOKURO_PACKAGE_SPEC,
     "transformers>=4.25,<5",
     "sentencepiece",
 ]
+
+# What the admin page's Environment block says under the backend line. Plain
+# sentences for the person running the server; a command is written as plain
+# text, and the page decides how to set it.
+OCR_CLI_HINT: str = (
+    "To change the backend, restart the server with --ocr set to auto, cuda, rocm, "
+    "cpu or skip. To see which backends this machine can use, run "
+    "mokuro-bunko install-ocr --list-backends"
+)
+OCR_DRIVER_HINT: str = (
+    "The CUDA and ROCm backends need the graphics card's drivers installed on this machine."
+)
+OCR_NO_LOCAL_HINT: str = (
+    "This server does no OCR itself: local processing is off, or the backend is set "
+    "to skip. Volumes are read by processors on other machines, started there with "
+    "mokuro-bunko processor serve"
+)
+
+# Package set of the separate engines environment (see EnginesInstaller).
+# Detector extras (e.g. "mokuro" for the GPL comic-text-detector) are added
+# per configured detector, never by default.
+# The ``hayai-ocr`` package is deliberately NOT here. It existed only to drive
+# hayai-ocr v2, which was withdrawn; v2.5 Nova goes through transformers
+# directly, which is what lets it honour a generation's ``patch_budget`` at
+# all. Nor is ``manga-ocr``: it was here only to lend attention positions to
+# the per-character placement system, and that whole system is gone.
+# Environments installed before either removal still carry the package; it is
+# inert there, and `install-ocr --force` sheds it.
+#
+# PINNED, exactly: the three packages that turn a page into the crop every
+# read starts from -- Pillow decodes the page, OpenCV warps and cuts the line
+# out of it, transformers' image processors turn the crop into patches (and
+# run the models). A silent upgrade of any of them could change a sidecar
+# with nothing else changing, the way an unpinned model repo could, so they
+# get the same treatment: pinned to what both processors were verified on
+# (the workstation and tower reproduce each other's line crops bit for bit,
+# 403/403), and bumped only after re-running a bench volume and comparing
+# the sidecar. transformers 5 is also the floor PaddleOCR-VL-1.6 needs.
+# The pins reach NEW installs and `--force` reinstalls; an environment that
+# already exists keeps what it has.
+ENGINES_ENV_PACKAGES: tuple[str, ...] = (
+    "transformers==5.17.0",
+    "sentencepiece",
+    "peft",
+    "accelerate",
+    "natsort",
+    "opencv-python-headless==5.0.0.93",
+    "Pillow==12.3.0",
+)
 
 
 # Map system ROCm major.minor to the best PyTorch wheel channel.
@@ -157,6 +210,11 @@ def detect_cuda() -> tuple[bool, str | None]:
     return False, None
 
 
+# Run first in the OCR environments' own interpreters by the verify
+# snippets: `rocm_gfx` is standard-library only for exactly this.
+_ROCM_PRELUDE = inspect.getsource(_rocm_gfx_module)
+
+
 def detect_rocm() -> tuple[bool, str | None]:
     """Detect ROCm availability and version.
 
@@ -189,6 +247,13 @@ def detect_rocm() -> tuple[bool, str | None]:
             return True, None
     except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError):
         pass
+
+    # No system ROCm at all: PyTorch's ROCm wheels bring their own runtime and
+    # need only the kernel driver, so an AMD GPU the driver sees is enough.
+    from mokuro_bunko.ocr import rocm_gfx
+
+    if rocm_gfx.amd_gpu_present():
+        return True, None
 
     return False, None
 
@@ -362,6 +427,9 @@ class OCRInstaller:
         """
         self.env_path = env_path or self.get_default_env_path()
         self.output_callback = output_callback or print
+        # The GPU backend a CPU install replaced (install_with_fallback), so a
+        # caller can say so; None when nothing fell back.
+        self.fell_back_from: OCRBackend | None = None
 
     def _log(self, message: str) -> None:
         """Log a message using the output callback."""
@@ -402,10 +470,12 @@ class OCRInstaller:
             result = subprocess.run(
                 [str(python_path), "-c", """
 import torch
-if torch.cuda.is_available():
-    print('cuda')
-elif hasattr(torch.version, 'hip') and torch.version.hip is not None:
+# ROCm torch answers torch.cuda.is_available() True (HIP wears the cuda API),
+# so the HIP check has to come FIRST or every ROCm install calls itself cuda.
+if hasattr(torch.version, 'hip') and torch.version.hip is not None:
     print('rocm')
+elif torch.cuda.is_available():
+    print('cuda')
 elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
     print('mps')
 else:
@@ -425,6 +495,73 @@ else:
             pass
 
         return None
+
+    def get_installed_torch_build(self) -> OCRBackend | None:
+        """Which wheel flavour of torch the environment holds, or None.
+
+        Unlike get_installed_backend this reports the build (a CUDA or ROCm
+        wheel counts even when the device is not usable right now), which
+        is the right question for "does this environment need rebuilding
+        for the GPU we detected".
+        """
+        python_path = self._get_python_path()
+        if not python_path.exists():
+            return None
+        snippet = (
+            "import torch\n"
+            "v = torch.version\n"
+            "if getattr(v, 'hip', None):\n"
+            "    print('rocm')\n"
+            "elif getattr(v, 'cuda', None):\n"
+            "    print('cuda')\n"
+            "elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_built():\n"
+            "    print('mps')\n"
+            "else:\n"
+            "    print('cpu')\n"
+        )
+        try:
+            result = subprocess.run(
+                [str(python_path), "-c", snippet], capture_output=True, text=True, timeout=30
+            )
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            return OCRBackend(result.stdout.strip())
+        except ValueError:
+            return None
+
+    # Written after a GPU rebuild that still ended on a CPU torch (the GPU
+    # wheels failed to install), so the multi-GB attempt is not repeated on
+    # every start. Removed by any successful (re)install.
+    _REBUILD_FAILED_MARKER = ".gpu-rebuild-failed"
+
+    def needs_rebuild_for(self, backend: OCRBackend) -> bool:
+        """True when a GPU backend was selected but the env holds a CPU torch."""
+        if backend not in (OCRBackend.CUDA, OCRBackend.ROCM, OCRBackend.MPS):
+            return False
+        if (self.env_path / self._REBUILD_FAILED_MARKER).exists():
+            return False
+        return self.get_installed_torch_build() == OCRBackend.CPU
+
+    def rebuild_for(self, backend: OCRBackend) -> bool:
+        """Reinstall the environment for a GPU backend.
+
+        Returns True when the environment now holds a build for that backend;
+        False (and remembers not to retry) when it fell back to CPU.
+        """
+        ok = self.install_with_fallback(backend, force=True)
+        if ok and self.get_installed_torch_build() == backend:
+            return True
+        try:
+            (self.env_path / self._REBUILD_FAILED_MARKER).write_text(
+                f"rebuild for {backend.value} failed; delete this file to retry\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        return False
 
     def create_environment(self, force: bool = False) -> bool:
         """Create the isolated virtual environment.
@@ -530,10 +667,10 @@ else:
         if not self.create_environment(force=force):
             return False
 
-        # Upgrade pip first
-        pip_path = self._get_pip_path()
+        # Upgrade pip first -- through the interpreter: Windows refuses to let
+        # pip.exe replace itself ("ERROR: To modify pip, please run ...").
         self._log("Upgrading pip...")
-        self._run_pip([str(pip_path), "install", "--upgrade", "pip"])
+        self._run_pip([str(self._get_python_path()), "-m", "pip", "install", "--upgrade", "pip"])
 
         # Install PyTorch
         if not self.install_torch(backend, hardware=hardware):
@@ -560,19 +697,27 @@ else:
     # Snippet run inside the OCR env to validate the installed stack.
     # Import-only (no model downloads). Prints one line per check;
     # lines starting with "PROBLEM:" indicate failures.
-    _VERIFY_SNIPPET = """
+    _VERIFY_SNIPPET = _ROCM_PRELUDE + """
 import importlib.metadata as md
 
 problems = []
 
 try:
     import torch
+    _override = apply_for_torch(torch)
+    if _override:
+        print(f"ROCm: this card is not in the torch build; HSA_OVERRIDE_GFX_VERSION={_override}")
     line = f"torch {torch.__version__}, cuda available: {torch.cuda.is_available()}"
     if torch.cuda.is_available():
         line += f" ({torch.cuda.get_device_name(0)})"
+        # "Available" is not "computes": an unbuilt AMD target passes the
+        # line above and dumps core at its first kernel.
+        _x = torch.randn(64, 64, device="cuda")
+        if not bool(torch.isfinite((_x @ _x).sum()).item()):
+            problems.append("a matrix multiply on the GPU returned a non-finite result")
     print(line)
 except Exception as e:
-    problems.append(f"torch import failed: {e}")
+    problems.append(f"torch failed on this machine: {e}")
 
 try:
     version = md.version("transformers")
@@ -646,16 +791,50 @@ for problem in problems:
         if backend == OCRBackend.SKIP:
             return self.install(backend, force=force, hardware=hardware)
 
+        self.fell_back_from = None
         if self.install(backend, force=force, hardware=hardware):
             return True
 
         if backend == OCRBackend.CPU:
             return False
 
+        # A GPU build is gigabytes of wheels, and one damaged download (a
+        # "Bad CRC-32" in a CUDA DLL) fails the whole install -- possibly from
+        # pip's cache, which would serve the same damaged file again. So once
+        # more, with the cache off, before settling for the CPU.
         self._log(
-            f"Backend {backend.value} installation failed, falling back to CPU backend..."
+            f"Backend {backend.value} installation failed; retrying once without pip's cache..."
         )
-        return self.install(OCRBackend.CPU, force=True)
+        previous = os.environ.get("PIP_NO_CACHE_DIR")
+        os.environ["PIP_NO_CACHE_DIR"] = "1"
+        try:
+            if self.install(backend, force=True, hardware=hardware):
+                return True
+        finally:
+            if previous is None:
+                os.environ.pop("PIP_NO_CACHE_DIR", None)
+            else:
+                os.environ["PIP_NO_CACHE_DIR"] = previous
+
+        self._log(
+            f"Backend {backend.value} installation failed again, falling back to CPU backend..."
+        )
+        if not self.install(OCRBackend.CPU, force=True):
+            return False
+        self.fell_back_from = backend
+        self._log("")
+        self._log("=" * 72)
+        self._log(
+            f"WARNING: {self.env_path.name} could not be installed for {backend.value} "
+            "and runs OCR on the CPU instead."
+        )
+        self._log("  The reason is in the lines above this one.")
+        self._log(
+            "  Fix the cause (driver, network, disk space), then reinstall with --force "
+            "(processor install --force, or install-ocr --force)."
+        )
+        self._log("=" * 72)
+        return True
 
     def uninstall(self) -> bool:
         """Remove the OCR environment.
@@ -737,6 +916,188 @@ for problem in problems:
         except subprocess.SubprocessError as e:
             self._log(f"Command failed: {e}")
             return False
+
+
+class EnginesInstaller(OCRInstaller):
+    """Installer for the second, transformers-5 environment used by the
+    non-mokuro OCR engines (hayai-ocr v2.5 Nova, PaddleOCR-VL manga LoRA,
+    PP-OCRv6 manga).
+
+    Torch is installed exactly like the mokuro environment; on top of it go
+    ``ENGINES_ENV_PACKAGES`` plus the extras of the configured detector
+    (``detector="ctd"`` pulls the GPL-3.0 comic-text-detector via the mokuro
+    package; the default ``ppocr-manga`` needs onnxruntime).
+
+    ``detectors`` is the UNION over the configured generations: a row on an
+    engine with a detector of its own (``ppocr-manga``: onnxruntime) needs
+    that one, and every other row needs the detector it names. It is
+    recomputed by :meth:`set_detectors` on every live settings change,
+    because with a detector per generation the set really does move.
+
+    ``hayai-nova`` needs no package of its own: the runner drives it through
+    ``transformers`` (``trust_remote_code``, at a pinned commit) directly, and
+    transformers is already in ``ENGINES_ENV_PACKAGES``. Its vision half is
+    stock SigLIP2 NaFlex, whose processor comes from
+    ``google/siglip2-base-patch16-naflex``.
+    """
+
+    def __init__(
+        self,
+        env_path: Path | None = None,
+        output_callback: Callable[[str], None] | None = None,
+        detector: str = DEFAULT_DETECTOR,
+        detectors: Sequence[str] = (),
+    ) -> None:
+        super().__init__(env_path=env_path, output_callback=output_callback)
+        self.detector = get_detector(detector).id
+        self.detectors: tuple[str, ...] = (self.detector,)
+        if detectors:
+            self.set_detectors(detectors)
+
+    def set_detectors(self, detectors: Sequence[str]) -> None:
+        """Replace the detectors this environment is for.
+
+        Both fields move together. ``detectors`` is what ``has_detector()``
+        and ``install_detector()`` iterate, and setting only ``detector``
+        left the readiness check testing the one before the change.
+        """
+        wanted = tuple(get_detector(d).id for d in detectors)
+        self.detectors = wanted or (self.detector,)
+        self.detector = self.detectors[0]
+
+    @classmethod
+    def get_default_env_path(cls) -> Path:
+        """Resolve the engines env path: env override, project dir, then home."""
+        env_override = os.environ.get("MOKURO_BUNKO_OCR_ENGINES_ENV")
+        if env_override:
+            return Path(env_override).expanduser()
+
+        project_root = cls._discover_project_root()
+        if project_root is not None:
+            return project_root / ".ocr-engines-env"
+
+        return Path.home() / ".mokuro-bunko" / "ocr-engines-env"
+
+    def _probe(self, snippet: str) -> bool:
+        python_path = self._get_python_path()
+        if not python_path.exists():
+            return False
+        try:
+            result = subprocess.run(
+                [str(python_path), "-c", snippet],
+                capture_output=True,
+                timeout=60,
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+            return False
+
+    def is_installed(self) -> bool:
+        """True when the env exists and the engine packages import.
+
+        Not ``hayai_ocr``: it is no longer installed (the v2 engine is gone),
+        so probing for it would report every freshly built environment as
+        missing.
+        """
+        return self._probe("import transformers, peft, cv2, natsort")
+
+    def has_detector(self, detector: str | None = None) -> bool:
+        """True when the given detector's extra packages are importable.
+
+        Without an argument: every detector this environment is for (the
+        configured one and those built into its engines).
+        """
+        if detector is None:
+            return all(self.has_detector(d) for d in self.detectors)
+        spec = get_detector(detector)
+        if spec.probe_import is None:
+            return True
+        return self._probe(f"import {spec.probe_import}")
+
+    def install_detector(self, detector: str | None = None) -> bool:
+        """Install one detector's extra packages into an existing env.
+
+        Without an argument: the extras of every detector this environment
+        is for.
+        """
+        if detector is None:
+            return all(self.install_detector(d) for d in self.detectors)
+        spec = get_detector(detector)
+        if not spec.extra_packages:
+            return True
+        pip_path = self._get_pip_path()
+        if not pip_path.exists():
+            self._log("Pip not found in environment")
+            return False
+        self._log(
+            f"Installing detector '{spec.id}' extras ({spec.license}): "
+            f"{' '.join(spec.extra_packages)}"
+        )
+        return self._run_pip([str(pip_path), "install", *spec.extra_packages])
+
+    def install_mokuro(self) -> bool:
+        """Install the engine package set (name kept so ``install`` is reused)."""
+        pip_path = self._get_pip_path()
+        if not pip_path.exists():
+            self._log("Pip not found in environment")
+            return False
+
+        extras: list[str] = []
+        for detector_id in self.detectors:
+            for package in get_detector(detector_id).extra_packages:
+                if package not in extras:
+                    extras.append(package)
+        self._log(
+            "Installing OCR engines (hayai-ocr Nova, PaddleOCR-VL support; "
+            f"detector={', '.join(self.detectors)})..."
+        )
+        cmd = [str(pip_path), "install", *ENGINES_ENV_PACKAGES, *extras]
+        return self._run_pip(cmd)
+
+    _VERIFY_SNIPPET = _ROCM_PRELUDE + """
+import importlib.metadata as md
+
+problems = []
+
+try:
+    import torch
+    _override = apply_for_torch(torch)
+    if _override:
+        print(f"ROCm: this card is not in the torch build; HSA_OVERRIDE_GFX_VERSION={_override}")
+    line = f"torch {torch.__version__}, cuda available: {torch.cuda.is_available()}"
+    if torch.cuda.is_available():
+        line += f" ({torch.cuda.get_device_name(0)})"
+        # "Available" is not "computes": an unbuilt AMD target passes the
+        # line above and dumps core at its first kernel.
+        _x = torch.randn(64, 64, device="cuda")
+        if not bool(torch.isfinite((_x @ _x).sum()).item()):
+            problems.append("a matrix multiply on the GPU returned a non-finite result")
+    print(line)
+except Exception as e:
+    problems.append(f"torch failed on this machine: {e}")
+
+try:
+    version = md.version("transformers")
+    major = int(version.split(".")[0])
+    print(f"transformers {version}")
+    if major < 5:
+        problems.append(
+            f"transformers {version} is too old for PaddleOCR-VL-1.6 (needs >=5); "
+            "reinstall with: mokuro-bunko install-ocr --engines hayai-nova,paddle-manga --force"
+        )
+except Exception as e:
+    problems.append(f"transformers check failed: {e}")
+
+for module in ("peft", "cv2", "natsort", "PIL"):
+    try:
+        __import__(module)
+        print(f"{module} ok")
+    except Exception as e:
+        problems.append(f"{module} import failed: {e}")
+
+for problem in problems:
+    print(f"PROBLEM: {problem}")
+"""
 
 
 def prompt_for_backend(hardware: HardwareInfo) -> OCRBackend:

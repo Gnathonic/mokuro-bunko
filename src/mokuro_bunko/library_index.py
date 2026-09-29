@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from mokuro_bunko.ocr.generations import split_layer_sidecar
+
 
 @dataclass(frozen=True)
 class VolumeSnapshot:
@@ -18,6 +20,17 @@ class VolumeSnapshot:
     has_mokuro: bool
     has_mokuro_gz: bool
     cover: str | None
+    # Layer postfixes OBSERVED beside the archive, sorted: the `<id>` of
+    # every `<name>.<id>.mokuro[.gz]` whose id the reader would read as a
+    # layer (e.g. ("hayai-nova",) for `<name>.hayai-nova.mokuro`).
+    #
+    # What is on disk, NOT what is configured. The index has no handle on
+    # the settings and should not grow one: a generation may be renamed or
+    # removed while its files stay, another server may have written a layer
+    # this one never heard of, and a reader may have pushed an edit. The
+    # config decides what is still pending (`OCRProcessor.missing_
+    # generations`); this says what is there.
+    sidecars: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -34,6 +47,11 @@ class LibrarySnapshot:
     """Immutable snapshot returned by the shared library index."""
 
     series: tuple[SeriesSnapshot, ...]
+    # (series, volume) of every archive without the reader-facing sidecar
+    # (`Volume.mokuro`). MEMBERSHIP ONLY, in the walk's name order: it feeds
+    # the health endpoint's count. It is not the OCR queue and says nothing
+    # about processing order; the queue page gets that from the worker
+    # (`OCRWorker.pending_jobs`, ordered by `ocr.job_order.order_jobs`).
     pending_ocr: tuple[tuple[str, str], ...]
     pending_thumbnails: int
 
@@ -54,6 +72,9 @@ class LibraryIndexCache:
         self._lock = threading.Lock()
         self._snapshot: LibrarySnapshot | None = None
         self._snapshot_time = 0.0
+        # How many scans have produced a snapshot: a cheap "did it change?"
+        # for the queue page's fingerprint.
+        self.scans = 0
 
     def invalidate(self) -> None:
         """Drop current snapshot so next read rescans the filesystem."""
@@ -63,16 +84,30 @@ class LibraryIndexCache:
 
     def get_snapshot(self) -> LibrarySnapshot:
         """Return a recent snapshot, rescanning when stale."""
+        return self.get_snapshot_counted()[0]
+
+    def get_snapshot_counted(self) -> tuple[LibrarySnapshot, int]:
+        """`get_snapshot`, and the scan count that produced it -- read together.
+
+        Under one lock, so a rescan by another thread can never pair a new
+        count with an old snapshot (a pairing a fingerprint would then keep).
+        """
         now = time.monotonic()
         with self._lock:
             if self._snapshot is not None and (now - self._snapshot_time) < self.ttl:
-                return self._snapshot
+                return self._snapshot, self.scans
 
         snapshot = self._scan_library()
         with self._lock:
             self._snapshot = snapshot
             self._snapshot_time = time.monotonic()
-            return snapshot
+            self.scans += 1
+            return snapshot, self.scans
+
+    def cached_snapshot(self) -> LibrarySnapshot | None:
+        """The last snapshot, however old, without ever scanning (None: none yet)."""
+        with self._lock:
+            return self._snapshot
 
     def _scan_library(self) -> LibrarySnapshot:
         """Scan the entire library tree once (recursive walk) and build an immutable snapshot."""
@@ -80,7 +115,7 @@ class LibraryIndexCache:
             return LibrarySnapshot(series=(), pending_ocr=(), pending_thumbnails=0)
 
         series_items: list[SeriesSnapshot] = []
-        pending_ocr: list[tuple[float, str, str]] = []
+        pending_ocr: list[tuple[str, str]] = []
         pending_thumbnails = 0
 
         try:
@@ -107,6 +142,20 @@ class LibraryIndexCache:
                     if lower_name.endswith(".cbz"):
                         volume_names.add(file_name[:-len(".cbz")])
 
+                # Every layer sidecar in this directory, grouped by the stem
+                # it belongs to, in ONE pass: a hundred-volume folder would
+                # otherwise re-read the whole name list once per volume.
+                layers_by_stem: dict[str, set[str]] = {}
+                for file_name in filenames:
+                    split = split_layer_sidecar(file_name)
+                    if split is None:
+                        continue
+                    # ``Volume 01.5.mokuro`` is volume 1.5's own OCR when that
+                    # archive is here, not a layer called ``5`` of volume 1.
+                    if f"{split[0]}.{split[1]}" in volume_names:
+                        continue
+                    layers_by_stem.setdefault(split[0], set()).add(split[1])
+
                 volumes: list[VolumeSnapshot] = []
                 series_cover: str | None = None
 
@@ -127,12 +176,12 @@ class LibraryIndexCache:
                             has_mokuro=has_mokuro,
                             has_mokuro_gz=has_mokuro_gz,
                             cover=cover,
+                            sidecars=tuple(sorted(layers_by_stem.get(volume_name, ()))),
                         )
                     )
 
                     if has_cbz and not has_mokuro and not has_mokuro_gz:
-                        cbz_path = current_dir / f"{volume_name}.cbz"
-                        pending_ocr.append((self._created_timestamp(cbz_path), series_name, volume_name))
+                        pending_ocr.append((series_name, volume_name))
                     if has_cbz and f"{volume_name}.webp" not in filenames and f"{volume_name}.nocover" not in filenames:
                         pending_thumbnails += 1
 
@@ -147,21 +196,8 @@ class LibraryIndexCache:
         except OSError:
             return LibrarySnapshot(series=(), pending_ocr=(), pending_thumbnails=0)
 
-        pending_ocr.sort(key=lambda item: (item[0], item[1], item[2]))
         return LibrarySnapshot(
             series=tuple(series_items),
-            pending_ocr=tuple((series_name, volume_name) for _, series_name, volume_name in pending_ocr),
+            pending_ocr=tuple(pending_ocr),
             pending_thumbnails=pending_thumbnails,
         )
-
-    @staticmethod
-    def _created_timestamp(path: Path) -> float:
-        """Best-effort creation time for FIFO ordering."""
-        try:
-            st = path.stat()
-        except OSError:
-            return 0.0
-        birth = getattr(st, "st_birthtime", None)
-        if birth is not None:
-            return float(birth)
-        return float(st.st_mtime)

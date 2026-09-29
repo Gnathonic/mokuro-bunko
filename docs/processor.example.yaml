@@ -1,0 +1,65 @@
+# mokuro-bunko processor -- the whole configuration of an OCR processor.
+#
+# The easy way to make this file is not to: `processor setup` asks for the
+# library URL, username and password, checks them against the library, and
+# writes a processor.yaml holding only what differs from the defaults below
+# (then offers to install and start the processor):
+#
+#   uv run mokuro-bunko processor setup
+#
+# By hand, copy this file, set the three `library` values, then:
+#
+#   uv run mokuro-bunko processor install --config processor.yaml
+#   uv run mokuro-bunko processor install --config processor.yaml --detector ctd  # per extra detector
+#   uv run mokuro-bunko processor serve   --config processor.yaml
+#   uv run mokuro-bunko processor status  --config processor.yaml
+#   uv run mokuro-bunko processor service --config processor.yaml --install  # start with the machine
+#
+# The full walkthrough, for Linux and Windows, is in docs/deployment.md
+# ("Remote OCR processors").
+#
+# (`uv run` from the source checkout, the recommended install; with the
+# package installed any other way, drop it.)
+#
+# This machine holds no library, no users and no admin UI: it logs in to a
+# library server as an ordinary account whose role is `processor`, and runs
+# whatever that server sends it. Keep this file mode 600 -- it holds a
+# password.
+
+library:
+  # Where the library server is, exactly as a browser would reach it.
+  url: https://library.example:8080
+  # An account created with: mokuro-bunko admin add-user gpu-box --role processor
+  username: gpu-box
+  password: change-me
+  # true to verify the library's certificate normally, false to skip
+  # verification (a self-signed certificate on a LAN), or the path to the
+  # certificate to trust.
+  tls_verify: true
+
+processor:
+  # How the library shows this machine to its admins. Defaults to the hostname.
+  name: gpu-box
+  # What the public queue page calls it. Unset, visitors see a numbered alias
+  # ("machine 1") -- never the name above. At most 64 characters.
+  # public_name: the big GPU box
+  # How many OCR pipelines this hardware can hold at once -- one per card is
+  # the rule, the same one `ocr.concurrency` follows on the library server.
+  max_sessions: 1
+  # The runner's logs, the volume workspaces, any archive too big for memory
+  # and the status file -- one storage per processor; a second processor on
+  # the same storage refuses to start.
+  # Defaults to $XDG_DATA_HOME/mokuro-bunko-processor (~/.local/share/...)
+  # on Linux and macOS, and %LOCALAPPDATA%\mokuro-bunko-processor on Windows.
+  # storage: /data/mokuro-bunko-processor
+  # RAM the queued archives may use: the volume in the runner and the one on
+  # deck, across all sessions. Held as unnamed files in /dev/shm (nothing to
+  # clean up, even after a crash); an archive that does not fit goes to
+  # `storage` on disk instead. 0 = always disk. Windows has no /dev/shm, so
+  # there archives always go to disk.
+  archive_memory_mb: 2048
+
+ocr:
+  # Which build of torch `processor install` puts in the environments.
+  # auto | cuda | rocm | cpu
+  backend: auto

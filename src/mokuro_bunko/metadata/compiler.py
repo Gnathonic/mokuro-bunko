@@ -8,7 +8,10 @@ and which the reader matches against `.cbz` filenames anyway.
 
 Parsing every `.mokuro` on every regeneration would mean re-reading gigabytes
 on a large library, so each compiled entry is cached against the stat of the
-files it came from; a regeneration that changes nothing is a stat walk.
+files it came from; a regeneration that changes nothing is a stat walk. A
+cache MISS also opens the `.cbz` — only its central directory, to list the
+images the volume actually contains — so that the entry can say how many of
+the sidecar's pages are really there.
 """
 
 from __future__ import annotations
@@ -22,20 +25,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mokuro_bunko.metadata.reader_compat import (
+    count_matched_pages,
     count_page_chars,
     deterministic_uuid,
+    is_image_extension,
+    is_system_file,
     natural_sort_key,
     normalize_volume_title_key,
+    trailing_extension,
 )
-from mokuro_bunko.metadata.schema import VolumeEntry
+from mokuro_bunko.metadata.schema import VolumeEntry, missing_page_count
 from mokuro_bunko.ocr.processor import OCRProcessor
 
 if TYPE_CHECKING:
     from mokuro_bunko.database import Database
-
-_IMAGE_SUFFIXES = frozenset(
-    {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
-)
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,118 @@ class SeriesFolder:
 def volume_key_for(series_title: str, volume_title: str) -> str:
     """Library-relative key of a volume's archive — the entry cache's key."""
     return f"{series_title}/{volume_title}.cbz"
+
+
+def cached_missing_pages(database: Database, library_path: Path, cbz_path: Path) -> int:
+    """Pages this volume's archive is short of what its `.mokuro` names -- from the CACHE only.
+
+    The answer the last metadata pass already worked out and stored in
+    `series_entry_cache`, looked up with exactly the key and the stamps
+    `compile_series_volumes` uses, so it is current or it is nothing: a
+    replaced archive (new size/mtime) or a rewritten sidecar misses, and a miss
+    reads as 0. So does an entry whose match was never determined
+    (`missing_page_count`). "Not known to be short" must never look like
+    "short" -- the OCR worker skips extra layers for a volume on this number,
+    and the user's fix for a short volume is to replace the file, which is
+    precisely what makes the stale entry stop applying.
+
+    Never opens the archive and never compiles: that is the metadata pass's
+    job, and this is called for every candidate on every queue walk.
+    """
+    entry = _cached_entry(database, library_path, cbz_path)
+    if entry is None:
+        return 0
+    return missing_page_count(entry.page_count, entry.matched_page_count)
+
+
+def missing_pages_now(database: Database, library_path: Path, cbz_path: Path) -> int:
+    """`cached_missing_pages`, decided NOW when nothing current is cached.
+
+    The OCR worker's gate on extra layers. A `.mokuro` that arrived with the
+    volume (uploaded or imported) is judged at once, before any OCR runs --
+    not whenever the metadata pass gets to it, by which time every layer may
+    have been claimed. The one volume is compiled exactly as the pass would
+    and the entry kept in its cache, so the pass then finds it done.
+
+    No `.mokuro` means nothing to be short against: 0, and nothing is opened
+    (the primary will be produced from this very archive). A volume outside
+    a top-level series folder has no entry and is never short, as before.
+    """
+    try:
+        relative = cbz_path.relative_to(library_path)
+    except ValueError:
+        return 0
+    if len(relative.parts) != 2:
+        return 0
+    sidecar = _sidecar_for(cbz_path)
+    if sidecar is None:
+        return 0
+    cached = _cached_entry(database, library_path, cbz_path)
+    if cached is not None:
+        return missing_page_count(cached.page_count, cached.matched_page_count)
+    series_title = relative.parts[0]
+    try:
+        cbz_stat = cbz_path.stat()
+    except OSError:
+        return 0
+    sidecar_stat = _sidecar_stat(sidecar)
+    entry, cacheable = _compile_volume(series_title, cbz_path, sidecar, sidecar_stat)
+    if cacheable:
+        database.put_cached_volume_entry(
+            volume_key_for(series_title, entry.volume_title),
+            normalize_volume_title_key(series_title),
+            _entry_to_dict(entry),
+            cbz_stat.st_size,
+            cbz_stat.st_mtime,
+            _stat_key(sidecar, sidecar_stat),
+        )
+    return missing_page_count(entry.page_count, entry.matched_page_count)
+
+
+def cached_page_count(database: Database, library_path: Path, cbz_path: Path) -> int | None:
+    """Pages this volume's `.mokuro` names -- from the CACHE only, else None.
+
+    The same lookup as :func:`cached_missing_pages` and with the same
+    guarantee: current or nothing. None where that one returns 0, because the
+    caller here is an ESTIMATE (how long the rest of the queue will take) and
+    a volume of unknown length must read as unknown rather than as a volume
+    of no pages.
+    """
+    entry = _cached_entry(database, library_path, cbz_path)
+    if entry is None:
+        return None
+    pages = int(entry.page_count or 0)
+    return pages if pages > 0 else None
+
+
+def _cached_entry(
+    database: Database, library_path: Path, cbz_path: Path
+) -> VolumeEntry | None:
+    """One volume's cached compiled entry, or None when it is absent or stale."""
+    try:
+        relative = cbz_path.relative_to(library_path)
+    except ValueError:
+        return None
+    # Only a volume directly inside a top-level series folder has an entry.
+    if len(relative.parts) != 2:
+        return None
+    series_title = relative.parts[0]
+    volume_title = cbz_path.with_suffix("").name
+    try:
+        cbz_stat = cbz_path.stat()
+    except OSError:
+        return None
+    sidecar = _sidecar_for(cbz_path)
+    sidecar_key = _stat_key(sidecar, _sidecar_stat(sidecar))
+    cached = database.get_cached_volume_entry(
+        volume_key_for(series_title, volume_title),
+        cbz_stat.st_size,
+        cbz_stat.st_mtime,
+        sidecar_key,
+    )
+    if cached is None:
+        return None
+    return _entry_from_dict(cached)
 
 
 def iter_series_folders(library_path: Path) -> list[SeriesFolder]:
@@ -161,17 +276,64 @@ def _read_sidecar(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _count_archive_images(cbz_path: Path) -> int:
-    """Page count for an image-only volume: images inside the archive."""
+def _archive_image_names(cbz_path: Path) -> list[str] | None:
+    """The archive entries a reader would treat as pages, in archive order.
+
+    A port of the filter the client applies while unpacking a `.cbz`
+    (`import-service.ts`, the local-archive branch): OS junk out, non-images
+    out, and the volume's own embedded cover sidecar out. Matching page paths
+    against a set of files the reader would never load would report a page as
+    present that the reader cannot show, so the two sides have to agree on
+    what is in the archive before they can agree on what is missing.
+
+    Returns `None` — "unknown", as distinct from an empty list — when the file
+    cannot be opened at all: a permissions problem or a disappearing network
+    mount is not a damaged volume, and its result must not be cached. A
+    `BadZipFile`/truncation IS damage and comes back as `[]`, every page
+    missing, which is exactly what a reader would find.
+    """
+    archive_stem = cbz_path.with_suffix("").name.lower()
+    names: list[str] = []
     try:
         with zipfile.ZipFile(cbz_path, "r") as archive:
-            return sum(
-                1
-                for name in archive.namelist()
-                if Path(name).suffix.lower() in _IMAGE_SUFFIXES
-            )
-    except (zipfile.BadZipFile, OSError, EOFError):
-        return 0
+            for info in archive.infolist():
+                name = info.filename
+                if info.is_dir() or is_system_file(name):
+                    continue
+                if not is_image_extension(trailing_extension(name)):
+                    continue
+                basename = name.split("/")[-1] or name
+                if basename.lower() == f"{archive_stem}.webp":
+                    continue
+                names.append(name)
+    except (zipfile.BadZipFile, EOFError):
+        return []
+    except OSError:
+        return None
+    return names
+
+
+def _page_paths(pages: Any) -> list[str | None] | None:
+    """Each page's `img_path`, or `None` when the sidecar names no images.
+
+    A page whose `img_path` is missing or not a string becomes a `None` entry
+    — one unmatched page. But a sidecar where NOT ONE page carries an
+    `img_path` is a different animal: nothing can be matched, so nothing is
+    claimed, and the volume is reported as unknown rather than as missing
+    every page it has.
+    """
+    if not isinstance(pages, list):
+        return None
+    paths: list[str | None] = []
+    any_path = False
+    for page in pages:
+        raw = page.get("img_path") if isinstance(page, dict) else None
+        if isinstance(raw, str) and raw:
+            any_path = True
+            paths.append(raw)
+        else:
+            paths.append(None)
+    return paths if any_path else None
 
 
 def _positive_number(value: Any) -> float | None:
@@ -195,7 +357,15 @@ def _compile_volume(
     cbz_path: Path,
     sidecar: Path | None,
     sidecar_stat: os.stat_result | None,
-) -> VolumeEntry:
+) -> tuple[VolumeEntry, bool]:
+    """One compiled entry, and whether it is safe to cache.
+
+    Not cacheable means the archive could not be opened THIS time (see
+    `_archive_image_names`): the entry is honest about knowing nothing, but
+    storing it against the archive's stat would freeze that ignorance until
+    the file next changes — which, for a mount that came back a second later,
+    is forever.
+    """
     volume_title = cbz_path.with_suffix("").name
     data = _read_sidecar(sidecar) if sidecar is not None else None
 
@@ -207,19 +377,33 @@ def _compile_volume(
     mokuro_size = sidecar_stat.st_size if sidecar_stat is not None else None
     mokuro_modified = int(sidecar_stat.st_mtime) if sidecar_stat is not None else None
 
+    image_names = _archive_image_names(cbz_path)
+    cacheable = image_names is not None
+    archive_pages = len(image_names) if image_names is not None else 0
+
     if data is None:
         # Image-only (or an unreadable sidecar): the reader derives this uuid
         # for its placeholder, so deriving the same one keeps synced progress
         # attached when the index arrives.
-        return VolumeEntry(
-            volume_uuid=deterministic_uuid(f"{series_title}/{volume_title}"),
-            volume_title=volume_title,
-            page_count=_count_archive_images(cbz_path),
-            character_count=0,
-            mokuro_version="",
-            archive_size=archive_size or None,
-            mokuro_size=mokuro_size,
-            mokuro_modified=mokuro_modified,
+        #
+        # Every page of an image-only volume IS an archive image — the two
+        # counts come from the same listing — so `matched_page_count` matches
+        # `page_count` by construction and such a volume is never damaged.
+        # It is still written: a reader comparing the two fields must not have
+        # to special-case a whole class of volumes that simply omit one.
+        return (
+            VolumeEntry(
+                volume_uuid=deterministic_uuid(f"{series_title}/{volume_title}"),
+                volume_title=volume_title,
+                page_count=archive_pages,
+                matched_page_count=archive_pages if cacheable else None,
+                character_count=0,
+                mokuro_version="",
+                archive_size=archive_size or None,
+                mokuro_size=mokuro_size,
+                mokuro_modified=mokuro_modified,
+            ),
+            cacheable,
         )
 
     pages = data.get("pages")
@@ -240,16 +424,33 @@ def _compile_volume(
     else:
         character_count = count_page_chars(pages)
 
-    return VolumeEntry(
-        volume_uuid=uuid,
-        volume_title=volume_title,
-        page_count=len(pages) if isinstance(pages, list) else _count_archive_images(cbz_path),
-        character_count=character_count,
-        mokuro_version=version,
-        spine_width=_positive_number(data.get("spine_width")),
-        archive_size=archive_size or None,
-        mokuro_size=mokuro_size,
-        mokuro_modified=mokuro_modified,
+    page_paths = _page_paths(pages)
+    if page_paths is None:
+        # No usable `pages` array, or one that names no images at all: fall
+        # back to the archive's own listing for the count and claim nothing
+        # about matching.
+        page_count = len(pages) if isinstance(pages, list) else archive_pages
+        matched_page_count = None
+    else:
+        page_count = len(page_paths)
+        matched_page_count = (
+            count_matched_pages(page_paths, image_names) if image_names is not None else None
+        )
+
+    return (
+        VolumeEntry(
+            volume_uuid=uuid,
+            volume_title=volume_title,
+            page_count=page_count,
+            matched_page_count=matched_page_count,
+            character_count=character_count,
+            mokuro_version=version,
+            spine_width=_positive_number(data.get("spine_width")),
+            archive_size=archive_size or None,
+            mokuro_size=mokuro_size,
+            mokuro_modified=mokuro_modified,
+        ),
+        cacheable,
     )
 
 
@@ -258,6 +459,7 @@ def _entry_to_dict(entry: VolumeEntry) -> dict[str, Any]:
         "volume_uuid": entry.volume_uuid,
         "volume_title": entry.volume_title,
         "page_count": entry.page_count,
+        "matched_page_count": entry.matched_page_count,
         "character_count": entry.character_count,
         "mokuro_version": entry.mokuro_version,
         "spine_width": entry.spine_width,
@@ -273,6 +475,13 @@ def _entry_from_dict(raw: dict[str, Any]) -> VolumeEntry | None:
             volume_uuid=str(raw["volume_uuid"]),
             volume_title=str(raw["volume_title"]),
             page_count=int(raw["page_count"]),
+            # Required-key access for the same reason `mokuro_size` below uses
+            # it: a row written before this field existed has no key at all,
+            # so it must raise here, miss the cache, and be recompiled — that
+            # KeyError IS the backfill for every volume already in the cache.
+            matched_page_count=(
+                None if raw["matched_page_count"] is None else int(raw["matched_page_count"])
+            ),
             character_count=int(raw["character_count"]),
             mokuro_version=str(raw["mokuro_version"]),
             spine_width=raw.get("spine_width"),
@@ -334,8 +543,8 @@ def compile_series_volumes(
                 entry = _entry_from_dict(cached)
 
         if entry is None:
-            entry = _compile_volume(series.title, cbz_path, sidecar, sidecar_stat)
-            if database is not None:
+            entry, cacheable = _compile_volume(series.title, cbz_path, sidecar, sidecar_stat)
+            if database is not None and cacheable:
                 database.put_cached_volume_entry(
                     key,
                     series_key,

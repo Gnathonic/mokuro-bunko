@@ -83,7 +83,9 @@ class TestRolePermissions:
 
     def test_all_roles_defined(self) -> None:
         """Test all expected roles are defined."""
-        expected_roles = {"anonymous", "registered", "uploader", "inviter", "editor", "admin"}
+        expected_roles = {
+            "anonymous", "registered", "uploader", "inviter", "editor", "admin", "processor",
+        }
         assert set(ROLE_PERMISSIONS.keys()) == expected_roles
 
 

@@ -3,9 +3,12 @@
     One-command Windows setup for mokuro-bunko.
 
 .DESCRIPTION
-    Installs everything mokuro-bunko needs on Windows with no prerequisites:
-      1. Downloads the mokuro-bunko source (no git required) - or uses the
-         repo you are already in.
+    Installs everything mokuro-bunko needs on Windows except Git for Windows,
+    which the OCR engine needs (it is installed from a git repository). The
+    script checks for Git first and, when it is missing, says how to get it
+    and stops; it never installs Git itself.
+      1. Downloads the mokuro-bunko source (no git needed for this step) - or
+         uses the repo you are already in.
       2. Installs the uv Python manager (user-scope, no admin).
       3. Installs the server and its Python 3.12 runtime (uv sync).
       4. Installs the OCR engine (GPU/CUDA auto-detected, CPU fallback).
@@ -86,6 +89,25 @@ function Fail([string]$Message) {
 try {
     Write-Host "Mokuro Bunko - Windows setup" -ForegroundColor White
     Write-Host "----------------------------"
+
+    # --- 0. Git (the OCR engine is installed from a git repository) -------
+    # Checked first, so a missing Git costs nothing. Only an operator who
+    # pointed MOKURO_BUNKO_MOKURO_SPEC at a non-git package can do without.
+    $spec = $env:MOKURO_BUNKO_MOKURO_SPEC
+    $needsGit = -not $spec -or $spec -match "git\+"
+    Write-Step "Checking for Git (the OCR engine is installed from a git repository)"
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($git) {
+        Write-Ok "Git found: $($git.Source)"
+    } elseif ($needsGit) {
+        Write-Host "    Git for Windows is not installed (or not on PATH)." -ForegroundColor Yellow
+        Write-Host "    Get it from https://git-scm.com/download/win" -ForegroundColor Yellow
+        Write-Host "    or, with winget: winget install --id Git.Git -e --source winget" -ForegroundColor Yellow
+        Write-Host "    Then open a NEW PowerShell window and run this setup again." -ForegroundColor Yellow
+        Fail "Git for Windows is required to install the OCR engine."
+    } else {
+        Write-Ok "Git not found; not needed (MOKURO_BUNKO_MOKURO_SPEC=$spec)."
+    }
 
     # --- 1. Locate or download the source -------------------------------
     Write-Step "Locating mokuro-bunko source"

@@ -26,16 +26,41 @@
 
     <main class="queue-page">
         <h1 class="queue-page__title">OCR Queue</h1>
-        <p class="queue-page__subtitle">
+        <!-- Sent to admins only: which OCR backend this server runs. -->
+        <p class="queue-page__subtitle" id="backend-line" hidden>
             Backend: <span id="backend" class="badge">-</span>
         </p>
 
-        <!-- Current Job -->
-        <section class="queue-section" id="current-section">
-            <h2 class="queue-section__title">Currently Processing</h2>
-            <div id="current-job" class="current-job current-job--empty">
-                <p class="current-job__idle">Idle - no active OCR job</p>
-            </div>
+        <!-- The configured generations, in the order they run -->
+        <div class="queue-order" id="run-order" hidden>
+            <span class="queue-order__label">Run order</span>
+            <ol class="queue-order__list" id="run-order-list"></ol>
+        </div>
+
+        <!-- Every machine that can run OCR: one card (a compact one at the
+             minimal level) for as long as it is connected, of one fixed
+             shape, saying what it is doing -- what it is processing (or
+             "Idle"), and what is on deck (or "None"). A card comes when its
+             machine connects and goes when it leaves; nothing else adds,
+             removes or moves one, and nothing in it comes or goes. -->
+        <section class="queue-section" id="machines-section">
+            <h2 class="queue-section__title">Machines</h2>
+            <!-- No machine: this server does no OCR and no processor is connected -->
+            <p class="paused-banner" id="processing-hold" role="status" hidden>
+                <span class="paused-banner__icon" aria-hidden="true">⏸</span>
+                <span id="processing-hold-text"></span>
+            </p>
+            <!-- Admins only: generations no connected machine can run (a
+                 forced precision no machine's card supports), one line each -->
+            <ul id="held-rows" class="held-rows" hidden></ul>
+            <div id="machines" class="machines"></div>
+            <p id="machines-none" class="machines-none" hidden>No machine connected</p>
+        </section>
+
+        <!-- detailed only: how fast each layer being read goes, all its machines together -->
+        <section class="queue-section" id="speed-section" hidden>
+            <h2 class="queue-section__title">Speed</h2>
+            <ul id="speed-list" class="speed"></ul>
         </section>
 
         <!-- Pending OCR -->
@@ -43,14 +68,20 @@
             <h2 class="queue-section__title">
                 Pending OCR
                 <span id="pending-ocr-count" class="badge badge--muted">0</span>
+                <!-- When the LAST volume of this queue finishes, on the
+                     reader's own clock. Hidden whenever any volume in the
+                     queue cannot be predicted: a queue with an unknown
+                     volume in it has an unknown end. -->
+                <span id="queue-done" class="queue-done" hidden></span>
             </h2>
-            <div id="pending-ocr-list" class="pending-list">
-                <p class="pending-list__empty">No volumes waiting for OCR</p>
-            </div>
+            <p id="pending-ocr-order" class="queue-section__detail" hidden></p>
+            <ol id="pending-ocr-list" class="pending-list__items" hidden></ol>
+            <p id="pending-more" class="pending-more" hidden></p>
+            <p id="pending-ocr-empty" class="pending-list__empty">No volumes waiting for OCR</p>
         </section>
 
         <!-- Pending Thumbnails -->
-        <section class="queue-section">
+        <section class="queue-section" id="thumb-section" hidden>
             <h2 class="queue-section__title">
                 Pending Thumbnails
                 <span id="pending-thumb-count" class="badge badge--muted">0</span>
@@ -66,9 +97,26 @@
             </h2>
             <p class="queue-section__detail">
                 These volumes failed OCR and are retried with increasing delays.
-                Check the log file for the full error, or replace the file to retry immediately.
+                Replacing the file retries it immediately.
             </p>
             <div id="failed-list" class="pending-list"></div>
+        </section>
+
+        <!-- Volumes the extra generations step over: uploaded with pages
+             missing, so only the OCR they arrived with is kept. Not an error,
+             not retried, and the fix is one sentence. -->
+        <section class="queue-section" id="skipped-section" hidden>
+            <h2 class="queue-section__title">
+                Skipped &mdash; missing pages
+                <span id="skipped-count" class="badge badge--muted">0</span>
+            </h2>
+            <p class="queue-section__detail">
+                These volumes were uploaded with pages missing &mdash; the archive holds fewer images
+                than its <code>.mokuro</code> names. They keep the OCR they arrived with, and the other
+                generations skip them. Replace the file with a complete volume and the next scan picks
+                it up.
+            </p>
+            <div id="skipped-list" class="pending-list"></div>
         </section>
     </main>
 

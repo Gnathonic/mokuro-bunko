@@ -1,0 +1,34 @@
+[Unit]
+Description=Mokuro Bunko OCR processor
+Documentation=https://github.com/Gnathonic/mokuro-bunko/blob/main/docs/deployment.md#remote-ocr-processors
+# The processor dials out to the library; it needs the network, not a port.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Any user that can reach the GPU (on most distributions: a member of the
+# `video` group, and for AMD also `render`) and write its own home directory.
+User=mokuro
+Group=mokuro
+
+# processor.yaml holds the processor account's password: chmod 600 it.
+ExecStart=/usr/local/bin/mokuro-bunko processor serve --config /etc/mokuro-bunko/processor.yaml
+
+# SIGTERM stops it cleanly: the volumes it held go back to the library's
+# queue unrecorded. It reconnects by itself when the library restarts.
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=60s
+
+# Light hardening only. OCR writes model downloads and kernel caches under
+# the user's home, its OCR environments wherever they were installed, and
+# archives into /dev/shm; the GPU device nodes must stay visible.
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
