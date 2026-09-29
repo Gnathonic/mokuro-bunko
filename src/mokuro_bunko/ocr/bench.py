@@ -1241,6 +1241,13 @@ class BenchService:
         fields are folded into a snapshot and saved FIRST, and only then does
         `run.update` make that state visible to a reader.
         """
+        if state == "failed" and run.cancelled:
+            # A cancel kills the runner, and whichever path notices the end
+            # first -- often the read loop, blocked on its next event, reading
+            # the runner's own exit -- would call it a failure. It was asked
+            # for: it is a cancel, and the error its death produced is noise.
+            state = "cancelled"
+            run.update(error=None)
         finished_at = _now_iso()
         if state == "done" and not run.draft:
             snapshot = run.snapshot()
