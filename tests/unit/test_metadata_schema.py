@@ -374,3 +374,58 @@ class TestCatalogFileDeterminism:
         assert data.count('"series_title"') == 1
         assert '"tag":"First"' in data
         assert "Second" not in data
+
+
+class TestMatchedPageCount:
+    def test_sits_directly_after_page_count(self) -> None:
+        data = dump_series_file(
+            series_title="Bakemonogatari",
+            facts=SeriesFacts(),
+            index=SeriesIndexData(),
+            volumes=[
+                VolumeEntry(
+                    volume_uuid="u1",
+                    volume_title="v01",
+                    page_count=187,
+                    matched_page_count=185,
+                    character_count=13247,
+                    mokuro_version="0.2.2",
+                )
+            ],
+        )
+        assert (
+            '"page_count":187,"matched_page_count":185,"character_count":13247'
+            in data.decode("utf-8")
+        )
+
+    def test_is_omitted_not_nulled_when_undetermined(self) -> None:
+        data = dump_series_file(
+            series_title="Bakemonogatari",
+            facts=SeriesFacts(),
+            index=SeriesIndexData(),
+            volumes=[VolumeEntry("u1", "v01", 187, 13247, "0.2.2")],
+        ).decode("utf-8")
+        assert "matched_page_count" not in data
+        assert '"page_count":187,"character_count":13247' in data
+
+    def test_a_fully_matched_volume_still_writes_the_field(self) -> None:
+        """Zero missing is a measurement, not a default: a reader must be able
+        to tell "checked, all there" from "never checked"."""
+        data = dump_series_file(
+            series_title="B",
+            facts=SeriesFacts(),
+            index=SeriesIndexData(),
+            volumes=[VolumeEntry("u1", "v01", 187, 13247, "0.2.2", matched_page_count=187)],
+        ).decode("utf-8")
+        assert '"matched_page_count":187' in data
+
+
+class TestMissingPageCount:
+    def test_the_difference_when_both_are_known(self) -> None:
+        assert VolumeEntry("u", "v", 200, 0, "", matched_page_count=198).missing_pages == 2
+
+    def test_zero_when_the_match_was_never_determined(self) -> None:
+        assert VolumeEntry("u", "v", 200, 0, "").missing_pages == 0
+
+    def test_clamped_when_duplicate_page_paths_overmatch(self) -> None:
+        assert VolumeEntry("u", "v", 2, 0, "", matched_page_count=3).missing_pages == 0

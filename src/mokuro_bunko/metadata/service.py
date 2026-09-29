@@ -259,6 +259,8 @@ class MetadataService:
                 latest_volume_modified=latest,
                 total_pages=sum(v.page_count for v in volumes),
                 total_chars=sum(v.character_count for v in volumes),
+                missing_pages=sum(v.missing_pages for v in volumes),
+                damaged_volumes=sum(1 for v in volumes if v.missing_pages),
             )
         )
 

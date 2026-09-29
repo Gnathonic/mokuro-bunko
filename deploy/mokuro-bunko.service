@@ -1,6 +1,6 @@
 [Unit]
 Description=Mokuro Bunko Server
-Documentation=https://github.com/nathan/mokuro-bunko
+Documentation=https://github.com/Gnathonic/mokuro-bunko
 After=network.target
 
 [Service]

@@ -62,8 +62,11 @@ def test_library_index_scans_nested_directories(tmp_path: Path) -> None:
     assert snapshot.pending_ocr == (("Group/Series C", "v03"),)
 
 
-def test_library_index_pending_ocr_is_fifo_by_created_time(tmp_path: Path) -> None:
-    """Pending OCR list should be FIFO by created-time proxy (mtime fallback)."""
+def test_library_index_pending_ocr_is_membership_not_a_schedule(tmp_path: Path) -> None:
+    """The index no longer orders the OCR queue (it used to sort FIFO by
+    creation time, a second opinion the worker did not share): it lists what
+    is missing in name order, whatever the archives' timestamps. Processing
+    order is `ocr.job_order.order_jobs`, used by the worker."""
     library = tmp_path / "library"
     series = library / "Series D"
     series.mkdir(parents=True)
@@ -72,9 +75,9 @@ def test_library_index_pending_ocr_is_fifo_by_created_time(tmp_path: Path) -> No
     first.write_bytes(b"cbz")
     second.write_bytes(b"cbz")
 
-    # Force deterministic ordering in tests via mtime.
-    os.utime(first, (1000, 1000))
-    os.utime(second, (2000, 2000))
+    # v02 is the OLDER file: FIFO would have put it first.
+    os.utime(first, (2000, 2000))
+    os.utime(second, (1000, 1000))
 
     index = LibraryIndexCache(library, ttl=60.0)
     snapshot = index.get_snapshot()

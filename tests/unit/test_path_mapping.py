@@ -48,7 +48,9 @@ class TestPathMapperInit:
     def test_class_constants(self) -> None:
         """Test class-level constants."""
         assert PathMapper.READER_ROOT == "mokuro-reader"
-        assert PathMapper.PER_USER_FILES == frozenset({"volume-data.json", "profiles.json"})
+        assert PathMapper.PER_USER_FILES == frozenset(
+            {"volume-data.json", "profiles.json", "goals.json"}
+        )
 
 
 class TestIsPerUserFile:
@@ -61,6 +63,23 @@ class TestIsPerUserFile:
     def test_profiles_is_per_user(self, mapper: PathMapper) -> None:
         """Test profiles.json is a per-user file."""
         assert mapper.is_per_user_file("/mokuro-reader/profiles.json") is True
+
+    def test_goals_is_per_user(self, mapper: PathMapper) -> None:
+        """goals.json is per-user: reading goals belong to one account.
+
+        Left off PER_USER_FILES it would resolve into the SHARED library, so
+        every account would read and overwrite one another's goals, and any
+        account without library write permission would have its upload
+        rejected.
+        """
+        assert mapper.is_per_user_file("/mokuro-reader/goals.json") is True
+        assert mapper.virtual_to_physical(
+            "/mokuro-reader/goals.json", username="alice"
+        ) == mapper.users_path / "alice" / "goals.json"
+        assert (
+            mapper.physical_to_virtual(mapper.users_path / "alice" / "goals.json", "alice")
+            == "/mokuro-reader/goals.json"
+        )
 
     def test_library_file_not_per_user(self, mapper: PathMapper) -> None:
         """Test library files are not per-user."""

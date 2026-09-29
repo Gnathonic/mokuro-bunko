@@ -1,19 +1,19 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>mokuro-bunko</Name>
-  <Repository>ghcr.io/nathan/mokuro-bunko:unraid-cuda</Repository>
-  <Registry>https://ghcr.io</Registry>
+  <Repository>mokuro-bunko:unraid-cuda</Repository>
+  <Registry/>
   <Network>bridge</Network>
   <MyIP/>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/nathan/mokuro-bunko</Support>
-  <Project>https://github.com/nathan/mokuro-bunko</Project>
-  <Overview>Mokuro Bunko server for mokuro-reader with optional CUDA OCR. Unraid template with NVIDIA runtime support.</Overview>
+  <Support>https://github.com/Gnathonic/mokuro-bunko/issues</Support>
+  <Project>https://github.com/Gnathonic/mokuro-bunko</Project>
+  <Overview>Mokuro Bunko server for mokuro-reader with optional CUDA OCR. Unraid template with NVIDIA runtime support. No image is published: build it first on the Unraid host with docker build -f deploy/Dockerfile.unraid -t mokuro-bunko:unraid-cuda . (see docs/deployment.md).</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/nathan/mokuro-bunko/main/deploy/unraid/mokuro-bunko.xml</TemplateURL>
-  <Icon>https://raw.githubusercontent.com/nathan/mokuro-bunko/main/docs/assets/icon.png</Icon>
+  <TemplateURL>https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/deploy/unraid/mokuro-bunko.xml</TemplateURL>
+  <Icon/>
   <ExtraParams>--runtime=nvidia</ExtraParams>
   <PostArgs/>
   <CPUset/>
@@ -39,6 +39,9 @@
   <Config Name="OCR Backend" Target="MOKURO_OCR_BACKEND" Default="auto" Mode="" Description="auto|cuda|rocm|cpu|skip" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="OCR Auto Install" Target="OCR_AUTO_INSTALL" Default="false" Mode="" Description="Set true to run install-ocr at startup" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="OCR Env Path" Target="MOKURO_BUNKO_OCR_ENV" Default="/data/.ocr-env" Mode="" Description="Persistent OCR venv path" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OCR Generations" Target="MOKURO_OCR_GENERATIONS" Default="" Mode="" Description="Leave empty to use config.yaml (default: one mokuro generation), or the JSON list of OCR generations, e.g. [{&quot;name&quot;:&quot;mokuro&quot;,&quot;engine&quot;:&quot;mokuro&quot;,&quot;primary&quot;:true},{&quot;name&quot;:&quot;hayai-nova&quot;,&quot;engine&quot;:&quot;hayai-nova&quot;,&quot;detector&quot;:&quot;ppocr-manga&quot;}]. Engines: mokuro, hayai-nova, paddle-manga, ppocr-manga. Easier to edit in the admin panel (OCR - Generations)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OCR Local Processing" Target="MOKURO_OCR_LOCAL_PROCESSING" Default="true" Mode="" Description="false: this container runs no OCR and waits for a remote processor (mokuro-bunko processor serve) to log in" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OCR Engines Env Path" Target="MOKURO_BUNKO_OCR_ENGINES_ENV" Default="/data/.ocr-engines-env" Mode="" Description="Persistent venv for the hayai-nova / paddle-manga / ppocr-manga engines" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
   <Config Name="NVIDIA_VISIBLE_DEVICES" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="GPU visibility for NVIDIA runtime" Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="NVIDIA_DRIVER_CAPABILITIES" Target="NVIDIA_DRIVER_CAPABILITIES" Default="compute,utility" Mode="" Description="NVIDIA driver capabilities" Type="Variable" Display="advanced" Required="false" Mask="false"/>

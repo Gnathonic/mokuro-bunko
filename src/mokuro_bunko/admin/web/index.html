@@ -110,8 +110,40 @@
                     <button class="btn btn--secondary btn--sm" onclick="loadAudit()">Refresh</button>
                 </div>
 
+                <div class="audit-filters" id="audit-filters">
+                    <input type="search" id="audit-q" class="form-input audit-filters__search"
+                           placeholder="Search actor, action, path or details" aria-label="Search the audit log">
+                    <select id="audit-actor" class="form-select" aria-label="Actor">
+                        <option value="">All actors</option>
+                    </select>
+                    <select id="audit-action" class="form-select" aria-label="Action">
+                        <option value="">All actions</option>
+                        <option value="ocr_sidecar_written,ocr_sidecar_rejected">OCR results (written or rejected)</option>
+                    </select>
+                    <select id="audit-type" class="form-select" aria-label="Target type">
+                        <option value="">All targets</option>
+                    </select>
+                    <label class="audit-filters__date">From
+                        <input type="date" id="audit-since" class="form-input" aria-label="From date">
+                    </label>
+                    <label class="audit-filters__date">To
+                        <input type="date" id="audit-until" class="form-input" aria-label="To date">
+                    </label>
+                    <label class="audit-filters__check">
+                        <input type="checkbox" id="audit-progress"> Include reading-progress sync
+                    </label>
+                </div>
+                <p class="audit-count" id="audit-count" aria-live="polite">&nbsp;</p>
+
                 <div class="table-container">
-                    <table class="table" id="audit-table">
+                    <table class="table audit-table" id="audit-table">
+                        <colgroup>
+                            <col class="audit-col--time">
+                            <col class="audit-col--actor">
+                            <col class="audit-col--action">
+                            <col class="audit-col--target">
+                            <col class="audit-col--details">
+                        </colgroup>
                         <thead>
                             <tr>
                                 <th>Time</th>
@@ -126,138 +158,242 @@
                         </tbody>
                     </table>
                 </div>
+                <div class="audit-more">
+                    <button class="btn btn--secondary btn--sm" id="audit-more" onclick="loadMoreAudit()">Load more</button>
+                </div>
             </section>
 
             <!-- Settings Tab -->
             <section id="settings-tab" class="tab-content">
-                <div class="toolbar">
-                    <h2 class="toolbar__title">Settings</h2>
-                </div>
+                <div class="settings-layout">
+                    <nav class="settings-rail" aria-label="Settings sections">
+                        <a href="#settings-access">Access</a>
+                        <a href="#settings-cors">CORS</a>
+                        <a href="#settings-catalog">Catalog</a>
+                        <a href="#settings-queue">Queue</a>
+                        <a href="#settings-ocr">OCR</a>
+                    </nav>
 
-                <div class="settings-grid">
-                    <!-- Registration -->
-                    <div class="settings-section card">
-                        <h3 class="settings-section__title">Registration & Access</h3>
-                        <div class="form-group">
-                            <label for="settings-reg-mode" class="form-label">Mode</label>
-                            <select id="settings-reg-mode" class="form-select">
-                                <option value="disabled">Disabled</option>
-                                <option value="self">Self Registration</option>
-                                <option value="invite">Invite Only</option>
-                                <option value="approval">Requires Approval</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label for="settings-reg-role" class="form-label">Default Role</label>
-                            <select id="settings-reg-role" class="form-select">
-                                <option value="registered">Registered</option>
-                                <option value="uploader">Uploader</option>
-                                <option value="editor">Editor</option>
-                                <option value="inviter">Inviter</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">
-                                <input type="checkbox" id="settings-anon-webdav"> Allow anonymous webdav browsing/downloads
-                            </label>
-                            <p class="form-hint">When disabled, login is required for WebDAV listing and file downloads.</p>
-                        </div>
-                        <button class="btn btn--primary" onclick="saveRegistrationSettings()">Save</button>
-                    </div>
-
-                    <!-- CORS -->
-                    <div class="settings-section card">
-                        <h3 class="settings-section__title">CORS</h3>
-                        <div class="form-group">
-                            <label class="form-label">
-                                <input type="checkbox" id="settings-cors-enabled"> Enabled
-                            </label>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Allowed Origins</label>
-                            <div id="cors-origins-list" class="origin-list"></div>
-                            <div class="origin-add">
-                                <input type="text" id="cors-new-origin" class="form-input" placeholder="https://example.com">
-                                <button class="btn btn--secondary btn--sm" onclick="addCorsOrigin()">Add</button>
+                    <div class="settings-body">
+                        <section class="settings-section" id="settings-access">
+                            <header class="settings-section__header">
+                                <h3>Access</h3>
+                                <p>Who can create an account, and what visitors without one can do.</p>
+                            </header>
+                            <div class="field">
+                                <label class="field__label" for="settings-reg-mode">Registration</label>
+                                <div class="field__control">
+                                    <select id="settings-reg-mode" class="form-select">
+                                        <option value="disabled">Disabled: admins create accounts</option>
+                                        <option value="self">Open: anyone can register</option>
+                                        <option value="invite">Invite codes only</option>
+                                        <option value="approval">Open, admin approves each account</option>
+                                    </select>
+                                </div>
                             </div>
-                        </div>
-                        <button class="btn btn--primary" onclick="saveCorsSettings()">Save</button>
-                    </div>
-
-                    <!-- Catalog -->
-                    <div class="settings-section card">
-                        <h3 class="settings-section__title">Catalog</h3>
-                        <div class="form-group">
-                            <label class="form-label">
-                                <input type="checkbox" id="settings-catalog-enabled"> Public catalog enabled
-                            </label>
-                            <p class="form-hint">Show the /catalog web page with volume covers and titles. Does not affect WebDAV access.</p>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">
-                                <input type="checkbox" id="settings-catalog-as-home"> Replace home page with catalog
-                            </label>
-                            <p class="form-hint">When enabled, browser requests to / go directly to /catalog/.</p>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Reader URL</label>
-                            <p class="form-hint">Where to open volumes for reading.</p>
-                            <div class="radio-group">
-                                <label class="radio-label">
-                                    <input type="radio" name="reader-url" value="https://reader.mokuro.app" id="reader-url-prod"> Production (reader.mokuro.app)
-                                </label>
-                                <label class="radio-label">
-                                    <input type="radio" name="reader-url" value="http://localhost:5173" id="reader-url-dev"> Development (localhost:5173)
-                                </label>
-                                <label class="radio-label">
-                                    <input type="radio" name="reader-url" value="https://mokuro-reader-tan.vercel.app" id="reader-url-beta"> Beta (mokuro-reader-tan.vercel.app)
-                                </label>
-                                <label class="radio-label">
-                                    <input type="radio" name="reader-url" value="custom" id="reader-url-custom"> Custom
-                                </label>
+                            <div class="field">
+                                <label class="field__label" for="settings-reg-role">New accounts start as</label>
+                                <div class="field__control">
+                                    <select id="settings-reg-role" class="form-select">
+                                        <option value="registered">Registered</option>
+                                        <option value="uploader">Uploader</option>
+                                        <option value="editor">Editor</option>
+                                        <option value="inviter">Inviter</option>
+                                    </select>
+                                </div>
                             </div>
-                            <input type="text" id="reader-url-custom-input" class="form-input mt-2" placeholder="https://my-reader.example.com" style="display:none">
-                        </div>
-                        <button class="btn btn--primary" onclick="saveCatalogSettings()">Save</button>
-                    </div>
-
-                    <!-- OCR -->
-                    <div class="settings-section card">
-                        <h3 class="settings-section__title">OCR</h3>
-                        <div class="form-group">
-                            <label class="form-label">Mode</label>
-                            <p class="form-hint">Backend selection is launch-only.</p>
-                            <div class="status-list">
-                                <div class="status-list__row"><span>Configured backend</span><strong id="ocr-configured-backend">-</strong></div>
-                                <div class="status-list__row"><span>Installed backend</span><strong id="ocr-installed-backend">-</strong></div>
-                                <div class="status-list__row"><span>OCR env path</span><strong id="ocr-env-path">-</strong></div>
-                                <div class="status-list__row"><span>Supported on this host</span><strong id="ocr-supported-backends">-</strong></div>
+                            <div class="field">
+                                <span class="field__label">Without an account</span>
+                                <div class="field__control">
+                                    <label class="check"><input type="checkbox" id="settings-anon-webdav"> Allow browsing and downloading the library over WebDAV</label>
+                                    <p class="form-hint">When off, listing and downloads require a login.</p>
+                                </div>
                             </div>
-                            <p class="form-hint" id="ocr-cli-hint">Use CLI to change OCR backend.</p>
-                            <p class="form-hint" id="ocr-driver-hint"></p>
-                        </div>
-                        <div class="form-group">
-                            <label for="settings-ocr-interval" class="form-label">Poll Interval (seconds)</label>
-                            <input type="number" id="settings-ocr-interval" class="form-input" min="1" value="30">
-                        </div>
-                        <button class="btn btn--primary" onclick="saveOcrSettings()">Save Poll Interval</button>
-                    </div>
+                            <footer class="settings-section__footer">
+                                <button class="btn btn--primary" onclick="saveRegistrationSettings()">Save access settings</button>
+                            </footer>
+                        </section>
 
-                    <!-- Queue -->
-                    <div class="settings-section card">
-                        <h3 class="settings-section__title">Queue</h3>
-                        <div class="form-group">
-                            <label class="form-label">
-                                <input type="checkbox" id="settings-queue-show-nav"> Show Queue button in top navigation
-                            </label>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">
-                                <input type="checkbox" id="settings-queue-public"> Public queue status page/API
-                            </label>
-                            <p class="form-hint">When disabled, queue access requires authenticated user credentials.</p>
-                        </div>
-                        <button class="btn btn--primary" onclick="saveQueueSettings()">Save</button>
+                        <section class="settings-section" id="settings-cors">
+                            <header class="settings-section__header">
+                                <h3>CORS</h3>
+                                <p>Browser apps, like the reader, that may call this server from another origin.</p>
+                            </header>
+                            <div class="field">
+                                <span class="field__label">Cross-origin requests</span>
+                                <div class="field__control">
+                                    <label class="check"><input type="checkbox" id="settings-cors-enabled"> Allow from the origins below</label>
+                                </div>
+                            </div>
+                            <div class="field">
+                                <span class="field__label">Allowed origins</span>
+                                <div class="field__control">
+                                    <div id="cors-origins-list" class="origin-list"></div>
+                                    <div class="origin-add">
+                                        <input type="text" id="cors-new-origin" class="form-input" placeholder="https://example.com">
+                                        <button class="btn btn--secondary btn--sm" onclick="addCorsOrigin()">Add</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <footer class="settings-section__footer">
+                                <button class="btn btn--primary" onclick="saveCorsSettings()">Save CORS settings</button>
+                            </footer>
+                        </section>
+
+                        <section class="settings-section" id="settings-catalog">
+                            <header class="settings-section__header">
+                                <h3>Catalog</h3>
+                                <p>The public web page of covers and titles, and where "Read" sends people.</p>
+                            </header>
+                            <div class="field">
+                                <span class="field__label">Catalog page</span>
+                                <div class="field__control">
+                                    <label class="check"><input type="checkbox" id="settings-catalog-enabled"> Serve /catalog with volume covers and titles</label>
+                                    <label class="check"><input type="checkbox" id="settings-catalog-as-home"> Send browser visits to / straight to the catalog</label>
+                                    <p class="form-hint">Neither affects WebDAV access.</p>
+                                </div>
+                            </div>
+                            <div class="field">
+                                <span class="field__label">Reader</span>
+                                <div class="field__control">
+                                    <div class="radio-group">
+                                        <label class="radio-label"><input type="radio" name="reader-url" value="https://reader.mokuro.app" id="reader-url-prod"> reader.mokuro.app</label>
+                                        <label class="radio-label"><input type="radio" name="reader-url" value="http://localhost:5173" id="reader-url-dev"> localhost:5173 (development)</label>
+                                        <label class="radio-label"><input type="radio" name="reader-url" value="https://mokuro-reader-tan.vercel.app" id="reader-url-beta"> mokuro-reader-tan.vercel.app (beta)</label>
+                                        <label class="radio-label"><input type="radio" name="reader-url" value="custom" id="reader-url-custom"> Custom</label>
+                                    </div>
+                                    <input type="text" id="reader-url-custom-input" class="form-input mt-2" placeholder="https://my-reader.example.com" style="display:none">
+                                </div>
+                            </div>
+                            <footer class="settings-section__footer">
+                                <button class="btn btn--primary" onclick="saveCatalogSettings()">Save catalog settings</button>
+                            </footer>
+                        </section>
+
+                        <section class="settings-section" id="settings-queue">
+                            <header class="settings-section__header">
+                                <h3>Queue</h3>
+                                <p>The page that shows what OCR is working on and what is waiting.</p>
+                            </header>
+                            <div class="field">
+                                <span class="field__label">Visibility</span>
+                                <div class="field__control">
+                                    <label class="check"><input type="checkbox" id="settings-queue-show-nav"> Show a Queue link in the top navigation</label>
+                                    <label class="check"><input type="checkbox" id="settings-queue-public"> Let anyone view the queue page and its API</label>
+                                    <p class="form-hint">When off, the queue requires a login.</p>
+                                </div>
+                            </div>
+                            <div class="field">
+                                <label class="field__label" for="settings-queue-display">Detail</label>
+                                <div class="field__control">
+                                    <select id="settings-queue-display" class="form-select">
+                                        <option value="minimal">Minimal — one line per working machine</option>
+                                        <option value="normal">Normal — a card per machine and the pending list</option>
+                                        <option value="detailed">Detailed — adds stage pipelines and rate details</option>
+                                    </select>
+                                    <p class="form-hint">What every viewer of the queue page sees; applies at once. Error messages, log paths and hardware names are shown to admins only, at any level.</p>
+                                </div>
+                            </div>
+                            <footer class="settings-section__footer">
+                                <button class="btn btn--primary" onclick="saveQueueSettings()">Save queue settings</button>
+                            </footer>
+                        </section>
+
+                        <section class="settings-section" id="settings-ocr">
+                            <header class="settings-section__header">
+                                <h3>OCR</h3>
+                                <p>The sidecar files this server generates for every volume, in the order it generates them.</p>
+                            </header>
+
+                            <div class="field">
+                                <span class="field__label">Environment</span>
+                                <div class="field__control">
+                                    <p class="ocr-env"><span class="ocr-env__label">Backend:</span> <span id="ocr-backend">-</span></p>
+                                    <details class="ocr-env__details" id="ocr-env-details">
+                                        <summary>Details</summary>
+                                        <dl class="kv">
+                                            <div><dt>mokuro env</dt><dd class="mono" id="ocr-env-path">-</dd></div>
+                                            <div><dt>Engines env</dt><dd class="mono" id="ocr-engines-env">-</dd></div>
+                                            <div><dt>Active this run</dt><dd class="mono" id="ocr-active-engines">-</dd></div>
+                                        </dl>
+                                        <p class="form-hint"><span id="ocr-cli-hint"></span> <span id="ocr-driver-hint"></span></p>
+                                    </details>
+                                </div>
+                            </div>
+
+                            <div class="field" id="processors-card">
+                                <span class="field__label">Processors</span>
+                                <div class="field__control">
+                                    <p class="form-hint" id="processors-hint"></p>
+                                    <p class="gen-banner" id="processors-hold" role="status" hidden></p>
+                                    <div class="table-container processors-box">
+                                        <table class="pools__table processors-table">
+                                            <colgroup>
+                                                <col class="processors-table__machine">
+                                                <col class="processors-table__host">
+                                                <col class="processors-table__rates">
+                                            </colgroup>
+                                            <thead>
+                                                <tr><th scope="col">Machine</th><th scope="col">Hardware</th>
+                                                    <th scope="col" title="Pages a minute per OCR generation: the pages of its recent finished volumes over the wall time they took; until it has finished one, its benchmark">Pages/min</th></tr>
+                                            </thead>
+                                            <tbody id="processors-body"></tbody>
+                                        </table>
+                                    </div>
+                                    <details class="processors-refused" id="processor-failed-logins" hidden>
+                                        <summary id="processor-failed-summary">Refused logins</summary>
+                                        <ul class="processors-refused__list" id="processor-failed-list"></ul>
+                                    </details>
+                                </div>
+                            </div>
+
+                            <div class="field" id="settings-ocr-generations-field">
+                                <span class="field__label">Generations</span>
+                                <div class="field__control">
+                                    <p class="form-hint">Each generation writes one sidecar per volume, top row first; readers open the primary by default.</p>
+                                    <p class="gen-banner" id="gen-banner" role="alert" hidden></p>
+                                    <ol class="gen-list" id="gen-list"></ol>
+                                    <p class="gen-empty" id="gen-empty" hidden>No generations yet. Add one and no volume will be read until you do.</p>
+                                    <div class="gen-actions">
+                                        <button type="button" class="btn btn--secondary btn--sm" id="gen-add-btn">Add generation</button>
+                                        <span class="gen-dirty" id="gen-dirty" hidden>Unsaved changes</span>
+                                        <button type="button" class="btn btn--secondary btn--sm" id="gen-revert-btn" disabled>Revert</button>
+                                        <button type="button" class="btn btn--primary btn--sm" id="gen-save-btn">Save generations</button>
+                                    </div>
+                                    <p class="form-hint" id="gen-save-note" hidden></p>
+                                </div>
+                            </div>
+
+                            <div class="field">
+                                <label class="field__label" for="settings-ocr-interval">Library scan</label>
+                                <div class="field__control field__control--short">
+                                    <div class="input-suffix"><input type="number" id="settings-ocr-interval" class="form-input" min="1" value="30"><span>seconds between scans</span></div>
+                                </div>
+                            </div>
+
+                            <footer class="settings-section__footer">
+                                <button class="btn btn--primary" onclick="saveOcrSettings()">Save scan interval</button>
+                                <span class="form-hint">Generations have their own Save button above.</span>
+                            </footer>
+
+                            <details class="bench">
+                                <summary>Reference: quality and hardware of each setup</summary>
+                                <p class="form-hint">How the setups compare on quality, which no benchmark can measure. For the speed of any of them on <strong>your</strong> machine and your pages, use <strong>Benchmark &amp; tune</strong> on that generation's row above.</p>
+                                <div class="table-container">
+                                    <table class="bench__table">
+                                        <thead><tr><th>Setup</th><th>Quality</th><th>Minimum hardware</th></tr></thead>
+                                        <tbody>
+                                            <tr><td class="mono">mokuro</td><td>Good on dialogue; fails on colorized and display text. Fast even in fp32; its fp16 reads close to fp32, while bf16 is much worse, so it never runs bf16.</td><td>any CPU, 2 GB RAM</td></tr>
+                                            <tr><td class="mono">hayai-nova + ppocr-manga</td><td>Fixes manga-ocr's errors, reads covers. Its bf16 tested more accurate than fp32; fp16 is the one that loses.</td><td>any CPU, 2 GB RAM; on a card, bf16 needs about 0.9 GB of GPU memory</td></tr>
+                                            <tr><td class="mono">paddle-manga + ppocr-manga</td><td>Best on Japanese display text and sound effects. Most accurate in fp32, and much faster in bf16 on cards whose hardware runs bf16 natively.</td><td>8 GB RAM on the CPU; on a card, fp32 takes about 4.1 GB of GPU memory in its own process (about 6 GB of card in total), bf16 about 2.2 GB (about 3 GB of card)</td></tr>
+                                            <tr><td class="mono">ppocr-manga</td><td>Line-level: rotated text, furigana removed; reads novels. Sets its own precision.</td><td>any CPU, 1 GB RAM (runs on the CPU only)</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <p class="form-hint">Detectors: ppocr-manga (the default), or ctd as a GPL-3.0 opt-in. On covers and colored lettering the classic pipeline's failure is recognition, not detection, and both new engines fix it.</p>
+                                <p class="form-hint">Precision is one mode per generation, for every machine. <strong>Auto: accuracy</strong> (the default) picks what tested most accurate for each engine; <strong>Auto: balanced</strong> gives up a little accuracy for a lot of speed; <strong>Auto: speed</strong> takes the fastest format each card runs well. For balanced and speed, each machine benchmarks the generation automatically before its first volume, and again when the mode changes, and keeps the fastest format its card supports. <strong>fp32</strong>, <strong>bf16</strong> or <strong>fp16 only</strong> force that format, and a machine whose card cannot run it is skipped: it is never given that generation's volumes.</p>
+                            </details>
+                        </section>
                     </div>
                 </div>
             </section>
@@ -423,6 +559,7 @@
                             <option value="editor">Editor</option>
                             <option value="inviter">Inviter</option>
                             <option value="admin">Admin</option>
+                            <option value="processor">Processor (an OCR machine)</option>
                         </select>
                     </div>
                 </div>
@@ -527,6 +664,7 @@
                             <option value="editor">Editor</option>
                             <option value="inviter">Inviter</option>
                             <option value="admin">Admin</option>
+                            <option value="processor">Processor (an OCR machine)</option>
                         </select>
                     </div>
                 </div>

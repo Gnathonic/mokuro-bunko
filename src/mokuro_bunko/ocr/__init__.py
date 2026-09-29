@@ -1,6 +1,7 @@
 """OCR module for mokuro-bunko."""
 
 from mokuro_bunko.ocr.installer import (
+    EnginesInstaller,
     OCRBackend,
     OCRInstaller,
     detect_hardware,
@@ -12,6 +13,7 @@ from mokuro_bunko.ocr.processor import OCRProcessor
 from mokuro_bunko.ocr.watcher import InboxWatcher, OCRWorker
 
 __all__ = [
+    "EnginesInstaller",
     "OCRBackend",
     "OCRInstaller",
     "OCRProcessor",

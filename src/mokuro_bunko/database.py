@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import functools
 import json
 import math
 import re
@@ -10,23 +12,41 @@ import sqlite3
 import threading
 import time
 import unicodedata
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict, TypeVar, cast
 
 import bcrypt
 
 from mokuro_bunko.validation import validate_password, validate_username
 
+_T = TypeVar("_T")
+
 UserStatus = Literal["active", "pending", "disabled", "deleted"]
-UserRole = Literal["anonymous", "registered", "uploader", "inviter", "editor", "admin"]
+UserRole = Literal[
+    "anonymous", "registered", "uploader", "inviter", "editor", "admin", "processor"
+]
 
 LEGACY_ROLE_ALIASES: dict[str, str] = {
     "writer": "uploader",
 }
-VALID_ROLES = frozenset({"anonymous", "registered", "uploader", "inviter", "editor", "admin"})
+VALID_ROLES = frozenset(
+    {"anonymous", "registered", "uploader", "inviter", "editor", "admin", "processor"}
+)
+
+# The roles an invite may carry — deliberately NOT every role in
+# VALID_ROLES. `admin` and `processor` are granted by an administrator
+# acting on purpose, never minted by a code someone redeems: a processor
+# is a machine account for a second host, and an invite that could carry
+# one would hand library-wide read access to whoever redeemed the code.
+#
+# Enforced in `create_invite` rather than only by the four-role menus the
+# admin API and CLI present, so the rule holds for every caller
+# (`registration/invites.py` included) instead of depending on each one
+# remembering to filter.
+INVITABLE_ROLES = frozenset({"registered", "uploader", "inviter", "editor"})
 
 
 class UserDict(TypedDict):
@@ -52,6 +72,21 @@ class InviteDict(TypedDict):
     invited_by: str | None
 
 
+class AuditQueryError(ValueError):
+    """An audit query argument that cannot be used (a date, a cursor)."""
+
+
+class AuditPage(TypedDict):
+    """One page of `Database.query_audit_events`, newest first."""
+
+    events: list[AuditEventDict]
+    # Pass back as ``cursor`` for the next (older) page; None on the last.
+    next_cursor: str | None
+    # Every event matching the filters, on a first page (no cursor); None on
+    # later pages, where it would only cost another count.
+    total: int | None
+
+
 class AuditEventDict(TypedDict):
     """Type definition for audit event dictionary."""
 
@@ -63,6 +98,47 @@ class AuditEventDict(TypedDict):
     target_username: str | None
     details: str | None
     created_at: str
+
+
+class OcrSidecarRow(TypedDict):
+    """Who wrote one OCR sidecar that is on disk now, and what with.
+
+    One row per sidecar FILE (``sidecar_path``, library-relative), written
+    when the OCR worker installs it and deleted when the file leaves the
+    library (its volume or folder deleted, the archive moved away, the
+    sidecar deleted, overwritten over WebDAV, or swept as corrupt). A
+    sidecar with no row has an unknown producer: it predates this table, or
+    arrived some other way, and nothing guesses who wrote it.
+
+    ``machine`` is the History key: ``local`` for this server, else the
+    processor's NAME (what its profile and the admin card are filed under).
+    ``account`` is the processor's login (NULL for this server) -- one
+    account may run several machines. Never pruned with the audit log: the
+    row lives exactly as long as its file.
+    """
+
+    sidecar_path: str
+    volume_key: str
+    generation_id: str
+    generation_name: str
+    machine: str
+    account: str | None
+    engine: str | None
+    detector: str | None
+    precision: str | None
+    runner_build: str | None
+    pages: int | None
+    failed_pages: int | None
+    archive_size: int | None
+    archive_mtime_ns: int | None
+    written_at: str
+
+
+_OCR_SIDECAR_COLUMNS = (
+    "sidecar_path", "volume_key", "generation_id", "generation_name", "machine", "account",
+    "engine", "detector", "precision", "runner_build", "pages", "failed_pages",
+    "archive_size", "archive_mtime_ns",
+)
 
 
 class SeriesFactsRow(TypedDict):
@@ -122,6 +198,15 @@ class CatalogSeriesRow(TypedDict):
     latest_volume_modified: float
     total_pages: int
     total_chars: int
+    #: Pages the compiled entries say are referenced by a `.mokuro` but absent
+    #: from the archive, summed over the series. Volumes whose match could not
+    #: be determined contribute nothing.
+    missing_pages: int
+    #: How many volumes contribute to `missing_pages` at all — the catalog's
+    #: "damaged" filter keys off this, not off the page total, because one
+    #: volume short by 200 pages and 200 volumes short by one are the same
+    #: number and very different libraries.
+    damaged_volumes: int
 
 
 class CommunityDetailsRow(TypedDict):
@@ -295,10 +380,24 @@ class _RetryingConnection:
         return getattr(self._conn, name)
 
 
+
+def _bumps_users_version(method: Callable[..., _T]) -> Callable[..., _T]:
+    """Move `Database.users_version` after an account change, raised or not."""
+
+    @functools.wraps(method)
+    def wrapper(self: Database, *args: Any, **kwargs: Any) -> _T:
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self.users_version += 1
+
+    return wrapper
+
+
 class Database:
     """SQLite database for user and invite management."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
     AUDIT_PRUNE_INTERVAL_SECONDS = 3600
 
     def __init__(self, db_path: Path | str) -> None:
@@ -312,6 +411,10 @@ class Database:
         self.lock_retries = 5
         self.retry_initial_delay_seconds = 0.05
         self._last_audit_prune_monotonic = 0.0
+        # Moves on every change to who may log in as what (a user created,
+        # re-roled, given a new password, approved, disabled or deleted):
+        # anything caching an authentication result keys on it.
+        self.users_version = 0
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(
@@ -496,9 +599,52 @@ class Database:
                     latest_volume_modified REAL NOT NULL DEFAULT 0,
                     total_pages INTEGER NOT NULL DEFAULT 0,
                     total_chars INTEGER NOT NULL DEFAULT 0,
+                    missing_pages INTEGER NOT NULL DEFAULT 0,
+                    damaged_volumes INTEGER NOT NULL DEFAULT 0,
                     scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )
             """)
+
+            # Schema v4: which machine wrote each OCR sidecar on disk
+            # (`OcrSidecarRow`). CREATE TABLE IF NOT EXISTS like the rest, so a
+            # v3 database gains it empty on the next open: every sidecar it
+            # already has reads as "unknown producer".
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ocr_sidecars (
+                    sidecar_path TEXT PRIMARY KEY,
+                    volume_key TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    generation_name TEXT NOT NULL,
+                    machine TEXT NOT NULL,
+                    account TEXT,
+                    engine TEXT,
+                    detector TEXT,
+                    precision TEXT,
+                    runner_build TEXT,
+                    pages INTEGER,
+                    failed_pages INTEGER,
+                    archive_size INTEGER,
+                    archive_mtime_ns INTEGER,
+                    written_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ocr_sidecars_volume
+                ON ocr_sidecars(volume_key)
+            """)
+
+            # `catalog_series` predates these two columns on any database that
+            # ran an earlier build. Adding them with a 0 default reads as "no
+            # damage known yet", which is true until the next metadata pass
+            # rewrites every row wholesale -- and the pass recompiles every
+            # cached entry anyway (see `_entry_from_dict`), so the real numbers
+            # land on the first pass after startup, not eventually.
+            for column in ("missing_pages", "damaged_volumes"):
+                if not self._column_exists(conn, "catalog_series", column):
+                    conn.execute(
+                        f"ALTER TABLE catalog_series ADD COLUMN {column} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
 
             if not self._column_exists(conn, "users", "notes"):
                 conn.execute("ALTER TABLE users ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
@@ -521,6 +667,21 @@ class Database:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_audit_actor
                 ON audit_logs(actor_username)
+            """)
+            # The audit list's filters, each walked newest first by
+            # (column, created_at) -- the rowid, which IS the id, rides along
+            # in every index entry, so the keyset (created_at, id) is covered.
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_audit_type_created
+                ON audit_logs(target_type, created_at)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_audit_action_created
+                ON audit_logs(action, created_at)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_audit_actor_created
+                ON audit_logs(actor_username, created_at)
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_volume_uploads_uploader
@@ -554,6 +715,7 @@ class Database:
 
     # User CRUD operations
 
+    @_bumps_users_version
     def create_user(
         self,
         username: str,
@@ -601,6 +763,16 @@ class Database:
                 )
                 return cursor.lastrowid or 0
             except sqlite3.IntegrityError as e:
+                # A deleted account keeps its row for the audit trail, so its
+                # name stays taken; say that, and how to bring it back.
+                row = conn.execute(
+                    "SELECT status FROM users WHERE username = ?", (username,)
+                ).fetchone()
+                if row is not None and row[0] == "deleted":
+                    raise ValueError(
+                        f"Username '{username}' belongs to a deleted account; bring it back "
+                        f"with: mokuro-bunko admin restore-user {username}"
+                    ) from e
                 raise ValueError(f"Username '{username}' already exists") from e
 
     def get_user(self, username: str) -> UserDict | None:
@@ -664,6 +836,31 @@ class Database:
                     )
             return None
 
+    def processor_account_stamp(self, username: str) -> str | None:
+        """A fingerprint of a PROCESSOR account as it stands, or None.
+
+        None unless the account exists, is active and has the ``processor``
+        role. The fingerprint covers the role, the status and the password
+        hash, so it changes when any of them does: the library compares it
+        at every heartbeat of a connected processor, and a processor whose
+        account was disabled, deleted, re-roled or given a new password is
+        cut off (``ProcessorAPI._account_revoked``). Only a digest of the
+        hash is returned; nothing that could log a credential.
+        """
+        import hashlib
+
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT role, status, password_hash FROM users WHERE username = ?",
+                (username,),
+            ).fetchone()
+        if row is None or row["role"] != "processor" or row["status"] != "active":
+            return None
+        digest = hashlib.sha256(
+            f"{row['role']}\0{row['status']}\0{row['password_hash']}".encode()
+        ).hexdigest()
+        return digest[:32]
+
     def list_users(self, status: UserStatus | None = None) -> list[UserDict]:
         """List all users.
 
@@ -702,6 +899,7 @@ class Database:
                 for row in cursor.fetchall()
             ]
 
+    @_bumps_users_version
     def update_user_role(self, username: str, role: UserRole) -> bool:
         """Update a user's role.
 
@@ -735,6 +933,7 @@ class Database:
             )
             return cursor.rowcount > 0
 
+    @_bumps_users_version
     def update_user_password(self, username: str, password: str) -> bool:
         """Update a user's password.
 
@@ -760,6 +959,7 @@ class Database:
             )
             return cursor.rowcount > 0
 
+    @_bumps_users_version
     def approve_user(self, username: str) -> bool:
         """Approve a pending user.
 
@@ -779,6 +979,7 @@ class Database:
             )
             return cursor.rowcount > 0
 
+    @_bumps_users_version
     def disable_user(self, username: str) -> bool:
         """Disable a user.
 
@@ -798,6 +999,7 @@ class Database:
             )
             return cursor.rowcount > 0
 
+    @_bumps_users_version
     def delete_user(self, username: str) -> bool:
         """Soft-delete a user by setting status to 'deleted'.
 
@@ -814,6 +1016,35 @@ class Database:
                 "UPDATE users SET status = 'deleted', updated_at = datetime('now') "
                 "WHERE username = ? AND status != 'deleted'",
                 (username,),
+            )
+            return cursor.rowcount > 0
+
+    @_bumps_users_version
+    def restore_user(self, username: str, password: str, role: UserRole | None = None) -> bool:
+        """Bring a soft-deleted account back, with a new password.
+
+        The row (and so the name) survives a delete for the audit trail; this
+        is the only way to use the name again. The old password never comes
+        back with it. ``role`` replaces the account's role when given.
+
+        Returns:
+            True if a deleted account was restored, False if ``username`` is
+            not a deleted account (unknown, or still active).
+
+        Raises:
+            ValueError: If the password is not acceptable.
+        """
+        password_error = validate_password(password)
+        if password_error:
+            raise ValueError(password_error)
+        password_hash = self._hash_password(password)
+        normalized_role = normalize_role(role) if role is not None else None
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "UPDATE users SET status = 'active', password_hash = ?, "
+                "role = COALESCE(?, role), updated_at = datetime('now') "
+                "WHERE username = ? AND status = 'deleted'",
+                (password_hash, normalized_role, username),
             )
             return cursor.rowcount > 0
 
@@ -834,8 +1065,18 @@ class Database:
 
         Returns:
             Generated invite code.
+
+        Raises:
+            ValueError: If the role is not one an invite may carry.
         """
+        # Tested AFTER normalization, so a legacy `writer` invite still
+        # resolves to `uploader` and is accepted.
         normalized_role = normalize_role(role)
+        if normalized_role not in INVITABLE_ROLES:
+            raise ValueError(
+                f"Role cannot be granted by invite: {role}. "
+                f"Must be one of: {sorted(INVITABLE_ROLES)}"
+            )
         code = secrets.token_urlsafe(16)
         # token_urlsafe's alphabet includes '-' and '_'; a leading '-' is
         # misread as an option by positional CLI argument parsing (Click),
@@ -1085,33 +1326,211 @@ class Database:
                 self._last_audit_prune_monotonic = now
             return cursor.lastrowid or 0
 
-    def list_audit_events(self, limit: int = 200) -> list[AuditEventDict]:
-        """Return newest audit events first."""
+    def list_audit_events(
+        self, limit: int = 200, *, actor: str | None = None
+    ) -> list[AuditEventDict]:
+        """Return newest audit events first, optionally only one actor's."""
         safe_limit = max(1, min(int(limit), 1000))
+        where = "WHERE actor_username = ?" if actor else ""
+        params: tuple[Any, ...] = (actor, safe_limit) if actor else (safe_limit,)
         with self._connection() as conn:
             cursor = conn.execute(
-                """
+                f"""
                 SELECT id, actor_username, action, target_type, target_path,
                        target_username, details, created_at
                 FROM audit_logs
+                {where}
                 ORDER BY created_at DESC, id DESC
                 LIMIT ?
-                """,
-                (safe_limit,),
+                """,  # noqa: S608 - the WHERE is a constant, the value is bound
+                params,
             )
-            return [
-                AuditEventDict(
-                    id=row["id"],
-                    actor_username=row["actor_username"],
-                    action=row["action"],
-                    target_type=row["target_type"],
-                    target_path=row["target_path"],
-                    target_username=row["target_username"],
-                    details=row["details"],
-                    created_at=row["created_at"],
-                )
-                for row in cursor.fetchall()
+            return [self._audit_event(row) for row in cursor.fetchall()]
+
+    AUDIT_PAGE_SIZE = 50
+    AUDIT_PAGE_MAX = 200
+    #: Reading-progress sync (per-user progress files): most of the log on a
+    #: library with readers, so left out of a query unless asked for.
+    AUDIT_PROGRESS_TYPE = "progress"
+    _AUDIT_COLUMNS = (
+        "id, actor_username, action, target_type, target_path, "
+        "target_username, details, created_at"
+    )
+
+    @staticmethod
+    def _audit_instant(value: str, name: str) -> str:
+        """A date or an ISO date-time as the log stores it (UTC, to the second)."""
+        text = value.strip()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return f"{text} 00:00:00"
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00").replace("z", "+00:00"))
+        except ValueError:
+            raise AuditQueryError(f"{name} is not a date: {value[:40]!r}") from None
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _audit_cursor(created_at: str, event_id: int) -> str:
+        raw = json.dumps([created_at, event_id], separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _audit_uncursor(cursor: str) -> tuple[str, int]:
+        try:
+            padded = cursor + "=" * (-len(cursor) % 4)
+            created_at, event_id = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+            if not isinstance(created_at, str) or not isinstance(event_id, int):
+                raise ValueError
+        except (ValueError, TypeError, UnicodeError):
+            raise AuditQueryError("cursor is not one this server gave out") from None
+        return created_at, event_id
+
+    @staticmethod
+    def _like_pattern(term: str) -> str:
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return f"%{escaped}%"
+
+    def query_audit_events(
+        self,
+        *,
+        actor: str | None = None,
+        actions: Sequence[str] = (),
+        target_types: Sequence[str] = (),
+        since: str | None = None,
+        until: str | None = None,
+        search: str | None = None,
+        include_progress: bool = False,
+        cursor: str | None = None,
+        limit: int = AUDIT_PAGE_SIZE,
+    ) -> AuditPage:
+        """One page of audit events, newest first, every filter applied in SQL.
+
+        All filters are optional and combine with AND: ``actor`` exact;
+        ``actions`` and ``target_types`` any of; ``since`` inclusive and
+        ``until`` exclusive (a date is its midnight, an ISO date-time with a
+        zone is converted to UTC, which is what the log stores); ``search``
+        a case-insensitive substring of the actor, action, target path or
+        details. Reading-progress sync (`AUDIT_PROGRESS_TYPE`) is left out
+        unless ``include_progress`` -- or the progress type is named in
+        ``target_types``, which asks for it.
+
+        Keyset paging by (created_at, id): ``cursor`` is the previous page's
+        ``next_cursor``, and events logged between two page loads are newer
+        than every cursor, so they never shift a later page (no duplicates,
+        no gaps). Raises `AuditQueryError` for a date or cursor it cannot use.
+        """
+        size = max(1, min(int(limit), self.AUDIT_PAGE_MAX))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if actor:
+            clauses.append("actor_username = ?")
+            params.append(actor)
+        wanted_actions = [a for a in actions if a]
+        if wanted_actions:
+            clauses.append(f"action IN ({','.join('?' for _ in wanted_actions)})")
+            params.extend(wanted_actions)
+        wanted_types = [t for t in target_types if t]
+        if wanted_types:
+            clauses.append(f"target_type IN ({','.join('?' for _ in wanted_types)})")
+            params.extend(wanted_types)
+        elif not include_progress:
+            clauses.append("(target_type IS NULL OR target_type <> ?)")
+            params.append(self.AUDIT_PROGRESS_TYPE)
+        if since:
+            clauses.append("created_at >= ?")
+            params.append(self._audit_instant(since, "since"))
+        if until:
+            clauses.append("created_at < ?")
+            params.append(self._audit_instant(until, "until"))
+        term = (search or "").strip()
+        if term:
+            patterns = [self._like_pattern(term)]
+            # Details are stored as ASCII JSON (`log_audit_event`), so 漢字
+            # is on disk as \u6f22\u5b57: search that spelling too.
+            ascii_form = json.dumps(term, ensure_ascii=True)[1:-1]
+            if ascii_form != term:
+                patterns.append(self._like_pattern(ascii_form))
+            ors = [
+                f"{column} LIKE ? ESCAPE '\\'"
+                for column in ("actor_username", "action", "target_path", "details")
             ]
+            ors += ["details LIKE ? ESCAPE '\\'"] * (len(patterns) - 1)
+            clauses.append("(" + " OR ".join(ors) + ")")
+            params.extend([patterns[0]] * 4 + patterns[1:])
+        filters = list(clauses)
+        filter_params = list(params)
+        if cursor:
+            created_at, event_id = self._audit_uncursor(cursor)
+            # A row value, not the equivalent OR: SQLite seeks the
+            # created_at index with it (measured 0.1 ms against 9 ms a page
+            # at 100k rows).
+            clauses.append("(created_at, id) < (?, ?)")
+            params.extend([created_at, event_id])
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"SELECT {self._AUDIT_COLUMNS} FROM audit_logs {where} "  # noqa: S608
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (*params, size + 1),
+            ).fetchall()
+            total: int | None = None
+            if not cursor:
+                count_where = ("WHERE " + " AND ".join(filters)) if filters else ""
+                total = int(
+                    conn.execute(
+                        f"SELECT COUNT(*) FROM audit_logs {count_where}",  # noqa: S608
+                        filter_params,
+                    ).fetchone()[0]
+                )
+        events = [self._audit_event(row) for row in rows[:size]]
+        next_cursor = (
+            self._audit_cursor(events[-1]["created_at"], events[-1]["id"])
+            if len(rows) > size
+            else None
+        )
+        return AuditPage(events=events, next_cursor=next_cursor, total=total)
+
+    def audit_facets(self) -> dict[str, list[str]]:
+        """The distinct actors, actions and target types in the log, sorted.
+
+        Read by skip-scanning each column's index (one seek per distinct
+        value), so it costs the number of values, not the number of events.
+        """
+        facets: dict[str, list[str]] = {}
+        with self._connection() as conn:
+            for key, column in (
+                ("actors", "actor_username"),
+                ("actions", "action"),
+                ("target_types", "target_type"),
+            ):
+                rows = conn.execute(
+                    f"""
+                    WITH RECURSIVE seen(value) AS (
+                        SELECT MIN({column}) FROM audit_logs
+                        UNION ALL
+                        SELECT (SELECT MIN({column}) FROM audit_logs WHERE {column} > seen.value)
+                        FROM seen WHERE seen.value IS NOT NULL
+                    )
+                    SELECT value FROM seen WHERE value IS NOT NULL
+                    """  # noqa: S608 - the column names are constants
+                ).fetchall()
+                facets[key] = [str(row[0]) for row in rows]
+        return facets
+
+    @staticmethod
+    def _audit_event(row: sqlite3.Row) -> AuditEventDict:
+        return AuditEventDict(
+            id=row["id"],
+            actor_username=row["actor_username"],
+            action=row["action"],
+            target_type=row["target_type"],
+            target_path=row["target_path"],
+            target_username=row["target_username"],
+            details=row["details"],
+            created_at=row["created_at"],
+        )
 
     # Upload ownership operations
 
@@ -1362,6 +1781,100 @@ class Database:
             )
             conn.execute("DELETE FROM volume_uploads WHERE volume_key = ?", (old_key,))
 
+    # OCR sidecar provenance
+
+    def record_ocr_sidecar(self, row: Mapping[str, Any]) -> None:
+        """Upsert the row of one sidecar just written (``written_at`` = now).
+
+        The same file written again -- a re-run -- replaces the row whole: it
+        describes what is on disk, not a history (the audit log is that).
+        """
+        values = tuple(row.get(column) for column in _OCR_SIDECAR_COLUMNS)
+        columns = ", ".join(_OCR_SIDECAR_COLUMNS)
+        marks = ", ".join("?" for _ in _OCR_SIDECAR_COLUMNS)
+        with self._connection() as conn:
+            conn.execute(
+                f"INSERT OR REPLACE INTO ocr_sidecars ({columns}, written_at) "  # noqa: S608
+                f"VALUES ({marks}, datetime('now'))",
+                values,
+            )
+
+    @staticmethod
+    def _ocr_sidecar_from_row(raw: sqlite3.Row) -> OcrSidecarRow:
+        return cast("OcrSidecarRow", {key: raw[key] for key in raw.keys()})  # noqa: SIM118
+
+    def get_ocr_sidecar(self, sidecar_path: str) -> OcrSidecarRow | None:
+        """The row of one library-relative sidecar path, or None (unknown)."""
+        with self._connection() as conn:
+            raw = conn.execute(
+                "SELECT * FROM ocr_sidecars WHERE sidecar_path = ?", (sidecar_path.strip("/"),)
+            ).fetchone()
+            return self._ocr_sidecar_from_row(raw) if raw is not None else None
+
+    def list_ocr_sidecars(self) -> list[OcrSidecarRow]:
+        """Every row, oldest write first."""
+        with self._connection() as conn:
+            cursor = conn.execute("SELECT * FROM ocr_sidecars ORDER BY written_at, rowid")
+            return [self._ocr_sidecar_from_row(raw) for raw in cursor.fetchall()]
+
+    def ocr_sidecar_producers(self) -> list[tuple[str, str, str]]:
+        """``(generation_id, volume_key, machine)`` of every row, oldest write first."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT generation_id, volume_key, machine FROM ocr_sidecars "
+                "ORDER BY written_at, rowid"
+            )
+            return [(str(r[0]), str(r[1]), str(r[2])) for r in cursor.fetchall()]
+
+    def forget_ocr_sidecar(self, sidecar_path: str) -> int:
+        """The sidecar at this library-relative path is gone (or replaced)."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM ocr_sidecars WHERE sidecar_path = ?", (sidecar_path.strip("/"),)
+            )
+            return cursor.rowcount
+
+    def forget_ocr_sidecars_of_volume(self, volume_key: str) -> int:
+        """Every row of one archive (library-relative ``.cbz`` path)."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM ocr_sidecars WHERE volume_key = ?", (volume_key.strip("/"),)
+            )
+            return cursor.rowcount
+
+    def forget_ocr_sidecars_under_prefix(self, library_prefix: str) -> int:
+        """Every row under a folder. Matched by exact prefix, never LIKE."""
+        prefix = library_prefix.strip("/")
+        if not prefix:
+            return 0
+        head = prefix + "/"
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM ocr_sidecars WHERE substr(sidecar_path, 1, ?) = ?",
+                (len(head), head),
+            )
+            return cursor.rowcount
+
+    def rename_ocr_sidecars_under_prefix(self, old_prefix: str, new_prefix: str) -> int:
+        """A folder moved with its sidecars: the rows follow them."""
+        old = old_prefix.strip("/")
+        new = new_prefix.strip("/")
+        if not old or not new or old == new:
+            return 0
+        old_head, new_head = old + "/", new + "/"
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE OR REPLACE ocr_sidecars SET
+                    sidecar_path = ? || substr(sidecar_path, ?),
+                    volume_key = ? || substr(volume_key, ?)
+                WHERE substr(sidecar_path, 1, ?) = ?
+                """,
+                (new_head, len(old_head) + 1, new_head, len(old_head) + 1,
+                 len(old_head), old_head),
+            )
+            return cursor.rowcount
+
     # Series metadata operations
 
     @staticmethod
@@ -1558,8 +2071,9 @@ class Database:
                 """
                 INSERT INTO catalog_series (
                     series_key, folder_name, cover_path, volume_count,
-                    latest_volume_modified, total_pages, total_chars, scanned_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    latest_volume_modified, total_pages, total_chars,
+                    missing_pages, damaged_volumes, scanned_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                 ON CONFLICT(series_key) DO UPDATE SET
                     folder_name = excluded.folder_name,
                     cover_path = excluded.cover_path,
@@ -1567,6 +2081,8 @@ class Database:
                     latest_volume_modified = excluded.latest_volume_modified,
                     total_pages = excluded.total_pages,
                     total_chars = excluded.total_chars,
+                    missing_pages = excluded.missing_pages,
+                    damaged_volumes = excluded.damaged_volumes,
                     scanned_at = excluded.scanned_at
                 """,
                 (
@@ -1577,6 +2093,8 @@ class Database:
                     row["latest_volume_modified"],
                     row["total_pages"],
                     row["total_chars"],
+                    row["missing_pages"],
+                    row["damaged_volumes"],
                 ),
             )
 
@@ -1595,6 +2113,8 @@ class Database:
                     latest_volume_modified=float(raw["latest_volume_modified"]),
                     total_pages=int(raw["total_pages"]),
                     total_chars=int(raw["total_chars"]),
+                    missing_pages=int(raw["missing_pages"]),
+                    damaged_volumes=int(raw["damaged_volumes"]),
                 )
                 for raw in cursor.fetchall()
             ]

@@ -12,6 +12,7 @@ import bisect
 import re
 import time
 import unicodedata
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -250,3 +251,175 @@ def iso_stamp(seconds: float) -> str:
     """`Date.prototype.toISOString()` shape: UTC, exactly 3 decimals, `Z`."""
     moment = datetime.fromtimestamp(seconds, tz=timezone.utc)
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
+
+
+# --- page/image matching ----------------------------------------------------
+
+# Ported from `src/lib/import/types.ts` (`IMAGE_MIME_TYPES` -> `IMAGE_EXTENSIONS`).
+# Extensions, not suffixes: the client compares `filename.split('.').pop()`, so
+# the leading dot is not part of the value.
+IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {"jpg", "jpeg", "png", "webp", "gif", "bmp", "avif", "tif", "tiff", "jxl"}
+)
+
+# Ported from `src/lib/import/types.ts` (`EXCLUDED_SYSTEM_PATTERNS`).
+_EXCLUDED_SYSTEM_PATTERNS: frozenset[str] = frozenset(
+    {
+        # macOS
+        "__MACOSX",
+        ".DS_Store",
+        ".Trashes",
+        ".Spotlight-V100",
+        ".fseventsd",
+        ".TemporaryItems",
+        ".Trash",
+        # Windows
+        "System Volume Information",
+        "$RECYCLE.BIN",
+        "Thumbs.db",
+        "desktop.ini",
+        "Desktop.ini",
+        "RECYCLER",
+        "RECYCLED",
+        # Linux
+        ".Trash-1000",
+        ".thumbnails",
+        ".directory",
+        # Cloud storage
+        ".dropbox",
+        ".dropbox.cache",
+        # Version control
+        ".git",
+        ".svn",
+    }
+)
+
+# Ported from `src/lib/import/types.ts` (`EXCLUDED_EXTENSIONS`).
+_EXCLUDED_EXTENSIONS: frozenset[str] = frozenset({"bak", "tmp", "temp"})
+
+
+def is_system_file(path: str) -> bool:
+    """OS junk the client refuses to import (client: `isSystemFile`)."""
+    segments = path.replace("\\", "/").split("/")
+    for segment in segments:
+        if not segment:
+            continue
+        if segment.startswith("._"):
+            return True
+        if segment.endswith("~"):
+            return True
+        if segment in _EXCLUDED_SYSTEM_PATTERNS:
+            return True
+    filename = segments[-1] if segments else ""
+    last_dot = filename.rfind(".")
+    if last_dot >= 0 and filename[last_dot + 1 :].lower() in _EXCLUDED_EXTENSIONS:
+        return True
+    return False
+
+
+def is_image_extension(extension: str) -> bool:
+    """Client: `isImageExtension`."""
+    return extension.lower() in IMAGE_EXTENSIONS
+
+
+def trailing_extension(path: str) -> str:
+    """The client's `path.split('.').pop()` — the WHOLE path, not the basename.
+
+    A quirk worth preserving rather than fixing: for `chapter.1/page001` the
+    client's split yields `1/page001`, which matches no image extension, so
+    the entry is skipped. Deriving the extension from the basename instead
+    would keep that file and put bunko's view of an archive out of step with
+    the reader's for no gain — the same file would be "extra" on one side and
+    a page on the other.
+    """
+    return path.split(".")[-1].lower()
+
+
+def _normalize_path(path: str) -> str:
+    """Client: `normalizePath` — lowercase, backslashes to forward slashes.
+
+    `str.lower()` vs JS `toLowerCase()` carries the same handful of Unicode
+    divergences documented on `normalize_series_key`; page paths are ASCII or
+    Japanese in practice, where the two agree.
+    """
+    return path.lower().replace("\\", "/")
+
+
+def _stem(path: str) -> str:
+    """Client: `getStem` — basename minus its last extension.
+
+    `lastDot > 0` (not `>= 0`) is the client's own test, so a dotfile like
+    `.gitkeep` keeps its whole name as the stem.
+    """
+    parts = path.split("/")
+    filename = parts[-1] or path
+    last_dot = filename.rfind(".")
+    return filename[:last_dot] if last_dot > 0 else filename
+
+
+def count_matched_pages(page_paths: Sequence[str | None], file_paths: Sequence[str]) -> int:
+    """How many of a `.mokuro`'s pages have an image in the archive.
+
+    The counting half of the client's `matchImagesToPages`
+    (`src/lib/import/processing.ts`): same three strategies, in the same
+    order — exact normalized path, then stem (an extension change like
+    `.png` -> `.webp`), then the whole-volume positional fallback.
+
+    What is deliberately NOT ported is the *pairing*: the client needs to know
+    WHICH file backs each page, so it builds a `remapped` map and, in the
+    fallback, sorts both leftover lists with `naturalSort` before pairing them
+    positionally. A count cannot observe that order — the fallback either
+    matches every leftover page or none of them — so the sort is elided. Add
+    it back the moment this function is asked for anything but a total.
+
+    `None` in `page_paths` is a page whose `img_path` is missing or not a
+    string. The client would throw on that (`normalizePath(undefined)`); here
+    it counts as unmatched, which is what a page with no image to point at
+    is. See `compile_series_volumes` for the systemic case (a sidecar where
+    NO page carries an `img_path`), which is reported as unknown rather than
+    as a volume missing every page.
+    """
+    # Dedup preserving order: the client's `files` is a Map keyed by path, so
+    # a duplicated archive entry is one file to it and must be one here too.
+    unique_files = list(dict.fromkeys(file_paths))
+
+    normalized_files: dict[str, str] = {}
+    stem_files: dict[str, str] = {}
+    for file_path in unique_files:
+        normalized_files[_normalize_path(file_path)] = file_path
+        stem_files[_stem(file_path).lower()] = file_path
+
+    used: set[str] = set()
+    matched = 0
+    missing = 0
+
+    for page_path in page_paths:
+        if page_path is None:
+            missing += 1
+            continue
+
+        # Exact match, normalized. Deliberately does NOT consult `used`: the
+        # client lets two pages naming the same image both match.
+        actual = normalized_files.get(_normalize_path(page_path))
+        if actual is not None:
+            matched += 1
+            used.add(actual)
+            continue
+
+        # Stem match — the extension changed since OCR ran.
+        actual = stem_files.get(_stem(page_path).lower())
+        if actual is not None and actual not in used:
+            matched += 1
+            used.add(actual)
+            continue
+
+        missing += 1
+
+    extra = sum(1 for file_path in unique_files if file_path not in used)
+
+    # Whole-volume fallback: images renamed after OCR. Only when nearly every
+    # page failed by name AND the leftovers line up one-to-one.
+    if missing and missing == extra and matched / len(page_paths) < 0.5:
+        matched += missing
+
+    return matched

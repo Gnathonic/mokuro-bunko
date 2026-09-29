@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -114,6 +116,40 @@ class TestConfigPath:
         assert "Config file:" in result.output
         assert "Storage dir:" in result.output
 
+    def test_the_environment_variable_is_the_file(self, temp_dir: Path) -> None:
+        config_path = temp_dir / "data" / "config.yaml"
+        config = Config()
+        config.storage.base_path = temp_dir / "library-root"
+        config_path.parent.mkdir()
+        save_config(config, config_path)
+        runner = CliRunner()
+        result = runner.invoke(cli, ["config", "path"], env={"MOKURO_CONFIG": str(config_path)})
+        assert result.exit_code == 0, result.output
+        assert f"Config file: {config_path}" in result.output
+        # The storage the server would use: the file's, not the default.
+        assert f"Storage dir: {temp_dir / 'library-root'}" in result.output
+        # ...and `config set` writes that same file.
+        result = runner.invoke(
+            cli, ["config", "set", "server.port", "9191"], env={"MOKURO_CONFIG": str(config_path)}
+        )
+        assert result.exit_code == 0, result.output
+        assert yaml.safe_load(config_path.read_text())["server"]["port"] == 9191
+
+    def test_the_option_is_the_file(self, temp_dir: Path) -> None:
+        config_path = temp_dir / "elsewhere.yaml"
+        save_config(Config(), config_path)
+        result = CliRunner().invoke(cli, ["-c", str(config_path), "config", "path"])
+        assert result.exit_code == 0, result.output
+        assert f"Config file: {config_path}" in result.output
+
+    def test_an_unreadable_file_is_still_named(self, temp_dir: Path) -> None:
+        config_path = temp_dir / "config.yaml"
+        config_path.write_text("server: [not, a, mapping\n")
+        result = CliRunner().invoke(cli, ["-c", str(config_path), "config", "path"])
+        assert result.exit_code == 0, result.output
+        assert f"Config file: {config_path}" in result.output
+        assert "cannot be read" in result.output
+
 
 class TestConfigInit:
     """Tests for config init command."""
@@ -201,3 +237,54 @@ class TestCorsRemove:
         runner = CliRunner()
         result = runner.invoke(cli, ["-c", str(config_path), "config", "cors-remove", "https://nonexistent.com"])
         assert result.exit_code != 0
+
+
+class TestServeGenerations:
+    """The serve --generations flag overrides ocr.generations.
+
+    It replaces the per-setting flags (``--detector`` and friends), because
+    a recipe field now belongs to one row rather than to the server: the
+    flag takes the whole list, as the JSON text ``$MOKURO_OCR_GENERATIONS``
+    also takes.
+    """
+
+    def test_flag_overrides_config(
+        self, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mokuro_bunko.server as server_module
+
+        config_path = temp_dir / "config.yaml"
+        save_config(Config(), config_path)
+        seen: list[Config] = []
+        monkeypatch.setattr(
+            server_module,
+            "run_server",
+            lambda config, path, verbose=False: seen.append(config),
+        )
+        rows = json.dumps(
+            [
+                {"name": "mokuro", "engine": "mokuro", "primary": True},
+                {
+                    "name": "nova-ctd",
+                    "engine": "hayai-nova",
+                    "detector": "ctd",
+                    "patch_budget": 256,
+                },
+            ]
+        )
+        runner = CliRunner()
+        result = runner.invoke(cli, ["-c", str(config_path), "serve", "--generations", rows])
+        assert result.exit_code == 0, result.output
+        served = seen[0].ocr.generations
+        assert [row.name for row in served] == ["mokuro", "nova-ctd"]
+        # A per-row recipe field rides the flag through, not just the identity.
+        assert served[1].patch_budget == 256
+        assert served[1].effective_detector == "ctd"
+
+    def test_unknown_value_rejected(self, temp_dir: Path) -> None:
+        config_path = temp_dir / "config.yaml"
+        save_config(Config(), config_path)
+        bad = json.dumps([{"name": "mokuro", "engine": "magic", "primary": True}])
+        result = CliRunner().invoke(cli, ["-c", str(config_path), "serve", "--generations", bad])
+        assert result.exit_code != 0
+        assert "magic" in result.output

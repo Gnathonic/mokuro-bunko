@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mokuro-bunko"
-version = "0.3.4"
+version = "0.5.0"
 description = "A WebDAV server for Mokuro reader with shared manga library, per-user reading progress, and optional OCR processing"
 readme = "README.md"
 license = "MPL-2.0"
@@ -110,6 +110,22 @@ packages = ["mokuro_bunko"]
 module = [
     "wsgidav.*",
     "cheroot.*",
+    # Engine runner deps live only in the OCR engines venv, never here.
+    "natsort",
+    "torch",
+    "cv2",
+    "numpy",
+    "onnxruntime",
+    "_common",
+    "comic_text_detector.*",
+    "mokuro",
+    "mokuro.*",
+    "jaconv",
+    "manga_ocr",
+    "huggingface_hub",
+    "peft",
+    "safetensors.*",
+    "transformers",
 ]
 ignore_missing_imports = true
 

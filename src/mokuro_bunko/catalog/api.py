@@ -4,15 +4,31 @@ from __future__ import annotations
 
 import gzip
 import json
+import time
 import urllib.parse
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from mokuro_bunko.catalog.manifest import build_volume_manifest
 from mokuro_bunko.database import Database
 from mokuro_bunko.library_index import LibraryIndexCache
 from mokuro_bunko.metadata.reader_compat import normalize_volume_title_key
+from mokuro_bunko.metadata.schema import missing_page_count
+from mokuro_bunko.ocr.volume_outlook import recheck_after
+from mokuro_bunko.queue.api import read_running_jobs
 from mokuro_bunko.security import is_within_path
+from mokuro_bunko.webdav.resources import PathMapper
+
+if TYPE_CHECKING:
+    from mokuro_bunko.middleware.auth import AuthMiddleware
+    from mokuro_bunko.ocr.control import OcrControl
+
+#: The per-volume manifest a reader deep link carries (`?series=&volume=`).
+MANIFEST_PATH = "/catalog/api/manifest"
+#: How long a manifest may wait for the OCR queue's pending list to price its
+#: volume against, when none is cached (the queue page usually keeps one).
+MANIFEST_PRICE_WAIT = 1.0
 
 #: Bodies below this stay identity-encoded: gzip overhead beats the savings.
 _GZIP_MIN_BYTES = 512
@@ -44,6 +60,9 @@ class CatalogAPI:
         catalog_config: Any = None,
         library_index: LibraryIndexCache | None = None,
         database: Database | None = None,
+        read_gate: AuthMiddleware | None = None,
+        layer_order: Callable[[], Iterable[str]] | None = None,
+        ocr_control: OcrControl | None = None,
     ) -> None:
         """Initialize catalog API middleware.
 
@@ -53,8 +72,18 @@ class CatalogAPI:
             enabled: Whether the catalog is enabled.
             catalog_config: Live CatalogConfig reference for runtime toggling.
             database: Source of merged series facts (display titles).
+            read_gate: The server's AuthMiddleware. The volume manifest is
+                read with exactly the rules of the volume's `.cbz`, so it is
+                only served when this is given (fail closed).
+            layer_order: The configured generation names, read per request,
+                that order a manifest's layers.
+            ocr_control: The live OCR handle a manifest's `pending` and
+                `recheck_after` come from; without one nothing is pending.
         """
         self.app = app
+        self._read_gate = read_gate
+        self._layer_order = layer_order
+        self._ocr_control = ocr_control
         self._database = database
         self.storage_base_path = Path(storage_base_path) if storage_base_path else None
         self._enabled = enabled
@@ -79,11 +108,17 @@ class CatalogAPI:
         start_response: Callable[..., Any],
     ) -> Iterable[bytes]:
         """Handle WSGI request."""
-        if not self.enabled:
-            return self.app(environ, start_response)
-
         path = environ.get("PATH_INFO", "")
         method = environ.get("REQUEST_METHOD", "GET")
+
+        # The manifest's gate is the archive's own read gate, not the catalog
+        # page toggle: a volume anyone may download has a manifest anyone may
+        # read, whether or not the catalog page is on.
+        if path == MANIFEST_PATH and method == "GET":
+            return self._serve_manifest(environ, start_response)
+
+        if not self.enabled:
+            return self.app(environ, start_response)
 
         # Handle catalog routes
         if path == "/catalog" or path == "/catalog/":
@@ -132,6 +167,83 @@ class CatalogAPI:
 
         return self._json_response(start_response, 404, {"error": "Not found"})
 
+    def _serve_manifest(
+        self,
+        environ: dict[str, Any],
+        start_response: Callable[..., Any],
+    ) -> list[bytes]:
+        """``GET /catalog/api/manifest?series=<name>&volume=<name>``.
+
+        Answered as ``GET /mokuro-reader/<series>/<volume>.cbz`` would be:
+        the read gate first (401/429 exactly as for the archive), then a path
+        that escapes the library is 403 and a volume without its archive 404.
+        """
+        if self._read_gate is None or self.storage_base_path is None:
+            return self._json_response(start_response, 404, {"error": "Not found"})
+        query = urllib.parse.parse_qs(environ.get("QUERY_STRING", ""))
+        series_name = query.get("series", [""])[0]
+        volume_name = query.get("volume", [""])[0]
+        if not series_name or not volume_name:
+            return self._json_response(
+                start_response, 400, {"error": "Missing series or volume"}
+            )
+
+        refused = self._read_gate.gate_read(
+            environ,
+            start_response,
+            f"/{PathMapper.READER_ROOT}/{series_name}/{volume_name}.cbz",
+        )
+        if refused is not None:
+            return refused
+
+        library = self.storage_base_path
+        try:
+            series_dir = (library / series_name).resolve()
+            archive = (series_dir / f"{volume_name}.cbz").resolve()
+        except (OSError, ValueError):
+            return self._json_response(start_response, 400, {"error": "Invalid path"})
+        if not is_within_path(series_dir, library) or not is_within_path(archive, library):
+            return self._json_response(start_response, 403, {"error": "Forbidden"})
+        if series_dir == library.resolve() or "/" in volume_name or "\\" in volume_name:
+            return self._json_response(start_response, 404, {"error": "Volume not found"})
+
+        layer_order: list[str] = []
+        if self._layer_order is not None:
+            try:
+                layer_order = list(self._layer_order())
+            except Exception:  # noqa: BLE001 - the manifest orders alphabetically without it
+                layer_order = []
+        manifest = build_volume_manifest(series_dir, series_name, volume_name, layer_order)
+        if manifest is None:
+            return self._json_response(start_response, 404, {"error": "Volume not found"})
+        pending = self._volume_pending(archive, series_name, volume_name)
+        manifest["pending"] = pending
+        manifest["recheck_after"] = recheck_after(pending, time.time())
+        return self._json_response(
+            start_response,
+            200,
+            manifest,
+            environ=environ,
+            extra_headers=[("Cache-Control", "no-store")],
+        )
+
+    def _volume_pending(self, cbz: Path, series: str, volume: str) -> list[dict[str, Any]]:
+        """The manifest's ``pending``: OCR jobs still to run for this volume, with ETAs."""
+        control = self._ocr_control
+        if control is None or self.storage_base_path is None:
+            return []
+        try:
+            pending = control.volume_pending(
+                cbz,
+                series,
+                volume,
+                read_running_jobs(self.storage_base_path.parent),
+                wait=MANIFEST_PRICE_WAIT,
+            )
+        except Exception:  # noqa: BLE001 - the manifest serves its files without it
+            return []
+        return pending or []
+
     def _get_ocr_status(self, start_response: Callable[..., Any]) -> list[bytes]:
         """Return live OCR progress status for the currently active volume."""
         progress = self._read_ocr_progress()
@@ -175,6 +287,8 @@ class CatalogAPI:
                     "latest_volume_modified": row["latest_volume_modified"],
                     "total_pages": row["total_pages"],
                     "total_chars": row["total_chars"],
+                    "missing_pages": row["missing_pages"],
+                    "damaged_volumes": row["damaged_volumes"],
                 }
                 series_info.update(facts_by_key.get(row["series_key"], {}))
                 community = community_by_key.get(row["series_key"])
@@ -255,16 +369,21 @@ class CatalogAPI:
             return self._json_response(start_response, 404, {"error": "Series not found"})
 
         progress = self._read_ocr_progress()
+        damage = self._damage_by_volume_title(series_dir)
 
         volumes = []
         for volume in series.volumes:
             vol_info: dict[str, Any] = {"name": volume.name, "cover": volume.cover}
-            is_active = self._is_active_ocr_volume(progress, series_name, volume.name)
+            active = self._active_ocr_job(progress, series_name, volume.name)
             vol_info["ocr_pending"] = volume.has_cbz and not volume.has_mokuro and not volume.has_mokuro_gz
-            vol_info["ocr_active"] = is_active
-            if is_active:
+            vol_info["ocr_active"] = active is not None
+            if active is not None:
                 vol_info["ocr_pending"] = False
-                vol_info["ocr_progress"] = self._volume_progress(progress)
+                vol_info["ocr_progress"] = self._volume_progress(active)
+            missing = damage.get(volume.name)
+            if missing is not None:
+                vol_info["page_count"] = missing[0]
+                vol_info["missing_pages"] = missing[1]
             volumes.append(vol_info)
 
         # Series cover is the first volume's cover
@@ -279,6 +398,37 @@ class CatalogAPI:
             "cover": series_cover,
             "volumes": volumes,
         })
+
+    def _damage_by_volume_title(self, series_dir: Path) -> dict[str, tuple[int, int]]:
+        """`{volume_title: (page_count, missing_pages)}` from the series file.
+
+        Read back out of the compiled `<Series>/series.json` rather than
+        recomputed or re-queried: that file is what the metadata pass just
+        published and what every reader client sees, so the catalog cannot
+        show a volume as whole that the file calls damaged. A series with no
+        compiled file yet (first boot, before the startup pass) simply
+        contributes no damage — the grid renders, without badges, instead of
+        failing.
+        """
+        try:
+            raw = json.loads((series_dir / "series.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(raw, dict) or not isinstance(raw.get("volumes"), list):
+            return {}
+        damage: dict[str, tuple[int, int]] = {}
+        for entry in raw["volumes"]:
+            if not isinstance(entry, dict):
+                continue
+            title = entry.get("volume_title")
+            pages = entry.get("page_count")
+            matched = entry.get("matched_page_count")
+            if not isinstance(title, str) or not isinstance(pages, int):
+                continue
+            if not isinstance(matched, int) or isinstance(matched, bool):
+                matched = None
+            damage[title] = (pages, missing_page_count(pages, matched))
+        return damage
 
     def _serve_cover(self, start_response: Callable[..., Any], cover_path: str) -> list[bytes]:
         """Serve a cover image."""
@@ -330,20 +480,32 @@ class CatalogAPI:
             return None
         return data
 
-    def _is_active_ocr_volume(
+    def _active_ocr_job(
         self,
         progress: dict[str, Any] | None,
         series_name: str,
         volume_name: str,
-    ) -> bool:
-        """Return True when OCR progress points at this series/volume."""
+    ) -> dict[str, Any] | None:
+        """The running OCR job for this series/volume, if one of them is it.
+
+        With `ocr.concurrency` above 1 the worker reports several running
+        jobs in `jobs`; any of them may be this volume. A file without
+        `jobs` describes one job at the top level, which is what every
+        version before that setting wrote.
+        """
         if not progress:
-            return False
-        relative_cbz = progress.get("relative_cbz")
-        if not isinstance(relative_cbz, str):
-            return False
-        expected = f"{series_name}/{volume_name}.cbz"
-        return relative_cbz.casefold() == expected.casefold()
+            return None
+        entries = progress.get("jobs")
+        if not isinstance(entries, list) or not entries:
+            entries = [progress]
+        expected = f"{series_name}/{volume_name}.cbz".casefold()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            relative_cbz = entry.get("relative_cbz")
+            if isinstance(relative_cbz, str) and relative_cbz.casefold() == expected:
+                return entry
+        return None
 
     @staticmethod
     def _volume_progress(progress: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -393,9 +555,16 @@ class CatalogAPI:
         status_code: int,
         data: dict[str, Any],
         environ: dict[str, Any] | None = None,
+        extra_headers: list[tuple[str, str]] | None = None,
     ) -> list[bytes]:
         """Return a JSON response, gzipped when the client accepts it."""
-        status_map = {200: "OK", 404: "Not Found", 500: "Internal Server Error"}
+        status_map = {
+            200: "OK",
+            400: "Bad Request",
+            403: "Forbidden",
+            404: "Not Found",
+            500: "Internal Server Error",
+        }
         status = f"{status_code} {status_map.get(status_code, 'Error')}"
         body = json.dumps(data).encode("utf-8")
         encoding_headers: list[tuple[str, str]] = []
@@ -410,7 +579,7 @@ class CatalogAPI:
         headers = encoding_headers + [
             ("Content-Type", "application/json"),
             ("Content-Length", str(len(body))),
-        ]
+        ] + list(extra_headers or [])
         start_response(status, headers)
         return [body]
 

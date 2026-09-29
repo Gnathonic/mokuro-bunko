@@ -31,6 +31,7 @@ RUN python3 -m venv /opt/venv && \
 
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
 
+LABEL org.opencontainers.image.source="https://github.com/Gnathonic/mokuro-bunko"
 LABEL org.opencontainers.image.title="Mokuro Bunko Server (Unraid CUDA)"
 LABEL org.opencontainers.image.description="Mokuro Bunko with optional CUDA OCR for Unraid/NVIDIA runtime"
 LABEL org.opencontainers.image.licenses="MIT"
@@ -41,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     python3-pip \
     ca-certificates \
+    git \
     tini \
     gosu \
     nginx \
@@ -69,6 +71,7 @@ ENV PYTHONUNBUFFERED="1" \
     MOKURO_CONFIG="/config/config.yaml" \
     MOKURO_OCR_BACKEND="auto" \
     MOKURO_BUNKO_OCR_ENV="/opt/ocr-env" \
+    MOKURO_BUNKO_OCR_ENGINES_ENV="/opt/ocr-engines-env" \
     NVIDIA_VISIBLE_DEVICES="all" \
     NVIDIA_DRIVER_CAPABILITIES="compute,utility"
 

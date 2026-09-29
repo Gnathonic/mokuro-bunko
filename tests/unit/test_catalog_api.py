@@ -131,6 +131,8 @@ def test_library_carries_the_user_series_tag(tmp_path: Path) -> None:
             "latest_volume_modified": 0.0,
             "total_pages": 0,
             "total_chars": 0,
+            "missing_pages": 0,
+            "damaged_volumes": 0,
         }
     )
     db.put_series_facts(
@@ -181,6 +183,8 @@ def test_library_serves_from_the_materialized_table_when_populated(tmp_path: Pat
             "latest_volume_modified": 1_756_400_000.0,
             "total_pages": 570,
             "total_chars": 42000,
+            "missing_pages": 0,
+            "damaged_volumes": 0,
         }
     )
 
@@ -218,6 +222,8 @@ def test_library_joins_community_details(tmp_path: Path) -> None:
             "latest_volume_modified": 0.0,
             "total_pages": 0,
             "total_chars": 0,
+            "missing_pages": 0,
+            "damaged_volumes": 0,
         }
     )
     db.upsert_community_details(
@@ -438,3 +444,83 @@ def test_series_active_ocr_volume_clears_pending(tmp_path: Path) -> None:
     assert volume["ocr_progress"]["percent"] == 33
 
 
+
+
+def _write_series_file(series: Path, volumes: list[dict[str, object]]) -> None:
+    (series / "series.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "series_title": series.name,
+                "external_ids": {},
+                "titles": {},
+                "synonyms": [],
+                "updated_at": "1970-01-01T00:00:00.000Z",
+                "volumes": volumes,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_series_endpoint_reports_missing_pages_from_the_compiled_file(
+    tmp_path: Path,
+) -> None:
+    library = tmp_path / "library"
+    series = library / "Series A"
+    series.mkdir(parents=True)
+    (series / "vol1.cbz").write_bytes(b"cbz")
+    (series / "vol2.cbz").write_bytes(b"cbz")
+    (series / "vol3.cbz").write_bytes(b"cbz")
+    _write_series_file(
+        series,
+        [
+            {"volume_uuid": "a", "volume_title": "vol1", "page_count": 10,
+             "matched_page_count": 7, "character_count": 0, "mokuro_version": ""},
+            {"volume_uuid": "b", "volume_title": "vol2", "page_count": 10,
+             "matched_page_count": 10, "character_count": 0, "mokuro_version": ""},
+            # No `matched_page_count`: never checked, so nothing is claimed.
+            {"volume_uuid": "c", "volume_title": "vol3", "page_count": 10,
+             "character_count": 0, "mokuro_version": ""},
+        ],
+    )
+
+    api = CatalogAPI(app=lambda e, s: [], storage_base_path=str(library), enabled=True)
+    _, start_response = _start_response_capture()
+    body = _read_json_response(api._get_series(start_response, "Series A"))
+    by_name = {v["name"]: v for v in body["volumes"]}
+
+    assert by_name["vol1"]["missing_pages"] == 3
+    assert by_name["vol1"]["page_count"] == 10
+    assert by_name["vol2"]["missing_pages"] == 0
+    assert by_name["vol3"]["missing_pages"] == 0
+
+
+def test_series_endpoint_renders_without_a_compiled_file(tmp_path: Path) -> None:
+    """First boot, before the metadata pass: no badges, but no failure."""
+    library = tmp_path / "library"
+    series = library / "Series A"
+    series.mkdir(parents=True)
+    (series / "vol1.cbz").write_bytes(b"cbz")
+
+    api = CatalogAPI(app=lambda e, s: [], storage_base_path=str(library), enabled=True)
+    state, start_response = _start_response_capture()
+    body = _read_json_response(api._get_series(start_response, "Series A"))
+
+    assert state["status"] == "200 OK"
+    assert "missing_pages" not in body["volumes"][0]
+
+
+def test_series_endpoint_ignores_a_corrupt_compiled_file(tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    series = library / "Series A"
+    series.mkdir(parents=True)
+    (series / "vol1.cbz").write_bytes(b"cbz")
+    (series / "series.json").write_text("{ not json", encoding="utf-8")
+
+    api = CatalogAPI(app=lambda e, s: [], storage_base_path=str(library), enabled=True)
+    state, start_response = _start_response_capture()
+    body = _read_json_response(api._get_series(start_response, "Series A"))
+
+    assert state["status"] == "200 OK"
+    assert "missing_pages" not in body["volumes"][0]

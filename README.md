@@ -3,15 +3,16 @@
 A self-hosted manga library server with WebDAV, built-in OCR processing, and multi-user support. Designed as a backend for [Mokuro Reader](https://reader.mokuro.app).
 
 > [!WARNING]
-> **v0.3 -- Alpha.** Core functionality works and installation is now automated (one-command Windows setup, self-contained portable build, install verification via `mokuro-bunko doctor`), but some features remain untested and rough edges remain. No binary releases or Docker images are published yet -- use the setup script or build the portable zip from source.
+> **v0.5 -- Alpha.** Core functionality works and installation is automated (one-command Windows setup, self-contained portable build, install verification via `mokuro-bunko doctor`), but rough edges remain. No binary releases, PyPI packages or Docker images are published yet -- install from source, use the setup script, or build the portable zip or a Docker image yourself.
 
 ## What it does
 
 - Serves a shared manga library over WebDAV so Mokuro Reader can connect directly
 - Tracks per-user reading progress (each user gets their own progress files transparently)
 - Compiles the reader's metadata files (`series.json`, `catalog.json`) server-side from the library itself, merging in client-submitted series facts (titles, links, tags), and recompiles within seconds of an upload
-- Runs [mokuro](https://github.com/kha-white/mokuro) OCR automatically on uploaded manga (CUDA, ROCm, or CPU)
-- Manages users with role-based permissions (anonymous browse, registered, uploader, editor, admin)
+- Runs OCR automatically on uploaded manga (CUDA, ROCm, or CPU): [mokuro](https://github.com/kha-white/mokuro) by default, plus optional extra OCR layers from other engines (hayai-nova, PaddleOCR-VL, PP-OCRv6 — the last also reads scanned novels)
+- Can hand OCR to a stronger computer: a remote processor logs in to the library and works the queue, and each volume goes to whichever machine will finish it first
+- Manages users with role-based permissions (anonymous browse, registered, uploader, editor, inviter, admin)
 - Provides a web catalog for browsing the library — display-title language options, sorting (A–Z / newest / wordiest / rating), genre filters, and ratings/tags fetched from AniList/MAL for linked series (no API key required) — plus an admin panel for user/config management
 - Asks search engines and crawlers to stay out (`X-Robots-Tag: noindex` on every response, deny-all `robots.txt`)
 
@@ -54,12 +55,14 @@ uv run mokuro-bunko serve   # first browser visit walks you through setup
 
 Optional: `uv run mokuro-bunko setup` for the interactive console wizard, and
 `uv run mokuro-bunko install-ocr` to install OCR up front instead of on first
-launch.
+launch. OCR installs need `git` on the machine (the optimized mokuro fork is
+fetched from GitHub).
 
 ### Docker
 
 See [docs/deployment.md](docs/deployment.md) and [`deploy/`](deploy/) for
-Docker/Compose (including a CUDA image for Unraid).
+building and running the Docker images (a generic one and a CUDA one, with an
+Unraid template), systemd units and reverse-proxy examples.
 
 **Something not working?** Run `uv run mokuro-bunko doctor` — it checks your
 Python, GPU driver, OCR stack, disk space, and port, with fix hints. See
@@ -76,27 +79,55 @@ Copy [`config.example.yaml`](config.example.yaml) for a documented starting poin
 | `server.port` | `8080` | Listen port |
 | `storage.base_path` | `~/.local/share/mokuro-bunko` | Library and database location |
 | `registration.mode` | `self` | `disabled`, `self`, `invite`, or `approval` |
-| `ocr.backend` | `auto` | `auto`, `cuda`, `rocm`, `cpu`, or `skip` |
+| `ocr.backend` | `auto` | `auto`, `cuda`, `rocm`, `cpu`, or `skip` (no OCR on this machine) |
+| `ocr.generations` | one `mokuro` row | The OCR recipes every volume gets a layer from, in run order |
+| `ocr.local_processing` | `true` | `false` leaves all OCR to remote processors |
 | `catalog.enabled` | `false` | Web-based library browser |
 | `catalog.enrich_community` | `true` | Fetch ratings/tags/genres from AniList/MAL for linked series |
 
-Environment variable overrides: `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE`, `MOKURO_CONFIG`.
+Every key can also be set from the environment (`MOKURO_<SECTION>_<KEY>`, e.g. `MOKURO_OCR_BACKEND`), plus the shortcuts `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` and `MOKURO_CONFIG`. The full reference is [docs/configuration.md](docs/configuration.md).
 
 ## OCR
 
-Mokuro Bunko manages an isolated Python environment for OCR dependencies (PyTorch + mokuro). This keeps the heavy ML stack separate from the server itself.
+Mokuro Bunko manages isolated Python environments for OCR, so the heavy ML
+stack stays separate from the server: one for mokuro, and a second one for
+the other engines, created only when a configured OCR generation needs it.
 
 ```bash
-mokuro-bunko install-ocr                # auto-detect best backend
-mokuro-bunko install-ocr --backend cuda # force a specific backend
+mokuro-bunko install-ocr                 # auto-detect best backend
+mokuro-bunko install-ocr --backend cuda  # force a specific backend
 mokuro-bunko install-ocr --list-backends # show what's available
+mokuro-bunko install-ocr --engines hayai-nova,paddle-manga,ppocr-manga
 ```
 
-When OCR is enabled, the server watches for new uploads and processes them in the background. Results (`.mokuro` overlay files and `.webp` thumbnails) are placed alongside the source volumes.
+The server scans the library in the background and OCRs every volume that is
+missing a sidecar. Results (`.mokuro` overlay files and `.webp` thumbnails)
+are placed alongside the source volumes. What runs is a list of **OCR
+generations** (`ocr.generations`, editable in the admin panel): each is a
+named recipe — engine, text detector, reading resolution, and how it uses the
+hardware — that writes its own layer, `<Volume>.mokuro` for the primary one
+and `<Volume>.<name>.mokuro` for the others, in the order you list them. Each
+row can be benchmarked and tuned on your own pages from the admin panel.
 
-The installer manages Python packages only -- CUDA/ROCm drivers must be installed on the host. Every install is smoke-tested automatically (imports, CUDA availability, tokenizer-stack version pins) so a broken OCR environment fails loudly at install time instead of silently at OCR time.
+OCR can also run on another machine. Create an account with the `processor`
+role on the library (`mokuro-bunko admin add-user gpu-box --role processor`),
+then on the machine with the GPU (with `git`, its driver and uv installed):
 
-Failures are visible: volumes that fail OCR appear on the Queue page (`/queue`) with the error and retry count, full per-volume logs land in `<storage>/logs/ocr/`, and the server log is `<storage>/logs/server.log`. Failed volumes are retried with exponential backoff.
+```bash
+git clone https://github.com/Gnathonic/mokuro-bunko.git && cd mokuro-bunko
+uv sync
+uv run mokuro-bunko processor setup   # checks the account, installs, starts it
+```
+
+It dials out to the library, so nothing has to be opened on it. See the
+[deployment walkthrough](docs/deployment.md#remote-ocr-processors) (Linux
+and Windows) and [remote OCR processors](docs/configuration.md#remote-ocr-processors).
+
+The installer manages Python packages only -- CUDA/ROCm drivers must be installed on the host. Every install is smoke-tested automatically so a broken OCR environment fails loudly at install time instead of silently at OCR time.
+
+Failures are visible: volumes that fail OCR appear on the Queue page (`/queue`) with a reason and retry count, full per-volume logs land in `<storage>/logs/ocr/`, and the server log is `<storage>/logs/server.log`. Failed volumes are retried with exponential backoff.
+
+How the OCR pipeline, scheduling and benchmarks work is described in [docs/ocr-internals.md](docs/ocr-internals.md).
 
 ## User roles
 
@@ -111,6 +142,8 @@ Failures are visible: volumes that fail OCR appear on the Queue page (`/queue`) 
 
 Roles are a strict hierarchy: Admin > Inviter > Editor > Uploader > Registered > Anonymous. Each role inherits all capabilities of the roles below it.
 
+A separate `processor` role is for [remote OCR machines](docs/configuration.md#remote-ocr-processors), not people: it can read the library and run OCR for it, nothing else. Only an admin can grant it.
+
 ## CLI reference
 
 ```
@@ -118,8 +151,9 @@ mokuro-bunko serve          # start the server
 mokuro-bunko setup          # first-time setup wizard
 mokuro-bunko doctor         # diagnose install/OCR problems (PASS/WARN/FAIL + hints)
 mokuro-bunko install-ocr    # install/reinstall OCR environment
-mokuro-bunko admin          # user management (create, delete, list, set-role)
-mokuro-bunko config         # view/edit config
+mokuro-bunko admin          # users and invites (add-user, list-users, change-role, set-password, restore-user, generate-invite, ...)
+mokuro-bunko config         # view/edit config (show, set, init, path, cors-add, cors-remove)
+mokuro-bunko processor      # run this machine as a remote OCR processor (setup, install, serve, service, status)
 mokuro-bunko ssl            # manage SSL certificates
 mokuro-bunko tunnel         # cloudflare tunnel management
 mokuro-bunko dyndns         # dynamic DNS management
