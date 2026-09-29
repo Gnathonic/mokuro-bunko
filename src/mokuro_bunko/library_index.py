@@ -63,6 +63,15 @@ class LibrarySnapshot:
         return None
 
 
+# A scan slower than this is not repeated for every change: after an
+# invalidation the old snapshot is served until it is RESCAN_FACTOR of its own
+# scans old. On a 12k-volume library on a network share a scan takes seconds,
+# and eight OCR machines landing sidecars invalidated it several times a
+# minute -- every reader paid for a fresh walk of the whole tree.
+SLOW_SCAN_SECONDS = 0.1
+RESCAN_FACTOR = 4.0
+
+
 class LibraryIndexCache:
     """Time-based cached scanner for `storage/library`."""
 
@@ -72,15 +81,26 @@ class LibraryIndexCache:
         self._lock = threading.Lock()
         self._snapshot: LibrarySnapshot | None = None
         self._snapshot_time = 0.0
+        # Set by `invalidate`: the snapshot is known to be behind the disk.
+        self._stale = False
+        # How long the last scan took (see SLOW_SCAN_SECONDS).
+        self._scan_seconds = 0.0
         # How many scans have produced a snapshot: a cheap "did it change?"
         # for the queue page's fingerprint.
         self.scans = 0
 
     def invalidate(self) -> None:
-        """Drop current snapshot so next read rescans the filesystem."""
+        """The library changed: the next read rescans -- soon, on a slow library.
+
+        A cheap scan is redone on the next read. A slow one keeps serving the
+        snapshot it has until that is `RESCAN_FACTOR` scans old, so a burst
+        of changes costs one walk, not one per change.
+        """
         with self._lock:
-            self._snapshot = None
-            self._snapshot_time = 0.0
+            self._stale = True
+            if self._scan_seconds < SLOW_SCAN_SECONDS:
+                self._snapshot = None
+                self._snapshot_time = 0.0
 
     def get_snapshot(self) -> LibrarySnapshot:
         """Return a recent snapshot, rescanning when stale."""
@@ -94,13 +114,20 @@ class LibraryIndexCache:
         """
         now = time.monotonic()
         with self._lock:
-            if self._snapshot is not None and (now - self._snapshot_time) < self.ttl:
-                return self._snapshot, self.scans
+            if self._snapshot is not None:
+                age = now - self._snapshot_time
+                if not self._stale and age < self.ttl:
+                    return self._snapshot, self.scans
+                if self._stale and age < RESCAN_FACTOR * self._scan_seconds:
+                    return self._snapshot, self.scans
 
+        started = time.monotonic()
         snapshot = self._scan_library()
         with self._lock:
+            self._scan_seconds = time.monotonic() - started
             self._snapshot = snapshot
             self._snapshot_time = time.monotonic()
+            self._stale = False
             self.scans += 1
             return snapshot, self.scans
 

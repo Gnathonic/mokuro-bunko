@@ -15,7 +15,6 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mokuro_bunko.queue.shape import QUEUE_REPORT_LIMIT
 from mokuro_bunko.ocr.engines import GpuUse, backend_is_gpu, get_detector, uses_mokuro_env
 from mokuro_bunko.ocr.generations import (
     ENV_ENGINES,
@@ -28,6 +27,7 @@ from mokuro_bunko.ocr.generations import (
     required_engines,
 )
 from mokuro_bunko.ocr.volume_outlook import pending_entries
+from mokuro_bunko.queue.shape import QUEUE_REPORT_LIMIT
 from mokuro_bunko.queue.state import QueueStateVersion
 
 if TYPE_CHECKING:
