@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mokuro_bunko.queue.shape import QUEUE_REPORT_LIMIT
 from mokuro_bunko.ocr.engines import GpuUse, backend_is_gpu, get_detector, uses_mokuro_env
 from mokuro_bunko.ocr.generations import (
     ENV_ENGINES,
@@ -311,11 +312,13 @@ class OcrControl:
 
     def queue_document(
         self, running: Sequence[dict[str, Any]], *, wait: float
-    ) -> tuple[str | None, list[dict[str, Any]]]:
-        """``(held, volumes)`` for the queue file (`middleware.queue_file`).
+    ) -> tuple[str | None, list[dict[str, Any]], int]:
+        """``(held, volumes, pending_volumes)`` for the queue file (`middleware.queue_file`).
 
-        Every volume with OCR still to run, in queue order (running ones
-        first), each with ``(series, volume, jobs)``: one job per row the
+        Every volume with OCR running, then the next `QUEUE_REPORT_LIMIT`
+        volumes waiting, in queue order; ``pending_volumes`` counts ALL the
+        waiting ones (the plan still orders and prices the whole queue).
+        Each volume is ``(series, volume, jobs)``: one job per row the
         volume is owed (primary first, then list order) and per row running
         on it, as ``{"kind", "id", "state", "eta", "progress"}``. Priced from
         the same plan as the manifest (`OCRWorker.plan_items`). A job the plan
@@ -325,7 +328,7 @@ class OcrControl:
         """
         worker = self._ocr_worker()
         if worker is None:
-            return None, []
+            return None, [], 0
         held = self.queue_hold()
         running = worker._with_known_totals(running)
         pending = worker.pending_within(wait) or []
@@ -360,9 +363,19 @@ class OcrControl:
         library = worker.storage_path / "library"
         rank = worker._generation_rank()
         volumes: list[dict[str, Any]] = []
+        # Every pending volume's rows at once, from the worker's shared walk:
+        # asking each of 12k volumes in turn stat'ed every sidecar again.
+        owed_all = worker.owed_by_volume()
+        running_volumes = {(series, volume) for series, volume, _ in running_now}
+        pending_volumes = sum(1 for key in order if key not in running_volumes)
+        waiting_listed = 0
         for series, volume in order:
+            if (series, volume) not in running_volumes:
+                if waiting_listed >= QUEUE_REPORT_LIMIT:
+                    continue
+                waiting_listed += 1
             listed = jobs[(series, volume)]
-            owed = {row.id: row for row in worker.owed_generations(library / series / f"{volume}.cbz")}
+            owed = {row.id: row for row in owed_all.get(library / series / f"{volume}.cbz", [])}
             rows = {**owed}
             for gen_id in listed:
                 row = worker._generation(gen_id)
@@ -396,7 +409,7 @@ class OcrControl:
                 })
             if out:
                 volumes.append({"series": series, "volume": volume, "jobs": out})
-        return held, volumes
+        return held, volumes, pending_volumes
 
     def generation_order(self) -> list[dict[str, Any]] | None:
         """The enabled generations in the order the worker runs them."""

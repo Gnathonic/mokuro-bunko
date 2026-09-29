@@ -2080,9 +2080,25 @@ class AdminAPI:
             return {}
         library = Path(self.full_config.storage.base_path) / "library"
         snapshot = index.get_snapshot()
+        # Only series the metadata pass found damage in are asked volume by
+        # volume: each ask stats the archive and its sidecar and queries the
+        # cache, and asking all 12k volumes of a large library made this page
+        # take seconds. A series the pass has not compiled yet is asked too.
+        try:
+            catalog_rows = self.db.list_catalog_series()
+        except Exception:  # noqa: BLE001 - a count is never worth the page
+            logger.exception("could not read the catalog series rows")
+            catalog_rows = []
+        compiled = {row["folder_name"] for row in catalog_rows}
+        damaged = {
+            row["folder_name"]
+            for row in catalog_rows
+            if row["missing_pages"] > 0 or row["damaged_volumes"] > 0
+        }
         short = [
             volume
             for series in snapshot.series
+            if series.name in damaged or series.name not in compiled
             for volume in series.volumes
             if volume.has_cbz
             and cached_missing_pages(self.db, library, library / series.name / f"{volume.name}.cbz") > 0
