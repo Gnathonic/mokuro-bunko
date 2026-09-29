@@ -12,7 +12,7 @@
 #   --platform    Target platform: linux-x64, macos-arm64, windows-x64 (default: current)
 #
 # Requirements:
-#   - Python 3.10+
+#   - Python 3.11+
 #   - pip with shiv installed
 #   - Build tools (gcc/clang for native dependencies)
 

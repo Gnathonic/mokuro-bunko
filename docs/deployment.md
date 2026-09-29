@@ -46,7 +46,7 @@ sudo ln -s /opt/mokuro-bunko/bin/mokuro-bunko /usr/local/bin/mokuro-bunko
 
 Installed this way, the OCR environments go under the running user's
 `~/.mokuro-bunko/` unless `MOKURO_BUNKO_OCR_ENV` and
-`MOKURO_BUNKO_OCR_ENGINES_ENV` say otherwise. Python 3.10 or later is
+`MOKURO_BUNKO_OCR_ENGINES_ENV` say otherwise. Python 3.11 or later is
 required; for CUDA OCR use 3.12 (CUDA wheels are not available for newer
 interpreters).
 

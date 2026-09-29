@@ -799,7 +799,10 @@ class TestExclusivity:
         assert len(calls) == 1, "pre-empted exactly once for the whole line"
 
         # A second benchmark, once the first line has fully drained, is a
-        # NEW line and pre-empts again.
+        # NEW line and pre-empts again. "done" is visible before the line's
+        # thread has let the machine go; enqueued in between, the second
+        # would join the SAME line (rightly without a second pre-empt).
+        _wait_until_released(worker)
         service.enqueue(rows[1].id, None, 8)
         _wait_for(service, rows[1].id, "done")
         assert len(calls) == 2

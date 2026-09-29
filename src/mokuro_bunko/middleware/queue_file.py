@@ -29,7 +29,7 @@ import json
 import threading
 import time
 from collections.abc import Callable, Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -73,7 +73,7 @@ def build_document(control: OcrControl | None, storage_base_path: Path) -> dict[
     all_jobs = [job for volume in volumes for job in volume["jobs"]]
     return {
         "version": QUEUE_FILE_VERSION,
-        "generated_at": datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": datetime.fromtimestamp(now, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "held": {"reason": held} if held is not None else None,
         "next_check_after": recheck_after(all_jobs, now),
         "volumes": [

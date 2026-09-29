@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import urllib.parse
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +59,7 @@ def _file_entry(series: str, entry: os.DirEntry[str]) -> dict[str, Any]:
     return {
         "url": reader_file_url(series, entry.name),
         "size": stat.st_size,
-        "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "modified": datetime.fromtimestamp(stat.st_mtime, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
 

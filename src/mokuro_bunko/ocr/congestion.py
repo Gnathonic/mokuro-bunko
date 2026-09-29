@@ -43,7 +43,7 @@ import logging
 import os
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -414,5 +414,5 @@ def _iso(stamp: float) -> str | None:
     if stamp <= 0:
         return None
     return (
-        datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        datetime.fromtimestamp(stamp, tz=UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     )

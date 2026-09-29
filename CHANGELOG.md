@@ -45,6 +45,8 @@
 - Queue page shows raw errors, log paths and machine names to admins only.
 - `GET /queue/api/status` is grouped by machine; `current` and `pending_ocr` are gone.
 - A failed GPU install is retried once without pip's cache; a CPU fallback warns loudly.
+- Python 3.11 or newer is required; tested on 3.11 through 3.14.
+- Unraid image: Ubuntu 24.04 and Python 3.12; its OCR environment is rebuilt.
 
 ### Fixed
 - A cut-short upload of a sidecar or JSON file is refused, not stored short.
@@ -59,6 +61,11 @@
 - Same-named volumes in different series no longer overwrite each other's OCR log.
 - A stray `goals.json` in the shared folder no longer breaks the library listing.
 - Windows consoles on legacy code pages no longer crash commands.
+- Cancelling a running benchmark no longer reports it as failed.
+- Audit log pages stay fast on SQLite 3.53 and newer.
+- A mokuro-only server runs served mokuro without an engines environment.
+- Large libraries no longer stall OCR sessions between pages.
+- The queue page rescans large libraries less often.
 
 ### Security
 - Catalog folder names can no longer run script in the page.

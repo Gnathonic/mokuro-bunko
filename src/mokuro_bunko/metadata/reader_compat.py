@@ -13,7 +13,7 @@ import re
 import time
 import unicodedata
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 # Ported from `src/lib/util/count-chars.ts`. The client's character class is
@@ -239,7 +239,7 @@ def normalize_updated_at(value: object, now: float | None = None) -> str | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     seconds = parsed.timestamp()
     reference = time.time() if now is None else now
     if seconds > reference + FUTURE_TOLERANCE_SECONDS:
@@ -249,7 +249,7 @@ def normalize_updated_at(value: object, now: float | None = None) -> str | None:
 
 def iso_stamp(seconds: float) -> str:
     """`Date.prototype.toISOString()` shape: UTC, exactly 3 decimals, `Z`."""
-    moment = datetime.fromtimestamp(seconds, tz=timezone.utc)
+    moment = datetime.fromtimestamp(seconds, tz=UTC)
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
 
 

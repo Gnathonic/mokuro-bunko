@@ -14,7 +14,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, TypedDict, TypeVar, cast
 
@@ -1368,7 +1368,7 @@ class Database:
         except ValueError:
             raise AuditQueryError(f"{name} is not a date: {value[:40]!r}") from None
         if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+            parsed = parsed.astimezone(UTC).replace(tzinfo=None)
         return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
@@ -1469,9 +1469,19 @@ class Database:
             clauses.append("(created_at, id) < (?, ?)")
             params.extend([created_at, event_id])
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        # With no actor/action/type filter, the page is a walk down the
+        # created_at index. SQLite 3.53 costs a skip-scan of the target_type
+        # index plus a sort cheaper than that walk, and it is not: 9 ms
+        # against 0.07 ms a page at 100k rows (3.50 chose the walk itself).
+        # A filter that has its own index is left to the planner.
+        index = (
+            ""
+            if actor or wanted_actions or wanted_types
+            else "INDEXED BY idx_audit_created_at "
+        )
         with self._connection() as conn:
             rows = conn.execute(
-                f"SELECT {self._AUDIT_COLUMNS} FROM audit_logs {where} "  # noqa: S608
+                f"SELECT {self._AUDIT_COLUMNS} FROM audit_logs {index}{where} "  # noqa: S608
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (*params, size + 1),
             ).fetchall()

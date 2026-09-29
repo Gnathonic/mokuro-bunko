@@ -1128,3 +1128,63 @@ class TestTheRowInTheAdmin:
         assert rows[0].served
         assert rows[0].mokuro_env
         assert rows[0].reported_detector is None
+
+
+class TestAMokuroOnlyServer:
+    """A server whose only row is mokuro has no engines environment.
+
+    Nothing installs one for it (only a non-mokuro engine asks for it), and
+    served mokuro starts its runner from an interpreter: the mokuro
+    environment's own, then -- the runner is stdlib-only until an engine is
+    loaded, and mokuro's is loaded through ``--mokuro-python`` anyway. Seen
+    rehearsing an upgrade of a mokuro-only library: every volume failed with
+    "OCR engines environment not installed (needed for 'mokuro')".
+    """
+
+    @staticmethod
+    def _processor(tmp_path: Path) -> Any:
+        from mokuro_bunko.ocr.processor import OCRProcessor
+
+        processor = OCRProcessor(
+            storage_path=tmp_path / "storage",
+            python_path=tmp_path / "mokuro-env" / "bin" / "python",
+        )
+        processor.engines_python_path = None
+        return processor
+
+    def test_served_mokuro_runs_its_runner_from_the_mokuro_env(self, tmp_path: Path) -> None:
+        from mokuro_bunko.ocr.generations import GenerationSpec
+
+        processor = self._processor(tmp_path)
+        served = GenerationSpec(id="g-1", name="mokuro", engine="mokuro", primary=True)
+        cmd = processor.session_command(served, tmp_path / "session.log")
+        assert cmd[0] == str(processor.python_path)
+        assert processor.runner_python(served) == processor.python_path
+
+    def test_its_benchmark_does_too(self, tmp_path: Path) -> None:
+        from mokuro_bunko.ocr.generations import GenerationSpec
+
+        processor = self._processor(tmp_path)
+        served = GenerationSpec(id="g-1", name="mokuro", engine="mokuro", primary=True)
+        assert processor.runner_python(served) == processor.python_path
+
+    def test_another_engine_still_says_to_install_the_engines_env(self, tmp_path: Path) -> None:
+        from mokuro_bunko.ocr.generations import GenerationSpec
+
+        processor = self._processor(tmp_path)
+        composed = GenerationSpec(id="g-2", name="hayai", engine="hayai-nova")
+        assert processor.runner_python(composed) is None
+        with pytest.raises(FileNotFoundError, match="install-ocr --engines hayai-nova"):
+            processor.session_command(composed, tmp_path / "session.log")
+
+    def test_an_installed_engines_env_is_still_preferred(self, tmp_path: Path) -> None:
+        from mokuro_bunko.ocr.generations import GenerationSpec
+
+        processor = self._processor(tmp_path)
+        processor.engines_python_path = tmp_path / "engines-env" / "bin" / "python"
+        served = GenerationSpec(id="g-1", name="mokuro", engine="mokuro", primary=True)
+        assert processor.runner_python(served) == processor.engines_python_path
+
+    def test_devices_are_probed_with_an_interpreter_that_has_torch(self, tmp_path: Path) -> None:
+        processor = self._processor(tmp_path)
+        assert processor.device_probe_python() == processor.python_path

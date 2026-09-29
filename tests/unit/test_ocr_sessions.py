@@ -655,6 +655,34 @@ class TestPreemptionAndClosing:
         assert len(_sidecars(storage, ".hayai-nova.mokuro")) == 2
 
 
+class TestTheClaimCadence:
+    """A claim walks the whole library, so a session must not make one per event.
+
+    Rehearsing an upgrade on a 12,494-volume library: one walk took 7.2 s,
+    the session claimed before reading EACH event (one per page), and a
+    122-page volume the runner finished in 28 s sat uncollected at page 50
+    for minutes -- every event behind a fresh, fruitless walk.
+    """
+
+    def test_a_long_volume_costs_a_few_claims_not_one_per_page(self, storage: Path) -> None:
+        rows = _gens(PRIMARY, HAYAI)
+        _library(storage, Alpha=["Volume 1"])
+        script = _script(storage, pages=40)
+        worker = _worker(storage, rows, script=script)
+        claims: list[float] = []
+        real_claim = worker.claim_for_session
+
+        def counted(*args: Any, **kwargs: Any) -> Any:
+            claims.append(time.monotonic())
+            return real_claim(*args, **kwargs)
+
+        worker.claim_for_session = counted  # type: ignore[method-assign]
+        worker._scan_ocr_once()
+
+        assert _sidecars(storage, ".hayai-nova.mokuro") == ["Volume 1.hayai-nova.mokuro"]
+        assert len(claims) <= 4, f"{len(claims)} library walks for one 40-page volume"
+
+
 class TestSettingsChanges:
     def _running_session(
         self, storage: Path, rows: list[GenerationSpec]
@@ -1194,3 +1222,31 @@ def test_the_fake_runner_speaks_the_contract(storage: Path, tmp_path: Path) -> N
     ]
     assert (workspace / "Vol 1.mokuro").is_file()
     assert "volume v1" in log.read_text(encoding="utf-8")
+
+
+class TestTheQueuePageCache:
+    """The page's pending list is not rewalked faster than a walk takes."""
+
+    def test_a_slow_walk_stretches_the_cache(self, storage: Path) -> None:
+        rows = _gens(PRIMARY, HAYAI)
+        worker = _worker(storage, rows)
+        worker._queue_walk_seconds = 7.0
+        with worker._lock:
+            worker._queue_cache = (time.monotonic() - 10.0, worker._queue_generation, [])
+        assert worker._cached_queue(5.0) == [], "10 s old, but a walk takes 7 s"
+
+    def test_a_fast_walk_keeps_the_asked_age(self, storage: Path) -> None:
+        rows = _gens(PRIMARY, HAYAI)
+        worker = _worker(storage, rows)
+        worker._queue_walk_seconds = 0.01
+        with worker._lock:
+            worker._queue_cache = (time.monotonic() - 10.0, worker._queue_generation, [])
+        assert worker._cached_queue(5.0) is None
+
+    def test_a_change_still_invalidates_it_at_once(self, storage: Path) -> None:
+        rows = _gens(PRIMARY, HAYAI)
+        worker = _worker(storage, rows)
+        worker._queue_walk_seconds = 7.0
+        with worker._lock:
+            worker._queue_cache = (time.monotonic(), worker._queue_generation - 1, [])
+        assert worker._cached_queue(5.0) is None

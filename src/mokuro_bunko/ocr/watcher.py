@@ -125,6 +125,9 @@ LOCAL_SLOT = "local"
 # How often a waiting slot wakes to re-check pre-emption, the queue hold and
 # the stop flag while its session is busy.
 SESSION_POLL_SECONDS = 1.0
+# The queue page's pending list is cached for at least this many of its own
+# walks (`OCRWorker._queue_max_age`).
+QUEUE_CACHE_WALK_FACTOR = 4.0
 
 # Sessions of one generation that may die without completing a volume before
 # that row is given up on for the rest of the scan. Two: one death is a
@@ -792,6 +795,9 @@ class OCRWorker:
         # Bumping the generation drops the cache, including a result that a
         # poll was still computing when the queue changed.
         self._queue_cache: tuple[float, int, list[dict[str, Any]]] | None = None
+        # How long the last `pending_jobs` walk took: the cache lives at
+        # least QUEUE_CACHE_WALK_FACTOR of it (`_queue_max_age`).
+        self._queue_walk_seconds = 0.0
         self._queue_generation = 0
         # The queue page's state version (`queue.state`): bumped by every
         # change that page shows -- a claim, a page event, a volume done or
@@ -1566,12 +1572,14 @@ class OCRWorker:
                 generation = self._queue_generation
             failures = self._load_failures()
             jobs: list[dict[str, Any]] = []
+            walk_started = time.monotonic()
             for job in self._upcoming_ocr_jobs():
                 entry = self._pending_entry(job, failures)
                 if entry is not None:
                     jobs.append(entry)
             with self._lock:
                 previous = self._queue_cache
+                self._queue_walk_seconds = time.monotonic() - walk_started
                 self._queue_cache = (time.monotonic(), generation, jobs)
             if previous is None or previous[2] != jobs:
                 # A new upload, a backoff that ran out: the list the page
@@ -2211,7 +2219,7 @@ class OCRWorker:
         if (
             cached is not None
             and cached[1] == generation
-            and time.monotonic() - cached[0] <= max_age
+            and time.monotonic() - cached[0] <= self._queue_max_age(max_age)
         ):
             return
         self.pending_jobs(max_age)
@@ -2279,8 +2287,22 @@ class OCRWorker:
             )
         return report
 
+    def _queue_max_age(self, max_age: float) -> float:
+        """``max_age``, stretched to a few walks' worth on a library that is slow to walk.
+
+        The page polls every few seconds, and at 12k volumes on a network
+        share one walk took 7 s: a 5 s cache meant walking back to back for
+        as long as anybody watched. A start, an end or an arrival still
+        invalidates the cache at once (``_queue_generation``), so what this
+        delays is only a backoff running out.
+        """
+        if max_age <= 0:
+            return max_age
+        return max(max_age, QUEUE_CACHE_WALK_FACTOR * self._queue_walk_seconds)
+
     def _cached_queue(self, max_age: float) -> list[dict[str, Any]] | None:
         """A copy of the cached `pending_jobs` result, if it is still good."""
+        max_age = self._queue_max_age(max_age)
         with self._lock:
             cached = self._queue_cache
             generation = self._queue_generation
@@ -4528,6 +4550,12 @@ class OCRWorker:
         order: list[str] = []
         completed = 0
         draining: str | None = None
+        # When the next claim may walk the library, after one found nothing.
+        # A claim is a walk of every volume (7 s at 12k volumes on a network
+        # share) and this loop comes round once per EVENT -- a page -- so an
+        # empty claim is not repeated before the scan interval, unless the
+        # session is about to close for want of work.
+        next_claim_at = 0.0
         session: OcrSession | None = None
         last_event = time.monotonic()
         fatal_error: str | None = None
@@ -4581,12 +4609,19 @@ class OCRWorker:
                     draining = self._session_drain_reason(session, generation, hardware)
                     if draining is not None:
                         self._log(f"{generation.name} session: no more volumes ({draining})")
-                while draining is None and len(inflight) < SESSION_LOOKAHEAD:
+                while (
+                    draining is None
+                    and len(inflight) < SESSION_LOOKAHEAD
+                    and (not inflight or time.monotonic() >= next_claim_at)
+                ):
                     job, preempt = self.claim_for_session(slot, generation.id)
                     if job is None:
                         if preempt:
                             draining = "an earlier generation has work"
+                        else:
+                            next_claim_at = time.monotonic() + max(1.0, self.poll_interval)
                         break
+                    next_claim_at = 0.0
                     if not self._submit_session_volume(
                         session, slot, generation, job, inflight, order, clock
                     ):

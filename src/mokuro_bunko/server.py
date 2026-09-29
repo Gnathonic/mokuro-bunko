@@ -983,7 +983,7 @@ def run_server(config: Config, config_path: Path | None = None, verbose: bool = 
         from mokuro_bunko.ocr.bench import probe_devices
         from mokuro_bunko.ocr.devices import set_cached_catalog
 
-        set_cached_catalog(probe_devices(ocr_worker.processor.engines_python_path))
+        set_cached_catalog(probe_devices(ocr_worker.processor.device_probe_python()))
     # Auto-bench asks the admin API's BenchService, built on first use;
     # a server whose admin panel is off has none, and then nothing is
     # benchmarked automatically (a pair runs on the row's own table).

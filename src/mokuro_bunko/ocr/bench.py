@@ -44,7 +44,7 @@ import threading
 import time
 import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -156,7 +156,7 @@ def bench_path(storage_path: Path) -> Path:
 
 
 def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(tz=UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _natural_key(name: str) -> tuple[Any, ...]:
@@ -1213,7 +1213,7 @@ class BenchService:
                 run.update(host=dict(getattr(run.entry, "host", None) or {}))
                 self._run_remote(run, sample)
                 return
-            run.update(host=self.host(processor.engines_python_path))
+            run.update(host=self.host(processor.device_probe_python()))
             # The SAME question the queue asks (``runs_mokuro_cli``): a row
             # that streams its pages into one process is benchmarked through
             # the runner like any other, and only a row that really is one

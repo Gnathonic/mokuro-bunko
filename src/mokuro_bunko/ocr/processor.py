@@ -321,6 +321,25 @@ class OCRProcessor:
         else:
             self.engines_python_path = EnginesInstaller().get_python_executable()
 
+    def runner_python(self, generation: GenerationSpec) -> Path | None:
+        """The interpreter an engine runner for this row starts with, or None.
+
+        The engines environment's when there is one. A row whose engine lives
+        in the MOKURO environment (served mokuro) can do without it: the
+        runner is stdlib-only until an engine loads, and mokuro's loads
+        through ``--mokuro-python`` anyway -- and a mokuro-only server never
+        installs an engines environment, since nothing else asks for one.
+        """
+        if self.engines_python_path is not None:
+            return self.engines_python_path
+        if generation.mokuro_env:
+            return self.python_path
+        return None
+
+    def device_probe_python(self) -> Path:
+        """An interpreter with torch in it, to ask what devices this host has."""
+        return self.engines_python_path or self.python_path
+
     def _log(self, message: str) -> None:
         """Log a status message."""
         self.status_callback(message)
@@ -1526,7 +1545,8 @@ class OCRProcessor:
         get. Everything keyed by a name here uses the generation's immutable
         ``id``, so two rows on one engine never share a directory.
         """
-        if self.engines_python_path is None:
+        runner_python = self.runner_python(generation)
+        if runner_python is None:
             needed = sorted(
                 {
                     row.engine
@@ -1546,7 +1566,7 @@ class OCRProcessor:
         output_file = output_dir / f"{stem}{generation.sidecar_suffix}"
         cache_dir = output_dir / "_ocr" / generation.id / stem
         cmd = [
-            str(self.engines_python_path),
+            str(runner_python),
             str(runner_path),
             "--engine",
             generation.engine,
@@ -1647,14 +1667,15 @@ class OCRProcessor:
         belongs to which volume -- arrives later as a ``volume`` op, because
         a session outlives every one of them.
         """
-        if self.engines_python_path is None:
+        runner_python = self.runner_python(generation)
+        if runner_python is None:
             raise FileNotFoundError(
                 f"OCR engines environment not installed (needed for '{generation.engine}'); "
                 f"run: mokuro-bunko install-ocr --engines {generation.engine}"
             )
         generation = self._as_run(generation)
         cmd = [
-            str(self.engines_python_path),
+            str(runner_python),
             str(self._stage_runner()),
             "--serve",
             "--engine",
@@ -1706,14 +1727,15 @@ class OCRProcessor:
         run is part of the spec being measured, not a width to rediscover,
         and the tuner explores placements from the one it was given.
         """
-        if self.engines_python_path is None:
+        runner_python = self.runner_python(generation)
+        if runner_python is None:
             raise FileNotFoundError(
                 f"OCR engines environment not installed (needed for '{generation.engine}'); "
                 f"run: mokuro-bunko install-ocr --engines {generation.engine}"
             )
         session_log.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
-            str(self.engines_python_path),
+            str(runner_python),
             str(self._stage_runner()),
             "--bench",
             "--engine",
