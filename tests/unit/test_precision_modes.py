@@ -650,7 +650,7 @@ class TestTheQueueFile:
             worker.rates.record_volume(row.id, 20, 10.0)
         control = OcrControl()
         control.worker = worker
-        held, volumes = control.queue_document([], wait=10.0)
+        held, volumes, _ = control.queue_document([], wait=10.0)
         assert held is None
         (volume,) = volumes
         (job,) = volume["jobs"]

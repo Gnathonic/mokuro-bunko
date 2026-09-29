@@ -162,6 +162,10 @@ _STATE_RANK = {STATE_RUNNING: 0, STATE_LOADING: 1, STATE_WAITING: 2, STATE_IDLE:
 
 # At `minimal` the pending list is a short glance, not the queue.
 MINIMAL_PENDING_LIMIT = 10
+# At every level the pending list is a horizon, never the whole queue:
+# `pending_count` and `queue_done_at` still describe all of it. A 12k-volume
+# queue sent 2 MB on every change; nobody reads past the first hundred.
+QUEUE_REPORT_LIMIT = 100
 
 
 def job_state(job: Mapping[str, Any]) -> str:
@@ -602,7 +606,7 @@ def shape_status(
                 "attempts": item.get("attempts") or 0,
                 "returned": _returned(item.get("returned"), name, admin),
             }
-            for item in pending
+            for item in pending[:QUEUE_REPORT_LIMIT]
         ],
         "pending_thumbnails": raw.get("pending_thumbnails") or 0,
         "failed": failed,
