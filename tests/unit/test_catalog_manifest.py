@@ -13,7 +13,7 @@ import json
 import os
 import urllib.parse
 from collections.abc import Callable, Iterable
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +40,7 @@ def _touch(folder: Path, name: str, body: bytes = b"x") -> Path:
 
 
 def _stamp() -> str:
-    return datetime.fromtimestamp(MTIME, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.fromtimestamp(MTIME, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _names(manifest: dict[str, Any]) -> dict[str, Any]:

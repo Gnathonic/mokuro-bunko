@@ -411,7 +411,8 @@ class TestVerification:
     def test_directory_entries_are_ignored(self, tmp_path: Path) -> None:
         blob = io.BytesIO()
         with zipfile.ZipFile(blob, "w") as zf:
-            zf.mkdir("sub")
+            # A directory entry; `ZipFile.mkdir` is 3.11+, and 3.10 is supported.
+            zf.writestr(zipfile.ZipInfo("sub/"), b"")
             zf.writestr("sub/000.jpg", b"fake image data")
         verified = verify_archive(_write(tmp_path, blob.getvalue()))
         assert verified.ok
