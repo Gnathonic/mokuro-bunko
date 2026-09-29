@@ -14,9 +14,10 @@ import threading
 import time
 import uuid
 import zipfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import TYPE_CHECKING, Generator
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -276,7 +277,7 @@ class TestOCRProcessor:
             return MokuroRunResult(False, "mocked failure", None)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
-            result = processor.process_library_ocr(library_cbz)
+            result = processor.process_library_ocr(library_cbz, processor.generations[0])
 
         assert result is True
         assert (storage_dir / "library" / f"{sample_cbz.stem}.mokuro").exists()
@@ -298,7 +299,7 @@ class TestOCRProcessor:
             return MokuroRunResult(False, "mocked failure", None)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
-            result = processor.process_library_ocr(library_cbz)
+            result = processor.process_library_ocr(library_cbz, processor.generations[0])
 
         assert result is True
         assert (storage_dir / "library" / f"{sample_cbz.stem}.mokuro").exists()
@@ -325,7 +326,7 @@ class TestOCRProcessor:
             return MokuroRunResult(True)
 
         with patch.object(processor, "_run_mokuro", side_effect=mock_mokuro_run):
-            result = processor.process_library_ocr(library_cbz)
+            result = processor.process_library_ocr(library_cbz, processor.generations[0])
 
         assert result is True
         sidecar_path = series_dir / "Trigun 01.mokuro"

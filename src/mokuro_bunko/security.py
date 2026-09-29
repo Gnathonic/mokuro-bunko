@@ -28,17 +28,56 @@ def safe_resolve_under(base: Path, relative: str) -> Path | None:
     return None
 
 
+_TRUSTED_PROXIES: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
+
+
+def set_trusted_proxies(networks: list[str]) -> None:
+    """Networks besides this machine whose proxy headers are believed.
+
+    Installed by `create_app` from ``server.trusted_proxies``. This machine
+    (loopback) is always trusted: it is where the container's own nginx
+    connects from.
+    """
+    global _TRUSTED_PROXIES
+    _TRUSTED_PROXIES = tuple(ipaddress.ip_network(n, strict=False) for n in networks)
+
+
+def _is_proxy_peer(value: str) -> bool:
+    """A peer whose proxy headers are believed: loopback, or a configured network.
+
+    A private address is NOT enough: a server exposed straight on a LAN sees
+    its clients' own private addresses, and they would pick their own
+    rate-limit key.
+    """
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return address.is_loopback or any(address in net for net in _TRUSTED_PROXIES)
+
+
 def get_client_ip(environ: dict[str, object]) -> str:
-    """Extract best-effort client IP for throttling."""
-    xff = str(environ.get("HTTP_X_FORWARDED_FOR", "") or "").strip()
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
+    """The address a request is counted against (rate limits, local-only checks).
+
+    Proxy headers are believed only from a trusted proxy (`_is_proxy_peer`):
+    from anyone else they are the client's own words. From a proxy,
+    ``X-Real-IP`` (set outright by the shipped nginx and Caddy configs) wins;
+    failing that, the RIGHTMOST ``X-Forwarded-For`` entry, which is the one
+    the proxy appended -- everything left of it arrived from the client, so
+    rotating it must not change the answer.
+    """
+    remote = str(environ.get("REMOTE_ADDR", "") or "").strip()
+    if not _is_proxy_peer(remote):
+        return remote
     xreal = str(environ.get("HTTP_X_REAL_IP", "") or "").strip()
     if xreal:
         return xreal
-    return str(environ.get("REMOTE_ADDR", "") or "").strip()
+    xff = str(environ.get("HTTP_X_FORWARDED_FOR", "") or "").strip()
+    if xff:
+        last = xff.split(",")[-1].strip()
+        if last:
+            return last
+    return remote
 
 
 def is_loopback_ip(value: str) -> bool:

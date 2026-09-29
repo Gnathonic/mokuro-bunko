@@ -34,6 +34,7 @@ class Permission(Enum):
     MODIFY_DELETE = auto()  # Modify or delete existing files (DELETE, MOVE, COPY)
     MANAGE_INVITES = auto()  # Create/list/delete invite codes
     ADMIN = auto()  # Access admin panel
+    PROCESS = auto()  # Register as an OCR processor and post session events
 
 
 # Role permission matrix
@@ -71,6 +72,14 @@ ROLE_PERMISSIONS: dict[str, set[Permission]] = {
         Permission.MANAGE_INVITES,
         Permission.ADMIN,
     },
+    # A processor is a CLIENT of this server, not a user of it: it reads the
+    # archives it is told to OCR and posts the runner's events back. It
+    # cannot write a library file (the library server writes every sidecar),
+    # save progress, manage invites or reach the admin API.
+    "processor": {
+        Permission.READ,
+        Permission.PROCESS,
+    },
 }
 
 # HTTP methods mapped to required permissions
@@ -103,7 +112,7 @@ def check_permission(role: str, permission: Permission) -> bool:
 def is_progress_file(path: str) -> bool:
     """Check if a path is a per-user progress/profile file.
 
-    Per-user files are volume-data.json and profiles.json stored
+    Per-user files (see PathMapper.PER_USER_FILES) are stored
     directly under /mokuro-reader/.
     """
     path = "/" + path.strip("/")
@@ -146,6 +155,11 @@ def is_inbox_path(path: str) -> bool:
 def is_admin_path(path: str) -> bool:
     """Check if a path is an admin endpoint."""
     return path.startswith("/_admin")
+
+
+def is_processor_path(path: str) -> bool:
+    """Check if a path is an OCR processor endpoint."""
+    return path == "/_processor" or path.startswith("/_processor/")
 
 
 def is_invites_admin_api_path(path: str) -> bool:
@@ -198,6 +212,9 @@ class AuthResult:
     user: UserDict | None = None
     role: str = "anonymous"
     error: str | None = None
+    # The username a FAILED Basic auth carried. `username` above is only
+    # ever set on success, and a refused login has to be reportable by name.
+    attempted_username: str | None = None
 
     @property
     def username(self) -> str | None:
@@ -309,12 +326,17 @@ class AuthMiddleware:
         realm: str = "mokuro-bunko",
         allow_anonymous: bool = True,
         registration_config: Any = None,
+        on_processor_login_refused: Callable[[str, str], None] | None = None,
     ) -> None:
         self.app = app
         self.database = database
         self.realm = realm
         self._allow_anonymous = allow_anonymous
         self._registration_config = registration_config
+        # Fired when a request to /_processor/* fails authentication. A
+        # refused processor login never reaches ProcessorAPI, so this is
+        # the only place it can be seen at all (spec section 6).
+        self._on_processor_login_refused = on_processor_login_refused
 
     @property
     def allow_anonymous(self) -> bool:
@@ -361,6 +383,18 @@ class AuthMiddleware:
         authz_result = self.authorize(environ, auth_result)
 
         if not authz_result.authorized:
+            if (
+                self._on_processor_login_refused is not None
+                and authz_result.status_code in (401, 429)
+                and is_processor_path(environ.get("PATH_INFO", "/"))
+                and auth_result.attempted_username
+            ):
+                try:
+                    self._on_processor_login_refused(
+                        auth_result.attempted_username, get_client_ip(environ)
+                    )
+                except Exception:  # noqa: BLE001 - a listener never breaks a 401
+                    pass
             return self._error_response(
                 start_response,
                 authz_result.status_code,
@@ -369,6 +403,34 @@ class AuthMiddleware:
             )
 
         return self.app(environ, start_response)
+
+    def gate_read(
+        self,
+        environ: dict[str, Any],
+        start_response: Callable[..., Any],
+        path: str,
+    ) -> list[bytes] | None:
+        """Decide this request exactly as a ``GET`` of ``path`` would be decided.
+
+        For a route served outside this middleware that must answer with the
+        rules of some DAV file (the catalog's volume manifest answers as its
+        ``.cbz`` would): the same authentication, rate limiter, anonymous
+        download switch and 401 challenge. None when the read is allowed --
+        the caller serves it -- else the refusal, already started.
+        """
+        probe = dict(environ)
+        probe["REQUEST_METHOD"] = "GET"
+        probe["PATH_INFO"] = path
+        auth_result = self.authenticate(probe)
+        authz_result = self.authorize(probe, auth_result)
+        if authz_result.authorized:
+            return None
+        return self._error_response(
+            start_response,
+            authz_result.status_code,
+            authz_result.error or "Access denied",
+            include_auth_header=(authz_result.status_code == 401),
+        )
 
     def authenticate(self, environ: dict[str, Any]) -> AuthResult:
         """Authenticate request from environ.
@@ -394,6 +456,7 @@ class AuthMiddleware:
             return AuthResult(
                 authenticated=False,
                 error=f"Too many failed attempts. Retry in {retry_after}s",
+                attempted_username=username,
             )
 
         user = self.database.authenticate_user(username, password)
@@ -409,6 +472,7 @@ class AuthMiddleware:
         return AuthResult(
             authenticated=False,
             error="Invalid credentials",
+            attempted_username=username,
         )
 
     def authorize(
@@ -433,6 +497,24 @@ class AuthMiddleware:
                 status_code=status_code,
                 error=auth_result.error,
             )
+
+        # Processor endpoints are their own permission, not a tier of the
+        # others: `processor` is the only role that has it, and it has
+        # nothing else beyond READ.
+        if is_processor_path(path):
+            if not check_permission(role, Permission.PROCESS):
+                if not auth_result.authenticated:
+                    return AuthorizationResult(
+                        authorized=False,
+                        status_code=401,
+                        error="Authentication required",
+                    )
+                return AuthorizationResult(
+                    authorized=False,
+                    status_code=403,
+                    error="Processor access required",
+                )
+            return AuthorizationResult(authorized=True)
 
         # Admin paths require admin permission
         if is_admin_path(path):

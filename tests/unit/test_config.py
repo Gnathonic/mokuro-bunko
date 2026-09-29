@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
-import yaml
 
 from mokuro_bunko.config import (
     AdminConfig,
@@ -22,6 +22,10 @@ from mokuro_bunko.config import (
     load_config,
     save_config,
 )
+
+# The row every `ocr.generations` list needs: exactly one enabled generation
+# must be the primary one, or the list is refused.
+_MOKURO_ROW = {"name": "mokuro", "engine": "mokuro", "primary": True}
 
 
 class TestServerConfig:
@@ -430,6 +434,176 @@ class TestSaveConfig:
         path = temp_dir / "subdir" / "config.yaml"
         save_config(config, path)
         assert path.exists()
+
+
+class TestOcrGenerationsSurface:
+    """``ocr.generations`` is the config surface the OCR recipe now has.
+
+    The patch budget used to be a scalar ``ocr.*`` key of its own; it is a
+    field of a generation row now. What the config layer owes it did not
+    change, so the four things the retired ``ocr.patch_budget`` tests pinned
+    are pinned here instead: a default, validation, a round trip through the
+    file AND the environment, and ``config set``. (The values themselves --
+    why the patch budget defaults to 512 and not the model card's 384 --
+    belong to the registry and are pinned in ``test_ocr_engines.py``.)
+    """
+
+    def test_defaults_are_one_primary_mokuro_row(self) -> None:
+        row = OcrConfig().generations[0]
+        assert (row.name, row.engine, row.primary, row.enabled) == (
+            "mokuro",
+            "mokuro",
+            True,
+            True,
+        )
+        assert row.patch_budget == 512
+
+        stored = Config().to_dict()["ocr"]
+        assert stored["generations"] == [row.to_dict()]
+        # `concurrency` was silently dropped on save, so a server tuned to
+        # several slots fell back to one on its next restart.
+        assert stored["concurrency"] == 1
+
+    def test_values_are_validated(self) -> None:
+        row = {"name": "nova", "engine": "hayai-nova"}
+        parsed = OcrConfig(
+            generations=[
+                _MOKURO_ROW,
+                {**row, "patch_budget": "384 "},
+            ]
+        ).generations
+        # YAML and the environment hand it over as text.
+        assert parsed[1].patch_budget == 384
+        for bad in ({"patch_budget": 500}, {"engine": "nope"}, {"detector": "magic"}):
+            with pytest.raises(ValueError):
+                OcrConfig(generations=[_MOKURO_ROW, {**row, **bad}])
+
+    def test_round_trips_through_file_and_env(
+        self, temp_config_file: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        temp_config_file.write_text(
+            "ocr:\n"
+            "  generations:\n"
+            "    - {name: mokuro, engine: mokuro, primary: true, patch_budget: 256}\n"
+        )
+        assert load_config(temp_config_file).ocr.generations[0].patch_budget == 256
+        # A list of objects, so the environment carries it as JSON text.
+        monkeypatch.setenv(
+            "MOKURO_OCR_GENERATIONS",
+            json.dumps([{**_MOKURO_ROW, "patch_budget": 384}, {"engine": "hayai-nova"}]),
+        )
+        rows = load_config(temp_config_file).ocr.generations
+        # An unnamed row is seeded from its engine and detector.
+        assert [row.name for row in rows] == ["mokuro", "hayai-nova-ppocr-manga"]
+        assert rows[0].patch_budget == 384
+
+    def test_set_by_dotted_key(self) -> None:
+        from mokuro_bunko.config import set_by_dotted_key
+
+        config = Config()
+        set_by_dotted_key(
+            config,
+            "ocr.generations",
+            json.dumps([{**_MOKURO_ROW, "patch_budget": 256}]),
+        )
+        assert config.ocr.generations[0].patch_budget == 256
+        with pytest.raises(ValueError):
+            set_by_dotted_key(config, "ocr.generations", json.dumps([{"engine": "nope"}]))
+        # Not YAML, not a comma-separated list: unreadable JSON says so.
+        with pytest.raises(ValueError):
+            set_by_dotted_key(config, "ocr.generations", "mokuro,hayai-nova")
+
+
+class TestRetiredOcrKeys:
+    """A config still on the pre-generations OCR keys is refused at LOAD.
+
+    Not migrated and not ignored: the keys named an engine list and one
+    global recipe, and guessing which generation rows that was meant to be
+    would silently re-OCR a library under file names nobody chose. Both
+    places a server reads them from are checked -- the file and the
+    environment -- because a container sets only the second.
+    """
+
+    def test_a_config_file_naming_an_old_key_does_not_load(
+        self, temp_config_file: Path
+    ) -> None:
+        temp_config_file.write_text("ocr:\n  engines: [mokuro, hayai-nova]\n  detector: ctd\n")
+        with pytest.raises(ValueError) as excinfo:
+            load_config(temp_config_file)
+        message = str(excinfo.value)
+        assert "ocr.engines" in message and "ocr.detector" in message
+        assert "ocr.generations" in message
+
+    @pytest.mark.parametrize(
+        ("env_key", "value"),
+        [
+            ("MOKURO_OCR_ENGINES", "mokuro,hayai-nova"),
+            ("MOKURO_OCR_DETECTOR", "ctd"),
+            ("MOKURO_OCR_PATCH_BUDGET", "256"),
+        ],
+    )
+    def test_an_old_environment_variable_does_not_load(
+        self, temp_dir: Path, monkeypatch: pytest.MonkeyPatch, env_key: str, value: str
+    ) -> None:
+        monkeypatch.setenv(env_key, value)
+        with pytest.raises(ValueError) as excinfo:
+            load_config(temp_dir / "nonexistent.yaml")
+        message = str(excinfo.value)
+        assert env_key in message
+        assert "MOKURO_OCR_GENERATIONS" in message
+
+    def test_the_replacement_variable_is_what_works(
+        self, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MOKURO_OCR_GENERATIONS", json.dumps([_MOKURO_ROW]))
+        assert load_config(temp_dir / "nonexistent.yaml").ocr.generations[0].name == "mokuro"
+
+
+class TestRemovedOcrKeys:
+    """``ocr.char_map`` named a system that is GONE, not one that moved.
+
+    The retired keys above have somewhere to go -- a generation row -- and
+    their message points at it. The character map has nowhere: no
+    per-character placement mode produced output worth using, so the whole
+    system was deleted and the only fix is to delete the key. Pointing the
+    reader at ``ocr.generations`` would send them looking for a row field
+    that does not exist either, so the two refusals must not share wording.
+    """
+
+    def test_a_config_naming_it_is_refused_as_removed_not_moved(self) -> None:
+        with pytest.raises(ValueError) as excinfo:
+            Config.from_dict({"ocr": {"char_map": "attn"}})
+        message = str(excinfo.value)
+        assert "ocr.char_map" in message
+        assert "removed" in message and "delete the key" in message
+        # Not the retired-key sentence: there is no replacement to name.
+        assert "ocr.generations" not in message
+
+    def test_a_config_file_naming_it_does_not_load(self, temp_config_file: Path) -> None:
+        temp_config_file.write_text("ocr:\n  char_map: attn\n")
+        with pytest.raises(ValueError) as excinfo:
+            load_config(temp_config_file)
+        assert "ocr.char_map" in str(excinfo.value)
+
+    def test_the_environment_variable_does_not_load(
+        self, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A container is the one place that sets it without a file to edit.
+        monkeypatch.setenv("MOKURO_OCR_CHAR_MAP", "attn")
+        with pytest.raises(ValueError) as excinfo:
+            load_config(temp_dir / "nonexistent.yaml")
+        message = str(excinfo.value)
+        assert "MOKURO_OCR_CHAR_MAP" in message
+        assert "removed" in message and "delete the key" in message
+        assert "MOKURO_OCR_GENERATIONS" not in message
+
+    def test_it_is_still_named_beside_a_retired_key(self) -> None:
+        # Both checks run at load. If the retired list won, the user would be
+        # told to move a key that has nowhere to move to, and the config would
+        # keep failing after they did what the message said.
+        with pytest.raises(ValueError) as excinfo:
+            Config.from_dict({"ocr": {"char_map": "attn", "engines": ["mokuro"]}})
+        assert "ocr.char_map" in str(excinfo.value)
 
 
 class TestDefaultPaths:

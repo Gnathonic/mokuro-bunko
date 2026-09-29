@@ -3,16 +3,49 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mokuro_bunko import server as _server_module
 from mokuro_bunko.config import Config, StorageConfig
 from mokuro_bunko.database import Database
+from mokuro_bunko.server import create_app as _create_app
+from mokuro_bunko.server import shutdown_app
 
 if TYPE_CHECKING:
     from playwright.sync_api import Page
+
+
+# --------------------------------------------------------------------------
+# Every app a test builds is shut down with its module. ``create_app`` arms a
+# metadata pass, a periodic rescan, the library watcher, PROPFIND debounce
+# timers and the community fetcher; only ``run_server``'s shutdown stopped
+# them, so each test app left daemon timers that fired during interpreter
+# finalization. Wrapped here, before any test module imports it (and
+# ``create_ssl_server`` calls it through the module, so it is caught too).
+# Module scope, not function scope: the web suites serve one app per module.
+# --------------------------------------------------------------------------
+
+_built_apps: list[Any] = []
+
+
+def _tracking_create_app(*args: Any, **kwargs: Any) -> Any:
+    app = _create_app(*args, **kwargs)
+    _built_apps.append(app)
+    return app
+
+
+_server_module.create_app = _tracking_create_app  # type: ignore[assignment]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _shut_down_built_apps() -> Generator[None, None, None]:
+    yield
+    while _built_apps:
+        shutdown_app(_built_apps.pop())
 
 
 # Playwright fixtures
@@ -25,7 +58,7 @@ def browser_context_args() -> dict:
 
 
 @pytest.fixture
-def page(request: pytest.FixtureRequest) -> Generator["Page", None, None]:
+def page(request: pytest.FixtureRequest) -> Generator[Page, None, None]:
     """Provide a Playwright page fixture."""
     try:
         from playwright.sync_api import sync_playwright
@@ -150,3 +183,33 @@ ocr:
   backend: "cpu"
   poll_interval: 60
 """
+
+
+# --------------------------------------------------------------------------
+# Thread survey: MOKURO_TEST_THREAD_SURVEY=<file> writes what is still running
+# when pytest unconfigures -- just before the interpreter finalizes, where a
+# daemon timer that fires writes to a stderr being torn down (the
+# intermittent "Fatal Python error: _enter_buffered_busy" at exit). A file,
+# because output capture is still in place at this point.
+# --------------------------------------------------------------------------
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    import os
+    import threading
+    from collections import Counter
+
+    target = os.environ.get("MOKURO_TEST_THREAD_SURVEY")
+    if not target:
+        return
+    alive = [t for t in threading.enumerate() if t is not threading.main_thread()]
+    daemons = [t for t in alive if t.daemon]
+
+    def label(thread: threading.Thread) -> str:
+        run = getattr(thread, "_target", None) or getattr(thread, "function", None)
+        name = getattr(run, "__qualname__", None) or thread.name
+        return f"{type(thread).__name__}:{name}"
+
+    lines = [f"{len(alive)} threads alive at unconfigure, {len(daemons)} daemon"]
+    lines += [f"  {count:4d}  {what}" for what, count in Counter(map(label, alive)).most_common()]
+    Path(target).write_text("\n".join(lines) + "\n", encoding="utf-8")

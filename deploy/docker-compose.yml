@@ -11,11 +11,15 @@ services:
       - "8080:8080"
     volumes:
       - mokuro-data:/data
-      - ./config.yaml:/app/config.yaml:ro
+      # To start from your own config file, mount it where MOKURO_CONFIG
+      # points. It must be writable: the admin panel saves settings to it.
+      # - ./config.yaml:/data/config.yaml
     environment:
       - MOKURO_HOST=0.0.0.0
       - MOKURO_PORT=8080
       - MOKURO_STORAGE=/data
+      # config.yaml lives in the data volume, so admin-panel changes persist.
+      - MOKURO_CONFIG=/data/config.yaml
       - MOKURO_REGISTRATION_MODE=self
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/', timeout=5)"]

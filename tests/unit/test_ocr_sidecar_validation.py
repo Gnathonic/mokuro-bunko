@@ -6,6 +6,7 @@ import gzip
 import json
 from pathlib import Path
 
+from mokuro_bunko.ocr.generations import DEFAULT_GENERATION
 from mokuro_bunko.ocr.processor import OCRProcessor
 from mokuro_bunko.ocr.watcher import OCRWorker
 
@@ -66,5 +67,8 @@ def test_workspace_sidecar_found_for_glob_metacharacter_names(tmp_path: Path) ->
         sidecar = workspace / f"{stem}.mokuro"
         sidecar.write_text(json.dumps({"ok": True}), encoding="utf-8")
 
-        assert processor._collect_valid_workspace_sidecar(extract_dir, workspace) == sidecar
+        assert (
+            processor._collect_valid_workspace_sidecar(extract_dir, workspace, DEFAULT_GENERATION)
+            == sidecar
+        )
         assert processor._collect_workspace_sidecar(extract_dir, workspace) == sidecar

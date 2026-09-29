@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from mokuro_bunko.ocr.generations import GenerationSpec, parse_generation_list
 from mokuro_bunko.ocr.processor import OcrFailure, OCRProcessor
 from mokuro_bunko.ocr.watcher import OCRWorker
 
@@ -24,8 +25,19 @@ def storage(temp_dir: Path) -> Path:
 
 @pytest.fixture
 def worker(storage: Path) -> OCRWorker:
-    """OCR worker over the temp storage (never started)."""
+    """OCR worker over the temp storage (never started).
+
+    Its generations list is the default one: a single primary row running
+    `mokuro`. A failure is always a failure of a (volume, GENERATION) pair,
+    so every record below names that row.
+    """
     return OCRWorker(storage_path=storage, poll_interval=30.0)
+
+
+@pytest.fixture
+def generation(worker: OCRWorker) -> GenerationSpec:
+    """The worker's only configured row."""
+    return worker.generations[0]
 
 
 def _make_cbz(path: Path) -> Path:
@@ -39,37 +51,72 @@ def _make_cbz(path: Path) -> Path:
 class TestFailureRecords:
     """Persisting and clearing .ocr-failures.json records."""
 
-    def test_record_failure_creates_entry(self, worker: OCRWorker, storage: Path) -> None:
+    def test_record_failure_creates_entry(
+        self, worker: OCRWorker, generation: GenerationSpec, storage: Path
+    ) -> None:
         cbz = _make_cbz(storage / "library" / "Series A" / "Vol 01.cbz")
         worker.processor.last_failure = OcrFailure("boom", "C:/logs/vol.log")
 
-        worker._record_ocr_failure(cbz)
+        worker._record_ocr_failure(cbz, generation)
 
         data = json.loads((storage / ".ocr-failures.json").read_text(encoding="utf-8"))
+        # The PRIMARY row keeps the bare relative path, so records written
+        # before generations existed stay valid.
+        assert worker.failure_key("Series A/Vol 01.cbz", generation) == "Series A/Vol 01.cbz"
         entry = data[str(cbz.relative_to(storage / "library"))]
         assert entry["error"] == "boom"
         assert entry["attempts"] == 1
         assert entry["volume"] == "Vol 01"
         assert entry["series"] == "Series A"
         assert entry["log_file"] == "C:/logs/vol.log"
+        # A record says which recipe failed, not only which volume: the row
+        # by name, and the engine and detector it ran.
+        assert entry["generation"] == "mokuro"
+        assert entry["engine"] == "mokuro"
+        # mokuro detects behind its own CLI, so the row configures none.
+        assert entry["detector"] is None
 
-    def test_repeat_failures_increment_attempts(self, worker: OCRWorker, storage: Path) -> None:
+    def test_a_secondary_row_is_recorded_under_its_own_key(
+        self, worker: OCRWorker, storage: Path
+    ) -> None:
+        """One volume, two rows, two records: a failure is per generation."""
+        cbz = _make_cbz(storage / "library" / "S" / "V.cbz")
+        nova = parse_generation_list(
+            [
+                {"name": "mokuro", "engine": "mokuro", "primary": True},
+                {"name": "nova", "engine": "hayai-nova"},
+            ]
+        )[1]
+        worker.processor.last_failure = OcrFailure("oom")
+
+        worker._record_ocr_failure(cbz, worker.generations[0])
+        worker._record_ocr_failure(cbz, nova)
+
+        data = json.loads((storage / ".ocr-failures.json").read_text(encoding="utf-8"))
+        assert set(data) == {"S/V.cbz", "S/V.cbz@nova"}
+        assert data["S/V.cbz@nova"]["detector"] == "ppocr-manga"
+
+    def test_repeat_failures_increment_attempts(
+        self, worker: OCRWorker, generation: GenerationSpec, storage: Path
+    ) -> None:
         cbz = _make_cbz(storage / "library" / "S" / "V.cbz")
         worker.processor.last_failure = OcrFailure("boom")
 
-        worker._record_ocr_failure(cbz)
-        worker._record_ocr_failure(cbz)
-        worker._record_ocr_failure(cbz)
+        worker._record_ocr_failure(cbz, generation)
+        worker._record_ocr_failure(cbz, generation)
+        worker._record_ocr_failure(cbz, generation)
 
         data = json.loads((storage / ".ocr-failures.json").read_text(encoding="utf-8"))
         assert next(iter(data.values()))["attempts"] == 3
 
-    def test_clear_failure_removes_entry_and_file(self, worker: OCRWorker, storage: Path) -> None:
+    def test_clear_failure_removes_entry_and_file(
+        self, worker: OCRWorker, generation: GenerationSpec, storage: Path
+    ) -> None:
         cbz = _make_cbz(storage / "library" / "S" / "V.cbz")
         worker.processor.last_failure = OcrFailure("boom")
-        worker._record_ocr_failure(cbz)
+        worker._record_ocr_failure(cbz, generation)
 
-        worker._clear_ocr_failure(cbz)
+        worker._clear_ocr_failure(cbz, generation)
 
         # File is removed once the last record is cleared.
         assert not (storage / ".ocr-failures.json").exists()
@@ -95,7 +142,7 @@ class TestRetryBackoff:
         assert worker._retry_delay_seconds(10**9) == 3600.0
 
     def test_long_failing_volume_does_not_block_scan(
-        self, worker: OCRWorker, storage: Path
+        self, worker: OCRWorker, generation: GenerationSpec, storage: Path
     ) -> None:
         stuck = _make_cbz(storage / "library" / "S" / "Stuck.cbz")
         # Older than the failure record, so the backoff path (not the
@@ -103,7 +150,7 @@ class TestRetryBackoff:
         old = time.time() - 3 * 86400
         os.utime(stuck, (old, old))
         worker.processor.last_failure = OcrFailure("boom")
-        worker._record_ocr_failure(stuck)
+        worker._record_ocr_failure(stuck, generation)
         failures = worker._load_failures()
         key = next(iter(failures))
         failures[key]["attempts"] = 513
@@ -111,19 +158,25 @@ class TestRetryBackoff:
         worker._save_failures(failures)
         fresh = _make_cbz(storage / "library" / "S" / "Fresh.cbz")
 
-        assert sorted(worker._ocr_candidates()) == sorted([stuck, fresh])
+        assert sorted(worker._ocr_candidates()) == sorted(
+            [(stuck, generation.id), (fresh, generation.id)]
+        )
 
-    def test_recent_failure_is_skipped(self, worker: OCRWorker, storage: Path) -> None:
+    def test_recent_failure_is_skipped(
+        self, worker: OCRWorker, generation: GenerationSpec, storage: Path
+    ) -> None:
         cbz = _make_cbz(storage / "library" / "S" / "V.cbz")
         worker.processor.last_failure = OcrFailure("boom")
-        worker._record_ocr_failure(cbz)
+        worker._record_ocr_failure(cbz, generation)
 
         assert worker._ocr_candidates() == []
 
-    def test_failure_retried_after_backoff(self, worker: OCRWorker, storage: Path) -> None:
+    def test_failure_retried_after_backoff(
+        self, worker: OCRWorker, generation: GenerationSpec, storage: Path
+    ) -> None:
         cbz = _make_cbz(storage / "library" / "S" / "V.cbz")
         worker.processor.last_failure = OcrFailure("boom")
-        worker._record_ocr_failure(cbz)
+        worker._record_ocr_failure(cbz, generation)
 
         # Age the record past the first backoff window.
         failures = worker._load_failures()
@@ -131,12 +184,15 @@ class TestRetryBackoff:
         failures[key]["last_attempt_at"] = time.time() - 60.0
         worker._save_failures(failures)
 
-        assert worker._ocr_candidates() == [cbz]
+        # A job is a (volume, generation id) pair.
+        assert worker._ocr_candidates() == [(cbz, generation.id)]
 
-    def test_replaced_file_resets_failure(self, worker: OCRWorker, storage: Path) -> None:
+    def test_replaced_file_resets_failure(
+        self, worker: OCRWorker, generation: GenerationSpec, storage: Path
+    ) -> None:
         cbz = _make_cbz(storage / "library" / "S" / "V.cbz")
         worker.processor.last_failure = OcrFailure("boom")
-        worker._record_ocr_failure(cbz)
+        worker._record_ocr_failure(cbz, generation)
 
         # Backdate the failure so the file's mtime is newer (file "replaced").
         failures = worker._load_failures()
@@ -146,8 +202,12 @@ class TestRetryBackoff:
         failures[key]["attempts"] = 10
         worker._save_failures(failures)
 
-        assert worker._ocr_candidates() == [cbz]
-        # Record was reset (dropped) for the replaced file.
+        # Listing is read only (the queue page lists from request threads):
+        # the replaced file is runnable, its stale record is left alone.
+        assert worker._ocr_candidates() == [(cbz, generation.id)]
+        assert key in worker._load_failures()
+        # The worker's scan is what resets (drops) the record.
+        assert worker._ocr_candidates(reset_stale_failures=True) == [(cbz, generation.id)]
         assert worker._load_failures() == {}
 
 

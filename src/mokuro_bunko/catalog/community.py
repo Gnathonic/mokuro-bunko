@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from mokuro_bunko.database import CommunityDetailsRow, Database
@@ -123,7 +123,7 @@ def normalize_jikan(data: dict[str, Any]) -> Normalized:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _is_fresh(fetched_at: str, now: datetime) -> bool:
@@ -132,7 +132,7 @@ def _is_fresh(fetched_at: str, now: datetime) -> bool:
     except ValueError:
         return False
     if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
+        stamp = stamp.replace(tzinfo=UTC)
     return now - stamp < REFRESH_AGE
 
 
@@ -175,7 +175,7 @@ class CommunityFetcher:
         self, only: set[str] | None = None, force: bool = False
     ) -> tuple[dict[str, int], dict[str, int]]:
         """(anilist-linked, mal-only) series needing a fetch, key → external id."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         fresh = (
             set()
             if force

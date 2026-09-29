@@ -8,6 +8,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mokuro_bunko.ocr.installer import (
+    OCR_CLI_HINT,
+    OCR_DRIVER_HINT,
+    OCR_NO_LOCAL_HINT,
     OCRBackend,
     OCRInstaller,
     get_supported_backends,
@@ -24,6 +27,16 @@ def temp_env_path(temp_dir: Path) -> Path:
 def installer(temp_env_path: Path) -> OCRInstaller:
     """Create an installer with temporary path."""
     return OCRInstaller(env_path=temp_env_path)
+
+
+
+def _probe_source() -> str:
+    """The installer module's source, for the backend-probe test to read the script out of."""
+    import inspect
+
+    import mokuro_bunko.ocr.installer as installer_module
+
+    return inspect.getsource(installer_module)
 
 
 class TestOCRInstallerEnvironment:
@@ -221,16 +234,19 @@ class TestOCRInstallerInstallation:
             assert result is False
 
     def test_install_with_fallback_uses_cpu(self, installer: OCRInstaller) -> None:
-        """Test fallback path retries CPU when accelerated install fails."""
+        """An accelerated install that fails twice (the second time without
+        pip's cache) falls back to CPU."""
         with patch.object(installer, "install") as mock_install:
-            mock_install.side_effect = [False, True]
+            mock_install.side_effect = [False, False, True]
 
             result = installer.install_with_fallback(OCRBackend.CUDA)
 
             assert result is True
-            assert mock_install.call_count == 2
+            assert mock_install.call_count == 3
             assert mock_install.call_args_list[0].args[0] == OCRBackend.CUDA
-            assert mock_install.call_args_list[1].args[0] == OCRBackend.CPU
+            assert mock_install.call_args_list[1].args[0] == OCRBackend.CUDA
+            assert mock_install.call_args_list[2].args[0] == OCRBackend.CPU
+            assert installer.fell_back_from == OCRBackend.CUDA
 
     def test_install_with_fallback_cpu_no_retry(self, installer: OCRInstaller) -> None:
         """Test CPU install failure does not retry further."""
@@ -403,6 +419,48 @@ class TestOCRInstallerBackendDetection:
 
             assert backend == OCRBackend.CUDA
 
+    def test_the_probe_calls_rocm_torch_rocm_not_cuda(
+        self, installer: OCRInstaller, tmp_path: Path
+    ) -> None:
+        """The probe SCRIPT, run for real against a torch that answers like ROCm.
+
+        ROCm torch wears the cuda API: `torch.cuda.is_available()` is True and
+        `torch.version.cuda` is None while `torch.version.hip` is set. Checking
+        cuda first therefore called every ROCm install "cuda" -- which is what
+        the admin page showed on a ROCm host. The mocked tests above never run
+        the script, so this one does, with a stand-in `torch` on sys.path.
+        """
+        import re
+        import subprocess
+        import sys
+
+        script = re.search(r'"-c", """(.*?)"""', _probe_source(), re.S)
+        assert script is not None
+        fake = tmp_path / "torch" / "__init__.py"
+        fake.parent.mkdir()
+        fake.write_text(
+            "class _Cuda:\n"
+            "    @staticmethod\n"
+            "    def is_available(): return True\n"
+            "class _Version:\n"
+            "    hip = '7.1.52802'\n"
+            "    cuda = None\n"
+            "class _Backends:\n"
+            "    class mps:\n"
+            "        @staticmethod\n"
+            "        def is_available(): return False\n"
+            "cuda = _Cuda(); version = _Version(); backends = _Backends()\n",
+            encoding="utf-8",
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", script.group(1)],
+            capture_output=True,
+            text=True,
+            env={"PYTHONPATH": str(tmp_path)},
+            check=True,
+        )
+        assert out.stdout.strip() == "rocm"
+
     def test_get_installed_backend_cpu(self, installer: OCRInstaller) -> None:
         """Test detecting CPU backend (mocked)."""
         installer.create_environment()
@@ -417,7 +475,72 @@ class TestOCRInstallerBackendDetection:
 
             assert backend == OCRBackend.CPU
 
+    def test_needs_rebuild_only_for_cpu_build_under_gpu_backend(
+        self, installer: OCRInstaller
+    ) -> None:
+        """A CPU torch wheel under a selected GPU backend asks for a rebuild."""
+        assert installer.get_installed_torch_build() is None  # no env yet
+        assert not installer.needs_rebuild_for(OCRBackend.ROCM)
+        installer.create_environment()
+
+        def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "cpu\n"
+            return result
+
+        with patch("subprocess.run", side_effect=fake_run):
+            assert installer.get_installed_torch_build() == OCRBackend.CPU
+            assert installer.needs_rebuild_for(OCRBackend.ROCM)
+            assert installer.needs_rebuild_for(OCRBackend.CUDA)
+            assert not installer.needs_rebuild_for(OCRBackend.CPU)
+
+        def rocm_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "rocm\n"
+            return result
+
+        with patch("subprocess.run", side_effect=rocm_run):
+            assert installer.get_installed_torch_build() == OCRBackend.ROCM
+            assert not installer.needs_rebuild_for(OCRBackend.ROCM)
+
+    def test_failed_rebuild_is_not_retried(self, installer: OCRInstaller) -> None:
+        """A rebuild that fell back to CPU leaves a marker that stops retries."""
+        installer.create_environment()
+
+        def cpu_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = "cpu\n"
+            return result
+
+        with (
+            patch("subprocess.run", side_effect=cpu_run),
+            patch.object(installer, "install_with_fallback", return_value=True) as install,
+        ):
+            assert installer.needs_rebuild_for(OCRBackend.ROCM)
+            assert installer.rebuild_for(OCRBackend.ROCM) is False
+            install.assert_called_once_with(OCRBackend.ROCM, force=True)
+            assert (installer.env_path / installer._REBUILD_FAILED_MARKER).exists()
+            assert not installer.needs_rebuild_for(OCRBackend.ROCM)
+
     def test_supported_backends_includes_cpu(self) -> None:
         """Test runtime supported backends always include CPU."""
         backends = get_supported_backends(python_version=(3, 14))
         assert OCRBackend.CPU in backends
+
+
+class TestEnvironmentHints:
+    """The admin page's Environment hints are sentences for the person running
+    the server: no markdown backticks, no ``<a|b>`` usage syntax."""
+
+    @pytest.mark.parametrize("hint", [OCR_CLI_HINT, OCR_DRIVER_HINT, OCR_NO_LOCAL_HINT])
+    def test_plain_wording(self, hint: str) -> None:
+        assert "`" not in hint
+        assert "<" not in hint and "|" not in hint
+
+    def test_the_commands_are_still_named(self) -> None:
+        assert "mokuro-bunko install-ocr --list-backends" in OCR_CLI_HINT
+        assert "--ocr" in OCR_CLI_HINT
+        assert "mokuro-bunko processor serve" in OCR_NO_LOCAL_HINT

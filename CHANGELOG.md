@@ -1,10 +1,92 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] - Unreleased
+
+### Added
+- OCR on other machines: `mokuro-bunko processor` logs in and runs the queue.
+- `processor` account role for OCR machines, granted only by an admin.
+- `processor setup` checks the account, writes processor.yaml, installs and starts it.
+- `processor service`: a systemd user unit, or a Windows Startup entry.
+- `admin restore-user` brings back a deleted account.
+- AMD GPUs need no system ROCm; unbuilt RDNA cards run as their family's target.
+- Each volume goes to the machine predicted to finish it first.
+- `MOKURO_EFT_TRACE=1` logs which machine gets which volume, and why.
+- `ocr.local_processing: false` leaves all OCR to remote processors.
+- OCR generations: an ordered list of named OCR recipes, one layer each.
+- `hayai-nova` and `paddle-manga` engines, stronger on display text and sound effects.
+- `ppocr-manga` engine reads text lines, including scanned novel pages, on CPU.
+- Text detectors for the new engines: `ppocr-manga`, opt-in GPL `ctd`.
+- Per-generation pools: stage widths and devices.
+- Per-generation precision mode (accuracy, balanced, speed, or one format) for every machine.
+- Benchmark and tune a generation on your own pages, from the admin panel.
+- New generations are benchmarked automatically on each machine (`ocr.autobench`).
+- `ocr.concurrency` OCRs several volumes at once.
+- `ocr.sessions` keeps OCR models loaded between volumes.
+- Queue page: one card per machine, and `queue.display` detail levels.
+- Queue page shows a finishing time for every pending volume.
+- Admin panel: generations editor, Processors card and per-row congestion history.
+- Extra OCR layers record their engine, detector and pinned model commits.
+- Every OCR sidecar records which machine wrote it; results are audited.
+- Admin audit log: search, filters, paging; reading-progress sync hidden by default.
+- OCR settings saved in the admin panel apply without a restart.
+- `auto` backend rebuilds a CPU-only OCR environment when a GPU is available.
+- Catalog read links carry a volume manifest listing its OCR, layers and cover.
+- Archives uploaded over WebDAV join the OCR queue at once, not at the next poll.
+- Manifests and `.cbz` PUT replies say when pending OCR should be done.
+- Every WebDAV upload answers a verdict: verified and stored, or why not.
+- Uploads may carry `Content-Digest`, telling damage in transit from a damaged file.
+- `/mokuro-reader/.mokuro-queue.json`: the whole OCR queue, per volume, with ETAs.
 
 ### Changed
-- **OCR engine switched to the performance-optimized mokuro fork** (`Gnathonic/mokuro`, branch `perf/worker-pipeline`, a rebuild of GolyBidoof/mokuro proposed upstream). `install-ocr` now installs `mokuro @ git+https://github.com/Gnathonic/mokuro.git@perf/worker-pipeline` (override with `MOKURO_BUNKO_MOKURO_SPEC`). It runs in fp32 by default, so `.mokuro` output is identical to upstream mokuro 0.2.5, while a worker-process page pipeline makes OCR 4-20x faster on GPUs (RTX 4090 0.416 -> 0.039 s/page, RX 6900 XT 0.718 -> 0.118, Apple M2 Pro 1.21 -> 0.34) and 2-4x faster on CPUs. The processor command is unchanged (no `--fp16`: half precision is opt-in in the fork and trades a small character-error rate for speed). Existing OCR environments: `mokuro-bunko install-ocr --force`.
+- mokuro runs from the optimized fork and stays loaded; output unchanged.
+- `ocr.backend: skip` now means no OCR on this machine, not none anywhere.
+- OCR queue goes round-robin across series in reading order, not upload date.
+- Volumes missing pages get only their primary OCR layer.
+- Queue page shows raw errors, log paths and machine names to admins only.
+- `GET /queue/api/status` is grouped by machine; `current` and `pending_ocr` are gone.
+- A failed GPU install is retried once without pip's cache; a CPU fallback warns loudly.
+- Python 3.11 or newer is required; tested on 3.11 through 3.14.
+- Unraid image: Ubuntu 24.04 and Python 3.12; its OCR environment is rebuilt.
 
+### Fixed
+- A cut-short upload of a sidecar or JSON file is refused, not stored short.
+- OCR of a volume deleted or replaced mid-run no longer leaves a stray sidecar.
+- Benchmarks taken at a precision a machine no longer runs are re-measured.
+- Benchmarks sample interior pages of a few volumes, not every volume's cover.
+- A volume's OCR time no longer includes the previous volume's tail.
+- A processor no longer re-registers when a session the library ended reports late.
+- A cancel or benchmark pre-empt that lands before an OCR process starts is no longer lost.
+- OCR retry backoff no longer freezes the queue after many failures.
+- Sidecars for names with brackets like [Author] now import.
+- Same-named volumes in different series no longer overwrite each other's OCR log.
+- A stray `goals.json` in the shared folder no longer breaks the library listing.
+- Windows consoles on legacy code pages no longer crash commands.
+- Cancelling a running benchmark no longer reports it as failed.
+- Audit log pages stay fast on SQLite 3.53 and newer.
+- A mokuro-only server runs served mokuro without an engines environment.
+- Large libraries no longer stall OCR sessions between pages.
+- The queue page rescans large libraries less often.
+
+### Security
+- Catalog folder names can no longer run script in the page.
+- Proxy headers are trusted only from this machine or `trusted_proxies`.
+- Uploaded archives that inflate far beyond their size are refused.
+- A machine name belongs to the processor account that first used it.
+- Processors ignore library ids that are not plain ids.
+
+## [0.3.6] - 2026-09-02
+
+### Fixed
+- **goals.json is now a per-user file.** It joins volume-data.json and profiles.json, so mokuro-reader's reading goals sync per account instead of into the shared library.
+
+## [0.3.5] - 2026-08-29
+
+### Added
+- **Incomplete volumes are counted and surfaced.** Each `series.json` volume entry now carries `matched_page_count`: how many of the pages its `.mokuro` references actually exist inside the `.cbz`. Matching is a port of the reader's own `matchImagesToPages` — exact path, then stem (an extension changed since OCR), then the whole-volume positional fallback for archives whose images were renamed — so the server and the reader agree on which pages are missing. The field is omitted, never zeroed, when the match could not be determined (an unreadable archive, or a sidecar that names no images at all); an unreadable archive is also left out of the entry cache so it is re-checked next pass instead of being remembered as broken.
+- **The catalog shows missing pages.** Volume cards badge how many pages are absent, series cards badge how many volumes are incomplete, and a "Missing pages" filter above the grid narrows the library to just those series. The filter appears only when the library actually has damage.
+
+### Changed
+- **Archive contents are read the way the reader reads them.** An archive's images are now listed with the reader's own filters — OS junk (`__MACOSX`, `._` forks, `Thumbs.db`, backup files) and the volume's embedded cover sidecar are excluded, and `.avif`/`.jxl` join the recognised image types. Page counts for image-only volumes shift accordingly, in the direction of what a reader would actually display.
 
 ## [0.3.4] - 2026-08-29
 

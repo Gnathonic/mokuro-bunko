@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import ssl
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -64,7 +64,7 @@ def generate_self_signed_cert(
     ])
 
     # Build certificate
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cert_builder = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -226,7 +226,7 @@ def validate_certificate_pair(
         errors.append(f"Failed to parse certificate file: {exc}")
         return errors, warnings
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if cert.not_valid_after_utc <= now:
         errors.append(f"SSL certificate has expired: {cert.not_valid_after_utc.isoformat()}")
         return errors, warnings

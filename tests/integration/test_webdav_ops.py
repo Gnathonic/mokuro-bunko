@@ -225,6 +225,30 @@ class TestPropfind:
         content = response.text
         assert "volume-data.json" in content
 
+    def test_propfind_root_survives_a_stray_per_user_file_in_the_shared_folder(
+        self, client: WSGITestClient, test_storage: Path
+    ) -> None:
+        """A goals.json lying physically in the library must not 500 the root.
+
+        Per-user names are served from the user's own copy; a physical one in
+        the shared folder (from before goals.json was per-user) has nothing to
+        resolve to. It was still LISTED, wsgidav asserted on a listed name that
+        resolved to nothing, and the reader's first request on connect was a
+        500 for every user -- seen live on the review server.
+        """
+        (test_storage / "library" / "goals.json").write_text("{}", encoding="utf-8")
+        for headers in (
+            {"Depth": "1"},
+            {"Depth": "1", "Authorization": make_auth_header("reader", "pass1234")},
+        ):
+            response = client.request("PROPFIND", "/mokuro-reader", headers=headers)
+            assert response.status_code == 207, response.text[:200]
+            assert "manga1.cbz" in response.text
+        # The stray file is not offered as a shared member either: an
+        # anonymous listing has no goals.json at all.
+        anonymous = client.request("PROPFIND", "/mokuro-reader", headers={"Depth": "1"})
+        assert "goals.json" not in anonymous.text
+
     def test_propfind_mokuro_reader(self, client: WSGITestClient) -> None:
         """Test PROPFIND on mokuro-reader returns manga files."""
         response = client.request(
@@ -408,13 +432,14 @@ class TestPut:
     def test_put_corrupted_library_cbz_rejected(
         self, client: WSGITestClient, test_storage: Path
     ) -> None:
-        """Corrupted CBZ upload should be rejected and not written."""
+        """Corrupted CBZ upload should be rejected (422, with a verdict) and not written."""
         response = client.put(
             "/mokuro-reader/corrupt.cbz",
             content=b"not a zip archive",
             headers={"Authorization": make_auth_header("uploader", "pass1234")},
         )
-        assert response.status_code == 400
+        assert response.status_code == 422
+        assert b'"not-an-archive"' in response.content
         assert not (test_storage / "library" / "corrupt.cbz").exists()
 
     def test_put_corrupted_inbox_cbz_not_exposed(self, client: WSGITestClient) -> None:
