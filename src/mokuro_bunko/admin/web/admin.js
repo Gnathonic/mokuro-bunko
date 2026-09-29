@@ -1129,6 +1129,43 @@ function adoptGenerations(data) {
     // still going is invisible in it: ask each row directly, which is also
     // what makes a reload mid-run pick the progress back up.
     benchProbeAll();
+    // The volume counts are worked out in the background on a large library:
+    // the list comes without them, and they are filled in when ready.
+    genStatsPending = !!data.stats_pending;
+    if (genStatsPending) loadGenerationStats();
+}
+
+let genStatsTimer = null;
+// True while the rows' volume counts are still being worked out.
+let genStatsPending = false;
+
+// Fill in the rows' volume counts (done / total / skipped / by machine) once
+// the server has them. Only those fields are touched, so nothing being
+// edited is disturbed; asks again every few seconds while they are pending.
+async function loadGenerationStats(attempt) {
+    clearTimeout(genStatsTimer);
+    const tries = attempt || 0;
+    let data;
+    try {
+        data = await apiGet('/ocr/generations/stats');
+    } catch (err) {
+        return;
+    }
+    if (data.stats_pending) {
+        if (tries < 60) genStatsTimer = setTimeout(() => loadGenerationStats(tries + 1), 3000);
+        return;
+    }
+    genStatsPending = false;
+    const byId = data.generations || {};
+    genRows.forEach((row) => {
+        const stats = row.id ? byId[row.id] : null;
+        if (!stats) return;
+        row.volumesDone = typeof stats.volumes_done === 'number' ? stats.volumes_done : null;
+        row.volumesTotal = typeof stats.volumes_total === 'number' ? stats.volumes_total : null;
+        row.volumesSkipped = typeof stats.volumes_skipped === 'number' ? stats.volumes_skipped : 0;
+        row.volumesByMachine = Object.assign({}, stats.volumes_by_machine);
+    });
+    renderGenerations();
 }
 
 function genRowFromServer(g, openById, machineById) {
@@ -1786,6 +1823,8 @@ function genHistoryParts(row) {
     } else if (row.volumesTotal !== null) {
         bits.push(row.volumesDone + '/' + row.volumesTotal + ' volumes' +
             (row.volumesSkipped > 0 ? ' · ' + row.volumesSkipped + ' skipped' : ''));
+    } else if (genStatsPending) {
+        bits.push('counting volumes…');
     }
     if (real.length) bits.push(genPpmText(total) + ' pages/min' + (all && real.length > 1 ? ' combined' : ''));
     if (!bits.length) bits.push(row.id ? 'nothing read yet' : 'not saved yet');
