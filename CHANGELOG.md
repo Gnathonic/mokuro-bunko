@@ -3,6 +3,8 @@
 ## [0.5.0] - Unreleased
 
 ### Added
+- Bearer tokens: sign in once with `POST /login/api/token`, then send the token.
+- The web pages and processors use tokens; passwords are no longer stored.
 - OCR on other machines: `mokuro-bunko processor` logs in and runs the queue.
 - `processor` account role for OCR machines, granted only by an admin.
 - `processor setup` checks the account, writes processor.yaml, installs and starts it.

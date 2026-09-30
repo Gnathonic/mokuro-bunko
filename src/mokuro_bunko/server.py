@@ -373,7 +373,16 @@ def create_app(
     app = RegistrationAPI(app, database, config.registration)
 
     # Wrap with login page
-    app = LoginAPI(app, database, nav_config=config)
+    app = LoginAPI(
+        app,
+        database,
+        nav_config=config,
+        # A processor asks for its token here first: a refusal is reported
+        # to the admin panel exactly as a refused `/_processor/` request is.
+        on_processor_login_refused=lambda user, ip: registry.record_failed_login(
+            user, f"invalid credentials from {ip}"
+        ),
+    )
 
     # Wrap with account page
     app = AccountAPI(app, database, storage_path=config.storage.base_path)

@@ -132,6 +132,36 @@ registration:
 | `invite` | Invite codes required. Generate codes via admin panel or CLI. |
 | `approval` | Users can register but admin must approve accounts. |
 
+#### Signing in: bearer tokens
+
+A client checks a password once and then sends a token instead of it:
+
+```
+POST /login/api/token
+{"username": "alice", "password": "…", "kind": "reader", "label": "Firefox on the laptop"}
+→ {"token": "…", "token_type": "Bearer", "kind": "reader", "expires_at": 1790000000.0,
+   "user": {"username": "alice", "role": "uploader"}}
+```
+
+Credentials may also come as a Basic header on the same request. `kind` sets
+the lifetime: `web` 7 days (the server's own pages), `reader` 90 days,
+`processor` 30 days. Every request then carries `Authorization: Bearer <token>`,
+which costs one database read instead of a bcrypt check. `DELETE
+/login/api/token` with the token signs it out. The password is rate-limited
+exactly like a login; a token is 32 random bytes and only its SHA-256 is
+stored.
+
+A token stops working when it expires, when it is signed out, when its
+account's password changes (every token of the account), or when the account
+is disabled or deleted. A role change applies to the next request. A request
+with a token that no longer works gets `401` with `WWW-Authenticate: Bearer
+error="invalid_token"`, and `GET /login/api/me` answers `401
+{"authenticated": false}` so a client knows to sign in again.
+
+The server's pages keep only the token (in `sessionStorage`), never the
+password. Processors fetch a token when they register and fetch a new one if
+it is refused. Basic auth still works for any WebDAV client.
+
 #### User Roles
 
 | Role | Read | Write Progress | Add Files | Modify/Delete | Invites | Admin |

@@ -323,9 +323,8 @@ async function updateNav() {
     }
 }
 
-function logout() {
-    sessionStorage.removeItem('mokuro_auth');
-    sessionStorage.removeItem('mokuro_user');
+async function logout() {
+    await window.mokuroAuth.signOut();
     window.location.href = '/';
 }
 

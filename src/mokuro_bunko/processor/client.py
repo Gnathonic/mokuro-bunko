@@ -394,8 +394,13 @@ class LibraryClient:
         self.port = parts.port or (443 if parts.scheme == "https" else 80)
         self.secure = parts.scheme == "https"
         self.root = parts.path.rstrip("/")
-        token = f"{config.library.username}:{config.library.password}".encode()
-        self._auth = "Basic " + base64.b64encode(token).decode("ascii")
+        credentials = f"{config.library.username}:{config.library.password}".encode()
+        self._basic = "Basic " + base64.b64encode(credentials).decode("ascii")
+        # What every request carries: a bearer token once `register` has
+        # traded the password for one (`_issue_token`), the password itself
+        # only against a library that predates tokens.
+        self._auth = self._basic
+        self._has_token = False
         self.channels: dict[str, str] = {}
         self.processor_id: str = ""
         self._stream: http.client.HTTPConnection | None = None
@@ -439,10 +444,70 @@ class LibraryClient:
 
     # -- the handshake ---------------------------------------------------
 
+    def _issue_token(self) -> None:
+        """Trade the password for a bearer token (``POST /login/api/token``).
+
+        The password is then checked once per token instead of on every
+        request of every session. A library without the endpoint (404/405:
+        older than tokens) keeps being sent the password.
+        """
+        body = json.dumps({"kind": "processor", "label": self.config.processor.name}).encode()
+        connection = self._connect(timeout=30.0)
+        try:
+            connection.request(
+                "POST",
+                f"{self.root}/login/api/token",
+                body=body,
+                headers={
+                    "Authorization": self._basic,
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+            )
+            response = connection.getresponse()
+            raw = response.read()
+            status = response.status
+        except OSError as e:
+            raise LibraryError(f"could not reach {self.config.library.url}: {e}") from e
+        finally:
+            connection.close()
+        if status in (404, 405):
+            self._auth = self._basic
+            self._has_token = False
+            return
+        if status != 200:
+            raise self._refusal(status, raw)
+        try:
+            token = json.loads(raw.decode("utf-8")).get("token")
+        except (ValueError, AttributeError) as e:
+            raise LibraryError("the library's token reply is not an object") from e
+        if not isinstance(token, str) or not token:
+            raise LibraryError("the library's token reply carried no token")
+        self._auth = "Bearer " + token
+        self._has_token = True
+
     def register(
         self, catalog: Mapping[str, Any], host: Mapping[str, Any]
     ) -> dict[str, Any]:
-        """Log in and learn the channel paths. Raises `LibraryError` on refusal."""
+        """Log in and learn the channel paths. Raises `LibraryError` on refusal.
+
+        With a token held, it is tried first; refused (expired, revoked by a
+        password change), a new one is fetched with the password and the
+        registration tried once more.
+        """
+        if not self._has_token:
+            self._issue_token()
+        try:
+            return self._register_once(catalog, host)
+        except LibraryLoginRefused:
+            if not self._has_token:
+                raise
+            self._issue_token()
+            return self._register_once(catalog, host)
+
+    def _register_once(
+        self, catalog: Mapping[str, Any], host: Mapping[str, Any]
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "protocol": PROTOCOL_VERSION,
             "name": self.config.processor.name,
