@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import functools
+import hashlib
 import json
 import math
 import re
@@ -47,6 +48,17 @@ VALID_ROLES = frozenset(
 # (`registration/invites.py` included) instead of depending on each one
 # remembering to filter.
 INVITABLE_ROLES = frozenset({"registered", "uploader", "inviter", "editor"})
+
+# What a bearer token is for, and how long it lives (`Database.create_auth_token`).
+# A web page's is the session of a signed-in tab; the reader and a processor
+# hold theirs for as long as they are set up, and fetch a new one on a 401.
+TOKEN_KINDS: dict[str, float] = {
+    "web": 7 * 86400.0,
+    "reader": 90 * 86400.0,
+    "processor": 30 * 86400.0,
+}
+# A token's last use is written at most this often: a request is a read, not a write.
+TOKEN_TOUCH_SECONDS = 60.0
 
 
 class UserDict(TypedDict):
@@ -397,7 +409,7 @@ def _bumps_users_version(method: Callable[..., _T]) -> Callable[..., _T]:
 class Database:
     """SQLite database for user and invite management."""
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
     AUDIT_PRUNE_INTERVAL_SECONDS = 3600
 
     def __init__(self, db_path: Path | str) -> None:
@@ -609,6 +621,21 @@ class Database:
             # (`OcrSidecarRow`). CREATE TABLE IF NOT EXISTS like the rest, so a
             # v3 database gains it empty on the next open: every sidecar it
             # already has reads as "unknown producer".
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS auth_tokens (
+                    token_hash TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    last_used_at REAL NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_auth_tokens_username
+                ON auth_tokens(username)
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ocr_sidecars (
                     sidecar_path TEXT PRIMARY KEY,
@@ -957,6 +984,9 @@ class Database:
                 """,
                 (password_hash, username),
             )
+            if cursor.rowcount > 0:
+                # A new password signs out everything the old one signed in.
+                conn.execute("DELETE FROM auth_tokens WHERE username = ?", (username,))
             return cursor.rowcount > 0
 
     @_bumps_users_version
@@ -1017,7 +1047,97 @@ class Database:
                 "WHERE username = ? AND status != 'deleted'",
                 (username,),
             )
+            # Its tokens go with it: a restored account signs in afresh.
+            conn.execute("DELETE FROM auth_tokens WHERE username = ?", (username,))
             return cursor.rowcount > 0
+
+    # -- bearer tokens ----------------------------------------------------
+
+    @staticmethod
+    def _token_hash(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def create_auth_token(
+        self,
+        username: str,
+        kind: str,
+        *,
+        label: str = "",
+        lifetime_seconds: float | None = None,
+    ) -> tuple[str, float]:
+        """A new bearer token for ``username``: ``(token, expires_at)``.
+
+        The caller has already checked the password. Only a SHA-256 of the
+        token is stored -- it is 32 random bytes, so no slow hash is needed
+        to make it unguessable -- and the token itself is returned once.
+        """
+        if kind not in TOKEN_KINDS:
+            raise ValueError(f"unknown token kind {kind!r}")
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        lifetime = TOKEN_KINDS[kind] if lifetime_seconds is None else lifetime_seconds
+        expires_at = now + lifetime
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT INTO auth_tokens "
+                "(token_hash, username, kind, label, created_at, expires_at, last_used_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (self._token_hash(token), username, kind, label[:200], now, expires_at, now),
+            )
+        return token, expires_at
+
+    def resolve_auth_token(self, token: str) -> UserDict | None:
+        """The active user a live token belongs to, or None.
+
+        Status and role are read from the user row on every call, so a
+        disabled, deleted or re-roled account is seen on its next request.
+        """
+        if not token:
+            return None
+        digest = self._token_hash(token)
+        now = time.time()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT t.expires_at, t.last_used_at, u.id, u.username, u.role, u.status, "
+                "u.notes, u.created_at FROM auth_tokens t JOIN users u "
+                "ON u.username = t.username WHERE t.token_hash = ?",
+                (digest,),
+            ).fetchone()
+            if row is None or float(row["expires_at"]) <= now or row["status"] != "active":
+                return None
+            if now - float(row["last_used_at"]) >= TOKEN_TOUCH_SECONDS:
+                conn.execute(
+                    "UPDATE auth_tokens SET last_used_at = ? WHERE token_hash = ?",
+                    (now, digest),
+                )
+            return UserDict(
+                id=row["id"],
+                username=row["username"],
+                role=normalize_role(row["role"]),
+                status=row["status"],
+                notes=row["notes"],
+                created_at=row["created_at"],
+            )
+
+    def revoke_auth_token(self, token: str) -> bool:
+        """Sign this one token out. True if it existed."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM auth_tokens WHERE token_hash = ?", (self._token_hash(token),)
+            )
+            return cursor.rowcount > 0
+
+    def revoke_user_auth_tokens(self, username: str) -> int:
+        """Sign every token of ``username`` out; how many there were."""
+        with self._connection() as conn:
+            cursor = conn.execute("DELETE FROM auth_tokens WHERE username = ?", (username,))
+            return cursor.rowcount
+
+    def prune_expired_auth_tokens(self) -> int:
+        """Drop tokens past their expiry; how many."""
+        with self._connection() as conn:
+            cursor = conn.execute("DELETE FROM auth_tokens WHERE expires_at <= ?", (time.time(),))
+            return cursor.rowcount
 
     @_bumps_users_version
     def restore_user(self, username: str, password: str, role: UserRole | None = None) -> bool:

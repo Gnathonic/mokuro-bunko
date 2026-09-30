@@ -14,16 +14,13 @@ const usersBody = document.getElementById('users-body');
 const invitesBody = document.getElementById('invites-body');
 const auditBody = document.getElementById('audit-body');
 
-// Auth helper - get Basic auth header from sessionStorage
+// Auth helper - the signed-in tab's bearer token (see /_static/nav.js)
 function getAuthHeaders() {
-    const auth = sessionStorage.getItem('mokuro_auth');
-    if (!auth) return {};
-    return { 'Authorization': 'Basic ' + auth };
+    return window.mokuroAuth.headers();
 }
 
-function logout() {
-    sessionStorage.removeItem('mokuro_auth');
-    sessionStorage.removeItem('mokuro_user');
+async function logout() {
+    await window.mokuroAuth.signOut();
     window.location.href = '/';
 }
 
@@ -48,8 +45,7 @@ function trimToInvitesOnly() {
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
-    const auth = sessionStorage.getItem('mokuro_auth');
-    if (!auth) {
+    if (!window.mokuroAuth.token()) {
         window.location.href = '/login';
         return;
     }
@@ -292,6 +288,12 @@ function initForms() {
 // "that row cannot be benchmarked" (400) are different answers to the same
 // button, and only the caller knows which of them it can act on.
 function apiError(response, data) {
+    if (response.status === 401) {
+        // The tab's token expired or was revoked (a password change signs
+        // every session out): sign in again rather than show errors.
+        window.mokuroAuth.clear();
+        window.location.href = '/login';
+    }
     const error = new Error((data && data.error) || 'Request failed');
     error.status = response.status;
     error.payload = data || {};

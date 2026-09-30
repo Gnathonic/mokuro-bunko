@@ -280,14 +280,40 @@ def parse_basic_auth(authorization_header: str | None) -> tuple[str | None, str 
     return creds
 
 
+BEARER_PREFIX = "Bearer "
+INVALID_TOKEN_ERROR = "Invalid or expired token"
+
+
+def bearer_token(authorization_header: str | None) -> str | None:
+    """The token of a ``Bearer`` header, or None for any other header."""
+    if not authorization_header or not authorization_header.startswith(BEARER_PREFIX):
+        return None
+    return authorization_header[len(BEARER_PREFIX):].strip()
+
+
+def authenticate_bearer(database: Database, token: str) -> AuthResult:
+    """A bearer token's user, or an error the caller turns into a 401.
+
+    No rate limiter: a token is 32 random bytes, so there is nothing to
+    guess, and a lookup costs one indexed read rather than a bcrypt check.
+    """
+    user = database.resolve_auth_token(token)
+    if user is None:
+        return AuthResult(authenticated=False, role="anonymous", error=INVALID_TOKEN_ERROR)
+    return AuthResult(authenticated=True, user=user, role=user["role"])
+
+
 def authenticate_basic_header(
     database: Database,
     authorization_header: str | None,
 ) -> AuthResult:
-    """Authenticate a user from a Basic auth header.
+    """Authenticate a user from an Authorization header (Bearer or Basic).
 
     No rate limiting here; callers that need it apply their own.
     """
+    token = bearer_token(authorization_header)
+    if token is not None:
+        return authenticate_bearer(database, token)
     creds, parse_error = parse_basic_auth_checked(authorization_header)
     if parse_error:
         return AuthResult(
@@ -400,6 +426,7 @@ class AuthMiddleware:
                 authz_result.status_code,
                 authz_result.error or "Access denied",
                 include_auth_header=(authz_result.status_code == 401),
+                bearer=auth_result.error == INVALID_TOKEN_ERROR,
             )
 
         return self.app(environ, start_response)
@@ -440,6 +467,10 @@ class AuthMiddleware:
         auth error (401), never silent anonymous.
         """
         auth_header = environ.get("HTTP_AUTHORIZATION")
+        token = bearer_token(auth_header)
+        if token is not None:
+            # A token stands in for the password (`Database.create_auth_token`).
+            return authenticate_bearer(self.database, token)
         creds, parse_error = parse_basic_auth_checked(auth_header)
         if parse_error:
             # Present-but-garbage header -> 401 via authorize()'s error gate.
@@ -858,8 +889,14 @@ class AuthMiddleware:
         status_code: int,
         message: str,
         include_auth_header: bool = False,
+        bearer: bool = False,
     ) -> list[bytes]:
-        """Generate error response."""
+        """Generate error response.
+
+        ``bearer``: the request carried a token that is no good. It is told
+        so in the token's own scheme (RFC 6750) -- a Basic challenge would
+        pop a browser's password dialog over a page that signs in by token.
+        """
         status_messages = {
             401: "Unauthorized",
             403: "Forbidden",
@@ -870,7 +907,11 @@ class AuthMiddleware:
         status = f"{status_code} {status_messages.get(status_code, 'Error')}"
 
         headers = [("Content-Type", "text/plain; charset=utf-8")]
-        if include_auth_header:
+        if include_auth_header and bearer:
+            headers.append(
+                ("WWW-Authenticate", f'Bearer realm="{self.realm}", error="invalid_token"')
+            )
+        elif include_auth_header:
             # charset="UTF-8" (RFC 7617) tells clients to UTF-8-encode credentials
             headers.append(
                 ("WWW-Authenticate", f'Basic realm="{self.realm}", charset="UTF-8"')

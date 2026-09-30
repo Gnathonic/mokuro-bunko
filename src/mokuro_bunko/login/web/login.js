@@ -1,13 +1,5 @@
 // Login JavaScript
 
-// UTF-8-safe base64 (btoa alone is Latin-1 and corrupts/throws on non-ASCII)
-function utf8ToBase64(str) {
-    const bytes = new TextEncoder().encode(str);
-    let bin = '';
-    for (const b of bytes) bin += String.fromCharCode(b);
-    return btoa(bin);
-}
-
 const form = document.getElementById('login-form');
 const errorMsg = document.getElementById('error-message');
 const submitBtn = document.getElementById('submit-btn');
@@ -30,9 +22,8 @@ async function updateNav() {
     }
 }
 
-function logout() {
-    sessionStorage.removeItem('mokuro_auth');
-    sessionStorage.removeItem('mokuro_user');
+async function logout() {
+    await window.mokuroAuth.signOut();
     window.location.href = '/';
 }
 
@@ -49,25 +40,9 @@ form.addEventListener('submit', async (e) => {
     submitBtn.textContent = 'Signing in...';
     
     try {
-        const response = await fetch('/login/api/check', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ username, password })
-        });
-        
-        const data = await response.json();
-        
-        if (!response.ok) {
-            throw new Error(data.error || 'Authentication failed');
-        }
-        
-        // Store credentials for WebDAV requests
-        const credentials = utf8ToBase64(username + ':' + password);
-        sessionStorage.setItem('mokuro_auth', credentials);
-        sessionStorage.setItem('mokuro_user', JSON.stringify(data.user));
-        
+        // The password is checked once and traded for a token; it is not kept.
+        await window.mokuroAuth.signIn(username, password);
+
         // Redirect to home
         window.location.href = '/';
         

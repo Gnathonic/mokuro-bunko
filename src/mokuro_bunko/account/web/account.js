@@ -1,15 +1,8 @@
 // Account page JavaScript
 
-// UTF-8-safe base64 (btoa alone is Latin-1 and corrupts/throws on non-ASCII)
-function utf8ToBase64(str) {
-    const bytes = new TextEncoder().encode(str);
-    let bin = '';
-    for (const b of bytes) bin += String.fromCharCode(b);
-    return btoa(bin);
-}
-
+// `auth` is the tab's bearer token (see /_static/nav.js), never the password.
 function getAuth() {
-    const auth = sessionStorage.getItem('mokuro_auth');
+    const auth = window.mokuroAuth.token();
     const user = sessionStorage.getItem('mokuro_user');
     if (!auth || !user) return null;
     try {
@@ -19,9 +12,8 @@ function getAuth() {
     }
 }
 
-function logout() {
-    sessionStorage.removeItem('mokuro_auth');
-    sessionStorage.removeItem('mokuro_user');
+async function logout() {
+    await window.mokuroAuth.signOut();
     window.location.href = '/';
 }
 
@@ -72,7 +64,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Fetch user info for created_at
     try {
         const meResp = await fetch('/login/api/me', {
-            headers: { 'Authorization': 'Basic ' + session.auth }
+            headers: { 'Authorization': 'Bearer ' + session.auth }
         });
         if (meResp.ok) {
             const meData = await meResp.json();
@@ -97,7 +89,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function loadStats(auth) {
     try {
         const response = await fetch('/api/account/stats', {
-            headers: { 'Authorization': 'Basic ' + auth }
+            headers: { 'Authorization': 'Bearer ' + auth }
         });
         if (!response.ok) throw new Error('Failed to fetch stats');
         const data = await response.json();
@@ -144,7 +136,7 @@ async function handlePasswordChange(e, session) {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': 'Basic ' + session.auth
+                'Authorization': 'Bearer ' + session.auth
             },
             body: JSON.stringify({
                 current_password: currentPassword,
@@ -158,10 +150,10 @@ async function handlePasswordChange(e, session) {
             throw new Error(data.error || 'Failed to change password');
         }
 
-        // Update stored credentials
-        const newAuth = utf8ToBase64(session.user.username + ':' + newPassword);
-        sessionStorage.setItem('mokuro_auth', newAuth);
-        session.auth = newAuth;
+        // A new password signs out every token, this tab's included: trade
+        // the new password for a fresh one so the page stays signed in.
+        await window.mokuroAuth.signIn(session.user.username, newPassword);
+        session.auth = window.mokuroAuth.token();
 
         // Clear form and show success
         document.getElementById('password-form').reset();
@@ -217,7 +209,7 @@ async function deleteAccount() {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': 'Basic ' + session.auth
+                'Authorization': 'Bearer ' + session.auth
             },
             body: JSON.stringify({ password })
         });
@@ -228,8 +220,7 @@ async function deleteAccount() {
             throw new Error(data.error || 'Failed to delete account');
         }
 
-        sessionStorage.removeItem('mokuro_auth');
-        sessionStorage.removeItem('mokuro_user');
+        window.mokuroAuth.clear();
         window.location.href = '/';
     } catch (err) {
         errorEl.textContent = err.message;

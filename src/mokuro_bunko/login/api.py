@@ -7,8 +7,11 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from mokuro_bunko.database import TOKEN_KINDS
 from mokuro_bunko.middleware.auth import (
     Permission,
+    authenticate_bearer,
+    bearer_token,
     check_permission,
     parse_basic_auth_checked,
 )
@@ -37,10 +40,17 @@ class LoginAPI:
         app: Callable[..., Iterable[bytes]],
         database: Database | None = None,
         nav_config: Any | None = None,
+        on_processor_login_refused: Callable[[str, str], None] | None = None,
     ) -> None:
-        """Initialize login API middleware."""
+        """Initialize login API middleware.
+
+        ``on_processor_login_refused(username, ip)``: a processor's token
+        request was refused -- the same report the auth middleware makes for a
+        refused `/_processor/` request, so the admin panel can name it.
+        """
         self.app = app
         self.db = database
+        self._on_processor_login_refused = on_processor_login_refused
         self._nav_config = nav_config
 
     def __call__(
@@ -55,6 +65,12 @@ class LoginAPI:
         # Handle auth check endpoint
         if path == "/login/api/check" and method == "POST":
             return self._check_auth(environ, start_response)
+
+        # A password buys a bearer token; the token signs itself out.
+        if path == "/login/api/token" and method == "POST":
+            return self._issue_token(environ, start_response)
+        if path == "/login/api/token" and method == "DELETE":
+            return self._revoke_token(environ, start_response)
 
         # Handle user info endpoint (reads Basic auth header)
         if path == "/login/api/me" and method == "GET":
@@ -122,6 +138,100 @@ class LoginAPI:
         except (json.JSONDecodeError, ValueError):
             return self._json_response(start_response, 400, {"error": "Invalid request"})
 
+    def _issue_token(
+        self,
+        environ: dict[str, Any],
+        start_response: Callable[..., Any],
+    ) -> list[bytes]:
+        """``POST /login/api/token``: check the password once, return a bearer token.
+
+        Credentials as JSON ``{"username", "password"}`` or a Basic header;
+        ``kind`` (``web``, ``reader``, ``processor``; default ``web``) sets
+        the token's lifetime, ``label`` says what holds it. The password is
+        rate-limited exactly like a login; the token is then sent as
+        ``Authorization: Bearer <token>`` on every request in its place.
+        """
+        if not self.db:
+            return self._json_response(start_response, 500, {"error": "Database not configured"})
+        data: dict[str, Any] = {}
+        try:
+            content_length = int(environ.get("CONTENT_LENGTH", 0) or 0)
+        except ValueError:
+            content_length = 0
+        if content_length > MAX_JSON_BODY_BYTES:
+            return self._json_response(start_response, 413, {"error": "Request body too large"})
+        if content_length > 0:
+            try:
+                parsed = json.loads(environ["wsgi.input"].read(content_length).decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return self._json_response(start_response, 400, {"error": "Invalid request"})
+            if not isinstance(parsed, dict):
+                return self._json_response(start_response, 400, {"error": "Invalid request"})
+            data = parsed
+        username = data.get("username")
+        password = data.get("password")
+        if not username and not password:
+            creds, parse_error = parse_basic_auth_checked(environ.get("HTTP_AUTHORIZATION", ""))
+            if parse_error:
+                return self._json_response(start_response, 400, {"error": "Invalid credentials"})
+            if creds is not None:
+                username, password = creds
+        if not isinstance(username, str) or not isinstance(password, str) or not username or not password:
+            return self._json_response(start_response, 400, {"error": "Missing credentials"})
+        kind = data.get("kind") or "web"
+        if kind not in TOKEN_KINDS:
+            return self._json_response(
+                start_response, 400, {"error": f"kind must be one of {', '.join(TOKEN_KINDS)}"}
+            )
+        label = data.get("label") if isinstance(data.get("label"), str) else ""
+
+        key = f"{get_client_ip(environ)}:{username}"
+        allowed, retry_after = AUTH_RATE_LIMITER.allow_attempt(key)
+        if not allowed:
+            if kind == "processor":
+                self._report_processor_refusal(username, environ)
+            return self._json_response(
+                start_response, 429, {"error": f"Too many failed attempts. Retry in {retry_after}s"}
+            )
+        user = self.db.authenticate_user(username, password)
+        if user is None:
+            AUTH_RATE_LIMITER.record_failure(key)
+            if kind == "processor":
+                self._report_processor_refusal(username, environ)
+            return self._json_response(start_response, 401, {"error": "Invalid credentials"})
+        AUTH_RATE_LIMITER.record_success(key)
+        self.db.prune_expired_auth_tokens()
+        token, expires_at = self.db.create_auth_token(user["username"], kind, label=str(label))
+        return self._json_response(start_response, 200, {
+            "token": token,
+            "token_type": "Bearer",
+            "kind": kind,
+            "expires_at": expires_at,
+            "user": {"username": user["username"], "role": user["role"]},
+        })
+
+    def _report_processor_refusal(self, username: str, environ: dict[str, Any]) -> None:
+        if self._on_processor_login_refused is None:
+            return
+        try:
+            self._on_processor_login_refused(username, get_client_ip(environ))
+        except Exception:  # noqa: BLE001 - a listener never breaks a refusal
+            pass
+
+    def _revoke_token(
+        self,
+        environ: dict[str, Any],
+        start_response: Callable[..., Any],
+    ) -> list[bytes]:
+        """``DELETE /login/api/token``: sign out the token the request carries."""
+        if not self.db:
+            return self._json_response(start_response, 500, {"error": "Database not configured"})
+        token = bearer_token(environ.get("HTTP_AUTHORIZATION", ""))
+        if not token:
+            return self._json_response(start_response, 400, {"error": "No bearer token"})
+        revoked = self.db.revoke_auth_token(token)
+        return self._json_response(start_response, 200, {"revoked": revoked})
+
     @staticmethod
     def _role_permissions(role: str) -> dict[str, bool]:
         """Derive the client-facing permissions object from a role."""
@@ -170,10 +280,13 @@ class LoginAPI:
 
         Contract (consumed by mokuro-reader; the "authenticated" boolean is
         load-bearing in EVERY response, including 401/429):
-        - valid Basic creds (UTF-8 encoded) -> 200 authenticated:true
-          with username/role/created_at (legacy account.js keys) + permissions
+        - valid Basic creds (UTF-8 encoded) or a live Bearer token -> 200
+          authenticated:true with username/role/created_at (legacy account.js
+          keys) + permissions
         - Basic header present but invalid/malformed -> 401 authenticated:false
-        - no Authorization header or non-Basic scheme -> 200 authenticated:false
+        - Bearer token unknown, expired or revoked -> 401 authenticated:false
+          (sign in again)
+        - no Authorization header or another scheme -> 200 authenticated:false
           (anonymous), never 401
         - rate-limited -> 429 authenticated:false
 
@@ -184,6 +297,24 @@ class LoginAPI:
             return self._json_response(start_response, 500, {"error": "Database not configured"})
 
         auth_header = environ.get("HTTP_AUTHORIZATION", "")
+        token = bearer_token(auth_header)
+        if token is not None:
+            # A token: valid -> who it is; revoked or expired -> 401, so a
+            # client knows to sign in again rather than carry on anonymous.
+            result = authenticate_bearer(self.db, token)
+            if result.user is None:
+                return self._json_response(start_response, 401, {
+                    "authenticated": False,
+                    "error": result.error or "Invalid or expired token",
+                })
+            holder = result.user
+            return self._json_response(start_response, 200, {
+                "authenticated": True,
+                "username": holder["username"],
+                "role": holder["role"],
+                "created_at": holder["created_at"],
+                "permissions": self._permissions_payload(holder["role"], holder["username"]),
+            })
         creds, parse_error = parse_basic_auth_checked(auth_header)
 
         if parse_error:

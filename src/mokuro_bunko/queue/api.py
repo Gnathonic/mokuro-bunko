@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mokuro_bunko.library_index import LibraryIndexCache, LibrarySnapshot
-from mokuro_bunko.middleware.auth import AUTH_RATE_LIMITER, parse_basic_auth_checked
+from mokuro_bunko.middleware.auth import (
+    AUTH_RATE_LIMITER,
+    authenticate_bearer,
+    bearer_token,
+    parse_basic_auth_checked,
+)
 from mokuro_bunko.ocr.generations import (
     GenerationSpec,
     default_generations,
@@ -196,6 +201,14 @@ class QueueAPI:
         auth_header = environ.get("HTTP_AUTHORIZATION")
         if not auth_header:
             return Viewer()
+        token = bearer_token(auth_header)
+        if token is not None:
+            # A token is one indexed read, and must stop working the moment
+            # it is revoked: never cached here.
+            result = authenticate_bearer(self.database, token)
+            if result.user is None:
+                return Viewer(failed=True)
+            return Viewer(role=str(result.user["role"]))
         digest = hmac.new(
             self._auth_key, auth_header.encode("utf-8", "replace"), hashlib.sha256
         ).digest()
