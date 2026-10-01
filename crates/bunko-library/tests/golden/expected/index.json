@@ -1,0 +1,214 @@
+{
+ "series": [
+  {
+   "name": "A story about a wolf and a hunter",
+   "cover": "A story about a wolf and a hunter/A story about a wolf and a hunter 2.webp",
+   "volumes": [
+    {
+     "name": "A story about a wolf and a hunter 2",
+     "has_cbz": true,
+     "has_mokuro": true,
+     "has_mokuro_gz": false,
+     "cover": "A story about a wolf and a hunter/A story about a wolf and a hunter 2.webp",
+     "sidecars": []
+    },
+    {
+     "name": "A story about a wolf and a hunter 3",
+     "has_cbz": true,
+     "has_mokuro": false,
+     "has_mokuro_gz": true,
+     "cover": null,
+     "sidecars": []
+    },
+    {
+     "name": "A story about a wolf and a hunter 4.1",
+     "has_cbz": true,
+     "has_mokuro": false,
+     "has_mokuro_gz": true,
+     "cover": null,
+     "sidecars": []
+    }
+   ]
+  },
+  {
+   "name": "Dr  stone",
+   "cover": null,
+   "volumes": [
+    {
+     "name": "Extra",
+     "has_cbz": true,
+     "has_mokuro": false,
+     "has_mokuro_gz": false,
+     "cover": null,
+     "sidecars": []
+    }
+   ]
+  },
+  {
+   "name": "Dr Stone",
+   "cover": "Dr Stone/Dr Stone 01.webp",
+   "volumes": [
+    {
+     "name": "Dr Stone 01",
+     "has_cbz": true,
+     "has_mokuro": true,
+     "has_mokuro_gz": false,
+     "cover": "Dr Stone/Dr Stone 01.webp",
+     "sidecars": []
+    },
+    {
+     "name": "Dr Stone 02",
+     "has_cbz": true,
+     "has_mokuro": false,
+     "has_mokuro_gz": true,
+     "cover": null,
+     "sidecars": [
+      "hayai-nova",
+      "ppocr-manga"
+     ]
+    },
+    {
+     "name": "Dr Stone 02.5",
+     "has_cbz": true,
+     "has_mokuro": true,
+     "has_mokuro_gz": false,
+     "cover": null,
+     "sidecars": []
+    },
+    {
+     "name": "Dr Stone 03",
+     "has_cbz": false,
+     "has_mokuro": true,
+     "has_mokuro_gz": false,
+     "cover": null,
+     "sidecars": []
+    },
+    {
+     "name": "Dr Stone 10",
+     "has_cbz": true,
+     "has_mokuro": false,
+     "has_mokuro_gz": false,
+     "cover": null,
+     "sidecars": []
+    }
+   ]
+  },
+  {
+   "name": "Nested/Inner",
+   "cover": "Nested/Inner/x.webp",
+   "volumes": [
+    {
+     "name": "x",
+     "has_cbz": true,
+     "has_mokuro": false,
+     "has_mokuro_gz": false,
+     "cover": "Nested/Inner/x.webp",
+     "sidecars": []
+    }
+   ]
+  },
+  {
+   "name": "Odd.Name. With.Dots",
+   "cover": "Odd.Name. With.Dots/v.1.webp",
+   "volumes": [
+    {
+     "name": "v.1",
+     "has_cbz": true,
+     "has_mokuro": true,
+     "has_mokuro_gz": false,
+     "cover": "Odd.Name. With.Dots/v.1.webp",
+     "sidecars": [
+      "hayai-nova"
+     ]
+    },
+    {
+     "name": "v.2",
+     "has_cbz": true,
+     "has_mokuro": false,
+     "has_mokuro_gz": false,
+     "cover": null,
+     "sidecars": []
+    }
+   ]
+  },
+  {
+   "name": "Shinjuku a\u0301 Zombie",
+   "cover": "Shinjuku a\u0301 Zombie/Vol 2.webp",
+   "volumes": [
+    {
+     "name": "Vol 1",
+     "has_cbz": true,
+     "has_mokuro": true,
+     "has_mokuro_gz": false,
+     "cover": null,
+     "sidecars": []
+    },
+    {
+     "name": "Vol 1.5",
+     "has_cbz": true,
+     "has_mokuro": false,
+     "has_mokuro_gz": true,
+     "cover": null,
+     "sidecars": []
+    },
+    {
+     "name": "Vol 2",
+     "has_cbz": true,
+     "has_mokuro": true,
+     "has_mokuro_gz": false,
+     "cover": "Shinjuku a\u0301 Zombie/Vol 2.webp",
+     "sidecars": []
+    }
+   ]
+  },
+  {
+   "name": "\u9032\u6483\u306e\u5de8\u4eba",
+   "cover": "\u9032\u6483\u306e\u5de8\u4eba/\u9032\u6483\u306e\u5de8\u4eba 03.webp",
+   "volumes": [
+    {
+     "name": "\u9032\u6483\u306e\u5de8\u4eba 01",
+     "has_cbz": true,
+     "has_mokuro": true,
+     "has_mokuro_gz": false,
+     "cover": null,
+     "sidecars": []
+    },
+    {
+     "name": "\u9032\u6483\u306e\u5de8\u4eba 02",
+     "has_cbz": true,
+     "has_mokuro": true,
+     "has_mokuro_gz": false,
+     "cover": null,
+     "sidecars": []
+    },
+    {
+     "name": "\u9032\u6483\u306e\u5de8\u4eba 03",
+     "has_cbz": true,
+     "has_mokuro": true,
+     "has_mokuro_gz": false,
+     "cover": "\u9032\u6483\u306e\u5de8\u4eba/\u9032\u6483\u306e\u5de8\u4eba 03.webp",
+     "sidecars": []
+    }
+   ]
+  }
+ ],
+ "pending_ocr": [
+  [
+   "Dr  stone",
+   "Extra"
+  ],
+  [
+   "Dr Stone",
+   "Dr Stone 10"
+  ],
+  [
+   "Nested/Inner",
+   "x"
+  ],
+  [
+   "Odd.Name. With.Dots",
+   "v.2"
+  ]
+ ],
+ "pending_thumbnails": 10
+}

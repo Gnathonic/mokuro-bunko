@@ -1,0 +1,401 @@
+{
+ "A story about a wolf and a hunter/A story about a wolf and a hunter 2": {
+  "version": 1,
+  "series": "A story about a wolf and a hunter",
+  "volume": "A story about a wolf and a hunter 2",
+  "archive": {
+   "url": "/mokuro-reader/A%20story%20about%20a%20wolf%20and%20a%20hunter/A%20story%20about%20a%20wolf%20and%20a%20hunter%202.cbz",
+   "size": 15898,
+   "modified": "2023-11-14T22:30:00Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/A%20story%20about%20a%20wolf%20and%20a%20hunter/A%20story%20about%20a%20wolf%20and%20a%20hunter%202.mokuro",
+   "size": 57340,
+   "modified": "2023-11-14T22:46:40Z"
+  },
+  "layers": [],
+  "cover": {
+   "url": "/mokuro-reader/A%20story%20about%20a%20wolf%20and%20a%20hunter/A%20story%20about%20a%20wolf%20and%20a%20hunter%202.webp",
+   "size": 9,
+   "modified": "2023-11-14T23:03:20Z"
+  },
+  "series_file": {
+   "url": "/mokuro-reader/A%20story%20about%20a%20wolf%20and%20a%20hunter/series.json",
+   "size": 1266,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "A story about a wolf and a hunter/A story about a wolf and a hunter 3": {
+  "version": 1,
+  "series": "A story about a wolf and a hunter",
+  "volume": "A story about a wolf and a hunter 3",
+  "archive": {
+   "url": "/mokuro-reader/A%20story%20about%20a%20wolf%20and%20a%20hunter/A%20story%20about%20a%20wolf%20and%20a%20hunter%203.cbz",
+   "size": 18064,
+   "modified": "2023-11-14T23:20:00Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/A%20story%20about%20a%20wolf%20and%20a%20hunter/A%20story%20about%20a%20wolf%20and%20a%20hunter%203.mokuro.gz",
+   "size": 18707,
+   "modified": "2023-11-14T23:36:40Z"
+  },
+  "layers": [],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/A%20story%20about%20a%20wolf%20and%20a%20hunter/series.json",
+   "size": 1266,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "A story about a wolf and a hunter/A story about a wolf and a hunter 4.1": {
+  "version": 1,
+  "series": "A story about a wolf and a hunter",
+  "volume": "A story about a wolf and a hunter 4.1",
+  "archive": {
+   "url": "/mokuro-reader/A%20story%20about%20a%20wolf%20and%20a%20hunter/A%20story%20about%20a%20wolf%20and%20a%20hunter%204.1.cbz",
+   "size": 8806,
+   "modified": "2023-11-14T23:53:20Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/A%20story%20about%20a%20wolf%20and%20a%20hunter/A%20story%20about%20a%20wolf%20and%20a%20hunter%204.1.mokuro.gz",
+   "size": 21124,
+   "modified": "2023-11-15T00:10:00Z"
+  },
+  "layers": [],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/A%20story%20about%20a%20wolf%20and%20a%20hunter/series.json",
+   "size": 1266,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "Dr  stone/Extra": {
+  "version": 1,
+  "series": "Dr  stone",
+  "volume": "Extra",
+  "archive": {
+   "url": "/mokuro-reader/Dr%20%20stone/Extra.cbz",
+   "size": 123,
+   "modified": "2023-11-15T00:26:40Z"
+  },
+  "ocr": null,
+  "layers": [],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/Dr%20%20stone/series.json",
+   "size": 445,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "Dr Stone/Dr Stone 01": {
+  "version": 1,
+  "series": "Dr Stone",
+  "volume": "Dr Stone 01",
+  "archive": {
+   "url": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2001.cbz",
+   "size": 1162,
+   "modified": "2023-11-15T00:43:20Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2001.mokuro",
+   "size": 1214,
+   "modified": "2023-11-15T01:00:00Z"
+  },
+  "layers": [],
+  "cover": {
+   "url": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2001.webp",
+   "size": 11,
+   "modified": "2023-11-15T01:16:40Z"
+  },
+  "series_file": {
+   "url": "/mokuro-reader/Dr%20Stone/series.json",
+   "size": 1709,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "Dr Stone/Dr Stone 02": {
+  "version": 1,
+  "series": "Dr Stone",
+  "volume": "Dr Stone 02",
+  "archive": {
+   "url": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2002.cbz",
+   "size": 1017,
+   "modified": "2023-11-15T02:06:40Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2002.mokuro.gz",
+   "size": 256,
+   "modified": "2023-11-15T02:40:00Z"
+  },
+  "layers": [
+   {
+    "id": "ppocr-manga",
+    "url": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2002.ppocr-manga.mokuro.gz",
+    "size": 22,
+    "modified": "2023-11-15T02:56:40Z"
+   },
+   {
+    "id": "hayai-nova",
+    "url": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2002.hayai-nova.mokuro",
+    "size": 2123,
+    "modified": "2023-11-15T02:23:20Z"
+   }
+  ],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/Dr%20Stone/series.json",
+   "size": 1709,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "Dr Stone/Dr Stone 02.5": {
+  "version": 1,
+  "series": "Dr Stone",
+  "volume": "Dr Stone 02.5",
+  "archive": {
+   "url": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2002.5.cbz",
+   "size": 343,
+   "modified": "2023-11-15T01:33:20Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2002.5.mokuro",
+   "size": 737,
+   "modified": "2023-11-15T01:50:00Z"
+  },
+  "layers": [],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/Dr%20Stone/series.json",
+   "size": 1709,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "Dr Stone/Dr Stone 03": null,
+ "Dr Stone/Dr Stone 10": {
+  "version": 1,
+  "series": "Dr Stone",
+  "volume": "Dr Stone 10",
+  "archive": {
+   "url": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2010.cbz",
+   "size": 467,
+   "modified": "2023-11-15T03:46:40Z"
+  },
+  "ocr": null,
+  "layers": [],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/Dr%20Stone/series.json",
+   "size": 1709,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "Nested/Inner/x": {
+  "version": 1,
+  "series": "Nested/Inner",
+  "volume": "x",
+  "archive": {
+   "url": "/mokuro-reader/Nested%2FInner/x.cbz",
+   "size": 120,
+   "modified": "2023-11-15T04:53:20Z"
+  },
+  "ocr": null,
+  "layers": [],
+  "cover": {
+   "url": "/mokuro-reader/Nested%2FInner/x.webp",
+   "size": 5,
+   "modified": "2023-11-15T05:10:00Z"
+  },
+  "series_file": null
+ },
+ "Odd.Name. With.Dots/v.1": {
+  "version": 1,
+  "series": "Odd.Name. With.Dots",
+  "volume": "v.1",
+  "archive": {
+   "url": "/mokuro-reader/Odd.Name.%20With.Dots/v.1.cbz",
+   "size": 2148,
+   "modified": "2023-11-15T05:43:20Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/Odd.Name.%20With.Dots/v.1.mokuro",
+   "size": 956,
+   "modified": "2023-11-15T06:16:40Z"
+  },
+  "layers": [
+   {
+    "id": "hayai-nova",
+    "url": "/mokuro-reader/Odd.Name.%20With.Dots/v.1.hayai-nova.mokuro",
+    "size": 2,
+    "modified": "2023-11-15T06:00:00Z"
+   }
+  ],
+  "cover": {
+   "url": "/mokuro-reader/Odd.Name.%20With.Dots/v.1.webp",
+   "size": 12,
+   "modified": "2023-11-15T06:33:20Z"
+  },
+  "series_file": {
+   "url": "/mokuro-reader/Odd.Name.%20With.Dots/series.json",
+   "size": 680,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "Odd.Name. With.Dots/v.2": {
+  "version": 1,
+  "series": "Odd.Name. With.Dots",
+  "volume": "v.2",
+  "archive": {
+   "url": "/mokuro-reader/Odd.Name.%20With.Dots/v.2.cbz",
+   "size": 139,
+   "modified": "2023-11-15T06:50:00Z"
+  },
+  "ocr": null,
+  "layers": [],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/Odd.Name.%20With.Dots/series.json",
+   "size": 680,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "Shinjuku a\u0301 Zombie/Vol 1": {
+  "version": 1,
+  "series": "Shinjuku a\u0301 Zombie",
+  "volume": "Vol 1",
+  "archive": {
+   "url": "/mokuro-reader/Shinjuku%20a%CC%81%20Zombie/Vol%201.cbz",
+   "size": 325,
+   "modified": "2023-11-15T07:40:00Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/Shinjuku%20a%CC%81%20Zombie/Vol%201.mokuro",
+   "size": 733,
+   "modified": "2023-11-15T07:56:40Z"
+  },
+  "layers": [],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/Shinjuku%20a%CC%81%20Zombie/series.json",
+   "size": 1098,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "Shinjuku a\u0301 Zombie/Vol 1.5": {
+  "version": 1,
+  "series": "Shinjuku a\u0301 Zombie",
+  "volume": "Vol 1.5",
+  "archive": {
+   "url": "/mokuro-reader/Shinjuku%20a%CC%81%20Zombie/Vol%201.5.cbz",
+   "size": 230,
+   "modified": "2023-11-15T07:06:40Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/Shinjuku%20a%CC%81%20Zombie/Vol%201.5.mokuro.gz",
+   "size": 267,
+   "modified": "2023-11-15T07:23:20Z"
+  },
+  "layers": [],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/Shinjuku%20a%CC%81%20Zombie/series.json",
+   "size": 1098,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "Shinjuku a\u0301 Zombie/Vol 2": {
+  "version": 1,
+  "series": "Shinjuku a\u0301 Zombie",
+  "volume": "Vol 2",
+  "archive": {
+   "url": "/mokuro-reader/Shinjuku%20a%CC%81%20Zombie/Vol%202.cbz",
+   "size": 37,
+   "modified": "2023-11-15T08:13:20Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/Shinjuku%20a%CC%81%20Zombie/Vol%202.mokuro",
+   "size": 506,
+   "modified": "2023-11-15T08:30:00Z"
+  },
+  "layers": [],
+  "cover": {
+   "url": "/mokuro-reader/Shinjuku%20a%CC%81%20Zombie/Vol%202.webp",
+   "size": 11,
+   "modified": "2023-11-15T08:46:40Z"
+  },
+  "series_file": {
+   "url": "/mokuro-reader/Shinjuku%20a%CC%81%20Zombie/series.json",
+   "size": 1098,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "\u9032\u6483\u306e\u5de8\u4eba/\u9032\u6483\u306e\u5de8\u4eba 01": {
+  "version": 1,
+  "series": "\u9032\u6483\u306e\u5de8\u4eba",
+  "volume": "\u9032\u6483\u306e\u5de8\u4eba 01",
+  "archive": {
+   "url": "/mokuro-reader/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA%2001.cbz",
+   "size": 466,
+   "modified": "2023-11-15T09:36:40Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA%2001.mokuro",
+   "size": 305,
+   "modified": "2023-11-15T09:53:20Z"
+  },
+  "layers": [],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA/series.json",
+   "size": 948,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "\u9032\u6483\u306e\u5de8\u4eba/\u9032\u6483\u306e\u5de8\u4eba 02": {
+  "version": 1,
+  "series": "\u9032\u6483\u306e\u5de8\u4eba",
+  "volume": "\u9032\u6483\u306e\u5de8\u4eba 02",
+  "archive": {
+   "url": "/mokuro-reader/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA%2002.cbz",
+   "size": 218,
+   "modified": "2023-11-15T10:10:00Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA%2002.mokuro",
+   "size": 2,
+   "modified": "2023-11-15T10:26:40Z"
+  },
+  "layers": [],
+  "cover": null,
+  "series_file": {
+   "url": "/mokuro-reader/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA/series.json",
+   "size": 948,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ },
+ "\u9032\u6483\u306e\u5de8\u4eba/\u9032\u6483\u306e\u5de8\u4eba 03": {
+  "version": 1,
+  "series": "\u9032\u6483\u306e\u5de8\u4eba",
+  "volume": "\u9032\u6483\u306e\u5de8\u4eba 03",
+  "archive": {
+   "url": "/mokuro-reader/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA%2003.cbz",
+   "size": 316,
+   "modified": "2023-11-15T10:43:20Z"
+  },
+  "ocr": {
+   "url": "/mokuro-reader/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA%2003.mokuro",
+   "size": 169,
+   "modified": "2023-11-15T11:00:00Z"
+  },
+  "layers": [],
+  "cover": {
+   "url": "/mokuro-reader/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA%2003.webp",
+   "size": 7,
+   "modified": "2023-11-15T11:16:40Z"
+  },
+  "series_file": {
+   "url": "/mokuro-reader/%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA/series.json",
+   "size": 948,
+   "modified": "2027-01-15T08:00:00Z"
+  }
+ }
+}
