@@ -1,6 +1,11 @@
-# Mokuro Bunko Server Configuration
+# Mokuro Bunko Server Configuration (0.7)
 # Copy this file to ~/.config/mokuro-bunko/config.yaml (Linux/macOS)
-# or %LOCALAPPDATA%\mokuro-bunko\config.yaml (Windows)
+# or %LOCALAPPDATA%\mokuro-bunko\config.yaml (Windows).
+# A 0.5.2 config.yaml works unchanged; see docs/MIGRATING-0.7.md.
+#
+# Every key can also be set from the environment as MOKURO_<SECTION>_<KEY>
+# (for example MOKURO_OCR_LOCAL_PROCESSING=false), which wins over this file.
+# docs/configuration.md describes every key.
 
 server:
   # Host to bind to (0.0.0.0 for all interfaces)
@@ -10,11 +15,19 @@ server:
   # Reverse proxies on ANOTHER host or container whose X-Forwarded-For is
   # believed (a proxy on this machine always is). Example: ["172.16.0.0/12"]
   trusted_proxies: []
+  # Async worker threads. 0 (the default) means min(CPU cores, 4). Takes
+  # effect at startup.
+  threads: 0
+  # Memory budget for the server's in-memory caches (directory listings,
+  # library index, compiled metadata), in MiB. Raise it for a very large
+  # library on a machine with spare RAM; lower it on a tiny host.
+  cache_mb: 32
 
 storage:
   # Base path for all data storage
   # Default: ~/.local/share/mokuro-bunko (Linux/macOS)
   #          %LOCALAPPDATA%\mokuro-bunko (Windows)
+  # Holds library/, inbox/, users/, logs/, models/ and mokuro.db.
   base_path: "/var/lib/mokuro-bunko"
 
 registration:
@@ -94,36 +107,43 @@ database:
   # First retry backoff delay in seconds; doubles on each subsequent retry
   retry_initial_delay_seconds: 0.05
 
+update:
+  # Look for new releases in the background (every 12 hours) and show them in
+  # the admin panel's Updates card. Nothing is installed without a click.
+  check: true
+  # stable, or prerelease
+  channel: stable
+  # Where the signed release manifest (release.json) comes from. Change it only
+  # for a mirror or a fork.
+  manifest_url: "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json"
+
 ocr:
-  # OCR backend:
-  # - auto: Detect best available
-  # - cuda: NVIDIA GPU
-  # - rocm: AMD GPU
-  # - cpu: CPU only
-  # - skip: no OCR on THIS machine (the same as local_processing: false);
-  #         a processor that logs in runs the queue, which holds until one does
+  # Execution provider for OCR on THIS machine (a full build; a lite build has
+  # no local OCR):
+  # - auto:     the best one this build and machine offer
+  # - cuda:     NVIDIA GPU (the CUDA build; driver 580 or newer)
+  # - directml: any DirectX 12 GPU (Windows)
+  # - coreml:   Apple silicon (macOS)
+  # - webgpu:   GPUs through WebGPU (rocm is accepted as an alias: ONNX
+  #             Runtime has no ROCm provider any more)
+  # - cpu:      CPU only
+  # - skip:     no OCR on THIS machine (the same as local_processing: false);
+  #             a processor that logs in runs the queue, which holds until one does
   backend: auto
   # Seconds between library scans for volumes missing a sidecar or a
   # thumbnail. Also the base of the retry backoff for failed volumes.
   poll_interval: 30
-  # How many OCR jobs run at once, 1-8 (default 1: one at a time, as before).
-  # Concurrent jobs are always on DIFFERENT volumes. One job already keeps
-  # 2-4 cores busy and holds its own copy of the model in RAM (or VRAM), so
-  # roughly cores/3 is the useful ceiling; raising this past what the machine
-  # has only makes every job slower. Takes effect at startup.
+  # How many OCR jobs run at once on this machine, 1-8 (default 1). Concurrent
+  # jobs are always on DIFFERENT volumes, and each holds its own copy of the
+  # models in RAM (or VRAM). Takes effect at startup.
   concurrency: 1
-  # Keep ONE OCR process open per generation and stream volumes through it,
-  # so the models load once per session instead of once per volume. false
-  # is the one-process-per-volume fallback; the sidecars are identical either
-  # way. mokuro rows join in through mokuro's serve mode (if the installed
-  # mokuro has none, they run one command per volume). Takes effect at
-  # startup.
+  # Accepted so old config files keep loading, and ignored: 0.7 always keeps
+  # the models loaded between volumes.
   sessions: true
   # Does the machine serving the library also run OCR? A small always-on box
   # sets this off and waits for `mokuro-bunko processor serve` to log in from
-  # a stronger machine; the queue then holds, and says so, instead of
-  # grinding for hours. Nothing is installed locally when it is off. At
-  # startup.
+  # a stronger machine; the queue then holds, and says so. A lite build never
+  # runs OCR locally. At startup.
   local_processing: true
   # A generation that has never been measured on a machine is benchmarked
   # there before that machine is offered its volumes, and the widths found
@@ -131,113 +151,107 @@ ocr:
   # that happens only for a row whose pools are empty. Off means "run with
   # the derived settings and benchmark by hand". At startup.
   autobench: true
+
+  # Replace OLD primary OCR with the current primary generation's. Off by
+  # default: an upgrade rewrites what readers see (the old file is kept as a
+  # layer). See docs/MIGRATING-0.7.md.
+  upgrade:
+    enabled: false
+    # Which existing <Volume>.mokuro files may be replaced: an engine id, or
+    # mokuro-legacy (files written by mokuro itself).
+    replace: [mokuro-legacy, mokuro]
+
   # The OCR generations: named recipes, IN THE ORDER THE QUEUE RUNS THEM.
   # Every enabled row writes its own sidecar beside every archive, named
   # after the row -- `<Volume>.<name>.mokuro`, or the bare `<Volume>.mokuro`
   # for the one row flagged `primary`. Rearranging the rows is how the queue
   # is prioritised: every volume gets the first row's file before the second
-  # row starts, and the first row is the only one at normal OS priority.
-  #
-  # Two rows may run the SAME engine with different detectors -- that is the
-  # point of the list, since the detector changes the result as much as the
-  # recognizer does.
+  # row starts.
   #
   #   id           server-minted (g-1, g-2, ...), never shown; keys every
-  #                piece of internal state, so a rename or a reorder costs
-  #                nothing but the file name. Leave it out for a new row.
+  #                piece of internal state. Leave it out for a new row.
   #   name         the label AND the file-name postfix. Editable.
   #                ^[a-z0-9][a-z0-9-]{0,31}$ -- lowercase ASCII, digits and
   #                hyphens, 32 characters at most. No dot, no uppercase, no
   #                space, no underscore: a name outside that grammar is
-  #                SILENTLY invisible on every reader. `original`, `gcv` and
-  #                anything starting with `tr-` are reserved. Unique across
-  #                every row, enabled or not.
+  #                SILENTLY invisible on every reader. `original`, `gcv`,
+  #                `updated-ocr` and anything starting with `tr-` are
+  #                reserved. Unique across every row, enabled or not.
   #   primary      exactly one ENABLED row must have it. That row writes the
   #                bare <Volume>.mokuro: the only source of a volume's
   #                character counts and of the volume_uuid every other layer
   #                inherits. Any engine may be the primary one.
   #   enabled      a disabled row queues nothing and writes nothing; its name
   #                and its files stay reserved.
-  #   engine       - mokuro:       manga-ocr via mokuro (its own detector)
-  #                - hayai-nova:   hayai-ocr v2.5 Nova (reads at patch_budget)
-  #                - paddle-manga: PaddleOCR-VL 1.6 + manga LoRA (~2 GB
-  #                                weights, slowest, best accuracy)
-  #                - ppocr-manga:  PP-OCRv6 manga, a 23 MB line detector +
-  #                                CTC recognizer on the CPU; brings its own
-  #                                detector and is the one engine that reads
-  #                                scanned NOVEL pages
-  #                hayai-nova, paddle-manga and ppocr-manga share a second
-  #                environment, installed at startup when a row needs it (or
-  #                up front: mokuro-bunko install-ocr --engines hayai-nova)
-  #   detector     - ppocr-manga: (default) Apache-2.0 rotated line quads,
-  #                               CPU only; the engine re-reads every line
-  #                               and the two reads are merged
-  #                - ctd:         GPL-3.0 comic-text-detector, mokuro-identical
-  #                               lines; opt-in via install-ocr --detector ctd
-  #                (animetext is disabled for now; a row naming it is refused)
-  #                Ignored (and stored as null) when the engine brings its own.
+  #   engine       - hayai-nova:   hayai-ocr v2.5 Nova (Apache-2.0); reads
+  #                                each line at patch_budget. The default.
+  #                - paddle-manga: PaddleOCR-VL 1.6 + manga LoRA (Apache-2.0);
+  #                                ~2 GB of model files, slowest, most accurate
+  #                - ppocr-manga:  PP-OCRv6 manga (Apache-2.0), a small line
+  #                                detector + CTC recognizer on the CPU; brings
+  #                                its own detector and is the one engine that
+  #                                reads scanned NOVEL pages
+  #                The 0.5 engine `mokuro` was removed. A row that still names
+  #                it is kept (disabled, its name stays reserved) and a
+  #                hayai-nova primary is added; see docs/MIGRATING-0.7.md.
+  #   detector     ppocr-manga (Apache-2.0 rotated line quads, CPU only) is the
+  #                only detector. hayai-nova and paddle-manga re-read every
+  #                line it finds and the two reads are merged. Ignored (and
+  #                stored as null) for the ppocr-manga engine. A row naming the
+  #                removed ctd / animetext / rtdetr is switched to ppocr-manga.
   #   precision    the row's precision MODE, one for every machine:
-  #                  auto-accuracy (default) what tested most accurate for
-  #                                 the engine: hayai-nova bf16 where the
-  #                                 card supports it, else fp32; paddle-manga
-  #                                 and mokuro fp32. Never fp16.
+  #                  auto-accuracy (default) what tested most accurate for the engine
   #                  auto-balanced  a little accuracy for a lot of speed
   #                  auto-speed     the fastest format each card runs well
-  #                                 (these two: each machine's benchmark tries
-  #                                 its supported candidates and keeps the
-  #                                 fastest; within 5% the more accurate)
-  #                  fp32 / bf16 / fp16  that format only; a machine whose
-  #                                 card cannot run it is never given the
-  #                                 row. mokuro has no bf16. ppocr-manga
-  #                                 ignores the mode.
+  #                  fp32 / fp16 / bf16  that format only; a machine whose
+  #                                 card cannot run it is never given the row
+  #                ppocr-manga ignores the mode.
   #   patch_budget resolution hayai-nova reads a line at (256/384/512).
-  #                Reaches no other engine. 512 is the default and is NOT the
-  #                model card's own 384: on the author's benchmark 384 reads
-  #                worse than the retired hayai v2 and only 512 beats it.
-  #   pools        per-stage tuning of THIS row, {} to derive it. The keys are
-  #                that row's stage keys (which depend on its engine and
-  #                detector; the server refuses a key from another road).
-  #                Never changes what is written, only how fast it is written.
+  #                Reaches no other engine. 512 is the default.
+  #   pools        per-stage tuning of THIS row, {} to derive it. Stage keys
+  #                depend on the road: the ppocr-manga engine has detect and
+  #                layout; hayai-nova and paddle-manga have detect, engine
+  #                and post.
   #                  stage_workers  how many pages that stage runs at once
   #                  queue_capacity how many may wait in the queue it fills
   #                  stage_device   WHERE that stage's model runs: cpu or
-  #                                 gpu:<n>; absent = auto (card 0 when there
-  #                                 is one). Only a stage holding a model
-  #                                 takes one -- detect and engine, or the
-  #                                 `mokuro` stage of a mokuro row, which is
-  #                                 the serve process (cpu there means
-  #                                 --force_cpu, gpu:<n> hides the rest).
-  #                                 A stage on a card runs one model and one
-  #                                 worker; on the CPU it is a pool, which is
-  #                                 what makes "detector on the CPU, engine
-  #                                 on the card" worth asking for.
+  #                                 gpu:<n>; absent = auto. The ppocr-manga
+  #                                 detector is CPU only.
   #
-  # See docs/configuration.md for the full reference and
-  # docs/ocr-internals.md for how it works.
-  #
-  # Renaming a row simply means its files are looked for under the new name:
-  # volumes re-OCR under it and the old files are left where they are. A job
-  # already running when its row is renamed finishes under the name it
-  # started with.
+  # See docs/configuration.md for the full reference and docs/ocr-internals.md
+  # for how it works. Renaming a row means its files are looked for under the
+  # new name: volumes re-OCR under it and the old files stay where they are.
   generations:
-    - name: mokuro
-      engine: mokuro
+    - name: hayai-nova
+      engine: hayai-nova
+      detector: ppocr-manga
       primary: true
       enabled: true
       patch_budget: 512
+      precision: auto-accuracy
       pools:
         stage_workers: {}
         queue_capacity: {}
         stage_device: {}
-    # A second recipe, on a different engine and detector:
-    # - name: hayai-nova-ctd
-    #   engine: hayai-nova
-    #   detector: ctd
+    # A second layer on another engine (its own file: <Volume>.paddle-manga.mokuro):
+    # - name: paddle-manga
+    #   engine: paddle-manga
+    #   detector: ppocr-manga
     #   precision: auto-balanced
     #   pools:
-    #     stage_workers: {detect: 4, post: 2}
     #     stage_device: {detect: cpu, engine: "gpu:0"}
-    # The same engine again, on another detector -- a different file:
-    # - name: hayai-nova-ppocr-manga
-    #   engine: hayai-nova
-    #   detector: ppocr-manga
+    # The small CPU engine, which also reads scanned novels:
+    # - name: ppocr-manga
+    #   engine: ppocr-manga
+
+# Dynamic DNS (mokuro-bunko dyndns setup fills this in)
+dyndns:
+  enabled: false
+  # duckdns, or generic
+  provider: duckdns
+  token: ""
+  domain: ""
+  # generic provider only
+  update_url: ""
+  # seconds, at least 30
+  interval: 300

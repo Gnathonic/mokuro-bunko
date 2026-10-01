@@ -1,5 +1,79 @@
 # Changelog
 
+## [0.7.0] - Unreleased
+
+A rewrite of the server in Rust, as a drop-in over 0.5.2 storage (same
+`config.yaml`, `mokuro.db` and library tree). See
+[docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
+
+### Added
+- One native `mokuro-bunko` binary: no Python, uv, venvs or torch anywhere.
+- Lite and full builds. Lite is the server only and runs in 1 GB of RAM (about
+  16 MiB idle in Docker); full adds local OCR and the `processor` command.
+- OCR on ONNX Runtime: CUDA, DirectML (Windows), CoreML (macOS), WebGPU or CPU.
+- Release packages: Linux tarballs (static lite, glibc full, CUDA), Windows zip
+  with a portable mode, macOS tarballs, an Android APK of the lite server, and
+  Docker images `:latest-lite`, `:latest` and `:latest-cuda` (multi-arch except CUDA).
+- `scripts/install.sh` and `scripts/install.ps1` install a release, checking its
+  signed manifest and sha256.
+- One-click updates: the admin panel's Updates card checks for new releases
+  and installs them (ed25519-signed `release.json`, sha256-checked archive). Also
+  `mokuro-bunko update check|apply`, and `update.*` settings.
+- Processor protocol v3: one WebSocket per processor plus streamed result
+  uploads, replacing 0.5's long-lived chunked streams.
+- `mokuro-bunko models list|download|verify`: OCR models are ONNX files downloaded
+  on first use, sha256-verified.
+- `mokuro-bunko healthcheck` for container health checks.
+- A processor needs no checkout or Python: `processor setup` and `processor serve` come
+  with the binary, and `processor service` also installs a launchd agent on macOS.
+- `server.threads` and `server.cache_mb` settings.
+- Generation upgrade (`ocr.upgrade`, off by default) replaces old primary OCR
+  with the current primary generation and keeps the old file as a layer.
+
+### Changed
+- OCR engines are `hayai-nova` (the new default primary), `paddle-manga` and
+  `ppocr-manga`, all Apache-2.0. A fresh config has one `hayai-nova` primary row.
+- `ocr.backend` names an ONNX Runtime execution provider (`auto`, `cuda`,
+  `webgpu`, `directml`, `coreml`, `cpu`, `skip`); `rocm` is an alias of `webgpu`.
+- Old configs are migrated at load: a `mokuro` row is retired (kept, disabled),
+  rows on removed detectors move to `ppocr-manga`, and a `hayai-nova` primary is
+  added when none is left. Existing `.mokuro` files are kept and served.
+- `install-ocr` is a deprecated no-op that downloads models on a full build.
+- The licence is MPL-2.0 everywhere, including the image labels (0.5 images said MIT).
+- nginx download offload is off by default in the images; `MOKURO_NGINX_ACCEL=1`
+  still turns it on. The in-image nginx passes WebSockets for `/_processor/`.
+- Request threads are gone: the server is async, `MOKURO_THREADS` is no longer read.
+- Memory: the server streams downloads and uploads from and to disk, and caches
+  are byte-bounded (`server.cache_mb`).
+
+### Removed
+- The `mokuro` engine (manga-ocr and its GPL detector).
+- The `ctd`, `animetext` and `rtdetr` detectors.
+- Python packaging: the PyPI package, zipapp, `uv` portable zip, `setup-windows.ps1`
+  source install (it forwards to `install.ps1`), `docs/make_volume.py`.
+- Python OCR environments and `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`,
+  `MOKURO_BUNKO_MOKURO_SPEC`, `OCR_AUTO_INSTALL`, `MOKURO_PPOCR_THREADS`,
+  `MOKURO_EFT_TRACE`, `MOKURO_DEBUG` (use `MOKURO_LOG` or `-v`).
+- `processor install` and the install step of `processor setup`.
+- Protocol v2: 0.5.2 processors cannot connect to a 0.7 library, nor the reverse.
+
+### Fixed
+- WebDAV `MOVE`/`COPY` between a reader's own files and library files, of a file
+  onto a folder, and of the library root used to delete data and answer 201;
+  they are now refused (403, or 409 for a file/folder mismatch). `DELETE` of the
+  library root is refused too.
+- `If-Modified-Since` with an equal date answers 304 instead of 200.
+- `config set`, `cors-add/-remove`, `ssl enable/disable` and the `dyndns` commands no
+  longer write `MOKURO_*` overrides into `config.yaml` (Docker's `MOKURO_STORAGE=/data`
+  or the nginx backend port used to be saved).
+- The server shuts down gracefully on SIGTERM (`docker stop`, systemd), not only on
+  Ctrl+C; 0.5.2 was simply killed.
+- Removing a folder over WebDAV no longer forgets upload ownership of other
+  folders whose names matched by `_` or case.
+- Invites with an unreadable expiry are treated as expired instead of causing a 500,
+  and an invite and its audit row are written together.
+- The failed-login limiter's table is bounded in size.
+
 ## [0.5.2] - 2026-10-01
 
 ### Added

@@ -18,6 +18,12 @@ upstream mokuro_backend {
     keepalive 32;
 }
 
+# WebSocket upgrade for /_processor/ (an empty Upgrade keeps keep-alive).
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      '';
+}
+
 server {
     listen 80;
     listen [::]:80;
@@ -71,11 +77,10 @@ server {
         proxy_request_buffering off;
     }
 
-    # Remote OCR processors (docs/deployment.md, "Remote OCR processors
-    # behind a proxy"). The events channel is ONE chunked request body that
-    # lives as long as a session and the assignment stream one chunked
-    # response: no buffering either way, and no body limit (the 500M above is
-    # cumulative over a body, and would cut a long session off).
+    # Remote OCR processors (protocol v3, docs/deployment.md "Remote OCR
+    # processors behind a proxy"): one WebSocket per processor plus streamed
+    # result uploads. Forward the upgrade, keep the socket open for an hour
+    # (the server pings every 15 s), and never buffer or cap upload bodies.
     location /_processor/ {
         proxy_pass http://mokuro_backend;
         proxy_http_version 1.1;
@@ -84,15 +89,16 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Connection "";
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
 
         client_max_body_size 0;
         proxy_request_buffering off;
         proxy_buffering off;
 
         proxy_connect_timeout 60s;
-        proxy_send_timeout 300s;
-        proxy_read_timeout 300s;
+        proxy_send_timeout 3600s;
+        proxy_read_timeout 3600s;
     }
 
     # Static assets caching
