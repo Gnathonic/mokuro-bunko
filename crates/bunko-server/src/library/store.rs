@@ -17,7 +17,6 @@ use bunko_library::store::{
     CachedEntryRow, CachedEntryWrite, CatalogSeriesRow, MetadataStore, SeriesFactsRow, SqlNumber,
     StoreResult,
 };
-use rusqlite::OptionalExtension;
 use serde_json::{Map, Number, Value};
 
 /// The metadata store over the server's database.
@@ -153,24 +152,9 @@ impl MetadataStore for DbMetadataStore {
     }
 
     fn cached_volume_entry(&self, volume_key: &str) -> StoreResult<Option<CachedEntryRow>> {
-        // bunko-db only offers the stat-checked lookup (`get_cached_volume_entry`), but
-        // this crate decides validity itself, so it needs the raw row. Read on the
-        // writer connection until bunko-db grows a raw accessor (see the module report).
-        let row = self.db.with_writer_connection(|conn| {
-            conn.prepare_cached(
-                "SELECT entry_json, cbz_size, cbz_mtime, sidecar_key FROM series_entry_cache \
-                 WHERE volume_key = ?",
-            )?
-            .query_row([volume_key], |r| {
-                Ok(CachedEntryRow {
-                    entry_json: r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                    cbz_size: r.get::<_, Option<i64>>(1)?.unwrap_or(-1),
-                    cbz_mtime: r.get::<_, Option<f64>>(2)?.unwrap_or(f64::NAN),
-                    sidecar_key: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                })
-            })
-            .optional()
-        })?;
+        let row = self.db.cached_volume_entry_row(volume_key)?.map(|(entry_json, cbz_size, cbz_mtime, sidecar_key)| {
+            CachedEntryRow { entry_json, cbz_size, cbz_mtime, sidecar_key }
+        });
         Ok(row)
     }
 
