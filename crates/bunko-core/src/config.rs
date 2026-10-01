@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 pub enum ConfigError {
     #[error("{0}")]
     Invalid(String),
-    #[error("Unknown config key: {0}")]
+    #[error("{0}")]
     UnknownKey(String),
     #[error("could not read {path}: {source}")]
     Io { path: PathBuf, source: std::io::Error },

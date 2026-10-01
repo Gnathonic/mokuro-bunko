@@ -34,6 +34,11 @@ pub fn default_cert_paths() -> (PathBuf, PathBuf) {
 
 /// Generate a self-signed certificate for `localhost`, `127.0.0.1` and this host name.
 pub fn generate_self_signed(cert_path: &Path, key_path: &Path, hostname: &str) -> Result<(), TlsError> {
+    generate_self_signed_days(cert_path, key_path, hostname, 365)
+}
+
+/// [`generate_self_signed`] with an explicit validity in days (`ssl generate --days`).
+pub fn generate_self_signed_days(cert_path: &Path, key_path: &Path, hostname: &str, days: i64) -> Result<(), TlsError> {
     let mut names = vec!["localhost".to_string(), hostname.to_string(), "127.0.0.1".to_string()];
     if let Ok(h) = hostname::get() {
         names.push(h.to_string_lossy().into_owned());
@@ -45,7 +50,7 @@ pub fn generate_self_signed(cert_path: &Path, key_path: &Path, hostname: &str) -
     params.is_ca = rcgen::IsCa::ExplicitNoCa;
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now;
-    params.not_after = now + time::Duration::days(365);
+    params.not_after = now + time::Duration::days(days.max(1));
     let key = rcgen::KeyPair::generate().map_err(|e| TlsError::Invalid(e.to_string()))?;
     let cert = params.self_signed(&key).map_err(|e| TlsError::Invalid(e.to_string()))?;
     for p in [cert_path, key_path] {

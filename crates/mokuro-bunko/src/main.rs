@@ -1,16 +1,71 @@
-//! `mokuro-bunko` — the command-line entry point (CLI wiring lands with the server).
+//! `mokuro-bunko` — the command-line entry point: one binary for the server, its admin
+//! tools and (full build) the OCR processor. See `cli.rs` for the command tree.
 
+mod cfgfile;
+mod cli;
+mod cmd;
+// `init_server` is for `serve.rs` (orchestrator) and `processor serve`. logging.rs is
+// not this CLI's file; its one collapsible `if` is left to its owner.
+#[allow(dead_code)]
+mod logging;
+#[cfg(feature = "ocr")]
+mod ocr_probe;
+mod out;
+mod prompt;
+mod serve;
+
+use clap::{CommandFactory, Parser};
+use cli::{Cli, Command};
 use mimalloc::MiMalloc;
+use out::Fail;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+/// `full` (local OCR linked in) or `lite` (server only).
+pub const FLAVOR: &str = if cfg!(feature = "ocr") { "full" } else { "lite" };
+
 fn main() {
-    let flavor = if cfg!(feature = "ocr") { "full" } else { "lite" };
-    if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!("mokuro-bunko {} ({flavor}, {})", bunko_core::VERSION, bunko_update::TARGET);
+    let cli = Cli::parse();
+    if cli.version {
+        println!("mokuro-bunko, version {}", bunko_core::VERSION);
+        println!("flavor: {FLAVOR}, target: {}", bunko_update::TARGET);
         return;
     }
-    eprintln!("mokuro-bunko {} ({flavor}): CLI not wired yet", bunko_core::VERSION);
-    std::process::exit(2);
+    let code = match run(cli) {
+        Ok(()) => 0,
+        Err(Fail::Exit(code)) => code,
+        Err(Fail::Error(msg)) => {
+            eprintln!("Error: {msg}");
+            1
+        }
+    };
+    std::process::exit(code);
+}
+
+fn run(cli: Cli) -> out::CmdResult {
+    let Some(command) = cli.command else {
+        // click's `invoke_without_command`: show the help, exit 0.
+        let _ = Cli::command().print_help();
+        println!();
+        return Ok(());
+    };
+    let ctx = cmd::Ctx { config_path: cfgfile::resolve(cli.config.as_deref()), verbose: cli.verbose, cli_config: cli.config };
+    match command {
+        Command::Serve(args) => cmd::serve::run(&ctx, args),
+        Command::Setup { skip_if_exists } => cmd::setup::run(&ctx, skip_if_exists),
+        Command::Doctor => cmd::doctor::run(&ctx),
+        Command::Admin(c) => cmd::admin::run(&ctx, c),
+        Command::Config(c) => cmd::config::run(&ctx, c),
+        Command::Ssl(c) => cmd::ssl::run(&ctx, c),
+        Command::Tunnel(c) => cmd::tunnel::run(&ctx, c),
+        Command::Dyndns(c) => cmd::dyndns::run(&ctx, c),
+        Command::Update(c) => cmd::update::run(&ctx, c),
+        #[cfg(feature = "ocr")]
+        Command::Models(c) => cmd::models::run(&ctx, c),
+        Command::InstallOcr(args) => cmd::install_ocr::run(&ctx, args),
+        #[cfg(feature = "ocr")]
+        Command::Processor(c) => cmd::processor::run(&ctx, c),
+        Command::Healthcheck { url } => cmd::healthcheck::run(&ctx, url),
+    }
 }
