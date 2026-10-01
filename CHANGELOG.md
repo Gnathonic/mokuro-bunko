@@ -5,6 +5,9 @@
 ### Added
 - `series.json` volumes carry `mokuro_sha256`, so readers re-download changed OCR.
 
+### Changed
+- Uploaders may replace only files of their own volumes, not others' or untracked ones.
+
 ### Fixed
 - A re-OCR'd volume keeps its `volume_uuid`, so read progress stays attached.
 - Uploaders can edit and delete their own series with non-ASCII titles.
