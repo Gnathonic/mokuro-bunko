@@ -41,7 +41,7 @@ Raw page JSON (:func:`page_to_json`, also what the CLI writes and what the
 geometry tests use as fixtures)::
 
     {"format": "ppocr-lines/1", "width": 1925, "height": 2800,
-     "detector": {"side": 1280, "passes": [...], ...},
+     "detector": {"side": 1120, "passes": [...], ...},
      "lines": [{"quad": [[x, y] * 4], "score": 0.91, "text": "...",
                 "conf": 0.97, "char_confs": [...], "vertical": true,
                 "angle": -0.4}]}
@@ -55,7 +55,7 @@ process can import it without any of those packages.
 CLI::
 
     python -m mokuro_bunko.ocr.ppocr --image page.webp --out lines.json \
-        [--side 1280] [--tile auto|off|force] [--models DIR] [--no-recognize]
+        [--side 1120] [--tile auto|off|force] [--models DIR] [--no-recognize]
 """
 
 from __future__ import annotations
@@ -78,7 +78,9 @@ except ImportError:  # pragma: no cover - exercised only in a bare server instal
 
 REPO_ID = "Kellenok/PP-OCRv6_manga"
 # Pinned so a silent upstream re-upload cannot change OCR output under us.
-REPO_REVISION = "3f5274450b5074e54e8c0997480bb7cdc5e875d7"
+# v0.2 (2026-09-28): a retrained detector and recognizer, drop-in for v0.1
+# (same architectures, sizes, dictionary and speed).
+REPO_REVISION = "ba1d479e8a61a20e8318c9758c73fbbbd290b98d"
 MODELS_ENV = "MOKURO_PPOCR_MODELS"
 DOWNLOAD_ENV = "MOKURO_PPOCR_DOWNLOAD"
 PRECISION_ENV = "MOKURO_PPOCR_PRECISION"
@@ -87,10 +89,10 @@ THREADS_ENV = "MOKURO_PPOCR_THREADS"
 DICT_FILE = "ppocrv6_dict.txt"
 MODEL_FILES: dict[str, tuple[str, str]] = {
     # precision -> (detector, recognizer), paths as laid out in the HF repo.
-    "fp32": ("det/manga_det_v0.1.onnx", "rec/manga_rec_v0.1.onnx"),
-    "fp16": ("det/manga_det_v0.1_fp16.onnx", "rec/manga_rec_v0.1_fp16.onnx"),
+    "fp32": ("det/manga_det_v0.2.onnx", "rec/manga_rec_v0.2.onnx"),
+    "fp16": ("det/manga_det_v0.2_fp16.onnx", "rec/manga_rec_v0.2_fp16.onnx"),
 }
-# Measured with onnxruntime on CPU (4 threads): the FP16 files take float32
+# Measured on v0.1 with onnxruntime on CPU (4 threads): the FP16 files take float32
 # input and are cast back per op, so they are SLOWER than FP32 (0.34 vs 0.30 s
 # per page over 6 manga + 5 novel pages; detector alone 53 vs 42 ms) and read
 # 19 of 322 lines differently. FP16 only buys a smaller download (11 vs 23 MB).
@@ -99,8 +101,11 @@ DEFAULT_PRECISION = "fp32"
 FORMAT_ID = "ppocr-lines/1"
 
 # --- detector ---------------------------------------------------------------
-# 960 (the authors' default) loses small lines on 2800-px scans; 1280 does not.
-DEFAULT_SIDE = 1280
+# v0.2's best detector input on the authors' benchmark (README Table 1:
+# end-to-end CER 10.89% at 1120 vs 11.34% at 960, the demo app's size), and
+# on the owner's own run of v0.2: 1120 beat 960, which beat 1280. On v0.1,
+# 960 lost small lines on 2800-px scans and this was 1280.
+DEFAULT_SIDE = 1120
 SIDE_MULTIPLE = 32
 # Small web pages gain from some enlargement, but past 1.5x the detector only
 # sees interpolation blur and starts boxing screentone.
@@ -109,9 +114,10 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 DB_THRESH = 0.15
 DB_BOX_THRESH = 0.25
-# The authors benchmark with 1.40; on our bench that clips an end glyph on
-# ~3% of lines, 1.5 does not.
-DB_UNCLIP_RATIO = 1.5
+# What the authors run every v0.2 benchmark with. On v0.1 it clipped an end
+# glyph on ~3% of our bench's lines and this was 1.5; `recover_clipped_ends`
+# now gives such a line its last bracket or stop back.
+DB_UNCLIP_RATIO = 1.4
 DB_MIN_SIDE = 3.0
 DB_MAX_CANDIDATES = 3000
 

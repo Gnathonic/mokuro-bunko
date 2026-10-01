@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mokuro_bunko.library_index import LibraryIndexCache, LibrarySnapshot
-from mokuro_bunko.middleware.auth import AUTH_RATE_LIMITER, parse_basic_auth_checked
+from mokuro_bunko.middleware.auth import (
+    AUTH_RATE_LIMITER,
+    authenticate_bearer,
+    bearer_token,
+    parse_basic_auth_checked,
+)
 from mokuro_bunko.ocr.generations import (
     GenerationSpec,
     default_generations,
@@ -44,6 +49,10 @@ AUTH_CACHE_SIZE = 256
 # library snapshot, and how often it re-walks the missing-pages list.
 REFRESH_SECONDS = 2.0
 SKIPPED_TTL_SECONDS = 10.0
+# ...and never sooner than this many of its own reads: the list walks every
+# archive, seconds on a large library on a network share, and a compile
+# asking for a re-read after every sidecar kept it walking back to back.
+SKIPPED_COST_FACTOR = 8.0
 
 
 @dataclass(frozen=True)
@@ -108,6 +117,10 @@ class QueueAPI:
         self._skipped: list[dict[str, Any]] = []
         self._skipped_signature = "[]"
         self._skipped_read_at = float("-inf")
+        # How long the last `skipped_missing_pages` read took, and when it
+        # was (`invalidate_skipped` resets `_skipped_read_at`, not this).
+        self._skipped_cost = 0.0
+        self._skipped_last_read = float("-inf")
         self._auth_lock = threading.Lock()
         self._auth_key = secrets.token_bytes(32)
         self._auth_cache: dict[bytes, tuple[float, int, str | None]] = {}
@@ -188,6 +201,14 @@ class QueueAPI:
         auth_header = environ.get("HTTP_AUTHORIZATION")
         if not auth_header:
             return Viewer()
+        token = bearer_token(auth_header)
+        if token is not None:
+            # A token is one indexed read, and must stop working the moment
+            # it is revoked: never cached here.
+            result = authenticate_bearer(self.database, token)
+            if result.user is None:
+                return Viewer(failed=True)
+            return Viewer(role=str(result.user["role"]))
         digest = hmac.new(
             self._auth_key, auth_header.encode("utf-8", "replace"), hashlib.sha256
         ).digest()
@@ -289,9 +310,16 @@ class QueueAPI:
                 repr((snapshot.pending_thumbnails, snapshot.pending_ocr)).encode()
             ).hexdigest()
             now = time.monotonic()
-            if control is not None and now - self._skipped_read_at >= SKIPPED_TTL_SECONDS:
+            due = now - self._skipped_read_at >= SKIPPED_TTL_SECONDS
+            # However it was asked for, never sooner than a few of its own reads.
+            if now - self._skipped_last_read < SKIPPED_COST_FACTOR * self._skipped_cost:
+                due = False
+            if control is not None and due:
                 self._skipped_read_at = now
+                self._skipped_last_read = now
+                started = time.monotonic()
                 skipped = control.skipped_missing_pages()
+                self._skipped_cost = time.monotonic() - started
                 signature = json.dumps(skipped, sort_keys=True, default=str)
                 if signature != self._skipped_signature:
                     # The fingerprint carries the signature: the next poll

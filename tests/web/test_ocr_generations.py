@@ -101,7 +101,7 @@ def open_admin(stub: StubServer, page: Page) -> Page:
     of taking the `admin` fixture, which loads the page too early for that.
     """
     page.add_init_script(
-        "sessionStorage.setItem('mokuro_auth', 'YWRtaW46YWRtaW5wYXNz');"
+        "sessionStorage.setItem('mokuro_token', 'YWRtaW46YWRtaW5wYXNz');"
         "sessionStorage.setItem('mokuro_user', '{\"username\":\"admin\",\"role\":\"admin\"}');"
     )
     page.goto(stub.url + "/_admin/")

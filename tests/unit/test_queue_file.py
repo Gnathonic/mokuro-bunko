@@ -360,7 +360,11 @@ class TestScale:
         packed = len(gzip.compress(raw, compresslevel=6))
         body = json.loads(raw)
         jobs = sum(len(v["jobs"]) for v in body["volumes"])
-        assert jobs == 2000
+        # A horizon of the queue, and the whole queue's count: the next
+        # hundred waiting volumes (two jobs each) of the thousand.
+        assert len(body["volumes"]) == 100
+        assert jobs == 200
+        assert body["pending_volumes"] == 1000
         print(f"\n[queue file] {jobs} jobs: built in {seconds * 1000:.0f} ms, "
               f"{len(raw)} bytes, {packed} gzipped")
         assert seconds < 2.0

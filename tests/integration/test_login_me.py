@@ -181,10 +181,17 @@ class TestMeEndpoint:
         }
 
     def test_me_non_basic_scheme_200_anonymous(self, api: LoginAPI) -> None:
-        status, body = call_me(api, "Bearer xyz")
+        status, body = call_me(api, "Negotiate xyz")
         assert status == 200
         assert body["authenticated"] is False
         assert body["role"] == "anonymous"
+
+    def test_me_unknown_bearer_token_401(self, api: LoginAPI) -> None:
+        # A token that no longer works must say so: the client signs in again
+        # instead of carrying on as a visitor.
+        status, body = call_me(api, "Bearer xyz")
+        assert status == 401
+        assert body["authenticated"] is False
 
     def test_me_rate_limited_429(
         self, api: LoginAPI, fresh_rate_limiter: AuthAttemptLimiter

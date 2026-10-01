@@ -65,8 +65,9 @@ def build_document(control: OcrControl | None, storage_base_path: Path) -> dict[
     """The queue file's content, ``generated_at`` included."""
     held: str | None = None
     volumes: list[dict[str, Any]] = []
+    pending_volumes = 0
     if control is not None:
-        held, volumes = control.queue_document(
+        held, volumes, pending_volumes = control.queue_document(
             read_running_jobs(storage_base_path), wait=PENDING_WAIT_SECONDS
         )
     now = time.time()
@@ -76,6 +77,11 @@ def build_document(control: OcrControl | None, storage_base_path: Path) -> dict[
         "generated_at": datetime.fromtimestamp(now, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "held": {"reason": held} if held is not None else None,
         "next_check_after": recheck_after(all_jobs, now),
+        # Waiting volumes in the whole queue. `volumes` lists the running
+        # ones and only the next hundred waiting: when this is larger than
+        # the waiting ones listed, a volume missing from `volumes` may still
+        # be queued -- its manifest says.
+        "pending_volumes": pending_volumes,
         "volumes": [
             {
                 "series": volume["series"],

@@ -59,7 +59,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 SIGNED_IN = (
-    "sessionStorage.setItem('mokuro_auth', 'YWRtaW46YWRtaW5wYXNz');"
+    "sessionStorage.setItem('mokuro_token', 'YWRtaW46YWRtaW5wYXNz');"
     "sessionStorage.setItem('mokuro_user', '{\"username\":\"admin\",\"role\":\"admin\"}');"
 )
 

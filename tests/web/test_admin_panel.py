@@ -134,7 +134,7 @@ def admin_page(server_url: str, page: Page) -> Page:
     import base64
 
     credentials = base64.b64encode(b"admin:adminpass").decode()
-    page.add_init_script(f"sessionStorage.setItem('mokuro_auth', '{credentials}');")
+    page.add_init_script(f"sessionStorage.setItem('mokuro_token', '{credentials}');")
 
     # Add auth header via route interception
     def handle_route(route):
@@ -283,7 +283,7 @@ def _auth_session(page: Page, username: str, password: str, role: str) -> None:
     credentials = base64.b64encode(f"{username}:{password}".encode()).decode()
     user_json = json.dumps({"username": username, "role": role})
     page.add_init_script(
-        f"sessionStorage.setItem('mokuro_auth', '{credentials}');"
+        f"sessionStorage.setItem('mokuro_token', '{credentials}');"
         f"sessionStorage.setItem('mokuro_user', '{user_json}');"
     )
 
@@ -407,7 +407,7 @@ class TestAdminPanelResponsive:
         import base64
 
         credentials = base64.b64encode(b"admin:adminpass").decode()
-        page.add_init_script(f"sessionStorage.setItem('mokuro_auth', '{credentials}');")
+        page.add_init_script(f"sessionStorage.setItem('mokuro_token', '{credentials}');")
 
         def handle_route(route):
             headers = {**route.request.headers, "Authorization": f"Basic {credentials}"}
