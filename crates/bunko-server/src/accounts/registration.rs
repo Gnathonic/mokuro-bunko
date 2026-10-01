@@ -14,12 +14,13 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::get;
-use bunko_core::Role;
 use bunko_db::pyfmt::strip;
-use bunko_db::{DbError, UserStatus, normalize_role, validate_password, validate_username};
+use bunko_db::{
+    DbError, INVALID_INVITE_MESSAGE, UserStatus, normalize_role, validate_password,
+    validate_username,
+};
 use http::HeaderMap;
 use serde_json::{Value, json};
-use tracing::warn;
 
 pub fn routes() -> Router<AccountsDeps> {
     Router::new()
@@ -136,13 +137,13 @@ async fn register(State(d): State<AccountsDeps>, headers: HeaderMap, body: Body)
     let db = d.db.clone();
     let approval = mode == "approval";
     let outcome = blocking(move || -> bunko_db::Result<Result<(), Response>> {
-        let role: Role = match &invite_code {
-            Some(code) => match db.validate_invite(code)? {
-                Some(invite) => invite.role,
-                None => return Ok(Err(json_error(400, "Invalid or expired invite code"))),
-            },
-            None => default_role,
-        };
+        // 0.5.2's order of refusals: a bad invite, then a taken name. Both are checked
+        // again inside the transaction that creates the account.
+        if let Some(code) = &invite_code
+            && db.validate_invite(code)?.is_none()
+        {
+            return Ok(Err(json_error(400, INVALID_INVITE_MESSAGE)));
+        }
         if db.get_user(&username)?.is_some() {
             return Ok(Err(json_error(409, "Username already exists")));
         }
@@ -151,21 +152,21 @@ async fn register(State(d): State<AccountsDeps>, headers: HeaderMap, body: Body)
         } else {
             UserStatus::Active
         };
-        match db.create_user(&username, &password, role, status, "") {
-            Ok(_) => {}
-            Err(DbError::Invalid(msg) | DbError::Conflict(msg)) => {
-                return Ok(Err(json_error(400, &msg)));
-            }
-            Err(e) => return Err(e),
+        // With an invite: the account and the invite's consumption are one transaction,
+        // so of N parallel registrations with one code exactly one gets an account.
+        let created = match &invite_code {
+            Some(code) => db
+                .create_user_with_invite(&username, &password, code, status, "")
+                .map(|_| ()),
+            None => db
+                .create_user(&username, &password, default_role, status, "")
+                .map(|_| ()),
+        };
+        match created {
+            Ok(()) => Ok(Ok(())),
+            Err(DbError::Invalid(msg) | DbError::Conflict(msg)) => Ok(Err(json_error(400, &msg))),
+            Err(e) => Err(e),
         }
-        if let Some(code) = &invite_code {
-            // 0.5.2 order: the account exists before the invite is consumed; a
-            // concurrent registration that lost the race keeps its account.
-            if !db.use_invite(code, &username)? {
-                warn!("invite {code} was consumed concurrently; '{username}' registered anyway");
-            }
-        }
-        Ok(Ok(()))
     })
     .await;
     let username = data

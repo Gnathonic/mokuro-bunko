@@ -133,6 +133,10 @@ async fn confirm_password(
 
 /// The JSON object body of the password/delete calls, with their 0.5.2 errors.
 async fn object_body(headers: &HeaderMap, body: Body) -> Result<Map<String, Value>, Response> {
+    // A form post cannot declare JSON (CSRF; see `http::csrf`).
+    if let Some((status, msg)) = crate::http::csrf::require_json(headers) {
+        return Err(json_error(status, msg));
+    }
     match read_body(headers, body).await {
         JsonBody::Empty => Err(json_error(400, "Missing request body")),
         JsonBody::TooLarge => Err(json_error(413, "Request body too large")),

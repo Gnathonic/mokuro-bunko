@@ -25,9 +25,10 @@ fn big_env(series: usize, per: usize) -> Env {
 #[tokio::test]
 async fn a_large_listing_streams_identically_in_both_encodings() {
     let env = big_env(40, 30);
+    // No Depth means infinity (RFC 4918 9.1): the same cached answer.
     let live = env
         .req(Some("reader"), "PROPFIND", "/mokuro-reader", &[], b"")
-        .await; // no Depth: live walk
+        .await;
     assert_eq!(live.code(), 207);
     let ident = env
         .req(
@@ -65,6 +66,109 @@ async fn a_large_listing_streams_identically_in_both_encodings() {
     b.sort();
     assert_eq!(a.len(), 7 + 40 * 61);
     assert_eq!(a, b);
+}
+
+/// Regression (review finding): a missing Depth or a differently spelled `infinity` used
+/// to bypass the cache and build the whole listing in memory per request; 40 parallel
+/// requests on a 30k-file library held ~1 GiB. They are now the cached answer.
+#[tokio::test]
+async fn implied_or_odd_case_infinity_is_served_from_the_cache() {
+    let env = big_env(5, 4);
+    let exact = env
+        .req(
+            None,
+            "PROPFIND",
+            "/mokuro-reader",
+            &[("depth", "infinity")],
+            b"",
+        )
+        .await;
+    assert_eq!(exact.code(), 207);
+    assert_eq!(env.dav.propfind_cache().usage().0, 1);
+    for headers in [
+        &[][..],
+        &[("depth", "Infinity")][..],
+        &[("depth", "INFINITY")][..],
+    ] {
+        let r = env
+            .req(None, "PROPFIND", "/mokuro-reader/", headers, b"")
+            .await;
+        assert_eq!(r.code(), 207, "{headers:?}");
+        assert_eq!(r.body, exact.body, "{headers:?}");
+        // Still the one entry: the same key, not a new walk kept elsewhere.
+        assert_eq!(env.dav.propfind_cache().usage().0, 1, "{headers:?}");
+    }
+    // A file is one response at any depth: answered live, never a cache entry that would
+    // evict a listing.
+    let file = env
+        .req(
+            None,
+            "PROPFIND",
+            "/mokuro-reader/Series%20000%20%CE%A9/Vol%2000.cbz",
+            &[],
+            b"",
+        )
+        .await;
+    assert_eq!(file.code(), 207, "{}", file.text());
+    assert_eq!(file.text().matches("<D:response>").count(), 1);
+    assert_eq!(env.dav.propfind_cache().usage().0, 1);
+    // A propname body cannot make the implied-infinity walk go live either.
+    let r = env
+        .req(
+            None,
+            "PROPFIND",
+            "/mokuro-reader",
+            &[],
+            br#"<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:propname/></D:propfind>"#,
+        )
+        .await;
+    assert_eq!(r.body, exact.body);
+}
+
+/// Depth: 1 of a big folder is generated compressed and streamed: complete, identical in
+/// both encodings, and the gzip form is the small one.
+#[tokio::test]
+async fn depth_one_of_a_big_folder_streams_compressed() {
+    let env = Env::new();
+    let dir = env.lib("Flat");
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..3000 {
+        std::fs::write(dir.join(format!("Volume {i:05}.cbz")), b"x").unwrap();
+    }
+    let ident = env
+        .req(
+            None,
+            "PROPFIND",
+            "/mokuro-reader/Flat",
+            &[("depth", "1")],
+            b"",
+        )
+        .await;
+    assert_eq!(ident.code(), 207);
+    assert_eq!(
+        ident.header("content-length").unwrap(),
+        ident.body.len().to_string()
+    );
+    let text = ident.text();
+    assert!(text.starts_with("<?xml"));
+    assert!(text.ends_with("</D:multistatus>"));
+    assert_eq!(text.matches("<D:response>").count(), 3001);
+    assert!(text.contains("Volume%2002999.cbz") || text.contains("Volume 02999.cbz"));
+    let gz = env
+        .req(
+            None,
+            "PROPFIND",
+            "/mokuro-reader/Flat",
+            &[("depth", "1"), ("accept-encoding", "gzip")],
+            b"",
+        )
+        .await;
+    assert_eq!(gz.code(), 207);
+    assert_eq!(gz.header("content-encoding").unwrap(), "gzip");
+    assert!(gz.body.len() < ident.body.len() / 5);
+    assert_eq!(decode_gzip(&gz.body), ident.body);
+    // Not cached: a live answer (locks and dead properties are per request).
+    assert_eq!(env.dav.propfind_cache().usage().0, 0);
 }
 
 #[tokio::test]

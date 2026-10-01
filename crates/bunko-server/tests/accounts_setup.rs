@@ -302,3 +302,27 @@ async fn cached_once_an_admin_is_seen() {
     fresh.db.delete_user("gone").unwrap();
     assert!(!fresh.deps.setup.needs_setup(&fresh.db).unwrap());
 }
+
+/// Regression (review finding, CSRF): the setup completion takes JSON only.
+#[tokio::test]
+async fn complete_needs_a_json_body() {
+    let env = Env::new();
+    let body = complete_body().to_string();
+    let r = env
+        .send(
+            req("POST", "/setup/api/complete")
+                .header("content-type", "text/plain")
+                .header("content-length", body.len().to_string())
+                .body(axum::body::Body::from(body))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(
+        (r.status, r.json()),
+        (
+            415,
+            json!({"error": "Content-Type must be application/json"})
+        )
+    );
+    assert!(env.db.get_user("admin").unwrap().is_none());
+}

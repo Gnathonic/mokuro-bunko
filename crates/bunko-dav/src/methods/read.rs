@@ -79,8 +79,8 @@ pub(crate) async fn options(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
 }
 
 pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult<Resp> {
-    let raw_depth = req.header("depth").map(str::to_string);
-    let depth = match raw_depth.as_deref().map(str::to_ascii_lowercase).as_deref() {
+    let raw_depth = req.header("depth").map(str::to_ascii_lowercase);
+    let depth = match raw_depth.as_deref() {
         None | Some("infinity") => None,
         Some("0") => Some(0),
         Some("1") => Some(1),
@@ -97,16 +97,21 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
     eval_if(inner, req, &res)?;
     let body = read_body(body, XML_BODY_LIMIT).await?;
 
-    // Depth: infinity (the exact header) is answered from the shared cache, allprop.
+    // Depth: infinity, in any spelling or implied by a missing header (RFC 4918 9.1), is
+    // answered from the shared cache, allprop. Walking it live per request let a burst of
+    // header-less PROPFINDs each build a whole-library listing (one per request, in RAM).
+    // A file (one response, whatever the depth) is still answered live: caching each
+    // file would only evict the listings worth keeping.
     let norm = paths::normalize(&req.path);
-    if raw_depth.as_deref() == Some("infinity")
+    let gzip = req
+        .header("accept-encoding")
+        .is_some_and(|v| v.contains("gzip"));
+    if depth.is_none()
+        && res.is_collection()
         && !matches!(paths::classify(&norm), paths::Target::Progress(_))
     {
         if let Some(hit) = inner.cache.get(&norm).await {
             let tail = injected_progress(inner, req, &norm).await?;
-            let gzip = req
-                .header("accept-encoding")
-                .is_some_and(|v| v.contains("gzip"));
             return Ok(crate::cache::respond(hit, &tail, gzip));
         }
         return Err(DavError::new(StatusCode::NOT_FOUND, &req.path));
@@ -116,6 +121,24 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
         propfind::parse_mode(&body).ok_or_else(|| DavError::status(StatusCode::BAD_REQUEST))?;
     let inner2 = inner.clone();
     let user = req.username().map(str::to_string);
+    if depth == Some(1) && res.is_collection() {
+        // A folder's members: generated compressed in one of the cache's bounded
+        // generation slots and streamed out, so a 30k-member folder costs its compressed
+        // size per request and at most a few are built at once.
+        let hit = inner
+            .cache
+            .live(move |feed| {
+                let ctx = PropCtx {
+                    username: user.as_deref(),
+                    locks: Some(&inner2.locks),
+                    dead: Some(&inner2.dead),
+                };
+                propfind::walk(&inner2.roots, &res, depth, &mode, &ctx, feed);
+            })
+            .await
+            .ok_or_else(|| DavError::status(crate::SERVER_ERROR))?;
+        return Ok(crate::cache::respond(hit, "", gzip));
+    }
     let xml = blocking(move || {
         let ctx = PropCtx {
             username: user.as_deref(),

@@ -342,3 +342,50 @@ async fn methods_and_pages() {
     // Unrelated paths are not ours.
     assert_eq!(env.send(empty(req("GET", "/api/other"))).await.status, 418);
 }
+
+/// Regression (review finding): 20 parallel registrations with one invite code made 20
+/// accounts (the account was created, then the invite consumed in a second step). The
+/// account and the invite's consumption are now one transaction: exactly one succeeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_registrations_with_one_invite_make_one_account() {
+    let env = env("invite", "registered");
+    let code = env.db.create_invite(Role::Uploader, "7d", None).unwrap();
+    let app = env.app();
+    let tasks: Vec<_> = (0..20)
+        .map(|i| {
+            let (app, code) = (app.clone(), code.clone());
+            tokio::spawn(async move {
+                send(
+                    app,
+                    json_body(
+                        req("POST", "/api/register"),
+                        json!({"username": format!("racer{i}"), "password": "password123", "invite_code": code}),
+                    ),
+                )
+                .await
+            })
+        })
+        .collect();
+    let mut created = 0;
+    for t in tasks {
+        let r = t.await.unwrap();
+        match r.status {
+            201 => created += 1,
+            400 => assert_eq!(r.json()["error"], "Invalid or expired invite code"),
+            other => panic!("unexpected {other}: {}", r.text()),
+        }
+    }
+    assert_eq!(created, 1);
+    let racers = env
+        .db
+        .list_users(None)
+        .unwrap()
+        .into_iter()
+        .filter(|u| u.username.starts_with("racer"))
+        .count();
+    assert_eq!(racers, 1);
+    assert_eq!(
+        env.db.invite_info(&code).unwrap().unwrap().status,
+        InviteStatus::Used
+    );
+}

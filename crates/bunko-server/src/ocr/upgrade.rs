@@ -21,6 +21,11 @@ use super::collect::{CollectRequest, Outcome, lock_with_patience};
 use super::owed::UpgradeProbe;
 use super::types::{LibraryFacts, PathLocks, mtime_ns, rel_of};
 
+/// A plain sidecar's bytes, refused past `MAX_SIDECAR_BYTES` (never read whole).
+fn read_sidecar(path: &Path) -> std::io::Result<Vec<u8>> {
+    bunko_library::sidecar::read_capped(path, bunko_library::sidecar::MAX_SIDECAR_BYTES)
+}
+
 /// The family of a file no recipe can be read from.
 pub const UNKNOWN: &str = "unknown";
 pub const LEGACY: &str = "mokuro-legacy";
@@ -437,7 +442,7 @@ impl Upgrade {
         row: Option<&bunko_db::OcrSidecar>,
         stamp: bool,
     ) -> std::io::Result<PathBuf> {
-        let old = std::fs::read(bare)?;
+        let old = read_sidecar(bare)?;
         let base = Self::kept_name(recipe, row);
         let mut n = 0;
         let kept = loop {
@@ -447,7 +452,7 @@ impl Upgrade {
                 k => format!("{base}-prev{k}"),
             };
             let candidate = bunko_library::sidecar::with_suffix(cbz, &format!(".{name}.mokuro"));
-            match std::fs::read(&candidate) {
+            match read_sidecar(&candidate) {
                 Err(_) => break candidate,
                 Ok(existing) if existing == old || stamped_equal(&existing, &old) => {
                     break candidate;
@@ -684,7 +689,7 @@ impl Upgrade {
             return Err(format!("{} is locked by a WebDAV write", bare.display()));
         };
         let current =
-            std::fs::read(&bare).map_err(|e| format!("could not read {}: {e}", bare.display()))?;
+            read_sidecar(&bare).map_err(|e| format!("could not read {}: {e}", bare.display()))?;
         let primary = self.primary.lock().clone();
         let back_name = primary
             .as_ref()
@@ -692,7 +697,7 @@ impl Upgrade {
             .unwrap_or_else(|| "upgraded".into());
         let mut slot = bunko_library::sidecar::with_suffix(cbz, &format!(".{back_name}.mokuro"));
         let mut n = 1;
-        while slot.exists() && std::fs::read(&slot).ok().as_deref() != Some(current.as_slice()) {
+        while slot.exists() && read_sidecar(&slot).ok().as_deref() != Some(current.as_slice()) {
             slot = bunko_library::sidecar::with_suffix(
                 cbz,
                 &format!(
@@ -705,9 +710,9 @@ impl Upgrade {
         std::fs::write(&slot, &current)
             .map_err(|e| format!("could not keep {}: {e}", slot.display()))?;
         let backup = self.backup_of(&layer);
-        let original = match std::fs::read(&backup) {
+        let original = match read_sidecar(&backup) {
             Ok(bytes) => bytes,
-            Err(_) => std::fs::read(&layer)
+            Err(_) => read_sidecar(&layer)
                 .map_err(|e| format!("could not read {}: {e}", layer.display()))?,
         };
         let tmp = bare.with_file_name(format!(

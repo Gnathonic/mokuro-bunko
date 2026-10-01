@@ -272,37 +272,87 @@ impl Thumbnails {
     }
 }
 
+/// What the corrupt-sidecar sweep learnt about one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarCheck {
+    Valid,
+    /// Not JSON as Python reads it (or not readable at all): safe to delete.
+    Invalid,
+    /// Over [`bunko_library::sidecar::MAX_SIDECAR_BYTES`] (inflated): unreadable here, but
+    /// not provably damaged, so it is left alone.
+    TooLarge,
+}
+
+/// A reader that fails with `FileTooLarge` once more than `left` bytes went through.
+struct Capped<R> {
+    inner: R,
+    left: u64,
+}
+
+impl<R: Read> Read for Capped<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n as u64 > self.left {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "sidecar larger than the cap",
+            ));
+        }
+        self.left -= n as u64;
+        Ok(n)
+    }
+}
+
 /// Whether a sidecar parses as Python's `json.load` would (gzip-aware).
 pub fn is_valid_sidecar(path: &Path) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
+    check_sidecar(path) == SidecarCheck::Valid
+}
+
+/// [`is_valid_sidecar`], telling "damaged" from "too large to read" (at most
+/// [`bunko_library::sidecar::MAX_SIDECAR_BYTES`] are inflated, streamed, never held).
+pub fn check_sidecar(path: &Path) -> SidecarCheck {
+    check_sidecar_capped(path, bunko_library::sidecar::MAX_SIDECAR_BYTES)
+}
+
+fn check_sidecar_capped(path: &Path, cap: u64) -> SidecarCheck {
+    let too_large = |e: &std::io::Error| e.kind() == std::io::ErrorKind::FileTooLarge;
+    let open = || -> std::io::Result<Box<dyn Read>> {
+        let file = std::fs::File::open(path)?;
+        let gz = path.to_string_lossy().ends_with(".mokuro.gz");
+        let reader: Box<dyn Read> = if gz {
+            Box::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file)))
+        } else {
+            Box::new(std::io::BufReader::new(file))
+        };
+        Ok(Box::new(Capped {
+            inner: reader,
+            left: cap,
+        }))
     };
-    let gz = path.to_string_lossy().ends_with(".mokuro.gz");
-    let reader: Box<dyn Read> = if gz {
-        Box::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file)))
-    } else {
-        Box::new(std::io::BufReader::new(file))
+    let Ok(reader) = open() else {
+        return SidecarCheck::Invalid;
     };
-    if serde_json::from_reader::<_, serde::de::IgnoredAny>(reader).is_ok() {
-        return true;
+    match serde_json::from_reader::<_, serde::de::IgnoredAny>(reader) {
+        Ok(_) => return SidecarCheck::Valid,
+        Err(e) if e.io_error_kind() == Some(std::io::ErrorKind::FileTooLarge) => {
+            return SidecarCheck::TooLarge;
+        }
+        Err(_) => {}
     }
-    // serde is stricter than Python in two ways: NaN/Infinity and lone surrogates.
-    let mut text = Vec::new();
-    let read = if gz {
-        std::fs::File::open(path)
-            .and_then(|f| flate2::read::GzDecoder::new(f).read_to_end(&mut text))
-    } else {
-        std::fs::File::open(path).and_then(|mut f| f.read_to_end(&mut text))
+    // serde is stricter than Python in two ways: NaN/Infinity and lone surrogates. The
+    // second look reads the whole text, allocated once at its size (never past the cap).
+    let text = match bunko_library::sidecar::read_sidecar_bytes_capped(path, cap) {
+        Ok(text) => text,
+        Err(e) if too_large(&e) => return SidecarCheck::TooLarge,
+        Err(_) => return SidecarCheck::Invalid,
     };
-    if read.is_err() {
-        return false;
-    }
     let Ok(text) = String::from_utf8(text) else {
-        return false;
+        return SidecarCheck::Invalid;
     };
     match bunko_layout::json::Value::parse(&text) {
-        Ok(_) => true,
-        Err(e) => e.to_string().contains("surrogate"),
+        Ok(_) => SidecarCheck::Valid,
+        Err(e) if e.to_string().contains("surrogate") => SidecarCheck::Valid,
+        Err(_) => SidecarCheck::Invalid,
     }
 }
 
@@ -318,8 +368,20 @@ pub fn remove_corrupt_sidecars(library: &Path, db: Option<&Database>) -> usize {
     found.sort();
     let mut removed = 0;
     for path in found {
-        if !path.is_file() || is_valid_sidecar(&path) {
+        if !path.is_file() {
             continue;
+        }
+        match check_sidecar(&path) {
+            SidecarCheck::Valid => continue,
+            SidecarCheck::TooLarge => {
+                warn!(
+                    "Sidecar too large to check (over {} MiB inflated), left alone: {}",
+                    bunko_library::sidecar::MAX_SIDECAR_BYTES / (1024 * 1024),
+                    path.display()
+                );
+                continue;
+            }
+            SidecarCheck::Invalid => {}
         }
         match std::fs::remove_file(&path) {
             Ok(()) => {
@@ -436,5 +498,28 @@ mod tests {
                 "sur.mokuro"
             ]
         );
+    }
+
+    /// Regression (review finding): a 1.5 MB gzip of whitespace inflated to 1.5 GiB in
+    /// memory here. Inflation stops at the cap, and an over-cap sidecar is left in place
+    /// (it is not provably damaged), while small damaged ones are still removed.
+    #[test]
+    fn over_cap_sidecars_are_not_inflated_or_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("V.mokuro.gz");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(b"{\"pages\": [").unwrap();
+        gz.write_all(&vec![b' '; 4 << 20]).unwrap();
+        gz.write_all(b"]}").unwrap();
+        std::fs::write(&path, gz.finish().unwrap()).unwrap();
+        assert_eq!(check_sidecar_capped(&path, 1 << 20), SidecarCheck::TooLarge);
+        assert_eq!(check_sidecar_capped(&path, 8 << 20), SidecarCheck::Valid);
+        let plain = tmp.path().join("W.mokuro");
+        std::fs::write(&plain, vec![b' '; 2 << 20]).unwrap();
+        assert_eq!(
+            check_sidecar_capped(&plain, 1 << 20),
+            SidecarCheck::TooLarge
+        );
+        assert_eq!(check_sidecar_capped(&plain, 4 << 20), SidecarCheck::Invalid);
     }
 }

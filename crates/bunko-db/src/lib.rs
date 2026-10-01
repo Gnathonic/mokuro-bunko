@@ -44,13 +44,15 @@ pub use audit::{
 };
 pub use database::{Database, DbOptions};
 pub use error::{DbError, Result};
-pub use invites::{INVITABLE_ROLES, Invite, InviteInfo, InviteStatus, parse_duration};
+pub use invites::{
+    INVALID_INVITE_MESSAGE, INVITABLE_ROLES, Invite, InviteInfo, InviteStatus, parse_duration,
+};
 pub use ocr::OcrSidecar;
 pub use schema::SCHEMA_VERSION;
 pub use series::{CatalogSeries, CommunityDetails, SeriesFacts};
 pub use tokens::{TOKEN_TOUCH_SECONDS, TokenKind, token_hash};
 pub use uploads::{fold_series_title_key, layer_sidecar_volume_path, normalize_volume_key};
-pub use users::{User, UserStatus, normalize_role};
+pub use users::{KeepAdmin, LAST_ADMIN_MESSAGE, User, UserStatus, normalize_role};
 pub use validation::{validate_password, validate_username};
 
 #[cfg(test)]

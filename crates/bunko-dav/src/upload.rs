@@ -442,10 +442,19 @@ const RATIO: f64 = 20.0;
 const FLOOR: u64 = 256 * 1024 * 1024;
 const CEILING: u64 = 16 * 1024 * 1024 * 1024;
 
+/// The inflation an archive of `archive_size` bytes may reach.
+fn inflate_allowance(archive_size: u64) -> u64 {
+    CEILING.min(FLOOR.max((archive_size as f64 * RATIO) as u64))
+}
+
 /// Check a staged archive (0.5.2 `verify_archive` with the upload `InflateLimit`):
 /// the inflation bound is decided from the central directory before a byte is inflated;
 /// then every reachable member is read to its end against its CRC-32. Blocking.
 pub fn verify_staged(path: &Path) -> Verified {
+    verify_with_allowance(path, inflate_allowance)
+}
+
+fn verify_with_allowance(path: &Path, allowance: fn(u64) -> u64) -> Verified {
     let mut result = Verified::default();
     let Ok(mut file) = std::fs::File::open(path) else {
         result.structural = Some("OSError: cannot open the staged upload".to_string());
@@ -498,7 +507,7 @@ pub fn verify_staged(path: &Path) -> Verified {
         return result;
     }
     let declared: u64 = reachable.iter().map(|m| m.4).sum();
-    let allowed = CEILING.min(FLOOR.max((archive_size as f64 * RATIO) as u64));
+    let allowed = allowance(archive_size);
     if declared > allowed {
         result.refused = Some(format!(
             "its pages declare {:.1} GiB for a {:.1} MiB archive, more than any volume inflates to",
@@ -507,8 +516,12 @@ pub fn verify_staged(path: &Path) -> Verified {
         ));
         return result;
     }
+    // The declared sizes are the uploader's word: the bytes that actually come out are
+    // counted too. A member inflating past its declared size is damaged (and its reading
+    // stops there); the running total may never pass `allowed`.
     let mut buf = vec![0u8; 64 * 1024];
-    for (index, name, _, _, _) in reachable {
+    let mut inflated: u64 = 0;
+    for (index, name, _, _, declared_size) in reachable {
         result.members += 1;
         let mut member = match archive.by_index(*index) {
             Ok(m) => m,
@@ -518,10 +531,26 @@ pub fn verify_staged(path: &Path) -> Verified {
                 continue;
             }
         };
+        let mut produced: u64 = 0;
         loop {
             match member.read(&mut buf) {
                 Ok(0) => break,
-                Ok(_) => {}
+                Ok(n) => {
+                    produced += n as u64;
+                    inflated += n as u64;
+                    if inflated > allowed {
+                        result.refused = Some(format!(
+                            "its pages inflate past {:.1} GiB for a {:.1} MiB archive, more than any volume inflates to",
+                            allowed as f64 / 1024f64.powi(3),
+                            archive_size as f64 / 1024f64.powi(2)
+                        ));
+                        return result;
+                    }
+                    if produced > *declared_size {
+                        result.damaged.push(name.clone());
+                        break;
+                    }
+                }
                 Err(_) => {
                     result.damaged.push(name.clone());
                     break;
@@ -730,6 +759,54 @@ pub fn failure_for_status(code: u16) -> (u16, &'static str, String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deflated one-member zip of `real` zero bytes whose headers declare `declared`.
+    fn understated_zip(real: usize, declared: u32) -> Vec<u8> {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("p1.jpg", opts).unwrap();
+        w.write_all(&vec![0u8; real]).unwrap();
+        let mut bytes = w.finish().unwrap().into_inner();
+        // Local header: uncompressed size at 22; central directory entry: at 24.
+        bytes[22..26].copy_from_slice(&declared.to_le_bytes());
+        let cd = bytes.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        bytes[cd + 24..cd + 28].copy_from_slice(&declared.to_le_bytes());
+        bytes
+    }
+
+    /// Regression (review finding): verification trusted each member's declared size, so
+    /// a member declaring 1 KiB could inflate without bound (CPU, and an "intact" verdict
+    /// when its CRC matched). Real output is counted: past the declared size the member
+    /// is damaged, and the total may never pass the allowance.
+    #[test]
+    fn understated_members_are_counted_by_what_they_inflate_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.cbz");
+        std::fs::write(&path, understated_zip(4 << 20, 1024)).unwrap();
+        let v = verify_with_allowance(&path, |_| 64 << 20);
+        assert!(v.refused.is_none(), "{:?}", v.refused);
+        assert_eq!(v.damaged, vec!["p1.jpg".to_string()]);
+        assert!(!v.ok());
+        // The declared 1 KiB fits a 2 KiB allowance; the real output does not.
+        let v = verify_with_allowance(&path, |_| 2048);
+        assert!(
+            v.refused
+                .as_deref()
+                .is_some_and(|r| r.contains("inflate past")),
+            "{:?}",
+            v.refused
+        );
+        // Declared honestly but over the allowance once inflated: refused while reading.
+        std::fs::write(&path, understated_zip(4 << 20, 4 << 20)).unwrap();
+        assert!(verify_with_allowance(&path, |_| 64 << 20).ok());
+        let v = verify_with_allowance(&path, |_| 1 << 20);
+        assert!(v.refused.is_some(), "declared check must refuse first");
+        // An honest small archive still verifies under the real allowance.
+        std::fs::write(&path, understated_zip(1000, 1000)).unwrap();
+        assert!(verify_staged(&path).ok());
+    }
 
     fn b64(data: &[u8]) -> String {
         base64::engine::general_purpose::STANDARD.encode(data)

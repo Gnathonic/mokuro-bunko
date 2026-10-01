@@ -286,13 +286,16 @@ impl Scheduler {
     }
 
     /// A result upload landed for an outstanding claim.
+    ///
+    /// `name` comes off the wire: it is compared, never joined. The result's directory is
+    /// built from the server's own ids only, and the file inside it from the name the
+    /// library chose (a Windows prefix such as `C:x.mokuro` would otherwise REPLACE the
+    /// joined path, and the cleanup below would `remove_dir_all` outside `.processing`).
     pub fn result_stored(&mut self, pid: &str, sid: &str, claim: &str, name: &str, sha256: String) {
-        let path = self
-            .storage()
-            .join(".processing")
-            .join(sid)
-            .join(claim)
-            .join(name);
+        if !bunko_proto::valid_id(sid) || !bunko_proto::valid_id(claim) {
+            return;
+        }
+        let dir = self.storage().join(".processing").join(sid).join(claim);
         let wanted = self
             .sessions
             .get(sid)
@@ -301,11 +304,12 @@ impl Scheduler {
             .map(|j| j.sidecar_name.clone());
         match wanted {
             Some(expected) if expected == name => {
+                let path = dir.join(&expected);
                 self.results
                     .insert((sid.to_string(), claim.to_string()), (path, sha256));
             }
             Some(expected) => {
-                let _ = std::fs::remove_dir_all(path.parent().unwrap_or(&path));
+                let _ = std::fs::remove_dir_all(&dir);
                 let reason = format!(
                     "its sidecar arrived as {}, not {}",
                     bunko_sched::py::py_repr(&Value::String(name.chars().take(80).collect())),
@@ -324,7 +328,7 @@ impl Scheduler {
             }
             None => {
                 // A cancelled or ended claim may still be answered: nothing to do.
-                let _ = std::fs::remove_dir_all(path.parent().unwrap_or(&path));
+                let _ = std::fs::remove_dir_all(&dir);
             }
         }
     }

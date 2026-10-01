@@ -614,3 +614,47 @@ fn autobench_runs_first_then_the_row_runs_untuned_when_it_fails() {
     let ops = p.drain();
     assert_eq!(opened(&ops).len(), 1, "{ops:?}");
 }
+
+/// Regression (review finding): a mismatched result name used to be joined under
+/// `.processing/<sid>/<claim>/` and its PARENT removed — `../keep/x.mokuro` removed a
+/// sibling directory (on Windows `C:x.mokuro` replaced the whole path). The cleanup now
+/// removes `.processing/<sid>/<claim>` built from the server's ids only.
+#[test]
+fn a_mismatched_result_name_removes_only_its_claim_directory() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 3);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let claim = volumes(&ops)[0].1.clone();
+    let processing = h.storage().join(".processing");
+    let claim_dir = processing.join(&sid).join(&claim);
+    let keep = processing.join(&sid).join("keep");
+    std::fs::create_dir_all(&claim_dir).unwrap();
+    std::fs::create_dir_all(&keep).unwrap();
+    std::fs::write(keep.join("precious"), b"x").unwrap();
+    std::fs::write(claim_dir.join("V1.mokuro"), b"{}").unwrap();
+    for name in ["../keep/x.mokuro", "..", "C:x.mokuro", "/abs/x.mokuro"] {
+        h.s.handle(Msg::ResultStored {
+            pid: p.pid.clone(),
+            sid: sid.clone(),
+            claim: claim.clone(),
+            name: name.into(),
+            sha256: "0".repeat(64),
+        });
+        assert!(keep.join("precious").is_file(), "{name}");
+    }
+    assert!(!claim_dir.exists());
+    // Ids that are not the server's own never reach the filesystem either.
+    std::fs::create_dir_all(&claim_dir).unwrap();
+    h.s.handle(Msg::ResultStored {
+        pid: p.pid.clone(),
+        sid: format!("{sid}/keep"),
+        claim: "..".into(),
+        name: "x.mokuro".into(),
+        sha256: "0".repeat(64),
+    });
+    assert!(keep.join("precious").is_file());
+    assert!(claim_dir.is_dir());
+}

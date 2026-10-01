@@ -744,3 +744,90 @@ async fn proppatch_dead_properties() {
         400
     );
 }
+
+/// Regression (review finding): `COPY x` with a Destination that names the same file by
+/// another spelling (`d/../x`, `a//x`, `a/./x`) passed the "onto itself" check (it
+/// compared virtual paths), deleted the destination — the source — and then failed: the
+/// file was gone. `..` is refused (400) and the self check compares files on disk (403).
+#[tokio::test]
+async fn copy_or_move_onto_itself_by_another_spelling_is_refused() {
+    let env = Env::new();
+    let dir = env.lib("A");
+    std::fs::create_dir_all(dir.join("B")).unwrap();
+    std::fs::write(dir.join("x.cbz"), b"PK-x").unwrap();
+    std::fs::write(dir.join("x.mokuro"), b"{}").unwrap();
+    std::fs::create_dir_all(env.lib("S/inner")).unwrap();
+    for (method, from, to, code) in [
+        (
+            "COPY",
+            "/mokuro-reader/A/x.cbz",
+            "/mokuro-reader/A/B/../x.cbz",
+            400,
+        ),
+        (
+            "COPY",
+            "/mokuro-reader/A/x.cbz",
+            "/mokuro-reader/A/B/%2e%2e/x.cbz",
+            400,
+        ),
+        (
+            "COPY",
+            "/mokuro-reader/A/x.cbz",
+            "/mokuro-reader/A//x.cbz",
+            403,
+        ),
+        (
+            "COPY",
+            "/mokuro-reader/A/x.cbz",
+            "/mokuro-reader/A/./x.cbz",
+            403,
+        ),
+        (
+            "MOVE",
+            "/mokuro-reader/A/x.cbz",
+            "/mokuro-reader/A//x.cbz",
+            403,
+        ),
+        ("COPY", "/mokuro-reader/A", "/mokuro-reader//A", 403),
+        ("MOVE", "/mokuro-reader/A", "/mokuro-reader/./A", 403),
+        // Below itself, by another spelling.
+        (
+            "COPY",
+            "/mokuro-reader/S",
+            "/mokuro-reader//S/inner/S2",
+            403,
+        ),
+        (
+            "MOVE",
+            "/mokuro-reader/S",
+            "/mokuro-reader/S/./inner/S2",
+            403,
+        ),
+    ] {
+        let r = env
+            .req(
+                Some("admin"),
+                method,
+                from,
+                &[("destination", &dest(to))],
+                b"",
+            )
+            .await;
+        assert_eq!(r.code(), code, "{method} {from} -> {to}: {}", r.text());
+        assert_eq!(std::fs::read(dir.join("x.cbz")).unwrap(), b"PK-x", "{to}");
+        assert!(dir.join("x.mokuro").is_file(), "{to}");
+        assert!(env.lib("S/inner").is_dir());
+    }
+    // An honest copy still works.
+    let r = env
+        .req(
+            Some("admin"),
+            "COPY",
+            "/mokuro-reader/A/x.cbz",
+            &[("destination", &dest("/mokuro-reader/A/B/x.cbz"))],
+            b"",
+        )
+        .await;
+    assert_eq!(r.code(), 201);
+    assert_eq!(std::fs::read(dir.join("B/x.cbz")).unwrap(), b"PK-x");
+}

@@ -1,8 +1,10 @@
 //! `Depth: infinity` PROPFIND cache (spec §10).
 //!
-//! Observable behaviour kept from 0.5.2: only `Depth: infinity` (exact header) is cached,
-//! keyed by the normalised path; the shared entry is generated anonymously and always
-//! answers `allprop`; an authenticated caller of `/` or `/mokuro-reader` gets their own
+//! Observable behaviour kept from 0.5.2: `Depth: infinity` is cached, keyed by the
+//! normalised path (changed: a missing `Depth` or any spelling of `infinity` means the
+//! same and is answered from the same cache; 0.5.2 walked those live, which let parallel
+//! requests each hold a whole-library listing); the shared entry is generated anonymously
+//! and always answers `allprop`; an authenticated caller of `/` or `/mokuro-reader` gets their own
 //! progress files appended; `gzip` is served when `Accept-Encoding` mentions it; entries
 //! are fresh for `ttl`, then served stale while one background refresh runs, until
 //! `stale_ttl`.
@@ -82,9 +84,49 @@ pub struct PropfindCache {
     state: Mutex<State>,
     flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     runtime: Option<Handle>,
+    /// Listings generated at once (cache fills, refreshes and live Depth: 1 walks). Each
+    /// holds a directory's member list plus its compressed output; without a bound, N
+    /// parallel requests for N different folders would hold N of those.
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
+/// How many listings are generated at the same time (see [`PropfindCache`]`::slots`).
+const GENERATION_SLOTS: usize = 4;
+
 const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+
+/// `MULTISTATUS_OPEN` plus whatever `body` writes, deflated as it is produced into a
+/// gzip prefix without its final block. Blocking.
+fn compress(level: Compression, body: impl FnOnce(&mut dyn FnMut(&str))) -> Option<Entry> {
+    let mut crc = crc32fast::Hasher::new();
+    let mut raw_len = 0u64;
+    let mut enc = DeflateEncoder::new(Vec::with_capacity(64 * 1024), level);
+    let mut failed = false;
+    let mut feed = |chunk: &str| {
+        crc.update(chunk.as_bytes());
+        raw_len += chunk.len() as u64;
+        if enc.write_all(chunk.as_bytes()).is_err() {
+            failed = true;
+        }
+    };
+    feed(MULTISTATUS_OPEN);
+    body(&mut feed);
+    // Sync flush: byte-aligned, no final block, so another deflate stream may follow.
+    if failed || enc.flush().is_err() {
+        return None;
+    }
+    let deflated = std::mem::take(enc.get_mut());
+    let mut gz = Vec::with_capacity(GZIP_HEADER.len() + deflated.len());
+    gz.extend_from_slice(&GZIP_HEADER);
+    gz.extend_from_slice(&deflated);
+    Some(Entry {
+        gz_prefix: Bytes::from(gz),
+        crc,
+        raw_len,
+        generated: Instant::now(),
+        last_used: 0,
+    })
+}
 
 /// A cache answer, before per-user injection.
 pub(crate) struct Hit {
@@ -99,6 +141,7 @@ impl PropfindCache {
             state: Mutex::new(State::default()),
             flights: Mutex::new(HashMap::new()),
             runtime: Handle::try_current().ok(),
+            slots: Arc::new(tokio::sync::Semaphore::new(GENERATION_SLOTS)),
         })
     }
 
@@ -106,39 +149,30 @@ impl PropfindCache {
     /// the path is not a resource (not cached; the live path answers it).
     fn generate(roots: &Roots, key: &str) -> Option<Entry> {
         let res = roots.lookup(key, None)?;
-        let mut crc = crc32fast::Hasher::new();
-        let mut raw_len = 0u64;
-        let mut enc = DeflateEncoder::new(Vec::with_capacity(64 * 1024), Compression::new(6));
-        let mut failed = false;
-        let mut feed = |chunk: &str| {
-            crc.update(chunk.as_bytes());
-            raw_len += chunk.len() as u64;
-            if enc.write_all(chunk.as_bytes()).is_err() {
-                failed = true;
-            }
-        };
-        feed(MULTISTATUS_OPEN);
         let ctx = PropCtx {
             username: None,
             locks: None,
             dead: None,
         };
-        propfind::walk(roots, &res, None, &Mode::AllProp, &ctx, &mut feed);
-        // Sync flush: byte-aligned, no final block, so another deflate stream may follow.
-        if failed || enc.flush().is_err() {
-            return None;
-        }
-        let deflated = std::mem::take(enc.get_mut());
-        let mut gz = Vec::with_capacity(GZIP_HEADER.len() + deflated.len());
-        gz.extend_from_slice(&GZIP_HEADER);
-        gz.extend_from_slice(&deflated);
-        Some(Entry {
-            gz_prefix: Bytes::from(gz),
-            crc,
-            raw_len,
-            generated: Instant::now(),
-            last_used: 0,
+        compress(Compression::new(6), |feed| {
+            propfind::walk(roots, &res, None, &Mode::AllProp, &ctx, feed)
         })
+    }
+
+    /// Run `body` (which writes the `<D:response>` elements of a listing) on a blocking
+    /// thread, one of the bounded generation slots, and answer the result like a cache
+    /// hit: compressed while generated, so a huge `Depth: 1` folder costs its compressed
+    /// size per request, not its XML size.
+    pub(crate) async fn live(
+        &self,
+        body: impl FnOnce(&mut dyn FnMut(&str)) + Send + 'static,
+    ) -> Option<Hit> {
+        let _slot = self.slots.clone().acquire_owned().await.ok()?;
+        let entry = tokio::task::spawn_blocking(move || compress(Compression::fast(), body))
+            .await
+            .ok()
+            .flatten()?;
+        Some(Hit { entry })
     }
 
     fn insert(&self, key: &str, mut entry: Entry, epoch: u64) {
@@ -190,6 +224,7 @@ impl PropfindCache {
         if let Some(hit) = self.lookup_fresh(key) {
             return Some(hit);
         }
+        let slot = self.slots.clone().acquire_owned().await.ok();
         let epoch = self.state.lock().epoch;
         let roots = self.roots.clone();
         let k = key.to_string();
@@ -197,6 +232,7 @@ impl PropfindCache {
             .await
             .ok()
             .flatten();
+        drop(slot);
         if let Some(e) = &entry {
             self.insert(key, e.clone(), epoch);
         }
@@ -231,6 +267,7 @@ impl PropfindCache {
         };
         let this = Arc::clone(self);
         rt.spawn(async move {
+            let slot = this.slots.clone().acquire_owned().await.ok();
             let epoch = this.state.lock().epoch;
             let roots = this.roots.clone();
             let k = key.clone();
@@ -239,6 +276,7 @@ impl PropfindCache {
             {
                 this.insert(&key, entry, epoch);
             }
+            drop(slot);
             this.state.lock().refreshing.remove(&key);
         });
     }

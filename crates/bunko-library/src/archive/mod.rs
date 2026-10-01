@@ -20,6 +20,9 @@ use crate::compat;
 use crate::pyunicode;
 use zipdir::{ZipEntry, ZipError};
 
+/// The largest page [`Volume::read_page`] reads into memory.
+pub const MAX_PAGE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Page image suffixes the OCR runner accepts (`engine_runner.IMAGE_EXTENSIONS`).
 pub const PAGE_EXTENSIONS: &[&str] = &[".jpg", ".jpeg", ".png", ".webp", ".avif"];
 
@@ -189,11 +192,19 @@ impl Volume {
         }
     }
 
-    /// Read page `index` into memory (one page, never the archive).
+    /// Read page `index` into memory (one page, never the archive), at most
+    /// [`MAX_PAGE_BYTES`]: a larger page is [`ArchiveError::Damaged`] (no real manga page
+    /// comes close; a member that inflates past it is a bomb or garbage).
     pub fn read_page(&self, index: usize) -> Result<Vec<u8>, ArchiveError> {
-        let mut reader = self.open_page(index)?;
+        self.read_page_capped(index, MAX_PAGE_BYTES)
+    }
+
+    /// [`read_page`](Self::read_page) with an explicit cap.
+    pub fn read_page_capped(&self, index: usize, cap: u64) -> Result<Vec<u8>, ArchiveError> {
+        let reader = self.open_page(index)?;
         let mut buffer = Vec::new();
         reader
+            .take(cap + 1)
             .read_to_end(&mut buffer)
             .map_err(|error| match error.kind() {
                 io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {
@@ -201,6 +212,12 @@ impl Volume {
                 }
                 _ => ArchiveError::Io(error),
             })?;
+        if buffer.len() as u64 > cap {
+            return Err(ArchiveError::Damaged(format!(
+                "page {index} is larger than {} MiB",
+                cap / (1024 * 1024)
+            )));
+        }
         Ok(buffer)
     }
 }
@@ -366,6 +383,23 @@ mod tests {
         out.extend(cd_offset.to_le_bytes());
         out.extend(0u16.to_le_bytes());
         out
+    }
+
+    /// Regression (review finding): a page read into memory stops at the cap instead of
+    /// trusting the member's declared size (up to 4 GiB, more with zip64).
+    #[test]
+    fn read_page_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = vec![7u8; 100_000];
+        let path = dir.path().join("v.cbz");
+        std::fs::write(&path, stored_zip("p1.jpg", &data, crc32fast::hash(&data))).unwrap();
+        let volume = Volume::open(&path).unwrap();
+        assert!(matches!(
+            volume.read_page_capped(0, 99_999),
+            Err(ArchiveError::Damaged(m)) if m.contains("larger than")
+        ));
+        assert_eq!(volume.read_page_capped(0, 100_000).unwrap(), data);
+        assert_eq!(volume.read_page(0).unwrap(), data);
     }
 
     #[test]

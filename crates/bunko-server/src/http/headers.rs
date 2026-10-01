@@ -84,8 +84,16 @@ pub async fn request_log(req: Request, next: Next) -> Response {
 /// Refuse request paths whose percent-decoded form has a `..` segment, a NUL byte or
 /// invalid UTF-8 (400). Authorisation and WebDAV then always see the same normalised
 /// path; no client sends such paths legitimately.
+///
+/// The same rule covers the `Destination` of a MOVE/COPY: it names a second path the
+/// request writes to (a `..` there let `COPY x` with `Destination: d/../x` resolve onto
+/// its own source and delete it).
 pub async fn path_guard(req: Request, next: Next) -> Response {
-    if !path_is_clean(req.uri().path()) {
+    let dest_ok = req
+        .headers()
+        .get("destination")
+        .is_none_or(|v| v.to_str().is_ok_and(destination_is_clean));
+    if !path_is_clean(req.uri().path()) || !dest_ok {
         let mut resp = Response::new(axum::body::Body::from("Bad Request: invalid path"));
         *resp.status_mut() = http::StatusCode::BAD_REQUEST;
         resp.headers_mut().insert(
@@ -95,6 +103,16 @@ pub async fn path_guard(req: Request, next: Next) -> Response {
         return resp;
     }
     next.run(req).await
+}
+
+/// [`path_is_clean`] for a `Destination` header value: an absolute URL or a path; the
+/// path part (before any query or fragment) must be clean.
+pub fn destination_is_clean(raw: &str) -> bool {
+    let path = match raw.find("://") {
+        Some(i) => raw[i + 3..].find('/').map_or("/", |j| &raw[i + 3 + j..]),
+        None => raw,
+    };
+    path_is_clean(path.split(['?', '#']).next().unwrap_or(""))
 }
 
 pub fn path_is_clean(raw: &str) -> bool {
@@ -118,5 +136,25 @@ mod tests {
         assert!(!path_is_clean("/mokuro-reader/x/..%5cVol.cbz"));
         assert!(!path_is_clean("/a%00b"));
         assert!(!path_is_clean("/a%ff"));
+    }
+
+    /// Regression (review finding): MOVE/COPY destinations with `..` reached WebDAV.
+    #[test]
+    fn destinations_get_the_same_rule() {
+        use super::destination_is_clean;
+        assert!(destination_is_clean("/mokuro-reader/A/x.cbz"));
+        assert!(destination_is_clean(
+            "http://h:8080/mokuro-reader/A/x%20y.cbz?a=..#.."
+        ));
+        assert!(destination_is_clean("http://h"));
+        assert!(!destination_is_clean("/mokuro-reader/A/B/../x.cbz"));
+        assert!(!destination_is_clean(
+            "http://h/mokuro-reader/A/B/%2e%2e/x.cbz"
+        ));
+        assert!(!destination_is_clean(
+            "https://h/mokuro-reader/A/..%5cx.cbz"
+        ));
+        assert!(!destination_is_clean("/mokuro-reader/A/x%00.cbz"));
+        assert!(!destination_is_clean("/mokuro-reader/A/x%ff.cbz"));
     }
 }

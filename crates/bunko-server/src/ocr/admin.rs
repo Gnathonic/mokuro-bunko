@@ -487,7 +487,13 @@ impl OcrAdmin for OcrControl {
         } else {
             format!("{rel}.cbz")
         };
-        if rel.split('/').any(|p| p == ".." || p.is_empty()) {
+        // Every part one plain component: on Windows `C:x` or `\\server\x` would make
+        // the join below REPLACE the library path, and `a\..\b` would climb out.
+        if rel.split('/').any(|p| p == ".." || p.is_empty())
+            || !std::path::Path::new(&rel)
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
             return Some(Err(OcrError::new(400, "not a volume of the library")));
         }
         let cbz = self.core().layout.library().join(&rel);

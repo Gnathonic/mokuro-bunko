@@ -260,3 +260,36 @@ async fn options_and_pages() {
     let r = env.send(empty(req("GET", "/account/nope.js"))).await;
     assert_eq!((r.status, r.text().as_str()), (404, "Not found"));
 }
+
+/// Regression (review finding, CSRF): a body that is not declared JSON (what a cross-site
+/// form can send) is refused before it is read.
+#[tokio::test]
+async fn account_calls_need_a_json_body() {
+    let env = env();
+    let auth = basic("carol", PW);
+    for ct in ["text/plain", "application/x-www-form-urlencoded"] {
+        let body = json!({"current_password": PW, "new_password": "brand-new-pass-1"}).to_string();
+        let r = env
+            .send(
+                req("POST", "/api/account/password")
+                    .header("authorization", auth.as_str())
+                    .header("content-type", ct)
+                    .header("content-length", body.len().to_string())
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            (r.status, r.json()),
+            (
+                415,
+                json!({"error": "Content-Type must be application/json"})
+            ),
+            "{ct}"
+        );
+    }
+    assert!(
+        env.db.authenticate_user("carol", PW).unwrap().is_some(),
+        "the password did not change"
+    );
+}
