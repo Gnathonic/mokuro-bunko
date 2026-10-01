@@ -8,6 +8,7 @@ rules of the volume's own `.cbz` (the same `AuthMiddleware` decides both).
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -23,6 +24,7 @@ from mokuro_bunko.catalog.api import CatalogAPI
 from mokuro_bunko.catalog.manifest import build_volume_manifest, reader_file_url
 from mokuro_bunko.config import CatalogConfig, CorsConfig, RegistrationConfig
 from mokuro_bunko.database import Database
+from mokuro_bunko.metadata.compiler import SeriesFolder, compile_series_volumes
 from mokuro_bunko.middleware import auth as auth_module
 from mokuro_bunko.middleware.auth import AuthMiddleware
 from mokuro_bunko.middleware.cors import CorsMiddleware
@@ -380,6 +382,7 @@ def _api(
     anonymous_download: bool = True,
     catalog_enabled: bool = True,
     layer_order: Callable[[], Iterable[str]] | None = None,
+    with_metadata: bool = False,
 ) -> CatalogAPI:
     gate = AuthMiddleware(
         _inner,
@@ -392,6 +395,7 @@ def _api(
         catalog_config=CatalogConfig(enabled=catalog_enabled),
         read_gate=gate,
         layer_order=layer_order,
+        database=database if with_metadata else None,
     )
 
 
@@ -568,3 +572,57 @@ class TestCors:
         status, headers, _ = _get(app, VOLUME, self.ORIGIN, method="OPTIONS")
         assert status == "204 No Content"
         assert headers["Access-Control-Allow-Origin"] == "https://reader.mokuro.app"
+
+
+class TestOcrSha256:
+    """`ocr.sha256`: the metadata pass's hash of the primary, from its cache only."""
+
+    @staticmethod
+    def _primary(library: Path, body: bytes) -> Path:
+        path = library / "Dr Stone" / "Dr Stone 01.mokuro"
+        path.write_bytes(body)
+        return path
+
+    @staticmethod
+    def _compile(library: Path, database: Database) -> None:
+        compile_series_volumes(SeriesFolder("Dr Stone", library / "Dr Stone"), database=database)
+
+    def test_carries_the_compiled_hash(self, library: Path, database: Database) -> None:
+        body = json.dumps({"version": "0.2.2", "pages": []}).encode("utf-8")
+        self._primary(library, body)
+        (library / "Dr Stone" / "Dr Stone 01.hayai-nova.mokuro").write_bytes(b"{}")
+        self._compile(library, database)
+
+        _, _, raw = _get(_api(library, database, with_metadata=True), VOLUME)
+        manifest = json.loads(raw)
+        assert manifest["ocr"]["sha256"] == hashlib.sha256(body).hexdigest()
+        # Layers are never hashed.
+        assert all("sha256" not in layer for layer in manifest["layers"])
+
+    def test_absent_before_the_pass_has_hashed_it(
+        self, library: Path, database: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._primary(library, json.dumps({"version": "0.2.2", "pages": []}).encode("utf-8"))
+
+        def no_read(path: Path) -> object:
+            raise AssertionError(f"the manifest must never read a sidecar: {path}")
+
+        monkeypatch.setattr("mokuro_bunko.metadata.compiler._load_sidecar", no_read)
+        _, _, raw = _get(_api(library, database, with_metadata=True), VOLUME)
+        assert "sha256" not in json.loads(raw)["ocr"]
+
+    def test_absent_once_the_primary_changed_since(
+        self, library: Path, database: Database
+    ) -> None:
+        path = self._primary(library, json.dumps({"version": "0.2.2", "pages": []}).encode())
+        self._compile(library, database)
+        path.write_bytes(json.dumps({"version": "0.3.0", "pages": [], "x": 1}).encode())
+
+        _, _, raw = _get(_api(library, database, with_metadata=True), VOLUME)
+        assert "sha256" not in json.loads(raw)["ocr"]
+
+    def test_no_ocr_no_hash(self, library: Path, database: Database) -> None:
+        (library / "Dr Stone" / "Dr Stone 01.mokuro").unlink()
+        self._compile(library, database)
+        _, _, raw = _get(_api(library, database, with_metadata=True), VOLUME)
+        assert json.loads(raw)["ocr"] is None

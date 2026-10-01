@@ -323,6 +323,7 @@ def create_app(
         on_processor_login_refused=lambda user, ip: registry.record_failed_login(
             user, f"invalid credentials from {ip}"
         ),
+        storage_base_path=config.storage.base_path,
     )
     # Wrap with upload middleware (a .cbz written over WebDAV is queued for
     # OCR at once; a PUT says where its manifest is and when to recheck).

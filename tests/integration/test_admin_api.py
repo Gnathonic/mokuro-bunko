@@ -632,7 +632,7 @@ class TestSettingsAPI:
         assert "char_maps" not in catalog
         assert catalog["patch_budgets"] == [256, 384, 512]
         assert catalog["name_pattern"] == "^[a-z0-9][a-z0-9-]{0,31}$"
-        assert catalog["reserved_names"] == ["original", "gcv"]
+        assert catalog["reserved_names"] == ["original", "gcv", "updated-ocr"]
         assert catalog["reserved_prefixes"] == ["tr-"]
         # Every device a model may be placed on, and which models may not move.
         assert [row["id"] for row in catalog["devices"]][:2] == ["auto", "cpu"]

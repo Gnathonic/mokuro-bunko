@@ -112,6 +112,9 @@ def storage(tmp_path: Path) -> Path:
     (base / "library" / "S" / "V1.cbz").write_bytes(cbz_bytes())
     db = Database(base / "mokuro.db")
     db.create_user("uploader", "pass1234", "uploader")
+    # The uploader's own volume: replacing it (and its sidecars) is theirs to
+    # do; ADD_FILES alone never replaces another account's file.
+    db.record_volume_upload("S/V1.cbz", "uploader")
     return base
 
 

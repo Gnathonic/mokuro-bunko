@@ -7,12 +7,14 @@ import binascii
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum, auto
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlparse
 
 from mokuro_bunko.metadata.paths import (
     is_compiled_metadata_path,
     is_series_file_path,
+    re_encode_wsgi_path,
     series_title_from_series_file_path,
 )
 from mokuro_bunko.security import AuthAttemptLimiter, get_client_ip
@@ -353,9 +355,14 @@ class AuthMiddleware:
         allow_anonymous: bool = True,
         registration_config: Any = None,
         on_processor_login_refused: Callable[[str, str], None] | None = None,
+        storage_base_path: Path | None = None,
     ) -> None:
         self.app = app
         self.database = database
+        # Where the library lives, to tell a PUT that REPLACES a file from one
+        # that creates it (`_authorize_put`). None (tests, embedding): no
+        # replace check, as before.
+        self._path_mapper = PathMapper(storage_base_path) if storage_base_path else None
         self.realm = realm
         self._allow_anonymous = allow_anonymous
         self._registration_config = registration_config
@@ -457,6 +464,7 @@ class AuthMiddleware:
             authz_result.status_code,
             authz_result.error or "Access denied",
             include_auth_header=(authz_result.status_code == 401),
+            bearer=auth_result.error == INVALID_TOKEN_ERROR,
         )
 
     def authenticate(self, environ: dict[str, Any]) -> AuthResult:
@@ -513,7 +521,9 @@ class AuthMiddleware:
     ) -> AuthorizationResult:
         """Check if request is authorized."""
         method = environ.get("REQUEST_METHOD", "GET")
-        path = environ.get("PATH_INFO", "/")
+        # The path the DAV app and the database see: ownership of a
+        # non-ASCII series is recorded in unicode, never latin-1 mojibake.
+        path = re_encode_wsgi_path(environ.get("PATH_INFO", "/"))
         role = auth_result.role
 
         # OPTIONS always allowed for CORS preflight
@@ -840,6 +850,14 @@ class AuthMiddleware:
                     status_code=403,
                     error="Permission denied: cannot add files",
                 )
+            if not check_permission(role, Permission.MODIFY_DELETE) and self._replaces_unowned(
+                path, auth_result
+            ):
+                return AuthorizationResult(
+                    authorized=False,
+                    status_code=403,
+                    error="Permission denied: cannot replace a file another account uploaded",
+                )
             return AuthorizationResult(authorized=True)
 
         # Other PUT paths are not supported.
@@ -848,6 +866,25 @@ class AuthMiddleware:
             status_code=403,
             error="Permission denied: unsupported target path",
         )
+
+    def _replaces_unowned(self, path: str, auth_result: AuthResult) -> bool:
+        """Would this PUT overwrite a library file its volume's owner is not the caller?
+
+        ADD_FILES alone means adding: a new archive, a new sidecar, a new
+        OCR layer file. Replacing what is already there is MODIFY_DELETE's,
+        except for the caller's own volumes (`can_user_delete_library_path`,
+        the same ownership a DELETE checks, layer files included). Untracked
+        legacy files belong to nobody, so an uploader can no longer
+        overwrite them -- nor capture them (`record_volume_upload` used to
+        hand an overwritten untracked archive to whoever overwrote it).
+        """
+        if self._path_mapper is None:
+            return False
+        target = self._path_mapper.virtual_to_physical(path, auth_result.username)
+        if target is None or not target.exists():
+            return False
+        username = auth_result.username
+        return not (username and self.database.can_user_delete_library_path(username, path))
 
     def _authorize_progress_write(
         self,
