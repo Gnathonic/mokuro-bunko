@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 
 /// What the binary tells the server about itself.
 #[derive(Clone, Default)]
@@ -125,6 +125,12 @@ pub fn dav_unavailable() -> DavFallback {
 /// Assemble the router: module routers (each with its own state) in 0.5.2 precedence,
 /// then the authenticated WebDAV fallback, wrapped by CORS and security headers.
 pub fn build_router(core: Core, modules: Vec<Router>, dav: DavFallback) -> Router {
+    build_router_with(core, modules, dav, |r| r)
+}
+
+/// [`build_router`] with `inner` applied inside CORS and the security headers (for
+/// gates that must see every request, like the `/` home/setup redirect).
+pub fn build_router_with(core: Core, modules: Vec<Router>, dav: DavFallback, inner: impl FnOnce(Router) -> Router) -> Router {
     let mut app: Router = Router::new()
         .route("/robots.txt", get(static_files::robots))
         .route("/_static/{*file}", get(static_files::shared_static));
@@ -133,7 +139,15 @@ pub fn build_router(core: Core, modules: Vec<Router>, dav: DavFallback) -> Route
     }
     let fallback_state = FallbackState { core: core.clone(), dav };
     let dav_router: Router = Router::new().fallback(dav_fallback).with_state(fallback_state);
-    app.fallback_service(dav_router)
+    // A method a module route does not take (PUT /login/x, HEAD /) goes to WebDAV, as 0.5.2.
+    let mna = dav_router.clone();
+    let app = app
+        .method_not_allowed_fallback(move |req: Request| {
+            let svc = mna.clone();
+            async move { tower::ServiceExt::oneshot(svc, req).await.unwrap_or_else(|e| match e {}) }
+        })
+        .fallback_service(dav_router);
+    inner(app)
         .layer(axum::middleware::from_fn_with_state(core.clone(), cors::cors))
         .layer(axum::middleware::from_fn(headers::security_headers))
 }
@@ -170,6 +184,36 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
     Ok(())
 }
 
+/// Build every module router and the WebDAV fallback for these services. Modules are
+/// added here as they land; the order is 0.5.2's precedence (spec http-webdav §2.1).
+pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
+    let accounts = crate::accounts::AccountsDeps::new(services.core.clone(), services.db.clone());
+    let modules: Vec<Router> = vec![crate::accounts::router(accounts.clone())];
+    build_router_with(services.core.clone(), modules, dav_unavailable(), move |r| {
+        r.layer(axum::middleware::from_fn_with_state(accounts, crate::accounts::root_middleware))
+    })
+}
+
+/// When nobody can sign in yet, write (or reuse) a one-time setup token and log the URL,
+/// so the wizard is reachable from another machine (Docker bridge networking).
+pub fn announce_setup(services: &Services) {
+    let flag = crate::accounts::SetupFlag::default();
+    if !flag.needs_setup(&services.db).unwrap_or(false) {
+        return;
+    }
+    let (host, port, ssl) = {
+        let c = services.core.config.read();
+        (c.server.host.clone(), c.server.port, c.ssl.enabled)
+    };
+    let scheme = if ssl { "https" } else { "http" };
+    let host = if host == "0.0.0.0" || host == "::" { "localhost".to_string() } else { host };
+    match crate::accounts::ensure_setup_token(&services.core.layout) {
+        Ok(Some(token)) => info!("First run: finish setup at {scheme}://{host}:{port}/setup?token={token}"),
+        Ok(None) => info!("First run: finish setup at {scheme}://{host}:{port}/setup (token from MOKURO_SETUP_TOKEN)"),
+        Err(e) => info!("First run: finish setup at {scheme}://{host}:{port}/setup from this machine ({e})"),
+    }
+}
+
 pub fn not_found_json() -> Response {
     let mut r = Response::new(Body::from(r#"{"error": "Not found"}"#));
     *r.status_mut() = StatusCode::NOT_FOUND;
@@ -177,7 +221,3 @@ pub fn not_found_json() -> Response {
     r
 }
 
-#[allow(dead_code)]
-fn warn_unused() {
-    warn!("unused");
-}

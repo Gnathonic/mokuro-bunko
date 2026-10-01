@@ -1,0 +1,952 @@
+{
+ "series_facts": [
+  [
+   {
+    "type": "str",
+    "value": "a story about a wolf and a hunter"
+   },
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter"
+   },
+   {
+    "type": "str",
+    "value": "{\"mal\": 5}"
+   },
+   {
+    "type": "str",
+    "value": "{}"
+   },
+   {
+    "type": "str",
+    "value": "[\"Ookami\"]"
+   },
+   {
+    "type": "NoneType",
+    "value": null
+   },
+   {
+    "type": "NoneType",
+    "value": null
+   },
+   {
+    "type": "str",
+    "value": "2026-02-28T15:00:00.000Z"
+   },
+   {
+    "type": "NoneType",
+    "value": null
+   },
+   {
+    "type": "str",
+    "value": "{}"
+   },
+   {
+    "type": "str",
+    "value": "erin"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "dr stone"
+   },
+   {
+    "type": "str",
+    "value": "Dr  stone"
+   },
+   {
+    "type": "str",
+    "value": "{\"anilist\": 98416, \"mal\": 103897}"
+   },
+   {
+    "type": "str",
+    "value": "{\"native\": \"Dr.STONE\", \"romaji\": \"Dr. STONE\"}"
+   },
+   {
+    "type": "str",
+    "value": "[\"\u9032\u6483\u306e\u5de8\u4eba\"]"
+   },
+   {
+    "type": "str",
+    "value": "HD Scan"
+   },
+   {
+    "type": "str",
+    "value": "volumes"
+   },
+   {
+    "type": "str",
+    "value": "2026-08-18T19:36:24.324Z"
+   },
+   {
+    "type": "float",
+    "value": "12.5"
+   },
+   {
+    "type": "str",
+    "value": "{}"
+   },
+   {
+    "type": "str",
+    "value": "carol"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "odd.name. with.dots"
+   },
+   {
+    "type": "str",
+    "value": "Odd.Name. With.Dots"
+   },
+   {
+    "type": "str",
+    "value": "{}"
+   },
+   {
+    "type": "str",
+    "value": "{}"
+   },
+   {
+    "type": "str",
+    "value": "[]"
+   },
+   {
+    "type": "NoneType",
+    "value": null
+   },
+   {
+    "type": "NoneType",
+    "value": null
+   },
+   {
+    "type": "str",
+    "value": "2026-05-05T05:05:05.555Z"
+   },
+   {
+    "type": "NoneType",
+    "value": null
+   },
+   {
+    "type": "str",
+    "value": "{\"odd-v1\": 1000000000000000000000000000000}"
+   },
+   {
+    "type": "str",
+    "value": "gina"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "shinjuku \u00e1 zombie"
+   },
+   {
+    "type": "str",
+    "value": "Shinjuku a\u0301 Zombie"
+   },
+   {
+    "type": "str",
+    "value": "{}"
+   },
+   {
+    "type": "str",
+    "value": "{\"english\": \"Zombie\"}"
+   },
+   {
+    "type": "str",
+    "value": "[]"
+   },
+   {
+    "type": "NoneType",
+    "value": null
+   },
+   {
+    "type": "NoneType",
+    "value": null
+   },
+   {
+    "type": "str",
+    "value": "2026-01-01T00:00:00.000Z"
+   },
+   {
+    "type": "int",
+    "value": 12
+   },
+   {
+    "type": "str",
+    "value": "{\"nfd-v1\": 2.5}"
+   },
+   {
+    "type": "str",
+    "value": "bob"
+   }
+  ]
+ ],
+ "series_entry_cache": [
+  [
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter/A story about a wolf and a hunter 2.cbz"
+   },
+   {
+    "type": "str",
+    "value": "a story about a wolf and a hunter"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"cc029e65-4dc6-4f47-b02b-f04959ec8912\", \"volume_title\": \"A story about a wolf and a hunter 2\", \"page_count\": 54, \"matched_page_count\": 54, \"character_count\": 2539, \"mokuro_version\": \"0.2.2\", \"spine_width\": null, \"archive_size\": 15898, \"mokuro_size\": 57340, \"mokuro_modified\": 1700002000, \"mokuro_sha256\": \"346bde1a70f75e3152c0d376637c36ef24b4da2828bf32e8f1ed04c8e728dca7\"}"
+   },
+   {
+    "type": "int",
+    "value": 15898
+   },
+   {
+    "type": "float",
+    "value": "1700001000.1234567"
+   },
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter 2.mokuro:57340:1700002000.2469137"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter/A story about a wolf and a hunter 3.cbz"
+   },
+   {
+    "type": "str",
+    "value": "a story about a wolf and a hunter"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"23ace065-81ea-457b-956a-560b59eddca5\", \"volume_title\": \"A story about a wolf and a hunter 3\", \"page_count\": 64, \"matched_page_count\": 62, \"character_count\": 3201, \"mokuro_version\": \"0.2.2\", \"spine_width\": null, \"archive_size\": 18064, \"mokuro_size\": 18707, \"mokuro_modified\": 1700005000, \"mokuro_sha256\": \"edc7cbf47b08dc2ea7e3843f48d41f9dddfa862df1746ebbe5fbc597543a5379\"}"
+   },
+   {
+    "type": "int",
+    "value": 18064
+   },
+   {
+    "type": "float",
+    "value": "1700004000.493827"
+   },
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter 3.mokuro.gz:18707:1700005000.617284"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter/A story about a wolf and a hunter 4.1.cbz"
+   },
+   {
+    "type": "str",
+    "value": "a story about a wolf and a hunter"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"ab774197-c282-406b-88b0-d85ff813a480\", \"volume_title\": \"A story about a wolf and a hunter 4.1\", \"page_count\": 61, \"matched_page_count\": 61, \"character_count\": 3656, \"mokuro_version\": \"0.2.2\", \"spine_width\": null, \"archive_size\": 8806, \"mokuro_size\": 21124, \"mokuro_modified\": 1700007000, \"mokuro_sha256\": \"cda439d5f333a2647e04d904c1eef49c674c56eaf47579e2341b7d2085eded51\"}"
+   },
+   {
+    "type": "int",
+    "value": 8806
+   },
+   {
+    "type": "float",
+    "value": "1700006000.0"
+   },
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter 4.1.mokuro.gz:21124:1700007000.8641975"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Dr  stone/Extra.cbz"
+   },
+   {
+    "type": "str",
+    "value": "dr stone"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"30e44865-95c6-4847-a522-f022c6ab\", \"volume_title\": \"Extra\", \"page_count\": 1, \"matched_page_count\": 1, \"character_count\": 0, \"mokuro_version\": \"\", \"spine_width\": null, \"archive_size\": 123, \"mokuro_size\": null, \"mokuro_modified\": null, \"mokuro_sha256\": null}"
+   },
+   {
+    "type": "int",
+    "value": 123
+   },
+   {
+    "type": "float",
+    "value": "1700008000.9876542"
+   },
+   {
+    "type": "str",
+    "value": ""
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Dr Stone/Dr Stone 01.cbz"
+   },
+   {
+    "type": "str",
+    "value": "dr stone"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"cfb5220c-57db-4008-9f44-e659d794e381\", \"volume_title\": \"Dr Stone 01\", \"page_count\": 5, \"matched_page_count\": 5, \"character_count\": 15, \"mokuro_version\": \"0.2.2\", \"spine_width\": null, \"archive_size\": 1162, \"mokuro_size\": 1214, \"mokuro_modified\": 1700010000, \"mokuro_sha256\": \"97e35890d0d05c8c64a11187d1e792241116c28123a7d61ec346c76e47d8ea0a\"}"
+   },
+   {
+    "type": "int",
+    "value": 1162
+   },
+   {
+    "type": "float",
+    "value": "1700009000.0"
+   },
+   {
+    "type": "str",
+    "value": "Dr Stone 01.mokuro:1214:1700010000.2345679"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Dr Stone/Dr Stone 02.5.cbz"
+   },
+   {
+    "type": "str",
+    "value": "dr stone"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"u-025\", \"volume_title\": \"Dr Stone 02.5\", \"page_count\": 3, \"matched_page_count\": 3, \"character_count\": 9, \"mokuro_version\": \"0.2.2\", \"spine_width\": 33.25, \"archive_size\": 343, \"mokuro_size\": 737, \"mokuro_modified\": 1700013000, \"mokuro_sha256\": \"537e942803fbcbeafc172713695436a32cc02e3fb7dffec1ddf26e6a31dbad78\"}"
+   },
+   {
+    "type": "int",
+    "value": 343
+   },
+   {
+    "type": "float",
+    "value": "1700012000.0"
+   },
+   {
+    "type": "str",
+    "value": "Dr Stone 02.5.mokuro:737:1700013000.6049383"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Dr Stone/Dr Stone 02.cbz"
+   },
+   {
+    "type": "str",
+    "value": "dr stone"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"u-02\", \"volume_title\": \"Dr Stone 02\", \"page_count\": 10, \"matched_page_count\": 9, \"character_count\": 30, \"mokuro_version\": \"0.2.2\", \"spine_width\": 250, \"archive_size\": 1017, \"mokuro_size\": 256, \"mokuro_modified\": 1700016000, \"mokuro_sha256\": \"22d15577bfed4dd56479c42ad98d6612553e208529aa7bf104894e1ad0553e84\"}"
+   },
+   {
+    "type": "int",
+    "value": 1017
+   },
+   {
+    "type": "float",
+    "value": "1700014000.728395"
+   },
+   {
+    "type": "str",
+    "value": "Dr Stone 02.mokuro.gz:256:1700016000.9753087"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Dr Stone/Dr Stone 03.cbz"
+   },
+   {
+    "type": "str",
+    "value": "dr stone"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"u-03\", \"volume_title\": \"Dr Stone 03\", \"page_count\": 2, \"matched_page_count\": 2, \"character_count\": 7, \"mokuro_version\": \"0.2.2\", \"spine_width\": null, \"archive_size\": 218, \"mokuro_size\": 516, \"mokuro_modified\": 1700019000, \"mokuro_sha256\": \"5e102e9fddfc9e89935d69a286097de801989f0783e99d6b633ca52a2913c3ee\"}"
+   },
+   {
+    "type": "int",
+    "value": 218
+   },
+   {
+    "type": "float",
+    "value": "1700018000.0"
+   },
+   {
+    "type": "str",
+    "value": "Dr Stone 03.mokuro:516:1700019000.345679"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Dr Stone/Dr Stone 10.cbz"
+   },
+   {
+    "type": "str",
+    "value": "dr stone"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"90a954ab-a0d7-4b09-b07e-5fa23180\", \"volume_title\": \"Dr Stone 10\", \"page_count\": 3, \"matched_page_count\": 3, \"character_count\": 0, \"mokuro_version\": \"\", \"spine_width\": null, \"archive_size\": 467, \"mokuro_size\": null, \"mokuro_modified\": null, \"mokuro_sha256\": null}"
+   },
+   {
+    "type": "int",
+    "value": 467
+   },
+   {
+    "type": "float",
+    "value": "1700020000.4691358"
+   },
+   {
+    "type": "str",
+    "value": ""
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Odd.Name. With.Dots/v.1.cbz"
+   },
+   {
+    "type": "str",
+    "value": "odd.name. with.dots"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"odd-v1\", \"volume_title\": \"v.1\", \"page_count\": 5, \"matched_page_count\": 3, \"character_count\": 12, \"mokuro_version\": \"0.2.2\", \"spine_width\": null, \"archive_size\": 2148, \"mokuro_size\": 956, \"mokuro_modified\": 1700029000, \"mokuro_sha256\": \"902b56be3e38c0924b17131ca9a1be61a47a37c36671888f1bec594671a24ac0\"}"
+   },
+   {
+    "type": "int",
+    "value": 2148
+   },
+   {
+    "type": "float",
+    "value": "1700027000.0"
+   },
+   {
+    "type": "str",
+    "value": "v.1.mokuro:956:1700029000.580247"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Odd.Name. With.Dots/v.2.cbz"
+   },
+   {
+    "type": "str",
+    "value": "odd.name. with.dots"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"515b9308-928e-4cea-83d5-dfe2e3e9\", \"volume_title\": \"v.2\", \"page_count\": 0, \"matched_page_count\": 0, \"character_count\": 0, \"mokuro_version\": \"\", \"spine_width\": null, \"archive_size\": 139, \"mokuro_size\": null, \"mokuro_modified\": null, \"mokuro_sha256\": null}"
+   },
+   {
+    "type": "int",
+    "value": 139
+   },
+   {
+    "type": "float",
+    "value": "1700031000.8271604"
+   },
+   {
+    "type": "str",
+    "value": ""
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Shinjuku a\u0301 Zombie/Vol 1.5.cbz"
+   },
+   {
+    "type": "str",
+    "value": "shinjuku \u00e1 zombie"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"nfd-v15\", \"volume_title\": \"Vol 1.5\", \"page_count\": 2, \"matched_page_count\": 2, \"character_count\": 6, \"mokuro_version\": \"0.2.2\", \"spine_width\": 12, \"archive_size\": 230, \"mokuro_size\": 267, \"mokuro_modified\": 1700033000, \"mokuro_sha256\": \"e4d375178bf17234ffa1615d8e99ffafe98139edaedfa0cc8559bbdfb2ecafe3\"}"
+   },
+   {
+    "type": "int",
+    "value": 230
+   },
+   {
+    "type": "float",
+    "value": "1700032000.9506173"
+   },
+   {
+    "type": "str",
+    "value": "Vol 1.5.mokuro.gz:267:1700033000.0"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Shinjuku a\u0301 Zombie/Vol 1.cbz"
+   },
+   {
+    "type": "str",
+    "value": "shinjuku \u00e1 zombie"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"nfd-v1\", \"volume_title\": \"Vol 1\", \"page_count\": 3, \"matched_page_count\": 3, \"character_count\": 9, \"mokuro_version\": \"0.2.2\", \"spine_width\": null, \"archive_size\": 325, \"mokuro_size\": 733, \"mokuro_modified\": 1700035000, \"mokuro_sha256\": \"9b3863576f8f6b6c256f6e8984db3c3f22bf0588d70e1586dcc13a914fc7f941\"}"
+   },
+   {
+    "type": "int",
+    "value": 325
+   },
+   {
+    "type": "float",
+    "value": "1700034000.1975307"
+   },
+   {
+    "type": "str",
+    "value": "Vol 1.mokuro:733:1700035000.3209877"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Shinjuku a\u0301 Zombie/Vol 2.cbz"
+   },
+   {
+    "type": "str",
+    "value": "shinjuku \u00e1 zombie"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"nfd-v2\", \"volume_title\": \"Vol 2\", \"page_count\": 2, \"matched_page_count\": 0, \"character_count\": 6, \"mokuro_version\": \"0.2.2\", \"spine_width\": null, \"archive_size\": 37, \"mokuro_size\": 506, \"mokuro_modified\": 1700037000, \"mokuro_sha256\": \"7e5f3cf61852af44fb89a578f4a5cceb1eb3399f3e7e677cd7b6e37a378c1c02\"}"
+   },
+   {
+    "type": "int",
+    "value": 37
+   },
+   {
+    "type": "float",
+    "value": "1700036000.0"
+   },
+   {
+    "type": "str",
+    "value": "Vol 2.mokuro:506:1700037000.5679011"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba/\u9032\u6483\u306e\u5de8\u4eba 01.cbz"
+   },
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"bfbc350b-3bda-4469-8466-c162fb97\", \"volume_title\": \"\u9032\u6483\u306e\u5de8\u4eba 01\", \"page_count\": 3, \"matched_page_count\": 3, \"character_count\": 0, \"mokuro_version\": \"\", \"spine_width\": null, \"archive_size\": 466, \"mokuro_size\": 305, \"mokuro_modified\": 1700042000, \"mokuro_sha256\": null}"
+   },
+   {
+    "type": "int",
+    "value": 466
+   },
+   {
+    "type": "float",
+    "value": "1700041000.0617282"
+   },
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba 01.mokuro:305:1700042000.0"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba/\u9032\u6483\u306e\u5de8\u4eba 02.cbz"
+   },
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"bfbc3508-3bda-446a-8466-c162fb97\", \"volume_title\": \"\u9032\u6483\u306e\u5de8\u4eba 02\", \"page_count\": 2, \"matched_page_count\": 2, \"character_count\": 0, \"mokuro_version\": \"\", \"spine_width\": null, \"archive_size\": 218, \"mokuro_size\": 2, \"mokuro_modified\": 1700044000, \"mokuro_sha256\": null}"
+   },
+   {
+    "type": "int",
+    "value": 218
+   },
+   {
+    "type": "float",
+    "value": "1700043000.308642"
+   },
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba 02.mokuro:2:1700044000.4320986"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba/\u9032\u6483\u306e\u5de8\u4eba 03.cbz"
+   },
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba"
+   },
+   {
+    "type": "str",
+    "value": "{\"volume_uuid\": \"bfbc3509-3bda-446b-8466-c162fb97\", \"volume_title\": \"\u9032\u6483\u306e\u5de8\u4eba 03\", \"page_count\": 3, \"matched_page_count\": null, \"character_count\": 1234567890123, \"mokuro_version\": \"\", \"spine_width\": null, \"archive_size\": 316, \"mokuro_size\": 169, \"mokuro_modified\": 1700046000, \"mokuro_sha256\": \"a285f4a131014e53343002b6f1164f2002cbc135be7a8f8945ee3426e4a8cd8b\"}"
+   },
+   {
+    "type": "int",
+    "value": 316
+   },
+   {
+    "type": "float",
+    "value": "1700045000.0"
+   },
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba 03.mokuro:169:1700046000.6790123"
+   }
+  ]
+ ],
+ "catalog_series": [
+  [
+   {
+    "type": "str",
+    "value": "a story about a wolf and a hunter"
+   },
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter"
+   },
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter/A story about a wolf and a hunter 2.webp"
+   },
+   {
+    "type": "int",
+    "value": 3
+   },
+   {
+    "type": "float",
+    "value": "1700006000.0"
+   },
+   {
+    "type": "int",
+    "value": 179
+   },
+   {
+    "type": "int",
+    "value": 9396
+   },
+   {
+    "type": "int",
+    "value": 2
+   },
+   {
+    "type": "int",
+    "value": 1
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "dr stone"
+   },
+   {
+    "type": "str",
+    "value": "Dr Stone"
+   },
+   {
+    "type": "str",
+    "value": "Dr Stone/Dr Stone 01.webp"
+   },
+   {
+    "type": "int",
+    "value": 5
+   },
+   {
+    "type": "float",
+    "value": "1700020000.4691358"
+   },
+   {
+    "type": "int",
+    "value": 23
+   },
+   {
+    "type": "int",
+    "value": 61
+   },
+   {
+    "type": "int",
+    "value": 1
+   },
+   {
+    "type": "int",
+    "value": 1
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "odd.name. with.dots"
+   },
+   {
+    "type": "str",
+    "value": "Odd.Name. With.Dots"
+   },
+   {
+    "type": "str",
+    "value": "Odd.Name. With.Dots/v.1.webp"
+   },
+   {
+    "type": "int",
+    "value": 2
+   },
+   {
+    "type": "float",
+    "value": "1700031000.8271604"
+   },
+   {
+    "type": "int",
+    "value": 5
+   },
+   {
+    "type": "int",
+    "value": 12
+   },
+   {
+    "type": "int",
+    "value": 2
+   },
+   {
+    "type": "int",
+    "value": 1
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "shinjuku \u00e1 zombie"
+   },
+   {
+    "type": "str",
+    "value": "Shinjuku a\u0301 Zombie"
+   },
+   {
+    "type": "str",
+    "value": "Shinjuku a\u0301 Zombie/Vol 2.webp"
+   },
+   {
+    "type": "int",
+    "value": 3
+   },
+   {
+    "type": "float",
+    "value": "1700036000.0"
+   },
+   {
+    "type": "int",
+    "value": 7
+   },
+   {
+    "type": "int",
+    "value": 21
+   },
+   {
+    "type": "int",
+    "value": 2
+   },
+   {
+    "type": "int",
+    "value": 1
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba"
+   },
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba"
+   },
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba/\u9032\u6483\u306e\u5de8\u4eba 03.webp"
+   },
+   {
+    "type": "int",
+    "value": 3
+   },
+   {
+    "type": "float",
+    "value": "1700045000.0"
+   },
+   {
+    "type": "int",
+    "value": 8
+   },
+   {
+    "type": "int",
+    "value": 1234567890123
+   },
+   {
+    "type": "int",
+    "value": 0
+   },
+   {
+    "type": "int",
+    "value": 0
+   }
+  ]
+ ],
+ "volume_identities": [
+  [
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter/A story about a wolf and a hunter 2.cbz"
+   },
+   {
+    "type": "str",
+    "value": "cc029e65-4dc6-4f47-b02b-f04959ec8912"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter/A story about a wolf and a hunter 3.cbz"
+   },
+   {
+    "type": "str",
+    "value": "23ace065-81ea-457b-956a-560b59eddca5"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "A story about a wolf and a hunter/A story about a wolf and a hunter 4.1.cbz"
+   },
+   {
+    "type": "str",
+    "value": "ab774197-c282-406b-88b0-d85ff813a480"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Dr Stone/Dr Stone 01.cbz"
+   },
+   {
+    "type": "str",
+    "value": "cfb5220c-57db-4008-9f44-e659d794e381"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Dr Stone/Dr Stone 02.5.cbz"
+   },
+   {
+    "type": "str",
+    "value": "u-025"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Dr Stone/Dr Stone 02.cbz"
+   },
+   {
+    "type": "str",
+    "value": "u-02"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Dr Stone/Dr Stone 03.cbz"
+   },
+   {
+    "type": "str",
+    "value": "u-03"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Odd.Name. With.Dots/v.1.cbz"
+   },
+   {
+    "type": "str",
+    "value": "odd-v1"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Shinjuku a\u0301 Zombie/Vol 1.5.cbz"
+   },
+   {
+    "type": "str",
+    "value": "nfd-v15"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Shinjuku a\u0301 Zombie/Vol 1.cbz"
+   },
+   {
+    "type": "str",
+    "value": "nfd-v1"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "Shinjuku a\u0301 Zombie/Vol 2.cbz"
+   },
+   {
+    "type": "str",
+    "value": "nfd-v2"
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "\u9032\u6483\u306e\u5de8\u4eba/\u9032\u6483\u306e\u5de8\u4eba 03.cbz"
+   },
+   {
+    "type": "str",
+    "value": "bfbc3509-3bda-446b-8466-c162fb97"
+   }
+  ]
+ ],
+ "schema": [
+  "CREATE TABLE series_facts (\n                    series_key TEXT PRIMARY KEY,\n                    series_title TEXT NOT NULL,\n                    external_ids TEXT NOT NULL DEFAULT '{}',\n                    titles TEXT NOT NULL DEFAULT '{}',\n                    synonyms TEXT NOT NULL DEFAULT '[]',\n                    tag TEXT,\n                    unit TEXT,\n                    facts_updated_at TEXT NOT NULL,\n                    spine_offset NUMERIC,\n                    volume_offsets TEXT NOT NULL DEFAULT '{}',\n                    updated_by TEXT,\n                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )",
+  "CREATE TABLE series_entry_cache (\n                    volume_key TEXT PRIMARY KEY,\n                    series_key TEXT NOT NULL,\n                    entry_json TEXT NOT NULL,\n                    cbz_size INTEGER NOT NULL,\n                    cbz_mtime REAL NOT NULL,\n                    sidecar_key TEXT NOT NULL DEFAULT '',\n                    computed_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )",
+  "CREATE TABLE catalog_series (\n                    series_key TEXT PRIMARY KEY,\n                    folder_name TEXT NOT NULL,\n                    cover_path TEXT,\n                    volume_count INTEGER NOT NULL,\n                    latest_volume_modified REAL NOT NULL DEFAULT 0,\n                    total_pages INTEGER NOT NULL DEFAULT 0,\n                    total_chars INTEGER NOT NULL DEFAULT 0,\n                    missing_pages INTEGER NOT NULL DEFAULT 0,\n                    damaged_volumes INTEGER NOT NULL DEFAULT 0,\n                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )",
+  "CREATE TABLE volume_identities (\n                    volume_key TEXT PRIMARY KEY,\n                    volume_uuid TEXT NOT NULL,\n                    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+ ]
+}
