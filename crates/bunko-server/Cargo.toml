@@ -45,6 +45,9 @@ bunko-update.workspace = true
 fs4 = { version = "1", default-features = false }
 # accounts: one-time setup token generation
 rand.workspace = true
+# WebDAV wiring
+bunko-dav.workspace = true
+flate2 = "1"
 
 [dev-dependencies]
 tempfile.workspace = true
