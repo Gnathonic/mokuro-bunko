@@ -1,0 +1,10 @@
+[package]
+name = "bunko-proto"
+description = "Wire types shared by the mokuro-bunko library server and its OCR processors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

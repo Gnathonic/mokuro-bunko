@@ -1,0 +1,17 @@
+[package]
+name = "bunko-core"
+description = "Configuration, storage layout and shared types for mokuro-bunko"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ipnet = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
