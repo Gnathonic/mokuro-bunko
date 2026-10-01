@@ -38,6 +38,9 @@ pub async fn shutdown_signal() {
     }
 }
 
+/// Most connections served at once.
+pub const MAX_CONNECTIONS: usize = 1024;
+
 /// Serve `app` on `listener` until `stop` is cancelled; open connections get
 /// `grace` to finish. Long-lived connections (processor WebSockets, downloads) are
 /// cut at the end of the grace period.
@@ -51,7 +54,14 @@ pub async fn serve(
     let acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
     let tracker = tokio_util::task::TaskTracker::new();
     let conn_stop = CancellationToken::new();
+    // Bounded concurrency: past this many open connections, accepting waits (the
+    // kernel backlog queues new clients) instead of growing memory without limit.
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
+        let permit = tokio::select! {
+            p = slots.clone().acquire_owned() => match p { Ok(p) => p, Err(_) => break },
+            _ = stop.cancelled() => break,
+        };
         let (stream, peer) = tokio::select! {
             r = listener.accept() => match r {
                 Ok(v) => v,
@@ -69,6 +79,7 @@ pub async fn serve(
         let acceptor = acceptor.clone();
         let conn_stop = conn_stop.clone();
         tracker.spawn(async move {
+            let _permit = permit;
             let svc = hyper::service::service_fn(
                 move |mut req: hyper::Request<hyper::body::Incoming>| {
                     req.extensions_mut().insert(ConnectInfo(peer));
@@ -76,7 +87,8 @@ pub async fn serve(
                     async move { app.call(req.map(axum::body::Body::new)).await }
                 },
             );
-            let mut builder = auto::Builder::new(TokioExecutor::new());
+            // HTTP/1.1 only (as 0.5.2): no h2c surface with its own limits to tune.
+            let mut builder = auto::Builder::new(TokioExecutor::new()).http1_only();
             builder
                 .http1()
                 .timer(TokioTimer::new())

@@ -308,6 +308,10 @@ async fn complete(
     if !allowed(&d, &client, &parts) {
         return json_error(403, LOCAL_ONLY);
     }
+    // One completion at a time: two concurrent requests must not both see "no admin
+    // yet" and create two admins.
+    static COMPLETING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one_at_a_time = COMPLETING.lock().await;
     match needs_setup(&d).await {
         Ok(true) => {}
         Ok(false) => return json_error(400, "Setup already completed"),

@@ -417,7 +417,17 @@ async fn result_upload(
     let mut hasher = sha2::Sha256::new();
     let mut received: u64 = 0;
     let mut stream = req.into_body().into_data_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        // Two minutes without a byte: the processor is gone; free the slot and the file.
+        let next =
+            match tokio::time::timeout(std::time::Duration::from_secs(120), stream.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    let _ = tokio::fs::remove_file(&part).await;
+                    return error(408, "the upload stalled");
+                }
+            };
+        let Some(chunk) = next else { break };
         let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {

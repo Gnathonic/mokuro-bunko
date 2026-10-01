@@ -376,6 +376,7 @@ pub fn build_router_with(
         core.clone(),
         cors::cors,
     ))
+    .layer(axum::middleware::from_fn(headers::path_guard))
     .layer(axum::middleware::from_fn(headers::security_headers))
     .layer(axum::middleware::from_fn(
         |req: Request, next: axum::middleware::Next| async move {
