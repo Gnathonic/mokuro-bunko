@@ -35,10 +35,11 @@ def db(tmp_path: Path) -> Database:
 
 class TestSchema:
     def test_schema_version_is_current(self, db: Database) -> None:
-        # v3 added these tables; v4 (the OCR sidecar provenance) keeps them.
-        assert Database.SCHEMA_VERSION == 5
+        # v3 added these tables; v4 (the OCR sidecar provenance) and v6 (volume
+        # identities) keep them.
+        assert Database.SCHEMA_VERSION == 6
         with db._connection() as conn:
-            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 6
 
     def test_upgrading_an_existing_database_adds_the_tables(self, tmp_path: Path) -> None:
         path = tmp_path / "old.db"
@@ -61,7 +62,7 @@ class TestSchema:
         assert upgraded.get_user("alice") is not None
         assert upgraded.list_series_facts() == []
         with upgraded._connection() as conn:
-            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+            assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         upgraded.put_series_facts(make_row())
         assert upgraded.get_series_facts("dr stone") is not None
 

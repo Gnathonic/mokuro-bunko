@@ -5,6 +5,9 @@
 ### Added
 - `series.json` volumes carry `mokuro_sha256`, so readers re-download changed OCR.
 
+### Fixed
+- A re-OCR'd volume keeps its `volume_uuid`, so read progress stays attached.
+
 ## [0.5.1] - 2026-09-30
 
 ### Added
