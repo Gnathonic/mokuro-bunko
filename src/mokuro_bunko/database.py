@@ -302,6 +302,24 @@ def normalize_volume_key_from_library_relative(path: str) -> str | None:
     return None
 
 
+# A layer id as `ocr.generations.LAYER_ID_RE` reads it, plus a letter: a
+# purely numeric postfix is a decimal volume number (`Vol 01.5.mokuro` is the
+# primary of `Vol 01.5.cbz`), never a layer, so it never borrows an owner.
+_LAYER_POSTFIX_RE = re.compile(r"^(?=[a-z0-9-]*[a-z])[a-z0-9-]{1,32}\Z")
+
+
+def _layer_sidecar_volume_path(path: str) -> str | None:
+    """`S/Vol 1.cbz` for the layer file `S/Vol 1.hayai-nova.mokuro[.gz]`, else None."""
+    name = path[: -len(".gz")] if path.endswith(".gz") else path
+    if not name.endswith(".mokuro"):
+        return None
+    middle = name[: -len(".mokuro")]
+    cut = middle.rfind(".")
+    if cut <= 0 or "/" in middle[cut:] or not _LAYER_POSTFIX_RE.match(middle[cut + 1 :]):
+        return None
+    return middle[:cut] + ".cbz"
+
+
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 
 
@@ -1759,6 +1777,12 @@ class Database:
             return False
 
         owner = self.get_volume_owner(relative)
+        if owner is None:
+            # An OCR layer file (`<stem>.<layer>.mokuro[.gz]`) belongs to its
+            # volume, `<stem>.cbz`, not to a `<stem>.<layer>.cbz` nobody owns.
+            parent = _layer_sidecar_volume_path(relative)
+            if parent is not None:
+                owner = self.get_volume_owner(parent)
         return owner == username
 
     def _volume_upload_folder_owners(self) -> list[tuple[str, str]]:
