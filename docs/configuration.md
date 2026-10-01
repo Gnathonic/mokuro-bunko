@@ -1017,7 +1017,7 @@ Other variables:
 | `MOKURO_PPOCR_DOWNLOAD` | `1` | `0` never downloads the PP-OCRv6 models; it fails with the list of files to copy. |
 | `MOKURO_PPOCR_THREADS` | `4` | CPU threads for PP-OCRv6. |
 | `MOKURO_PPOCR_PRECISION` | `fp32` | `fp16` is a smaller download but slower on a CPU. |
-| `MOKURO_PPOCR_SIDE`, `MOKURO_PPOCR_TILE` | `1280`, `auto` | PP-OCRv6 detector input size and tiling (`auto`, `off`, `force`). |
+| `MOKURO_PPOCR_SIDE`, `MOKURO_PPOCR_TILE` | `1120`, `auto` | PP-OCRv6 detector input size and tiling (`auto`, `off`, `force`). |
 
 Advanced pipeline overrides (`MOKURO_OCR_STAGE_WORKERS`,
 `MOKURO_OCR_CPU_WORKERS`, `MOKURO_OCR_QUEUE_CAPACITY`,
