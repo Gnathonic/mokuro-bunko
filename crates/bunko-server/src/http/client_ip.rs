@@ -34,10 +34,10 @@ impl TrustedProxies {
         if let Some(ip) = header("x-real-ip").and_then(|s| s.parse::<IpAddr>().ok()) {
             return canonical(ip);
         }
-        if let Some(xff) = header("x-forwarded-for") {
-            if let Some(ip) = xff.split(',').map(str::trim).filter(|s| !s.is_empty()).next_back().and_then(|s| s.parse::<IpAddr>().ok()) {
-                return canonical(ip);
-            }
+        if let Some(xff) = header("x-forwarded-for")
+            && let Some(ip) = xff.split(',').map(str::trim).filter(|s| !s.is_empty()).next_back().and_then(|s| s.parse::<IpAddr>().ok())
+        {
+            return canonical(ip);
         }
         canonical(peer)
     }
@@ -50,10 +50,10 @@ impl TrustedProxies {
             if let Some(real) = header("x-real-ip") {
                 return real.to_string();
             }
-            if let Some(xff) = header("x-forwarded-for") {
-                if let Some(last) = xff.split(',').map(str::trim).filter(|s| !s.is_empty()).next_back() {
-                    return last.to_string();
-                }
+            if let Some(xff) = header("x-forwarded-for")
+                && let Some(last) = xff.split(',').map(str::trim).filter(|s| !s.is_empty()).next_back()
+            {
+                return last.to_string();
             }
         }
         canonical(peer).to_string()

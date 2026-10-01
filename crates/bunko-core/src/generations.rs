@@ -718,10 +718,10 @@ pub fn parse_device(value: &str) -> Result<String, String> {
         "auto" | "cpu" => Ok(v.to_string()),
         "gpu" | "cuda" => Ok("gpu:0".to_string()),
         _ => {
-            if let Some(n) = v.strip_prefix("gpu:").or_else(|| v.strip_prefix("cuda:")) {
-                if let Ok(i) = n.parse::<u32>() {
-                    return Ok(format!("gpu:{i}"));
-                }
+            if let Some(n) = v.strip_prefix("gpu:").or_else(|| v.strip_prefix("cuda:"))
+                && let Ok(i) = n.parse::<u32>()
+            {
+                return Ok(format!("gpu:{i}"));
             }
             Err(format!("'{v}' is not a device (use auto, cpu or gpu:<n>)"))
         }
