@@ -40,6 +40,9 @@ base64.workspace = true
 percent-encoding.workspace = true
 reqwest.workspace = true
 which = "7"
+# admin module: update checks/apply, disk usage for /_admin/api/status
+bunko-update.workspace = true
+fs4 = { version = "1", default-features = false }
 # accounts: one-time setup token generation
 rand.workspace = true
 

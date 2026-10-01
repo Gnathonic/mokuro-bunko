@@ -74,19 +74,31 @@ pub struct Services {
     pub db: Arc<Database>,
     pub dyndns: DynDnsService,
     pub tunnel: TunnelService,
+    pub updates: crate::admin::UpdateService,
     pub stop: CancellationToken,
+    /// Set by the admin "Update and restart" action: the binary re-execs after shutdown.
+    pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Services {
-    pub fn new(config: Config, config_path: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub fn new(config: Config, config_path: Option<PathBuf>, flavor: &str) -> anyhow::Result<Self> {
         let db_options = DbOptions::from(&config.database);
         let layout = config.storage.layout();
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
         let backend = Arc::new(DbAuthBackend { db: db.clone(), layout: layout.clone() });
+        let updates = crate::admin::UpdateService::from_config(config.clone(), flavor);
         let core = Core::new(config, config_path, backend);
-        Ok(Services { core, db, dyndns, tunnel: TunnelService::default(), stop: CancellationToken::new() })
+        Ok(Services {
+            core,
+            db,
+            dyndns,
+            tunnel: TunnelService::default(),
+            updates,
+            stop: CancellationToken::new(),
+            restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
     }
 }
 
@@ -115,6 +127,19 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
         return denied.into_response();
     }
     (st.dav)(req, ctx).await
+}
+
+/// 0.5.2 put `AuthMiddleware` in front of the admin and processor APIs: anonymous or
+/// wrongly-roled requests get its 401/403 text answers before the module runs.
+async fn auth_gate(State(core): State<Core>, ctx: RequestCtx, req: Request, next: axum::middleware::Next) -> Response {
+    let path = percent_encoding::percent_decode_str(req.uri().path()).decode_utf8_lossy().into_owned();
+    if auth::paths::is_admin_path(&path) || auth::paths::is_processor_path(&path) {
+        let anon = core.anonymous_access();
+        if let Err(denied) = auth::authorize(req.method(), &path, None, &ctx.identity, anon, core.backend.as_ref()) {
+            return denied.into_response();
+        }
+    }
+    next.run(req).await
 }
 
 /// A placeholder WebDAV handler until bunko-dav is wired.
@@ -147,7 +172,7 @@ pub fn build_router_with(core: Core, modules: Vec<Router>, dav: DavFallback, inn
             async move { tower::ServiceExt::oneshot(svc, req).await.unwrap_or_else(|e| match e {}) }
         })
         .fallback_service(dav_router);
-    inner(app)
+    inner(app.layer(axum::middleware::from_fn_with_state(core.clone(), auth_gate)))
         .layer(axum::middleware::from_fn_with_state(core.clone(), cors::cors))
         .layer(axum::middleware::from_fn(headers::security_headers))
 }
@@ -177,9 +202,11 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
     if services.core.config.read().dyndns.enabled {
         services.dyndns.start();
     }
+    services.updates.start(stop.clone());
     crate::serve::serve(listener, app, tls, stop, Duration::from_secs(5)).await?;
     // Ordered shutdown (0.5.2 shutdown_app order, plus the new services).
     services.dyndns.stop();
+    services.updates.stop().await;
     services.tunnel.stop().await;
     Ok(())
 }
@@ -188,7 +215,25 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
 /// added here as they land; the order is 0.5.2's precedence (spec http-webdav §2.1).
 pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
     let accounts = crate::accounts::AccountsDeps::new(services.core.clone(), services.db.clone());
-    let modules: Vec<Router> = vec![crate::accounts::router(accounts.clone())];
+    let restart = {
+        let flag = services.restart_requested.clone();
+        let stop = services.stop.clone();
+        Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            stop.cancel();
+        }) as Arc<dyn Fn() + Send + Sync>
+    };
+    let admin = crate::admin::AdminDeps {
+        core: services.core.clone(),
+        db: services.db.clone(),
+        ocr: Arc::new(crate::admin::NoOcr),
+        tunnel: Some(services.tunnel.clone()),
+        dyndns: Some(services.dyndns.clone()),
+        updates: Some(services.updates.clone()),
+        drop_processors: None,
+        restart: Some(restart),
+    };
+    let modules: Vec<Router> = vec![crate::accounts::router(accounts.clone()), crate::admin::router(admin)];
     build_router_with(services.core.clone(), modules, dav_unavailable(), move |r| {
         r.layer(axum::middleware::from_fn_with_state(accounts, crate::accounts::root_middleware))
     })

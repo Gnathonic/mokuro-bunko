@@ -33,11 +33,19 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
         info!("mokuro-bunko {} ({flavor})", bunko_core::VERSION);
         info!("Storage path: {}", config.storage.base_path.display());
         info!("Server log: {}", config.storage.base_path.join("logs").join(crate::logging::SERVER_LOG_NAME).display());
-        let services = Services::new(config, Some(config_path))?;
+        let services = Services::new(config, Some(config_path), flavor)?;
         let opts = ServeOptions { verbose: args.verbose, flavor };
         app::announce_setup(&services);
         let router = app::assemble(&services, &opts);
         println!("Press Ctrl+C to stop");
-        app::serve_router(&services, router).await
+        app::serve_router(&services, router).await?;
+        Ok::<_, anyhow::Error>(services.restart_requested.load(std::sync::atomic::Ordering::SeqCst))
+    })
+    .and_then(|restart| {
+        if restart {
+            info!("Restarting into the updated binary");
+            bunko_update::restart()?;
+        }
+        Ok(())
     })
 }
