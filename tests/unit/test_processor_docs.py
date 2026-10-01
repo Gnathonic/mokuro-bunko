@@ -80,6 +80,6 @@ def test_skip_is_documented_as_no_ocr_on_this_machine_not_none_at_all() -> None:
     assert "No OCR, WebDAV server only" not in example
     row = next(line for line in guide.splitlines() if line.startswith("| `skip` |"))
     assert "local_processing: false" in row
-    unreleased = changelog.split("## [", 2)[1]
-    changed = unreleased.split("### Changed", 1)[1].split("###", 1)[0]
+    release = changelog.split("## [0.5.0]", 1)[1].split("## [", 1)[0]
+    changed = release.split("### Changed", 1)[1].split("###", 1)[0]
     assert "`ocr.backend: skip`" in changed, "a Changed entry, not only an Added aside"

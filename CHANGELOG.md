@@ -1,10 +1,22 @@
 # Changelog
 
-## [0.5.0] - Unreleased
+## [0.5.1] - 2026-09-30
 
 ### Added
 - Bearer tokens: sign in once with `POST /login/api/token`, then send the token.
 - The web pages and processors use tokens; passwords are no longer stored.
+
+### Changed
+- PP-OCRv6 manga models updated to v0.2, run at the authors' best settings.
+- Queue status and queue file list the next 100 waiting volumes; totals stay whole.
+
+### Fixed
+- Queue page, queue file and claims share one library walk; large queues load fast.
+- OCR settings page no longer stalls on large libraries; volume counts fill in.
+
+## [0.5.0] - 2026-09-29
+
+### Added
 - OCR on other machines: `mokuro-bunko processor` logs in and runs the queue.
 - `processor` account role for OCR machines, granted only by an admin.
 - `processor setup` checks the account, writes processor.yaml, installs and starts it.
@@ -40,7 +52,6 @@
 - `/mokuro-reader/.mokuro-queue.json`: the whole OCR queue, per volume, with ETAs.
 
 ### Changed
-- PP-OCRv6 manga models updated to v0.2, run at the authors' best settings.
 - mokuro runs from the optimized fork and stays loaded; output unchanged.
 - `ocr.backend: skip` now means no OCR on this machine, not none anywhere.
 - OCR queue goes round-robin across series in reading order, not upload date.
