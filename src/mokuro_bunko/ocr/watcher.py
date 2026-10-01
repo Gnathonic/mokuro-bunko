@@ -128,6 +128,17 @@ SESSION_POLL_SECONDS = 1.0
 # The queue page's pending list is cached for at least this many of its own
 # walks (`OCRWorker._queue_max_age`).
 QUEUE_CACHE_WALK_FACTOR = 4.0
+# The library walk every claim and the queue page start from -- which jobs
+# are owed at all -- is shared for this many of its own durations
+# (`OCRWorker._walked_candidates`): about a minute where a walk takes 7 s,
+# not at all where it takes milliseconds.
+CANDIDATE_WALK_FACTOR = 8.0
+# A walk faster than this is not shared at all: caching it saves nothing, and
+# a small library then sees a file written straight to the disk at once.
+CANDIDATE_WALK_CACHE_MIN_SECONDS = 0.1
+# Per-archive memo tables (`_job_key`, `_rel_library_path`, `_archive_pages`):
+# room for a large library, cleared whole if it ever outgrows them.
+PATH_KEY_CACHE_MAX = 200_000
 
 # Sessions of one generation that may die without completing a volume before
 # that row is given up on for the rest of the scan. Two: one death is a
@@ -798,6 +809,16 @@ class OCRWorker:
         # How long the last `pending_jobs` walk took: the cache lives at
         # least QUEUE_CACHE_WALK_FACTOR of it (`_queue_max_age`).
         self._queue_walk_seconds = 0.0
+        # The shared library walk: (monotonic time, epoch, owed jobs). Kept
+        # current without re-walking -- a finished job leaves it, an arrival
+        # joins it, a removal takes its volumes out -- and re-walked when it
+        # ages out or the generations change (`_candidate_epoch`).
+        self._candidate_walk: tuple[float, int, list[tuple[Path, str]]] | None = None
+        self._candidate_epoch = 0
+        self._candidate_walk_seconds = 0.0
+        self._candidate_walk_lock = threading.Lock()
+        self._path_keys: dict[Path, tuple[str, str]] = {}
+        self._rel_paths: dict[Path, str] = {}
         self._queue_generation = 0
         # The queue page's state version (`queue.state`): bumped by every
         # change that page shows -- a claim, a page event, a volume done or
@@ -1026,6 +1047,9 @@ class OCRWorker:
             if session.kill():
                 self._log(f"Closed the open {name} session: {reason}")
         self._congestion.prune(row.id for row in self.generations)
+        # Which rows a volume owes depends on the rows: the shared walk is
+        # re-taken by the next claim.
+        self._invalidate_candidates()
         self._prune_failure_records()
         self._log(
             "OCR settings applied (generations, in run order: "
@@ -1223,11 +1247,17 @@ class OCRWorker:
             logger.warning("Could not persist OCR failure records: %s", e)
 
     def _rel_library_path(self, path: Path) -> str:
-        """Best-effort path relative to the library root."""
-        try:
-            return str(path.relative_to(self.storage_path / "library"))
-        except ValueError:
-            return str(path)
+        """Best-effort path relative to the library root (memoized like `_job_key`)."""
+        known = self._rel_paths.get(path)
+        if known is None:
+            try:
+                known = str(path.relative_to(self.storage_path / "library"))
+            except ValueError:
+                known = str(path)
+            if len(self._rel_paths) >= PATH_KEY_CACHE_MAX:
+                self._rel_paths.clear()
+            self._rel_paths[path] = known
+        return known
 
     @staticmethod
     def failure_key(rel_cbz: str, generation: GenerationSpec) -> str:
@@ -1420,12 +1450,7 @@ class OCRWorker:
         library_path = self.storage_path / "library"
         if not library_path.exists():
             return [], []
-        candidates: list[tuple[Path, str]] = [
-            (p, generation.id)
-            for p in library_path.rglob("*.cbz")
-            if p.is_file()
-            for generation in self.processor.missing_generations(p)
-        ]
+        candidates = self._walked_candidates()
 
         failures = self._load_failures()
         if not failures:
@@ -1451,6 +1476,84 @@ class OCRWorker:
                 eligible.append((path, gen_id))
         return eligible, stale_records
 
+    def _walk_candidates(self) -> list[tuple[Path, str]]:
+        """Every (CBZ, generation id) the library owes, straight off the disk."""
+        library_path = self.storage_path / "library"
+        return [
+            (p, generation.id)
+            for p in library_path.rglob("*.cbz")
+            if p.is_file()
+            for generation in self.processor.missing_generations(p)
+        ]
+
+    def _walked_candidates(self) -> list[tuple[Path, str]]:
+        """The owed jobs, from the shared walk while it is current.
+
+        A walk stats every archive and every sidecar and asks the metadata
+        cache about each volume: 7 s at 12k volumes on a network share. Every
+        slot's claim and every queue-page computation used to take one; with
+        eight machines claiming, they ran back to back and starved every
+        request of the interpreter. One walk now serves them all, kept
+        current in place (`_forget_candidate`, `archive_arrived`,
+        `archive_removed`) and re-taken when it is older than
+        `CANDIDATE_WALK_FACTOR` of its own walks or the generations changed:
+        a walk that costs milliseconds is effectively not cached, so a file
+        copied straight onto the disk is seen as soon as it ever was.
+        Single-flight: a claim that finds it stale waits for the one walk
+        under way.
+        """
+        with self._lock:
+            cached = self._candidate_walk
+            epoch = self._candidate_epoch
+            walk_seconds = self._candidate_walk_seconds
+            max_age = (
+                CANDIDATE_WALK_FACTOR * walk_seconds
+                if walk_seconds >= CANDIDATE_WALK_CACHE_MIN_SECONDS
+                else 0.0
+            )
+        if cached is not None and cached[1] == epoch and time.monotonic() - cached[0] <= max_age:
+            return list(cached[2])
+        with self._candidate_walk_lock:
+            with self._lock:
+                cached = self._candidate_walk
+                epoch = self._candidate_epoch
+            if cached is not None and cached[1] == epoch and time.monotonic() - cached[0] <= max_age:
+                return list(cached[2])
+            started = time.monotonic()
+            walked = self._walk_candidates()
+            with self._lock:
+                self._candidate_walk_seconds = time.monotonic() - started
+                if self._candidate_epoch == epoch:
+                    # Only if nothing invalidated it while it was being taken.
+                    self._candidate_walk = (time.monotonic(), epoch, walked)
+            return list(walked)
+
+    def _invalidate_candidates(self) -> None:
+        """The generations changed: the next claim walks the library again."""
+        with self._lock:
+            self._candidate_epoch += 1
+            self._candidate_walk = None
+
+    def _forget_candidate(self, job: tuple[Path, str]) -> None:
+        """This job's sidecar exists now: it is owed no more."""
+        with self._lock:
+            cached = self._candidate_walk
+            if cached is not None and job in cached[2]:
+                self._candidate_walk = (cached[0], cached[1], [j for j in cached[2] if j != job])
+
+    def _still_owed(self, job: tuple[Path, str], row: GenerationSpec) -> bool:
+        """The claim's last look at the disk: archive there, sidecar not yet.
+
+        The shared walk can be a minute old, and a sidecar can arrive
+        by other roads (a reader's upload, a copy); three stats settle it for
+        the one job being handed out.
+        """
+        path = job[0]
+        if not path.is_file():
+            return False
+        plain, gz = row.sidecar_paths(path)
+        return not plain.exists() and not gz.exists()
+
     def _drop_failure_records(self, keys: Collection[str]) -> None:
         """Delete failure records. The WORKER's write: never call it for a request."""
         with self._lock:
@@ -1460,13 +1563,23 @@ class OCRWorker:
             self._save_failures(current)
 
     def _job_key(self, job: tuple[Path, str]) -> tuple[str, str, str]:
-        """(series, volume, generation id) of a job, as `order_jobs` reads it."""
+        """(series, volume, generation id) of a job, as `order_jobs` reads it.
+
+        Memoized per archive path: ordering the queue asks it of every job
+        several times, and `relative_to` on 12k paths was most of a claim.
+        """
         path, gen_id = job
-        try:
-            series = path.parent.relative_to(self.storage_path / "library").as_posix()
-        except ValueError:
-            series = path.parent.as_posix()
-        return series, path.stem, gen_id
+        known = self._path_keys.get(path)
+        if known is None:
+            try:
+                series = path.parent.relative_to(self.storage_path / "library").as_posix()
+            except ValueError:
+                series = path.parent.as_posix()
+            known = (series, path.stem)
+            if len(self._path_keys) >= PATH_KEY_CACHE_MAX:
+                self._path_keys.clear()
+            self._path_keys[path] = known
+        return known[0], known[1], gen_id
 
     def _ocr_candidates(
         self,
@@ -1684,7 +1797,9 @@ class OCRWorker:
         except (OSError, zipfile.BadZipFile, ValueError):
             count = 0
         pages = count if count > 0 else None
-        if len(self._archive_pages_cache) > 4096:
+        if len(self._archive_pages_cache) > PATH_KEY_CACHE_MAX:
+            # Sized for a large library: at 4096 a 12k-volume queue cleared
+            # it on every pass and re-read thousands of zips over the network.
             self._archive_pages_cache.clear()
         self._archive_pages_cache[key] = pages
         return pages
@@ -1979,6 +2094,19 @@ class OCRWorker:
         rows = self.processor.missing_generations(cbz_path)
         return sorted(rows, key=lambda row: not row.primary)
 
+    def owed_by_volume(self) -> dict[Path, list[GenerationSpec]]:
+        """`owed_generations` for every volume at once, from the shared walk.
+
+        For a caller that would otherwise ask each of thousands of volumes
+        in turn -- the queue file lists every pending volume's rows.
+        """
+        owed: dict[Path, list[GenerationSpec]] = {}
+        for path, gen_id in self._walked_candidates():
+            row = self._generation(gen_id)
+            if row is not None:
+                owed.setdefault(path, []).append(row)
+        return {path: sorted(rows, key=lambda row: not row.primary) for path, rows in owed.items()}
+
     @staticmethod
     def _archive_stamp(path: Path) -> tuple[int, int] | None:
         try:
@@ -2037,6 +2165,11 @@ class OCRWorker:
 
         self._cancel_stale_jobs(gone)
         with self._lock:
+            walk = self._candidate_walk
+            if walk is not None:
+                self._candidate_walk = (
+                    walk[0], walk[1], [job for job in walk[2] if not gone(job[0])]
+                )
             cached = self._queue_cache
             if cached is None:
                 return
@@ -2125,6 +2258,12 @@ class OCRWorker:
             return
         # A replaced archive: whatever still runs on the old file is wasted.
         self._cancel_stale_jobs(lambda job_path: job_path == cbz)
+        owed_now = [(cbz, row.id) for row in self.processor.missing_generations(cbz)]
+        with self._lock:
+            walk = self._candidate_walk
+            if walk is not None:
+                kept = [job for job in walk[2] if job[0] != cbz]
+                self._candidate_walk = (walk[0], walk[1], kept + owed_now)
         with self._lock:
             cached = self._queue_cache
             generation = self._queue_generation
@@ -2661,6 +2800,11 @@ class OCRWorker:
                     # Spec section 3 rule 2: never offered a row its catalog
                     # cannot run. Skipped, not attempted: it stays pending
                     # for a slot that can.
+                    continue
+                if not self._still_owed(job, row):
+                    # Done by another road since the shared walk was taken.
+                    # (`self._lock` is re-entrant: a Condition's RLock.)
+                    self._forget_candidate(job)
                     continue
                 if job[1] in unmeasured:
                     # Spec section 4: measured on THIS machine first. The
@@ -5789,6 +5933,7 @@ class OCRWorker:
                 self._download_returns.pop(job, None)
         try:
             if ok:
+                self._forget_candidate(job)
                 self._clear_ocr_failure(path, generation)
                 self._record_congestion(generation, pipeline)
             elif returned:

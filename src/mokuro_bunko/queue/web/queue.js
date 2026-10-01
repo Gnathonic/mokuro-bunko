@@ -57,7 +57,7 @@
 
   function getSessionAuth() {
     try {
-      return sessionStorage.getItem("mokuro_auth");
+      return window.mokuroAuth ? window.mokuroAuth.token() : null;
     } catch (e) {
       return null;
     }
@@ -65,17 +65,15 @@
 
   function forgetStoredLogin() {
     try {
-      sessionStorage.removeItem("mokuro_auth");
-      sessionStorage.removeItem("mokuro_user");
+      if (window.mokuroAuth) window.mokuroAuth.clear();
     } catch (e) {
       /* storage unavailable: nothing stored to forget */
     }
     etag = null;
   }
 
-  function logout() {
-    sessionStorage.removeItem("mokuro_auth");
-    sessionStorage.removeItem("mokuro_user");
+  async function logout() {
+    if (window.mokuroAuth) await window.mokuroAuth.signOut();
     window.location.href = "/";
   }
 
@@ -90,8 +88,8 @@
   // who that is.
   function getStatusHeaders() {
     var headers = {};
-    var auth = getSessionAuth();
-    if (auth) headers.Authorization = "Basic " + auth;
+    var token = getSessionAuth();
+    if (token) headers.Authorization = "Bearer " + token;
     return headers;
   }
 

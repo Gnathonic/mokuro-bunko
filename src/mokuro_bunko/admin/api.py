@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs
@@ -112,6 +113,14 @@ MIME_TYPES = {
 }
 
 MAX_JSON_BODY_BYTES = 64 * 1024
+# The generations list's library-derived counts (`AdminAPI._generation_stats`):
+# recomputed in the background when older than this, and how long the lazy
+# `/api/ocr/generations/stats` request waits for a first computation.
+GEN_STATS_TTL_SECONDS = 60.0
+GEN_STATS_WAIT_SECONDS = 5.0
+# ...and how long the LIST waits for a first one: a small library's counts
+# arrive inline, a large one's list goes out without them.
+GEN_STATS_LIST_WAIT_SECONDS = 0.5
 
 # "Threadripper 7960X (24 cores)" -> 24: how a processor's host line says
 # how many cores it has (`bench.cpu_label`).
@@ -398,6 +407,11 @@ class AdminAPI:
         # runs. Built lazily, because it needs a storage path that only a
         # server with a full config has.
         self._bench: BenchService | None = None
+        # The generations list's library-derived counts (`_generation_stats`):
+        # computed in the background, served from here, never waited on.
+        self._gen_stats_lock = threading.Lock()
+        self._gen_stats: dict[str, Any] | None = None
+        self._gen_stats_thread: threading.Thread | None = None
         # This server's own hardware for the Processors table: probed ONCE, in
         # the background (the GPU is asked of torch in the engines env, which
         # takes seconds), by the first request that wants it.
@@ -521,6 +535,8 @@ class AdminAPI:
             return self._update_queue(environ, start_response)
         elif path == "/api/settings/ocr" and method == "PUT":
             return self._update_ocr(environ, start_response)
+        elif path == "/api/ocr/generations/stats" and method == "GET":
+            return self._get_generation_stats(environ, start_response)
         elif path == "/api/ocr/generations" and method == "GET":
             return self._get_generations(environ, start_response)
         elif path == "/api/ocr/generations" and method == "PUT":
@@ -1553,9 +1569,14 @@ class AdminAPI:
         assert self.full_config is not None
         rows = list(self.full_config.ocr.generations)
         history = CongestionHistory(self.full_config.storage.base_path).load()
-        counts = self._generation_volume_counts(rows)
-        skipped = self._generation_skipped_counts(rows)
-        by_machine = self._generation_machine_counts(rows)
+        # Library-derived and slow on a large library (a scan of every volume,
+        # the provenance table): never computed in this request. The last
+        # counts are sent if there are any; otherwise the page asks for them
+        # (`/api/ocr/generations/stats`) and fills them in when they are ready.
+        stats = self._generation_stats(rows, wait=GEN_STATS_LIST_WAIT_SECONDS)
+        counts = stats["counts"] if stats is not None else {}
+        skipped = stats["skipped"] if stats is not None else {}
+        by_machine = stats["by_machine"] if stats is not None else {}
         budget = host_worker_budget(jobs=self.full_config.ocr.concurrency)
         bench = self._bench_service()
         # The last FINISHED benchmark of each row, without its trials: the
@@ -1667,6 +1688,9 @@ class AdminAPI:
             return out
 
         return {
+            # True while the counts are still being worked out: the rows'
+            # volume counts are null until `/api/ocr/generations/stats` has them.
+            "stats_pending": stats is None,
             "generations": [
                 {
                     **self._generation_entry(
@@ -1987,7 +2011,7 @@ class AdminAPI:
         devices: DeviceCatalog | None = None,
         labels: DeviceCatalog | None = None,
     ) -> dict[str, Any]:
-        done, total = counts.get(row.id, (0, 0))
+        done, total = counts.get(row.id, (None, None))
         entry = row.to_dict()
         entry.setdefault("detector", None)
         entry.update(
@@ -2007,6 +2031,87 @@ class AdminAPI:
             }
         )
         return entry
+
+    def _generation_stats(
+        self, rows: list[GenerationSpec], *, wait: float = 0.0
+    ) -> dict[str, Any] | None:
+        """The rows' library-derived counts, from the background cache.
+
+        ``{"counts", "skipped", "by_machine", "computed_at"}``, or None when
+        none have been worked out for this list of rows yet. Never computes
+        in the caller: a missing or older than `GEN_STATS_TTL_SECONDS` entry
+        starts one background refresh (single-flight) and the caller gets
+        what there is -- at most ``wait`` seconds of patience for a first one.
+        """
+        signature = [(row.id, row.name, row.primary, row.enabled) for row in rows]
+        with self._gen_stats_lock:
+            cached = self._gen_stats
+            fresh = (
+                cached is not None
+                and cached["signature"] == signature
+                and time.monotonic() - cached["at"] < GEN_STATS_TTL_SECONDS
+            )
+            thread = self._gen_stats_thread
+            if not fresh and (thread is None or not thread.is_alive()):
+                thread = threading.Thread(
+                    target=self._refresh_generation_stats,
+                    args=(list(rows), signature),
+                    name="generation-stats",
+                    daemon=True,
+                )
+                self._gen_stats_thread = thread
+                thread.start()
+        if (cached is None or cached["signature"] != signature) and wait > 0 and thread is not None:
+            thread.join(wait)
+            with self._gen_stats_lock:
+                cached = self._gen_stats
+        if cached is None or cached["signature"] != signature:
+            return None
+        return cached
+
+    def _refresh_generation_stats(self, rows: list[GenerationSpec], signature: Any) -> None:
+        try:
+            stats = {
+                "signature": signature,
+                "at": time.monotonic(),
+                "computed_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "counts": self._generation_volume_counts(rows),
+                "skipped": self._generation_skipped_counts(rows),
+                "by_machine": self._generation_machine_counts(rows),
+            }
+        except Exception:  # noqa: BLE001 - counts are never worth a crash
+            logger.exception("could not work out the generations' volume counts")
+            return
+        with self._gen_stats_lock:
+            self._gen_stats = stats
+
+    def _get_generation_stats(
+        self, environ: dict[str, Any], start_response: Callable[..., Any]
+    ) -> list[bytes]:
+        """``GET /api/ocr/generations/stats``: the counts the list left out, when ready."""
+        if self.full_config is None:
+            return self._json_response(start_response, 503, {"error": "Config unavailable"})
+        rows = list(self.full_config.ocr.generations)
+        stats = self._generation_stats(rows, wait=GEN_STATS_WAIT_SECONDS)
+        if stats is None:
+            return self._json_response(start_response, 200, {"stats_pending": True})
+        return self._json_response(
+            start_response,
+            200,
+            {
+                "stats_pending": False,
+                "computed_at": stats["computed_at"],
+                "generations": {
+                    row.id: {
+                        "volumes_done": stats["counts"].get(row.id, (None, None))[0],
+                        "volumes_total": stats["counts"].get(row.id, (None, None))[1],
+                        "volumes_skipped": stats["skipped"].get(row.id, 0),
+                        "volumes_by_machine": stats["by_machine"].get(row.id, {}),
+                    }
+                    for row in rows
+                },
+            },
+        )
 
     def _generation_volume_counts(
         self, rows: list[GenerationSpec]
@@ -2080,9 +2185,25 @@ class AdminAPI:
             return {}
         library = Path(self.full_config.storage.base_path) / "library"
         snapshot = index.get_snapshot()
+        # Only series the metadata pass found damage in are asked volume by
+        # volume: each ask stats the archive and its sidecar and queries the
+        # cache, and asking all 12k volumes of a large library made this page
+        # take seconds. A series the pass has not compiled yet is asked too.
+        try:
+            catalog_rows = self.db.list_catalog_series()
+        except Exception:  # noqa: BLE001 - a count is never worth the page
+            logger.exception("could not read the catalog series rows")
+            catalog_rows = []
+        compiled = {row["folder_name"] for row in catalog_rows}
+        damaged = {
+            row["folder_name"]
+            for row in catalog_rows
+            if row["missing_pages"] > 0 or row["damaged_volumes"] > 0
+        }
         short = [
             volume
             for series in snapshot.series
+            if series.name in damaged or series.name not in compiled
             for volume in series.volumes
             if volume.has_cbz
             and cached_missing_pages(self.db, library, library / series.name / f"{volume.name}.cbz") > 0

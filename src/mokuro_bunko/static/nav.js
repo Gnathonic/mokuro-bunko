@@ -11,9 +11,61 @@
     }
   }
 
+  // Signed-in state is a bearer token (`POST /login/api/token`), never the
+  // password: a page keeps `mokuro_token` and sends `Authorization: Bearer`.
+  // `mokuro_auth` held base64 username:password before tokens -- dropped on
+  // sight, which signs such a tab out once.
+  sessionStorage.removeItem('mokuro_auth');
+
+  const TOKEN_KEY = 'mokuro_token';
+  const USER_KEY = 'mokuro_user';
+
   function getSessionAuth() {
-    return sessionStorage.getItem('mokuro_auth');
+    return sessionStorage.getItem(TOKEN_KEY);
   }
+
+  const mokuroAuth = {
+    token: getSessionAuth,
+    // Headers carrying the token, or none when signed out.
+    headers: function () {
+      const token = getSessionAuth();
+      return token ? { Authorization: 'Bearer ' + token } : {};
+    },
+    // Check the password once and keep the token it buys. Throws with the
+    // server's message on failure.
+    signIn: async function (username, password) {
+      const response = await fetch('/login/api/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username, password: password, kind: 'web', label: 'web page' }),
+      });
+      let data = {};
+      try { data = await response.json(); } catch (_) { data = {}; }
+      if (!response.ok || !data.token) {
+        throw new Error(data.error || 'Authentication failed');
+      }
+      sessionStorage.setItem(TOKEN_KEY, data.token);
+      sessionStorage.setItem(USER_KEY, JSON.stringify(data.user));
+      return data;
+    },
+    // Forget the token here (nothing is sent: the server may be unreachable).
+    clear: function () {
+      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(USER_KEY);
+      sessionStorage.removeItem('mokuro_auth');
+    },
+    // Revoke the token on the server, then forget it.
+    signOut: async function () {
+      const headers = mokuroAuth.headers();
+      mokuroAuth.clear();
+      if (headers.Authorization) {
+        try {
+          await fetch('/login/api/token', { method: 'DELETE', headers: headers });
+        } catch (_) { /* signed out here either way */ }
+      }
+    },
+  };
+  window.mokuroAuth = mokuroAuth;
 
   function link(label, href, currentKey, key) {
     const klass = key === currentKey ? 'btn btn--secondary btn--sm' : 'btn btn--ghost btn--sm';

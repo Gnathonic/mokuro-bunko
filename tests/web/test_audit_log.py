@@ -74,7 +74,7 @@ def server_url(tmp_path_factory: pytest.TempPathFactory) -> Generator[str, None,
 
 def open_audit(page: Page, server_url: str, hash_part: str = "") -> Page:
     credentials = base64.b64encode(b"admin:adminpass").decode()
-    page.add_init_script(f"sessionStorage.setItem('mokuro_auth', '{credentials}');")
+    page.add_init_script(f"sessionStorage.setItem('mokuro_token', '{credentials}');")
     page.route("**/*", lambda route: route.continue_(
         headers={**route.request.headers, "Authorization": f"Basic {credentials}"}
     ))

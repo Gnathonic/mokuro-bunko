@@ -406,7 +406,7 @@ class TestPhone:
 
 class TestAdminSetting:
     SIGNED_IN = (
-        "sessionStorage.setItem('mokuro_auth', 'YWRtaW46YWRtaW5wYXNz');"
+        "sessionStorage.setItem('mokuro_token', 'YWRtaW46YWRtaW5wYXNz');"
         "sessionStorage.setItem('mokuro_user', '{\"username\":\"admin\",\"role\":\"admin\"}');"
     )
 
@@ -445,7 +445,7 @@ class TestStaleLogin:
         page.add_init_script(TestAdminSetting.SIGNED_IN)
         _open(stub, page, JOB)
         page.wait_for_function(
-            "() => sessionStorage.getItem('mokuro_auth') === null", timeout=5000
+            "() => sessionStorage.getItem('mokuro_token') === null", timeout=5000
         )
         page.wait_for_timeout(2500)
         assert stub.state.status_auth[0] is True

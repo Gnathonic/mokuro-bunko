@@ -171,7 +171,7 @@ class TestTable:
         upgraded.record_ocr_sidecar(row())
         assert len(upgraded.list_ocr_sidecars()) == 1
         raw = sqlite3.connect(path)
-        assert raw.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        assert raw.execute("SELECT version FROM schema_version").fetchone()[0] == 5
         raw.close()
 
 

@@ -1,12 +1,5 @@
 // Setup Wizard JavaScript
 
-// UTF-8-safe base64 (btoa alone is Latin-1 and corrupts/throws on non-ASCII)
-function utf8ToBase64(str) {
-    const bytes = new TextEncoder().encode(str);
-    let bin = '';
-    for (const b of bytes) bin += String.fromCharCode(b);
-    return btoa(bin);
-}
 
 const steps = ['step-welcome', 'step-admin', 'step-registration', 'step-done'];
 let currentStep = 0;
@@ -110,9 +103,22 @@ async function completeSetup() {
         const data = await resp.json();
 
         if (resp.ok) {
-            // Store auth for admin panel access
-            const auth = utf8ToBase64(username + ':' + password);
-            sessionStorage.setItem('mokuro_auth', auth);
+            // Sign the new admin in for the admin panel: the password buys a
+            // bearer token and is not kept (the same as /_static/nav.js).
+            try {
+                const tokenResp = await fetch('/login/api/token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, kind: 'web', label: 'web page' }),
+                });
+                if (tokenResp.ok) {
+                    const tokenData = await tokenResp.json();
+                    sessionStorage.setItem('mokuro_token', tokenData.token);
+                    sessionStorage.setItem('mokuro_user', JSON.stringify(tokenData.user));
+                }
+            } catch (_) {
+                // Not signed in: the admin logs in from the login page.
+            }
             showStep(3); // Done step
         } else {
             const errorEl = document.getElementById('admin-error');

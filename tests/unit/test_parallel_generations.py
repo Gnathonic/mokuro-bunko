@@ -201,7 +201,7 @@ class TestAnUpload:
         page = [(e["volume"], e["generation"]) for e in api.raw_status()["pending_ocr"]]
         assert page == listed
         assert all(e["eta_at"] is not None for e in api.raw_status()["pending_ocr"])
-        held, volumes = control.queue_document([], wait=0.0)
+        held, volumes, _ = control.queue_document([], wait=0.0)
         assert held is None
         in_file = sorted(
             (volume["volume"], job["id"]) for volume in volumes for job in volume["jobs"]
