@@ -776,6 +776,7 @@ async function loadSettings() {
         showToast('Failed to load settings: ' + err.message, 'error');
     }
     loadGenerations();
+    loadUpgrade();
 }
 
 // The Environment block is one line (the backend) with the paths and the
@@ -1083,6 +1084,79 @@ function initGenerations() {
     document.getElementById('gen-add-btn').addEventListener('click', addGeneration);
     document.getElementById('gen-revert-btn').addEventListener('click', revertGenerations);
     document.getElementById('gen-save-btn').addEventListener('click', saveGenerations);
+    document.getElementById('upgrade-save-btn').addEventListener('click', saveUpgrade);
+    document.getElementById('upgrade-edited').addEventListener('click', (e) => {
+        const b = e.target.closest('[data-upgrade]');
+        if (b) upgradeVolume(b.dataset.volume, b.dataset.upgrade);
+    });
+}
+
+// ---- Upgrade old OCR: census + settings (hidden when the endpoint is 404).
+let upgradeCensus = null;
+
+async function loadUpgrade() {
+    const field = document.getElementById('upgrade-field');
+    if (!field) return;
+    try {
+        upgradeCensus = await apiGet('/ocr/upgrade');
+    } catch (err) {
+        upgradeCensus = null;
+        field.hidden = true;
+        return;
+    }
+    field.hidden = false;
+    renderUpgrade();
+}
+
+function renderUpgrade() {
+    const c = upgradeCensus;
+    document.getElementById('upgrade-enabled').checked = !!c.enabled;
+    const replace = c.replace || [];
+    const families = Object.assign({}, c.families || {});
+    replace.forEach((f) => { if (!(f in families)) families[f] = 0; });
+    document.getElementById('upgrade-families').innerHTML = Object.keys(families)
+        .filter((f) => f !== 'unknown')
+        .map((f) => '<label class="check"><input type="checkbox" data-family="' + escapeHtml(f) + '"' +
+            (replace.includes(f) ? ' checked' : '') + '> ' + escapeHtml(f) + ' <span class="upgrade-n">' +
+            families[f].toLocaleString() + '</span></label>').join('') +
+        (families.unknown ? '<span class="form-hint">unknown ' + families.unknown.toLocaleString() +
+            ' (never upgraded)</span>' : '');
+    document.getElementById('upgrade-counts').textContent = c.enabled
+        ? 'Ready to swap ' + c.ready + ' · needs OCR ' + c.needs_ocr +
+          ' · skipped (missing pages) ' + c.skipped_missing_pages + ' · skipped (edited) ' + c.skipped_edited
+        : 'Counts appear once upgrading is enabled and saved.';
+    const list = document.getElementById('upgrade-edited');
+    const edited = c.edited_volumes || [];
+    list.hidden = !edited.length;
+    list.innerHTML = edited.map((v) => '<li><span class="upgrade-edited__name">' + escapeHtml(v) + '</span>' +
+        '<button type="button" class="btn btn--secondary btn--sm" data-upgrade="force" data-volume="' + escapeHtml(v) +
+        '">Upgrade anyway</button><button type="button" class="btn btn--secondary btn--sm" data-upgrade="revert" data-volume="' +
+        escapeHtml(v) + '">Revert</button></li>').join('');
+}
+
+async function saveUpgrade() {
+    const replace = [...document.querySelectorAll('#upgrade-families [data-family]:checked')]
+        .map((b) => b.dataset.family);
+    try {
+        const result = await apiPut('/settings/ocr', {
+            upgrade: { enabled: document.getElementById('upgrade-enabled').checked, replace },
+        });
+        showToast(liveApplyMessage(result, 'Upgrade settings saved'), result?.restart_required ? 'warning' : 'success');
+        loadUpgrade();
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+async function upgradeVolume(volume, action) {
+    const path = '/ocr/upgrade/' + volume.split('/').map(encodeURIComponent).join('/');
+    try {
+        const r = action === 'revert' ? await apiPost(path + '/revert', {}) : await apiPost(path, { force: true });
+        showToast(action === 'revert' ? 'Reverted ' + volume : 'Upgrade ' + (r.mode || 'done') + ': ' + volume, 'success');
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+    loadUpgrade();
 }
 
 async function loadGenerations() {
