@@ -33,8 +33,8 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
         info!("mokuro-bunko {} ({flavor})", bunko_core::VERSION);
         info!("Storage path: {}", config.storage.base_path.display());
         info!("Server log: {}", config.storage.base_path.join("logs").join(crate::logging::SERVER_LOG_NAME).display());
-        let services = Services::new(config, Some(config_path), flavor)?;
-        let opts = ServeOptions { verbose: args.verbose, flavor };
+        let opts = ServeOptions { verbose: args.verbose, flavor, local: crate::local_ocr::factory() };
+        let services = Services::new(config, Some(config_path), &opts)?;
         app::announce_setup(&services);
         let router = app::assemble(&services, &opts);
         println!("Press Ctrl+C to stop");

@@ -26,8 +26,10 @@ use tracing::info;
 #[derive(Clone, Default)]
 pub struct ServeOptions {
     pub verbose: bool,
-    /// `full` or `lite`.
+    /// `full`, `full-cuda`, ... or `lite`.
     pub flavor: &'static str,
+    /// Local OCR (full build): starts an in-process processor over the real engines.
+    pub local: Option<Arc<dyn crate::ocr::LocalProcessorFactory>>,
 }
 
 /// 0.5.2 `_validate_startup_environment`: directories exist and are writable; TLS
@@ -78,13 +80,15 @@ pub struct Services {
     pub dav: bunko_dav::Dav,
     pub dav_hooks: Arc<crate::davhooks::ServerDavHooks>,
     pub library: Arc<crate::library::LibraryRuntime>,
+    pub ocr: crate::ocr::OcrControl,
     pub stop: CancellationToken,
     /// Set by the admin "Update and restart" action: the binary re-execs after shutdown.
     pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Services {
-    pub fn new(config: Config, config_path: Option<PathBuf>, flavor: &str) -> anyhow::Result<Self> {
+    pub fn new(config: Config, config_path: Option<PathBuf>, opts: &ServeOptions) -> anyhow::Result<Self> {
+        let flavor = opts.flavor;
         let db_options = DbOptions::from(&config.database);
         let layout = config.storage.layout();
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
@@ -100,14 +104,36 @@ impl Services {
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
         let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
         let core = Core::new(config, config_path, backend);
+        let late_ocr: Arc<std::sync::OnceLock<crate::ocr::OcrControl>> = Arc::new(std::sync::OnceLock::new());
         let library = {
             let mut deps = crate::library::RuntimeDeps::new(core.clone(), db.clone());
+            deps.hooks.archive_events = Some(Arc::new(LateArchiveEvents(late_ocr.clone())));
             deps.locks = Arc::new(DavPathLocks(dav.write_locks().clone()));
             let cache = dav.propfind_cache().clone();
             deps.hooks.propfind_refresh = Some(Arc::new(move || cache.schedule_refresh(Duration::from_secs(5))));
             crate::library::LibraryRuntime::new(deps)
         };
         dav_hooks.add_listener(library.clone());
+        let ocr = {
+            let store: Arc<dyn bunko_library::MetadataStore> = library.store().clone();
+            let lib = library.clone();
+            let facts = crate::ocr::types::StoreFacts {
+                store,
+                library: layout.library(),
+                installed: Some(Arc::new(move |cbz: &Path| lib.on_library_write(cbz))),
+                thumbnails: None,
+            };
+            crate::ocr::OcrControl::new(crate::ocr::OcrDeps {
+                core: core.clone(),
+                db: Some(db.clone()),
+                facts: Arc::new(facts),
+                locks: Arc::new(DavPathLocks(dav.write_locks().clone())),
+                local: opts.local.clone(),
+                clock: None,
+            })
+        };
+        let _ = late_ocr.set(ocr.clone());
+        dav_hooks.add_listener(Arc::new(ocr.clone()));
         Ok(Services {
             core,
             db,
@@ -117,9 +143,26 @@ impl Services {
             dav,
             dav_hooks,
             library,
+            ocr,
             stop: CancellationToken::new(),
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+}
+
+/// Library watcher → OCR queue, bound once the OCR control exists.
+struct LateArchiveEvents(Arc<std::sync::OnceLock<crate::ocr::OcrControl>>);
+
+impl crate::library::ArchiveEvents for LateArchiveEvents {
+    fn archive_added(&self, cbz: &Path) {
+        if let Some(o) = self.0.get() {
+            o.archive_arrived(cbz);
+        }
+    }
+    fn archive_removed(&self, cbz: &Path) {
+        if let Some(o) = self.0.get() {
+            o.archives_removed(&[cbz.to_path_buf()]);
+        }
     }
 }
 
@@ -193,11 +236,21 @@ async fn auth_gate(State(core): State<Core>, ctx: RequestCtx, req: Request, next
     if auth::paths::is_admin_path(&path) || auth::paths::is_processor_path(&path) {
         let anon = core.anonymous_access();
         if let Err(denied) = auth::authorize(req.method(), &path, None, &ctx.identity, anon, core.backend.as_ref()) {
+            if auth::paths::is_processor_path(&path)
+                && matches!(denied.status.as_u16(), 401 | 429)
+                && let (Some(user), Some(cb)) = (&ctx.identity.attempted_username, PROCESSOR_REFUSALS.get())
+            {
+                cb(user, &format!("invalid credentials from {}", ctx.client_ip));
+            }
             return denied.into_response();
         }
     }
     next.run(req).await
 }
+
+type RefusalHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// Where refused processor logins are reported (the registry's admin-panel list).
+static PROCESSOR_REFUSALS: std::sync::OnceLock<RefusalHook> = std::sync::OnceLock::new();
 
 /// A placeholder WebDAV handler until bunko-dav is wired.
 pub fn dav_unavailable() -> DavFallback {
@@ -267,8 +320,10 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
     }
     services.updates.start(stop.clone());
     services.library.start();
+    services.ocr.start(stop.child_token());
     crate::serve::serve(listener, app, tls, stop, Duration::from_secs(5)).await?;
     // Ordered shutdown (0.5.2 shutdown_app order, plus the new services).
+    services.ocr.stop().await;
     services.library.stop().await;
     services.dyndns.stop();
     services.dav.shutdown();
@@ -280,9 +335,29 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
 /// Build every module router and the WebDAV fallback for these services. Modules are
 /// added here as they land; the order is 0.5.2's precedence (spec http-webdav §2.1).
 pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
+    let ocr = services.ocr.clone();
+    let refused: RefusalHook = {
+        let ocr = ocr.clone();
+        Arc::new(move |u: &str, why: &str| ocr.record_failed_login(u, why))
+    };
+    let _ = PROCESSOR_REFUSALS.set(refused.clone());
+    let drop: crate::admin::DropProcessors = {
+        let ocr = ocr.clone();
+        Arc::new(move |u: &str, why: &str| ocr.drop_account(u, why))
+    };
     let mut accounts = crate::accounts::AccountsDeps::new(services.core.clone(), services.db.clone());
     accounts.library = Some(services.library.counts());
-    let library = crate::library::LibraryDeps::new(services.core.clone(), services.db.clone(), services.library.clone());
+    accounts.health = Some(Arc::new(ocr.clone()));
+    accounts.hooks.on_processor_login_refused = Some(refused);
+    accounts.hooks.drop_processor_account = Some(drop.clone());
+    let mut library = crate::library::LibraryDeps::new(services.core.clone(), services.db.clone(), services.library.clone());
+    let glue = Arc::new(crate::glue::OcrGlue(ocr.clone()));
+    library.ocr_status = Some(glue.clone());
+    library.outlook = Some(glue);
+    let core_for_layers = services.core.clone();
+    library.layer_order = Some(Arc::new(move || {
+        core_for_layers.config.read().ocr.generations.iter().filter(|g| g.runnable() && !g.primary).map(|g| g.name.clone()).collect()
+    }));
     let restart = {
         let flag = services.restart_requested.clone();
         let stop = services.stop.clone();
@@ -294,19 +369,26 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
     let admin = crate::admin::AdminDeps {
         core: services.core.clone(),
         db: services.db.clone(),
-        ocr: Arc::new(crate::admin::NoOcr),
+        ocr: Arc::new(ocr.clone()),
         tunnel: Some(services.tunnel.clone()),
         dyndns: Some(services.dyndns.clone()),
         updates: Some(services.updates.clone()),
-        drop_processors: None,
+        drop_processors: Some(drop),
         restart: Some(restart),
     };
-    let modules: Vec<Router> =
-        vec![crate::accounts::router(accounts.clone()), crate::admin::router(admin), crate::library::router(library.clone())];
+    let modules: Vec<Router> = vec![
+        crate::accounts::router(accounts.clone()),
+        crate::ocr::queue_router(ocr.clone()),
+        crate::library::router(library.clone()),
+        crate::ocr::processor_router(ocr.clone()),
+        crate::admin::router(admin),
+    ];
+    let queue_file = crate::ocr::queue_file::QueueFileState { core: services.core.clone(), ocr: Some(ocr.clone()) };
     let dav = dav_handler(services.dav.clone(), services.dav_hooks.clone());
     let catalog = library.clone();
     build_router_with(services.core.clone(), modules, dav, Some(library), move |r| {
-        r.layer(axum::middleware::from_fn_with_state(catalog, crate::library::catalog_middleware))
+        r.layer(axum::middleware::from_fn_with_state(queue_file, crate::ocr::queue_file::middleware))
+            .layer(axum::middleware::from_fn_with_state(catalog, crate::library::catalog_middleware))
             .layer(axum::middleware::from_fn_with_state(accounts, crate::accounts::root_middleware))
     })
 }

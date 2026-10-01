@@ -7,6 +7,7 @@ mod cmd;
 // `init_server` is for `serve.rs` (orchestrator) and `processor serve`. logging.rs is
 // not this CLI's file; its one collapsible `if` is left to its owner.
 #[allow(dead_code)]
+mod local_ocr;
 mod logging;
 #[cfg(feature = "ocr")]
 mod ocr_probe;
