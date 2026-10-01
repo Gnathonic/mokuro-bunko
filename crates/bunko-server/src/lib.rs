@@ -8,6 +8,7 @@ pub mod backend;
 pub mod core;
 pub mod davhooks;
 pub mod http;
+pub mod library;
 pub mod ops;
 pub mod serve;
 pub mod tls;

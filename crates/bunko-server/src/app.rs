@@ -77,6 +77,7 @@ pub struct Services {
     pub updates: crate::admin::UpdateService,
     pub dav: bunko_dav::Dav,
     pub dav_hooks: Arc<crate::davhooks::ServerDavHooks>,
+    pub library: Arc<crate::library::LibraryRuntime>,
     pub stop: CancellationToken,
     /// Set by the admin "Update and restart" action: the binary re-execs after shutdown.
     pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
@@ -99,6 +100,14 @@ impl Services {
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
         let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
         let core = Core::new(config, config_path, backend);
+        let library = {
+            let mut deps = crate::library::RuntimeDeps::new(core.clone(), db.clone());
+            deps.locks = Arc::new(DavPathLocks(dav.write_locks().clone()));
+            let cache = dav.propfind_cache().clone();
+            deps.hooks.propfind_refresh = Some(Arc::new(move || cache.schedule_refresh(Duration::from_secs(5))));
+            crate::library::LibraryRuntime::new(deps)
+        };
+        dav_hooks.add_listener(library.clone());
         Ok(Services {
             core,
             db,
@@ -107,9 +116,19 @@ impl Services {
             updates,
             dav,
             dav_hooks,
+            library,
             stop: CancellationToken::new(),
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+}
+
+/// The metadata compiler takes the same per-path write locks as WebDAV writes.
+struct DavPathLocks(bunko_dav::PathWriteLocks);
+
+impl bunko_library::service::PathWriteLocks for DavPathLocks {
+    fn try_lock(&self, path: &Path) -> Option<Box<dyn Send>> {
+        self.0.try_lock(path).map(|g| Box::new(g) as Box<dyn Send>)
     }
 }
 
@@ -120,6 +139,7 @@ pub type DavFallback = Arc<dyn Fn(Request, RequestCtx) -> futures_util::future::
 struct FallbackState {
     core: Core,
     dav: DavFallback,
+    library: Option<crate::library::LibraryDeps>,
 }
 
 impl axum::extract::FromRef<FallbackState> for Core {
@@ -138,6 +158,11 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
         let resp = denied.into_response();
         // A refused PUT still answers with the upload verdict JSON (spec http-webdav §9).
         return if req.method() == http::Method::PUT { bunko_dav::put_refusal_verdict(&path, resp) } else { resp };
+    }
+    if let Some(lib) = &st.library
+        && crate::library::is_series_put(req.method(), &path)
+    {
+        return crate::library::series_put(lib, req, ctx).await;
     }
     (st.dav)(req, ctx).await
 }
@@ -182,19 +207,25 @@ pub fn dav_unavailable() -> DavFallback {
 /// Assemble the router: module routers (each with its own state) in 0.5.2 precedence,
 /// then the authenticated WebDAV fallback, wrapped by CORS and security headers.
 pub fn build_router(core: Core, modules: Vec<Router>, dav: DavFallback) -> Router {
-    build_router_with(core, modules, dav, |r| r)
+    build_router_with(core, modules, dav, None, |r| r)
 }
 
 /// [`build_router`] with `inner` applied inside CORS and the security headers (for
 /// gates that must see every request, like the `/` home/setup redirect).
-pub fn build_router_with(core: Core, modules: Vec<Router>, dav: DavFallback, inner: impl FnOnce(Router) -> Router) -> Router {
+pub fn build_router_with(
+    core: Core,
+    modules: Vec<Router>,
+    dav: DavFallback,
+    library: Option<crate::library::LibraryDeps>,
+    inner: impl FnOnce(Router) -> Router,
+) -> Router {
     let mut app: Router = Router::new()
         .route("/robots.txt", get(static_files::robots))
         .route("/_static/{*file}", get(static_files::shared_static));
     for m in modules {
         app = app.merge(m);
     }
-    let fallback_state = FallbackState { core: core.clone(), dav };
+    let fallback_state = FallbackState { core: core.clone(), dav, library };
     let dav_router: Router = Router::new().fallback(dav_fallback).with_state(fallback_state);
     // A method a module route does not take (PUT /login/x, HEAD /) goes to WebDAV, as 0.5.2.
     let mna = dav_router.clone();
@@ -235,8 +266,10 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
         services.dyndns.start();
     }
     services.updates.start(stop.clone());
+    services.library.start();
     crate::serve::serve(listener, app, tls, stop, Duration::from_secs(5)).await?;
     // Ordered shutdown (0.5.2 shutdown_app order, plus the new services).
+    services.library.stop().await;
     services.dyndns.stop();
     services.dav.shutdown();
     services.updates.stop().await;
@@ -247,7 +280,9 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
 /// Build every module router and the WebDAV fallback for these services. Modules are
 /// added here as they land; the order is 0.5.2's precedence (spec http-webdav §2.1).
 pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
-    let accounts = crate::accounts::AccountsDeps::new(services.core.clone(), services.db.clone());
+    let mut accounts = crate::accounts::AccountsDeps::new(services.core.clone(), services.db.clone());
+    accounts.library = Some(services.library.counts());
+    let library = crate::library::LibraryDeps::new(services.core.clone(), services.db.clone(), services.library.clone());
     let restart = {
         let flag = services.restart_requested.clone();
         let stop = services.stop.clone();
@@ -266,10 +301,13 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
         drop_processors: None,
         restart: Some(restart),
     };
-    let modules: Vec<Router> = vec![crate::accounts::router(accounts.clone()), crate::admin::router(admin)];
+    let modules: Vec<Router> =
+        vec![crate::accounts::router(accounts.clone()), crate::admin::router(admin), crate::library::router(library.clone())];
     let dav = dav_handler(services.dav.clone(), services.dav_hooks.clone());
-    build_router_with(services.core.clone(), modules, dav, move |r| {
-        r.layer(axum::middleware::from_fn_with_state(accounts, crate::accounts::root_middleware))
+    let catalog = library.clone();
+    build_router_with(services.core.clone(), modules, dav, Some(library), move |r| {
+        r.layer(axum::middleware::from_fn_with_state(catalog, crate::library::catalog_middleware))
+            .layer(axum::middleware::from_fn_with_state(accounts, crate::accounts::root_middleware))
     })
 }
 

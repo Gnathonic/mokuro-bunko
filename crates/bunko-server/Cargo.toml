@@ -48,6 +48,10 @@ rand.workspace = true
 # WebDAV wiring
 bunko-dav.workspace = true
 flate2 = "1"
+# library module
+notify.workspace = true
+rusqlite.workspace = true
+bunko-library.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
