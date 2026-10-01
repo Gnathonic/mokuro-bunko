@@ -1,0 +1,54 @@
+# Dev-only tooling: turns the pinned Hugging Face checkpoints into the ONNX
+# artifact set the Rust recognizers load (docs/rust-port/MODELS.md). Never
+# installed on users' machines; nothing here is imported by mokuro-bunko.
+[project]
+name = "mokuro-bunko-onnx-export"
+version = "1.0.0"
+description = "Reproducible ONNX exports of the mokuro-bunko OCR recognizers (models-v1)"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = []
+
+[project.optional-dependencies]
+# Exact pins: an export is only reproducible against the same exporter. These
+# are the versions the models-v1 artifacts were produced (and parity-checked) with.
+export = [
+    "torch==2.14.0",
+    "torchvision==0.29.0",
+    "transformers==5.17.0",
+    "peft==0.21.1",
+    "accelerate==1.15.0",
+    "safetensors==0.8.0",
+    "huggingface-hub==1.33.0",
+    "tokenizers==0.23.2",
+    "sentencepiece==0.2.2",
+    "onnx==1.23.1",
+    "onnxscript==0.7.2",
+    "onnx-ir==1.0.0",
+    "onnxruntime==1.30.0",
+    "onnxconverter-common==1.16.0",
+    "numpy==2.5.3",
+    "ml-dtypes==0.6.0",
+    "pillow==12.3.0",
+]
+
+[project.scripts]
+onnx-export = "onnx_export.__main__:main"
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["onnx_export*"]
+
+# CPU-only torch: the exports and the fp32 parity runs are CPU work, and the
+# CUDA wheels are ~3 GB of nothing here.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
