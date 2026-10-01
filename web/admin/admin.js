@@ -2112,7 +2112,7 @@ const GEN_PRECISION_RULES =
     'first volume, and again when the mode changes, and keeps the fastest (within 5%, the more accurate ' +
     'one). Only with automatic benchmarks off, or when a machine\'s benchmark failed, does it use the ' +
     'first format its card supports. fp32, bf16 or fp16 only: a machine whose card cannot run that format ' +
-    'is not eligible. mokuro never runs bf16.';
+    'is not eligible (the ONNX engines ship fp32 and fp16, so bf16 holds the row).';
 
 function genPrecisionFieldHtml(row, index) {
     const fallback = genDefaultMode();
