@@ -78,7 +78,9 @@ except ImportError:  # pragma: no cover - exercised only in a bare server instal
 
 REPO_ID = "Kellenok/PP-OCRv6_manga"
 # Pinned so a silent upstream re-upload cannot change OCR output under us.
-REPO_REVISION = "3f5274450b5074e54e8c0997480bb7cdc5e875d7"
+# v0.2 (2026-09-28): a retrained detector and recognizer, drop-in for v0.1
+# (same architectures, sizes, dictionary and speed).
+REPO_REVISION = "ba1d479e8a61a20e8318c9758c73fbbbd290b98d"
 MODELS_ENV = "MOKURO_PPOCR_MODELS"
 DOWNLOAD_ENV = "MOKURO_PPOCR_DOWNLOAD"
 PRECISION_ENV = "MOKURO_PPOCR_PRECISION"
@@ -87,10 +89,10 @@ THREADS_ENV = "MOKURO_PPOCR_THREADS"
 DICT_FILE = "ppocrv6_dict.txt"
 MODEL_FILES: dict[str, tuple[str, str]] = {
     # precision -> (detector, recognizer), paths as laid out in the HF repo.
-    "fp32": ("det/manga_det_v0.1.onnx", "rec/manga_rec_v0.1.onnx"),
-    "fp16": ("det/manga_det_v0.1_fp16.onnx", "rec/manga_rec_v0.1_fp16.onnx"),
+    "fp32": ("det/manga_det_v0.2.onnx", "rec/manga_rec_v0.2.onnx"),
+    "fp16": ("det/manga_det_v0.2_fp16.onnx", "rec/manga_rec_v0.2_fp16.onnx"),
 }
-# Measured with onnxruntime on CPU (4 threads): the FP16 files take float32
+# Measured on v0.1 with onnxruntime on CPU (4 threads): the FP16 files take float32
 # input and are cast back per op, so they are SLOWER than FP32 (0.34 vs 0.30 s
 # per page over 6 manga + 5 novel pages; detector alone 53 vs 42 ms) and read
 # 19 of 322 lines differently. FP16 only buys a smaller download (11 vs 23 MB).

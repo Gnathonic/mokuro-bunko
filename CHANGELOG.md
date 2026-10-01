@@ -40,6 +40,7 @@
 - `/mokuro-reader/.mokuro-queue.json`: the whole OCR queue, per volume, with ETAs.
 
 ### Changed
+- PP-OCRv6 manga models updated to v0.2: fewer missed lines, rare kanji.
 - mokuro runs from the optimized fork and stays loaded; output unchanged.
 - `ocr.backend: skip` now means no OCR on this machine, not none anywhere.
 - OCR queue goes round-robin across series in reading order, not upload date.
