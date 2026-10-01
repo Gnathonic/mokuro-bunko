@@ -205,6 +205,12 @@ pub fn resolve_under(base: &Path, rel: &str) -> Option<PathBuf> {
             continue;
         }
         if comp == ".." {
+            // After a missing component the rest is only joined lexically, so a `..`
+            // there could step back out through a symlink the OS would follow
+            // (`nope/../link/x`). Python's realpath resolved it; refuse instead.
+            if !probing {
+                return None;
+            }
             cur.pop();
             continue;
         }

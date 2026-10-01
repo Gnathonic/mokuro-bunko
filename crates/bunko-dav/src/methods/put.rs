@@ -9,6 +9,9 @@ use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue};
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 
+/// Longest silence tolerated in the middle of an upload body.
+const BODY_STALL: std::time::Duration = std::time::Duration::from_secs(120);
+
 use super::{
     Effects, Req, audit, check_dav_locks, eval_if, file_audit_target, forget_ocr_records, is_cbz,
     lookup, write_lock_conflict,
@@ -193,7 +196,13 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
     let mut staging = Staging::create(&dest, expected, digest).await?;
     let mut body = body;
     loop {
-        match body.frame().await {
+        // A client that stops sending for two minutes is gone: drop the upload rather
+        // than hold the connection, the staging file and the path lock forever.
+        let next = match tokio::time::timeout(BODY_STALL, body.frame()).await {
+            Ok(next) => next.map(|r| r.map_err(|_| ())),
+            Err(_) => Some(Err(())),
+        };
+        match next {
             None => break,
             Some(Ok(frame)) => {
                 if let Ok(data) = frame.into_data() {

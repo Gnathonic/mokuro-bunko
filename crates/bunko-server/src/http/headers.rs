@@ -80,3 +80,43 @@ pub async fn request_log(req: Request, next: Next) -> Response {
     );
     resp
 }
+
+/// Refuse request paths whose percent-decoded form has a `..` segment, a NUL byte or
+/// invalid UTF-8 (400). Authorisation and WebDAV then always see the same normalised
+/// path; no client sends such paths legitimately.
+pub async fn path_guard(req: Request, next: Next) -> Response {
+    if !path_is_clean(req.uri().path()) {
+        let mut resp = Response::new(axum::body::Body::from("Bad Request: invalid path"));
+        *resp.status_mut() = http::StatusCode::BAD_REQUEST;
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        return resp;
+    }
+    next.run(req).await
+}
+
+pub fn path_is_clean(raw: &str) -> bool {
+    let Ok(decoded) = percent_encoding::percent_decode_str(raw).decode_utf8() else {
+        return false;
+    };
+    !decoded.contains('\0') && !decoded.split(['/', '\\']).any(|seg| seg == "..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_is_clean;
+
+    #[test]
+    fn dotdot_and_garbage_refused() {
+        assert!(path_is_clean("/mokuro-reader/Series%20A/Vol%201.cbz"));
+        assert!(path_is_clean("/mokuro-reader/a..b/c.cbz"));
+        assert!(!path_is_clean("/mokuro-reader/x/../Vol.cbz"));
+        assert!(!path_is_clean("/mokuro-reader/x/%2e%2e/Vol.cbz"));
+        assert!(!path_is_clean("/mokuro-reader/x/%2E%2E%2fVol.cbz"));
+        assert!(!path_is_clean("/mokuro-reader/x/..%5cVol.cbz"));
+        assert!(!path_is_clean("/a%00b"));
+        assert!(!path_is_clean("/a%ff"));
+    }
+}

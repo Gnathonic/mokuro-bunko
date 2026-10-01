@@ -53,12 +53,51 @@ pub fn validate_password(password: &str) -> Option<&'static str> {
 
 /// `bcrypt.hashpw(password.encode(), bcrypt.gensalt(cost))`.
 pub fn hash_password(password: &str, cost: u32) -> Result<String, bcrypt::BcryptError> {
+    let _slot = BcryptSlots::acquire();
     bcrypt::hash(password.as_bytes(), cost)
 }
 
 /// `bcrypt.checkpw(password.encode(), hash.encode())`; a malformed hash is `false`.
 pub fn verify_password(password: &str, hash: &str) -> bool {
+    let _slot = BcryptSlots::acquire();
     bcrypt::verify(password.as_bytes(), hash).unwrap_or(false)
+}
+
+/// At most this many bcrypt computations run at once (half the cores, 2..8): a burst of
+/// password guesses queues here instead of pinning every core of a small host. Each
+/// cost-12 check is ~0.25 s of one core.
+struct BcryptSlots;
+
+static SLOTS: parking_lot::Mutex<usize> = parking_lot::Mutex::new(0);
+static FREED: parking_lot::Condvar = parking_lot::Condvar::new();
+
+impl BcryptSlots {
+    fn limit() -> usize {
+        static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *LIMIT.get_or_init(|| {
+            (std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
+                / 2)
+            .clamp(2, 8)
+        })
+    }
+
+    fn acquire() -> BcryptSlots {
+        let mut used = SLOTS.lock();
+        while *used >= Self::limit() {
+            FREED.wait(&mut used);
+        }
+        *used += 1;
+        BcryptSlots
+    }
+}
+
+impl Drop for BcryptSlots {
+    fn drop(&mut self) {
+        *SLOTS.lock() -= 1;
+        FREED.notify_one();
+    }
 }
 
 #[cfg(test)]
