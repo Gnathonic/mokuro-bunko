@@ -289,10 +289,18 @@ pub fn float_repr(x: f64) -> String {
         return "nan".to_string();
     }
     if x.is_infinite() {
-        return if x > 0.0 { "inf".to_string() } else { "-inf".to_string() };
+        return if x > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
     }
     if x == 0.0 {
-        return if x.is_sign_negative() { "-0.0".to_string() } else { "0.0".to_string() };
+        return if x.is_sign_negative() {
+            "-0.0".to_string()
+        } else {
+            "0.0".to_string()
+        };
     }
     // Rust's `{:e}` gives the SHORTEST round-trip length, but when several
     // strings of that length round-trip it may not pick the one dtoa mode 0
@@ -300,9 +308,16 @@ pub fn float_repr(x: f64) -> String {
     // the digits from the exact, correctly rounded formatting at that length,
     // keeping the shortest form only if that one does not round-trip.
     let shortest = format!("{:e}", x.abs());
-    let n_digits = shortest.split_once('e').map(|(m, _)| m.chars().filter(char::is_ascii_digit).count()).unwrap_or(1);
+    let n_digits = shortest
+        .split_once('e')
+        .map(|(m, _)| m.chars().filter(char::is_ascii_digit).count())
+        .unwrap_or(1);
     let exact = format!("{:.*e}", n_digits.saturating_sub(1), x.abs());
-    let sci = if exact.parse::<f64>().ok() == Some(x.abs()) { exact } else { shortest };
+    let sci = if exact.parse::<f64>().ok() == Some(x.abs()) {
+        exact
+    } else {
+        shortest
+    };
     let (mant, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
     let exp: i32 = exp.parse().unwrap_or(0);
     let digits: String = mant.chars().filter(|c| *c != '.').collect();

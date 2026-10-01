@@ -16,7 +16,10 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRef, Path, Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
-use bunko_proto::{ACCOUNT_RECHECK_SECONDS, Event, HEADER_RESULT_NAME, HEADER_RESULT_SHA256, HEARTBEAT_SECONDS, MAX_REGISTER_BODY_BYTES, MAX_RESULT_BYTES, Op, SILENCE_SECONDS, valid_id};
+use bunko_proto::{
+    ACCOUNT_RECHECK_SECONDS, Event, HEADER_RESULT_NAME, HEADER_RESULT_SHA256, HEARTBEAT_SECONDS,
+    MAX_REGISTER_BODY_BYTES, MAX_RESULT_BYTES, Op, SILENCE_SECONDS, valid_id,
+};
 use futures_util::{SinkExt, StreamExt};
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use serde_json::{Value, json};
@@ -38,7 +41,10 @@ pub fn json_response(status: u16, body: &Value) -> Response {
     let bytes = serde_json::to_vec(body).unwrap_or_default();
     let mut resp = Response::new(Body::from(bytes));
     *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     resp
 }
 
@@ -54,8 +60,14 @@ pub fn router(ocr: OcrControl) -> Router {
     Router::new()
         .route("/_processor/register", post(register))
         .route("/_processor/{pid}/socket", get(socket))
-        .route("/_processor/{pid}/results/{sid}/{claim}", put(result_upload))
-        .route("/_processor/{pid}/bench/{bid}/sample", get(bench_sample).head(bench_sample))
+        .route(
+            "/_processor/{pid}/results/{sid}/{claim}",
+            put(result_upload),
+        )
+        .route(
+            "/_processor/{pid}/bench/{bid}/sample",
+            get(bench_sample).head(bench_sample),
+        )
         .route("/_processor", any(unknown))
         .route("/_processor/", any(unknown))
         .route("/_processor/{pid}", any(unknown))
@@ -76,12 +88,18 @@ fn processor_of(ocr: &OcrControl, ctx: &RequestCtx) -> Result<String, Response> 
         if let Some(u) = &id.attempted_username {
             ocr.record_failed_login(u, &format!("invalid credentials from {}", ctx.client_ip));
         }
-        let status = if err.contains("Too many failed attempts") { 429 } else { 401 };
+        let status = if err.contains("Too many failed attempts") {
+            429
+        } else {
+            401
+        };
         return Err(error(status, err.clone()));
     }
     match &id.user {
         None => Err(error(401, "Authentication required")),
-        Some(u) if u.role == bunko_core::Role::Processor && !u.username.is_empty() => Ok(u.username.clone()),
+        Some(u) if u.role == bunko_core::Role::Processor && !u.username.is_empty() => {
+            Ok(u.username.clone())
+        }
         Some(_) => Err(error(403, "Processor access required")),
     }
 }
@@ -89,7 +107,10 @@ fn processor_of(ocr: &OcrControl, ctx: &RequestCtx) -> Result<String, Response> 
 async fn stamp_of_account(ocr: &OcrControl, username: &str) -> Option<String> {
     let db = ocr.db()?.clone();
     let u = username.to_string();
-    tokio::task::spawn_blocking(move || db.processor_account_stamp(&u).ok().flatten()).await.ok().flatten()
+    tokio::task::spawn_blocking(move || db.processor_account_stamp(&u).ok().flatten())
+        .await
+        .ok()
+        .flatten()
 }
 
 // --- register -------------------------------------------------------------------------------
@@ -99,9 +120,15 @@ async fn register(State(ocr): State<OcrControl>, ctx: RequestCtx, req: Request) 
         Ok(u) => u,
         Err(r) => return r,
     };
-    if let Some(len) = req.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()) {
+    if let Some(len) = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+    {
         match len.trim().parse::<usize>() {
-            Ok(n) if n > MAX_REGISTER_BODY_BYTES => return error(400, "registration body too large"),
+            Ok(n) if n > MAX_REGISTER_BODY_BYTES => {
+                return error(400, "registration body too large");
+            }
             Ok(_) => {}
             Err(_) => return error(400, "invalid Content-Length"),
         }
@@ -122,11 +149,20 @@ async fn register(State(ocr): State<OcrControl>, ctx: RequestCtx, req: Request) 
     }
     let account_stamp = stamp_of_account(&ocr, &username).await;
     let (reply, rx) = oneshot::channel();
-    if !ocr.send(Msg::Register { input: RegisterInput { username, body: value, account_stamp }, reply }) {
+    if !ocr.send(Msg::Register {
+        input: RegisterInput {
+            username,
+            body: value,
+            account_stamp,
+        },
+        reply,
+    }) {
         return error(503, "OCR is not running");
     }
     match rx.await {
-        Ok(RegisterOutcome::Ok(reply)) => json_response(200, &serde_json::to_value(reply).unwrap_or_default()),
+        Ok(RegisterOutcome::Ok(reply)) => {
+            json_response(200, &serde_json::to_value(reply).unwrap_or_default())
+        }
         Ok(RegisterOutcome::Refused { status, body }) => json_response(status, &body),
         Err(_) => error(503, "OCR is not running"),
     }
@@ -141,7 +177,12 @@ enum Precheck {
     Ghost,
 }
 
-async fn socket(State(ocr): State<OcrControl>, ctx: RequestCtx, Path(pid): Path<String>, ws: WebSocketUpgrade) -> Response {
+async fn socket(
+    State(ocr): State<OcrControl>,
+    ctx: RequestCtx,
+    Path(pid): Path<String>,
+    ws: WebSocketUpgrade,
+) -> Response {
     let username = match processor_of(&ocr, &ctx) {
         Ok(u) => u,
         Err(r) => return r,
@@ -151,7 +192,9 @@ async fn socket(State(ocr): State<OcrControl>, ctx: RequestCtx, Path(pid): Path<
     let check = ocr
         .ask(move |s| match s.machines.get(&pid2) {
             None => Precheck::Refused(404, "No such processor"),
-            Some(m) if m.local || m.username.as_deref() != Some(user2.as_str()) => Precheck::Refused(403, "Not your processor"),
+            Some(m) if m.local || m.username.as_deref() != Some(user2.as_str()) => {
+                Precheck::Refused(403, "Not your processor")
+            }
             Some(m) if m.connected() => {
                 s.drop_processor(&pid2, "a second socket was opened");
                 Precheck::Ghost
@@ -168,10 +211,21 @@ async fn socket(State(ocr): State<OcrControl>, ctx: RequestCtx, Path(pid): Path<
     ws.on_upgrade(move |socket| run_socket(ocr, pid, username, stamp, socket))
 }
 
-async fn run_socket(ocr: OcrControl, pid: String, username: String, stamp: Option<String>, socket: WebSocket) {
+async fn run_socket(
+    ocr: OcrControl,
+    pid: String,
+    username: String,
+    stamp: Option<String>,
+    socket: WebSocket,
+) {
     let (ops_tx, mut ops_rx) = mpsc::unbounded_channel::<Op>();
     let (reply, rx) = oneshot::channel();
-    if !ocr.send(Msg::SocketOpen { pid: pid.clone(), username: username.clone(), ops: ops_tx, reply }) {
+    if !ocr.send(Msg::SocketOpen {
+        pid: pid.clone(),
+        username: username.clone(),
+        ops: ops_tx,
+        reply,
+    }) {
         return;
     }
     if !matches!(rx.await, Ok(Ok(()))) {
@@ -241,7 +295,10 @@ async fn run_socket(ocr: OcrControl, pid: String, username: String, stamp: Optio
         }
     };
     if let Some(reason) = reason {
-        ocr.send(Msg::Drop { pid: pid.clone(), reason });
+        ocr.send(Msg::Drop {
+            pid: pid.clone(),
+            reason,
+        });
     }
     let _ = tx.send(Message::Close(None)).await;
 }
@@ -249,7 +306,11 @@ async fn run_socket(ocr: OcrControl, pid: String, username: String, stamp: Optio
 // --- result uploads ---------------------------------------------------------------------
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim).filter(|s| !s.is_empty())
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// What an upload is for, checked before a byte is read.
@@ -258,7 +319,12 @@ enum UploadCheck {
     Refused(u16, &'static str, &'static str),
 }
 
-async fn result_upload(State(ocr): State<OcrControl>, ctx: RequestCtx, Path((pid, sid, claim)): Path<(String, String, String)>, req: Request) -> Response {
+async fn result_upload(
+    State(ocr): State<OcrControl>,
+    ctx: RequestCtx,
+    Path((pid, sid, claim)): Path<(String, String, String)>,
+    req: Request,
+) -> Response {
     let username = match processor_of(&ocr, &ctx) {
         Ok(u) => u,
         Err(r) => return r,
@@ -268,11 +334,22 @@ async fn result_upload(State(ocr): State<OcrControl>, ctx: RequestCtx, Path((pid
     }
     let headers = req.headers().clone();
     // Percent-encoded by the processor (a header is ASCII; names often are not).
-    let Some(name) = header_str(&headers, HEADER_RESULT_NAME).map(|v| percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned()) else {
+    let Some(name) = header_str(&headers, HEADER_RESULT_NAME).map(|v| {
+        percent_encoding::percent_decode_str(v)
+            .decode_utf8_lossy()
+            .into_owned()
+    }) else {
         return error(400, format!("{HEADER_RESULT_NAME} is required"));
     };
-    if name.contains('/') || name.contains('\\') || name.starts_with('.') || !name.ends_with(".mokuro") {
-        return error(400, format!("{HEADER_RESULT_NAME} must be a sidecar file name"));
+    if name.contains('/')
+        || name.contains('\\')
+        || name.starts_with('.')
+        || !name.ends_with(".mokuro")
+    {
+        return error(
+            400,
+            format!("{HEADER_RESULT_NAME} must be a sidecar file name"),
+        );
     }
     let Some(sha) = header_str(&headers, HEADER_RESULT_SHA256).map(str::to_ascii_lowercase) else {
         return error(400, format!("{HEADER_RESULT_SHA256} is required"));
@@ -288,16 +365,22 @@ async fn result_upload(State(ocr): State<OcrControl>, ctx: RequestCtx, Path((pid
     let (p, s, c, u) = (pid.clone(), sid.clone(), claim.clone(), username.clone());
     let check = ocr
         .ask(move |sch| {
-            let Some(m) = sch.machines.get(&p) else { return UploadCheck::Refused(404, "No such processor", "unknown") };
+            let Some(m) = sch.machines.get(&p) else {
+                return UploadCheck::Refused(404, "No such processor", "unknown");
+            };
             if m.local || m.username.as_deref() != Some(u.as_str()) {
                 return UploadCheck::Refused(403, "Not your processor", "not_owner");
             }
             match sch.sessions.get(&s).filter(|x| x.pid == p) {
                 Some(session) => match session.jobs.get(&c) {
                     Some(j) => UploadCheck::Ok(j.sidecar_name.clone()),
-                    None => UploadCheck::Refused(409, "That claim is not outstanding", "session_ended"),
+                    None => {
+                        UploadCheck::Refused(409, "That claim is not outstanding", "session_ended")
+                    }
                 },
-                None if sch.ended_sessions.contains_key(&s) => UploadCheck::Refused(409, "That session has ended", "session_ended"),
+                None if sch.ended_sessions.contains_key(&s) => {
+                    UploadCheck::Refused(409, "That session has ended", "session_ended")
+                }
                 None => UploadCheck::Refused(404, "No such session", "unknown"),
             }
         })
@@ -308,8 +391,18 @@ async fn result_upload(State(ocr): State<OcrControl>, ctx: RequestCtx, Path((pid
         Some(UploadCheck::Ok(expected)) => expected,
     };
     if expected != name {
-        ocr.send(Msg::ResultStored { pid, sid, claim, name, sha256: sha });
-        return refused(409, "the sidecar name is not the one the library chose", "rejected");
+        ocr.send(Msg::ResultStored {
+            pid,
+            sid,
+            claim,
+            name,
+            sha256: sha,
+        });
+        return refused(
+            409,
+            "the sidecar name is not the one the library chose",
+            "rejected",
+        );
     }
     let dir = ocr.storage().join(".processing").join(&sid).join(&claim);
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
@@ -351,12 +444,21 @@ async fn result_upload(State(ocr): State<OcrControl>, ctx: RequestCtx, Path((pid
     let actual = hex::encode(hasher.finalize());
     if actual != sha {
         let _ = tokio::fs::remove_file(&part).await;
-        return error(400, format!("the body's sha256 is {actual}, not the {HEADER_RESULT_SHA256} sent"));
+        return error(
+            400,
+            format!("the body's sha256 is {actual}, not the {HEADER_RESULT_SHA256} sent"),
+        );
     }
     if let Err(e) = tokio::fs::rename(&part, &final_path).await {
         return error(507, format!("could not store the result: {e}"));
     }
-    ocr.send(Msg::ResultStored { pid, sid, claim, name, sha256: actual.clone() });
+    ocr.send(Msg::ResultStored {
+        pid,
+        sid,
+        claim,
+        name,
+        sha256: actual.clone(),
+    });
     json_response(200, &json!({"received": received, "sha256": actual}))
 }
 
@@ -379,7 +481,11 @@ pub fn parse_range(value: &str, size: u64) -> Result<(u64, u64), u16> {
         return Ok((size.saturating_sub(n), size - 1));
     }
     let start: u64 = a.parse().map_err(|_| 400u16)?;
-    let end: Option<u64> = if b.is_empty() { None } else { Some(b.parse().map_err(|_| 400u16)?) };
+    let end: Option<u64> = if b.is_empty() {
+        None
+    } else {
+        Some(b.parse().map_err(|_| 400u16)?)
+    };
     if end.is_some_and(|e| e < start) {
         return Err(400);
     }
@@ -390,7 +496,13 @@ pub fn parse_range(value: &str, size: u64) -> Result<(u64, u64), u16> {
     Ok((start, end.min(size - 1)))
 }
 
-async fn bench_sample(State(ocr): State<OcrControl>, ctx: RequestCtx, Path((pid, bid)): Path<(String, String)>, method: Method, headers: HeaderMap) -> Response {
+async fn bench_sample(
+    State(ocr): State<OcrControl>,
+    ctx: RequestCtx,
+    Path((pid, bid)): Path<(String, String)>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     let username = match processor_of(&ocr, &ctx) {
         Ok(u) => u,
         Err(r) => return r,
@@ -398,7 +510,10 @@ async fn bench_sample(State(ocr): State<OcrControl>, ctx: RequestCtx, Path((pid,
     let p = pid.clone();
     let found = ocr
         .ask(move |s| {
-            let owned = s.machines.get(&p).is_some_and(|m| m.username.as_deref() == Some(username.as_str()));
+            let owned = s
+                .machines
+                .get(&p)
+                .is_some_and(|m| m.username.as_deref() == Some(username.as_str()));
             if !owned {
                 return Err((404, "No such processor"));
             }
@@ -410,7 +525,9 @@ async fn bench_sample(State(ocr): State<OcrControl>, ctx: RequestCtx, Path((pid,
         Some(Err((status, msg))) => return error(status, msg),
         Some(Ok(path)) => path,
     };
-    let Ok(meta) = tokio::fs::metadata(&path).await else { return error(404, "No such sample") };
+    let Ok(meta) = tokio::fs::metadata(&path).await else {
+        return error(404, "No such sample");
+    };
     let size = meta.len();
     let (status, start, end) = match headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
         None => (StatusCode::OK, 0, size.saturating_sub(1)),
@@ -419,7 +536,11 @@ async fn bench_sample(State(ocr): State<OcrControl>, ctx: RequestCtx, Path((pid,
             Err(400) => return error(400, "bad Range header"),
             Err(_) => {
                 let mut resp = error(416, "range not satisfiable");
-                resp.headers_mut().insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes */{size}")).unwrap_or(HeaderValue::from_static("bytes */0")));
+                resp.headers_mut().insert(
+                    header::CONTENT_RANGE,
+                    HeaderValue::from_str(&format!("bytes */{size}"))
+                        .unwrap_or(HeaderValue::from_static("bytes */0")),
+                );
                 return resp;
             }
         },
@@ -429,16 +550,24 @@ async fn bench_sample(State(ocr): State<OcrControl>, ctx: RequestCtx, Path((pid,
         Body::empty()
     } else {
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        let Ok(mut f) = tokio::fs::File::open(&path).await else { return error(404, "No such sample") };
+        let Ok(mut f) = tokio::fs::File::open(&path).await else {
+            return error(404, "No such sample");
+        };
         if f.seek(std::io::SeekFrom::Start(start)).await.is_err() {
             return error(500, "could not read the sample");
         }
-        Body::from_stream(tokio_util::io::ReaderStream::with_capacity(f.take(length), 256 * 1024))
+        Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+            f.take(length),
+            256 * 1024,
+        ))
     };
     let mut resp = Response::new(body);
     *resp.status_mut() = status;
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/vnd.comicbook+zip"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.comicbook+zip"),
+    );
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

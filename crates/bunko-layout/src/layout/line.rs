@@ -31,16 +31,28 @@ pub struct Line {
 
 impl Line {
     pub fn thickness(&self) -> f64 {
-        if self.vertical { self.width } else { self.height }
+        if self.vertical {
+            self.width
+        } else {
+            self.height
+        }
     }
 
     pub fn length(&self) -> f64 {
-        if self.vertical { self.height } else { self.width }
+        if self.vertical {
+            self.height
+        } else {
+            self.width
+        }
     }
 
     pub fn aspect(&self) -> f64 {
         let short = min2(self.width, self.height);
-        if short > 0.0 { max2(self.width, self.height) / short } else { f64::INFINITY }
+        if short > 0.0 {
+            max2(self.width, self.height) / short
+        } else {
+            f64::INFINITY
+        }
     }
 
     pub fn angle_reliable(&self) -> bool {
@@ -48,7 +60,10 @@ impl Line {
     }
 
     pub fn centre(&self) -> Point {
-        (py::sum(self.quad.iter().map(|p| p.0)) / 4.0, py::sum(self.quad.iter().map(|p| p.1)) / 4.0)
+        (
+            py::sum(self.quad.iter().map(|p| p.0)) / 4.0,
+            py::sum(self.quad.iter().map(|p| p.1)) / 4.0,
+        )
     }
 
     /// `(x0, x1, y0, y1)` of the quad in a frame turned `theta` degrees; the
@@ -60,7 +75,11 @@ impl Line {
     /// `(main0, main1, cross0, cross1)` for text running `vertical`-ly.
     pub fn main_cross(&self, theta: f64, vertical: bool) -> Spans {
         let (x0, x1, y0, y1) = self.spans(theta);
-        if vertical { (y0, y1, x0, x1) } else { (x0, x1, y0, y1) }
+        if vertical {
+            (y0, y1, x0, x1)
+        } else {
+            (x0, x1, y0, y1)
+        }
     }
 }
 
@@ -69,7 +88,12 @@ pub(crate) fn quad_spans_at(quad: &Quad, theta: f64) -> Spans {
     let (c, s) = (py::radians(key).cos(), py::radians(key).sin());
     let xs = quad.map(|p| p.0 * c + p.1 * s);
     let ys = quad.map(|p| -p.0 * s + p.1 * c);
-    (py::min_of(xs), py::max_of(xs), py::min_of(ys), py::max_of(ys))
+    (
+        py::min_of(xs),
+        py::max_of(xs),
+        py::min_of(ys),
+        py::max_of(ys),
+    )
 }
 
 /// The quad as TL, TR, BR, BL of the line's frame, `None` if degenerate.
@@ -78,7 +102,8 @@ pub fn canonical_quad(quad: &[[f64; 2]]) -> Option<Quad> {
         return None;
     }
     let mut pts: Vec<Point> = quad[..4].iter().map(|p| (p[0], p[1])).collect();
-    let area2 = py::sum((0..4).map(|i| pts[i].0 * pts[(i + 1) % 4].1 - pts[(i + 1) % 4].0 * pts[i].1));
+    let area2 =
+        py::sum((0..4).map(|i| pts[i].0 * pts[(i + 1) % 4].1 - pts[(i + 1) % 4].0 * pts[i].1));
     if area2.abs() < 1e-6 {
         return None;
     }
@@ -90,19 +115,33 @@ pub fn canonical_quad(quad: &[[f64; 2]]) -> Option<Quad> {
         let ex = pts[(start + 1) % 4].0 - pts[start].0;
         let ey = pts[(start + 1) % 4].1 - pts[start].1;
         let norm = hypot(ex, ey);
-        let dx = if norm > 0.0 { ex / norm } else { f64::NEG_INFINITY };
+        let dx = if norm > 0.0 {
+            ex / norm
+        } else {
+            f64::NEG_INFINITY
+        };
         if dx > best_dx + 1e-6 {
             best = start;
             best_dx = dx;
         }
     }
-    Some([pts[best % 4], pts[(best + 1) % 4], pts[(best + 2) % 4], pts[(best + 3) % 4]])
+    Some([
+        pts[best % 4],
+        pts[(best + 1) % 4],
+        pts[(best + 2) % 4],
+        pts[(best + 3) % 4],
+    ])
 }
 
 /// `(width, height, angle_deg)` of a canonical quad (midpoint construction).
 pub fn quad_frame(quad: &Quad) -> (f64, f64, f64) {
     let mids: Vec<Point> = (0..4)
-        .map(|i| ((quad[i].0 + quad[(i + 1) % 4].0) / 2.0, (quad[i].1 + quad[(i + 1) % 4].1) / 2.0))
+        .map(|i| {
+            (
+                (quad[i].0 + quad[(i + 1) % 4].0) / 2.0,
+                (quad[i].1 + quad[(i + 1) % 4].1) / 2.0,
+            )
+        })
         .collect();
     let across = (mids[1].0 - mids[3].0, mids[1].1 - mids[3].1);
     let down = (mids[2].0 - mids[0].0, mids[2].1 - mids[0].1);
@@ -173,7 +212,9 @@ pub fn box_distance(a: &Line, b: &Line) -> f64 {
 
 /// Settle `vertical` for ambiguous lines from their neighbours.
 pub fn decide_orientations(lines: &mut [Line]) {
-    let clear: Vec<usize> = (0..lines.len()).filter(|&i| !is_ambiguous(&lines[i])).collect();
+    let clear: Vec<usize> = (0..lines.len())
+        .filter(|&i| !is_ambiguous(&lines[i]))
+        .collect();
     let page_vertical = dominant_vertical(clear.iter().map(|&i| &lines[i]));
     for li in 0..lines.len() {
         let ambiguous = is_ambiguous(&lines[li]);
@@ -197,7 +238,11 @@ pub fn decide_orientations(lines: &mut [Line]) {
                 vertical = other.vertical;
             }
         }
-        lines[li].vertical = if best.is_none() { page_vertical } else { vertical };
+        lines[li].vertical = if best.is_none() {
+            page_vertical
+        } else {
+            vertical
+        };
     }
 }
 
@@ -208,7 +253,11 @@ pub fn pair_theta(a: &Line, b: &Line) -> Option<f64> {
         if (a.angle - b.angle).abs() > ANGLE_TOLERANCE_DEG {
             return None;
         }
-        return Some(if max2(a.width, a.height) >= max2(b.width, b.height) { a.angle } else { b.angle });
+        return Some(if max2(a.width, a.height) >= max2(b.width, b.height) {
+            a.angle
+        } else {
+            b.angle
+        });
     }
     if ar {
         return Some(a.angle);

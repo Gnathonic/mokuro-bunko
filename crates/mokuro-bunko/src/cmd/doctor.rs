@@ -5,7 +5,7 @@
 
 use super::Ctx;
 use crate::FLAVOR;
-use crate::out::{Color, CmdResult, Fail, style};
+use crate::out::{CmdResult, Color, Fail, style};
 use bunko_core::Config;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -29,18 +29,36 @@ struct Check {
 
 impl Check {
     fn pass(label: &'static str, detail: impl Into<String>) -> Check {
-        Check { status: Status::Pass, label, detail: detail.into(), hint: None }
+        Check {
+            status: Status::Pass,
+            label,
+            detail: detail.into(),
+            hint: None,
+        }
     }
     fn warn(label: &'static str, detail: impl Into<String>, hint: Option<String>) -> Check {
-        Check { status: Status::Warn, label, detail: detail.into(), hint }
+        Check {
+            status: Status::Warn,
+            label,
+            detail: detail.into(),
+            hint,
+        }
     }
     fn fail(label: &'static str, detail: impl Into<String>, hint: Option<String>) -> Check {
-        Check { status: Status::Fail, label, detail: detail.into(), hint }
+        Check {
+            status: Status::Fail,
+            label,
+            detail: detail.into(),
+            hint,
+        }
     }
 }
 
 pub fn run(ctx: &Ctx) -> CmdResult {
-    println!("mokuro-bunko {} - environment diagnostics\n", bunko_core::VERSION);
+    println!(
+        "mokuro-bunko {} - environment diagnostics\n",
+        bunko_core::VERSION
+    );
 
     let mut results = vec![check_build()];
     let (config_result, config) = check_config(&ctx.config_path);
@@ -67,7 +85,12 @@ pub fn run(ctx: &Ctx) -> CmdResult {
             Status::Warn => ("WARN", Color::Yellow),
             Status::Fail => ("FAIL", Color::Red),
         };
-        println!(" {}  {}: {}", style(&format!("{word:<4}"), color, true), r.label, r.detail);
+        println!(
+            " {}  {}: {}",
+            style(&format!("{word:<4}"), color, true),
+            r.label,
+            r.detail
+        );
         if let (Some(hint), false) = (&r.hint, r.status == Status::Pass) {
             println!("        -> {hint}");
         }
@@ -77,11 +100,25 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     let warnings = results.iter().filter(|r| r.status == Status::Warn).count();
     println!();
     if failures > 0 {
-        println!("{}", style(&format!("{failures} problem(s) found - see FAIL lines above."), Color::Red, true));
+        println!(
+            "{}",
+            style(
+                &format!("{failures} problem(s) found - see FAIL lines above."),
+                Color::Red,
+                true
+            )
+        );
         return Err(Fail::Exit(1));
     }
     if warnings > 0 {
-        println!("{}", style(&format!("OK with {warnings} warning(s) - see WARN lines above."), Color::Yellow, false));
+        println!(
+            "{}",
+            style(
+                &format!("OK with {warnings} warning(s) - see WARN lines above."),
+                Color::Yellow,
+                false
+            )
+        );
         return Ok(());
     }
     println!("{}", style("All checks passed.", Color::Green, true));
@@ -133,8 +170,18 @@ fn check_config(path: &Path) -> (Check, Option<Config>) {
             Some(config),
         );
     }
-    let exists = if path.exists() { "" } else { " (not found; using defaults)" };
-    (Check::pass("Config", format!("{}{exists} - storage: {}", path.display(), base.display())), Some(config))
+    let exists = if path.exists() {
+        ""
+    } else {
+        " (not found; using defaults)"
+    };
+    (
+        Check::pass(
+            "Config",
+            format!("{}{exists} - storage: {}", path.display(), base.display()),
+        ),
+        Some(config),
+    )
 }
 
 #[cfg(feature = "ocr")]
@@ -168,7 +215,11 @@ fn check_disk(storage: &Path) -> Check {
         Ok(f) => f,
         Err(e) => return Check::warn("Disk space", format!("could not check: {e}"), None),
     };
-    let detail = format!("{:.1} GB free at {}", free as f64 / (1024.0 * 1024.0 * 1024.0), storage.display());
+    let detail = format!(
+        "{:.1} GB free at {}",
+        free as f64 / (1024.0 * 1024.0 * 1024.0),
+        storage.display()
+    );
     if free < LOW_DISK_BYTES {
         Check::warn(
             "Disk space",

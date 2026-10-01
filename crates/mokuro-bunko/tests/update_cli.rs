@@ -14,7 +14,12 @@ fn env_with_dead_manifest() -> Env {
 #[test]
 fn check_reports_and_fails_when_unreachable() {
     let env = env_with_dead_manifest();
-    let out = env.cmd().env("MOKURO_INSTALL_KIND", "docker").args(["update", "check"]).output().unwrap();
+    let out = env
+        .cmd()
+        .env("MOKURO_INSTALL_KIND", "docker")
+        .args(["update", "check"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let s = stdout(&out);
     assert_eq!(
@@ -24,7 +29,11 @@ fn check_reports_and_fails_when_unreachable() {
             env!("CARGO_PKG_VERSION")
         )
     );
-    assert!(stderr(&out).starts_with("Error: could not check for updates: "), "{}", stderr(&out));
+    assert!(
+        stderr(&out).starts_with("Error: could not check for updates: "),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -82,5 +91,7 @@ fn apply_self_managed_fails_cleanly_when_unreachable() {
         .args(["update", "apply", "--yes"])
         .assert()
         .code(1)
-        .stderr(predicate::str::starts_with("Error: could not check for updates: "));
+        .stderr(predicate::str::starts_with(
+            "Error: could not check for updates: ",
+        ));
 }

@@ -36,8 +36,14 @@ fn no_ocr() -> Value {
 
 pub fn routes() -> Router<AccountsDeps> {
     Router::new()
-        .route("/api/health", get(health).options(preflight).fallback(method_not_allowed))
-        .route("/api/stats", get(stats).options(preflight).fallback(method_not_allowed))
+        .route(
+            "/api/health",
+            get(health).options(preflight).fallback(method_not_allowed),
+        )
+        .route(
+            "/api/stats",
+            get(stats).options(preflight).fallback(method_not_allowed),
+        )
         .route("/_home/{*file}", get(file))
 }
 
@@ -54,11 +60,18 @@ async fn file(Path(file): Path<String>) -> Response {
 }
 
 fn count_users(d: &AccountsDeps) -> bunko_db::Result<u64> {
-    Ok(d.db.list_users(None)?.iter().filter(|u| u.status != UserStatus::Deleted).count() as u64)
+    Ok(d.db
+        .list_users(None)?
+        .iter()
+        .filter(|u| u.status != UserStatus::Deleted)
+        .count() as u64)
 }
 
 fn epoch_seconds() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// `GET /api/stats`: never fails; a broken source counts as 0.
@@ -68,7 +81,11 @@ async fn stats(State(d): State<AccountsDeps>) -> Response {
             warn!("stats: user count failed: {e}");
             0
         });
-        let volumes = d.library.as_ref().map(|l| l.total_volumes().unwrap_or(0)).unwrap_or(0);
+        let volumes = d
+            .library
+            .as_ref()
+            .map(|l| l.total_volumes().unwrap_or(0))
+            .unwrap_or(0);
         (users, volumes)
     })
     .await;
@@ -111,7 +128,11 @@ async fn health(State(d): State<AccountsDeps>) -> Response {
                 }
             },
         };
-        let ocr = d.health.as_ref().map(|h| h.ocr_health()).unwrap_or_else(no_ocr);
+        let ocr = d
+            .health
+            .as_ref()
+            .map(|h| h.ocr_health())
+            .unwrap_or_else(no_ocr);
         json!({
             "status": if healthy { "ok" } else { "degraded" },
             "uptime_seconds": uptime,
@@ -133,23 +154,42 @@ async fn health(State(d): State<AccountsDeps>) -> Response {
 /// client User-Agent; else not a `Depth` header containing the text "Depth" (0.5.2's
 /// test, which in practice never matches, is reproduced as is).
 pub fn is_browser_request(headers: &HeaderMap) -> bool {
-    let text = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let text = |name: header::HeaderName| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
     if text(header::ACCEPT).contains("text/html") {
         return true;
     }
     let agent = text(header::USER_AGENT).to_lowercase();
-    const DAV_CLIENTS: [&str; 9] =
-        ["davfs", "cadaver", "cyberduck", "webdav", "gvfs", "nautilus", "finder", "microsoft-webdav", "litmus"];
+    const DAV_CLIENTS: [&str; 9] = [
+        "davfs",
+        "cadaver",
+        "cyberduck",
+        "webdav",
+        "gvfs",
+        "nautilus",
+        "finder",
+        "microsoft-webdav",
+        "litmus",
+    ];
     if DAV_CLIENTS.iter().any(|c| agent.contains(c)) {
         return false;
     }
-    let depth = headers.get("depth").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let depth = headers
+        .get("depth")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     !depth.contains("Depth")
 }
 
 fn redirect(location: &'static str) -> Response {
     let mut resp = StatusCode::FOUND.into_response();
-    resp.headers_mut().insert(header::LOCATION, HeaderValue::from_static(location));
+    resp.headers_mut()
+        .insert(header::LOCATION, HeaderValue::from_static(location));
     resp
 }
 
@@ -160,11 +200,19 @@ fn redirect(location: &'static str) -> Response {
 ///
 /// `None` (every other method/path, and non-browser `GET /`) means: hand the request
 /// to WebDAV.
-pub async fn root_response(deps: &AccountsDeps, method: &Method, path: &str, headers: &HeaderMap) -> Option<Response> {
+pub async fn root_response(
+    deps: &AccountsDeps,
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+) -> Option<Response> {
     if method != Method::GET || path != "/" {
         return None;
     }
-    let wants_html = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/html"));
+    let wants_html = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
     if wants_html {
         let (flag, db) = (deps.setup.clone(), deps.db.clone());
         match blocking(move || flag.needs_setup(&db)).await {
@@ -185,12 +233,21 @@ pub async fn root_response(deps: &AccountsDeps, method: &Method, path: &str, hea
     if catalog_home {
         return Some(redirect("/catalog/"));
     }
-    Some(serve_page_json_errors("home", "index.html", "File not found", Some("no-cache")))
+    Some(serve_page_json_errors(
+        "home",
+        "index.html",
+        "File not found",
+        Some("no-cache"),
+    ))
 }
 
 /// Middleware form of [`root_response`] for the app's outermost router:
 /// `.layer(axum::middleware::from_fn_with_state(deps.clone(), root_middleware))`.
-pub async fn root_middleware(State(deps): State<AccountsDeps>, req: Request, next: Next) -> Response {
+pub async fn root_middleware(
+    State(deps): State<AccountsDeps>,
+    req: Request,
+    next: Next,
+) -> Response {
     if let Some(resp) = root_response(&deps, req.method(), req.uri().path(), req.headers()).await {
         return resp;
     }
@@ -204,18 +261,30 @@ mod tests {
     fn h(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut m = HeaderMap::new();
         for (k, v) in pairs {
-            m.insert(http::HeaderName::from_bytes(k.as_bytes()).unwrap(), v.parse().unwrap());
+            m.insert(
+                http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
         }
         m
     }
 
     #[test]
     fn browser_heuristics() {
-        assert!(is_browser_request(&h(&[("accept", "text/html,application/xhtml+xml")])));
+        assert!(is_browser_request(&h(&[(
+            "accept",
+            "text/html,application/xhtml+xml"
+        )])));
         assert!(is_browser_request(&h(&[])));
         assert!(!is_browser_request(&h(&[("user-agent", "davfs2/1.5")])));
-        assert!(!is_browser_request(&h(&[("user-agent", "Microsoft-WebDAV-MiniRedir/10")])));
-        assert!(is_browser_request(&h(&[("accept", "text/html"), ("user-agent", "davfs2")])));
+        assert!(!is_browser_request(&h(&[(
+            "user-agent",
+            "Microsoft-WebDAV-MiniRedir/10"
+        )])));
+        assert!(is_browser_request(&h(&[
+            ("accept", "text/html"),
+            ("user-agent", "davfs2")
+        ])));
         // 0.5.2 quirk: a Depth header only counts when its value contains "Depth".
         assert!(is_browser_request(&h(&[("depth", "1")])));
         assert!(!is_browser_request(&h(&[("depth", "Depth")])));

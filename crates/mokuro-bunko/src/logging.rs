@@ -32,7 +32,13 @@ impl RotatingFile {
             std::fs::create_dir_all(parent)?;
         }
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        Ok(Self { inner: Arc::new(Mutex::new(Rotating { path, file: None, size })) })
+        Ok(Self {
+            inner: Arc::new(Mutex::new(Rotating {
+                path,
+                file: None,
+                size,
+            })),
+        })
     }
 }
 
@@ -55,9 +61,19 @@ impl Rotating {
             self.rotate()?;
         }
         if self.file.is_none() {
-            self.file = Some(OpenOptions::new().create(true).append(true).open(&self.path)?);
+            self.file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?,
+            );
         }
-        let n = self.file.as_mut().map(|f| f.write(buf)).transpose()?.unwrap_or(0);
+        let n = self
+            .file
+            .as_mut()
+            .map(|f| f.write(buf))
+            .transpose()?
+            .unwrap_or(0);
         self.size += n as u64;
         Ok(n)
     }
@@ -73,7 +89,10 @@ pub struct Handle(Arc<Mutex<Rotating>>);
 
 impl Write for Handle {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.lock().map_err(|_| io::Error::other("log lock poisoned"))?.write(buf)
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("log lock poisoned"))?
+            .write(buf)
     }
     fn flush(&mut self) -> io::Result<()> {
         if let Ok(mut g) = self.0.lock()
@@ -94,15 +113,22 @@ impl<'a> MakeWriter<'a> for RotatingFile {
 
 /// Console-only logging for CLI commands.
 pub fn init_console(verbose: bool) {
-    let filter = EnvFilter::try_from_env("MOKURO_LOG").unwrap_or_else(|_| EnvFilter::new(if verbose { "debug" } else { "info" }));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_target(false).try_init();
+    let filter = EnvFilter::try_from_env("MOKURO_LOG")
+        .unwrap_or_else(|_| EnvFilter::new(if verbose { "debug" } else { "info" }));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .try_init();
 }
 
 /// Console + rotating file for `serve` / `processor serve`.
 pub fn init_server(storage: &Path, verbose: bool) {
     let console_level = if verbose { "debug" } else { "info" };
-    let console_filter = EnvFilter::try_from_env("MOKURO_LOG").unwrap_or_else(|_| EnvFilter::new(format!("{console_level},hyper=warn,h2=warn,ort=warn")));
-    let console = tracing_subscriber::fmt::layer().with_target(true).with_filter_reload_free(console_filter);
+    let console_filter = EnvFilter::try_from_env("MOKURO_LOG")
+        .unwrap_or_else(|_| EnvFilter::new(format!("{console_level},hyper=warn,h2=warn,ort=warn")));
+    let console = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_filter_reload_free(console_filter);
     let path = storage.join("logs").join(SERVER_LOG_NAME);
     match RotatingFile::new(path) {
         Ok(file) => {
@@ -110,17 +136,26 @@ pub fn init_server(storage: &Path, verbose: bool) {
                 .with_ansi(false)
                 .with_writer(file)
                 .with_filter_reload_free(EnvFilter::new("info,hyper=warn,ort=warn"));
-            let _ = tracing_subscriber::registry().with(console).with(file_layer).try_init();
+            let _ = tracing_subscriber::registry()
+                .with(console)
+                .with(file_layer)
+                .try_init();
         }
         Err(e) => {
             let _ = tracing_subscriber::registry().with(console).try_init();
-            tracing::warn!("Could not create log file under {}: {e} (console logging only)", storage.display());
+            tracing::warn!(
+                "Could not create log file under {}: {e} (console logging only)",
+                storage.display()
+            );
         }
     }
 }
 
 trait FilterExt<S>: Sized {
-    fn with_filter_reload_free(self, f: EnvFilter) -> tracing_subscriber::filter::Filtered<Self, EnvFilter, S>;
+    fn with_filter_reload_free(
+        self,
+        f: EnvFilter,
+    ) -> tracing_subscriber::filter::Filtered<Self, EnvFilter, S>;
 }
 
 impl<S, L> FilterExt<S> for L
@@ -128,7 +163,10 @@ where
     L: tracing_subscriber::Layer<S>,
     S: tracing::Subscriber,
 {
-    fn with_filter_reload_free(self, f: EnvFilter) -> tracing_subscriber::filter::Filtered<Self, EnvFilter, S> {
+    fn with_filter_reload_free(
+        self,
+        f: EnvFilter,
+    ) -> tracing_subscriber::filter::Filtered<Self, EnvFilter, S> {
         tracing_subscriber::Layer::with_filter(self, f)
     }
 }

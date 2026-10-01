@@ -110,7 +110,10 @@ impl AdminState {
 
 /// `/_admin`, `/_admin/` and `/_admin/<anything>`.
 pub fn router(deps: AdminDeps) -> Router {
-    let state = AdminState(Arc::new(AdminInner { deps, config_lock: parking_lot::Mutex::new(()) }));
+    let state = AdminState(Arc::new(AdminInner {
+        deps,
+        config_lock: parking_lot::Mutex::new(()),
+    }));
     Router::new()
         .route("/_admin", any(entry))
         .route("/_admin/", any(entry))
@@ -125,7 +128,10 @@ pub(crate) fn json_response(status: u16, body: &Value) -> Response {
     let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
     let mut resp = Response::new(Body::from(bytes));
     *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     resp
 }
 
@@ -149,8 +155,12 @@ pub(crate) fn internal(what: &str, e: impl std::fmt::Display) -> Response {
 }
 
 /// Run blocking work (SQLite, files, OCR control calls) off the async workers.
-pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, Response> {
-    tokio::task::spawn_blocking(f).await.map_err(|e| internal("worker failed", e))
+pub(crate) async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Response> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| internal("worker failed", e))
 }
 
 // --- request ------------------------------------------------------------------------------
@@ -179,14 +189,19 @@ impl ApiRequest {
 
 async fn read_body(headers: &http::HeaderMap, body: Body) -> Result<Map<String, Value>, String> {
     const TOO_LARGE: &str = "Request body too large";
-    let declared = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok());
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
     if declared == Some(0) {
         return Ok(Map::new());
     }
     if declared.is_some_and(|n| n > MAX_JSON_BODY_BYTES as u64) {
         return Err(TOO_LARGE.into());
     }
-    let bytes = axum::body::to_bytes(body, MAX_JSON_BODY_BYTES).await.map_err(|_| TOO_LARGE.to_string())?;
+    let bytes = axum::body::to_bytes(body, MAX_JSON_BODY_BYTES)
+        .await
+        .map_err(|_| TOO_LARGE.to_string())?;
     if bytes.is_empty() {
         return Ok(Map::new());
     }
@@ -199,7 +214,9 @@ async fn read_body(headers: &http::HeaderMap, body: Body) -> Result<Map<String, 
 
 /// Percent-decode one path segment (WSGI hands 0.5.2 a decoded `PATH_INFO`).
 pub(crate) fn decode_segment(seg: &str) -> String {
-    percent_encoding::percent_decode_str(seg).decode_utf8_lossy().into_owned()
+    percent_encoding::percent_decode_str(seg)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 /// `urllib.parse.parse_qs`: `+` is a space, percent-escapes decoded, pairs without `=`
@@ -218,7 +235,10 @@ pub(crate) fn parse_qs(query: &str) -> Vec<(String, String)> {
 
 /// First value of `name`, stripped; empty → None (0.5.2 `one`).
 pub(crate) fn query_one(q: &[(String, String)], name: &str) -> Option<String> {
-    q.iter().find(|(k, _)| k == name).map(|(_, v)| bunko_db::pyfmt::strip(v).to_string()).filter(|v| !v.is_empty())
+    q.iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| bunko_db::pyfmt::strip(v).to_string())
+        .filter(|v| !v.is_empty())
 }
 
 // --- entry and dispatch --------------------------------------------------------------------
@@ -252,7 +272,12 @@ async fn entry(State(state): State<AdminState>, req: Request) -> Response {
     } else {
         Ok(Map::new())
     };
-    let req = ApiRequest { ctx, method, query: parts.uri.query().unwrap_or("").to_string(), body };
+    let req = ApiRequest {
+        ctx,
+        method,
+        query: parts.uri.query().unwrap_or("").to_string(),
+        body,
+    };
     dispatch(&state, &sub["/api/".len()..], req).await
 }
 
@@ -269,12 +294,18 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
         ["users", u] if delete => accounts::delete_user(s, &req, &decode_segment(u)).await,
         ["users", u, "notes"] if put => accounts::update_notes(s, &req, &decode_segment(u)).await,
         ["users", u, "role"] if put => accounts::change_role(s, &req, &decode_segment(u)).await,
-        ["users", u, "approve"] if post => accounts::approve_user(s, &req, &decode_segment(u)).await,
-        ["users", u, "disable"] if post => accounts::disable_user(s, &req, &decode_segment(u)).await,
+        ["users", u, "approve"] if post => {
+            accounts::approve_user(s, &req, &decode_segment(u)).await
+        }
+        ["users", u, "disable"] if post => {
+            accounts::disable_user(s, &req, &decode_segment(u)).await
+        }
 
         ["invites"] if get => accounts::list_invites(s).await,
         ["invites"] if post => accounts::create_invite(s, &req).await,
-        ["invites", code] if delete => accounts::delete_invite(s, &req, &decode_segment(code)).await,
+        ["invites", code] if delete => {
+            accounts::delete_invite(s, &req, &decode_segment(code)).await
+        }
 
         ["audit"] if get => audit::list(s, &req).await,
 
@@ -333,15 +364,22 @@ fn serve_static(sub: &str) -> Response {
 }
 
 fn text(status: u16, body: &'static str) -> Response {
-    let mut resp = (StatusCode::from_u16(status).unwrap_or(StatusCode::NOT_FOUND), body).into_response();
-    resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    let mut resp = (
+        StatusCode::from_u16(status).unwrap_or(StatusCode::NOT_FOUND),
+        body,
+    )
+        .into_response();
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
     resp
 }
 
 /// Persist the live config after an admin edit, then re-apply the parts other modules
 /// cache (the trusted-proxy list). Called with `config_lock` held.
 pub(crate) fn save_config(s: &AdminState) -> Result<(), Response> {
-    s.core().save_config().map_err(|e| internal("could not save the config", e))?;
+    s.core()
+        .save_config()
+        .map_err(|e| internal("could not save the config", e))?;
     s.core().refresh_proxies();
     Ok(())
 }

@@ -28,14 +28,22 @@ pub async fn security_headers(req: Request, next: Next) -> Response {
         let media = headers
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .map(|v| v.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+            .map(|v| {
+                v.split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase()
+            })
             .unwrap_or_default();
         let value = if media == "application/json" {
             Some("no-store")
         } else if media.starts_with("image/") {
             Some("private, max-age=86400")
         } else if (method == Method::GET || method == Method::HEAD)
-            && (path_lower.ends_with(".mokuro") || path_lower.ends_with(".mokuro.gz") || path_lower.ends_with(".cbz"))
+            && (path_lower.ends_with(".mokuro")
+                || path_lower.ends_with(".mokuro.gz")
+                || path_lower.ends_with(".cbz"))
         {
             Some("no-cache")
         } else {

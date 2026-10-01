@@ -26,12 +26,20 @@ fn status() -> CmdResult {
     println!("cloudflared: {}", path.display());
     let rt = runtime()?;
     let out = rt.block_on(async {
-        tokio::time::timeout(Duration::from_secs(10), tokio::process::Command::new(&path).arg("version").output()).await
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::process::Command::new(&path).arg("version").output(),
+        )
+        .await
     });
     match out {
         Ok(Ok(o)) => {
             let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            let text = if stdout.is_empty() { String::from_utf8_lossy(&o.stderr).trim().to_string() } else { stdout };
+            let text = if stdout.is_empty() {
+                String::from_utf8_lossy(&o.stderr).trim().to_string()
+            } else {
+                stdout
+            };
             if !text.is_empty() {
                 println!("Version: {text}");
             }

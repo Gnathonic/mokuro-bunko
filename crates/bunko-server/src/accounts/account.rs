@@ -10,8 +10,8 @@
 use super::AccountsDeps;
 use super::login::{AuthHeader, auth_header};
 use super::util::{
-    Client, JsonBody, blocking, db_failed, json_error, json_response, limited_message, options_response, parse_object,
-    read_body, serve_page_text_errors,
+    Client, JsonBody, blocking, db_failed, json_error, json_response, limited_message,
+    options_response, parse_object, read_body, serve_page_text_errors,
 };
 use axum::Router;
 use axum::body::Body;
@@ -27,8 +27,14 @@ use tracing::warn;
 pub fn routes() -> Router<AccountsDeps> {
     Router::new()
         .route("/api/account/stats", get(stats).options(preflight))
-        .route("/api/account/password", post(change_password).options(preflight))
-        .route("/api/account/delete", post(delete_account).options(preflight))
+        .route(
+            "/api/account/password",
+            post(change_password).options(preflight),
+        )
+        .route(
+            "/api/account/delete",
+            post(delete_account).options(preflight),
+        )
         .route("/api/account/{*rest}", options(preflight))
         .route("/account", get(index))
         .route("/account/", get(index))
@@ -65,7 +71,11 @@ pub fn format_reading_time(seconds: u64) -> String {
 
 /// Bearer or Basic (0.5.2 `authenticate_basic_header`); anything else is 401
 /// `Authentication required`.
-async fn authenticate(d: &AccountsDeps, client: &Client, headers: &HeaderMap) -> Result<User, Response> {
+async fn authenticate(
+    d: &AccountsDeps,
+    client: &Client,
+    headers: &HeaderMap,
+) -> Result<User, Response> {
     let refused = || json_error(401, "Authentication required");
     let db = d.db.clone();
     match auth_header(headers) {
@@ -97,7 +107,12 @@ async fn authenticate(d: &AccountsDeps, client: &Client, headers: &HeaderMap) ->
 
 /// Re-check the account's own password (current password / delete confirmation),
 /// rate limited like a login. `Ok(false)` is a wrong password.
-async fn confirm_password(d: &AccountsDeps, client: &Client, username: &str, password: &str) -> Result<bool, Response> {
+async fn confirm_password(
+    d: &AccountsDeps,
+    client: &Client,
+    username: &str,
+    password: &str,
+) -> Result<bool, Response> {
     let key = client.limiter_key(username);
     if let Err(retry) = d.core.login_limiter.allow(&key) {
         return Err(json_error(429, &limited_message(retry)));
@@ -155,7 +170,12 @@ async fn stats(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap
 
 /// `POST /api/account/password` `{current_password, new_password}`. Changing the
 /// password revokes every token of the account, the caller's included.
-async fn change_password(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap, body: Body) -> Response {
+async fn change_password(
+    State(d): State<AccountsDeps>,
+    client: Client,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     let user = match authenticate(&d, &client, &headers).await {
         Ok(u) => u,
         Err(resp) => return resp,
@@ -164,7 +184,10 @@ async fn change_password(State(d): State<AccountsDeps>, client: Client, headers:
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let (Some(current), Some(new)) = (nonempty(&data, "current_password"), nonempty(&data, "new_password")) else {
+    let (Some(current), Some(new)) = (
+        nonempty(&data, "current_password"),
+        nonempty(&data, "new_password"),
+    ) else {
         return json_error(400, "Missing required fields");
     };
     match confirm_password(&d, &client, &user.username, current).await {
@@ -188,7 +211,12 @@ async fn change_password(State(d): State<AccountsDeps>, client: Client, headers:
 
 /// `POST /api/account/delete` `{password}`: audit, soft-delete (tokens wiped), then
 /// remove the account's progress directory.
-async fn delete_account(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap, body: Body) -> Response {
+async fn delete_account(
+    State(d): State<AccountsDeps>,
+    client: Client,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     let user = match authenticate(&d, &client, &headers).await {
         Ok(u) => u,
         Err(resp) => return resp,
@@ -236,14 +264,20 @@ async fn delete_account(State(d): State<AccountsDeps>, client: Client, headers: 
 /// the users directory (`false`). Removal errors are ignored, as 0.5.2's
 /// `ignore_errors=True`.
 fn remove_user_dir(users_root: &FsPath, username: &str) -> bool {
-    if username.is_empty() || username == "." || username.contains(['/', '\\']) || username.split('/').any(|s| s == "..") {
+    if username.is_empty()
+        || username == "."
+        || username.contains(['/', '\\'])
+        || username.split('/').any(|s| s == "..")
+    {
         return false;
     }
     let dir = users_root.join(username);
     if !dir.exists() {
         return true;
     }
-    let (Ok(root), Ok(real)) = (users_root.canonicalize(), dir.canonicalize()) else { return true };
+    let (Ok(root), Ok(real)) = (users_root.canonicalize(), dir.canonicalize()) else {
+        return true;
+    };
     if !real.starts_with(&root) || real == root {
         return false;
     }

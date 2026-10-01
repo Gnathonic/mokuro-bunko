@@ -28,7 +28,10 @@ struct Inner {
 
 impl DynDnsService {
     pub fn new(config: DynDnsConfig) -> Self {
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap_or_default();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
         Self {
             inner: Arc::new(Inner {
                 config: Mutex::new(config),
@@ -111,11 +114,21 @@ impl DynDnsService {
     }
 
     async fn get_text(&self, url: &str) -> Result<String, String> {
-        let resp = self.inner.client.get(url).send().await.map_err(|e| e.to_string())?;
+        let resp = self
+            .inner
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
         let status = resp.status();
         let body = resp.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
-            return Err(format!("HTTP Error {}: {}", status.as_u16(), status.canonical_reason().unwrap_or("")));
+            return Err(format!(
+                "HTTP Error {}: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("")
+            ));
         }
         Ok(body.trim().to_string())
     }
@@ -127,7 +140,10 @@ impl DynDnsService {
         let body = if c.provider == "duckdns" {
             let domain = c.domain.strip_suffix(".duckdns.org").unwrap_or(&c.domain);
             let body = self
-                .get_text(&format!("https://www.duckdns.org/update?domains={domain}&token={}&ip={ip}", c.token))
+                .get_text(&format!(
+                    "https://www.duckdns.org/update?domains={domain}&token={}&ip={ip}",
+                    c.token
+                ))
                 .await?;
             if body != "OK" {
                 return Err(format!("DuckDNS update failed: {body}"));
@@ -137,7 +153,11 @@ impl DynDnsService {
             if c.update_url.is_empty() {
                 return Err("No update_url configured for generic provider".into());
             }
-            let url = c.update_url.replace("{ip}", &ip).replace("{domain}", &c.domain).replace("{token}", &c.token);
+            let url = c
+                .update_url
+                .replace("{ip}", &ip)
+                .replace("{domain}", &c.domain)
+                .replace("{token}", &c.token);
             self.get_text(&url).await?
         };
         Ok((ip, body))

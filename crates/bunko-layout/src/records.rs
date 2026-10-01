@@ -69,13 +69,21 @@ impl RawLine {
     /// `ppocr.page_to_json`'s rounding of one line.
     pub fn rounded(&self) -> RawLine {
         RawLine {
-            quad: self.quad.iter().map(|p| [round_digits(p[0], 2), round_digits(p[1], 2)]).collect(),
+            quad: self
+                .quad
+                .iter()
+                .map(|p| [round_digits(p[0], 2), round_digits(p[1], 2)])
+                .collect(),
             score: round_digits(self.score, 4),
             text: self.text.clone(),
             conf: round_digits(self.conf, 4),
             vertical: self.vertical,
             angle: round_digits(self.angle, 2),
-            char_confs: self.char_confs.iter().map(|c| round_digits(*c, 4)).collect(),
+            char_confs: self
+                .char_confs
+                .iter()
+                .map(|c| round_digits(*c, 4))
+                .collect(),
         }
     }
 
@@ -96,14 +104,22 @@ impl RawLine {
             ("conf".into(), Value::Float(self.conf)),
             ("vertical".into(), Value::Bool(self.vertical)),
             ("angle".into(), Value::Float(self.angle)),
-            ("char_confs".into(), Value::Array(self.char_confs.iter().map(|c| Value::Float(*c)).collect())),
+            (
+                "char_confs".into(),
+                Value::Array(self.char_confs.iter().map(|c| Value::Float(*c)).collect()),
+            ),
         ])
     }
 
     /// Read one line leniently, the way `line_layout` reads a raw dict
     /// (`raw.get("text") or ""`, `float(raw.get("score") or 0.0)`, ...).
     pub fn from_value(v: &Value) -> RawLine {
-        let num = |k: &str| v.get(k).filter(|x| x.truthy()).and_then(Value::as_f64).unwrap_or(0.0);
+        let num = |k: &str| {
+            v.get(k)
+                .filter(|x| x.truthy())
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+        };
         let quad = v
             .get("quad")
             .and_then(Value::as_array)
@@ -139,7 +155,13 @@ impl RawLine {
 impl RawPage {
     /// A page as the reader hands it over.
     pub fn new(width: i64, height: i64, lines: Vec<RawLine>) -> RawPage {
-        RawPage { format: FORMAT_ID.to_string(), width, height, detector: None, lines }
+        RawPage {
+            format: FORMAT_ID.to_string(),
+            width,
+            height,
+            detector: None,
+            lines,
+        }
     }
 
     /// `ppocr.page_to_json(lines, width, height, detector=...)`: the form the
@@ -164,15 +186,27 @@ impl RawPage {
         if let Some(d) = &self.detector {
             items.push(("detector".to_string(), d.clone()));
         }
-        items.push(("lines".to_string(), Value::Array(self.lines.iter().map(RawLine::to_value).collect())));
+        items.push((
+            "lines".to_string(),
+            Value::Array(self.lines.iter().map(RawLine::to_value).collect()),
+        ));
         Value::Object(items)
     }
 
     /// Read a raw page JSON value leniently (extra keys ignored).
     pub fn from_value(v: &Value) -> RawPage {
-        let int = |k: &str| v.get(k).filter(|x| x.truthy()).and_then(Value::as_f64).unwrap_or(0.0) as i64;
+        let int = |k: &str| {
+            v.get(k)
+                .filter(|x| x.truthy())
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0) as i64
+        };
         RawPage {
-            format: v.get("format").and_then(Value::as_str).unwrap_or(FORMAT_ID).to_string(),
+            format: v
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or(FORMAT_ID)
+                .to_string(),
             width: int("width"),
             height: int("height"),
             detector: v.get("detector").cloned(),

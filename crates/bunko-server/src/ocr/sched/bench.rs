@@ -61,17 +61,36 @@ pub struct BenchState {
 }
 
 fn bench_error(status: u16, message: impl Into<String>) -> (u16, Value) {
-    (status, json!({"error": message.into(), "row": null, "field": null}))
+    (
+        status,
+        json!({"error": message.into(), "row": null, "field": null}),
+    )
 }
 
 fn is_draft(key: &str) -> bool {
-    key.strip_prefix("draft-").is_some_and(|rest| (1..=24).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+    key.strip_prefix("draft-").is_some_and(|rest| {
+        (1..=24).contains(&rest.len())
+            && rest
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    })
 }
 
 /// `bench_sample_filename`: `[A-Za-z0-9_-]` of the id, at most 80, + `.cbz`.
 pub fn bench_sample_filename(bid: &str) -> String {
-    let safe: String = bid.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').take(80).collect();
-    format!("{}.cbz", if safe.is_empty() { "sample".to_string() } else { safe })
+    let safe: String = bid
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .take(80)
+        .collect();
+    format!(
+        "{}.cbz",
+        if safe.is_empty() {
+            "sample".to_string()
+        } else {
+            safe
+        }
+    )
 }
 
 fn spec_payload(row: &Generation) -> Value {
@@ -90,18 +109,28 @@ fn spec_payload(row: &Generation) -> Value {
 
 /// `build_sample`: up to `pages` story pages spread over the library's volumes,
 /// round-robin across series, packed as a stored zip. `(pages, volumes)`.
-pub fn build_sample(library: &std::path::Path, out: &std::path::Path, wanted: i64) -> Result<(i64, i64), String> {
+pub fn build_sample(
+    library: &std::path::Path,
+    out: &std::path::Path,
+    wanted: i64,
+) -> Result<(i64, i64), String> {
     use std::io::Write;
-    let mut by_series: std::collections::BTreeMap<String, Vec<std::path::PathBuf>> = Default::default();
+    let mut by_series: std::collections::BTreeMap<String, Vec<std::path::PathBuf>> =
+        Default::default();
     for cbz in crate::ocr::owed::list_archives(library) {
-        let series = cbz.parent().and_then(|p| crate::ocr::types::rel_of(library, p)).unwrap_or_default();
+        let series = cbz
+            .parent()
+            .and_then(|p| crate::ocr::types::rel_of(library, p))
+            .unwrap_or_default();
         by_series.entry(series).or_default().push(cbz);
     }
     if by_series.is_empty() {
         return Err("there are no volumes in the library to benchmark with \u{2014} upload one first, then the numbers are measured on your own pages".into());
     }
     for list in by_series.values_mut() {
-        list.sort_by(|a, b| bunko_sched::job_order::natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
+        list.sort_by(|a, b| {
+            bunko_sched::job_order::natural_cmp(&a.to_string_lossy(), &b.to_string_lossy())
+        });
     }
     let mut ordered = Vec::new();
     let longest = by_series.values().map(Vec::len).max().unwrap_or(0);
@@ -113,9 +142,11 @@ pub fn build_sample(library: &std::path::Path, out: &std::path::Path, wanted: i6
         }
     }
     let per_archive = 4.max(((wanted as f64) / (ordered.len() as f64)).ceil() as i64);
-    let file = std::fs::File::create(out).map_err(|e| format!("could not write the sample: {e}"))?;
+    let file =
+        std::fs::File::create(out).map_err(|e| format!("could not write the sample: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     let mut extracted = 0i64;
     let mut volumes = 0i64;
     let mut readable = false;
@@ -123,7 +154,9 @@ pub fn build_sample(library: &std::path::Path, out: &std::path::Path, wanted: i6
         if extracted >= wanted {
             break;
         }
-        let Ok(volume) = bunko_library::Volume::open(&cbz) else { continue };
+        let Ok(volume) = bunko_library::Volume::open(&cbz) else {
+            continue;
+        };
         let total = volume.pages().len() as i64;
         if total == 0 {
             continue;
@@ -136,20 +169,45 @@ pub fn build_sample(library: &std::path::Path, out: &std::path::Path, wanted: i6
             let edge = 2.min((total - count) / 2);
             let span = total - 2 * edge;
             let step = span as f64 / count as f64;
-            let mut set: Vec<i64> = (0..count).map(|i| edge + (span - 1).min(((i as f64 + 0.5) * step) as i64)).collect();
+            let mut set: Vec<i64> = (0..count)
+                .map(|i| edge + (span - 1).min(((i as f64 + 0.5) * step) as i64))
+                .collect();
             set.sort();
             set.dedup();
             set
         };
-        let stem: String = cbz.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let safe: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' }).take(40).collect();
+        let stem: String = cbz
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let safe: String = stem
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(40)
+            .collect();
         let mut took = false;
         for index in picks {
             let page = &volume.pages()[index as usize];
-            let suffix = page.path.rfind('.').map(|i| page.path[i..].to_lowercase()).unwrap_or_default();
-            let Ok(bytes) = volume.read_page(index as usize) else { continue };
+            let suffix = page
+                .path
+                .rfind('.')
+                .map(|i| page.path[i..].to_lowercase())
+                .unwrap_or_default();
+            let Ok(bytes) = volume.read_page(index as usize) else {
+                continue;
+            };
             let name = format!("{extracted:04}_{safe}{suffix}");
-            if zip.start_file(name, options).and_then(|_| zip.write_all(&bytes).map_err(Into::into)).is_err() {
+            if zip
+                .start_file(name, options)
+                .and_then(|_| zip.write_all(&bytes).map_err(Into::into))
+                .is_err()
+            {
                 return Err("could not write the sample".into());
             }
             extracted += 1;
@@ -159,12 +217,15 @@ pub fn build_sample(library: &std::path::Path, out: &std::path::Path, wanted: i6
             volumes += 1;
         }
     }
-    zip.finish().map_err(|e| format!("could not write the sample: {e}"))?;
+    zip.finish()
+        .map_err(|e| format!("could not write the sample: {e}"))?;
     if !readable {
         return Err("the library's archives have no readable pages to benchmark with".into());
     }
     if extracted == 0 {
-        return Err("no pages could be read out of the library's archives to benchmark with".into());
+        return Err(
+            "no pages could be read out of the library's archives to benchmark with".into(),
+        );
     }
     Ok((extracted, volumes))
 }
@@ -182,54 +243,106 @@ impl Scheduler {
 
     /// `enqueue(key, spec, pages, processor, autobench, precision_only)`.
     pub fn bench_enqueue(&mut self, req: BenchRequest) -> Result<Value, (u16, Value)> {
-        let machine = if req.processor.is_empty() { LOCAL.to_string() } else { req.processor.clone() };
+        let machine = if req.processor.is_empty() {
+            LOCAL.to_string()
+        } else {
+            req.processor.clone()
+        };
         let pid = if machine == LOCAL {
             LOCAL.to_string()
         } else {
-            match self.machines.values().find(|m| !m.local && m.name == machine && m.connected()) {
+            match self
+                .machines
+                .values()
+                .find(|m| !m.local && m.name == machine && m.connected())
+            {
                 Some(m) => m.pid.clone(),
-                None => return Err(bench_error(400, format!("no processor called {} is connected", bunko_sched::py::py_repr(&json!(machine))))),
+                None => {
+                    return Err(bench_error(
+                        400,
+                        format!(
+                            "no processor called {} is connected",
+                            bunko_sched::py::py_repr(&json!(machine))
+                        ),
+                    ));
+                }
             }
         };
         let saved = self.settings.rows.iter().find(|r| r.id == req.key).cloned();
         if saved.is_none() && !is_draft(&req.key) {
-            return Err(bench_error(400, format!("there is no generation {} to benchmark", bunko_sched::py::py_repr(&json!(req.key)))));
+            return Err(bench_error(
+                400,
+                format!(
+                    "there is no generation {} to benchmark",
+                    bunko_sched::py::py_repr(&json!(req.key))
+                ),
+            ));
         }
         let row = match &req.spec {
             Some(spec) => match parse_bench_spec(spec) {
                 Ok(mut r) => {
                     r.id = req.key.clone();
-                    r.name = saved.as_ref().map(|s| s.name.clone()).unwrap_or_else(|| req.key.clone());
+                    r.name = saved
+                        .as_ref()
+                        .map(|s| s.name.clone())
+                        .unwrap_or_else(|| req.key.clone());
                     r.primary = true;
                     r.enabled = true;
                     r
                 }
-                Err(e) => return Err((400, json!({"error": e.message, "row": null, "field": e.field}))),
+                Err(e) => {
+                    return Err((
+                        400,
+                        json!({"error": e.message, "row": null, "field": e.field}),
+                    ));
+                }
             },
             None => match saved {
                 Some(r) => r,
                 None => {
                     return Err(bench_error(
                         400,
-                        format!("there is no generation {} to benchmark \u{2014} send a spec to measure one that is not saved yet", bunko_sched::py::py_repr(&json!(req.key))),
+                        format!(
+                            "there is no generation {} to benchmark \u{2014} send a spec to measure one that is not saved yet",
+                            bunko_sched::py::py_repr(&json!(req.key))
+                        ),
                     ));
                 }
             },
         };
         if machine == LOCAL {
             if !self.settings.local_processing || !self.machines.contains_key(LOCAL) {
-                return Err(bench_error(400, "this server runs no OCR of its own (ocr.local_processing is off); choose a connected processor to benchmark on"));
+                return Err(bench_error(
+                    400,
+                    "this server runs no OCR of its own (ocr.local_processing is off); choose a connected processor to benchmark on",
+                ));
             }
             if let Some(refusal) = self.refusal(LOCAL, &row) {
-                return Err(bench_error(400, format!("this server cannot run this row: {refusal}")));
+                return Err(bench_error(
+                    400,
+                    format!("this server cannot run this row: {refusal}"),
+                ));
             }
         } else if let Some(refusal) = self.refusal(&pid, &row) {
-            return Err(bench_error(400, format!("{machine} cannot run this row: {refusal}")));
+            return Err(bench_error(
+                400,
+                format!("{machine} cannot run this row: {refusal}"),
+            ));
         }
         let pages = match &req.pages {
             None | Some(Value::Null) => DEFAULT_SAMPLE_PAGES,
-            Some(v) if v.is_i64() && (MIN_SAMPLE_PAGES..=MAX_SAMPLE_PAGES).contains(&v.as_i64().unwrap_or(0)) => v.as_i64().unwrap_or(DEFAULT_SAMPLE_PAGES),
-            Some(_) => return Err(bench_error(400, "pages must be a whole number between 4 and 512")),
+            Some(v)
+                if v.is_i64()
+                    && (MIN_SAMPLE_PAGES..=MAX_SAMPLE_PAGES).contains(&v.as_i64().unwrap_or(0)) =>
+            {
+                v.as_i64().unwrap_or(DEFAULT_SAMPLE_PAGES)
+            }
+            Some(_) => {
+                return Err(bench_error(
+                    400,
+                    "pages must be a whole number between 4 and 512",
+                ));
+            }
         };
         if crate::ocr::owed::list_archives(&self.library()).is_empty() {
             return Err(bench_error(
@@ -237,9 +350,24 @@ impl Scheduler {
                 "there are no volumes in the library to benchmark with \u{2014} upload one first, then the numbers are measured on your own pages",
             ));
         }
-        if self.bench.lines.get(&machine).is_some_and(|l| l.iter().any(|r| r.key == req.key)) {
-            let on = if machine == LOCAL { String::new() } else { format!("on {machine} ") };
-            return Err(bench_error(409, format!("a benchmark of {} is already queued or running {on}\u{2014} re-posting the same row is a no-op", row.name)));
+        if self
+            .bench
+            .lines
+            .get(&machine)
+            .is_some_and(|l| l.iter().any(|r| r.key == req.key))
+        {
+            let on = if machine == LOCAL {
+                String::new()
+            } else {
+                format!("on {machine} ")
+            };
+            return Err(bench_error(
+                409,
+                format!(
+                    "a benchmark of {} is already queued or running {on}\u{2014} re-posting the same row is a no-op",
+                    row.name
+                ),
+            ));
         }
         let bid = format!("bench-{}", crate::ocr::types::token_hex(6));
         let mut data = Map::new();
@@ -254,7 +382,12 @@ impl Scheduler {
         data.insert("finished_at".into(), Value::Null);
         data.insert("waiting_for_queue".into(), json!(true));
         data.insert("sample".into(), Value::Null);
-        data.insert("host".into(), self.machines.get(&pid).map_or(Value::Null, |m| m.host_value.clone()));
+        data.insert(
+            "host".into(),
+            self.machines
+                .get(&pid)
+                .map_or(Value::Null, |m| m.host_value.clone()),
+        );
         data.insert("tunable".into(), json!(!req.precision_only));
         data.insert("progress".into(), Value::Null);
         data.insert("startup_seconds".into(), Value::Null);
@@ -264,8 +397,23 @@ impl Scheduler {
         data.insert("estimates".into(), Value::Null);
         data.insert("preempted".into(), json!([]));
         data.insert("error".into(), Value::Null);
-        let run = BenchRun { key: req.key.clone(), bid, machine: machine.clone(), row, autobench: req.autobench, precision_only: req.precision_only, pages, data, started_mono: None, sent: false };
-        self.bench.lines.entry(machine.clone()).or_default().push_back(run);
+        let run = BenchRun {
+            key: req.key.clone(),
+            bid,
+            machine: machine.clone(),
+            row,
+            autobench: req.autobench,
+            precision_only: req.precision_only,
+            pages,
+            data,
+            started_mono: None,
+            sent: false,
+        };
+        self.bench
+            .lines
+            .entry(machine.clone())
+            .or_default()
+            .push_back(run);
         self.bench.order.push((req.key.clone(), machine.clone()));
         self.bench_advance(&machine);
         Ok(self.bench_get(&req.key, &machine))
@@ -285,9 +433,17 @@ impl Scheduler {
             data.insert("queue".into(), self.queue_value());
             return Value::Object(data);
         }
-        let mut found = self.bench.recent.get(&(key.to_string(), machine.to_string())).cloned();
+        let mut found = self
+            .bench
+            .recent
+            .get(&(key.to_string(), machine.to_string()))
+            .cloned();
         if found.is_none() && machine == LOCAL && !is_draft(key) {
-            found = bunko_sched::bench_file::BenchFile::new(&self.storage()).load().get(key).and_then(Value::as_object).cloned();
+            found = bunko_sched::bench_file::BenchFile::new(&self.storage())
+                .load()
+                .get(key)
+                .and_then(Value::as_object)
+                .cloned();
         }
         let mut data = found.unwrap_or_else(|| {
             let mut m = Map::new();
@@ -303,14 +459,30 @@ impl Scheduler {
 
     /// `cancel(key, processor)`.
     pub fn bench_cancel(&mut self, key: &str, machine: &str) -> Result<Value, (u16, Value)> {
-        let machine = if machine.is_empty() { LOCAL.to_string() } else { machine.to_string() };
-        let Some(pos) = self.bench.lines.get(&machine).and_then(|l| l.iter().position(|r| r.key == key)) else {
-            return Err(bench_error(400, "there is no benchmark of this generation queued or running to cancel"));
+        let machine = if machine.is_empty() {
+            LOCAL.to_string()
+        } else {
+            machine.to_string()
+        };
+        let Some(pos) = self
+            .bench
+            .lines
+            .get(&machine)
+            .and_then(|l| l.iter().position(|r| r.key == key))
+        else {
+            return Err(bench_error(
+                400,
+                "there is no benchmark of this generation queued or running to cancel",
+            ));
         };
         if pos == 0 && self.bench.lines[&machine][0].sent {
             let bid = self.bench.lines[&machine][0].bid.clone();
             if let Some(m) = self.machine_by_name(&machine) {
-                m.send(Op::Cancel { sid: None, claim: None, bid: Some(bid) });
+                m.send(Op::Cancel {
+                    sid: None,
+                    claim: None,
+                    bid: Some(bid),
+                });
             }
         }
         self.bench_finish(&machine, pos, "cancelled", None);
@@ -320,8 +492,16 @@ impl Scheduler {
     /// `paused_for_benchmark()`: the head of the global line.
     pub fn paused_for_benchmark(&self) -> Option<Value> {
         let (key, machine) = self.bench.order.first()?;
-        let generation = self.settings.rows.iter().find(|r| &r.id == key).map(|r| r.name.clone()).unwrap_or_else(|| key.clone());
-        Some(json!({"key": key, "generation": generation, "queued": self.bench.order.len() - 1, "processor": machine}))
+        let generation = self
+            .settings
+            .rows
+            .iter()
+            .find(|r| &r.id == key)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| key.clone());
+        Some(
+            json!({"key": key, "generation": generation, "queued": self.bench.order.len() - 1, "processor": machine}),
+        )
     }
 
     /// `configuring()`: `{machine: {key, generation, auto}}` for each line's head.
@@ -329,8 +509,17 @@ impl Scheduler {
         let mut out = Map::new();
         for (machine, line) in &self.bench.lines {
             if let Some(run) = line.front() {
-                let generation = self.settings.rows.iter().find(|r| r.id == run.key).map(|r| r.name.clone()).unwrap_or_else(|| run.key.clone());
-                out.insert(machine.clone(), json!({"key": run.key, "generation": generation, "auto": run.autobench}));
+                let generation = self
+                    .settings
+                    .rows
+                    .iter()
+                    .find(|r| r.id == run.key)
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| run.key.clone());
+                out.insert(
+                    machine.clone(),
+                    json!({"key": run.key, "generation": generation, "auto": run.autobench}),
+                );
             }
         }
         out
@@ -365,24 +554,42 @@ impl Scheduler {
     /// (visible to other machines at once). `[{generation, volume}]` pre-empted.
     pub fn preempt_for_bench(&mut self, machine: &str) -> Vec<Value> {
         self.hold_queue(machine);
-        let mut jobs: Vec<(Job, String)> = self.claims.iter().filter(|(_, c)| c.machine == machine && !c.settling).map(|(j, c)| (j.clone(), c.row.name.clone())).collect();
+        let mut jobs: Vec<(Job, String)> = self
+            .claims
+            .iter()
+            .filter(|(_, c)| c.machine == machine && !c.settling)
+            .map(|(j, c)| (j.clone(), c.row.name.clone()))
+            .collect();
         jobs.sort_by(|a, b| (&a.0.rel, &a.0.gid).cmp(&(&b.0.rel, &b.0.gid)));
         for (job, _) in &jobs {
             self.cancelled.insert(job.clone());
             self.attempted.remove(job);
         }
-        let sids: Vec<String> = self.sessions.iter().filter(|(_, s)| s.machine == machine).map(|(k, _)| k.clone()).collect();
+        let sids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.machine == machine)
+            .map(|(k, _)| k.clone())
+            .collect();
         for sid in sids {
             self.kill_session(&sid, None);
         }
-        jobs.into_iter().map(|(j, name)| json!({"generation": name, "volume": j.volume()})).collect()
+        jobs.into_iter()
+            .map(|(j, name)| json!({"generation": name, "volume": j.volume()}))
+            .collect()
     }
 
     // --- the line -------------------------------------------------------------------------
 
     /// Start the head of a machine's line if it is not running yet.
     fn bench_advance(&mut self, machine: &str) {
-        let Some(run) = self.bench.lines.get(machine).and_then(|l| l.front()).cloned() else {
+        let Some(run) = self
+            .bench
+            .lines
+            .get(machine)
+            .and_then(|l| l.front())
+            .cloned()
+        else {
             if self.bench.holding.remove(machine).is_some() {
                 self.release_queue(machine);
             }
@@ -393,16 +600,35 @@ impl Scheduler {
         }
         if !self.bench.holding.contains_key(machine) {
             let preempted = self.preempt_for_bench(machine);
-            self.bench.holding.insert(machine.to_string(), preempted.clone());
-            if let Some(head) = self.bench.lines.get_mut(machine).and_then(|l| l.front_mut()) {
-                head.data.insert("preempted".into(), Value::Array(preempted));
+            self.bench
+                .holding
+                .insert(machine.to_string(), preempted.clone());
+            if let Some(head) = self
+                .bench
+                .lines
+                .get_mut(machine)
+                .and_then(|l| l.front_mut())
+            {
+                head.data
+                    .insert("preempted".into(), Value::Array(preempted));
             }
         }
-        let Some(target) = self.machine_by_name(machine).map(|m| (m.pid.clone(), m.local)) else {
-            self.bench_finish(machine, 0, "failed", Some(format!("{machine} is not connected")));
+        let Some(target) = self
+            .machine_by_name(machine)
+            .map(|m| (m.pid.clone(), m.local))
+        else {
+            self.bench_finish(
+                machine,
+                0,
+                "failed",
+                Some(format!("{machine} is not connected")),
+            );
             return;
         };
-        let sample_path = self.storage().join(".processing").join(bench_sample_filename(&run.bid));
+        let sample_path = self
+            .storage()
+            .join(".processing")
+            .join(bench_sample_filename(&run.bid));
         if let Some(dir) = sample_path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -415,39 +641,90 @@ impl Scheduler {
             }
         };
         let spec = self.row_spec(machine, &run.row);
-        let sample = if target.1 { sample_path.to_string_lossy().into_owned() } else { format!("{}/{}/bench/{}/sample", bunko_proto::PROCESSOR_ROOT, target.0, run.bid) };
-        let op = Op::Bench(BenchOp { bid: run.bid.clone(), spec, sample, pages: pages as u32, precision_only: run.precision_only });
+        let sample = if target.1 {
+            sample_path.to_string_lossy().into_owned()
+        } else {
+            format!(
+                "{}/{}/bench/{}/sample",
+                bunko_proto::PROCESSOR_ROOT,
+                target.0,
+                run.bid
+            )
+        };
+        let op = Op::Bench(BenchOp {
+            bid: run.bid.clone(),
+            spec,
+            sample,
+            pages: pages as u32,
+            precision_only: run.precision_only,
+        });
         let sent = self.machines.get(&target.0).is_some_and(|m| m.send(op));
         let mono = self.mono();
-        if let Some(head) = self.bench.lines.get_mut(machine).and_then(|l| l.front_mut()) {
+        if let Some(head) = self
+            .bench
+            .lines
+            .get_mut(machine)
+            .and_then(|l| l.front_mut())
+        {
             head.sent = sent;
             head.started_mono = Some(mono);
             head.data.insert("state".into(), json!("running"));
             head.data.insert("waiting_for_queue".into(), json!(false));
-            head.data.insert("sample".into(), json!({"pages": pages, "volumes": volumes}));
+            head.data
+                .insert("sample".into(), json!({"pages": pages, "volumes": volumes}));
         }
         if !sent {
-            self.bench_finish(machine, 0, "failed", Some(format!("{machine} disconnected")));
+            self.bench_finish(
+                machine,
+                0,
+                "failed",
+                Some(format!("{machine} disconnected")),
+            );
         }
     }
 
     /// End the run at `pos` of a machine's line.
     fn bench_finish(&mut self, machine: &str, pos: usize, state: &str, error: Option<String>) {
-        let Some(mut run) = self.bench.lines.get_mut(machine).and_then(|l| l.remove(pos)) else { return };
-        if let Some(i) = self.bench.order.iter().position(|(k, m)| *k == run.key && m == machine) {
+        let Some(mut run) = self
+            .bench
+            .lines
+            .get_mut(machine)
+            .and_then(|l| l.remove(pos))
+        else {
+            return;
+        };
+        if let Some(i) = self
+            .bench
+            .order
+            .iter()
+            .position(|(k, m)| *k == run.key && m == machine)
+        {
             self.bench.order.remove(i);
         }
-        let _ = std::fs::remove_file(self.storage().join(".processing").join(bench_sample_filename(&run.bid)));
+        let _ = std::fs::remove_file(
+            self.storage()
+                .join(".processing")
+                .join(bench_sample_filename(&run.bid)),
+        );
         run.data.insert("state".into(), json!(state));
         run.data.insert("finished_at".into(), json!(self.now_iso()));
         run.data.insert("progress".into(), Value::Null);
         run.data.insert("waiting_for_queue".into(), json!(false));
-        run.data.insert("error".into(), error.map_or(Value::Null, Value::String));
+        run.data
+            .insert("error".into(), error.map_or(Value::Null, Value::String));
         if state == "done" {
             self.bench_store(&run);
         }
-        self.bench.recent.insert((run.key.clone(), machine.to_string()), run.data.clone());
-        let drafts: Vec<(String, String)> = self.bench.recent.keys().filter(|(k, _)| is_draft(k)).cloned().collect();
+        self.bench
+            .recent
+            .insert((run.key.clone(), machine.to_string()), run.data.clone());
+        let drafts: Vec<(String, String)> = self
+            .bench
+            .recent
+            .keys()
+            .filter(|(k, _)| is_draft(k))
+            .cloned()
+            .collect();
         if drafts.len() > MAX_DRAFT_RESULTS
             && let Some(oldest) = drafts.first()
         {
@@ -465,26 +742,50 @@ impl Scheduler {
     /// Persist a finished result: `.ocr-bench.json` (local, saved row, not precision-only)
     /// and the machine's profile (remote benches and every autobench).
     fn bench_store(&mut self, run: &BenchRun) {
-        let pps = run.data.get("best").and_then(|b| b.get("pages_per_second")).and_then(Value::as_f64).or_else(|| run.data.get("baseline").and_then(|b| b.get("pages_per_second")).and_then(Value::as_f64));
+        let pps = run
+            .data
+            .get("best")
+            .and_then(|b| b.get("pages_per_second"))
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                run.data
+                    .get("baseline")
+                    .and_then(|b| b.get("pages_per_second"))
+                    .and_then(Value::as_f64)
+            });
         let saved = self.settings.rows.iter().any(|r| r.id == run.key);
         if run.machine == LOCAL && saved && !run.precision_only {
             let ids: Vec<String> = self.settings.rows.iter().map(|r| r.id.clone()).collect();
             let mut result = run.data.clone();
             result.insert("state".into(), json!("done"));
-            if let Err(e) = bunko_sched::bench_file::BenchFile::new(&self.storage()).save(&run.key, result, &ids) {
+            if let Err(e) = bunko_sched::bench_file::BenchFile::new(&self.storage())
+                .save(&run.key, result, &ids)
+            {
                 tracing::warn!("could not save the benchmark: {e}");
             }
         }
         if saved && (run.machine != LOCAL || run.autobench) {
             let mut bench = Map::new();
             bench.insert("pages_per_second".into(), json!(pps));
-            for k in ["startup_seconds", "host", "precision", "precision_mode", "precision_trials", "precision_why"] {
+            for k in [
+                "startup_seconds",
+                "host",
+                "precision",
+                "precision_mode",
+                "precision_trials",
+                "precision_why",
+            ] {
                 if let Some(v) = run.data.get(k).filter(|v| !v.is_null()) {
                     bench.insert(k.into(), v.clone());
                 }
             }
             bench.insert("at".into(), json!(self.now_iso()));
-            self.profiles.set_bench(profile_key(&run.machine), &run.key, &bench, Some(&run.row.output_affecting()));
+            self.profiles.set_bench(
+                profile_key(&run.machine),
+                &run.key,
+                &bench,
+                Some(&run.row.output_affecting()),
+            );
             if run.autobench
                 && !run.precision_only
                 && let Some(best) = run.data.get("best").and_then(Value::as_object)
@@ -494,22 +795,48 @@ impl Scheduler {
                 for t in crate::ocr::profiles::POOL_TABLES {
                     pools.insert(t.into(), best.get(t).cloned().unwrap_or(json!({})));
                 }
-                self.profiles.set_pools(profile_key(&run.machine), &run.key, &pools, Some(&run.row.output_affecting()), true, true);
+                self.profiles.set_pools(
+                    profile_key(&run.machine),
+                    &run.key,
+                    &pools,
+                    Some(&run.row.output_affecting()),
+                    true,
+                    true,
+                );
             }
         }
     }
 
     /// The `bench_*` events (and `fatal`/`exit` of a `bench-…` id).
     pub fn bench_event(&mut self, pid: &str, event: Event) {
-        let Some(machine) = self.machines.get(pid).map(|m| m.name.clone()) else { return };
+        let Some(machine) = self.machines.get(pid).map(|m| m.name.clone()) else {
+            return;
+        };
         let bid = match &event {
-            Event::BenchReady { bid, .. } | Event::BenchProgress { bid, .. } | Event::BenchTrial { bid, .. } | Event::BenchDone { bid, .. } => bid.clone(),
+            Event::BenchReady { bid, .. }
+            | Event::BenchProgress { bid, .. }
+            | Event::BenchTrial { bid, .. }
+            | Event::BenchDone { bid, .. } => bid.clone(),
             other => other.sid().unwrap_or_default().to_string(),
         };
-        let Some(pos) = self.bench.lines.get(&machine).and_then(|l| l.iter().position(|r| r.bid == bid)) else { return };
+        let Some(pos) = self
+            .bench
+            .lines
+            .get(&machine)
+            .and_then(|l| l.iter().position(|r| r.bid == bid))
+        else {
+            return;
+        };
         let mut finish: Option<(&str, Option<String>)> = None;
         {
-            let Some(run) = self.bench.lines.get_mut(&machine).and_then(|l| l.get_mut(pos)) else { return };
+            let Some(run) = self
+                .bench
+                .lines
+                .get_mut(&machine)
+                .and_then(|l| l.get_mut(pos))
+            else {
+                return;
+            };
             match event {
                 Event::BenchReady { detail, .. } => {
                     for k in ["startup_seconds", "tunable"] {
@@ -517,7 +844,9 @@ impl Scheduler {
                             run.data.insert(k.into(), v.clone());
                         }
                     }
-                    if let (Some(Value::Object(host)), Some(sd)) = (run.data.get_mut("host"), detail.get("stage_device")) {
+                    if let (Some(Value::Object(host)), Some(sd)) =
+                        (run.data.get_mut("host"), detail.get("stage_device"))
+                    {
                         host.insert("devices".into(), sd.clone());
                     }
                 }
@@ -535,18 +864,40 @@ impl Scheduler {
                             run.data.insert(k, v);
                         }
                     }
-                    let pps = run.data.get("best").and_then(|b| b.get("pages_per_second")).and_then(Value::as_f64);
+                    let pps = run
+                        .data
+                        .get("best")
+                        .and_then(|b| b.get("pages_per_second"))
+                        .and_then(Value::as_f64);
                     if let Some(pps) = pps.filter(|p| *p > 0.0) {
                         run.data.insert("estimates".into(), json!({"volume_200_pages_seconds": (BENCH_VOLUME_PAGES / pps).round() as i64, "remaining_pages": null, "remaining_seconds": null}));
                     }
-                    let error = run.data.get("error").and_then(Value::as_str).map(str::to_string);
-                    finish = Some(if error.is_some() { ("failed", error) } else { ("done", None) });
+                    let error = run
+                        .data
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    finish = Some(if error.is_some() {
+                        ("failed", error)
+                    } else {
+                        ("done", None)
+                    });
                 }
-                Event::Fatal { error, .. } | Event::SpawnFailed { error, .. } => finish = Some(("failed", Some(error))),
+                Event::Fatal { error, .. } | Event::SpawnFailed { error, .. } => {
+                    finish = Some(("failed", Some(error)))
+                }
                 Event::Exit { returncode, .. } => {
                     let name = run.row.name.clone();
-                    let code = returncode.filter(|c| *c != 0).map(|c| format!(" with status {c}")).unwrap_or_default();
-                    finish = Some(("failed", Some(format!("the {name} benchmark ended{code} before it produced a result"))));
+                    let code = returncode
+                        .filter(|c| *c != 0)
+                        .map(|c| format!(" with status {c}"))
+                        .unwrap_or_default();
+                    finish = Some((
+                        "failed",
+                        Some(format!(
+                            "the {name} benchmark ended{code} before it produced a result"
+                        )),
+                    ));
                 }
                 _ => {}
             }
@@ -564,26 +915,52 @@ impl Scheduler {
             .bench
             .lines
             .iter()
-            .filter_map(|(m, l)| l.front().filter(|r| r.started_mono.is_some_and(|t| now - t > BENCH_BUDGET_SECONDS + BENCH_SLACK_SECONDS)).map(|_| m.clone()))
+            .filter_map(|(m, l)| {
+                l.front()
+                    .filter(|r| {
+                        r.started_mono
+                            .is_some_and(|t| now - t > BENCH_BUDGET_SECONDS + BENCH_SLACK_SECONDS)
+                    })
+                    .map(|_| m.clone())
+            })
             .collect();
         for machine in overdue {
-            if let Some(bid) = self.bench.lines.get(&machine).and_then(|l| l.front()).map(|r| r.bid.clone())
+            if let Some(bid) = self
+                .bench
+                .lines
+                .get(&machine)
+                .and_then(|l| l.front())
+                .map(|r| r.bid.clone())
                 && let Some(m) = self.machine_by_name(&machine)
             {
-                m.send(Op::Cancel { sid: None, claim: None, bid: Some(bid) });
+                m.send(Op::Cancel {
+                    sid: None,
+                    claim: None,
+                    bid: Some(bid),
+                });
             }
-            self.bench_finish(&machine, 0, "failed", Some("the benchmark ran past its time budget and was stopped".into()));
+            self.bench_finish(
+                &machine,
+                0,
+                "failed",
+                Some("the benchmark ran past its time budget and was stopped".into()),
+            );
         }
     }
 
     /// A machine left: its line ends (autobench pairs may be asked again).
     pub fn bench_machine_left(&mut self, machine: &str) {
-        let Some(line) = self.bench.lines.remove(machine) else { return };
+        let Some(line) = self.bench.lines.remove(machine) else {
+            return;
+        };
         self.bench.order.retain(|(_, m)| m != machine);
         for mut run in line {
             run.data.insert("state".into(), json!("failed"));
-            run.data.insert("error".into(), json!(format!("{machine} disconnected")));
-            self.bench.recent.insert((run.key.clone(), machine.to_string()), run.data.clone());
+            run.data
+                .insert("error".into(), json!(format!("{machine} disconnected")));
+            self.bench
+                .recent
+                .insert((run.key.clone(), machine.to_string()), run.data.clone());
             if run.autobench {
                 let key = (profile_key(machine).to_string(), run.row.id.clone());
                 self.autobench.inflight.remove(&key);
@@ -617,7 +994,11 @@ impl Scheduler {
     pub fn drain_autobench_requests(&mut self) {
         let wanted = std::mem::take(&mut self.autobench.wanted);
         for (profile, gid) in wanted {
-            let machine = if profile == crate::ocr::profiles::LOCAL_PROFILE { LOCAL.to_string() } else { profile.clone() };
+            let machine = if profile == crate::ocr::profiles::LOCAL_PROFILE {
+                LOCAL.to_string()
+            } else {
+                profile.clone()
+            };
             let pid = self.machine_by_name(&machine).map(|m| m.pid.clone());
             let row = self.row(&gid).cloned();
             let (Some(pid), Some(row)) = (pid, row) else {
@@ -628,24 +1009,55 @@ impl Scheduler {
                 self.autobench.inflight.remove(&(profile, gid));
                 continue;
             }
-            let label = self.machines.get(&pid).map(|m| m.label()).unwrap_or_default();
-            self.log(format!("Benchmarking {} on {label} before it runs there", row.name));
-            let req = BenchRequest { key: gid.clone(), spec: None, pages: None, processor: machine.clone(), autobench: true, precision_only: false };
+            let label = self
+                .machines
+                .get(&pid)
+                .map(|m| m.label())
+                .unwrap_or_default();
+            self.log(format!(
+                "Benchmarking {} on {label} before it runs there",
+                row.name
+            ));
+            let req = BenchRequest {
+                key: gid.clone(),
+                spec: None,
+                pages: None,
+                processor: machine.clone(),
+                autobench: true,
+                precision_only: false,
+            };
             if let Err((_, body)) = self.bench_enqueue(req) {
-                tracing::info!("benchmark of {} on {label} refused: {}", row.name, body["error"]);
+                tracing::info!(
+                    "benchmark of {} on {label} refused: {}",
+                    row.name,
+                    body["error"]
+                );
                 self.autobench_settled(&machine, &gid, "refused");
             }
         }
     }
 
     /// The bench a sample URL serves, if `pid` owns it: its file.
-    pub fn bench_sample(&self, pid: &str, bid: &str) -> Result<std::path::PathBuf, (u16, &'static str)> {
-        let Some(machine) = self.machines.get(pid) else { return Err((404, "No such processor")) };
-        let live = self.bench.lines.get(&machine.name).is_some_and(|l| l.iter().any(|r| r.bid == bid && r.sent));
+    pub fn bench_sample(
+        &self,
+        pid: &str,
+        bid: &str,
+    ) -> Result<std::path::PathBuf, (u16, &'static str)> {
+        let Some(machine) = self.machines.get(pid) else {
+            return Err((404, "No such processor"));
+        };
+        let live = self
+            .bench
+            .lines
+            .get(&machine.name)
+            .is_some_and(|l| l.iter().any(|r| r.bid == bid && r.sent));
         if !bid.starts_with("bench-") || !live {
             return Err((404, "No such sample"));
         }
-        Ok(self.storage().join(".processing").join(bench_sample_filename(bid)))
+        Ok(self
+            .storage()
+            .join(".processing")
+            .join(bench_sample_filename(bid)))
     }
 }
 

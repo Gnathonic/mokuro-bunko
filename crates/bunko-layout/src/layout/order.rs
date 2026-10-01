@@ -93,7 +93,13 @@ pub fn split_paragraphs<'a>(group: &[&'a Line], body: &Body) -> Vec<Vec<&'a Line
     let mut prev_text = String::new();
     for (k, column) in columns.into_iter().enumerate() {
         let inset = (text_start(column[0], body.theta, body.vertical) - body.top) / body.em;
-        let short = (body.bottom - py::max_of(column.iter().map(|l| l.main_cross(body.theta, body.vertical).1))) / body.em;
+        let short = (body.bottom
+            - py::max_of(
+                column
+                    .iter()
+                    .map(|l| l.main_cross(body.theta, body.vertical).1),
+            ))
+            / body.em;
         let text: String = column.iter().map(|l| l.text.as_str()).collect();
         let start = if k == 0 || prev_short >= PARAGRAPH_SHORT_END_EM {
             true
@@ -134,7 +140,9 @@ pub fn group_box(group: &[&Line]) -> Spans {
 pub fn order_blocks(groups: &[Vec<&Line>], kinds: &[Kind], bodies: &[Body]) -> Vec<usize> {
     let boxes: Vec<Spans> = groups.iter().map(|g| group_box(g)).collect();
     let of_kind = |k: Kind| -> Vec<usize> { (0..kinds.len()).filter(|&i| kinds[i] == k).collect() };
-    let flow: Vec<usize> = (0..kinds.len()).filter(|&i| matches!(kinds[i], Kind::Text | Kind::Body)).collect();
+    let flow: Vec<usize> = (0..kinds.len())
+        .filter(|&i| matches!(kinds[i], Kind::Text | Kind::Body))
+        .collect();
     let mut order = order_rows(&of_kind(Kind::Header), groups, &boxes);
 
     let mut cuts: Vec<f64> = Vec::new();
@@ -167,7 +175,11 @@ fn row_overlap(a0: f64, a1: f64, b0: f64, b1: f64) -> f64 {
 
 fn order_rows(indices: &[usize], groups: &[Vec<&Line>], boxes: &[Spans]) -> Vec<usize> {
     let mut remaining = indices.to_vec();
-    remaining.sort_by(|&a, &b| fcmp(boxes[a].2, boxes[b].2).then(fcmp(-boxes[a].1, -boxes[b].1)).then(a.cmp(&b)));
+    remaining.sort_by(|&a, &b| {
+        fcmp(boxes[a].2, boxes[b].2)
+            .then(fcmp(-boxes[a].1, -boxes[b].1))
+            .then(a.cmp(&b))
+    });
     let mut ordered = Vec::new();
     while !remaining.is_empty() {
         let seed = remaining[0];
@@ -177,7 +189,9 @@ fn order_rows(indices: &[usize], groups: &[Vec<&Line>], boxes: &[Spans]) -> Vec<
             let (y0, y1) = (boxes[i].2, boxes[i].3);
             let joins = i == seed
                 || row_overlap(s0, s1, y0, y1) >= ROW_MIN_OVERLAP
-                || row.iter().any(|&m| row_overlap(boxes[m].2, boxes[m].3, y0, y1) >= ROW_CHAIN_OVERLAP);
+                || row
+                    .iter()
+                    .any(|&m| row_overlap(boxes[m].2, boxes[m].3, y0, y1) >= ROW_CHAIN_OVERLAP);
             if joins {
                 row.push(i);
             }
@@ -188,9 +202,17 @@ fn order_rows(indices: &[usize], groups: &[Vec<&Line>], boxes: &[Spans]) -> Vec<
             .map(|l| glyph_count(&l.text) as i64 * if l.vertical { 1 } else { -1 })
             .sum();
         if glyphs_vertical >= 0 {
-            row.sort_by(|&a, &b| fcmp(-boxes[a].1, -boxes[b].1).then(fcmp(boxes[a].2, boxes[b].2)).then(a.cmp(&b)));
+            row.sort_by(|&a, &b| {
+                fcmp(-boxes[a].1, -boxes[b].1)
+                    .then(fcmp(boxes[a].2, boxes[b].2))
+                    .then(a.cmp(&b))
+            });
         } else {
-            row.sort_by(|&a, &b| fcmp(boxes[a].0, boxes[b].0).then(fcmp(boxes[a].2, boxes[b].2)).then(a.cmp(&b)));
+            row.sort_by(|&a, &b| {
+                fcmp(boxes[a].0, boxes[b].0)
+                    .then(fcmp(boxes[a].2, boxes[b].2))
+                    .then(a.cmp(&b))
+            });
         }
         ordered.extend(row.iter().copied());
         remaining.retain(|i| !row.contains(i));

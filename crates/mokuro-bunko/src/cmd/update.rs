@@ -16,7 +16,11 @@ use bunko_update::{InstallKind, UpdateStatus, Updater};
 pub fn run(ctx: &Ctx, cmd: UpdateCmd) -> CmdResult {
     let config = cfgfile::load_effective(&ctx.config_path)?;
     crate::logging::init_console(ctx.verbose);
-    let updater = Updater::new(config.update.manifest_url.clone(), config.update.channel.clone(), FLAVOR);
+    let updater = Updater::new(
+        config.update.manifest_url.clone(),
+        config.update.channel.clone(),
+        FLAVOR,
+    );
     match cmd {
         UpdateCmd::Check => check(&updater),
         UpdateCmd::Apply { yes, restart } => apply(ctx, &updater, yes, restart),
@@ -34,8 +38,14 @@ pub fn describe_install(kind: &InstallKind) -> String {
 
 fn print_status(s: &UpdateStatus) {
     println!("Current version: {}", s.current);
-    println!("Latest version:  {}", s.latest.as_deref().unwrap_or("unknown"));
-    println!("Update available: {}", if s.available { "yes" } else { "no" });
+    println!(
+        "Latest version:  {}",
+        s.latest.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "Update available: {}",
+        if s.available { "yes" } else { "no" }
+    );
     println!("Install kind: {}", describe_install(&s.install));
     if let Some(notes) = &s.notes_url {
         println!("Release notes: {notes}");
@@ -57,7 +67,9 @@ fn check(updater: &Updater) -> CmdResult {
     let status = runtime()?.block_on(updater.check());
     print_status(&status);
     match status.error {
-        Some(e) => Err(exit_with(format!("Error: could not check for updates: {e}"))),
+        Some(e) => Err(exit_with(format!(
+            "Error: could not check for updates: {e}"
+        ))),
         None => Ok(()),
     }
 }
@@ -69,7 +81,9 @@ fn refusal(kind: &InstallKind) -> Option<String> {
         InstallKind::Docker => {
             Some("this is a Docker install: pull the new image and recreate the container".into())
         }
-        InstallKind::Managed { by } => Some(format!("this install is managed by {by}: update it there")),
+        InstallKind::Managed { by } => {
+            Some(format!("this install is managed by {by}: update it there"))
+        }
         InstallKind::Mobile => Some("this app updates through its app store".into()),
     }
 }
@@ -95,7 +109,12 @@ fn apply(ctx: &Ctx, updater: &Updater, yes: bool, restart: bool) -> CmdResult {
             bunko_update::TARGET
         )));
     }
-    if !yes && !prompt::confirm(&format!("Install mokuro-bunko {latest} over {}?", status.current), Some(false))? {
+    if !yes
+        && !prompt::confirm(
+            &format!("Install mokuro-bunko {latest} over {}?", status.current),
+            Some(false),
+        )?
+    {
         println!("Update cancelled.");
         return Ok(());
     }

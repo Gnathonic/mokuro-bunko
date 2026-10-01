@@ -47,10 +47,16 @@ impl StorageLayout {
     /// Fail unless `path` is an existing directory we can create files in.
     pub fn assert_writable_dir(path: &Path, label: &str) -> Result<(), String> {
         if !path.exists() {
-            return Err(format!("Required directory does not exist ({label}): {}", path.display()));
+            return Err(format!(
+                "Required directory does not exist ({label}): {}",
+                path.display()
+            ));
         }
         if !path.is_dir() {
-            return Err(format!("Required path is not a directory ({label}): {}", path.display()));
+            return Err(format!(
+                "Required path is not a directory ({label}): {}",
+                path.display()
+            ));
         }
         let probe = path.join(".mokuro-write-test");
         std::fs::write(&probe, b"ok")
@@ -60,7 +66,9 @@ impl StorageLayout {
 }
 
 fn env_path(var: &str) -> Option<PathBuf> {
-    std::env::var_os(var).filter(|v| !v.is_empty()).map(PathBuf::from)
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 pub fn home_dir() -> PathBuf {
@@ -77,9 +85,13 @@ pub fn home_dir() -> PathBuf {
 /// `~/.local/share/mokuro-bunko` (XDG_DATA_HOME), or `%LOCALAPPDATA%\mokuro-bunko`.
 pub fn default_storage_path() -> PathBuf {
     if cfg!(windows) {
-        env_path("LOCALAPPDATA").unwrap_or_else(|| home_dir().join("AppData").join("Local")).join("mokuro-bunko")
+        env_path("LOCALAPPDATA")
+            .unwrap_or_else(|| home_dir().join("AppData").join("Local"))
+            .join("mokuro-bunko")
     } else {
-        env_path("XDG_DATA_HOME").unwrap_or_else(|| home_dir().join(".local").join("share")).join("mokuro-bunko")
+        env_path("XDG_DATA_HOME")
+            .unwrap_or_else(|| home_dir().join(".local").join("share"))
+            .join("mokuro-bunko")
     }
 }
 

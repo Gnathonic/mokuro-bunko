@@ -43,6 +43,6 @@ pub use records::{RawLine, RawPage};
 pub use road::EngineRoad;
 pub use script::normalize_text;
 pub use sidecar::{
-    FinishedPage, LayerStamp, Normalization, OcrEngine, Page, VolumeHeader, build_volume, finish_page,
-    layout_page_dict, normalize_sidecar, normalize_sidecar_file, write_sidecar,
+    FinishedPage, LayerStamp, Normalization, OcrEngine, Page, VolumeHeader, build_volume,
+    finish_page, layout_page_dict, normalize_sidecar, normalize_sidecar_file, write_sidecar,
 };

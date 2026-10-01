@@ -40,7 +40,11 @@ impl UpdateSource for bunko_update::Updater {
         Box::pin(bunko_update::Updater::check(self))
     }
     fn apply(&self) -> BoxFuture<'_, Result<String, String>> {
-        Box::pin(async move { bunko_update::Updater::apply(self).await.map_err(|e| e.to_string()) })
+        Box::pin(async move {
+            bunko_update::Updater::apply(self)
+                .await
+                .map_err(|e| e.to_string())
+        })
     }
 }
 
@@ -79,7 +83,11 @@ impl UpdateService {
     pub fn from_config(config: Arc<RwLock<Config>>, flavor: &str) -> Self {
         let updater = {
             let c = config.read();
-            bunko_update::Updater::new(c.update.manifest_url.clone(), c.update.channel.clone(), flavor)
+            bunko_update::Updater::new(
+                c.update.manifest_url.clone(),
+                c.update.channel.clone(),
+                flavor,
+            )
         };
         Self::new(Arc::new(updater), config)
     }
@@ -101,7 +109,11 @@ impl UpdateService {
         let _one = self.inner.checking.lock().await;
         let status = self.inner.source.check().await;
         if status.available {
-            info!("mokuro-bunko {} is available (running {})", status.latest.as_deref().unwrap_or("?"), status.current);
+            info!(
+                "mokuro-bunko {} is available (running {})",
+                status.latest.as_deref().unwrap_or("?"),
+                status.current
+            );
         } else if let Some(e) = &status.error {
             warn!("update check failed: {e}");
         }
@@ -113,7 +125,9 @@ impl UpdateService {
     /// are on) or when `refresh` is asked.
     pub async fn status(&self, refresh: bool) -> UpdateStatus {
         let cached = self.inner.cached.lock().clone();
-        let fresh = cached.as_ref().is_some_and(|(at, _)| at.elapsed() < CHECK_EVERY);
+        let fresh = cached
+            .as_ref()
+            .is_some_and(|(at, _)| at.elapsed() < CHECK_EVERY);
         if refresh || (!fresh && self.checks_enabled()) {
             return self.check_now().await;
         }
@@ -134,7 +148,11 @@ impl UpdateService {
 
     async fn apply_inner(&self) -> Result<(String, String), (u16, String)> {
         let status = self.status(false).await;
-        let status = if status.checked_at.is_none() { self.check_now().await } else { status };
+        let status = if status.checked_at.is_none() {
+            self.check_now().await
+        } else {
+            status
+        };
         if !status.available {
             return Err((409, "No newer release is available".into()));
         }
@@ -142,7 +160,12 @@ impl UpdateService {
             return Err((409, cannot_apply_reason(&status)));
         }
         let from = status.current.clone();
-        let version = self.inner.source.apply().await.map_err(|e| (500, format!("The update failed: {e}")))?;
+        let version = self
+            .inner
+            .source
+            .apply()
+            .await
+            .map_err(|e| (500, format!("The update failed: {e}")))?;
         info!("installed mokuro-bunko {version} (was {from})");
         Ok((from, version))
     }
@@ -198,18 +221,28 @@ fn unchecked_status() -> UpdateStatus {
 pub fn cannot_apply_reason(status: &UpdateStatus) -> String {
     match &status.install {
         InstallKind::Docker => match &status.docker_image {
-            Some(image) => format!("This server runs in Docker: pull {image} and recreate the container"),
-            None => "This server runs in Docker: pull the new image and recreate the container".into(),
+            Some(image) => {
+                format!("This server runs in Docker: pull {image} and recreate the container")
+            }
+            None => {
+                "This server runs in Docker: pull the new image and recreate the container".into()
+            }
         },
-        InstallKind::Managed { by } => format!("This installation is managed by {by}; update it there"),
+        InstallKind::Managed { by } => {
+            format!("This installation is managed by {by}; update it there")
+        }
         InstallKind::Mobile => "Update the app through its store".into(),
-        InstallKind::SelfManaged { .. } => "There is no download of this release for this platform".into(),
+        InstallKind::SelfManaged { .. } => {
+            "There is no download of this release for this platform".into()
+        }
     }
 }
 
 pub(super) mod http {
     use super::UpdateStatus;
-    use crate::admin::{AdminState, ApiRequest, blocking, error, not_found, ok, parse_qs, query_one};
+    use crate::admin::{
+        AdminState, ApiRequest, blocking, error, not_found, ok, parse_qs, query_one,
+    };
     use axum::response::Response;
     use bunko_db::{AuditDetails, NewAuditEvent};
     use serde_json::{Value, json};
@@ -224,22 +257,34 @@ pub(super) mod http {
             m.insert("checks_enabled".into(), json!(checks_enabled));
             m.insert("applying".into(), json!(applying));
             if status.available && !status.can_apply {
-                m.insert("cannot_apply_reason".into(), json!(super::cannot_apply_reason(status)));
+                m.insert(
+                    "cannot_apply_reason".into(),
+                    json!(super::cannot_apply_reason(status)),
+                );
             }
         }
         v
     }
 
     pub async fn get(s: &AdminState, req: &ApiRequest) -> Response {
-        let Some(updates) = &s.deps.updates else { return not_found() };
+        let Some(updates) = &s.deps.updates else {
+            return not_found();
+        };
         let q = parse_qs(&req.query);
-        let refresh = query_one(&q, "refresh").is_some_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"));
+        let refresh = query_one(&q, "refresh")
+            .is_some_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"));
         let status = updates.status(refresh).await;
-        ok(body(&status, updates.checks_enabled(), updates.is_applying()))
+        ok(body(
+            &status,
+            updates.checks_enabled(),
+            updates.is_applying(),
+        ))
     }
 
     pub async fn apply(s: &AdminState, req: &ApiRequest) -> Response {
-        let Some(updates) = &s.deps.updates else { return not_found() };
+        let Some(updates) = &s.deps.updates else {
+            return not_found();
+        };
         let (from, version) = match updates.apply().await {
             Ok(v) => v,
             Err((status, msg)) => return error(status, msg),
@@ -271,6 +316,8 @@ pub(super) mod http {
             }
             None => false,
         };
-        ok(json!({"ok": true, "success": true, "version": version, "previous": from, "restarting": restarting}))
+        ok(
+            json!({"ok": true, "success": true, "version": version, "previous": from, "restarting": restarting}),
+        )
     }
 }

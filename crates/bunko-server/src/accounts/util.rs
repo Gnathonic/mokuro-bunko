@@ -22,7 +22,10 @@ pub fn json_response(status: u16, value: Value) -> Response {
     let body = serde_json::to_vec(&value).unwrap_or_default();
     let mut resp = Response::new(Body::from(body));
     *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     resp
 }
 
@@ -37,13 +40,16 @@ pub fn internal_error() -> Response {
 /// `204 No Content` with an `Allow` header (0.5.2 `_handle_options`).
 pub fn options_response(allow: &'static str) -> Response {
     let mut resp = StatusCode::NO_CONTENT.into_response();
-    resp.headers_mut().insert(header::ALLOW, HeaderValue::from_static(allow));
+    resp.headers_mut()
+        .insert(header::ALLOW, HeaderValue::from_static(allow));
     resp
 }
 
 /// Run blocking work (SQLite, bcrypt, fs) off the async workers. A panic in `f`
 /// becomes a 500.
-pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, Response> {
+pub async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Response> {
     tokio::task::spawn_blocking(f).await.map_err(|e| {
         error!("account task failed: {e}");
         internal_error()
@@ -113,8 +119,16 @@ impl Client {
     pub fn of(deps: &AccountsDeps, parts: &Parts) -> Client {
         let peer_known = parts.extensions.get::<ConnectInfo<SocketAddr>>().is_some();
         let peer = canonical(RequestCtx::peer_of(parts));
-        let ip = deps.core.proxies.read().client_ip_text(peer, &parts.headers);
-        Client { peer, ip, peer_known }
+        let ip = deps
+            .core
+            .proxies
+            .read()
+            .client_ip_text(peer, &parts.headers);
+        Client {
+            peer,
+            ip,
+            peer_known,
+        }
     }
 
     /// The `ip:username` limiter key every 0.5.2 login surface uses.
@@ -126,7 +140,10 @@ impl Client {
 impl FromRequestParts<AccountsDeps> for Client {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, deps: &AccountsDeps) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        deps: &AccountsDeps,
+    ) -> Result<Self, Self::Rejection> {
         Ok(Client::of(deps, parts))
     }
 }
@@ -139,7 +156,11 @@ pub fn is_traversal(file: &str) -> bool {
 /// Login/account static rules: `index.html` for the bare prefix, 403 text `Forbidden`
 /// for traversal, 404 text `Not found`, `Cache-Control: no-cache`.
 pub fn serve_page_text_errors(module: &str, file: &str) -> Response {
-    let file = if file.is_empty() || file == "/" { "index.html" } else { file };
+    let file = if file.is_empty() || file == "/" {
+        "index.html"
+    } else {
+        file
+    };
     if is_traversal(file) {
         return text(403, "Forbidden");
     }
@@ -148,7 +169,12 @@ pub fn serve_page_text_errors(module: &str, file: &str) -> Response {
 
 /// Home/setup/registration static rules: JSON 404 `{"error": <not_found>}` for
 /// traversal and missing files.
-pub fn serve_page_json_errors(module: &str, file: &str, not_found: &str, cache: Option<&'static str>) -> Response {
+pub fn serve_page_json_errors(
+    module: &str,
+    file: &str,
+    not_found: &str,
+    cache: Option<&'static str>,
+) -> Response {
     if file.is_empty() || is_traversal(file) {
         return json_error(404, not_found);
     }
@@ -159,7 +185,8 @@ pub fn serve_page_json_errors(module: &str, file: &str, not_found: &str, cache: 
 pub fn text(status: u16, message: &'static str) -> Response {
     let mut resp = Response::new(Body::from(message));
     *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    resp.headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
     resp
 }
 

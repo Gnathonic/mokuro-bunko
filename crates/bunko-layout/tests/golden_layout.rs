@@ -15,10 +15,21 @@ fn check_layout(name: &str, got: &PageLayout, want: &Value) -> Vec<String> {
     let mut errs = Vec::new();
     let blocks: Vec<Value> = got.blocks.iter().map(|b| b.to_value()).collect();
     if &Value::Array(blocks.clone()) != get(want, "blocks") {
-        errs.push(format!("{name}: blocks differ\n got {}\nwant {}", Value::Array(blocks), get(want, "blocks")));
+        errs.push(format!(
+            "{name}: blocks differ\n got {}\nwant {}",
+            Value::Array(blocks),
+            get(want, "blocks")
+        ));
     }
-    let groups: Vec<Vec<i64>> = arr(get(want, "groups")).iter().map(|g| arr(g).iter().map(i).collect()).collect();
-    let got_groups: Vec<Vec<i64>> = got.groups.iter().map(|g| g.iter().map(|&x| x as i64).collect()).collect();
+    let groups: Vec<Vec<i64>> = arr(get(want, "groups"))
+        .iter()
+        .map(|g| arr(g).iter().map(i).collect())
+        .collect();
+    let got_groups: Vec<Vec<i64>> = got
+        .groups
+        .iter()
+        .map(|g| g.iter().map(|&x| x as i64).collect())
+        .collect();
     if groups != got_groups {
         errs.push(format!("{name}: groups {got_groups:?} != {groups:?}"));
     }
@@ -57,7 +68,11 @@ fn check_layout(name: &str, got: &PageLayout, want: &Value) -> Vec<String> {
     }
     let bodies = arr(get(want, "bodies"));
     if bodies.len() != got.bodies.len() {
-        errs.push(format!("{name}: {} bodies != {}", got.bodies.len(), bodies.len()));
+        errs.push(format!(
+            "{name}: {} bodies != {}",
+            got.bodies.len(),
+            bodies.len()
+        ));
     } else {
         for (g, w) in got.bodies.iter().zip(bodies) {
             let members: Vec<i64> = arr(get(w, "members")).iter().map(i).collect();
@@ -80,15 +95,24 @@ fn check_layout(name: &str, got: &PageLayout, want: &Value) -> Vec<String> {
 
 fn check_page(name: &str, page: &RawPage, expect: &Value) -> Vec<String> {
     let mut errs = check_layout(name, &layout_page(page), get(expect, "layout"));
-    let pieces: Vec<Vec<i64>> = arr(get(expect, "column_pieces")).iter().map(|g| arr(g).iter().map(i).collect()).collect();
-    let got: Vec<Vec<i64>> = column_pieces(&page.lines).iter().map(|g| g.iter().map(|&x| x as i64).collect()).collect();
+    let pieces: Vec<Vec<i64>> = arr(get(expect, "column_pieces"))
+        .iter()
+        .map(|g| arr(g).iter().map(i).collect())
+        .collect();
+    let got: Vec<Vec<i64>> = column_pieces(&page.lines)
+        .iter()
+        .map(|g| g.iter().map(|&x| x as i64).collect())
+        .collect();
     if pieces != got {
         errs.push(format!("{name}: column_pieces {got:?} != {pieces:?}"));
     }
     let (dict, _) = layout_page_dict(page, MOKURO_FORMAT_VERSION);
     let json = dict.to_value(None).dumps(Separators::Default);
     if json != s(get(expect, "page_json")) {
-        errs.push(format!("{name}: page json differs\n got {json}\nwant {}", s(get(expect, "page_json"))));
+        errs.push(format!(
+            "{name}: page json differs\n got {json}\nwant {}",
+            s(get(expect, "page_json"))
+        ));
     }
     errs
 }
@@ -102,7 +126,12 @@ fn layout_pages_match_python() {
     for case in arr(&cases) {
         let name = s(get(case, "name"));
         let page = match case.get("ref").and_then(Value::as_str) {
-            Some("real") => reals.iter().find(|(n, _)| n == name).expect("real page").1.rounded(),
+            Some("real") => reals
+                .iter()
+                .find(|(n, _)| n == name)
+                .expect("real page")
+                .1
+                .rounded(),
             Some("fixture") => RawPage::from_value(&fixture_page(name)),
             Some("page129") => RawPage::from_value(&load(&format!("inputs/{name}.detect.json"))),
             _ => RawPage::from_value(get(case, "page")),
@@ -111,7 +140,12 @@ fn layout_pages_match_python() {
         n += 1;
     }
     assert!(n >= 100, "only {n} pages");
-    assert!(errs.is_empty(), "{} of {n} pages differ:\n{}", errs.len(), errs.join("\n"));
+    assert!(
+        errs.is_empty(),
+        "{} of {n} pages differ:\n{}",
+        errs.len(),
+        errs.join("\n")
+    );
 }
 
 #[test]
@@ -126,27 +160,46 @@ fn unit_test_layout_calls_match_python() {
         match fname {
             "layout_page" => {
                 let page = RawPage::from_value(get(args, "page"));
-                errs.extend(check_layout("unit layout_page", &layout_page(&page), result));
+                errs.extend(check_layout(
+                    "unit layout_page",
+                    &layout_page(&page),
+                    result,
+                ));
             }
             "column_pieces" => {
                 let page = RawPage::from_value(get(args, "page"));
-                let want: Vec<Vec<i64>> = arr(result).iter().map(|g| arr(g).iter().map(i).collect()).collect();
-                let got: Vec<Vec<i64>> =
-                    column_pieces(&page.lines).iter().map(|g| g.iter().map(|&x| x as i64).collect()).collect();
+                let want: Vec<Vec<i64>> = arr(result)
+                    .iter()
+                    .map(|g| arr(g).iter().map(i).collect())
+                    .collect();
+                let got: Vec<Vec<i64>> = column_pieces(&page.lines)
+                    .iter()
+                    .map(|g| g.iter().map(|&x| x as i64).collect())
+                    .collect();
                 if want != got {
-                    errs.push(format!("column_pieces {got:?} != {want:?} for {}", short(args)));
+                    errs.push(format!(
+                        "column_pieces {got:?} != {want:?} for {}",
+                        short(args)
+                    ));
                 }
             }
             "normalize_text" => {
                 let got = normalize_text(s(get(args, "text")));
                 if got != s(result) {
-                    errs.push(format!("normalize_text({:?}) = {got:?} != {:?}", s(get(args, "text")), s(result)));
+                    errs.push(format!(
+                        "normalize_text({:?}) = {got:?} != {:?}",
+                        s(get(args, "text")),
+                        s(result)
+                    ));
                 }
             }
             "is_ruby_script" => {
                 let got = is_ruby_script(s(get(args, "text")));
                 if got != b(result) {
-                    errs.push(format!("is_ruby_script({:?}) = {got}", s(get(args, "text"))));
+                    errs.push(format!(
+                        "is_ruby_script({:?}) = {got}",
+                        s(get(args, "text"))
+                    ));
                 }
             }
             _ => continue,
@@ -154,5 +207,10 @@ fn unit_test_layout_calls_match_python() {
         *counts.entry(fname.to_string()).or_insert(0) += 1;
     }
     eprintln!("layout unit calls replayed: {counts:?}");
-    assert!(errs.is_empty(), "{} differ:\n{}", errs.len(), errs.join("\n"));
+    assert!(
+        errs.is_empty(),
+        "{} differ:\n{}",
+        errs.len(),
+        errs.join("\n")
+    );
 }

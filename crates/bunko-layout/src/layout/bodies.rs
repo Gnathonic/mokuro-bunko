@@ -63,7 +63,11 @@ fn supported_edge(values: &[f64], window: f64, lowest: bool) -> f64 {
     }
     let need = if ordered.len() >= 2 { 2 } else { 1 };
     for &value in &ordered {
-        let cluster: Vec<f64> = ordered.iter().copied().filter(|v| (v - value).abs() <= window).collect();
+        let cluster: Vec<f64> = ordered
+            .iter()
+            .copied()
+            .filter(|v| (v - value).abs() <= window)
+            .collect();
         if cluster.len() >= need {
             return median(cluster).unwrap_or(value);
         }
@@ -74,9 +78,16 @@ fn supported_edge(values: &[f64], window: f64, lowest: bool) -> f64 {
 /// Where the body's FULL columns end: the best-supported end near the last one.
 fn full_column_edge(ends: &[f64], window: f64, reach: f64) -> f64 {
     let lowest = py::max_of(ends.iter().copied());
-    let near: Vec<f64> = ends.iter().copied().filter(|v| lowest - v <= reach).collect();
+    let near: Vec<f64> = ends
+        .iter()
+        .copied()
+        .filter(|v| lowest - v <= reach)
+        .collect();
     let mut best = near[0];
-    let mut best_key = (near.iter().filter(|u| (*u - best).abs() <= window).count(), best);
+    let mut best_key = (
+        near.iter().filter(|u| (*u - best).abs() <= window).count(),
+        best,
+    );
     for &v in &near[1..] {
         let key = (near.iter().filter(|u| (*u - v).abs() <= window).count(), v);
         if key.0 > best_key.0 || (key.0 == best_key.0 && key.1 > best_key.1) {
@@ -89,15 +100,22 @@ fn full_column_edge(ends: &[f64], window: f64, reach: f64) -> f64 {
 
 /// Stretches of the reading axis that many long columns cover at once.
 fn coverage_bands(extents: &[(f64, f64)]) -> Vec<(f64, f64)> {
-    let mut events: Vec<(f64, i64)> =
-        extents.iter().map(|e| (e.0, 1)).chain(extents.iter().map(|e| (e.1, -1))).collect();
+    let mut events: Vec<(f64, i64)> = extents
+        .iter()
+        .map(|e| (e.0, 1))
+        .chain(extents.iter().map(|e| (e.1, -1)))
+        .collect();
     events.sort_by(|a, b| fcmp(a.0, b.0).then(a.1.cmp(&b.1)));
     let (mut peak, mut level) = (0i64, 0i64);
     for &(_, step) in &events {
         level += step;
         peak = peak.max(level);
     }
-    let floor = if peak > 2 { max2(1.0, BAND_GUTTER_COVERAGE * peak as f64) } else { 0.0 };
+    let floor = if peak > 2 {
+        max2(1.0, BAND_GUTTER_COVERAGE * peak as f64)
+    } else {
+        0.0
+    };
     let mut bands = Vec::new();
     level = 0;
     let mut start: Option<f64> = None;
@@ -120,7 +138,11 @@ pub fn find_bodies(lines: &[Line]) -> Vec<Body> {
     let mut bodies = Vec::new();
     for vertical in [true, false] {
         let pool: Vec<&Line> = lines.iter().filter(|l| l.vertical == vertical).collect();
-        let long: Vec<&Line> = pool.iter().copied().filter(|l| l.length() >= LONG_LINE_EM * l.thickness()).collect();
+        let long: Vec<&Line> = pool
+            .iter()
+            .copied()
+            .filter(|l| l.length() >= LONG_LINE_EM * l.thickness())
+            .collect();
         if long.len() < BODY_MIN_LONG_COLUMNS {
             continue;
         }
@@ -162,7 +184,10 @@ pub fn find_bodies(lines: &[Line]) -> Vec<Body> {
             if members.len() < BODY_MIN_COLUMNS {
                 continue;
             }
-            let spans: Vec<_> = members.iter().map(|l| l.main_cross(theta, vertical)).collect();
+            let spans: Vec<_> = members
+                .iter()
+                .map(|l| l.main_cross(theta, vertical))
+                .collect();
             let window = BODY_EDGE_CLUSTER_EM * em;
             let mut by_cross = spans.clone();
             by_cross.sort_by(|a, b| fcmp(a.2, b.2));
@@ -171,7 +196,10 @@ pub fn find_bodies(lines: &[Line]) -> Vec<Body> {
                 .map(|w| w[1].2 - w[0].3)
                 .filter(|g| 0.0 < *g && *g < 2.5 * em)
                 .collect();
-            let starts: Vec<f64> = members.iter().map(|l| text_start(l, theta, vertical)).collect();
+            let starts: Vec<f64> = members
+                .iter()
+                .map(|l| text_start(l, theta, vertical))
+                .collect();
             let top = min2(
                 supported_edge(&starts, window, true),
                 py::min_of(band.iter().map(|l| text_start(l, theta, vertical))),
@@ -199,22 +227,36 @@ pub fn find_bodies(lines: &[Line]) -> Vec<Body> {
 }
 
 fn body_y_extent(body: &Body) -> (f64, f64) {
-    if body.vertical { (body.top, body.bottom) } else { (body.cross0, body.cross1) }
+    if body.vertical {
+        (body.top, body.bottom)
+    } else {
+        (body.cross0, body.cross1)
+    }
 }
 
 fn is_lone_doubt(line: &Line) -> bool {
-    glyph_count(&line.text) <= LONE_GLYPHS_MAX && !has_kanji(&line.text) && line.conf < LONE_GLYPHS_MIN_CONF
+    glyph_count(&line.text) <= LONE_GLYPHS_MAX
+        && !has_kanji(&line.text)
+        && line.conf < LONE_GLYPHS_MIN_CONF
 }
 
 /// Role of every line (by raw index): text, header, footer or noise.
-pub fn classify_roles(lines: &[Line], bodies: &[Body], page_height: f64, page_width: f64) -> HashMap<usize, Role> {
+pub fn classify_roles(
+    lines: &[Line],
+    bodies: &[Body],
+    page_height: f64,
+    page_width: f64,
+) -> HashMap<usize, Role> {
     let mut roles: HashMap<usize, Role> = lines.iter().map(|l| (l.index, Role::Text)).collect();
     for line in lines {
         if line.conf < LOW_CONFIDENCE {
             roles.insert(line.index, Role::Noise);
         }
     }
-    let readable: Vec<&Line> = lines.iter().filter(|l| roles[&l.index] == Role::Text).collect();
+    let readable: Vec<&Line> = lines
+        .iter()
+        .filter(|l| roles[&l.index] == Role::Text)
+        .collect();
     if readable.len() == 1 && is_lone_doubt(readable[0]) {
         roles.insert(readable[0].index, Role::Noise);
     }
@@ -229,7 +271,10 @@ pub fn classify_roles(lines: &[Line], bodies: &[Body], page_height: f64, page_wi
     }
     let em = median(bodies.iter().map(|b| b.em)).unwrap_or(0.0);
     let theta = bodies[0].theta;
-    let in_body: BTreeSet<usize> = bodies.iter().flat_map(|b| b.members.iter().copied()).collect();
+    let in_body: BTreeSet<usize> = bodies
+        .iter()
+        .flat_map(|b| b.members.iter().copied())
+        .collect();
     for line in lines {
         if roles[&line.index] != Role::Text || in_body.contains(&line.index) {
             continue;
@@ -242,7 +287,8 @@ pub fn classify_roles(lines: &[Line], bodies: &[Body], page_height: f64, page_wi
         let clearance = MARGIN_CLEARANCE_EM * em;
         if y1 <= y_top - clearance && centre <= MARGIN_BAND_FRACTION * page_height {
             roles.insert(line.index, Role::Header);
-        } else if y0 >= y_bottom + clearance && centre >= (1.0 - MARGIN_BAND_FRACTION) * page_height {
+        } else if y0 >= y_bottom + clearance && centre >= (1.0 - MARGIN_BAND_FRACTION) * page_height
+        {
             roles.insert(line.index, Role::Footer);
         }
     }

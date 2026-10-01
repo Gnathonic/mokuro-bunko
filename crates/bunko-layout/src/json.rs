@@ -195,7 +195,11 @@ impl Value {
 
     /// `json.loads(text)`.
     pub fn parse(text: &str) -> Result<Value, ParseError> {
-        let mut p = Parser { s: text.as_bytes(), text, i: 0 };
+        let mut p = Parser {
+            s: text.as_bytes(),
+            text,
+            i: 0,
+        };
         p.ws();
         let v = p.value()?;
         p.ws();
@@ -244,7 +248,11 @@ fn float_json(f: f64) -> String {
     if f.is_nan() {
         "NaN".to_string()
     } else if f.is_infinite() {
-        if f > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        if f > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        }
     } else {
         float_repr(f)
     }
@@ -278,7 +286,10 @@ struct Parser<'a> {
 
 impl Parser<'_> {
     fn err(&self, message: &str) -> ParseError {
-        ParseError { offset: self.i, message: message.to_string() }
+        ParseError {
+            offset: self.i,
+            message: message.to_string(),
+        }
     }
 
     /// Python's json whitespace: space, tab, newline, carriage return.
@@ -394,7 +405,10 @@ impl Parser<'_> {
         let mut out = String::new();
         loop {
             let start = self.i;
-            while self.i < self.s.len() && !matches!(self.s[self.i], b'"' | b'\\') && self.s[self.i] >= 0x20 {
+            while self.i < self.s.len()
+                && !matches!(self.s[self.i], b'"' | b'\\')
+                && self.s[self.i] >= 0x20
+            {
                 self.i += 1;
             }
             out.push_str(&self.text[start..self.i]);
@@ -420,7 +434,9 @@ impl Parser<'_> {
                         b't' => out.push('\t'),
                         b'u' => {
                             let mut cp = self.hex4()?;
-                            if (0xd800..0xdc00).contains(&cp) && self.s[self.i..].starts_with(b"\\u") {
+                            if (0xd800..0xdc00).contains(&cp)
+                                && self.s[self.i..].starts_with(b"\\u")
+                            {
                                 let save = self.i;
                                 self.i += 2;
                                 let lo = self.hex4()?;
@@ -488,7 +504,9 @@ impl Parser<'_> {
         }
         let lit = &self.text[start..self.i];
         if is_float {
-            lit.parse::<f64>().map(Value::Float).map_err(|_| self.err("bad number"))
+            lit.parse::<f64>()
+                .map(Value::Float)
+                .map_err(|_| self.err("bad number"))
         } else {
             match lit.parse::<i64>() {
                 Ok(v) => Ok(Value::Int(v)),
@@ -557,7 +575,9 @@ impl<'de> serde::Deserialize<'de> for Value {
                 Ok(Value::Int(i))
             }
             fn visit_u64<E>(self, u: u64) -> Result<Value, E> {
-                Ok(i64::try_from(u).map(Value::Int).unwrap_or_else(|_| Value::BigInt(u.to_string())))
+                Ok(i64::try_from(u)
+                    .map(Value::Int)
+                    .unwrap_or_else(|_| Value::BigInt(u.to_string())))
             }
             fn visit_f64<E>(self, f: f64) -> Result<Value, E> {
                 Ok(Value::Float(f))
@@ -568,14 +588,20 @@ impl<'de> serde::Deserialize<'de> for Value {
             fn visit_string<E>(self, s: String) -> Result<Value, E> {
                 Ok(Value::Str(s))
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Value, A::Error> {
                 let mut items = Vec::new();
                 while let Some(v) = seq.next_element()? {
                     items.push(v);
                 }
                 Ok(Value::Array(items))
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Value, A::Error> {
                 let mut out = Value::object();
                 while let Some((k, v)) = map.next_entry::<String, Value>()? {
                     out.set(&k, v);
@@ -593,11 +619,22 @@ mod tests {
 
     #[test]
     fn dumps_like_python() {
-        let v = Value::parse(r#"{"a": [1, 2.5, 1e-05, true, null], "b": "x\"\\\n\u0001/é", "a": 3}"#).unwrap();
-        assert_eq!(v.dumps(Separators::Default), r#"{"a": 3, "b": "x\"\\\n\u0001/é"}"#);
-        assert_eq!(v.dumps(Separators::Compact), r#"{"a":3,"b":"x\"\\\n\u0001/é"}"#);
+        let v =
+            Value::parse(r#"{"a": [1, 2.5, 1e-05, true, null], "b": "x\"\\\n\u0001/é", "a": 3}"#)
+                .unwrap();
+        assert_eq!(
+            v.dumps(Separators::Default),
+            r#"{"a": 3, "b": "x\"\\\n\u0001/é"}"#
+        );
+        assert_eq!(
+            v.dumps(Separators::Compact),
+            r#"{"a":3,"b":"x\"\\\n\u0001/é"}"#
+        );
         let f = Value::parse("[1E5, -0.0, 1e16, 123456789012345678901234567890]").unwrap();
-        assert_eq!(f.dumps(Separators::Default), "[100000.0, -0.0, 1e+16, 123456789012345678901234567890]");
+        assert_eq!(
+            f.dumps(Separators::Default),
+            "[100000.0, -0.0, 1e+16, 123456789012345678901234567890]"
+        );
     }
 
     #[test]

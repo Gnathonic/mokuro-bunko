@@ -20,7 +20,11 @@ fn many(q: &[(String, String)], name: &str) -> Vec<String> {
 fn py_int(text: &str) -> Option<i64> {
     let t = text.trim();
     let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
-    if digits.is_empty() || digits.starts_with('_') || digits.ends_with('_') || digits.contains("__") {
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
         return None;
     }
     t.replace('_', "").parse().ok()
@@ -44,7 +48,8 @@ pub(super) async fn list(s: &AdminState, req: &ApiRequest) -> Response {
         since: query_one(&q, "since"),
         until: query_one(&q, "until"),
         search: query_one(&q, "q"),
-        include_progress: query_one(&q, "include_progress").is_some_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes")),
+        include_progress: query_one(&q, "include_progress")
+            .is_some_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes")),
         cursor,
         limit,
     };
@@ -52,11 +57,23 @@ pub(super) async fn list(s: &AdminState, req: &ApiRequest) -> Response {
     let result = blocking(move || -> Result<Value, DbError> {
         let page = db.query_audit_events(&query)?;
         let mut body = Map::new();
-        body.insert("events".into(), serde_json::to_value(&page.events).unwrap_or_default());
-        body.insert("next_cursor".into(), serde_json::to_value(&page.next_cursor).unwrap_or_default());
-        body.insert("total".into(), serde_json::to_value(page.total).unwrap_or_default());
+        body.insert(
+            "events".into(),
+            serde_json::to_value(&page.events).unwrap_or_default(),
+        );
+        body.insert(
+            "next_cursor".into(),
+            serde_json::to_value(&page.next_cursor).unwrap_or_default(),
+        );
+        body.insert(
+            "total".into(),
+            serde_json::to_value(page.total).unwrap_or_default(),
+        );
         if first_page {
-            body.insert("facets".into(), serde_json::to_value(db.audit_facets()?).unwrap_or_default());
+            body.insert(
+                "facets".into(),
+                serde_json::to_value(db.audit_facets()?).unwrap_or_default(),
+            );
         }
         Ok(Value::Object(body))
     })

@@ -7,7 +7,14 @@ use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 /// Roles the admin CLI accepts for accounts (no `anonymous`, no legacy `writer`).
-pub const ACCOUNT_ROLES: [&str; 6] = ["registered", "uploader", "inviter", "editor", "admin", "processor"];
+pub const ACCOUNT_ROLES: [&str; 6] = [
+    "registered",
+    "uploader",
+    "inviter",
+    "editor",
+    "admin",
+    "processor",
+];
 /// `sorted(INVITABLE_ROLES)`.
 pub const INVITE_ROLES: [&str; 4] = ["editor", "inviter", "registered", "uploader"];
 pub const USER_STATUSES: [&str; 4] = ["active", "pending", "disabled", "deleted"];
@@ -20,7 +27,12 @@ pub const USER_STATUSES: [&str; 4] = ["active", "pending", "disabled", "deleted"
 )]
 pub struct Cli {
     /// Path to configuration file
-    #[arg(short = 'c', long = "config", env = "MOKURO_CONFIG", value_name = "PATH")]
+    #[arg(
+        short = 'c',
+        long = "config",
+        env = "MOKURO_CONFIG",
+        value_name = "PATH"
+    )]
     pub config: Option<PathBuf>,
     /// Enable verbose output
     #[arg(short = 'v', long)]

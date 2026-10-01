@@ -8,7 +8,9 @@
 
 use super::{AdminState, ApiRequest, blocking, error, json_response, ok, save_config};
 use axum::response::Response;
-use bunko_core::config::{DEFAULT_ROLES, DYNDNS_PROVIDERS, QUEUE_DISPLAY_LEVELS, REGISTRATION_MODES};
+use bunko_core::config::{
+    DEFAULT_ROLES, DYNDNS_PROVIDERS, QUEUE_DISPLAY_LEVELS, REGISTRATION_MODES,
+};
 use bunko_db::pyfmt::truthy;
 use serde_json::{Map, Value, json};
 
@@ -18,7 +20,11 @@ const TOKEN_MASK: &str = "****";
 pub(crate) fn py_int_value(v: &Value) -> Option<i64> {
     match v {
         Value::Bool(b) => Some(*b as i64),
-        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().filter(|f| f.is_finite()).map(|f| f.trunc() as i64)),
+        Value::Number(n) => n.as_i64().or_else(|| {
+            n.as_f64()
+                .filter(|f| f.is_finite())
+                .map(|f| f.trunc() as i64)
+        }),
         Value::String(s) => {
             let t = bunko_db::pyfmt::strip(s).replace('_', "");
             t.parse().ok()
@@ -29,7 +35,14 @@ pub(crate) fn py_int_value(v: &Value) -> Option<i64> {
 
 /// The Python list repr 0.5.2 prints in "Must be one of" messages.
 fn py_list(items: &[&str]) -> String {
-    format!("[{}]", items.iter().map(|i| format!("'{i}'")).collect::<Vec<_>>().join(", "))
+    format!(
+        "[{}]",
+        items
+            .iter()
+            .map(|i| format!("'{i}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 pub(super) async fn get(s: &AdminState) -> Response {
@@ -71,13 +84,29 @@ pub(super) async fn registration(s: &AdminState, req: &ApiRequest) -> Response {
             if let Some(v) = data.get("mode") {
                 match v.as_str().filter(|m| REGISTRATION_MODES.contains(m)) {
                     Some(m) => reg.mode = m.to_string(),
-                    None => return error(400, format!("Invalid mode. Must be one of: {}", py_list(REGISTRATION_MODES))),
+                    None => {
+                        return error(
+                            400,
+                            format!(
+                                "Invalid mode. Must be one of: {}",
+                                py_list(REGISTRATION_MODES)
+                            ),
+                        );
+                    }
                 }
             }
             if let Some(v) = data.get("default_role") {
                 match v.as_str().filter(|r| DEFAULT_ROLES.contains(r)) {
                     Some(r) => reg.default_role = r.to_string(),
-                    None => return error(400, format!("Invalid default_role. Must be one of: {}", py_list(DEFAULT_ROLES))),
+                    None => {
+                        return error(
+                            400,
+                            format!(
+                                "Invalid default_role. Must be one of: {}",
+                                py_list(DEFAULT_ROLES)
+                            ),
+                        );
+                    }
                 }
             }
             if let Some(v) = data.get("allow_anonymous_browse") {
@@ -315,50 +344,52 @@ pub(super) async fn dyndns(s: &AdminState, req: &ApiRequest) -> Response {
         Err(r) => return r,
     };
     let s2 = s.clone();
-    let saved = blocking(move || -> Result<bunko_core::config::DynDnsConfig, Response> {
-        let _guard = s2.config_lock.lock();
-        {
-            let mut cfg = s2.core().config.write();
-            let d = &mut cfg.dyndns;
-            if let Some(v) = data.get("enabled") {
-                d.enabled = truthy(v);
-            }
-            if let Some(v) = data.get("provider") {
-                match v.as_str().filter(|p| DYNDNS_PROVIDERS.contains(p)) {
-                    Some(p) => d.provider = p.to_string(),
-                    None => return Err(error(400, "Invalid provider")),
-                }
-            }
-            let text = |key: &str| -> Result<Option<String>, Response> {
-                match data.get(key) {
-                    None => Ok(None),
-                    Some(Value::Null) => Ok(Some(String::new())),
-                    Some(Value::String(t)) => Ok(Some(t.clone())),
-                    Some(_) => Err(error(400, format!("{key} must be a string"))),
-                }
-            };
-            // The masked value the page was given never overwrites the real token.
-            if let Some(token) = text("token")?
-                && token != TOKEN_MASK
+    let saved = blocking(
+        move || -> Result<bunko_core::config::DynDnsConfig, Response> {
+            let _guard = s2.config_lock.lock();
             {
-                d.token = token;
-            }
-            if let Some(domain) = text("domain")? {
-                d.domain = domain;
-            }
-            if let Some(url) = text("update_url")? {
-                d.update_url = url;
-            }
-            if let Some(v) = data.get("interval") {
-                match py_int_value(v).filter(|n| *n >= 30 && *n <= u32::MAX as i64) {
-                    Some(n) => d.interval = n as u32,
-                    None => return Err(error(400, "interval must be at least 30")),
+                let mut cfg = s2.core().config.write();
+                let d = &mut cfg.dyndns;
+                if let Some(v) = data.get("enabled") {
+                    d.enabled = truthy(v);
+                }
+                if let Some(v) = data.get("provider") {
+                    match v.as_str().filter(|p| DYNDNS_PROVIDERS.contains(p)) {
+                        Some(p) => d.provider = p.to_string(),
+                        None => return Err(error(400, "Invalid provider")),
+                    }
+                }
+                let text = |key: &str| -> Result<Option<String>, Response> {
+                    match data.get(key) {
+                        None => Ok(None),
+                        Some(Value::Null) => Ok(Some(String::new())),
+                        Some(Value::String(t)) => Ok(Some(t.clone())),
+                        Some(_) => Err(error(400, format!("{key} must be a string"))),
+                    }
+                };
+                // The masked value the page was given never overwrites the real token.
+                if let Some(token) = text("token")?
+                    && token != TOKEN_MASK
+                {
+                    d.token = token;
+                }
+                if let Some(domain) = text("domain")? {
+                    d.domain = domain;
+                }
+                if let Some(url) = text("update_url")? {
+                    d.update_url = url;
+                }
+                if let Some(v) = data.get("interval") {
+                    match py_int_value(v).filter(|n| *n >= 30 && *n <= u32::MAX as i64) {
+                        Some(n) => d.interval = n as u32,
+                        None => return Err(error(400, "interval must be at least 30")),
+                    }
                 }
             }
-        }
-        save_config(&s2)?;
-        Ok(s2.core().config.read().dyndns.clone())
-    })
+            save_config(&s2)?;
+            Ok(s2.core().config.read().dyndns.clone())
+        },
+    )
     .await;
     let d = match saved {
         Ok(Ok(d)) => d,

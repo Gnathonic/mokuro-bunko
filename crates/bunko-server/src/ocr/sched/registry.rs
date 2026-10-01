@@ -4,12 +4,15 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use bunko_proto::{Catalog, HostInfo, MAX_ENTRIES_PER_ACCOUNT, MAX_IDENTITY_BYTES, MAX_PROCESSOR_NAME, MAX_SESSIONS_PER_PROCESSOR, Op, PROCESSOR_ROOT, PROTOCOL_VERSION, RegisterReply};
+use bunko_proto::{
+    Catalog, HostInfo, MAX_ENTRIES_PER_ACCOUNT, MAX_IDENTITY_BYTES, MAX_PROCESSOR_NAME,
+    MAX_SESSIONS_PER_PROCESSOR, Op, PROCESSOR_ROOT, PROTOCOL_VERSION, RegisterReply,
+};
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc;
 
 use super::{Lane, Scheduler};
-use crate::ocr::types::{LOCAL, LOCAL_DISPLAY, Job, token_hex};
+use crate::ocr::types::{Job, LOCAL, LOCAL_DISPLAY, token_hex};
 
 /// A registration with no socket for this long is evicted by the next registration.
 pub const STALE_REGISTRATION_SECONDS: f64 = 300.0;
@@ -36,12 +39,17 @@ pub struct TransferStats {
 }
 
 fn num(detail: &std::collections::BTreeMap<String, Value>, key: &str) -> f64 {
-    detail.get(key).and_then(|v| if v.is_boolean() { None } else { v.as_f64() }).unwrap_or(0.0)
+    detail
+        .get(key)
+        .and_then(|v| if v.is_boolean() { None } else { v.as_f64() })
+        .unwrap_or(0.0)
 }
 
 impl TransferStats {
     pub fn note_ready(&mut self, detail: &std::collections::BTreeMap<String, Value>) {
-        let damaged = detail.get("verdict").is_some_and(|v| !v.is_null() && v != &json!("") && v != &json!(false));
+        let damaged = detail
+            .get("verdict")
+            .is_some_and(|v| !v.is_null() && v != &json!("") && v != &json!(false));
         self.ready.push_back([
             num(detail, "bytes"),
             num(detail, "seconds"),
@@ -64,7 +72,9 @@ impl TransferStats {
             klass = "other".into();
         }
         *self.returned.entry(klass.clone()).or_insert(0) += 1;
-        self.last_returned = Some(json!({"class": klass, "error": error.chars().take(300).collect::<String>(), "at": now}));
+        self.last_returned = Some(
+            json!({"class": klass, "error": error.chars().take(300).collect::<String>(), "at": now}),
+        );
     }
 
     pub fn to_value(&self) -> Value {
@@ -102,7 +112,8 @@ impl PublicNames {
         } else if !self.aliases.contains_key(name) || self.explicit.contains(name) {
             self.explicit.remove(name);
             self.count += 1;
-            self.aliases.insert(name.to_string(), format!("machine {}", self.count));
+            self.aliases
+                .insert(name.to_string(), format!("machine {}", self.count));
         }
         self.aliases[name].clone()
     }
@@ -169,7 +180,10 @@ impl Machine {
     }
 
     pub fn has_gpu(&self) -> bool {
-        self.catalog.devices.iter().any(|d| d.id.starts_with("gpu:"))
+        self.catalog
+            .devices
+            .iter()
+            .any(|d| d.id.starts_with("gpu:"))
     }
 
     /// `ProcessorEntry.to_dict()` (admin panel).
@@ -216,7 +230,14 @@ pub struct SocketRefusal {
 
 /// `clean_processor_name(raw, fallback)`.
 pub fn clean_processor_name(raw: &str, fallback: &str) -> String {
-    let cut = |s: &str| -> String { s.trim().chars().take(MAX_PROCESSOR_NAME).collect::<String>().trim().to_string() };
+    let cut = |s: &str| -> String {
+        s.trim()
+            .chars()
+            .take(MAX_PROCESSOR_NAME)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    };
     let name = cut(raw);
     if name.is_empty() { cut(fallback) } else { name }
 }
@@ -225,7 +246,16 @@ pub fn clean_processor_name(raw: &str, fallback: &str) -> String {
 /// skipped rather than costing the whole catalog (which would read as "installing").
 pub fn lenient_catalog(value: &Value) -> Catalog {
     let strings = |key: &str| -> Vec<String> {
-        value.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default()
+        value
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
     };
     let devices = value
         .get("devices")
@@ -236,15 +266,35 @@ pub fn lenient_catalog(value: &Value) -> Catalog {
                     let id = d.get("id").and_then(Value::as_str)?;
                     Some(bunko_proto::Device {
                         id: id.to_string(),
-                        label: d.get("label").and_then(Value::as_str).unwrap_or(id).to_string(),
-                        formats: d.get("formats").and_then(Value::as_array).map(|f| f.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
-                        provider: d.get("provider").and_then(Value::as_str).map(str::to_string),
+                        label: d
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .unwrap_or(id)
+                            .to_string(),
+                        formats: d
+                            .get("formats")
+                            .and_then(Value::as_array)
+                            .map(|f| {
+                                f.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        provider: d
+                            .get("provider")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default();
-    Catalog { engines: strings("engines"), detectors: strings("detectors"), devices }
+    Catalog {
+        engines: strings("engines"),
+        detectors: strings("detectors"),
+        devices,
+    }
 }
 
 /// Python `repr()` of a str for the error texts.
@@ -259,7 +309,10 @@ impl Scheduler {
 
     /// `POST /_processor/register` (spec remote-processors §5.2, protocol v3).
     pub fn register(&mut self, input: RegisterInput) -> RegisterOutcome {
-        let refuse = |status: u16, error: String| RegisterOutcome::Refused { status, body: json!({"error": error}) };
+        let refuse = |status: u16, error: String| RegisterOutcome::Refused {
+            status,
+            body: json!({"error": error}),
+        };
         let Value::Object(body) = &input.body else {
             return refuse(400, "registration body is not an object".into());
         };
@@ -324,13 +377,28 @@ impl Scheduler {
             Some(Value::Object(h)) => Value::Object(h.clone()),
             _ => json!({}),
         };
-        let identity = crate::ocr::pyjson::dumps(&json!({"host": host_value, "catalog": catalog_value}), crate::ocr::pyjson::DEFAULT);
+        let identity = crate::ocr::pyjson::dumps(
+            &json!({"host": host_value, "catalog": catalog_value}),
+            crate::ocr::pyjson::DEFAULT,
+        );
         if identity.len() > MAX_IDENTITY_BYTES {
-            return refuse(413, format!("host and catalog take more than {MAX_IDENTITY_BYTES} bytes"));
+            return refuse(
+                413,
+                format!("host and catalog take more than {MAX_IDENTITY_BYTES} bytes"),
+            );
         }
-        let held_by_another = self.machines.values().any(|m| !m.local && m.name == name && m.username.as_deref() != Some(&input.username));
+        let held_by_another = self
+            .machines
+            .values()
+            .any(|m| !m.local && m.name == name && m.username.as_deref() != Some(&input.username));
         if held_by_another || !self.profiles.claim(&name, &input.username) {
-            return refuse(409, format!("the name {} belongs to another processor account; give this machine its own name", repr(&name)));
+            return refuse(
+                409,
+                format!(
+                    "the name {} belongs to another processor account; give this machine its own name",
+                    repr(&name)
+                ),
+            );
         }
         let catalog = lenient_catalog(&catalog_value);
         let host: HostInfo = serde_json::from_value(host_value.clone()).unwrap_or_default();
@@ -351,7 +419,11 @@ impl Scheduler {
         let mut keep: Vec<(&String, bool, f64)> = self
             .machines
             .values()
-            .filter(|m| !m.local && m.username.as_deref() == Some(&input.username) && !doomed.iter().any(|(p, _)| *p == m.pid))
+            .filter(|m| {
+                !m.local
+                    && m.username.as_deref() == Some(&input.username)
+                    && !doomed.iter().any(|(p, _)| *p == m.pid)
+            })
             .map(|m| (&m.pid, m.connected(), m.connected_since))
             .collect();
         keep.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
@@ -382,7 +454,8 @@ impl Scheduler {
             transfer: TransferStats::default(),
         };
         self.public_names.assign(&name, public_name.as_deref());
-        self.profiles.set_identity(&name, &host_value, &catalog_value);
+        self.profiles
+            .set_identity(&name, &host_value, &catalog_value);
         self.machines.insert(pid.clone(), machine);
         self.log(format!("Processor {name} registered ({pid})"));
         RegisterOutcome::Ok(RegisterReply {
@@ -396,16 +469,30 @@ impl Scheduler {
     }
 
     /// `GET /_processor/{pid}/socket`: the link of a registration.
-    pub fn socket_open(&mut self, pid: &str, username: &str, ops: mpsc::UnboundedSender<Op>) -> Result<(), super::SocketRefusal> {
+    pub fn socket_open(
+        &mut self,
+        pid: &str,
+        username: &str,
+        ops: mpsc::UnboundedSender<Op>,
+    ) -> Result<(), super::SocketRefusal> {
         let Some(m) = self.machines.get(pid) else {
-            return Err(SocketRefusal { status: 404, body: json!({"error": "No such processor"}) });
+            return Err(SocketRefusal {
+                status: 404,
+                body: json!({"error": "No such processor"}),
+            });
         };
         if m.local || m.username.as_deref() != Some(username) {
-            return Err(SocketRefusal { status: 403, body: json!({"error": "Not your processor"}) });
+            return Err(SocketRefusal {
+                status: 403,
+                body: json!({"error": "Not your processor"}),
+            });
         }
         if m.connected() {
             self.drop_processor(pid, "a second socket was opened");
-            return Err(SocketRefusal { status: 409, body: json!({"error": "Socket already open; register again"}) });
+            return Err(SocketRefusal {
+                status: 409,
+                body: json!({"error": "Socket already open; register again"}),
+            });
         }
         let now = self.now();
         let mono = self.mono();
@@ -416,14 +503,19 @@ impl Scheduler {
             m.last_frame = mono;
             label = m.label();
         } else {
-            return Err(SocketRefusal { status: 404, body: json!({"error": "No such processor"}) });
+            return Err(SocketRefusal {
+                status: 404,
+                body: json!({"error": "No such processor"}),
+            });
         }
         self.rebuild_lanes();
         self.bump();
         self.bump_page();
         let slots = self.lanes.iter().filter(|l| l.pid == pid).count();
         if self.scan_active {
-            self.log(format!("{label} joined the running scan with {slots} slot(s)"));
+            self.log(format!(
+                "{label} joined the running scan with {slots} slot(s)"
+            ));
         } else {
             self.log(format!("{label} connected with {slots} slot(s)"));
         }
@@ -436,7 +528,11 @@ impl Scheduler {
         let now = self.now();
         let catalog_value = serde_json::to_value(&catalog).unwrap_or(json!({}));
         let host_value = serde_json::to_value(&host).unwrap_or(json!({}));
-        self.profiles.set_identity(crate::ocr::profiles::LOCAL_PROFILE, &host_value, &catalog_value);
+        self.profiles.set_identity(
+            crate::ocr::profiles::LOCAL_PROFILE,
+            &host_value,
+            &catalog_value,
+        );
         let machine = Machine {
             pid: LOCAL.into(),
             name: LOCAL.into(),
@@ -496,7 +592,13 @@ impl Scheduler {
                 }
             }
             while kept.len() < *count {
-                kept.push(Lane { id: self.next_lane_id, pid: pid.clone(), session: None, waiting_for_faster: false, idle_at: None });
+                kept.push(Lane {
+                    id: self.next_lane_id,
+                    pid: pid.clone(),
+                    session: None,
+                    waiting_for_faster: false,
+                    idle_at: None,
+                });
                 self.next_lane_id += 1;
             }
             kept.sort_by_key(|l| l.id);
@@ -522,14 +624,23 @@ impl Scheduler {
 
     pub fn record_failed_login(&mut self, username: &str, reason: &str) {
         let at = self.now();
-        self.failed_logins.push_front(FailedLogin { username: username.chars().take(64).collect(), reason: reason.to_string(), at });
+        self.failed_logins.push_front(FailedLogin {
+            username: username.chars().take(64).collect(),
+            reason: reason.to_string(),
+            at,
+        });
         while self.failed_logins.len() > FAILED_LOGIN_MEMORY {
             self.failed_logins.pop_back();
         }
     }
 
     pub fn drop_account(&mut self, username: &str, reason: &str) {
-        let pids: Vec<String> = self.machines.values().filter(|m| m.username.as_deref() == Some(username)).map(|m| m.pid.clone()).collect();
+        let pids: Vec<String> = self
+            .machines
+            .values()
+            .filter(|m| m.username.as_deref() == Some(username))
+            .map(|m| m.pid.clone())
+            .collect();
         for pid in pids {
             self.drop_processor(&pid, reason);
         }
@@ -539,14 +650,21 @@ impl Scheduler {
     /// claim of that machine not being installed goes back unrecorded and is offered
     /// again this scan; its sessions end blaming nobody; its breaker goes.
     pub fn drop_processor(&mut self, pid: &str, reason: &str) {
-        let Some(machine) = self.machines.shift_remove(pid) else { return };
+        let Some(machine) = self.machines.shift_remove(pid) else {
+            return;
+        };
         let label = machine.label();
         let now = self.now();
         if !machine.local {
             self.last_disconnect = Some((machine.name.clone(), now));
         }
         let mut returned = 0;
-        let jobs: Vec<Job> = self.claims.iter().filter(|(_, c)| c.pid == pid && !c.settling).map(|(j, _)| j.clone()).collect();
+        let jobs: Vec<Job> = self
+            .claims
+            .iter()
+            .filter(|(_, c)| c.pid == pid && !c.settling)
+            .map(|(j, _)| j.clone())
+            .collect();
         for job in jobs {
             self.claims.remove(&job);
             self.attempted.remove(&job);
@@ -554,12 +672,18 @@ impl Scheduler {
             self.cards.shift_remove(&job);
             returned += 1;
         }
-        let sids: Vec<String> = self.sessions.iter().filter(|(_, s)| s.pid == pid).map(|(k, _)| k.clone()).collect();
+        let sids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.pid == pid)
+            .map(|(k, _)| k.clone())
+            .collect();
         for sid in sids {
             self.sessions.remove(&sid);
             self.ended_sessions.insert(sid, now);
         }
-        self.results.retain(|(sid, _), _| self.sessions.contains_key(sid));
+        self.results
+            .retain(|(sid, _), _| self.sessions.contains_key(sid));
         self.breakers.remove(pid);
         self.lanes.retain(|l| l.pid != pid);
         self.bench_machine_left(&machine.name);
@@ -567,9 +691,13 @@ impl Scheduler {
         self.bump();
         self.bump_page();
         if machine.local {
-            self.log(format!("{label} stopped ({reason}); {returned} volume(s) back in the queue"));
+            self.log(format!(
+                "{label} stopped ({reason}); {returned} volume(s) back in the queue"
+            ));
         } else {
-            self.log(format!("{label} disconnected ({reason}); {returned} volume(s) back in the queue"));
+            self.log(format!(
+                "{label} disconnected ({reason}); {returned} volume(s) back in the queue"
+            ));
         }
         // Dropping `machine` drops its link: the socket task sees the end and closes.
         drop(machine);
@@ -578,7 +706,11 @@ impl Scheduler {
     /// Every registration (local first, then by lowercase name), as the admin reads them.
     pub fn processors(&self) -> Vec<Value> {
         let mut entries: Vec<&Machine> = self.machines.values().collect();
-        entries.sort_by(|a, b| b.local.cmp(&a.local).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+        entries.sort_by(|a, b| {
+            b.local
+                .cmp(&a.local)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
         entries
             .into_iter()
             .map(|m| {
@@ -597,11 +729,16 @@ impl Scheduler {
     }
 
     pub fn failed_logins(&self) -> Vec<Value> {
-        self.failed_logins.iter().map(|f| json!({"username": f.username, "reason": f.reason, "at": f.at})).collect()
+        self.failed_logins
+            .iter()
+            .map(|f| json!({"username": f.username, "reason": f.reason, "at": f.at}))
+            .collect()
     }
 
     pub fn last_disconnect(&self) -> Option<Value> {
-        self.last_disconnect.as_ref().map(|(n, at)| json!({"name": n, "at": at}))
+        self.last_disconnect
+            .as_ref()
+            .map(|(n, at)| json!({"name": n, "at": at}))
     }
 
     /// The machine a hardware name belongs to.
@@ -610,7 +747,10 @@ impl Scheduler {
     }
 
     pub fn remote_connected(&self) -> Vec<&Machine> {
-        self.machines.values().filter(|m| !m.local && m.connected()).collect()
+        self.machines
+            .values()
+            .filter(|m| !m.local && m.connected())
+            .collect()
     }
 
     /// A `catalog` event: what the processor can run changed (models downloaded).
@@ -624,8 +764,13 @@ impl Scheduler {
         } else {
             return;
         }
-        let host = self.machines.get(pid).map(|m| m.host_value.clone()).unwrap_or(json!({}));
-        self.profiles.set_identity(crate::ocr::profiles::profile_key(&name), &host, &value);
+        let host = self
+            .machines
+            .get(pid)
+            .map(|m| m.host_value.clone())
+            .unwrap_or(json!({}));
+        self.profiles
+            .set_identity(crate::ocr::profiles::profile_key(&name), &host, &value);
         self.rebuild_lanes();
         self.bump();
         self.maybe_start_scan();

@@ -19,7 +19,10 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
         warn!("{w}");
     }
     let threads = match config.server.threads {
-        0 => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).min(4),
+        0 => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .min(4),
         n => n as usize,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -29,23 +32,40 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
         .enable_all()
         .build()?;
     let flavor = crate::FLAVOR;
-    runtime.block_on(async move {
-        info!("mokuro-bunko {} ({flavor})", bunko_core::VERSION);
-        info!("Storage path: {}", config.storage.base_path.display());
-        info!("Server log: {}", config.storage.base_path.join("logs").join(crate::logging::SERVER_LOG_NAME).display());
-        let opts = ServeOptions { verbose: args.verbose, flavor, local: crate::local_ocr::factory() };
-        let services = Services::new(config, Some(config_path), &opts)?;
-        app::announce_setup(&services);
-        let router = app::assemble(&services, &opts);
-        println!("Press Ctrl+C to stop");
-        app::serve_router(&services, router).await?;
-        Ok::<_, anyhow::Error>(services.restart_requested.load(std::sync::atomic::Ordering::SeqCst))
-    })
-    .and_then(|restart| {
-        if restart {
-            info!("Restarting into the updated binary");
-            bunko_update::restart()?;
-        }
-        Ok(())
-    })
+    runtime
+        .block_on(async move {
+            info!("mokuro-bunko {} ({flavor})", bunko_core::VERSION);
+            info!("Storage path: {}", config.storage.base_path.display());
+            info!(
+                "Server log: {}",
+                config
+                    .storage
+                    .base_path
+                    .join("logs")
+                    .join(crate::logging::SERVER_LOG_NAME)
+                    .display()
+            );
+            let opts = ServeOptions {
+                verbose: args.verbose,
+                flavor,
+                local: crate::local_ocr::factory(),
+            };
+            let services = Services::new(config, Some(config_path), &opts)?;
+            app::announce_setup(&services);
+            let router = app::assemble(&services, &opts);
+            println!("Press Ctrl+C to stop");
+            app::serve_router(&services, router).await?;
+            Ok::<_, anyhow::Error>(
+                services
+                    .restart_requested
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            )
+        })
+        .and_then(|restart| {
+            if restart {
+                info!("Restarting into the updated binary");
+                bunko_update::restart()?;
+            }
+            Ok(())
+        })
 }

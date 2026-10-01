@@ -27,10 +27,22 @@ pub const RECOGNIZER_REPOS: [(&str, &str); 3] = [
 
 /// `REPO_REVISIONS`: the pinned commit of every VLM repo the runner resolves.
 pub const REPO_REVISIONS: [(&str, &str); 4] = [
-    ("JustANormalTinkerer/hayai-ocr-v2.5-nova", "e46d79138499600564f810d44ab6bdea7230dee1"),
-    ("google/siglip2-base-patch16-naflex", "b53b807d3a2d5e2b3911292f2d69e5341cdc064c"),
-    ("sorryhyun/paddleocr-vl-1.6-manga-lora", "26292839d1469c14212a12a1e01b5b1fe01bff15"),
-    ("PaddlePaddle/PaddleOCR-VL-1.6", "c5630abae1d940eafe0697512a0325494b02ab42"),
+    (
+        "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+        "e46d79138499600564f810d44ab6bdea7230dee1",
+    ),
+    (
+        "google/siglip2-base-patch16-naflex",
+        "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+    ),
+    (
+        "sorryhyun/paddleocr-vl-1.6-manga-lora",
+        "26292839d1469c14212a12a1e01b5b1fe01bff15",
+    ),
+    (
+        "PaddlePaddle/PaddleOCR-VL-1.6",
+        "c5630abae1d940eafe0697512a0325494b02ab42",
+    ),
 ];
 
 /// Engines whose sidecar carries `patch_budget` (`PATCH_BUDGET_ENGINES`).
@@ -60,17 +72,27 @@ impl Block {
     /// The block dict, keys in the runner's order.
     pub fn to_value(&self) -> Value {
         Value::Object(vec![
-            ("box".into(), Value::Array(self.bbox.iter().map(|v| Value::Int(*v)).collect())),
+            (
+                "box".into(),
+                Value::Array(self.bbox.iter().map(|v| Value::Int(*v)).collect()),
+            ),
             ("vertical".into(), Value::Bool(self.vertical)),
             ("font_size".into(), Value::Int(self.font_size)),
-            ("lines".into(), Value::Array(self.lines.iter().map(|l| Value::Str(l.clone())).collect())),
+            (
+                "lines".into(),
+                Value::Array(self.lines.iter().map(|l| Value::Str(l.clone())).collect()),
+            ),
             (
                 "lines_coords".into(),
                 Value::Array(
                     self.lines_coords
                         .iter()
                         .map(|q| {
-                            Value::Array(q.iter().map(|p| Value::Array(vec![Value::Int(p[0]), Value::Int(p[1])])).collect())
+                            Value::Array(
+                                q.iter()
+                                    .map(|p| Value::Array(vec![Value::Int(p[0]), Value::Int(p[1])]))
+                                    .collect(),
+                            )
                         })
                         .collect(),
                 ),
@@ -91,7 +113,12 @@ pub struct Page {
 impl Page {
     /// A page with no blocks (a page the engine failed on, `_blank_from`).
     pub fn blank(img_width: i64, img_height: i64) -> Page {
-        Page { version: MOKURO_FORMAT_VERSION.to_string(), img_width, img_height, blocks: Vec::new() }
+        Page {
+            version: MOKURO_FORMAT_VERSION.to_string(),
+            img_width,
+            img_height,
+            blocks: Vec::new(),
+        }
     }
 
     /// The page dict; with `img_path` as the volume carries it.
@@ -100,7 +127,10 @@ impl Page {
             ("version".to_string(), Value::Str(self.version.clone())),
             ("img_width".to_string(), Value::Int(self.img_width)),
             ("img_height".to_string(), Value::Int(self.img_height)),
-            ("blocks".to_string(), Value::Array(self.blocks.iter().map(Block::to_value).collect())),
+            (
+                "blocks".to_string(),
+                Value::Array(self.blocks.iter().map(Block::to_value).collect()),
+            ),
         ];
         if let Some(p) = img_path {
             items.push(("img_path".to_string(), Value::Str(p.replace('\\', "/"))));
@@ -120,7 +150,12 @@ pub fn layout_page_dict(raw: &RawPage, version: &str) -> (Page, PageLayout) {
         .map(|(b, _)| b.clone())
         .collect();
     (
-        Page { version: version.to_string(), img_width: raw.width, img_height: raw.height, blocks },
+        Page {
+            version: version.to_string(),
+            img_width: raw.width,
+            img_height: raw.height,
+            blocks,
+        },
         result,
     )
 }
@@ -138,8 +173,18 @@ pub struct FinishedPage {
 
 /// `PPOcrPageReader.finish`: round the lines, lay them out, and keep the
 /// removed ruby with the raw dump.
-pub fn finish_page(lines: &[RawLine], width: i64, height: i64, detector: Option<Value>, version: &str) -> FinishedPage {
-    let raw_page = RawPage { detector, ..RawPage::new(width, height, lines.to_vec()) }.rounded();
+pub fn finish_page(
+    lines: &[RawLine],
+    width: i64,
+    height: i64,
+    detector: Option<Value>,
+    version: &str,
+) -> FinishedPage {
+    let raw_page = RawPage {
+        detector,
+        ..RawPage::new(width, height, lines.to_vec())
+    }
+    .rounded();
     let (page, layout) = layout_page_dict(&raw_page, version);
     let mut raw = raw_page.to_value();
     let ruby = layout
@@ -150,12 +195,20 @@ pub fn finish_page(lines: &[RawLine], width: i64, height: i64, detector: Option<
                 ("line".into(), Value::Int(r.line as i64)),
                 ("base".into(), Value::Int(r.base as i64)),
                 ("text".into(), Value::Str(r.text.clone())),
-                ("chars".into(), Value::Array(vec![Value::Int(r.chars.0), Value::Int(r.chars.1)])),
+                (
+                    "chars".into(),
+                    Value::Array(vec![Value::Int(r.chars.0), Value::Int(r.chars.1)]),
+                ),
             ])
         })
         .collect();
     raw.set("ruby", Value::Array(ruby));
-    FinishedPage { page, layout, raw, doubtful: None }
+    FinishedPage {
+        page,
+        layout,
+        raw,
+        doubtful: None,
+    }
 }
 
 /// The `ocr_engine` block of a composed engine's sidecar.
@@ -186,7 +239,10 @@ impl OcrEngine {
                 .map(|(_, r)| r.to_string())
                 .unwrap_or_default(),
             detector: "ppocr-manga".to_string(),
-            generator: generator.filter(|g| !g.is_empty()).unwrap_or("mokuro-bunko").to_string(),
+            generator: generator
+                .filter(|g| !g.is_empty())
+                .unwrap_or("mokuro-bunko")
+                .to_string(),
             patch_budget: PATCH_BUDGET_ENGINES.contains(&engine).then_some(patches),
             weights: Vec::new(),
             precision: None,
@@ -196,7 +252,10 @@ impl OcrEngine {
     pub fn to_value(&self) -> Value {
         let mut items = vec![
             ("id".to_string(), Value::Str(self.id.clone())),
-            ("recognizer".to_string(), Value::Str(self.recognizer.clone())),
+            (
+                "recognizer".to_string(),
+                Value::Str(self.recognizer.clone()),
+            ),
             ("detector".to_string(), Value::Str(self.detector.clone())),
             ("generator".to_string(), Value::Str(self.generator.clone())),
         ];
@@ -206,7 +265,12 @@ impl OcrEngine {
         if !self.weights.is_empty() {
             items.push((
                 "weights".to_string(),
-                Value::Object(self.weights.iter().map(|(k, v)| (k.clone(), Value::Str(v.clone()))).collect()),
+                Value::Object(
+                    self.weights
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                        .collect(),
+                ),
             ));
         }
         if let Some(p) = self.precision.as_ref().filter(|p| !p.is_empty()) {
@@ -233,24 +297,41 @@ pub fn build_volume(header: &VolumeHeader, pages: &[(String, Page)]) -> Value {
     let mut items = vec![
         ("version".to_string(), Value::Str(header.version.clone())),
         ("title".to_string(), Value::Str(header.title.clone())),
-        ("title_uuid".to_string(), Value::Str(header.title_uuid.clone())),
+        (
+            "title_uuid".to_string(),
+            Value::Str(header.title_uuid.clone()),
+        ),
         ("volume".to_string(), Value::Str(header.volume.clone())),
-        ("volume_uuid".to_string(), Value::Str(header.volume_uuid.clone())),
+        (
+            "volume_uuid".to_string(),
+            Value::Str(header.volume_uuid.clone()),
+        ),
     ];
     if let Some(engine) = &header.ocr_engine {
         items.push(("ocr_engine".to_string(), engine.clone()));
     }
     items.push((
         "pages".to_string(),
-        Value::Array(pages.iter().map(|(path, page)| page.to_value(Some(path))).collect()),
+        Value::Array(
+            pages
+                .iter()
+                .map(|(path, page)| page.to_value(Some(path)))
+                .collect(),
+        ),
     ));
     Value::Object(items)
 }
 
 /// Write `contents` to `<path>.tmp` beside `path`, then rename it over `path`.
 pub fn write_atomic(path: &Path, contents: &str) -> Result<(), SidecarError> {
-    let io = |source| SidecarError::Io { path: path.to_path_buf(), source };
-    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let io = |source| SidecarError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     name.push(".tmp");
     let tmp = path.with_file_name(name);
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -318,8 +399,14 @@ pub fn normalize_sidecar(data: &mut Value, norm: &Normalization) -> bool {
 /// Read, normalise and rewrite a sidecar compact (atomically). `Ok(false)`
 /// when the root is not an object (left untouched, as the server does).
 pub fn normalize_sidecar_file(path: &Path, norm: &Normalization) -> Result<bool, SidecarError> {
-    let text = fs::read_to_string(path).map_err(|source| SidecarError::Io { path: path.to_path_buf(), source })?;
-    let mut data = Value::parse(&text).map_err(|source| SidecarError::Json { path: path.to_path_buf(), source })?;
+    let text = fs::read_to_string(path).map_err(|source| SidecarError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut data = Value::parse(&text).map_err(|source| SidecarError::Json {
+        path: path.to_path_buf(),
+        source,
+    })?;
     if !normalize_sidecar(&mut data, norm) {
         return Ok(false);
     }
@@ -335,16 +422,26 @@ pub fn title_uuid(series_name: &str) -> String {
 /// `_derive_series_name`: the parent folder's name, stripped, or the cbz stem
 /// when the parent is the library root or the inbox (or the name is blank).
 pub fn derive_series_name(cbz: &Path, library_root: &Path, inbox: &Path) -> String {
-    let stem = cbz.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = cbz
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let Some(parent) = cbz.parent() else {
         return stem;
     };
     if parent == library_root || parent == inbox {
         return stem;
     }
-    let name = parent.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = parent
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let name = py::strip(&name);
-    if name.is_empty() { stem } else { name.to_string() }
+    if name.is_empty() {
+        stem
+    } else {
+        name.to_string()
+    }
 }
 
 /// Port of the reader's `generateDeterministicUUID` (djb2-xor pair over UTF-16
@@ -365,7 +462,16 @@ pub fn deterministic_uuid(value: &str) -> String {
     let hash4 = format!("{:08x}", h1.wrapping_add(h2));
     let lead = u32::from_str_radix(&hash3[..1], 16).unwrap_or(0);
     let variant = format!("{:x}", 8 + lead % 4);
-    format!("{}-{}-4{}-{}{}-{}{}", hex1, &hex2[..4], &hex2[5..8], variant, &hash3[1..4], &hash3[4..], &hash4[..4])
+    format!(
+        "{}-{}-4{}-{}{}-{}{}",
+        hex1,
+        &hex2[..4],
+        &hex2[5..8],
+        variant,
+        &hash3[1..4],
+        &hash3[4..],
+        &hash4[..4]
+    )
 }
 
 #[cfg(test)]
@@ -375,15 +481,27 @@ mod tests {
     #[test]
     fn uuid5_of_dns_namespace() {
         // python: str(uuid.uuid5(uuid.NAMESPACE_DNS, "python.org"))
-        assert_eq!(title_uuid("python.org"), "886313e1-3b8a-5372-9b90-0c9aee199e5d");
+        assert_eq!(
+            title_uuid("python.org"),
+            "886313e1-3b8a-5372-9b90-0c9aee199e5d"
+        );
     }
 
     #[test]
     fn series_name_rules() {
         let lib = Path::new("/lib");
         let inbox = Path::new("/lib/inbox");
-        assert_eq!(derive_series_name(Path::new("/lib/Vol 1.cbz"), lib, inbox), "Vol 1");
-        assert_eq!(derive_series_name(Path::new("/lib/inbox/Vol 1.cbz"), lib, inbox), "Vol 1");
-        assert_eq!(derive_series_name(Path::new("/lib/ Series /Vol 1.cbz"), lib, inbox), "Series");
+        assert_eq!(
+            derive_series_name(Path::new("/lib/Vol 1.cbz"), lib, inbox),
+            "Vol 1"
+        );
+        assert_eq!(
+            derive_series_name(Path::new("/lib/inbox/Vol 1.cbz"), lib, inbox),
+            "Vol 1"
+        );
+        assert_eq!(
+            derive_series_name(Path::new("/lib/ Series /Vol 1.cbz"), lib, inbox),
+            "Series"
+        );
     }
 }

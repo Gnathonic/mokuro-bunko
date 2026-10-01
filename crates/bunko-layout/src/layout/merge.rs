@@ -13,7 +13,11 @@ use super::line::{Line, decide_orientations, measure, measure_lines, overlap, pa
 /// One column the detector cut in two: same size, stacked along the reading axis.
 fn is_stitch(ta: f64, tb: f64, cross_overlap: f64, main_gap: f64, body_gap: Option<f64>) -> bool {
     let em = max2(ta, tb);
-    let limit = if body_gap.is_none() { STITCH_MAX_GAP_EM } else { BODY_STITCH_MAX_GAP_EM };
+    let limit = if body_gap.is_none() {
+        STITCH_MAX_GAP_EM
+    } else {
+        BODY_STITCH_MAX_GAP_EM
+    };
     em / min2(ta, tb) <= STITCH_MAX_SIZE_RATIO
         && cross_overlap >= STITCH_MIN_CROSS_OVERLAP * min2(ta, tb)
         && main_gap <= limit * em
@@ -33,7 +37,13 @@ pub fn is_column_piece(a: &Line, b: &Line, body_gap: Option<f64>) -> bool {
     if ac1 <= ac0 || bc1 <= bc0 {
         return false;
     }
-    is_stitch(ac1 - ac0, bc1 - bc0, overlap(ac0, ac1, bc0, bc1), -overlap(am0, am1, bm0, bm1), body_gap)
+    is_stitch(
+        ac1 - ac0,
+        bc1 - bc0,
+        overlap(ac0, ac1, bc0, bc1),
+        -overlap(am0, am1, bm0, bm1),
+        body_gap,
+    )
 }
 
 /// Body index of every member line: the first body that lists it.
@@ -77,16 +87,29 @@ pub fn column_pieces(raw: &[RawLine]) -> Vec<Vec<usize>> {
     decide_orientations(&mut lines);
     let (kept_pos, _) = filter_furigana(&lines);
     let kept: Vec<Line> = kept_pos.iter().map(|&p| lines[p].clone()).collect();
-    let mut blanks: Vec<Line> = dropped.iter().filter_map(|&i| measure(i, &raw[i])).collect();
+    let mut blanks: Vec<Line> = dropped
+        .iter()
+        .filter_map(|&i| measure(i, &raw[i]))
+        .collect();
     let bodies = find_bodies(&kept);
     let body_of = body_of_lines(&bodies);
 
-    let mut uf = UnionFind { parent: kept.iter().chain(blanks.iter()).map(|l| (l.index, l.index)).collect() };
+    let mut uf = UnionFind {
+        parent: kept
+            .iter()
+            .chain(blanks.iter())
+            .map(|l| (l.index, l.index))
+            .collect(),
+    };
     for (i, a) in kept.iter().enumerate() {
         let body_a = body_of.get(&a.index).copied();
         for b in &kept[i + 1..] {
             let shared = body_a.is_some() && body_a == body_of.get(&b.index).copied();
-            let gap = if shared { body_a.map(|k| bodies[k].gap) } else { None };
+            let gap = if shared {
+                body_a.map(|k| bodies[k].gap)
+            } else {
+                None
+            };
             if is_column_piece(a, b, gap) {
                 uf.union(a.index, b.index);
             }
@@ -149,11 +172,18 @@ pub fn should_merge(a: &Line, b: &Line, body_gap: Option<f64>, body_top: Option<
         return false;
     }
     let mean_t = (ta + tb) / 2.0;
-    let tier1 = if ratio > MERGE_MIXED_SIZE_RATIO { MERGE_GAP_MIXED_SIZE_EM } else { MERGE_GAP_EM };
+    let tier1 = if ratio > MERGE_MIXED_SIZE_RATIO {
+        MERGE_GAP_MIXED_SIZE_EM
+    } else {
+        MERGE_GAP_EM
+    };
     if gap < tier1 * mean_t {
         return true;
     }
-    if ratio < MERGE_ALIGNED_SIZE_RATIO && gap < MERGE_ALIGNED_GAP_EM * mean_t && start_diff < MERGE_ALIGNED_START_EM * em {
+    if ratio < MERGE_ALIGNED_SIZE_RATIO
+        && gap < MERGE_ALIGNED_GAP_EM * mean_t
+        && start_diff < MERGE_ALIGNED_START_EM * em
+    {
         return true;
     }
     gap < MERGE_LOOSE_GAP_EM * mean_t && start_diff < MERGE_LOOSE_START_EM * em
@@ -161,8 +191,14 @@ pub fn should_merge(a: &Line, b: &Line, body_gap: Option<f64>, body_top: Option<
 
 /// Group lines into blocks (union-find over `should_merge`); groups are
 /// positions into `lines`, ordered by their lowest position.
-pub fn merge_lines(lines: &[Line], bodies: &[Body], roles: &HashMap<usize, Role>) -> Vec<Vec<usize>> {
-    let mut uf = UnionFind { parent: (0..lines.len()).map(|i| (i, i)).collect() };
+pub fn merge_lines(
+    lines: &[Line],
+    bodies: &[Body],
+    roles: &HashMap<usize, Role>,
+) -> Vec<Vec<usize>> {
+    let mut uf = UnionFind {
+        parent: (0..lines.len()).map(|i| (i, i)).collect(),
+    };
     let body_of = body_of_lines(bodies);
     for (i, a) in lines.iter().enumerate() {
         let role_a = roles.get(&a.index).copied().unwrap_or(Role::Text);
@@ -170,10 +206,19 @@ pub fn merge_lines(lines: &[Line], bodies: &[Body], roles: &HashMap<usize, Role>
             let role_b = roles.get(&b.index).copied().unwrap_or(Role::Text);
             let body_a = body_of.get(&a.index).copied();
             let shared = body_a.is_some() && body_a == body_of.get(&b.index).copied();
-            let body_gap = if shared { body_a.map(|k| bodies[k].gap) } else { None };
-            let body_top = if shared { body_a.map(|k| bodies[k].top) } else { None };
+            let body_gap = if shared {
+                body_a.map(|k| bodies[k].gap)
+            } else {
+                None
+            };
+            let body_top = if shared {
+                body_a.map(|k| bodies[k].top)
+            } else {
+                None
+            };
             let joined = if role_a == Role::Noise || role_b == Role::Noise {
-                let pair = (role_a == Role::Noise && role_b == Role::Text) || (role_a == Role::Text && role_b == Role::Noise);
+                let pair = (role_a == Role::Noise && role_b == Role::Text)
+                    || (role_a == Role::Text && role_b == Role::Noise);
                 pair && is_column_piece(a, b, body_gap)
             } else {
                 role_a == role_b && should_merge(a, b, body_gap, body_top)

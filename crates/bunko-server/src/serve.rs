@@ -69,11 +69,13 @@ pub async fn serve(
         let acceptor = acceptor.clone();
         let conn_stop = conn_stop.clone();
         tracker.spawn(async move {
-            let svc = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
-                req.extensions_mut().insert(ConnectInfo(peer));
-                let mut app = app.clone();
-                async move { app.call(req.map(axum::body::Body::new)).await }
-            });
+            let svc = hyper::service::service_fn(
+                move |mut req: hyper::Request<hyper::body::Incoming>| {
+                    req.extensions_mut().insert(ConnectInfo(peer));
+                    let mut app = app.clone();
+                    async move { app.call(req.map(axum::body::Body::new)).await }
+                },
+            );
             let mut builder = auto::Builder::new(TokioExecutor::new());
             builder
                 .http1()
@@ -81,14 +83,20 @@ pub async fn serve(
                 .header_read_timeout(Duration::from_secs(30))
                 .keep_alive(true);
             let result = match acceptor {
-                Some(acceptor) => match tokio::time::timeout(Duration::from_secs(15), acceptor.accept(stream)).await {
-                    Ok(Ok(tls)) => serve_conn(&builder, TokioIo::new(tls), svc, &conn_stop).await,
-                    Ok(Err(e)) => {
-                        debug!("TLS handshake with {peer} failed: {e}");
-                        return;
+                Some(acceptor) => {
+                    match tokio::time::timeout(Duration::from_secs(15), acceptor.accept(stream))
+                        .await
+                    {
+                        Ok(Ok(tls)) => {
+                            serve_conn(&builder, TokioIo::new(tls), svc, &conn_stop).await
+                        }
+                        Ok(Err(e)) => {
+                            debug!("TLS handshake with {peer} failed: {e}");
+                            return;
+                        }
+                        Err(_) => return,
                     }
-                    Err(_) => return,
-                },
+                }
                 None => serve_conn(&builder, TokioIo::new(stream), svc, &conn_stop).await,
             };
             if let Err(e) = result {
@@ -113,8 +121,11 @@ async fn serve_conn<I, S>(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
-    S: hyper::service::Service<hyper::Request<hyper::body::Incoming>, Response = axum::response::Response, Error = std::convert::Infallible>
-        + Clone
+    S: hyper::service::Service<
+            hyper::Request<hyper::body::Incoming>,
+            Response = axum::response::Response,
+            Error = std::convert::Infallible,
+        > + Clone
         + Send
         + 'static,
     S::Future: Send + 'static,

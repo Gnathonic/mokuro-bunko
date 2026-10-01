@@ -15,7 +15,10 @@ pub enum ConfigError {
     #[error("{0}")]
     UnknownKey(String),
     #[error("could not read {path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("invalid YAML in {path}: {message}")]
     Yaml { path: PathBuf, message: String },
 }
@@ -34,7 +37,9 @@ pub const REGISTRATION_MODES: &[&str] = &["disabled", "self", "invite", "approva
 pub const DEFAULT_ROLES: &[&str] = &["registered", "uploader", "inviter", "editor"];
 pub const QUEUE_DISPLAY_LEVELS: &[&str] = &["minimal", "normal", "detailed"];
 /// `rocm` is accepted as an alias of `webgpu` (onnxruntime dropped its ROCm provider).
-pub const OCR_BACKENDS: &[&str] = &["auto", "cuda", "rocm", "webgpu", "directml", "coreml", "cpu", "skip"];
+pub const OCR_BACKENDS: &[&str] = &[
+    "auto", "cuda", "rocm", "webgpu", "directml", "coreml", "cpu", "skip",
+];
 pub const DYNDNS_PROVIDERS: &[&str] = &["duckdns", "generic"];
 pub const MAX_OCR_CONCURRENCY: u32 = 8;
 
@@ -51,7 +56,13 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { host: "0.0.0.0".into(), port: 8080, trusted_proxies: vec![], threads: 0, cache_mb: 32 }
+        Self {
+            host: "0.0.0.0".into(),
+            port: 8080,
+            trusted_proxies: vec![],
+            threads: 0,
+            cache_mb: 32,
+        }
     }
 }
 
@@ -62,7 +73,9 @@ pub struct StorageConfig {
 
 impl Default for StorageConfig {
     fn default() -> Self {
-        Self { base_path: storage::default_storage_path() }
+        Self {
+            base_path: storage::default_storage_path(),
+        }
     }
 }
 
@@ -126,7 +139,11 @@ impl Default for CorsConfig {
 
 impl CorsConfig {
     pub fn is_origin_allowed(&self, origin: &str) -> bool {
-        self.enabled && self.allowed_origins.iter().any(|p| Self::matches_pattern(origin, p))
+        self.enabled
+            && self
+                .allowed_origins
+                .iter()
+                .any(|p| Self::matches_pattern(origin, p))
     }
 
     /// Exact match, or `scheme://host:*` matching any numeric port (0.5.2 semantics).
@@ -160,7 +177,10 @@ pub struct AdminConfig {
 
 impl Default for AdminConfig {
     fn default() -> Self {
-        Self { enabled: true, path: "/_admin".into() }
+        Self {
+            enabled: true,
+            path: "/_admin".into(),
+        }
     }
 }
 
@@ -174,7 +194,12 @@ pub struct CatalogConfig {
 
 impl Default for CatalogConfig {
     fn default() -> Self {
-        Self { enabled: false, reader_url: "https://reader.mokuro.app".into(), use_as_homepage: false, enrich_community: true }
+        Self {
+            enabled: false,
+            reader_url: "https://reader.mokuro.app".into(),
+            use_as_homepage: false,
+            enrich_community: true,
+        }
     }
 }
 
@@ -187,7 +212,11 @@ pub struct QueueConfig {
 
 impl Default for QueueConfig {
     fn default() -> Self {
-        Self { show_in_nav: false, public_access: true, display: "normal".into() }
+        Self {
+            show_in_nav: false,
+            public_access: true,
+            display: "normal".into(),
+        }
     }
 }
 
@@ -200,7 +229,11 @@ pub struct DatabaseConfig {
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
-        Self { busy_timeout_ms: 5000, lock_retries: 5, retry_initial_delay_seconds: 0.05 }
+        Self {
+            busy_timeout_ms: 5000,
+            lock_retries: 5,
+            retry_initial_delay_seconds: 0.05,
+        }
     }
 }
 
@@ -214,7 +247,10 @@ pub struct UpgradeConfig {
 
 impl Default for UpgradeConfig {
     fn default() -> Self {
-        Self { enabled: false, replace: vec!["mokuro-legacy".into(), "mokuro".into()] }
+        Self {
+            enabled: false,
+            replace: vec!["mokuro-legacy".into(), "mokuro".into()],
+        }
     }
 }
 
@@ -283,7 +319,9 @@ impl Default for UpdateConfig {
         Self {
             check: true,
             channel: "stable".into(),
-            manifest_url: "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json".into(),
+            manifest_url:
+                "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json"
+                    .into(),
         }
     }
 }
@@ -314,17 +352,28 @@ fn section(data: &Map<String, Value>, name: &str) -> Result<Map<String, Value>, 
     match data.get(name) {
         None | Some(Value::Null) => Ok(Map::new()),
         Some(Value::Object(m)) => Ok(m.clone()),
-        Some(_) => Err(invalid(format!("config section '{name}' must be a mapping"))),
+        Some(_) => Err(invalid(format!(
+            "config section '{name}' must be a mapping"
+        ))),
     }
 }
 
-fn get_bool(m: &Map<String, Value>, sec: &str, key: &str, default: bool) -> Result<bool, ConfigError> {
+fn get_bool(
+    m: &Map<String, Value>,
+    sec: &str,
+    key: &str,
+    default: bool,
+) -> Result<bool, ConfigError> {
     match m.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(Value::Bool(b)) => Ok(*b),
         Some(Value::Number(n)) => Ok(n.as_f64().unwrap_or(0.0) != 0.0),
-        Some(Value::String(s)) => parse_bool(s).ok_or_else(|| invalid(format!("{sec}.{key}: Invalid boolean value: {s}"))),
-        Some(other) => Err(invalid(format!("{sec}.{key}: expected a boolean, got {other}"))),
+        Some(Value::String(s)) => {
+            parse_bool(s).ok_or_else(|| invalid(format!("{sec}.{key}: Invalid boolean value: {s}")))
+        }
+        Some(other) => Err(invalid(format!(
+            "{sec}.{key}: expected a boolean, got {other}"
+        ))),
     }
 }
 
@@ -335,18 +384,33 @@ fn get_int(m: &Map<String, Value>, sec: &str, key: &str, default: i64) -> Result
             .as_i64()
             .or_else(|| n.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))
             .ok_or_else(|| invalid(format!("{sec}.{key}: expected a whole number, got {n}"))),
-        Some(Value::String(s)) => s.trim().parse().map_err(|_| invalid(format!("{sec}.{key}: expected a whole number, got '{s}'"))),
+        Some(Value::String(s)) => s
+            .trim()
+            .parse()
+            .map_err(|_| invalid(format!("{sec}.{key}: expected a whole number, got '{s}'"))),
         Some(Value::Bool(b)) => Ok(*b as i64),
-        Some(other) => Err(invalid(format!("{sec}.{key}: expected a whole number, got {other}"))),
+        Some(other) => Err(invalid(format!(
+            "{sec}.{key}: expected a whole number, got {other}"
+        ))),
     }
 }
 
-fn get_float(m: &Map<String, Value>, sec: &str, key: &str, default: f64) -> Result<f64, ConfigError> {
+fn get_float(
+    m: &Map<String, Value>,
+    sec: &str,
+    key: &str,
+    default: f64,
+) -> Result<f64, ConfigError> {
     match m.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(Value::Number(n)) => Ok(n.as_f64().unwrap_or(default)),
-        Some(Value::String(s)) => s.trim().parse().map_err(|_| invalid(format!("{sec}.{key}: expected a number, got '{s}'"))),
-        Some(other) => Err(invalid(format!("{sec}.{key}: expected a number, got {other}"))),
+        Some(Value::String(s)) => s
+            .trim()
+            .parse()
+            .map_err(|_| invalid(format!("{sec}.{key}: expected a number, got '{s}'"))),
+        Some(other) => Err(invalid(format!(
+            "{sec}.{key}: expected a number, got {other}"
+        ))),
     }
 }
 
@@ -358,7 +422,12 @@ fn get_str(m: &Map<String, Value>, key: &str, default: &str) -> String {
     }
 }
 
-fn get_list(m: &Map<String, Value>, sec: &str, key: &str, default: &[String]) -> Result<Vec<String>, ConfigError> {
+fn get_list(
+    m: &Map<String, Value>,
+    sec: &str,
+    key: &str,
+    default: &[String],
+) -> Result<Vec<String>, ConfigError> {
     match m.get(key) {
         None | Some(Value::Null) => Ok(default.to_vec()),
         Some(Value::Array(a)) => Ok(a
@@ -369,12 +438,18 @@ fn get_list(m: &Map<String, Value>, sec: &str, key: &str, default: &[String]) ->
             })
             .collect()),
         Some(Value::String(s)) => Ok(split_list(s)),
-        Some(other) => Err(invalid(format!("{sec}.{key}: expected a list, got {other}"))),
+        Some(other) => Err(invalid(format!(
+            "{sec}.{key}: expected a list, got {other}"
+        ))),
     }
 }
 
 fn split_list(s: &str) -> Vec<String> {
-    s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect()
+    s.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 pub fn parse_bool(s: &str) -> Option<bool> {
@@ -394,7 +469,10 @@ fn leftovers(mut m: Map<String, Value>, known: &[&str]) -> Map<String, Value> {
 }
 
 const RETIRED_OCR_KEYS: &[(&str, &str)] = &[
-    ("engines", "each engine becomes a generation row with its own name"),
+    (
+        "engines",
+        "each engine becomes a generation row with its own name",
+    ),
     ("detector", "the detector is now per generation"),
     ("patch_budget", "the patch budget is now per generation"),
 ];
@@ -405,17 +483,26 @@ const REMOVED_OCR_KEYS: &[(&str, &str)] = &[(
 )];
 
 fn reject_retired_ocr_keys(ocr: &Map<String, Value>) -> Result<(), ConfigError> {
-    let gone: Vec<String> =
-        REMOVED_OCR_KEYS.iter().filter(|(k, _)| ocr.contains_key(*k)).map(|(k, why)| format!("ocr.{k}: {why}")).collect();
+    let gone: Vec<String> = REMOVED_OCR_KEYS
+        .iter()
+        .filter(|(k, _)| ocr.contains_key(*k))
+        .map(|(k, why)| format!("ocr.{k}: {why}"))
+        .collect();
     if !gone.is_empty() {
         return Err(invalid(gone.join("; ")));
     }
-    let present: Vec<&(&str, &str)> = RETIRED_OCR_KEYS.iter().filter(|(k, _)| ocr.contains_key(*k)).collect();
+    let present: Vec<&(&str, &str)> = RETIRED_OCR_KEYS
+        .iter()
+        .filter(|(k, _)| ocr.contains_key(*k))
+        .collect();
     if present.is_empty() {
         return Ok(());
     }
     let named: Vec<String> = present.iter().map(|(k, _)| format!("ocr.{k}")).collect();
-    let reasons: Vec<String> = present.iter().map(|(k, why)| format!("ocr.{k}: {why}")).collect();
+    let reasons: Vec<String> = present
+        .iter()
+        .map(|(k, why)| format!("ocr.{k}: {why}"))
+        .collect();
     Err(invalid(format!(
         "{} was replaced by ocr.generations, a list of named OCR recipes ({}) — rewrite the ocr section as \
          generations, e.g. generations: [{{name: hayai-nova, engine: hayai-nova, primary: true}}]",
@@ -448,7 +535,10 @@ impl Config {
         validate_trusted_proxies(&c.server.trusted_proxies)?;
         c.server.threads = get_int(&s, "server", "threads", 0)?.clamp(0, 256) as u32;
         c.server.cache_mb = get_int(&s, "server", "cache_mb", 32)?.clamp(1, 65536) as u32;
-        let server_extra = leftovers(s, &["host", "port", "trusted_proxies", "threads", "cache_mb"]);
+        let server_extra = leftovers(
+            s,
+            &["host", "port", "trusted_proxies", "threads", "cache_mb"],
+        );
 
         let s = section(data, "storage")?;
         if let Some(p) = s.get("base_path").filter(|v| !v.is_null()) {
@@ -461,14 +551,21 @@ impl Config {
         let storage_extra = leftovers(s, &["base_path"]);
 
         let mut s = section(data, "registration")?;
-        if !s.contains_key("allow_anonymous_browse") && !s.contains_key("allow_anonymous_download") {
+        if !s.contains_key("allow_anonymous_browse") && !s.contains_key("allow_anonymous_download")
+        {
             let require_login = get_bool(&s, "registration", "require_login", false)?;
             s.insert("allow_anonymous_browse".into(), Value::Bool(!require_login));
-            s.insert("allow_anonymous_download".into(), Value::Bool(!require_login));
+            s.insert(
+                "allow_anonymous_download".into(),
+                Value::Bool(!require_login),
+            );
         }
         c.registration.mode = get_str(&s, "mode", "self");
         if !REGISTRATION_MODES.contains(&c.registration.mode.as_str()) {
-            return Err(invalid(format!("Invalid registration mode: {}", c.registration.mode)));
+            return Err(invalid(format!(
+                "Invalid registration mode: {}",
+                c.registration.mode
+            )));
         }
         c.registration.default_role = get_str(&s, "default_role", "registered");
         if c.registration.default_role == "writer" {
@@ -480,17 +577,30 @@ impl Config {
                 c.registration.default_role
             )));
         }
-        c.registration.allow_anonymous_browse = get_bool(&s, "registration", "allow_anonymous_browse", true)?;
-        c.registration.allow_anonymous_download = get_bool(&s, "registration", "allow_anonymous_download", true)?;
+        c.registration.allow_anonymous_browse =
+            get_bool(&s, "registration", "allow_anonymous_browse", true)?;
+        c.registration.allow_anonymous_download =
+            get_bool(&s, "registration", "allow_anonymous_download", true)?;
         c.registration.require_login = get_bool(&s, "registration", "require_login", false)?;
         let registration_extra = leftovers(
             s,
-            &["mode", "default_role", "allow_anonymous_browse", "allow_anonymous_download", "require_login"],
+            &[
+                "mode",
+                "default_role",
+                "allow_anonymous_browse",
+                "allow_anonymous_download",
+                "require_login",
+            ],
         );
 
         let s = section(data, "cors")?;
         c.cors.enabled = get_bool(&s, "cors", "enabled", true)?;
-        c.cors.allowed_origins = get_list(&s, "cors", "allowed_origins", &CorsConfig::default().allowed_origins)?;
+        c.cors.allowed_origins = get_list(
+            &s,
+            "cors",
+            "allowed_origins",
+            &CorsConfig::default().allowed_origins,
+        )?;
         c.cors.allow_credentials = get_bool(&s, "cors", "allow_credentials", true)?;
         let cors_extra = leftovers(s, &["enabled", "allowed_origins", "allow_credentials"]);
 
@@ -499,7 +609,10 @@ impl Config {
         c.ssl.auto_cert = get_bool(&s, "ssl", "auto_cert", false)?;
         c.ssl.cert_file = get_str(&s, "cert_file", "");
         c.ssl.key_file = get_str(&s, "key_file", "");
-        if c.ssl.enabled && !c.ssl.auto_cert && (c.ssl.cert_file.is_empty() || c.ssl.key_file.is_empty()) {
+        if c.ssl.enabled
+            && !c.ssl.auto_cert
+            && (c.ssl.cert_file.is_empty() || c.ssl.key_file.is_empty())
+        {
             return Err(invalid(
                 "SSL enabled but cert_file and key_file not provided. Either provide cert paths or set auto_cert: true",
             ));
@@ -516,7 +629,15 @@ impl Config {
         c.catalog.reader_url = get_str(&s, "reader_url", "https://reader.mokuro.app");
         c.catalog.use_as_homepage = get_bool(&s, "catalog", "use_as_homepage", false)?;
         c.catalog.enrich_community = get_bool(&s, "catalog", "enrich_community", true)?;
-        let catalog_extra = leftovers(s, &["enabled", "reader_url", "use_as_homepage", "enrich_community"]);
+        let catalog_extra = leftovers(
+            s,
+            &[
+                "enabled",
+                "reader_url",
+                "use_as_homepage",
+                "enrich_community",
+            ],
+        );
 
         let s = section(data, "queue")?;
         c.queue.show_in_nav = get_bool(&s, "queue", "show_in_nav", false)?;
@@ -533,11 +654,20 @@ impl Config {
         let queue_extra = leftovers(s, &["show_in_nav", "public_access", "display"]);
 
         let s = section(data, "database")?;
-        c.database.busy_timeout_ms = get_int(&s, "database", "busy_timeout_ms", 5000)?.max(0) as u32;
+        c.database.busy_timeout_ms =
+            get_int(&s, "database", "busy_timeout_ms", 5000)?.max(0) as u32;
         c.database.lock_retries = get_int(&s, "database", "lock_retries", 5)?.max(0) as u32;
-        c.database.retry_initial_delay_seconds = get_float(&s, "database", "retry_initial_delay_seconds", 0.05)?;
+        c.database.retry_initial_delay_seconds =
+            get_float(&s, "database", "retry_initial_delay_seconds", 0.05)?;
         c.database.validate()?;
-        let database_extra = leftovers(s, &["busy_timeout_ms", "lock_retries", "retry_initial_delay_seconds"]);
+        let database_extra = leftovers(
+            s,
+            &[
+                "busy_timeout_ms",
+                "lock_retries",
+                "retry_initial_delay_seconds",
+            ],
+        );
 
         let s = section(data, "ocr")?;
         reject_retired_ocr_keys(&s)?;
@@ -547,16 +677,31 @@ impl Config {
         c.ocr.sessions = get_bool(&s, "ocr", "sessions", true)?;
         c.ocr.local_processing = get_bool(&s, "ocr", "local_processing", true)?;
         c.ocr.autobench = get_bool(&s, "ocr", "autobench", true)?;
-        let parsed = generations::parse_generation_list(s.get("generations").unwrap_or(&Value::Null))?;
+        let parsed =
+            generations::parse_generation_list(s.get("generations").unwrap_or(&Value::Null))?;
         c.apply_parsed_generations(parsed);
         if let Some(up) = s.get("upgrade").and_then(Value::as_object) {
             c.ocr.upgrade.enabled = get_bool(up, "ocr.upgrade", "enabled", false)?;
-            c.ocr.upgrade.replace = get_list(up, "ocr.upgrade", "replace", &UpgradeConfig::default().replace)?;
+            c.ocr.upgrade.replace = get_list(
+                up,
+                "ocr.upgrade",
+                "replace",
+                &UpgradeConfig::default().replace,
+            )?;
         }
         c.ocr.validate()?;
         let ocr_extra = leftovers(
             s,
-            &["backend", "poll_interval", "concurrency", "sessions", "local_processing", "autobench", "generations", "upgrade"],
+            &[
+                "backend",
+                "poll_interval",
+                "concurrency",
+                "sessions",
+                "local_processing",
+                "autobench",
+                "generations",
+                "upgrade",
+            ],
         );
 
         let s = section(data, "dyndns")?;
@@ -567,7 +712,17 @@ impl Config {
         c.dyndns.update_url = get_str(&s, "update_url", "");
         c.dyndns.interval = get_int(&s, "dyndns", "interval", 300)?.max(0) as u32;
         c.dyndns.validate()?;
-        let dyndns_extra = leftovers(s, &["enabled", "provider", "token", "domain", "update_url", "interval"]);
+        let dyndns_extra = leftovers(
+            s,
+            &[
+                "enabled",
+                "provider",
+                "token",
+                "domain",
+                "update_url",
+                "interval",
+            ],
+        );
 
         let s = section(data, "update")?;
         c.update.check = get_bool(&s, "update", "check", true)?;
@@ -596,7 +751,23 @@ impl Config {
             }
         }
         for (k, v) in data {
-            if !c.extra.contains_key(k) && !matches!(k.as_str(), "server" | "storage" | "registration" | "cors" | "ssl" | "admin" | "catalog" | "queue" | "database" | "ocr" | "dyndns" | "update") {
+            if !c.extra.contains_key(k)
+                && !matches!(
+                    k.as_str(),
+                    "server"
+                        | "storage"
+                        | "registration"
+                        | "cors"
+                        | "ssl"
+                        | "admin"
+                        | "catalog"
+                        | "queue"
+                        | "database"
+                        | "ocr"
+                        | "dyndns"
+                        | "update"
+                )
+            {
                 c.extra.insert(k.clone(), v.clone());
             }
         }
@@ -612,7 +783,9 @@ impl Config {
     pub fn to_value(&self) -> Value {
         let merge = |name: &str, base: Value| -> Value {
             let mut base = base;
-            if let (Value::Object(b), Some(Value::Object(extra))) = (&mut base, self.extra.get(name)) {
+            if let (Value::Object(b), Some(Value::Object(extra))) =
+                (&mut base, self.extra.get(name))
+            {
                 for (k, v) in extra {
                     b.entry(k.clone()).or_insert_with(|| v.clone());
                 }
@@ -637,7 +810,13 @@ impl Config {
         if self.server.cache_mb != 32 {
             out["server"]["cache_mb"] = json!(self.server.cache_mb);
         }
-        out.insert("storage".into(), merge("storage", json!({"base_path": self.storage.base_path.to_string_lossy()})));
+        out.insert(
+            "storage".into(),
+            merge(
+                "storage",
+                json!({"base_path": self.storage.base_path.to_string_lossy()}),
+            ),
+        );
         out.insert(
             "registration".into(),
             merge(
@@ -674,7 +853,13 @@ impl Config {
                 }),
             ),
         );
-        out.insert("admin".into(), merge("admin", json!({"enabled": self.admin.enabled, "path": self.admin.path})));
+        out.insert(
+            "admin".into(),
+            merge(
+                "admin",
+                json!({"enabled": self.admin.enabled, "path": self.admin.path}),
+            ),
+        );
         out.insert(
             "catalog".into(),
             merge(
@@ -719,7 +904,8 @@ impl Config {
             "generations": self.ocr.generations.iter().map(Generation::to_value).collect::<Vec<_>>(),
         });
         if self.ocr.upgrade != UpgradeConfig::default() {
-            ocr["upgrade"] = json!({"enabled": self.ocr.upgrade.enabled, "replace": self.ocr.upgrade.replace});
+            ocr["upgrade"] =
+                json!({"enabled": self.ocr.upgrade.enabled, "replace": self.ocr.upgrade.replace});
         }
         out.insert("ocr".into(), merge("ocr", ocr));
         out.insert(
@@ -760,10 +946,18 @@ impl Config {
     pub fn set_by_dotted_key(&mut self, key: &str, value: &str) -> Result<(), ConfigError> {
         let parts: Vec<&str> = key.split('.').collect();
         if parts.len() != 2 {
-            return Err(ConfigError::UnknownKey(format!("Invalid key: {key}. Expected format: section.field")));
+            return Err(ConfigError::UnknownKey(format!(
+                "Invalid key: {key}. Expected format: section.field"
+            )));
         }
-        let b = || parse_bool(value).ok_or_else(|| invalid(format!("Invalid boolean value: {value}")));
-        let i = || value.trim().parse::<i64>().map_err(|_| invalid(format!("invalid literal for int() with base 10: '{value}'")));
+        let b =
+            || parse_bool(value).ok_or_else(|| invalid(format!("Invalid boolean value: {value}")));
+        let i = || {
+            value
+                .trim()
+                .parse::<i64>()
+                .map_err(|_| invalid(format!("invalid literal for int() with base 10: '{value}'")))
+        };
         match key {
             "server.port" => {
                 let p = i()?;
@@ -794,8 +988,12 @@ impl Config {
                 }
                 self.registration.default_role = v.to_string();
             }
-            "registration.allow_anonymous_browse" => self.registration.allow_anonymous_browse = b()?,
-            "registration.allow_anonymous_download" => self.registration.allow_anonymous_download = b()?,
+            "registration.allow_anonymous_browse" => {
+                self.registration.allow_anonymous_browse = b()?
+            }
+            "registration.allow_anonymous_download" => {
+                self.registration.allow_anonymous_download = b()?
+            }
             "registration.require_login" => self.registration.require_login = b()?,
             "cors.enabled" => self.cors.enabled = b()?,
             "cors.allow_credentials" => self.cors.allow_credentials = b()?,
@@ -830,8 +1028,9 @@ impl Config {
                 self.database.validate()?;
             }
             "database.retry_initial_delay_seconds" => {
-                self.database.retry_initial_delay_seconds =
-                    value.trim().parse().map_err(|_| invalid(format!("could not convert string to float: '{value}'")))?;
+                self.database.retry_initial_delay_seconds = value.trim().parse().map_err(|_| {
+                    invalid(format!("could not convert string to float: '{value}'"))
+                })?;
                 self.database.validate()?;
             }
             "ocr.backend" => {
@@ -872,8 +1071,18 @@ impl Config {
             "update.manifest_url" => self.update.manifest_url = value.to_string(),
             _ => {
                 let section_ok = [
-                    "server", "storage", "registration", "cors", "ssl", "admin", "catalog", "queue", "database", "ocr",
-                    "dyndns", "update",
+                    "server",
+                    "storage",
+                    "registration",
+                    "cors",
+                    "ssl",
+                    "admin",
+                    "catalog",
+                    "queue",
+                    "database",
+                    "ocr",
+                    "dyndns",
+                    "update",
                 ]
                 .contains(&parts[0]);
                 return Err(ConfigError::UnknownKey(if section_ok {
@@ -888,23 +1097,55 @@ impl Config {
 
     /// Every dotted key `set_by_dotted_key` accepts (also the `MOKURO_*` env names).
     pub const KEYS: &'static [&'static str] = &[
-        "server.port", "server.host", "server.trusted_proxies", "server.threads", "server.cache_mb",
+        "server.port",
+        "server.host",
+        "server.trusted_proxies",
+        "server.threads",
+        "server.cache_mb",
         "storage.base_path",
-        "registration.mode", "registration.default_role", "registration.allow_anonymous_browse",
-        "registration.allow_anonymous_download", "registration.require_login",
-        "cors.enabled", "cors.allow_credentials",
-        "ssl.enabled", "ssl.auto_cert", "ssl.cert_file", "ssl.key_file",
-        "admin.enabled", "admin.path",
-        "catalog.enabled", "catalog.reader_url", "catalog.use_as_homepage", "catalog.enrich_community",
-        "queue.show_in_nav", "queue.public_access", "queue.display",
-        "ocr.backend", "ocr.poll_interval", "ocr.concurrency", "ocr.sessions", "ocr.local_processing",
-        "ocr.autobench", "ocr.generations",
-        "dyndns.enabled", "dyndns.provider", "dyndns.token", "dyndns.domain", "dyndns.update_url", "dyndns.interval",
-        "update.check", "update.channel", "update.manifest_url",
+        "registration.mode",
+        "registration.default_role",
+        "registration.allow_anonymous_browse",
+        "registration.allow_anonymous_download",
+        "registration.require_login",
+        "cors.enabled",
+        "cors.allow_credentials",
+        "ssl.enabled",
+        "ssl.auto_cert",
+        "ssl.cert_file",
+        "ssl.key_file",
+        "admin.enabled",
+        "admin.path",
+        "catalog.enabled",
+        "catalog.reader_url",
+        "catalog.use_as_homepage",
+        "catalog.enrich_community",
+        "queue.show_in_nav",
+        "queue.public_access",
+        "queue.display",
+        "ocr.backend",
+        "ocr.poll_interval",
+        "ocr.concurrency",
+        "ocr.sessions",
+        "ocr.local_processing",
+        "ocr.autobench",
+        "ocr.generations",
+        "dyndns.enabled",
+        "dyndns.provider",
+        "dyndns.token",
+        "dyndns.domain",
+        "dyndns.update_url",
+        "dyndns.interval",
+        "update.check",
+        "update.channel",
+        "update.manifest_url",
     ];
 
     /// Apply `MOKURO_<SECTION>_<KEY>` variables plus the `MOKURO_HOST`/`PORT`/`STORAGE` aliases.
-    pub fn apply_env_overrides(&mut self, env: impl Fn(&str) -> Option<String>) -> Result<(), ConfigError> {
+    pub fn apply_env_overrides(
+        &mut self,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<(), ConfigError> {
         let removed: Vec<String> = REMOVED_OCR_KEYS
             .iter()
             .filter(|(k, _)| env(&format!("MOKURO_OCR_{}", k.to_uppercase())).is_some())
@@ -928,12 +1169,18 @@ impl Config {
         for key in Self::KEYS {
             let name = format!("MOKURO_{}", key.replace('.', "_").to_uppercase());
             if let Some(v) = env(&name) {
-                self.set_by_dotted_key(key, &v).map_err(|e| invalid(format!("{name}: {e}")))?;
+                self.set_by_dotted_key(key, &v)
+                    .map_err(|e| invalid(format!("{name}: {e}")))?;
             }
         }
-        for (name, key) in [("MOKURO_HOST", "server.host"), ("MOKURO_PORT", "server.port"), ("MOKURO_STORAGE", "storage.base_path")] {
+        for (name, key) in [
+            ("MOKURO_HOST", "server.host"),
+            ("MOKURO_PORT", "server.port"),
+            ("MOKURO_STORAGE", "storage.base_path"),
+        ] {
             if let Some(v) = env(name) {
-                self.set_by_dotted_key(key, &v).map_err(|e| invalid(format!("{name}: {e}")))?;
+                self.set_by_dotted_key(key, &v)
+                    .map_err(|e| invalid(format!("{name}: {e}")))?;
             }
         }
         Ok(())
@@ -967,21 +1214,31 @@ impl OcrConfig {
             return Err(invalid(format!("Invalid OCR backend: {}", self.backend)));
         }
         if self.poll_interval < 1 {
-            return Err(invalid(format!("Invalid poll interval: {}", self.poll_interval)));
+            return Err(invalid(format!(
+                "Invalid poll interval: {}",
+                self.poll_interval
+            )));
         }
         Ok(())
     }
 
     /// `rocm` is the 0.5 spelling of the AMD path, which is WebGPU in 0.7.
     pub fn effective_backend(&self) -> &str {
-        if self.backend == "rocm" { "webgpu" } else { &self.backend }
+        if self.backend == "rocm" {
+            "webgpu"
+        } else {
+            &self.backend
+        }
     }
 }
 
 impl DynDnsConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         if !DYNDNS_PROVIDERS.contains(&self.provider.as_str()) {
-            return Err(invalid(format!("Invalid DynDNS provider: {}", self.provider)));
+            return Err(invalid(format!(
+                "Invalid DynDNS provider: {}",
+                self.provider
+            )));
         }
         if self.interval < 30 {
             return Err(invalid("DynDNS interval must be at least 30 seconds"));
@@ -992,7 +1249,9 @@ impl DynDnsConfig {
 
 fn validate_concurrency(slots: i64) -> Result<u32, ConfigError> {
     if slots < 1 {
-        return Err(invalid(format!("Invalid OCR concurrency: {slots} (must be at least 1)")));
+        return Err(invalid(format!(
+            "Invalid OCR concurrency: {slots} (must be at least 1)"
+        )));
     }
     if slots > MAX_OCR_CONCURRENCY as i64 {
         return Err(invalid(format!(
@@ -1006,7 +1265,9 @@ pub fn validate_trusted_proxies(list: &[String]) -> Result<(), ConfigError> {
     for network in list {
         let ok = network.parse::<ipnet::IpNet>().is_ok() || network.parse::<IpAddr>().is_ok();
         if !ok {
-            return Err(invalid(format!("server.trusted_proxies: '{network}' is not a network or address")));
+            return Err(invalid(format!(
+                "server.trusted_proxies: '{network}' is not a network or address"
+            )));
         }
     }
     Ok(())
@@ -1018,7 +1279,11 @@ fn sort_value(v: &Value) -> Value {
         Value::Object(m) => {
             let mut keys: Vec<&String> = m.keys().collect();
             keys.sort();
-            Value::Object(keys.into_iter().map(|k| (k.clone(), sort_value(&m[k]))).collect())
+            Value::Object(
+                keys.into_iter()
+                    .map(|k| (k.clone(), sort_value(&m[k])))
+                    .collect(),
+            )
         }
         Value::Array(a) => Value::Array(a.iter().map(sort_value).collect()),
         other => other.clone(),
@@ -1028,13 +1293,21 @@ fn sort_value(v: &Value) -> Value {
 /// Load `path` (or the default path). A missing file means defaults. Environment
 /// overrides are applied afterwards.
 pub fn load_config(path: Option<&Path>) -> Result<Config, ConfigError> {
-    let path = path.map(Path::to_path_buf).unwrap_or_else(storage::default_config_path);
+    let path = path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(storage::default_config_path);
     let mut config = if path.exists() {
-        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io { path: path.clone(), source })?;
+        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io {
+            path: path.clone(),
+            source,
+        })?;
         let value: Value = if text.trim().is_empty() {
             Value::Null
         } else {
-            serde_yaml_ng::from_str(&text).map_err(|e| ConfigError::Yaml { path: path.clone(), message: e.to_string() })?
+            serde_yaml_ng::from_str(&text).map_err(|e| ConfigError::Yaml {
+                path: path.clone(),
+                message: e.to_string(),
+            })?
         };
         Config::from_value(&value)?
     } else {
@@ -1046,13 +1319,24 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, ConfigError> {
 
 /// Write `config` as YAML, atomically (temp file + rename).
 pub fn save_config(config: &Config, path: Option<&Path>) -> Result<(), ConfigError> {
-    let path = path.map(Path::to_path_buf).unwrap_or_else(storage::default_config_path);
+    let path = path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(storage::default_config_path);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| ConfigError::Io { path: parent.to_path_buf(), source })?;
+        std::fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
     let tmp = path.with_extension("yaml.tmp");
-    std::fs::write(&tmp, config.to_yaml()).map_err(|source| ConfigError::Io { path: tmp.clone(), source })?;
-    std::fs::rename(&tmp, &path).map_err(|source| ConfigError::Io { path: path.clone(), source })?;
+    std::fs::write(&tmp, config.to_yaml()).map_err(|source| ConfigError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
+    std::fs::rename(&tmp, &path).map_err(|source| ConfigError::Io {
+        path: path.clone(),
+        source,
+    })?;
     Ok(())
 }
 
@@ -1112,7 +1396,10 @@ mod tests {
 
     #[test]
     fn roundtrip_preserves_unknown() {
-        let c = Config::from_value(&yaml("server: {port: 1234, future_knob: 7}\nfuture_section: {a: 1}\n")).unwrap();
+        let c = Config::from_value(&yaml(
+            "server: {port: 1234, future_knob: 7}\nfuture_section: {a: 1}\n",
+        ))
+        .unwrap();
         let v = c.to_value();
         assert_eq!(v["server"]["port"], 1234);
         assert_eq!(v["server"]["future_knob"], 7);
@@ -1130,7 +1417,12 @@ mod tests {
         assert!(!c.warnings.is_empty());
         let primary = generations::primary_generation(&c.ocr.generations).unwrap();
         assert_eq!(primary.engine, "hayai-nova");
-        let paddle = c.ocr.generations.iter().find(|g| g.engine == "paddle-manga").unwrap();
+        let paddle = c
+            .ocr
+            .generations
+            .iter()
+            .find(|g| g.engine == "paddle-manga")
+            .unwrap();
         assert_eq!(paddle.detector.as_deref(), Some("ppocr-manga"));
         assert!(c.to_yaml().contains("engine: mokuro"));
     }

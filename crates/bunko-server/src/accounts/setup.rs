@@ -21,7 +21,10 @@
 //! `/setup/api/*` carry it. The token file is deleted when setup completes.
 
 use super::AccountsDeps;
-use super::util::{Client, JsonBody, blocking, db_failed, json_error, json_response, read_body, serve_page_json_errors};
+use super::util::{
+    Client, JsonBody, blocking, db_failed, json_error, json_response, read_body,
+    serve_page_json_errors,
+};
 use crate::http::client_ip::is_loopback;
 use axum::Router;
 use axum::body::Body;
@@ -57,8 +60,14 @@ pub struct SetupFlag {
 
 impl SetupFlag {
     pub fn from_env() -> Self {
-        let env_token = std::env::var(SETUP_TOKEN_ENV).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-        SetupFlag { complete: Arc::default(), env_token }
+        let env_token = std::env::var(SETUP_TOKEN_ENV)
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        SetupFlag {
+            complete: Arc::default(),
+            env_token,
+        }
     }
 
     /// No admin account exists (blocking: reads the users table until one is seen).
@@ -151,25 +160,48 @@ fn accepted_tokens(deps: &AccountsDeps) -> Vec<String> {
 fn query_token(query: Option<&str>) -> Option<String> {
     query?.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        (k == "token").then(|| percent_encoding::percent_decode_str(&v.replace('+', " ")).decode_utf8_lossy().into_owned())
+        (k == "token").then(|| {
+            percent_encoding::percent_decode_str(&v.replace('+', " "))
+                .decode_utf8_lossy()
+                .into_owned()
+        })
     })
 }
 
 fn cookie_token(headers: &HeaderMap) -> Option<String> {
-    headers.get_all(header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).find_map(|c| {
-        let (k, v) = c.trim().split_once('=')?;
-        (k == SETUP_TOKEN_COOKIE).then(|| v.trim().to_string())
-    })
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|c| {
+            let (k, v) = c.trim().split_once('=')?;
+            (k == SETUP_TOKEN_COOKIE).then(|| v.trim().to_string())
+        })
 }
 
 /// Every token the request presents (query, header, cookie).
 fn presented_tokens(parts: &Parts) -> Vec<String> {
-    let header = parts.headers.get(SETUP_TOKEN_HEADER).and_then(|v| v.to_str().ok()).map(|v| v.trim().to_string());
-    [query_token(parts.uri.query()), header, cookie_token(&parts.headers)].into_iter().flatten().filter(|t| !t.is_empty()).collect()
+    let header = parts
+        .headers
+        .get(SETUP_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_string());
+    [
+        query_token(parts.uri.query()),
+        header,
+        cookie_token(&parts.headers),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|t| !t.is_empty())
+    .collect()
 }
 
 fn token_matches(accepted: &[String], presented: &str) -> bool {
-    accepted.iter().any(|t| constant_time_eq(t.as_bytes(), presented.as_bytes()))
+    accepted
+        .iter()
+        .any(|t| constant_time_eq(t.as_bytes(), presented.as_bytes()))
 }
 
 /// 0.5.2 `_is_local_request`: loopback peer, and a loopback client address if proxy
@@ -237,8 +269,12 @@ async fn index(State(d): State<AccountsDeps>, client: Client, parts: Parts) -> R
     }
     let mut resp = serve_page_json_errors("setup", "index.html", "Not found", Some("no-cache"));
     // A valid `?token=` is remembered for the page's own API calls.
-    if let Some(t) = query_token(parts.uri.query()).filter(|t| token_matches(&accepted_tokens(&d), t)) {
-        let cookie = format!("{SETUP_TOKEN_COOKIE}={t}; Path=/setup; Max-Age=3600; HttpOnly; SameSite=Strict");
+    if let Some(t) =
+        query_token(parts.uri.query()).filter(|t| token_matches(&accepted_tokens(&d), t))
+    {
+        let cookie = format!(
+            "{SETUP_TOKEN_COOKIE}={t}; Path=/setup; Max-Age=3600; HttpOnly; SameSite=Strict"
+        );
         if let Ok(v) = HeaderValue::from_str(&cookie) {
             resp.headers_mut().insert(header::SET_COOKIE, v);
         }
@@ -246,7 +282,12 @@ async fn index(State(d): State<AccountsDeps>, client: Client, parts: Parts) -> R
     resp
 }
 
-async fn file(State(d): State<AccountsDeps>, client: Client, Path(file): Path<String>, parts: Parts) -> Response {
+async fn file(
+    State(d): State<AccountsDeps>,
+    client: Client,
+    Path(file): Path<String>,
+    parts: Parts,
+) -> Response {
     // 0.5.2 passed `/setup/api/...` GETs on to WebDAV; nothing there serves them.
     if file.starts_with("api/") {
         return json_error(404, "Not found");
@@ -258,7 +299,12 @@ async fn file(State(d): State<AccountsDeps>, client: Client, Path(file): Path<St
 }
 
 /// `POST /setup/api/complete` `{admin: {username, password}, registration: {mode}}`.
-async fn complete(State(d): State<AccountsDeps>, client: Client, parts: Parts, body: Body) -> Response {
+async fn complete(
+    State(d): State<AccountsDeps>,
+    client: Client,
+    parts: Parts,
+    body: Body,
+) -> Response {
     if !allowed(&d, &client, &parts) {
         return json_error(403, LOCAL_ONLY);
     }
@@ -283,7 +329,11 @@ async fn complete(State(d): State<AccountsDeps>, client: Client, parts: Parts, b
         Some(_) => return json_error(400, "Invalid JSON"),
     };
     let username = strip(admin.get("username").and_then(Value::as_str).unwrap_or("")).to_string();
-    let password = admin.get("password").and_then(Value::as_str).unwrap_or("").to_string();
+    let password = admin
+        .get("password")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     if let Some(msg) = validate_username(&username) {
         return json_error(400, msg);
     }
@@ -291,13 +341,22 @@ async fn complete(State(d): State<AccountsDeps>, client: Client, parts: Parts, b
         return json_error(400, msg);
     }
     let db = d.db.clone();
-    match blocking(move || db.create_user(&username, &password, Role::Admin, UserStatus::Active, "")).await {
+    match blocking(move || {
+        db.create_user(&username, &password, Role::Admin, UserStatus::Active, "")
+    })
+    .await
+    {
         Ok(Ok(_)) => {}
-        Ok(Err(e @ (DbError::Invalid(_) | DbError::Conflict(_)))) => return json_error(409, &e.to_string()),
+        Ok(Err(e @ (DbError::Invalid(_) | DbError::Conflict(_)))) => {
+            return json_error(409, &e.to_string());
+        }
         Ok(Err(e)) => return db_failed("setup admin", &e),
         Err(resp) => return resp,
     }
-    let mode = data.get("registration").and_then(|r| r.get("mode")).and_then(Value::as_str);
+    let mode = data
+        .get("registration")
+        .and_then(|r| r.get("mode"))
+        .and_then(Value::as_str);
     if let Some(mode) = mode.filter(|m| VALID_MODES.contains(m)) {
         d.core.config.write().registration.mode = mode.to_string();
     }
@@ -314,7 +373,10 @@ async fn complete(State(d): State<AccountsDeps>, client: Client, parts: Parts, b
         warn!("setup: could not save the config: {e}");
     }
     d.setup.mark_complete();
-    json_response(201, json!({ "success": true, "message": "Setup completed successfully" }))
+    json_response(
+        201,
+        json!({ "success": true, "message": "Setup completed successfully" }),
+    )
 }
 
 #[cfg(test)]
@@ -327,7 +389,10 @@ mod tests {
         assert_eq!(query_token(Some("tokens=x")), None);
         assert_eq!(query_token(None), None);
         let mut h = HeaderMap::new();
-        h.insert(header::COOKIE, "x=1; mokuro_setup_token=abc ; y=2".parse().unwrap());
+        h.insert(
+            header::COOKIE,
+            "x=1; mokuro_setup_token=abc ; y=2".parse().unwrap(),
+        );
         assert_eq!(cookie_token(&h), Some("abc".into()));
     }
 
@@ -348,11 +413,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let layout = StorageLayout::new(tmp.path());
         let t = ensure_setup_token(&layout).unwrap().unwrap();
-        assert_eq!(ensure_setup_token(&layout).unwrap().unwrap(), t, "reused, not regenerated");
+        assert_eq!(
+            ensure_setup_token(&layout).unwrap().unwrap(),
+            t,
+            "reused, not regenerated"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(tmp.path().join(SETUP_TOKEN_FILE)).unwrap().permissions().mode();
+            let mode = std::fs::metadata(tmp.path().join(SETUP_TOKEN_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
         remove_setup_token(&layout);

@@ -12,7 +12,9 @@ use bunko_core::config::UpgradeConfig;
 use bunko_core::generations::{Generation, default_generation};
 use bunko_proto::{Event, Op};
 use bunko_sched::rate::ManualClock;
-use bunko_server::ocr::sched::{Exec, Msg, RegisterInput, RegisterOutcome, SchedDeps, Scheduler, Settings};
+use bunko_server::ocr::sched::{
+    Exec, Msg, RegisterInput, RegisterOutcome, SchedDeps, Scheduler, Settings,
+};
 use bunko_server::ocr::types::{FileFacts, LibraryFacts};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -20,7 +22,10 @@ use tokio::sync::mpsc;
 /// The manual clock starts a little after the real now (archives written by the test
 /// must be older than every failure record, as they would be).
 pub fn t0() -> f64 {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
     (now + 100.0).floor()
 }
 
@@ -43,7 +48,14 @@ pub fn layer(id: &str, name: &str) -> Generation {
 }
 
 pub fn settings(rows: Vec<Generation>) -> Settings {
-    Settings { rows, poll_interval: 30.0, local_processing: false, concurrency: 1, autobench: false, upgrade: UpgradeConfig::default() }
+    Settings {
+        rows,
+        poll_interval: 30.0,
+        local_processing: false,
+        concurrency: 1,
+        autobench: false,
+        upgrade: UpgradeConfig::default(),
+    }
 }
 
 pub fn harness(rows: Vec<Generation>) -> H {
@@ -55,7 +67,11 @@ pub fn harness_with(rows: Vec<Generation>, facts: Arc<dyn LibraryFacts>) -> H {
 }
 
 /// With generation upgrades configured (`ocr.upgrade`).
-pub fn harness_full(rows: Vec<Generation>, facts: Arc<dyn LibraryFacts>, upgrade: Option<UpgradeConfig>) -> H {
+pub fn harness_full(
+    rows: Vec<Generation>,
+    facts: Arc<dyn LibraryFacts>,
+    upgrade: Option<UpgradeConfig>,
+) -> H {
     let dir = tempfile::tempdir().unwrap();
     let layout = StorageLayout::new(dir.path());
     layout.ensure_directories().unwrap();
@@ -94,7 +110,8 @@ pub fn write_cbz(path: &Path, pages: usize) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let f = std::fs::File::create(path).unwrap();
     let mut z = zip::ZipWriter::new(f);
-    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     for i in 0..pages {
         z.start_file(format!("{:03}.jpg", i + 1), opts).unwrap();
         z.write_all(b"not really a jpeg").unwrap();
@@ -137,7 +154,11 @@ impl H {
 
     /// Register + open the socket of a processor that runs every engine.
     pub fn connect(&mut self, name: &str, sessions: u32) -> Proc {
-        self.connect_with(name, sessions, json!(["hayai-nova", "paddle-manga", "ppocr-manga"]))
+        self.connect_with(
+            name,
+            sessions,
+            json!(["hayai-nova", "paddle-manga", "ppocr-manga"]),
+        )
     }
 
     pub fn connect_with(&mut self, name: &str, sessions: u32, engines: serde_json::Value) -> Proc {
@@ -148,34 +169,76 @@ impl H {
             "catalog": {"engines": engines, "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}]},
             "max_sessions": sessions,
         });
-        self.s.handle(Msg::Register { input: RegisterInput { username: format!("acct-{name}"), body, account_stamp: None }, reply });
+        self.s.handle(Msg::Register {
+            input: RegisterInput {
+                username: format!("acct-{name}"),
+                body,
+                account_stamp: None,
+            },
+            reply,
+        });
         let pid = match rx.try_recv().unwrap() {
             RegisterOutcome::Ok(r) => r.processor_id,
             other => panic!("register refused: {other:?}"),
         };
         let (tx, ops) = mpsc::unbounded_channel();
         let (reply, mut rx) = tokio::sync::oneshot::channel();
-        self.s.handle(Msg::SocketOpen { pid: pid.clone(), username: format!("acct-{name}"), ops: tx, reply });
+        self.s.handle(Msg::SocketOpen {
+            pid: pid.clone(),
+            username: format!("acct-{name}"),
+            ops: tx,
+            reply,
+        });
         rx.try_recv().unwrap().unwrap();
-        Proc { pid, name: name.into(), ops }
+        Proc {
+            pid,
+            name: name.into(),
+            ops,
+        }
     }
 
     pub fn event(&mut self, p: &Proc, event: Event) {
-        self.s.handle(Msg::Event { pid: p.pid.clone(), event });
+        self.s.handle(Msg::Event {
+            pid: p.pid.clone(),
+            event,
+        });
     }
 
     /// Answer a volume as done: the sidecar lands where an upload would put it.
     pub fn done(&mut self, p: &Proc, sid: &str, claim: &str, name: &str, pages: u32, seconds: f64) {
-        self.done_with(p, sid, claim, name, pages, seconds, br#"{"version":"0.2.5","title":"x","volume":"y","pages":[]}"#);
+        self.done_with(
+            p,
+            sid,
+            claim,
+            name,
+            pages,
+            seconds,
+            br#"{"version":"0.2.5","title":"x","volume":"y","pages":[]}"#,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn done_with(&mut self, p: &Proc, sid: &str, claim: &str, name: &str, pages: u32, seconds: f64, body: &[u8]) {
+    pub fn done_with(
+        &mut self,
+        p: &Proc,
+        sid: &str,
+        claim: &str,
+        name: &str,
+        pages: u32,
+        seconds: f64,
+        body: &[u8],
+    ) {
         let dir = self.storage().join(".processing").join(sid).join(claim);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), body).unwrap();
         let sha = bunko_server::ocr::collect::sha256_file(&dir.join(name)).unwrap();
-        self.s.handle(Msg::ResultStored { pid: p.pid.clone(), sid: sid.into(), claim: claim.into(), name: name.into(), sha256: sha.clone() });
+        self.s.handle(Msg::ResultStored {
+            pid: p.pid.clone(),
+            sid: sid.into(),
+            claim: claim.into(),
+            name: name.into(),
+            sha256: sha.clone(),
+        });
         self.event(
             p,
             Event::VolumeDone {
@@ -236,9 +299,16 @@ pub fn ready(sid: &str) -> Event {
 }
 
 pub fn started(sid: &str, claim: &str, pages: u32) -> Event {
-    Event::VolumeStarted { sid: sid.into(), id: claim.into(), pages }
+    Event::VolumeStarted {
+        sid: sid.into(),
+        id: claim.into(),
+        pages,
+    }
 }
 
 pub fn exit(sid: &str, code: Option<i32>) -> Event {
-    Event::Exit { sid: sid.into(), returncode: code }
+    Event::Exit {
+        sid: sid.into(),
+        returncode: code,
+    }
 }

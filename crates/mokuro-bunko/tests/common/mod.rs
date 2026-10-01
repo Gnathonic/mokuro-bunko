@@ -12,7 +12,9 @@ pub struct Env {
 
 impl Env {
     pub fn new() -> Env {
-        Env { dir: tempfile::tempdir().expect("tempdir") }
+        Env {
+            dir: tempfile::tempdir().expect("tempdir"),
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -48,7 +50,10 @@ impl Env {
 
     /// Write a config file with storage under the temp dir plus `extra` YAML.
     pub fn write_config(&self, extra: &str) {
-        let text = format!("storage:\n  base_path: {}\n{extra}", self.storage().display());
+        let text = format!(
+            "storage:\n  base_path: {}\n{extra}",
+            self.storage().display()
+        );
         std::fs::write(self.config_path(), text).expect("write config");
     }
 

@@ -25,7 +25,11 @@ impl EngineSpec {
     }
     /// The road through the pipeline: `line` (detector + CTC only) or `reconciled`.
     pub fn road(&self) -> Road {
-        if self.detector.is_some() { Road::Line } else { Road::Reconciled }
+        if self.detector.is_some() {
+            Road::Line
+        } else {
+            Road::Reconciled
+        }
     }
 }
 
@@ -116,15 +120,27 @@ pub const DEFAULT_DETECTOR: &str = "ppocr-manga";
 
 /// Engines that existed in 0.5.x and were removed in 0.7, with the reason shown to admins.
 pub const REMOVED_ENGINES: &[(&str, &str)] = &[
-    ("mokuro", "mokuro (manga-ocr + comic-text-detector) was removed in 0.7: GPL-licensed detector and weaker reading than hayai-nova/paddle-manga"),
-    ("mokuro-fp16", "mokuro was removed in 0.7: GPL-licensed detector and weaker reading than hayai-nova/paddle-manga"),
+    (
+        "mokuro",
+        "mokuro (manga-ocr + comic-text-detector) was removed in 0.7: GPL-licensed detector and weaker reading than hayai-nova/paddle-manga",
+    ),
+    (
+        "mokuro-fp16",
+        "mokuro was removed in 0.7: GPL-licensed detector and weaker reading than hayai-nova/paddle-manga",
+    ),
 ];
 
 /// Detectors that existed in 0.5.x and were removed in 0.7.
 pub const REMOVED_DETECTORS: &[(&str, &str)] = &[
-    ("ctd", "comic-text-detector is GPL-3.0 and was removed in 0.7"),
+    (
+        "ctd",
+        "comic-text-detector is GPL-3.0 and was removed in 0.7",
+    ),
     ("animetext", "AnimeText (GPL-3.0) was removed in 0.7"),
-    ("rtdetr", "rtdetr was removed in 0.7 (poor detection quality)"),
+    (
+        "rtdetr",
+        "rtdetr was removed in 0.7 (poor detection quality)",
+    ),
 ];
 
 pub const PATCH_BUDGETS: &[u32] = &[256, 384, 512];
@@ -139,11 +155,17 @@ pub fn detector(id: &str) -> Option<&'static DetectorSpec> {
 }
 
 pub fn removed_engine(id: &str) -> Option<&'static str> {
-    REMOVED_ENGINES.iter().find(|(e, _)| *e == id).map(|(_, why)| *why)
+    REMOVED_ENGINES
+        .iter()
+        .find(|(e, _)| *e == id)
+        .map(|(_, why)| *why)
 }
 
 pub fn removed_detector(id: &str) -> Option<&'static str> {
-    REMOVED_DETECTORS.iter().find(|(d, _)| *d == id).map(|(_, why)| *why)
+    REMOVED_DETECTORS
+        .iter()
+        .find(|(d, _)| *d == id)
+        .map(|(_, why)| *why)
 }
 
 // --- precision ---------------------------------------------------------------
@@ -156,8 +178,14 @@ pub const PRECISIONS: &[&str] = &[PRECISION_BF16, PRECISION_FP16, PRECISION_FP32
 pub const MODE_ACCURACY: &str = "auto-accuracy";
 pub const MODE_BALANCED: &str = "auto-balanced";
 pub const MODE_SPEED: &str = "auto-speed";
-pub const PRECISION_MODES: &[&str] =
-    &[MODE_ACCURACY, MODE_BALANCED, MODE_SPEED, PRECISION_FP32, PRECISION_BF16, PRECISION_FP16];
+pub const PRECISION_MODES: &[&str] = &[
+    MODE_ACCURACY,
+    MODE_BALANCED,
+    MODE_SPEED,
+    PRECISION_FP32,
+    PRECISION_BF16,
+    PRECISION_FP16,
+];
 pub const DEFAULT_PRECISION_MODE: &str = MODE_ACCURACY;
 
 pub fn is_forced_precision(mode: &str) -> bool {
@@ -174,5 +202,10 @@ pub fn normalize_precision_mode(value: Option<&str>) -> Result<&'static str, Str
         .iter()
         .find(|m| **m == v)
         .copied()
-        .ok_or_else(|| format!("precision is '{v}'; it must be one of {}", PRECISION_MODES.join(", ")))
+        .ok_or_else(|| {
+            format!(
+                "precision is '{v}'; it must be one of {}",
+                PRECISION_MODES.join(", ")
+            )
+        })
 }

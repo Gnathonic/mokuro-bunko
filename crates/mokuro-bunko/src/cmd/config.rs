@@ -56,7 +56,12 @@ pub fn run(ctx: &Ctx, cmd: ConfigCmd) -> CmdResult {
         }
         ConfigCmd::CorsRemove { origin } => {
             let mut config = cfgfile::load_for_write(path)?;
-            let Some(pos) = config.cors.allowed_origins.iter().position(|o| *o == origin) else {
+            let Some(pos) = config
+                .cors
+                .allowed_origins
+                .iter()
+                .position(|o| *o == origin)
+            else {
                 return Err(exit_with(format!("Error: Origin not found: {origin}")));
             };
             config.cors.allowed_origins.remove(pos);

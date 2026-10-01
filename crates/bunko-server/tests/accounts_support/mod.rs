@@ -38,18 +38,34 @@ impl Env {
         let layout = config.storage.layout();
         layout.ensure_directories().expect("dirs");
         let db = Arc::new(
-            Database::open_with(layout.database(), &DbOptions { bcrypt_cost: 4, ..DbOptions::default() }).expect("db"),
+            Database::open_with(
+                layout.database(),
+                &DbOptions {
+                    bcrypt_cost: 4,
+                    ..DbOptions::default()
+                },
+            )
+            .expect("db"),
         );
-        let backend = Arc::new(DbAuthBackend { db: db.clone(), layout });
+        let backend = Arc::new(DbAuthBackend {
+            db: db.clone(),
+            layout,
+        });
         // A config path inside the temp dir: setup saves the config, never to ~/.config.
-        let core = Core::new(Arc::new(RwLock::new(config)), Some(dir.path().join("config.yaml")), backend);
+        let core = Core::new(
+            Arc::new(RwLock::new(config)),
+            Some(dir.path().join("config.yaml")),
+            backend,
+        );
         let mut deps = AccountsDeps::new(core, db.clone());
         deps.setup.env_token = None;
         Env { dir, db, deps }
     }
 
     pub fn user(&self, name: &str, password: &str, role: Role) {
-        self.db.create_user(name, password, role, UserStatus::Active, "").expect("create user");
+        self.db
+            .create_user(name, password, role, UserStatus::Active, "")
+            .expect("create user");
     }
 
     /// The router as the orchestrator mounts it: module routes, the `/` gate, WebDAV.
@@ -69,7 +85,10 @@ impl Env {
 pub fn app(deps: AccountsDeps) -> Router {
     accounts::router(deps.clone())
         .fallback(|| async { (StatusCode::IM_A_TEAPOT, "dav") })
-        .layer(axum::middleware::from_fn_with_state(deps, accounts::root_middleware))
+        .layer(axum::middleware::from_fn_with_state(
+            deps,
+            accounts::root_middleware,
+        ))
 }
 
 pub struct Resp {
@@ -80,7 +99,8 @@ pub struct Resp {
 
 impl Resp {
     pub fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap_or_else(|e| panic!("not JSON ({e}): {:?}", self.text()))
+        serde_json::from_slice(&self.body)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {:?}", self.text()))
     }
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
@@ -94,8 +114,14 @@ pub async fn send(app: Router, req: Request<Body>) -> Resp {
     let resp = app.oneshot(req).await.expect("infallible");
     let status = resp.status().as_u16();
     let headers = resp.headers().clone();
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body");
-    Resp { status, headers, body }
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    Resp {
+        status,
+        headers,
+        body,
+    }
 }
 
 /// A request builder from a loopback peer (what a test without ConnectInfo would get
@@ -105,12 +131,19 @@ pub fn req(method: &str, uri: &str) -> http::request::Builder {
 }
 
 pub fn from_peer(method: &str, uri: &str, peer: &str) -> http::request::Builder {
-    let addr: SocketAddr = format!("{peer}:50000").parse().unwrap_or_else(|_| format!("[{peer}]:50000").parse().expect("peer"));
-    Request::builder().method(method).uri(uri).extension(ConnectInfo(addr))
+    let addr: SocketAddr = format!("{peer}:50000")
+        .parse()
+        .unwrap_or_else(|_| format!("[{peer}]:50000").parse().expect("peer"));
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .extension(ConnectInfo(addr))
 }
 
 pub fn json_body(b: http::request::Builder, value: Value) -> Request<Body> {
-    b.header("content-type", "application/json").body(Body::from(value.to_string())).expect("request")
+    b.header("content-type", "application/json")
+        .body(Body::from(value.to_string()))
+        .expect("request")
 }
 
 pub fn empty(b: http::request::Builder) -> Request<Body> {
@@ -118,11 +151,16 @@ pub fn empty(b: http::request::Builder) -> Request<Body> {
 }
 
 pub fn raw(b: http::request::Builder, body: &'static [u8]) -> Request<Body> {
-    b.header("content-length", body.len().to_string()).body(Body::from(body)).expect("request")
+    b.header("content-length", body.len().to_string())
+        .body(Body::from(body))
+        .expect("request")
 }
 
 pub fn basic(user: &str, password: &str) -> String {
-    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}")))
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"))
+    )
 }
 
 pub fn bearer(token: &str) -> String {
@@ -131,7 +169,12 @@ pub fn bearer(token: &str) -> String {
 
 /// Sign in through the API; returns the token.
 pub async fn token(env: &Env, user: &str, password: &str) -> String {
-    let r = env.send(json_body(req("POST", "/login/api/token"), serde_json::json!({"username": user, "password": password}))).await;
+    let r = env
+        .send(json_body(
+            req("POST", "/login/api/token"),
+            serde_json::json!({"username": user, "password": password}),
+        ))
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
     r.json()["token"].as_str().expect("token").to_string()
 }

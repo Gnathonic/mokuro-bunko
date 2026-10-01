@@ -25,12 +25,19 @@ pub struct Ruby {
 
 /// `(pitch, em)` of the page's column lattice, `None` when it has none.
 pub fn column_lattice(lines: &[&Line]) -> Option<(f64, f64)> {
-    let long: Vec<&Line> = lines.iter().copied().filter(|l| l.length() >= LONG_LINE_EM * l.thickness()).collect();
+    let long: Vec<&Line> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.length() >= LONG_LINE_EM * l.thickness())
+        .collect();
     if long.is_empty() {
         return None;
     }
     let vertical = dominant_vertical(long.iter().copied());
-    let long: Vec<&Line> = long.into_iter().filter(|l| l.vertical == vertical).collect();
+    let long: Vec<&Line> = long
+        .into_iter()
+        .filter(|l| l.vertical == vertical)
+        .collect();
     if long.len() < BODY_MIN_LONG_COLUMNS {
         return None;
     }
@@ -74,12 +81,20 @@ fn ruby_candidacy(line: &Line, lattice_em: Option<f64>) -> Option<f64> {
     if line.conf < LOW_CONFIDENCE {
         return Some(FURIGANA_MAX_THICKNESS_RATIO);
     }
-    Some(if lattice_em.is_some() { FURIGANA_UNREADABLE_MAX_RATIO } else { FURIGANA_TINY_MAX_RATIO })
+    Some(if lattice_em.is_some() {
+        FURIGANA_UNREADABLE_MAX_RATIO
+    } else {
+        FURIGANA_TINY_MAX_RATIO
+    })
 }
 
 /// If `cand` is furigana for `base`: the annotated span, as base fractions.
 pub fn ruby_of(cand: &Line, base: &Line, pitch: Option<f64>, max_ratio: f64) -> Option<(f64, f64)> {
-    let theta = if base.angle_reliable() { base.angle } else { 0.0 };
+    let theta = if base.angle_reliable() {
+        base.angle
+    } else {
+        0.0
+    };
     let vertical = base.vertical;
     let (bm0, bm1, bc0, bc1) = base.main_cross(theta, vertical);
     let (cm0, cm1, cc0, cc1) = cand.main_cross(theta, vertical);
@@ -109,7 +124,8 @@ pub fn ruby_of(cand: &Line, base: &Line, pitch: Option<f64>, max_ratio: f64) -> 
     let small_glyphs = generous_box
         && glyphs >= 2
         && base_glyphs >= 1
-        && (cm1 - cm0) / glyphs as f64 <= FURIGANA_MAX_GLYPH_PITCH_RATIO * (bm1 - bm0) / base_glyphs as f64;
+        && (cm1 - cm0) / glyphs as f64
+            <= FURIGANA_MAX_GLYPH_PITCH_RATIO * (bm1 - bm0) / base_glyphs as f64;
     let on_lattice_gap =
         generous_box && pitch.is_some_and(|p| offset <= FURIGANA_LATTICE_MAX_PITCH_FRACTION * p);
     if !(thin || small_glyphs || on_lattice_gap) {
@@ -132,12 +148,19 @@ pub fn filter_furigana(lines: &[Line]) -> (Vec<usize>, Vec<Ruby>) {
         Some((p, e)) => (Some(p), Some(e)),
         None => (None, None),
     };
-    let limits: HashMap<usize, Option<f64>> = lines.iter().map(|l| (l.index, ruby_candidacy(l, lattice_em))).collect();
+    let limits: HashMap<usize, Option<f64>> = lines
+        .iter()
+        .map(|l| (l.index, ruby_candidacy(l, lattice_em)))
+        .collect();
     let mut ruby: BTreeMap<usize, Ruby> = BTreeMap::new();
     for final_pass in [false, true] {
         let bases: Vec<&Line> = lines
             .iter()
-            .filter(|l| has_kanji(&l.text) && !ruby.contains_key(&l.index) && (limits[&l.index].is_none() || final_pass))
+            .filter(|l| {
+                has_kanji(&l.text)
+                    && !ruby.contains_key(&l.index)
+                    && (limits[&l.index].is_none() || final_pass)
+            })
             .collect();
         for cand in lines {
             let Some(limit) = limits[&cand.index] else {
@@ -173,10 +196,19 @@ pub fn filter_furigana(lines: &[Line]) -> (Vec<usize>, Vec<Ruby>) {
             );
             ruby.insert(
                 cand.index,
-                Ruby { line: cand.index, base: base_line.index, text: cand.text.clone(), quad: cand.quad, span, chars },
+                Ruby {
+                    line: cand.index,
+                    base: base_line.index,
+                    text: cand.text.clone(),
+                    quad: cand.quad,
+                    span,
+                    chars,
+                },
             );
         }
     }
-    let kept = (0..lines.len()).filter(|&i| !ruby.contains_key(&lines[i].index)).collect();
+    let kept = (0..lines.len())
+        .filter(|&i| !ruby.contains_key(&lines[i].index))
+        .collect();
     (kept, ruby.into_values().collect())
 }

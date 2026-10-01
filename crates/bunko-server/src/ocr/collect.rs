@@ -86,7 +86,11 @@ pub fn audit_rejected(req: &CollectRequest, reason: &str) {
         .with("machine", req.machine.clone())
         .with("engine", req.row.engine.clone())
         .with("reason", reason.chars().take(500).collect::<String>());
-    let event = NewAuditEvent::new("ocr_sidecar_rejected").actor(req.account.as_deref()).target_type("sidecar").target_path(&target).details(details);
+    let event = NewAuditEvent::new("ocr_sidecar_rejected")
+        .actor(req.account.as_deref())
+        .target_type("sidecar")
+        .target_path(&target)
+        .details(details);
     if let Err(e) = db.log_audit_event(&event) {
         tracing::warn!("could not audit a rejected sidecar: {e}");
     }
@@ -109,15 +113,29 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 
 fn sidecar_volume_uuid(path: &Path) -> Option<String> {
     let loaded = bunko_library::sidecar::load_sidecar(path);
-    loaded.data?.get("volume_uuid")?.as_str().filter(|s| !s.is_empty()).map(str::to_string)
+    loaded
+        .data?
+        .get("volume_uuid")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// `volume_uuid_for(cbz, row)`: the primary's, the remembered one, the oldest layer's,
 /// else the reader's deterministic id of `<Series>/<Volume>`.
-pub fn volume_uuid_for(cbz: &Path, row: &Generation, rows: &[Generation], library: &Path, inbox: &Path, db: Option<&Database>) -> String {
+pub fn volume_uuid_for(
+    cbz: &Path,
+    row: &Generation,
+    rows: &[Generation],
+    library: &Path,
+    inbox: &Path,
+    db: Option<&Database>,
+) -> String {
     if !row.primary {
         for suffix in [".mokuro", ".mokuro.gz"] {
-            if let Some(found) = sidecar_volume_uuid(&bunko_library::sidecar::with_suffix(cbz, suffix)) {
+            if let Some(found) =
+                sidecar_volume_uuid(&bunko_library::sidecar::with_suffix(cbz, suffix))
+            {
                 return found;
             }
         }
@@ -134,9 +152,18 @@ pub fn volume_uuid_for(cbz: &Path, row: &Generation, rows: &[Generation], librar
         }
         let (plain, gz) = sidecar_paths(cbz, &other.sidecar_suffix());
         for candidate in [plain, gz] {
-            let Some(uuid) = sidecar_volume_uuid(&candidate) else { continue };
-            let Some(mtime) = std::fs::metadata(&candidate).ok().and_then(|m| m.modified().ok()) else { continue };
-            let secs = mtime.duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+            let Some(uuid) = sidecar_volume_uuid(&candidate) else {
+                continue;
+            };
+            let Some(mtime) = std::fs::metadata(&candidate)
+                .ok()
+                .and_then(|m| m.modified().ok())
+            else {
+                continue;
+            };
+            let secs = mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |d| d.as_secs_f64());
             found.push((secs, uuid));
         }
     }
@@ -145,7 +172,10 @@ pub fn volume_uuid_for(cbz: &Path, row: &Generation, rows: &[Generation], librar
         return uuid;
     }
     let series = bunko_layout::sidecar::derive_series_name(cbz, library, inbox);
-    let stem = cbz.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = cbz
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     bunko_layout::sidecar::deterministic_uuid(&format!("{series}/{stem}"))
 }
 
@@ -154,7 +184,10 @@ pub fn unique_path(path: &Path) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
     }
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let (stem, suffix) = match name.rfind('.') {
         Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
         _ => (name.clone(), String::new()),
@@ -176,7 +209,12 @@ pub fn move_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(_) => {
-            let tmp = to.with_file_name(format!(".{}.part", to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+            let tmp = to.with_file_name(format!(
+                ".{}.part",
+                to.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ));
             std::fs::copy(from, &tmp)?;
             std::fs::rename(&tmp, to)?;
             let _ = std::fs::remove_file(from);
@@ -213,7 +251,13 @@ pub fn run(req: CollectRequest) -> CollectDone {
             let _ = std::fs::remove_dir(session_dir);
         }
     }
-    CollectDone { job: req.job.clone(), sid: req.sid.clone(), claim: req.claim.clone(), outcome, congestion: req.congestion.clone() }
+    CollectDone {
+        job: req.job.clone(),
+        sid: req.sid.clone(),
+        claim: req.claim.clone(),
+        outcome,
+        congestion: req.congestion.clone(),
+    }
 }
 
 fn install(req: &CollectRequest) -> Outcome {
@@ -234,32 +278,66 @@ fn install(req: &CollectRequest) -> Outcome {
     if let Some(expected) = &req.expected_sha256 {
         match sha256_file(&req.result) {
             Ok(actual) if actual.eq_ignore_ascii_case(expected) => {}
-            Ok(_) => return Outcome::Failed(format!("the {} sidecar that arrived does not match the sha256 its processor announced", row.name)),
-            Err(e) => return Outcome::Failed(format!("the {} sidecar could not be read: {e}", row.name)),
+            Ok(_) => {
+                return Outcome::Failed(format!(
+                    "the {} sidecar that arrived does not match the sha256 its processor announced",
+                    row.name
+                ));
+            }
+            Err(e) => {
+                return Outcome::Failed(format!("the {} sidecar could not be read: {e}", row.name));
+            }
         }
     }
     // 3. Facts before normalisation (the runner's own `ocr_engine` block).
     let loaded = bunko_library::sidecar::load_sidecar(&req.result);
     let Some(data) = loaded.data else {
-        return Outcome::Failed(format!("the {} sidecar it wrote is not readable JSON", row.name));
+        return Outcome::Failed(format!(
+            "the {} sidecar it wrote is not readable JSON",
+            row.name
+        ));
     };
-    let facts_pages = data.get("pages").and_then(|p| p.as_array()).map(|a| a.len() as i64);
+    let facts_pages = data
+        .get("pages")
+        .and_then(|p| p.as_array())
+        .map(|a| a.len() as i64);
     let engine_block = data.get("ocr_engine").and_then(|b| b.as_object());
-    let block_str = |k: &str| engine_block.and_then(|b| b.get(k)).and_then(|v| v.as_str()).map(str::to_string);
+    let block_str = |k: &str| {
+        engine_block
+            .and_then(|b| b.get(k))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
     let detector = block_str("detector").or_else(|| Some(row.effective_detector().to_string()));
-    let precision = block_str("precision").or_else(|| row.precision_applies().then(|| row.precision.clone()));
+    let precision =
+        block_str("precision").or_else(|| row.precision_applies().then(|| row.precision.clone()));
     drop(data);
     // 4. Normalise.
     let series_name = bunko_layout::sidecar::derive_series_name(&cbz, &req.library, &req.inbox);
-    let volume_uuid = volume_uuid_for(&cbz, row, &req.rows, &req.library, &req.inbox, req.db.as_deref());
+    let volume_uuid = volume_uuid_for(
+        &cbz,
+        row,
+        &req.rows,
+        &req.library,
+        &req.inbox,
+        req.db.as_deref(),
+    );
     let stamp = (!row.primary).then(|| bunko_layout::sidecar::LayerStamp {
         engine: row.engine.clone(),
         generator: req.generator.clone(),
         generation: row.name.clone(),
     });
-    let norm = bunko_layout::sidecar::Normalization { series_name, volume: req.job.volume().to_string(), volume_uuid, stamp };
+    let norm = bunko_layout::sidecar::Normalization {
+        series_name,
+        volume: req.job.volume().to_string(),
+        volume_uuid,
+        stamp,
+    };
     if let Err(e) = bunko_layout::sidecar::normalize_sidecar_file(&req.result, &norm) {
-        return Outcome::Failed(format!("the {} sidecar it wrote is not readable JSON ({e})", row.name));
+        return Outcome::Failed(format!(
+            "the {} sidecar it wrote is not readable JSON ({e})",
+            row.name
+        ));
     }
     // 5. Into place, under the DAV write lock.
     let destination = if req.job.upgrade {
@@ -272,9 +350,17 @@ fn install(req: &CollectRequest) -> Outcome {
         let Some(_guard) = lock_with_patience(&req.locks, &plain) else {
             return Outcome::Busy(format!("{} is locked by a WebDAV write", plain.display()));
         };
-        let dest = if plain.exists() || gz.exists() { unique_path(&plain) } else { plain };
+        let dest = if plain.exists() || gz.exists() {
+            unique_path(&plain)
+        } else {
+            plain
+        };
         if let Err(e) = move_into_place(&req.result, &dest) {
-            return Outcome::Failed(format!("could not move the {} sidecar to {}: {e}", row.name, dest.display()));
+            return Outcome::Failed(format!(
+                "could not move the {} sidecar to {}: {e}",
+                row.name,
+                dest.display()
+            ));
         }
         dest
     };
@@ -284,9 +370,19 @@ fn install(req: &CollectRequest) -> Outcome {
     Outcome::Installed(destination)
 }
 
-fn record_written(req: &CollectRequest, cbz: &Path, sidecar: &Path, detector: Option<String>, precision: Option<String>, facts_pages: Option<i64>) {
+fn record_written(
+    req: &CollectRequest,
+    cbz: &Path,
+    sidecar: &Path,
+    detector: Option<String>,
+    precision: Option<String>,
+    facts_pages: Option<i64>,
+) {
     let Some(db) = &req.db else { return };
-    let (Some(sidecar_rel), Some(volume_key)) = (crate::ocr::types::rel_of(&req.library, sidecar), crate::ocr::types::rel_of(&req.library, cbz)) else {
+    let (Some(sidecar_rel), Some(volume_key)) = (
+        crate::ocr::types::rel_of(&req.library, sidecar),
+        crate::ocr::types::rel_of(&req.library, cbz),
+    ) else {
         return;
     };
     let archive = stamp_of(cbz);
@@ -309,7 +405,10 @@ fn record_written(req: &CollectRequest, cbz: &Path, sidecar: &Path, detector: Op
         written_at: String::new(),
     };
     if let Err(e) = db.record_ocr_sidecar(&row) {
-        tracing::warn!("could not record the provenance of {}: {e}", sidecar.display());
+        tracing::warn!(
+            "could not record the provenance of {}: {e}",
+            sidecar.display()
+        );
     }
     let target = target_of(&req.library, sidecar);
     let details = AuditDetails::new()
@@ -320,9 +419,19 @@ fn record_written(req: &CollectRequest, cbz: &Path, sidecar: &Path, detector: Op
         .with("detector", detector.map_or(Value::Null, Value::String))
         .with("precision", precision.map_or(Value::Null, Value::String))
         .with("pages", pages.map_or(Value::Null, Value::from))
-        .with("failed_pages", req.failed_pages.map_or(Value::Null, Value::from))
-        .with("runner_build", req.runner_build.clone().map_or(Value::Null, Value::String));
-    let event = NewAuditEvent::new("ocr_sidecar_written").actor(req.account.as_deref()).target_type("sidecar").target_path(&target).details(details);
+        .with(
+            "failed_pages",
+            req.failed_pages.map_or(Value::Null, Value::from),
+        )
+        .with(
+            "runner_build",
+            req.runner_build.clone().map_or(Value::Null, Value::String),
+        );
+    let event = NewAuditEvent::new("ocr_sidecar_written")
+        .actor(req.account.as_deref())
+        .target_type("sidecar")
+        .target_path(&target)
+        .details(details);
     if let Err(e) = db.log_audit_event(&event) {
         tracing::warn!("could not audit {}: {e}", sidecar.display());
     }

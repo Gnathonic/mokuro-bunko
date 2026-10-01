@@ -18,7 +18,10 @@ pub struct ServerDavHooks {
 
 impl ServerDavHooks {
     pub fn new(db: Arc<Database>) -> Self {
-        Self { db, listeners: RwLock::new(Vec::new()) }
+        Self {
+            db,
+            listeners: RwLock::new(Vec::new()),
+        }
     }
 
     pub fn add_listener(&self, l: Arc<dyn DavHooks>) {
@@ -43,13 +46,18 @@ fn sidecar_volume_uuid(path: &Path) -> Option<String> {
     let raw = std::fs::read(path).ok()?;
     let bytes = if path.extension().is_some_and(|e| e == "gz") {
         let mut out = Vec::new();
-        flate2::read::MultiGzDecoder::new(&raw[..]).read_to_end(&mut out).ok()?;
+        flate2::read::MultiGzDecoder::new(&raw[..])
+            .read_to_end(&mut out)
+            .ok()?;
         out
     } else {
         raw
     };
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    v.get("volume_uuid").and_then(|u| u.as_str()).map(str::to_string).filter(|s| !s.trim().is_empty())
+    v.get("volume_uuid")
+        .and_then(|u| u.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
 }
 
 impl DavHooks for ServerDavHooks {
@@ -58,13 +66,19 @@ impl DavHooks for ServerDavHooks {
             Some(serde_json::Value::Object(m)) => Some(AuditDetails::from(m)),
             _ => None,
         };
-        let mut ev = NewAuditEvent::new(e.action).actor(e.actor.as_deref()).target_type(e.target_type).target_path(&e.target_path);
+        let mut ev = NewAuditEvent::new(e.action)
+            .actor(e.actor.as_deref())
+            .target_type(e.target_type)
+            .target_path(&e.target_path);
         ev.details = details;
         Self::log("audit", self.db.log_audit_event(&ev));
     }
 
     fn record_volume_upload(&self, rel: &str, actor: &str, _existed_before: bool) {
-        Self::log("record_volume_upload", self.db.record_volume_upload(rel, actor));
+        Self::log(
+            "record_volume_upload",
+            self.db.record_volume_upload(rel, actor),
+        );
     }
     fn forget_volume_upload(&self, rel: &str) {
         Self::log("forget_volume_upload", self.db.forget_volume_upload(rel));
@@ -73,35 +87,59 @@ impl DavHooks for ServerDavHooks {
         Self::log("forget_volume_uuid", self.db.forget_volume_uuid(rel));
     }
     fn forget_ocr_sidecars_of_volume(&self, rel: &str) {
-        Self::log("forget_ocr_sidecars_of_volume", self.db.forget_ocr_sidecars_of_volume(rel));
+        Self::log(
+            "forget_ocr_sidecars_of_volume",
+            self.db.forget_ocr_sidecars_of_volume(rel),
+        );
     }
     fn forget_ocr_sidecar(&self, rel: &str) {
         Self::log("forget_ocr_sidecar", self.db.forget_ocr_sidecar(rel));
     }
     fn rename_volume_upload(&self, old: &str, new: &str) {
-        Self::log("rename_volume_upload", self.db.rename_volume_upload(old, new));
+        Self::log(
+            "rename_volume_upload",
+            self.db.rename_volume_upload(old, new),
+        );
     }
     fn forget_volume_uploads_under_prefix(&self, p: &str) {
-        Self::log("forget_volume_uploads_under_prefix", self.db.forget_volume_uploads_under_prefix(p));
+        Self::log(
+            "forget_volume_uploads_under_prefix",
+            self.db.forget_volume_uploads_under_prefix(p),
+        );
     }
     fn forget_ocr_sidecars_under_prefix(&self, p: &str) {
-        Self::log("forget_ocr_sidecars_under_prefix", self.db.forget_ocr_sidecars_under_prefix(p));
+        Self::log(
+            "forget_ocr_sidecars_under_prefix",
+            self.db.forget_ocr_sidecars_under_prefix(p),
+        );
     }
     fn forget_volume_uuids_under_prefix(&self, p: &str) {
-        Self::log("forget_volume_uuids_under_prefix", self.db.forget_volume_uuids_under_prefix(p));
+        Self::log(
+            "forget_volume_uuids_under_prefix",
+            self.db.forget_volume_uuids_under_prefix(p),
+        );
     }
     fn rename_ocr_sidecars_under_prefix(&self, old: &str, new: &str) {
-        Self::log("rename_ocr_sidecars_under_prefix", self.db.rename_ocr_sidecars_under_prefix(old, new));
+        Self::log(
+            "rename_ocr_sidecars_under_prefix",
+            self.db.rename_ocr_sidecars_under_prefix(old, new),
+        );
     }
     fn rename_volume_uuids_under_prefix(&self, old: &str, new: &str) {
-        Self::log("rename_volume_uuids_under_prefix", self.db.rename_volume_uuids_under_prefix(old, new));
+        Self::log(
+            "rename_volume_uuids_under_prefix",
+            self.db.rename_volume_uuids_under_prefix(old, new),
+        );
     }
 
     fn primary_sidecar_leaving(&self, rel: &str, sidecar: &Path) {
         // 0.5.2 `_remember_primary_uuid`: a re-uploaded volume keeps its id (and reading
         // progress) even though its sidecar went away first.
         if let Some(uuid) = sidecar_volume_uuid(sidecar) {
-            Self::log("remember_volume_uuid", self.db.remember_volume_uuid(rel, &uuid));
+            Self::log(
+                "remember_volume_uuid",
+                self.db.remember_volume_uuid(rel, &uuid),
+            );
         }
         self.each(|l| l.primary_sidecar_leaving(rel, sidecar));
     }
@@ -113,7 +151,10 @@ impl DavHooks for ServerDavHooks {
         self.each(|l| l.archive_arrived(cbz));
     }
     fn put_follow_up(&self, cbz: &Path, series: &str, volume: &str) -> Option<PutFollowUp> {
-        self.listeners.read().iter().find_map(|l| l.put_follow_up(cbz, series, volume))
+        self.listeners
+            .read()
+            .iter()
+            .find_map(|l| l.put_follow_up(cbz, series, volume))
     }
     fn library_changed(&self, paths: &[PathBuf]) {
         self.each(|l| l.library_changed(paths));

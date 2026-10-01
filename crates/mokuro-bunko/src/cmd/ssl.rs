@@ -14,9 +14,15 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 pub fn run(ctx: &Ctx, cmd: SslCmd) -> CmdResult {
     let path = &ctx.config_path;
     match cmd {
-        SslCmd::Enable { auto_cert, cert, key } => {
+        SslCmd::Enable {
+            auto_cert,
+            cert,
+            key,
+        } => {
             if !(auto_cert || cert.is_some() && key.is_some()) {
-                return Err(exit_with("Error: Provide --auto-cert or both --cert and --key"));
+                return Err(exit_with(
+                    "Error: Provide --auto-cert or both --cert and --key",
+                ));
             }
             if cert.is_some() != key.is_some() {
                 return Err(exit_with("Error: Both --cert and --key are required"));
@@ -30,7 +36,8 @@ pub fn run(ctx: &Ctx, cmd: SslCmd) -> CmdResult {
                 let (cert_path, key_path) = tls::default_cert_paths();
                 if !cert_path.exists() {
                     println!("Generating self-signed certificate...");
-                    tls::generate_self_signed(&cert_path, &key_path, "localhost").map_err(Fail::msg)?;
+                    tls::generate_self_signed(&cert_path, &key_path, "localhost")
+                        .map_err(Fail::msg)?;
                     println!("Certificate: {}", cert_path.display());
                     println!("Key: {}", key_path.display());
                 }
@@ -53,12 +60,19 @@ pub fn run(ctx: &Ctx, cmd: SslCmd) -> CmdResult {
         SslCmd::Generate { hostname, days } => {
             let (cert_path, key_path) = tls::default_cert_paths();
             if cert_path.exists()
-                && !prompt::confirm(&format!("Certificate already exists at {}. Overwrite?", cert_path.display()), Some(false))?
+                && !prompt::confirm(
+                    &format!(
+                        "Certificate already exists at {}. Overwrite?",
+                        cert_path.display()
+                    ),
+                    Some(false),
+                )?
             {
                 return Ok(());
             }
             println!("Generating self-signed certificate for '{hostname}'...");
-            tls::generate_self_signed_days(&cert_path, &key_path, &hostname, i64::from(days)).map_err(Fail::msg)?;
+            tls::generate_self_signed_days(&cert_path, &key_path, &hostname, i64::from(days))
+                .map_err(Fail::msg)?;
             println!("Certificate: {}", cert_path.display());
             println!("Key: {}", key_path.display());
         }
@@ -113,7 +127,13 @@ pub fn describe_cert(path: &Path) -> Result<Vec<String>, String> {
             .value
             .general_names
             .iter()
-            .filter_map(|n| if let GeneralName::DNSName(d) = n { Some(*d) } else { None })
+            .filter_map(|n| {
+                if let GeneralName::DNSName(d) = n {
+                    Some(*d)
+                } else {
+                    None
+                }
+            })
             .collect();
         if !names.is_empty() {
             lines.push(format!("SANs: {}", names.join(", ")));
@@ -159,7 +179,10 @@ fn rfc4514(name: &x509_parser::x509::X509Name<'_>) -> String {
                         other => other,
                     }
                     .to_string();
-                    let value = atv.as_str().map(escape_rfc4514).unwrap_or_else(|_| "#".to_string());
+                    let value = atv
+                        .as_str()
+                        .map(escape_rfc4514)
+                        .unwrap_or_else(|_| "#".to_string());
                     format!("{key}={value}")
                 })
                 .collect::<Vec<_>>()
@@ -192,8 +215,14 @@ mod tests {
         tls::generate_self_signed(&c, &k, "myhost.local").unwrap();
         let lines = describe_cert(&c).unwrap();
         assert_eq!(lines[0], "Subject: O=mokuro-bunko,CN=localhost");
-        assert!(lines[1].starts_with("Not before: ") && lines[1].ends_with("+00:00"), "{lines:?}");
-        assert!(lines[3].starts_with("SANs: localhost, myhost.local"), "{lines:?}");
+        assert!(
+            lines[1].starts_with("Not before: ") && lines[1].ends_with("+00:00"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[3].starts_with("SANs: localhost, myhost.local"),
+            "{lines:?}"
+        );
     }
 
     #[test]

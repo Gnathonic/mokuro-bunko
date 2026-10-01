@@ -31,7 +31,12 @@ pub const RESERVED_NAMES: &[&str] = &["original", "gcv", "updated-ocr"];
 pub const RESERVED_PREFIXES: &[&str] = &["tr-"];
 pub const MAX_STAGE_WORKERS: u32 = 64;
 pub const MAX_QUEUE_CAPACITY: u32 = 256;
-pub const POOL_KEYS: &[&str] = &["stage_workers", "queue_capacity", "stage_device", "precision"];
+pub const POOL_KEYS: &[&str] = &[
+    "stage_workers",
+    "queue_capacity",
+    "stage_device",
+    "precision",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationError {
@@ -49,7 +54,11 @@ impl fmt::Display for GenerationError {
 impl std::error::Error for GenerationError {}
 
 fn row_err(index: usize, field: &'static str, msg: impl fmt::Display) -> GenerationError {
-    GenerationError { message: format!("ocr.generations[{index}]: {msg}"), row: Some(index), field: Some(field) }
+    GenerationError {
+        message: format!("ocr.generations[{index}]: {msg}"),
+        row: Some(index),
+        field: Some(field),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -62,7 +71,9 @@ pub struct Pools {
 
 impl Pools {
     pub fn is_empty(&self) -> bool {
-        self.stage_workers.is_empty() && self.queue_capacity.is_empty() && self.stage_device.is_empty()
+        self.stage_workers.is_empty()
+            && self.queue_capacity.is_empty()
+            && self.stage_device.is_empty()
     }
     pub fn to_value(&self) -> Value {
         json!({
@@ -108,7 +119,10 @@ impl Generation {
     pub fn effective_detector(&self) -> &str {
         match self.engine_spec().and_then(|e| e.detector) {
             Some(own) => own,
-            None => self.detector.as_deref().unwrap_or(engines::DEFAULT_DETECTOR),
+            None => self
+                .detector
+                .as_deref()
+                .unwrap_or(engines::DEFAULT_DETECTOR),
         }
     }
 
@@ -134,7 +148,11 @@ impl Generation {
 
     /// `.mokuro` for the primary row, `.<name>.mokuro` otherwise.
     pub fn sidecar_suffix(&self) -> String {
-        if self.primary { ".mokuro".to_string() } else { format!(".{}.mokuro", self.name) }
+        if self.primary {
+            ".mokuro".to_string()
+        } else {
+            format!(".{}.mokuro", self.name)
+        }
     }
 
     /// What must not change under a running job: engine, effective detector, and the
@@ -225,9 +243,14 @@ pub fn is_layer_id(s: &str) -> bool {
 /// Why `name` cannot be a generation name, or None when it can.
 pub fn name_rejection(name: &str) -> Option<String> {
     if name.is_empty() {
-        return Some("a name is required (it is this row's label and its file-name postfix)".into());
+        return Some(
+            "a name is required (it is this row's label and its file-name postfix)".into(),
+        );
     }
-    let first_ok = name.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let first_ok = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     if !first_ok || name.len() > MAX_GENERATION_NAME || !name.chars().all(is_name_char) {
         return Some(format!(
             "name '{name}' cannot be a file-name postfix: use lowercase letters, digits and hyphens only, \
@@ -236,7 +259,9 @@ pub fn name_rejection(name: &str) -> Option<String> {
         ));
     }
     if RESERVED_NAMES.contains(&name) {
-        return Some(format!("name '{name}' is reserved by the reader for its own layer of that name"));
+        return Some(format!(
+            "name '{name}' is reserved by the reader for its own layer of that name"
+        ));
     }
     for prefix in RESERVED_PREFIXES {
         if name.starts_with(prefix) {
@@ -255,7 +280,11 @@ fn trim_name(stem: &str) -> String {
 }
 
 /// The name a new row gets: the engine, or `<engine>-<detector>`, de-duplicated.
-pub fn seed_generation_name<'a>(engine: &str, detector: Option<&str>, taken: impl IntoIterator<Item = &'a str>) -> String {
+pub fn seed_generation_name<'a>(
+    engine: &str,
+    detector: Option<&str>,
+    taken: impl IntoIterator<Item = &'a str>,
+) -> String {
     let used: HashSet<&str> = taken.into_iter().collect();
     let own_detector = engines::engine(engine).is_some_and(|e| e.detector.is_some());
     let stem = match detector {
@@ -278,7 +307,8 @@ fn is_valid_id(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
         && s.len() <= 32
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// The next free `g-<n>` id.
@@ -339,7 +369,10 @@ fn coerce_rows(value: &Value) -> Result<Vec<Value>, GenerationError> {
         Value::Object(_) => Ok(vec![value.clone()]),
         Value::Array(a) => Ok(a.clone()),
         other => Err(GenerationError {
-            message: format!("ocr.generations must be a list of generations, got {}", json_type(other)),
+            message: format!(
+                "ocr.generations must be a list of generations, got {}",
+                json_type(other)
+            ),
             row: None,
             field: None,
         }),
@@ -362,7 +395,11 @@ fn json_type(v: &Value) -> &'static str {
 pub fn parse_generation_list(value: &Value) -> Result<ParsedGenerations, GenerationError> {
     let raw = coerce_rows(value)?;
     if raw.is_empty() {
-        return Ok(ParsedGenerations { rows: default_generations(), warnings: vec![], migrated: false });
+        return Ok(ParsedGenerations {
+            rows: default_generations(),
+            warnings: vec![],
+            migrated: false,
+        });
     }
     let mut maps = Vec::with_capacity(raw.len());
     for (index, entry) in raw.into_iter().enumerate() {
@@ -405,15 +442,30 @@ pub fn parse_bench_spec(value: &Value) -> Result<Generation, GenerationError> {
             field: None,
         });
     };
-    let row: Map<String, Value> =
-        m.iter().filter(|(k, _)| !matches!(k.as_str(), "name" | "primary" | "enabled" | "id")).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let row: Map<String, Value> = m
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "name" | "primary" | "enabled" | "id"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let mut scratch = ParsedGenerations::default();
     let spec = parse_row(0, &row, "bench-spec", &HashMap::new(), &mut scratch).map_err(|e| {
-        let msg = e.message.strip_prefix("ocr.generations[0]: ").unwrap_or(&e.message).to_string();
-        GenerationError { message: format!("spec: {msg}"), row: None, field: e.field }
+        let msg = e
+            .message
+            .strip_prefix("ocr.generations[0]: ")
+            .unwrap_or(&e.message)
+            .to_string();
+        GenerationError {
+            message: format!("spec: {msg}"),
+            row: None,
+            field: e.field,
+        }
     })?;
     if let Some(why) = spec.retired {
-        return Err(GenerationError { message: format!("spec: {why}"), row: None, field: Some("engine") });
+        return Err(GenerationError {
+            message: format!("spec: {why}"),
+            row: None,
+            field: Some("engine"),
+        });
     }
     Ok(spec)
 }
@@ -470,25 +522,39 @@ fn parse_row(
     let engine = value_str(row.get("engine"));
     if engine.is_empty() {
         let known: Vec<_> = engines::ENGINES.iter().map(|e| e.id).collect();
-        return Err(row_err(index, "engine", format!("engine is required (one of {})", known.join(", "))));
+        return Err(row_err(
+            index,
+            "engine",
+            format!("engine is required (one of {})", known.join(", ")),
+        ));
     }
 
     let raw_name = value_str(row.get("name"));
 
     if let Some(why) = engines::removed_engine(&engine) {
         // Kept, never run. Its name stays taken so a new row cannot collide with its files.
-        let name = if raw_name.is_empty() { engine.clone() } else { raw_name };
+        let name = if raw_name.is_empty() {
+            engine.clone()
+        } else {
+            raw_name
+        };
         if let Some(prev) = names.get(&name) {
             return Err(row_err(
                 index,
                 "name",
-                format!("name '{name}' is already generation {prev}'s; every generation writes a file named after it, so names must be unique"),
+                format!(
+                    "name '{name}' is already generation {prev}'s; every generation writes a file named after it, so names must be unique"
+                ),
             ));
         }
         let was_primary = value_bool(row.get("primary"), false);
         out.warnings.push(format!(
             "ocr.generations[{index}] '{name}': {why}. The row is kept but no longer runs{}.",
-            if was_primary { "; its existing <Volume>.mokuro files stay and are still served" } else { "" }
+            if was_primary {
+                "; its existing <Volume>.mokuro files stay and are still served"
+            } else {
+                ""
+            }
         ));
         out.migrated = true;
         return Ok(Generation {
@@ -510,7 +576,14 @@ fn parse_row(
 
     let Some(spec) = engines::engine(&engine) else {
         let known: Vec<_> = engines::ENGINES.iter().map(|e| e.id).collect();
-        return Err(row_err(index, "engine", format!("Unknown OCR engine '{engine}' (known: {})", known.join(", "))));
+        return Err(row_err(
+            index,
+            "engine",
+            format!(
+                "Unknown OCR engine '{engine}' (known: {})",
+                known.join(", ")
+            ),
+        ));
     };
 
     let mut detector = None;
@@ -529,13 +602,24 @@ fn parse_row(
         }
         let Some(d) = engines::detector(&wanted) else {
             let known: Vec<_> = engines::DETECTORS.iter().map(|d| d.id).collect();
-            return Err(row_err(index, "detector", format!("Unknown OCR detector '{wanted}' (known: {})", known.join(", "))));
+            return Err(row_err(
+                index,
+                "detector",
+                format!(
+                    "Unknown OCR detector '{wanted}' (known: {})",
+                    known.join(", ")
+                ),
+            ));
         };
         detector = Some(d.id.to_string());
     }
 
     let name = if raw_name.is_empty() {
-        seed_generation_name(&engine, detector.as_deref(), names.keys().map(String::as_str))
+        seed_generation_name(
+            &engine,
+            detector.as_deref(),
+            names.keys().map(String::as_str),
+        )
     } else {
         raw_name
     };
@@ -546,7 +630,9 @@ fn parse_row(
         return Err(row_err(
             index,
             "name",
-            format!("name '{name}' is already generation {prev}'s; every generation writes a file named after it, so names must be unique"),
+            format!(
+                "name '{name}' is already generation {prev}'s; every generation writes a file named after it, so names must be unique"
+            ),
         ));
     }
 
@@ -567,18 +653,38 @@ fn parse_row(
             match parsed {
                 Some(p) if engines::PATCH_BUDGETS.contains(&p) => p,
                 Some(_) => {
-                    let known: Vec<String> = engines::PATCH_BUDGETS.iter().map(u32::to_string).collect();
-                    return Err(row_err(index, "patch_budget", format!("Unknown OCR patch budget '{text}' (known: {})", known.join(", "))));
+                    let known: Vec<String> =
+                        engines::PATCH_BUDGETS.iter().map(u32::to_string).collect();
+                    return Err(row_err(
+                        index,
+                        "patch_budget",
+                        format!(
+                            "Unknown OCR patch budget '{text}' (known: {})",
+                            known.join(", ")
+                        ),
+                    ));
                 }
-                None => return Err(row_err(index, "patch_budget", format!("Invalid OCR patch budget '{text}'"))),
+                None => {
+                    return Err(row_err(
+                        index,
+                        "patch_budget",
+                        format!("Invalid OCR patch budget '{text}'"),
+                    ));
+                }
             }
         }
     };
 
     let pools_raw = row.get("pools");
-    let legacy_precision = pools_raw.and_then(|p| p.get("precision")).map(|v| value_str(Some(v)));
+    let legacy_precision = pools_raw
+        .and_then(|p| p.get("precision"))
+        .map(|v| value_str(Some(v)));
     let precision_raw = value_str(row.get("precision"));
-    let precision_value = if precision_raw.is_empty() { legacy_precision.filter(|s| !s.is_empty()) } else { Some(precision_raw) };
+    let precision_value = if precision_raw.is_empty() {
+        legacy_precision.filter(|s| !s.is_empty())
+    } else {
+        Some(precision_raw)
+    };
     let mut precision = engines::normalize_precision_mode(precision_value.as_deref())
         .map_err(|e| row_err(index, "precision", e))?
         .to_string();
@@ -630,17 +736,33 @@ fn parse_pools(
         }
     };
     if let Some(unknown) = raw.keys().find(|k| !POOL_KEYS.contains(&k.as_str())) {
-        return Err(row_err(index, "pools", format!("pools has no '{unknown}' setting (the settings are {})", POOL_KEYS.join(", "))));
+        return Err(row_err(
+            index,
+            "pools",
+            format!(
+                "pools has no '{unknown}' setting (the settings are {})",
+                POOL_KEYS.join(", ")
+            ),
+        ));
     }
     let stage_keys = spec.stage_keys();
     let mut pools = Pools::default();
-    for (pool_key, limit, floor) in [("stage_workers", MAX_STAGE_WORKERS, 0u32), ("queue_capacity", MAX_QUEUE_CAPACITY, 1u32)] {
-        let Some(values) = raw.get(pool_key) else { continue };
+    for (pool_key, limit, floor) in [
+        ("stage_workers", MAX_STAGE_WORKERS, 0u32),
+        ("queue_capacity", MAX_QUEUE_CAPACITY, 1u32),
+    ] {
+        let Some(values) = raw.get(pool_key) else {
+            continue;
+        };
         if values.is_null() {
             continue;
         }
         let Value::Object(values) = values else {
-            return Err(row_err(index, "pools", format!("pools.{pool_key} must map a stage name to a number")));
+            return Err(row_err(
+                index,
+                "pools",
+                format!("pools.{pool_key} must map a stage name to a number"),
+            ));
         };
         for (stage, number) in values {
             let key = stage.trim();
@@ -655,28 +777,49 @@ fn parse_pools(
                 continue;
             }
             let width: i64 = match number {
-                Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)).unwrap_or(-1),
+                Value::Number(n) => n
+                    .as_i64()
+                    .or_else(|| n.as_f64().map(|f| f as i64))
+                    .unwrap_or(-1),
                 Value::String(s) => s.trim().parse().map_err(|_| {
-                    row_err(index, "pools", format!("pools.{pool_key}.{key} must be a whole number, got '{s}'"))
+                    row_err(
+                        index,
+                        "pools",
+                        format!("pools.{pool_key}.{key} must be a whole number, got '{s}'"),
+                    )
                 })?,
                 other => {
-                    return Err(row_err(index, "pools", format!("pools.{pool_key}.{key} must be a whole number, got {other}")));
+                    return Err(row_err(
+                        index,
+                        "pools",
+                        format!("pools.{pool_key}.{key} must be a whole number, got {other}"),
+                    ));
                 }
             };
             if width < floor as i64 || width > limit as i64 {
                 return Err(row_err(
                     index,
                     "pools",
-                    format!("pools.{pool_key}.{key} is {width}; it must be between {floor} and {limit}"),
+                    format!(
+                        "pools.{pool_key}.{key} is {width}; it must be between {floor} and {limit}"
+                    ),
                 ));
             }
-            let map = if pool_key == "stage_workers" { &mut pools.stage_workers } else { &mut pools.queue_capacity };
+            let map = if pool_key == "stage_workers" {
+                &mut pools.stage_workers
+            } else {
+                &mut pools.queue_capacity
+            };
             map.insert(key.to_string(), width as u32);
         }
     }
     if let Some(devs) = raw.get("stage_device").filter(|v| !v.is_null()) {
         let Value::Object(devs) = devs else {
-            return Err(row_err(index, "pools", "pools.stage_device must map a stage name to a device (cpu or gpu:<n>)"));
+            return Err(row_err(
+                index,
+                "pools",
+                "pools.stage_device must map a stage name to a device (cpu or gpu:<n>)",
+            ));
         };
         let allowed = spec.device_stage_keys();
         for (stage, value) in devs {
@@ -693,7 +836,8 @@ fn parse_pools(
                 continue;
             }
             let device = value_str(Some(value));
-            let device = parse_device(&device).map_err(|e| row_err(index, "pools", format!("pools.stage_device.{key}: {e}")))?;
+            let device = parse_device(&device)
+                .map_err(|e| row_err(index, "pools", format!("pools.stage_device.{key}: {e}")))?;
             let cpu_locked = match key {
                 "detect" => true, // the PP-OCR detector is CPU-only
                 _ => spec.engine_spec().is_some_and(|e| e.cpu_only()),
@@ -702,7 +846,9 @@ fn parse_pools(
                 return Err(row_err(
                     index,
                     "pools",
-                    format!("pools.stage_device.{key} is '{device}', but that stage runs on the CPU; leave it on cpu"),
+                    format!(
+                        "pools.stage_device.{key} is '{device}', but that stage runs on the CPU; leave it on cpu"
+                    ),
                 ));
             }
             pools.stage_device.insert(key.to_string(), device);
@@ -734,7 +880,12 @@ fn ensure_runnable_primary(out: &mut ParsedGenerations) {
         return;
     }
     let any_runnable_enabled = out.rows.iter().any(|g| g.runnable());
-    let lost_primary = out.rows.iter().any(|g| g.retired.is_some() && g.raw.as_ref().is_some_and(|r| value_bool(r.get("primary"), false) && value_bool(r.get("enabled"), true)));
+    let lost_primary = out.rows.iter().any(|g| {
+        g.retired.is_some()
+            && g.raw.as_ref().is_some_and(|r| {
+                value_bool(r.get("primary"), false) && value_bool(r.get("enabled"), true)
+            })
+    });
     if !lost_primary && any_runnable_enabled {
         // Leave the ordinary "no primary" error to validate_primary.
         return;
@@ -747,7 +898,11 @@ fn ensure_runnable_primary(out: &mut ParsedGenerations) {
     let mut row = default_generation(&mint_generation_id(ids.iter().map(String::as_str)));
     row.name = seed_generation_name(&row.engine, None, names.iter().map(String::as_str));
     // An existing hayai-nova layer row becomes the primary instead of adding a duplicate.
-    if let Some(existing) = out.rows.iter_mut().find(|g| g.runnable() && g.engine == engines::DEFAULT_ENGINE) {
+    if let Some(existing) = out
+        .rows
+        .iter_mut()
+        .find(|g| g.runnable() && g.engine == engines::DEFAULT_ENGINE)
+    {
         existing.primary = true;
         out.warnings.push(format!(
             "ocr.generations: the primary row was retired; '{}' is now the primary generation (new volumes get \
@@ -898,7 +1053,14 @@ mod tests {
         let p = parse_generation_list(&v).unwrap();
         assert_eq!(p.rows[0].pools.stage_workers.get("engine"), Some(&4));
         assert!(!p.rows[0].pools.stage_workers.contains_key("crop"));
-        assert_eq!(p.rows[0].pools.stage_device.get("engine").map(String::as_str), Some("gpu:1"));
+        assert_eq!(
+            p.rows[0]
+                .pools
+                .stage_device
+                .get("engine")
+                .map(String::as_str),
+            Some("gpu:1")
+        );
         let bad = json!([{"engine": "hayai-nova", "primary": true, "pools": {"stage_device": {"detect": "gpu:0"}}}]);
         assert!(parse_generation_list(&bad).is_err());
     }

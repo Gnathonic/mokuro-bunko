@@ -6,7 +6,11 @@ use predicates::prelude::*;
 
 #[test]
 fn version() {
-    let flavor = if cfg!(feature = "ocr") { "full" } else { "lite" };
+    let flavor = if cfg!(feature = "ocr") {
+        "full"
+    } else {
+        "lite"
+    };
     Env::new()
         .cmd()
         .arg("--version")
@@ -20,7 +24,13 @@ fn version() {
 
 #[test]
 fn no_command_prints_help() {
-    Env::new().cmd().assert().success().stdout(predicate::str::contains("Usage: mokuro-bunko [OPTIONS] [COMMAND]"));
+    Env::new()
+        .cmd()
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Usage: mokuro-bunko [OPTIONS] [COMMAND]",
+        ));
 }
 
 #[test]
@@ -36,7 +46,9 @@ fn install_ocr_is_a_deprecated_alias() {
         .args(["install-ocr", "--backend", "cuda", "--force"])
         .assert()
         .success()
-        .stdout(predicate::str::starts_with("install-ocr is deprecated: OCR is built into mokuro-bunko"));
+        .stdout(predicate::str::starts_with(
+            "install-ocr is deprecated: OCR is built into mokuro-bunko",
+        ));
 }
 
 #[test]
@@ -46,17 +58,34 @@ fn serve_applies_flags_then_hands_over() {
     // The serve body is a stub until the orchestrator wires it: flags must still parse
     // and be validated before the hand-over.
     env.cmd()
-        .args(["-v", "serve", "--port", "8080", "--host", "127.0.0.1", "--ocr", "cpu"])
+        .args([
+            "-v",
+            "serve",
+            "--port",
+            "8080",
+            "--host",
+            "127.0.0.1",
+            "--ocr",
+            "cpu",
+        ])
         .assert()
         .code(1)
-        .stdout(format!("Verbose mode enabled\nStorage path: {}\n", env.storage().display()))
+        .stdout(format!(
+            "Verbose mode enabled\nStorage path: {}\n",
+            env.storage().display()
+        ))
         .stderr("Error: not wired yet\n");
-    env.cmd().args(["serve", "--ocr", "mokuro"]).assert().code(2);
+    env.cmd()
+        .args(["serve", "--ocr", "mokuro"])
+        .assert()
+        .code(2);
     env.cmd()
         .args(["serve", "--generations", "[{\"engine\": \"nope\"}]"])
         .assert()
         .code(1)
-        .stderr(predicate::str::starts_with("Error: ").and(predicate::str::contains("not wired").not()));
+        .stderr(
+            predicate::str::starts_with("Error: ").and(predicate::str::contains("not wired").not()),
+        );
 }
 
 #[test]
@@ -93,8 +122,13 @@ fn dyndns_status_enable_update() {
         .write_stdin("generic\nhome.example\ntok\nhttps://dns.example/?ip={ip}\n10\n60\ny\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Error: DynDNS interval must be at least 30 seconds"))
-        .stdout(predicate::str::contains(format!("DynDNS configuration saved to {}", env.config_path().display())));
+        .stdout(predicate::str::contains(
+            "Error: DynDNS interval must be at least 30 seconds",
+        ))
+        .stdout(predicate::str::contains(format!(
+            "DynDNS configuration saved to {}",
+            env.config_path().display()
+        )));
     let v = env.config_yaml();
     assert_eq!(v["dyndns"]["provider"], "generic");
     assert_eq!(v["dyndns"]["interval"], 60);
@@ -103,5 +137,9 @@ fn dyndns_status_enable_update() {
         .args(["dyndns", "status"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Token:     ****\n").and(predicate::str::contains("URL:       https://dns.example/?ip={ip}\n")));
+        .stdout(
+            predicate::str::contains("Token:     ****\n").and(predicate::str::contains(
+                "URL:       https://dns.example/?ip={ip}\n",
+            )),
+        );
 }

@@ -13,7 +13,9 @@ use serde_json::{Map, Value, json};
 use super::OcrControl;
 use super::profiles::{LOCAL_PROFILE, Profiles, profile_key};
 use super::sched::{BenchRequest as SchedBench, Scheduler};
-use crate::admin::ocr::{BenchRequest, OcrAdmin, OcrError, catalog, default_devices, generation_entry, stage_rows};
+use crate::admin::ocr::{
+    BenchRequest, OcrAdmin, OcrError, catalog, default_devices, generation_entry, stage_rows,
+};
 
 const WAIT: Duration = Duration::from_secs(10);
 pub const GEN_STATS_TTL_SECONDS: u64 = 60;
@@ -37,10 +39,17 @@ fn merged_devices(s: &Scheduler) -> Value {
     for (id, label) in gpus {
         out.push(json!({"id": id, "label": label}));
     }
-    if out.len() == 2 { default_devices() } else { Value::Array(out) }
+    if out.len() == 2 {
+        default_devices()
+    } else {
+        Value::Array(out)
+    }
 }
 
-fn ask<T: Send + 'static>(ocr: &OcrControl, f: impl FnOnce(&mut Scheduler) -> T + Send + 'static) -> Option<T> {
+fn ask<T: Send + 'static>(
+    ocr: &OcrControl,
+    f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
+) -> Option<T> {
     ocr.ask_blocking(WAIT, f)
 }
 
@@ -49,8 +58,23 @@ fn compute_stats(ocr: &OcrControl, rows: &[Generation]) -> Value {
     let library = ocr.core().layout.library();
     let archives = super::owed::list_archives(&library);
     let mut out = Map::new();
-    let skipped: HashMap<String, Vec<String>> = ask(ocr, |s| s.owed.volumes.iter().map(|(rel, v)| (rel.clone(), v.skipped.iter().map(|g| g.to_string()).collect())).collect()).unwrap_or_default();
-    let producers = ocr.db().and_then(|db| db.ocr_sidecar_producers().ok()).unwrap_or_default();
+    let skipped: HashMap<String, Vec<String>> = ask(ocr, |s| {
+        s.owed
+            .volumes
+            .iter()
+            .map(|(rel, v)| {
+                (
+                    rel.clone(),
+                    v.skipped.iter().map(|g| g.to_string()).collect(),
+                )
+            })
+            .collect()
+    })
+    .unwrap_or_default();
+    let producers = ocr
+        .db()
+        .and_then(|db| db.ocr_sidecar_producers().ok())
+        .unwrap_or_default();
     for row in rows {
         let mut done = 0u64;
         let mut present: std::collections::HashSet<String> = Default::default();
@@ -95,7 +119,10 @@ fn stats(ocr: &OcrControl, config: &Config) -> Value {
 impl OcrAdmin for OcrControl {
     fn runtime_status(&self, config: &Config) -> Value {
         let local = config.processes_locally(self.has_local());
-        let engines: Vec<String> = bunko_core::generations::enabled_generations(&config.ocr.generations).map(|g| g.engine.clone()).collect();
+        let engines: Vec<String> =
+            bunko_core::generations::enabled_generations(&config.ocr.generations)
+                .map(|g| g.engine.clone())
+                .collect();
         json!({
             "available": self.has_local(),
             "launch_only": true,
@@ -143,7 +170,11 @@ impl OcrAdmin for OcrControl {
         let rows = config.ocr.generations.clone();
         let (devices, holds, processors) = ask(self, |s| {
             let holds: HashMap<String, String> = s.precision_holds().into_iter().collect();
-            let processors: Vec<Value> = s.processors().into_iter().filter(|p| p.get("local") != Some(&json!(true))).collect();
+            let processors: Vec<Value> = s
+                .processors()
+                .into_iter()
+                .filter(|p| p.get("local") != Some(&json!(true)))
+                .collect();
             (merged_devices(s), holds, processors)
         })
         .unwrap_or_else(|| (default_devices(), HashMap::new(), Vec::new()));
@@ -156,28 +187,58 @@ impl OcrAdmin for OcrControl {
         let mut entries = Vec::new();
         for row in &rows {
             let mut e = generation_entry(row, &devices);
-            if let Some(Value::Object(st)) = stats.as_ref().and_then(|s| s.get("generations")).and_then(|g| g.get(&row.id)) {
+            if let Some(Value::Object(st)) = stats
+                .as_ref()
+                .and_then(|s| s.get("generations"))
+                .and_then(|g| g.get(&row.id))
+            {
                 for (k, v) in st {
                     e.insert(k.clone(), v.clone());
                 }
             }
-            e.insert("congestion".into(), history.summary(&row.id).map_or(Value::Null, Value::Object));
+            e.insert(
+                "congestion".into(),
+                history.summary(&row.id).map_or(Value::Null, Value::Object),
+            );
             if let Some(Value::Object(b)) = saved.get(&row.id) {
                 let mut b = b.clone();
                 b.remove("trials");
                 b.insert("progress".into(), Value::Null);
                 e.insert("bench".into(), Value::Object(b));
             }
-            e.insert("precision_hold".into(), holds.get(&row.id).map_or(Value::Null, |r| json!(r)));
+            e.insert(
+                "precision_hold".into(),
+                holds.get(&row.id).map_or(Value::Null, |r| json!(r)),
+            );
             let recipe = row.output_affecting();
             if let Some(local) = profiles.row(LOCAL_PROFILE, &row.id, Some(&recipe)) {
-                e.insert("local_pools".into(), if local.pools.is_empty() { Value::Null } else { Value::Object(local.pools.clone()) });
-                e.insert("local_bench".into(), local.bench.clone().map_or(Value::Null, Value::Object));
-                e.insert("local_runs".into(), if local.runs.is_empty() { Value::Null } else { Value::Object(local.runs.clone()) });
+                e.insert(
+                    "local_pools".into(),
+                    if local.pools.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Object(local.pools.clone())
+                    },
+                );
+                e.insert(
+                    "local_bench".into(),
+                    local.bench.clone().map_or(Value::Null, Value::Object),
+                );
+                e.insert(
+                    "local_runs".into(),
+                    if local.runs.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Object(local.runs.clone())
+                    },
+                );
             }
-            let (mut pools, mut bench, mut runs, mut cong) = (Map::new(), Map::new(), Map::new(), Map::new());
+            let (mut pools, mut bench, mut runs, mut cong) =
+                (Map::new(), Map::new(), Map::new(), Map::new());
             for name in &names {
-                let Some(p) = profiles.row(name, &row.id, Some(&recipe)) else { continue };
+                let Some(p) = profiles.row(name, &row.id, Some(&recipe)) else {
+                    continue;
+                };
                 if !p.pools.is_empty() {
                     pools.insert(name.clone(), Value::Object(p.pools.clone()));
                 }
@@ -185,7 +246,12 @@ impl OcrAdmin for OcrControl {
                     bench.insert(name.clone(), Value::Object(b));
                 }
                 if !p.runs.is_empty() {
-                    if let Some(c) = p.runs.get("congestion").and_then(Value::as_array).and_then(|r| bunko_sched::congestion::average_runs(r)) {
+                    if let Some(c) = p
+                        .runs
+                        .get("congestion")
+                        .and_then(Value::as_array)
+                        .and_then(|r| bunko_sched::congestion::average_runs(r))
+                    {
                         cong.insert(name.clone(), Value::Object(c));
                     }
                     runs.insert(name.clone(), Value::Object(p.runs.clone()));
@@ -222,18 +288,38 @@ impl OcrAdmin for OcrControl {
         Profiles::new(&storage).prune(known_ids);
     }
 
-    fn derive(&self, _config: &Config, spec: &Value, processor: Option<&str>) -> Result<Value, OcrError> {
+    fn derive(
+        &self,
+        _config: &Config,
+        spec: &Value,
+        processor: Option<&str>,
+    ) -> Result<Value, OcrError> {
         let devices = match processor.filter(|p| *p != "local") {
             Some(name) => {
                 let n = name.to_string();
                 let found = ask(self, move |s| {
-                    s.machine_by_name(&n).map(|m| serde_json::to_value(&m.catalog.devices).unwrap_or(Value::Null)).or_else(|| s.profiles.load(&n).get("catalog").and_then(|c| c.get("devices")).cloned())
+                    s.machine_by_name(&n)
+                        .map(|m| serde_json::to_value(&m.catalog.devices).unwrap_or(Value::Null))
+                        .or_else(|| {
+                            s.profiles
+                                .load(&n)
+                                .get("catalog")
+                                .and_then(|c| c.get("devices"))
+                                .cloned()
+                        })
                 })
                 .flatten();
                 match found {
                     Some(Value::Array(d)) if !d.is_empty() => {
-                        let mut list = vec![json!({"id": "auto", "label": "Auto"}), json!({"id": "cpu", "label": "CPU"})];
-                        list.extend(d.into_iter().filter(|x| x.get("id").and_then(Value::as_str).is_some_and(|i| i.starts_with("gpu:"))));
+                        let mut list = vec![
+                            json!({"id": "auto", "label": "Auto"}),
+                            json!({"id": "cpu", "label": "CPU"}),
+                        ];
+                        list.extend(d.into_iter().filter(|x| {
+                            x.get("id")
+                                .and_then(Value::as_str)
+                                .is_some_and(|i| i.starts_with("gpu:"))
+                        }));
                         Value::Array(list)
                     }
                     Some(_) => default_devices(),
@@ -246,7 +332,13 @@ impl OcrAdmin for OcrControl {
         Ok(json!({"road": row.road().map(|r| r.as_str()), "stages": stage_rows(&row, &devices)}))
     }
 
-    fn set_pools(&self, _config: &Config, row: &Generation, processor: &str, pools: &Value) -> Result<Value, OcrError> {
+    fn set_pools(
+        &self,
+        _config: &Config,
+        row: &Generation,
+        processor: &str,
+        pools: &Value,
+    ) -> Result<Value, OcrError> {
         let storage = self.storage().to_path_buf();
         let profiles = Profiles::new(&storage);
         let name = processor.to_string();
@@ -255,7 +347,10 @@ impl OcrAdmin for OcrControl {
             return Err(OcrError::unknown_processor(processor));
         }
         let Value::Object(p) = pools else {
-            return Err(OcrError { status: 400, body: json!({"error": "pools must be an object", "field": "pools"}) });
+            return Err(OcrError {
+                status: 400,
+                body: json!({"error": "pools must be an object", "field": "pools"}),
+            });
         };
         // `"auto"` widths/capacities are validated as 1 and stored as "auto".
         let mut check = p.clone();
@@ -276,18 +371,47 @@ impl OcrAdmin for OcrControl {
         parse_bench_spec(&Value::Object(spec))?;
         let mut stored = Map::new();
         for t in super::profiles::POOL_TABLES {
-            stored.insert(t.into(), p.get(t).cloned().filter(Value::is_object).unwrap_or(json!({})));
+            stored.insert(
+                t.into(),
+                p.get(t)
+                    .cloned()
+                    .filter(Value::is_object)
+                    .unwrap_or(json!({})),
+            );
         }
-        profiles.set_pools(profile_key(processor), &row.id, &stored, Some(&row.output_affecting()), false, false);
+        profiles.set_pools(
+            profile_key(processor),
+            &row.id,
+            &stored,
+            Some(&row.output_affecting()),
+            false,
+            false,
+        );
         Ok(json!({"success": true, "pools": stored}))
     }
 
-    fn bench(&self, _config: &Config, key: &str, request: BenchRequest) -> Result<(u16, Value), OcrError> {
+    fn bench(
+        &self,
+        _config: &Config,
+        key: &str,
+        request: BenchRequest,
+    ) -> Result<(u16, Value), OcrError> {
         let key = key.to_string();
         let to_err = |(status, body): (u16, Value)| OcrError { status, body };
         match request {
-            BenchRequest::Enqueue { spec, pages, processor } => {
-                let req = SchedBench { key, spec, pages, processor, autobench: false, precision_only: false };
+            BenchRequest::Enqueue {
+                spec,
+                pages,
+                processor,
+            } => {
+                let req = SchedBench {
+                    key,
+                    spec,
+                    pages,
+                    processor,
+                    autobench: false,
+                    precision_only: false,
+                };
                 match ask(self, move |s| s.bench_enqueue(req)) {
                     Some(Ok(v)) => Ok((202, v)),
                     Some(Err(e)) => Err(to_err(e)),
@@ -296,7 +420,9 @@ impl OcrAdmin for OcrControl {
             }
             BenchRequest::Get { processor } => {
                 let m = processor.unwrap_or_else(|| "local".into());
-                ask(self, move |s| s.bench_get(&key, &m)).map(|v| (200, v)).ok_or_else(|| OcrError::new(400, "OCR is disabled in this server process"))
+                ask(self, move |s| s.bench_get(&key, &m))
+                    .map(|v| (200, v))
+                    .ok_or_else(|| OcrError::new(400, "OCR is disabled in this server process"))
             }
             BenchRequest::Cancel { processor } => {
                 let m = processor.unwrap_or_else(|| "local".into());
@@ -320,7 +446,14 @@ impl OcrAdmin for OcrControl {
 
     /// `/api/ocr/upgrade` (GET census), `/api/ocr/upgrade/<volume>` (POST, `force`),
     /// `/api/ocr/upgrade/<volume>/revert` (POST).
-    fn other(&self, _config: &Config, method: &Method, path: &[&str], _query: &str, body: &Value) -> Option<Result<(u16, Value), OcrError>> {
+    fn other(
+        &self,
+        _config: &Config,
+        method: &Method,
+        path: &[&str],
+        _query: &str,
+        body: &Value,
+    ) -> Option<Result<(u16, Value), OcrError>> {
         if path.len() < 2 || path[0] != "ocr" || path[1] != "upgrade" {
             return None;
         }
@@ -335,9 +468,25 @@ impl OcrAdmin for OcrControl {
             return Some(Err(OcrError::not_found()));
         }
         let revert = path.last() == Some(&"revert");
-        let parts = if revert { &path[2..path.len() - 1] } else { &path[2..] };
-        let rel: String = parts.iter().map(|p| percent_encoding::percent_decode_str(p).decode_utf8_lossy().into_owned()).collect::<Vec<_>>().join("/");
-        let rel = if rel.to_lowercase().ends_with(".cbz") { rel } else { format!("{rel}.cbz") };
+        let parts = if revert {
+            &path[2..path.len() - 1]
+        } else {
+            &path[2..]
+        };
+        let rel: String = parts
+            .iter()
+            .map(|p| {
+                percent_encoding::percent_decode_str(p)
+                    .decode_utf8_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let rel = if rel.to_lowercase().ends_with(".cbz") {
+            rel
+        } else {
+            format!("{rel}.cbz")
+        };
         if rel.split('/').any(|p| p == ".." || p.is_empty()) {
             return Some(Err(OcrError::new(400, "not a volume of the library")));
         }
@@ -346,9 +495,15 @@ impl OcrAdmin for OcrControl {
             return Some(Err(OcrError::new(404, "no such volume")));
         }
         if revert {
-            let actor = body.get("actor").and_then(Value::as_str).map(str::to_string);
+            let actor = body
+                .get("actor")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             return Some(match up.revert(&cbz, actor.as_deref()) {
-                Ok(bare) => Ok((200, json!({"success": true, "sidecar": super::types::rel_of(&self.core().layout.library(), &bare)}))),
+                Ok(bare) => Ok((
+                    200,
+                    json!({"success": true, "sidecar": super::types::rel_of(&self.core().layout.library(), &bare)}),
+                )),
                 Err(e) => Err(OcrError::new(409, e)),
             });
         }
@@ -365,8 +520,18 @@ impl OcrAdmin for OcrControl {
                 self.archive_arrived(&cbz);
                 json!({"success": true, "mode": "generated"})
             }
-            super::upgrade::Verdict::SkippedMissingPages => return Some(Err(OcrError::new(409, "the archive is missing pages its sidecar names; replace it with a whole volume first"))),
-            super::upgrade::Verdict::SkippedEdited => return Some(Err(OcrError::new(409, "its sidecar was edited by a person; send force to upgrade it anyway"))),
+            super::upgrade::Verdict::SkippedMissingPages => {
+                return Some(Err(OcrError::new(
+                    409,
+                    "the archive is missing pages its sidecar names; replace it with a whole volume first",
+                )));
+            }
+            super::upgrade::Verdict::SkippedEdited => {
+                return Some(Err(OcrError::new(
+                    409,
+                    "its sidecar was edited by a person; send force to upgrade it anyway",
+                )));
+            }
             super::upgrade::Verdict::Current => json!({"success": true, "mode": "current"}),
         };
         Some(Ok((200, answer)))

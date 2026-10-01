@@ -70,7 +70,11 @@ pub fn style(text: &str, color: Color, bold: bool) -> String {
         Color::Green => 32,
         Color::Yellow => 33,
     };
-    if bold { format!("\x1b[{code};1m{text}\x1b[0m") } else { format!("\x1b[{code}m{text}\x1b[0m") }
+    if bold {
+        format!("\x1b[{code};1m{text}\x1b[0m")
+    } else {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    }
 }
 
 fn color_enabled() -> bool {
@@ -79,5 +83,8 @@ fn color_enabled() -> bool {
 
 /// A tokio runtime for the few commands that do network I/O.
 pub fn runtime() -> Result<tokio::runtime::Runtime, Fail> {
-    tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(Fail::from)
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(Fail::from)
 }
