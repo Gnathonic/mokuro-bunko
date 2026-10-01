@@ -75,6 +75,8 @@ pub struct Services {
     pub dyndns: DynDnsService,
     pub tunnel: TunnelService,
     pub updates: crate::admin::UpdateService,
+    pub dav: bunko_dav::Dav,
+    pub dav_hooks: Arc<crate::davhooks::ServerDavHooks>,
     pub stop: CancellationToken,
     /// Set by the admin "Update and restart" action: the binary re-execs after shutdown.
     pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
@@ -89,6 +91,13 @@ impl Services {
         let config = Arc::new(RwLock::new(config));
         let backend = Arc::new(DbAuthBackend { db: db.clone(), layout: layout.clone() });
         let updates = crate::admin::UpdateService::from_config(config.clone(), flavor);
+        // The PROPFIND cache takes half of the cache budget (server.cache_mb).
+        let cache_mb = config.read().server.cache_mb.max(2) as usize;
+        let dav_config = bunko_dav::DavConfig {
+            propfind_cache: bunko_dav::CacheConfig { budget_bytes: cache_mb * 1024 * 1024 / 2, ..Default::default() },
+        };
+        let dav = bunko_dav::Dav::new(&layout, dav_config)?;
+        let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
         let core = Core::new(config, config_path, backend);
         Ok(Services {
             core,
@@ -96,6 +105,8 @@ impl Services {
             dyndns,
             tunnel: TunnelService::default(),
             updates,
+            dav,
+            dav_hooks,
             stop: CancellationToken::new(),
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -124,9 +135,30 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
     let anon = st.core.anonymous_access();
     let backend = st.core.backend.clone();
     if let Err(denied) = auth::authorize(req.method(), &path, destination.as_deref(), &ctx.identity, anon, backend.as_ref()) {
-        return denied.into_response();
+        let resp = denied.into_response();
+        // A refused PUT still answers with the upload verdict JSON (spec http-webdav §9).
+        return if req.method() == http::Method::PUT { bunko_dav::put_refusal_verdict(&path, resp) } else { resp };
     }
     (st.dav)(req, ctx).await
+}
+
+/// The WebDAV handler over `bunko-dav`, with the server's hooks.
+pub fn dav_handler(dav: bunko_dav::Dav, hooks: Arc<crate::davhooks::ServerDavHooks>) -> DavFallback {
+    let nginx_accel = std::env::var("MOKURO_NGINX_ACCEL").is_ok_and(|v| v.trim() == "1");
+    Arc::new(move |req, ctx| {
+        let dav = dav.clone();
+        let hooks: Arc<dyn bunko_dav::DavHooks> = hooks.clone();
+        Box::pin(async move {
+            let dctx = bunko_dav::DavContext {
+                username: ctx.identity.username().map(str::to_string),
+                role: ctx.identity.role(),
+                nginx_accel,
+                client_ip: Some(ctx.client_ip.clone()),
+                hooks,
+            };
+            dav.handle(req, dctx).await
+        })
+    })
 }
 
 /// 0.5.2 put `AuthMiddleware` in front of the admin and processor APIs: anonymous or
@@ -206,6 +238,7 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
     crate::serve::serve(listener, app, tls, stop, Duration::from_secs(5)).await?;
     // Ordered shutdown (0.5.2 shutdown_app order, plus the new services).
     services.dyndns.stop();
+    services.dav.shutdown();
     services.updates.stop().await;
     services.tunnel.stop().await;
     Ok(())
@@ -234,7 +267,8 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
         restart: Some(restart),
     };
     let modules: Vec<Router> = vec![crate::accounts::router(accounts.clone()), crate::admin::router(admin)];
-    build_router_with(services.core.clone(), modules, dav_unavailable(), move |r| {
+    let dav = dav_handler(services.dav.clone(), services.dav_hooks.clone());
+    build_router_with(services.core.clone(), modules, dav, move |r| {
         r.layer(axum::middleware::from_fn_with_state(accounts, crate::accounts::root_middleware))
     })
 }
