@@ -77,7 +77,7 @@ class TestNameGrammar:
     def test_rejects_an_unusable_postfix(self, name: str, why: str) -> None:
         assert name_rejection(name) is not None, why
 
-    @pytest.mark.parametrize("name", ["original", "gcv", "tr-en", "tr-"])
+    @pytest.mark.parametrize("name", ["original", "gcv", "updated-ocr", "tr-en", "tr-"])
     def test_rejects_a_name_the_reader_already_owns(self, name: str) -> None:
         rejection = name_rejection(name)
         assert rejection is not None

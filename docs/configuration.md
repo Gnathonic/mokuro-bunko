@@ -582,7 +582,7 @@ order (`Volume 2` before `Volume 10`, `第二巻` before `第十巻`).
 **Names are file names.** A name must match `^[a-z0-9][a-z0-9-]{0,31}$`:
 lowercase ASCII letters, digits and hyphens, at most 32 characters, starting
 with a letter or digit. No dots, capitals, spaces or underscores — readers
-would not recognise the file as a layer. `original`, `gcv` and anything
+would not recognise the file as a layer. `original`, `gcv`, `updated-ocr` and anything
 starting with `tr-` are reserved by readers. Names must be unique across all
 rows, enabled or not.
 
