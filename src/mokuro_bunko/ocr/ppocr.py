@@ -41,7 +41,7 @@ Raw page JSON (:func:`page_to_json`, also what the CLI writes and what the
 geometry tests use as fixtures)::
 
     {"format": "ppocr-lines/1", "width": 1925, "height": 2800,
-     "detector": {"side": 1280, "passes": [...], ...},
+     "detector": {"side": 1120, "passes": [...], ...},
      "lines": [{"quad": [[x, y] * 4], "score": 0.91, "text": "...",
                 "conf": 0.97, "char_confs": [...], "vertical": true,
                 "angle": -0.4}]}
@@ -55,7 +55,7 @@ process can import it without any of those packages.
 CLI::
 
     python -m mokuro_bunko.ocr.ppocr --image page.webp --out lines.json \
-        [--side 1280] [--tile auto|off|force] [--models DIR] [--no-recognize]
+        [--side 1120] [--tile auto|off|force] [--models DIR] [--no-recognize]
 """
 
 from __future__ import annotations
@@ -101,8 +101,11 @@ DEFAULT_PRECISION = "fp32"
 FORMAT_ID = "ppocr-lines/1"
 
 # --- detector ---------------------------------------------------------------
-# 960 (the authors' default) loses small lines on 2800-px scans; 1280 does not.
-DEFAULT_SIDE = 1280
+# v0.2's best detector input on the authors' benchmark (README Table 1:
+# end-to-end CER 10.89% at 1120 vs 11.34% at 960, the demo app's size), and
+# on the owner's own run of v0.2: 1120 beat 960, which beat 1280. On v0.1,
+# 960 lost small lines on 2800-px scans and this was 1280.
+DEFAULT_SIDE = 1120
 SIDE_MULTIPLE = 32
 # Small web pages gain from some enlargement, but past 1.5x the detector only
 # sees interpolation blur and starts boxing screentone.
@@ -111,9 +114,10 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 DB_THRESH = 0.15
 DB_BOX_THRESH = 0.25
-# The authors benchmark with 1.40; on our bench that clips an end glyph on
-# ~3% of lines, 1.5 does not.
-DB_UNCLIP_RATIO = 1.5
+# What the authors run every v0.2 benchmark with. On v0.1 it clipped an end
+# glyph on ~3% of our bench's lines and this was 1.5; `recover_clipped_ends`
+# now gives such a line its last bracket or stop back.
+DB_UNCLIP_RATIO = 1.4
 DB_MIN_SIDE = 3.0
 DB_MAX_CANDIDATES = 3000
 
