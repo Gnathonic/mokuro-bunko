@@ -64,6 +64,9 @@ pub(super) async fn get(s: &AdminState) -> Response {
             json!({"check": cfg.update.check, "channel": cfg.update.channel, "manifest_url": cfg.update.manifest_url})
         });
         m.insert("ocr_runtime".into(), runtime);
+        if let Some(Value::Object(o)) = m.get_mut("ocr") {
+            o.insert("upgrade".into(), upgrade_value(&cfg.ocr.upgrade));
+        }
         // New in 0.7: migration notes (removed engines/detectors), for the admin to read.
         m.insert("config_warnings".into(), json!(cfg.warnings));
     }
@@ -308,6 +311,16 @@ pub(super) async fn ocr(s: &AdminState, req: &ApiRequest) -> Response {
                     None => return error(400, "poll_interval must be a positive integer"),
                 }
             }
+            if let Some(v) = data.get("upgrade") {
+                match parse_upgrade(v) {
+                    Ok(up) => {
+                        let mut cfg = s2.core().config.write();
+                        changed |= cfg.ocr.upgrade != up;
+                        cfg.ocr.upgrade = up;
+                    }
+                    Err(m) => return error(400, m),
+                }
+            }
             if let Err(r) = save_config(&s2) {
                 return r;
             }
@@ -321,12 +334,59 @@ pub(super) async fn ocr(s: &AdminState, req: &ApiRequest) -> Response {
             "ocr".into(),
             json!({"backend": snapshot.ocr.backend, "poll_interval": snapshot.ocr.poll_interval, "concurrency": snapshot.ocr.concurrency}),
         );
+        // Only when sent: the usual answer's shape stays what older pages read.
+        if data.contains_key("upgrade")
+            && let Some(Value::Object(o)) = body.get_mut("ocr")
+        {
+            o.insert("upgrade".into(), upgrade_value(&snapshot.ocr.upgrade));
+        }
         merge(&mut body, outcome);
         body.insert("ocr_runtime".into(), ocr.runtime_status(&snapshot));
         ok(Value::Object(body))
     })
     .await
     .unwrap_or_else(|r| r)
+}
+
+fn upgrade_value(u: &bunko_core::config::UpgradeConfig) -> Value {
+    json!({"enabled": u.enabled, "replace": u.replace})
+}
+
+/// `upgrade: {enabled, replace}` of `PUT /api/settings/ocr`. Absent keys
+/// are not merged: the section is one unit, so absent keys take the defaults.
+fn parse_upgrade(v: &Value) -> Result<bunko_core::config::UpgradeConfig, String> {
+    use bunko_core::engines;
+    let Some(m) = v.as_object() else {
+        return Err("upgrade must be an object".into());
+    };
+    let mut up = bunko_core::config::UpgradeConfig::default();
+    if let Some(e) = m.get("enabled") {
+        up.enabled = truthy(e);
+    }
+    if let Some(r) = m.get("replace") {
+        let Some(list) = r.as_array() else {
+            return Err("upgrade.replace must be a list".into());
+        };
+        let mut out: Vec<String> = Vec::new();
+        for f in list {
+            let Some(f) = f.as_str() else {
+                return Err("upgrade.replace must be a list of strings".into());
+            };
+            let ok = f == "mokuro-legacy"
+                || engines::engine(f).is_some()
+                || engines::removed_engine(f).is_some();
+            if !ok {
+                return Err(format!(
+                    "upgrade.replace: '{f}' is not a recipe family (an engine id or 'mokuro-legacy')"
+                ));
+            }
+            if !out.iter().any(|o| o == f) {
+                out.push(f.to_string());
+            }
+        }
+        up.replace = out;
+    }
+    Ok(up)
 }
 
 /// Copy an object's keys into `into` (Python `{**a, **b}`).
