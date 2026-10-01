@@ -34,6 +34,8 @@ const PERMISSIVE: &[&str] = &[
     "CDLA-Permissive-2.0",
     "bzip2-1.0.6",
     "NCSA",
+    // libjpeg-turbo (via mozjpeg): permissive, requires an acknowledgement in the docs.
+    "IJG",
 ];
 
 /// Licence ids (prefixes) that must never ship.

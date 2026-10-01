@@ -1,0 +1,152 @@
+{
+ "id": "12kingdoms-010",
+ "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+ "page_index": 10,
+ "compose": null,
+ "member": "12 Kingdoms test/temp00010.webp",
+ "crop": null,
+ "threads": 4,
+ "timing": {
+  "read_page": 0.0509,
+  "read_lines": 0.065
+ },
+ "first": {
+  "format": "ppocr-lines/1",
+  "width": 1925,
+  "height": 2800,
+  "detector": {
+   "side": 1120,
+   "tile": "auto",
+   "passes": [
+    {
+     "scale": 0.399,
+     "tiles": 1,
+     "lines": 2,
+     "why": "first"
+    }
+   ]
+  },
+  "lines": [
+   {
+    "quad": [
+     [
+      910.77,
+      1852.63
+     ],
+     [
+      974.92,
+      1851.54
+     ],
+     [
+      979.77,
+      2137.23
+     ],
+     [
+      915.63,
+      2138.32
+     ]
+    ],
+    "score": 0.8945,
+    "text": "イラスト",
+    "conf": 0.9999,
+    "vertical": true,
+    "angle": -0.97,
+    "char_confs": [
+     0.9997,
+     0.9999,
+     1.0,
+     0.9999
+    ]
+   },
+   {
+    "quad": [
+     [
+      912.9,
+      2128.03
+     ],
+     [
+      974.5,
+      2128.03
+     ],
+     [
+      974.5,
+      2366.97
+     ],
+     [
+      912.9,
+      2366.97
+     ]
+    ],
+    "score": 0.9544,
+    "text": "山田章博",
+    "conf": 0.9995,
+    "vertical": true,
+    "angle": 0.0,
+    "char_confs": [
+     0.9999,
+     0.9999,
+     0.9984,
+     0.9998
+    ]
+   }
+  ]
+ },
+ "final": {
+  "format": "ppocr-lines/1",
+  "width": 1925,
+  "height": 2800,
+  "detector": {
+   "side": 1120,
+   "tile": "auto",
+   "passes": [
+    {
+     "scale": 0.399,
+     "tiles": 1,
+     "lines": 2,
+     "why": "first"
+    }
+   ],
+   "joined": 1,
+   "recovered_ends": 0,
+   "second_opinions": 0
+  },
+  "lines": [
+   {
+    "quad": [
+     [
+      908.69,
+      1852.66
+     ],
+     [
+      971.68,
+      1851.6
+     ],
+     [
+      980.43,
+      2366.87
+     ],
+     [
+      917.45,
+      2367.94
+     ]
+    ],
+    "score": 0.9244,
+    "text": "イラスト　山田章博",
+    "conf": 0.9979,
+    "vertical": true,
+    "angle": -0.97,
+    "char_confs": [
+     0.9993,
+     0.9998,
+     0.9999,
+     0.9999,
+     1.0,
+     0.9997,
+     0.9997,
+     0.9854,
+     0.9998
+    ]
+   }
+  ]
+ }
+}
