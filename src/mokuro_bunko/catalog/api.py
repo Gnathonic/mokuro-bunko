@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from mokuro_bunko.catalog.manifest import build_volume_manifest
 from mokuro_bunko.database import Database
 from mokuro_bunko.library_index import LibraryIndexCache
+from mokuro_bunko.metadata.compiler import cached_mokuro_sha256
 from mokuro_bunko.metadata.reader_compat import normalize_volume_title_key
 from mokuro_bunko.metadata.schema import missing_page_count
 from mokuro_bunko.ocr.volume_outlook import recheck_after
@@ -216,6 +217,12 @@ class CatalogAPI:
         manifest = build_volume_manifest(series_dir, series_name, volume_name, layer_order)
         if manifest is None:
             return self._json_response(start_response, 404, {"error": "Volume not found"})
+        if manifest["ocr"] is not None and self._database is not None:
+            # The hash the metadata pass took of this very sidecar, when it is
+            # still current; never computed here, on the request.
+            digest = cached_mokuro_sha256(self._database, library.resolve(), archive)
+            if digest is not None:
+                manifest["ocr"]["sha256"] = digest
         pending = self._volume_pending(archive, series_name, volume_name)
         manifest["pending"] = pending
         manifest["recheck_after"] = recheck_after(pending, time.time())
