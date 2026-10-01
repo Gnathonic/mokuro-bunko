@@ -80,3 +80,26 @@ def test_an_uploader_edits_and_deletes_their_own_series(app: Any, series: str) -
 
     status, _, body = call(app, "DELETE", _wsgi(f"/mokuro-reader/{series}/Vol 1.cbz"), headers=AUTH)
     assert status == 204, body
+
+
+def test_an_uploader_deletes_the_ocr_layers_of_their_own_volume(app: Any, tmp_path: Path) -> None:
+    """`Vol 1.hayai-nova.mokuro` belongs to `Vol 1.cbz`; a decimal volume's
+    primary (`Vol 1.5.mokuro`) never borrows `Vol 1`'s owner."""
+    series = "よつばと！"
+    call(app, "MKCOL", _wsgi(f"/mokuro-reader/{series}"), headers=AUTH)
+    call(
+        app,
+        "PUT",
+        _wsgi(f"/mokuro-reader/{series}/Vol 1.cbz"),
+        _archive(),
+        {**AUTH, "Content-Type": "application/zip"},
+    )
+    folder = tmp_path / "storage" / "library" / series
+    for name in ("Vol 1.hayai-nova.mokuro", "Vol 1.ppocr-manga.mokuro.gz", "Vol 1.5.mokuro"):
+        (folder / name).write_bytes(b"{}")
+
+    for name in ("Vol 1.hayai-nova.mokuro", "Vol 1.ppocr-manga.mokuro.gz"):
+        status, _, body = call(app, "DELETE", _wsgi(f"/mokuro-reader/{series}/{name}"), headers=AUTH)
+        assert status == 204, (name, body)
+    status, _, _ = call(app, "DELETE", _wsgi(f"/mokuro-reader/{series}/Vol 1.5.mokuro"), headers=AUTH)
+    assert status == 403
