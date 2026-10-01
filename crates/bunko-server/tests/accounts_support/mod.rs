@@ -47,10 +47,7 @@ impl Env {
             )
             .expect("db"),
         );
-        let backend = Arc::new(DbAuthBackend {
-            db: db.clone(),
-            layout,
-        });
+        let backend = Arc::new(DbAuthBackend::new(db.clone(), layout));
         // A config path inside the temp dir: setup saves the config, never to ~/.config.
         let core = Core::new(
             Arc::new(RwLock::new(config)),
@@ -150,8 +147,10 @@ pub fn empty(b: http::request::Builder) -> Request<Body> {
     b.body(Body::empty()).expect("request")
 }
 
+/// Raw body bytes, declared `application/json`.
 pub fn raw(b: http::request::Builder, body: &'static [u8]) -> Request<Body> {
     b.header("content-length", body.len().to_string())
+        .header("content-type", "application/json")
         .body(Body::from(body))
         .expect("request")
 }

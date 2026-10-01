@@ -90,10 +90,7 @@ impl Env {
             )
             .expect("db"),
         );
-        let backend = Arc::new(DbAuthBackend {
-            db: db.clone(),
-            layout: layout.clone(),
-        });
+        let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
         let core = Core::new(
             Arc::new(RwLock::new(config)),
             Some(dir.path().join("config.yaml")),

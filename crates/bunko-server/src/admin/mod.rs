@@ -266,6 +266,15 @@ async fn entry(State(state): State<AdminState>, req: Request) -> Response {
     } else if role != Role::Admin {
         return error(403, "Admin access required");
     }
+    // CSRF (new in 0.7): a state-changing call must come from this server's pages or an
+    // allowed CORS origin, and a body must be declared JSON (see `http::csrf`).
+    let refusal = {
+        let cfg = state.core().config.read();
+        crate::http::csrf::check(&parts.method, &parts.headers, &cfg.cors)
+    };
+    if let Some((status, msg)) = refusal {
+        return error(status, msg);
+    }
     let method = parts.method.clone();
     let body = if method == Method::POST || method == Method::PUT {
         read_body(&parts.headers, body).await

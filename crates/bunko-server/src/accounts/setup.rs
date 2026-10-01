@@ -317,6 +317,9 @@ async fn complete(
         Ok(false) => return json_error(400, "Setup already completed"),
         Err(resp) => return resp,
     }
+    if let Some((status, msg)) = crate::http::csrf::require_json(&parts.headers) {
+        return json_error(status, msg);
+    }
     let data = match read_body(&parts.headers, body).await {
         JsonBody::Empty => return json_error(400, "Empty body"),
         JsonBody::TooLarge => return json_error(413, "Request body too large"),

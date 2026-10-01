@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::extract::{FromRef, Path, Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post, put};
@@ -208,8 +208,21 @@ async fn socket(
         Some(Precheck::Ghost) => return error(409, "Socket already open; register again"),
         Some(Precheck::Ok(stamp)) => stamp,
     };
-    ws.on_upgrade(move |socket| run_socket(ocr, pid, username, stamp, socket))
+    // Events are small JSON objects (the largest, a `stats` pipeline snapshot or a
+    // `volume_done` with its stage timings, is a few KiB); tungstenite's defaults (64 MiB
+    // messages, 16 MiB frames) let one socket make the library buffer 64 MiB per message.
+    ws.max_message_size(MAX_EVENT_BYTES)
+        .max_frame_size(MAX_EVENT_BYTES)
+        .on_upgrade(move |socket| run_socket(ocr, pid, username, stamp, socket))
 }
+
+/// The largest WebSocket message (and frame) a processor may send.
+pub const MAX_EVENT_BYTES: usize = 1024 * 1024;
+
+/// How many messages one socket may have queued for the scheduler before it waits for
+/// them to be handled (the scheduler's mailbox is unbounded; reading pauses, so TCP
+/// pushes back on the processor instead of the library's memory).
+pub const MAILBOX_WINDOW: u32 = 16;
 
 async fn run_socket(
     ocr: OcrControl,
@@ -237,6 +250,8 @@ async fn run_socket(
     let mut ping = tokio::time::interval(Duration::from_secs(HEARTBEAT_SECONDS));
     ping.tick().await;
     let mut watch = tokio::time::interval(Duration::from_secs(1));
+    let mut queued: u32 = 0;
+    let mut close: Option<CloseFrame> = None;
     let reason: Option<String> = loop {
         tokio::select! {
             op = ops_rx.recv() => match op {
@@ -252,26 +267,41 @@ async fn run_socket(
                 // The scheduler dropped this registration: its reason stands.
                 None => break None,
             },
-            frame = rx.next() => match frame {
-                Some(Ok(Message::Text(text))) => {
-                    last_frame = Instant::now();
-                    match serde_json::from_str::<Event>(text.as_str()) {
-                        Ok(event) => {
-                            ocr.send(Msg::Event { pid: pid.clone(), event });
-                        }
-                        Err(_) => {
-                            tracing::warn!("unreadable event from processor {pid}: {:.80}", text.as_str());
-                            ocr.send(Msg::Seen { pid: pid.clone() });
+            frame = rx.next() => {
+                let msg = match frame {
+                    Some(Ok(Message::Text(text))) => {
+                        last_frame = Instant::now();
+                        match serde_json::from_str::<Event>(text.as_str()) {
+                            Ok(event) => Msg::Event { pid: pid.clone(), event },
+                            Err(_) => {
+                                tracing::warn!("unreadable event from processor {pid}: {:.80}", text.as_str());
+                                Msg::Seen { pid: pid.clone() }
+                            }
                         }
                     }
+                    Some(Ok(Message::Binary(_))) => {
+                        close = Some(CloseFrame {
+                            code: close_code::POLICY,
+                            reason: "binary messages are not part of the protocol".into(),
+                        });
+                        break Some("it sent a binary message".into());
+                    }
+                    Some(Ok(Message::Close(_))) | None => break Some("the socket closed".into()),
+                    Some(Ok(_)) => {
+                        last_frame = Instant::now();
+                        Msg::Seen { pid: pid.clone() }
+                    }
+                    Some(Err(e)) => break Some(format!("the socket failed: {e}")),
+                };
+                ocr.send(msg);
+                queued += 1;
+                if queued >= MAILBOX_WINDOW {
+                    // FIFO mailbox: once this no-op is answered, everything this socket
+                    // sent before it has been handled.
+                    queued = 0;
+                    let _ = ocr.ask(|_| ()).await;
                 }
-                Some(Ok(Message::Close(_))) | None => break Some("the socket closed".into()),
-                Some(Ok(_)) => {
-                    last_frame = Instant::now();
-                    ocr.send(Msg::Seen { pid: pid.clone() });
-                }
-                Some(Err(e)) => break Some(format!("the socket failed: {e}")),
-            },
+            }
             _ = ping.tick() => {
                 if tx.send(Message::Ping(Vec::new().into())).await.is_err() {
                     break Some("the socket closed".into());
@@ -300,7 +330,7 @@ async fn run_socket(
             reason,
         });
     }
-    let _ = tx.send(Message::Close(None)).await;
+    let _ = tx.send(Message::Close(close)).await;
 }
 
 // --- result uploads ---------------------------------------------------------------------
@@ -311,6 +341,72 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
+}
+
+/// Names Windows reserves for devices, whatever the extension (`CON.mokuro` is the
+/// console). Compared case-insensitively against the part before the first dot.
+const WINDOWS_DEVICE_NAMES: &[&str] = &[
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "CONIN$",
+    "CONOUT$",
+    "COM0",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "COM\u{b9}",
+    "COM\u{b2}",
+    "COM\u{b3}",
+    "LPT0",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+    "LPT\u{b9}",
+    "LPT\u{b2}",
+    "LPT\u{b3}",
+];
+
+/// Is `name` (the processor's `X-Mokuro-Sidecar-Name`, decoded) one plain file name on
+/// every OS the library runs on: exactly one `Normal` path component, none of the
+/// characters Windows refuses or reads as a drive/stream separator (`<>:"/\|?*`, control
+/// characters), no trailing dot or space, not a device name, not hidden, ending
+/// `.mokuro`. Non-ASCII letters are fine (volume names are often Japanese).
+pub fn is_safe_result_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.len() > 255
+        || name.starts_with('.')
+        || !name.ends_with(".mokuro")
+        || name.ends_with(['.', ' '])
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
+    {
+        return false;
+    }
+    let mut parts = std::path::Path::new(name).components();
+    if !matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(n)), None) if n == name
+    ) {
+        return false;
+    }
+    let base = name.split('.').next().unwrap_or("").trim_end_matches(' ');
+    let base = base.to_uppercase();
+    !WINDOWS_DEVICE_NAMES.iter().any(|d| *d == base)
 }
 
 /// What an upload is for, checked before a byte is read.
@@ -341,11 +437,7 @@ async fn result_upload(
     }) else {
         return error(400, format!("{HEADER_RESULT_NAME} is required"));
     };
-    if name.contains('/')
-        || name.contains('\\')
-        || name.starts_with('.')
-        || !name.ends_with(".mokuro")
-    {
+    if !is_safe_result_name(&name) {
         return error(
             400,
             format!("{HEADER_RESULT_NAME} must be a sidecar file name"),
@@ -592,6 +684,55 @@ async fn bench_sample(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (review finding): the result name is joined under `.processing/` and its
+    /// directory removed on a mismatch; anything but one plain, Windows-safe component
+    /// must be refused before that.
+    #[test]
+    fn result_names_must_be_one_windows_safe_component() {
+        for ok in [
+            "Vol 1.mokuro",
+            "第1巻.mokuro",
+            "Vol 1.hayai-nova.mokuro",
+            "Console.mokuro",
+            "COM10.mokuro",
+        ] {
+            assert!(is_safe_result_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            ".mokuro",
+            ".hidden.mokuro",
+            "a/b.mokuro",
+            "a\\b.mokuro",
+            "..\\x.mokuro",
+            "C:x.mokuro",
+            "C:\\x.mokuro",
+            "\\\\server\\share\\x.mokuro",
+            "x.mokuro:stream",
+            "x:y.mokuro",
+            "x?.mokuro",
+            "x*.mokuro",
+            "x|y.mokuro",
+            "x\"y.mokuro",
+            "x<y>.mokuro",
+            "x\u{0}.mokuro",
+            "x\n.mokuro",
+            "x.mokuro.",
+            "x.mokuro ",
+            "x.json",
+            "CON.mokuro",
+            "con.mokuro",
+            "nul.mokuro",
+            "Aux .mokuro",
+            "LPT1.mokuro",
+            "COM\u{b9}.mokuro",
+            "conin$.mokuro",
+        ] {
+            assert!(!is_safe_result_name(bad), "{bad:?}");
+        }
+        assert!(!is_safe_result_name(&format!("{}.mokuro", "a".repeat(250))));
+    }
 
     #[test]
     fn ranges() {

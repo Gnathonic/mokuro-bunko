@@ -40,6 +40,10 @@ pub const INVITABLE_ROLES: [Role; 4] = [
 ];
 const INVITABLE_ROLES_TEXT: &str = "['editor', 'inviter', 'registered', 'uploader']";
 
+/// The registration API's answer for an unusable invite (0.5.2's wording; register.js
+/// routes it to the invite field).
+pub const INVALID_INVITE_MESSAGE: &str = "Invalid or expired invite code";
+
 /// 0.5.2 `InviteDict`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Invite {
@@ -291,6 +295,72 @@ impl Database {
         })
     }
 
+    /// Register `username` with the invite `code`, atomically: in ONE write transaction the
+    /// invite is re-read and must be unused and unexpired, the account is inserted with
+    /// the invite's role, and the invite is consumed (`used_by IS NULL` guarded); any
+    /// failure rolls all of it back. Returns the new id and the role granted.
+    ///
+    /// 0.5.2 (and the first port) created the account, then consumed the invite in a
+    /// second step and kept the account even when a concurrent registration had already
+    /// consumed it: N parallel registrations with one code made N accounts.
+    ///
+    /// Errors: name/password validation as [`create_user`](Self::create_user);
+    /// [`DbError::Invalid`] with [`INVALID_INVITE_MESSAGE`] when the invite is unknown,
+    /// used, expired or consumed concurrently; [`DbError::Conflict`] for a taken name.
+    pub fn create_user_with_invite(
+        &self,
+        username: &str,
+        password: &str,
+        code: &str,
+        status: crate::users::UserStatus,
+        notes: &str,
+    ) -> Result<(i64, Role)> {
+        let _bump = self.bump_users_version();
+        let password_hash = self.new_account_hash(username, password)?;
+        let invalid = || DbError::Invalid(INVALID_INVITE_MESSAGE.into());
+        self.write(|conn| {
+            let raw = conn
+                .prepare_cached(&format!(
+                    "SELECT {INVITE_COLUMNS} FROM invites WHERE code = ?"
+                ))?
+                .query_row([code], RawInvite::from_row)
+                .optional()?;
+            let invite = match raw.map(RawInvite::into_invite) {
+                Some(Ok(invite)) if invite.status() == InviteStatus::Valid => invite,
+                _ => return Err(invalid()),
+            };
+            let id = crate::users::insert_user(
+                conn,
+                username,
+                &password_hash,
+                invite.role,
+                status,
+                notes,
+            )?;
+            let consumed = conn.execute(
+                "UPDATE invites SET used_by = ?, used_at = datetime('now') \
+                 WHERE code = ? AND used_by IS NULL",
+                params![username, code],
+            )?;
+            if consumed != 1 {
+                return Err(invalid()); // rolls the account back too
+            }
+            let invited_by = invite.invited_by.clone().map_or(Value::Null, Value::String);
+            let event = NewAuditEvent::new("invite_used")
+                .actor(Some(username))
+                .target_type("invite")
+                .target_path(code)
+                .target_username(username)
+                .details(
+                    AuditDetails::new()
+                        .with("invited_by", invited_by)
+                        .with("role", invite.role.as_str()),
+                );
+            self.log_audit_in(conn, &event)?;
+            Ok((id, invite.role))
+        })
+    }
+
     /// Invites, newest first: all of them, or (0.5.2's SQL, quirk included) the unused
     /// ones whose `expires_at` text sorts after `datetime('now')`.
     pub fn list_invites(&self, include_used: bool) -> Result<Vec<Invite>> {
@@ -429,6 +499,114 @@ mod tests {
             Some(r#"{"role":"uploader","expires":"7d"}"#)
         );
         assert_eq!(events[1].actor_username.as_deref(), Some("root"));
+    }
+
+    /// Regression (review finding): the account was created before the invite was
+    /// consumed and kept when consuming failed, so 20 parallel registrations with one
+    /// code made 20 accounts. Now exactly one wins and the others leave nothing behind.
+    #[test]
+    fn registration_consumes_the_invite_atomically() {
+        use crate::users::UserStatus;
+        let (_dir, db) = temp_db();
+        let code = db.create_invite(Role::Editor, "7d", Some("root")).unwrap();
+        let wins: Vec<bool> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..20)
+                .map(|i| {
+                    let (db, code) = (&db, &code);
+                    scope.spawn(move || {
+                        db.create_user_with_invite(
+                            &format!("racer{i}"),
+                            "racer-pass-1",
+                            code,
+                            UserStatus::Active,
+                            "",
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| match h.join().unwrap() {
+                    Ok((_, role)) => {
+                        assert_eq!(role, Role::Editor);
+                        true
+                    }
+                    Err(DbError::Invalid(m)) => {
+                        assert_eq!(m, INVALID_INVITE_MESSAGE);
+                        false
+                    }
+                    Err(e) => panic!("{e}"),
+                })
+                .collect()
+        });
+        assert_eq!(wins.iter().filter(|w| **w).count(), 1);
+        let racers: Vec<_> = db
+            .list_users(None)
+            .unwrap()
+            .into_iter()
+            .filter(|u| u.username.starts_with("racer"))
+            .collect();
+        assert_eq!(racers.len(), 1);
+        let invite = db.get_invite(&code).unwrap().unwrap();
+        assert_eq!(invite.used_by.as_deref(), Some(racers[0].username.as_str()));
+        let used = db
+            .list_audit_events(50, None)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.action == "invite_used")
+            .count();
+        assert_eq!(used, 1);
+    }
+
+    #[test]
+    fn registration_with_a_bad_invite_creates_nothing() {
+        use crate::users::UserStatus;
+        let (_dir, db) = temp_db();
+        let err = db
+            .create_user_with_invite("ghost", "ghost-pass-1", "nope", UserStatus::Active, "")
+            .unwrap_err();
+        assert!(matches!(err, DbError::Invalid(ref m) if m == INVALID_INVITE_MESSAGE));
+        assert!(db.get_user("ghost").unwrap().is_none());
+        // Expired.
+        let code = db.create_invite(Role::Uploader, "1h", None).unwrap();
+        db.with_writer_connection(|c| {
+            c.execute(
+                "UPDATE invites SET expires_at = '2000-01-01T00:00:00' WHERE code = ?",
+                [&code],
+            )
+            .unwrap()
+        });
+        assert!(
+            db.create_user_with_invite("late", "late-pass-12", &code, UserStatus::Active, "")
+                .is_err()
+        );
+        assert!(db.get_user("late").unwrap().is_none());
+        // A taken name keeps the invite unused.
+        let code = db.create_invite(Role::Uploader, "1h", None).unwrap();
+        db.create_user(
+            "taken",
+            "taken-pass-1",
+            Role::Registered,
+            UserStatus::Active,
+            "",
+        )
+        .unwrap();
+        let err = db
+            .create_user_with_invite("taken", "taken-pass-1", &code, UserStatus::Active, "")
+            .unwrap_err();
+        assert!(matches!(err, DbError::Conflict(_)));
+        assert!(db.validate_invite(&code).unwrap().is_some());
+        // And a good one works, with the invite's role and the asked status.
+        let (_, role) = db
+            .create_user_with_invite("fresh", "fresh-pass-1", &code, UserStatus::Pending, "")
+            .unwrap();
+        assert_eq!(role, Role::Uploader);
+        let user = db.get_user("fresh").unwrap().unwrap();
+        assert_eq!(
+            (user.role, user.status),
+            (Role::Uploader, UserStatus::Pending)
+        );
+        assert!(db.validate_invite(&code).unwrap().is_none());
     }
 
     #[test]

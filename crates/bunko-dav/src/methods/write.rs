@@ -229,6 +229,7 @@ fn destination_path(req: &Req) -> DavResult<String> {
         }
     }
     let decoded = paths::decode_request_path(path)
+        .filter(|p| !p.split(['/', '\\']).any(|seg| seg == ".."))
         .ok_or_else(|| DavError::new(StatusCode::BAD_REQUEST, "Invalid Destination header."))?;
     if !decoded.starts_with('/') {
         return Err(DavError::new(
@@ -362,6 +363,10 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         ));
     }
 
+    // A file MOVE that only changes letter case is the same file on a case-insensitive
+    // filesystem, and a rename does the right thing there.
+    let case_only_rename =
+        is_move && !src.is_collection() && src_norm.to_lowercase() == dest_norm.to_lowercase();
     let dest_name = paths::uri_name(&dest_path).to_string();
     let (inner2, req2) = (inner.clone(), req.clone());
     let dest_exists = dest.is_some();
@@ -373,6 +378,22 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
+        // The virtual paths differed; the files may not (`a//x`, `a/./x`, a symlink, a
+        // case-insensitive filesystem). Overwriting the source with itself deletes it.
+        if let Some(src_phys) = src.phys() {
+            if !case_only_rename && same_physical(src_phys, &dest_phys) {
+                return Err(DavError::new(
+                    StatusCode::FORBIDDEN,
+                    "Cannot copy/move source onto itself",
+                ));
+            }
+            if src.is_collection() && physically_below(&dest_phys, src_phys) {
+                return Err(DavError::new(
+                    StatusCode::FORBIDDEN,
+                    "Cannot copy/move source below itself",
+                ));
+            }
+        }
         let mut effects = Effects::default();
         let status = match &src {
             Resource::File { path, phys, .. } => {
@@ -447,6 +468,49 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
     } else {
         response::status_page(status, "")
     })
+}
+
+/// Do `a` and `b` name the same file or folder on disk (equal paths, the same inode, or
+/// the same canonical path)? Missing paths are only equal to themselves.
+fn same_physical(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return x.dev() == y.dev() && x.ino() == y.ino();
+        }
+    }
+    matches!(
+        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+        (Ok(x), Ok(y)) if x == y
+    )
+}
+
+/// Is `dest` (which may not exist yet) inside the folder `src` on disk?
+fn physically_below(dest: &Path, src: &Path) -> bool {
+    let Ok(src) = std::fs::canonicalize(src) else {
+        return dest.starts_with(src);
+    };
+    // The deepest existing ancestor of `dest`, canonical, with the rest re-attached.
+    let mut probe = dest.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(canon) = std::fs::canonicalize(&probe) {
+            let mut full = canon;
+            full.extend(tail.iter().rev());
+            return full.starts_with(&src);
+        }
+        match (probe.file_name().map(|n| n.to_os_string()), probe.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name);
+                probe = parent.to_path_buf();
+            }
+            _ => return dest.starts_with(&src),
+        }
+    }
 }
 
 /// 0.5.2 `MokuroFileResource.handle_move`. Sidecars stay where they are (pinned).

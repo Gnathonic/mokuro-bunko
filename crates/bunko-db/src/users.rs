@@ -20,7 +20,7 @@ use crate::error::{DbError, Result};
 use crate::pyfmt;
 use crate::validation::{hash_password, validate_password, validate_username, verify_password};
 use bunko_core::Role;
-use rusqlite::{ErrorCode, OptionalExtension, Row, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -159,7 +159,7 @@ impl RawUser {
 const USER_COLUMNS: &str = "id, username, role, status, notes, created_at";
 
 /// Bumps `users_version` when dropped: after the method body, whether it succeeded or not.
-struct BumpOnDrop<'a>(&'a Database);
+pub(crate) struct BumpOnDrop<'a>(&'a Database);
 
 impl Drop for BumpOnDrop<'_> {
     fn drop(&mut self) {
@@ -174,6 +174,96 @@ fn validation(err: Option<&'static str>) -> Result<()> {
     }
 }
 
+/// Insert an account row inside the caller's write transaction; returns its id. Errors
+/// carry 0.5.2's messages (`already exists` as [`DbError::Conflict`], a deleted
+/// account's name pointing at `restore-user`).
+pub(crate) fn insert_user(
+    conn: &Connection,
+    username: &str,
+    password_hash: &str,
+    role: Role,
+    status: UserStatus,
+    notes: &str,
+) -> Result<i64> {
+    let inserted = conn.execute(
+        "INSERT INTO users (username, password_hash, role, status, notes) \
+         VALUES (?, ?, ?, ?, ?)",
+        params![
+            username,
+            password_hash,
+            role.as_str(),
+            status.as_str(),
+            notes
+        ],
+    );
+    match inserted {
+        Ok(_) => Ok(conn.last_insert_rowid()),
+        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == ErrorCode::ConstraintViolation => {
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM users WHERE username = ?",
+                    [username],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if existing.as_deref() == Some("deleted") {
+                Err(DbError::Invalid(format!(
+                    "Username '{username}' belongs to a deleted account; bring it back \
+                     with: mokuro-bunko admin restore-user {username}"
+                )))
+            } else {
+                Err(DbError::Conflict(format!(
+                    "Username '{username}' already exists"
+                )))
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The refusal of a change that would leave no active admin (HTTP 409 in the admin API).
+pub const LAST_ADMIN_MESSAGE: &str = "This is the last active admin account: make another \
+account an admin first, so the server keeps someone who can administer it";
+
+/// Would turning `username` into a non-admin (or making it inactive) leave no active
+/// admin? Run inside the write transaction that makes the change.
+fn is_last_active_admin(conn: &Connection, username: &str) -> Result<bool> {
+    let target_is_admin: bool = conn
+        .query_row(
+            "SELECT role = 'admin' AND status = 'active' FROM users WHERE username = ?",
+            [username],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !target_is_admin {
+        return Ok(false);
+    }
+    let others: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'active' \
+         AND username != ?",
+        [username],
+        |r| r.get(0),
+    )?;
+    Ok(others == 0)
+}
+
+/// Whether an account change may remove the last active admin: the web admin keeps one
+/// ([`KeepAdmin::Keep`]); the CLI, run by whoever owns the server's files, may not need
+/// to ([`KeepAdmin::Allow`], 0.5.2's behaviour).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeepAdmin {
+    Keep,
+    Allow,
+}
+
+fn guard_last_admin(conn: &Connection, username: &str, keep: KeepAdmin) -> Result<()> {
+    if keep == KeepAdmin::Keep && is_last_active_admin(conn, username)? {
+        return Err(DbError::Conflict(LAST_ADMIN_MESSAGE.into()));
+    }
+    Ok(())
+}
+
 impl Database {
     /// Moves on every change to who may log in as what (`create_user`, `update_user_role`,
     /// `update_user_password`, `approve_user`, `disable_user`, `delete_user`,
@@ -182,7 +272,7 @@ impl Database {
         self.users_version.load(Ordering::SeqCst)
     }
 
-    fn bump_users_version(&self) -> BumpOnDrop<'_> {
+    pub(crate) fn bump_users_version(&self) -> BumpOnDrop<'_> {
         BumpOnDrop(self)
     }
 
@@ -198,50 +288,19 @@ impl Database {
         notes: &str,
     ) -> Result<i64> {
         let _bump = self.bump_users_version();
+        let password_hash = self.new_account_hash(username, password)?;
+        self.write(|conn| insert_user(conn, username, &password_hash, role, status, notes))
+    }
+
+    /// Validate a new account's name and password and hash the password (outside every
+    /// lock): the first half of [`create_user`](Self::create_user).
+    pub(crate) fn new_account_hash(&self, username: &str, password: &str) -> Result<String> {
         if pyfmt::strip(username).is_empty() {
             return Err(DbError::invalid("Username is required"));
         }
         validation(validate_username(username))?;
         validation(validate_password(password))?;
-        let password_hash = hash_password(password, self.bcrypt_cost)?;
-        self.write(|conn| {
-            let inserted = conn.execute(
-                "INSERT INTO users (username, password_hash, role, status, notes) \
-                 VALUES (?, ?, ?, ?, ?)",
-                params![
-                    username,
-                    password_hash,
-                    role.as_str(),
-                    status.as_str(),
-                    notes
-                ],
-            );
-            match inserted {
-                Ok(_) => Ok(conn.last_insert_rowid()),
-                Err(rusqlite::Error::SqliteFailure(e, _))
-                    if e.code == ErrorCode::ConstraintViolation =>
-                {
-                    let existing: Option<String> = conn
-                        .query_row(
-                            "SELECT status FROM users WHERE username = ?",
-                            [username],
-                            |r| r.get(0),
-                        )
-                        .optional()?;
-                    if existing.as_deref() == Some("deleted") {
-                        Err(DbError::Invalid(format!(
-                            "Username '{username}' belongs to a deleted account; bring it back \
-                             with: mokuro-bunko admin restore-user {username}"
-                        )))
-                    } else {
-                        Err(DbError::Conflict(format!(
-                            "Username '{username}' already exists"
-                        )))
-                    }
-                }
-                Err(e) => Err(e.into()),
-            }
-        })
+        Ok(hash_password(password, self.bcrypt_cost)?)
     }
 
     /// Any account by name, whatever its status.
@@ -257,8 +316,9 @@ impl Database {
         raw.map(RawUser::into_user).transpose()
     }
 
-    /// The account if it is `active` and the password matches; one bcrypt check at most
-    /// (none for an unknown or inactive account).
+    /// The account if it is `active` and the password matches. Exactly one bcrypt check
+    /// whatever the outcome: an unknown or inactive account is checked against a dummy
+    /// hash of the same cost, so the answer's timing does not tell which accounts exist.
     pub fn authenticate_user(&self, username: &str, password: &str) -> Result<Option<User>> {
         let row = self.read(|conn| {
             Ok(conn
@@ -270,13 +330,25 @@ impl Database {
                 })
                 .optional()?)
         })?;
-        let Some((raw, password_hash)) = row else {
+        let Some((raw, password_hash)) = row.filter(|(raw, _)| raw.status == "active") else {
+            let _ = verify_password(password, self.dummy_hash()?);
             return Ok(None);
         };
-        if raw.status != "active" || !verify_password(password, &password_hash) {
+        if !verify_password(password, &password_hash) {
             return Ok(None);
         }
         Ok(raw.into_login())
+    }
+
+    /// A bcrypt hash of a random password at this handle's cost, made once: what an
+    /// unknown account's password is checked against.
+    fn dummy_hash(&self) -> Result<&str> {
+        if let Some(h) = self.dummy_hash.get() {
+            return Ok(h);
+        }
+        let secret = crate::tokens::token_urlsafe(16);
+        let hash = hash_password(&secret, self.bcrypt_cost)?;
+        Ok(self.dummy_hash.get_or_init(|| hash))
     }
 
     /// A fingerprint of a PROCESSOR account as it stands (role, status and password
@@ -334,8 +406,23 @@ impl Database {
     /// Set an account's role (any status, deleted included). Tokens are kept: they carry
     /// the account's current role. `false` if there is no such account.
     pub fn update_user_role(&self, username: &str, role: Role) -> Result<bool> {
+        self.update_user_role_with(username, role, KeepAdmin::Allow)
+    }
+
+    /// [`update_user_role`](Self::update_user_role); with [`KeepAdmin::Keep`], demoting
+    /// the last active admin is refused ([`DbError::Conflict`], [`LAST_ADMIN_MESSAGE`])
+    /// in the same transaction as the change.
+    pub fn update_user_role_with(
+        &self,
+        username: &str,
+        role: Role,
+        keep: KeepAdmin,
+    ) -> Result<bool> {
         let _bump = self.bump_users_version();
         self.write(|conn| {
+            if role != Role::Admin {
+                guard_last_admin(conn, username, keep)?;
+            }
             Ok(conn.execute(
                 "UPDATE users SET role = ?, updated_at = datetime('now') WHERE username = ?",
                 params![role.as_str(), username],
@@ -385,8 +472,15 @@ impl Database {
 
     /// Any status -> `disabled` (a deleted account too). Tokens stay but stop resolving.
     pub fn disable_user(&self, username: &str) -> Result<bool> {
+        self.disable_user_with(username, KeepAdmin::Allow)
+    }
+
+    /// [`disable_user`](Self::disable_user), refusing the last active admin with
+    /// [`KeepAdmin::Keep`].
+    pub fn disable_user_with(&self, username: &str, keep: KeepAdmin) -> Result<bool> {
         let _bump = self.bump_users_version();
         self.write(|conn| {
+            guard_last_admin(conn, username, keep)?;
             Ok(conn.execute(
                 "UPDATE users SET status = 'disabled', updated_at = datetime('now') \
                  WHERE username = ?",
@@ -398,8 +492,15 @@ impl Database {
     /// Soft delete; the account's tokens are always deleted. `true` only if the account
     /// existed and was not already deleted.
     pub fn delete_user(&self, username: &str) -> Result<bool> {
+        self.delete_user_with(username, KeepAdmin::Allow)
+    }
+
+    /// [`delete_user`](Self::delete_user), refusing the last active admin with
+    /// [`KeepAdmin::Keep`].
+    pub fn delete_user_with(&self, username: &str, keep: KeepAdmin) -> Result<bool> {
         let _bump = self.bump_users_version();
         self.write(|conn| {
+            guard_last_admin(conn, username, keep)?;
             let changed = conn.execute(
                 "UPDATE users SET status = 'deleted', updated_at = datetime('now') \
                  WHERE username = ? AND status != 'deleted'",
@@ -431,6 +532,107 @@ impl Database {
 mod tests {
     use super::*;
     use crate::testutil::temp_db;
+
+    /// Regression (review finding): the admin API could delete, disable or demote the only
+    /// active admin, leaving nobody able to administer the server.
+    #[test]
+    fn the_last_active_admin_is_kept_when_asked() {
+        let (_dir, db) = temp_db();
+        let mk = |u: &str, role| {
+            db.create_user(u, "password123", role, UserStatus::Active, "")
+                .unwrap()
+        };
+        mk("root", Role::Admin);
+        mk("bob", Role::Editor);
+        let last =
+            |r: Result<bool>| matches!(r, Err(DbError::Conflict(m)) if m == LAST_ADMIN_MESSAGE);
+        assert!(last(db.delete_user_with("root", KeepAdmin::Keep)));
+        assert!(last(db.disable_user_with("root", KeepAdmin::Keep)));
+        assert!(last(db.update_user_role_with(
+            "root",
+            Role::Editor,
+            KeepAdmin::Keep
+        )));
+        // Nothing changed.
+        let root = db.get_user("root").unwrap().unwrap();
+        assert_eq!((root.role, root.status), (Role::Admin, UserStatus::Active));
+        // Re-granting admin, and changes to other accounts, are fine.
+        assert!(
+            db.update_user_role_with("root", Role::Admin, KeepAdmin::Keep)
+                .unwrap()
+        );
+        assert!(db.disable_user_with("bob", KeepAdmin::Keep).unwrap());
+        assert!(
+            db.delete_user_with("ghost", KeepAdmin::Keep)
+                .is_ok_and(|d| !d)
+        );
+        // An inactive admin does not count as the other one.
+        mk("old", Role::Admin);
+        db.disable_user("old").unwrap();
+        assert!(last(db.delete_user_with("root", KeepAdmin::Keep)));
+        // A second active admin: the first may go.
+        mk("root2", Role::Admin);
+        assert!(
+            db.update_user_role_with("root", Role::Editor, KeepAdmin::Keep)
+                .unwrap()
+        );
+        assert!(last(db.delete_user_with("root2", KeepAdmin::Keep)));
+        // The CLI's Allow keeps 0.5.2's behaviour.
+        assert!(db.delete_user("root2").unwrap());
+    }
+
+    /// Regression (review finding): an unknown or inactive account answered without any
+    /// bcrypt work, so response timing told which usernames exist. One check always runs.
+    #[test]
+    fn unknown_accounts_cost_one_bcrypt_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_with(
+            dir.path().join("mokuro.db"),
+            &crate::DbOptions {
+                bcrypt_cost: 8,
+                ..crate::DbOptions::default()
+            },
+        )
+        .unwrap();
+        db.create_user(
+            "alice",
+            "password123",
+            Role::Uploader,
+            UserStatus::Active,
+            "",
+        )
+        .unwrap();
+        db.create_user(
+            "gone",
+            "password123",
+            Role::Uploader,
+            UserStatus::Active,
+            "",
+        )
+        .unwrap();
+        db.disable_user("gone").unwrap();
+        let time = |u: &str| {
+            (0..3)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    assert!(db.authenticate_user(u, "wrong-password").unwrap().is_none());
+                    t.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        let _ = time("nobody"); // the dummy hash is made on first use
+        let known = time("alice");
+        for who in ["nobody", "gone"] {
+            let t = time(who);
+            assert!(t * 3 >= known, "{who}: {t:?} vs a real check {known:?}");
+        }
+        assert!(
+            db.authenticate_user("alice", "password123")
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn create_and_get() {

@@ -111,10 +111,7 @@ impl Services {
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
-        let backend = Arc::new(DbAuthBackend {
-            db: db.clone(),
-            layout: layout.clone(),
-        });
+        let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
         let updates = crate::admin::UpdateService::from_config(config.clone(), flavor);
         // The PROPFIND cache takes half of the cache budget (server.cache_mb).
         let cache_mb = config.read().server.cache_mb.max(2) as usize;

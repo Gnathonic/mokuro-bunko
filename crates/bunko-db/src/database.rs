@@ -101,6 +101,8 @@ pub struct Database {
     pub(crate) bcrypt_cost: u32,
     pub(crate) users_version: AtomicU64,
     pub(crate) last_audit_prune: Mutex<Option<Instant>>,
+    /// See `users.rs` `dummy_hash`: made on the first failed lookup.
+    pub(crate) dummy_hash: std::sync::OnceLock<String>,
 }
 
 impl std::fmt::Debug for Database {
@@ -161,6 +163,7 @@ impl Database {
             bcrypt_cost: options.bcrypt_cost.clamp(4, 31),
             users_version: AtomicU64::new(0),
             last_audit_prune: Mutex::new(None),
+            dummy_hash: std::sync::OnceLock::new(),
         };
         {
             let writer = db.writer.lock();

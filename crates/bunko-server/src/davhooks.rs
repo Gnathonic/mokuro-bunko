@@ -5,7 +5,6 @@
 use bunko_dav::{AuditEvent, DavHooks, PutFollowUp};
 use bunko_db::{AuditDetails, Database, NewAuditEvent};
 use parking_lot::RwLock;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::warn;
@@ -41,18 +40,11 @@ impl ServerDavHooks {
     }
 }
 
-/// `volume_uuid` of a primary sidecar (plain or gzip), if readable.
+/// `volume_uuid` of a primary sidecar (plain or gzip), if readable. Capped like every
+/// sidecar read (`MAX_SIDECAR_BYTES` inflated): this runs after any uploader's PUT, and an
+/// uncapped gunzip let a 1.5 MB upload hold 1.5 GiB.
 fn sidecar_volume_uuid(path: &Path) -> Option<String> {
-    let raw = std::fs::read(path).ok()?;
-    let bytes = if path.extension().is_some_and(|e| e == "gz") {
-        let mut out = Vec::new();
-        flate2::read::MultiGzDecoder::new(&raw[..])
-            .read_to_end(&mut out)
-            .ok()?;
-        out
-    } else {
-        raw
-    };
+    let bytes = bunko_library::sidecar::read_sidecar_bytes(path).ok()?;
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     v.get("volume_uuid")
         .and_then(|u| u.as_str())

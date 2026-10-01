@@ -377,3 +377,142 @@ async fn role_notes_approve_disable_delete() {
         (404, json!({"error": "User 'dash-name' not found"}))
     );
 }
+
+/// Regression (review finding): a cross-site page could drive the admin API with the
+/// admin's browser credentials (a `text/plain` form post parses as JSON here). Bodies
+/// must be declared JSON (415) and a foreign `Origin` is refused (403).
+#[tokio::test]
+async fn state_changes_refuse_forged_cross_site_requests() {
+    use axum::body::Body;
+    use http::{Request, header};
+    let h = Harness::new();
+    let admin = h.admin();
+    h.login("victim", Role::Editor);
+    let req = |method: &str, path: &str, headers: &[(&str, &str)], body: &'static str| {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {admin}"))
+            .header(header::HOST, "library.example:8080")
+            .header(header::CONTENT_LENGTH, body.len());
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        b.body(Body::from(body)).unwrap()
+    };
+    let promote = r#"{"role": "admin"}"#;
+    // A form-shaped body: 415, nothing changed.
+    for ct in [
+        None,
+        Some("text/plain"),
+        Some("application/x-www-form-urlencoded"),
+    ] {
+        let headers: Vec<(&str, &str)> = ct.map(|c| ("content-type", c)).into_iter().collect();
+        let r = h
+            .send(req(
+                "PUT",
+                "/_admin/api/users/victim/role",
+                &headers,
+                promote,
+            ))
+            .await;
+        assert_eq!(r.status.as_u16(), 415, "{ct:?}");
+        assert_eq!(
+            r.json(),
+            json!({"error": "Content-Type must be application/json"})
+        );
+    }
+    assert_eq!(h.db.get_user("victim").unwrap().unwrap().role, Role::Editor);
+    // A foreign Origin: 403 even with a JSON body, and for a body-less DELETE.
+    let r = h
+        .send(req(
+            "PUT",
+            "/_admin/api/users/victim/role",
+            &[
+                ("content-type", "application/json"),
+                ("origin", "https://evil.example"),
+            ],
+            promote,
+        ))
+        .await;
+    assert_eq!(r.status.as_u16(), 403);
+    assert_eq!(r.json(), json!({"error": "Cross-origin request refused"}));
+    let r = h
+        .send(req(
+            "DELETE",
+            "/_admin/api/users/victim",
+            &[("origin", "https://evil.example")],
+            "",
+        ))
+        .await;
+    assert_eq!(r.status.as_u16(), 403);
+    let victim = h.db.get_user("victim").unwrap().unwrap();
+    assert_eq!(
+        (victim.role, victim.status),
+        (Role::Editor, bunko_db::UserStatus::Active)
+    );
+    // The admin page itself (same origin), an allowed CORS origin, and no Origin at all
+    // (curl, scripts) still work; reads are never refused.
+    for origin in [
+        Some("http://library.example:8080"),
+        Some("http://localhost:5173"),
+        None,
+    ] {
+        let mut headers = vec![("content-type", "application/json")];
+        headers.extend(origin.map(|o| ("origin", o)));
+        let r = h
+            .send(req(
+                "PUT",
+                "/_admin/api/users/victim/notes",
+                &headers,
+                r#"{"notes": "ok"}"#,
+            ))
+            .await;
+        assert_eq!(r.status.as_u16(), 200, "{origin:?}: {}", r.text());
+    }
+    let r = h
+        .send(req(
+            "GET",
+            "/_admin/api/users",
+            &[("origin", "https://evil.example")],
+            "",
+        ))
+        .await;
+    assert_eq!(r.status.as_u16(), 200);
+}
+
+/// Regression (review finding): the admin API deleted, disabled or demoted the only
+/// active admin. Refused with 409 now; with a second admin it works.
+#[tokio::test]
+async fn the_last_active_admin_cannot_be_removed() {
+    let h = Harness::new();
+    let admin = h.admin(); // "boss", the only admin
+    for (method, path, body) in [
+        ("DELETE", "/_admin/api/users/boss", None),
+        ("POST", "/_admin/api/users/boss/disable", Some(json!({}))),
+        (
+            "PUT",
+            "/_admin/api/users/boss/role",
+            Some(json!({"role": "editor"})),
+        ),
+    ] {
+        let r = h.call(method, path, Some(&admin), body).await;
+        assert_eq!(r.status.as_u16(), 409, "{method} {path}: {}", r.text());
+        assert_eq!(r.json()["error"], bunko_db::LAST_ADMIN_MESSAGE);
+    }
+    let boss = h.db.get_user("boss").unwrap().unwrap();
+    assert_eq!(
+        (boss.role, boss.status),
+        (Role::Admin, bunko_db::UserStatus::Active)
+    );
+    h.login("second", Role::Admin);
+    let r = h
+        .call(
+            "PUT",
+            "/_admin/api/users/boss/role",
+            Some(&admin),
+            Some(json!({"role": "editor"})),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 200, "{}", r.text());
+}

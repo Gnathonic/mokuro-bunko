@@ -76,6 +76,11 @@ pub trait AuthBackend: Send + Sync {
     fn resolve_token(&self, token: &str) -> Option<AuthUser>;
     /// Password check for an active user.
     fn check_password(&self, username: &str, password: &str) -> Option<AuthUser>;
+    /// A recently verified `(username, password)` pair, answered without bcrypt or the
+    /// limiter (WebDAV clients send Basic credentials on every request).
+    fn cached_login(&self, _username: &str, _password: &str) -> Option<AuthUser> {
+        None
+    }
     /// Uploader ownership of a library file (and its sidecars/layers).
     fn can_user_delete_library_path(&self, username: &str, virtual_path: &str) -> bool;
     /// Uploader owns every tracked volume of the series.
@@ -134,8 +139,11 @@ pub fn authenticate(
             ..Default::default()
         },
         Ok(Some((username, password))) => {
+            if let Some(user) = backend.cached_login(&username, &password) {
+                return Identity { user: Some(user), ..Default::default() };
+            }
             let key = format!("{client_ip}:{username}");
-            if let Err(retry) = limiter.allow(&key) {
+            if let Err(retry) = limiter.allow_blocking(&key) {
                 return Identity {
                     error: Some(format!("Too many failed attempts. Retry in {retry}s")),
                     attempted_username: Some(username),

@@ -49,10 +49,7 @@ fn env(configure: impl FnOnce(&mut Config)) -> Env {
         )
         .unwrap(),
     );
-    let backend = Arc::new(DbAuthBackend {
-        db: db.clone(),
-        layout: layout.clone(),
-    });
+    let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
     let core = Core::new(Arc::new(RwLock::new(config)), None, backend);
     let ocr = OcrControl::new(OcrDeps {
         core: core.clone(),
@@ -799,10 +796,7 @@ async fn local_lanes_run_the_in_process_processor() {
         )
         .unwrap(),
     );
-    let backend = Arc::new(DbAuthBackend {
-        db: db.clone(),
-        layout: layout.clone(),
-    });
+    let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
     let core = Core::new(Arc::new(RwLock::new(config)), None, backend);
     let fake = bunko_processor::FakePipeline::new(bunko_processor::FakeConfig {
         engines: vec!["hayai-nova".into()],
@@ -1060,6 +1054,94 @@ async fn the_admin_panel_reads_the_scheduler() {
     assert_eq!(census.1["enabled"], false);
     let outcome = outcome.unwrap();
     assert_eq!(outcome["applied"], true);
+    e.stop.cancel();
+    e.ocr.stop().await;
+}
+
+/// Regression (review finding): a processor socket accepted 64 MiB messages (a 60 MB
+/// fragmented message was buffered whole) and binary frames. Messages and frames are now
+/// capped at 1 MiB and a binary message closes the socket with 1008 (policy).
+#[tokio::test]
+async fn oversized_and_binary_messages_close_the_socket() {
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let e = env(|_| {});
+    e.db.create_user(
+        "tower-acct",
+        "processor-pass-1",
+        Role::Processor,
+        UserStatus::Active,
+        "",
+    )
+    .unwrap();
+    let app = bunko_server::ocr::processor_router(e.ocr.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let auth = basic("tower-acct", "processor-pass-1");
+    let http = reqwest::Client::new();
+    let connect = || async {
+        let reg: Value = http
+            .post(format!("http://{addr}/_processor/register"))
+            .header("authorization", &auth)
+            .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"]}}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let pid = reg["processor_id"].as_str().unwrap().to_string();
+        let mut req = format!("ws://{addr}/_processor/{pid}/socket")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut()
+            .insert("authorization", auth.parse().unwrap());
+        tokio_tungstenite::connect_async(req).await.unwrap().0
+    };
+    // Waits for the server to end the socket; the close frame it sent, if any.
+    async fn closed_by_server(
+        rx: &mut (
+                 impl futures_util::Stream<
+            Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin
+             ),
+    ) -> Option<u16> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.next().await {
+                    Some(Ok(WsMessage::Close(frame))) => return frame.map(|f| u16::from(f.code)),
+                    Some(Ok(_)) => continue,
+                    Some(Err(_)) | None => return None,
+                }
+            }
+        })
+        .await
+        .expect("the server closes the socket")
+    }
+
+    // A legitimate event well under the cap is read.
+    let ws = connect().await;
+    let (mut tx, mut rx) = ws.split();
+    let stats = json!({"event": "stats", "sid": "nope", "pipeline": {"pad": "x".repeat(200_000)}});
+    tx.send(WsMessage::Text(stats.to_string().into()))
+        .await
+        .unwrap();
+    // Over 1 MiB: refused while it arrives, the socket ends.
+    let big = format!(
+        r#"{{"event":"stats","sid":"x","pipeline":"{}"}}"#,
+        "0".repeat(2 << 20)
+    );
+    let _ = tx.send(WsMessage::Text(big.into())).await;
+    let _ = closed_by_server(&mut rx).await;
+
+    // A binary message: closed with 1008.
+    let ws = connect().await;
+    let (mut tx, mut rx) = ws.split();
+    tx.send(WsMessage::Binary(vec![0u8; 16].into()))
+        .await
+        .unwrap();
+    assert_eq!(closed_by_server(&mut rx).await, Some(1008));
     e.stop.cancel();
     e.ocr.stop().await;
 }

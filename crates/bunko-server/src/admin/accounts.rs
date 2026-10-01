@@ -1,10 +1,15 @@
 //! Users and invites (spec db-auth-admin §18.3, §18.4).
+//!
+//! Changed from 0.5.2: deleting, disabling or demoting the last active admin is refused
+//! with 409 and `bunko_db::LAST_ADMIN_MESSAGE` (checked in the transaction that makes the
+//! change). The CLI `admin` commands still allow it: whoever runs them owns the server's
+//! files and can always add an admin back with `admin add-user --role admin`.
 
 use super::{AdminState, ApiRequest, blocking, error, internal, json_response, ok};
 use axum::response::Response;
 use bunko_core::Role;
 use bunko_db::{
-    AuditDetails, DbError, NewAuditEvent, normalize_role, pyfmt, validate_password,
+    AuditDetails, DbError, KeepAdmin, NewAuditEvent, normalize_role, pyfmt, validate_password,
     validate_username,
 };
 use serde_json::{Value, json};
@@ -135,7 +140,7 @@ pub(super) async fn create_user(s: &AdminState, req: &ApiRequest) -> Response {
 pub(super) async fn delete_user(s: &AdminState, req: &ApiRequest, username: &str) -> Response {
     let db = s.db();
     let u = username.to_string();
-    let deleted = match blocking(move || db.delete_user(&u)).await {
+    let deleted = match blocking(move || db.delete_user_with(&u, KeepAdmin::Keep)).await {
         Ok(Ok(d)) => d,
         Ok(Err(e)) => return db_error(e),
         Err(r) => return r,
@@ -245,7 +250,7 @@ pub(super) async fn change_role(s: &AdminState, req: &ApiRequest, username: &str
     };
     let db = s.db();
     let u = username.to_string();
-    match blocking(move || db.update_user_role(&u, role)).await {
+    match blocking(move || db.update_user_role_with(&u, role, KeepAdmin::Keep)).await {
         Ok(Ok(true)) => {
             if role != Role::Processor {
                 s.drop_processors(
@@ -282,7 +287,7 @@ pub(super) async fn approve_user(s: &AdminState, req: &ApiRequest, username: &st
 pub(super) async fn disable_user(s: &AdminState, req: &ApiRequest, username: &str) -> Response {
     let db = s.db();
     let u = username.to_string();
-    match blocking(move || db.disable_user(&u)).await {
+    match blocking(move || db.disable_user_with(&u, KeepAdmin::Keep)).await {
         Ok(Ok(true)) => {
             s.drop_processors(username, "its account was disabled");
             user_after(s, req, "admin_disable_user", username, None).await

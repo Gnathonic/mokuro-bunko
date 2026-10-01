@@ -82,10 +82,7 @@ impl Harness {
         let config_path = dir.path().join("config.yaml");
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
-        let backend = Arc::new(DbAuthBackend {
-            db: db.clone(),
-            layout: layout.clone(),
-        });
+        let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
         let core = Core::new(config.clone(), Some(config_path.clone()), backend);
         let dropped: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
         let restarts = Arc::new(AtomicUsize::new(0));
@@ -157,6 +154,7 @@ impl Harness {
         self.send(req.body(body).unwrap()).await
     }
 
+    /// Raw body bytes, declared `application/json`.
     pub async fn raw(&self, method: &str, path: &str, token: Option<&str>, body: Vec<u8>) -> Reply {
         let mut req = Request::builder()
             .method(Method::from_bytes(method.as_bytes()).unwrap())
@@ -166,12 +164,13 @@ impl Harness {
         }
         let req = req
             .header(header::CONTENT_LENGTH, body.len())
+            .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body))
             .unwrap();
         self.send(req).await
     }
 
-    async fn send(&self, req: Request<Body>) -> Reply {
+    pub async fn send(&self, req: Request<Body>) -> Reply {
         let resp = self.app.clone().oneshot(req).await.expect("infallible");
         let status = resp.status();
         let headers = resp.headers().clone();
