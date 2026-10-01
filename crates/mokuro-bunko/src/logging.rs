@@ -76,10 +76,10 @@ impl Write for Handle {
         self.0.lock().map_err(|_| io::Error::other("log lock poisoned"))?.write(buf)
     }
     fn flush(&mut self) -> io::Result<()> {
-        if let Ok(mut g) = self.0.lock() {
-            if let Some(f) = g.file.as_mut() {
-                f.flush()?;
-            }
+        if let Ok(mut g) = self.0.lock()
+            && let Some(f) = g.file.as_mut()
+        {
+            f.flush()?;
         }
         Ok(())
     }
