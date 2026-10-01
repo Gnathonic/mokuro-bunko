@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -18,6 +19,7 @@ from mokuro_bunko.metadata import service as metadata_service
 from mokuro_bunko.metadata.compiler import volume_key_for
 from mokuro_bunko.metadata.reader_compat import normalize_volume_title_key
 from mokuro_bunko.metadata.service import MetadataService, MetadataUpdateBusy
+from mokuro_bunko.middleware import fs_watcher
 from mokuro_bunko.webdav.resources import _PATH_WRITE_LOCKS
 
 
@@ -110,6 +112,9 @@ class TestRegeneration:
                 "archive_size": (library / "Dr Stone" / "Volume 01.cbz").stat().st_size,
                 "mokuro_size": sidecar_stat.st_size,
                 "mokuro_modified": int(sidecar_stat.st_mtime),
+                "mokuro_sha256": hashlib.sha256(
+                    (library / "Dr Stone" / "Volume 01.mokuro").read_bytes()
+                ).hexdigest(),
             }
         ]
 
@@ -1324,3 +1329,199 @@ class TestReentrantPublishHook:
         thread.join(timeout=5.0)
         assert finished.is_set(), "a re-entrant on_published hook deadlocked on _pass_lock"
         service.stop()
+
+
+def _sidecar_sha256(library: Path, series: str, volume: str) -> str:
+    return hashlib.sha256((library / series / f"{volume}.mokuro").read_bytes()).hexdigest()
+
+
+def _published(library: Path, series: str) -> dict[str, object]:
+    return json.loads((library / series / "series.json").read_text("utf-8"))
+
+
+def _strip_cached_hash(database: Database, library: Path, series: str, volume: str) -> None:
+    """Rewrite a volume's cache row into the shape a pre-hash bunko left."""
+    cbz = library / series / f"{volume}.cbz"
+    sidecar = library / series / f"{volume}.mokuro"
+    cbz_stat, sidecar_stat = cbz.stat(), sidecar.stat()
+    sidecar_key = f"{sidecar.name}:{sidecar_stat.st_size}:{sidecar_stat.st_mtime}"
+    key = volume_key_for(series, volume)
+    row = database.get_cached_volume_entry(key, cbz_stat.st_size, cbz_stat.st_mtime, sidecar_key)
+    assert row is not None and "mokuro_sha256" in row
+    del row["mokuro_sha256"]
+    database.put_cached_volume_entry(
+        key,
+        normalize_volume_title_key(series),
+        row,
+        cbz_stat.st_size,
+        cbz_stat.st_mtime,
+        sidecar_key,
+    )
+
+
+class TestMokuroSha256:
+    """The primary sidecar's hash in `series.json`: server-computed, index data only."""
+
+    def test_a_client_sent_hash_is_ignored(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.regenerate_all()
+        forged = "0" * 64
+        assert service.apply_series_update(
+            "Dr Stone",
+            series_update(
+                volumes=[
+                    {"volume_uuid": "uuid-Volume 01", "mokuro_sha256": forged, "offset": 3},
+                    {"volume_uuid": "uuid-not-here", "mokuro_sha256": forged},
+                ]
+            ),
+            "alice",
+        )
+        [volume] = _published(library, "Dr Stone")["volumes"]
+        assert volume["offset"] == 3      # the request's volumes WERE read...
+        assert volume["mokuro_sha256"] == _sidecar_sha256(library, "Dr Stone", "Volume 01")
+        assert forged.encode() not in (library / "Dr Stone" / "series.json").read_bytes()
+
+    def test_a_new_primary_changes_the_hash_but_never_the_facts_stamp(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        assert service.apply_series_update("Dr Stone", series_update(), "alice")
+        before = _published(library, "Dr Stone")
+
+        sidecar = library / "Dr Stone" / "Volume 01.mokuro"
+        text = sidecar.read_text("utf-8")
+        assert '"blocks": []' in text
+        sidecar.write_text(text.replace('"blocks": []', '"blocks": [], "x": 1'), "utf-8")
+        assert service.regenerate_series("Dr Stone")
+        after = _published(library, "Dr Stone")
+
+        assert after["volumes"][0]["mokuro_sha256"] == _sidecar_sha256(
+            library, "Dr Stone", "Volume 01"
+        )
+        assert after["volumes"][0]["mokuro_sha256"] != before["volumes"][0]["mokuro_sha256"]
+        assert after["updated_at"] == before["updated_at"] == "2026-08-18T19:36:24.324Z"
+        assert service.database.get_series_facts("dr stone")["facts_updated_at"] == (
+            "2026-08-18T19:36:24.324Z"
+        )
+
+    def test_the_catalog_never_carries_it(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.regenerate_all()
+        assert "mokuro_sha256" in _published(library, "Dr Stone")["volumes"][0]
+        assert b"sha256" not in (library / "catalog.json").read_bytes()
+
+    def test_a_renamed_series_publishes_the_same_hash(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.regenerate_all()
+        digest = _published(library, "Dr Stone")["volumes"][0]["mokuro_sha256"]
+
+        (library / "Dr Stone").rename(library / "Dr. Stone")
+        service.regenerate_all()
+        assert _published(library, "Dr. Stone")["volumes"][0]["mokuro_sha256"] == digest
+
+    def test_legacy_rows_fill_on_the_background_pass_not_on_a_put(
+        self, service: MetadataService, library: Path
+    ) -> None:
+        write_volume(library, "Dr Stone", "Volume 01")
+        write_volume(library, "Dr Stone", "Volume 02")
+        service.regenerate_all()
+        for volume in ("Volume 01", "Volume 02"):
+            _strip_cached_hash(service.database, library, "Dr Stone", volume)
+        (library / "Dr Stone" / "series.json").unlink()
+
+        # A client PUT republishes from the cache as it stands: no sidecar read
+        # on the request, so no hash yet.
+        assert service.apply_series_update("Dr Stone", series_update(), "alice")
+        assert all("mokuro_sha256" not in v for v in _published(library, "Dr Stone")["volumes"])
+
+        # The background pass fills both, once, and then the file is stable.
+        assert service.regenerate_all() >= 1
+        assert [v["mokuro_sha256"] for v in _published(library, "Dr Stone")["volumes"]] == [
+            _sidecar_sha256(library, "Dr Stone", "Volume 01"),
+            _sidecar_sha256(library, "Dr Stone", "Volume 02"),
+        ]
+        sidecar = library / "Dr Stone" / "series.json"
+        old = sidecar.stat().st_mtime - 60
+        os.utime(sidecar, (old, old))
+        assert service.regenerate_all() == 0
+        assert sidecar.stat().st_mtime == old
+
+    def test_a_debounced_series_regen_fills_too(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        database = Database(tmp_path / "test.db")
+        service = MetadataService(library, database, debounce_seconds=0.05)
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.regenerate_all()
+        _strip_cached_hash(database, library, "Dr Stone", "Volume 01")
+        (library / "Dr Stone" / "series.json").unlink()
+
+        service.schedule_series_regeneration("Dr Stone")
+        service._series_timers[normalize_volume_title_key("Dr Stone")].join(timeout=5.0)
+        assert _published(library, "Dr Stone")["volumes"][0]["mokuro_sha256"] == (
+            _sidecar_sha256(library, "Dr Stone", "Volume 01")
+        )
+        service.stop()
+
+
+class TestReOcrReachesTheHash:
+    """A new primary written into the library is seen by the watcher, routed to
+    its series, and recompiled with the new hash -- end to end, real inotify."""
+
+    @pytest.mark.skipif(not fs_watcher.WATCHDOG_AVAILABLE, reason="watchdog not installed")
+    def test_an_ocr_worker_style_install_republishes_the_new_hash(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        database = Database(tmp_path / "test.db")
+        service = MetadataService(library, database, debounce_seconds=0.05)
+        write_volume(library, "Dr Stone", "Volume 01")
+        service.regenerate_all()
+        old_digest = _published(library, "Dr Stone")["volumes"][0]["mokuro_sha256"]
+
+        # Exactly the server's routing (`server.py`'s `on_library_change`).
+        def on_change(path: str) -> None:
+            kind, series_title = fs_watcher.classify_change(library, path)
+            if kind == "series" and series_title is not None:
+                service.schedule_series_regeneration(series_title)
+            elif kind == "library":
+                service.schedule_regeneration()
+
+        watcher = fs_watcher.LibraryWatcher(watch_path=library, on_change=on_change)
+        watcher.start()
+        try:
+            # The OCR worker's install: the old primary is gone, and a new one
+            # is moved in from a workspace outside the library
+            # (`OCRProcessor.install_session_sidecar`'s `shutil.move`).
+            workspace = tmp_path / "workspace"
+            workspace.mkdir()
+            staged = workspace / "Volume 01.mokuro"
+            old_text = (library / "Dr Stone" / "Volume 01.mokuro").read_text("utf-8")
+            staged.write_text(old_text.replace('"0.2.2"', '"0.3.0"'), "utf-8")
+            new_digest = hashlib.sha256(staged.read_bytes()).hexdigest()
+            assert new_digest != old_digest
+            (library / "Dr Stone" / "Volume 01.mokuro").unlink()
+            shutil.move(str(staged), str(library / "Dr Stone" / "Volume 01.mokuro"))
+
+            deadline = time.monotonic() + 10.0
+            published = old_digest
+            while time.monotonic() < deadline:
+                try:
+                    published = _published(library, "Dr Stone")["volumes"][0].get(
+                        "mokuro_sha256"
+                    )
+                except (OSError, ValueError):
+                    published = None
+                if published == new_digest:
+                    break
+                time.sleep(0.05)
+            assert published == new_digest
+            assert _published(library, "Dr Stone")["volumes"][0]["mokuro_version"] == "0.3.0"
+        finally:
+            watcher.stop()
+            service.stop()

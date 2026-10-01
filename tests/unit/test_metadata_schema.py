@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from mokuro_bunko.metadata.schema import (
@@ -285,6 +287,82 @@ class TestFreshnessStamps:
         for key in ("mokuro_size", "mokuro_modified", "cover_size", "cover_modified"):
             assert f'"{key}"' not in text
         assert "null" not in text
+
+
+HASH = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+
+
+class TestMokuroSha256:
+    def test_sits_right_after_mokuro_modified(self) -> None:
+        data = dump_series_file(
+            series_title="Dr Stone",
+            facts=SeriesFacts(),
+            index=SeriesIndexData(volume_offsets={"u1": 7}),
+            volumes=[
+                VolumeEntry(
+                    "u1", "Volume 1", 180, 9000, "0.2.2", spine_width=250.5,
+                    archive_size=99, mokuro_size=15000, mokuro_modified=1700000100,
+                    mokuro_sha256=HASH, cover_size=4096, cover_modified=1700000200,
+                ),
+            ],
+        )
+        assert data.decode("utf-8") == (
+            '{"version":2,"series_title":"Dr Stone","external_ids":{},"titles":{},'
+            '"synonyms":[],"updated_at":"1970-01-01T00:00:00.000Z","volumes":['
+            '{"volume_uuid":"u1","volume_title":"Volume 1","page_count":180,'
+            '"character_count":9000,"mokuro_version":"0.2.2","spine_width":250.5,'
+            '"archive_size":99,"mokuro_size":15000,"mokuro_modified":1700000100,'
+            f'"mokuro_sha256":"{HASH}",'
+            '"cover_size":4096,"cover_modified":1700000200,"offset":7}]}'
+        )
+
+    def test_omitted_not_nulled_when_absent(self) -> None:
+        volume = VolumeEntry("u1", "Volume 1", 1, 1, "", mokuro_size=1, mokuro_modified=1)
+        text = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(), volumes=[volume]
+        ).decode("utf-8")
+        assert "mokuro_sha256" not in text
+        assert "null" not in text
+
+    @pytest.mark.parametrize(
+        "bad", ["", HASH.upper(), HASH[:-1], HASH + "0", "z" * 64, "sha256:" + HASH[:57]]
+    )
+    def test_anything_but_64_lowercase_hex_is_dropped(self, bad: str) -> None:
+        volume = VolumeEntry("u1", "Volume 1", 1, 1, "0.2.2", mokuro_sha256=bad)
+        text = dump_series_file(
+            series_title="S", facts=SeriesFacts(), index=SeriesIndexData(), volumes=[volume]
+        ).decode("utf-8")
+        assert "mokuro_sha256" not in text
+
+    def test_is_index_data_and_never_moves_the_facts_stamp(self) -> None:
+        def dump(digest: str | None) -> dict[str, object]:
+            return json.loads(
+                dump_series_file(
+                    series_title="Dr Stone",
+                    facts=DR_STONE,
+                    index=SeriesIndexData(),
+                    volumes=[VolumeEntry("u1", "Volume 1", 1, 1, "0.2.2", mokuro_sha256=digest)],
+                )
+            )
+
+        before, after = dump(None), dump(HASH)
+        assert before["updated_at"] == after["updated_at"] == DR_STONE.updated_at
+
+    def test_rebuild_with_hashes_is_byte_identical(self) -> None:
+        volumes = [
+            VolumeEntry("u2", "Volume 2", 1, 1, "0.2.2", mokuro_sha256=HASH),
+            VolumeEntry("u1", "Volume 1", 1, 1, "0.2.2", mokuro_sha256="0" * 64),
+        ]
+        first = dump_series_file(
+            series_title="S", facts=DR_STONE, index=SeriesIndexData(), volumes=volumes
+        )
+        second = dump_series_file(
+            series_title="S", facts=DR_STONE, index=SeriesIndexData(), volumes=volumes[::-1]
+        )
+        assert first == second
+
+    def test_never_reaches_the_catalog(self) -> None:
+        assert b"sha256" not in dump_catalog_file([("Dr Stone", DR_STONE), ("Aria", SeriesFacts())])
 
 
 class TestSeriesFileDeterminism:

@@ -17,9 +17,11 @@ the sidecar's pages are really there.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import os
 import zipfile
+import zlib
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -134,6 +136,19 @@ def cached_page_count(database: Database, library_path: Path, cbz_path: Path) ->
         return None
     pages = int(entry.page_count or 0)
     return pages if pages > 0 else None
+
+
+def cached_mokuro_sha256(database: Database, library_path: Path, cbz_path: Path) -> str | None:
+    """The primary sidecar's `mokuro_sha256` -- from the CACHE only, else None.
+
+    For the per-volume manifest, which is served on a request and so must
+    never read a sidecar: the same current-or-nothing lookup as
+    :func:`cached_missing_pages`, keyed on the very sidecar the manifest names
+    as `ocr` (`<stem>.mokuro`, else `<stem>.mokuro.gz`). None until the
+    metadata pass has hashed this sidecar, and again as soon as it changes.
+    """
+    entry = _cached_entry(database, library_path, cbz_path)
+    return entry.mokuro_sha256 if entry is not None else None
 
 
 def _cached_entry(
@@ -262,18 +277,34 @@ def _cover_stat(cbz_path: Path) -> os.stat_result | None:
         return None
 
 
-def _read_sidecar(path: Path) -> dict[str, Any] | None:
-    """Parse a `.mokuro`/`.mokuro.gz`; None when unreadable or not an object."""
+def _load_sidecar(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Parse a `.mokuro`/`.mokuro.gz`, and hash the JSON bytes it parsed.
+
+    Returns `(data, mokuro_sha256)`: the parsed object, or None when the file
+    is unreadable or not a JSON object; and the lowercase hex SHA-256 of the
+    file's JSON bytes as stored -- after gunzip for `.gz`, so the same JSON
+    hashes the same whether it is kept plain or compressed. The hash is
+    published only for a sidecar that parsed: one that degrades the volume to
+    image-only has no OCR a reader could install, so there is nothing for it
+    to compare.
+
+    One read serves both, so hashing costs a cache miss no extra I/O. The
+    bytes are decoded as strict UTF-8 before parsing (not handed to
+    `json.loads` as bytes, which would also accept a BOM or UTF-16), so what
+    parses is exactly what parsed before the hash existed.
+    """
     try:
         if path.name.lower().endswith(".gz"):
-            with gzip.open(path, "rt", encoding="utf-8") as handle:
-                data = json.load(handle)
+            with gzip.open(path, "rb") as handle:
+                raw = handle.read()
         else:
-            with path.open("r", encoding="utf-8") as handle:
-                data = json.load(handle)
-    except (OSError, UnicodeDecodeError, ValueError, EOFError):
-        return None
-    return data if isinstance(data, dict) else None
+            raw = path.read_bytes()
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, EOFError, zlib.error):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    return data, hashlib.sha256(raw).hexdigest()
 
 
 def _archive_image_names(cbz_path: Path) -> list[str] | None:
@@ -367,7 +398,7 @@ def _compile_volume(
     is forever.
     """
     volume_title = cbz_path.with_suffix("").name
-    data = _read_sidecar(sidecar) if sidecar is not None else None
+    data, mokuro_sha256 = _load_sidecar(sidecar) if sidecar is not None else (None, None)
 
     try:
         archive_size = cbz_path.stat().st_size
@@ -449,6 +480,7 @@ def _compile_volume(
             archive_size=archive_size or None,
             mokuro_size=mokuro_size,
             mokuro_modified=mokuro_modified,
+            mokuro_sha256=mokuro_sha256,
         ),
         cacheable,
     )
@@ -466,6 +498,7 @@ def _entry_to_dict(entry: VolumeEntry) -> dict[str, Any]:
         "archive_size": entry.archive_size,
         "mokuro_size": entry.mokuro_size,
         "mokuro_modified": entry.mokuro_modified,
+        "mokuro_sha256": entry.mokuro_sha256,
     }
 
 
@@ -497,17 +530,47 @@ def _entry_from_dict(raw: dict[str, Any]) -> VolumeEntry | None:
             # both stamps `None` forever (review round 1, Finding 1).
             mokuro_size=raw["mokuro_size"],
             mokuro_modified=raw["mokuro_modified"],
+            # `.get`, deliberately NOT the required-key backfill above: a row
+            # written before the hash existed is otherwise still current, and
+            # missing it outright would also blank the cache-only readers
+            # (`cached_missing_pages`, `cached_page_count`) for every volume
+            # until the pass recompiled it. `compile_series_volumes` fills the
+            # hash in on its own -- see `_needs_hash_fill`.
+            mokuro_sha256=raw.get("mokuro_sha256"),
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _needs_hash_fill(cached: dict[str, Any]) -> bool:
+    """Is this current cache row one written before `mokuro_sha256` existed?
+
+    The KEY is what tells: since the hash landed, `_entry_to_dict` writes it
+    on every row, `None` included (no sidecar, or one that did not parse). A
+    row without the key predates it; when its volume has a sidecar, the hash
+    was never taken from it.
+    """
+    return "mokuro_sha256" not in cached
 
 
 def compile_series_volumes(
     series: SeriesFolder,
     *,
     database: Database | None = None,
+    fill_hashes: bool = True,
 ) -> list[VolumeEntry]:
     """Every volume of one series, in natural title order.
+
+    `fill_hashes`: complete cache rows written before `mokuro_sha256` existed
+    (`_needs_hash_fill`) by reading just their sidecar -- no archive open,
+    the rest of the row stays as cached -- and storing the row back, so each
+    volume is filled exactly once. The background passes fill; a caller on a
+    request path passes False and publishes such a volume without the hash
+    for now, because a series whose every row predates the hash would
+    otherwise read every one of its sidecars inside the request. A sidecar
+    that cannot be read or parsed right now is left unfilled and retried on
+    the next pass rather than stored as "no hash", so a network share that
+    hiccups does not freeze a volume without one.
 
     `series_key` here feeds only `series_entry_cache.series_key` — an
     informational column nothing currently queries by (every lookup filters
@@ -541,6 +604,23 @@ def compile_series_volumes(
             )
             if cached is not None:
                 entry = _entry_from_dict(cached)
+                if (
+                    entry is not None
+                    and fill_hashes
+                    and sidecar is not None
+                    and _needs_hash_fill(cached)
+                ):
+                    _, digest = _load_sidecar(sidecar)
+                    if digest is not None:
+                        entry = replace(entry, mokuro_sha256=digest)
+                        database.put_cached_volume_entry(
+                            key,
+                            series_key,
+                            _entry_to_dict(entry),
+                            cbz_stat.st_size,
+                            cbz_stat.st_mtime,
+                            sidecar_key,
+                        )
 
         if entry is None:
             entry, cacheable = _compile_volume(series.title, cbz_path, sidecar, sidecar_stat)

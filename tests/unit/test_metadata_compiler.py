@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
+import os
 import zipfile
 from pathlib import Path
 
 import pytest
 
 from mokuro_bunko.database import Database
+from mokuro_bunko.metadata import compiler as compiler_module
 from mokuro_bunko.metadata.compiler import (
     SeriesFolder,
+    cached_missing_pages,
+    cached_mokuro_sha256,
+    cached_page_count,
     compile_series_volumes,
     iter_series_folders,
 )
@@ -611,3 +617,372 @@ class TestMatchedPageCount:
         assert database.get_cached_volume_entry(
             "Dr Stone/v1.cbz", cbz_stat.st_size, cbz_stat.st_mtime, sidecar_key
         )["matched_page_count"] == 2
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sidecar_key_of(path: Path) -> str:
+    stat = path.stat()
+    return f"{path.name}:{stat.st_size}:{stat.st_mtime}"
+
+
+class TestMokuroSha256:
+    """`mokuro_sha256`: the primary sidecar's JSON bytes, hashed as stored (gunzipped)."""
+
+    def test_hashes_the_plain_sidecars_bytes(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        raw = json.dumps(mokuro_payload(), ensure_ascii=False).encode("utf-8")
+        (series / "v1.mokuro").write_bytes(raw)
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_sha256 == sha256_hex(raw)
+        assert len(entry.mokuro_sha256) == 64
+        assert entry.mokuro_sha256 == entry.mokuro_sha256.lower()
+
+    def test_the_same_json_hashes_the_same_plain_or_gzipped(self, library: Path) -> None:
+        raw = json.dumps(mokuro_payload(), ensure_ascii=False).encode("utf-8")
+        plain = library / "Plain"
+        write_cbz(plain / "v1.cbz")
+        (plain / "v1.mokuro").write_bytes(raw)
+        packed = library / "Packed"
+        write_cbz(packed / "v1.cbz")
+        # Two different gzip framings of the same JSON (header mtime, level):
+        # the hash is of the JSON, never of the compressed file.
+        (packed / "v1.mokuro.gz").write_bytes(gzip.compress(raw, compresslevel=9, mtime=1))
+        [from_plain] = compile_series_volumes(SeriesFolder("Plain", plain))
+        [from_gz] = compile_series_volumes(SeriesFolder("Packed", packed))
+        assert from_gz.mokuro_sha256 == from_plain.mokuro_sha256 == sha256_hex(raw)
+
+        (packed / "v1.mokuro.gz").write_bytes(gzip.compress(raw, compresslevel=1, mtime=2))
+        [again] = compile_series_volumes(SeriesFolder("Packed", packed))
+        assert again.mokuro_sha256 == sha256_hex(raw)
+
+    def test_the_bytes_are_hashed_as_stored_not_re_serialized(self, library: Path) -> None:
+        # Pretty-printed and compact forms of the same object are different
+        # files to a reader, so they hash differently.
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        pretty = json.dumps(mokuro_payload(), indent=2).encode("utf-8")
+        (series / "v1.mokuro").write_bytes(pretty)
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_sha256 == sha256_hex(pretty)
+        assert entry.mokuro_sha256 != sha256_hex(json.dumps(mokuro_payload()).encode("utf-8"))
+
+    def test_an_image_only_volume_has_no_hash(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz", pages=3)
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_sha256 is None
+        dumped = dump_series_file(
+            series_title="Dr Stone", facts=SeriesFacts(), index=SeriesIndexData(), volumes=[entry]
+        )
+        assert b"mokuro_sha256" not in dumped
+
+    @pytest.mark.parametrize(
+        ("name", "body"),
+        [
+            ("v1.mokuro", b"{ this is not json"),
+            ("v1.mokuro", b"[1, 2, 3]"),
+            ("v1.mokuro", b"\xff\xfe not utf-8"),
+            ("v1.mokuro.gz", b"not gzip data at all"),
+        ],
+    )
+    def test_a_sidecar_that_does_not_parse_has_no_hash(
+        self, library: Path, name: str, body: bytes
+    ) -> None:
+        # It degrades the volume to image-only: there is no OCR a reader could
+        # install from it, so nothing for a reader to compare.
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / name).write_bytes(body)
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_version == ""
+        assert entry.mokuro_sha256 is None
+
+    def test_a_truncated_gzip_has_no_hash(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        full = gzip.compress(json.dumps(mokuro_payload()).encode("utf-8"))
+        (series / "v1.mokuro.gz").write_bytes(full[: len(full) // 2])
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_sha256 is None
+
+    def test_an_ocr_layer_is_never_hashed_as_the_primary(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        layer = json.dumps(mokuro_payload(version="layer")).encode("utf-8")
+        (series / "v1.hayai-nova.mokuro").write_bytes(layer)
+        (series / "v1.paddle-manga.mokuro.gz").write_bytes(gzip.compress(layer))
+        # Only layers: the volume has no primary, so no hash at all.
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_sha256 is None
+
+        primary = json.dumps(mokuro_payload()).encode("utf-8")
+        (series / "v1.mokuro").write_bytes(primary)
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_sha256 == sha256_hex(primary)
+
+    def test_plain_beats_gzip_like_the_rest_of_the_entry(self, library: Path) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        plain = json.dumps(mokuro_payload(version="plain")).encode("utf-8")
+        packed = json.dumps(mokuro_payload(version="gz")).encode("utf-8")
+        (series / "v1.mokuro").write_bytes(plain)
+        (series / "v1.mokuro.gz").write_bytes(gzip.compress(packed))
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series))
+        assert entry.mokuro_version == "plain"
+        assert entry.mokuro_sha256 == sha256_hex(plain)
+
+    def test_rewriting_the_primary_changes_the_hash_through_the_cache(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        first_bytes = json.dumps(mokuro_payload()).encode("utf-8")
+        (series / "v1.mokuro").write_bytes(first_bytes)
+        database = Database(tmp_path / "test.db")
+        [first] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert first.mokuro_sha256 == sha256_hex(first_bytes)
+
+        # A re-OCR: a new primary of the same length, mtime pushed forward so
+        # the change cannot hide inside the filesystem's timestamp grain.
+        second_bytes = first_bytes.replace(b"0.2.2", b"0.2.3")
+        assert len(second_bytes) == len(first_bytes)
+        (series / "v1.mokuro").write_bytes(second_bytes)
+        stat = (series / "v1.mokuro").stat()
+        os.utime(series / "v1.mokuro", ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+        [second] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert second.mokuro_sha256 == sha256_hex(second_bytes)
+        assert second.mokuro_sha256 != first.mokuro_sha256
+
+    def test_the_hash_round_trips_through_the_entry_cache_without_a_read(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        raw = json.dumps(mokuro_payload()).encode("utf-8")
+        (series / "v1.mokuro").write_bytes(raw)
+        database = Database(tmp_path / "test.db")
+        compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+
+        cbz_stat = (series / "v1.cbz").stat()
+        cached = database.get_cached_volume_entry(
+            "Dr Stone/v1.cbz",
+            cbz_stat.st_size,
+            cbz_stat.st_mtime,
+            sidecar_key_of(series / "v1.mokuro"),
+        )
+        assert cached is not None
+        assert cached["mokuro_sha256"] == sha256_hex(raw)
+
+        def no_read(path: Path) -> object:
+            raise AssertionError(f"a warm cache must not read {path}")
+
+        monkeypatch.setattr(compiler_module, "_load_sidecar", no_read)
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert entry.mokuro_sha256 == sha256_hex(raw)
+
+    def test_an_image_only_row_records_none_and_is_never_filled(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        database = Database(tmp_path / "test.db")
+        compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        cbz_stat = (series / "v1.cbz").stat()
+        cached = database.get_cached_volume_entry(
+            "Dr Stone/v1.cbz", cbz_stat.st_size, cbz_stat.st_mtime, ""
+        )
+        assert cached is not None
+        assert "mokuro_sha256" in cached and cached["mokuro_sha256"] is None
+
+        def no_read(path: Path) -> object:
+            raise AssertionError(f"nothing to read for an image-only volume: {path}")
+
+        monkeypatch.setattr(compiler_module, "_load_sidecar", no_read)
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert entry.mokuro_sha256 is None
+
+
+def _seed_legacy_row(database: Database, series: Path, **fields: object) -> str:
+    """A cache row exactly as a pre-hash bunko wrote it: every key but the hash."""
+    cbz_stat = (series / "v1.cbz").stat()
+    sidecar = series / "v1.mokuro"
+    sidecar_key = sidecar_key_of(sidecar) if sidecar.exists() else ""
+    row: dict[str, object] = {
+        "volume_uuid": "cached-uuid",
+        "volume_title": "v1",
+        "page_count": 999,
+        "matched_page_count": 990,
+        "character_count": 888,
+        "mokuro_version": "cached",
+        "spine_width": None,
+        "archive_size": 1,
+        "mokuro_size": 111,
+        "mokuro_modified": 222,
+    }
+    row.update(fields)
+    database.put_cached_volume_entry(
+        "Dr Stone/v1.cbz", "dr stone", row, cbz_stat.st_size, cbz_stat.st_mtime, sidecar_key
+    )
+    return sidecar_key
+
+
+class TestHashFill:
+    """Rows cached before the hash existed are completed once, from the sidecar alone."""
+
+    def test_a_legacy_row_gets_its_hash_without_a_recompile(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        raw = json.dumps(mokuro_payload()).encode("utf-8")
+        (series / "v1.mokuro").write_bytes(raw)
+        database = Database(tmp_path / "test.db")
+        sidecar_key = _seed_legacy_row(database, series)
+
+        def no_archive(path: Path) -> object:
+            raise AssertionError(f"a hash fill must not open the archive: {path}")
+
+        monkeypatch.setattr(compiler_module, "_archive_image_names", no_archive)
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        # Everything else is still the cached row's (no recompile)...
+        assert entry.page_count == 999
+        assert entry.matched_page_count == 990
+        assert entry.mokuro_version == "cached"
+        # ...and the hash is the sidecar's.
+        assert entry.mokuro_sha256 == sha256_hex(raw)
+
+        cbz_stat = (series / "v1.cbz").stat()
+        cached = database.get_cached_volume_entry(
+            "Dr Stone/v1.cbz", cbz_stat.st_size, cbz_stat.st_mtime, sidecar_key
+        )
+        assert cached is not None
+        assert cached["mokuro_sha256"] == sha256_hex(raw)
+        assert cached["page_count"] == 999
+
+    def test_a_filled_row_is_never_read_again(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        database = Database(tmp_path / "test.db")
+        _seed_legacy_row(database, series)
+
+        reads: list[Path] = []
+        real_load = compiler_module._load_sidecar
+
+        def counting_load(path: Path) -> object:
+            reads.append(path)
+            return real_load(path)
+
+        monkeypatch.setattr(compiler_module, "_load_sidecar", counting_load)
+        compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert reads == [series / "v1.mokuro"]
+
+    def test_the_fill_hashes_the_gunzipped_primary(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        raw = json.dumps(mokuro_payload()).encode("utf-8")
+        (series / "v1.mokuro.gz").write_bytes(gzip.compress(raw))
+        (series / "v1.hayai-nova.mokuro").write_text("{}", encoding="utf-8")
+        database = Database(tmp_path / "test.db")
+        cbz_stat = (series / "v1.cbz").stat()
+        database.put_cached_volume_entry(
+            "Dr Stone/v1.cbz",
+            "dr stone",
+            {
+                "volume_uuid": "u",
+                "volume_title": "v1",
+                "page_count": 2,
+                "matched_page_count": 2,
+                "character_count": 4,
+                "mokuro_version": "0.2.2",
+                "mokuro_size": 1,
+                "mokuro_modified": 1,
+            },
+            cbz_stat.st_size,
+            cbz_stat.st_mtime,
+            sidecar_key_of(series / "v1.mokuro.gz"),
+        )
+        [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert entry.mokuro_sha256 == sha256_hex(raw)
+
+    def test_fill_hashes_false_serves_the_row_and_leaves_it_for_the_pass(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        raw = json.dumps(mokuro_payload()).encode("utf-8")
+        (series / "v1.mokuro").write_bytes(raw)
+        database = Database(tmp_path / "test.db")
+        sidecar_key = _seed_legacy_row(database, series)
+
+        def no_read(path: Path) -> object:
+            raise AssertionError(f"a request-path compile must not read {path}")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(compiler_module, "_load_sidecar", no_read)
+            [entry] = compile_series_volumes(
+                SeriesFolder("Dr Stone", series), database=database, fill_hashes=False
+            )
+        assert entry.page_count == 999                # served from the cache
+        assert entry.mokuro_sha256 is None
+        cbz_stat = (series / "v1.cbz").stat()
+        cached = database.get_cached_volume_entry(
+            "Dr Stone/v1.cbz", cbz_stat.st_size, cbz_stat.st_mtime, sidecar_key
+        )
+        assert cached is not None and "mokuro_sha256" not in cached
+
+        [filled] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert filled.mokuro_sha256 == sha256_hex(raw)
+
+    def test_an_unreadable_sidecar_is_retried_not_stored_as_no_hash(
+        self, library: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        raw = json.dumps(mokuro_payload()).encode("utf-8")
+        (series / "v1.mokuro").write_bytes(raw)
+        database = Database(tmp_path / "test.db")
+        sidecar_key = _seed_legacy_row(database, series)
+
+        # The share hiccups for one pass.
+        with monkeypatch.context() as patch:
+            patch.setattr(compiler_module, "_load_sidecar", lambda path: (None, None))
+            [entry] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert entry.mokuro_sha256 is None
+        cbz_stat = (series / "v1.cbz").stat()
+        cached = database.get_cached_volume_entry(
+            "Dr Stone/v1.cbz", cbz_stat.st_size, cbz_stat.st_mtime, sidecar_key
+        )
+        assert cached is not None and "mokuro_sha256" not in cached
+
+        [healed] = compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert healed.mokuro_sha256 == sha256_hex(raw)
+
+    def test_cache_only_readers_still_hit_a_legacy_row(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        # The OCR worker and the queue ETA read the cache without compiling; a
+        # row without the hash is otherwise current and must keep answering.
+        series = library / "Dr Stone"
+        write_cbz(series / "v1.cbz")
+        (series / "v1.mokuro").write_text(json.dumps(mokuro_payload()), encoding="utf-8")
+        database = Database(tmp_path / "test.db")
+        _seed_legacy_row(database, series)
+        assert cached_page_count(database, library, series / "v1.cbz") == 999
+        assert cached_missing_pages(database, library, series / "v1.cbz") == 9
+        assert cached_mokuro_sha256(database, library, series / "v1.cbz") is None
+
+        compile_series_volumes(SeriesFolder("Dr Stone", series), database=database)
+        assert cached_mokuro_sha256(database, library, series / "v1.cbz") == sha256_hex(
+            (series / "v1.mokuro").read_bytes()
+        )

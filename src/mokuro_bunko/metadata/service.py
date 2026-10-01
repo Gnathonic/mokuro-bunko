@@ -383,8 +383,12 @@ class MetadataService:
         self._published(changed)
         return changed > 0
 
-    def _regenerate_series_locked(self, series_title: str) -> int:
+    def _regenerate_series_locked(self, series_title: str, *, fill_hashes: bool = True) -> int:
         """The guts of `regenerate_series`. Caller must hold `_pass_lock`.
+
+        `fill_hashes=False` from a request path (`apply_series_update`): see
+        `compile_series_volumes` -- a legacy row's missing `mokuro_sha256` is
+        the background passes' job, never a client PUT's to wait on.
 
         Split out so `apply_series_update` can run its read-merge-persist
         step and this republish inside the SAME critical section, without
@@ -413,7 +417,9 @@ class MetadataService:
             catalog_entries.append((folder.title, facts))
             if series_key != key:
                 continue
-            volumes = compile_series_volumes(folder, database=self.database)
+            volumes = compile_series_volumes(
+                folder, database=self.database, fill_hashes=fill_hashes
+            )
             self._materialize_catalog_row(folder, volumes)
             try:
                 changed += (
@@ -516,7 +522,7 @@ class MetadataService:
                     )
                 )
             try:
-                changed = self._regenerate_series_locked(series_title)
+                changed = self._regenerate_series_locked(series_title, fill_hashes=False)
             except Exception as error:  # noqa: BLE001 - facts are already durable; the
                 # caller must never see an accepted, persisted update reported
                 # as a failure just because publishing itself blew up.
