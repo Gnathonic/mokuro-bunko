@@ -1,7 +1,15 @@
+# System service for a binary installed by scripts/install.sh as root
+# (/usr/local/lib/mokuro-bunko, linked from /usr/local/bin/mokuro-bunko).
+# install.sh --systemd writes this unit for you; copy it by hand otherwise:
+#   sudo useradd --system --home-dir /var/lib/mokuro-bunko --shell /usr/sbin/nologin mokuro
+#   sudo install -d -o mokuro -g mokuro /var/lib/mokuro-bunko
+#   sudo cp deploy/mokuro-bunko.service /etc/systemd/system/
+#   sudo systemctl enable --now mokuro-bunko
 [Unit]
-Description=Mokuro Bunko Server
+Description=Mokuro Bunko manga library server
 Documentation=https://github.com/Gnathonic/mokuro-bunko
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
@@ -13,13 +21,18 @@ WorkingDirectory=/var/lib/mokuro-bunko
 Environment=MOKURO_HOST=127.0.0.1
 Environment=MOKURO_PORT=8080
 Environment=MOKURO_STORAGE=/var/lib/mokuro-bunko/storage
+# ProtectHome hides ~/.config, so keep config.yaml next to the data.
+Environment=MOKURO_CONFIG=/var/lib/mokuro-bunko/config.yaml
+# The binary is root-owned and /usr is read-only to this service: the admin panel
+# reports new releases, and re-running install.sh applies them.
+Environment=MOKURO_INSTALL_KIND=install.sh
 
-# Start command
 ExecStart=/usr/local/bin/mokuro-bunko serve
 
-# Restart policy
+# SIGTERM is a clean shutdown.
 Restart=on-failure
 RestartSec=5s
+TimeoutStopSec=30s
 
 # Security hardening
 NoNewPrivileges=yes
@@ -31,7 +44,7 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 
-# Resource limits
+# Resource limits (a lite server targets <= 256 MB peak; local OCR needs more)
 LimitNOFILE=65536
 MemoryMax=2G
 

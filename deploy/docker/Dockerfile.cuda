@@ -1,0 +1,77 @@
+# syntax=docker/dockerfile:1.7
+#
+# mokuro-bunko FULL image with the CUDA execution provider (NVIDIA GPUs), plus the
+# optional nginx X-Accel offload. Successor of the 0.5 `Dockerfile.unraid`.
+#
+#   docker build -f deploy/docker/Dockerfile.cuda -t mokuro-bunko:cuda .
+#   docker run --gpus all -p 8080:8080 -v ./data:/data mokuro-bunko:cuda
+#
+# ort's prebuilt ONNX Runtime CUDA provider targets CUDA 13 + cuDNN 9, which needs an
+# NVIDIA driver >= 580 on the host. The provider libraries ship next to the binary in
+# /opt/mokuro-bunko (found through its $ORIGIN runpath); CUDA and cuDNN come from the
+# base image. linux/amd64 only (ort has no aarch64 CUDA build).
+
+ARG BIN_FROM=source
+ARG CUDA_IMAGE=nvidia/cuda:13.0.3-cudnn-runtime-ubuntu24.04
+
+# bookworm's glibc (2.36) <= ubuntu 24.04's (2.39).
+FROM rust:1-slim-bookworm AS source
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gcc g++ make perl pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/root/.cache/ort.pyke.io \
+    --mount=type=cache,target=/src/target \
+    set -eux; \
+    host="$(rustc -vV | sed -n 's/^host: //p')"; \
+    cargo run --release --locked -p xtask -- dist --locked --target "$host" --flavor full --ep cuda --out /tmp/dist; \
+    mkdir -p /out; \
+    tar -xzf /tmp/dist/*.tar.gz -C /out --strip-components=1; \
+    cargo build --release --locked --manifest-path packaging/docker-init/Cargo.toml --target-dir target/docker-init; \
+    cp target/docker-init/release/bunko-init /out/
+
+FROM scratch AS prebuilt
+ARG TARGETARCH
+COPY dist/docker/${TARGETARCH}/cuda/ /out/
+
+FROM ${BIN_FROM} AS bin
+
+FROM ${CUDA_IMAGE}
+ARG VERSION=dev
+LABEL org.opencontainers.image.source="https://github.com/Gnathonic/mokuro-bunko" \
+      org.opencontainers.image.title="mokuro-bunko (CUDA)" \
+      org.opencontainers.image.description="Self-hosted manga library server for Mokuro Reader with local OCR on NVIDIA GPUs (ONNX Runtime CUDA)" \
+      org.opencontainers.image.licenses="MPL-2.0" \
+      org.opencontainers.image.version="${VERSION}"
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini nginx gettext-base \
+    && rm -rf /var/lib/apt/lists/* /etc/nginx/sites-enabled/default
+
+COPY --from=bin /out/ /opt/mokuro-bunko/
+COPY deploy/nginx-internal.conf.template /etc/nginx/nginx-internal.conf.template
+COPY deploy/docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
+ENV PATH="/opt/mokuro-bunko:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    MOKURO_INSTALL_KIND="docker" \
+    MOKURO_HOST="0.0.0.0" \
+    MOKURO_PORT="8080" \
+    MOKURO_BACKEND_PORT="8081" \
+    MOKURO_STORAGE="/data" \
+    MOKURO_CONFIG="/config/config.yaml" \
+    MOKURO_NGINX_ACCEL="0" \
+    PUID="99" \
+    PGID="100" \
+    UMASK="002" \
+    NVIDIA_VISIBLE_DEVICES="all" \
+    NVIDIA_DRIVER_CAPABILITIES="compute,utility"
+
+VOLUME ["/data", "/config"]
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD ["mokuro-bunko", "healthcheck"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+CMD ["serve"]

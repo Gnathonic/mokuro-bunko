@@ -1,9 +1,6 @@
 services:
   mokuro-bunko:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.unraid
-    image: mokuro-bunko:unraid-cuda
+    image: ghcr.io/gnathonic/mokuro-bunko:latest-cuda
     container_name: mokuro-bunko
     ports:
       - "8081:8080"    # 8081 to avoid conflict with VM on 8080
@@ -16,8 +13,6 @@ services:
       - UMASK=002
       - MOKURO_CONFIG=/config/config.yaml
       - MOKURO_OCR_BACKEND=cuda
-      - MOKURO_BUNKO_OCR_ENV=/opt/ocr-env
-      - OCR_AUTO_INSTALL=true
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     deploy:

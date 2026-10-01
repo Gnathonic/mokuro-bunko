@@ -1,0 +1,23 @@
+[package]
+name = "bunko-init"
+description = "Container entrypoint for mokuro-bunko images: PUID/PGID/UMASK, then exec the server"
+version = "0.7.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MPL-2.0"
+publish = false
+
+# Built as a static musl binary for the distroless image (no shell, no gosu there).
+# Deliberately outside the cargo workspace: it only depends on libc.
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[workspace]
