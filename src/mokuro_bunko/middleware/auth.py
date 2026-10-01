@@ -457,6 +457,7 @@ class AuthMiddleware:
             authz_result.status_code,
             authz_result.error or "Access denied",
             include_auth_header=(authz_result.status_code == 401),
+            bearer=auth_result.error == INVALID_TOKEN_ERROR,
         )
 
     def authenticate(self, environ: dict[str, Any]) -> AuthResult:
