@@ -278,6 +278,11 @@ class OCRProcessor:
         # the database (the server wires it; None = never skip). See
         # `missing_generations`.
         self.missing_pages_lookup: Callable[[Path], int] | None = None
+        # "What id did this archive's primary `.mokuro` last carry?" -- asked
+        # with the archive's library-relative path, answered from the app's
+        # database (`Database.remembered_volume_uuid`) by whoever owns it.
+        # None = nothing remembered, which a bare processor in a test is.
+        self.volume_uuid_lookup: Callable[[str], str | None] | None = None
         # How fast each row reads a page, and what opening a session for it
         # costs (`ocr.eta.RateModel`). The worker owns one and hands it to
         # every slot's processor; None leaves the progress readout with no
@@ -833,14 +838,35 @@ class OCRProcessor:
                     continue
         return min(found)[1] if found else None
 
+    def _remembered_volume_uuid(self, cbz_path: Path) -> str | None:
+        """The id this archive's primary carried before it went, if known."""
+        lookup = self.volume_uuid_lookup
+        if lookup is None:
+            return None
+        try:
+            relative = cbz_path.resolve().relative_to(self.library_path.resolve()).as_posix()
+        except (OSError, ValueError):
+            return None
+        try:
+            found = lookup(relative)
+        except Exception as e:
+            self._log(f"Could not look up the remembered volume id of {relative}: {e}")
+            return None
+        return found if isinstance(found, str) and found.strip() else None
+
     def volume_uuid_for(
         self, cbz_path: Path, generation: GenerationSpec | None = None
     ) -> str:
         """The ``volume_uuid`` every OCR file of this volume carries.
 
         In order: the primary sidecar's (a `.mokuro` that came with the volume,
-        or one already produced); else a layer's already on disk (a primary
-        being made again keeps the id its layers, and every reader's
+        or one already produced); else the id the primary carried before it
+        went (`Database.remembered_volume_uuid`) -- the server only makes a
+        primary that is MISSING, so a re-OCR (the `.mokuro` deleted over
+        WebDAV, or removed on disk) would otherwise mint a new id while every
+        device installed before it keeps the old one, splitting one reader's
+        progress across their devices; else a layer's already on disk (a
+        primary being made again keeps the id its layers, and every reader's
         progress, know the volume by); else the id the catalog index and the
         reader already give a volume with no `.mokuro` --
         ``deterministic_uuid("<Series>/<Volume>")``. ``generation`` is the row
@@ -850,7 +876,8 @@ class OCRProcessor:
         with nothing on disk, every one of them -- the primary included --
         works out the same id from the path alone, so a layer finished before
         its primary, or two landing together on different machines, still
-        name one volume. Before, a layer run first got a fresh random id and
+        name one volume (a remembered id is one database row, the same answer
+        to all of them). Before, a layer run first got a fresh random id and
         was detached from the volume for good, which is why no layer could be
         claimed until the primary's sidecar existed.
         """
@@ -858,6 +885,9 @@ class OCRProcessor:
             found = self._primary_volume_uuid(cbz_path)
             if found is not None:
                 return found
+        found = self._remembered_volume_uuid(cbz_path)
+        if found is not None:
+            return found
         found = self._layer_volume_uuid(cbz_path, generation)
         if found is not None:
             return found

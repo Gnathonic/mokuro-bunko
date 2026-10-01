@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.2] - 2026-10-01
+
+### Added
+- `series.json` volumes carry `mokuro_sha256`, so readers re-download changed OCR.
+
+### Changed
+- Uploaders may replace only files of their own volumes, not others' or untracked ones.
+- Generation name `updated-ocr` is reserved for readers.
+
+### Fixed
+- A re-OCR'd volume keeps its `volume_uuid`, so read progress stays attached.
+- Uploaders can edit and delete their own series with non-ASCII titles.
+- Uploaders can delete the OCR layer files of their own volumes.
+- Volume files are revalidated, so readers never install stale cached OCR.
+- An expired token on the volume manifest gets a Bearer challenge, not Basic.
+
 ## [0.5.1] - 2026-09-30
 
 ### Added

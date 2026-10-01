@@ -348,6 +348,8 @@ JSON (`Cache-Control: no-store`) naming every file of that volume with its
 ```
 
 - `ocr` is `<volume>.mokuro`, else `<volume>.mokuro.gz`, else `null`.
+  It carries `sha256` (the `series.json` entry's `mokuro_sha256`) once the
+  metadata pass has hashed that exact file; never computed on the request.
 - `layers` holds each `<volume>.<id>.mokuro[.gz]` whose id matches
   `[a-z0-9-]{1,32}` (plain beats `.gz`), in `ocr.generations` order, then
   alphabetically. A file belongs to the longest archive name it starts with,
@@ -580,7 +582,7 @@ order (`Volume 2` before `Volume 10`, `第二巻` before `第十巻`).
 **Names are file names.** A name must match `^[a-z0-9][a-z0-9-]{0,31}$`:
 lowercase ASCII letters, digits and hyphens, at most 32 characters, starting
 with a letter or digit. No dots, capitals, spaces or underscores — readers
-would not recognise the file as a layer. `original`, `gcv` and anything
+would not recognise the file as a layer. `original`, `gcv`, `updated-ocr` and anything
 starting with `tr-` are reserved by readers. Names must be unique across all
 rows, enabled or not.
 
@@ -951,7 +953,7 @@ The server compiles two files into the shared library and keeps them current:
 
 | File | Contents |
 | --- | --- |
-| `<Series>/series.json` | The series' facts (external ids, titles, synonyms, tag, unit) plus an index of its volumes: uuid, title, page and character counts, mokuro version, spine width, archive size, freshness stamps and shelf offsets. |
+| `<Series>/series.json` | The series' facts (external ids, titles, synonyms, tag, unit) plus an index of its volumes: uuid, title, page and character counts, mokuro version, spine width, archive size, freshness stamps, OCR hash and shelf offsets. |
 | `catalog.json` (library root) | One entry per series folder with the same facts — name, mapping and search data only. |
 
 Both are regenerated when the library changes and whenever a client submits an
@@ -968,6 +970,19 @@ the stamped `_modified` is strictly newer than what it stored; an older-or-equal
 `_modified` at an equal size is fresh. Stamps are always whole seconds, never
 sub-second, because a generic WebDAV client only ever sees second-precision
 `Last-Modified` HTTP dates.
+
+A volume entry may also carry `mokuro_sha256`, right after `mokuro_modified`: the
+lowercase hex SHA-256 of the volume's primary OCR sidecar (`<volume>.mokuro`, else
+`<volume>.mokuro.gz`; never an OCR layer `<volume>.<id>.mokuro`), taken over its
+JSON bytes as stored, after gunzip for `.gz` — so the same JSON hashes the same
+plain or compressed. It is omitted when the volume has no sidecar or the sidecar
+does not parse. A reader that recorded the hash when it installed a volume's OCR
+compares it with the published one and re-downloads only a `.mokuro` that changed
+(a re-OCR, a newer mokuro, a new primary generation). Like the stamps it is index
+data: it never moves the series' `updated_at`, and a hash in a client's `PUT` is
+ignored. The hash is computed from the same read that compiles the entry and is
+cached with it; entries cached by an older version gain it on the next background
+metadata pass (one read of each sidecar, never on a request).
 
 Clients do not write these files. A `PUT` of `<Series>/series.json` is accepted as
 an update *request*: the facts are validated and merged (newest stamp wins), the

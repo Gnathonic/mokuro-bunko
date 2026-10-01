@@ -127,3 +127,19 @@ def test_a_non_admin_token_is_not_an_admin(app: Any) -> None:
     _, body = _issue(app, username="bob", password="bob-password-12")
     status, _, _ = call(app, "GET", "/_admin/api/users", headers=_bearer(body["token"]))
     assert status == 403
+
+
+def test_a_bad_token_on_the_manifest_route_is_challenged_as_a_token(app: Any, storage: Path) -> None:
+    """The volume manifest answers as its `.cbz` would (`gate_read`), and a dead
+    token there must not get a Basic challenge: that would pop a browser's
+    password dialog over a reader signed in by token."""
+    import zipfile
+
+    with zipfile.ZipFile(storage / "library" / "S" / "V.cbz", "w") as archive:
+        archive.writestr("001.jpg", b"jpg")
+    status, headers, _ = call(
+        app, "GET", "/catalog/api/manifest", headers=_bearer("nope"), query="series=S&volume=V"
+    )
+    assert status == 401
+    assert headers["WWW-Authenticate"].startswith("Bearer ")
+    assert 'error="invalid_token"' in headers["WWW-Authenticate"]

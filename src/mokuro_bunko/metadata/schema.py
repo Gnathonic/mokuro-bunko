@@ -90,6 +90,13 @@ class VolumeEntry:
     archive_size: int | None = None
     mokuro_size: int | None = None
     mokuro_modified: int | None = None
+    #: Lowercase hex SHA-256 of the primary sidecar's JSON bytes as stored,
+    #: after gunzip for a `.mokuro.gz` -- what a reader compares with the hash
+    #: it recorded at install to re-download only changed OCR. `None` (key
+    #: omitted) when the volume has no sidecar, or it could not be read and
+    #: parsed. INDEX data, like the stamps around it: it never moves the
+    #: series facts stamp.
+    mokuro_sha256: str | None = None
     cover_size: int | None = None
     cover_modified: int | None = None
 
@@ -137,6 +144,19 @@ def _is_archive_size(value: int | None) -> bool:
     floats) there is no separate "is it a whole number" check to make.
     """
     return value is not None and value > 0
+
+
+def _is_sha256(value: str | None) -> bool:
+    """A usable digest: exactly 64 lowercase hex characters.
+
+    The server computes every value itself, so this only keeps a damaged
+    cache row from publishing something a reader would compare as a hash.
+    """
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
 
 
 def _facts_payload(facts: SeriesFacts) -> dict[str, Any]:
@@ -264,6 +284,8 @@ def dump_series_file(
             entry["mokuro_size"] = volume.mokuro_size
         if volume.mokuro_modified is not None:
             entry["mokuro_modified"] = volume.mokuro_modified
+        if _is_sha256(volume.mokuro_sha256):
+            entry["mokuro_sha256"] = volume.mokuro_sha256
         if volume.cover_size is not None:
             entry["cover_size"] = volume.cover_size
         if volume.cover_modified is not None:

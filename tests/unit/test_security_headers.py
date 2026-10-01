@@ -111,3 +111,35 @@ def test_robots_tag_does_not_clobber_a_handler_that_set_one() -> None:
         SecurityHeadersMiddleware(_fake_app("text/html", [("X-Robots-Tag", "none")]))
     )
     assert _values(headers, "X-Robots-Tag") == ["none"]
+
+
+def test_volume_files_are_revalidated_every_time() -> None:
+    """A re-OCR rewrites `.mokuro` in place: a heuristically fresh cached copy
+    would hand a reader the old OCR, so volume files must revalidate (the ETag
+    keeps that a 304)."""
+    for path, content_type in [
+        ("/mokuro-reader/S/Vol 1.mokuro", "application/octet-stream"),
+        ("/mokuro-reader/S/Vol 1.hayai-nova.mokuro.gz", "application/gzip"),
+        ("/mokuro-reader/S/Vol 1.CBZ", "application/zip"),
+    ]:
+        headers = _capture_headers(
+            SecurityHeadersMiddleware(_fake_app(content_type)), {"PATH_INFO": path}
+        )
+        assert _values(headers, "Cache-Control") == ["no-cache"], path
+
+
+def test_other_downloads_keep_no_forced_cache_control() -> None:
+    headers = _capture_headers(
+        SecurityHeadersMiddleware(_fake_app("application/octet-stream")),
+        {"PATH_INFO": "/mokuro-reader/S/notes.txt"},
+    )
+    assert _values(headers, "Cache-Control") == []
+
+
+def test_a_preflight_or_put_answer_about_a_volume_file_is_left_alone() -> None:
+    for method in ("OPTIONS", "PUT"):
+        headers = _capture_headers(
+            SecurityHeadersMiddleware(_fake_app("text/plain")),
+            {"REQUEST_METHOD": method, "PATH_INFO": "/mokuro-reader/S/Vol 1.cbz"},
+        )
+        assert _values(headers, "Cache-Control") == [], method

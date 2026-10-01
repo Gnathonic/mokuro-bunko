@@ -741,6 +741,13 @@ class OCRWorker:
         # asked per candidate; every slot's processor shares the one lookup.
         self.missing_pages_lookup = missing_pages_lookup
         self.processor.missing_pages_lookup = missing_pages_lookup
+        # The id each archive's primary `.mokuro` last carried, so a primary
+        # made again (the old one deleted to re-OCR the volume) keeps naming
+        # the volume every reader's progress knows (`volume_uuid_for`).
+        self.volume_uuid_lookup: Callable[[str], str | None] | None = (
+            database.remembered_volume_uuid if database is not None else None
+        )
+        self.processor.volume_uuid_lookup = self.volume_uuid_lookup
         # "How many pages has this archive?", answered from the metadata
         # pass's cache by whoever owns the database. It is what turns a
         # pending job into a number of seconds; without it every queued
@@ -945,6 +952,7 @@ class OCRWorker:
             concurrency=self.concurrency,
         )
         clone.missing_pages_lookup = self.missing_pages_lookup
+        clone.volume_uuid_lookup = self.volume_uuid_lookup
         clone.rates = self.rates
         clone.run_recorder = self._record_local_run
         return clone
@@ -3463,6 +3471,7 @@ class OCRWorker:
             row_spec_for=self._remote_row_spec,
         )
         processor.missing_pages_lookup = self.missing_pages_lookup
+        processor.volume_uuid_lookup = self.volume_uuid_lookup
         processor.rates = self.rates
         slot = _OcrSlot(index=index, processor=processor, processor_id=entry.processor_id)
         processor.progress_callback = lambda data: self._on_progress(slot, data)
