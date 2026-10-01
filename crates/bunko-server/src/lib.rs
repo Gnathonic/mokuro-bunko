@@ -1,6 +1,7 @@
 //! The mokuro-bunko library server.
 
 pub mod accounts;
+pub mod admin;
 pub mod app;
 pub mod auth;
 pub mod backend;

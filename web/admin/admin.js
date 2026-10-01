@@ -96,6 +96,7 @@ function initTabs() {
             }
             if (tabId === 'status') {
                 loadStatus();
+                loadUpdate(false);
                 startStatusRefresh();
             } else {
                 stopStatusRefresh();
@@ -1197,6 +1198,8 @@ function genRowFromServer(g, openById, machineById) {
         // it out for the SAVED engine, and the saved state's hold reason.
         precisionOn: g.precision_on || null,
         precisionHold: typeof g.precision_hold === 'string' && g.precision_hold ? g.precision_hold : null,
+        // Why the row no longer runs (its engine was removed), or null.
+        retired: typeof g.retired === 'string' && g.retired ? g.retired : null,
         savedEngine: g.engine || '',
         savedPrecision: typeof g.precision === 'string' && g.precision ? g.precision : genDefaultMode(),
         road: g.road || null,
@@ -1613,6 +1616,7 @@ function genRowHtml(row, index) {
         '<span class="gen__spacer"></span>' +
         genRemoveHtml(row, index) +
         '</div>' +
+        (row.retired ? '<p class="gen-banner" role="status">Retired: ' + escapeHtml(row.retired) + '</p>' : '') +
         '<div class="gen__fields">' +
         genNameFieldHtml(row, index, shown) +
         genSelectFieldHtml(row, index, 'engine', 'Engine',
@@ -4099,6 +4103,60 @@ async function loadStatus() {
         }
     } catch (err) {
         showToast('Failed to load status: ' + err.message, 'error');
+    }
+}
+
+// Updates: the server checks for releases itself (every 12 h when update.check is
+// on); "Check now" asks again. A server without the endpoint (404) hides the card.
+async function loadUpdate(refresh) {
+    const card = document.getElementById('update-card');
+    let data;
+    try {
+        data = await apiGet('/update' + (refresh ? '?refresh=1' : ''));
+    } catch (err) {
+        if (err.status === 404) {
+            card.hidden = true;
+        } else {
+            showToast('Update check failed: ' + err.message, 'error');
+        }
+        return;
+    }
+    card.hidden = false;
+    let summary = 'Running ' + data.current + '. ';
+    if (data.error) {
+        summary += 'Could not check for updates: ' + data.error;
+    } else if (data.available) {
+        summary += 'Version ' + data.latest + ' is available.';
+    } else if (data.latest) {
+        summary += 'This is the latest release.';
+    } else {
+        summary += data.checks_enabled === false ? 'Automatic update checks are off.' : 'Not checked yet.';
+    }
+    document.getElementById('update-summary').textContent = summary;
+    const hint = document.getElementById('update-hint');
+    hint.textContent = data.available && !data.can_apply ? (data.cannot_apply_reason || '') : '';
+    hint.hidden = !hint.textContent;
+    const apply = document.getElementById('update-apply-btn');
+    // .btn sets display, which beats the hidden attribute.
+    apply.style.display = data.available && data.can_apply ? '' : 'none';
+    apply.disabled = !!data.applying;
+    const notes = document.getElementById('update-notes');
+    notes.style.display = data.notes_url ? '' : 'none';
+    if (data.notes_url) notes.href = data.notes_url;
+}
+
+async function applyUpdate() {
+    if (!confirm('Download and install the update, then restart the server?')) return;
+    const apply = document.getElementById('update-apply-btn');
+    apply.disabled = true;
+    try {
+        const result = await apiPost('/update/apply', {});
+        showToast('Installed ' + result.version + (result.restarting
+            ? '; the server is restarting.' : '. Restart the server to finish.'), 'success');
+        if (result.restarting) setTimeout(() => window.location.reload(), 8000);
+    } catch (err) {
+        showToast('Update failed: ' + err.message, 'error');
+        apply.disabled = false;
     }
 }
 
