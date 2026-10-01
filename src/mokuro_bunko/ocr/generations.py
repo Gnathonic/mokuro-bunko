@@ -98,10 +98,12 @@ GENERATION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 MAX_GENERATION_NAME = 32
 
 # Names the reader already owns. ``original`` is the editor's read-only
-# pre-edit snapshot, ``gcv`` is its own Cloud Vision layer; a ``tr-`` prefix
-# makes the reader file the layer as a TRANSLATION by id, whatever anything
-# else says, which makes it permanently unpromotable.
-RESERVED_NAMES: tuple[str, ...] = ("original", "gcv")
+# pre-edit snapshot, ``gcv`` its (retired) Cloud Vision layer, which readers
+# may still hold, ``updated-ocr`` the local copy of a newer server primary it
+# keeps beside a hand-edited one; a ``tr-`` prefix makes the reader file the
+# layer as a TRANSLATION by id, whatever anything else says, which makes it
+# permanently unpromotable.
+RESERVED_NAMES: tuple[str, ...] = ("original", "gcv", "updated-ocr")
 RESERVED_PREFIXES: tuple[str, ...] = ("tr-",)
 
 # What an ``id`` may look like. Minted as ``g-<n>``; a hand-written one is
