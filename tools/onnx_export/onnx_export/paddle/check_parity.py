@@ -1,7 +1,7 @@
 """paddle-manga parity: the 0.5.2 torch recognizer vs the exported graphs on ORT (CPU EP).
 
 Reference: ``PaddleMangaRecognizer(device="cpu", precision="fp32", fold=False)``
-from this checkout's ``src/mokuro_bunko/ocr/engine_runner.py``. Candidate: the
+from the 0.5.2 reference checkout's ``src/mokuro_bunko/ocr/engine_runner.py`` (``MOKURO_REF_052``). Candidate: the
 torch-free host in ``host.py`` over ``paddle-manga_*_{fp32,fp16}.onnx``.
 
 Two passes over the crop set: the default token cap (64, every crop), and
