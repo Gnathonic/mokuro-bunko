@@ -26,7 +26,11 @@ fn enable_auto_cert_generates_and_saves() {
     assert_eq!(v["ssl"]["cert_file"], "");
 
     // Existing cert: not regenerated.
-    env.cmd().args(["ssl", "enable", "--auto-cert"]).assert().success().stdout("SSL enabled\n");
+    env.cmd()
+        .args(["ssl", "enable", "--auto-cert"])
+        .assert()
+        .success()
+        .stdout("SSL enabled\n");
 
     let s = stdout(&env.cmd().args(["ssl", "status"]).output().unwrap());
     let lines: Vec<&str> = s.lines().collect();
@@ -34,7 +38,10 @@ fn enable_auto_cert_generates_and_saves() {
     assert_eq!(lines[1], "Mode: auto-cert");
     assert_eq!(lines[2], format!("Certificate: {}", cert.display()));
     assert_eq!(lines[3], "Subject: O=mokuro-bunko,CN=localhost");
-    assert!(lines[4].starts_with("Not before: ") && lines[4].ends_with("+00:00"), "{s}");
+    assert!(
+        lines[4].starts_with("Not before: ") && lines[4].ends_with("+00:00"),
+        "{s}"
+    );
     assert!(lines[5].starts_with("Not after: "), "{s}");
     assert!(lines[6].starts_with("SANs: localhost"), "{s}");
 }
@@ -71,7 +78,11 @@ fn enable_custom_cert() {
 fn enable_argument_errors() {
     let env = Env::new();
     env.write_config("");
-    env.cmd().args(["ssl", "enable"]).assert().code(1).stderr("Error: Provide --auto-cert or both --cert and --key\n");
+    env.cmd()
+        .args(["ssl", "enable"])
+        .assert()
+        .code(1)
+        .stderr("Error: Provide --auto-cert or both --cert and --key\n");
     let c = env.root().join("c.pem");
     std::fs::write(&c, "x").unwrap();
     env.cmd()
@@ -87,25 +98,41 @@ fn enable_argument_errors() {
         .code(1)
         .stderr("Error: Both --cert and --key are required\n");
     // click Path(exists=True): usage error.
-    env.cmd().args(["ssl", "enable", "--cert", "/nope/c.pem", "--key", "/nope/k.pem"]).assert().code(2);
+    env.cmd()
+        .args([
+            "ssl",
+            "enable",
+            "--cert",
+            "/nope/c.pem",
+            "--key",
+            "/nope/k.pem",
+        ])
+        .assert()
+        .code(2);
 }
 
 #[test]
 fn disable_and_status() {
     let env = Env::new();
     env.write_config("ssl:\n  enabled: true\n  auto_cert: true\n");
+    env.cmd().args(["ssl", "status"]).assert().success().stdout(
+        predicate::str::contains("SSL: enabled").and(predicate::str::contains(
+            "Certificate file not found (will be generated on server start)",
+        )),
+    );
+    env.cmd()
+        .args(["ssl", "disable"])
+        .assert()
+        .success()
+        .stdout("SSL disabled\n");
+    let v = env.config_yaml();
+    assert_eq!(v["ssl"]["enabled"], false);
+    assert_eq!(v["ssl"]["auto_cert"], false);
     env.cmd()
         .args(["ssl", "status"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("SSL: enabled").and(predicate::str::contains(
-            "Certificate file not found (will be generated on server start)",
-        )));
-    env.cmd().args(["ssl", "disable"]).assert().success().stdout("SSL disabled\n");
-    let v = env.config_yaml();
-    assert_eq!(v["ssl"]["enabled"], false);
-    assert_eq!(v["ssl"]["auto_cert"], false);
-    env.cmd().args(["ssl", "status"]).assert().success().stdout("SSL: disabled\n");
+        .stdout("SSL: disabled\n");
 }
 
 #[test]
@@ -116,7 +143,9 @@ fn generate_and_overwrite_prompt() {
         .args(["ssl", "generate", "--hostname", "myhost.local"])
         .assert()
         .success()
-        .stdout(predicate::str::starts_with("Generating self-signed certificate for 'myhost.local'...\nCertificate: "));
+        .stdout(predicate::str::starts_with(
+            "Generating self-signed certificate for 'myhost.local'...\nCertificate: ",
+        ));
     assert!(cert.exists());
     std::fs::write(&cert, "existing").unwrap();
     env.cmd()
@@ -124,8 +153,15 @@ fn generate_and_overwrite_prompt() {
         .write_stdin("n\n")
         .assert()
         .success()
-        .stdout(format!("Certificate already exists at {}. Overwrite? [y/N]: ", cert.display()));
+        .stdout(format!(
+            "Certificate already exists at {}. Overwrite? [y/N]: ",
+            cert.display()
+        ));
     assert_eq!(std::fs::read_to_string(&cert).unwrap(), "existing");
-    env.cmd().args(["ssl", "generate"]).write_stdin("y\n").assert().success();
+    env.cmd()
+        .args(["ssl", "generate"])
+        .write_stdin("y\n")
+        .assert()
+        .success();
     assert_ne!(std::fs::read_to_string(&cert).unwrap(), "existing");
 }

@@ -27,8 +27,8 @@ mod util;
 pub use account::format_reading_time;
 pub use home::{HealthSource, LibraryCounts, is_browser_request, root_middleware, root_response};
 pub use setup::{
-    SETUP_TOKEN_COOKIE, SETUP_TOKEN_ENV, SETUP_TOKEN_FILE, SETUP_TOKEN_HEADER, SetupFlag, ensure_setup_token,
-    remove_setup_token,
+    SETUP_TOKEN_COOKIE, SETUP_TOKEN_ENV, SETUP_TOKEN_FILE, SETUP_TOKEN_HEADER, SetupFlag,
+    ensure_setup_token, remove_setup_token,
 };
 
 use crate::core::Core;
@@ -73,7 +73,14 @@ pub struct AccountsDeps {
 impl AccountsDeps {
     /// Deps with no hooks or optional sources; reads `MOKURO_SETUP_TOKEN` now.
     pub fn new(core: Core, db: Arc<Database>) -> Self {
-        AccountsDeps { core, db, hooks: AccountHooks::default(), library: None, health: None, setup: SetupFlag::from_env() }
+        AccountsDeps {
+            core,
+            db,
+            hooks: AccountHooks::default(),
+            library: None,
+            health: None,
+            setup: SetupFlag::from_env(),
+        }
     }
 }
 

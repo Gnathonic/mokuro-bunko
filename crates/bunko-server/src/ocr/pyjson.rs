@@ -12,13 +12,29 @@ pub struct Style {
 }
 
 /// `json.dumps(v, sort_keys=True)` (default separators, ASCII escapes).
-pub const SORTED_DEFAULT: Style = Style { sort_keys: true, ensure_ascii: true, compact: false };
+pub const SORTED_DEFAULT: Style = Style {
+    sort_keys: true,
+    ensure_ascii: true,
+    compact: false,
+};
 /// `json.dumps(v, separators=(",", ":"))`.
-pub const COMPACT: Style = Style { sort_keys: false, ensure_ascii: true, compact: true };
+pub const COMPACT: Style = Style {
+    sort_keys: false,
+    ensure_ascii: true,
+    compact: true,
+};
 /// `json.dumps(v, sort_keys=True, separators=(",", ":"))`.
-pub const SORTED_COMPACT: Style = Style { sort_keys: true, ensure_ascii: true, compact: true };
+pub const SORTED_COMPACT: Style = Style {
+    sort_keys: true,
+    ensure_ascii: true,
+    compact: true,
+};
 /// `json.dumps(v)`.
-pub const DEFAULT: Style = Style { sort_keys: false, ensure_ascii: true, compact: false };
+pub const DEFAULT: Style = Style {
+    sort_keys: false,
+    ensure_ascii: true,
+    compact: false,
+};
 
 pub fn dumps(value: &Value, style: Style) -> String {
     let mut out = String::new();
@@ -27,7 +43,11 @@ pub fn dumps(value: &Value, style: Style) -> String {
 }
 
 fn write(out: &mut String, value: &Value, style: Style) {
-    let (item, kv) = if style.compact { (",", ":") } else { (", ", ": ") };
+    let (item, kv) = if style.compact {
+        (",", ":")
+    } else {
+        (", ", ": ")
+    };
     match value {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -102,7 +122,13 @@ mod tests {
     #[test]
     fn spellings() {
         let v = json!({"b": 1, "a": [1.0, "\u{e9}"], "c": null});
-        assert_eq!(dumps(&v, SORTED_DEFAULT), "{\"a\": [1.0, \"\\u00e9\"], \"b\": 1, \"c\": null}");
-        assert_eq!(dumps(&v, COMPACT), "{\"b\":1,\"a\":[1.0,\"\\u00e9\"],\"c\":null}");
+        assert_eq!(
+            dumps(&v, SORTED_DEFAULT),
+            "{\"a\": [1.0, \"\\u00e9\"], \"b\": 1, \"c\": null}"
+        );
+        assert_eq!(
+            dumps(&v, COMPACT),
+            "{\"b\":1,\"a\":[1.0,\"\\u00e9\"],\"c\":null}"
+        );
     }
 }

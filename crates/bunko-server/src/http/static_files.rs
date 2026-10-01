@@ -10,7 +10,10 @@ use rust_embed::RustEmbed;
 pub struct WebAssets;
 
 pub fn content_type(name: &str) -> &'static str {
-    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
     match ext.as_str() {
         "html" => "text/html; charset=utf-8",
         "js" => "application/javascript; charset=utf-8",
@@ -41,7 +44,10 @@ pub fn serve(module: &str, file: &str, cache_control: Option<&'static str>) -> O
     let f = asset(module, file)?;
     let mut resp = Response::new(Body::from(f.data.into_owned()));
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type(file)));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type(file)),
+    );
     if let Some(cc) = cache_control {
         h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cc));
     }
@@ -49,13 +55,22 @@ pub fn serve(module: &str, file: &str, cache_control: Option<&'static str>) -> O
 }
 
 pub fn not_found_text() -> Response {
-    (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain")], "Not Found").into_response()
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "text/plain")],
+        "Not Found",
+    )
+        .into_response()
 }
 
 pub const ROBOTS_TXT: &str = "User-agent: *\nDisallow: /\n";
 
 pub async fn robots() -> Response {
-    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], ROBOTS_TXT).into_response()
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        ROBOTS_TXT,
+    )
+        .into_response()
 }
 
 /// `GET /_static/<file>` with `Cache-Control: public, max-age=3600`.

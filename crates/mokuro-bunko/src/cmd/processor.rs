@@ -23,5 +23,7 @@ pub fn run(ctx: &Ctx, cmd: ProcessorCmd) -> CmdResult {
         ProcessorCmd::Status { .. } => "status",
         ProcessorCmd::Service { .. } => "service",
     };
-    Err(Fail::msg(format!("processor {name} is not wired into this build yet")))
+    Err(Fail::msg(format!(
+        "processor {name} is not wired into this build yet"
+    )))
 }

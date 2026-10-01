@@ -17,14 +17,24 @@ fn float_semantics_match_cpython() {
         let c = arr(c);
         let got = py::hypot(f(&c[0]), f(&c[1]));
         if !same(got, f(&c[2])) {
-            errs.push(format!("hypot({}, {}) = {got:e} != {:e}", f(&c[0]), f(&c[1]), f(&c[2])));
+            errs.push(format!(
+                "hypot({}, {}) = {got:e} != {:e}",
+                f(&c[0]),
+                f(&c[1]),
+                f(&c[2])
+            ));
         }
     }
     for c in arr(get(&v, "round")) {
         let c = arr(c);
         let got = py::round_digits(f(&c[0]), i(&c[1]) as u32);
         if !same(got, f(&c[2])) {
-            errs.push(format!("round({:e}, {}) = {got:e} != {:e}", f(&c[0]), i(&c[1]), f(&c[2])));
+            errs.push(format!(
+                "round({:e}, {}) = {got:e} != {:e}",
+                f(&c[0]),
+                i(&c[1]),
+                f(&c[2])
+            ));
         }
     }
     for c in arr(get(&v, "sum")) {
@@ -58,15 +68,26 @@ fn float_semantics_match_cpython() {
             }
         }
     }
-    assert!(errs.is_empty(), "{} differ:\n{}", errs.len(), errs.iter().take(40).cloned().collect::<Vec<_>>().join("\n"));
+    assert!(
+        errs.is_empty(),
+        "{} differ:\n{}",
+        errs.len(),
+        errs.iter().take(40).cloned().collect::<Vec<_>>().join("\n")
+    );
 }
 
 #[test]
 fn isspace_matches_python() {
     let v = load("cases/pyfloat.json.gz");
-    let want: std::collections::BTreeSet<u32> = arr(get(&v, "isspace")).iter().map(|x| i(x) as u32).collect();
-    let got: std::collections::BTreeSet<u32> =
-        (0..=0x10FFFFu32).filter_map(char::from_u32).filter(|c| py::is_space(*c)).map(|c| c as u32).collect();
+    let want: std::collections::BTreeSet<u32> = arr(get(&v, "isspace"))
+        .iter()
+        .map(|x| i(x) as u32)
+        .collect();
+    let got: std::collections::BTreeSet<u32> = (0..=0x10FFFFu32)
+        .filter_map(char::from_u32)
+        .filter(|c| py::is_space(*c))
+        .map(|c| c as u32)
+        .collect();
     assert_eq!(got, want);
 }
 
@@ -76,18 +97,29 @@ fn isspace_matches_python() {
 #[test]
 fn nfkc_matches_python_on_assigned_characters() {
     let v = load("cases/pyfloat.json.gz");
-    let Value::Object(map) = get(&v, "nfkc") else { panic!("nfkc map") };
-    let want: std::collections::HashMap<u32, &str> =
-        map.iter().map(|(k, v)| (k.parse::<u32>().expect("cp"), s(v))).collect();
-    let unassigned: Vec<(u32, u32)> =
-        arr(get(&v, "unassigned")).iter().map(|r| (i(&arr(r)[0]) as u32, i(&arr(r)[1]) as u32)).collect();
+    let Value::Object(map) = get(&v, "nfkc") else {
+        panic!("nfkc map")
+    };
+    let want: std::collections::HashMap<u32, &str> = map
+        .iter()
+        .map(|(k, v)| (k.parse::<u32>().expect("cp"), s(v)))
+        .collect();
+    let unassigned: Vec<(u32, u32)> = arr(get(&v, "unassigned"))
+        .iter()
+        .map(|r| (i(&arr(r)[0]) as u32, i(&arr(r)[1]) as u32))
+        .collect();
     let is_unassigned = |cp: u32| unassigned.iter().any(|&(a, b)| a <= cp && cp <= b);
     let mut errs = Vec::new();
     let mut drift = Vec::new();
     for cp in 0..=0x10FFFFu32 {
-        let Some(ch) = char::from_u32(cp) else { continue };
+        let Some(ch) = char::from_u32(cp) else {
+            continue;
+        };
         let got: String = std::iter::once(ch).nfkc().collect();
-        let expect = want.get(&cp).map(|s| s.to_string()).unwrap_or_else(|| ch.to_string());
+        let expect = want
+            .get(&cp)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| ch.to_string());
         if got != expect {
             if is_unassigned(cp) {
                 drift.push(cp);
@@ -101,5 +133,10 @@ fn nfkc_matches_python_on_assigned_characters() {
         s(get(&v, "unidata_version")),
         drift.len()
     );
-    assert!(errs.is_empty(), "{} differ:\n{}", errs.len(), errs.iter().take(40).cloned().collect::<Vec<_>>().join("\n"));
+    assert!(
+        errs.is_empty(),
+        "{} differ:\n{}",
+        errs.len(),
+        errs.iter().take(40).cloned().collect::<Vec<_>>().join("\n")
+    );
 }

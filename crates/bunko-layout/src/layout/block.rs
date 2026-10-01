@@ -33,7 +33,11 @@ fn widened(quad: Quad, vertical: bool, margin: f64) -> Quad {
     let (ux, uy) = (ux / norm * margin, uy / norm * margin);
     let lo = |p: (f64, f64)| (p.0 - ux, p.1 - uy);
     let hi = |p: (f64, f64)| (p.0 + ux, p.1 + uy);
-    if vertical { [lo(a), hi(b), hi(c), lo(d)] } else { [lo(a), lo(b), hi(c), hi(d)] }
+    if vertical {
+        [lo(a), hi(b), hi(c), lo(d)]
+    } else {
+        [lo(a), lo(b), hi(c), hi(d)]
+    }
 }
 
 /// `[x0, y0, x1, y1]` in whole pixels around `spans`, clamped to the page.
@@ -41,7 +45,13 @@ pub fn page_box(spans: Spans, page_width: f64, page_height: f64) -> [i64; 4] {
     let (x0, x1, y0, y1) = spans;
     let w = (page_width.trunc() as i64).max(0);
     let h = (page_height.trunc() as i64).max(0);
-    let clamp = |value: i64, limit: i64| if limit > 0 { value.max(0).min(limit) } else { value.max(0) };
+    let clamp = |value: i64, limit: i64| {
+        if limit > 0 {
+            value.max(0).min(limit)
+        } else {
+            value.max(0)
+        }
+    };
     [
         clamp(x0.floor() as i64, w),
         clamp(y0.floor() as i64, h),
@@ -66,19 +76,39 @@ fn settled_quad(line: &Line, theta: f64) -> Quad {
 /// One mokuro block from lines already in reading order.
 pub fn build_block(group: &[&Line], page_width: f64, page_height: f64, margin_cap: f64) -> Block {
     let theta = block_theta(group);
-    let margins: Vec<f64> = group.iter().map(|l| min2(BODY_QUAD_MARGIN_EM * l.thickness(), margin_cap)).collect();
-    let quads: Vec<Quad> =
-        group.iter().zip(&margins).map(|(l, &m)| widened(settled_quad(l, theta), l.vertical, m)).collect();
+    let margins: Vec<f64> = group
+        .iter()
+        .map(|l| min2(BODY_QUAD_MARGIN_EM * l.thickness(), margin_cap))
+        .collect();
+    let quads: Vec<Quad> = group
+        .iter()
+        .zip(&margins)
+        .map(|(l, &m)| widened(settled_quad(l, theta), l.vertical, m))
+        .collect();
     let xs = quads.iter().flat_map(|q| q.iter().map(|p| p.0));
     let ys = quads.iter().flat_map(|q| q.iter().map(|p| p.1));
-    let spans = (py::min_of(xs.clone()), py::max_of(xs), py::min_of(ys.clone()), py::max_of(ys));
-    let font = median(group.iter().zip(&margins).map(|(l, &m)| l.thickness() + 2.0 * m)).unwrap_or(0.0);
+    let spans = (
+        py::min_of(xs.clone()),
+        py::max_of(xs),
+        py::min_of(ys.clone()),
+        py::max_of(ys),
+    );
+    let font = median(
+        group
+            .iter()
+            .zip(&margins)
+            .map(|(l, &m)| l.thickness() + 2.0 * m),
+    )
+    .unwrap_or(0.0);
     Block {
         bbox: page_box(spans, page_width, page_height),
         vertical: group[0].vertical,
         font_size: round_int(font),
         lines: group.iter().map(|l| normalize_text(&l.text)).collect(),
-        lines_coords: quads.iter().map(|q| q.map(|p| [round_int(p.0), round_int(p.1)])).collect(),
+        lines_coords: quads
+            .iter()
+            .map(|q| q.map(|p| [round_int(p.0), round_int(p.1)]))
+            .collect(),
     }
 }
 
@@ -98,7 +128,9 @@ fn rect_meets_quad(rect: [i64; 4], quad: &[[i64; 2]; 4]) -> bool {
     for (ax, ay) in axes {
         let rect_proj = corners.map(|(x, y)| x * ax + y * ay);
         let quad_proj = q.map(|(x, y)| x * ax + y * ay);
-        if py::max_of(rect_proj) <= py::min_of(quad_proj) || py::max_of(quad_proj) <= py::min_of(rect_proj) {
+        if py::max_of(rect_proj) <= py::min_of(quad_proj)
+            || py::max_of(quad_proj) <= py::min_of(rect_proj)
+        {
             return false;
         }
     }
@@ -135,7 +167,12 @@ fn clear_reach(bx: [i64; 4], side: usize, goal: i64, obstacles: &[[[i64; 2]; 4]]
 fn quad_spans(quad: &Quad) -> Spans {
     let xs = quad.map(|p| p.0);
     let ys = quad.map(|p| p.1);
-    (py::min_of(xs), py::max_of(xs), py::min_of(ys), py::max_of(ys))
+    (
+        py::min_of(xs),
+        py::max_of(xs),
+        py::min_of(ys),
+        py::max_of(ys),
+    )
 }
 
 /// Grow every block's box over the furigana of its lines, in place.
@@ -183,7 +220,11 @@ pub fn grow_boxes_over_ruby(
         for run in block_runs {
             let goal = page_box(quad_spans(&run.quad), page_width, page_height);
             for side in [1usize, 3, 0, 2] {
-                let target = if side < 2 { bx[side].min(goal[side]) } else { bx[side].max(goal[side]) };
+                let target = if side < 2 {
+                    bx[side].min(goal[side])
+                } else {
+                    bx[side].max(goal[side])
+                };
                 bx[side] = clear_reach(bx, side, target, &obstacles);
             }
         }

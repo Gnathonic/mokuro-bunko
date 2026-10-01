@@ -20,7 +20,9 @@ pub use line::{
     is_ambiguous, measure, measure_lines, overlap, pair_theta, quad_frame,
 };
 pub use merge::{column_pieces, is_column_piece, merge_lines, should_merge};
-pub use order::{Kind, block_theta, cluster_columns, group_box, order_blocks, order_lines, split_paragraphs};
+pub use order::{
+    Kind, block_theta, cluster_columns, group_box, order_blocks, order_lines, split_paragraphs,
+};
 
 use crate::records::RawPage;
 
@@ -42,7 +44,10 @@ pub struct PageLayout {
 impl PageLayout {
     /// Every line index that belongs to some text body (`∪ body.members`).
     pub fn body_members(&self) -> std::collections::BTreeSet<usize> {
-        self.bodies.iter().flat_map(|b| b.members.iter().copied()).collect()
+        self.bodies
+            .iter()
+            .flat_map(|b| b.members.iter().copied())
+            .collect()
     }
 
     /// Line indices removed as ruby.
@@ -107,9 +112,29 @@ pub fn layout_page(page: &RawPage) -> PageLayout {
     }
 
     let order = order_blocks(&groups, &kinds, &bodies);
-    let mut blocks: Vec<Block> = order.iter().map(|&i| build_block(&groups[i], width, height, caps[i])).collect();
-    let ordered_groups: Vec<Vec<usize>> = order.iter().map(|&i| groups[i].iter().map(|l| l.index).collect()).collect();
+    let mut blocks: Vec<Block> = order
+        .iter()
+        .map(|&i| build_block(&groups[i], width, height, caps[i]))
+        .collect();
+    let ordered_groups: Vec<Vec<usize>> = order
+        .iter()
+        .map(|&i| groups[i].iter().map(|l| l.index).collect())
+        .collect();
     let ordered_kinds: Vec<Kind> = order.iter().map(|&i| kinds[i]).collect();
-    grow_boxes_over_ruby(&mut blocks, &ordered_groups, &ordered_kinds, &ruby, width, height);
-    PageLayout { blocks, groups: ordered_groups, kinds: ordered_kinds, ruby, dropped, bodies }
+    grow_boxes_over_ruby(
+        &mut blocks,
+        &ordered_groups,
+        &ordered_kinds,
+        &ruby,
+        width,
+        height,
+    );
+    PageLayout {
+        blocks,
+        groups: ordered_groups,
+        kinds: ordered_kinds,
+        ruby,
+        dropped,
+        bodies,
+    }
 }

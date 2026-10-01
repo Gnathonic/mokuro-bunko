@@ -27,7 +27,9 @@ pub fn is_kanji(ch: char) -> bool {
 /// Hiragana, katakana (full or half width), the prolonged-sound mark.
 pub fn is_kana(ch: char) -> bool {
     let o = ch as u32;
-    (0x3041..=0x309F).contains(&o) || (0x30A0..=0x30FF).contains(&o) || (0xFF66..=0xFF9F).contains(&o)
+    (0x3041..=0x309F).contains(&o)
+        || (0x30A0..=0x30FF).contains(&o)
+        || (0xFF66..=0xFF9F).contains(&o)
 }
 
 pub fn has_kanji(text: &str) -> bool {
@@ -148,7 +150,9 @@ fn fix_dashes(text: &[char]) -> Vec<char> {
             None => true,
             Some(p) if !is_kana(p) || p == DASH => true,
             Some(p) if is_hiragana(p) => {
-                let runs_on = nxt.is_some_and(|n| is_kana(n) || is_kanji(n) || is_space(n) || "」』。".contains(n));
+                let runs_on = nxt.is_some_and(|n| {
+                    is_kana(n) || is_kanji(n) || is_space(n) || "」』。".contains(n)
+                });
                 j - i >= 2 && runs_on
             }
             Some(_) => false,
@@ -191,7 +195,12 @@ pub fn normalize_text(text: &str) -> String {
             if !is_ascii(&around) {
                 out[i] = DASH;
             }
-        } else if ch == ' ' && 0 < i && i + 1 < n && !text[i - 1].is_ascii() && !text[i + 1].is_ascii() {
+        } else if ch == ' '
+            && 0 < i
+            && i + 1 < n
+            && !text[i - 1].is_ascii()
+            && !text[i + 1].is_ascii()
+        {
             out[i] = '\u{3000}';
         }
     }

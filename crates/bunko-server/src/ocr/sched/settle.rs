@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use bunko_sched::breaker::{DOWNLOAD_RETURN_LIMIT, DownloadBreaker, JobReturns, return_counts_for_job};
+use bunko_sched::breaker::{
+    DOWNLOAD_RETURN_LIMIT, DownloadBreaker, JobReturns, return_counts_for_job,
+};
 use bunko_sched::failures::{NewFailure, failure_log_line, record_failure};
 use serde_json::{Map, Value};
 
@@ -38,7 +40,9 @@ pub fn read_own_copy(path: &Path) -> Option<String> {
     let mut at: u64 = 0;
     loop {
         if started.elapsed().as_secs() > OWN_COPY_READ_SECONDS {
-            return Some(format!("reading it took longer than {OWN_COPY_READ_SECONDS}s at byte {at}"));
+            return Some(format!(
+                "reading it took longer than {OWN_COPY_READ_SECONDS}s at byte {at}"
+            ));
         }
         match f.read(&mut buf) {
             Ok(0) => return None,
@@ -50,14 +54,26 @@ pub fn read_own_copy(path: &Path) -> Option<String> {
 
 impl Scheduler {
     fn label_of(&self, pid: &str) -> String {
-        self.machines.get(pid).map(|m| m.label()).unwrap_or_else(|| pid.to_string())
+        self.machines
+            .get(pid)
+            .map(|m| m.label())
+            .unwrap_or_else(|| pid.to_string())
     }
 
     /// `finish_ocr_job`: the claim's outcome, recorded (a failure gets a record and a
     /// backoff unless the claim was cancelled or its processor left).
-    pub fn finish(&mut self, job: &Job, ok: bool, failure: Option<String>, congestion: Option<Map<String, Value>>) {
+    pub fn finish(
+        &mut self,
+        job: &Job,
+        ok: bool,
+        failure: Option<String>,
+        congestion: Option<Map<String, Value>>,
+    ) {
         let Some(claim) = self.claims.remove(job) else {
-            self.log(format!("Ignored a late outcome for {}: its claim was returned already", job.rel));
+            self.log(format!(
+                "Ignored a late outcome for {}: its claim was returned already",
+                job.rel
+            ));
             return;
         };
         let row = claim.row.clone();
@@ -79,13 +95,26 @@ impl Scheduler {
                 }
             }
         } else if returned {
-            self.log(format!("Returned {} for {}: {} disconnected", row.name, job.file_name(), claim.machine));
+            self.log(format!(
+                "Returned {} for {}: {} disconnected",
+                row.name,
+                job.file_name(),
+                claim.machine
+            ));
         } else if cancelled {
-            self.log(format!("Skipped {} for {}: cancelled, not a failure of the volume", row.name, job.file_name()));
+            self.log(format!(
+                "Skipped {} for {}: cancelled, not a failure of the volume",
+                row.name,
+                job.file_name()
+            ));
         } else if self.settings.rows.iter().any(|r| r.id == row.id) {
             self.record_failure(job, &row, failure.as_deref());
         } else {
-            self.log(format!("Skipped {} for {}: the generation is no longer configured", row.name, job.file_name()));
+            self.log(format!(
+                "Skipped {} for {}: the generation is no longer configured",
+                row.name,
+                job.file_name()
+            ));
         }
         if returned {
             self.attempted.remove(job);
@@ -95,7 +124,12 @@ impl Scheduler {
         self.bump_page();
     }
 
-    fn record_failure(&mut self, job: &Job, row: &bunko_core::generations::Generation, error: Option<&str>) {
+    fn record_failure(
+        &mut self,
+        job: &Job,
+        row: &bunko_core::generations::Generation,
+        error: Option<&str>,
+    ) {
         let key = self.failure_key_of(job, row);
         let failure = NewFailure {
             series: job.series(),
@@ -108,14 +142,26 @@ impl Scheduler {
         };
         let now = self.now();
         let record = record_failure(&mut self.failures, &key, &failure, now);
-        self.log(failure_log_line(&row.name, &job.rel, record.attempts, self.settings.poll_interval, &record.error));
+        self.log(failure_log_line(
+            &row.name,
+            &job.rel,
+            record.attempts,
+            self.settings.poll_interval,
+            &record.error,
+        ));
         self.save_failures();
     }
 
     /// `release_ocr_job`: give the claim back, recording nothing.
     pub fn release(&mut self, job: &Job, reason: &str, retry_this_scan: bool) {
-        let Some(claim) = self.claims.remove(job) else { return };
-        self.log(format!("Returned {} for {} to the queue: {reason}", claim.row.name, job.file_name()));
+        let Some(claim) = self.claims.remove(job) else {
+            return;
+        };
+        self.log(format!(
+            "Returned {} for {} to the queue: {reason}",
+            claim.row.name,
+            job.file_name()
+        ));
         self.cancelled.remove(job);
         if retry_this_scan {
             self.attempted.remove(job);
@@ -136,7 +182,9 @@ impl Scheduler {
         congestion: Option<Map<String, Value>>,
     ) {
         let job = entry.job.clone();
-        let owned = self.claims.get(&job).is_some_and(|c| c.sid.as_deref() == Some(sid) && c.claim.as_deref() == Some(entry.claim.as_str()));
+        let owned = self.claims.get(&job).is_some_and(|c| {
+            c.sid.as_deref() == Some(sid) && c.claim.as_deref() == Some(entry.claim.as_str())
+        });
         let uploaded = self.results.remove(&(sid.to_string(), entry.claim.clone()));
         if !owned {
             self.log(format!("Ignored a late {} outcome for {}: a file written now would land beside the one the next owner writes", entry.row.name, job.rel));
@@ -147,7 +195,9 @@ impl Scheduler {
             }
             return;
         }
-        let Some(claim) = self.claims.get_mut(&job) else { return };
+        let Some(claim) = self.claims.get_mut(&job) else {
+            return;
+        };
         claim.settling = true;
         let stamp = claim.stamp;
         let pid = claim.pid.clone();
@@ -164,13 +214,32 @@ impl Scheduler {
                     (path, Some(sha))
                 }
             }
-            None => (self.storage().join(".processing").join(sid).join(&entry.claim).join(&entry.sidecar_name), sidecar_sha256.clone()),
+            None => (
+                self.storage()
+                    .join(".processing")
+                    .join(sid)
+                    .join(&entry.claim)
+                    .join(&entry.sidecar_name),
+                sidecar_sha256.clone(),
+            ),
         };
         let account = machine.and_then(|m| m.username.clone());
         let runner_build = machine
-            .map(|m| if !m.host.runner_build.is_empty() { m.host.runner_build.clone() } else if !m.host.version.is_empty() { format!("mokuro-bunko {}", m.host.version) } else { self.deps.generator.clone() })
+            .map(|m| {
+                if !m.host.runner_build.is_empty() {
+                    m.host.runner_build.clone()
+                } else if !m.host.version.is_empty() {
+                    format!("mokuro-bunko {}", m.host.version)
+                } else {
+                    self.deps.generator.clone()
+                }
+            })
             .filter(|s| !s.is_empty());
-        let machine_name = if local { LOCAL.to_string() } else { machine.map(|m| m.name.clone()).unwrap_or_default() };
+        let machine_name = if local {
+            LOCAL.to_string()
+        } else {
+            machine.map(|m| m.name.clone()).unwrap_or_default()
+        };
         let req = CollectRequest {
             job,
             row: entry.row.clone(),
@@ -194,7 +263,9 @@ impl Scheduler {
             congestion,
             upgrade: self.deps.upgrade.clone(),
         };
-        self.run_background(Box::new(move || Msg::Collected(Box::new(crate::ocr::collect::run(req)))));
+        self.run_background(Box::new(move || {
+            Msg::Collected(Box::new(crate::ocr::collect::run(req)))
+        }));
     }
 
     /// A helper thread finished installing (or refused) a result.
@@ -216,11 +287,22 @@ impl Scheduler {
 
     /// A result upload landed for an outstanding claim.
     pub fn result_stored(&mut self, pid: &str, sid: &str, claim: &str, name: &str, sha256: String) {
-        let path = self.storage().join(".processing").join(sid).join(claim).join(name);
-        let wanted = self.sessions.get(sid).filter(|s| s.pid == pid).and_then(|s| s.jobs.get(claim)).map(|j| j.sidecar_name.clone());
+        let path = self
+            .storage()
+            .join(".processing")
+            .join(sid)
+            .join(claim)
+            .join(name);
+        let wanted = self
+            .sessions
+            .get(sid)
+            .filter(|s| s.pid == pid)
+            .and_then(|s| s.jobs.get(claim))
+            .map(|j| j.sidecar_name.clone());
         match wanted {
             Some(expected) if expected == name => {
-                self.results.insert((sid.to_string(), claim.to_string()), (path, sha256));
+                self.results
+                    .insert((sid.to_string(), claim.to_string()), (path, sha256));
             }
             Some(expected) => {
                 let _ = std::fs::remove_dir_all(path.parent().unwrap_or(&path));
@@ -229,7 +311,12 @@ impl Scheduler {
                     bunko_sched::py::py_repr(&Value::String(name.chars().take(80).collect())),
                     bunko_sched::py::py_repr(&Value::String(expected))
                 );
-                if let Some(job) = self.sessions.get(sid).and_then(|s| s.jobs.get(claim)).map(|j| (j.job.clone(), j.row.clone())) {
+                if let Some(job) = self
+                    .sessions
+                    .get(sid)
+                    .and_then(|s| s.jobs.get(claim))
+                    .map(|j| (j.job.clone(), j.row.clone()))
+                {
                     let req_like = (job.0, job.1);
                     self.audit_rejection(&req_like.0, &req_like.1, pid, &reason);
                 }
@@ -242,20 +329,35 @@ impl Scheduler {
         }
     }
 
-    fn audit_rejection(&self, job: &Job, row: &bunko_core::generations::Generation, pid: &str, reason: &str) {
+    fn audit_rejection(
+        &self,
+        job: &Job,
+        row: &bunko_core::generations::Generation,
+        pid: &str,
+        reason: &str,
+    ) {
         let Some(db) = &self.deps.db else { return };
         let cbz = job.path(&self.library());
         let (plain, _) = crate::ocr::owed::sidecar_paths(&cbz, &row.sidecar_suffix());
-        let target = rel_of(&self.library(), &plain).map(|r| format!("{}{r}", bunko_proto::ARCHIVES_ROOT)).unwrap_or_default();
+        let target = rel_of(&self.library(), &plain)
+            .map(|r| format!("{}{r}", bunko_proto::ARCHIVES_ROOT))
+            .unwrap_or_default();
         let machine = self.machines.get(pid);
         let details = bunko_db::AuditDetails::new()
             .with("generation", row.name.clone())
             .with("generation_id", row.id.clone())
-            .with("machine", machine.map(|m| m.name.clone()).unwrap_or_default())
+            .with(
+                "machine",
+                machine.map(|m| m.name.clone()).unwrap_or_default(),
+            )
             .with("engine", row.engine.clone())
             .with("reason", reason.chars().take(500).collect::<String>());
         let account = machine.and_then(|m| m.username.clone());
-        let event = bunko_db::NewAuditEvent::new("ocr_sidecar_rejected").actor(account.as_deref()).target_type("sidecar").target_path(&target).details(details);
+        let event = bunko_db::NewAuditEvent::new("ocr_sidecar_rejected")
+            .actor(account.as_deref())
+            .target_type("sidecar")
+            .target_path(&target)
+            .details(details);
         if let Err(e) = db.log_audit_event(&event) {
             tracing::warn!("could not audit a rejected sidecar: {e}");
         }
@@ -264,14 +366,23 @@ impl Scheduler {
     // --- returned claims and the download breaker -------------------------------------------
 
     /// `_download_delivered`: the processor has the verified archive.
-    pub fn download_delivered(&mut self, pid: &str, job: &Job, detail: &std::collections::BTreeMap<String, Value>) {
+    pub fn download_delivered(
+        &mut self,
+        pid: &str,
+        job: &Job,
+        detail: &std::collections::BTreeMap<String, Value>,
+    ) {
         let stamp = stamp_of(&job.path(&self.library()));
         if let Some(c) = self.claims.get_mut(job) {
             c.stamp = stamp;
         }
         self.download_returns.remove(job);
         let label = self.label_of(pid);
-        let reopened = self.breakers.entry(pid.to_string()).or_insert_with(|| DownloadBreaker::new(label.clone())).note_delivered();
+        let reopened = self
+            .breakers
+            .entry(pid.to_string())
+            .or_insert_with(|| DownloadBreaker::new(label.clone()))
+            .note_delivered();
         if let Some(m) = self.machines.get_mut(pid) {
             m.transfer.note_ready(detail);
             m.transfer.held_until = None;
@@ -281,12 +392,23 @@ impl Scheduler {
             self.log(format!("{label} fetched an archive again; no longer held"));
             self.bump();
         }
-        let requests = detail.get("requests").and_then(Value::as_f64).unwrap_or(0.0);
+        let requests = detail
+            .get("requests")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
         let anomalous = requests > 1.0
-            || detail.get("restarts").and_then(Value::as_f64).unwrap_or(0.0) > 0.0
+            || detail
+                .get("restarts")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                > 0.0
             || detail.get("repairs").and_then(Value::as_f64).unwrap_or(0.0) > 0.0
             || detail.get("verdict").is_some_and(|v| !v.is_null());
-        let line = format!("{label} fetched {}: {}", job.rel, serde_json::to_string(detail).unwrap_or_default());
+        let line = format!(
+            "{label} fetched {}: {}",
+            job.rel,
+            serde_json::to_string(detail).unwrap_or_default()
+        );
         if anomalous {
             self.log(line);
         } else {
@@ -295,8 +417,19 @@ impl Scheduler {
     }
 
     /// `_judge_returned` (spec §16.2).
-    pub fn judge_returned(&mut self, pid: &str, _sid: &str, entry: super::session::SessionJob, class: &str, error: &str) {
-        let klass: String = if class.is_empty() { "local".into() } else { class.chars().take(40).collect() };
+    pub fn judge_returned(
+        &mut self,
+        pid: &str,
+        _sid: &str,
+        entry: super::session::SessionJob,
+        class: &str,
+        error: &str,
+    ) {
+        let klass: String = if class.is_empty() {
+            "local".into()
+        } else {
+            class.chars().take(40).collect()
+        };
         let error: String = error.chars().take(300).collect();
         let now = self.now();
         let (label, machine, local) = match self.machines.get_mut(pid) {
@@ -323,10 +456,22 @@ impl Scheduler {
         if let (Some(m), Some(size)) = (&meta, entry.archive_size)
             && m.len() != size
         {
-            self.release(&job, &format!("{label}: the archive changed after it was sent"), true);
+            self.release(
+                &job,
+                &format!("{label}: the archive changed after it was sent"),
+                true,
+            );
             return;
         }
-        let ctx = ReturnContext { pid: pid.to_string(), machine, label, local, klass: klass.clone(), error, stamp: stamp_of(&path) };
+        let ctx = ReturnContext {
+            pid: pid.to_string(),
+            machine,
+            label,
+            local,
+            klass: klass.clone(),
+            error,
+            stamp: stamp_of(&path),
+        };
         if klass == "stalled" || klass == "differs" {
             if let Some(c) = self.claims.get_mut(&job) {
                 c.settling = true;
@@ -334,7 +479,11 @@ impl Scheduler {
             let job2 = job.clone();
             self.run_background(Box::new(move || {
                 let error = read_own_copy(&path);
-                Msg::OwnCopyRead { job: job2, error, then: Box::new(ctx) }
+                Msg::OwnCopyRead {
+                    job: job2,
+                    error,
+                    then: Box::new(ctx),
+                }
             }));
             return;
         }
@@ -346,7 +495,14 @@ impl Scheduler {
             c.settling = false;
         }
         if let Some(e) = error {
-            self.finish(&job, false, Some(format!("the library cannot read its own copy of this archive: {e}")), None);
+            self.finish(
+                &job,
+                false,
+                Some(format!(
+                    "the library cannot read its own copy of this archive: {e}"
+                )),
+                None,
+            );
             return;
         }
         self.count_return(job, ctx);
@@ -354,7 +510,10 @@ impl Scheduler {
 
     fn count_return(&mut self, job: Job, ctx: ReturnContext) {
         let now = self.now();
-        let breaker = self.breakers.entry(ctx.pid.clone()).or_insert_with(|| DownloadBreaker::new(ctx.label.clone()));
+        let breaker = self
+            .breakers
+            .entry(ctx.pid.clone())
+            .or_insert_with(|| DownloadBreaker::new(ctx.label.clone()));
         let noted = breaker.note_return(&ctx.klass, &ctx.error, now);
         if let Some(opened) = &noted.opened {
             self.log(opened.log_line(&ctx.label));
@@ -366,7 +525,15 @@ impl Scheduler {
             self.bump_page();
         }
         let counted = return_counts_for_job(noted.job_counted, &ctx.klass);
-        let returns = JobReturns::note(self.download_returns.remove(&job), ctx.stamp, &ctx.klass, &ctx.error, &ctx.machine, counted, now);
+        let returns = JobReturns::note(
+            self.download_returns.remove(&job),
+            ctx.stamp,
+            &ctx.klass,
+            &ctx.error,
+            &ctx.machine,
+            counted,
+            now,
+        );
         if counted && returns.count >= DOWNLOAD_RETURN_LIMIT {
             let summary = returns.failure_summary(&ctx.klass, &ctx.error);
             self.finish(&job, false, Some(summary), None);
@@ -374,9 +541,19 @@ impl Scheduler {
         }
         self.download_returns.insert(job.clone(), returns);
         if !ctx.local {
-            self.returned_by.entry(job.clone()).or_default().insert(ctx.pid.clone());
+            self.returned_by
+                .entry(job.clone())
+                .or_default()
+                .insert(ctx.pid.clone());
         }
-        self.release(&job, &format!("{} could not fetch the archive ({}): {}", ctx.label, ctx.klass, ctx.error), true);
+        self.release(
+            &job,
+            &format!(
+                "{} could not fetch the archive ({}): {}",
+                ctx.label, ctx.klass, ctx.error
+            ),
+            true,
+        );
     }
 
     // --- WebDAV hooks ---------------------------------------------------------------------
@@ -397,13 +574,18 @@ impl Scheduler {
         }
         let sids: Vec<String> = self.sessions.keys().cloned().collect();
         for sid in sids {
-            let Some(s) = self.sessions.get(&sid) else { continue };
+            let Some(s) = self.sessions.get(&sid) else {
+                continue;
+            };
             let held: Vec<Job> = s.jobs.values().map(|j| j.job.clone()).collect();
             if !held.is_empty() && held.iter().all(|j| stale.contains(j)) {
                 for j in &held {
                     self.cancelled.insert(j.clone());
                 }
-                self.log(format!("Stopping the {} session: its archive was replaced or removed", s.row.name));
+                self.log(format!(
+                    "Stopping the {} session: its archive was replaced or removed",
+                    s.row.name
+                ));
                 self.kill_session(&sid, None);
             }
         }
@@ -412,13 +594,23 @@ impl Scheduler {
     /// `archive_arrived(cbz)`: a `.cbz` is now in place (PUT / MOVE / COPY).
     pub fn archive_arrived(&mut self, path: &Path) {
         let library = self.library();
-        let Some(rel) = rel_of(&library, path) else { return };
+        let Some(rel) = rel_of(&library, path) else {
+            return;
+        };
         if !rel.ends_with(".cbz") {
             return;
         }
         self.cancel_stale_jobs(|r| r == rel);
         let probe = self.upgrade_probe();
-        let entry = crate::ocr::owed::compute(&library, path, &self.settings.rows, self.deps.facts.as_ref(), probe.as_deref().map(|p| p as &dyn crate::ocr::owed::UpgradeProbe));
+        let entry = crate::ocr::owed::compute(
+            &library,
+            path,
+            &self.settings.rows,
+            self.deps.facts.as_ref(),
+            probe
+                .as_deref()
+                .map(|p| p as &dyn crate::ocr::owed::UpgradeProbe),
+        );
         match entry {
             Some(mut v) => {
                 v.pages = crate::ocr::owed::pages_of(path, self.deps.facts.as_ref());
@@ -452,10 +644,22 @@ impl Scheduler {
         };
         let is_archive = rel.to_lowercase().ends_with(".cbz");
         let prefix = format!("{rel}/");
-        let gone = |r: &str| if is_archive { r == rel } else { r.starts_with(&prefix) };
+        let gone = |r: &str| {
+            if is_archive {
+                r == rel
+            } else {
+                r.starts_with(&prefix)
+            }
+        };
         self.cancel_stale_jobs(gone);
         let before = self.owed.volumes.len();
-        self.owed.volumes.retain(|r, _| !(if is_archive { r == &rel } else { r.starts_with(&prefix) }));
+        self.owed.volumes.retain(|r, _| {
+            !(if is_archive {
+                r == &rel
+            } else {
+                r.starts_with(&prefix)
+            })
+        });
         if self.owed.volumes.len() != before {
             self.bump_page();
         }
@@ -468,14 +672,22 @@ impl Scheduler {
         if let Some(s) = self.sessions.get_mut(sid) {
             s.fatal_error = Some(error);
         }
-        let Some(s) = self.sessions.get(sid) else { return };
+        let Some(s) = self.sessions.get(sid) else {
+            return;
+        };
         let pid = s.pid.clone();
         let claims = s.order.clone();
         if let Some(m) = self.machines.get(&pid) {
             for claim in claims {
-                m.send(bunko_proto::Op::Cancel { sid: Some(sid.to_string()), claim: Some(claim), bid: None });
+                m.send(bunko_proto::Op::Cancel {
+                    sid: Some(sid.to_string()),
+                    claim: Some(claim),
+                    bid: None,
+                });
             }
-            m.send(bunko_proto::Op::CloseSession { sid: sid.to_string() });
+            m.send(bunko_proto::Op::CloseSession {
+                sid: sid.to_string(),
+            });
         }
         self.end_session(sid, None, false);
     }

@@ -29,11 +29,17 @@ pub fn load_for_write(path: &Path) -> Result<Config, ConfigError> {
     if !path.exists() {
         return Ok(Config::default());
     }
-    let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io { path: path.to_path_buf(), source })?;
+    let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let value: serde_json::Value = if text.trim().is_empty() {
         serde_json::Value::Null
     } else {
-        parse_yaml(&text).map_err(|message| ConfigError::Yaml { path: path.to_path_buf(), message })?
+        parse_yaml(&text).map_err(|message| ConfigError::Yaml {
+            path: path.to_path_buf(),
+            message,
+        })?
     };
     Config::from_value(&value)
 }

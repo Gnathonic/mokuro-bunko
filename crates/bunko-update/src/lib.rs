@@ -39,7 +39,11 @@ pub enum UpdateError {
     #[error("the release manifest signature does not verify")]
     BadSignature,
     #[error("no {flavor} build for {target} in release {version}")]
-    NoArtifact { flavor: String, target: String, version: String },
+    NoArtifact {
+        flavor: String,
+        target: String,
+        version: String,
+    },
     #[error("the download's sha256 is {got}, the signed manifest says {want}")]
     Checksum { got: String, want: String },
     #[error("this installation is managed by {0}; update it there")]
@@ -61,7 +65,11 @@ pub struct Artifact {
 }
 
 fn default_binary() -> String {
-    if cfg!(windows) { "mokuro-bunko.exe".into() } else { "mokuro-bunko".into() }
+    if cfg!(windows) {
+        "mokuro-bunko.exe".into()
+    } else {
+        "mokuro-bunko".into()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,35 +89,54 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn semver(&self) -> Result<semver::Version, UpdateError> {
-        semver::Version::parse(self.version.trim_start_matches('v')).map_err(|e| UpdateError::Manifest(e.to_string()))
+        semver::Version::parse(self.version.trim_start_matches('v'))
+            .map_err(|e| UpdateError::Manifest(e.to_string()))
     }
 
     pub fn artifact(&self, target: &str, flavor: &str) -> Result<&Artifact, UpdateError> {
-        self.artifacts.get(target).and_then(|f| f.get(flavor)).ok_or_else(|| UpdateError::NoArtifact {
-            flavor: flavor.into(),
-            target: target.into(),
-            version: self.version.clone(),
-        })
+        self.artifacts
+            .get(target)
+            .and_then(|f| f.get(flavor))
+            .ok_or_else(|| UpdateError::NoArtifact {
+                flavor: flavor.into(),
+                target: target.into(),
+                version: self.version.clone(),
+            })
     }
 }
 
 /// Verify `sig_b64` over `bytes` with the base64 public key.
-pub fn verify_signature(bytes: &[u8], sig_b64: &str, public_key_b64: &str) -> Result<(), UpdateError> {
+pub fn verify_signature(
+    bytes: &[u8],
+    sig_b64: &str,
+    public_key_b64: &str,
+) -> Result<(), UpdateError> {
     let b64 = base64::engine::general_purpose::STANDARD;
     let key: [u8; 32] = b64
         .decode(public_key_b64.trim())
         .ok()
         .and_then(|k| k.try_into().ok())
         .ok_or_else(|| UpdateError::Manifest("bad public key".into()))?;
-    let key = VerifyingKey::from_bytes(&key).map_err(|_| UpdateError::Manifest("bad public key".into()))?;
-    let sig: [u8; 64] = b64.decode(sig_b64.trim()).ok().and_then(|s| s.try_into().ok()).ok_or(UpdateError::BadSignature)?;
-    key.verify_strict(bytes, &Signature::from_bytes(&sig)).map_err(|_| UpdateError::BadSignature)
+    let key = VerifyingKey::from_bytes(&key)
+        .map_err(|_| UpdateError::Manifest("bad public key".into()))?;
+    let sig: [u8; 64] = b64
+        .decode(sig_b64.trim())
+        .ok()
+        .and_then(|s| s.try_into().ok())
+        .ok_or(UpdateError::BadSignature)?;
+    key.verify_strict(bytes, &Signature::from_bytes(&sig))
+        .map_err(|_| UpdateError::BadSignature)
 }
 
 /// Parse and verify a manifest.
-pub fn parse_manifest(bytes: &[u8], sig_b64: &str, public_key_b64: &str) -> Result<Manifest, UpdateError> {
+pub fn parse_manifest(
+    bytes: &[u8],
+    sig_b64: &str,
+    public_key_b64: &str,
+) -> Result<Manifest, UpdateError> {
     verify_signature(bytes, sig_b64, public_key_b64)?;
-    let m: Manifest = serde_json::from_slice(bytes).map_err(|e| UpdateError::Manifest(e.to_string()))?;
+    let m: Manifest =
+        serde_json::from_slice(bytes).map_err(|e| UpdateError::Manifest(e.to_string()))?;
     m.semver()?;
     Ok(m)
 }
@@ -118,10 +145,14 @@ pub fn parse_manifest(bytes: &[u8], sig_b64: &str, public_key_b64: &str) -> Resu
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InstallKind {
     /// We own our executable and may replace it.
-    SelfManaged { exe: PathBuf },
+    SelfManaged {
+        exe: PathBuf,
+    },
     Docker,
     /// Installed by a package manager / system location we must not touch.
-    Managed { by: String },
+    Managed {
+        by: String,
+    },
     /// Mobile app bundles update through their store.
     Mobile,
 }
@@ -133,7 +164,11 @@ impl InstallKind {
         match std::env::var("MOKURO_INSTALL_KIND").ok().as_deref() {
             Some("docker") => return InstallKind::Docker,
             Some("self") => {}
-            Some(other) if !other.is_empty() => return InstallKind::Managed { by: other.to_string() },
+            Some(other) if !other.is_empty() => {
+                return InstallKind::Managed {
+                    by: other.to_string(),
+                };
+            }
             _ => {
                 if Path::new("/.dockerenv").exists() {
                     return InstallKind::Docker;
@@ -146,13 +181,21 @@ impl InstallKind {
         match std::env::current_exe() {
             Ok(exe) => {
                 let s = exe.to_string_lossy();
-                if s.starts_with("/usr/bin") || s.starts_with("/usr/sbin") || s.contains("/Cellar/") || s.starts_with("/nix/store") {
-                    InstallKind::Managed { by: "the system package manager".into() }
+                if s.starts_with("/usr/bin")
+                    || s.starts_with("/usr/sbin")
+                    || s.contains("/Cellar/")
+                    || s.starts_with("/nix/store")
+                {
+                    InstallKind::Managed {
+                        by: "the system package manager".into(),
+                    }
                 } else {
                     InstallKind::SelfManaged { exe }
                 }
             }
-            Err(_) => InstallKind::Managed { by: "an unknown installer".into() },
+            Err(_) => InstallKind::Managed {
+                by: "an unknown installer".into(),
+            },
         }
     }
 
@@ -186,7 +229,11 @@ pub struct Updater {
 
 impl Updater {
     /// `flavor` is `full` or `lite`; `channel` is `stable` or `prerelease`.
-    pub fn new(manifest_url: impl Into<String>, channel: impl Into<String>, flavor: impl Into<String>) -> Self {
+    pub fn new(
+        manifest_url: impl Into<String>,
+        channel: impl Into<String>,
+        flavor: impl Into<String>,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .user_agent(format!("mokuro-bunko/{}", bunko_core::VERSION))
             .connect_timeout(std::time::Duration::from_secs(15))
@@ -207,14 +254,30 @@ impl Updater {
     }
 
     pub async fn fetch_manifest(&self) -> Result<Manifest, UpdateError> {
-        let body = self.client.get(&self.manifest_url).send().await?.error_for_status()?.bytes().await?;
-        let sig = self.client.get(format!("{}.sig", self.manifest_url)).send().await?.error_for_status()?.text().await?;
+        let body = self
+            .client
+            .get(&self.manifest_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        let sig = self
+            .client
+            .get(format!("{}.sig", self.manifest_url))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
         parse_manifest(&body, &sig, &self.public_key)
     }
 
     /// Whether `latest` should be offered over `current` on this channel.
     pub fn newer(&self, current: &str, latest: &semver::Version) -> bool {
-        let Ok(current) = semver::Version::parse(current) else { return false };
+        let Ok(current) = semver::Version::parse(current) else {
+            return false;
+        };
         (latest.pre.is_empty() || self.channel == "prerelease") && *latest > current
     }
 
@@ -234,11 +297,16 @@ impl Updater {
         };
         match self.fetch_manifest().await {
             Ok(m) => {
-                status.available = m.semver().map(|l| self.newer(bunko_core::VERSION, &l)).unwrap_or(false);
+                status.available = m
+                    .semver()
+                    .map(|l| self.newer(bunko_core::VERSION, &l))
+                    .unwrap_or(false);
                 status.latest = Some(m.version.clone());
                 status.notes_url = (!m.notes_url.is_empty()).then(|| m.notes_url.clone());
                 status.docker_image = m.docker.get(&self.flavor).cloned();
-                status.can_apply = status.available && install.can_apply() && m.artifact(TARGET, &self.flavor).is_ok();
+                status.can_apply = status.available
+                    && install.can_apply()
+                    && m.artifact(TARGET, &self.flavor).is_ok();
             }
             Err(e) => status.error = Some(e.to_string()),
         }
@@ -250,26 +318,44 @@ impl Updater {
     pub async fn apply(&self) -> Result<String, UpdateError> {
         let exe = match InstallKind::detect() {
             InstallKind::SelfManaged { exe } => exe,
-            InstallKind::Docker => return Err(UpdateError::Managed("Docker (pull the new image)".into())),
+            InstallKind::Docker => {
+                return Err(UpdateError::Managed("Docker (pull the new image)".into()));
+            }
             InstallKind::Managed { by } => return Err(UpdateError::Managed(by)),
             InstallKind::Mobile => return Err(UpdateError::Managed("the app store".into())),
         };
         let manifest = self.fetch_manifest().await?;
         let latest = manifest.semver()?;
         if !self.newer(bunko_core::VERSION, &latest) {
-            return Err(UpdateError::Manifest(format!("{} is not newer than {}", manifest.version, bunko_core::VERSION)));
+            return Err(UpdateError::Manifest(format!(
+                "{} is not newer than {}",
+                manifest.version,
+                bunko_core::VERSION
+            )));
         }
         let artifact = manifest.artifact(TARGET, &self.flavor)?.clone();
         // Download next to the executable so the final swap is a same-filesystem rename.
-        let dir = exe.parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
+        let dir = exe
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
         let download = dir.join(format!(".mokuro-bunko-update-{}.part", manifest.version));
         let result = self.download_and_install(&artifact, &download).await;
         let _ = tokio::fs::remove_file(&download).await;
         result.map(|_| manifest.version)
     }
 
-    async fn download_and_install(&self, artifact: &Artifact, download: &Path) -> Result<(), UpdateError> {
-        let mut resp = self.client.get(&artifact.url).send().await?.error_for_status()?;
+    async fn download_and_install(
+        &self,
+        artifact: &Artifact,
+        download: &Path,
+    ) -> Result<(), UpdateError> {
+        let mut resp = self
+            .client
+            .get(&artifact.url)
+            .send()
+            .await?
+            .error_for_status()?;
         let mut file = tokio::fs::File::create(download).await?;
         let mut hasher = Sha256::new();
         while let Some(chunk) = resp.chunk().await? {
@@ -280,7 +366,10 @@ impl Updater {
         drop(file);
         let got = hex::encode(hasher.finalize());
         if !got.eq_ignore_ascii_case(&artifact.sha256) {
-            return Err(UpdateError::Checksum { got, want: artifact.sha256.clone() });
+            return Err(UpdateError::Checksum {
+                got,
+                want: artifact.sha256.clone(),
+            });
         }
         let download = download.to_path_buf();
         let binary = artifact.binary.clone();
@@ -298,11 +387,17 @@ impl Updater {
 }
 
 /// Pull `binary` out of a `.tar.gz`, `.zip` or bare executable download into `out`.
-pub fn extract_binary(archive: &Path, url: &str, binary: &str, out: &Path) -> Result<(), UpdateError> {
+pub fn extract_binary(
+    archive: &Path,
+    url: &str,
+    binary: &str,
+    out: &Path,
+) -> Result<(), UpdateError> {
     let lower = url.to_ascii_lowercase();
     let mut bytes = Vec::new();
     if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(std::fs::File::open(archive)?));
+        let mut tar =
+            tar::Archive::new(flate2::read::GzDecoder::new(std::fs::File::open(archive)?));
         let mut found = false;
         for entry in tar.entries()? {
             let mut entry = entry?;
@@ -314,16 +409,21 @@ pub fn extract_binary(archive: &Path, url: &str, binary: &str, out: &Path) -> Re
             }
         }
         if !found {
-            return Err(UpdateError::Unpack(format!("{binary} is not in the archive")));
+            return Err(UpdateError::Unpack(format!(
+                "{binary} is not in the archive"
+            )));
         }
     } else if lower.ends_with(".zip") {
-        let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?).map_err(|e| UpdateError::Unpack(e.to_string()))?;
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?)
+            .map_err(|e| UpdateError::Unpack(e.to_string()))?;
         let name = zip
             .file_names()
             .find(|n| *n == binary || n.rsplit('/').next() == Some(binary))
             .map(str::to_string)
             .ok_or_else(|| UpdateError::Unpack(format!("{binary} is not in the archive")))?;
-        zip.by_name(&name).map_err(|e| UpdateError::Unpack(e.to_string()))?.read_to_end(&mut bytes)?;
+        zip.by_name(&name)
+            .map_err(|e| UpdateError::Unpack(e.to_string()))?
+            .read_to_end(&mut bytes)?;
     } else {
         std::fs::copy(archive, out)?;
         set_executable(out)?;
@@ -372,7 +472,10 @@ pub fn restart() -> std::io::Result<std::convert::Infallible> {
 }
 
 fn now_iso() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     // Civil-from-days (Howard Hinnant), UTC.
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
@@ -385,7 +488,12 @@ fn now_iso() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 #[cfg(test)]
@@ -419,9 +527,15 @@ mod tests {
         assert!(m.artifact(TARGET, "full").is_err());
         let mut tampered = bytes.clone();
         tampered[5] ^= 1;
-        assert!(matches!(parse_manifest(&tampered, &sig, &pk), Err(UpdateError::BadSignature)));
+        assert!(matches!(
+            parse_manifest(&tampered, &sig, &pk),
+            Err(UpdateError::BadSignature)
+        ));
         let (_, other) = keypair();
-        assert!(matches!(parse_manifest(&bytes, &sig, &other), Err(UpdateError::BadSignature)));
+        assert!(matches!(
+            parse_manifest(&bytes, &sig, &other),
+            Err(UpdateError::BadSignature)
+        ));
     }
 
     #[test]
@@ -447,7 +561,8 @@ mod tests {
             h.set_size(data.len() as u64);
             h.set_mode(0o755);
             h.set_cksum();
-            b.append_data(&mut h, "mokuro-bunko-0.7/mokuro-bunko", &data[..]).unwrap();
+            b.append_data(&mut h, "mokuro-bunko-0.7/mokuro-bunko", &data[..])
+                .unwrap();
             b.into_inner().unwrap().finish().unwrap();
         }
         let out = dir.path().join("out");

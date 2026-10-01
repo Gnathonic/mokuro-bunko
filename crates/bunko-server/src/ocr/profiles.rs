@@ -28,7 +28,11 @@ static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// The profile key of a machine name (`"local"` is this server).
 pub fn profile_key(machine: &str) -> &str {
-    if machine == crate::ocr::types::LOCAL { LOCAL_PROFILE } else { machine }
+    if machine == crate::ocr::types::LOCAL {
+        LOCAL_PROFILE
+    } else {
+        machine
+    }
 }
 
 fn is_plain(name: &str) -> bool {
@@ -60,8 +64,16 @@ pub fn profile_filename(name: &str) -> String {
             in_unsafe = true;
         }
     }
-    let trimmed: String = readable.trim_matches(|c| c == '.' || c == '_').chars().take(40).collect();
-    let readable = if trimmed.is_empty() { "processor".to_string() } else { trimmed };
+    let trimmed: String = readable
+        .trim_matches(|c| c == '.' || c == '_')
+        .chars()
+        .take(40)
+        .collect();
+    let readable = if trimmed.is_empty() {
+        "processor".to_string()
+    } else {
+        trimmed
+    };
     let digest = hex::encode(sha2::Sha256::digest(name.as_bytes()));
     format!("{readable}~{}.json", &digest[..16])
 }
@@ -81,17 +93,28 @@ pub struct RowProfile {
 
 impl RowProfile {
     pub fn bench_pages_per_second(&self) -> Option<f64> {
-        self.bench.as_ref().and_then(|b| b.get("pages_per_second")).and_then(Value::as_f64).filter(|p| *p > 0.0)
+        self.bench
+            .as_ref()
+            .and_then(|b| b.get("pages_per_second"))
+            .and_then(Value::as_f64)
+            .filter(|p| *p > 0.0)
     }
     pub fn bench_startup_seconds(&self) -> Option<f64> {
-        self.bench.as_ref().and_then(|b| b.get("startup_seconds")).and_then(Value::as_f64).filter(|p| *p > 0.0)
+        self.bench
+            .as_ref()
+            .and_then(|b| b.get("startup_seconds"))
+            .and_then(Value::as_f64)
+            .filter(|p| *p > 0.0)
     }
 }
 
 /// `holds_pools`: a stored pools object that names a stage in any table.
 pub fn holds_pools(pools: Option<&Value>) -> bool {
-    let Some(Value::Object(p)) = pools else { return false };
-    p.iter().any(|(k, t)| k != "precision" && t.as_object().is_some_and(|t| !t.is_empty()))
+    let Some(Value::Object(p)) = pools else {
+        return false;
+    };
+    p.iter()
+        .any(|(k, t)| k != "precision" && t.as_object().is_some_and(|t| !t.is_empty()))
 }
 
 /// `machine_pools(stored, own)`: table by table, a non-empty stored table wins whole.
@@ -100,7 +123,11 @@ pub fn machine_pools(stored: &Map<String, Value>, own: &Value) -> Map<String, Va
     for key in POOL_TABLES {
         let table = match stored.get(key) {
             Some(Value::Object(t)) if !t.is_empty() => Value::Object(t.clone()),
-            _ => own.get(key).cloned().filter(Value::is_object).unwrap_or_else(|| json!({})),
+            _ => own
+                .get(key)
+                .cloned()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({})),
         };
         out.insert(key.to_string(), table);
     }
@@ -111,7 +138,11 @@ pub fn machine_pools(stored: &Map<String, Value>, own: &Value) -> Map<String, Va
 pub fn runner_pools(pools: &Map<String, Value>) -> Map<String, Value> {
     let mut out = Map::new();
     for key in POOL_TABLES {
-        let mut table = pools.get(key).and_then(Value::as_object).cloned().unwrap_or_default();
+        let mut table = pools
+            .get(key)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
         if key != "stage_device" {
             table.retain(|_, v| v.as_str() != Some(POOL_AUTO));
         }
@@ -128,7 +159,9 @@ pub struct Profiles {
 
 impl Profiles {
     pub fn new(storage: &Path) -> Profiles {
-        Profiles { dir: storage.join(PROFILES_DIRNAME) }
+        Profiles {
+            dir: storage.join(PROFILES_DIRNAME),
+        }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -151,9 +184,18 @@ impl Profiles {
     }
 
     /// `row(name, id, recipe=...)`: None when absent or measured for another recipe.
-    pub fn row(&self, name: &str, generation_id: &str, recipe: Option<&(String, String, Option<u32>)>) -> Option<RowProfile> {
+    pub fn row(
+        &self,
+        name: &str,
+        generation_id: &str,
+        recipe: Option<&(String, String, Option<u32>)>,
+    ) -> Option<RowProfile> {
         let profile = self.load(name);
-        let entry = profile.get("rows")?.get(generation_id)?.as_object()?.clone();
+        let entry = profile
+            .get("rows")?
+            .get(generation_id)?
+            .as_object()?
+            .clone();
         let stored = entry.get("recipe");
         if let (Some(recipe), Some(stored)) = (recipe, stored)
             && !stored.is_null()
@@ -164,26 +206,42 @@ impl Profiles {
         let pools = entry.get("pools");
         Some(RowProfile {
             pools: if holds_pools(pools) {
-                pools.and_then(Value::as_object).cloned().unwrap_or_default().into_iter().filter(|(k, _)| k != "precision").collect()
+                pools
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|(k, _)| k != "precision")
+                    .collect()
             } else {
                 Map::new()
             },
             bench: entry.get("bench").and_then(Value::as_object).cloned(),
-            runs: entry.get("runs").and_then(Value::as_object).cloned().unwrap_or_default(),
+            runs: entry
+                .get("runs")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default(),
         })
     }
 
     /// Every processor with a profile, by the name inside the file.
     pub fn names(&self) -> Vec<String> {
-        let Ok(rd) = std::fs::read_dir(&self.dir) else { return Vec::new() };
-        let mut paths: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
+        let Ok(rd) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut paths: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
         paths.sort();
         let mut out = Vec::new();
         for p in paths {
             if let Some(Value::String(name)) = Self::read(&p).get("name")
                 && !name.is_empty()
                 && name != LOCAL_PROFILE
-                && p.file_name().is_some_and(|f| f.to_string_lossy() == profile_filename(name))
+                && p.file_name()
+                    .is_some_and(|f| f.to_string_lossy() == profile_filename(name))
             {
                 out.push(name.clone());
             }
@@ -204,12 +262,18 @@ impl Profiles {
         }
         edit(&mut profile);
         let text = ascii_escape(&bunko_sched::pyjson::dumps_indent2(&Value::Object(profile)));
-        if let Err(e) = std::fs::create_dir_all(&self.dir).and_then(|_| bunko_sched::pyjson::write_atomic(&path, &text)) {
+        if let Err(e) = std::fs::create_dir_all(&self.dir)
+            .and_then(|_| bunko_sched::pyjson::write_atomic(&path, &text))
+        {
             tracing::error!("could not write {}: {e}", path.display());
         }
     }
 
-    fn row_entry<'a>(profile: &'a mut Map<String, Value>, generation_id: &str, recipe: Option<&(String, String, Option<u32>)>) -> &'a mut Map<String, Value> {
+    fn row_entry<'a>(
+        profile: &'a mut Map<String, Value>,
+        generation_id: &str,
+        recipe: Option<&(String, String, Option<u32>)>,
+    ) -> &'a mut Map<String, Value> {
         let rows = profile.entry("rows").or_insert_with(|| json!({}));
         if !rows.is_object() {
             *rows = json!({});
@@ -226,7 +290,10 @@ impl Profiles {
         if reset {
             rows.insert(generation_id.to_string(), json!({}));
         }
-        let entry = rows.get_mut(generation_id).and_then(Value::as_object_mut).expect("row entry was just made an object");
+        let entry = rows
+            .get_mut(generation_id)
+            .and_then(Value::as_object_mut)
+            .expect("row entry was just made an object");
         if let Some(w) = wanted {
             entry.insert("recipe".into(), w);
         }
@@ -247,7 +314,11 @@ impl Profiles {
 
     /// The account that owns `name`, if any.
     pub fn owner(&self, name: &str) -> Option<String> {
-        self.load(name).get("account").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
+        self.load(name)
+            .get("account")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
     }
 
     pub fn set_identity(&self, name: &str, host: &Value, catalog: &Value) {
@@ -257,13 +328,25 @@ impl Profiles {
         });
     }
 
-    pub fn set_pools(&self, name: &str, generation_id: &str, pools: &Map<String, Value>, recipe: Option<&(String, String, Option<u32>)>, keep_existing: bool, autobench: bool) {
+    pub fn set_pools(
+        &self,
+        name: &str,
+        generation_id: &str,
+        pools: &Map<String, Value>,
+        recipe: Option<&(String, String, Option<u32>)>,
+        keep_existing: bool,
+        autobench: bool,
+    ) {
         self.update(name, true, |p| {
             let row = Self::row_entry(p, generation_id, recipe);
             if keep_existing && holds_pools(row.get("pools")) {
                 return;
             }
-            let pools: Map<String, Value> = pools.iter().filter(|(k, _)| *k != "precision").map(|(k, v)| (k.clone(), v.clone())).collect();
+            let pools: Map<String, Value> = pools
+                .iter()
+                .filter(|(k, _)| *k != "precision")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             row.insert("pools".into(), Value::Object(pools));
             if autobench {
                 row.insert("pools_autobench".into(), json!({}));
@@ -273,7 +356,13 @@ impl Profiles {
         });
     }
 
-    pub fn set_bench(&self, name: &str, generation_id: &str, bench: &Map<String, Value>, recipe: Option<&(String, String, Option<u32>)>) {
+    pub fn set_bench(
+        &self,
+        name: &str,
+        generation_id: &str,
+        bench: &Map<String, Value>,
+        recipe: Option<&(String, String, Option<u32>)>,
+    ) {
         self.update(name, true, |p| {
             let row = Self::row_entry(p, generation_id, recipe);
             row.insert("bench".into(), Value::Object(bench.clone()));
@@ -282,7 +371,17 @@ impl Profiles {
 
     /// `record_run`: one finished volume's evidence; a contended one is only counted.
     #[allow(clippy::too_many_arguments)]
-    pub fn record_run(&self, name: &str, generation_id: &str, pages: i64, seconds: f64, congestion: Option<&Map<String, Value>>, recipe: Option<&(String, String, Option<u32>)>, contended: bool, now: f64) {
+    pub fn record_run(
+        &self,
+        name: &str,
+        generation_id: &str,
+        pages: i64,
+        seconds: f64,
+        congestion: Option<&Map<String, Value>>,
+        recipe: Option<&(String, String, Option<u32>)>,
+        contended: bool,
+        now: f64,
+    ) {
         if contended {
             self.update(name, true, |p| {
                 let row = Self::row_entry(p, generation_id, recipe);
@@ -305,21 +404,38 @@ impl Profiles {
             if !runs.is_object() {
                 *runs = json!({});
             }
-            let Some(runs) = runs.as_object_mut() else { return };
+            let Some(runs) = runs.as_object_mut() else {
+                return;
+            };
             let volumes = runs.get("volumes").and_then(Value::as_i64).unwrap_or(0) + 1;
             let total_pages = runs.get("pages").and_then(Value::as_i64).unwrap_or(0) + pages;
-            let total_seconds = runs.get("seconds").and_then(Value::as_f64).unwrap_or(0.0) + seconds;
+            let total_seconds =
+                runs.get("seconds").and_then(Value::as_f64).unwrap_or(0.0) + seconds;
             runs.insert("volumes".into(), json!(volumes));
             runs.insert("pages".into(), json!(total_pages));
             runs.insert("seconds".into(), json!(total_seconds));
-            runs.insert("pages_per_second".into(), json!(total_pages as f64 / total_seconds));
-            let mut recent: Vec<Value> = runs.get("recent").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().filter(Value::is_object).collect();
+            runs.insert(
+                "pages_per_second".into(),
+                json!(total_pages as f64 / total_seconds),
+            );
+            let mut recent: Vec<Value> = runs
+                .get("recent")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(Value::is_object)
+                .collect();
             recent.push(json!({"pages": pages, "seconds": seconds, "at": now}));
             let skip = recent.len().saturating_sub(RECENT_VOLUMES);
             runs.insert("recent".into(), Value::Array(recent.split_off(skip)));
             runs.insert("last_at".into(), json!(now));
             if let Some(c) = congestion {
-                let mut history: Vec<Value> = runs.get("congestion").and_then(Value::as_array).cloned().unwrap_or_default();
+                let mut history: Vec<Value> = runs
+                    .get("congestion")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
                 history.push(Value::Object(c.clone()));
                 let skip = history.len().saturating_sub(keep);
                 runs.insert("congestion".into(), Value::Array(history.split_off(skip)));
@@ -377,7 +493,11 @@ mod tests {
         assert!(p.claim("tower", "alice"));
         assert!(p.claim("tower", "alice"));
         assert!(!p.claim("tower", "bob"));
-        let recipe = ("hayai-nova".to_string(), "ppocr-manga".to_string(), Some(512));
+        let recipe = (
+            "hayai-nova".to_string(),
+            "ppocr-manga".to_string(),
+            Some(512),
+        );
         p.record_run("tower", "g-1", 10, 5.0, None, Some(&recipe), false, 100.0);
         let row = p.row("tower", "g-1", Some(&recipe)).unwrap();
         assert_eq!(row.runs["volumes"], 1);

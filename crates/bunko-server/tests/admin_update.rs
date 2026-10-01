@@ -70,7 +70,9 @@ fn harness(fake: Arc<Fake>, check: bool) -> Harness {
 }
 
 fn self_managed() -> InstallKind {
-    InstallKind::SelfManaged { exe: "/opt/bunko/mokuro-bunko".into() }
+    InstallKind::SelfManaged {
+        exe: "/opt/bunko/mokuro-bunko".into(),
+    }
 }
 
 #[tokio::test]
@@ -78,7 +80,9 @@ async fn status_is_cached_and_refreshable() {
     let fake = Fake::new(self_managed(), "9.9.9", true);
     let h = harness(fake.clone(), true);
     let admin = h.admin();
-    let r = h.call("GET", "/_admin/api/update", Some(&admin), None).await;
+    let r = h
+        .call("GET", "/_admin/api/update", Some(&admin), None)
+        .await;
     assert_eq!(r.status, 200);
     let s = r.json();
     assert_eq!(s["current"], bunko_core::VERSION);
@@ -89,9 +93,15 @@ async fn status_is_cached_and_refreshable() {
     assert_eq!(s["install"]["kind"], "self_managed");
     assert_eq!(s["checks_enabled"], true);
     assert_eq!(s["applying"], false);
-    h.call("GET", "/_admin/api/update", Some(&admin), None).await;
-    assert_eq!(fake.checks.load(Ordering::SeqCst), 1, "served from the cache");
-    h.call("GET", "/_admin/api/update?refresh=1", Some(&admin), None).await;
+    h.call("GET", "/_admin/api/update", Some(&admin), None)
+        .await;
+    assert_eq!(
+        fake.checks.load(Ordering::SeqCst),
+        1,
+        "served from the cache"
+    );
+    h.call("GET", "/_admin/api/update?refresh=1", Some(&admin), None)
+        .await;
     assert_eq!(fake.checks.load(Ordering::SeqCst), 2);
 
     // Admins only.
@@ -105,12 +115,18 @@ async fn checks_off_means_no_contact_until_asked() {
     let fake = Fake::new(self_managed(), "9.9.9", true);
     let h = harness(fake.clone(), false);
     let admin = h.admin();
-    let s = h.call("GET", "/_admin/api/update", Some(&admin), None).await.json();
+    let s = h
+        .call("GET", "/_admin/api/update", Some(&admin), None)
+        .await
+        .json();
     assert_eq!(fake.checks.load(Ordering::SeqCst), 0);
     assert_eq!(s["checks_enabled"], false);
     assert_eq!(s["latest"], Value::Null);
     assert_eq!(s["checked_at"], Value::Null);
-    let s = h.call("GET", "/_admin/api/update?refresh=1", Some(&admin), None).await.json();
+    let s = h
+        .call("GET", "/_admin/api/update?refresh=1", Some(&admin), None)
+        .await
+        .json();
     assert_eq!(fake.checks.load(Ordering::SeqCst), 1);
     assert_eq!(s["latest"], "9.9.9");
 }
@@ -120,7 +136,14 @@ async fn apply_installs_audits_and_restarts() {
     let fake = Fake::new(self_managed(), "9.9.9", true);
     let h = harness(fake.clone(), true);
     let admin = h.admin();
-    let r = h.call("POST", "/_admin/api/update/apply", Some(&admin), Some(json!({}))).await;
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/update/apply",
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await;
     assert_eq!(r.status, 200, "{}", r.text());
     let body = r.json();
     assert_eq!(body["ok"], true);
@@ -129,14 +152,22 @@ async fn apply_installs_audits_and_restarts() {
     assert_eq!(fake.applies.load(Ordering::SeqCst), 1);
     let ev = &h.audit()[0];
     assert_eq!(ev.action, "admin_update_server");
-    assert_eq!(ev.details.as_deref(), Some(format!(r#"{{"from":"{}","to":"9.9.9"}}"#, bunko_core::VERSION).as_str()));
+    assert_eq!(
+        ev.details.as_deref(),
+        Some(format!(r#"{{"from":"{}","to":"9.9.9"}}"#, bunko_core::VERSION).as_str())
+    );
     // The restart comes after the response.
     assert_eq!(h.restarts.load(Ordering::SeqCst), 0);
     tokio::time::sleep(Duration::from_millis(1200)).await;
     assert_eq!(h.restarts.load(Ordering::SeqCst), 1);
     // While restarting, a second apply is refused.
-    let r = h.call("POST", "/_admin/api/update/apply", Some(&admin), None).await;
-    assert_eq!((r.status.as_u16(), r.json()), (409, json!({"error": "An update is already being applied"})));
+    let r = h
+        .call("POST", "/_admin/api/update/apply", Some(&admin), None)
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (409, json!({"error": "An update is already being applied"}))
+    );
 }
 
 #[tokio::test]
@@ -144,11 +175,21 @@ async fn apply_refusals_and_failures() {
     let docker = Fake::new(InstallKind::Docker, "9.9.9", false);
     let h = harness(docker.clone(), true);
     let admin = h.admin();
-    let s = h.call("GET", "/_admin/api/update", Some(&admin), None).await.json();
+    let s = h
+        .call("GET", "/_admin/api/update", Some(&admin), None)
+        .await
+        .json();
     assert_eq!(s["can_apply"], false);
     assert_eq!(s["docker_image"], "ghcr.io/example/bunko:9.9.9");
-    assert!(s["cannot_apply_reason"].as_str().unwrap().contains("pull ghcr.io/example/bunko:9.9.9"));
-    let r = h.call("POST", "/_admin/api/update/apply", Some(&admin), None).await;
+    assert!(
+        s["cannot_apply_reason"]
+            .as_str()
+            .unwrap()
+            .contains("pull ghcr.io/example/bunko:9.9.9")
+    );
+    let r = h
+        .call("POST", "/_admin/api/update/apply", Some(&admin), None)
+        .await;
     assert_eq!(r.status, 409);
     assert!(r.json()["error"].as_str().unwrap().contains("Docker"));
     assert_eq!(docker.applies.load(Ordering::SeqCst), 0);
@@ -156,19 +197,29 @@ async fn apply_refusals_and_failures() {
     let current = Fake::new(self_managed(), bunko_core::VERSION, true);
     let h = harness(current, true);
     let admin = h.admin();
-    let r = h.call("POST", "/_admin/api/update/apply", Some(&admin), None).await;
-    assert_eq!((r.status.as_u16(), r.json()), (409, json!({"error": "No newer release is available"})));
+    let r = h
+        .call("POST", "/_admin/api/update/apply", Some(&admin), None)
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (409, json!({"error": "No newer release is available"}))
+    );
 
     let failing = Fake::new(self_managed(), "9.9.9", true);
-    *failing.apply_result.lock() = Err("the download's sha256 is 00, the signed manifest says ff".into());
+    *failing.apply_result.lock() =
+        Err("the download's sha256 is 00, the signed manifest says ff".into());
     let h = harness(failing.clone(), true);
     let admin = h.admin();
-    let r = h.call("POST", "/_admin/api/update/apply", Some(&admin), None).await;
+    let r = h
+        .call("POST", "/_admin/api/update/apply", Some(&admin), None)
+        .await;
     assert_eq!(r.status, 500);
     assert!(r.json()["error"].as_str().unwrap().contains("sha256"));
     // A failure releases the guard: the admin may retry.
     *failing.apply_result.lock() = Ok("9.9.9".into());
-    let r = h.call("POST", "/_admin/api/update/apply", Some(&admin), None).await;
+    let r = h
+        .call("POST", "/_admin/api/update/apply", Some(&admin), None)
+        .await;
     assert_eq!(r.status, 200);
     assert_eq!(h.restarts.load(Ordering::SeqCst), 0, "not yet");
 }
@@ -177,8 +228,15 @@ async fn apply_refusals_and_failures() {
 async fn without_an_update_service_the_endpoints_are_absent() {
     let h = Harness::new();
     let admin = h.admin();
-    let r = h.call("GET", "/_admin/api/update", Some(&admin), None).await;
-    assert_eq!((r.status.as_u16(), r.json()), (404, json!({"error": "API endpoint not found"})));
-    let r = h.call("POST", "/_admin/api/update/apply", Some(&admin), None).await;
+    let r = h
+        .call("GET", "/_admin/api/update", Some(&admin), None)
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (404, json!({"error": "API endpoint not found"}))
+    );
+    let r = h
+        .call("POST", "/_admin/api/update/apply", Some(&admin), None)
+        .await;
     assert_eq!(r.status, 404);
 }

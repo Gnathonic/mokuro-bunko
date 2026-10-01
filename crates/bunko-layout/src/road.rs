@@ -23,8 +23,8 @@ use crate::json::Value;
 use crate::layout::{PageLayout, column_pieces};
 use crate::py::{self, hypot, round_digits};
 use crate::reconcile::{
-    CONFIRMED_CONF, Reconciled, engine_only_verdict, line_cells, needs_second_read, overlap_repeat, page_summary,
-    reconcile_line, settle_disputes, token_cap,
+    CONFIRMED_CONF, Reconciled, engine_only_verdict, line_cells, needs_second_read, overlap_repeat,
+    page_summary, reconcile_line, settle_disputes, token_cap,
 };
 use crate::records::{RawLine, RawPage};
 use crate::script::normalize_text;
@@ -52,19 +52,32 @@ pub fn quad_extents(quad: &[[f64; 2]], vertical: bool) -> (f64, f64) {
     if p.len() < 4 {
         return (0.0, 0.0);
     }
-    let mid: Vec<(f64, f64)> =
-        (0..4).map(|i| ((p[i].0 + p[(i + 1) % 4].0) / 2.0, (p[i].1 + p[(i + 1) % 4].1) / 2.0)).collect();
+    let mid: Vec<(f64, f64)> = (0..4)
+        .map(|i| {
+            (
+                (p[i].0 + p[(i + 1) % 4].0) / 2.0,
+                (p[i].1 + p[(i + 1) % 4].1) / 2.0,
+            )
+        })
+        .collect();
     let vec_v = (mid[2].0 - mid[0].0, mid[2].1 - mid[0].1);
     let vec_h = (mid[1].0 - mid[3].0, mid[1].1 - mid[3].1);
     let len_v = py::pow(py::pow(vec_v.0, 2.0) + py::pow(vec_v.1, 2.0), 0.5);
     let len_h = py::pow(py::pow(vec_h.0, 2.0) + py::pow(vec_h.1, 2.0), 0.5);
-    if vertical { (len_v, len_h) } else { (len_h, len_v) }
+    if vertical {
+        (len_v, len_h)
+    } else {
+        (len_h, len_v)
+    }
 }
 
 /// Margin of a line crop in pixels.
 pub fn line_margin_px(quad: &[[f64; 2]], margin_em: f64) -> f64 {
     let (main, cross) = quad_extents(quad, true);
-    py::min2(UPRIGHT_MARGIN * py::max2(main, cross), margin_em * py::min2(main, cross))
+    py::min2(
+        UPRIGHT_MARGIN * py::max2(main, cross),
+        margin_em * py::min2(main, cross),
+    )
 }
 
 /// The page's glyph cell: median thickness of the lines the CTC read text in.
@@ -89,10 +102,17 @@ pub fn parallel_neighbours(lines: &[RawLine]) -> Vec<usize> {
             let thick = quad_extents(&l.quad, l.vertical).1;
             let p = pts(&l.quad);
             let count = p.len().max(1) as f64;
-            (thick, py::sum(p.iter().map(|q| q.0)) / count, py::sum(p.iter().map(|q| q.1)) / count)
+            (
+                thick,
+                py::sum(p.iter().map(|q| q.0)) / count,
+                py::sum(p.iter().map(|q| q.1)) / count,
+            )
         })
         .collect();
-    let read: Vec<bool> = lines.iter().map(|l| !py::strip(&l.text).is_empty()).collect();
+    let read: Vec<bool> = lines
+        .iter()
+        .map(|l| !py::strip(&l.text).is_empty())
+        .collect();
     (0..lines.len())
         .map(|i| {
             let (thick, cx, cy) = geo[i];
@@ -105,7 +125,8 @@ pub fn parallel_neighbours(lines: &[RawLine]) -> Vec<usize> {
                         return false;
                     }
                     let (other_thick, ox, oy) = geo[j];
-                    hypot(cx - ox, cy - oy) <= NEIGHBOUR_REACH * py::max_of([thick, other_thick, 1.0])
+                    hypot(cx - ox, cy - oy)
+                        <= NEIGHBOUR_REACH * py::max_of([thick, other_thick, 1.0])
                 })
                 .count()
         })
@@ -141,7 +162,13 @@ impl EngineRoad {
                 line_cells(main, cross, pitch)
             })
             .collect();
-        EngineRoad { targets, in_body: first.body_members(), pitch, neighbours: parallel_neighbours(lines), cells }
+        EngineRoad {
+            targets,
+            in_body: first.body_members(),
+            pitch,
+            neighbours: parallel_neighbours(lines),
+            cells,
+        }
     }
 
     /// `max_new_tokens` per target (for recognizers that take token caps).
@@ -171,7 +198,9 @@ impl EngineRoad {
 
     /// Targets (positions `k`) worth a second engine read.
     pub fn doubted(&self, settled: &[Reconciled]) -> Vec<usize> {
-        (0..settled.len()).filter(|&k| needs_second_read(&settled[k])).collect()
+        (0..settled.len())
+            .filter(|&k| needs_second_read(&settled[k]))
+            .collect()
     }
 
     /// Apply the second reads: `second[n]` is the read of target `doubted[n]`.
@@ -185,7 +214,13 @@ impl EngineRoad {
     /// Write the settled texts into the lines: the engine-only verdicts (a
     /// dropped line keeps its CTC text), then the seam trim between pieces of
     /// one column that stayed apart.
-    pub fn apply(&self, lines: &mut [RawLine], settled: &mut [Reconciled], width: i64, height: i64) {
+    pub fn apply(
+        &self,
+        lines: &mut [RawLine],
+        settled: &mut [Reconciled],
+        width: i64,
+        height: i64,
+    ) {
         for (k, &i) in self.targets.iter().enumerate() {
             let result = &mut settled[k];
             let (main, em) = quad_extents(&lines[i].quad, lines[i].vertical);
@@ -214,9 +249,20 @@ impl EngineRoad {
         self.trim_repeats(lines, settled, width, height);
     }
 
-    fn trim_repeats(&self, lines: &mut [RawLine], settled: &mut [Reconciled], width: i64, height: i64) {
+    fn trim_repeats(
+        &self,
+        lines: &mut [RawLine],
+        settled: &mut [Reconciled],
+        width: i64,
+        height: i64,
+    ) {
         let raw = RawPage::new(width, height, lines.to_vec()).rounded();
-        let by_line: HashMap<usize, usize> = self.targets.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+        let by_line: HashMap<usize, usize> = self
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| (i, k))
+            .collect();
         for group in column_pieces(&raw.lines) {
             let vertical = lines[group[0]].vertical;
             let axis = if vertical { 1 } else { 0 };
@@ -224,12 +270,18 @@ impl EngineRoad {
                 .iter()
                 .map(|&i| {
                     let q = pts(&lines[i].quad);
-                    (py::min_of(q.iter().map(|p| if axis == 1 { p.1 } else { p.0 })),
-                     py::max_of(q.iter().map(|p| if axis == 1 { p.1 } else { p.0 })),
-                     i)
+                    (
+                        py::min_of(q.iter().map(|p| if axis == 1 { p.1 } else { p.0 })),
+                        py::max_of(q.iter().map(|p| if axis == 1 { p.1 } else { p.0 })),
+                        i,
+                    )
                 })
                 .collect();
-            spans.sort_by(|a, b| py::fcmp(a.0, b.0).then(py::fcmp(a.1, b.1)).then(a.2.cmp(&b.2)));
+            spans.sort_by(|a, b| {
+                py::fcmp(a.0, b.0)
+                    .then(py::fcmp(a.1, b.1))
+                    .then(a.2.cmp(&b.2))
+            });
             for w in 0..spans.len().saturating_sub(1) {
                 let (_, end, before) = spans[w];
                 let (start, _, after) = spans[w + 1];
@@ -245,7 +297,8 @@ impl EngineRoad {
                 let room = (shared / em + 0.5).trunc() as i64 + 1;
                 let count = overlap_repeat(&lines[before].text, &lines[after].text, room);
                 if count > 0 {
-                    let trimmed: String = py::strip(&lines[after].text).chars().skip(count).collect();
+                    let trimmed: String =
+                        py::strip(&lines[after].text).chars().skip(count).collect();
                     lines[after].text = trimmed.clone();
                     settled[ka].text = trimmed;
                     settled[ka].notes.push("seam".to_string());
@@ -268,7 +321,9 @@ impl EngineRoad {
         let mut done = finish_page(lines, width, height, detector, version);
         if let Some(Value::Array(raw_lines)) = done.raw.get_mut("lines") {
             for (k, &i) in self.targets.iter().enumerate() {
-                if let (Some(entry), Value::Object(extra)) = (raw_lines.get_mut(i), settled[k].to_value()) {
+                if let (Some(entry), Value::Object(extra)) =
+                    (raw_lines.get_mut(i), settled[k].to_value())
+                {
                     for (key, v) in extra {
                         entry.set(&key, v);
                     }
@@ -293,8 +348,11 @@ pub fn doubtful_lines(raw: &Value) -> Vec<Value> {
         let agreement = line.get("agreement").cloned().unwrap_or(Value::Null);
         let notes = line.get("notes").cloned().unwrap_or(Value::Null);
         let fell_back = line.get("source").and_then(Value::as_str) == Some("ctc")
-            && notes.as_array().is_some_and(|ns| ns.iter().any(|n| n.as_str() == Some("runaway")));
-        let below = !matches!(agreement, Value::Null) && agreement.as_f64().is_some_and(|a| a < 1.0);
+            && notes
+                .as_array()
+                .is_some_and(|ns| ns.iter().any(|n| n.as_str() == Some("runaway")));
+        let below =
+            !matches!(agreement, Value::Null) && agreement.as_f64().is_some_and(|a| a < 1.0);
         if !line.get("text").is_some_and(Value::truthy) || !(fell_back || below) {
             continue;
         }

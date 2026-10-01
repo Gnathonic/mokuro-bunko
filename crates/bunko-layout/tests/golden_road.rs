@@ -10,8 +10,8 @@ use bunko_layout::layout::layout_page;
 use bunko_layout::records::{RawLine, RawPage};
 use bunko_layout::road::EngineRoad;
 use bunko_layout::sidecar::{
-    LayerStamp, MOKURO_FORMAT_VERSION, Normalization, OcrEngine, Page, VolumeHeader, build_volume, derive_series_name,
-    deterministic_uuid, normalize_sidecar_file, title_uuid, write_sidecar,
+    LayerStamp, MOKURO_FORMAT_VERSION, Normalization, OcrEngine, Page, VolumeHeader, build_volume,
+    derive_series_name, deterministic_uuid, normalize_sidecar_file, title_uuid, write_sidecar,
 };
 use common::*;
 
@@ -37,17 +37,32 @@ fn road_input(case: &Value, reals: &[(String, RawPage)]) -> RoadInput {
         "fixture" => fixture_page(s(get(case, "page_name"))),
         _ => get(case, "page").clone(),
     };
-    let lines = arr(get(&page_v, "lines")).iter().map(line_as_python).collect();
+    let lines = arr(get(&page_v, "lines"))
+        .iter()
+        .map(line_as_python)
+        .collect();
     RoadInput {
         width: f(get(&page_v, "width")) as i64,
         height: f(get(&page_v, "height")) as i64,
-        detector: page_v.get("detector").filter(|d| d.truthy()).cloned().unwrap_or_else(Value::object),
+        detector: page_v
+            .get("detector")
+            .filter(|d| d.truthy())
+            .cloned()
+            .unwrap_or_else(Value::object),
         lines,
     }
 }
 
 fn reads(v: &Value, targets: &[usize]) -> Vec<String> {
-    targets.iter().map(|t| v.get(&t.to_string()).and_then(Value::as_str).unwrap_or("").to_string()).collect()
+    targets
+        .iter()
+        .map(|t| {
+            v.get(&t.to_string())
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect()
 }
 
 /// Run one road case; return the finished page (for the volume tests) and the
@@ -56,25 +71,46 @@ fn run_road(case: &Value, reals: &[(String, RawPage)]) -> (Page, Vec<String>) {
     let name = s(get(case, "name"));
     let want = get(case, "expect");
     let mut errs = Vec::new();
-    let RoadInput { width, height, detector, mut lines } = road_input(case, reals);
+    let RoadInput {
+        width,
+        height,
+        detector,
+        mut lines,
+    } = road_input(case, reals);
 
     let first = layout_page(&RawPage::new(width, height, lines.clone()).rounded());
     let road = EngineRoad::plan(&lines, &first);
-    let want_targets: Vec<usize> = arr(get(want, "targets")).iter().map(|t| i(t) as usize).collect();
+    let want_targets: Vec<usize> = arr(get(want, "targets"))
+        .iter()
+        .map(|t| i(t) as usize)
+        .collect();
     if road.targets != want_targets {
-        errs.push(format!("{name}: targets {:?} != {want_targets:?}", road.targets));
+        errs.push(format!(
+            "{name}: targets {:?} != {want_targets:?}",
+            road.targets
+        ));
     }
     if !same(road.pitch, f(get(want, "pitch"))) {
-        errs.push(format!("{name}: pitch {} != {}", road.pitch, f(get(want, "pitch"))));
+        errs.push(format!(
+            "{name}: pitch {} != {}",
+            road.pitch,
+            f(get(want, "pitch"))
+        ));
     }
     let caps: Vec<i64> = arr(get(want, "first_caps")).iter().map(i).collect();
     if !caps.is_empty() && road.token_caps() != caps {
-        errs.push(format!("{name}: token caps {:?} != {caps:?}", road.token_caps()));
+        errs.push(format!(
+            "{name}: token caps {:?} != {caps:?}",
+            road.token_caps()
+        ));
     }
 
     let texts = reads(get(case, "first_reads"), &road.targets);
     let mut settled = road.reconcile_first(&lines, &texts);
-    if let Some(second_v) = case.get("second_reads").filter(|v| !matches!(v, Value::Null)) {
+    if let Some(second_v) = case
+        .get("second_reads")
+        .filter(|v| !matches!(v, Value::Null))
+    {
         let doubted = road.doubted(&settled);
         let doubted_lines: Vec<usize> = doubted.iter().map(|&k| road.targets[k]).collect();
         let second = reads(second_v, &doubted_lines);
@@ -84,31 +120,62 @@ fn run_road(case: &Value, reals: &[(String, RawPage)]) -> (Page, Vec<String>) {
     let want_settled = arr(get(want, "settled"));
     for (k, (g, w)) in settled.iter().zip(want_settled).enumerate() {
         if let Err(e) = check_reconciled(g, w) {
-            errs.push(format!("{name}: settled[{k}] (line {}):\n{e}", road.targets[k]));
+            errs.push(format!(
+                "{name}: settled[{k}] (line {}):\n{e}",
+                road.targets[k]
+            ));
         }
     }
     for (idx, (g, w)) in lines.iter().zip(arr(get(want, "lines"))).enumerate() {
         if g.text != s(get(w, "text")) || !same(g.conf, f(get(w, "conf"))) {
-            errs.push(format!("{name}: line {idx} = ({:?}, {}) != {}", g.text, g.conf, short(w)));
+            errs.push(format!(
+                "{name}: line {idx} = ({:?}, {}) != {}",
+                g.text,
+                g.conf,
+                short(w)
+            ));
         }
     }
-    let done = road.finish(&lines, &settled, width, height, Some(detector), MOKURO_FORMAT_VERSION);
+    let done = road.finish(
+        &lines,
+        &settled,
+        width,
+        height,
+        Some(detector),
+        MOKURO_FORMAT_VERSION,
+    );
     let page_json = done.page.to_value(None).dumps(Separators::Default);
     if page_json != s(get(want, "page_json")) {
-        errs.push(format!("{name}: page json\n got {page_json}\nwant {}", s(get(want, "page_json"))));
+        errs.push(format!(
+            "{name}: page json\n got {page_json}\nwant {}",
+            s(get(want, "page_json"))
+        ));
     }
     let raw_json = done.raw.dumps(Separators::Default);
     if raw_json != s(get(want, "raw_json")) {
         let (g, w) = (raw_json.as_str(), s(get(want, "raw_json")));
-        let at = g.bytes().zip(w.bytes()).position(|(a, b)| a != b).unwrap_or(g.len().min(w.len()));
+        let at = g
+            .bytes()
+            .zip(w.bytes())
+            .position(|(a, b)| a != b)
+            .unwrap_or(g.len().min(w.len()));
         let window = |t: &str| -> String {
-            String::from_utf8_lossy(&t.as_bytes()[at.saturating_sub(120)..(at + 120).min(t.len())]).into_owned()
+            String::from_utf8_lossy(&t.as_bytes()[at.saturating_sub(120)..(at + 120).min(t.len())])
+                .into_owned()
         };
-        errs.push(format!("{name}: raw dump differs at byte {at}\n got ...{}\nwant ...{}", window(g), window(w)));
+        errs.push(format!(
+            "{name}: raw dump differs at byte {at}\n got ...{}\nwant ...{}",
+            window(g),
+            window(w)
+        ));
     }
-    let doubtful = Value::Array(done.doubtful.clone().unwrap_or_default()).dumps(Separators::Default);
+    let doubtful =
+        Value::Array(done.doubtful.clone().unwrap_or_default()).dumps(Separators::Default);
     if doubtful != s(get(want, "doubtful_json")) {
-        errs.push(format!("{name}: review lines\n got {doubtful}\nwant {}", s(get(want, "doubtful_json"))));
+        errs.push(format!(
+            "{name}: review lines\n got {doubtful}\nwant {}",
+            s(get(want, "doubtful_json"))
+        ));
     }
     (done.page, errs)
 }
@@ -121,8 +188,17 @@ fn reconciled_road_matches_python() {
     for case in arr(&cases) {
         errs.extend(run_road(case, &reals).1);
     }
-    assert!(arr(&cases).len() >= 50, "only {} road cases", arr(&cases).len());
-    assert!(errs.is_empty(), "{} differences:\n{}", errs.len(), errs.join("\n\n"));
+    assert!(
+        arr(&cases).len() >= 50,
+        "only {} road cases",
+        arr(&cases).len()
+    );
+    assert!(
+        errs.is_empty(),
+        "{} differences:\n{}",
+        errs.len(),
+        errs.join("\n\n")
+    );
 }
 
 #[test]
@@ -154,7 +230,10 @@ fn volume_sidecars_and_normalization_match_python() {
                     .iter()
                     .map(|kv| (s(&arr(kv)[0]).to_string(), s(&arr(kv)[1]).to_string()))
                     .collect();
-                meta.precision = e.get("precision").and_then(Value::as_str).map(str::to_string);
+                meta.precision = e
+                    .get("precision")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 Some(meta.to_value())
             }
         };
@@ -176,19 +255,34 @@ fn volume_sidecars_and_normalization_match_python() {
         write_sidecar(&path, &volume).expect("write");
         let runner_bytes = std::fs::read_to_string(&path).expect("read");
         if !b(get(case, "runner_modified")) && runner_bytes != s(get(case, "runner_bytes")) {
-            errs.push(format!("{name}: runner bytes\n got {}\nwant {}", &runner_bytes, s(get(case, "runner_bytes"))));
+            errs.push(format!(
+                "{name}: runner bytes\n got {}\nwant {}",
+                &runner_bytes,
+                s(get(case, "runner_bytes"))
+            ));
         }
         // normalise the bytes Python's runner wrote
         std::fs::write(&path, s(get(case, "runner_bytes"))).expect("write");
         let n = get(case, "normalize");
         let cbz = std::path::Path::new(s(get(n, "cbz")));
-        let series = derive_series_name(cbz, std::path::Path::new(s(get(n, "library"))), std::path::Path::new(s(get(n, "inbox"))));
+        let series = derive_series_name(
+            cbz,
+            std::path::Path::new(s(get(n, "library"))),
+            std::path::Path::new(s(get(n, "inbox"))),
+        );
         if series != s(get(n, "series_name")) {
-            errs.push(format!("{name}: series {series:?} != {:?}", s(get(n, "series_name"))));
+            errs.push(format!(
+                "{name}: series {series:?} != {:?}",
+                s(get(n, "series_name"))
+            ));
         }
         let norm = Normalization {
             series_name: series,
-            volume: cbz.file_stem().expect("stem").to_string_lossy().into_owned(),
+            volume: cbz
+                .file_stem()
+                .expect("stem")
+                .to_string_lossy()
+                .into_owned(),
             volume_uuid: s(get(n, "volume_uuid")).to_string(),
             stamp: (!b(get(n, "primary"))).then(|| LayerStamp {
                 engine: s(get(n, "engine")).to_string(),
@@ -199,22 +293,34 @@ fn volume_sidecars_and_normalization_match_python() {
         assert!(normalize_sidecar_file(&path, &norm).expect("normalize"));
         let normalized = std::fs::read_to_string(&path).expect("read");
         if normalized != s(get(case, "normalized_bytes")) {
-            errs.push(format!("{name}: normalized\n got {normalized}\nwant {}", s(get(case, "normalized_bytes"))));
+            errs.push(format!(
+                "{name}: normalized\n got {normalized}\nwant {}",
+                s(get(case, "normalized_bytes"))
+            ));
         }
         let leftover = std::fs::read_dir(tmp.path()).expect("ls").filter(|e| {
-            e.as_ref().is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            e.as_ref()
+                .is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
         });
         assert_eq!(leftover.count(), 0, "temporary file left behind");
     }
     for u in arr(get(&v, "uuids")) {
         let value = s(get(u, "value"));
         if deterministic_uuid(value) != s(get(u, "deterministic")) {
-            errs.push(format!("deterministic_uuid({value:?}) = {}", deterministic_uuid(value)));
+            errs.push(format!(
+                "deterministic_uuid({value:?}) = {}",
+                deterministic_uuid(value)
+            ));
         }
         if title_uuid(value) != s(get(u, "uuid5")) {
             errs.push(format!("uuid5({value:?}) = {}", title_uuid(value)));
         }
     }
     assert!(arr(get(&v, "volumes")).len() >= 8);
-    assert!(errs.is_empty(), "{} differences:\n{}", errs.len(), errs.join("\n\n"));
+    assert!(
+        errs.is_empty(),
+        "{} differences:\n{}",
+        errs.len(),
+        errs.join("\n\n")
+    );
 }

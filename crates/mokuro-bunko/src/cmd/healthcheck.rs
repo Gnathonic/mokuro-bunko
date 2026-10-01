@@ -36,7 +36,10 @@ pub fn run(ctx: &Ctx, url: Option<String>) -> CmdResult {
             println!("healthy: {url} ({})", status.as_u16());
             Ok(())
         }
-        Ok(status) => Err(exit_with(format!("unhealthy: {url} returned HTTP {}", status.as_u16()))),
+        Ok(status) => Err(exit_with(format!(
+            "unhealthy: {url} returned HTTP {}",
+            status.as_u16()
+        ))),
         Err(e) => Err(exit_with(format!("unhealthy: {url}: {e}"))),
     }
 }

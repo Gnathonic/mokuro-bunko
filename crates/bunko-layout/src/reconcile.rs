@@ -82,23 +82,46 @@ fn tokens(text: &[char], blanks: bool) -> Vec<Token> {
     let mut out: Vec<Token> = Vec::new();
     for (i, &ch) in text.iter().enumerate() {
         if BLANKS.contains(ch) && blanks {
-            out.push(Token { value: ch.to_string(), start: i, end: i + 1 });
+            out.push(Token {
+                value: ch.to_string(),
+                start: i,
+                end: i + 1,
+            });
             continue;
         }
-        let folded: String = std::iter::once(ch).nfkc().filter(|c| !is_space(*c)).collect();
+        let folded: String = std::iter::once(ch)
+            .nfkc()
+            .filter(|c| !is_space(*c))
+            .collect();
         if !folded.is_empty() && folded.chars().all(|c| DOTS.contains(c)) {
             if let Some(last) = out.last_mut()
                 && last.end == i
                 && (last.value == "." || last.value == ELLIPSIS)
             {
-                *last = Token { value: ELLIPSIS.to_string(), start: last.start, end: i + 1 };
+                *last = Token {
+                    value: ELLIPSIS.to_string(),
+                    start: last.start,
+                    end: i + 1,
+                };
             } else {
-                let value = if folded.chars().count() > 1 { ELLIPSIS.to_string() } else { ".".to_string() };
-                out.push(Token { value, start: i, end: i + 1 });
+                let value = if folded.chars().count() > 1 {
+                    ELLIPSIS.to_string()
+                } else {
+                    ".".to_string()
+                };
+                out.push(Token {
+                    value,
+                    start: i,
+                    end: i + 1,
+                });
             }
             continue;
         }
-        out.extend(folded.chars().map(|c| Token { value: c.to_string(), start: i, end: i + 1 }));
+        out.extend(folded.chars().map(|c| Token {
+            value: c.to_string(),
+            start: i,
+            end: i + 1,
+        }));
     }
     out
 }
@@ -142,7 +165,9 @@ pub fn widen_punctuation(text: &str, keep: Option<&[bool]>) -> String {
     if !t.iter().any(|c| "!?.".contains(*c)) || !t.iter().any(|c| is_japanese(*c)) {
         return text.to_string();
     }
-    let kept: Vec<bool> = keep.map(<[bool]>::to_vec).unwrap_or_else(|| vec![false; t.len()]);
+    let kept: Vec<bool> = keep
+        .map(<[bool]>::to_vec)
+        .unwrap_or_else(|| vec![false; t.len()]);
     let mut out = String::new();
     let mut i = 0;
     while i < t.len() {
@@ -249,7 +274,11 @@ fn repeated_tail_chars(t: &[char]) -> usize {
             let end = n as i64 - (unit * count) as i64;
             let start = start.max(0) as usize;
             let end = end.max(0) as usize;
-            let slice = if end > start { &t[start..end] } else { &t[0..0] };
+            let slice = if end > start {
+                &t[start..end]
+            } else {
+                &t[0..0]
+            };
             if slice == tail {
                 count += 1;
             } else {
@@ -265,7 +294,10 @@ fn repeated_tail_chars(t: &[char]) -> usize {
 
 /// Glyph cells `text` takes: Latin letters and digits are set two to the em.
 fn cells_of(text: &[char]) -> f64 {
-    py::sum(text.iter().map(|&c| if is_ascii_alnum(c) { 0.5 } else { 1.0 }))
+    py::sum(
+        text.iter()
+            .map(|&c| if is_ascii_alnum(c) { 0.5 } else { 1.0 }),
+    )
 }
 
 /// Did the engine repeat one unit until it had filled the quad twice over?
@@ -330,7 +362,14 @@ pub struct Reconciled {
 }
 
 impl Reconciled {
-    fn new(text: String, vlm: &str, ctc: &str, agreement: Option<f64>, source: Source, notes: Vec<String>) -> Self {
+    fn new(
+        text: String,
+        vlm: &str,
+        ctc: &str,
+        agreement: Option<f64>,
+        source: Source,
+        notes: Vec<String>,
+    ) -> Self {
         Reconciled {
             text,
             vlm: vlm.to_string(),
@@ -354,10 +393,15 @@ impl Reconciled {
         items.push(("merged".into(), self.text.clone().into()));
         items.push((
             "agreement".into(),
-            self.agreement.map(|a| Value::Float(round_digits(a, 4))).unwrap_or(Value::Null),
+            self.agreement
+                .map(|a| Value::Float(round_digits(a, 4)))
+                .unwrap_or(Value::Null),
         ));
         items.push(("source".into(), self.source.as_str().into()));
-        items.push(("notes".into(), Value::Array(self.notes.iter().map(|n| n.clone().into()).collect())));
+        items.push((
+            "notes".into(),
+            Value::Array(self.notes.iter().map(|n| n.clone().into()).collect()),
+        ));
         if self.engine_only {
             items.push(("engine_only".into(), true.into()));
             items.push(("confirmed".into(), self.confirmed.into()));
@@ -374,11 +418,19 @@ fn ratio(a: &[String], b: &[String]) -> f64 {
 }
 
 fn matches(a: &[String], b: &[String]) -> usize {
-    SequenceMatcher::new(a, b).matching_blocks().iter().map(|m| m.size).sum()
+    SequenceMatcher::new(a, b)
+        .matching_blocks()
+        .iter()
+        .map(|m| m.size)
+        .sum()
 }
 
 fn values(tokens: &[Token]) -> Vec<String> {
-    tokens.iter().filter(|t| !BLANKS.contains(t.value.as_str())).map(|t| t.value.clone()).collect()
+    tokens
+        .iter()
+        .filter(|t| !BLANKS.contains(t.value.as_str()))
+        .map(|t| t.value.clone())
+        .collect()
 }
 
 /// `values` without the leading openers and trailing closers.
@@ -439,7 +491,11 @@ pub fn reconcile_line(
         confs.clear();
     }
     if vlm_text.is_empty() {
-        let notes = if ctc_text.is_empty() { vec![] } else { vec!["empty".to_string()] };
+        let notes = if ctc_text.is_empty() {
+            vec![]
+        } else {
+            vec!["empty".to_string()]
+        };
         return Reconciled::new(ctc_text, vlm, ctc, None, Source::Ctc, notes);
     }
     let (vlm_text, dash_runs) = adopt_dash_runs(&vlm_text, &ctc_text);
@@ -453,9 +509,24 @@ pub fn reconcile_line(
             let tc = chars(&text);
             let cut = slice(&tc, 0, tc.len() - repeated_tail_chars(&tc));
             // `text[:cells]`, a negative stop counting from the end as in Python.
-            let stop = if cells >= 0 { cells as usize } else { (tc.len() as i64 + cells).max(0) as usize };
-            let text = if cut.is_empty() { slice(&tc, 0, stop) } else { cut };
-            let mut r = Reconciled::new(text, vlm, ctc, None, Source::Merged, vec!["runaway".to_string()]);
+            let stop = if cells >= 0 {
+                cells as usize
+            } else {
+                (tc.len() as i64 + cells).max(0) as usize
+            };
+            let text = if cut.is_empty() {
+                slice(&tc, 0, stop)
+            } else {
+                cut
+            };
+            let mut r = Reconciled::new(
+                text,
+                vlm,
+                ctc,
+                None,
+                Source::Merged,
+                vec!["runaway".to_string()],
+            );
             r.engine_only = true;
             return r;
         }
@@ -466,9 +537,16 @@ pub fn reconcile_line(
 
     let mine_values = token_values(&mine);
     let folded = dashes_folded(&mine_values);
-    let same_line = py::max2(ratio(&folded, &core(&their_values)), ratio(&folded, &their_values)) >= PATCH_MIN_AGREEMENT;
+    let same_line = py::max2(
+        ratio(&folded, &core(&their_values)),
+        ratio(&folded, &their_values),
+    ) >= PATCH_MIN_AGREEMENT;
 
-    let mut notes: Vec<String> = if dash_runs > 0 { vec!["dash".to_string()] } else { vec![] };
+    let mut notes: Vec<String> = if dash_runs > 0 {
+        vec!["dash".to_string()]
+    } else {
+        vec![]
+    };
     let mut replace: HashMap<usize, (usize, String)> = HashMap::new();
     let mut insert_before: HashMap<usize, String> = HashMap::new();
     let mut vouched = vec![false; vt.len()];
@@ -496,7 +574,13 @@ pub fn reconcile_line(
     let (op_f, cl_f) = (openers_folded(), closers_folded());
 
     for (k, op) in opcodes.iter().enumerate() {
-        let Opcode { tag, i1, i2, j1, j2 } = *op;
+        let Opcode {
+            tag,
+            i1,
+            i2,
+            j1,
+            j2,
+        } = *op;
         let k = k as i64;
         if tag == Tag::Equal {
             for (a, b) in mine[i1..i2].iter().zip(&theirs[j1..j2]) {
@@ -515,12 +599,23 @@ pub fn reconcile_line(
         }
         let added: Vec<&str> = theirs[j1..j2].iter().map(|t| t.value.as_str()).collect();
         let source = slice(&ctc_chars, theirs[j1].start, theirs[j2 - 1].end);
-        let at = if i1 < mine.len() { mine[i1].start } else { vt.len() };
+        let at = if i1 < mine.len() {
+            mine[i1].start
+        } else {
+            vt.len()
+        };
         let end_marks = format!("{}{}", op_f, if thin { THIN_GLYPHS } else { "" });
         if tag == Tag::Insert && i1 == 0 && added.iter().all(|v| end_marks.contains(v)) {
             if anchored(k + 1, true) {
                 insert_before.insert(at, source.clone());
-                notes.push(if op_f.contains(added[0]) { "opener" } else { "thin" }.into());
+                notes.push(
+                    if op_f.contains(added[0]) {
+                        "opener"
+                    } else {
+                        "thin"
+                    }
+                    .into(),
+                );
             }
             continue;
         }
@@ -528,7 +623,14 @@ pub fn reconcile_line(
         if tag == Tag::Insert && i1 == mine.len() && added.iter().all(|v| end_marks.contains(v)) {
             if anchored(k - 1, false) {
                 insert_before.insert(at, source.clone());
-                notes.push(if cl_f.contains(added[added.len() - 1]) { "closer" } else { "thin" }.into());
+                notes.push(
+                    if cl_f.contains(added[added.len() - 1]) {
+                        "closer"
+                    } else {
+                        "thin"
+                    }
+                    .into(),
+                );
             }
             continue;
         }
@@ -545,7 +647,9 @@ pub fn reconcile_line(
             continue;
         }
         if tag == Tag::Replace
-            && mine_values[i1..i2].iter().all(|v| is_plain_kana(first(v)) && v.chars().count() == 1)
+            && mine_values[i1..i2]
+                .iter()
+                .all(|v| is_plain_kana(first(v)) && v.chars().count() == 1)
             && source.chars().all(is_plain_kana)
             && !stretch.is_empty()
             && py::min_of(stretch.iter().copied()) >= KANA_STANDS_CONF
@@ -555,9 +659,15 @@ pub fn reconcile_line(
             continue;
         }
         if source.trim_matches(' ').is_empty() {
-            let around: &[String] = if tag == Tag::Insert && 0 < i1 { &mine_values[i1 - 1..(i1 + 1).min(mine_values.len())] } else { &[] };
+            let around: &[String] = if tag == Tag::Insert && 0 < i1 {
+                &mine_values[i1 - 1..(i1 + 1).min(mine_values.len())]
+            } else {
+                &[]
+            };
             if around.len() == 2
-                && around.iter().all(|v| v.chars().count() == 1 && is_ascii_alnum(first(v)))
+                && around
+                    .iter()
+                    .all(|v| v.chars().count() == 1 && is_ascii_alnum(first(v)))
                 && (anchored(k - 1, false) || anchored(k + 1, true))
             {
                 insert_before.entry(at).or_default().push(' ');
@@ -603,7 +713,8 @@ pub fn reconcile_line(
         && their_core.len() <= SHORT_LINE_GLYPHS
         && core(&merged_values) != their_core
         && (their_core.iter().any(|v| is_kanji(first(v)))
-            || (their_core.iter().any(|v| is_japanese(first(v))) && !merged.chars().any(is_japanese))
+            || (their_core.iter().any(|v| is_japanese(first(v)))
+                && !merged.chars().any(is_japanese))
             || lacks_end_bracket(&merged_values, &their_values))
     {
         let agreement = ratio(&mine_values, &their_values);
@@ -633,7 +744,10 @@ fn sure_text(source: &str, confs: &[f64], floor: f64) -> bool {
     if src.is_empty() || confs.len() != src.len() {
         return false;
     }
-    let brackets: String = format!("{OPENERS}{CLOSERS}").chars().filter(|c| *c != '。' && *c != '、').collect();
+    let brackets: String = format!("{OPENERS}{CLOSERS}")
+        .chars()
+        .filter(|c| *c != '。' && *c != '、')
+        .collect();
     for (&ch, &conf) in src.iter().zip(confs) {
         if brackets.contains(ch) || BLANKS.contains(ch) {
             continue;
@@ -642,7 +756,8 @@ fn sure_text(source: &str, confs: &[f64], floor: f64) -> bool {
             return false;
         }
     }
-    src.iter().any(|c| !BLANKS.contains(*c) && !brackets.contains(*c))
+    src.iter()
+        .any(|c| !BLANKS.contains(*c) && !brackets.contains(*c))
 }
 
 /// Does the CTC read open or close with a bracket the merged text does not have there?
@@ -650,7 +765,10 @@ fn lacks_end_bracket(merged: &[String], theirs: &[String]) -> bool {
     if theirs.is_empty() {
         return false;
     }
-    let closers: String = closers_folded().chars().filter(|c| *c != '。' && *c != '、').collect();
+    let closers: String = closers_folded()
+        .chars()
+        .filter(|c| *c != '。' && *c != '、')
+        .collect();
     let opens = openers_folded().contains(theirs[0].as_str()) && merged.first() != Some(&theirs[0]);
     let last = &theirs[theirs.len() - 1];
     let closes = closers.contains(last.as_str()) && merged.last() != Some(last);
@@ -668,11 +786,19 @@ fn adopt_dash_runs(vlm_text: &str, ctc_text: &str) -> (String, usize) {
     let mut out = chars(vlm_text);
     let mut runs = 0;
     for op in opcodes.iter().rev() {
-        let Opcode { tag, i1, i2, mut j1, mut j2 } = *op;
+        let Opcode {
+            tag,
+            i1,
+            i2,
+            mut j1,
+            mut j2,
+        } = *op;
         if tag != Tag::Replace || i2 - i1 != 1 {
             continue;
         }
-        if !mine[i1].value.chars().eq([LONG_VOWEL]) && !ENGINE_DASHES.contains(mine[i1].value.as_str()) {
+        if !mine[i1].value.chars().eq([LONG_VOWEL])
+            && !ENGINE_DASHES.contains(mine[i1].value.as_str())
+        {
             continue;
         }
         while j2 > j1 && j2 == theirs.len() && cl_f.contains(theirs[j2 - 1].value.as_str()) {
@@ -695,7 +821,14 @@ fn adopt_dash_runs(vlm_text: &str, ctc_text: &str) -> (String, usize) {
 }
 
 /// The CTC read's printed form of an agreed token, if it differs.
-fn printed_form(vlm: &[char], ctc: &[char], mine: &Token, theirs: &Token, all_mine: &[Token], all_theirs: &[Token]) -> Option<String> {
+fn printed_form(
+    vlm: &[char],
+    ctc: &[char],
+    mine: &Token,
+    theirs: &Token,
+    all_mine: &[Token],
+    all_theirs: &[Token],
+) -> Option<String> {
     let engine = slice(vlm, mine.start, mine.end);
     let printed = slice(ctc, theirs.start, theirs.end);
     if engine == printed {
@@ -709,18 +842,31 @@ fn printed_form(vlm: &[char], ctc: &[char], mine: &Token, theirs: &Token, all_mi
         let cells = printed.chars().filter(|c| *c == '…' || *c == '‥').count() as i64
             + ((dots as f64) / 3.0).round_ties_even() as i64;
         let engine_len = engine.replace("...", ELLIPSIS).chars().count() as i64;
-        return if cells > engine_len { Some(ELLIPSIS.repeat(cells.max(0) as usize)) } else { None };
+        return if cells > engine_len {
+            Some(ELLIPSIS.repeat(cells.max(0) as usize))
+        } else {
+            None
+        };
     }
     for (token, tokens) in [(mine, all_mine), (theirs, all_theirs)] {
         if tokens.iter().filter(|t| t.start == token.start).count() != 1 {
             return None;
         }
     }
-    if keeps_width(&printed) { Some(printed) } else { None }
+    if keeps_width(&printed) {
+        Some(printed)
+    } else {
+        None
+    }
 }
 
 /// The merged text; unvouched ASCII marks then get the default width policy.
-fn assemble(vlm: &[char], replace: &HashMap<usize, (usize, String)>, insert_before: &HashMap<usize, String>, vouched: &[bool]) -> String {
+fn assemble(
+    vlm: &[char],
+    replace: &HashMap<usize, (usize, String)>,
+    insert_before: &HashMap<usize, String>,
+    vouched: &[bool],
+) -> String {
     let mut out: Vec<char> = Vec::new();
     let mut keep: Vec<bool> = Vec::new();
     let mut i = 0;
@@ -764,11 +910,18 @@ pub fn settle_disputes(mut line: Reconciled, second: &str, cells: i64) -> Reconc
     let second_text: String = second.chars().filter(|c| !is_space(*c)).collect();
     if line.source == Source::Ctc {
         let mut retry = reconcile_line(second, &line.ctc, cells, false, None, None);
-        if !second_text.is_empty() && retry.source == Source::Merged && !retry.notes.iter().any(|n| n == "disagree") {
+        if !second_text.is_empty()
+            && retry.source == Source::Merged
+            && !retry.notes.iter().any(|n| n == "disagree")
+        {
             retry.vlm = line.vlm.clone();
             retry.second = Some(second.to_string());
-            let mut notes: Vec<String> =
-                line.notes.iter().filter(|n| *n == "empty" || *n == "runaway").cloned().collect();
+            let mut notes: Vec<String> = line
+                .notes
+                .iter()
+                .filter(|n| *n == "empty" || *n == "runaway")
+                .cloned()
+                .collect();
             notes.extend(retry.notes.iter().cloned());
             notes.push("retry".into());
             retry.notes = notes;
@@ -796,21 +949,38 @@ pub fn settle_disputes(mut line: Reconciled, second: &str, cells: i64) -> Reconc
     let mine = tokens(&text, false);
     let ops = SequenceMatcher::new(&token_values(&mine), &token_values(&theirs)).opcodes();
     for (i1, i2, j1, j2) in single_disputes(&ops).into_iter().rev() {
-        let source = if j2 > j1 { slice(&ctc_stripped, theirs[j1].start, theirs[j2 - 1].end) } else { String::new() };
+        let source = if j2 > j1 {
+            slice(&ctc_stripped, theirs[j1].start, theirs[j2 - 1].end)
+        } else {
+            String::new()
+        };
         if !source.is_empty() && source.chars().all(|c| BLANKS.contains(c)) {
             continue;
         }
         if source.contains(MISSING_GLYPH) {
             continue;
         }
-        let start = if i1 < mine.len() { mine[i1].start } else { text.len() };
+        let start = if i1 < mine.len() {
+            mine[i1].start
+        } else {
+            text.len()
+        };
         let end = if i2 > i1 { mine[i2 - 1].end } else { start };
-        let (s, e) = (start.min(text.len()), end.min(text.len()).max(start.min(text.len())));
+        let (s, e) = (
+            start.min(text.len()),
+            end.min(text.len()).max(start.min(text.len())),
+        );
         let mut swapped: Vec<char> = text[..s].to_vec();
         swapped.extend(source.chars());
         swapped.extend_from_slice(&text[e..]);
-        let before = matches(&dashes_folded(&token_values(&tokens(&text, false))), &witness);
-        let after = matches(&dashes_folded(&token_values(&tokens(&swapped, false))), &witness);
+        let before = matches(
+            &dashes_folded(&token_values(&tokens(&text, false))),
+            &witness,
+        );
+        let after = matches(
+            &dashes_folded(&token_values(&tokens(&swapped, false))),
+            &witness,
+        );
         if after > before {
             text = swapped;
             changed = true;
@@ -823,7 +993,14 @@ pub fn settle_disputes(mut line: Reconciled, second: &str, cells: i64) -> Reconc
     let agreement = ratio(&values(&tokens(&chars(&text), false)), &values(&theirs));
     let mut notes = line.notes.clone();
     notes.push("vote".into());
-    let mut r = Reconciled::new(text, &line.vlm, &line.ctc, Some(agreement), Source::Merged, notes);
+    let mut r = Reconciled::new(
+        text,
+        &line.vlm,
+        &line.ctc,
+        Some(agreement),
+        Source::Merged,
+        notes,
+    );
     r.second = Some(second.to_string());
     r
 }
@@ -861,7 +1038,10 @@ pub fn engine_only_verdict(
     if det_score >= DETECTOR_SURE {
         return (true, "backed");
     }
-    if det_score >= DETECTOR_REGION && is_region(main, thickness, pitch) && fold(&line.text).chars().count() >= ROOM_MIN_CELLS {
+    if det_score >= DETECTOR_REGION
+        && is_region(main, thickness, pitch)
+        && fold(&line.text).chars().count() >= ROOM_MIN_CELLS
+    {
         return (true, "region");
     }
     if det_score >= DETECTOR_BODY
@@ -897,7 +1077,9 @@ fn single_disputes(opcodes: &[Opcode]) -> Vec<(usize, usize, usize, usize)> {
             out.push((i1 + pairs, i2, j1 + pairs, j2));
         }
     }
-    out.into_iter().filter(|&(i1, i2, j1, j2)| i2 > i1 || j2 > j1).collect()
+    out.into_iter()
+        .filter(|&(i1, i2, j1, j2)| i2 > i1 || j2 > j1)
+        .collect()
 }
 
 /// Glyphs at the start of `after` that repeat the end of `before`.
@@ -930,14 +1112,26 @@ pub fn page_summary(lines: &[Reconciled]) -> Value {
     let mean = if compared.is_empty() {
         Value::Null
     } else {
-        Value::Float(round_digits(py::sum(compared.iter().copied()) / compared.len() as f64, 4))
+        Value::Float(round_digits(
+            py::sum(compared.iter().copied()) / compared.len() as f64,
+            4,
+        ))
     };
     Value::Object(vec![
         ("lines".into(), Value::Int(lines.len() as i64)),
         ("compared".into(), Value::Int(compared.len() as i64)),
-        ("full_agreement".into(), Value::Int(compared.iter().filter(|a| **a >= 1.0).count() as i64)),
+        (
+            "full_agreement".into(),
+            Value::Int(compared.iter().filter(|a| **a >= 1.0).count() as i64),
+        ),
         ("mean_agreement".into(), mean),
-        ("from_ctc".into(), Value::Int(lines.iter().filter(|l| l.source == Source::Ctc).count() as i64)),
-        ("notes".into(), Value::Object(notes.into_iter().map(|(k, v)| (k, Value::Int(v))).collect())),
+        (
+            "from_ctc".into(),
+            Value::Int(lines.iter().filter(|l| l.source == Source::Ctc).count() as i64),
+        ),
+        (
+            "notes".into(),
+            Value::Object(notes.into_iter().map(|(k, v)| (k, Value::Int(v))).collect()),
+        ),
     ])
 }

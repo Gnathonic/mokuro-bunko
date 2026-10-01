@@ -60,7 +60,11 @@ pub fn text_opts(text: &str, default: Option<&str>, show_default: bool) -> Resul
 }
 
 /// A prompt whose answer must pass `parse` (re-asked with `Error: <msg>` otherwise).
-pub fn parsed<T>(text: &str, default: Option<&str>, parse: impl Fn(&str) -> Result<T, String>) -> Result<T, Fail> {
+pub fn parsed<T>(
+    text: &str,
+    default: Option<&str>,
+    parse: impl Fn(&str) -> Result<T, String>,
+) -> Result<T, Fail> {
     loop {
         let raw = self::text(text, default)?;
         match parse(&raw) {
@@ -105,7 +109,11 @@ pub fn confirm(text: &str, default: Option<bool>) -> Result<bool, Fail> {
 
 /// `click.confirm(text, abort=True)`: "no" aborts with exit 1.
 pub fn confirm_or_abort(text: &str) -> Result<(), Fail> {
-    if confirm(text, Some(false))? { Ok(()) } else { Err(abort()) }
+    if confirm(text, Some(false))? {
+        Ok(())
+    } else {
+        Err(abort())
+    }
 }
 
 fn hidden_once(prompt: &str) -> Result<String, Fail> {

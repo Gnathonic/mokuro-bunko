@@ -48,7 +48,11 @@ pub const HEADER_RESULT_NAME: &str = "x-mokuro-sidecar-name";
 
 /// Ids that become file names: `[A-Za-z0-9_-]{1,64}`.
 pub fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 // --- registration ---------------------------------------------------------------------
@@ -209,7 +213,10 @@ pub struct VolumeOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
-    OpenSession { sid: String, generation: RowSpec },
+    OpenSession {
+        sid: String,
+        generation: RowSpec,
+    },
     Volume(VolumeOp),
     /// Cancel a claim (nothing is recorded for it) or, with no claim, the whole session.
     Cancel {
@@ -221,7 +228,9 @@ pub enum Op {
         bid: Option<String>,
     },
     /// Finish what was accepted, abandon downloads, then end the session (`exit`).
-    CloseSession { sid: String },
+    CloseSession {
+        sid: String,
+    },
     Bench(BenchOp),
     Heartbeat,
 }
@@ -260,16 +269,31 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         precision: Option<String>,
     },
-    Fatal { sid: String, error: String },
-    SpawnFailed { sid: String, error: String },
+    Fatal {
+        sid: String,
+        error: String,
+    },
+    SpawnFailed {
+        sid: String,
+        error: String,
+    },
     /// Always the session's last event, exactly once.
     Exit {
         sid: String,
         #[serde(default)]
         returncode: Option<i32>,
     },
-    VolumeStarted { sid: String, id: String, pages: u32 },
-    Page { sid: String, id: String, done: u32, total: u32 },
+    VolumeStarted {
+        sid: String,
+        id: String,
+        pages: u32,
+    },
+    Page {
+        sid: String,
+        id: String,
+        done: u32,
+        total: u32,
+    },
     Stats {
         sid: String,
         pipeline: Value,
@@ -295,7 +319,11 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sidecar_sha256: Option<String>,
     },
-    VolumeFailed { sid: String, id: String, error: String },
+    VolumeFailed {
+        sid: String,
+        id: String,
+        error: String,
+    },
     /// Download progress (`downloading` / `retrying` / `restarting`) or `ready` once the
     /// verified archive is handed to the pipeline.
     Fetch {
@@ -314,12 +342,30 @@ pub enum Event {
         #[serde(flatten)]
         detail: BTreeMap<String, Value>,
     },
-    BenchReady { bid: String, #[serde(flatten)] detail: BTreeMap<String, Value> },
-    BenchProgress { bid: String, #[serde(flatten)] detail: BTreeMap<String, Value> },
-    BenchTrial { bid: String, #[serde(flatten)] detail: BTreeMap<String, Value> },
-    BenchDone { bid: String, #[serde(flatten)] detail: BTreeMap<String, Value> },
+    BenchReady {
+        bid: String,
+        #[serde(flatten)]
+        detail: BTreeMap<String, Value>,
+    },
+    BenchProgress {
+        bid: String,
+        #[serde(flatten)]
+        detail: BTreeMap<String, Value>,
+    },
+    BenchTrial {
+        bid: String,
+        #[serde(flatten)]
+        detail: BTreeMap<String, Value>,
+    },
+    BenchDone {
+        bid: String,
+        #[serde(flatten)]
+        detail: BTreeMap<String, Value>,
+    },
     /// Catalog changed (models finished downloading, device lost).
-    Catalog { catalog: Catalog },
+    Catalog {
+        catalog: Catalog,
+    },
     Ping,
 }
 

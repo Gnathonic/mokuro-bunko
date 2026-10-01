@@ -13,10 +13,10 @@
 //! Engines removed in 0.7 are never offered; a config row still naming one is shown with
 //! its `retired` reason.
 
+use ::http::Method;
 use bunko_core::Config;
 use bunko_core::engines::{self, Road};
 use bunko_core::generations::{self, Generation, GenerationError, ParsedGenerations};
-use ::http::Method;
 use serde_json::{Map, Value, json};
 
 /// An OCR endpoint's refusal: the status and the whole JSON body (`{"error", ...}`;
@@ -30,12 +30,23 @@ pub struct OcrError {
 impl OcrError {
     /// `{"error": message}`.
     pub fn new(status: u16, message: impl Into<String>) -> Self {
-        OcrError { status, body: json!({"error": message.into()}) }
+        OcrError {
+            status,
+            body: json!({"error": message.into()}),
+        }
     }
 
     /// `{"error", "row", "field"}` (the generations editor puts the message on that row).
-    pub fn at(status: u16, message: impl Into<String>, row: Option<usize>, field: Option<&str>) -> Self {
-        OcrError { status, body: json!({"error": message.into(), "row": row, "field": field}) }
+    pub fn at(
+        status: u16,
+        message: impl Into<String>,
+        row: Option<usize>,
+        field: Option<&str>,
+    ) -> Self {
+        OcrError {
+            status,
+            body: json!({"error": message.into(), "row": row, "field": field}),
+        }
     }
 
     /// `404 {"error": "API endpoint not found"}`: what a server without the feature says
@@ -46,7 +57,13 @@ impl OcrError {
 
     /// `400 {"error": "no processor called 'x' is known"}`.
     pub fn unknown_processor(name: &str) -> Self {
-        OcrError::new(400, format!("no processor called {} is known", bunko_db::pyfmt::repr_str(name)))
+        OcrError::new(
+            400,
+            format!(
+                "no processor called {} is known",
+                bunko_db::pyfmt::repr_str(name)
+            ),
+        )
     }
 }
 
@@ -60,7 +77,11 @@ impl From<GenerationError> for OcrError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BenchRequest {
     /// POST: `spec`/`pages` as sent (absent → None); `processor` defaults to `local`.
-    Enqueue { spec: Option<Value>, pages: Option<Value>, processor: String },
+    Enqueue {
+        spec: Option<Value>,
+        pages: Option<Value>,
+        processor: String,
+    },
     /// GET `?processor=` (None → this server's own).
     Get { processor: Option<String> },
     /// DELETE `?processor=`.
@@ -90,7 +111,11 @@ pub trait OcrAdmin: Send + Sync + 'static {
 
     /// Validate a full replacement list (`PUT /api/ocr/generations`), against every
     /// machine's devices. The default is the registry-only check of `bunko_core`.
-    fn parse_generations(&self, config: &Config, rows: &Value) -> Result<ParsedGenerations, GenerationError> {
+    fn parse_generations(
+        &self,
+        config: &Config,
+        rows: &Value,
+    ) -> Result<ParsedGenerations, GenerationError> {
         let _ = config;
         generations::parse_generation_list(rows)
     }
@@ -107,15 +132,31 @@ pub trait OcrAdmin: Send + Sync + 'static {
 
     /// `POST /api/ocr/generations/derive`: `{road, stages}` for an unsaved spec, as this
     /// server (processor None) or the named processor would run it.
-    fn derive(&self, config: &Config, spec: &Value, processor: Option<&str>) -> Result<Value, OcrError>;
+    fn derive(
+        &self,
+        config: &Config,
+        spec: &Value,
+        processor: Option<&str>,
+    ) -> Result<Value, OcrError>;
 
     /// `PUT /api/ocr/generations/<id>/pools` after the generic checks (a processor is
     /// named, the row exists): unknown machine, `pools must be an object`, validation,
     /// storage. Returns `{"success": true, "pools": {...}}`.
-    fn set_pools(&self, config: &Config, row: &Generation, processor: &str, pools: &Value) -> Result<Value, OcrError>;
+    fn set_pools(
+        &self,
+        config: &Config,
+        row: &Generation,
+        processor: &str,
+        pools: &Value,
+    ) -> Result<Value, OcrError>;
 
     /// The bench endpoints: `(status, body)` (POST answers 202).
-    fn bench(&self, config: &Config, key: &str, request: BenchRequest) -> Result<(u16, Value), OcrError>;
+    fn bench(
+        &self,
+        config: &Config,
+        key: &str,
+        request: BenchRequest,
+    ) -> Result<(u16, Value), OcrError>;
 
     /// `POST /api/ocr/devices/refresh`: `{"success": true, "devices": [...]}`.
     fn refresh_devices(&self) -> Value;
@@ -125,7 +166,14 @@ pub trait OcrAdmin: Send + Sync + 'static {
 
     /// Any other `/api/ocr/...` path (`path` = the segments after `/api/`), so the OCR
     /// subsystem can add endpoints without touching the admin router. `None` → 404.
-    fn other(&self, config: &Config, method: &Method, path: &[&str], query: &str, body: &Value) -> Option<Result<(u16, Value), OcrError>> {
+    fn other(
+        &self,
+        config: &Config,
+        method: &Method,
+        path: &[&str],
+        query: &str,
+        body: &Value,
+    ) -> Option<Result<(u16, Value), OcrError>> {
         let _ = (config, method, path, query, body);
         None
     }
@@ -222,7 +270,9 @@ pub fn stage_lock_reason(row: &Generation, key: &str) -> Option<String> {
         // The engine brings its own detector: its reason is the engine's.
         engine.cpu_only_reason
     } else {
-        engines::detector(row.effective_detector()).map(|d| d.cpu_only_reason).unwrap_or("")
+        engines::detector(row.effective_detector())
+            .map(|d| d.cpu_only_reason)
+            .unwrap_or("")
     };
     (!text.is_empty()).then(|| text.to_string())
 }
@@ -241,13 +291,24 @@ fn device_short(device: &str) -> String {
 /// a device and which are locked to the CPU. With no host facts (`NoOcr`), `auto`
 /// resolves to the CPU and the derived widths/capacities are unknown (null).
 pub fn stage_rows(row: &Generation, devices: &Value) -> Vec<Value> {
-    let Some(road) = row.road() else { return vec![] };
-    let ids: Vec<String> =
-        devices.as_array().map(|a| a.iter().filter_map(|d| d.get("id").and_then(Value::as_str).map(str::to_string)).collect()).unwrap_or_default();
+    let Some(road) = row.road() else {
+        return vec![];
+    };
+    let ids: Vec<String> = devices
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| d.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     let label_of = |id: &str| -> String {
         devices
             .as_array()
-            .and_then(|a| a.iter().find(|d| d.get("id").and_then(Value::as_str) == Some(id)))
+            .and_then(|a| {
+                a.iter()
+                    .find(|d| d.get("id").and_then(Value::as_str) == Some(id))
+            })
             .and_then(|d| d.get("label").and_then(Value::as_str))
             .map(str::to_string)
             .unwrap_or_else(|| device_short(id))
@@ -271,11 +332,19 @@ pub fn stage_rows(row: &Generation, devices: &Value) -> Vec<Value> {
             let options: Vec<Value> = allowed
                 .iter()
                 .map(|id| {
-                    let label = if id == "auto" { "Auto → CPU".to_string() } else { label_of(id) };
+                    let label = if id == "auto" {
+                        "Auto → CPU".to_string()
+                    } else {
+                        label_of(id)
+                    };
                     json!({"id": id, "label": label})
                 })
                 .collect();
-            let means = if *key == engines::STAGE_ENGINE && device.starts_with("gpu") { "copies" } else { "pool" };
+            let means = if *key == engines::STAGE_ENGINE && device.starts_with("gpu") {
+                "copies"
+            } else {
+                "pool"
+            };
             json!({
                 "key": key,
                 "name": stage_name(road, key),
@@ -305,13 +374,43 @@ pub fn generation_entry(row: &Generation, devices: &Value) -> Map<String, Value>
     let mut put = |k: &str, v: Value| {
         entry.insert(k.to_string(), v);
     };
-    put("sidecar", json!(format!("<Volume>{}", row.sidecar_suffix())));
-    put("effective_detector", if spec.is_some() { json!(row.effective_detector()) } else { Value::Null });
-    put("detector_locked", json!(spec.is_none_or(|e| e.detector.is_some())));
-    put("patch_budget_applies", json!(spec.is_some() && row.patch_budget_applies()));
-    put("precision_applies", json!(spec.is_some() && row.precision_applies()));
-    put("road", spec.map(|e| json!(e.road().as_str())).unwrap_or(Value::Null));
-    put("stages", json!(if spec.is_some() { stage_rows(row, devices) } else { vec![] }));
+    put(
+        "sidecar",
+        json!(format!("<Volume>{}", row.sidecar_suffix())),
+    );
+    put(
+        "effective_detector",
+        if spec.is_some() {
+            json!(row.effective_detector())
+        } else {
+            Value::Null
+        },
+    );
+    put(
+        "detector_locked",
+        json!(spec.is_none_or(|e| e.detector.is_some())),
+    );
+    put(
+        "patch_budget_applies",
+        json!(spec.is_some() && row.patch_budget_applies()),
+    );
+    put(
+        "precision_applies",
+        json!(spec.is_some() && row.precision_applies()),
+    );
+    put(
+        "road",
+        spec.map(|e| json!(e.road().as_str()))
+            .unwrap_or(Value::Null),
+    );
+    put(
+        "stages",
+        json!(if spec.is_some() {
+            stage_rows(row, devices)
+        } else {
+            vec![]
+        }),
+    );
     put("volumes_done", Value::Null);
     put("volumes_total", Value::Null);
     put("congestion", Value::Null);
@@ -345,7 +444,8 @@ pub fn generation_entry(row: &Generation, devices: &Value) -> Map<String, Value>
 pub struct NoOcr;
 
 /// Shown as the OCR environment hint when this process runs no OCR.
-pub const NO_OCR_HINT: &str = "This server process runs no OCR itself; volumes are read by processors connected to it.";
+pub const NO_OCR_HINT: &str =
+    "This server process runs no OCR itself; volumes are read by processors connected to it.";
 
 impl OcrAdmin for NoOcr {
     fn runtime_status(&self, config: &Config) -> Value {
@@ -375,7 +475,12 @@ impl OcrAdmin for NoOcr {
 
     fn generations_payload(&self, config: &Config) -> Value {
         let devices = default_devices();
-        let rows: Vec<Value> = config.ocr.generations.iter().map(|g| Value::Object(generation_entry(g, &devices))).collect();
+        let rows: Vec<Value> = config
+            .ocr
+            .generations
+            .iter()
+            .map(|g| Value::Object(generation_entry(g, &devices)))
+            .collect();
         json!({
             "stats_pending": false,
             "generations": rows,
@@ -407,7 +512,12 @@ impl OcrAdmin for NoOcr {
         }))
     }
 
-    fn derive(&self, _config: &Config, spec: &Value, processor: Option<&str>) -> Result<Value, OcrError> {
+    fn derive(
+        &self,
+        _config: &Config,
+        spec: &Value,
+        processor: Option<&str>,
+    ) -> Result<Value, OcrError> {
         if let Some(name) = processor {
             return Err(OcrError::unknown_processor(name));
         }
@@ -416,11 +526,22 @@ impl OcrAdmin for NoOcr {
         Ok(json!({"road": road, "stages": stage_rows(&row, &default_devices())}))
     }
 
-    fn set_pools(&self, _config: &Config, _row: &Generation, processor: &str, _pools: &Value) -> Result<Value, OcrError> {
+    fn set_pools(
+        &self,
+        _config: &Config,
+        _row: &Generation,
+        processor: &str,
+        _pools: &Value,
+    ) -> Result<Value, OcrError> {
         Err(OcrError::unknown_processor(processor))
     }
 
-    fn bench(&self, _config: &Config, _key: &str, _request: BenchRequest) -> Result<(u16, Value), OcrError> {
+    fn bench(
+        &self,
+        _config: &Config,
+        _key: &str,
+        _request: BenchRequest,
+    ) -> Result<(u16, Value), OcrError> {
         Err(OcrError::not_found())
     }
 
@@ -434,7 +555,10 @@ impl OcrAdmin for NoOcr {
 pub(super) mod http {
     use super::{BenchRequest, OcrError};
     use crate::admin::settings::{default_outcome, merge};
-    use crate::admin::{AdminState, ApiRequest, blocking, error, json_response, not_found, ok, parse_qs, save_config};
+    use crate::admin::{
+        AdminState, ApiRequest, blocking, error, json_response, not_found, ok, parse_qs,
+        save_config,
+    };
     use axum::response::Response;
     use bunko_core::Config;
     use serde_json::{Map, Value, json};
@@ -451,26 +575,41 @@ pub(super) mod http {
     }
 
     /// Run `f(ocr, config snapshot)` off the async workers.
-    async fn with_ocr<T: Send + 'static>(s: &AdminState, f: impl FnOnce(&dyn super::OcrAdmin, &Config) -> T + Send + 'static) -> Result<T, Response> {
+    async fn with_ocr<T: Send + 'static>(
+        s: &AdminState,
+        f: impl FnOnce(&dyn super::OcrAdmin, &Config) -> T + Send + 'static,
+    ) -> Result<T, Response> {
         let ocr = s.ocr();
         let cfg = snapshot(s);
         blocking(move || f(ocr.as_ref(), &cfg)).await
     }
 
     pub async fn processors(s: &AdminState) -> Response {
-        with_ocr(s, |o, c| o.processors(c)).await.map(ok).unwrap_or_else(|r| r)
+        with_ocr(s, |o, c| o.processors(c))
+            .await
+            .map(ok)
+            .unwrap_or_else(|r| r)
     }
 
     pub async fn list(s: &AdminState) -> Response {
-        with_ocr(s, |o, c| o.generations_payload(c)).await.map(ok).unwrap_or_else(|r| r)
+        with_ocr(s, |o, c| o.generations_payload(c))
+            .await
+            .map(ok)
+            .unwrap_or_else(|r| r)
     }
 
     pub async fn stats(s: &AdminState) -> Response {
-        with_ocr(s, |o, c| o.generation_stats(c)).await.map(ok).unwrap_or_else(|r| r)
+        with_ocr(s, |o, c| o.generation_stats(c))
+            .await
+            .map(ok)
+            .unwrap_or_else(|r| r)
     }
 
     pub async fn refresh_devices(s: &AdminState) -> Response {
-        with_ocr(s, |o, _| o.refresh_devices()).await.map(ok).unwrap_or_else(|r| r)
+        with_ocr(s, |o, _| o.refresh_devices())
+            .await
+            .map(ok)
+            .unwrap_or_else(|r| r)
     }
 
     /// Python `str(value)` for an id in a message.
@@ -558,7 +697,9 @@ pub(super) mod http {
 
     /// A processor named in a body: a non-empty string other than `local`.
     fn named_processor(v: Option<&Value>) -> Option<String> {
-        v.and_then(Value::as_str).filter(|n| !n.is_empty() && *n != "local").map(str::to_string)
+        v.and_then(Value::as_str)
+            .filter(|n| !n.is_empty() && *n != "local")
+            .map(str::to_string)
     }
 
     pub async fn derive(s: &AdminState, req: &ApiRequest) -> Response {
@@ -568,10 +709,12 @@ pub(super) mod http {
         };
         let spec = data.get("spec").cloned().unwrap_or(Value::Null);
         let processor = named_processor(data.get("processor"));
-        with_ocr(s, move |o, c| o.derive(c, &spec, processor.as_deref()).map(|v| (200, v)))
-            .await
-            .map(respond)
-            .unwrap_or_else(|r| r)
+        with_ocr(s, move |o, c| {
+            o.derive(c, &spec, processor.as_deref()).map(|v| (200, v))
+        })
+        .await
+        .map(respond)
+        .unwrap_or_else(|r| r)
     }
 
     pub async fn pools(s: &AdminState, req: &ApiRequest, generation_id: &str) -> Response {
@@ -586,7 +729,10 @@ pub(super) mod http {
         let pools = data.get("pools").cloned().unwrap_or(Value::Null);
         with_ocr(s, move |o, c| {
             let Some(row) = c.ocr.generations.iter().find(|g| g.id == id) else {
-                return Err(OcrError::new(400, format!("there is no generation {}", bunko_db::pyfmt::repr_str(&id))));
+                return Err(OcrError::new(
+                    400,
+                    format!("there is no generation {}", bunko_db::pyfmt::repr_str(&id)),
+                ));
             };
             o.set_pools(c, row, &processor, &pools).map(|v| (200, v))
         })
@@ -598,7 +744,10 @@ pub(super) mod http {
     pub async fn bench(s: &AdminState, req: &ApiRequest, key: &str) -> Response {
         let query = parse_qs(&req.query);
         // `?processor=`: the first value as given (0.5.2 did not strip it).
-        let asked = query.iter().find(|(k, _)| k == "processor").map(|(_, v)| v.clone());
+        let asked = query
+            .iter()
+            .find(|(k, _)| k == "processor")
+            .map(|(_, v)| v.clone());
         let request = match req.method.as_str() {
             "POST" => {
                 // A body that will not parse is treated as `{}` (0.5.2).
@@ -609,14 +758,21 @@ pub(super) mod http {
                     Some(Value::String(p)) => p.clone(),
                     Some(other) => other.to_string(),
                 };
-                BenchRequest::Enqueue { spec: body.get("spec").cloned(), pages: body.get("pages").cloned(), processor }
+                BenchRequest::Enqueue {
+                    spec: body.get("spec").cloned(),
+                    pages: body.get("pages").cloned(),
+                    processor,
+                }
             }
             "GET" => BenchRequest::Get { processor: asked },
             "DELETE" => BenchRequest::Cancel { processor: asked },
             _ => return not_found(),
         };
         let key = key.to_string();
-        with_ocr(s, move |o, c| o.bench(c, &key, request)).await.map(respond).unwrap_or_else(|r| r)
+        with_ocr(s, move |o, c| o.bench(c, &key, request))
+            .await
+            .map(respond)
+            .unwrap_or_else(|r| r)
     }
 
     pub async fn other(s: &AdminState, req: &ApiRequest, path: &[&str]) -> Response {
@@ -644,9 +800,19 @@ mod tests {
     #[test]
     fn catalog_offers_only_shipped_components() {
         let c = catalog(default_devices());
-        let engines: Vec<&str> = c["engines"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+        let engines: Vec<&str> = c["engines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap())
+            .collect();
         assert_eq!(engines, ["hayai-nova", "paddle-manga", "ppocr-manga"]);
-        let detectors: Vec<&str> = c["detectors"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+        let detectors: Vec<&str> = c["detectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["id"].as_str().unwrap())
+            .collect();
         assert_eq!(detectors, ["ppocr-manga"]);
         assert_eq!(c["engines"][2]["precision_modes"], json!([]));
         assert_eq!(c["engines"][2]["devices"], json!(["cpu"]));
@@ -665,7 +831,10 @@ mod tests {
         let stages = e["stages"].as_array().unwrap();
         let keys: Vec<&str> = stages.iter().map(|s| s["key"].as_str().unwrap()).collect();
         assert_eq!(keys, ["detect", "engine", "post"]);
-        assert_eq!(stages[0]["device_locked_reason"], json!("the PP-OCRv6 detector runs on the CPU"));
+        assert_eq!(
+            stages[0]["device_locked_reason"],
+            json!("the PP-OCRv6 detector runs on the CPU")
+        );
         assert_eq!(stages[1]["devices_allowed"], json!(["auto", "cpu"]));
         assert_eq!(stages[2]["devices_allowed"], json!([]));
         let first: Vec<&String> = e.keys().take(4).collect();

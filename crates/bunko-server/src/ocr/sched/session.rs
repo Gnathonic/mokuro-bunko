@@ -12,7 +12,10 @@ use bunko_sched::rate::rate_key;
 use bunko_sched::speed::busy_reason;
 use serde_json::{Map, Value, json};
 
-use super::{CLOSE_GRACE_SECONDS, PRECISION_REFUSAL, SESSION_CRASH_LIMIT, SESSION_LOOKAHEAD, SESSION_WEDGE_SECONDS, SILENCE_SECONDS, Scheduler};
+use super::{
+    CLOSE_GRACE_SECONDS, PRECISION_REFUSAL, SESSION_CRASH_LIMIT, SESSION_LOOKAHEAD,
+    SESSION_WEDGE_SECONDS, SILENCE_SECONDS, Scheduler,
+};
 use crate::ocr::profiles::{LOCAL_PROFILE, profile_key};
 use crate::ocr::types::{Job, LOCAL, token_hex};
 
@@ -61,13 +64,25 @@ fn precision_refused(error: Option<&str>) -> bool {
 
 impl Scheduler {
     fn where_(&self, machine: &str) -> String {
-        if machine == LOCAL { String::new() } else { format!(" on {machine}") }
+        if machine == LOCAL {
+            String::new()
+        } else {
+            format!(" on {machine}")
+        }
     }
 
     /// Open a session on `lane` for the job it just claimed.
     pub fn open_session(&mut self, lane_id: u64, job: Job) {
-        let Some(claimed) = self.claims.get(&job).cloned() else { return };
-        let Some((name, local)) = self.machines.get(&claimed.pid).map(|m| (m.name.clone(), m.local)) else { return };
+        let Some(claimed) = self.claims.get(&job).cloned() else {
+            return;
+        };
+        let Some((name, local)) = self
+            .machines
+            .get(&claimed.pid)
+            .map(|m| (m.name.clone(), m.local))
+        else {
+            return;
+        };
         let row = claimed.row.clone();
         let sid = token_hex(6);
         let spec = self.row_spec(&name, &row);
@@ -90,7 +105,12 @@ impl Scheduler {
             fatal_error: None,
             next_claim_at: 0.0,
         };
-        let sent = self.machines.get(&claimed.pid).is_some_and(|m| m.send(Op::OpenSession { sid: sid.clone(), generation: spec }));
+        let sent = self.machines.get(&claimed.pid).is_some_and(|m| {
+            m.send(Op::OpenSession {
+                sid: sid.clone(),
+                generation: spec,
+            })
+        });
         if !sent {
             self.fail_session_start(&claimed.pid, &row, &job, &format!("{name} disconnected"));
             return;
@@ -129,21 +149,35 @@ impl Scheduler {
 
     /// `_submit_session_volume`: send one claim. False when the runner refused it.
     pub fn submit(&mut self, sid: &str, job: &Job) -> bool {
-        let Some(session) = self.sessions.get(sid) else { return false };
+        let Some(session) = self.sessions.get(sid) else {
+            return false;
+        };
         let (pid, local, machine) = (session.pid.clone(), session.local, session.machine.clone());
-        let row = self.row(&job.gid).cloned().unwrap_or_else(|| session.row.clone());
+        let row = self
+            .row(&job.gid)
+            .cloned()
+            .unwrap_or_else(|| session.row.clone());
         self.claim_seq += 1;
         let claim = format!("v{}", self.claim_seq);
         let library = self.library();
         let cbz = job.path(&library);
         let stamp = crate::ocr::types::stamp_of(&cbz);
-        let series_name = bunko_layout::sidecar::derive_series_name(&cbz, &library, &self.deps.layout.inbox());
-        let volume_uuid = self.deps.db.as_ref().and_then(|db| db.remembered_volume_uuid(&job.rel).ok().flatten());
+        let series_name =
+            bunko_layout::sidecar::derive_series_name(&cbz, &library, &self.deps.layout.inbox());
+        let volume_uuid = self
+            .deps
+            .db
+            .as_ref()
+            .and_then(|db| db.remembered_volume_uuid(&job.rel).ok().flatten());
         let sidecar_name = format!("{}{}", job.volume(), row.sidecar_suffix());
         let op = VolumeOp {
             sid: sid.to_string(),
             claim: claim.clone(),
-            archive: if local { cbz.to_string_lossy().into_owned() } else { format!("{}{}", bunko_proto::ARCHIVES_ROOT, job.rel) },
+            archive: if local {
+                cbz.to_string_lossy().into_owned()
+            } else {
+                format!("{}{}", bunko_proto::ARCHIVES_ROOT, job.rel)
+            },
             sidecar_name: sidecar_name.clone(),
             title: series_name.clone(),
             volume_title: job.volume().to_string(),
@@ -152,7 +186,10 @@ impl Scheduler {
             size: stamp.map(|s| s.0),
             etag: None,
         };
-        let sent = self.machines.get(&pid).is_some_and(|m| m.send(Op::Volume(op)));
+        let sent = self
+            .machines
+            .get(&pid)
+            .is_some_and(|m| m.send(Op::Volume(op)));
         if !sent {
             self.release(job, "the runner closed before it took the volume", true);
             return false;
@@ -166,7 +203,11 @@ impl Scheduler {
             }
         }
         let ready = self.sessions.get(sid).is_some_and(|s| s.ready_at.is_some());
-        let started_at = self.sessions.get(sid).map(|s| s.started_at).unwrap_or_default();
+        let started_at = self
+            .sessions
+            .get(sid)
+            .map(|s| s.started_at)
+            .unwrap_or_default();
         if let Some(s) = self.sessions.get_mut(sid) {
             s.order.push(claim.clone());
             s.jobs.insert(
@@ -191,9 +232,21 @@ impl Scheduler {
 
     /// `begin_ocr_job`: the running card.
     #[allow(clippy::too_many_arguments)]
-    fn begin_card(&mut self, job: &Job, row: &Generation, machine: &str, slot: u64, ready: bool, delivered: bool, session_started_at: f64) {
+    fn begin_card(
+        &mut self,
+        job: &Job,
+        row: &Generation,
+        machine: &str,
+        slot: u64,
+        ready: bool,
+        delivered: bool,
+        session_started_at: f64,
+    ) {
         let now = self.now();
-        let label = self.machine_by_name(machine).filter(|m| !m.local).map(|m| m.label());
+        let label = self
+            .machine_by_name(machine)
+            .filter(|m| !m.local)
+            .map(|m| m.label());
         let mut card = Map::new();
         card.insert("started_at".into(), json!(now));
         card.insert("active".into(), json!(true));
@@ -241,7 +294,10 @@ impl Scheduler {
         if self.held(&s.machine) {
             return Some("the queue is held".into());
         }
-        if self.stopped.contains(&(s.row.id.clone(), s.machine.clone())) {
+        if self
+            .stopped
+            .contains(&(s.row.id.clone(), s.machine.clone()))
+        {
             return Some("the generation was stopped for this scan".into());
         }
         if !s.local && self.breaker_open(&s.pid) {
@@ -258,7 +314,9 @@ impl Scheduler {
 
     /// The session loop's claim half: keep two claims in flight, drain, close.
     pub fn top_up(&mut self, sid: String) {
-        let Some(s) = self.sessions.get(&sid) else { return };
+        let Some(s) = self.sessions.get(&sid) else {
+            return;
+        };
         if s.closing {
             return;
         }
@@ -268,13 +326,26 @@ impl Scheduler {
         {
             let s = self.sessions.get_mut(&sid).expect("session checked above");
             s.draining = Some(reason.clone());
-            let msg = format!("Draining the {} session{}: {reason}", s.row.name, if s.local { String::new() } else { format!(" on {}", s.machine) });
+            let msg = format!(
+                "Draining the {} session{}: {reason}",
+                s.row.name,
+                if s.local {
+                    String::new()
+                } else {
+                    format!(" on {}", s.machine)
+                }
+            );
             self.log(msg);
         }
         loop {
-            let Some(s) = self.sessions.get(&sid) else { return };
+            let Some(s) = self.sessions.get(&sid) else {
+                return;
+            };
             let now = self.mono();
-            if s.draining.is_some() || s.order.len() >= SESSION_LOOKAHEAD || (!s.order.is_empty() && now < s.next_claim_at) {
+            if s.draining.is_some()
+                || s.order.len() >= SESSION_LOOKAHEAD
+                || (!s.order.is_empty() && now < s.next_claim_at)
+            {
                 break;
             }
             let (job, preempt) = self.claim(lane, Some(&row_id));
@@ -312,14 +383,20 @@ impl Scheduler {
     /// Finish what was accepted (nothing), then `exit`.
     fn close_session(&mut self, sid: &str) {
         let now = self.mono();
-        let Some(s) = self.sessions.get_mut(sid) else { return };
+        let Some(s) = self.sessions.get_mut(sid) else {
+            return;
+        };
         if s.closing {
             return;
         }
         s.closing = true;
         s.closing_since = now;
         let pid = s.pid.clone();
-        let sent = self.machines.get(&pid).is_some_and(|m| m.send(Op::CloseSession { sid: sid.to_string() }));
+        let sent = self.machines.get(&pid).is_some_and(|m| {
+            m.send(Op::CloseSession {
+                sid: sid.to_string(),
+            })
+        });
         if !sent {
             self.end_session(sid, None, false);
         }
@@ -327,14 +404,22 @@ impl Scheduler {
 
     /// Cancel every claim of a session and close it; it ends now (`kill()`).
     pub fn kill_session(&mut self, sid: &str, fatal_error: Option<String>) {
-        let Some(s) = self.sessions.get(sid) else { return };
+        let Some(s) = self.sessions.get(sid) else {
+            return;
+        };
         let pid = s.pid.clone();
         let claims: Vec<String> = s.order.clone();
         if let Some(m) = self.machines.get(&pid) {
             for claim in claims {
-                m.send(Op::Cancel { sid: Some(sid.to_string()), claim: Some(claim), bid: None });
+                m.send(Op::Cancel {
+                    sid: Some(sid.to_string()),
+                    claim: Some(claim),
+                    bid: None,
+                });
             }
-            m.send(Op::CloseSession { sid: sid.to_string() });
+            m.send(Op::CloseSession {
+                sid: sid.to_string(),
+            });
         }
         if let Some(s) = self.sessions.get_mut(sid) {
             s.fatal_error = fatal_error.or(s.fatal_error.take());
@@ -360,28 +445,48 @@ impl Scheduler {
             self.kill_session(&sid, None);
         }
         for sid in wedged {
-            let Some(s) = self.sessions.get(&sid) else { continue };
+            let Some(s) = self.sessions.get(&sid) else {
+                continue;
+            };
             let (pid, local, name) = (s.pid.clone(), s.local, s.row.name.clone());
-            let silent = self.machines.get(&pid).map(|m| now - m.last_frame).unwrap_or(f64::INFINITY);
+            let silent = self
+                .machines
+                .get(&pid)
+                .map(|m| now - m.last_frame)
+                .unwrap_or(f64::INFINITY);
             if !local && silent > SILENCE_SECONDS {
-                self.drop_processor(&pid, &format!("it has sent nothing for {}s", silent.round()));
+                self.drop_processor(
+                    &pid,
+                    &format!("it has sent nothing for {}s", silent.round()),
+                );
                 continue;
             }
-            let wedge = format!("the {name} runner stopped responding (no event for {}s)", SESSION_WEDGE_SECONDS as i64);
+            let wedge = format!(
+                "the {name} runner stopped responding (no event for {}s)",
+                SESSION_WEDGE_SECONDS as i64
+            );
             self.kill_session_blaming(&sid, wedge);
         }
     }
 
     /// A wedged runner: killed, and judged like a crash (the oldest delivered volume).
     fn kill_session_blaming(&mut self, sid: &str, error: String) {
-        let Some(s) = self.sessions.get(sid) else { return };
+        let Some(s) = self.sessions.get(sid) else {
+            return;
+        };
         let pid = s.pid.clone();
         let claims = s.order.clone();
         if let Some(m) = self.machines.get(&pid) {
             for claim in claims {
-                m.send(Op::Cancel { sid: Some(sid.to_string()), claim: Some(claim), bid: None });
+                m.send(Op::Cancel {
+                    sid: Some(sid.to_string()),
+                    claim: Some(claim),
+                    bid: None,
+                });
             }
-            m.send(Op::CloseSession { sid: sid.to_string() });
+            m.send(Op::CloseSession {
+                sid: sid.to_string(),
+            });
         }
         if let Some(s) = self.sessions.get_mut(sid) {
             s.fatal_error = Some(error);
@@ -402,18 +507,25 @@ impl Scheduler {
                 self.catalog_changed(pid, catalog.clone());
                 return;
             }
-            Event::BenchReady { .. } | Event::BenchProgress { .. } | Event::BenchTrial { .. } | Event::BenchDone { .. } => {
+            Event::BenchReady { .. }
+            | Event::BenchProgress { .. }
+            | Event::BenchTrial { .. }
+            | Event::BenchDone { .. } => {
                 self.bench_event(pid, event);
                 return;
             }
             _ => {}
         }
-        let Some(sid) = event.sid().map(str::to_string) else { return };
+        let Some(sid) = event.sid().map(str::to_string) else {
+            return;
+        };
         if sid.starts_with("bench-") {
             self.bench_event(pid, event);
             return;
         }
-        let Some(session) = self.sessions.get_mut(&sid) else { return };
+        let Some(session) = self.sessions.get_mut(&sid) else {
+            return;
+        };
         if session.pid != pid {
             return;
         }
@@ -431,8 +543,17 @@ impl Scheduler {
                     s.fatal_error = Some(error);
                 }
             }
-            Event::Ready { startup_seconds, pipeline, .. } => self.on_ready(&sid, startup_seconds, &pipeline),
-            Event::Stats { pipeline, cpu_pressure, other_cpu, .. } => {
+            Event::Ready {
+                startup_seconds,
+                pipeline,
+                ..
+            } => self.on_ready(&sid, startup_seconds, &pipeline),
+            Event::Stats {
+                pipeline,
+                cpu_pressure,
+                other_cpu,
+                ..
+            } => {
                 let mut update = Map::new();
                 if let Some(summary) = summarize_event_stats(&pipeline) {
                     update.insert("pipeline".into(), Value::Object(summary));
@@ -444,18 +565,29 @@ impl Scheduler {
                     update.insert("host_busy".into(), json!(busy_reason(&ev).is_some()));
                 }
                 if !update.is_empty() {
-                    let jobs: Vec<Job> = self.sessions.get(&sid).map(|s| s.jobs.values().map(|j| j.job.clone()).collect()).unwrap_or_default();
+                    let jobs: Vec<Job> = self
+                        .sessions
+                        .get(&sid)
+                        .map(|s| s.jobs.values().map(|j| j.job.clone()).collect())
+                        .unwrap_or_default();
                     for j in jobs {
                         self.update_card(&j, update.clone());
                     }
                 }
             }
-            Event::Fetch { id, state, detail, .. } => {
+            Event::Fetch {
+                id, state, detail, ..
+            } => {
                 if state == "ready" {
-                    let Some(job) = self.sessions.get_mut(&sid).and_then(|s| s.jobs.get_mut(&id)).map(|j| {
-                        j.delivered = true;
-                        j.job.clone()
-                    }) else {
+                    let Some(job) = self
+                        .sessions
+                        .get_mut(&sid)
+                        .and_then(|s| s.jobs.get_mut(&id))
+                        .map(|j| {
+                            j.delivered = true;
+                            j.job.clone()
+                        })
+                    else {
                         return;
                     };
                     let mut u = Map::new();
@@ -464,19 +596,37 @@ impl Scheduler {
                     self.download_delivered(pid, &job, &detail);
                 }
             }
-            Event::VolumeReturned { id, class, error, .. } => {
-                let Some(entry) = self.pop_job(&sid, &id) else { return };
+            Event::VolumeReturned {
+                id, class, error, ..
+            } => {
+                let Some(entry) = self.pop_job(&sid, &id) else {
+                    return;
+                };
                 self.judge_returned(pid, &sid, entry, &class, &error);
             }
             Event::VolumeStarted { id, pages, .. } => {
-                let Some(j) = self.sessions.get_mut(&sid).and_then(|s| s.jobs.get_mut(&id)) else { return };
+                let Some(j) = self
+                    .sessions
+                    .get_mut(&sid)
+                    .and_then(|s| s.jobs.get_mut(&id))
+                else {
+                    return;
+                };
                 j.delivered = true;
                 j.total = i64::from(pages);
                 self.session_progress(&sid, &id);
             }
-            Event::Page { id, done, total, .. } => {
+            Event::Page {
+                id, done, total, ..
+            } => {
                 let now = self.now();
-                let Some(j) = self.sessions.get_mut(&sid).and_then(|s| s.jobs.get_mut(&id)) else { return };
+                let Some(j) = self
+                    .sessions
+                    .get_mut(&sid)
+                    .and_then(|s| s.jobs.get_mut(&id))
+                else {
+                    return;
+                };
                 j.done = i64::from(done);
                 if total > 0 {
                     j.total = i64::from(total);
@@ -486,14 +636,42 @@ impl Scheduler {
                 }
                 self.session_progress(&sid, &id);
             }
-            Event::VolumeDone { id, pages, failed_pages, seconds, stats, cpu_pressure, other_cpu, sidecar_sha256, .. } => {
-                let Some(entry) = self.pop_job(&sid, &id) else { return };
-                self.volume_done(&sid, entry, pages, failed_pages, seconds, stats, cpu_pressure, other_cpu, sidecar_sha256);
+            Event::VolumeDone {
+                id,
+                pages,
+                failed_pages,
+                seconds,
+                stats,
+                cpu_pressure,
+                other_cpu,
+                sidecar_sha256,
+                ..
+            } => {
+                let Some(entry) = self.pop_job(&sid, &id) else {
+                    return;
+                };
+                self.volume_done(
+                    &sid,
+                    entry,
+                    pages,
+                    failed_pages,
+                    seconds,
+                    stats,
+                    cpu_pressure,
+                    other_cpu,
+                    sidecar_sha256,
+                );
             }
             Event::VolumeFailed { id, error, .. } => {
-                let Some(entry) = self.pop_job(&sid, &id) else { return };
+                let Some(entry) = self.pop_job(&sid, &id) else {
+                    return;
+                };
                 let row_name = entry.row.name.clone();
-                let error = if error.is_empty() { format!("{row_name} could not read this volume") } else { error };
+                let error = if error.is_empty() {
+                    format!("{row_name} could not read this volume")
+                } else {
+                    error
+                };
                 self.drop_result(&sid, &id);
                 if self.stopping {
                     self.release(&entry.job, "the worker is stopping", false);
@@ -524,14 +702,23 @@ impl Scheduler {
 
     fn on_ready(&mut self, sid: &str, startup_seconds: f64, pipeline: &str) {
         let now = self.now();
-        let Some(s) = self.sessions.get_mut(sid) else { return };
+        let Some(s) = self.sessions.get_mut(sid) else {
+            return;
+        };
         s.ready_at = Some(now);
         let (name, machine, row_id) = (s.row.name.clone(), s.machine.clone(), s.row.id.clone());
         let jobs: Vec<Job> = s.jobs.values().map(|j| j.job.clone()).collect();
         let where_ = self.where_(&machine);
-        let pipe = if pipeline.is_empty() { String::new() } else { format!(": {pipeline}") };
-        self.log(format!("{name} session ready in {startup_seconds:.1}s{where_}{pipe}"));
-        self.rates.record_startup(&rate_key(&row_id, &machine), startup_seconds);
+        let pipe = if pipeline.is_empty() {
+            String::new()
+        } else {
+            format!(": {pipeline}")
+        };
+        self.log(format!(
+            "{name} session ready in {startup_seconds:.1}s{where_}{pipe}"
+        ));
+        self.rates
+            .record_startup(&rate_key(&row_id, &machine), startup_seconds);
         for j in jobs {
             let mut u = Map::new();
             u.insert("session_ready".into(), json!(true));
@@ -542,11 +729,15 @@ impl Scheduler {
 
     /// `_session_progress`: a page event's card update.
     fn session_progress(&mut self, sid: &str, claim: &str) {
-        let Some(s) = self.sessions.get(sid) else { return };
+        let Some(s) = self.sessions.get(sid) else {
+            return;
+        };
         let Some(j) = s.jobs.get(claim) else { return };
         let now = self.now();
         let since_first = j.first_page_at.map_or(0.0, |f| now - f);
-        let estimate = self.pricing().rate_for(&j.row.id, Some(&s.machine), j.done, since_first);
+        let estimate = self
+            .pricing()
+            .rate_for(&j.row.id, Some(&s.machine), j.done, since_first);
         let p = SessionProgress {
             generation_id: &j.row.id,
             slot: s.lane as i64,
@@ -576,7 +767,9 @@ impl Scheduler {
         other_cpu: Option<f64>,
         sidecar_sha256: Option<String>,
     ) {
-        let Some(s) = self.sessions.get_mut(sid) else { return };
+        let Some(s) = self.sessions.get_mut(sid) else {
+            return;
+        };
         let first_of_session = s.completed == 0;
         s.completed += 1;
         let (machine, local) = (s.machine.clone(), s.local);
@@ -586,31 +779,71 @@ impl Scheduler {
         let busy = busy_reason(&ev);
         let contended = busy.is_some();
         if let Some(busy) = &busy {
-            self.log(format!("{} ran on a busy host ({busy}{}); its speed is not learned as this machine's", entry.job.rel, self.where_(&machine)));
+            self.log(format!(
+                "{} ran on a busy host ({busy}{}); its speed is not learned as this machine's",
+                entry.job.rel,
+                self.where_(&machine)
+            ));
         } else {
-            self.rates.record_volume(&rate_key(&entry.row.id, &machine), f64::from(pages), seconds, first_of_session);
+            self.rates.record_volume(
+                &rate_key(&entry.row.id, &machine),
+                f64::from(pages),
+                seconds,
+                first_of_session,
+            );
         }
         let now = self.now();
         let summary = summarize_event_stats(&stats);
         let recipe = entry.row.output_affecting();
         if local {
-            self.profiles.record_run(LOCAL_PROFILE, &entry.row.id, i64::from(pages), seconds, None, Some(&recipe), contended, now);
+            self.profiles.record_run(
+                LOCAL_PROFILE,
+                &entry.row.id,
+                i64::from(pages),
+                seconds,
+                None,
+                Some(&recipe),
+                contended,
+                now,
+            );
         } else {
             let record = summary.as_ref().map(|s| {
                 build_record(
                     s,
                     &entry.job.rel,
                     now,
-                    VolumeTiming { volume_pages: Some(i64::from(pages)), volume_seconds: Some(seconds), volume_first: first_of_session },
+                    VolumeTiming {
+                        volume_pages: Some(i64::from(pages)),
+                        volume_seconds: Some(seconds),
+                        volume_first: first_of_session,
+                    },
                 )
             });
-            self.profiles.record_run(profile_key(&machine), &entry.row.id, i64::from(pages), seconds, record.as_ref(), Some(&recipe), contended, now);
+            self.profiles.record_run(
+                profile_key(&machine),
+                &entry.row.id,
+                i64::from(pages),
+                seconds,
+                record.as_ref(),
+                Some(&recipe),
+                contended,
+                now,
+            );
         }
         // The local, uncontended record goes into this server's congestion history at
         // collection (it only counts if the volume is installed).
         let congestion = if local && !contended {
             summary.map(|s| {
-                build_record(&s, &entry.job.rel, now, VolumeTiming { volume_pages: Some(i64::from(pages)), volume_seconds: Some(seconds), volume_first: first_of_session })
+                build_record(
+                    &s,
+                    &entry.job.rel,
+                    now,
+                    VolumeTiming {
+                        volume_pages: Some(i64::from(pages)),
+                        volume_seconds: Some(seconds),
+                        volume_first: first_of_session,
+                    },
+                )
             })
         } else {
             None
@@ -642,7 +875,9 @@ impl Scheduler {
 
     /// `_end_session`: settle whatever was still in flight (§9.8).
     pub fn end_session(&mut self, sid: &str, _code: Option<i32>, killed: bool) {
-        let Some(s) = self.sessions.remove(sid) else { return };
+        let Some(s) = self.sessions.remove(sid) else {
+            return;
+        };
         let now = self.now();
         self.ended_sessions.insert(sid.to_string(), now);
         if let Some(l) = self.lanes.iter_mut().find(|l| l.id == s.lane) {
@@ -653,8 +888,19 @@ impl Scheduler {
         let processor_left = !self.machines.contains_key(&s.pid);
         let cancelled = s.jobs.values().any(|j| self.cancelled.contains(&j.job));
         let ready = s.ready_at.is_some();
-        if !ready && !killed && fatal_error.is_some() && !processor_left && !cancelled && !self.stopping {
-            self.note_start_failure(&s.pid, &s.row, &s.machine, fatal_error.as_deref().unwrap_or_default());
+        if !ready
+            && !killed
+            && fatal_error.is_some()
+            && !processor_left
+            && !cancelled
+            && !self.stopping
+        {
+            self.note_start_failure(
+                &s.pid,
+                &s.row,
+                &s.machine,
+                fatal_error.as_deref().unwrap_or_default(),
+            );
         }
         self.rebuild_lanes();
         self.bump();
@@ -668,12 +914,23 @@ impl Scheduler {
             }
             return;
         }
-        let error = fatal_error.clone().unwrap_or_else(|| format!("the {} runner ended before it finished this volume", s.row.name));
+        let error = fatal_error.clone().unwrap_or_else(|| {
+            format!(
+                "the {} runner ended before it finished this volume",
+                s.row.name
+            )
+        });
         let blame_oldest = !self.stopping && !processor_left;
         let environment = (!s.local && !ready) || precision_refused(fatal_error.as_deref());
-        let oldest = s.order.first().filter(|c| blame_oldest && !environment && s.jobs.get(*c).is_some_and(|j| j.delivered)).cloned();
+        let oldest = s
+            .order
+            .first()
+            .filter(|c| blame_oldest && !environment && s.jobs.get(*c).is_some_and(|j| j.delivered))
+            .cloned();
         for claim in &s.order {
-            let Some(entry) = s.jobs.get(claim) else { continue };
+            let Some(entry) = s.jobs.get(claim) else {
+                continue;
+            };
             self.drop_result(sid, claim);
             if Some(claim) == oldest.as_ref() {
                 self.finish(&entry.job, false, Some(error.clone()), None);
@@ -714,14 +971,31 @@ impl Scheduler {
         let key = (row.id.clone(), machine.to_string());
         let signature = self.start_signature(pid, row);
         let now = self.now();
-        let backoff = StartBackoff::note_failure(self.start_backoff.get(&key), &signature, error, &row.name, self.settings.poll_interval, now);
-        self.log(backoff.log_line(&row.name, &self.where_(machine), self.settings.poll_interval, error));
+        let backoff = StartBackoff::note_failure(
+            self.start_backoff.get(&key),
+            &signature,
+            error,
+            &row.name,
+            self.settings.poll_interval,
+            now,
+        );
+        self.log(backoff.log_line(
+            &row.name,
+            &self.where_(machine),
+            self.settings.poll_interval,
+            error,
+        ));
         self.start_backoff.insert(key, backoff);
     }
 
     /// `start_backoffs(machine)`: `[{generation, until, failures, error}]`.
     pub fn start_backoffs(&self, machine: &str) -> Vec<Value> {
-        let mut out: Vec<(&String, &StartBackoff)> = self.start_backoff.iter().filter(|((_, m), _)| m == machine).map(|((g, _), b)| (g, b)).collect();
+        let mut out: Vec<(&String, &StartBackoff)> = self
+            .start_backoff
+            .iter()
+            .filter(|((_, m), _)| m == machine)
+            .map(|((g, _), b)| (g, b))
+            .collect();
         out.sort_by(|a, b| a.0.cmp(b.0));
         out.into_iter()
             .filter(|(_, b)| self.now() < b.until)

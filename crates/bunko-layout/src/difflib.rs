@@ -77,7 +77,11 @@ impl<'s, T: Eq + Hash> SequenceMatcher<'s, T> {
                     if j >= bhi {
                         break;
                     }
-                    let prev = if j > 0 { j2len.get(&(j - 1)).copied().unwrap_or(0) } else { 0 };
+                    let prev = if j > 0 {
+                        j2len.get(&(j - 1)).copied().unwrap_or(0)
+                    } else {
+                        0
+                    };
                     let k = prev + 1;
                     newj2len.insert(j, k);
                     if k > bestsize {
@@ -97,10 +101,17 @@ impl<'s, T: Eq + Hash> SequenceMatcher<'s, T> {
             bestj -= 1;
             bestsize += 1;
         }
-        while besti + bestsize < ahi && bestj + bestsize < bhi && a[besti + bestsize] == b[bestj + bestsize] {
+        while besti + bestsize < ahi
+            && bestj + bestsize < bhi
+            && a[besti + bestsize] == b[bestj + bestsize]
+        {
             bestsize += 1;
         }
-        Match { a: besti, b: bestj, size: bestsize }
+        Match {
+            a: besti,
+            b: bestj,
+            size: bestsize,
+        }
     }
 
     /// `get_matching_blocks()`, ending with the `(len(a), len(b), 0)` sentinel.
@@ -129,15 +140,27 @@ impl<'s, T: Eq + Hash> SequenceMatcher<'s, T> {
                 k1 += m.size;
             } else {
                 if k1 > 0 {
-                    out.push(Match { a: i1, b: j1, size: k1 });
+                    out.push(Match {
+                        a: i1,
+                        b: j1,
+                        size: k1,
+                    });
                 }
                 (i1, j1, k1) = (m.a, m.b, m.size);
             }
         }
         if k1 > 0 {
-            out.push(Match { a: i1, b: j1, size: k1 });
+            out.push(Match {
+                a: i1,
+                b: j1,
+                size: k1,
+            });
         }
-        out.push(Match { a: la, b: lb, size: 0 });
+        out.push(Match {
+            a: la,
+            b: lb,
+            size: 0,
+        });
         out
     }
 
@@ -156,12 +179,24 @@ impl<'s, T: Eq + Hash> SequenceMatcher<'s, T> {
                 None
             };
             if let Some(tag) = tag {
-                out.push(Opcode { tag, i1: i, i2: m.a, j1: j, j2: m.b });
+                out.push(Opcode {
+                    tag,
+                    i1: i,
+                    i2: m.a,
+                    j1: j,
+                    j2: m.b,
+                });
             }
             i = m.a + m.size;
             j = m.b + m.size;
             if m.size > 0 {
-                out.push(Opcode { tag: Tag::Equal, i1: m.a, i2: i, j1: m.b, j2: j });
+                out.push(Opcode {
+                    tag: Tag::Equal,
+                    i1: m.a,
+                    i2: i,
+                    j1: m.b,
+                    j2: j,
+                });
             }
         }
         out
@@ -171,7 +206,11 @@ impl<'s, T: Eq + Hash> SequenceMatcher<'s, T> {
     pub fn ratio(&self) -> f64 {
         let matches: usize = self.matching_blocks().iter().map(|m| m.size).sum();
         let length = self.a.len() + self.b.len();
-        if length == 0 { 1.0 } else { 2.0 * matches as f64 / length as f64 }
+        if length == 0 {
+            1.0
+        } else {
+            2.0 * matches as f64 / length as f64
+        }
     }
 }
 
@@ -184,7 +223,11 @@ mod tests {
         let a: Vec<char> = "qabxcd".chars().collect();
         let b: Vec<char> = "abycdf".chars().collect();
         let sm = SequenceMatcher::new(&a, &b);
-        let ops: Vec<_> = sm.opcodes().iter().map(|o| (o.tag.as_str(), o.i1, o.i2, o.j1, o.j2)).collect();
+        let ops: Vec<_> = sm
+            .opcodes()
+            .iter()
+            .map(|o| (o.tag.as_str(), o.i1, o.i2, o.j1, o.j2))
+            .collect();
         assert_eq!(
             ops,
             vec![

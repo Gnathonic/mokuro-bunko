@@ -9,11 +9,15 @@ use bunko_layout::reconcile::{Reconciled, Source};
 use bunko_layout::records::{RawLine, RawPage};
 
 pub fn golden_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("golden")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("golden")
 }
 
 pub fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
 }
 
 /// Parse a fixture with the crate's own (correctly rounded) JSON parser.
@@ -22,7 +26,9 @@ pub fn load(rel: &str) -> Value {
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let text = if rel.ends_with(".gz") {
         let mut s = String::new();
-        flate2::read::GzDecoder::new(&bytes[..]).read_to_string(&mut s).expect("gunzip");
+        flate2::read::GzDecoder::new(&bytes[..])
+            .read_to_string(&mut s)
+            .expect("gunzip");
         s
     } else {
         String::from_utf8(bytes).expect("utf-8")
@@ -63,12 +69,17 @@ pub fn b(v: &Value) -> bool {
 }
 
 pub fn get<'a>(v: &'a Value, key: &str) -> &'a Value {
-    v.get(key).unwrap_or_else(|| panic!("missing key {key} in {}", short(v)))
+    v.get(key)
+        .unwrap_or_else(|| panic!("missing key {key} in {}", short(v)))
 }
 
 pub fn short(v: &Value) -> String {
     let t = v.to_string();
-    if t.chars().count() > 300 { t.chars().take(300).collect::<String>() + "..." } else { t }
+    if t.chars().count() > 300 {
+        t.chars().take(300).collect::<String>() + "..."
+    } else {
+        t
+    }
 }
 
 /// Bit-exact float equality (NaN == NaN, -0.0 != 0.0).
@@ -90,8 +101,15 @@ pub fn reconciled_from(v: &Value) -> Reconciled {
         vlm: s(get(v, "vlm")).to_string(),
         ctc: s(get(v, "ctc")).to_string(),
         agreement: opt_f(get(v, "agreement")),
-        source: if s(get(v, "source")) == "ctc" { Source::Ctc } else { Source::Merged },
-        notes: arr(get(v, "notes")).iter().map(|n| s(n).to_string()).collect(),
+        source: if s(get(v, "source")) == "ctc" {
+            Source::Ctc
+        } else {
+            Source::Merged
+        },
+        notes: arr(get(v, "notes"))
+            .iter()
+            .map(|n| s(n).to_string())
+            .collect(),
         second: match get(v, "second") {
             Value::Null => None,
             x => Some(s(x).to_string()),

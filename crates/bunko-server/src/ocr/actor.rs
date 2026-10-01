@@ -41,7 +41,9 @@ pub fn run(mut sched: Scheduler, rx: Receiver<Msg>) {
 
 /// Start the thread.
 pub fn spawn(sched: Scheduler, rx: Receiver<Msg>) -> std::io::Result<std::thread::JoinHandle<()>> {
-    std::thread::Builder::new().name("ocr-scheduler".into()).spawn(move || run(sched, rx))
+    std::thread::Builder::new()
+        .name("ocr-scheduler".into())
+        .spawn(move || run(sched, rx))
 }
 
 /// A channel pair for the scheduler.

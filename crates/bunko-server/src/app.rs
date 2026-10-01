@@ -37,7 +37,12 @@ pub struct ServeOptions {
 /// `Startup validation failed: <msg>` and the process exits 2.
 pub fn validate_startup(config: &Config) -> Result<(), String> {
     let layout = config.storage.layout();
-    layout.ensure_directories().map_err(|e| format!("Could not create storage directories under {}: {e}", layout.base.display()))?;
+    layout.ensure_directories().map_err(|e| {
+        format!(
+            "Could not create storage directories under {}: {e}",
+            layout.base.display()
+        )
+    })?;
     StorageLayout::assert_writable_dir(&layout.base, "storage.base_path")?;
     StorageLayout::assert_writable_dir(&layout.library(), "storage.library_path")?;
     StorageLayout::assert_writable_dir(&layout.inbox(), "storage.inbox_path")?;
@@ -47,7 +52,10 @@ pub fn validate_startup(config: &Config) -> Result<(), String> {
     }
     if config.ssl.auto_cert {
         let (cert, key) = crate::tls::default_cert_paths();
-        for (p, label) in [(&cert, "ssl auto-cert directory"), (&key, "ssl auto-key directory")] {
+        for (p, label) in [
+            (&cert, "ssl auto-cert directory"),
+            (&key, "ssl auto-key directory"),
+        ] {
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
                 StorageLayout::assert_writable_dir(parent, label)?;
@@ -58,7 +66,10 @@ pub fn validate_startup(config: &Config) -> Result<(), String> {
     let cert = bunko_core::storage::expand_user(Path::new(&config.ssl.cert_file));
     let key = bunko_core::storage::expand_user(Path::new(&config.ssl.key_file));
     if !cert.is_file() {
-        return Err(format!("SSL certificate file not found: {}", cert.display()));
+        return Err(format!(
+            "SSL certificate file not found: {}",
+            cert.display()
+        ));
     }
     if !key.is_file() {
         return Err(format!("SSL private key file not found: {}", key.display()));
@@ -87,30 +98,43 @@ pub struct Services {
 }
 
 impl Services {
-    pub fn new(config: Config, config_path: Option<PathBuf>, opts: &ServeOptions) -> anyhow::Result<Self> {
+    pub fn new(
+        config: Config,
+        config_path: Option<PathBuf>,
+        opts: &ServeOptions,
+    ) -> anyhow::Result<Self> {
         let flavor = opts.flavor;
         let db_options = DbOptions::from(&config.database);
         let layout = config.storage.layout();
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
-        let backend = Arc::new(DbAuthBackend { db: db.clone(), layout: layout.clone() });
+        let backend = Arc::new(DbAuthBackend {
+            db: db.clone(),
+            layout: layout.clone(),
+        });
         let updates = crate::admin::UpdateService::from_config(config.clone(), flavor);
         // The PROPFIND cache takes half of the cache budget (server.cache_mb).
         let cache_mb = config.read().server.cache_mb.max(2) as usize;
         let dav_config = bunko_dav::DavConfig {
-            propfind_cache: bunko_dav::CacheConfig { budget_bytes: cache_mb * 1024 * 1024 / 2, ..Default::default() },
+            propfind_cache: bunko_dav::CacheConfig {
+                budget_bytes: cache_mb * 1024 * 1024 / 2,
+                ..Default::default()
+            },
         };
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
         let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
         let core = Core::new(config, config_path, backend);
-        let late_ocr: Arc<std::sync::OnceLock<crate::ocr::OcrControl>> = Arc::new(std::sync::OnceLock::new());
+        let late_ocr: Arc<std::sync::OnceLock<crate::ocr::OcrControl>> =
+            Arc::new(std::sync::OnceLock::new());
         let library = {
             let mut deps = crate::library::RuntimeDeps::new(core.clone(), db.clone());
             deps.hooks.archive_events = Some(Arc::new(LateArchiveEvents(late_ocr.clone())));
             deps.locks = Arc::new(DavPathLocks(dav.write_locks().clone()));
             let cache = dav.propfind_cache().clone();
-            deps.hooks.propfind_refresh = Some(Arc::new(move || cache.schedule_refresh(Duration::from_secs(5))));
+            deps.hooks.propfind_refresh = Some(Arc::new(move || {
+                cache.schedule_refresh(Duration::from_secs(5))
+            }));
             crate::library::LibraryRuntime::new(deps)
         };
         dav_hooks.add_listener(library.clone());
@@ -176,7 +200,9 @@ impl bunko_library::service::PathWriteLocks for DavPathLocks {
 }
 
 /// The handler WebDAV requests fall through to, after authentication and authorisation.
-pub type DavFallback = Arc<dyn Fn(Request, RequestCtx) -> futures_util::future::BoxFuture<'static, Response> + Send + Sync>;
+pub type DavFallback = Arc<
+    dyn Fn(Request, RequestCtx) -> futures_util::future::BoxFuture<'static, Response> + Send + Sync,
+>;
 
 #[derive(Clone)]
 struct FallbackState {
@@ -193,14 +219,31 @@ impl axum::extract::FromRef<FallbackState> for Core {
 
 /// Authenticate + authorise (spec §4.3) then hand the request to WebDAV.
 async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Request) -> Response {
-    let path = percent_encoding::percent_decode_str(req.uri().path()).decode_utf8_lossy().into_owned();
-    let destination = req.headers().get("destination").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let path = percent_encoding::percent_decode_str(req.uri().path())
+        .decode_utf8_lossy()
+        .into_owned();
+    let destination = req
+        .headers()
+        .get("destination")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let anon = st.core.anonymous_access();
     let backend = st.core.backend.clone();
-    if let Err(denied) = auth::authorize(req.method(), &path, destination.as_deref(), &ctx.identity, anon, backend.as_ref()) {
+    if let Err(denied) = auth::authorize(
+        req.method(),
+        &path,
+        destination.as_deref(),
+        &ctx.identity,
+        anon,
+        backend.as_ref(),
+    ) {
         let resp = denied.into_response();
         // A refused PUT still answers with the upload verdict JSON (spec http-webdav §9).
-        return if req.method() == http::Method::PUT { bunko_dav::put_refusal_verdict(&path, resp) } else { resp };
+        return if req.method() == http::Method::PUT {
+            bunko_dav::put_refusal_verdict(&path, resp)
+        } else {
+            resp
+        };
     }
     if let Some(lib) = &st.library
         && crate::library::is_series_put(req.method(), &path)
@@ -211,7 +254,10 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
 }
 
 /// The WebDAV handler over `bunko-dav`, with the server's hooks.
-pub fn dav_handler(dav: bunko_dav::Dav, hooks: Arc<crate::davhooks::ServerDavHooks>) -> DavFallback {
+pub fn dav_handler(
+    dav: bunko_dav::Dav,
+    hooks: Arc<crate::davhooks::ServerDavHooks>,
+) -> DavFallback {
     let nginx_accel = std::env::var("MOKURO_NGINX_ACCEL").is_ok_and(|v| v.trim() == "1");
     Arc::new(move |req, ctx| {
         let dav = dav.clone();
@@ -231,14 +277,29 @@ pub fn dav_handler(dav: bunko_dav::Dav, hooks: Arc<crate::davhooks::ServerDavHoo
 
 /// 0.5.2 put `AuthMiddleware` in front of the admin and processor APIs: anonymous or
 /// wrongly-roled requests get its 401/403 text answers before the module runs.
-async fn auth_gate(State(core): State<Core>, ctx: RequestCtx, req: Request, next: axum::middleware::Next) -> Response {
-    let path = percent_encoding::percent_decode_str(req.uri().path()).decode_utf8_lossy().into_owned();
+async fn auth_gate(
+    State(core): State<Core>,
+    ctx: RequestCtx,
+    req: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = percent_encoding::percent_decode_str(req.uri().path())
+        .decode_utf8_lossy()
+        .into_owned();
     if auth::paths::is_admin_path(&path) || auth::paths::is_processor_path(&path) {
         let anon = core.anonymous_access();
-        if let Err(denied) = auth::authorize(req.method(), &path, None, &ctx.identity, anon, core.backend.as_ref()) {
+        if let Err(denied) = auth::authorize(
+            req.method(),
+            &path,
+            None,
+            &ctx.identity,
+            anon,
+            core.backend.as_ref(),
+        ) {
             if auth::paths::is_processor_path(&path)
                 && matches!(denied.status.as_u16(), 401 | 429)
-                && let (Some(user), Some(cb)) = (&ctx.identity.attempted_username, PROCESSOR_REFUSALS.get())
+                && let (Some(user), Some(cb)) =
+                    (&ctx.identity.attempted_username, PROCESSOR_REFUSALS.get())
             {
                 cb(user, &format!("invalid credentials from {}", ctx.client_ip));
             }
@@ -254,7 +315,9 @@ static PROCESSOR_REFUSALS: std::sync::OnceLock<RefusalHook> = std::sync::OnceLoc
 
 /// A placeholder WebDAV handler until bunko-dav is wired.
 pub fn dav_unavailable() -> DavFallback {
-    Arc::new(|_req, _ctx| Box::pin(async { (StatusCode::NOT_IMPLEMENTED, "WebDAV not wired").into_response() }))
+    Arc::new(|_req, _ctx| {
+        Box::pin(async { (StatusCode::NOT_IMPLEMENTED, "WebDAV not wired").into_response() })
+    })
 }
 
 /// Assemble the router: module routers (each with its own state) in 0.5.2 precedence,
@@ -278,19 +341,35 @@ pub fn build_router_with(
     for m in modules {
         app = app.merge(m);
     }
-    let fallback_state = FallbackState { core: core.clone(), dav, library };
-    let dav_router: Router = Router::new().fallback(dav_fallback).with_state(fallback_state);
+    let fallback_state = FallbackState {
+        core: core.clone(),
+        dav,
+        library,
+    };
+    let dav_router: Router = Router::new()
+        .fallback(dav_fallback)
+        .with_state(fallback_state);
     // A method a module route does not take (PUT /login/x, HEAD /) goes to WebDAV, as 0.5.2.
     let mna = dav_router.clone();
     let app = app
         .method_not_allowed_fallback(move |req: Request| {
             let svc = mna.clone();
-            async move { tower::ServiceExt::oneshot(svc, req).await.unwrap_or_else(|e| match e {}) }
+            async move {
+                tower::ServiceExt::oneshot(svc, req)
+                    .await
+                    .unwrap_or_else(|e| match e {})
+            }
         })
         .fallback_service(dav_router);
-    inner(app.layer(axum::middleware::from_fn_with_state(core.clone(), auth_gate)))
-        .layer(axum::middleware::from_fn_with_state(core.clone(), cors::cors))
-        .layer(axum::middleware::from_fn(headers::security_headers))
+    inner(app.layer(axum::middleware::from_fn_with_state(
+        core.clone(),
+        auth_gate,
+    )))
+    .layer(axum::middleware::from_fn_with_state(
+        core.clone(),
+        cors::cors,
+    ))
+    .layer(axum::middleware::from_fn(headers::security_headers))
 }
 
 /// Bind, serve until SIGINT/SIGTERM, shut down in order.
@@ -303,7 +382,10 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
     let scheme = if tls.is_some() { "https" } else { "http" };
     let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
     let bound = listener.local_addr()?;
-    info!("Starting mokuro-bunko server on {scheme}://{host}:{}", bound.port());
+    info!(
+        "Starting mokuro-bunko server on {scheme}://{host}:{}",
+        bound.port()
+    );
     if ssl.enabled {
         info!("SSL: {}", crate::tls::describe(&ssl));
     }
@@ -345,18 +427,31 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
         let ocr = ocr.clone();
         Arc::new(move |u: &str, why: &str| ocr.drop_account(u, why))
     };
-    let mut accounts = crate::accounts::AccountsDeps::new(services.core.clone(), services.db.clone());
+    let mut accounts =
+        crate::accounts::AccountsDeps::new(services.core.clone(), services.db.clone());
     accounts.library = Some(services.library.counts());
     accounts.health = Some(Arc::new(ocr.clone()));
     accounts.hooks.on_processor_login_refused = Some(refused);
     accounts.hooks.drop_processor_account = Some(drop.clone());
-    let mut library = crate::library::LibraryDeps::new(services.core.clone(), services.db.clone(), services.library.clone());
+    let mut library = crate::library::LibraryDeps::new(
+        services.core.clone(),
+        services.db.clone(),
+        services.library.clone(),
+    );
     let glue = Arc::new(crate::glue::OcrGlue(ocr.clone()));
     library.ocr_status = Some(glue.clone());
     library.outlook = Some(glue);
     let core_for_layers = services.core.clone();
     library.layer_order = Some(Arc::new(move || {
-        core_for_layers.config.read().ocr.generations.iter().filter(|g| g.runnable() && !g.primary).map(|g| g.name.clone()).collect()
+        core_for_layers
+            .config
+            .read()
+            .ocr
+            .generations
+            .iter()
+            .filter(|g| g.runnable() && !g.primary)
+            .map(|g| g.name.clone())
+            .collect()
     }));
     let restart = {
         let flag = services.restart_requested.clone();
@@ -383,14 +478,32 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
         crate::ocr::processor_router(ocr.clone()),
         crate::admin::router(admin),
     ];
-    let queue_file = crate::ocr::queue_file::QueueFileState { core: services.core.clone(), ocr: Some(ocr.clone()) };
+    let queue_file = crate::ocr::queue_file::QueueFileState {
+        core: services.core.clone(),
+        ocr: Some(ocr.clone()),
+    };
     let dav = dav_handler(services.dav.clone(), services.dav_hooks.clone());
     let catalog = library.clone();
-    build_router_with(services.core.clone(), modules, dav, Some(library), move |r| {
-        r.layer(axum::middleware::from_fn_with_state(queue_file, crate::ocr::queue_file::middleware))
-            .layer(axum::middleware::from_fn_with_state(catalog, crate::library::catalog_middleware))
-            .layer(axum::middleware::from_fn_with_state(accounts, crate::accounts::root_middleware))
-    })
+    build_router_with(
+        services.core.clone(),
+        modules,
+        dav,
+        Some(library),
+        move |r| {
+            r.layer(axum::middleware::from_fn_with_state(
+                queue_file,
+                crate::ocr::queue_file::middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                catalog,
+                crate::library::catalog_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                accounts,
+                crate::accounts::root_middleware,
+            ))
+        },
+    )
 }
 
 /// When nobody can sign in yet, write (or reuse) a one-time setup token and log the URL,
@@ -405,18 +518,30 @@ pub fn announce_setup(services: &Services) {
         (c.server.host.clone(), c.server.port, c.ssl.enabled)
     };
     let scheme = if ssl { "https" } else { "http" };
-    let host = if host == "0.0.0.0" || host == "::" { "localhost".to_string() } else { host };
+    let host = if host == "0.0.0.0" || host == "::" {
+        "localhost".to_string()
+    } else {
+        host
+    };
     match crate::accounts::ensure_setup_token(&services.core.layout) {
-        Ok(Some(token)) => info!("First run: finish setup at {scheme}://{host}:{port}/setup?token={token}"),
-        Ok(None) => info!("First run: finish setup at {scheme}://{host}:{port}/setup (token from MOKURO_SETUP_TOKEN)"),
-        Err(e) => info!("First run: finish setup at {scheme}://{host}:{port}/setup from this machine ({e})"),
+        Ok(Some(token)) => {
+            info!("First run: finish setup at {scheme}://{host}:{port}/setup?token={token}")
+        }
+        Ok(None) => info!(
+            "First run: finish setup at {scheme}://{host}:{port}/setup (token from MOKURO_SETUP_TOKEN)"
+        ),
+        Err(e) => info!(
+            "First run: finish setup at {scheme}://{host}:{port}/setup from this machine ({e})"
+        ),
     }
 }
 
 pub fn not_found_json() -> Response {
     let mut r = Response::new(Body::from(r#"{"error": "Not found"}"#));
     *r.status_mut() = StatusCode::NOT_FOUND;
-    r.headers_mut().insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static("application/json"));
+    r.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
     r
 }
-

@@ -35,10 +35,17 @@ impl std::ops::Deref for Core {
 }
 
 impl Core {
-    pub fn new(config: Arc<RwLock<Config>>, config_path: Option<PathBuf>, backend: Arc<dyn AuthBackend>) -> Self {
+    pub fn new(
+        config: Arc<RwLock<Config>>,
+        config_path: Option<PathBuf>,
+        backend: Arc<dyn AuthBackend>,
+    ) -> Self {
         let (layout, proxies) = {
             let c = config.read();
-            (c.storage.layout(), TrustedProxies::new(&c.server.trusted_proxies))
+            (
+                c.storage.layout(),
+                TrustedProxies::new(&c.server.trusted_proxies),
+            )
         };
         Core(Arc::new(CoreInner {
             config,
@@ -60,7 +67,10 @@ impl Core {
 
     pub fn anonymous_access(&self) -> AnonymousAccess {
         let c = self.config.read();
-        AnonymousAccess { browse: c.registration.allow_anonymous_browse, download: c.registration.allow_anonymous_download }
+        AnonymousAccess {
+            browse: c.registration.allow_anonymous_browse,
+            download: c.registration.allow_anonymous_download,
+        }
     }
 
     /// Persist the live config (admin edits).
@@ -92,8 +102,17 @@ impl RequestCtx {
     pub fn resolve(core: &Core, parts: &Parts) -> Self {
         let peer = Self::peer_of(parts);
         let client_ip = core.proxies.read().client_ip_text(peer, &parts.headers);
-        let identity = auth::authenticate(&parts.headers, &client_ip, core.backend.as_ref(), &core.dav_limiter);
-        RequestCtx { peer, client_ip, identity }
+        let identity = auth::authenticate(
+            &parts.headers,
+            &client_ip,
+            core.backend.as_ref(),
+            &core.dav_limiter,
+        );
+        RequestCtx {
+            peer,
+            client_ip,
+            identity,
+        }
     }
 }
 
@@ -114,7 +133,11 @@ where
             let p = parts.clone();
             tokio::task::spawn_blocking(move || RequestCtx::resolve(&core, &p))
                 .await
-                .unwrap_or_else(|_| RequestCtx { peer: IpAddr::V4(Ipv4Addr::LOCALHOST), client_ip: String::new(), identity: Identity::default() })
+                .unwrap_or_else(|_| RequestCtx {
+                    peer: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    client_ip: String::new(),
+                    identity: Identity::default(),
+                })
         };
         parts.extensions.insert(ctx.clone());
         Ok(ctx)

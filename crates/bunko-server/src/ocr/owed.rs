@@ -76,14 +76,24 @@ pub fn compute(
         return None;
     }
     let enabled: Vec<&Generation> = bunko_core::generations::enabled_generations(rows).collect();
-    let mut owed: Vec<&Generation> = enabled.iter().copied().filter(|r| !row_done(cbz, r)).collect();
-    let primary_done = enabled.iter().any(|r| r.primary && !owed.iter().any(|o| o.id == r.id));
+    let mut owed: Vec<&Generation> = enabled
+        .iter()
+        .copied()
+        .filter(|r| !row_done(cbz, r))
+        .collect();
+    let primary_done = enabled
+        .iter()
+        .any(|r| r.primary && !owed.iter().any(|o| o.id == r.id));
     let mut skipped = Vec::new();
     let mut missing_pages = 0;
     if owed.iter().any(|r| !r.primary) && primary_done {
         missing_pages = facts.missing_pages(cbz);
         if missing_pages > 0 {
-            skipped = owed.iter().filter(|r| !r.primary).map(|r| Arc::from(r.id.as_str())).collect();
+            skipped = owed
+                .iter()
+                .filter(|r| !r.primary)
+                .map(|r| Arc::from(r.id.as_str()))
+                .collect();
             owed.retain(|r| r.primary);
         }
     }
@@ -97,7 +107,11 @@ pub fn compute(
     if owed.is_empty() && skipped.is_empty() && !wants_upgrade {
         return None;
     }
-    let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs_f64());
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0.0, |d| d.as_secs_f64());
     Some(OwedVolume {
         size: meta.len(),
         mtime_ns: mtime_ns(&meta),
@@ -115,13 +129,17 @@ pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![library.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in rd.flatten() {
             let Ok(ft) = entry.file_type() else { continue };
             let path = entry.path();
             if ft.is_dir() {
                 stack.push(path);
-            } else if (ft.is_file() || ft.is_symlink()) && entry.file_name().to_string_lossy().ends_with(".cbz") {
+            } else if (ft.is_file() || ft.is_symlink())
+                && entry.file_name().to_string_lossy().ends_with(".cbz")
+            {
                 out.push(path);
             }
         }
@@ -142,13 +160,25 @@ pub fn pages_of(cbz: &Path, facts: &dyn LibraryFacts) -> Option<i64> {
 }
 
 /// The full walk.
-pub fn walk(library: &Path, rows: &[Generation], facts: &dyn LibraryFacts, upgrade: Option<&dyn UpgradeProbe>, known: &KnownPages) -> OwedIndex {
+pub fn walk(
+    library: &Path,
+    rows: &[Generation],
+    facts: &dyn LibraryFacts,
+    upgrade: Option<&dyn UpgradeProbe>,
+    known: &KnownPages,
+) -> OwedIndex {
     let mut index = OwedIndex::default();
     for cbz in list_archives(library) {
-        let Some(rel) = rel_of(library, &cbz) else { continue };
+        let Some(rel) = rel_of(library, &cbz) else {
+            continue;
+        };
         if let Some(mut v) = compute(library, &cbz, rows, facts, upgrade) {
             v.pages = match known.get(&rel) {
-                Some((size, mtime, pages)) if *size == v.size && *mtime == v.mtime_ns && pages.is_some() => *pages,
+                Some((size, mtime, pages))
+                    if *size == v.size && *mtime == v.mtime_ns && pages.is_some() =>
+                {
+                    *pages
+                }
                 _ => pages_of(&cbz, facts),
             };
             index.volumes.insert(rel, v);
@@ -198,7 +228,10 @@ mod tests {
         std::fs::write(lib.join("S/V2.fast.mokuro.gz"), b"x").unwrap();
         let index = walk(lib, &rows(), &FileFacts, None, &KnownPages::new());
         let v1 = &index.volumes["S/V1.cbz"];
-        assert_eq!(v1.rows.iter().map(|r| r.to_string()).collect::<Vec<_>>(), vec!["g-1", "g-2"]);
+        assert_eq!(
+            v1.rows.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+            vec!["g-1", "g-2"]
+        );
         assert!(!index.volumes.contains_key("S/V2.cbz"));
     }
 }

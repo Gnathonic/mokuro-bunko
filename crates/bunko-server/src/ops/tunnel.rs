@@ -7,17 +7,23 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
-pub const INSTALL_URL: &str = "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/";
+pub const INSTALL_URL: &str =
+    "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/";
 
 /// The first `https://<x>.trycloudflare.com` in a line of cloudflared output.
 pub fn find_tunnel_url(line: &str) -> Option<String> {
     let start = line.find("https://")?;
     let rest = &line[start + 8..];
-    let end = rest.find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.'))
+        .unwrap_or(rest.len());
     let host = &rest[..end];
     let sub = host.strip_suffix(".trycloudflare.com")?;
-    (!sub.is_empty() && sub.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
-        .then(|| format!("https://{host}"))
+    (!sub.is_empty()
+        && sub
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+    .then(|| format!("https://{host}"))
 }
 
 pub fn cloudflared_path() -> Option<std::path::PathBuf> {

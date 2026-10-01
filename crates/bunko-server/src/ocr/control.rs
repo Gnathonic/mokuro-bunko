@@ -118,12 +118,20 @@ pub fn quote_component(value: &str) -> String {
 
 /// `/catalog/api/manifest?series=<s>&volume=<v>`.
 pub fn manifest_url(series: &str, volume: &str) -> String {
-    format!("/catalog/api/manifest?series={}&volume={}", quote_component(series), quote_component(volume))
+    format!(
+        "/catalog/api/manifest?series={}&volume={}",
+        quote_component(series),
+        quote_component(volume)
+    )
 }
 
 /// `/mokuro-reader/<series>/<file>`.
 pub fn reader_file_url(series: &str, file: &str) -> String {
-    format!("/mokuro-reader/{}/{}", quote_component(series), quote_component(file))
+    format!(
+        "/mokuro-reader/{}/{}",
+        quote_component(series),
+        quote_component(file)
+    )
 }
 
 impl OcrControl {
@@ -131,9 +139,18 @@ impl OcrControl {
         let (tx, rx) = actor::channel();
         let config = deps.core.config.read().clone();
         let settings = settings_from_config(&config, deps.local.is_some());
-        let clock: Arc<dyn Clock> = deps.clock.clone().unwrap_or_else(|| Arc::new(SystemClock::default()));
+        let clock: Arc<dyn Clock> = deps
+            .clock
+            .clone()
+            .unwrap_or_else(|| Arc::new(SystemClock::default()));
         let layout = deps.core.layout.clone();
-        let up = Arc::new(upgrade::Upgrade::new(layout.library(), deps.db.clone(), deps.facts.clone(), deps.locks.clone(), generator()));
+        let up = Arc::new(upgrade::Upgrade::new(
+            layout.library(),
+            deps.db.clone(),
+            deps.facts.clone(),
+            deps.locks.clone(),
+            generator(),
+        ));
         up.configure(&settings.upgrade, &settings.rows);
         let sched = Scheduler::new(
             SchedDeps {
@@ -195,7 +212,9 @@ impl OcrControl {
     /// Start the scheduler thread, the in-process processor (full build, local
     /// processing on) and the stop watcher. Must be called inside a tokio runtime.
     pub fn start(&self, stop: CancellationToken) {
-        let Some((sched, rx)) = self.0.pending.lock().take() else { return };
+        let Some((sched, rx)) = self.0.pending.lock().take() else {
+            return;
+        };
         let local_processing = sched.settings().local_processing;
         match actor::spawn(sched, rx) {
             Ok(handle) => *self.0.thread.lock() = Some(handle),
@@ -237,13 +256,26 @@ impl OcrControl {
         let mut events = channels.events;
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
-                if tx.send(Msg::Event { pid: types::LOCAL.into(), event }).is_err() {
+                if tx
+                    .send(Msg::Event {
+                        pid: types::LOCAL.into(),
+                        event,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
-            let _ = tx.send(Msg::Drop { pid: types::LOCAL.into(), reason: "the local processor stopped".into() });
+            let _ = tx.send(Msg::Drop {
+                pid: types::LOCAL.into(),
+                reason: "the local processor stopped".into(),
+            });
         });
-        self.send(Msg::LocalUp { ops: ops_tx, catalog: channels.catalog, host: channels.host });
+        self.send(Msg::LocalUp {
+            ops: ops_tx,
+            catalog: channels.catalog,
+            host: channels.host,
+        });
     }
 
     /// Stop the scheduler (in-flight volumes go back unrecorded) and wait for it.
@@ -260,7 +292,10 @@ impl OcrControl {
     }
 
     /// Run `f` on the scheduler and await its answer (None: stopped or busy > 30 s).
-    pub async fn ask<T: Send + 'static>(&self, f: impl FnOnce(&mut Scheduler) -> T + Send + 'static) -> Option<T> {
+    pub async fn ask<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
+    ) -> Option<T> {
         let (reply, rx) = tokio::sync::oneshot::channel();
         let q: sched::Query = Box::new(move |s: &mut Scheduler| {
             let _ = reply.send(f(s));
@@ -268,11 +303,18 @@ impl OcrControl {
         if !self.send(Msg::Query(q)) {
             return None;
         }
-        tokio::time::timeout(Duration::from_secs(30), rx).await.ok()?.ok()
+        tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .ok()?
+            .ok()
     }
 
     /// [`Self::ask`] from synchronous code (a blocking thread), with a deadline.
-    pub fn ask_blocking<T: Send + 'static>(&self, wait: Duration, f: impl FnOnce(&mut Scheduler) -> T + Send + 'static) -> Option<T> {
+    pub fn ask_blocking<T: Send + 'static>(
+        &self,
+        wait: Duration,
+        f: impl FnOnce(&mut Scheduler) -> T + Send + 'static,
+    ) -> Option<T> {
         let (reply, rx) = std::sync::mpsc::channel();
         let q: sched::Query = Box::new(move |s: &mut Scheduler| {
             let _ = reply.send(f(s));
@@ -303,7 +345,9 @@ impl OcrControl {
     pub fn put_follow_up(&self, cbz: &Path, series: &str, volume: &str) -> Option<(String, i64)> {
         let library = self.0.core.layout.library();
         let rel = types::rel_of(&library, cbz)?;
-        let (pending, now) = self.ask_blocking(Duration::from_secs(1), move |s| (s.volume_pending(&rel, Some(300)), s.now()))?;
+        let (pending, now) = self.ask_blocking(Duration::from_secs(1), move |s| {
+            (s.volume_pending(&rel, Some(300)), s.now())
+        })?;
         if pending.is_empty() {
             return None;
         }
@@ -316,7 +360,9 @@ impl OcrControl {
     pub async fn volume_outlook(&self, cbz: &Path) -> Option<(Vec<Value>, Option<i64>)> {
         let library = self.0.core.layout.library();
         let rel = types::rel_of(&library, cbz)?;
-        let (pending, now) = self.ask(move |s| (s.volume_pending(&rel, None), s.now())).await?;
+        let (pending, now) = self
+            .ask(move |s| (s.volume_pending(&rel, None), s.now()))
+            .await?;
         let recheck = bunko_sched::outlook::recheck_after(&pending, now);
         Some((pending, recheck))
     }
@@ -345,7 +391,8 @@ impl OcrControl {
         let mut restart_required = false;
         let mut reason = String::new();
         if config.ocr.local_processing && !self.has_local() && config.ocr.backend != "skip" {
-            reason = "this build runs no OCR of its own; only a connected processor reads volumes".into();
+            reason = "this build runs no OCR of its own; only a connected processor reads volumes"
+                .into();
         } else if wanted_local && !local_running {
             restart_required = true;
             reason = "local processing starts with the next server start".into();
@@ -355,12 +402,18 @@ impl OcrControl {
 
     /// Cut off every processor of an account now (disabled, deleted, re-roled).
     pub fn drop_account(&self, username: &str, reason: &str) {
-        self.send(Msg::DropAccount { username: username.to_string(), reason: reason.to_string() });
+        self.send(Msg::DropAccount {
+            username: username.to_string(),
+            reason: reason.to_string(),
+        });
     }
 
     /// A login on a processor path was refused (the admin's Processors card lists them).
     pub fn record_failed_login(&self, username: &str, reason: &str) {
-        self.send(Msg::FailedLogin { username: username.to_string(), reason: reason.to_string() });
+        self.send(Msg::FailedLogin {
+            username: username.to_string(),
+            reason: reason.to_string(),
+        });
     }
 
     // --- holds -------------------------------------------------------------------------------
@@ -389,12 +442,23 @@ impl OcrControl {
 
     /// The `ocr` block of `/api/health`: `{backend, worker_alive, pending, failed}`.
     pub fn health(&self) -> Value {
-        let alive = self.0.thread.lock().as_ref().is_some_and(|h| !h.is_finished());
-        let counts = self.ask_blocking(Duration::from_secs(2), |s| (s.pending_jobs().len(), s.failures.len()));
+        let alive = self
+            .0
+            .thread
+            .lock()
+            .as_ref()
+            .is_some_and(|h| !h.is_finished());
+        let counts = self.ask_blocking(Duration::from_secs(2), |s| {
+            (s.pending_jobs().len(), s.failures.len())
+        });
         let backend = self.0.core.config.read().ocr.backend.clone();
         match counts {
-            Some((pending, failed)) => json!({"backend": backend, "worker_alive": alive, "pending": pending, "failed": failed}),
-            None => json!({"backend": backend, "worker_alive": false, "pending": null, "failed": 0}),
+            Some((pending, failed)) => {
+                json!({"backend": backend, "worker_alive": alive, "pending": pending, "failed": failed})
+            }
+            None => {
+                json!({"backend": backend, "worker_alive": false, "pending": null, "failed": 0})
+            }
         }
     }
 }
@@ -409,9 +473,17 @@ impl bunko_dav::DavHooks for OcrControl {
         OcrControl::archives_removed(self, paths);
     }
 
-    fn put_follow_up(&self, cbz: &Path, series: &str, volume: &str) -> Option<bunko_dav::PutFollowUp> {
+    fn put_follow_up(
+        &self,
+        cbz: &Path,
+        series: &str,
+        volume: &str,
+    ) -> Option<bunko_dav::PutFollowUp> {
         let (manifest, recheck) = OcrControl::put_follow_up(self, cbz, series, volume)?;
-        Some(bunko_dav::PutFollowUp { manifest, recheck_after: recheck.max(0) as u64 })
+        Some(bunko_dav::PutFollowUp {
+            manifest,
+            recheck_after: recheck.max(0) as u64,
+        })
     }
 }
 

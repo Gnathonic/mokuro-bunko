@@ -10,7 +10,9 @@ use std::time::Duration;
 /// thread) without starving a tokio worker.
 fn blocking<T>(f: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current() {
-        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(f),
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
         _ => f(),
     }
 }
@@ -25,11 +27,18 @@ impl OutlookSource for OcrGlue {
         };
         let ocr = self.0.clone();
         // 0.5.2 waited at most 1 s for the pending list when serving a manifest.
-        let answer = blocking(move || ocr.ask_blocking(Duration::from_secs(1), move |s| (s.volume_pending(&rel, None), s.now())));
+        let answer = blocking(move || {
+            ocr.ask_blocking(Duration::from_secs(1), move |s| {
+                (s.volume_pending(&rel, None), s.now())
+            })
+        });
         match answer {
             Some((pending, now)) => {
                 let recheck = bunko_sched::outlook::recheck_after(&pending, now);
-                VolumeOutlook { pending, recheck_after: recheck.map(Value::from) }
+                VolumeOutlook {
+                    pending,
+                    recheck_after: recheck.map(Value::from),
+                }
             }
             None => VolumeOutlook::default(),
         }
@@ -41,11 +50,15 @@ impl OcrStatusSource for OcrGlue {
     /// plus `jobs` with every card.
     fn progress(&self) -> Option<Map<String, Value>> {
         let ocr = self.0.clone();
-        let jobs = blocking(move || ocr.ask_blocking(Duration::from_millis(500), |s| s.running_jobs()))?;
+        let jobs =
+            blocking(move || ocr.ask_blocking(Duration::from_millis(500), |s| s.running_jobs()))?;
         let first = jobs.first()?.clone();
         let mut doc = first;
         doc.insert("active".into(), Value::Bool(true));
-        doc.insert("jobs".into(), Value::Array(jobs.into_iter().map(Value::Object).collect()));
+        doc.insert(
+            "jobs".into(),
+            Value::Array(jobs.into_iter().map(Value::Object).collect()),
+        );
         Some(doc)
     }
 }

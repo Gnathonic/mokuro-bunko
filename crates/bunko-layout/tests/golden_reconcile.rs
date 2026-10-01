@@ -38,7 +38,9 @@ fn seeded_reconcile_cases_match_python() {
         let confs = opt_confs(get(c, "ctc_char_confs"));
         let r = reconcile_line(vlm, ctc, cells, thin, conf, confs.as_deref());
         if let Err(e) = check_reconciled(&r, get(c, "result")) {
-            errs.push(format!("reconcile_line({vlm:?}, {ctc:?}, {cells}, thin={thin}, conf={conf:?}):\n{e}"));
+            errs.push(format!(
+                "reconcile_line({vlm:?}, {ctc:?}, {cells}, thin={thin}, conf={conf:?}):\n{e}"
+            ));
             continue;
         }
         if needs_second_read(&r) != b(get(c, "needs_second")) {
@@ -47,7 +49,10 @@ fn seeded_reconcile_cases_match_python() {
         if let Some(second) = c.get("second") {
             let settled = settle_disputes(reconciled_from(get(c, "result")), s(second), cells);
             if let Err(e) = check_reconciled(&settled, get(c, "settled")) {
-                errs.push(format!("settle_disputes(.., {:?}, {cells}):\n{e}", s(second)));
+                errs.push(format!(
+                    "settle_disputes(.., {:?}, {cells}):\n{e}",
+                    s(second)
+                ));
             }
         }
         if let Some(kw) = c.get("verdict_args") {
@@ -62,7 +67,10 @@ fn seeded_reconcile_cases_match_python() {
             );
             let want = arr(get(c, "verdict"));
             if keep != b(&want[0]) || why != s(&want[1]) {
-                errs.push(format!("engine_only_verdict {keep} {why} != {}", short(get(c, "verdict"))));
+                errs.push(format!(
+                    "engine_only_verdict {keep} {why} != {}",
+                    short(get(c, "verdict"))
+                ));
             }
         }
         if corroborates(vlm, &r.text, cells) != b(get(c, "corroborates")) {
@@ -71,12 +79,22 @@ fn seeded_reconcile_cases_match_python() {
         let o = arr(get(c, "overlap_repeat"));
         let got = overlap_repeat(s(&o[0]), s(&o[1]), i(&o[2]));
         if got as i64 != i(&o[3]) {
-            errs.push(format!("overlap_repeat({:?}, {:?}, {}) = {got}", s(&o[0]), s(&o[1]), i(&o[2])));
+            errs.push(format!(
+                "overlap_repeat({:?}, {:?}, {}) = {got}",
+                s(&o[0]),
+                s(&o[1]),
+                i(&o[2])
+            ));
         }
         n += 1;
     }
     assert!(n > 1000, "only {n} cases");
-    assert!(errs.is_empty(), "{} of {n} differ:\n{}", errs.len(), errs.join("\n\n"));
+    assert!(
+        errs.is_empty(),
+        "{} of {n} differ:\n{}",
+        errs.len(),
+        errs.join("\n\n")
+    );
 }
 
 #[test]
@@ -115,14 +133,17 @@ fn unit_test_reconcile_calls_match_python() {
                     skipped += 1;
                     continue;
                 };
-                let r = settle_disputes(reconciled_from(get(a, "line")), s(get(a, "second")), cells);
+                let r =
+                    settle_disputes(reconciled_from(get(a, "line")), s(get(a, "second")), cells);
                 if let Err(e) = check_reconciled(&r, want) {
                     errs.push(format!("settle_disputes {}:\n{e}", short(a)));
                 }
                 None
             }
             "engine_only_verdict" => {
-                let (Some(cells), Some(nb)) = (int_arg(get(a, "cells")), int_arg(get(a, "neighbours"))) else {
+                let (Some(cells), Some(nb)) =
+                    (int_arg(get(a, "cells")), int_arg(get(a, "neighbours")))
+                else {
                     skipped += 1;
                     continue;
                 };
@@ -146,7 +167,9 @@ fn unit_test_reconcile_calls_match_python() {
                 };
                 Some(corroborates(s(get(a, "vlm")), s(get(a, "second")), cells) == b(want))
             }
-            "needs_second_read" => Some(needs_second_read(&reconciled_from(get(a, "line"))) == b(want)),
+            "needs_second_read" => {
+                Some(needs_second_read(&reconciled_from(get(a, "line"))) == b(want))
+            }
             "widen_punctuation" => {
                 let keep: Option<Vec<bool>> = match get(a, "keep") {
                     Value::Null => None,
@@ -156,22 +179,32 @@ fn unit_test_reconcile_calls_match_python() {
             }
             "repeated_tail" => Some(repeated_tail(s(get(a, "text"))) as i64 == i(want)),
             "engine_looped" => match (int_arg(get(a, "cells")), int_arg(get(a, "axis"))) {
-                (Some(cells), Some(axis)) => Some(engine_looped(s(get(a, "vlm")), cells, axis) == b(want)),
+                (Some(cells), Some(axis)) => {
+                    Some(engine_looped(s(get(a, "vlm")), cells, axis) == b(want))
+                }
                 _ => {
                     skipped += 1;
                     continue;
                 }
             },
             "is_runaway" => match int_arg(get(a, "cells")) {
-                Some(cells) => Some(is_runaway(s(get(a, "text")), s(get(a, "ctc")), cells) == b(want)),
+                Some(cells) => {
+                    Some(is_runaway(s(get(a, "text")), s(get(a, "ctc")), cells) == b(want))
+                }
                 None => {
                     skipped += 1;
                     continue;
                 }
             },
-            "line_cells" => Some(line_cells(num("main"), num("thickness"), num("pitch")) == i(want)),
-            "axis_cells" => Some(axis_cells(num("main"), num("thickness"), num("pitch")) == i(want)),
-            "region_cells" => Some(region_cells(num("main"), num("thickness"), num("pitch")) == i(want)),
+            "line_cells" => {
+                Some(line_cells(num("main"), num("thickness"), num("pitch")) == i(want))
+            }
+            "axis_cells" => {
+                Some(axis_cells(num("main"), num("thickness"), num("pitch")) == i(want))
+            }
+            "region_cells" => {
+                Some(region_cells(num("main"), num("thickness"), num("pitch")) == i(want))
+            }
             "is_region" => Some(is_region(num("main"), num("thickness"), num("pitch")) == b(want)),
             "token_cap" => match int_arg(get(a, "cells")) {
                 Some(cells) => Some(token_cap(cells) == i(want)),
@@ -181,11 +214,17 @@ fn unit_test_reconcile_calls_match_python() {
                 }
             },
             "overlap_repeat" => Some(
-                overlap_repeat(s(get(a, "before")), s(get(a, "after")), i(get(a, "max_glyphs"))) as i64 == i(want),
+                overlap_repeat(
+                    s(get(a, "before")),
+                    s(get(a, "after")),
+                    i(get(a, "max_glyphs")),
+                ) as i64
+                    == i(want),
             ),
             "fold" => Some(fold(s(get(a, "text"))) == s(want)),
             "page_summary" => {
-                let lines: Vec<Reconciled> = arr(get(a, "lines")).iter().map(reconciled_from).collect();
+                let lines: Vec<Reconciled> =
+                    arr(get(a, "lines")).iter().map(reconciled_from).collect();
                 let got = page_summary(&lines).dumps(Separators::Compact);
                 Some(got == want.dumps(Separators::Compact))
             }
@@ -197,7 +236,12 @@ fn unit_test_reconcile_calls_match_python() {
         *counts.entry(fname.to_string()).or_insert(0) += 1;
     }
     eprintln!("reconcile unit calls replayed: {counts:?}, skipped (non-int args): {skipped}");
-    assert!(errs.is_empty(), "{} differ:\n{}", errs.len(), errs.join("\n\n"));
+    assert!(
+        errs.is_empty(),
+        "{} differ:\n{}",
+        errs.len(),
+        errs.join("\n\n")
+    );
 }
 
 #[test]
@@ -224,7 +268,13 @@ fn sequence_matcher_matches_difflib() {
         let blocks: Vec<Value> = sm
             .matching_blocks()
             .iter()
-            .map(|m| Value::Array(vec![Value::Int(m.a as i64), Value::Int(m.b as i64), Value::Int(m.size as i64)]))
+            .map(|m| {
+                Value::Array(vec![
+                    Value::Int(m.a as i64),
+                    Value::Int(m.b as i64),
+                    Value::Int(m.size as i64),
+                ])
+            })
             .collect();
         if &Value::Array(ops) != get(c, "opcodes")
             || &Value::Array(blocks) != get(c, "blocks")
@@ -234,5 +284,10 @@ fn sequence_matcher_matches_difflib() {
         }
     }
     assert!(arr(&cases).len() >= 1000);
-    assert!(errs.is_empty(), "{} differ: {}", errs.len(), errs.join("\n"));
+    assert!(
+        errs.is_empty(),
+        "{} differ: {}",
+        errs.len(),
+        errs.join("\n")
+    );
 }

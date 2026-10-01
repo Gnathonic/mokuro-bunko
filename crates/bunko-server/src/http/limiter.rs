@@ -28,7 +28,12 @@ impl Default for AuthLimiter {
 
 impl AuthLimiter {
     pub fn new(max_failures: usize, window: Duration, block: Duration) -> Self {
-        Self { max_failures, window, block, inner: Mutex::new(HashMap::new()) }
+        Self {
+            max_failures,
+            window,
+            block,
+            inner: Mutex::new(HashMap::new()),
+        }
     }
 
     /// `Ok(())` or `Err(retry_in_seconds)`.
@@ -38,14 +43,20 @@ impl AuthLimiter {
 
     fn allow_at(&self, key: &str, now: Instant) -> Result<(), u64> {
         let mut map = self.inner.lock();
-        let Some(e) = map.get_mut(key) else { return Ok(()) };
+        let Some(e) = map.get_mut(key) else {
+            return Ok(());
+        };
         if let Some(until) = e.blocked_until {
             if until > now {
                 return Err((until - now).as_secs() + 1);
             }
             e.blocked_until = None;
         }
-        while e.failures.front().is_some_and(|t| now.duration_since(*t) > self.window) {
+        while e
+            .failures
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > self.window)
+        {
             e.failures.pop_front();
         }
         if e.failures.len() >= self.max_failures {
@@ -61,12 +72,20 @@ impl AuthLimiter {
         let mut map = self.inner.lock();
         if map.len() >= MAX_KEYS && !map.contains_key(key) {
             // Evict entries with nothing recent and no block before growing further.
-            map.retain(|_, e| e.blocked_until.is_some_and(|u| u > now) || e.failures.back().is_some_and(|t| now.duration_since(*t) <= self.window));
+            map.retain(|_, e| {
+                e.blocked_until.is_some_and(|u| u > now)
+                    || e.failures
+                        .back()
+                        .is_some_and(|t| now.duration_since(*t) <= self.window)
+            });
             if map.len() >= MAX_KEYS {
                 return;
             }
         }
-        map.entry(key.to_string()).or_default().failures.push_back(now);
+        map.entry(key.to_string())
+            .or_default()
+            .failures
+            .push_back(now);
     }
 
     pub fn record_success(&self, key: &str) {

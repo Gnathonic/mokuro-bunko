@@ -8,8 +8,8 @@
 
 use super::AccountsDeps;
 use super::util::{
-    Client, JsonBody, blocking, db_failed, json_error, json_response, limited_message, parse_object, read_body,
-    serve_page_text_errors, str_field,
+    Client, JsonBody, blocking, db_failed, json_error, json_response, limited_message,
+    parse_object, read_body, serve_page_text_errors, str_field,
 };
 use crate::auth::{Perm, has_perm, parse_basic};
 use axum::Router;
@@ -55,13 +55,19 @@ pub(super) enum AuthHeader {
 }
 
 pub(super) fn auth_header(headers: &HeaderMap) -> AuthHeader {
-    let Some(raw) = headers.get(header::AUTHORIZATION) else { return AuthHeader::None };
+    let Some(raw) = headers.get(header::AUTHORIZATION) else {
+        return AuthHeader::None;
+    };
     let Ok(value) = raw.to_str() else {
         // Non-ASCII header bytes: a Basic payload cannot be valid base64.
         return if raw.as_bytes().starts_with(b"Basic ") {
             AuthHeader::Malformed
         } else if raw.as_bytes().starts_with(b"Bearer ") {
-            AuthHeader::Bearer(String::from_utf8_lossy(&raw.as_bytes()[7..]).trim().to_string())
+            AuthHeader::Bearer(
+                String::from_utf8_lossy(&raw.as_bytes()[7..])
+                    .trim()
+                    .to_string(),
+            )
         } else {
             AuthHeader::None
         };
@@ -77,7 +83,12 @@ pub(super) fn auth_header(headers: &HeaderMap) -> AuthHeader {
 }
 
 /// `POST /login/api/check` (§15.1): the legacy credential check.
-async fn check(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap, body: Body) -> Response {
+async fn check(
+    State(d): State<AccountsDeps>,
+    client: Client,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     let data = match read_body(&headers, body).await {
         JsonBody::Empty => return json_error(400, "Missing credentials"),
         JsonBody::TooLarge => return json_error(413, "Request body too large"),
@@ -86,7 +97,9 @@ async fn check(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap
             None => return json_error(400, "Invalid request"),
         },
     };
-    let (Some(username), Some(password)) = (str_field(&data, "username"), str_field(&data, "password")) else {
+    let (Some(username), Some(password)) =
+        (str_field(&data, "username"), str_field(&data, "password"))
+    else {
         return json_error(400, "Missing credentials");
     };
     if username.is_empty() || password.is_empty() {
@@ -105,7 +118,10 @@ async fn check(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap
     match user {
         Some(user) => {
             d.core.login_limiter.record_success(&key);
-            json_response(200, json!({"success": true, "user": {"username": user.username, "role": user.role.as_str()}}))
+            json_response(
+                200,
+                json!({"success": true, "user": {"username": user.username, "role": user.role.as_str()}}),
+            )
         }
         None => {
             d.core.login_limiter.record_failure(&key);
@@ -116,7 +132,12 @@ async fn check(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap
 
 /// `POST /login/api/token` (§15.2): a password (JSON body or Basic header) buys a
 /// bearer token. `kind` sets its lifetime, `label` names its holder.
-async fn issue_token(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap, body: Body) -> Response {
+async fn issue_token(
+    State(d): State<AccountsDeps>,
+    client: Client,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     let data = match read_body(&headers, body).await {
         JsonBody::Empty => serde_json::Map::new(),
         JsonBody::TooLarge => return json_error(413, "Request body too large"),
@@ -137,8 +158,10 @@ async fn issue_token(State(d): State<AccountsDeps>, client: Client, headers: Hea
             AuthHeader::None | AuthHeader::Bearer(_) => {}
         }
     }
-    let (Some(username), Some(password)) = (username.as_str().filter(|s| !s.is_empty()), password.as_str().filter(|s| !s.is_empty()))
-    else {
+    let (Some(username), Some(password)) = (
+        username.as_str().filter(|s| !s.is_empty()),
+        password.as_str().filter(|s| !s.is_empty()),
+    ) else {
         return json_error(400, "Missing credentials");
     };
     let kind_value = data.get("kind").filter(|v| truthy(v));
@@ -160,7 +183,9 @@ async fn issue_token(State(d): State<AccountsDeps>, client: Client, headers: Hea
     }
     let (db, u, p) = (d.db.clone(), username.to_string(), password.to_string());
     let issued = blocking(move || -> bunko_db::Result<Option<(User, String, f64)>> {
-        let Some(user) = db.authenticate_user(&u, &p)? else { return Ok(None) };
+        let Some(user) = db.authenticate_user(&u, &p)? else {
+            return Ok(None);
+        };
         db.prune_expired_auth_tokens()?;
         let (token, expires_at) = db.create_auth_token(&user.username, kind, &label, None)?;
         Ok(Some((user, token, expires_at)))
@@ -237,7 +262,11 @@ fn permissions(role: Role, owned_series: Option<Vec<String>>) -> Value {
 /// The 200 identity body for a signed-in user (the uploader's owned series are read
 /// from the ownership table).
 fn identity_body(db: &bunko_db::Database, user: &User) -> bunko_db::Result<Value> {
-    let owned = if user.role == Role::Uploader { Some(db.list_series_owned_by(&user.username)?) } else { None };
+    let owned = if user.role == Role::Uploader {
+        Some(db.list_series_owned_by(&user.username)?)
+    } else {
+        None
+    };
     Ok(json!({
         "authenticated": true,
         "username": user.username,
@@ -329,9 +358,18 @@ mod tests {
             serde_json::to_string(&p).unwrap(),
             r#"{"canWriteProgress":true,"canAddFiles":true,"canModifyDelete":false,"metadata":{"scope":"owned","ownedSeries":["A"]}}"#
         );
-        assert_eq!(permissions(Role::Inviter, None)["metadata"], json!({"scope": "all"}));
-        assert_eq!(permissions(Role::Processor, None)["metadata"], json!({"scope": "none"}));
-        assert_eq!(permissions(Role::Anonymous, None)["canWriteProgress"], json!(false));
+        assert_eq!(
+            permissions(Role::Inviter, None)["metadata"],
+            json!({"scope": "all"})
+        );
+        assert_eq!(
+            permissions(Role::Processor, None)["metadata"],
+            json!({"scope": "none"})
+        );
+        assert_eq!(
+            permissions(Role::Anonymous, None)["canWriteProgress"],
+            json!(false)
+        );
     }
 
     #[test]
@@ -344,7 +382,10 @@ mod tests {
         assert!(matches!(auth_header(&h), AuthHeader::Bearer(t) if t == "abc"));
         h.insert(header::AUTHORIZATION, "Basic !!!notb64!!!".parse().unwrap());
         assert!(matches!(auth_header(&h), AuthHeader::Malformed));
-        h.insert(header::AUTHORIZATION, http::HeaderValue::from_bytes(b"Basic \xe4").unwrap());
+        h.insert(
+            header::AUTHORIZATION,
+            http::HeaderValue::from_bytes(b"Basic \xe4").unwrap(),
+        );
         assert!(matches!(auth_header(&h), AuthHeader::Malformed));
     }
 }

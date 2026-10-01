@@ -33,26 +33,46 @@ pub fn default_cert_paths() -> (PathBuf, PathBuf) {
 }
 
 /// Generate a self-signed certificate for `localhost`, `127.0.0.1` and this host name.
-pub fn generate_self_signed(cert_path: &Path, key_path: &Path, hostname: &str) -> Result<(), TlsError> {
+pub fn generate_self_signed(
+    cert_path: &Path,
+    key_path: &Path,
+    hostname: &str,
+) -> Result<(), TlsError> {
     generate_self_signed_days(cert_path, key_path, hostname, 365)
 }
 
 /// [`generate_self_signed`] with an explicit validity in days (`ssl generate --days`).
-pub fn generate_self_signed_days(cert_path: &Path, key_path: &Path, hostname: &str, days: i64) -> Result<(), TlsError> {
-    let mut names = vec!["localhost".to_string(), hostname.to_string(), "127.0.0.1".to_string()];
+pub fn generate_self_signed_days(
+    cert_path: &Path,
+    key_path: &Path,
+    hostname: &str,
+    days: i64,
+) -> Result<(), TlsError> {
+    let mut names = vec![
+        "localhost".to_string(),
+        hostname.to_string(),
+        "127.0.0.1".to_string(),
+    ];
     if let Ok(h) = hostname::get() {
         names.push(h.to_string_lossy().into_owned());
     }
     names.dedup();
-    let mut params = rcgen::CertificateParams::new(names).map_err(|e| TlsError::Invalid(e.to_string()))?;
-    params.distinguished_name.push(rcgen::DnType::CommonName, "localhost");
-    params.distinguished_name.push(rcgen::DnType::OrganizationName, "mokuro-bunko");
+    let mut params =
+        rcgen::CertificateParams::new(names).map_err(|e| TlsError::Invalid(e.to_string()))?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "localhost");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationName, "mokuro-bunko");
     params.is_ca = rcgen::IsCa::ExplicitNoCa;
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now;
     params.not_after = now + time::Duration::days(days.max(1));
     let key = rcgen::KeyPair::generate().map_err(|e| TlsError::Invalid(e.to_string()))?;
-    let cert = params.self_signed(&key).map_err(|e| TlsError::Invalid(e.to_string()))?;
+    let cert = params
+        .self_signed(&key)
+        .map_err(|e| TlsError::Invalid(e.to_string()))?;
     for p in [cert_path, key_path] {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)?;
@@ -68,7 +88,12 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
         f.write_all(bytes)
     }
     #[cfg(not(unix))]
@@ -77,13 +102,19 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
-fn load_pair(cert: &Path, key: &Path) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {
+fn load_pair(
+    cert: &Path,
+    key: &Path,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {
     let certs: Vec<_> = CertificateDer::pem_file_iter(cert)
         .map_err(|e| TlsError::Invalid(e.to_string()))?
         .collect::<Result<_, _>>()
         .map_err(|e| TlsError::Invalid(e.to_string()))?;
     if certs.is_empty() {
-        return Err(TlsError::Parse(format!("no certificate in {}", cert.display())));
+        return Err(TlsError::Parse(format!(
+            "no certificate in {}",
+            cert.display()
+        )));
     }
     let key = PrivateKeyDer::from_pem_file(key).map_err(|e| TlsError::Invalid(e.to_string()))?;
     Ok((certs, key))
@@ -112,7 +143,10 @@ pub fn validate_pair(cert: &Path, key: &Path) -> (Vec<String>, Vec<String>) {
             } else if not_before > now {
                 errors.push(TlsError::NotYetValid(validity.not_before.to_string()).to_string());
             } else if not_after - now < 30 * 86_400 {
-                warnings.push(format!("SSL certificate expires soon: {}", validity.not_after));
+                warnings.push(format!(
+                    "SSL certificate expires soon: {}",
+                    validity.not_after
+                ));
             }
         }
         Err(e) => errors.push(TlsError::Parse(e.to_string()).to_string()),
@@ -120,13 +154,18 @@ pub fn validate_pair(cert: &Path, key: &Path) -> (Vec<String>, Vec<String>) {
     (errors, warnings)
 }
 
-fn build_server_config(certs: Vec<CertificateDer<'static>>, key: PrivateKeyDer<'static>) -> Result<rustls::ServerConfig, TlsError> {
-    let mut cfg = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| TlsError::Invalid(e.to_string()))?
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| TlsError::Invalid(e.to_string()))?;
+fn build_server_config(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> Result<rustls::ServerConfig, TlsError> {
+    let mut cfg = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| TlsError::Invalid(e.to_string()))?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .map_err(|e| TlsError::Invalid(e.to_string()))?;
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(cfg)
 }
@@ -161,7 +200,10 @@ pub fn describe(ssl: &SslConfig) -> String {
     if !ssl.enabled {
         "SSL disabled".into()
     } else if ssl.auto_cert {
-        format!("SSL enabled (auto-cert: {})", default_cert_paths().0.display())
+        format!(
+            "SSL enabled (auto-cert: {})",
+            default_cert_paths().0.display()
+        )
     } else {
         format!("SSL enabled (cert: {})", ssl.cert_file)
     }
@@ -179,7 +221,12 @@ mod tests {
         let (errors, warnings) = validate_pair(&c, &k);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(warnings.is_empty());
-        let ssl = SslConfig { enabled: true, auto_cert: false, cert_file: c.to_string_lossy().into(), key_file: k.to_string_lossy().into() };
+        let ssl = SslConfig {
+            enabled: true,
+            auto_cert: false,
+            cert_file: c.to_string_lossy().into(),
+            key_file: k.to_string_lossy().into(),
+        };
         assert!(server_config(&ssl).unwrap().is_some());
     }
 }

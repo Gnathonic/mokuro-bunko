@@ -20,10 +20,16 @@ pub fn run(ctx: &Ctx, skip_if_exists: bool) -> CmdResult {
     let path = &ctx.config_path;
     if path.exists() {
         if skip_if_exists {
-            println!("Config file already exists at {}, skipping setup.", path.display());
+            println!(
+                "Config file already exists at {}, skipping setup.",
+                path.display()
+            );
             return Ok(());
         }
-        if !prompt::confirm(&format!("Config file exists at {}. Overwrite?", path.display()), Some(false))? {
+        if !prompt::confirm(
+            &format!("Config file exists at {}. Overwrite?", path.display()),
+            Some(false),
+        )? {
             return Ok(());
         }
     }
@@ -33,21 +39,32 @@ pub fn run(ctx: &Ctx, skip_if_exists: bool) -> CmdResult {
     // 1. Storage path, 2. port
     let default_storage = storage::default_storage_path().display().to_string();
     let storage_path = prompt::text("Storage path", Some(&default_storage))?;
-    let port = prompt::parsed("Server port", Some("8080"), |s| match s.trim().parse::<i64>() {
-        Ok(p) if (0..65536).contains(&p) => Ok(p as u16),
-        Ok(p) => Err(format!("Invalid port: {p}")),
-        Err(_) => Err(format!("'{s}' is not a valid integer.")),
+    let port = prompt::parsed("Server port", Some("8080"), |s| {
+        match s.trim().parse::<i64>() {
+            Ok(p) if (0..65536).contains(&p) => Ok(p as u16),
+            Ok(p) => Err(format!("Invalid port: {p}")),
+            Err(_) => Err(format!("'{s}' is not a valid integer.")),
+        }
     })?;
 
     // 3. SSL
     let mut ssl = SslConfig::default();
     if prompt::confirm("Enable SSL?", Some(false))? {
         if prompt::confirm("  Generate a self-signed certificate?", Some(true))? {
-            ssl = SslConfig { enabled: true, auto_cert: true, ..SslConfig::default() };
+            ssl = SslConfig {
+                enabled: true,
+                auto_cert: true,
+                ..SslConfig::default()
+            };
         } else {
             let cert_file = prompt::text("  Path to certificate file", None)?;
             let key_file = prompt::text("  Path to private key file", None)?;
-            ssl = SslConfig { enabled: true, auto_cert: false, cert_file, key_file };
+            ssl = SslConfig {
+                enabled: true,
+                auto_cert: false,
+                cert_file,
+                key_file,
+            };
         }
     }
 
@@ -55,10 +72,14 @@ pub fn run(ctx: &Ctx, skip_if_exists: bool) -> CmdResult {
     let create_admin = prompt::confirm("Create an admin user?", Some(true))?;
     let mut admin = None;
     if create_admin {
-        let username = prompt::parsed("  Admin username", Some("admin"), |s| match validate_username(s) {
-            None => Ok(s.to_string()),
-            Some(e) => Err(e.to_string()),
-        })?;
+        let username = prompt::parsed(
+            "  Admin username",
+            Some("admin"),
+            |s| match validate_username(s) {
+                None => Ok(s.to_string()),
+                Some(e) => Err(e.to_string()),
+            },
+        )?;
         let password = loop {
             let pw = prompt::hidden("  Admin password", true)?;
             match validate_password(&pw) {
@@ -75,17 +96,34 @@ pub fn run(ctx: &Ctx, skip_if_exists: bool) -> CmdResult {
     // 6. Connectivity
     let mut dyndns = DynDnsConfig::default();
     println!("\nConnectivity options:");
-    let access = prompt::choice("Access method", &["lan", "cloudflare", "dyndns", "reverse-proxy"], Some("lan"))?;
+    let access = prompt::choice(
+        "Access method",
+        &["lan", "cloudflare", "dyndns", "reverse-proxy"],
+        Some("lan"),
+    )?;
     match access.as_str() {
         "dyndns" => {
             let provider = prompt::choice("  DynDNS provider", DYNDNS_PROVIDERS, Some("duckdns"))?;
             let domain = prompt::text("  Domain", None)?;
             let token = prompt::hidden("  API token", false)?;
-            let update_url = if provider == "generic" { prompt::text("  Update URL", None)? } else { String::new() };
-            dyndns = DynDnsConfig { enabled: true, provider, token, domain, update_url, ..DynDnsConfig::default() };
+            let update_url = if provider == "generic" {
+                prompt::text("  Update URL", None)?
+            } else {
+                String::new()
+            };
+            dyndns = DynDnsConfig {
+                enabled: true,
+                provider,
+                token,
+                domain,
+                update_url,
+                ..DynDnsConfig::default()
+            };
         }
         "cloudflare" => {
-            println!("  Cloudflare tunnel will be available via the admin panel or 'mokuro-bunko tunnel cloudflare'")
+            println!(
+                "  Cloudflare tunnel will be available via the admin panel or 'mokuro-bunko tunnel cloudflare'"
+            )
         }
         "reverse-proxy" => println!("  Configure your reverse proxy to forward to the server port"),
         _ => {}

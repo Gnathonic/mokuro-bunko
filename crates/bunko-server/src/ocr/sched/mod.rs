@@ -22,9 +22,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bunko_core::StorageLayout;
 use bunko_core::config::UpgradeConfig;
 use bunko_core::generations::Generation;
-use bunko_core::StorageLayout;
 use bunko_db::Database;
 use bunko_proto::{Catalog, Event, HostInfo, Op};
 use bunko_sched::breaker::{DownloadBreaker, JobReturns, StartBackoff};
@@ -60,7 +60,8 @@ pub const CLOSE_GRACE_SECONDS: f64 = 30.0;
 /// `PRECISION_REFUSAL`: a runner that refused the row's forced precision.
 pub const PRECISION_REFUSAL: &str = "precision not available here";
 /// The release reason of a result whose archive changed under it.
-pub const DISCARDED: &str = "the archive was replaced or deleted while it was being read, so the result was discarded";
+pub const DISCARDED: &str =
+    "the archive was replaced or deleted while it was being read, so the result was discarded";
 
 /// Live settings (`apply_settings`).
 #[derive(Clone, Debug)]
@@ -110,32 +111,74 @@ pub enum Msg {
     /// The 1 s timer.
     Tick,
     /// A full library walk finished (`epoch` guards against a settings change during it).
-    Walked { epoch: u64, index: OwedIndex },
+    Walked {
+        epoch: u64,
+        index: OwedIndex,
+    },
     /// A frame from a processor (remote socket or local channel).
-    Event { pid: String, event: Event },
+    Event {
+        pid: String,
+        event: Event,
+    },
     /// Any frame at all from a remote processor (liveness).
-    Seen { pid: String },
+    Seen {
+        pid: String,
+    },
     /// A remote processor's registration.
-    Register { input: RegisterInput, reply: Reply<RegisterOutcome> },
+    Register {
+        input: RegisterInput,
+        reply: Reply<RegisterOutcome>,
+    },
     /// A remote processor opened its socket.
-    SocketOpen { pid: String, username: String, ops: mpsc::UnboundedSender<Op>, reply: Reply<Result<(), SocketRefusal>> },
+    SocketOpen {
+        pid: String,
+        username: String,
+        ops: mpsc::UnboundedSender<Op>,
+        reply: Reply<Result<(), SocketRefusal>>,
+    },
     /// The in-process processor is up.
-    LocalUp { ops: mpsc::UnboundedSender<Op>, catalog: Catalog, host: HostInfo },
+    LocalUp {
+        ops: mpsc::UnboundedSender<Op>,
+        catalog: Catalog,
+        host: HostInfo,
+    },
     /// A processor is gone (socket closed, silent, account revoked, ...): `registry.drop`.
-    Drop { pid: String, reason: String },
+    Drop {
+        pid: String,
+        reason: String,
+    },
     /// Drop every processor of an account (disabled, deleted, re-roled).
-    DropAccount { username: String, reason: String },
+    DropAccount {
+        username: String,
+        reason: String,
+    },
     /// A login on a processor path was refused.
-    FailedLogin { username: String, reason: String },
+    FailedLogin {
+        username: String,
+        reason: String,
+    },
     /// A result upload landed: `<storage>/.processing/<sid>/<claim>/<name>`.
-    ResultStored { pid: String, sid: String, claim: String, name: String, sha256: String },
+    ResultStored {
+        pid: String,
+        sid: String,
+        claim: String,
+        name: String,
+        sha256: String,
+    },
     /// A sidecar installation finished on a helper thread.
     Collected(Box<super::collect::CollectDone>),
     /// `read_own_copy` finished for a returned claim.
-    OwnCopyRead { job: Job, error: Option<String>, then: Box<settle::ReturnContext> },
+    OwnCopyRead {
+        job: Job,
+        error: Option<String>,
+        then: Box<settle::ReturnContext>,
+    },
     ArchiveArrived(PathBuf),
     ArchiveRemoved(PathBuf),
-    Apply { settings: Box<Settings>, reply: Option<Reply<()>> },
+    Apply {
+        settings: Box<Settings>,
+        reply: Option<Reply<()>>,
+    },
     Query(Query),
     Stop,
 }
@@ -264,8 +307,16 @@ pub struct Scheduler {
 impl Scheduler {
     pub fn new(deps: SchedDeps, settings: Settings) -> Scheduler {
         let storage = deps.layout.base.clone();
-        let priors = Arc::new(FilePriors::new(Some(&storage), bunko_sched::rate::CACHE_TTL_SECONDS, deps.clock.clone()));
-        let rates = Arc::new(RateModel::new(deps.clock.clone(), priors, bunko_sched::rate::SESSION_ALPHA));
+        let priors = Arc::new(FilePriors::new(
+            Some(&storage),
+            bunko_sched::rate::CACHE_TTL_SECONDS,
+            deps.clock.clone(),
+        ));
+        let rates = Arc::new(RateModel::new(
+            deps.clock.clone(),
+            priors,
+            bunko_sched::rate::SESSION_ALPHA,
+        ));
         let failure_store = FailureStore::new(&storage);
         let failures = failure_store.load();
         let started_at = deps.clock.time();
@@ -352,7 +403,9 @@ impl Scheduler {
     }
 
     pub fn enabled_rows(&self) -> Vec<Generation> {
-        bunko_core::generations::enabled_generations(&self.settings.rows).cloned().collect()
+        bunko_core::generations::enabled_generations(&self.settings.rows)
+            .cloned()
+            .collect()
     }
 
     pub fn primary(&self) -> Option<&Generation> {
@@ -361,7 +414,11 @@ impl Scheduler {
 
     /// `_generation_rank`: row id → position among the enabled rows.
     pub fn rank(&self) -> HashMap<String, usize> {
-        self.enabled_rows().iter().enumerate().map(|(i, r)| (r.id.clone(), i)).collect()
+        self.enabled_rows()
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.id.clone(), i))
+            .collect()
     }
 
     pub fn bump(&mut self) {
@@ -389,10 +446,13 @@ impl Scheduler {
             }
             Exec::Threads(tx) => {
                 let tx = tx.clone();
-                let spawned = std::thread::Builder::new().name("ocr-helper".into()).spawn(move || {
-                    let msg = job();
-                    let _ = tx.send(msg);
-                });
+                let spawned =
+                    std::thread::Builder::new()
+                        .name("ocr-helper".into())
+                        .spawn(move || {
+                            let msg = job();
+                            let _ = tx.send(msg);
+                        });
                 if let Err(e) = spawned {
                     tracing::error!("could not start an OCR helper thread: {e}");
                 }
@@ -426,7 +486,12 @@ impl Scheduler {
                 let outcome = self.register(input);
                 let _ = reply.send(outcome);
             }
-            Msg::SocketOpen { pid, username, ops, reply } => {
+            Msg::SocketOpen {
+                pid,
+                username,
+                ops,
+                reply,
+            } => {
                 let outcome = self.socket_open(&pid, &username, ops);
                 let _ = reply.send(outcome);
             }
@@ -434,7 +499,13 @@ impl Scheduler {
             Msg::Drop { pid, reason } => self.drop_processor(&pid, &reason),
             Msg::DropAccount { username, reason } => self.drop_account(&username, &reason),
             Msg::FailedLogin { username, reason } => self.record_failed_login(&username, &reason),
-            Msg::ResultStored { pid, sid, claim, name, sha256 } => self.result_stored(&pid, &sid, &claim, &name, sha256),
+            Msg::ResultStored {
+                pid,
+                sid,
+                claim,
+                name,
+                sha256,
+            } => self.result_stored(&pid, &sid, &claim, &name, sha256),
             Msg::Collected(done) => self.collected(*done),
             Msg::OwnCopyRead { job, error, then } => self.own_copy_read(job, error, *then),
             Msg::ArchiveArrived(path) => self.archive_arrived(&path),
@@ -483,9 +554,22 @@ impl Scheduler {
         let rows = self.settings.rows.clone();
         let facts = self.deps.facts.clone();
         let probe = self.upgrade_probe();
-        let known: super::owed::KnownPages = self.owed.volumes.iter().map(|(rel, v)| (rel.clone(), (v.size, v.mtime_ns, v.pages))).collect();
+        let known: super::owed::KnownPages = self
+            .owed
+            .volumes
+            .iter()
+            .map(|(rel, v)| (rel.clone(), (v.size, v.mtime_ns, v.pages)))
+            .collect();
         self.run_background(Box::new(move || {
-            let index = super::owed::walk(&library, &rows, facts.as_ref(), probe.as_deref().map(|p| p as &dyn super::owed::UpgradeProbe), &known);
+            let index = super::owed::walk(
+                &library,
+                &rows,
+                facts.as_ref(),
+                probe
+                    .as_deref()
+                    .map(|p| p as &dyn super::owed::UpgradeProbe),
+                &known,
+            );
             Msg::Walked { epoch, index }
         }));
     }
@@ -570,7 +654,11 @@ impl Scheduler {
             return;
         }
         let g = self.queue_generation;
-        if self.lanes.iter().any(|l| l.waiting_for_faster || l.session.is_some() || l.idle_at != Some(g)) {
+        if self
+            .lanes
+            .iter()
+            .any(|l| l.waiting_for_faster || l.session.is_some() || l.idle_at != Some(g))
+        {
             return;
         }
         self.scan_active = false;
@@ -587,7 +675,9 @@ impl Scheduler {
         self.drain_autobench_requests();
         let lane_ids: Vec<u64> = self.lanes.iter().map(|l| l.id).collect();
         for id in lane_ids {
-            let Some(lane) = self.lanes.iter().find(|l| l.id == id).cloned() else { continue };
+            let Some(lane) = self.lanes.iter().find(|l| l.id == id).cloned() else {
+                continue;
+            };
             if let Some(sid) = &lane.session {
                 self.top_up(sid.clone());
                 continue;
@@ -600,7 +690,12 @@ impl Scheduler {
                 Some(job) => {
                     self.open_session(id, job);
                     // Fill the lookahead at once, as the session loop does.
-                    if let Some(sid) = self.lanes.iter().find(|l| l.id == id).and_then(|l| l.session.clone()) {
+                    if let Some(sid) = self
+                        .lanes
+                        .iter()
+                        .find(|l| l.id == id)
+                        .and_then(|l| l.session.clone())
+                    {
                         self.top_up(sid);
                     }
                 }
@@ -645,7 +740,11 @@ impl Scheduler {
             }
         }
         for (sid, reason) in to_kill {
-            let jobs: Vec<Job> = self.sessions.get(&sid).map(|s| s.jobs.values().map(|j| j.job.clone()).collect()).unwrap_or_default();
+            let jobs: Vec<Job> = self
+                .sessions
+                .get(&sid)
+                .map(|s| s.jobs.values().map(|j| j.job.clone()).collect())
+                .unwrap_or_default();
             for j in jobs {
                 self.cancelled.insert(j);
             }
@@ -662,7 +761,10 @@ impl Scheduler {
         self.prune_failures();
         self.start_walk();
         let order: Vec<String> = self.enabled_rows().iter().map(|r| r.name.clone()).collect();
-        self.log(format!("OCR settings applied (generations, in run order: {})", order.join(", ")));
+        self.log(format!(
+            "OCR settings applied (generations, in run order: {})",
+            order.join(", ")
+        ));
         if local_changed {
             self.rebuild_lanes();
         }
@@ -677,7 +779,9 @@ impl Scheduler {
             .into_iter()
             .filter(|(_, v)| {
                 v.as_object().is_some_and(|r| {
-                    bunko_sched::failures::keep_record(r, &names, |s, v| bunko_sched::failures::archive_exists_in(&library, s, v))
+                    bunko_sched::failures::keep_record(r, &names, |s, v| {
+                        bunko_sched::failures::archive_exists_in(&library, s, v)
+                    })
                 })
             })
             .collect();

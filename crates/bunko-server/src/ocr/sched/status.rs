@@ -29,7 +29,8 @@ impl Scheduler {
 
     /// `processing_hold()`: nothing can run OCR (no local processing, no processor).
     pub fn processing_hold(&self) -> Option<Value> {
-        if self.settings.local_processing && self.machines.get(LOCAL).is_some_and(|m| m.connected()) {
+        if self.settings.local_processing && self.machines.get(LOCAL).is_some_and(|m| m.connected())
+        {
             return None;
         }
         if !self.remote_connected().is_empty() {
@@ -37,7 +38,14 @@ impl Scheduler {
         }
         let mut hold = Map::new();
         hold.insert("reason".into(), json!("no-processor"));
-        hold.insert("since".into(), json!(self.last_disconnect.as_ref().map_or(self.started_at, |l| l.1)));
+        hold.insert(
+            "since".into(),
+            json!(
+                self.last_disconnect
+                    .as_ref()
+                    .map_or(self.started_at, |l| l.1)
+            ),
+        );
         if let Some((name, at)) = &self.last_disconnect {
             hold.insert("last".into(), json!({"name": name, "disconnected_at": at}));
         }
@@ -66,26 +74,38 @@ impl Scheduler {
             return Some("no-processor");
         }
         if self.every_machine_held() {
-            return Some(if self.paused_for_benchmark().is_some() { "benchmarking" } else { "paused" });
+            return Some(if self.paused_for_benchmark().is_some() {
+                "benchmarking"
+            } else {
+                "paused"
+            });
         }
         None
     }
 
     /// `precision_holds()`: forced-precision rows every current machine refuses.
     pub fn precision_holds(&self) -> Vec<(String, String)> {
-        let machines: Vec<&super::Machine> =
-            self.machines.values().filter(|m| m.connected() && (!m.local || self.settings.local_processing)).collect();
+        let machines: Vec<&super::Machine> = self
+            .machines
+            .values()
+            .filter(|m| m.connected() && (!m.local || self.settings.local_processing))
+            .collect();
         if machines.is_empty() {
             return Vec::new();
         }
         let mut out = Vec::new();
         for row in self.enabled_rows() {
-            if !row.precision_applies() || !bunko_core::engines::is_forced_precision(&row.precision) {
+            if !row.precision_applies() || !bunko_core::engines::is_forced_precision(&row.precision)
+            {
                 continue;
             }
             let all_refuse = machines.iter().all(|m| {
                 let pools = self.machine_row_pools(&m.name, &row);
-                let sd = pools.get("stage_device").and_then(Value::as_object).cloned().unwrap_or_default();
+                let sd = pools
+                    .get("stage_device")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
                 super::claim::precision_refusal(&row, &m.catalog, &sd).is_some()
             });
             if all_refuse {
@@ -99,7 +119,13 @@ impl Scheduler {
         self.precision_holds()
             .into_iter()
             .map(|(id, reason)| {
-                let name = self.settings.rows.iter().find(|r| r.id == id).map(|r| r.name.clone()).unwrap_or(id);
+                let name = self
+                    .settings
+                    .rows
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map(|r| r.name.clone())
+                    .unwrap_or(id);
                 json!({"generation": name, "reason": reason})
             })
             .collect()
@@ -116,20 +142,53 @@ impl Scheduler {
             for k in ["series", "volume", "generation", "engine", "detector"] {
                 e.insert(k.into(), g(k));
             }
-            e.insert("percent".into(), data.get("percent").cloned().unwrap_or(json!(0)));
+            e.insert(
+                "percent".into(),
+                data.get("percent").cloned().unwrap_or(json!(0)),
+            );
             e.insert("eta_seconds".into(), g("eta_seconds"));
-            e.insert("done_pages".into(), data.get("done_pages").cloned().unwrap_or(json!(0)));
-            let total = data.get("total_pages").filter(|v| v.as_i64().is_some()).cloned();
-            e.insert("total_pages".into(), total.unwrap_or_else(|| json!(self.known_pages(&job.rel))));
-            e.insert("status".into(), data.get("status").cloned().unwrap_or(json!("running")));
-            for k in ["generation_id", "slot", "first_page_at", "session_started_at", "started_at", "session_ready", "delivered"] {
+            e.insert(
+                "done_pages".into(),
+                data.get("done_pages").cloned().unwrap_or(json!(0)),
+            );
+            let total = data
+                .get("total_pages")
+                .filter(|v| v.as_i64().is_some())
+                .cloned();
+            e.insert(
+                "total_pages".into(),
+                total.unwrap_or_else(|| json!(self.known_pages(&job.rel))),
+            );
+            e.insert(
+                "status".into(),
+                data.get("status").cloned().unwrap_or(json!("running")),
+            );
+            for k in [
+                "generation_id",
+                "slot",
+                "first_page_at",
+                "session_started_at",
+                "started_at",
+                "session_ready",
+                "delivered",
+            ] {
                 e.insert(k.into(), g(k));
             }
             e.insert("eta_at".into(), Value::Null);
-            for k in ["rate_pages_per_second", "latency_seconds", "rate_source", "processor", "machine"] {
+            for k in [
+                "rate_pages_per_second",
+                "latency_seconds",
+                "rate_source",
+                "processor",
+                "machine",
+            ] {
                 e.insert(k.into(), g(k));
             }
-            if data.get("pipeline").and_then(|p| p.get("stages")).is_some_and(|s| s.as_array().is_some_and(|a| !a.is_empty())) {
+            if data
+                .get("pipeline")
+                .and_then(|p| p.get("stages"))
+                .is_some_and(|s| s.as_array().is_some_and(|a| !a.is_empty()))
+            {
                 e.insert("pipeline".into(), g("pipeline"));
             }
             if let Some(b) = data.get("host_busy") {
@@ -156,7 +215,10 @@ impl Scheduler {
         }
         let key = self.failure_key_of(job, row);
         let mtime = self.owed.volumes.get(&*job.rel).map(|v| v.mtime);
-        if let Some(attempts) = bunko_sched::failures::pending_attempts(self.failures.get(&key).and_then(Value::as_object), mtime) {
+        if let Some(attempts) = bunko_sched::failures::pending_attempts(
+            self.failures.get(&key).and_then(Value::as_object),
+            mtime,
+        ) {
             e.insert("attempts".into(), json!(attempts));
         }
         if let Some(r) = self.download_returns.get(job) {
@@ -173,11 +235,20 @@ impl Scheduler {
         {
             return list.clone();
         }
-        let exclude: HashSet<Job> = self.claims.keys().cloned().chain(self.attempted.iter().cloned()).collect();
+        let exclude: HashSet<Job> = self
+            .claims
+            .keys()
+            .cloned()
+            .chain(self.attempted.iter().cloned())
+            .collect();
         let jobs = self.candidates(&exclude, false);
-        let list: Vec<Map<String, Value>> = jobs.iter().filter_map(|j| self.pending_entry(j)).collect();
+        let list: Vec<Map<String, Value>> =
+            jobs.iter().filter_map(|j| self.pending_entry(j)).collect();
         let list = Arc::new(list);
-        let changed = self.pending_cache.as_ref().is_none_or(|(_, old)| **old != *list);
+        let changed = self
+            .pending_cache
+            .as_ref()
+            .is_none_or(|(_, old)| **old != *list);
         self.pending_cache = Some((self.queue_generation, list.clone()));
         if changed {
             self.bump_page();
@@ -186,18 +257,36 @@ impl Scheduler {
     }
 
     /// `plan_items`: the pending list without what runs.
-    pub fn plan_items(pending: &[Map<String, Value>], running: &[Map<String, Value>]) -> Vec<Map<String, Value>> {
-        let running_keys: HashSet<String> = running.iter().map(|j| format!("{:?}", job_identity(j))).collect();
-        pending.iter().filter(|e| !running_keys.contains(&format!("{:?}", job_identity(e)))).cloned().collect()
+    pub fn plan_items(
+        pending: &[Map<String, Value>],
+        running: &[Map<String, Value>],
+    ) -> Vec<Map<String, Value>> {
+        let running_keys: HashSet<String> = running
+            .iter()
+            .map(|j| format!("{:?}", job_identity(j)))
+            .collect();
+        pending
+            .iter()
+            .filter(|e| !running_keys.contains(&format!("{:?}", job_identity(e))))
+            .cloned()
+            .collect()
     }
 
     /// `_lane_machines()`: one entry per lane, by hardware name.
     pub fn lane_machines(&self) -> Vec<String> {
-        self.lanes.iter().filter_map(|l| self.machines.get(&l.pid).map(|m| m.name.clone())).collect()
+        self.lanes
+            .iter()
+            .filter_map(|l| self.machines.get(&l.pid).map(|m| m.name.clone()))
+            .collect()
     }
 
     /// `queue_plan(running, pending, through)`.
-    pub fn queue_plan(&self, running: &[Map<String, Value>], pending: &[Map<String, Value>], through: Option<i64>) -> QueuePlan {
+    pub fn queue_plan(
+        &self,
+        running: &[Map<String, Value>],
+        pending: &[Map<String, Value>],
+        through: Option<i64>,
+    ) -> QueuePlan {
         let pricing = self.pricing();
         let lane_machines = self.lane_machines();
         let refusal = |g: &str, machine: &str| -> Option<String> {
@@ -207,7 +296,8 @@ impl Scheduler {
         };
         let hold = |g: &str| -> Option<String> {
             let row = self.settings.rows.iter().find(|r| r.id == g)?;
-            (row.precision_applies() && bunko_core::engines::is_forced_precision(&row.precision)).then(|| hold_reason(&row.precision))
+            (row.precision_applies() && bunko_core::engines::is_forced_precision(&row.precision))
+                .then(|| hold_reason(&row.precision))
         };
         let inputs = PlanInputs {
             lane_count: lane_machines.len().max(1),
@@ -225,7 +315,9 @@ impl Scheduler {
     pub fn connected_machines(&self) -> Vec<Value> {
         let mut order: Vec<(String, String, usize)> = Vec::new();
         for lane in &self.lanes {
-            let Some(m) = self.machines.get(&lane.pid) else { continue };
+            let Some(m) = self.machines.get(&lane.pid) else {
+                continue;
+            };
             match order.iter_mut().find(|(n, _, _)| *n == m.name) {
                 Some(e) => e.2 += 1,
                 None => order.push((m.name.clone(), m.pid.clone(), 1)),
@@ -240,7 +332,10 @@ impl Scheduler {
                 row.insert("machine".into(), json!(name));
                 row.insert("slots".into(), json!(slots));
                 let standby = !self.held(&name)
-                    && self.lanes.iter().any(|l| l.pid == pid && l.waiting_for_faster && l.session.is_none());
+                    && self
+                        .lanes
+                        .iter()
+                        .any(|l| l.pid == pid && l.waiting_for_faster && l.session.is_none());
                 if standby {
                     row.insert("standby".into(), json!(true));
                 }
@@ -262,7 +357,14 @@ impl Scheduler {
     }
 
     pub fn speed(&self, running: &[Map<String, Value>]) -> Vec<Value> {
-        let rows: Vec<RowRef> = self.enabled_rows().iter().map(|r| RowRef { id: r.id.clone(), name: r.name.clone() }).collect();
+        let rows: Vec<RowRef> = self
+            .enabled_rows()
+            .iter()
+            .map(|r| RowRef {
+                id: r.id.clone(),
+                name: r.name.clone(),
+            })
+            .collect();
         speed_report(&rows, running, &self.rates, SPEED_WINDOW_SECONDS)
     }
 
@@ -275,7 +377,17 @@ impl Scheduler {
             .filter(|(_, v)| !v.skipped.is_empty())
             .map(|(rel, v)| {
                 let job = Job::new(rel, "");
-                let names: Vec<String> = v.skipped.iter().filter_map(|g| self.settings.rows.iter().find(|r| *r.id == **g).map(|r| r.name.clone())).collect();
+                let names: Vec<String> = v
+                    .skipped
+                    .iter()
+                    .filter_map(|g| {
+                        self.settings
+                            .rows
+                            .iter()
+                            .find(|r| *r.id == **g)
+                            .map(|r| r.name.clone())
+                    })
+                    .collect();
                 json!({
                     "series": job.series(),
                     "volume": job.volume(),
@@ -304,7 +416,12 @@ impl Scheduler {
             })
             .collect();
         out.sort_by(|a, b| {
-            let k = |v: &Value| (v["series"].as_str().unwrap_or("").to_string(), v["volume"].as_str().unwrap_or("").to_string());
+            let k = |v: &Value| {
+                (
+                    v["series"].as_str().unwrap_or("").to_string(),
+                    v["volume"].as_str().unwrap_or("").to_string(),
+                )
+            };
             k(a).cmp(&k(b))
         });
         out
@@ -322,26 +439,57 @@ impl Scheduler {
         let items = Self::plan_items(&pending, &running);
         let plan = self.queue_plan(&running, &items, None);
         let mut raw = Map::new();
-        raw.insert("current".into(), plan.running.first().cloned().map_or(Value::Null, Value::Object));
-        raw.insert("current_jobs".into(), Value::Array(plan.running.iter().cloned().map(Value::Object).collect()));
-        raw.insert("pending_ocr".into(), Value::Array(plan.pending.iter().cloned().map(Value::Object).collect()));
+        raw.insert(
+            "current".into(),
+            plan.running
+                .first()
+                .cloned()
+                .map_or(Value::Null, Value::Object),
+        );
+        raw.insert(
+            "current_jobs".into(),
+            Value::Array(plan.running.iter().cloned().map(Value::Object).collect()),
+        );
+        raw.insert(
+            "pending_ocr".into(),
+            Value::Array(plan.pending.iter().cloned().map(Value::Object).collect()),
+        );
         raw.insert("queue_done_at".into(), json!(plan.done_at));
-        raw.insert("pending_thumbnails".into(), json!(self.deps.facts.pending_thumbnails()));
+        raw.insert(
+            "pending_thumbnails".into(),
+            json!(self.deps.facts.pending_thumbnails()),
+        );
         raw.insert("failed".into(), Value::Array(self.failed_list()));
         raw.insert("backend".into(), json!(self.backend_label()));
         raw.insert("generations".into(), Value::Array(self.generation_order()));
-        raw.insert("skipped_missing_pages".into(), Value::Array(self.skipped_missing_pages()));
-        raw.insert("paused_for_benchmark".into(), self.paused_for_benchmark().unwrap_or(Value::Null));
-        raw.insert("processing_hold".into(), self.processing_hold().unwrap_or(Value::Null));
+        raw.insert(
+            "skipped_missing_pages".into(),
+            Value::Array(self.skipped_missing_pages()),
+        );
+        raw.insert(
+            "paused_for_benchmark".into(),
+            self.paused_for_benchmark().unwrap_or(Value::Null),
+        );
+        raw.insert(
+            "processing_hold".into(),
+            self.processing_hold().unwrap_or(Value::Null),
+        );
         raw.insert("held_rows".into(), Value::Array(self.held_rows()));
-        raw.insert("connected_machines".into(), Value::Array(self.connected_machines()));
+        raw.insert(
+            "connected_machines".into(),
+            Value::Array(self.connected_machines()),
+        );
         raw.insert("speed".into(), Value::Array(self.speed(&plan.running)));
         raw
     }
 
     fn backend_label(&self) -> String {
         if self.settings.local_processing {
-            self.machines.get(LOCAL).map(|m| m.host.backend.clone()).filter(|b| !b.is_empty()).unwrap_or_else(|| "onnxruntime".into())
+            self.machines
+                .get(LOCAL)
+                .map(|m| m.host.backend.clone())
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(|| "onnxruntime".into())
         } else {
             "remote processors".into()
         }
@@ -349,12 +497,18 @@ impl Scheduler {
 
     /// The rows one volume is still owed: primary first, then list order.
     pub fn owed_rows(&self, rel: &str) -> Vec<OwedRow> {
-        let Some(v) = self.owed.volumes.get(rel) else { return Vec::new() };
+        let Some(v) = self.owed.volumes.get(rel) else {
+            return Vec::new();
+        };
         let mut rows: Vec<OwedRow> = self
             .enabled_rows()
             .into_iter()
             .filter(|r| v.rows.iter().any(|g| **g == *r.id) || (v.upgrade && r.primary))
-            .map(|r| OwedRow { id: r.id, name: r.name, primary: r.primary })
+            .map(|r| OwedRow {
+                id: r.id,
+                name: r.name,
+                primary: r.primary,
+            })
             .collect();
         rows.sort_by_key(|r| !r.primary);
         rows
@@ -377,10 +531,16 @@ impl Scheduler {
             let ours: Vec<usize> = items
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| e.get("series").and_then(Value::as_str) == Some(series.as_str()) && e.get("volume").and_then(Value::as_str) == Some(volume.as_str()))
+                .filter(|(_, e)| {
+                    e.get("series").and_then(Value::as_str) == Some(series.as_str())
+                        && e.get("volume").and_then(Value::as_str) == Some(volume.as_str())
+                })
                 .map(|(i, _)| i)
                 .collect();
-            let last = ours.last().copied().filter(|l| max_items.is_none_or(|m| *l < m));
+            let last = ours
+                .last()
+                .copied()
+                .filter(|l| max_items.is_none_or(|m| *l < m));
             let plan = match last {
                 Some(l) => self.queue_plan(&running, &items, Some(l as i64)),
                 None => self.queue_plan(&running, &[], None),
@@ -400,9 +560,17 @@ impl Scheduler {
         let items = Self::plan_items(&pending, &running);
         let plan = self.queue_plan(&running, &items, None);
         let mut order: Vec<(String, String)> = Vec::new();
-        let mut jobs: std::collections::HashMap<(String, String), indexmap::IndexMap<String, Map<String, Value>>> = Default::default();
+        let mut jobs: std::collections::HashMap<
+            (String, String),
+            indexmap::IndexMap<String, Map<String, Value>>,
+        > = Default::default();
         let mut running_now: HashSet<(String, String, String)> = HashSet::new();
-        for (entry, is_running) in plan.running.iter().map(|e| (e, true)).chain(plan.pending.iter().map(|e| (e, false))) {
+        for (entry, is_running) in plan
+            .running
+            .iter()
+            .map(|e| (e, true))
+            .chain(plan.pending.iter().map(|e| (e, false)))
+        {
             let (Some(s), Some(v), Some(g)) = (
                 entry.get("series").and_then(Value::as_str),
                 entry.get("volume").and_then(Value::as_str),
@@ -418,11 +586,20 @@ impl Scheduler {
             if is_running {
                 running_now.insert((s.to_string(), v.to_string(), g.to_string()));
             }
-            jobs.get_mut(&key).expect("inserted above").entry(g.to_string()).or_insert_with(|| entry.clone());
+            jobs.get_mut(&key)
+                .expect("inserted above")
+                .entry(g.to_string())
+                .or_insert_with(|| entry.clone());
         }
         let rank = self.rank();
-        let running_volumes: HashSet<(String, String)> = running_now.iter().map(|(s, v, _)| (s.clone(), v.clone())).collect();
-        let pending_volumes = order.iter().filter(|k| !running_volumes.contains(*k)).count();
+        let running_volumes: HashSet<(String, String)> = running_now
+            .iter()
+            .map(|(s, v, _)| (s.clone(), v.clone()))
+            .collect();
+        let pending_volumes = order
+            .iter()
+            .filter(|k| !running_volumes.contains(*k))
+            .count();
         let mut waiting_listed = 0;
         let mut volumes = Vec::new();
         for (series, volume) in order {
@@ -434,7 +611,11 @@ impl Scheduler {
                 waiting_listed += 1;
             }
             let listed = &jobs[&key];
-            let rel = if series == "." { format!("{volume}.cbz") } else { format!("{series}/{volume}.cbz") };
+            let rel = if series == "." {
+                format!("{volume}.cbz")
+            } else {
+                format!("{series}/{volume}.cbz")
+            };
             let mut rows: Vec<bunko_core::generations::Generation> = Vec::new();
             for o in self.owed_rows(&rel) {
                 if let Some(r) = self.settings.rows.iter().find(|r| r.id == o.id) {
@@ -452,15 +633,26 @@ impl Scheduler {
             let mut out = Vec::new();
             for row in rows {
                 let priced = listed.get(&row.id);
-                let is_running = running_now.contains(&(series.clone(), volume.clone(), row.id.clone()));
+                let is_running =
+                    running_now.contains(&(series.clone(), volume.clone(), row.id.clone()));
                 let state = if is_running {
                     "running"
-                } else if priced.is_none() || held.is_some() || priced.is_some_and(|p| bunko_sched::py::truthy(p.get("held"))) {
+                } else if priced.is_none()
+                    || held.is_some()
+                    || priced.is_some_and(|p| bunko_sched::py::truthy(p.get("held")))
+                {
                     "held"
                 } else {
                     "queued"
                 };
-                let eta = if state != "held" { priced.and_then(|p| p.get("eta_at")).and_then(Value::as_str).map(str::to_string) } else { None };
+                let eta = if state != "held" {
+                    priced
+                        .and_then(|p| p.get("eta_at"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                } else {
+                    None
+                };
                 let mut progress = Value::Null;
                 if is_running && let Some(p) = priced {
                     let done = p.get("done_pages").and_then(Value::as_f64);

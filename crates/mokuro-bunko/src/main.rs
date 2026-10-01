@@ -60,7 +60,11 @@ fn run(cli: Cli) -> out::CmdResult {
         println!();
         return Ok(());
     };
-    let ctx = cmd::Ctx { config_path: cfgfile::resolve(cli.config.as_deref()), verbose: cli.verbose, cli_config: cli.config };
+    let ctx = cmd::Ctx {
+        config_path: cfgfile::resolve(cli.config.as_deref()),
+        verbose: cli.verbose,
+        cli_config: cli.config,
+    };
     match command {
         Command::Serve(args) => cmd::serve::run(&ctx, args),
         Command::Setup { skip_if_exists } => cmd::setup::run(&ctx, skip_if_exists),

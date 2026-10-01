@@ -30,13 +30,19 @@ pub fn run(ctx: &Ctx, cmd: ModelsCmd) -> CmdResult {
 }
 
 fn models_dir(ctx: &Ctx) -> Result<PathBuf, Fail> {
-    Ok(cfgfile::load_effective(&ctx.config_path)?.storage.layout().models())
+    Ok(cfgfile::load_effective(&ctx.config_path)?
+        .storage
+        .layout()
+        .models())
 }
 
 /// Also used by the deprecated `install-ocr`.
 pub fn download(ctx: &Ctx, engine: Option<&str>) -> CmdResult {
     if let Some(e) = engine.filter(|e| !ENGINES.contains(e)) {
-        return Err(Fail::msg(format!("Unknown engine '{e}' (expected one of: {})", ENGINES.join(", "))));
+        return Err(Fail::msg(format!(
+            "Unknown engine '{e}' (expected one of: {})",
+            ENGINES.join(", ")
+        )));
     }
     let dir = models_dir(ctx)?;
     store_download(&dir, engine)
@@ -47,7 +53,9 @@ fn store_list(_dir: &Path) -> CmdResult {
 }
 
 fn store_download(_dir: &Path, _engine: Option<&str>) -> CmdResult {
-    Err(Fail::msg("models download is not wired into this build yet"))
+    Err(Fail::msg(
+        "models download is not wired into this build yet",
+    ))
 }
 
 fn store_verify(_dir: &Path) -> CmdResult {

@@ -21,11 +21,19 @@ pub struct Job {
 
 impl Job {
     pub fn new(rel: &str, gid: &str) -> Job {
-        Job { rel: Arc::from(rel), gid: Arc::from(gid), upgrade: false }
+        Job {
+            rel: Arc::from(rel),
+            gid: Arc::from(gid),
+            upgrade: false,
+        }
     }
 
     pub fn upgrade(rel: &str, gid: &str) -> Job {
-        Job { rel: Arc::from(rel), gid: Arc::from(gid), upgrade: true }
+        Job {
+            rel: Arc::from(rel),
+            gid: Arc::from(gid),
+            upgrade: true,
+        }
     }
 
     /// `path.parent.relative_to(library).as_posix()`: `"."` for a root-level volume.
@@ -66,7 +74,10 @@ pub fn stem_of(rel: &str) -> &str {
 /// The library-relative posix path of `path`, or None outside the library.
 pub fn rel_of(library: &Path, path: &Path) -> Option<String> {
     let rel = path.strip_prefix(library).ok()?;
-    let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
     if parts.is_empty() || parts.iter().any(|p| p == "..") {
         return None;
     }
@@ -122,9 +133,14 @@ impl LibraryFacts for FileFacts {
         let Some(sidecar) = bunko_library::sidecar::primary_sidecar(cbz) else {
             return 0;
         };
-        let series = cbz.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let series = cbz
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let meta = std::fs::metadata(&sidecar).ok();
-        let (entry, _) = bunko_library::compiler::compile_volume(&series, cbz, Some(&sidecar), meta.as_ref());
+        let (entry, _) =
+            bunko_library::compiler::compile_volume(&series, cbz, Some(&sidecar), meta.as_ref());
         bunko_library::schema::missing_page_count(entry.page_count, entry.matched_page_count)
     }
 }
@@ -147,11 +163,14 @@ pub type ThumbnailCount = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 impl LibraryFacts for StoreFacts {
     fn missing_pages(&self, cbz: &Path) -> i64 {
-        bunko_library::compiler::missing_pages_now(self.store.as_ref(), &self.library, cbz).unwrap_or(0)
+        bunko_library::compiler::missing_pages_now(self.store.as_ref(), &self.library, cbz)
+            .unwrap_or(0)
     }
 
     fn page_count(&self, cbz: &Path) -> Option<i64> {
-        bunko_library::compiler::cached_page_count(self.store.as_ref(), &self.library, cbz).ok().flatten()
+        bunko_library::compiler::cached_page_count(self.store.as_ref(), &self.library, cbz)
+            .ok()
+            .flatten()
     }
 
     fn sidecar_installed(&self, cbz: &Path) {

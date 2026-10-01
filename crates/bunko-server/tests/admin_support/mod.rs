@@ -46,7 +46,8 @@ pub struct Reply {
 
 impl Reply {
     pub fn json(&self) -> Value {
-        serde_json::from_slice(&self.bytes).unwrap_or_else(|e| panic!("not JSON ({e}): {}", String::from_utf8_lossy(&self.bytes)))
+        serde_json::from_slice(&self.bytes)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {}", String::from_utf8_lossy(&self.bytes)))
     }
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.bytes).into_owned()
@@ -69,12 +70,22 @@ impl Harness {
         let layout = config.storage.layout();
         layout.ensure_directories().expect("dirs");
         let db = Arc::new(
-            Database::open_with(layout.database(), &DbOptions { bcrypt_cost: 4, ..DbOptions::default() }).expect("db"),
+            Database::open_with(
+                layout.database(),
+                &DbOptions {
+                    bcrypt_cost: 4,
+                    ..DbOptions::default()
+                },
+            )
+            .expect("db"),
         );
         let config_path = dir.path().join("config.yaml");
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
-        let backend = Arc::new(DbAuthBackend { db: db.clone(), layout: layout.clone() });
+        let backend = Arc::new(DbAuthBackend {
+            db: db.clone(),
+            layout: layout.clone(),
+        });
         let core = Core::new(config.clone(), Some(config_path.clone()), backend);
         let dropped: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
         let restarts = Arc::new(AtomicUsize::new(0));
@@ -86,27 +97,53 @@ impl Harness {
             ocr: opts.ocr.unwrap_or_else(|| Arc::new(NoOcr)),
             tunnel: None,
             dyndns: Some(dyndns.clone()),
-            updates: opts.updates.map(|src| UpdateService::new(src, config.clone())),
-            drop_processors: Some(Arc::new(move |u: &str, why: &str| d2.lock().push((u.to_string(), why.to_string())))),
+            updates: opts
+                .updates
+                .map(|src| UpdateService::new(src, config.clone())),
+            drop_processors: Some(Arc::new(move |u: &str, why: &str| {
+                d2.lock().push((u.to_string(), why.to_string()))
+            })),
             restart: Some(Arc::new(move || {
                 r2.fetch_add(1, Ordering::SeqCst);
             })),
         });
-        Harness { dir, db, core, app, config_path, dyndns, dropped, restarts }
+        Harness {
+            dir,
+            db,
+            core,
+            app,
+            config_path,
+            dyndns,
+            dropped,
+            restarts,
+        }
     }
 
     /// Create an active account with `role` and return a bearer token for it.
     pub fn login(&self, username: &str, role: Role) -> String {
-        self.db.create_user(username, "password123", role, UserStatus::Active, "").expect("create user");
-        self.db.create_auth_token(username, TokenKind::Web, "test", None).expect("token").0
+        self.db
+            .create_user(username, "password123", role, UserStatus::Active, "")
+            .expect("create user");
+        self.db
+            .create_auth_token(username, TokenKind::Web, "test", None)
+            .expect("token")
+            .0
     }
 
     pub fn admin(&self) -> String {
         self.login("boss", Role::Admin)
     }
 
-    pub async fn call(&self, method: &str, path: &str, token: Option<&str>, body: Option<Value>) -> Reply {
-        let mut req = Request::builder().method(Method::from_bytes(method.as_bytes()).unwrap()).uri(path);
+    pub async fn call(
+        &self,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: Option<Value>,
+    ) -> Reply {
+        let mut req = Request::builder()
+            .method(Method::from_bytes(method.as_bytes()).unwrap())
+            .uri(path);
         if let Some(t) = token {
             req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
         }
@@ -121,11 +158,16 @@ impl Harness {
     }
 
     pub async fn raw(&self, method: &str, path: &str, token: Option<&str>, body: Vec<u8>) -> Reply {
-        let mut req = Request::builder().method(Method::from_bytes(method.as_bytes()).unwrap()).uri(path);
+        let mut req = Request::builder()
+            .method(Method::from_bytes(method.as_bytes()).unwrap())
+            .uri(path);
         if let Some(t) = token {
             req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
         }
-        let req = req.header(header::CONTENT_LENGTH, body.len()).body(Body::from(body)).unwrap();
+        let req = req
+            .header(header::CONTENT_LENGTH, body.len())
+            .body(Body::from(body))
+            .unwrap();
         self.send(req).await
     }
 
@@ -133,8 +175,15 @@ impl Harness {
         let resp = self.app.clone().oneshot(req).await.expect("infallible");
         let status = resp.status();
         let headers = resp.headers().clone();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.expect("body").to_vec();
-        Reply { status, headers, bytes }
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body")
+            .to_vec();
+        Reply {
+            status,
+            headers,
+            bytes,
+        }
     }
 
     /// The audit rows, newest first.

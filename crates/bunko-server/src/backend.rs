@@ -13,14 +13,24 @@ pub struct DbAuthBackend {
 }
 
 fn to_auth(u: bunko_db::User) -> AuthUser {
-    AuthUser { id: u.id, username: u.username, role: u.role }
+    AuthUser {
+        id: u.id,
+        username: u.username,
+        role: u.role,
+    }
 }
 
 impl DbAuthBackend {
     /// Physical path of a virtual DAV path (0.5.2 `PathMapper.virtual_to_physical`), without
     /// resolving symlinks.
-    pub fn virtual_to_physical(&self, virtual_path: &str, username: Option<&str>) -> Option<PathBuf> {
-        let rel = virtual_path.trim_start_matches('/').strip_prefix(paths::READER_ROOT)?;
+    pub fn virtual_to_physical(
+        &self,
+        virtual_path: &str,
+        username: Option<&str>,
+    ) -> Option<PathBuf> {
+        let rel = virtual_path
+            .trim_start_matches('/')
+            .strip_prefix(paths::READER_ROOT)?;
         let rel = rel.trim_start_matches('/');
         if paths::PER_USER_FILES.contains(&rel) {
             return Some(self.layout.users().join(username?).join(rel));
@@ -54,14 +64,19 @@ impl AuthBackend for DbAuthBackend {
     }
 
     fn can_user_delete_library_path(&self, username: &str, virtual_path: &str) -> bool {
-        self.db.can_user_delete_library_path(username, virtual_path).unwrap_or(false)
+        self.db
+            .can_user_delete_library_path(username, virtual_path)
+            .unwrap_or(false)
     }
 
     fn can_user_edit_series(&self, username: &str, series_title: &str) -> bool {
-        self.db.can_user_edit_series(username, series_title).unwrap_or(false)
+        self.db
+            .can_user_edit_series(username, series_title)
+            .unwrap_or(false)
     }
 
     fn physical_exists(&self, virtual_path: &str, username: Option<&str>) -> bool {
-        self.virtual_to_physical(virtual_path, username).is_some_and(|p| p.exists())
+        self.virtual_to_physical(virtual_path, username)
+            .is_some_and(|p| p.exists())
     }
 }

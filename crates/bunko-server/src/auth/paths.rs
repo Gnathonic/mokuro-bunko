@@ -86,7 +86,10 @@ pub fn is_compiled_metadata_path(path: &str) -> bool {
 
 /// The path part of a `Destination` header (absolute URI or bare path, percent-encoded).
 pub fn destination_path(header: &str) -> Option<String> {
-    let decoded = percent_encoding::percent_decode_str(header).decode_utf8().ok()?.into_owned();
+    let decoded = percent_encoding::percent_decode_str(header)
+        .decode_utf8()
+        .ok()?
+        .into_owned();
     let path = if let Some(rest) = decoded.split_once("://").map(|(_, r)| r) {
         match rest.find('/') {
             Some(i) => rest[i..].to_string(),
@@ -118,15 +121,24 @@ mod tests {
         assert!(is_catalog_file_path("/mokuro-reader//CATALOG.json"));
         assert!(is_catalog_file_path("/mokuro-reader/x/../catalog.json"));
         assert!(!is_catalog_file_path("/mokuro-reader/S/catalog.json"));
-        assert_eq!(series_title_from_series_file_path("/mokuro-reader/One Piece/series.json").as_deref(), Some("One Piece"));
-        assert_eq!(series_title_from_series_file_path("/mokuro-reader/./One Piece/Series.JSON").as_deref(), Some("One Piece"));
+        assert_eq!(
+            series_title_from_series_file_path("/mokuro-reader/One Piece/series.json").as_deref(),
+            Some("One Piece")
+        );
+        assert_eq!(
+            series_title_from_series_file_path("/mokuro-reader/./One Piece/Series.JSON").as_deref(),
+            Some("One Piece")
+        );
         assert!(series_title_from_series_file_path("/mokuro-reader/a/b/series.json").is_none());
         assert!(series_title_from_series_file_path("/mokuro-reader/ /series.json").is_none());
     }
 
     #[test]
     fn destination() {
-        assert_eq!(destination_path("http://h:1/mokuro-reader/a%20b/c.cbz").as_deref(), Some("/mokuro-reader/a b/c.cbz"));
+        assert_eq!(
+            destination_path("http://h:1/mokuro-reader/a%20b/c.cbz").as_deref(),
+            Some("/mokuro-reader/a b/c.cbz")
+        );
         assert_eq!(destination_path("/x/y").as_deref(), Some("/x/y"));
         assert_eq!(destination_path("").as_deref(), None);
     }
