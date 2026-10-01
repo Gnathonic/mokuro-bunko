@@ -1,0 +1,28 @@
+[package]
+name = "bunko-vlm"
+description = "hayai-nova and paddle-manga line recognizers on ONNX Runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# GPU execution providers, forwarded to `ort` (each makes `ort` fetch a matching ONNX Runtime build).
+cuda = ["ort/cuda"]
+webgpu = ["ort/webgpu"]
+directml = ["ort/directml"]
+coreml = ["ort/coreml"]
+
+[dependencies]
+ort = { workspace = true, features = ["std", "ndarray", "half", "download-binaries", "copy-dylibs", "tracing", "tls-rustls"] }
+half = { version = "2", default-features = false, features = ["std"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+image = { workspace = true }
+unicode-normalization = "0.1.24"
