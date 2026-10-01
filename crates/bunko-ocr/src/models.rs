@@ -44,6 +44,18 @@ pub struct Source {
 /// One file of the manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelFile {
+    /// The engine the file belongs to (`ppocr-manga`, `hayai-nova`, `paddle-manga`).
+    #[serde(default)]
+    pub engine: String,
+    /// What the file is to its engine (`detector`, `vision`, `decoder`, `embed`, ...).
+    #[serde(default)]
+    pub role: String,
+    /// `fp32` / `fp16` for weights that come in both; none for shared files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision: Option<String>,
+    /// For ONNX external data: the `.onnx` file (manifest id) that loads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_of: Option<String>,
     /// Stable id, e.g. `ppocr-manga/det-v0.2`.
     pub id: String,
     /// Path under `<storage>/models/`.
@@ -75,6 +87,22 @@ pub const PPOCR_DETECTOR: &str = "ppocr-manga/det-v0.2";
 pub const PPOCR_RECOGNIZER: &str = "ppocr-manga/rec-v0.2";
 pub const PPOCR_DICTIONARY: &str = "ppocr-manga/dict-v6";
 
+/// The upstream repo an exported engine's weights come from (the sidecar's
+/// `ocr_engine.weights` names every source; this is the primary one).
+fn release_source(engine: &str) -> (&'static str, &'static str) {
+    match engine {
+        "hayai-nova" => (
+            "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+            "e46d79138499600564f810d44ab6bdea7230dee1",
+        ),
+        "paddle-manga" => (
+            "sorryhyun/paddleocr-vl-1.6-manga-lora",
+            "26292839d1469c14212a12a1e01b5b1fe01bff15",
+        ),
+        _ => ("", ""),
+    }
+}
+
 fn hf(repo: &str, rev: &str, path: &str) -> String {
     format!("https://huggingface.co/{repo}/resolve/{rev}/{path}")
 }
@@ -82,11 +110,24 @@ fn hf(repo: &str, rev: &str, path: &str) -> String {
 impl Manifest {
     /// The manifest compiled into this build.
     pub fn builtin() -> Self {
-        let ppocr = |id: &str, file: &str, sha256: &str, size: u64| ModelFile {
+        let release_name = |id: &str| {
+            crate::models_release::PPOCR_RELEASE_NAMES
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, f)| *f)
+        };
+        let ppocr = |id: &str, file: &str, role: &str, sha256: &str, size: u64| ModelFile {
+            engine: "ppocr-manga".into(),
+            role: role.into(),
+            precision: file.ends_with(".onnx").then(|| "fp32".into()),
+            part_of: None,
             id: id.into(),
             path: format!("ppocr-manga/{}", file.rsplit('/').next().unwrap_or(file)),
             url: hf(PPOCR_REPO, PPOCR_REVISION, file),
-            mirrors: Vec::new(),
+            // The models-v1 release carries the same bytes under a flat name.
+            mirrors: release_name(id)
+                .map(|f| vec![format!("{}/{f}", crate::models_release::RELEASE_BASE_URL)])
+                .unwrap_or_default(),
             sha256: sha256.into(),
             size,
             license: "Apache-2.0".into(),
@@ -96,28 +137,62 @@ impl Manifest {
                 path: file.into(),
             },
         };
-        Manifest {
-            files: vec![
-                ppocr(
-                    PPOCR_DETECTOR,
-                    "det/manga_det_v0.2.onnx",
-                    "d132078c46e292b226fb5a2ca52a7612ad319262dfdf493e7d8e3be435295978",
-                    1_816_954,
-                ),
-                ppocr(
-                    PPOCR_RECOGNIZER,
-                    "rec/manga_rec_v0.2.onnx",
-                    "de12c84c63e62c80339e882e675983d886670dcb6f0147e1ed041afd6fa81888",
-                    21_167_540,
-                ),
-                ppocr(
-                    PPOCR_DICTIONARY,
-                    "ppocrv6_dict.txt",
-                    "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
-                    74_947,
-                ),
-            ],
+        let mut files = vec![
+            ppocr(
+                PPOCR_DETECTOR,
+                "det/manga_det_v0.2.onnx",
+                "detector",
+                "d132078c46e292b226fb5a2ca52a7612ad319262dfdf493e7d8e3be435295978",
+                1_816_954,
+            ),
+            ppocr(
+                PPOCR_RECOGNIZER,
+                "rec/manga_rec_v0.2.onnx",
+                "recognizer",
+                "de12c84c63e62c80339e882e675983d886670dcb6f0147e1ed041afd6fa81888",
+                21_167_540,
+            ),
+            ppocr(
+                PPOCR_DICTIONARY,
+                "ppocrv6_dict.txt",
+                "dictionary",
+                "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
+                74_947,
+            ),
+        ];
+        for f in crate::models_release::FILES {
+            let (repo, revision) = release_source(f.engine);
+            files.push(ModelFile {
+                engine: f.engine.into(),
+                role: f.role.into(),
+                precision: f.precision.map(str::to_string),
+                part_of: f.part_of.and_then(|onnx| {
+                    crate::models_release::FILES
+                        .iter()
+                        .find(|g| g.file == onnx)
+                        .map(|g| g.id.to_string())
+                }),
+                id: f.id.into(),
+                // Flat, as released: an `.onnx` finds its external data beside it by name.
+                path: f.file.into(),
+                url: format!("{}/{}", crate::models_release::RELEASE_BASE_URL, f.file),
+                mirrors: Vec::new(),
+                sha256: f.sha256.into(),
+                size: f.size,
+                license: "Apache-2.0".into(),
+                source: Source {
+                    repo: repo.into(),
+                    revision: revision.into(),
+                    path: format!("{}/{}", crate::models_release::RELEASE, f.file),
+                },
+            });
         }
+        Manifest { files }
+    }
+
+    /// Every file of one engine (all precisions).
+    pub fn engine_files(&self, engine: &str) -> Vec<&ModelFile> {
+        self.files.iter().filter(|f| f.engine == engine).collect()
     }
 
     pub fn get(&self, id: &str) -> Option<&ModelFile> {
@@ -214,32 +289,79 @@ impl ModelStore {
         self.opts.root.join(&file.path)
     }
 
+    /// Where the override directory may hold `file`: the store's layout, the upstream
+    /// repo layout, the bare upstream name, and the release asset name.
+    fn override_candidates(&self, file: &ModelFile) -> Vec<PathBuf> {
+        let Some(dir) = &self.opts.override_dir else {
+            return Vec::new();
+        };
+        let mut out = vec![dir.join(&file.path), dir.join(&file.source.path)];
+        if let Some(name) = Path::new(&file.source.path).file_name() {
+            out.push(dir.join(name));
+        }
+        for url in file.mirrors.iter().chain(std::iter::once(&file.url)) {
+            if let Some(name) = url.rsplit('/').next().filter(|n| !n.is_empty()) {
+                out.push(dir.join(name));
+            }
+        }
+        out.dedup();
+        out
+    }
+
+    /// The local copy of `id` if there is one, without hashing or downloading:
+    /// an override-directory file, or a store file of the manifest's size.
+    pub fn locate(&self, id: &str) -> Option<PathBuf> {
+        let file = self.manifest.get(id)?;
+        if let Some(found) = self
+            .override_candidates(file)
+            .into_iter()
+            .find(|c| c.is_file())
+        {
+            return Some(found);
+        }
+        let path = self.store_path(file);
+        fs::metadata(&path)
+            .ok()
+            .filter(|m| m.is_file() && m.len() == file.size)
+            .map(|_| path)
+    }
+
+    /// Whether missing files may be fetched (the `download` feature and
+    /// `MOKURO_MODELS_DOWNLOAD`).
+    pub fn can_download(&self) -> bool {
+        self.opts.download && cfg!(feature = "download")
+    }
+
+    /// Hash the local copy of `id` against the manifest (`models verify`): `None`
+    /// when there is no local copy.
+    pub fn verify(&self, id: &str) -> Result<Option<(PathBuf, bool)>> {
+        let Some(path) = self.locate(id) else {
+            return Ok(None);
+        };
+        let file = self.manifest.get(id).ok_or_else(|| Error::Model {
+            id: id.into(),
+            msg: "not in the manifest".into(),
+        })?;
+        let ok = sha256_file(&path)? == file.sha256;
+        Ok(Some((path, ok)))
+    }
+
     /// Local path of `id`, downloading it if needed and allowed.
     pub fn ensure(&self, id: &str) -> Result<Resolved> {
         let file = self.manifest.get(id).ok_or_else(|| Error::Model {
             id: id.into(),
             msg: "not in the manifest".into(),
         })?;
-        if let Some(dir) = &self.opts.override_dir {
-            let name = Path::new(&file.source.path)
-                .file_name()
-                .map(PathBuf::from)
-                .unwrap_or_default();
-            for candidate in [
-                dir.join(&file.path),
-                dir.join(&file.source.path),
-                dir.join(name),
-            ] {
-                if candidate.is_file() {
-                    let verified = sha256_file(&candidate)? == file.sha256;
-                    if !verified {
-                        warn!(id, path = %candidate.display(), "model file from the override directory does not match the manifest");
-                    }
-                    return Ok(Resolved {
-                        path: candidate,
-                        verified,
-                    });
+        for candidate in self.override_candidates(file) {
+            if candidate.is_file() {
+                let verified = override_verified(&candidate, &file.sha256)?;
+                if !verified {
+                    warn!(id, path = %candidate.display(), "model file from the override directory does not match the manifest");
                 }
+                return Ok(Resolved {
+                    path: candidate,
+                    verified,
+                });
             }
         }
         let path = self.store_path(file);
@@ -304,6 +426,7 @@ impl ModelStore {
         ));
         let mut errors: Vec<String> = Vec::new();
         for url in file.mirrors.iter().chain(std::iter::once(&file.url)) {
+            info!(id = %file.id, %url, size = file.size, "downloading model file");
             match fetch_to(url, &part, file.size) {
                 Ok(()) => {
                     let got = sha256_file(&part)?;
@@ -325,6 +448,33 @@ impl ModelStore {
             msg: format!("download failed: {}", errors.join("; ")),
         })
     }
+}
+
+/// sha256 checks of override-directory files, remembered for the process by
+/// (path, size, mtime): the override is never written to, and multi-gigabyte
+/// exports should be hashed once, not at every session open.
+fn override_verified(path: &Path, sha256: &str) -> Result<bool> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Key = (PathBuf, u64, u128, String);
+    static SEEN: OnceLock<Mutex<HashMap<Key, bool>>> = OnceLock::new();
+    let meta = fs::metadata(path).map_err(|e| Error::io(path, e))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let key = (path.to_path_buf(), meta.len(), mtime, sha256.to_string());
+    let seen = SEEN.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&ok) = seen.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+        return Ok(ok);
+    }
+    let ok = sha256_file(path)? == sha256;
+    seen.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key, ok);
+    Ok(ok)
 }
 
 fn stamp_of(path: &Path) -> PathBuf {
@@ -373,12 +523,30 @@ fn download(url: &str, part: &Path, expected: u64) -> Result<()> {
     let mut body = resp.into_body();
     let mut reader = body.as_reader();
     let mut buf = vec![0u8; 1 << 16];
+    let started = std::time::Instant::now();
+    let mut last_report = started;
+    let mut got: u64 = if resumed { have } else { 0 };
+    let name = url.rsplit('/').next().unwrap_or(url);
     loop {
         let n = reader.read(&mut buf).map_err(|e| err(e.to_string()))?;
         if n == 0 {
             break;
         }
         out.write_all(&buf[..n]).map_err(|e| Error::io(part, e))?;
+        got += n as u64;
+        // Progress for the log: a multi-gigabyte model takes minutes.
+        if last_report.elapsed() >= std::time::Duration::from_secs(5) {
+            last_report = std::time::Instant::now();
+            let secs = started.elapsed().as_secs_f64().max(0.001);
+            let fetched = got - if resumed { have } else { 0 };
+            info!(
+                "downloading {name}: {} / {} MB ({:.0}%), {:.1} MB/s",
+                got / 1_000_000,
+                expected / 1_000_000,
+                100.0 * got as f64 / expected.max(1) as f64,
+                fetched as f64 / 1e6 / secs
+            );
+        }
     }
     out.sync_all().map_err(|e| Error::io(part, e))?;
     Ok(())
@@ -427,6 +595,10 @@ mod tests {
         let sha = hex::encode(Sha256::digest(&bytes));
         Manifest {
             files: vec![ModelFile {
+                engine: "t".into(),
+                role: "test".into(),
+                precision: None,
+                part_of: None,
                 id: "t/one".into(),
                 path: "t/one.bin".into(),
                 url: format!("file://{}", src.display()),
@@ -534,10 +706,58 @@ mod tests {
     #[test]
     fn builtin_manifest_is_pinned() {
         let m = Manifest::builtin();
-        assert_eq!(m.files.len(), 3);
-        for f in &m.files {
+        let ppocr = m.engine_files("ppocr-manga");
+        assert_eq!(ppocr.len(), 3);
+        for f in &ppocr {
             assert!(f.url.contains(PPOCR_REVISION));
             assert_eq!(f.sha256.len(), 64);
+            assert!(f.mirrors[0].ends_with(&format!(
+                "/models-v1/{}",
+                crate::models_release::PPOCR_RELEASE_NAMES
+                    .iter()
+                    .find(|(i, _)| *i == f.id)
+                    .unwrap()
+                    .1
+            )));
         }
+        let hayai = m.engine_files("hayai-nova");
+        assert_eq!(hayai.len(), 8);
+        let paddle = m.engine_files("paddle-manga");
+        assert_eq!(paddle.len(), 12);
+        let data = m.get("paddle-manga/decoder-data-fp16").unwrap();
+        assert_eq!(data.part_of.as_deref(), Some("paddle-manga/decoder-fp16"));
+        assert_eq!(data.path, "paddle-manga_decoder_fp16.onnx.data");
+        for f in hayai.iter().chain(&paddle) {
+            assert!(f.url.starts_with(crate::models_release::RELEASE_BASE_URL));
+            assert_eq!(f.sha256.len(), 64);
+            assert!(!f.source.revision.is_empty());
+        }
+        let mut ids: Vec<&str> = m.files.iter().map(|f| f.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), m.files.len(), "ids are unique");
+    }
+
+    #[test]
+    fn override_dir_finds_release_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("ppocr-manga_dict.txt"), b"x").unwrap();
+        let store = ModelStore::new(
+            StoreOptions {
+                root: tmp.path().join("models"),
+                override_dir: Some(tmp.path().to_path_buf()),
+                download: false,
+            },
+            Manifest::builtin(),
+        );
+        let found = store.locate(PPOCR_DICTIONARY).unwrap();
+        assert_eq!(found, tmp.path().join("ppocr-manga_dict.txt"));
+        assert!(!store.ensure(PPOCR_DICTIONARY).unwrap().verified);
+        assert!(store.locate(PPOCR_DETECTOR).is_none());
+        assert_eq!(store.verify(PPOCR_DETECTOR).unwrap(), None);
+        assert_eq!(
+            store.verify(PPOCR_DICTIONARY).unwrap(),
+            Some((found, false))
+        );
     }
 }

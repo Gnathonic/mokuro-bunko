@@ -1,7 +1,10 @@
-//! The volume cover thumbnail `<Volume>.webp` (spec §9): the cover page decoded
-//! like Pillow's `convert("RGB")`, `ImageOps.contain(img, (250, 350), LANCZOS)`
-//! (which also enlarges small covers), saved as lossy WebP, quality 85, method 6,
-//! no metadata.
+//! The volume cover thumbnail `<Volume>.webp` (spec ocr-ppocr-layout §9): the cover
+//! page decoded like Pillow's `convert("RGB")`, `ImageOps.contain(img, (250, 350),
+//! LANCZOS)` (which also enlarges small covers), saved as lossy WebP, quality 85,
+//! method 6, no metadata.
+//!
+//! Its own crate so the lite server (no ONNX Runtime) can make covers: `bunko-ocr`
+//! re-exports everything here.
 //!
 //! The resampler is a port of Pillow's `ImagingResample` (two separable passes,
 //! horizontal first, Lanczos-3 with support scaled for reduction, 22-bit fixed
@@ -9,8 +12,26 @@
 //! libwebp (BSD-3-Clause) through the `webp` crate (MIT/Apache-2.0); the `image`
 //! crate only writes lossless WebP. Byte-equality with Pillow's file is not a goal
 //! (Pillow wraps the same libwebp encoder, but container details differ by version).
+//!
+//! Memory: [`make_thumbnail_limited`] refuses images whose decode would allocate more
+//! than a caller-given budget (a hostile or broken "cover" cannot blow up a 1 GB
+//! host); peak use is the decoded RGB image plus one resampling pass.
 
-use crate::error::{Error, Result};
+/// What can go wrong making a thumbnail.
+#[derive(Debug, thiserror::Error)]
+pub enum ThumbError {
+    #[error("cannot decode image: {0}")]
+    Decode(String),
+    #[error("cannot encode image: {0}")]
+    Encode(String),
+}
+
+pub type Result<T, E = ThumbError> = std::result::Result<T, E>;
+
+/// Default decode budget of [`make_thumbnail`]: 512 MiB of pixel buffers, sides up
+/// to 32768 px (a 1700×2800 page needs 14 MiB).
+pub const DEFAULT_MAX_ALLOC: u64 = 512 * 1024 * 1024;
+pub const DEFAULT_MAX_SIDE: u32 = 32_768;
 
 /// The box the cover is fitted into: `(width, height)`.
 pub const THUMBNAIL_BOX: (u32, u32) = (250, 350);
@@ -165,8 +186,27 @@ pub fn resize_lanczos_rgb(
 
 /// Encode the cover thumbnail from a page image's file bytes: returns the WebP bytes.
 pub fn make_thumbnail(image_bytes: &[u8]) -> Result<Vec<u8>> {
-    let rgb = ::image::load_from_memory(image_bytes)
-        .map_err(|e| Error::Decode(e.to_string()))?
+    make_thumbnail_limited(image_bytes, DEFAULT_MAX_ALLOC, DEFAULT_MAX_SIDE)
+}
+
+/// [`make_thumbnail`] with a decode budget: images needing more than `max_alloc`
+/// bytes of buffers, or wider/taller than `max_side`, are refused before decoding.
+pub fn make_thumbnail_limited(
+    image_bytes: &[u8],
+    max_alloc: u64,
+    max_side: u32,
+) -> Result<Vec<u8>> {
+    let mut limits = ::image::Limits::default();
+    limits.max_alloc = Some(max_alloc);
+    limits.max_image_width = Some(max_side);
+    limits.max_image_height = Some(max_side);
+    let mut reader = ::image::ImageReader::new(std::io::Cursor::new(image_bytes))
+        .with_guessed_format()
+        .map_err(|e| ThumbError::Decode(e.to_string()))?;
+    reader.limits(limits);
+    let rgb = reader
+        .decode()
+        .map_err(|e| ThumbError::Decode(e.to_string()))?
         .into_rgb8();
     let (w, h) = (rgb.width(), rgb.height());
     let (tw, th) = contain_size(w, h, THUMBNAIL_BOX);
@@ -178,13 +218,13 @@ pub fn make_thumbnail(image_bytes: &[u8]) -> Result<Vec<u8>> {
         th as usize,
     );
     let mut config =
-        webp::WebPConfig::new().map_err(|()| Error::Encode("libwebp config".into()))?;
+        webp::WebPConfig::new().map_err(|()| ThumbError::Encode("libwebp config".into()))?;
     config.lossless = 0;
     config.quality = THUMBNAIL_QUALITY;
     config.method = THUMBNAIL_METHOD;
     let encoded = webp::Encoder::from_rgb(&pixels, tw, th)
         .encode_advanced(&config)
-        .map_err(|e| Error::Encode(format!("libwebp: {e:?}")))?;
+        .map_err(|e| ThumbError::Encode(format!("libwebp: {e:?}")))?;
     Ok(encoded.to_vec())
 }
 
@@ -218,9 +258,10 @@ mod pillow_golden {
 
     #[test]
     fn lanczos_and_contain_match_pillow() {
+        // The fixture lives with bunko-ocr's other Pillow goldens (gen_pillow_golden.py).
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/golden/pillow_golden.json"
+            "/../bunko-ocr/tests/golden/pillow_golden.json"
         );
         let f: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).expect("fixture")).expect("json");
@@ -281,5 +322,25 @@ mod pillow_golden {
         assert_eq!(&webp[12..16], b"VP8 ");
         let back = ::image::load_from_memory(&webp).expect("decode");
         assert_eq!((back.width(), back.height()), (250, 350));
+    }
+
+    #[test]
+    fn a_cover_over_the_budget_is_refused() {
+        let mut png = Vec::new();
+        ::image::RgbImage::new(2000, 3000)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png),
+                ::image::ImageFormat::Png,
+            )
+            .expect("png");
+        assert!(matches!(
+            make_thumbnail_limited(&png, 1024 * 1024, DEFAULT_MAX_SIDE),
+            Err(ThumbError::Decode(_))
+        ));
+        assert!(matches!(
+            make_thumbnail_limited(&png, DEFAULT_MAX_ALLOC, 1000),
+            Err(ThumbError::Decode(_))
+        ));
+        assert!(make_thumbnail_limited(&png, 64 * 1024 * 1024, 4000).is_ok());
     }
 }

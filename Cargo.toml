@@ -22,6 +22,8 @@ bunko-update = { path = "crates/bunko-update" }
 bunko-sched = { path = "crates/bunko-sched" }
 bunko-layout = { path = "crates/bunko-layout" }
 bunko-vlm = { path = "crates/bunko-vlm" }
+bunko-engines = { path = "crates/bunko-engines" }
+bunko-thumb = { path = "crates/bunko-thumb" }
 
 anyhow = "1"
 thiserror = "2"

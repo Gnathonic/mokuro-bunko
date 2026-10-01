@@ -5,14 +5,21 @@
 
 mod decode;
 mod resize;
-mod thumbnail;
 mod warp;
 
 pub use decode::{decode_bgr, decode_size};
 pub use resize::resize_linear;
-pub use thumbnail::{
-    THUMBNAIL_BOX, THUMBNAIL_QUALITY, contain_size, make_thumbnail, resize_lanczos_rgb,
-};
+// The cover thumbnail moved to `bunko-thumb` (no ONNX Runtime, so the lite server can
+// make covers); re-exported here so nothing that used it from this crate breaks.
+pub use bunko_thumb::{THUMBNAIL_BOX, THUMBNAIL_QUALITY, contain_size, resize_lanczos_rgb};
+
+/// Encode the cover thumbnail from a page image's file bytes (see `bunko_thumb`).
+pub fn make_thumbnail(image_bytes: &[u8]) -> crate::Result<Vec<u8>> {
+    bunko_thumb::make_thumbnail(image_bytes).map_err(|e| match e {
+        bunko_thumb::ThumbError::Decode(m) => crate::Error::Decode(m),
+        bunko_thumb::ThumbError::Encode(m) => crate::Error::Encode(m),
+    })
+}
 pub use warp::{
     Matrix3, get_perspective_transform, rotate90_ccw, rotate90_cw, warp_perspective_cubic,
 };

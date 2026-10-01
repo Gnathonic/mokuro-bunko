@@ -48,7 +48,7 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
             let opts = ServeOptions {
                 verbose: args.verbose,
                 flavor,
-                local: crate::local_ocr::factory(),
+                local: crate::local_ocr::factory(&config),
             };
             let services = Services::new(config, Some(config_path), &opts)?;
             app::announce_setup(&services);

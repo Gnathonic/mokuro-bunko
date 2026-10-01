@@ -266,7 +266,10 @@ impl Database {
     /// The raw cache row `(entry_json, cbz_size, cbz_mtime, sidecar_key)` for callers that
     /// decide validity themselves (bunko-library compares stats with its own rules).
     /// NULL columns come back as `""`, `-1`, `NaN` and `""`, which never validate.
-    pub fn cached_volume_entry_row(&self, volume_key: &str) -> Result<Option<(String, i64, f64, String)>> {
+    pub fn cached_volume_entry_row(
+        &self,
+        volume_key: &str,
+    ) -> Result<Option<(String, i64, f64, String)>> {
         self.read(|conn| {
             Ok(conn
                 .prepare_cached(

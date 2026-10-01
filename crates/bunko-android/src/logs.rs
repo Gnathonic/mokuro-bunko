@@ -31,7 +31,10 @@ pub fn init(storage: &Path) {
     set_log_dir(&storage.join("logs"));
     INIT.get_or_init(|| {
         let filter = || EnvFilter::new("info,hyper=warn,h2=warn,rustls=warn");
-        let file = tracing_subscriber::fmt::layer().with_ansi(false).with_writer(FileWriter).with_filter(filter());
+        let file = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(FileWriter)
+            .with_filter(filter());
         let tail = tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_target(false)
@@ -57,7 +60,11 @@ fn set_log_dir(dir: &Path) {
         return;
     }
     *slot = match std::fs::create_dir_all(dir) {
-        Ok(()) => Some(Rotating { size: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0), path, file: None }),
+        Ok(()) => Some(Rotating {
+            size: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
+            path,
+            file: None,
+        }),
         Err(_) => None, // logcat and the tail still work
     };
 }
@@ -105,7 +112,12 @@ impl Rotating {
             self.size = 0;
         }
         if self.file.is_none() {
-            self.file = Some(OpenOptions::new().create(true).append(true).open(&self.path)?);
+            self.file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?,
+            );
         }
         let n = match self.file.as_mut() {
             Some(f) => f.write(buf)?,
@@ -230,7 +242,10 @@ mod logcat {
     impl<'a> MakeWriter<'a> for Logcat {
         type Writer = Event;
         fn make_writer(&'a self) -> Event {
-            Event { prio: 4, buf: Vec::new() }
+            Event {
+                prio: 4,
+                buf: Vec::new(),
+            }
         }
         fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Event {
             // android/log.h: VERBOSE 2, DEBUG 3, INFO 4, WARN 5, ERROR 6.
@@ -241,7 +256,10 @@ mod logcat {
                 Level::WARN => 5,
                 Level::ERROR => 6,
             };
-            Event { prio, buf: Vec::new() }
+            Event {
+                prio,
+                buf: Vec::new(),
+            }
         }
     }
 }
@@ -253,7 +271,11 @@ mod tests {
     #[test]
     fn rotates_and_tails() {
         let d = tempfile::tempdir().unwrap();
-        let mut r = Rotating { path: d.path().join("server.log"), file: None, size: 0 };
+        let mut r = Rotating {
+            path: d.path().join("server.log"),
+            file: None,
+            size: 0,
+        };
         let chunk = vec![b'x'; 512 * 1024];
         for _ in 0..20 {
             r.write(&chunk).unwrap();

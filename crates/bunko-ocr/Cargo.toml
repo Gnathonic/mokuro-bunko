@@ -37,7 +37,7 @@ parking_lot = { workspace = true }
 flate2 = "1"
 crc32fast = "1"
 unicode-normalization = "0.1"
-webp = { version = "0.3", default-features = false }
+bunko-thumb = { path = "../bunko-thumb" }
 mozjpeg = { version = "0.10", optional = true }
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
 

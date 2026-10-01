@@ -53,6 +53,10 @@ crates/
                    layout/reconcile, sidecar writer, model store (download + verify), devices.
   bunko-processor  [feature ocr] processor runtime: job loop over a `JobSource` (HTTP to a
                    remote server, or in-process channel for local OCR), bench.
+  bunko-engines    [feature ocr] the `PagePipeline` over bunko-ocr + bunko-vlm + bunko-layout:
+                   staged pages (detect → engine → post), devices, precision, model fetch.
+  bunko-thumb      cover thumbnails (Pillow-exact contain + Lanczos, lossy WebP); no ONNX
+                   Runtime, used by the server (lite too) and re-exported by bunko-ocr.
   bunko-server     axum app: auth, sessions, all JSON APIs, static UIs (embedded), WebDAV
                    mount, OCR scheduler + processor API, catalog enrichment, TLS, tunnel,
                    dyndns, update checks.
@@ -62,7 +66,8 @@ web/               the reused frontends (moved from src/mokuro_bunko/*/web), emb
 ```
 
 Dependency direction: `core ← db ← library ← dav ← server ← mokuro-bunko`;
-`core ← proto ← {server, processor}`; `core ← ocr ← processor ← mokuro-bunko[ocr]`.
+`core ← proto ← {server, processor}`; `{ocr, vlm, layout, processor} ← engines ←
+mokuro-bunko[ocr]`; `thumb ← {ocr, server}`.
 The server never depends on `bunko-ocr`; local OCR is wired in by the binary through the
 `LocalProcessor` hook (§6), which is what keeps the lite build free of ONNX Runtime.
 
