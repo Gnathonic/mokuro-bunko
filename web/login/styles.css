@@ -1,0 +1,85 @@
+/* Login Page Styles */
+
+.login-page {
+    min-height: calc(100vh - 60px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+}
+
+.login-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    padding: 2rem;
+    width: 100%;
+    max-width: 400px;
+}
+
+.login-card__header {
+    text-align: center;
+    margin-bottom: 1.5rem;
+}
+
+.login-card__title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.5rem;
+}
+
+.login-card__subtitle {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+}
+
+.login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.login-alert {
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-md);
+    font-size: 0.875rem;
+    display: none;
+    margin-bottom: 1rem;
+}
+
+.login-alert--error {
+    background: var(--error-muted);
+    color: var(--error);
+    border: 1px solid var(--error);
+}
+
+.login-alert--error:not(:empty) {
+    display: block;
+}
+
+.register-link {
+    text-align: center;
+    margin-top: 1.5rem;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+.register-link a {
+    color: var(--accent-primary);
+    text-decoration: none;
+}
+
+.register-link a:hover {
+    text-decoration: underline;
+}
+
+@media (max-width: 480px) {
+    .login-page {
+        padding: 1rem;
+    }
+
+    .login-card {
+        padding: 1.5rem;
+    }
+}

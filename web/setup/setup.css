@@ -1,0 +1,156 @@
+/* Setup Wizard Styles */
+
+.setup-container {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+}
+
+.setup-card {
+    max-width: 520px;
+    width: 100%;
+    padding: 2.5rem;
+}
+
+/* Steps */
+.setup-step {
+    display: none;
+}
+
+.setup-step.active {
+    display: block;
+}
+
+/* Logo */
+.setup-logo {
+    text-align: center;
+    margin-bottom: 1.5rem;
+    color: var(--accent-primary);
+}
+
+.setup-logo--success {
+    color: var(--success);
+}
+
+/* Titles */
+.setup-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 0.75rem;
+    color: var(--text-primary);
+}
+
+.setup-step-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: var(--text-primary);
+}
+
+.setup-description {
+    color: var(--text-secondary);
+    font-size: 0.9375rem;
+    text-align: center;
+    margin-bottom: 0.75rem;
+    line-height: 1.5;
+}
+
+/* Actions */
+.setup-actions {
+    display: flex;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+}
+
+.setup-links {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+    align-items: center;
+}
+
+/* Progress dots */
+.setup-progress {
+    display: flex;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-top: 2rem;
+}
+
+.setup-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--bg-tertiary);
+    transition: background var(--transition-fast);
+}
+
+.setup-dot.active {
+    background: var(--accent-primary);
+}
+
+/* Radio Cards */
+.radio-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
+
+.radio-card {
+    display: block;
+    cursor: pointer;
+}
+
+.radio-card input[type="radio"] {
+    display: none;
+}
+
+.radio-card__content {
+    padding: 0.875rem 1rem;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.radio-card__content strong {
+    display: block;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    margin-bottom: 0.125rem;
+}
+
+.radio-card__content p {
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+    margin: 0;
+}
+
+.radio-card input:checked + .radio-card__content {
+    border-color: var(--accent-primary);
+    background: var(--accent-primary-muted);
+}
+
+.radio-card:hover .radio-card__content {
+    border-color: var(--border-focus);
+}
+
+/* Responsive */
+@media (max-width: 480px) {
+    .setup-container {
+        padding: 1rem;
+    }
+
+    .setup-card {
+        padding: 1.5rem;
+    }
+
+    .setup-title {
+        font-size: 1.25rem;
+    }
+}

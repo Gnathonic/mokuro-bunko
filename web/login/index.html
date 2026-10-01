@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/login/styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="mokuro-header">
+        <a href="/" class="mokuro-header__brand">
+            <div class="mokuro-header__logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M8 12h8"/>
+                    <path d="M12 8v8"/>
+                </svg>
+            </div>
+            <span class="mokuro-header__title">Mokuro</span>
+        </a>
+        <nav class="mokuro-header__nav" id="header-nav" data-current="login">
+            <a href="/" class="btn btn--ghost btn--sm">Home</a>
+            <a href="/catalog" class="btn btn--ghost btn--sm">Catalog</a>
+            <a href="/register" class="btn btn--primary btn--sm">Register</a>
+        </nav>
+    </header>
+
+    <main class="login-page">
+        <div class="login-card">
+            <div class="login-card__header">
+                <h1 class="login-card__title">Sign In</h1>
+                <p class="login-card__subtitle">Access your Mokuro library</p>
+            </div>
+
+            <div id="error-message" class="login-alert login-alert--error"></div>
+
+            <form id="login-form" class="login-form">
+                <div class="form-group">
+                    <label for="username" class="form-label">Username</label>
+                    <input
+                        type="text"
+                        id="username"
+                        name="username"
+                        class="form-input"
+                        required
+                        autocomplete="username"
+                        placeholder="Enter your username"
+                    >
+                </div>
+
+                <div class="form-group">
+                    <label for="password" class="form-label">Password</label>
+                    <input
+                        type="password"
+                        id="password"
+                        name="password"
+                        class="form-input"
+                        required
+                        autocomplete="current-password"
+                        placeholder="Enter your password"
+                    >
+                </div>
+
+                <button type="submit" id="submit-btn" class="btn btn--primary btn--full btn--lg">
+                    Sign In
+                </button>
+            </form>
+
+            <p class="register-link">
+                Don't have an account? <a href="/register">Register</a>
+            </p>
+        </div>
+    </main>
+
+    <script src="/_static/nav.js"></script>
+    <script src="/login/login.js"></script>
+</body>
+</html>

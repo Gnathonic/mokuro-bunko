@@ -1,0 +1,36 @@
+[package]
+name = "mokuro-bunko"
+description = "Self-hosted manga library server with WebDAV, OCR and multi-user support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "mokuro-bunko"
+
+[[bin]]
+name = "mokuro-bunko"
+path = "src/main.rs"
+
+[features]
+# `lite`: no default features — server only, OCR by remote processors.
+default = ["ocr"]
+# Local OCR + the `processor` subcommand (links ONNX Runtime).
+ocr = []
+# Execution providers (each implies `ocr`).
+cuda = ["ocr"]
+webgpu = ["ocr"]
+directml = ["ocr"]
+coreml = ["ocr"]
+
+[dependencies]
+bunko-core.workspace = true
+bunko-server.workspace = true
+bunko-update.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+serde_json.workspace = true
+mimalloc = { version = "0.1", default-features = false }
