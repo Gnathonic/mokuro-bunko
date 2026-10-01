@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `series.json` volumes carry `mokuro_sha256`, so readers re-download changed OCR.
+
 ## [0.5.1] - 2026-09-30
 
 ### Added
