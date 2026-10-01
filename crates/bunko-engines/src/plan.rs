@@ -66,11 +66,19 @@ pub struct StagePlan {
     pub seconds: f64,
 }
 
-/// `ENGINE_STAGE_SECONDS`, else the road's figure.
-fn stage_seconds(engine: &str, key: &str, declared: f64) -> f64 {
-    match (engine, key) {
-        ("paddle-manga", STAGE_ENGINE) => 0.915,
-        ("hayai-nova", STAGE_ENGINE) => 0.177,
+/// `ENGINE_STAGE_SECONDS` (GPU figures), the CPU engine figures, else the road's.
+///
+/// 0.5.2 only knew the GPU figures, so a CPU engine stage was sized as if it took
+/// 0.177 s a page and got three detect workers. On the CPU the engine is 10-50x
+/// slower (measured on a 16-core desktop, fp32: hayai-nova 3.6 s, paddle-manga 27 s a
+/// page), one detect worker keeps it fed, and each extra one only holds another
+/// decoded page and another detector working set in memory.
+fn stage_seconds(engine: &str, key: &str, declared: f64, gpu: bool) -> f64 {
+    match (engine, key, gpu) {
+        ("paddle-manga", STAGE_ENGINE, true) => 0.915,
+        ("hayai-nova", STAGE_ENGINE, true) => 0.177,
+        ("paddle-manga", STAGE_ENGINE, false) => 27.0,
+        ("hayai-nova", STAGE_ENGINE, false) => 3.6,
         _ => declared,
     }
 }
@@ -147,7 +155,7 @@ pub fn plan(
     };
     let costs: Vec<f64> = declared
         .iter()
-        .map(|d| stage_seconds(engine, d.0, d.4))
+        .map(|d| stage_seconds(engine, d.0, d.4, d.2.starts_with("gpu")))
         .collect();
     let ceiling = budget.clamp(1, CPU_WORKERS_MAX);
     let bound = declared
@@ -257,6 +265,11 @@ mod tests {
         let p = plan("paddle-manga", Road::Reconciled, "gpu:0", &none, 3);
         assert_eq!(widths(&p), vec![(1, 4), (1, 1), (1, 1)]);
         // ppocr-manga: detect takes the ceiling, the layout one worker.
+        // A CPU engine is slow enough that one detect worker keeps it fed.
+        let p = plan("hayai-nova", Road::Reconciled, "cpu", &none, 3);
+        assert_eq!(widths(&p), vec![(1, 4), (1, 1), (1, 1)]);
+        let p = plan("paddle-manga", Road::Reconciled, "cpu", &none, 3);
+        assert_eq!(widths(&p), vec![(1, 4), (1, 1), (1, 1)]);
         let p = plan("ppocr-manga", Road::Line, "cpu", &none, 7);
         assert_eq!(widths(&p), vec![(4, 4), (1, 1)]);
         let p = plan("ppocr-manga", Road::Line, "cpu", &none, 1);
@@ -273,6 +286,7 @@ mod tests {
         assert_eq!(widths(&p), vec![(6, 6), (8, 8), (1, 8)]);
         let p = plan("hayai-nova", Road::Reconciled, "cpu", &pools, 3);
         assert_eq!(p[1].workers, 1, "the CPU engine stage is one worker");
+        assert_eq!(p[0].workers, 6, "an explicit width still wins on the CPU");
         pools.stage_workers.insert("detect".into(), 0);
         let p = plan("hayai-nova", Road::Reconciled, "cpu", &pools, 3);
         assert_eq!(p[0].workers, 1);

@@ -416,6 +416,7 @@ dependencies = [
  "bunko-proto",
  "bunko-vlm",
  "image",
+ "mimalloc",
  "ort",
  "parking_lot",
  "serde_json",

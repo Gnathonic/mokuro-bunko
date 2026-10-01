@@ -140,7 +140,10 @@ pub fn authenticate(
         },
         Ok(Some((username, password))) => {
             if let Some(user) = backend.cached_login(&username, &password) {
-                return Identity { user: Some(user), ..Default::default() };
+                return Identity {
+                    user: Some(user),
+                    ..Default::default()
+                };
             }
             let key = format!("{client_ip}:{username}");
             if let Err(retry) = limiter.allow_blocking(&key) {

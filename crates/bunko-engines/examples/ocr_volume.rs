@@ -5,16 +5,39 @@
 //! MOKURO_MODELS_DIR=~/.cache/mokuro-bunko-demo/models-v1 \
 //! cargo run -p bunko-engines --release --example ocr_volume -- \
 //!     hayai-nova path/to/volume.cbz out.mokuro [--backend cpu] [--precision fp32] \
-//!     [--stage-workers detect=3] [--device gpu:0]
+//!     [--stage-workers detect=3] [--device gpu:0] [--uuids TITLE,VOLUME]
 //! ```
+//!
+//! Memory is reported from `/proc/self/status` (Linux): RSS once the session is
+//! loaded, the mean and largest RSS sampled every 50 ms while the volume runs, the
+//! RSS at the end, and the process peak (`VmHWM`). The example uses mimalloc like the
+//! `mokuro-bunko` binary, so the figures match the server's. `--uuids` fixes the
+//! sidecar's title/volume uuids so two runs can be compared byte for byte.
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use bunko_engines::{Backend, EngineConfig, EnginePipeline};
 use bunko_processor::{CancelToken, PagePipeline, PageProgress, VolumeMeta};
 use bunko_proto::{PoolsSpec, RowSpec};
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// A `/proc/self/status` field in MiB (0 where there is none).
+fn status_mib(field: &str) -> f64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with(field))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<f64>().ok())
+        })
+        .map_or(0.0, |kb| kb / 1024.0)
+}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -33,6 +56,7 @@ fn main() -> Result<()> {
     let mut precision = "auto-accuracy".to_string();
     let mut pools = PoolsSpec::default();
     let mut models = std::env::temp_dir().join("bunko-engines-models");
+    let mut uuids: (Option<String>, Option<String>) = (None, None);
     let mut i = 3;
     while i + 1 < args.len() {
         let v = &args[i + 1];
@@ -43,6 +67,10 @@ fn main() -> Result<()> {
                 pools.stage_device.insert("engine".into(), v.clone());
             }
             "--models" => models = PathBuf::from(v),
+            "--uuids" => {
+                let (t, v) = v.split_once(',').context("--uuids TITLE,VOLUME")?;
+                uuids = (Some(t.into()), Some(v.into()));
+            }
             "--stage-workers" => {
                 for kv in v.split(',') {
                     let (k, n) = kv.split_once('=').context("k=n")?;
@@ -81,11 +109,14 @@ fn main() -> Result<()> {
         claim: "v1".into(),
         title: "Series".into(),
         volume: stem.clone(),
-        title_uuid: None,
-        volume_uuid: None,
+        title_uuid: uuids.0,
+        volume_uuid: uuids.1,
         stem,
         sidecar_name: out.file_name().unwrap().to_string_lossy().into_owned(),
     };
+    let loaded_rss = status_mib("VmRSS:");
+    let loaded_split = (status_mib("RssAnon:"), status_mib("RssFile:"));
+    let sampling = AtomicBool::new(true);
     let t1 = Instant::now();
     let first = std::sync::Mutex::new(None::<f64>);
     let progress = |p: PageProgress| {
@@ -99,10 +130,32 @@ fn main() -> Result<()> {
             }
         }
     };
-    let outcome = runner
-        .run_volume(&archive, &meta, &out, &progress, &CancelToken::new())
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (outcome, samples) = std::thread::scope(|scope| {
+        let sampler = scope.spawn(|| {
+            let mut samples = Vec::new();
+            while sampling.load(Ordering::Relaxed) {
+                samples.push(status_mib("VmRSS:"));
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            samples
+        });
+        let outcome = runner.run_volume(&archive, &meta, &out, &progress, &CancelToken::new());
+        sampling.store(false, Ordering::Relaxed);
+        (outcome, sampler.join().unwrap_or_default())
+    });
+    let outcome = outcome.map_err(|e| anyhow::anyhow!("{e}"))?;
     let secs = t1.elapsed().as_secs_f64();
+    let mean = samples.iter().sum::<f64>() / samples.len().max(1) as f64;
+    let max = samples.iter().copied().fold(0.0f64, f64::max);
+    println!(
+        "rss_mib: loaded={loaded_rss:.0} run_mean={mean:.0} run_max={max:.0} end={:.0} peak_hwm={:.0} (anon/file: loaded={:.0}/{:.0} end={:.0}/{:.0})",
+        status_mib("VmRSS:"),
+        status_mib("VmHWM:"),
+        loaded_split.0,
+        loaded_split.1,
+        status_mib("RssAnon:"),
+        status_mib("RssFile:"),
+    );
     let first = first.lock().unwrap().unwrap_or(0.0);
     println!(
         "pages={} failed={} seconds={secs:.2} pages/s={:.3} steady pages/s={:.3} (first page at {first:.2}s)",

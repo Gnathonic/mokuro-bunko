@@ -114,6 +114,9 @@ pub struct RecognizerInfo {
     pub device: Device,
     /// Whether per-line token caps are honoured (paddle-manga).
     pub token_caps: bool,
+    /// Whether [`Recognizer::second_crop`] gives crops (paddle-manga), i.e. whether a
+    /// caller must keep the page image after the first-read crops are cut.
+    pub second_read: bool,
     /// Generated-token limit when no cap is given.
     pub default_max_tokens: u32,
     /// Crops per generation batch.

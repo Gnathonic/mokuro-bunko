@@ -2,11 +2,11 @@
 
     ~/.cache/mokuro-bunko-demo/ref052/bin/python gen_golden.py
 
-Imports ``mokuro_bunko`` from this worktree's ``src/`` (the ref052 env does)
+Imports ``mokuro_bunko`` 0.5.2 through the ref052 env (an editable install of the ../ref-0.5.2 checkout)
 and writes ``cases/*.json``. Inputs:
 
 * ``inputs/real_pages.json``: real PP-OCR line records (``harvest_pages.py``);
-* ``<repo>/tests/fixtures/ppocr/*.json``: the 0.5.2 test fixture pages;
+* ``tests/golden/fixtures/ppocr/*.json``: the 0.5.2 test fixture pages (copied from 0.5.2's ``tests/fixtures/ppocr``);
 * ``inputs/page129-*.detect.json``: a real reconciled-road raw dump with the
   VLM engines' actual first and second reads (research run 2026-09-19);
 * seeded synthetic pages and seeded text mutations made here.
@@ -42,7 +42,7 @@ from mokuro_bunko.metadata.reader_compat import deterministic_uuid
 
 CASES = HERE / "cases"
 INPUTS = HERE / "inputs"
-FIXTURES = ROOT / "tests" / "fixtures" / "ppocr"
+FIXTURES = HERE / "fixtures" / "ppocr"
 VERSION = er.MOKURO_FORMAT_VERSION
 
 # ---------------------------------------------------------------------------

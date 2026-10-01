@@ -1,6 +1,8 @@
 //! What each stage does to a page (spec ocr-recognizers §2.3-§2.4, ocr-ppocr-layout
 //! §5, §7): detect + CTC read with the page-level passes; the engine's first read,
-//! reconcile, second read and verdicts; the layout into a mokuro page.
+//! reconcile, second read and verdicts; the layout into a mokuro page. On the
+//! reconciled road the detect stage also plans the engine road and cuts the
+//! first-read crops, so decoded pages do not wait in the engine's queue.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -12,7 +14,7 @@ use bunko_layout::reconcile::Reconciled;
 use bunko_layout::records::{RawLine, RawPage};
 use bunko_layout::road::EngineRoad;
 use bunko_layout::sidecar::{MOKURO_FORMAT_VERSION, Page, finish_page};
-use bunko_ocr::image::{BgrImage, decode_bgr, decode_size};
+use bunko_ocr::image::{decode_bgr, decode_size};
 use bunko_ocr::lines::{DetectorInfo, RawPage as OcrRawPage};
 use bunko_ocr::ppocr::{LayoutHooks, Line, PpocrPageReader, ReadLines};
 use bunko_vlm::{Bgr, CropSet, Recognizer};
@@ -59,9 +61,22 @@ pub enum State {
     Failed(String),
 }
 
+/// A detected page. The page image is not carried on (a decoded page is ~15 MB and
+/// the queue in front of the engine holds several): the engine's first-read crops
+/// are cut here, and the image is kept only for a recognizer that may take a second
+/// read of doubted lines (paddle-manga).
 pub struct Detected {
-    image: BgrImage,
     read: ReadLines<PageLayout>,
+    first: Option<FirstRead>,
+}
+
+/// The engine road's plan and first-read crops of a page, cut in the detect stage.
+pub struct FirstRead {
+    lines: Vec<RawLine>,
+    road: EngineRoad,
+    crops: Vec<CropSet>,
+    /// The page, for second-read crops.
+    page: Option<Bgr>,
 }
 
 pub struct Engined {
@@ -203,13 +218,33 @@ impl Engines {
         };
         drop(bytes);
         work.size = Some((image.width() as i64, image.height() as i64));
-        match self.reader.read_lines(&image, &LayoutBridge) {
-            Ok(read) => {
-                work.state = State::Detected(Box::new(Detected { image, read }));
-                work
+        let read = match self.reader.read_lines(&image, &LayoutBridge) {
+            Ok(read) => read,
+            Err(e) => return work.fail(e.to_string()),
+        };
+        let first = self.recognizer.as_ref().map(|rec| {
+            let lines: Vec<RawLine> = read.lines.iter().map(to_layout_line).collect();
+            let road = EngineRoad::plan(&lines, &read.first);
+            let (iw, ih) = (image.width(), image.height());
+            let page = Bgr {
+                width: iw,
+                height: ih,
+                data: image.into_raw(),
+            };
+            let crops: Vec<CropSet> = road
+                .targets
+                .iter()
+                .map(|&i| rec.crop(&page, &quad_of(&lines[i]), lines[i].vertical))
+                .collect();
+            FirstRead {
+                lines,
+                road,
+                crops,
+                page: rec.info().second_read.then_some(page),
             }
-            Err(e) => work.fail(e.to_string()),
-        }
+        });
+        work.state = State::Detected(Box::new(Detected { read, first }));
+        work
     }
 
     /// The line road's second stage: `layout + dump`.
@@ -245,17 +280,18 @@ impl Engines {
             return work.fail("this session has no recognizer");
         };
         let (w, h) = work.size.unwrap_or((0, 0));
-        let (image, read) = match std::mem::replace(&mut work.state, State::Failed(String::new())) {
-            State::Detected(d) => (d.image, d.read),
+        let (read, first) = match std::mem::replace(&mut work.state, State::Failed(String::new())) {
+            State::Detected(d) => (d.read, d.first),
             _ => return work.fail("engine got a page that was not detected"),
         };
-        let mut lines: Vec<RawLine> = read.lines.iter().map(to_layout_line).collect();
-        let road = EngineRoad::plan(&lines, &read.first);
-        let (iw, ih) = (image.width(), image.height());
-        let page = Bgr {
-            width: iw,
-            height: ih,
-            data: image.into_raw(),
+        let Some(FirstRead {
+            mut lines,
+            road,
+            crops,
+            page,
+        }) = first
+        else {
+            return work.fail("engine got a page without first-read crops");
         };
         let caps: Option<Vec<u32>> = rec.info().token_caps.then(|| {
             road.token_caps()
@@ -263,11 +299,6 @@ impl Engines {
                 .map(|c| c.clamp(0, i64::from(u32::MAX)) as u32)
                 .collect()
         });
-        let crops: Vec<CropSet> = road
-            .targets
-            .iter()
-            .map(|&i| rec.crop(&page, &quad_of(&lines[i]), lines[i].vertical))
-            .collect();
         let texts = match rec.read(&crops, caps.as_deref()) {
             Ok(t) => t,
             Err(e) => return work.fail(format!("recognizer: {e}")),
@@ -275,12 +306,14 @@ impl Engines {
         drop(crops);
         let mut settled = road.reconcile_first(&lines, &texts);
         let doubted = road.doubted(&settled);
-        if !doubted.is_empty() {
+        if let Some(page) = page.as_ref()
+            && !doubted.is_empty()
+        {
             let second: Option<Vec<CropSet>> = doubted
                 .iter()
                 .map(|&k| {
                     let i = road.targets[k];
-                    rec.second_crop(&page, &quad_of(&lines[i]), lines[i].vertical)
+                    rec.second_crop(page, &quad_of(&lines[i]), lines[i].vertical)
                 })
                 .collect();
             // Only recognizers with a wider second crop (paddle-manga) read twice.
@@ -295,6 +328,11 @@ impl Engines {
             }
         }
         drop(page);
+        if rec.info().device == bunko_vlm::Device::Cpu {
+            // A CPU page takes seconds; a trim takes milliseconds and keeps what the
+            // recognizer and detector freed from piling up (−150 MB peak, hayai-nova).
+            crate::runtime::trim_heap();
+        }
         road.apply(&mut lines, &mut settled, w, h);
         work.state = State::Engined(Box::new(Engined {
             lines,

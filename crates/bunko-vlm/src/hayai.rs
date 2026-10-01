@@ -28,6 +28,13 @@ pub const VISION_REVISION: &str = "b53b807d3a2d5e2b3911292f2d69e5341cdc064c";
 
 /// Crops per generation call, in input order (`HAYAI_NOVA_BATCH`).
 pub const BATCH: usize = 16;
+/// Crops per vision-graph run on the CPU. The vision working set grows with the crops
+/// of a run (SigLIP2 attention scores over up to 512 patches, 12 heads, per crop) and
+/// the CPU arena keeps its high-water mark: 16-crop runs left hayai-nova at 3.25 GB
+/// peak RSS, 4-crop runs at 1.9 GB, at the same speed (20-page volume, fp32). Rows are
+/// independent (each crop attends to its own patches, and every run keeps the batch's
+/// token count `m`), so the output is byte-identical. GPUs keep whole batches.
+const VISION_ROWS_CPU: usize = 4;
 /// Generated tokens per crop at most (`HAYAI_NOVA_MAX_NEW_TOKENS`).
 pub const MAX_NEW_TOKENS: usize = 96;
 /// Default `max_num_patches` (`--patches`).
@@ -249,6 +256,7 @@ impl HayaiNova {
             repos: vec![(REPO, REVISION), (VISION_REPO, VISION_REVISION)],
             precision,
             device: opts.device,
+            second_read: false,
             token_caps: false,
             default_max_tokens: MAX_NEW_TOKENS as u32,
             batch: BATCH,
@@ -388,21 +396,44 @@ impl HayaiNova {
             valid[i] = ho * wo;
         }
 
-        // vision graph
+        // vision graph, in row chunks (see `VISION_ROWS_CPU`)
         let vk = self.vis_kind;
-        let mut feeds: Vec<DynValue> = Vec::with_capacity(5);
-        for name in &self.vis_in {
-            feeds.push(match *name {
-                "pixel_values" => floats(vk, &[b, p, PATCH_DIM], std::mem::take(&mut pv))?,
-                "pixel_mask" => floats(vk, &[b, p], std::mem::take(&mut pmask))?,
-                "pos" => floats(vk, &[b, p, pd], std::mem::take(&mut pos))?,
-                "gather_idx" => i64s(&[b, m, 4], std::mem::take(&mut gather))?,
-                _ => floats(vk, &[b, m], std::mem::take(&mut tok_valid))?,
-            });
+        let chunk = match self.info.device {
+            crate::Device::Cpu => VISION_ROWS_CPU,
+            crate::Device::Gpu(_) => b,
         }
-        let refs: Vec<&DynValue> = feeds.iter().collect();
-        let vis = to_f32(&self.vision.run(&refs, Vec::new())?[0])?;
-        drop(feeds);
+        .clamp(1, b.max(1));
+        // Rows `r0..r1` of a row-major input with `per` values a row (moved out when
+        // the run takes every row).
+        fn rows<T: Clone>(v: &mut Vec<T>, r0: usize, r1: usize, per: usize, all: bool) -> Vec<T> {
+            if all {
+                std::mem::take(v)
+            } else {
+                v[r0 * per..r1 * per].to_vec()
+            }
+        }
+        let mut vis: Vec<f32> = Vec::with_capacity(b * m * dm);
+        for r0 in (0..b).step_by(chunk) {
+            let r1 = (r0 + chunk).min(b);
+            let (n, all) = (r1 - r0, r1 - r0 == b);
+            let mut feeds: Vec<DynValue> = Vec::with_capacity(5);
+            for name in &self.vis_in {
+                feeds.push(match *name {
+                    "pixel_values" => floats(
+                        vk,
+                        &[n, p, PATCH_DIM],
+                        rows(&mut pv, r0, r1, p * PATCH_DIM, all),
+                    )?,
+                    "pixel_mask" => floats(vk, &[n, p], rows(&mut pmask, r0, r1, p, all))?,
+                    "pos" => floats(vk, &[n, p, pd], rows(&mut pos, r0, r1, p * pd, all))?,
+                    "gather_idx" => i64s(&[n, m, 4], rows(&mut gather, r0, r1, m * 4, all))?,
+                    _ => floats(vk, &[n, m], rows(&mut tok_valid, r0, r1, m, all))?,
+                });
+            }
+            let refs: Vec<&DynValue> = feeds.iter().collect();
+            vis.extend(to_f32(&self.vision.run(&refs, Vec::new())?[0])?);
+        }
+        drop((pv, pmask, pos, gather, tok_valid));
         if vis.len() != b * m * dm {
             return Err(VlmError::Runtime(format!(
                 "vision returned {} values, expected {}",

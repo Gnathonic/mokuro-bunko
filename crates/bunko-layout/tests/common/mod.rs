@@ -36,8 +36,8 @@ pub fn load(rel: &str) -> Value {
     Value::parse(&text).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
-pub fn load_repo_json(rel: &str) -> Value {
-    let path = repo_root().join(rel);
+pub fn load_crate_json(rel: &str) -> Value {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     Value::parse(&text).expect("json")
 }
@@ -151,9 +151,10 @@ pub fn real_pages() -> Vec<(String, RawPage)> {
         .collect()
 }
 
-/// A 0.5.2 test fixture page (`tests/fixtures/ppocr/<name>.json`).
+/// A 0.5.2 test fixture page (copied from 0.5.2's `tests/fixtures/ppocr/<name>.json`
+/// into `tests/golden/fixtures/ppocr/`).
 pub fn fixture_page(name: &str) -> Value {
-    load_repo_json(&format!("tests/fixtures/ppocr/{name}.json"))
+    load_crate_json(&format!("tests/golden/fixtures/ppocr/{name}.json"))
 }
 
 /// A line record as the Python golden script's `as_lines` reads it

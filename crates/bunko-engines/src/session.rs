@@ -327,6 +327,8 @@ impl EngineRunner {
         let volume = self.sidecar(meta, &results);
         bunko_layout::sidecar::write_sidecar(out, &volume)
             .map_err(|e| RunError::Volume(e.to_string()))?;
+        // The volume's buffers are gone: give the C heap's free pages back.
+        crate::runtime::trim_heap();
         let stats = self.pipeline.report().since(mark.lock().as_ref());
         Ok(VolumeOutcome {
             pages: results.len() as u32,

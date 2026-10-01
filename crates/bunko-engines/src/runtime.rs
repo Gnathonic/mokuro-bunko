@@ -46,6 +46,26 @@ impl Backend {
     }
 }
 
+/// Hand the C heap's free pages back to the OS.
+///
+/// The PP-OCR sessions run without ONNX Runtime's CPU arena (see
+/// `bunko_ocr::runtime`), so their tensors come from the C allocator, and glibc keeps
+/// freed chunks below its adaptive (up to 32 MB) mmap threshold in its per-thread
+/// arenas: hundreds of MB after a volume. `malloc_trim` returns those pages
+/// (`madvise(DONTNEED)` on the free ranges) in a few milliseconds. No-op off glibc.
+pub fn trim_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> std::ffi::c_int;
+        }
+        // SAFETY: glibc's `malloc_trim` takes no pointers and locks each arena itself.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
+}
+
 /// Create the ORT environment once (idempotent). The binary calls it at start-up so
 /// its options apply; engines call it too in case it did not.
 pub fn init() {
