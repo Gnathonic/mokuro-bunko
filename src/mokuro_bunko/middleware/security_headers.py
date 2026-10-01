@@ -54,7 +54,11 @@ class SecurityHeadersMiddleware:
         environ: dict[str, Any],
         start_response: Callable[..., Any],
     ) -> Iterable[bytes]:
-        path_lower = environ.get("PATH_INFO", "").lower()
+        # Responses carrying a volume file's bytes (or their headers): a
+        # preflight or a PUT answer about the same path is not one.
+        revalidate = environ.get("REQUEST_METHOD", "GET") in ("GET", "HEAD") and environ.get(
+            "PATH_INFO", ""
+        ).lower().endswith(_REVALIDATED_SUFFIXES)
 
         def secure_start_response(
             status: str,
@@ -88,7 +92,7 @@ class SecurityHeadersMiddleware:
             # fresh for days: a reader would install the old OCR and never
             # learn of the new one. Revalidate every time (the ETag makes
             # that a 304).
-            if path_lower.endswith(_REVALIDATED_SUFFIXES) and "cache-control" not in present:
+            if revalidate and "cache-control" not in present:
                 new_headers.append(("Cache-Control", "no-cache"))
 
             return cast(

@@ -134,3 +134,12 @@ def test_other_downloads_keep_no_forced_cache_control() -> None:
         {"PATH_INFO": "/mokuro-reader/S/notes.txt"},
     )
     assert _values(headers, "Cache-Control") == []
+
+
+def test_a_preflight_or_put_answer_about_a_volume_file_is_left_alone() -> None:
+    for method in ("OPTIONS", "PUT"):
+        headers = _capture_headers(
+            SecurityHeadersMiddleware(_fake_app("text/plain")),
+            {"REQUEST_METHOD": method, "PATH_INFO": "/mokuro-reader/S/Vol 1.cbz"},
+        )
+        assert _values(headers, "Cache-Control") == [], method
