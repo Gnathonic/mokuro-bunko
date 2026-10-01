@@ -231,6 +231,7 @@ impl PaddleManga {
             repos: vec![(BASE_REPO, BASE_REVISION), (LORA_REPO, LORA_REVISION)],
             precision,
             device: opts.device,
+            second_read: true,
             token_caps: true,
             default_max_tokens: DEFAULT_MAX_NEW_TOKENS,
             batch: BATCH,

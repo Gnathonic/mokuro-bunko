@@ -15,8 +15,9 @@
 //! Stages are pools of OS threads joined by bounded queues ([`stages`]), sized from
 //! the row's `pools` and the derived widths ([`plan`]); their counters feed the
 //! `stats` events and each volume's window. Models are shared: one PP-OCR detector /
-//! recognizer pair (with one ORT session per detect worker) and one recognizer per
-//! (engine, assets, device, precision) across sessions ([`bunko_vlm::RecognizerCache`]).
+//! recognizer pair (one ORT session each, run concurrently by the detect workers) and
+//! one recognizer per (engine, assets, device, precision) across sessions
+//! ([`bunko_vlm::RecognizerCache`]).
 //! Model files come from [`bunko_ocr::models::ModelStore`]; missing ones are downloaded
 //! when a session opens ([`models`]). Precision modes resolve per device
 //! ([`precision`]); the recognizer runs on the device `pools.stage_device.engine`
@@ -139,8 +140,12 @@ impl EnginePipeline {
             return Ok(r);
         }
         let files = models::ppocr_files(&self.store)?;
+        // One session pair serves every detect worker (concurrent `Run`). Its pool
+        // gets two more intra-op threads per extra worker: with three workers, eight
+        // threads match the speed of three 4-thread sessions at ~10% more CPU time
+        // (twelve: +33% CPU for nothing; four: 10% slower).
         let opts = RuntimeOptions {
-            intra_threads: plan::SESSION_THREADS,
+            intra_threads: plan::SESSION_THREADS + 2 * (copies.max(1) - 1),
             targets: vec![ExecutionTarget::Cpu],
             copies,
             spinning,

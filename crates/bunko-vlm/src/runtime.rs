@@ -177,6 +177,15 @@ impl SessionFactory for OrtSessionFactory {
         if !opts.spinning {
             b = b.with_intra_op_spinning(false).map_err(ort_err(&what))?;
         }
+        if opts.provider == Provider::Cpu {
+            // Every call has new shapes (crop counts, patch grids, KV lengths), so a
+            // memory pattern is planned per run and its block held in the arena on
+            // top of the per-tensor chunks: off, hayai-nova's peak RSS on the CPU
+            // drops by ~270 MB at the same speed. The CPU arena itself stays on: off,
+            // every run's large tensors are fresh mmaps and the page faults cost ~8%
+            // of the CPU time (measured, 20-page volume).
+            b = b.with_memory_pattern(false).map_err(ort_err(&what))?;
+        }
         b = register_provider(b, opts).map_err(ort_err(&what))?;
         let session = b.commit_from_file(model).map_err(ort_err(&what))?;
         SharedSession::new(session, opts)

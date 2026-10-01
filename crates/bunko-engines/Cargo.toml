@@ -35,3 +35,5 @@ tempfile.workspace = true
 zip.workspace = true
 image.workspace = true
 tracing-subscriber.workspace = true
+# The example measures memory under the same allocator as the `mokuro-bunko` binary.
+mimalloc = { version = "0.1", default-features = false }

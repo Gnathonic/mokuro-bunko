@@ -3,10 +3,20 @@
 //!
 //! One [`Model`] is loaded per (model file, device) and shared by every worker
 //! thread. `ort` 2.0 makes `Session::run` take `&mut self` (its authors do not
-//! trust ORT's own thread-safety claim), so each `Model` holds a small pool of
-//! sessions behind mutexes: `copies = 1` serializes runs (ORT still uses its
-//! intra-op threads), more copies let several pages infer at once at the cost of
-//! one more set of weights in memory each.
+//! trust ORT's own thread-safety claim); [`Model::run_f32`] calls the C API's `Run`
+//! through a shared reference instead, for the EPs whose concurrent `Run` ONNX
+//! Runtime documents and bunko-vlm relies on too (CPU, CUDA). There a `Model` is one
+//! session whatever `copies` says; other EPs get `copies` sessions behind locks.
+//!
+//! ## Memory (CPU sessions)
+//!
+//! A session's CPU memory arena grows to the largest working set it has seen
+//! (rounded up to powers of two) and never shrinks, and the detector's input size
+//! changes with every page, so each detector copy used to settle at hundreds of MB.
+//! CPU sessions therefore run with the arena and the memory pattern off: tensors come
+//! from the C allocator and are freed after each run. Measured on a 20-page volume
+//! (ppocr-manga, 3 detect workers): peak RSS 1073 → ~580 MB, same output, same
+//! pages/s. GPU sessions keep both (their arenas hold device memory).
 //!
 //! The library never creates the ORT environment (`ort::init()`); the binary does,
 //! so its logging and global options apply.
@@ -15,13 +25,16 @@ mod devices;
 
 pub use devices::{DeviceInfo, device_catalog, ep_compiled};
 
+use std::ffi::CString;
 use std::path::Path;
+use std::ptr::{self, NonNull};
 use std::str::FromStr;
 
+use ort::AsPointer;
 use ort::ep::{self, ExecutionProviderDispatch};
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
-use ort::value::Tensor;
+use ort::value::{DynValue, Tensor};
 use parking_lot::Mutex;
 use tracing::{info, warn};
 
@@ -50,6 +63,13 @@ impl ExecutionTarget {
             Self::CoreMl => "coreml",
             Self::Nnapi => "nnapi",
         }
+    }
+
+    /// Whether ONNX Runtime's documented thread-safe `Run` is relied on for this EP
+    /// (CPU, CUDA: what bunko-vlm and the 0.5/0.6 spike run concurrently). Other EPs
+    /// get one session per concurrent caller, each behind a lock.
+    fn concurrent_run(&self) -> bool {
+        matches!(self, Self::Cpu | Self::Cuda(_))
     }
 
     /// The provider registration, or `None` when this build's onnxruntime lacks it.
@@ -133,7 +153,8 @@ pub struct RuntimeOptions {
     pub intra_threads: usize,
     /// Preference order; the first that registers wins, CPU is always the last resort.
     pub targets: Vec<ExecutionTarget>,
-    /// Sessions per model (concurrent runs).
+    /// Concurrent runs per model: sessions for EPs whose concurrent `Run` is not
+    /// relied on (one session serves any number of callers on the CPU and CUDA).
     pub copies: usize,
     /// Let idle ORT worker threads spin (ORT's default). Off on shared hosts: spinning
     /// burns CPU other work could use, for a few percent of latency.
@@ -153,8 +174,12 @@ impl Default for RuntimeOptions {
 
 /// A loaded model shared across threads.
 pub struct Model {
-    sessions: Vec<Mutex<Session>>,
-    input_name: String,
+    /// One session where concurrent `Run` is relied on; else `copies` sessions.
+    sessions: Vec<Session>,
+    /// One lock per session for EPs whose concurrent `Run` is not relied on.
+    locks: Option<Vec<Mutex<()>>>,
+    input_name: CString,
+    output_name: CString,
     target: ExecutionTarget,
     fallback_reason: Option<String>,
 }
@@ -163,7 +188,8 @@ impl std::fmt::Debug for Model {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Model")
             .field("target", &self.target)
-            .field("copies", &self.sessions.len())
+            .field("sessions", &self.sessions.len())
+            .field("concurrent", &self.locks.is_none())
             .finish()
     }
 }
@@ -189,6 +215,14 @@ fn build_session(path: &Path, opts: &RuntimeOptions, target: ExecutionTarget) ->
             ))
         })?;
         builder = builder.with_execution_providers([dispatch])?;
+    } else {
+        // See "Memory" in the module docs.
+        builder = builder
+            .with_memory_pattern(false)?
+            .with_execution_providers([ep::CPU::default()
+                .with_arena_allocator(false)
+                .build()
+                .error_on_failure()])?;
     }
     Ok(builder.commit_from_file(path)?)
 }
@@ -218,19 +252,27 @@ impl Model {
             ),
         };
         let fallback_reason = (!reasons.is_empty()).then(|| reasons.join("; "));
-        let input_name = first
-            .inputs()
-            .first()
-            .map(|i| i.name().to_string())
-            .ok_or_else(|| Error::ModelOutput(format!("{} has no inputs", path.display())))?;
-        let mut sessions = vec![Mutex::new(first)];
-        for _ in 1..opts.copies.max(1) {
-            sessions.push(Mutex::new(build_session(path, opts, target)?));
+        let name = |n: Option<&str>, what: &str| {
+            let n =
+                n.ok_or_else(|| Error::ModelOutput(format!("{} has no {what}", path.display())))?;
+            CString::new(n).map_err(|_| Error::ModelOutput(format!("bad {what} name {n:?}")))
+        };
+        let input_name = name(first.inputs().first().map(|i| i.name()), "inputs")?;
+        let output_name = name(first.outputs().first().map(|o| o.name()), "outputs")?;
+        let concurrent = target.concurrent_run();
+        let mut sessions = vec![first];
+        if !concurrent {
+            for _ in 1..opts.copies.max(1) {
+                sessions.push(build_session(path, opts, target)?);
+            }
         }
-        info!(model = %path.display(), %target, copies = sessions.len(), "model loaded");
+        let locks = (!concurrent).then(|| sessions.iter().map(|_| Mutex::new(())).collect());
+        info!(model = %path.display(), %target, sessions = sessions.len(), concurrent, "model loaded");
         Ok(Self {
             sessions,
+            locks,
             input_name,
+            output_name,
             target,
             fallback_reason,
         })
@@ -250,14 +292,47 @@ impl Model {
     pub fn run_f32(&self, shape: &[usize], data: Vec<f32>) -> Result<(Vec<usize>, Vec<f32>)> {
         let dims: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
         let tensor = Tensor::from_array((dims, data))?;
-        // Take a free session if there is one, else wait for the first.
-        let mut guard = self
-            .sessions
-            .iter()
-            .find_map(|s| s.try_lock())
-            .unwrap_or_else(|| self.sessions[0].lock());
-        let outputs = guard.run(ort::inputs![self.input_name.as_str() => tensor])?;
-        let (out_shape, out) = outputs[0].try_extract_tensor::<f32>()?;
+        // Concurrent EPs: the one session. Else a free session if there is one, else
+        // wait for the first.
+        let (session, _guard) = match &self.locks {
+            None => (&self.sessions[0], None),
+            Some(locks) => {
+                let (i, guard) = locks
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, l)| l.try_lock().map(|g| (i, g)))
+                    .unwrap_or_else(|| (0, locks[0].lock()));
+                (&self.sessions[i], Some(guard))
+            }
+        };
+        let in_names = [self.input_name.as_ptr()];
+        let in_vals = [tensor.ptr()];
+        let out_names = [self.output_name.as_ptr()];
+        let mut out_vals: [*mut ort::sys::OrtValue; 1] = [ptr::null_mut()];
+        // SAFETY: the names and the input value outlive the call, and `out_vals` has
+        // one (null) slot per requested output. `ort` 2.0 makes `Session::run` take
+        // `&mut self`; ONNX Runtime documents `Run` as thread-safe, which is relied on
+        // only for the EPs of `ExecutionTarget::concurrent_run` (others hold a lock).
+        let status = unsafe {
+            (ort::api().Run)(
+                session.ptr().cast_mut(),
+                ptr::null(),
+                in_names.as_ptr(),
+                in_vals.as_ptr(),
+                1,
+                out_names.as_ptr(),
+                1,
+                out_vals.as_mut_ptr(),
+            )
+        };
+        // SAFETY: `status` comes straight from the C API.
+        unsafe { ort::Error::result_from_status(status) }?;
+        let out = NonNull::new(out_vals[0])
+            .ok_or_else(|| Error::ModelOutput("run returned a null output".into()))?;
+        // SAFETY: an output ONNX Runtime allocated for this call; we own it now and keep
+        // the session alive as long as the value.
+        let out: DynValue = unsafe { DynValue::from_ptr(out, Some(session.inner())) };
+        let (out_shape, out) = out.try_extract_tensor::<f32>()?;
         let out_shape: Vec<usize> = out_shape.iter().map(|&d| d.max(0) as usize).collect();
         Ok((out_shape, out.to_vec()))
     }

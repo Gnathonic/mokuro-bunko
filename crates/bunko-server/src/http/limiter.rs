@@ -84,7 +84,12 @@ impl AuthLimiter {
     }
 
     /// `Ok(true)`: allowed and counted as pending; `Ok(false)`: no slot free; `Err`: blocked.
-    fn check(&self, map: &mut HashMap<String, Entry>, key: &str, now: Instant) -> Result<bool, u64> {
+    fn check(
+        &self,
+        map: &mut HashMap<String, Entry>,
+        key: &str,
+        now: Instant,
+    ) -> Result<bool, u64> {
         if !map.contains_key(key) && map.len() >= MAX_KEYS {
             evict(map, now, self.window);
         }
@@ -95,10 +100,18 @@ impl AuthLimiter {
             }
             e.blocked_until = None;
         }
-        while e.failures.front().is_some_and(|t| now.duration_since(*t) > self.window) {
+        while e
+            .failures
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > self.window)
+        {
             e.failures.pop_front();
         }
-        while e.pending.front().is_some_and(|t| now.duration_since(*t) > PENDING_TTL) {
+        while e
+            .pending
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > PENDING_TTL)
+        {
             e.pending.pop_front();
         }
         if e.failures.len() >= self.max_failures {

@@ -18,7 +18,9 @@ pub struct DbAuthBackend {
 /// `users_version` is unchanged (any role/status/password change empties it).
 struct LoginCache {
     salt: [u8; 16],
-    entries: parking_lot::Mutex<std::collections::HashMap<[u8; 32], (AuthUser, u64, std::time::Instant)>>,
+    entries: parking_lot::Mutex<
+        std::collections::HashMap<[u8; 32], (AuthUser, u64, std::time::Instant)>,
+    >,
 }
 
 const LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
@@ -28,7 +30,10 @@ impl LoginCache {
     fn new() -> Self {
         let mut salt = [0u8; 16];
         rand::fill(&mut salt);
-        Self { salt, entries: Default::default() }
+        Self {
+            salt,
+            entries: Default::default(),
+        }
     }
 
     fn key(&self, username: &str, password: &str) -> [u8; 32] {
@@ -44,7 +49,11 @@ impl LoginCache {
 
 impl DbAuthBackend {
     pub fn new(db: Arc<Database>, layout: StorageLayout) -> Self {
-        Self { db, layout, logins: LoginCache::new() }
+        Self {
+            db,
+            layout,
+            logins: LoginCache::new(),
+        }
     }
 }
 
@@ -115,7 +124,10 @@ impl AuthBackend for DbAuthBackend {
                         entries.clear();
                     }
                 }
-                entries.insert(self.logins.key(username, password), (user.clone(), version, std::time::Instant::now()));
+                entries.insert(
+                    self.logins.key(username, password),
+                    (user.clone(), version, std::time::Instant::now()),
+                );
                 Some(user)
             }
             Ok(None) => None,
