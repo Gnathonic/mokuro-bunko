@@ -370,6 +370,15 @@ pub fn build_router_with(
         cors::cors,
     ))
     .layer(axum::middleware::from_fn(headers::security_headers))
+    .layer(axum::middleware::from_fn(
+        |req: Request, next: axum::middleware::Next| async move {
+            if headers::request_log_enabled() {
+                headers::request_log(req, next).await
+            } else {
+                next.run(req).await
+            }
+        },
+    ))
 }
 
 /// Bind, serve until SIGINT/SIGTERM, shut down in order.
