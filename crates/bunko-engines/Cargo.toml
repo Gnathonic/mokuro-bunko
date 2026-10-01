@@ -1,0 +1,37 @@
+[package]
+name = "bunko-engines"
+description = "mokuro-bunko's OCR engines as a processor pipeline: ppocr-manga, hayai-nova and paddle-manga on ONNX Runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# libjpeg-turbo JPEG decoding (bit-identical pages to 0.5.2's Pillow).
+libjpeg = ["bunko-ocr/libjpeg"]
+# Execution providers: forwarded to both ONNX consumers (and so to ort).
+cuda = ["bunko-ocr/cuda", "bunko-vlm/cuda"]
+webgpu = ["bunko-ocr/webgpu", "bunko-vlm/webgpu"]
+directml = ["bunko-ocr/directml", "bunko-vlm/directml"]
+coreml = ["bunko-ocr/coreml", "bunko-vlm/coreml"]
+
+[dependencies]
+bunko-ocr.workspace = true
+bunko-vlm.workspace = true
+bunko-layout.workspace = true
+bunko-processor.workspace = true
+bunko-proto.workspace = true
+ort = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+tempfile.workspace = true
+zip.workspace = true
+image.workspace = true
+tracing-subscriber.workspace = true

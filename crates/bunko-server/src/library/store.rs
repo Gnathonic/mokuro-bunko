@@ -152,9 +152,14 @@ impl MetadataStore for DbMetadataStore {
     }
 
     fn cached_volume_entry(&self, volume_key: &str) -> StoreResult<Option<CachedEntryRow>> {
-        let row = self.db.cached_volume_entry_row(volume_key)?.map(|(entry_json, cbz_size, cbz_mtime, sidecar_key)| {
-            CachedEntryRow { entry_json, cbz_size, cbz_mtime, sidecar_key }
-        });
+        let row = self.db.cached_volume_entry_row(volume_key)?.map(
+            |(entry_json, cbz_size, cbz_mtime, sidecar_key)| CachedEntryRow {
+                entry_json,
+                cbz_size,
+                cbz_mtime,
+                sidecar_key,
+            },
+        );
         Ok(row)
     }
 

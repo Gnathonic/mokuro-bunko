@@ -198,14 +198,43 @@ fn check_onnx_runtime() -> Check {
 
 #[cfg(feature = "ocr")]
 fn check_models(models_dir: &Path) -> Check {
-    let manifest = models_dir.join("models.json");
-    if manifest.is_file() {
-        Check::pass("Models", models_dir.display().to_string())
+    // What the engines would use: the store (and `MOKURO_MODELS_DIR`), PP-OCR plus every
+    // engine's fp32 set; missing files are fetched when a session first needs them.
+    let config =
+        bunko_engines::EngineConfig::new(models_dir.to_path_buf(), bunko_engines::Backend::Auto);
+    let store = config.store();
+    let ids = bunko_engines::models::download_plan(None, false);
+    let missing: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| store.locate(id).is_none())
+        .collect();
+    if missing.is_empty() {
+        return Check::pass("Models", models_dir.display().to_string());
+    }
+    let bytes: u64 = missing
+        .iter()
+        .filter_map(|id| store.manifest().get(id))
+        .map(|f| f.size)
+        .sum();
+    let detail = format!(
+        "{} of {} files not downloaded yet ({:.1} GB) under {}",
+        missing.len(),
+        ids.len(),
+        bytes as f64 / 1e9,
+        models_dir.display()
+    );
+    if store.can_download() {
+        Check::warn(
+            "Models",
+            detail,
+            Some("Run: mokuro-bunko models download   (or start the server once; OCR downloads them on first use)".into()),
+        )
     } else {
         Check::warn(
             "Models",
-            format!("not downloaded (expected {})", manifest.display()),
-            Some("Run: mokuro-bunko models download   (or start the server once; OCR downloads them on first use)".into()),
+            format!("{detail}; downloads are off (MOKURO_MODELS_DOWNLOAD)"),
+            Some("Copy the model files into the models directory, or allow downloads.".into()),
         )
     }
 }

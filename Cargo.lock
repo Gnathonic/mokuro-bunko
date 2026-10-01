@@ -406,6 +406,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "bunko-engines"
+version = "0.7.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "bunko-layout",
+ "bunko-ocr",
+ "bunko-processor",
+ "bunko-proto",
+ "bunko-vlm",
+ "image",
+ "ort",
+ "parking_lot",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zip",
+]
+
+[[package]]
 name = "bunko-layout"
 version = "0.7.0-alpha.1"
 dependencies = [
@@ -528,6 +549,7 @@ dependencies = [
  "bunko-processor",
  "bunko-proto",
  "bunko-sched",
+ "bunko-thumb",
  "bunko-update",
  "bytes",
  "flate2",
@@ -539,6 +561,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "image",
  "indexmap",
  "ipnet",
  "notify",
@@ -1967,6 +1990,10 @@ dependencies = [
  "assert_cmd",
  "bunko-core",
  "bunko-db",
+ "bunko-engines",
+ "bunko-ocr",
+ "bunko-processor",
+ "bunko-proto",
  "bunko-server",
  "bunko-update",
  "clap",

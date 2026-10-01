@@ -92,6 +92,8 @@ pub struct Services {
     pub dav_hooks: Arc<crate::davhooks::ServerDavHooks>,
     pub library: Arc<crate::library::LibraryRuntime>,
     pub ocr: crate::ocr::OcrControl,
+    /// Cover thumbnails for library volumes (started by `serve_router`).
+    pub thumbs: Arc<crate::thumbs::Thumbnails>,
     pub stop: CancellationToken,
     /// Set by the admin "Update and restart" action: the binary re-execs after shutdown.
     pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
@@ -138,6 +140,7 @@ impl Services {
             crate::library::LibraryRuntime::new(deps)
         };
         dav_hooks.add_listener(library.clone());
+        let thumbs = Arc::new(crate::thumbs::Thumbnails::default());
         let ocr = {
             let store: Arc<dyn bunko_library::MetadataStore> = library.store().clone();
             let lib = library.clone();
@@ -145,7 +148,10 @@ impl Services {
                 store,
                 library: layout.library(),
                 installed: Some(Arc::new(move |cbz: &Path| lib.on_library_write(cbz))),
-                thumbnails: None,
+                thumbnails: Some({
+                    let t = thumbs.clone();
+                    Arc::new(move || t.pending())
+                }),
             };
             crate::ocr::OcrControl::new(crate::ocr::OcrDeps {
                 core: core.clone(),
@@ -168,6 +174,7 @@ impl Services {
             dav_hooks,
             library,
             ocr,
+            thumbs,
             stop: CancellationToken::new(),
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -411,9 +418,24 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
     }
     services.updates.start(stop.clone());
     services.library.start();
+    let library_dir = services.core.layout.library();
+    {
+        // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
+        // request path.
+        let (lib, db) = (library_dir.clone(), services.db.clone());
+        tokio::task::spawn_blocking(move || {
+            crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db))
+        });
+    }
+    let thumbs = services.thumbs.spawn(
+        services.core.config.clone(),
+        library_dir,
+        stop.child_token(),
+    );
     services.ocr.start(stop.child_token());
     crate::serve::serve(listener, app, tls, stop, Duration::from_secs(5)).await?;
     // Ordered shutdown (0.5.2 shutdown_app order, plus the new services).
+    let _ = thumbs.await;
     services.ocr.stop().await;
     services.library.stop().await;
     services.dyndns.stop();

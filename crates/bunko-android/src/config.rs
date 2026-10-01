@@ -27,9 +27,11 @@ impl StartOptions {
 /// Load (or create) the config and apply the native settings. The file is rewritten only
 /// when one of those settings changed, so admin edits are never clobbered otherwise.
 pub fn prepare(opts: &StartOptions) -> Result<Config, String> {
-    std::fs::create_dir_all(&opts.storage_dir).map_err(|e| format!("Could not create {}: {e}", opts.storage_dir.display()))?;
+    std::fs::create_dir_all(&opts.storage_dir)
+        .map_err(|e| format!("Could not create {}: {e}", opts.storage_dir.display()))?;
     let existed = opts.config_path.exists();
-    let mut config = load_config(Some(&opts.config_path)).map_err(|e| format!("Invalid config {}: {e}", opts.config_path.display()))?;
+    let mut config = load_config(Some(&opts.config_path))
+        .map_err(|e| format!("Invalid config {}: {e}", opts.config_path.display()))?;
     let before = existed.then(|| config.to_yaml());
     if !existed {
         first_run_defaults(&mut config);
@@ -38,7 +40,8 @@ pub fn prepare(opts: &StartOptions) -> Result<Config, String> {
     config.server.host = opts.host().to_string();
     config.server.port = opts.port;
     if before.as_deref() != Some(config.to_yaml().as_str()) {
-        save_config(&config, Some(&opts.config_path)).map_err(|e| format!("Could not write {}: {e}", opts.config_path.display()))?;
+        save_config(&config, Some(&opts.config_path))
+            .map_err(|e| format!("Could not write {}: {e}", opts.config_path.display()))?;
     }
     Ok(config)
 }
@@ -52,7 +55,11 @@ fn first_run_defaults(config: &mut Config) {
 
 /// The address the app shows for other devices: `http://<ip>:<port>/`.
 pub fn lan_url(ip: &str, port: u16) -> String {
-    if ip.contains(':') { format!("http://[{ip}]:{port}/") } else { format!("http://{ip}:{port}/") }
+    if ip.contains(':') {
+        format!("http://[{ip}]:{port}/")
+    } else {
+        format!("http://{ip}:{port}/")
+    }
 }
 
 /// `config.yaml` next to the storage directory by default (the app passes it explicitly).
@@ -65,7 +72,12 @@ mod tests {
     use super::*;
 
     fn opts(dir: &Path, port: u16, lan: bool) -> StartOptions {
-        StartOptions { storage_dir: dir.join("storage"), config_path: dir.join("config.yaml"), port, lan }
+        StartOptions {
+            storage_dir: dir.join("storage"),
+            config_path: dir.join("config.yaml"),
+            port,
+            lan,
+        }
     }
 
     #[test]

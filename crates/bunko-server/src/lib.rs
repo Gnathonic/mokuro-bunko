@@ -13,6 +13,7 @@ pub mod library;
 pub mod ocr;
 pub mod ops;
 pub mod serve;
+pub mod thumbs;
 pub mod tls;
 
 pub use core::{Core, RequestCtx};

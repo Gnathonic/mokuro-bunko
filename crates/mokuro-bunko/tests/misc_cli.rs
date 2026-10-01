@@ -55,8 +55,9 @@ fn install_ocr_is_a_deprecated_alias() {
 fn serve_applies_flags_then_hands_over() {
     let env = Env::new();
     env.write_config("");
-    // The serve body is a stub until the orchestrator wires it: flags must still parse
-    // and be validated before the hand-over.
+    // Storage is a FILE, so the hand-over reaches startup validation and stops there
+    // (exit 2) instead of starting a server: flags parsed, verbose lines printed.
+    std::fs::write(env.storage(), b"not a directory").unwrap();
     env.cmd()
         .args([
             "-v",
@@ -69,12 +70,11 @@ fn serve_applies_flags_then_hands_over() {
             "cpu",
         ])
         .assert()
-        .code(1)
-        .stdout(format!(
-            "Verbose mode enabled\nStorage path: {}\n",
+        .code(2)
+        .stdout(predicate::str::starts_with(format!(
+            "Verbose mode enabled\nStorage path: {}\nStartup validation failed: ",
             env.storage().display()
-        ))
-        .stderr("Error: not wired yet\n");
+        )));
     env.cmd()
         .args(["serve", "--ocr", "mokuro"])
         .assert()
@@ -83,9 +83,7 @@ fn serve_applies_flags_then_hands_over() {
         .args(["serve", "--generations", "[{\"engine\": \"nope\"}]"])
         .assert()
         .code(1)
-        .stderr(
-            predicate::str::starts_with("Error: ").and(predicate::str::contains("not wired").not()),
-        );
+        .stderr(predicate::str::starts_with("Error: "));
 }
 
 #[test]

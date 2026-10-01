@@ -31,7 +31,7 @@ fn healthy_storage_passes_core_checks() {
     if cfg!(feature = "ocr") {
         assert!(s.contains(" PASS  Build: full ("), "{s}");
         assert!(
-            s.contains(" WARN  Models: not downloaded (expected "),
+            s.contains(" WARN  Models: ") && s.contains(" files not downloaded yet ("),
             "{s}"
         );
         assert!(

@@ -58,12 +58,16 @@ fn start_locked(opts: &StartOptions) -> Result<Running, String> {
     logs::init(&config.storage.base_path);
     app::validate_startup(&config).map_err(|m| format!("Startup validation failed: {m}"))?;
     // Fail early (and readably) when the port is taken: serve_router would only log it.
-    std::net::TcpListener::bind((opts.host(), opts.port)).map_err(|e| format!("Port {} is not available: {e}", opts.port))?;
+    std::net::TcpListener::bind((opts.host(), opts.port))
+        .map_err(|e| format!("Port {} is not available: {e}", opts.port))?;
     for w in &config.warnings {
         warn!("{w}");
     }
     let threads = match config.server.threads {
-        0 => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).min(4),
+        0 => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .min(4),
         n => n as usize,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -73,13 +77,22 @@ fn start_locked(opts: &StartOptions) -> Result<Running, String> {
         .enable_all()
         .build()
         .map_err(|e| format!("Could not start the runtime: {e}"))?;
-    info!("mokuro-bunko {} ({}, Android)", bunko_core::VERSION, crate::FLAVOR);
+    info!(
+        "mokuro-bunko {} ({}, Android)",
+        bunko_core::VERSION,
+        crate::FLAVOR
+    );
     info!("Storage path: {}", config.storage.base_path.display());
     // No local OCR on Android: `local: None`, the lite server's remote-processor path.
-    let serve_opts = ServeOptions { verbose: false, flavor: crate::FLAVOR, local: None };
+    let serve_opts = ServeOptions {
+        verbose: false,
+        flavor: crate::FLAVOR,
+        local: None,
+    };
     let services = {
         let _guard = runtime.enter();
-        Services::new(config, Some(opts.config_path.clone()), &serve_opts).map_err(|e| format!("{e:#}"))?
+        Services::new(config, Some(opts.config_path.clone()), &serve_opts)
+            .map_err(|e| format!("{e:#}"))?
     };
     let stop = services.stop.clone();
     let port = opts.port;
@@ -104,7 +117,10 @@ fn run(runtime: tokio::runtime::Runtime, services: Services, opts: ServeOptions)
     } else {
         info!("Server stopped");
     }
-    if services.restart_requested.load(std::sync::atomic::Ordering::SeqCst) {
+    if services
+        .restart_requested
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
         // Updates come from the store or a new APK; the app restarts the service.
         info!("Restart requested: start the server again from the app");
     }
@@ -118,7 +134,10 @@ fn wait_ready(r: &Running) -> Result<(), String> {
     while Instant::now() < deadline {
         if r.thread.is_finished() {
             r.stop.cancel();
-            return Err(LAST_ERROR.lock().clone().unwrap_or_else(|| "the server stopped during startup".into()));
+            return Err(LAST_ERROR
+                .lock()
+                .clone()
+                .unwrap_or_else(|| "the server stopped during startup".into()));
         }
         if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok() {
             return Ok(());
@@ -126,13 +145,19 @@ fn wait_ready(r: &Running) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(50));
     }
     r.stop.cancel();
-    Err(format!("the server did not start listening on port {} within {}s", r.port, READY_TIMEOUT.as_secs()))
+    Err(format!(
+        "the server did not start listening on port {} within {}s",
+        r.port,
+        READY_TIMEOUT.as_secs()
+    ))
 }
 
 /// Stop the server (graceful: in-flight requests get up to 5 s) and wait for its thread.
 /// Returns whether a server was running.
 pub fn stop() -> bool {
-    let Some(r) = STATE.lock().take() else { return false };
+    let Some(r) = STATE.lock().take() else {
+        return false;
+    };
     info!("Stopping the server");
     r.stop.cancel();
     let _ = r.thread.join();
@@ -140,7 +165,10 @@ pub fn stop() -> bool {
 }
 
 pub fn is_running() -> bool {
-    STATE.lock().as_ref().is_some_and(|r| !r.thread.is_finished())
+    STATE
+        .lock()
+        .as_ref()
+        .is_some_and(|r| !r.thread.is_finished())
 }
 
 pub fn last_error() -> Option<String> {
@@ -157,7 +185,11 @@ mod tests {
     use std::io::{Read, Write};
 
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     }
 
     fn get(port: u16, path: &str) -> String {
@@ -174,7 +206,12 @@ mod tests {
     fn lifecycle() {
         let d = tempfile::tempdir().unwrap();
         let port = free_port();
-        let opts = StartOptions { storage_dir: d.path().join("storage"), config_path: d.path().join("config.yaml"), port, lan: false };
+        let opts = StartOptions {
+            storage_dir: d.path().join("storage"),
+            config_path: d.path().join("config.yaml"),
+            port,
+            lan: false,
+        };
 
         let url = start(opts.clone()).unwrap();
         assert_eq!(url, format!("http://127.0.0.1:{port}/"));
@@ -185,16 +222,27 @@ mod tests {
         assert!(health.starts_with("HTTP/1.1 200"), "{health}");
         // First run: the root sends the WebView (Accept: text/html) to the setup wizard.
         let root = get(port, "/");
-        assert!(root.starts_with("HTTP/1.1 302") && root.contains("/setup"), "{}", &root[..root.len().min(300)]);
+        assert!(
+            root.starts_with("HTTP/1.1 302") && root.contains("/setup"),
+            "{}",
+            &root[..root.len().min(300)]
+        );
         let setup = get(port, "/setup");
-        assert!(setup.starts_with("HTTP/1.1 200"), "{}", &setup[..setup.len().min(300)]);
+        assert!(
+            setup.starts_with("HTTP/1.1 200"),
+            "{}",
+            &setup[..setup.len().min(300)]
+        );
         assert!(d.path().join("storage/logs/server.log").exists());
         assert!(d.path().join("config.yaml").exists());
 
         assert!(stop());
         assert!(!is_running());
         assert!(!stop());
-        assert!(TcpStream::connect(("127.0.0.1", port)).is_err(), "port released");
+        assert!(
+            TcpStream::connect(("127.0.0.1", port)).is_err(),
+            "port released"
+        );
         assert!(logs::tail().contains("Server stopped"), "{}", logs::tail());
 
         // Restart in the same process (the service is stopped and started again).

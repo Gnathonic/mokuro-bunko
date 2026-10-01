@@ -14,19 +14,25 @@ path = "src/main.rs"
 [features]
 # `lite`: no default features — server only, OCR by remote processors.
 default = ["ocr"]
-# Local OCR + the `processor` subcommand (links ONNX Runtime).
-ocr = []
-# Execution providers (each implies `ocr`).
-cuda = ["ocr"]
-webgpu = ["ocr"]
-directml = ["ocr"]
-coreml = ["ocr"]
+# Local OCR + the `processor` subcommand (links ONNX Runtime). JPEG pages decode with
+# libjpeg-turbo, as 0.5.2's Pillow did (bit-identical pages).
+ocr = ["dep:bunko-engines", "dep:bunko-ocr", "dep:bunko-processor", "dep:bunko-proto", "bunko-ocr/libjpeg", "bunko-engines/libjpeg"]
+# Execution providers (each implies `ocr`), forwarded to bunko-ocr and bunko-vlm (ort).
+cuda = ["ocr", "bunko-engines/cuda"]
+webgpu = ["ocr", "bunko-engines/webgpu"]
+directml = ["ocr", "bunko-engines/directml"]
+coreml = ["ocr", "bunko-engines/coreml"]
 
 [dependencies]
 bunko-core.workspace = true
 bunko-db.workspace = true
 bunko-server.workspace = true
 bunko-update.workspace = true
+# full build only (feature `ocr`): the engines, the model store, the processor runtime
+bunko-engines = { path = "../bunko-engines", optional = true }
+bunko-ocr = { workspace = true, optional = true }
+bunko-processor = { workspace = true, optional = true }
+bunko-proto = { workspace = true, optional = true }
 reqwest.workspace = true
 time.workspace = true
 anyhow.workspace = true

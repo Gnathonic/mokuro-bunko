@@ -17,6 +17,7 @@ pub mod error;
 pub mod image;
 pub mod lines;
 pub mod models;
+pub mod models_release;
 pub mod natsort;
 mod natsort_tables;
 pub mod pages;
