@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlparse
 from mokuro_bunko.metadata.paths import (
     is_compiled_metadata_path,
     is_series_file_path,
+    re_encode_wsgi_path,
     series_title_from_series_file_path,
 )
 from mokuro_bunko.security import AuthAttemptLimiter, get_client_ip
@@ -514,7 +515,9 @@ class AuthMiddleware:
     ) -> AuthorizationResult:
         """Check if request is authorized."""
         method = environ.get("REQUEST_METHOD", "GET")
-        path = environ.get("PATH_INFO", "/")
+        # The path the DAV app and the database see: ownership of a
+        # non-ASCII series is recorded in unicode, never latin-1 mojibake.
+        path = re_encode_wsgi_path(environ.get("PATH_INFO", "/"))
         role = auth_result.role
 
         # OPTIONS always allowed for CORS preflight
