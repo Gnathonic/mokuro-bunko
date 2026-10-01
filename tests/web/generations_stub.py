@@ -117,7 +117,7 @@ CATALOG: dict[str, Any] = {
     "precision_modes": [{"id": mode, "label": PRECISION_MODE_LABELS[mode]} for mode in ALL_MODES],
     "precision_default": DEFAULT_MODE,
     "name_pattern": "^[a-z0-9][a-z0-9-]{0,31}$",
-    "reserved_names": ["original", "gcv"],
+    "reserved_names": ["original", "gcv", "updated-ocr"],
     "reserved_prefixes": ["tr-"],
 }
 
