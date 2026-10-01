@@ -56,6 +56,21 @@ detaches it from the volume the reader knows. That is also why a volume
 missing its primary sidecar is offered only the primary row, and why two jobs
 never run on the same volume at once (they could stamp different uuids).
 
+**A re-OCR keeps the volume's id.** Readers key progress and stats by
+`volume_uuid` and keep their local id when they take a volume's new OCR, so a
+primary the server makes again must name the volume as before. The server
+only makes a primary that is missing (deleted over WebDAV to re-OCR the
+volume, or removed on disk), so the id is remembered per archive in the
+database (`volume_identities`): written whenever the metadata pass compiles a
+volume from its `.mokuro`, and when a primary is deleted or moved away over
+WebDAV. Every sidecar is stamped, in order, with the primary's id on disk,
+else the remembered one, else a layer's, else
+`deterministic_uuid("<Series>/<Volume>")`. The memory goes with the archive's
+sidecars: deleting the `.cbz` (which deletes them) forgets it, so a new upload
+under that name starts fresh; a PUT over the `.cbz` leaves them, so the id
+survives; a folder move carries it along. An archive removed outside WebDAV
+leaves its id behind, and a new archive at exactly that path inherits it.
+
 **What cancels a job.** Each job carries the frozen row it was claimed with,
 so a rename or a `primary` flip only changes where the *next* job's file
 lands. A job is cancelled only when its row is removed or disabled, or when a

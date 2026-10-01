@@ -258,6 +258,35 @@ def _forget_ocr_records(db: Any, rel: str | None, *, archive_too: bool = True) -
         db.forget_ocr_sidecar(rel)
 
 
+def _remember_primary_uuid(db: Any, path: Path, rel: str | None) -> None:
+    """``path`` is leaving its place: if it is an archive's primary `.mokuro`, keep its id.
+
+    Deleting the bare `<Volume>.mokuro` is how a volume is re-OCR'd: the
+    server makes a missing primary again, and it must name the volume by the
+    id every reader's progress already knows (`Database.remember_volume_uuid`,
+    read by `OCRProcessor.volume_uuid_for`). A layer file, or a sidecar with
+    no archive beside it, is not a volume's primary and is left alone.
+    """
+    if db is None or rel is None:
+        return
+    name = path.name
+    lower = name.lower()
+    if lower.endswith(".mokuro.gz"):
+        stem = name[: -len(".mokuro.gz")]
+    elif lower.endswith(".mokuro"):
+        stem = name[: -len(".mokuro")]
+    else:
+        return
+    if not (path.parent / f"{stem}.cbz").is_file():
+        return
+    # Imported here: the OCR processor is heavy, and only this path needs it.
+    from mokuro_bunko.ocr.processor import OCRProcessor
+
+    volume_uuid = OCRProcessor._sidecar_volume_uuid(path)
+    if volume_uuid is not None:
+        db.remember_volume_uuid(rel, volume_uuid)
+
+
 def _try_acquire_all(paths: list[Path]) -> list[Path] | None:
     """Acquire write locks on all paths or none.
 
@@ -832,6 +861,7 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
         try:
             rel = self._relative_under_library()
             lower = self.file_path.name.lower()
+            _remember_primary_uuid(self._get_database(), self.file_path, rel)
             if lower.endswith(".cbz"):
                 # Every sidecar this archive has, LISTED from the directory
                 # rather than looked up in a registry of configured names: a
@@ -851,6 +881,9 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
             db = self._get_database()
             if db is not None and rel is not None and lower.endswith(".cbz"):
                 db.forget_volume_upload(rel)
+                # Its sidecars went with it: a new upload under this name is
+                # a new volume and gets an id of its own.
+                db.forget_volume_uuid(rel)
             _forget_ocr_records(db, rel)
             self._audit("delete")
         finally:
@@ -879,12 +912,13 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
                 except ValueError:
                     new_rel = None
 
+            db = self._get_database()
+            _remember_primary_uuid(db, self.file_path, old_rel)
             dest_physical.parent.mkdir(parents=True, exist_ok=True)
             os.replace(self.file_path, dest_physical)
             self._note_archive_removed(self.file_path)
             self._note_archive_written(dest_physical)
 
-            db = self._get_database()
             if db is not None and old_rel is not None and new_rel is not None:
                 db.rename_volume_upload(old_rel, new_rel)
             # The archive's sidecars stay where they were: their records are
@@ -921,6 +955,10 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
                 raise DAVError(_HTTP_LOCKED, _LOCKED_MESSAGE)
 
             try:
+                if is_move:
+                    _remember_primary_uuid(
+                        self._get_database(), self.file_path, self._relative_under_library()
+                    )
                 dest_physical.parent.mkdir(parents=True, exist_ok=True)
                 if is_move:
                     os.replace(self.file_path, dest_physical)
@@ -1387,10 +1425,13 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
                     suffix = old_rel[len(old_rel_prefix):].lstrip("/")
                     new_rel = f"{new_rel_prefix}/{suffix}" if suffix else new_rel_prefix
                     db.rename_volume_upload(old_rel, new_rel)
-                # The sidecars moved with the folder: so does who wrote them.
+                # The sidecars moved with the folder: so does who wrote them,
+                # and the ids their volumes are known by.
                 db.rename_ocr_sidecars_under_prefix(old_rel_prefix, new_rel_prefix)
+                db.rename_volume_uuids_under_prefix(old_rel_prefix, new_rel_prefix)
             elif db is not None and old_rel_prefix is not None:
                 db.forget_ocr_sidecars_under_prefix(old_rel_prefix)
+                db.forget_volume_uuids_under_prefix(old_rel_prefix)
 
             self._audit("move", details={"destination": dest_path})
             return []
@@ -1410,6 +1451,7 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
                 if db is not None and rel:
                     db.forget_volume_uploads_under_prefix(rel)
                     db.forget_ocr_sidecars_under_prefix(rel)
+                    db.forget_volume_uuids_under_prefix(rel)
                 shutil.rmtree(self.folder_path)
                 _note_removed(self.environ, self.path_mapper, self.folder_path)
                 self._audit("delete")

@@ -427,7 +427,7 @@ def _bumps_users_version(method: Callable[..., _T]) -> Callable[..., _T]:
 class Database:
     """SQLite database for user and invite management."""
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
     AUDIT_PRUNE_INTERVAL_SECONDS = 3600
 
     def __init__(self, db_path: Path | str) -> None:
@@ -677,6 +677,25 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_ocr_sidecars_volume
                 ON ocr_sidecars(volume_key)
             """)
+
+            # Schema v6: the `volume_uuid` each archive's primary `.mokuro`
+            # last carried, kept after that file is gone so a primary the
+            # server makes again names the same volume
+            # (`remember_volume_uuid`). A database from before learns it from
+            # the compiled-entry cache, once, below.
+            version_row = conn.execute("SELECT version FROM schema_version").fetchone()
+            had_identities = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'volume_identities'"
+            ).fetchone()
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS volume_identities (
+                    volume_key TEXT PRIMARY KEY,
+                    volume_uuid TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            if version_row is not None and not had_identities:
+                self._backfill_volume_identities(conn)
 
             # `catalog_series` predates these two columns on any database that
             # ran an earlier build. Adding them with a 0 default reads as "no
@@ -2029,6 +2048,117 @@ class Database:
             )
             return cursor.rowcount
 
+    # Volume identity
+
+    @staticmethod
+    def _identity_from_entry(entry: Mapping[str, Any]) -> str | None:
+        """The id a compiled entry published FROM ITS `.mokuro`, else None.
+
+        Only a sidecar that parsed counts (`mokuro_sha256` is set for exactly
+        those; a row from before the hash says so with a mokuro ``version``).
+        An image-only volume's id is derived from its path, and anyone
+        deriving it again gets the same answer: there is nothing to keep.
+        """
+        uuid_ = entry.get("volume_uuid")
+        if not isinstance(uuid_, str) or not uuid_.strip():
+            return None
+        if entry.get("mokuro_sha256") or (
+            entry.get("mokuro_size") is not None and entry.get("mokuro_version")
+        ):
+            return uuid_
+        return None
+
+    def _backfill_volume_identities(self, conn: sqlite3.Connection) -> None:
+        """Seed the table from what the compiled-entry cache already published."""
+        rows = conn.execute("SELECT volume_key, entry_json FROM series_entry_cache").fetchall()
+        for row in rows:
+            entry = self._load_json_object(row["entry_json"], {})
+            uuid_ = self._identity_from_entry(entry)
+            if uuid_ is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO volume_identities (volume_key, volume_uuid) "
+                    "VALUES (?, ?)",
+                    (row["volume_key"], uuid_),
+                )
+
+    def remember_volume_uuid(self, library_relative_path: str, volume_uuid: str) -> None:
+        """Keep the id this archive's primary `.mokuro` carries (newest wins).
+
+        Keyed by the archive (`S/V1.cbz`; a sidecar's path maps to it). Read
+        by `OCRProcessor.volume_uuid_for` when the server makes that primary
+        again: by then the file is gone, and with it the id every reader's
+        progress knows the volume by.
+        """
+        volume_key = normalize_volume_key_from_library_relative(library_relative_path)
+        if volume_key is None or not volume_uuid.strip():
+            return
+        with self._connection() as conn:
+            self._upsert_volume_identity(conn, volume_key, volume_uuid)
+
+    @staticmethod
+    def _upsert_volume_identity(conn: sqlite3.Connection, volume_key: str, uuid_: str) -> None:
+        conn.execute(
+            """
+            INSERT INTO volume_identities (volume_key, volume_uuid, recorded_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(volume_key) DO UPDATE SET
+                volume_uuid = excluded.volume_uuid,
+                recorded_at = excluded.recorded_at
+            WHERE volume_uuid != excluded.volume_uuid
+            """,
+            (volume_key, uuid_),
+        )
+
+    def remembered_volume_uuid(self, library_relative_path: str) -> str | None:
+        """The id this archive's primary last carried, or None."""
+        volume_key = normalize_volume_key_from_library_relative(library_relative_path)
+        if volume_key is None:
+            return None
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT volume_uuid FROM volume_identities WHERE volume_key = ?", (volume_key,)
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def forget_volume_uuid(self, library_relative_path: str) -> None:
+        """The archive is gone, and its sidecars with it: a new one starts fresh."""
+        volume_key = normalize_volume_key_from_library_relative(library_relative_path)
+        if volume_key is None:
+            return
+        with self._connection() as conn:
+            conn.execute("DELETE FROM volume_identities WHERE volume_key = ?", (volume_key,))
+
+    def forget_volume_uuids_under_prefix(self, library_prefix: str) -> int:
+        """Every archive under a folder. Matched by exact prefix, never LIKE."""
+        prefix = library_prefix.strip("/")
+        if not prefix:
+            return 0
+        head = prefix + "/"
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM volume_identities WHERE substr(volume_key, 1, ?) = ?",
+                (len(head), head),
+            )
+            return cursor.rowcount
+
+    def rename_volume_uuids_under_prefix(self, old_prefix: str, new_prefix: str) -> int:
+        """A folder moved with its sidecars: what they were known by follows."""
+        old = old_prefix.strip("/")
+        new = new_prefix.strip("/")
+        if not old or not new or old == new:
+            return 0
+        old_head, new_head = old + "/", new + "/"
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE OR REPLACE volume_identities SET
+                    volume_key = ? || substr(volume_key, ?)
+                WHERE substr(volume_key, 1, ?) = ?
+                """,
+                (new_head, len(old_head) + 1, len(old_head), old_head),
+            )
+            return cursor.rowcount
+
     # Series metadata operations
 
     @staticmethod
@@ -2169,8 +2299,17 @@ class Database:
         cbz_mtime: float,
         sidecar_key: str,
     ) -> None:
-        """Remember a compiled volume entry against its sources' stat."""
+        """Remember a compiled volume entry against its sources' stat.
+
+        An entry compiled from a `.mokuro` also keeps the id it publishes
+        (`remember_volume_uuid`), in the same transaction: the index is what
+        readers learn a volume's id from, so it is what the volume stays known
+        by after that file is gone. An image-only entry leaves it alone.
+        """
+        identity = self._identity_from_entry(entry)
         with self._connection() as conn:
+            if identity is not None:
+                self._upsert_volume_identity(conn, volume_key, identity)
             conn.execute(
                 """
                 INSERT INTO series_entry_cache (
