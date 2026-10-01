@@ -1,0 +1,182 @@
+[
+ {
+  "id": "drstone01-005",
+  "archive": "Dr Stone (HD Scan) - Dr Stone 01.cbz",
+  "page": 5
+ },
+ {
+  "id": "drstone01-020",
+  "archive": "Dr Stone (HD Scan) - Dr Stone 01.cbz",
+  "page": 20
+ },
+ {
+  "id": "drstone01-050",
+  "archive": "Dr Stone (HD Scan) - Dr Stone 01.cbz",
+  "page": 50
+ },
+ {
+  "id": "opm20-010",
+  "archive": "D049-213 One-Punch Man - One-Punch Man 20.cbz",
+  "page": 10
+ },
+ {
+  "id": "opm20-060",
+  "archive": "D049-213 One-Punch Man - One-Punch Man 20.cbz",
+  "page": 60
+ },
+ {
+  "id": "isakku01-008",
+  "archive": "Isakku - イサック_第01巻_mokuro.cbz",
+  "page": 8
+ },
+ {
+  "id": "isakku01-040",
+  "archive": "Isakku - イサック_第01巻_mokuro.cbz",
+  "page": 40
+ },
+ {
+  "id": "konosuba01-012",
+  "archive": "Kono Subarashii Sekai ni Shukufuku wo! (Upscaled) - [渡真仁, 暁なつめ, 三嶋くろね] この素晴らしい世界に祝福を！ 01.cbz",
+  "page": 12
+ },
+ {
+  "id": "konosuba01-070",
+  "archive": "Kono Subarashii Sekai ni Shukufuku wo! (Upscaled) - [渡真仁, 暁なつめ, 三嶋くろね] この素晴らしい世界に祝福を！ 01.cbz",
+  "page": 70
+ },
+ {
+  "id": "zombie01-009",
+  "archive": "#Zombie Sagashitemasu - -Zombie-Sagashitemasu-01.cbz",
+  "page": 9
+ },
+ {
+  "id": "zombie01-030",
+  "archive": "#Zombie Sagashitemasu - -Zombie-Sagashitemasu-01.cbz",
+  "page": 30
+ },
+ {
+  "id": "toloveru01-015",
+  "archive": "To LOVEる 1 とらぶる- 01.cbz",
+  "page": 15
+ },
+ {
+  "id": "toloveru01-080",
+  "archive": "To LOVEる 1 とらぶる- 01.cbz",
+  "page": 80
+ },
+ {
+  "id": "12kingdoms-010",
+  "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+  "page": 10
+ },
+ {
+  "id": "12kingdoms-030",
+  "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+  "page": 30
+ },
+ {
+  "id": "doraemon08-020",
+  "archive": "Raw Manga/Doraemon/Doraemon 08.cbz",
+  "page": 20
+ },
+ {
+  "id": "doraemon08-100",
+  "archive": "Raw Manga/Doraemon/Doraemon 08.cbz",
+  "page": 100
+ },
+ {
+  "id": "manomono03-012",
+  "archive": "魔のものたちは企てる - 魔のものたちは企てる ３.cbz",
+  "page": 12
+ },
+ {
+  "id": "manomono03-050",
+  "archive": "魔のものたちは企てる - 魔のものたちは企てる ３.cbz",
+  "page": 50
+ },
+ {
+  "id": "yume-005",
+  "archive": "TMW eBook Collection Pt. 4/夢でフラれてはじまる百合/夢でフラれてはじまる百合.cbz",
+  "page": 5
+ },
+ {
+  "id": "yume-020",
+  "archive": "TMW eBook Collection Pt. 4/夢でフラれてはじまる百合/夢でフラれてはじまる百合.cbz",
+  "page": 20
+ },
+ {
+  "id": "strip-12kingdoms-030",
+  "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+  "page": 30,
+  "crop": [
+   0,
+   0,
+   2000,
+   600
+  ]
+ },
+ {
+  "id": "strip-drstone01-020",
+  "archive": "Dr Stone (HD Scan) - Dr Stone 01.cbz",
+  "page": 20,
+  "crop": [
+   0,
+   0,
+   420,
+   1700
+  ]
+ },
+ {
+  "id": "12kingdoms-041",
+  "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+  "page": 41
+ },
+ {
+  "id": "12kingdoms-044",
+  "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+  "page": 44
+ },
+ {
+  "id": "12kingdoms-059",
+  "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+  "page": 59
+ },
+ {
+  "id": "12kingdoms-063",
+  "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+  "page": 63
+ },
+ {
+  "id": "12kingdoms-066",
+  "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+  "page": 66
+ },
+ {
+  "id": "spread-12kingdoms-41-66",
+  "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+  "compose": [
+   [
+    41,
+    66
+   ]
+  ]
+ },
+ {
+  "id": "grid-12kingdoms-3x2",
+  "archive": "Light Novels (D~371-p~292) - 12 Kingdoms test.cbz",
+  "compose": [
+   [
+    41,
+    66
+   ],
+   [
+    44,
+    59
+   ],
+   [
+    63,
+    55
+   ]
+  ]
+ }
+]

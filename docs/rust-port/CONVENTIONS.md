@@ -33,7 +33,7 @@ Prefer the versions pinned in the root `Cargo.toml` `[workspace.dependencies]`
 (`dep.workspace = true`). If you need a crate that is not there, add it to **your
 crate's** `Cargo.toml` with an explicit version; do not edit the root manifest (several
 agents work in parallel — tell the orchestrator in your report instead). Licences must
-be MIT/Apache-2.0/BSD/ISC/Zlib/MPL-2.0/Unicode — no GPL/LGPL/AGPL.
+be MIT/Apache-2.0/BSD/ISC/Zlib/MPL-2.0/Unicode/IJG — no GPL/LGPL/AGPL.
 
 ## Building in parallel
 

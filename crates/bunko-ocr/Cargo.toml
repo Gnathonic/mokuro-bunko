@@ -1,0 +1,47 @@
+[package]
+name = "bunko-ocr"
+description = "mokuro-bunko OCR: ONNX Runtime engines (PP-OCR manga), model store, page reading"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["download"]
+# Model downloads (blocking HTTPS via ureq + rustls). Without it the store only
+# verifies and uses files that are already on disk.
+download = ["dep:ureq"]
+# Decode JPEG pages with libjpeg-turbo's decoder (via mozjpeg, built from C with
+# nasm SIMD), which is what Pillow uses: JPEG pages then decode bit-identically to
+# 0.5.2. Licence: IJG + BSD-3-Clause + Zlib (needs the orchestrator's OK).
+libjpeg = ["dep:mozjpeg"]
+# Execution providers, forwarded to ort (each selects a different prebuilt
+# onnxruntime from ort's download-binaries table where one exists).
+cuda = ["ort/cuda"]
+webgpu = ["ort/webgpu"]
+directml = ["ort/directml"]
+coreml = ["ort/coreml"]
+nnapi = ["ort/nnapi"]
+
+[dependencies]
+ort = { workspace = true, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tracing", "tls-rustls", "api-24"] }
+image = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+parking_lot = { workspace = true }
+flate2 = "1"
+crc32fast = "1"
+unicode-normalization = "0.1"
+webp = { version = "0.3", default-features = false }
+mozjpeg = { version = "0.10", optional = true }
+ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+tempfile = { workspace = true }
+base64 = { workspace = true }
