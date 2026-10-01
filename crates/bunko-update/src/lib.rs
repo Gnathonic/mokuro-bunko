@@ -345,6 +345,9 @@ fn set_executable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Exit code the portable launcher (`run.bat`) treats as "start me again".
+pub const RESTART_EXIT_CODE: i32 = 75;
+
 /// Replace this process with a fresh copy of the (updated) executable, same arguments.
 /// On Unix this is `exec` (same pid, so systemd and Docker keep supervising it); on
 /// Windows a new process is started and this one exits.
@@ -358,6 +361,11 @@ pub fn restart() -> std::io::Result<std::convert::Infallible> {
     }
     #[cfg(not(unix))]
     {
+        // Under the portable launcher (run.bat loops on 75) let the launcher restart us,
+        // so the console window and environment stay the launcher's.
+        if std::env::var_os("MOKURO_LAUNCHER").is_some() {
+            std::process::exit(RESTART_EXIT_CODE)
+        }
         std::process::Command::new(&exe).args(&args).spawn()?;
         std::process::exit(0)
     }

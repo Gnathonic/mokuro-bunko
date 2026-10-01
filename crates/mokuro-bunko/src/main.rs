@@ -23,7 +23,16 @@ use out::Fail;
 static GLOBAL: MiMalloc = MiMalloc;
 
 /// `full` (local OCR linked in) or `lite` (server only).
-pub const FLAVOR: &str = if cfg!(feature = "ocr") { "full" } else { "lite" };
+/// The release flavor this binary updates to (the `artifacts[target][flavor]` key).
+pub const FLAVOR: &str = if cfg!(feature = "cuda") {
+    "full-cuda"
+} else if cfg!(feature = "webgpu") && cfg!(target_os = "linux") {
+    "full-webgpu"
+} else if cfg!(feature = "ocr") {
+    "full"
+} else {
+    "lite"
+};
 
 fn main() {
     let cli = Cli::parse();

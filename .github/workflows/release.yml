@@ -1,150 +1,301 @@
+# Build a release from a `v*` tag: every platform archive, the signed release.json,
+# a DRAFT GitHub release, and versioned Docker images. Nothing here is visible to the
+# updater or to `:latest` users: the owner reviews the draft and then runs the
+# "Publish" workflow (publish.yml), which un-drafts the release and moves the
+# `latest*` image tags. See docs/rust-port/PACKAGING.md.
+#
+# Needs the repository secret BUNKO_SIGNING_KEY (base64 ed25519 seed of the release
+# key whose public half is compiled into bunko-update).
 name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.7.0"
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      image: ${{ steps.v.outputs.image }}
+      epoch: ${{ steps.v.outputs.epoch }}
+    steps:
+      - name: validate tag
+        run: |
+          printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "bad tag: $TAG"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - id: v
+        name: tag matches the workspace version
+        run: |
+          set -eu
+          version="${TAG#v}"
+          ws=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mokuro-bunko") | .version')
+          [ "$ws" = "$version" ] || { echo "tag $TAG != workspace version $ws"; exit 1; }
+          case "$version" in *-*) pre=true ;; *) pre=false ;; esac
+          image="ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/mokuro-bunko"
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "prerelease=$pre"
+            echo "image=$image"
+            echo "epoch=$(git log -1 --format=%ct)"
+          } >> "$GITHUB_OUTPUT"
+      - name: signing key is configured
+        env:
+          BUNKO_SIGNING_KEY: ${{ secrets.BUNKO_SIGNING_KEY }}
+        run: |
+          if [ -z "$BUNKO_SIGNING_KEY" ]; then
+            echo "::error::Add the BUNKO_SIGNING_KEY repository secret (see docs/rust-port/PACKAGING.md)"
+            exit 1
+          fi
+
   test:
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          playwright install chromium
-
-      - name: Run all tests
-        run: pytest -v
-
-  build-binaries:
-    needs: test
+  build:
+    needs: prepare
+    name: build ${{ matrix.name }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            platform: linux-x64
-          - os: macos-latest
-            platform: macos-arm64
-          - os: windows-latest
-            platform: windows-x64
-
+          # Linux lite: fully static musl, cross-built with zig.
+          - { name: linux-x64-lite, os: ubuntu-latest, target: x86_64-unknown-linux-musl, flavor: lite, zig: true }
+          - { name: linux-arm64-lite, os: ubuntu-latest, target: aarch64-unknown-linux-musl, flavor: lite, zig: true }
+          # Linux full: glibc (ONNX Runtime has no musl build), built natively on the
+          # oldest supported Ubuntu so the binary runs on glibc >= 2.35.
+          - { name: linux-x64-full, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, flavor: full }
+          - { name: linux-x64-full-cuda, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, flavor: full, ep: cuda }
+          - { name: linux-arm64-full, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, flavor: full }
+          # Windows: full = DirectML, full-cuda = CUDA (+DirectML), lite.
+          - { name: windows-x64-full, os: windows-latest, target: x86_64-pc-windows-msvc, flavor: full }
+          - { name: windows-x64-full-cuda, os: windows-latest, target: x86_64-pc-windows-msvc, flavor: full, ep: cuda }
+          - { name: windows-x64-lite, os: windows-latest, target: x86_64-pc-windows-msvc, flavor: lite }
+          # macOS: full = CoreML (arm64 only: ort ships no x86_64 macOS ONNX Runtime), lite per arch.
+          - { name: macos-arm64-full, os: macos-latest, target: aarch64-apple-darwin, flavor: full }
+          - { name: macos-arm64-lite, os: macos-latest, target: aarch64-apple-darwin, flavor: lite }
+          - { name: macos-x64-lite, os: macos-latest, target: x86_64-apple-darwin, flavor: lite }
     runs-on: ${{ matrix.os }}
-
+    defaults:
+      run:
+        shell: bash
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+      TARGET: ${{ matrix.target }}
+      FLAVOR: ${{ matrix.flavor }}
+      EP: ${{ matrix.ep }}
+      ZIG: ${{ matrix.zig }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install shiv build
-
-      - name: Build wheel
-        run: python -m build --wheel
-
-      - name: Build binary (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p dist
-          pip wheel --no-deps --wheel-dir=build .
-          WHEEL=$(ls build/*.whl | head -1)
-          python -m shiv \
-            --compressed \
-            --python "/usr/bin/env python3" \
-            --output-file dist/mokuro-bunko-${{ matrix.platform }} \
-            --entry-point mokuro_bunko.__main__:main \
-            "$WHEEL" \
-            wsgidav cheroot pyyaml bcrypt watchdog cryptography click Pillow
-          chmod +x dist/mokuro-bunko-${{ matrix.platform }}
-
-      - name: Build binary (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          mkdir -p dist
-          pip wheel --no-deps --wheel-dir=build .
-          $wheel = Get-ChildItem build\*.whl | Select-Object -First 1
-          python -m shiv `
-            --compressed `
-            --python "python3" `
-            --output-file dist\mokuro-bunko-${{ matrix.platform }}.pyz `
-            --entry-point mokuro_bunko.__main__:main `
-            $wheel.FullName `
-            wsgidav cheroot pyyaml bcrypt watchdog cryptography click Pillow
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          name: binary-${{ matrix.platform }}
-          path: dist/mokuro-bunko-*
+          targets: ${{ matrix.target }}
+      - if: matrix.zig
+        uses: mlugg/setup-zig@v2
+      - if: matrix.zig
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - name: xtask dist
+        run: |
+          set -eux
+          args=(--locked --target "$TARGET" --flavor "$FLAVOR" --out dist)
+          if [ -n "$EP" ]; then args+=(--ep "$EP"); fi
+          if [ "$ZIG" = "true" ]; then args+=(--zig); fi
+          cargo run -p xtask --locked -- dist "${args[@]}"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
 
-  build-docker:
-    needs: test
+  # TODO(android): the Android app is a later task. This job is the hook for it: it
+  # cross-builds the lite server for aarch64-linux-android with cargo-ndk so the app
+  # can embed it. Off until the repository variable BUILD_ANDROID is "true"; when the
+  # app exists, add its artifact to the release job; the APK build itself (gradle,
+  # signing with an upload key) goes here too.
+  android:
+    needs: prepare
+    if: vars.BUILD_ANDROID == 'true'
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - name: cargo ndk build (lite)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: cargo ndk -t arm64-v8a --platform 26 build --release --locked -p mokuro-bunko --no-default-features
+      # TODO(android): gradle assembleRelease of the app, sign, upload the APK.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64-lite
+          path: target/aarch64-linux-android/release/mokuro-bunko
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+  release:
+    needs: [prepare, test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: release.json
+        run: |
+          set -eux
+          published_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cargo run -q -p xtask --locked -- manifest --version "$VERSION" --dir dist \
+            --published-at "$published_at" --docker-repo "$IMAGE"
+          cat dist/release.json
+      - name: sign
+        env:
+          BUNKO_SIGNING_KEY: ${{ secrets.BUNKO_SIGNING_KEY }}
+        run: cargo run -q -p xtask --locked -- sign dist/release.json
+      - name: verify with the key compiled into bunko-update
+        run: cargo run -q -p xtask --locked -- verify dist/release.json --dir dist --require-all
+      - name: draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          files=(dist/*.tar.gz dist/*.zip dist/release.json dist/release.json.sig dist/SHA256SUMS)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Re-run: replace the assets of the existing (draft) release.
+            gh release upload "$TAG" --clobber "${files[@]}"
+          else
+            flags=(--draft --verify-tag --title "mokuro-bunko $VERSION" --generate-notes)
+            if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+            gh release create "$TAG" "${flags[@]}" "${files[@]}"
+          fi
 
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
+  docker:
+    needs: [prepare, test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-linux-*
+          path: dist
+          merge-multiple: true
+      # The images reuse the release binaries (BIN_FROM=prebuilt): no second compile,
+      # and the arm64 images need no emulated build.
+      - name: docker context (release binaries + bunko-init per arch)
+        run: cargo run -q -p xtask --locked -- docker-context --version "$VERSION" --dir dist --out dist/docker --zig
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: lite (static musl on distroless)
+        uses: docker/build-push-action@v6
         with:
           context: .
-          file: deploy/Dockerfile
-          push: false
-          tags: mokuro-bunko:${{ github.ref_name }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Save Docker image
-        run: |
-          docker save mokuro-bunko:${{ github.ref_name }} | gzip > docker-image.tar.gz
-
-      - name: Upload Docker image artifact
-        uses: actions/upload-artifact@v4
+          file: deploy/docker/Dockerfile.lite
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BIN_FROM=prebuilt
+            VERSION=${{ env.VERSION }}
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-lite
+          push: true
+      - name: full (CPU, with optional nginx)
+        uses: docker/build-push-action@v6
         with:
-          name: docker-image
-          path: docker-image.tar.gz
-
-  create-release:
-    needs: [build-binaries, build-docker]
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BIN_FROM=prebuilt
+            VERSION=${{ env.VERSION }}
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          push: true
+      - name: cuda (amd64)
+        uses: docker/build-push-action@v6
         with:
-          path: artifacts
-
-      - name: List artifacts
-        run: find artifacts -type f
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          draft: true
-          generate_release_notes: true
-          files: |
-            artifacts/binary-*/mokuro-bunko-*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          context: .
+          file: deploy/docker/Dockerfile.cuda
+          platforms: linux/amd64
+          build-args: |
+            BIN_FROM=prebuilt
+            VERSION=${{ env.VERSION }}
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-cuda
+          push: true

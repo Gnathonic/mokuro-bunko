@@ -1,23 +1,22 @@
 # In-container nginx config for the X-Accel-Redirect download offload.
 #
-# Templated by docker-entrypoint.sh (envsubst): ${MOKURO_PORT},
+# Templated by deploy/docker/entrypoint.sh (envsubst): ${MOKURO_PORT},
 # ${MOKURO_BACKEND_PORT} and ${MOKURO_LIBRARY} are substituted at start.
 #
-# Topology:   client -> [front proxy] -> nginx (this) -> Python (cheroot)
+# Topology:   client -> [front proxy] -> nginx (this) -> mokuro-bunko
 #
 # Division of labour:
-#   nginx   - serves library file downloads via X-Accel-Redirect (sendfile;
-#             zero Python threads held for the transfer), Range requests,
-#             per-IP connection/rate limits, upload buffering.
-#   Python  - auth, PROPFIND, metadata, uploads, API endpoints. For a GET of a
-#             library file it returns an empty body plus
-#             "X-Accel-Redirect: /internal-library/<path>" and nginx streams
-#             the real bytes from the internal location below.
+#   nginx        - serves library file downloads via X-Accel-Redirect (sendfile),
+#                  Range requests, gzip of JSON.
+#   mokuro-bunko - auth, PROPFIND, metadata, uploads, API endpoints, the processor
+#                  WebSocket. For a GET of a library file it returns an empty body
+#                  plus "X-Accel-Redirect: /internal-library/<path>" and nginx
+#                  streams the real bytes from the internal location below.
 #
 # SECURITY: the internal location is aliased to the library root ONLY (never
 # "/"), and it is marked `internal` so it can never be requested directly from
-# outside. Python additionally confines the redirect path to the library root
-# and URL-encodes it (see MokuroFileResource._compute_accel_redirect).
+# outside. The server additionally confines the redirect path to the library root
+# and URL-encodes it.
 
 worker_processes auto;
 error_log /dev/stderr warn;
@@ -41,7 +40,7 @@ http {
 
     # Preserve the EDGE proxy's X-Forwarded-Proto instead of clobbering it
     # with this internal nginx's own $scheme (which is plain http — TLS ends
-    # at the front proxy). wsgidav validates a MOVE/COPY Destination's scheme
+    # at the front proxy). The server validates a MOVE/COPY Destination's scheme
     # against X-Forwarded-Proto; overwriting it with "http" made EVERY rename
     # arriving over https fail 502 ("Source and destination must have the
     # same scheme"). Empty when a client hits this nginx directly — then its
@@ -54,7 +53,7 @@ http {
     # Compress JSON metadata on the fly. The reader re-downloads catalog.json
     # on every listing refresh by design (the heal-by-review contract), so the
     # ~10x gzip saving applies on every refresh for every client. Applies to
-    # both the proxied path (gzip_proxied any: Python-served JSON) and the
+    # both the proxied path (gzip_proxied any: server-generated JSON) and the
     # X-Accel internal location (mime.types maps .json -> application/json).
     # Archives and images stay untouched: gzip_types lists JSON only.
     gzip on;
@@ -77,7 +76,7 @@ http {
     # only through a front proxy (e.g. Caddy) and docker NAT, so the direct peer
     # is a single private address. Trust X-Forwarded-For from private ranges
     # (clients can't reach the backend directly) and peel back to the originating
-    # client so access logs and the X-Real-IP we forward to Python reflect the
+    # client so access logs and the X-Real-IP we forward to the server reflect the
     # actual client. If no front proxy sets XFF, $remote_addr is unchanged.
     set_real_ip_from 10.0.0.0/8;
     set_real_ip_from 172.16.0.0/12;
@@ -86,14 +85,14 @@ http {
     real_ip_recursive on;
 
     # No per-IP rate/connection limiting here: abuse control belongs to the front
-    # proxy (Caddy), and X-Accel-Redirect already keeps downloads off Python's
+    # proxy (Caddy), and X-Accel-Redirect already keeps downloads off the server's
     # thread pool (the thread-exhaustion these limits originally guarded against).
     # A throttle at this layer instead rejected the reader's normal burst of
     # concurrent thumbnail GETs with a CORS-less 503 — the very break this config
     # now avoids.
 
     # CORS for nginx-GENERATED responses only (e.g. the backend is down). On
-    # success, library downloads inherit Access-Control-Allow-Origin from Python
+    # success, library downloads inherit Access-Control-Allow-Origin from the server
     # across the X-Accel-Redirect, so we must NOT add it unconditionally here or
     # the reader would see a duplicate header and reject the response. The map
     # reflects the request Origin (empty -> header omitted for same-origin calls)
@@ -107,6 +106,13 @@ http {
     # Large manga volume uploads.
     client_max_body_size 2048M;
 
+    # WebSocket upgrade for the processor socket (GET /_processor/{pid}/socket).
+    # Plain requests keep `Connection: ""` so upstream keepalive still works.
+    map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ""      "";
+    }
+
     upstream mokuro_backend {
         server 127.0.0.1:${MOKURO_BACKEND_PORT};
         keepalive 16;
@@ -117,7 +123,7 @@ http {
 
         # Attach CORS to errors nginx generates itself (backend down/timeout) so
         # the reader surfaces the real failure instead of an opaque cross-origin
-        # block. proxy_intercept_errors stays off (default), so Python's own
+        # block. proxy_intercept_errors stays off (default), so the server's own
         # error responses pass through untouched with their existing CORS.
         error_page 500 502 503 504 @cors_error;
 
@@ -135,19 +141,17 @@ http {
             proxy_send_timeout 300s;
             proxy_read_timeout 300s;
 
-            # Stream uploads straight to Python; don't buffer the (normally
+            # Stream uploads straight to the server; don't buffer the (normally
             # empty, X-Accel-bearing) responses.
             proxy_request_buffering off;
             proxy_buffering off;
         }
 
-        # Remote OCR processors (docs/deployment.md, "Remote OCR processors
-        # behind a proxy"). A processor's events channel is ONE chunked request
-        # body that lives as long as its session, and its assignment stream is
-        # one chunked response: neither may be buffered, and the body has no
-        # size limit -- the cap is cumulative over the one body, so 2048M would
-        # cut a long session off. Pings (every 3 s) and heartbeats (every 15 s)
-        # keep both well inside these timeouts.
+        # Remote OCR processors (protocol v3, docs/rust-port/PROTOCOL.md): one
+        # WebSocket per processor (GET /_processor/{pid}/socket) carrying every op
+        # and event, plus plain PUTs streaming finished sidecars. The socket needs
+        # the Upgrade/Connection headers and a long read timeout (WebSocket pings
+        # keep it alive); uploads must not be buffered or size-capped here.
         location /_processor/ {
             proxy_pass http://mokuro_backend;
             proxy_http_version 1.1;
@@ -156,31 +160,32 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $forwarded_proto;
-            proxy_set_header Connection "";
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
 
             client_max_body_size 0;
             proxy_request_buffering off;
             proxy_buffering off;
 
             proxy_connect_timeout 10s;
-            proxy_send_timeout 300s;
-            proxy_read_timeout 300s;
+            proxy_send_timeout 3600s;
+            proxy_read_timeout 3600s;
         }
 
         # Internal target for X-Accel-Redirect. Aliased to the LIBRARY ROOT
-        # only. Python emits: X-Accel-Redirect: /internal-library/<rel-path>
+        # only. The server emits: X-Accel-Redirect: /internal-library/<rel-path>
         location /internal-library/ {
             internal;
             alias ${MOKURO_LIBRARY}/;
 
             # Re-attach CORS that the X-Accel internal redirect drops. nginx does
-            # NOT carry the upstream (Python) response headers onto the file it
+            # NOT carry the upstream (server) response headers onto the file it
             # serves here, so the Access-Control-Allow-Origin that CorsMiddleware
             # set on the redirecting response is lost. Only shared library files
-            # reach this location (per-user files stream through Python with their
+            # reach this location (per-user files stream through the server with their
             # own CORS), and those files are served anonymously -- already public
             # -- so reflecting the request Origin exposes nothing and avoids
-            # duplicating Python's allowlist here. $cors_origin is empty for
+            # duplicating the server's allowlist here. $cors_origin is empty for
             # non-CORS requests, so add_header then omits the header.
             add_header Access-Control-Allow-Origin      $cors_origin always;
             add_header Access-Control-Allow-Credentials true        always;

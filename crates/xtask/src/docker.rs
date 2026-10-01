@@ -1,0 +1,164 @@
+//! `xtask docker-context`: lay out the Linux release binaries for the Dockerfiles'
+//! `BIN_FROM=prebuilt` stage, so images reuse the signed release builds instead of
+//! compiling again (and arm64 images need no emulated compile).
+//!
+//! Layout: `<out>/<amd64|arm64>/<lite|full|cuda>/` holding the archive's files plus
+//! `bunko-init` (the PUID/PGID entrypoint from `packaging/docker-init`).
+
+use crate::archive;
+use crate::names;
+use crate::util;
+use anyhow::{Context, Result, bail};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, clap::Args)]
+pub struct DockerContextArgs {
+    /// Release version of the archives.
+    #[arg(long)]
+    pub version: Option<String>,
+    /// Directory holding the release archives.
+    #[arg(long, default_value = "dist")]
+    pub dir: PathBuf,
+    /// Output directory (the Dockerfiles expect `dist/docker`).
+    #[arg(long, default_value = "dist/docker")]
+    pub out: PathBuf,
+    /// Build bunko-init with `cargo zigbuild` (needed for arm64 on an x86_64 host).
+    #[arg(long)]
+    pub zig: bool,
+    /// Don't build bunko-init (it must then be copied in by hand).
+    #[arg(long)]
+    pub no_init: bool,
+}
+
+/// Docker platform arch and image flavor dir for a release archive, if it goes in an image.
+fn slot(target: &str, flavor: &str) -> Option<(&'static str, &'static str)> {
+    let arch = match target.split('-').next()? {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => return None,
+    };
+    let dir = match (
+        flavor,
+        target.ends_with("-unknown-linux-musl"),
+        target.ends_with("-unknown-linux-gnu"),
+    ) {
+        ("lite", true, _) => "lite",
+        ("full", _, true) => "full",
+        ("full-cuda", _, true) => "cuda",
+        _ => return None,
+    };
+    Some((arch, dir))
+}
+
+pub fn run(args: &DockerContextArgs) -> Result<()> {
+    let root = util::workspace_root();
+    let version = match &args.version {
+        Some(v) => names::strip_v(v).to_string(),
+        None => util::workspace_version(&root)?,
+    };
+    let dir = if args.dir.is_absolute() {
+        args.dir.clone()
+    } else {
+        root.join(&args.dir)
+    };
+    let out = if args.out.is_absolute() {
+        args.out.clone()
+    } else {
+        root.join(&args.out)
+    };
+    let mut slots: Vec<(String, PathBuf)> = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let Some((target, flavor)) = names::parse_archive_name(&name, &version) else {
+            continue;
+        };
+        let Some((arch, flavor_dir)) = slot(target, flavor) else {
+            continue;
+        };
+        let dest = out.join(arch).join(flavor_dir);
+        if dest.exists() {
+            std::fs::remove_dir_all(&dest)?;
+        }
+        let files = archive::extract_flat(&path, &dest)?;
+        if !dest.join(names::BIN).is_file() {
+            bail!("{name} has no {} at its top level", names::BIN);
+        }
+        eprintln!("    {arch}/{flavor_dir}: {} files from {name}", files.len());
+        slots.push((arch.to_string(), dest));
+    }
+    if slots.is_empty() {
+        bail!(
+            "no Linux release archives for {version} in {}",
+            dir.display()
+        );
+    }
+    if !args.no_init {
+        let mut arches: Vec<_> = slots.iter().map(|(a, _)| a.clone()).collect();
+        arches.dedup();
+        for arch in arches {
+            let init = build_init(&root, &arch, args.zig)?;
+            for (_, dest) in slots.iter().filter(|(a, _)| *a == arch) {
+                std::fs::copy(&init, dest.join("bunko-init"))?;
+            }
+        }
+    }
+    println!("{}", out.display());
+    Ok(())
+}
+
+fn build_init(root: &Path, arch: &str, zig: bool) -> Result<PathBuf> {
+    let target = match arch {
+        "amd64" => "x86_64-unknown-linux-musl",
+        _ => "aarch64-unknown-linux-musl",
+    };
+    let manifest = root.join("packaging/docker-init/Cargo.toml");
+    let target_dir = util::target_dir(root).join("docker-init");
+    let mut cmd = util::cargo();
+    cmd.arg(if zig { "zigbuild" } else { "build" })
+        .args([
+            "--release",
+            "--locked",
+            "--target",
+            target,
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(&target_dir);
+    util::run(&mut cmd)?;
+    let bin = target_dir.join(target).join("release/bunko-init");
+    bin.is_file()
+        .then_some(bin.clone())
+        .with_context(|| format!("{} was not built", bin.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slots() {
+        assert_eq!(
+            slot("x86_64-unknown-linux-musl", "lite"),
+            Some(("amd64", "lite"))
+        );
+        assert_eq!(
+            slot("aarch64-unknown-linux-gnu", "full"),
+            Some(("arm64", "full"))
+        );
+        assert_eq!(
+            slot("x86_64-unknown-linux-gnu", "full-cuda"),
+            Some(("amd64", "cuda"))
+        );
+        assert_eq!(slot("x86_64-unknown-linux-gnu", "lite"), None);
+        assert_eq!(slot("x86_64-pc-windows-msvc", "full"), None);
+    }
+}

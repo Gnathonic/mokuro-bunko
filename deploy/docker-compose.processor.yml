@@ -1,0 +1,25 @@
+# A remote OCR processor on a GPU machine, working for a mokuro-bunko library
+# elsewhere (protocol: docs/rust-port/PROTOCOL.md). processor.yaml (library URL,
+# processor account) goes in ./processor/; models are cached in the volume.
+#
+#   docker compose -f deploy/docker-compose.processor.yml up -d
+services:
+  processor:
+    image: ghcr.io/gnathonic/mokuro-bunko:latest-cuda
+    container_name: mokuro-bunko-processor
+    restart: unless-stopped
+    command: ["processor", "serve", "--config", "/config/processor.yaml"]
+    volumes:
+      - ./processor:/config
+      - processor-data:/data
+    environment:
+      - PUID=1000
+      - PGID=1000
+    # The processor only dials out; no ports. No healthcheck needed.
+    healthcheck:
+      disable: true
+    gpus: all
+
+volumes:
+  processor-data:
+    driver: local

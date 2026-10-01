@@ -2,132 +2,162 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "rust/**"]
   pull_request:
-    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
 
 jobs:
-  lint:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.12"
+          components: rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo fmt --check --manifest-path packaging/docker-init/Cargo.toml
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff
-
-      - name: Run ruff
-        run: ruff check src/
-
-  type-check:
+  clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.12"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The full build (default features, links ONNX Runtime) and the lite build.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy -p mokuro-bunko --all-targets --locked --no-default-features -- -D warnings
+      - run: cargo clippy --locked --manifest-path packaging/docker-init/Cargo.toml -- -D warnings
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Run mypy
-        run: mypy src/
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --locked
 
   test:
-    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
-
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      - name: lite build compiles and tests on every OS
+        run: cargo test -p mokuro-bunko --locked --no-default-features
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Run unit tests
-        run: pytest tests/unit/ -v
-
-      - name: Run integration tests
-        run: pytest tests/integration/ -v
-
-  web-tests:
+  # The lite build as it ships: a static musl binary packaged by xtask, then the
+  # release tooling end to end (manifest, sign, verify, install.sh) with a throwaway key.
+  lite-smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: "3.12"
-
-      - name: Install dependencies
+          targets: x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+      - name: xtask dist (runs `--version` on the packaged binary)
+        run: cargo run -p xtask --locked -- dist --locked --zig --target x86_64-unknown-linux-musl --flavor lite --out dist
+      - name: static, and runs from the archive
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          set -eux
+          mkdir -p "$RUNNER_TEMP/x"
+          tar -xzf dist/mokuro-bunko-*-x86_64-unknown-linux-musl-lite.tar.gz -C "$RUNNER_TEMP/x"
+          bin=$(echo "$RUNNER_TEMP"/x/mokuro-bunko-*/mokuro-bunko)
+          file "$bin" | grep -q 'statically linked'
+          "$bin" --version | tee /dev/stderr | grep -q lite
+          ls -l "$bin" dist/
+      - name: manifest, sign, verify
+        run: |
+          set -eux
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mokuro-bunko") | .version')
+          cargo run -q -p xtask --locked -- manifest --version "$version" --dir dist --base-url http://127.0.0.1:18731
+          pk=$(cargo run -q -p xtask --locked -- keygen --out "$RUNNER_TEMP/ci.key")
+          echo "CI_PUBLIC_KEY=$pk" >> "$GITHUB_ENV"
+          cargo run -q -p xtask --locked -- sign dist/release.json --key "$RUNNER_TEMP/ci.key" --public-key "$pk"
+          cargo run -q -p xtask --locked -- verify dist/release.json --public-key "$pk" --dir dist --require-all
+          # The real release key must not accept a throwaway signature.
+          if cargo run -q -p xtask --locked -- verify dist/release.json; then exit 1; fi
+      - name: install.sh against the local release
+        run: |
+          set -eux
+          (cd dist && python3 -m http.server 18731 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 1
+          MOKURO_BUNKO_BASE_URL=http://127.0.0.1:18731 MOKURO_BUNKO_PUBLIC_KEY="$CI_PUBLIC_KEY" \
+            sh scripts/install.sh --flavor lite --require-signature --prefix "$RUNNER_TEMP/inst"
+          "$RUNNER_TEMP/inst/bin/mokuro-bunko" --version
+          # A wrong key is refused.
+          if MOKURO_BUNKO_BASE_URL=http://127.0.0.1:18731 sh scripts/install.sh --dry-run; then exit 1; fi
+      - name: licence audit (fails on copyleft)
+        run: |
+          set -eux
+          cargo run -q -p xtask --locked -- licenses --target x86_64-unknown-linux-musl --flavor lite
+          cargo run -q -p xtask --locked -- licenses --target x86_64-unknown-linux-gnu --flavor full
+          cargo run -q -p xtask --locked -- licenses --target x86_64-unknown-linux-gnu --flavor full --ep cuda
+          cargo run -q -p xtask --locked -- licenses --target x86_64-pc-windows-msvc --flavor full
+          cargo run -q -p xtask --locked -- licenses --target aarch64-apple-darwin --flavor full
 
-      - name: Install Playwright browsers
-        run: playwright install chromium
-
-      - name: Run web tests
-        run: pytest tests/web/ -v
-
-  e2e-tests:
+  scripts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
+      - name: shellcheck
+        run: shellcheck scripts/install.sh deploy/docker/entrypoint.sh
+      - name: PowerShell scripts parse
+        shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          foreach ($f in "scripts/install.ps1", "scripts/setup-windows.ps1") {
+            $tokens = $null; $errs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$tokens, [ref]$errs)
+            if ($errs.Count) { $errs | ForEach-Object { Write-Error "${f}: $($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+          }
+      - name: nginx template renders and passes nginx -t
+        run: |
+          docker run --rm -v "$PWD/deploy/nginx-internal.conf.template:/t:ro" \
+            -e MOKURO_PORT=8080 -e MOKURO_BACKEND_PORT=8081 -e MOKURO_LIBRARY=/data/library nginx:alpine \
+            sh -c 'envsubst "\${MOKURO_PORT} \${MOKURO_BACKEND_PORT} \${MOKURO_LIBRARY}" </t >/tmp/n.conf && mkdir -p /data/library && nginx -t -c /tmp/n.conf'
+      - name: compose files are valid
+        run: for f in deploy/docker-compose*.yml; do docker compose -f "$f" config -q; done
+        env:
+          CLOUDFLARE_TUNNEL_TOKEN: dummy
 
-      - name: Run E2E tests (excluding slow Docker tests)
-        run: pytest tests/e2e/ -v -m "not slow"
-
-  coverage:
+  docker-lite:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: build the lite image from source
+        uses: docker/build-push-action@v6
         with:
-          python-version: "3.12"
-
-      - name: Install dependencies
+          context: .
+          file: deploy/docker/Dockerfile.lite
+          load: true
+          tags: mokuro-bunko:ci-lite
+          cache-from: type=gha,scope=lite
+          cache-to: type=gha,scope=lite,mode=max
+      - name: run it
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          playwright install chromium
-
-      - name: Run tests with coverage
-        run: pytest --cov=mokuro_bunko --cov-report=xml -v tests/unit/ tests/integration/
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: coverage.xml
-          fail_ci_if_error: false
+          set -eux
+          docker run --rm mokuro-bunko:ci-lite --version | grep -q lite
+          docker run --rm -e PUID=4242 -e PGID=4242 -v "$RUNNER_TEMP/data:/data" mokuro-bunko:ci-lite --version
+          test "$(stat -c %u:%g "$RUNNER_TEMP/data")" = "4242:4242"
+          docker image ls mokuro-bunko:ci-lite

@@ -1,0 +1,31 @@
+[package]
+name = "xtask"
+description = "Release tooling for mokuro-bunko: dist archives, signed release manifest, Docker contexts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Run with `cargo run -p xtask -- <command>` (or `cargo xtask <command>` once the
+# workspace has the alias in .cargo/config.toml: `[alias] xtask = "run -p xtask --"`).
+
+[dependencies]
+bunko-update.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true
+rand.workspace = true
+zip = { workspace = true }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
+flate2 = "1"
+tar = "0.4"
+
+[dev-dependencies]
+tempfile.workspace = true

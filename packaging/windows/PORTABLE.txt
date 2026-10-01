@@ -1,0 +1,9 @@
+This file switches Mokuro Bunko to portable mode.
+
+While it is here, run.bat and doctor.bat keep everything (config, database,
+library, logs, OCR models) in the data\ folder next to them, and nothing is
+written to AppData or the registry.
+
+Delete it to use the normal locations instead
+(%LOCALAPPDATA%\mokuro-bunko, where mokuro-bunko 0.5 kept its library).
+scripts\install.ps1 deletes it for you.

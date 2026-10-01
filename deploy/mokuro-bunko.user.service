@@ -1,0 +1,24 @@
+# systemd USER service for a binary installed by scripts/install.sh without root
+# (~/.local/lib/mokuro-bunko, linked from ~/.local/bin/mokuro-bunko).
+#   cp deploy/mokuro-bunko.user.service ~/.config/systemd/user/mokuro-bunko.service
+#   systemctl --user enable --now mokuro-bunko
+#   loginctl enable-linger "$USER"     # keep it running after logout
+# Config and data use the defaults: ~/.config/mokuro-bunko/config.yaml and
+# ~/.local/share/mokuro-bunko (the same places as mokuro-bunko 0.5).
+[Unit]
+Description=Mokuro Bunko manga library server
+Documentation=https://github.com/Gnathonic/mokuro-bunko
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Self-managed install: the admin panel can download a signed update, replace the
+# binary in place and restart it (exec, same PID, so systemd keeps tracking it).
+ExecStart=%h/.local/bin/mokuro-bunko serve
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=default.target

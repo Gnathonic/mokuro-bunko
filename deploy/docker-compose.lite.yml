@@ -1,0 +1,23 @@
+# Lean mokuro-bunko server (lite image, ~1 GB RAM hosts): no local OCR; OCR is done
+# by processors on other machines (see docker-compose.processor.yml).
+#
+#   docker compose -f deploy/docker-compose.lite.yml up -d
+services:
+  mokuro-bunko:
+    image: ghcr.io/gnathonic/mokuro-bunko:latest-lite
+    container_name: mokuro-bunko
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - mokuro-data:/data
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - MOKURO_STORAGE=/data
+      - MOKURO_CONFIG=/data/config.yaml
+      - MOKURO_REGISTRATION_MODE=self
+
+volumes:
+  mokuro-data:
+    driver: local

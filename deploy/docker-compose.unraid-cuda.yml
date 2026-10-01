@@ -1,11 +1,11 @@
-version: "3.8"
-
+# Unraid / NVIDIA: mokuro-bunko with CUDA OCR (successor of the 0.5 unraid-cuda image).
+# Needs an NVIDIA driver >= 580 (CUDA 13) and the NVIDIA container runtime.
 services:
   mokuro-bunko:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.unraid
-    image: mokuro-bunko:unraid-cuda
+    image: ghcr.io/gnathonic/mokuro-bunko:latest-cuda
+    # build:
+    #   context: ..
+    #   dockerfile: deploy/docker/Dockerfile.cuda
     container_name: mokuro-bunko
     restart: unless-stopped
     ports:
@@ -19,17 +19,13 @@ services:
       - UMASK=002
       - MOKURO_CONFIG=/config/config.yaml
       - MOKURO_OCR_BACKEND=auto
-      - MOKURO_BUNKO_OCR_ENV=/data/.ocr-env
-      # Second env for the hayai-nova / paddle-manga / ppocr-manga engines,
-      # installed at startup when a configured OCR generation needs it.
-      - MOKURO_BUNKO_OCR_ENGINES_ENV=/data/.ocr-engines-env
       # OCR generations as JSON (or leave unset and edit them in the admin
-      # panel, which saves config.yaml):
-      # - 'MOKURO_OCR_GENERATIONS=[{"name":"mokuro","engine":"mokuro","primary":true},{"name":"hayai-nova","engine":"hayai-nova","detector":"ppocr-manga"}]'
+      # panel, which saves config.yaml). Engines: hayai-nova, paddle-manga, ppocr-manga.
+      # - 'MOKURO_OCR_GENERATIONS=[{"name":"ppocr-manga","engine":"ppocr-manga","primary":true}]'
       # No OCR in this container; a remote processor runs the queue:
       # - MOKURO_OCR_LOCAL_PROCESSING=false
-      - OCR_AUTO_INSTALL=false
+      # nginx in front, serving library downloads via X-Accel-Redirect:
+      # - MOKURO_NGINX_ACCEL=1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    # For compose v2:
     gpus: all

@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1.7
+#
+# mokuro-bunko LITE image: the server only (OCR runs on remote processors).
+# A static musl binary on distroless/static: CA certificates, /tmp, nothing else.
+#
+#   docker build -f deploy/docker/Dockerfile.lite -t mokuro-bunko:lite .
+#   docker run -p 8080:8080 -v ./data:/data mokuro-bunko:lite
+#
+# BIN_FROM=source (default) compiles in the build stage. The release workflow uses
+# BIN_FROM=prebuilt with the signed release binaries laid out by
+# `cargo run -p xtask -- docker-context` in dist/docker/<arch>/lite/.
+#
+# Environment contract (same names as the 0.5 images): PUID/PGID (the server drops
+# to them when the container starts as root), UMASK, TAKE_OWNERSHIP, MOKURO_* config
+# overrides. This image has no nginx: MOKURO_NGINX_ACCEL is ignored (use the full
+# image for the X-Accel offload).
+
+ARG BIN_FROM=source
+
+FROM rust:1-alpine AS source
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    set -eux; \
+    host="$(rustc -vV | sed -n 's/^host: //p')"; \
+    cargo run --release --locked -p xtask -- dist --locked --target "$host" --flavor lite --out /tmp/dist; \
+    mkdir -p /out; \
+    tar -xzf /tmp/dist/*.tar.gz -C /out --strip-components=1; \
+    cargo build --release --locked --manifest-path packaging/docker-init/Cargo.toml --target-dir target/docker-init; \
+    cp target/docker-init/release/bunko-init /out/
+
+FROM scratch AS prebuilt
+ARG TARGETARCH
+COPY dist/docker/${TARGETARCH}/lite/ /out/
+
+FROM ${BIN_FROM} AS bin
+
+FROM gcr.io/distroless/static-debian13:latest
+ARG VERSION=dev
+LABEL org.opencontainers.image.source="https://github.com/Gnathonic/mokuro-bunko" \
+      org.opencontainers.image.title="mokuro-bunko (lite)" \
+      org.opencontainers.image.description="Self-hosted manga library server for Mokuro Reader: WebDAV, catalog, accounts; OCR by remote processors" \
+      org.opencontainers.image.licenses="MPL-2.0" \
+      org.opencontainers.image.version="${VERSION}"
+
+COPY --from=bin /out/ /opt/mokuro-bunko/
+
+ENV PATH="/opt/mokuro-bunko:/usr/local/bin:/usr/bin:/bin" \
+    MOKURO_INSTALL_KIND="docker" \
+    MOKURO_HOST="0.0.0.0" \
+    MOKURO_PORT="8080" \
+    MOKURO_STORAGE="/data" \
+    MOKURO_CONFIG="/data/config.yaml" \
+    MOKURO_REGISTRATION_MODE="disabled" \
+    MOKURO_SSL_ENABLED="false" \
+    PUID="1000" \
+    PGID="1000" \
+    UMASK="002"
+
+VOLUME ["/data"]
+EXPOSE 8080
+
+# `mokuro-bunko healthcheck` GETs the local server (no curl/wget in this image).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD ["/opt/mokuro-bunko/mokuro-bunko", "healthcheck"]
+
+ENTRYPOINT ["/opt/mokuro-bunko/bunko-init"]
+CMD ["serve"]
