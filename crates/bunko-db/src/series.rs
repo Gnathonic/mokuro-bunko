@@ -263,6 +263,28 @@ impl Database {
         Ok((!entry.is_empty()).then_some(entry))
     }
 
+    /// The raw cache row `(entry_json, cbz_size, cbz_mtime, sidecar_key)` for callers that
+    /// decide validity themselves (bunko-library compares stats with its own rules).
+    /// NULL columns come back as `""`, `-1`, `NaN` and `""`, which never validate.
+    pub fn cached_volume_entry_row(&self, volume_key: &str) -> Result<Option<(String, i64, f64, String)>> {
+        self.read(|conn| {
+            Ok(conn
+                .prepare_cached(
+                    "SELECT entry_json, cbz_size, cbz_mtime, sidecar_key FROM series_entry_cache \
+                     WHERE volume_key = ?",
+                )?
+                .query_row([volume_key], |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        r.get::<_, Option<i64>>(1)?.unwrap_or(-1),
+                        r.get::<_, Option<f64>>(2)?.unwrap_or(f64::NAN),
+                        r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    ))
+                })
+                .optional()?)
+        })
+    }
+
     /// Remember a compiled volume entry against its sources' stat; an entry compiled from
     /// a `.mokuro` also keeps its `volume_uuid` (same transaction).
     pub fn put_cached_volume_entry(

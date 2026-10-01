@@ -57,10 +57,8 @@ hex.workspace = true
 indexmap = "2"
 flate2 = "1"
 zip.workspace = true
-# library module (catalog + metadata runtime): the filesystem watcher, raw reads of the
-# entry cache row through the database's connection
+# library module (catalog + metadata runtime): the filesystem watcher
 notify.workspace = true
-rusqlite.workspace = true
 
 [dev-dependencies]
 # ocr tests: a processor speaking the v3 WebSocket; the in-process processor over a
