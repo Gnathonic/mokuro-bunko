@@ -1,0 +1,31 @@
+[package]
+name = "bunko-db"
+description = "The mokuro-bunko SQLite database: a drop-in over 0.5.2 mokuro.db files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bunko-core.workspace = true
+rusqlite.workspace = true
+bcrypt.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+# Local (process-TZ) time for invite expiries, which 0.5.2 stores local-naive.
+# `time`'s local offset is unavailable in multi-threaded programs on Unix; chrono reads
+# TZ / /etc/localtime itself.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# NFC fold of series folder names (ownership), as 0.5.2's `unicodedata.normalize`.
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile.workspace = true
+anyhow.workspace = true

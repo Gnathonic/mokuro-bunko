@@ -2,7 +2,7 @@
 //! answered here with 204 and never reaches the app. `OPTIONS` without `Origin` is an
 //! ordinary request.
 
-use crate::state::AppState;
+use crate::core::Core;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
@@ -21,7 +21,7 @@ pub fn is_dav_path(path: &str) -> bool {
     matches!(path, "" | "/" | "/mokuro-reader" | "/inbox") || path.starts_with("/mokuro-reader/") || path.starts_with("/inbox/")
 }
 
-pub async fn cors(State(state): State<AppState>, req: Request, next: Next) -> Response {
+pub async fn cors(State(state): State<Core>, req: Request, next: Next) -> Response {
     let (enabled, allowed, credentials) = {
         let cfg = state.config.read();
         let origin = req.headers().get(http::header::ORIGIN).and_then(|v| v.to_str().ok()).map(str::to_string);

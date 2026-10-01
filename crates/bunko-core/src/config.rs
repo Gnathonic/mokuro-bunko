@@ -134,12 +134,11 @@ impl CorsConfig {
         if !pattern.contains('*') {
             return origin == pattern;
         }
-        if let Some(prefix) = pattern.strip_suffix(":*") {
-            if let Some(rest) = origin.strip_prefix(prefix) {
-                if let Some(port) = rest.strip_prefix(':') {
-                    return !port.is_empty() && port.chars().all(|c| c.is_ascii_digit());
-                }
-            }
+        if let Some(prefix) = pattern.strip_suffix(":*")
+            && let Some(rest) = origin.strip_prefix(prefix)
+            && let Some(port) = rest.strip_prefix(':')
+        {
+            return !port.is_empty() && port.chars().all(|c| c.is_ascii_digit());
         }
         false
     }
@@ -311,7 +310,7 @@ pub struct Config {
 
 // --- value helpers ----------------------------------------------------------------------
 
-fn section<'a>(data: &'a Map<String, Value>, name: &str) -> Result<Map<String, Value>, ConfigError> {
+fn section(data: &Map<String, Value>, name: &str) -> Result<Map<String, Value>, ConfigError> {
     match data.get(name) {
         None | Some(Value::Null) => Ok(Map::new()),
         Some(Value::Object(m)) => Ok(m.clone()),
@@ -1014,10 +1013,13 @@ pub fn validate_trusted_proxies(list: &[String]) -> Result<(), ConfigError> {
 }
 
 fn sort_value(v: &Value) -> Value {
-    // serde_json's Map is a BTreeMap without the preserve_order feature, so keys are
-    // already sorted; this recurses to normalise anything built elsewhere.
+    // PyYAML's safe_dump sorts keys; serde_json keeps insertion order (preserve_order).
     match v {
-        Value::Object(m) => Value::Object(m.iter().map(|(k, v)| (k.clone(), sort_value(v))).collect()),
+        Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            Value::Object(keys.into_iter().map(|k| (k.clone(), sort_value(&m[k]))).collect())
+        }
         Value::Array(a) => Value::Array(a.iter().map(sort_value).collect()),
         other => other.clone(),
     }

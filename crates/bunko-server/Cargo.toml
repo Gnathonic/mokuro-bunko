@@ -11,12 +11,13 @@ default = []
 [dependencies]
 bunko-core.workspace = true
 bunko-proto.workspace = true
+bunko-db.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 futures-util.workspace = true
 axum.workspace = true
 tower.workspace = true
@@ -35,6 +36,10 @@ time.workspace = true
 ipnet = "2"
 hostname = "0.4"
 x509-parser = "0.16"
+base64.workspace = true
+percent-encoding.workspace = true
+reqwest.workspace = true
+which = "7"
 
 [dev-dependencies]
 tempfile.workspace = true
