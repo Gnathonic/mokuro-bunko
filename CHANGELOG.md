@@ -7,6 +7,9 @@
 
 ### Fixed
 - A re-OCR'd volume keeps its `volume_uuid`, so read progress stays attached.
+- Uploaders can edit and delete their own series with non-ASCII titles.
+- Uploaders can delete the OCR layer files of their own volumes.
+- Volume files are revalidated, so readers never install stale cached OCR.
 
 ## [0.5.1] - 2026-09-30
 

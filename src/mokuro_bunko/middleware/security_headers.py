@@ -40,6 +40,7 @@ _SAFE_HEADERS: list[tuple[str, str]] = [
 # enough that a re-imported/re-processed volume's ETag change is noticed
 # again soon after.
 _IMAGE_CACHE_CONTROL = "private, max-age=86400"
+_REVALIDATED_SUFFIXES = (".mokuro", ".mokuro.gz", ".cbz")
 
 
 class SecurityHeadersMiddleware:
@@ -53,6 +54,8 @@ class SecurityHeadersMiddleware:
         environ: dict[str, Any],
         start_response: Callable[..., Any],
     ) -> Iterable[bytes]:
+        path_lower = environ.get("PATH_INFO", "").lower()
+
         def secure_start_response(
             status: str,
             headers: list[tuple[str, str]],
@@ -78,6 +81,15 @@ class SecurityHeadersMiddleware:
             is_image = bare_content_type.startswith("image/")
             if is_image and "cache-control" not in present:
                 new_headers.append(("Cache-Control", _IMAGE_CACHE_CONTROL))
+
+            # A volume's files change in place (a re-OCR rewrites its
+            # `.mokuro`, a verified PUT replaces its archive) under a
+            # Last-Modified a browser would otherwise treat as heuristically
+            # fresh for days: a reader would install the old OCR and never
+            # learn of the new one. Revalidate every time (the ETag makes
+            # that a 304).
+            if path_lower.endswith(_REVALIDATED_SUFFIXES) and "cache-control" not in present:
+                new_headers.append(("Cache-Control", "no-cache"))
 
             return cast(
                 "Callable[[bytes], None]",
