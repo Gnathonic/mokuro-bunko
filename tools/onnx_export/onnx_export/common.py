@@ -12,8 +12,17 @@ from typing import Any
 from . import EXPORT_TOOL_VERSION, RELEASE_TAG
 from .pins import Source
 
-# tools/onnx_export/onnx_export/common.py -> repository root
-REPO_ROOT = Path(__file__).resolve().parents[3]
+# The 0.5.2 Python sources (the reference runner and the pinned revisions) are no longer
+# in this tree. Point MOKURO_REF_052 at a checkout of commit 199cff5 (release 0.5.2), e.g.
+#   git worktree add --detach ../ref-0.5.2 199cff5
+# The default is that sibling worktree.
+_THIS_REPO = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(os.environ.get("MOKURO_REF_052", _THIS_REPO.parent / "ref-0.5.2"))
+if not (REPO_ROOT / "src/mokuro_bunko/ocr/engine_runner.py").is_file():
+    raise SystemExit(
+        f"0.5.2 reference sources not found at {REPO_ROOT}: set MOKURO_REF_052 to a checkout of "
+        "commit 199cff5 (git worktree add --detach ../ref-0.5.2 199cff5)"
+    )
 DEFAULT_OUT = Path(os.environ.get("MOKURO_MODELS_OUT", Path.home() / ".cache/mokuro-bunko-demo/models-v1"))
 SPIKE = Path.home() / ".cache/mokuro-bunko-demo/onnx-spike"
 DEFAULT_HAYAI_CROPS = SPIKE / "hayai"  # crops/ + crops.json (220 line crops)

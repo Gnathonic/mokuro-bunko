@@ -1,7 +1,7 @@
 """hayai-nova parity: the 0.5.2 torch recognizer vs the exported graphs on ORT (CPU EP).
 
 Reference: ``HayaiNovaRecognizer(device="cpu", precision="fp32", fold=False)``
-from this checkout's ``src/mokuro_bunko/ocr/engine_runner.py`` -- the texts the
+from the 0.5.2 reference checkout's ``src/mokuro_bunko/ocr/engine_runner.py`` (``MOKURO_REF_052``) -- the texts the
 reconciled road consumes (un-folded, ``str.strip()``ed). Candidate: the
 torch-free host in ``host.py`` (PIL preprocessing, numpy tables, ``tokenizers``
 decode) over ``hayai-nova_*_{fp32,fp16}.onnx``.

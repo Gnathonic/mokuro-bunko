@@ -1,7 +1,7 @@
 """Source checkpoints, pinned to commits, and their licences.
 
 The recognizer pins are the ones 0.5.2 reads with (``REPO_REVISIONS`` in
-``src/mokuro_bunko/ocr/engine_runner.py``); the PP-OCR pin is ``REPO_REVISION``
+``src/mokuro_bunko/ocr/engine_runner.py`` of the 0.5.2 reference checkout, ``MOKURO_REF_052``); the PP-OCR pin is ``REPO_REVISION``
 in ``src/mokuro_bunko/ocr/ppocr.py``. :func:`check_pins` (run before every
 export) holds them equal, so a pin bump in the runner cannot silently leave
 the exports behind.
