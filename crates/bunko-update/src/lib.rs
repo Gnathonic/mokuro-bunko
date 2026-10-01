@@ -254,9 +254,10 @@ impl Updater {
     }
 
     pub async fn fetch_manifest(&self) -> Result<Manifest, UpdateError> {
+        let url = self.manifest_location().await?;
         let body = self
             .client
-            .get(&self.manifest_url)
+            .get(&url)
             .send()
             .await?
             .error_for_status()?
@@ -264,13 +265,46 @@ impl Updater {
             .await?;
         let sig = self
             .client
-            .get(format!("{}.sig", self.manifest_url))
+            .get(format!("{url}.sig"))
             .send()
             .await?
             .error_for_status()?
             .text()
             .await?;
         parse_manifest(&body, &sig, &self.public_key)
+    }
+
+    /// Where `release.json` is. GitHub's `releases/latest/download/` never points at a
+    /// pre-release, so on the `prerelease` channel with a GitHub `latest` URL the newest
+    /// published release (pre-release or not) is looked up through the releases API.
+    async fn manifest_location(&self) -> Result<String, UpdateError> {
+        let Some((repo, file)) = prerelease_lookup(&self.manifest_url, &self.channel) else {
+            return Ok(self.manifest_url.clone());
+        };
+        #[derive(Deserialize)]
+        struct Release {
+            tag_name: String,
+            draft: bool,
+        }
+        let releases: Vec<Release> = self
+            .client
+            .get(format!(
+                "https://api.github.com/repos/{repo}/releases?per_page=10"
+            ))
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        // Newest first; drafts are not downloadable.
+        Ok(match releases.into_iter().find(|r| !r.draft) {
+            Some(r) => format!(
+                "https://github.com/{repo}/releases/download/{}/{file}",
+                r.tag_name
+            ),
+            None => self.manifest_url.clone(),
+        })
     }
 
     /// Whether `latest` should be offered over `current` on this channel.
@@ -384,6 +418,17 @@ impl Updater {
         .await
         .map_err(|e| UpdateError::Unpack(e.to_string()))?
     }
+}
+
+/// `(owner/repo, file)` when `url` is a GitHub `releases/latest/download/<file>` URL and
+/// the channel needs the releases API to see pre-releases.
+pub fn prerelease_lookup(url: &str, channel: &str) -> Option<(String, String)> {
+    if channel != "prerelease" {
+        return None;
+    }
+    let rest = url.strip_prefix("https://github.com/")?;
+    let (repo, file) = rest.split_once("/releases/latest/download/")?;
+    Some((repo.to_string(), file.to_string()))
 }
 
 /// Pull `binary` out of a `.tar.gz`, `.zip` or bare executable download into `out`.
@@ -568,6 +613,20 @@ mod tests {
         let out = dir.path().join("out");
         extract_binary(&tgz, "https://x/a.tar.gz", "mokuro-bunko", &out).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), b"#!/bin/sh\necho hi\n");
+    }
+
+    #[test]
+    fn prerelease_lookup_rules() {
+        let url = "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json";
+        assert_eq!(prerelease_lookup(url, "stable"), None);
+        assert_eq!(
+            prerelease_lookup(url, "prerelease"),
+            Some(("Gnathonic/mokuro-bunko".into(), "release.json".into()))
+        );
+        assert_eq!(
+            prerelease_lookup("https://mirror.example/release.json", "prerelease"),
+            None
+        );
     }
 
     #[test]
