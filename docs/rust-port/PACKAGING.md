@@ -11,6 +11,7 @@ Where things live:
 | `crates/xtask/` | release tooling: `dist`, `manifest`, `sign`, `verify`, `keygen`, `licenses`, `docker-context` |
 | `packaging/dist/README.md` | README shipped in unix archives |
 | `packaging/windows/` | `run.bat`, `doctor.bat`, `_env.cmd`, `README.txt`, `PORTABLE.txt` for the Windows zip |
+| `packaging/android/` | the Android app (Kotlin, Gradle) and `build.sh`; the server library is `crates/bunko-android` (MOBILE.md) |
 | `packaging/docker-init/` | `bunko-init`, the containers' PUID/PGID/UMASK entrypoint (static, libc only; own Cargo workspace) |
 | `deploy/docker/` | `Dockerfile.lite`, `Dockerfile` (full, CPU), `Dockerfile.cuda`, `entrypoint.sh` (nginx), per-Dockerfile `.dockerignore` |
 | `deploy/nginx-internal.conf.template` | the in-container nginx for the X-Accel offload (now with the processor WebSocket) |
@@ -49,7 +50,7 @@ Release matrix (`.github/workflows/release.yml`):
 | `x86_64-pc-windows-msvc` | ✔ | ✔ DirectML | ✔ CUDA 13 + DirectML | native, windows-latest |
 | `aarch64-apple-darwin` | ✔ | ✔ CoreML | | native, macos-latest |
 | `x86_64-apple-darwin` | ✔ | — (no ort build) | | cross from macos-latest |
-| `aarch64-linux-android` | TODO job (cargo-ndk, off) | | | `vars.BUILD_ANDROID == 'true'` |
+| `aarch64-linux-android` + `x86_64-linux-android` | ✔ APK (`mokuro-bunko-<ver>-android.apk`, not in release.json) | | | job `android`: cargo-ndk + Gradle (`packaging/android/build.sh`); skip with `vars.BUILD_ANDROID == 'false'`; see MOBILE.md |
 
 Why these choices:
 
@@ -316,7 +317,7 @@ Only verifiable in CI / on real hardware:
   wired), glibc 2.35 compatibility of ubuntu-22.04 builds.
 - Multi-arch image builds and pushes, GitHub release creation, Publish's tag moves.
 - CUDA EP on a GPU (driver ≥ 580), DirectML/CoreML at runtime, the Windows shortcuts,
-  `run.bat` restart loop, and the Android job (disabled TODO).
+  `run.bat` restart loop, and the Android CI job (the APK itself is verified on an emulator, MOBILE.md §6).
 - Code signing is not done: Windows Authenticode (SmartScreen will warn) and macOS
   notarization (a tarball downloaded by a browser gets quarantined:
   `xattr -d com.apple.quarantine mokuro-bunko`; `curl | sh` installs are not affected).

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- An open book with vertical text lines and a red ribbon (bunko = paperback). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M30,40 L52.5,44 L52.5,76 L30,72 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M55.5,44 L78,40 L78,72 L55.5,76 Z" />
+    <path
+        android:strokeColor="#FF2E3B63"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round"
+        android:pathData="M36,48 L36,64 M41.5,49 L41.5,62 M47,50 L47,67 M61,50 L61,67 M66.5,49 L66.5,60" />
+    <path
+        android:fillColor="#FFD9534F"
+        android:pathData="M70,41.4 L75,40.5 L75,54 L72.5,51.5 L70,54 Z" />
+</vector>

@@ -1,0 +1,10 @@
+.gradle/
+build/
+app/build/
+local.properties
+*.keystore
+*.jks
+keystore.properties
+# Produced by build.sh
+app/src/main/jniLibs/
+app/src/main/assets/THIRD-PARTY-LICENSES.md

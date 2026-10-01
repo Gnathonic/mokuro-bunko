@@ -1,0 +1,27 @@
+[package]
+name = "bunko-android"
+description = "The mokuro-bunko lite server as a JNI library for the Android app (packaging/android)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+# cdylib: libbunko_android.so loaded by the app; rlib: host unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bunko-core.workspace = true
+bunko-server.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+# JNI glue (MIT OR Apache-2.0). 0.21 rather than 0.22: the 0.22 API rework is not
+# needed for four static functions.
+jni = { version = "0.21", default-features = false }
+
+[dev-dependencies]
+tempfile.workspace = true

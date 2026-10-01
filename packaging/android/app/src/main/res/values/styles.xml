@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Bunko.TopBar" parent="">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:minHeight">56dp</item>
+        <item name="android:background">@color/bar</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:orientation">horizontal</item>
+        <item name="android:paddingStart">8dp</item>
+        <item name="android:paddingEnd">4dp</item>
+    </style>
+    <style name="Bunko.TopBar.Title" parent="">
+        <item name="android:textColor">@color/on_bar</item>
+        <item name="android:textSize">19sp</item>
+        <item name="android:paddingStart">8dp</item>
+    </style>
+    <style name="Bunko.TopBar.Button" parent="android:Widget.Material.Button.Borderless">
+        <item name="android:textColor">@color/on_bar</item>
+    </style>
+    <style name="Bunko.Section" parent="">
+        <item name="android:textSize">16sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/on_surface</item>
+        <item name="android:paddingTop">20dp</item>
+        <item name="android:paddingBottom">4dp</item>
+    </style>
+    <style name="Bunko.Hint" parent="">
+        <item name="android:textSize">13sp</item>
+        <item name="android:textColor">@color/muted</item>
+        <item name="android:paddingTop">2dp</item>
+        <item name="android:paddingBottom">4dp</item>
+    </style>
+    <style name="Bunko.Mono" parent="">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:textIsSelectable">true</item>
+        <item name="android:textColor">@color/on_surface</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:paddingTop">2dp</item>
+        <item name="android:paddingBottom">2dp</item>
+    </style>
+</resources>

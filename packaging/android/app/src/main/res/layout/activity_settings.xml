@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bar"
+    android:orientation="vertical">
+
+    <LinearLayout style="@style/Bunko.TopBar">
+        <Button
+            android:id="@+id/back"
+            style="@style/Bunko.TopBar.Button"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="48dp"
+            android:text="‹"
+            android:textSize="24sp" />
+        <TextView
+            style="@style/Bunko.TopBar.Title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/settings" />
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="@color/surface">
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:id="@+id/status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="@color/on_surface"
+                android:textSize="15sp" />
+            <Button
+                android:id="@+id/start_stop"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/stop" />
+
+            <TextView style="@style/Bunko.Section" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/connect_title" />
+            <TextView style="@style/Bunko.Hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/connect_local" />
+            <TextView android:id="@+id/local_url" style="@style/Bunko.Mono" android:layout_width="match_parent" android:layout_height="wrap_content" />
+            <TextView android:id="@+id/lan_label" style="@style/Bunko.Hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/connect_lan" />
+            <TextView android:id="@+id/lan_urls" style="@style/Bunko.Mono" android:layout_width="match_parent" android:layout_height="wrap_content" />
+            <Button
+                android:id="@+id/copy"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/copy" />
+            <TextView style="@style/Bunko.Hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/connect_https_note" />
+
+            <TextView style="@style/Bunko.Section" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/port" />
+            <EditText
+                android:id="@+id/port"
+                android:layout_width="160dp"
+                android:layout_height="wrap_content"
+                android:importantForAutofill="no"
+                android:inputType="number"
+                android:maxLength="5"
+                android:hint="8080" />
+            <Switch
+                android:id="@+id/lan"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/lan_access"
+                android:textSize="15sp" />
+            <TextView style="@style/Bunko.Hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/lan_access_hint" />
+
+            <TextView style="@style/Bunko.Section" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/storage_location" />
+            <RadioGroup
+                android:id="@+id/storage_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+            <TextView android:id="@+id/library_path" style="@style/Bunko.Mono" android:layout_width="match_parent" android:layout_height="wrap_content" android:textSize="12sp" />
+            <TextView style="@style/Bunko.Hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/storage_hint" />
+
+            <Button
+                android:id="@+id/apply"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/restart" />
+
+            <TextView style="@style/Bunko.Section" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/battery_title" />
+            <TextView android:id="@+id/battery_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:textColor="@color/on_surface" />
+            <TextView style="@style/Bunko.Hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/battery_hint" />
+            <Button
+                android:id="@+id/battery_open"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/battery_open" />
+
+            <Button
+                android:id="@+id/licences"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/licences" />
+
+            <TextView style="@style/Bunko.Section" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/log_title" />
+            <TextView
+                android:id="@+id/log"
+                style="@style/Bunko.Mono"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textSize="11sp" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

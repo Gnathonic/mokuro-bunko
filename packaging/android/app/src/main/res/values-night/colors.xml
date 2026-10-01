@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="surface">#FF141519</color>
+    <color name="on_surface">#FFE6E6EA</color>
+    <color name="muted">#FFA4A6B3</color>
+    <color name="bar">#FF1E2640</color>
+</resources>

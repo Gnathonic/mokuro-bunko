@@ -440,6 +440,7 @@ version = "0.7.0-alpha.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "bunko-thumb",
  "crc32fast",
  "flate2",
  "hex",
@@ -455,7 +456,6 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "ureq",
- "webp",
 ]
 
 [[package]]
@@ -565,6 +565,17 @@ dependencies = [
  "which",
  "x509-parser",
  "zip",
+]
+
+[[package]]
+name = "bunko-thumb"
+version = "0.7.0-alpha.1"
+dependencies = [
+ "base64 0.22.1",
+ "image",
+ "serde_json",
+ "thiserror 2.0.21",
+ "webp",
 ]
 
 [[package]]

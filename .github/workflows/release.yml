@@ -147,41 +147,89 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
-  # TODO(android): the Android app is a later task. This job is the hook for it: it
-  # cross-builds the lite server for aarch64-linux-android with cargo-ndk so the app
-  # can embed it. Off until the repository variable BUILD_ANDROID is "true"; when the
-  # app exists, add its artifact to the release job; the APK build itself (gradle,
-  # signing with an upload key) goes here too.
+  # Android APK (docs/rust-port/MOBILE.md): the lite server as a JNI library
+  # (crates/bunko-android, cargo ndk for arm64-v8a + x86_64) in the Kotlin app under
+  # packaging/android. A release asset only: it is not in release.json (the app updates
+  # by store/sideload; the updater reports InstallKind::Mobile). On by default; set the
+  # repository variable BUILD_ANDROID to "false" to skip it.
+  #
+  # Signing: the secrets ANDROID_KEYSTORE_BASE64 (base64 of a .jks/.keystore),
+  # ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD. Without them the
+  # APK is signed with a throwaway debug key, and users cannot update it in place.
   android:
     needs: prepare
-    if: vars.BUILD_ANDROID == 'true'
+    if: vars.BUILD_ANDROID != 'false'
     runs-on: ubuntu-latest
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+      CARGO_LOCKED: "1"
+      NDK_VERSION: "29.0.14206865"
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android
-      - uses: nttld/setup-ndk@v1
-        id: ndk
-        with:
-          ndk-version: r27c
+          targets: aarch64-linux-android,x86_64-linux-android
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk
-      - name: cargo ndk build (lite)
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - name: Android SDK packages (platform 36, build-tools, NDK)
+        run: |
+          set -eux
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" --install "platforms;android-36" "build-tools;36.0.0" "ndk;$NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - name: release keystore
         env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-        run: cargo ndk -t arm64-v8a --platform 26 build --release --locked -p mokuro-bunko --no-default-features
-      # TODO(android): gradle assembleRelease of the app, sign, upload the APK.
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set: the APK is signed with a debug key (see docs/rust-port/MOBILE.md)"
+            exit 0
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          {
+            echo "BUNKO_ANDROID_KEYSTORE=$RUNNER_TEMP/release.keystore"
+            echo "BUNKO_ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "BUNKO_ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "BUNKO_ANDROID_KEY_PASSWORD=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+          } >> "$GITHUB_ENV"
+      - name: build.sh (native libraries, licences, assembleRelease)
+        run: packaging/android/build.sh --out dist-android
+      - name: check the APK
+        run: |
+          set -eux
+          apk="dist-android/mokuro-bunko-${{ needs.prepare.outputs.version }}-android.apk"
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          "$bt/apksigner" verify --print-certs "$apk"
+          "$bt/zipalign" -c -P 16 4 "$apk"
+          unzip -l "$apk" | grep -E 'lib/(arm64-v8a|x86_64)/libbunko_android.so'
+          unzip -l "$apk" | grep -E 'assets/THIRD-PARTY-LICENSES.md'
       - uses: actions/upload-artifact@v4
         with:
-          name: android-arm64-lite
-          path: target/aarch64-linux-android/release/mokuro-bunko
+          name: android-apk
+          path: dist-android/*
+          if-no-files-found: error
 
   release:
-    needs: [prepare, test, build]
+    needs: [prepare, test, build, android]
+    # android may be skipped (BUILD_ANDROID=false); everything else must have passed.
+    if: >-
+      ${{ !cancelled() && needs.prepare.result == 'success' && needs.test.result == 'success'
+      && needs.build.result == 'success'
+      && (needs.android.result == 'success' || needs.android.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -201,6 +249,12 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
+      # Kept out of dist/: the APK is a release asset, not a release.json artifact.
+      - if: needs.android.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: dist-android
       - name: release.json
         run: |
           set -eux
@@ -220,6 +274,9 @@ jobs:
         run: |
           set -eux
           files=(dist/*.tar.gz dist/*.zip dist/release.json dist/release.json.sig dist/SHA256SUMS)
+          if compgen -G 'dist-android/*.apk' > /dev/null; then
+            files+=(dist-android/*.apk dist-android/*.apk.sha256)
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             # Re-run: replace the assets of the existing (draft) release.
             gh release upload "$TAG" --clobber "${files[@]}"
