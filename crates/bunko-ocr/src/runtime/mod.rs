@@ -18,6 +18,14 @@
 //! (ppocr-manga, 3 detect workers): peak RSS 1073 → ~580 MB, same output, same
 //! pages/s. GPU sessions keep both (their arenas hold device memory).
 //!
+//! Not on Windows: there the per-run allocations go to the system heap and both
+//! settings pay for themselves. ppocr-manga, full 196-page volume, 3 detect workers
+//! (pimax, Ryzen 3800X): both off 2.52 pages/s at ~0.9 GB peak working set; memory
+//! pattern on 3.15 at ~0.93 GB; both on (ONNX Runtime's defaults, used here) 3.80 at
+//! ~2.36 GB — faster than 0.5.2 (3.65 at 3.83 GB), same text. On Linux turning the
+//! pattern back on changes nothing (6.57 pages/s either way on 8 cores).
+//! `ep::CPU::default()` disables the arena, so Windows registers no CPU EP at all.
+//!
 //! The library never creates the ORT environment (`ort::init()`); the binary does,
 //! so its logging and global options apply.
 
@@ -215,7 +223,7 @@ fn build_session(path: &Path, opts: &RuntimeOptions, target: ExecutionTarget) ->
             ))
         })?;
         builder = builder.with_execution_providers([dispatch])?;
-    } else {
+    } else if !cfg!(windows) {
         // See "Memory" in the module docs.
         builder = builder
             .with_memory_pattern(false)?
