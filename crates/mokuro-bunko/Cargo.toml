@@ -14,10 +14,13 @@ path = "src/main.rs"
 [features]
 # `lite`: no default features — server only, OCR by remote processors.
 default = ["ocr"]
-# Local OCR + the `processor` subcommand (links ONNX Runtime). JPEG pages decode with
-# libjpeg-turbo, as 0.5.2's Pillow did (bit-identical pages).
-ocr = ["dep:bunko-engines", "dep:bunko-ocr", "dep:bunko-processor", "dep:bunko-proto", "bunko-ocr/libjpeg", "bunko-engines/libjpeg"]
-# Execution providers (each implies `ocr`), forwarded to bunko-ocr and bunko-vlm (ort).
+# Local OCR + the `processor` subcommand: ONNX Runtime (CPU) for ppocr-manga, and the
+# recognizers on libtorch through a backend pack loaded at run time (`torch`; the binary
+# never links libtorch, `install-ocr` fetches the pack). JPEG pages decode with
+# libjpeg-turbo, as 0.5.2's Pillow did (bit-identical pages). This is the `full` flavor.
+ocr = ["dep:bunko-engines", "dep:bunko-ocr", "dep:bunko-processor", "dep:bunko-proto", "bunko-ocr/libjpeg", "bunko-engines/libjpeg", "bunko-engines/torch"]
+# ONNX Runtime GPU execution providers (each implies `ocr`): deferred in 0.7. They keep
+# compiling (CI checks them) but no release ships them; see PACKAGING.md §1.
 cuda = ["ocr", "bunko-engines/cuda"]
 webgpu = ["ocr", "bunko-engines/webgpu"]
 directml = ["ocr", "bunko-engines/directml"]

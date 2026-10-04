@@ -285,6 +285,7 @@ pub fn lenient_catalog(value: &Value) -> Catalog {
                             .get("provider")
                             .and_then(Value::as_str)
                             .map(str::to_string),
+                        arch: d.get("arch").and_then(Value::as_str).map(str::to_string),
                     })
                 })
                 .collect()

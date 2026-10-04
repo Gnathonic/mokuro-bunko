@@ -759,12 +759,13 @@ impl bunko_server::ocr::LocalProcessorFactory for FakeLocal {
     ) -> Result<bunko_server::ocr::LocalChannels, String> {
         use bunko_processor::PagePipeline;
         let info = self.0.describe();
-        let link = bunko_processor::LocalProcessor::spawn(
+        let mut link = bunko_processor::LocalProcessor::spawn(
             Arc::new(self.0.clone()),
             bunko_processor::LocalConfig {
                 results_dir: results_dir.to_path_buf(),
             },
         );
+        let finished = link.take_finished();
         let ops = link.ops;
         let events = link.events;
         Ok(bunko_server::ocr::LocalChannels {
@@ -772,6 +773,7 @@ impl bunko_server::ocr::LocalProcessorFactory for FakeLocal {
             events,
             catalog: info.catalog,
             host: info.host,
+            finished,
         })
     }
 }
@@ -956,7 +958,8 @@ async fn bench_sample_is_served_with_ranges_to_its_processor_only() {
         .await
         .unwrap()
         .expect("queued");
-    assert_eq!(queued["sample"]["pages"], 8);
+    // The sample is packed on a helper thread; the op follows it.
+    assert_eq!(queued["state"], "running");
     let bench = loop {
         match tokio::time::timeout(Duration::from_secs(5), ops.recv())
             .await
@@ -968,6 +971,8 @@ async fn bench_sample_is_served_with_ranges_to_its_processor_only() {
         }
     };
     assert_eq!(bench.pages, 8);
+    let now = e.ocr.ask(|s| s.bench_get("g-1", "bench")).await.unwrap();
+    assert_eq!(now["sample"]["pages"], 8);
     let app = bunko_server::ocr::processor_router(e.ocr.clone());
     let req = |auth: &str, range: Option<&str>, method: &str| {
         let mut r = Request::builder()

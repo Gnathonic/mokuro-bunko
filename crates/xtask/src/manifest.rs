@@ -3,6 +3,7 @@
 use crate::names::{self, DEFAULT_DOCKER_REPO, DEFAULT_GITHUB_REPO};
 use crate::util;
 use anyhow::{Context, Result, bail};
+use bunko_update::backend::{BackendArtifact, Part};
 use bunko_update::{Artifact, Manifest};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -69,6 +70,16 @@ pub fn run(args: &ManifestArgs) -> Result<PathBuf> {
             );
         }
     }
+    for (target, variants) in &manifest.backends {
+        for (variant, b) in variants {
+            eprintln!(
+                "    {target:<28} torch-{variant:<8} {:>10} bytes in {} part(s)  {}",
+                b.size,
+                b.parts.len(),
+                b.sha256
+            );
+        }
+    }
     println!("{}", out.display());
     Ok(out)
 }
@@ -110,6 +121,7 @@ pub fn build_manifest(args: &ManifestArgs, version: &str, base: &str) -> Result<
             bail!("two archives for {target} {flavor}");
         }
     }
+    let backends = collect_backends(&args.dir, version, base)?;
     if artifacts.is_empty() {
         bail!(
             "no mokuro-bunko-{version}-*.tar.gz|zip archives in {}",
@@ -141,7 +153,96 @@ pub fn build_manifest(args: &ManifestArgs, version: &str, base: &str) -> Result<
         }),
         artifacts,
         docker,
+        backends,
     })
+}
+
+/// OCR backend packs (`xtask torch-pack` output, possibly split in parts) in `dir`:
+/// target → variant → artifact. The pack's metadata comes from its pack.json.
+fn collect_backends(
+    dir: &Path,
+    version: &str,
+    base: &str,
+) -> Result<BTreeMap<String, BTreeMap<String, BackendArtifact>>> {
+    let mut groups: BTreeMap<(String, String), Vec<(u32, PathBuf)>> = BTreeMap::new();
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if let Some((target, variant, part)) = crate::torch_pack::parse_pack_name(&name, version) {
+            groups
+                .entry((target.to_string(), variant.to_string()))
+                .or_default()
+                .push((part, e.path()));
+        }
+    }
+    let mut out: BTreeMap<String, BTreeMap<String, BackendArtifact>> = BTreeMap::new();
+    for ((target, variant), mut files) in groups {
+        files.sort();
+        let numbered: Vec<u32> = files.iter().map(|(n, _)| *n).collect();
+        let expected: Vec<u32> = if numbered == [0] {
+            vec![0]
+        } else {
+            (1..=files.len() as u32).collect()
+        };
+        if numbered != expected {
+            bail!(
+                "{target} {variant}: parts {numbered:?} are not a complete set (or the archive is there both whole and split)"
+            );
+        }
+        let pack = crate::torch_pack::read_pack_json(&files[0].1)?;
+        if pack.target != target || pack.variant != variant {
+            bail!(
+                "{}: pack.json says {} {}",
+                files[0].1.display(),
+                pack.target,
+                pack.variant
+            );
+        }
+        let mut hasher = sha2::Sha256::new();
+        let mut parts = Vec::new();
+        let mut size = 0u64;
+        for (_, path) in &files {
+            use sha2::Digest;
+            use std::io::Read;
+            let mut f = std::fs::File::open(path)?;
+            let mut part_hash = sha2::Sha256::new();
+            let mut buf = vec![0u8; 1 << 20];
+            let mut n_part = 0u64;
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                part_hash.update(&buf[..n]);
+                n_part += n as u64;
+            }
+            size += n_part;
+            let file = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            parts.push(Part {
+                url: format!("{base}/{file}"),
+                sha256: hex::encode(part_hash.finalize()),
+                size: n_part,
+            });
+        }
+        use sha2::Digest;
+        out.entry(target).or_default().insert(
+            variant,
+            BackendArtifact {
+                name: pack.name.clone(),
+                torch: pack.torch.clone(),
+                abi: (pack.abi > 0).then_some(pack.abi),
+                sha256: hex::encode(hasher.finalize()),
+                size,
+                parts,
+                external_size: pack.external_size(),
+                installed_size: pack.installed_size(),
+            },
+        );
+    }
+    Ok(out)
 }
 
 /// Pretty JSON with a trailing newline. These exact bytes are what gets signed; the
@@ -164,6 +265,19 @@ fn write_sha256sums(dir: &Path, m: &Manifest) -> Result<()> {
                 a.url.rsplit('/').next().unwrap_or(&a.url)
             )
         })
+        .chain(
+            m.backends
+                .values()
+                .flat_map(|v| v.values())
+                .flat_map(|b| &b.parts)
+                .map(|p| {
+                    format!(
+                        "{}  {}",
+                        p.sha256,
+                        p.url.rsplit('/').next().unwrap_or(&p.url)
+                    )
+                }),
+        )
         .collect();
     lines.sort();
     std::fs::write(dir.join("SHA256SUMS"), lines.join("\n") + "\n")?;

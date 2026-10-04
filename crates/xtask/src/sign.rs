@@ -161,6 +161,60 @@ pub fn verify(args: &VerifyArgs) -> Result<()> {
             }
         }
     }
+    for (target, variants) in &m.backends {
+        for (variant, b) in variants {
+            let mut whole = <sha2::Sha256 as sha2::Digest>::new();
+            let mut complete = true;
+            let mut total = 0u64;
+            for p in &b.parts {
+                let name = p.url.rsplit('/').next().unwrap_or(&p.url);
+                if !seen.insert(name.to_string()) {
+                    problems.push(format!("{name} is listed twice"));
+                }
+                let Some(dir) = &args.dir else {
+                    complete = false;
+                    continue;
+                };
+                let path = dir.join(name);
+                if !path.is_file() {
+                    complete = false;
+                    if args.require_all {
+                        problems.push(format!("{name} is missing from {}", dir.display()));
+                    }
+                    continue;
+                }
+                let bytes_ok = {
+                    use std::io::Read;
+                    let mut f = std::fs::File::open(&path)?;
+                    let mut h = <sha2::Sha256 as sha2::Digest>::new();
+                    let mut buf = vec![0u8; 1 << 20];
+                    let mut n_all = 0u64;
+                    loop {
+                        let n = f.read(&mut buf)?;
+                        if n == 0 {
+                            break;
+                        }
+                        sha2::Digest::update(&mut h, &buf[..n]);
+                        sha2::Digest::update(&mut whole, &buf[..n]);
+                        n_all += n as u64;
+                    }
+                    total += n_all;
+                    hex::encode(sha2::Digest::finalize(h)) == p.sha256 && n_all == p.size
+                };
+                if !bytes_ok {
+                    problems.push(format!("{name}: does not match the manifest"));
+                }
+            }
+            if complete && args.dir.is_some() {
+                let got = hex::encode(sha2::Digest::finalize(whole));
+                if got != b.sha256 || total != b.size {
+                    problems.push(format!("{target} torch-{variant}: the parts do not add up to the manifest's sha256/size"));
+                } else {
+                    eprintln!("    {target:<28} torch-{variant:<8} OK");
+                }
+            }
+        }
+    }
     if !problems.is_empty() {
         bail!("{}", problems.join("\n"));
     }

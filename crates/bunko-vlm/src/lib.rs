@@ -1,36 +1,55 @@
-//! The two vision-language line recognizers of mokuro-bunko 0.7 on ONNX Runtime:
-//! **hayai-nova** (SigLIP2 NaFlex + small decoder) and **paddle-manga**
-//! (PaddleOCR-VL-1.6 with the manga LoRA merged). Spec: `docs/rust-port/spec/ocr-recognizers.md`.
+//! The two vision-language line recognizers of mokuro-bunko 0.7: **hayai-nova** (SigLIP2
+//! NaFlex + small decoder) and **paddle-manga** (PaddleOCR-VL-1.6 with the manga LoRA
+//! merged). Spec: `docs/rust-port/spec/ocr-recognizers.md`.
 //!
+//! What every backend shares (always built, no ONNX Runtime):
 //! - [`crop`]: the line crops each recognizer reads (§3), from a [`Bgr`] page and a quad.
-//! - [`HayaiNova`], [`PaddleManga`]: the recognizers (§5, §6) behind the [`Recognizer`] trait.
+//! - [`Recognizer`], [`RecognizerInfo`], [`CropSet`], [`read_flat`]: the recognizer seam.
+//! - the model facts and host helpers: [`hayai`], [`paddle`], [`detok`], [`npy`],
+//!   [`resample`], [`pyfmt`].
+//!
+//! 0.7 runs the recognizers on libtorch (`bunko-torch`, loaded at run time by
+//! `bunko-engines`). The ONNX Runtime recognizers are kept behind the non-default
+//! **`onnx-vlm`** feature (deferred, not built for release):
+//! - [`HayaiNova`], [`PaddleManga`] (§5, §6) behind the [`Recognizer`] trait.
 //! - [`runtime`]: session construction ([`SessionFactory`]) and the shared-session runner.
 //! - [`RecognizerCache`]: one recognizer per (engine, assets, device, precision), shared by
 //!   any number of worker threads.
 
 pub mod crop;
 pub mod detok;
+pub mod device;
 pub mod hayai;
 pub mod image;
 pub mod npy;
 pub mod paddle;
 pub mod pyfmt;
 pub mod resample;
+#[cfg(feature = "onnx-vlm")]
 pub mod runtime;
 pub mod warp;
 
+#[cfg(feature = "onnx-vlm")]
 mod cache;
+#[cfg(feature = "onnx-vlm")]
 mod tensor;
 
 use std::fmt;
 
+#[cfg(feature = "onnx-vlm")]
 pub use cache::{EngineKey, RecognizerCache};
 pub use crop::Quad;
-pub use hayai::{HayaiAssets, HayaiNova};
+pub use device::Device;
+pub use hayai::HayaiAssets;
+#[cfg(feature = "onnx-vlm")]
+pub use hayai::HayaiNova;
 pub use image::{Bgr, Rgb};
-pub use paddle::{PaddleAssets, PaddleManga};
+pub use paddle::PaddleAssets;
+#[cfg(feature = "onnx-vlm")]
+pub use paddle::PaddleManga;
+#[cfg(feature = "onnx-vlm")]
 pub use runtime::{
-    Device, OrtSessionFactory, Provider, SessionFactory, SessionOptions, SharedSession, Sharing,
+    OrtSessionFactory, Provider, SessionFactory, SessionOptions, SharedSession, Sharing,
 };
 
 /// Errors of this crate.
@@ -41,8 +60,8 @@ pub enum VlmError {
     /// A model asset (graph, table, tokenizer) is missing or malformed.
     #[error("model asset: {0}")]
     Asset(String),
-    /// ONNX Runtime refused (load, run, provider).
-    #[error("onnxruntime: {0}")]
+    /// The inference runtime refused (load, run, provider).
+    #[error("runtime: {0}")]
     Runtime(String),
     /// Bad caller input (lengths, devices).
     #[error("{0}")]
@@ -52,10 +71,13 @@ pub enum VlmError {
     Crop(String),
 }
 
-/// Numeric format of a session: which exported graph file is loaded (spec §7.2).
+/// Numeric format of a recognizer: which exported graph files are loaded (spec §7.2).
+/// The ONNX exports come in fp32 and fp16; the libtorch packages also in bf16 (0.5.2's
+/// torch ran all three).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Precision {
     Fp32,
+    Bf16,
     Fp16,
 }
 
@@ -63,6 +85,7 @@ impl Precision {
     pub fn as_str(self) -> &'static str {
         match self {
             Precision::Fp32 => "fp32",
+            Precision::Bf16 => "bf16",
             Precision::Fp16 => "fp16",
         }
     }
@@ -80,6 +103,7 @@ impl std::str::FromStr for Precision {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "fp32" => Ok(Precision::Fp32),
+            "bf16" => Ok(Precision::Bf16),
             "fp16" => Ok(Precision::Fp16),
             _ => Err(VlmError::Config(format!(
                 "precision not available here: {s}"
@@ -141,8 +165,9 @@ pub trait Recognizer: Send + Sync {
     fn read(&self, lines: &[CropSet], caps: Option<&[u32]>) -> Result<Vec<String>, VlmError>;
 }
 
-/// Flattens line crop sets to `(crop, owner line)` and joins per-crop texts back per line.
-pub(crate) fn read_flat(
+/// Flattens line crop sets to `(crop, owner line)` and joins per-crop texts back per line:
+/// `read_crops` gets every crop with its token cap and returns one text per crop.
+pub fn read_flat(
     lines: &[CropSet],
     caps: Option<&[u32]>,
     default_cap: u32,
@@ -194,11 +219,22 @@ mod tests {
 
     #[test]
     fn recognizers_are_shareable() {
-        send_sync::<HayaiNova>();
-        send_sync::<PaddleManga>();
-        send_sync::<SharedSession>();
-        send_sync::<RecognizerCache>();
+        #[cfg(feature = "onnx-vlm")]
+        {
+            send_sync::<HayaiNova>();
+            send_sync::<PaddleManga>();
+            send_sync::<SharedSession>();
+            send_sync::<RecognizerCache>();
+        }
         send_sync::<std::sync::Arc<dyn Recognizer>>();
+    }
+
+    #[test]
+    fn precision_names() {
+        for p in [Precision::Fp32, Precision::Bf16, Precision::Fp16] {
+            assert_eq!(p.as_str().parse::<Precision>().unwrap(), p);
+        }
+        assert!("int8".parse::<Precision>().is_err());
     }
 
     #[test]

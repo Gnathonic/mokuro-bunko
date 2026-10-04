@@ -1,8 +1,11 @@
 //! Build flavours, cargo features and release file names.
 //!
 //! The release manifest keys artifacts by `target triple → flavor`, where the flavor is
-//! what the running server asks the updater for: `lite`, `full` (the platform's default
-//! execution provider) or `full-<ep>` for an extra variant such as `full-cuda`.
+//! what the running server asks the updater for: `lite` or `full`. Since 0.7's libtorch
+//! backend (TORCH-BACKEND.md) one `full` binary serves every GPU: the recognizers come
+//! from a backend pack that `install-ocr` downloads, and ONNX Runtime runs only the
+//! CPU PP-OCR stages. `full-<ep>` (an ONNX Runtime GPU execution provider: `--ep cuda`,
+//! `directml`, `coreml`, `webgpu`) can still be built locally but is not released.
 
 use std::fmt;
 
@@ -18,7 +21,8 @@ pub enum Flavor {
     Full,
 }
 
-/// ONNX Runtime execution provider linked into a full build.
+/// ONNX Runtime GPU execution provider linked into a full build (deferred in 0.7: not
+/// released; `None` is the release build).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Ep {
     /// CPU only.
@@ -41,16 +45,10 @@ impl fmt::Display for Ep {
     }
 }
 
-/// The execution provider a plain `full` build gets on each platform. ort's prebuilt
-/// Windows binaries all include DirectML and its macOS ones CoreML; Linux is CPU.
-pub fn default_ep(target: &str) -> Ep {
-    if target.contains("windows") {
-        Ep::Directml
-    } else if target.contains("apple") {
-        Ep::Coreml
-    } else {
-        Ep::None
-    }
+/// The execution provider a plain `full` build gets: none (ONNX Runtime on the CPU)
+/// on every platform. GPUs are served by the libtorch backend packs.
+pub fn default_ep(_target: &str) -> Ep {
+    Ep::None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +196,9 @@ mod tests {
     fn flavors_and_features() {
         let b = Build::new("x86_64-pc-windows-msvc", Flavor::Full, None).unwrap();
         assert_eq!(b.manifest_flavor(), "full");
+        assert_eq!(b.cargo_features(), (false, vec!["ocr"]));
+        let b = Build::new("x86_64-pc-windows-msvc", Flavor::Full, Some(Ep::Directml)).unwrap();
+        assert_eq!(b.manifest_flavor(), "full-directml");
         assert_eq!(b.cargo_features(), (false, vec!["ocr", "directml"]));
         let b = Build::new("x86_64-pc-windows-msvc", Flavor::Full, Some(Ep::Cuda)).unwrap();
         assert_eq!(b.manifest_flavor(), "full-cuda");
@@ -205,7 +206,7 @@ mod tests {
         let b = Build::new("x86_64-unknown-linux-gnu", Flavor::Full, Some(Ep::Cuda)).unwrap();
         assert_eq!(b.cargo_features(), (false, vec!["ocr", "cuda"]));
         let b = Build::new("aarch64-apple-darwin", Flavor::Full, None).unwrap();
-        assert_eq!(b.cargo_features(), (false, vec!["ocr", "coreml"]));
+        assert_eq!(b.cargo_features(), (false, vec!["ocr"]));
         let b = Build::new("x86_64-unknown-linux-musl", Flavor::Lite, None).unwrap();
         assert_eq!(b.cargo_features(), (true, vec![]));
         assert!(Build::new("x86_64-unknown-linux-musl", Flavor::Lite, Some(Ep::Cuda)).is_err());

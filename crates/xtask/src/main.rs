@@ -14,7 +14,10 @@ mod licenses;
 mod manifest;
 mod names;
 mod sign;
+mod torch_pack;
+mod torch_specs;
 mod util;
+mod vcredist;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -44,6 +47,9 @@ enum Cmd {
     Licenses(LicensesArgs),
     /// Lay out the Linux release binaries for the Dockerfiles' prebuilt stage.
     DockerContext(docker::DockerContextArgs),
+    /// Build an OCR backend pack (libtorch runtime + libbunko_torch + pack.json) as a
+    /// `.tar.zst` for `install-ocr` and the Docker images.
+    TorchPack(torch_pack::TorchPackArgs),
 }
 
 #[derive(clap::Args)]
@@ -68,6 +74,7 @@ fn main() -> Result<()> {
         Cmd::Keygen(a) => sign::keygen(&a),
         Cmd::Licenses(a) => licenses_cmd(&a),
         Cmd::DockerContext(a) => docker::run(&a),
+        Cmd::TorchPack(a) => torch_pack::run(&a).map(drop),
     }
 }
 

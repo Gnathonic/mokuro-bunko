@@ -78,7 +78,7 @@ pub enum Command {
     #[cfg(feature = "ocr")]
     #[command(subcommand)]
     Models(ModelsCmd),
-    /// Deprecated: OCR is built in. Kept so existing scripts keep working.
+    /// Install the OCR backend (libtorch pack for this GPU, or the CPU) and the models.
     #[command(name = "install-ocr")]
     InstallOcr(InstallOcrArgs),
     /// Run this machine as an OCR processor for a library (full build).
@@ -321,15 +321,31 @@ pub enum ModelsCmd {
     Verify,
 }
 
-/// 0.5.2 `install-ocr` options, accepted and ignored.
+/// `install-ocr` options (the 0.5.2 ones are accepted: `--backend` maps to `--variant`).
 #[derive(Args, Debug, Default)]
 pub struct InstallOcrArgs {
-    #[arg(long, hide = true)]
+    /// Backend pack: auto (detect the GPU), cpu, cu130 (NVIDIA), rocm7.1 (AMD, Linux)
+    #[arg(long, value_parser = PossibleValuesParser::new(["auto", "cpu", "cu130", "rocm7.1"]))]
+    pub variant: Option<String>,
+    /// Install from a directory holding the pack archive (and optionally the signed
+    /// release.json and the NVIDIA wheels) instead of downloading
+    #[arg(long, value_name = "DIR")]
+    pub from: Option<PathBuf>,
+    /// Install packs here  [default: <storage>/backends]
+    #[arg(long, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+    /// Only the backend pack, not the models
+    #[arg(long)]
+    pub no_models: bool,
+    /// Reinstall even when the pack is already there
+    #[arg(long)]
     pub force: bool,
+    /// Show the detected hardware, the pack it would install and the installed packs
+    #[arg(long, alias = "list-backends")]
+    pub list: bool,
+    /// 0.5.2: auto, cuda, rocm, cpu (same as --variant)
     #[arg(long, hide = true)]
     pub backend: Option<String>,
-    #[arg(long, hide = true)]
-    pub list_backends: bool,
     #[arg(long, hide = true)]
     pub engines: Option<String>,
     #[arg(long, hide = true)]

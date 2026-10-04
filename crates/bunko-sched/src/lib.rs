@@ -12,6 +12,7 @@
 //! files (`.ocr-failures.json`, `.ocr-congestion.json`, `.ocr-bench.json`)
 //! in their 0.5.2 format, and [`rate::FilePriors`], which reads the latter two.
 
+pub mod bench;
 pub mod bench_file;
 pub mod breaker;
 pub mod congestion;
@@ -20,6 +21,7 @@ pub mod failures;
 pub mod job_order;
 pub mod outlook;
 pub mod plan;
+pub mod precision;
 pub mod py;
 pub mod pyjson;
 pub mod rate;

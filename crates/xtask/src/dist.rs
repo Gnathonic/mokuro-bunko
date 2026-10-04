@@ -16,8 +16,8 @@ pub struct DistArgs {
     pub target: Option<String>,
     #[arg(long, value_enum)]
     pub flavor: Flavor,
-    /// Execution provider for a full build (default: DirectML on Windows, CoreML on
-    /// macOS, CPU elsewhere). `cuda` makes the `full-cuda` variant.
+    /// ONNX Runtime GPU execution provider for a full build (default: none, the release
+    /// build; GPUs use the libtorch packs). `cuda` makes an unreleased `full-cuda`.
     #[arg(long, value_enum)]
     pub ep: Option<Ep>,
     /// Output directory for the archive and its `.sha256`.
@@ -29,6 +29,10 @@ pub struct DistArgs {
     /// Pass `--locked` to cargo (CI).
     #[arg(long)]
     pub locked: bool,
+    /// Windows: do not ship the Visual C++ runtime DLLs the executable imports next to
+    /// it (they are then needed from the system, the "VC++ Redistributable").
+    #[arg(long)]
+    pub no_vc_runtime: bool,
     /// Package an existing build instead of running cargo (expects the binary in the
     /// target directory).
     #[arg(long)]
@@ -122,14 +126,30 @@ pub fn run(args: &DistArgs) -> Result<PathBuf> {
     std::fs::copy(&exe, stage.join(build.exe_name()))
         .with_context(|| format!("copying {}", exe.display()))?;
     for dir in &native_dirs {
-        for lib in shared_libs(dir, &args.exclude_lib)? {
+        for lib in shared_libs(dir, &args.exclude_lib, build.ep, build.is_windows())? {
             let name = lib.file_name().context("library name")?;
             // fs::copy follows ort's symlinks, so the archive holds real files.
             std::fs::copy(&lib, stage.join(name))?;
             eprintln!("    bundling {}", name.to_string_lossy());
         }
     }
-    stage_docs(&root, &build, &version, &stage, &report.markdown)?;
+    let mut third_party = report.markdown.clone();
+    if build.is_windows() && !args.no_vc_runtime {
+        let wanted = crate::vcredist::imported_by(&exe)?;
+        let names: Vec<&str> = wanted.iter().map(String::as_str).collect();
+        for dll in crate::vcredist::find(&names)? {
+            let name = dll.file_name().context("dll name")?;
+            std::fs::copy(&dll, stage.join(name))?;
+            eprintln!("    bundling {} (VC++ runtime)", name.to_string_lossy());
+        }
+        if !names.is_empty() {
+            third_party.push_str(&format!(
+                "\n\n## Microsoft Visual C++ runtime\n\n{}\n",
+                crate::vcredist::NOTICE
+            ));
+        }
+    }
+    stage_docs(&root, &build, &version, &stage, &third_party)?;
 
     if !args.no_smoke && util::can_run(&host, &target) {
         smoke_test(&stage.join(build.exe_name()), &version, &build)?;
@@ -252,7 +272,24 @@ fn cargo_build(root: &Path, build: &Build, args: &DistArgs) -> Result<(PathBuf, 
     Ok((exe, native))
 }
 
-fn shared_libs(dir: &Path, exclude: &[String]) -> Result<Vec<PathBuf>> {
+/// The ONNX Runtime libraries a build needs next to the executable. ONNX Runtime itself
+/// is linked statically, so a release `full` build (no GPU execution provider) needs
+/// none; only the (unreleased) EP builds load provider libraries at run time. Anything
+/// else in ort-sys's link directories is not ours to ship: the DirectML.dll of ort's
+/// Windows binaries, the Xcode sanitizer dylibs a macOS link path holds.
+fn shared_libs(dir: &Path, exclude: &[String], ep: Ep, windows: bool) -> Result<Vec<PathBuf>> {
+    let wanted = |name: &str| -> bool {
+        match ep {
+            Ep::None | Ep::Coreml => false,
+            Ep::Cuda => {
+                name.contains("onnxruntime_providers_cuda")
+                    || name.contains("onnxruntime_providers_shared")
+                    || (windows && name == "DirectML.dll")
+            }
+            Ep::Directml => name == "DirectML.dll",
+            Ep::Webgpu => name.contains("webgpu") || name.contains("dawn"),
+        }
+    };
     let mut libs = Vec::new();
     for e in std::fs::read_dir(dir)? {
         let p = e?.path();
@@ -266,6 +303,7 @@ fn shared_libs(dir: &Path, exclude: &[String]) -> Result<Vec<PathBuf>> {
             || name.contains(".so.");
         if is_lib
             && p.is_file()
+            && wanted(&name)
             && !exclude
                 .iter()
                 .any(|x| !x.is_empty() && name.contains(x.as_str()))
@@ -377,22 +415,36 @@ mod tests {
             "libonnxruntime_providers_tensorrt.so",
             "DirectML.dll",
             "x.so.1",
+            "libclang_rt.asan_osx_dynamic.dylib",
         ] {
             std::fs::write(dir.path().join(n), b"").unwrap();
         }
-        let names: Vec<_> = shared_libs(dir.path(), &["tensorrt".into()])
-            .unwrap()
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
-            .collect();
+        let names = |ep, windows| -> Vec<String> {
+            shared_libs(dir.path(), &["tensorrt".into()], ep, windows)
+                .unwrap()
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+                .collect()
+        };
+        // The release build: ONNX Runtime is static, nothing is bundled.
+        assert!(names(Ep::None, true).is_empty());
+        assert!(names(Ep::None, false).is_empty());
+        assert!(names(Ep::Coreml, false).is_empty());
         assert_eq!(
-            names,
+            names(Ep::Cuda, false),
+            [
+                "libonnxruntime_providers_cuda.so",
+                "libonnxruntime_providers_shared.so"
+            ]
+        );
+        assert_eq!(
+            names(Ep::Cuda, true),
             [
                 "DirectML.dll",
                 "libonnxruntime_providers_cuda.so",
-                "libonnxruntime_providers_shared.so",
-                "x.so.1"
+                "libonnxruntime_providers_shared.so"
             ]
         );
+        assert_eq!(names(Ep::Directml, true), ["DirectML.dll"]);
     }
 }

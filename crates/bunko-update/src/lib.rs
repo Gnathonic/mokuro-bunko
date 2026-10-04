@@ -11,6 +11,8 @@
 //! * Docker: only report the image tag to pull;
 //! * a system package or app store: only report.
 
+pub mod backend;
+
 use base64::Engine as _;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -85,6 +87,10 @@ pub struct Manifest {
     /// flavor → image reference, for Docker installs.
     #[serde(default)]
     pub docker: BTreeMap<String, String>,
+    /// target triple → backend variant (`cpu`, `cu130`, `rocm7.1`) → OCR backend pack
+    /// (`install-ocr`; [`backend`]). Absent in manifests before 0.7.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub backends: BTreeMap<String, BTreeMap<String, backend::BackendArtifact>>,
 }
 
 impl Manifest {

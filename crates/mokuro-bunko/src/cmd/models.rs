@@ -47,7 +47,8 @@ fn list(store: &ModelStore) -> CmdResult {
     let mut missing = 0u64;
     for engine in models::ENGINES {
         println!("{engine}:");
-        for file in store.manifest().engine_files(engine) {
+        let ids = models::list_ids(engine);
+        for file in ids.iter().filter_map(|id| store.manifest().get(id)) {
             let state = match store.locate(&file.id) {
                 Some(path) => format!("present  {}", path.display()),
                 None => {
@@ -56,6 +57,38 @@ fn list(store: &ModelStore) -> CmdResult {
                 }
             };
             println!("  {:<34} {:>10}  {}", file.id, mb(file.size), state);
+        }
+    }
+    // The compiled libtorch packages this machine's default rows need.
+    let pipeline = bunko_engines::EnginePipeline::new(EngineConfig::new(
+        store.options().root.clone(),
+        Backend::Auto,
+    ));
+    println!(
+        "compiled packages ({}):",
+        bunko_ocr::models::torch_release_name()
+    );
+    for engine in [models::HAYAI, models::PADDLE] {
+        match pipeline.package_status(engine) {
+            Ok(bunko_engines::PackageStatus {
+                need,
+                package: Some(dir),
+                ..
+            }) => println!(
+                "  {engine:<14} {} on {} ({})  present  {}",
+                need.precision,
+                need.device,
+                need.label,
+                dir.display()
+            ),
+            Ok(st) => println!(
+                "  {engine:<14} {} on {} ({})  missing  (one of {})",
+                st.need.precision,
+                st.need.device,
+                st.need.label,
+                st.need.targets.join(", ")
+            ),
+            Err(e) => println!("  {engine:<14} not runnable here: {e}"),
         }
     }
     if missing > 0 {
@@ -83,9 +116,42 @@ pub fn download(ctx: &Ctx, engine: Option<&str>) -> CmdResult {
     let dir = models_dir(ctx)?;
     let store = store(dir);
     bunko_engines::runtime::init();
-    // fp16 graphs are only worth fetching where a GPU provider is compiled in.
+    // What to fetch for: `--engine` (its default row), else the enabled generations
+    // (each at its precision mode), else (no config) every engine's default row.
+    let rows: Vec<(String, String)> = match (engine, cfgfile::load_effective(&ctx.config_path)) {
+        (Some(e), _) => vec![(e.to_string(), "auto-accuracy".to_string())],
+        (None, Ok(cfg)) => cfg
+            .ocr
+            .generations
+            .iter()
+            .filter(|g| g.enabled && g.retired.is_none())
+            .map(|g| (g.engine.clone(), g.precision.clone()))
+            .collect(),
+        (None, Err(_)) => models::ENGINES
+            .iter()
+            .map(|e| (e.to_string(), "auto-accuracy".to_string()))
+            .collect(),
+    };
+    let recognizer_rows: Vec<(&str, &str)> = rows
+        .iter()
+        .filter(|(e, _)| e == models::HAYAI || e == models::PADDLE)
+        .map(|(e, m)| (e.as_str(), m.as_str()))
+        .collect();
+    // Device-independent files: PP-OCR (every engine reads lines with it) and the host
+    // files of the recognizer engines those rows use.
     let gpu = bunko_ocr::runtime::ep_compiled().len() > 1;
-    let ids = models::download_plan(engine, gpu);
+    let mut ids: Vec<&'static str> = Vec::new();
+    for e in models::ENGINES {
+        let wanted = e == models::PPOCR || recognizer_rows.iter().any(|(r, _)| *r == e);
+        if !wanted {
+            continue;
+        }
+        for id in models::download_plan(Some(e), gpu) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
     let total: u64 = ids
         .iter()
         .filter(|id| store.locate(id).is_none())
@@ -94,11 +160,12 @@ pub fn download(ctx: &Ctx, engine: Option<&str>) -> CmdResult {
         .sum();
     println!(
         "Fetching {} into {} ({} to download)",
-        engine.unwrap_or("every engine"),
+        engine.unwrap_or("the enabled generations"),
         store.options().root.display(),
         mb(total)
     );
-    let mut failed = Vec::new();
+    // Every failure is reported at the end; one file failing does not stop the others.
+    let mut failed: Vec<String> = Vec::new();
     for id in ids {
         match store.ensure(id) {
             Ok(r) => println!(
@@ -116,7 +183,46 @@ pub fn download(ctx: &Ctx, engine: Option<&str>) -> CmdResult {
             ),
             Err(e) => {
                 println!("  {id:<34} FAILED: {e}");
-                failed.push(id);
+                failed.push(id.to_string());
+            }
+        }
+    }
+    if !recognizer_rows.is_empty() {
+        // The compiled libtorch packages depend on this machine's devices: the backend
+        // pack (install-ocr) says which.
+        let pipeline = bunko_engines::EnginePipeline::new(EngineConfig::new(
+            store.options().root.clone(),
+            Backend::Auto,
+        ));
+        match pipeline.torch() {
+            Err(e) => {
+                println!(
+                    "  compiled packages: FAILED: the OCR backend is not installed ({e}); run 'mokuro-bunko install-ocr'"
+                );
+                failed.push("compiled packages (no OCR backend)".into());
+            }
+            Ok(_) => {
+                for (e, r) in pipeline.prefetch_rows(&recognizer_rows) {
+                    match r {
+                        Ok(p) => {
+                            println!(
+                                "  {e:<14} {} on {} ({}): {} [{}]",
+                                p.need.precision,
+                                p.need.device,
+                                p.need.label,
+                                p.package.display(),
+                                p.target
+                            );
+                            if let Some(why) = &p.need.fallback {
+                                println!("  {e:<14} note: running on the CPU: {why}");
+                            }
+                        }
+                        Err(err) => {
+                            println!("  {e:<14} FAILED: {err}");
+                            failed.push(format!("{e} compiled package"));
+                        }
+                    }
+                }
             }
         }
     }
@@ -124,8 +230,9 @@ pub fn download(ctx: &Ctx, engine: Option<&str>) -> CmdResult {
         Ok(())
     } else {
         Err(Fail::msg(format!(
-            "{} model file(s) could not be fetched",
-            failed.len()
+            "{} item(s) could not be fetched: {}",
+            failed.len(),
+            failed.join(", ")
         )))
     }
 }

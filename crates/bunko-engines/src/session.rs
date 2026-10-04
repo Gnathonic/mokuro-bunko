@@ -92,6 +92,8 @@ pub struct EngineRunner {
     router: Mutex<Option<std::thread::JoinHandle<()>>>,
     feed: Turnstile,
     broken: Mutex<Option<String>>,
+    /// How wide a benchmark may make each stage (`plan::width_ceilings`).
+    ceilings: BTreeMap<String, u32>,
     // Keeps the models alive as long as the session.
     _engines: Arc<Engines>,
 }
@@ -103,6 +105,7 @@ impl EngineRunner {
         road: Road,
         stages: &[StagePlan],
         source_capacity: u32,
+        ceilings: BTreeMap<String, u32>,
     ) -> Result<EngineRunner, String> {
         let defs: Vec<StageDef<Work>> = stages
             .iter()
@@ -155,6 +158,7 @@ impl EngineRunner {
             router: Mutex::new(Some(router)),
             feed: Turnstile::default(),
             broken: Mutex::new(None),
+            ceilings,
             _engines: engines,
         })
     }
@@ -211,6 +215,10 @@ impl VolumeRunner for EngineRunner {
 
     fn overlap(&self) -> usize {
         2
+    }
+
+    fn width_ceilings(&self) -> BTreeMap<String, u32> {
+        self.ceilings.clone()
     }
 
     fn stats(&self) -> Option<PipelineReport> {

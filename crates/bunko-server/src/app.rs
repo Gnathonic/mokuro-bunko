@@ -500,13 +500,17 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
         drop_processors: Some(drop),
         restart: Some(restart),
     };
-    let modules: Vec<Router> = vec![
+    let mut modules: Vec<Router> = vec![
         crate::accounts::router(accounts.clone()),
         crate::ocr::queue_router(ocr.clone()),
         crate::library::router(library.clone()),
         crate::ocr::processor_router(ocr.clone()),
-        crate::admin::router(admin),
     ];
+    // 0.5.2 mounted the admin panel and API only with `admin.enabled` (server.py);
+    // off, `/_admin…` still passes the auth gate and then falls through to WebDAV.
+    if services.core.config.read().admin.enabled {
+        modules.push(crate::admin::router(admin));
+    }
     let queue_file = crate::ocr::queue_file::QueueFileState {
         core: services.core.clone(),
         ocr: Some(ocr.clone()),

@@ -35,6 +35,22 @@ pub struct FakeConfig {
     pub overlap: usize,
     /// Engines the catalog lists (default `["fake"]`).
     pub engines: Vec<String>,
+    /// Adds a `gpu:0` device computing in these formats; the engine runs there unless
+    /// the row pins it to the CPU.
+    pub gpu_formats: Option<Vec<String>>,
+    /// Time per page at a resolved precision (instead of `page_delay`), for the
+    /// precision engines (`hayai-nova`, `paddle-manga`).
+    pub precision_page_delay: BTreeMap<String, Duration>,
+    /// The engine stage's width (`pools.stage_workers.engine`) divides the page time,
+    /// up to this many workers; each worker past it slows a page by a quarter (0:
+    /// widths change nothing).
+    pub useful_width: u32,
+    /// What `width_ceilings` says of the engine stage (None: nothing).
+    pub width_ceiling: Option<u32>,
+    /// Formats the card reports but has no model files for: forcing one fails to load.
+    pub missing_formats: Vec<String>,
+    /// The GPU's architecture (default `sm_89`, where bf16 is native).
+    pub gpu_arch: Option<String>,
 }
 
 /// The fake engine. Cheap to clone (clones share their counters).
@@ -110,12 +126,25 @@ impl PagePipeline for FakePipeline {
             catalog: Catalog {
                 engines,
                 detectors: vec!["ppocr-manga".into()],
-                devices: vec![Device {
-                    id: "cpu".into(),
-                    label: "CPU".into(),
-                    formats: vec!["fp32".into()],
-                    provider: None,
-                }],
+                devices: {
+                    let mut devices = vec![Device {
+                        id: "cpu".into(),
+                        label: "CPU".into(),
+                        formats: vec!["fp32".into()],
+                        provider: Some("cpu".into()),
+                        arch: Some(std::env::consts::ARCH.into()),
+                    }];
+                    if let Some(formats) = &config.gpu_formats {
+                        devices.push(Device {
+                            id: "gpu:0".into(),
+                            label: "GPU 0 \u{2014} Fake GPU".into(),
+                            formats: formats.clone(),
+                            provider: Some("cuda".into()),
+                            arch: Some(config.gpu_arch.clone().unwrap_or_else(|| "sm_89".into())),
+                        });
+                    }
+                    devices
+                },
             },
         }
     }
@@ -126,11 +155,62 @@ impl PagePipeline for FakePipeline {
         if let Some(error) = &self.inner.config.fail_open {
             return Err(error.clone());
         }
+        let config = &self.inner.config;
+        let pinned = spec.pools.stage_device.get("engine").map(String::as_str);
+        let device = match (pinned, &config.gpu_formats) {
+            (Some("cpu"), _) | (_, None) => "cpu".to_string(),
+            _ => "gpu:0".to_string(),
+        };
+        // As the engines resolve: the shared bf16 rule over the device's formats.
+        let formats = match (&config.gpu_formats, device.as_str()) {
+            (Some(f), "gpu:0") => bunko_sched::precision::device_formats(
+                &spec.precision,
+                f,
+                Some("cuda"),
+                Some(config.gpu_arch.as_deref().unwrap_or("sm_89")),
+            ),
+            _ => bunko_sched::precision::device_formats(&spec.precision, &[], Some("cpu"), None),
+        };
+        let precision = if bunko_sched::precision::is_precision_engine(&spec.engine) {
+            let r = bunko_sched::precision::resolve_mode(
+                &spec.engine,
+                &spec.precision,
+                Some(&formats),
+                spec.precision_pick.as_deref(),
+                &spec.precision_why,
+            );
+            if !r.eligible {
+                return Err(format!(
+                    "precision not available here: {} is asked for {}, and this device cannot run it ({})",
+                    spec.engine, spec.precision, r.why
+                ));
+            }
+            let precision = r.precision.unwrap_or_else(|| "fp32".to_string());
+            if config.missing_formats.contains(&precision) {
+                return Err(format!(
+                    "could not load {}: no {precision} package for this card",
+                    spec.engine
+                ));
+            }
+            precision
+        } else {
+            "fp32".to_string()
+        };
+        let width = spec
+            .pools
+            .stage_workers
+            .get("engine")
+            .copied()
+            .unwrap_or(1)
+            .max(1);
         Ok(Box::new(FakeRunner {
             pipeline: self.inner.clone(),
             engine: spec.engine.clone(),
             started: Instant::now(),
             items: AtomicU64::new(0),
+            device,
+            precision,
+            width,
         }))
     }
 }
@@ -140,6 +220,28 @@ struct FakeRunner {
     engine: String,
     started: Instant,
     items: AtomicU64,
+    device: String,
+    precision: String,
+    width: u32,
+}
+
+impl FakeRunner {
+    fn page_delay(&self) -> Duration {
+        let config = &self.pipeline.config;
+        let base = config
+            .precision_page_delay
+            .get(&self.precision)
+            .copied()
+            .unwrap_or(config.page_delay);
+        let useful = self.width.min(config.useful_width).max(1);
+        // Workers past the useful width contend: each costs a quarter of a page.
+        let over = if config.useful_width > 0 {
+            self.width.saturating_sub(config.useful_width)
+        } else {
+            0
+        };
+        base / useful * (4 + over) / 4
+    }
 }
 
 /// Image members of the archive, sorted by name.
@@ -174,21 +276,29 @@ impl VolumeRunner for FakeRunner {
         let mut weights = BTreeMap::new();
         weights.insert("fake/model".to_string(), "0000000".to_string());
         let mut stage_workers = BTreeMap::new();
-        stage_workers.insert("engine".to_string(), 1);
+        stage_workers.insert("engine".to_string(), self.width);
         let mut stage_device = BTreeMap::new();
-        stage_device.insert("engine".to_string(), "cpu".to_string());
+        stage_device.insert("engine".to_string(), self.device.clone());
         ReadyInfo {
             weights,
             stage_workers,
             queue_capacity: BTreeMap::new(),
             stage_device,
-            pipeline: "engine (cpu x1)".to_string(),
-            precision: Some("fp32".to_string()),
+            pipeline: format!("engine ({} x{})", self.device, self.width),
+            precision: Some(self.precision.clone()),
         }
     }
 
     fn overlap(&self) -> usize {
         self.pipeline.config.overlap.max(1)
+    }
+
+    fn width_ceilings(&self) -> BTreeMap<String, u32> {
+        self.pipeline
+            .config
+            .width_ceiling
+            .map(|c| BTreeMap::from([("engine".to_string(), c)]))
+            .unwrap_or_default()
     }
 
     fn run_volume(
@@ -214,7 +324,7 @@ impl VolumeRunner for FakeRunner {
         let total = names.len() as u32;
         let mut out_pages = Vec::new();
         for (i, name) in names.iter().enumerate() {
-            if !sleep_cancellable(config.page_delay, cancel) {
+            if !sleep_cancellable(self.page_delay(), cancel) {
                 return Err(RunError::Cancelled);
             }
             if config.fatal_volumes.contains(&meta.claim)
@@ -240,7 +350,7 @@ impl VolumeRunner for FakeRunner {
             "title_uuid": meta.title_uuid,
             "volume": meta.volume,
             "volume_uuid": meta.volume_uuid,
-            "ocr_engine": {"id": self.engine, "generator": "mokuro-bunko", "precision": "fp32"},
+            "ocr_engine": {"id": self.engine, "generator": "mokuro-bunko", "precision": self.precision},
             "pages": out_pages,
         });
         let tmp = out.with_file_name(format!(
@@ -272,14 +382,20 @@ impl VolumeRunner for FakeRunner {
             stages: vec![StageReport {
                 key: "engine".into(),
                 name: "fake".into(),
-                device: "cpu".into(),
-                workers: 1,
+                device: self.device.clone(),
+                workers: self.width,
                 items,
-                busy_seconds: elapsed,
+                busy_seconds: elapsed * f64::from(self.width),
                 utilisation: 1.0,
                 ..Default::default()
             }],
-            queues: Vec::new(),
+            queues: vec![crate::pipeline::QueueReport {
+                name: "engine->out".into(),
+                capacity: 1,
+                puts: items,
+                gets: items,
+                ..Default::default()
+            }],
         })
     }
 }

@@ -24,6 +24,7 @@ use bunko_proto::{Event, Op};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::bench::BenchConfig;
 use crate::pipeline::{MachineInfo, PagePipeline};
 use crate::session::{Hub, Link, LocalLink as LocalPaths};
 
@@ -55,6 +56,13 @@ pub struct LocalLink {
 }
 
 impl LocalLink {
+    /// The processor's task, to await once the op sender is dropped: it ends after
+    /// every session wound down (up to 10 s), their models freed. Taken by an owner that
+    /// hands `ops` / `events` on; [`LocalLink::shutdown`] no longer waits after this.
+    pub fn take_finished(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.task.take()
+    }
+
     /// Abandon every session silently and wait (up to 10 s) for them to wind down.
     /// Nothing more arrives on `events` afterwards.
     pub async fn shutdown(&mut self) {
@@ -76,6 +84,15 @@ impl LocalProcessor {
 
     /// Start it on the current tokio runtime.
     pub fn spawn(pipeline: Arc<dyn PagePipeline>, config: LocalConfig) -> LocalLink {
+        Self::spawn_with(pipeline, config, BenchConfig::default())
+    }
+
+    /// [`LocalProcessor::spawn`] with the benchmark's numbers (tests shrink them).
+    pub fn spawn_with(
+        pipeline: Arc<dyn PagePipeline>,
+        config: LocalConfig,
+        bench: BenchConfig,
+    ) -> LocalLink {
         let (ops_tx, mut ops_rx) = mpsc::channel::<Op>(64);
         let (events_tx, events_rx) = mpsc::unbounded_channel::<Event>();
         let shutdown = CancellationToken::new();
@@ -87,6 +104,7 @@ impl LocalProcessor {
             }),
             events_tx,
             leaving,
+            bench,
         );
         let stop = shutdown.clone();
         let task = tokio::spawn(async move {

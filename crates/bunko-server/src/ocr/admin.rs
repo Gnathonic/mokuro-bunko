@@ -11,6 +11,10 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 
 use super::OcrControl;
+
+/// One row's `precision_on`, and each connected machine's benchmark of it (judged for
+/// the row's mode), by profile key.
+type JudgedRow = (Map<String, Value>, HashMap<String, Value>);
 use super::profiles::{LOCAL_PROFILE, Profiles, profile_key};
 use super::sched::{BenchRequest as SchedBench, Scheduler};
 use crate::admin::ocr::{
@@ -140,7 +144,6 @@ impl OcrAdmin for OcrControl {
     fn processors(&self, config: &Config) -> Value {
         let local = config.processes_locally(self.has_local());
         ask(self, move |s| {
-            let running = s.running_jobs();
             let mut processors = s.processors();
             for p in &mut processors {
                 let name = p.get("name").and_then(Value::as_str).map(|n| if p.get("local") == Some(&json!(true)) { super::types::LOCAL.to_string() } else { n.to_string() });
@@ -149,14 +152,24 @@ impl OcrAdmin for OcrControl {
                     let cpu = host.get("cpu").cloned().unwrap_or(Value::Null);
                     let gpu = host.get("gpu").cloned().unwrap_or(Value::Null);
                     if m.get("local") == Some(&json!(true)) {
+                        // This server's `_local_host()`: its CPU with its core count.
+                        let cpu = cpu
+                            .as_str()
+                            .map(|c| json!(super::sched::cpu_label(c, super::sched::physical_cores())))
+                            .unwrap_or(cpu);
                         m.insert("host".into(), json!({"cpu": cpu, "gpu": gpu}));
                     }
                     m.insert("cannot_start".into(), Value::Array(s.start_backoffs(&name)));
                 }
             }
+            let local_host = s
+                .machines
+                .values()
+                .find(|m| m.local)
+                .map(|m| json!({"cpu": super::sched::cpu_label(&m.host.cpu, super::sched::physical_cores()), "gpu": m.host.gpu}));
             json!({
                 "processors": processors,
-                "speed": s.speed(&running),
+                "speed": s.admin_speed(local_host.as_ref()),
                 "failed_logins": s.failed_logins(),
                 "last_disconnect": s.last_disconnect(),
                 "local_processing": local,
@@ -168,16 +181,44 @@ impl OcrAdmin for OcrControl {
 
     fn generations_payload(&self, config: &Config) -> Value {
         let rows = config.ocr.generations.clone();
-        let (devices, holds, processors) = ask(self, |s| {
+        let asked_rows = rows.clone();
+        let (devices, holds, processors, judged) = ask(self, move |s| {
             let holds: HashMap<String, String> = s.precision_holds().into_iter().collect();
             let processors: Vec<Value> = s
                 .processors()
                 .into_iter()
                 .filter(|p| p.get("local") != Some(&json!(true)))
                 .collect();
-            (merged_devices(s), holds, processors)
+            // Per row: where each machine's precision stands, and each connected
+            // machine's benchmark judged for the row's mode on its own device.
+            let mut judged: HashMap<String, JudgedRow> = HashMap::new();
+            for row in &asked_rows {
+                let mut benches = HashMap::new();
+                for m in s.machines.values() {
+                    let key = profile_key(if m.local {
+                        super::types::LOCAL
+                    } else {
+                        &m.name
+                    })
+                    .to_string();
+                    let bench = s
+                        .machine_profile(&m.name, row)
+                        .and_then(|p| p.bench)
+                        .map_or(Value::Null, Value::Object);
+                    benches.insert(key, bench);
+                }
+                judged.insert(row.id.clone(), (s.precision_on(row), benches));
+            }
+            (merged_devices(s), holds, processors, judged)
         })
-        .unwrap_or_else(|| (default_devices(), HashMap::new(), Vec::new()));
+        .unwrap_or_else(|| {
+            (
+                default_devices(),
+                HashMap::new(),
+                Vec::new(),
+                HashMap::new(),
+            )
+        });
         let storage = self.storage().to_path_buf();
         let profiles = Profiles::new(&storage);
         let names = profiles.names();
@@ -210,6 +251,10 @@ impl OcrAdmin for OcrControl {
                 "precision_hold".into(),
                 holds.get(&row.id).map_or(Value::Null, |r| json!(r)),
             );
+            let (precision_on, benches) = judged.get(&row.id).cloned().unwrap_or_default();
+            if row.precision_applies() {
+                e.insert("precision_on".into(), Value::Object(precision_on));
+            }
             let recipe = row.output_affecting();
             if let Some(local) = profiles.row(LOCAL_PROFILE, &row.id, Some(&recipe)) {
                 e.insert(
@@ -222,7 +267,10 @@ impl OcrAdmin for OcrControl {
                 );
                 e.insert(
                     "local_bench".into(),
-                    local.bench.clone().map_or(Value::Null, Value::Object),
+                    benches
+                        .get(LOCAL_PROFILE)
+                        .cloned()
+                        .unwrap_or_else(|| local.bench.clone().map_or(Value::Null, Value::Object)),
                 );
                 e.insert(
                     "local_runs".into(),
@@ -242,8 +290,17 @@ impl OcrAdmin for OcrControl {
                 if !p.pools.is_empty() {
                     pools.insert(name.clone(), Value::Object(p.pools.clone()));
                 }
-                if let Some(b) = p.bench.clone() {
-                    bench.insert(name.clone(), Value::Object(b));
+                // A connected machine's benchmark as judged for the row's mode there.
+                match benches.get(name.as_str()) {
+                    Some(Value::Object(b)) => {
+                        bench.insert(name.clone(), Value::Object(b.clone()));
+                    }
+                    Some(_) => {}
+                    None => {
+                        if let Some(b) = p.bench.clone() {
+                            bench.insert(name.clone(), Value::Object(b));
+                        }
+                    }
                 }
                 if !p.runs.is_empty() {
                     if let Some(c) = p

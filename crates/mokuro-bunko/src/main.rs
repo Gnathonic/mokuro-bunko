@@ -4,6 +4,8 @@
 mod cfgfile;
 mod cli;
 mod cmd;
+#[cfg(feature = "ocr")]
+mod hwdetect;
 // `init_server` is for `serve.rs` (orchestrator) and `processor serve`. logging.rs is
 // not this CLI's file; its one collapsible `if` is left to its owner.
 #[allow(dead_code)]
@@ -34,6 +36,17 @@ pub const FLAVOR: &str = if cfg!(feature = "cuda") {
 } else {
     "lite"
 };
+
+/// The flavor the updater looks up (`artifacts[target][flavor]`, `docker[flavor]`).
+/// `MOKURO_UPDATE_FLAVOR` overrides it: the CUDA Docker image runs the plain `full`
+/// binary but must be told to pull the `-cuda` image (it sets `full-cuda`).
+pub fn update_flavor() -> &'static str {
+    static F: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    F.get_or_init(|| match std::env::var("MOKURO_UPDATE_FLAVOR") {
+        Ok(v) if !v.trim().is_empty() => Box::leak(v.trim().to_string().into_boxed_str()),
+        _ => FLAVOR,
+    })
+}
 
 fn main() {
     let cli = Cli::parse();
