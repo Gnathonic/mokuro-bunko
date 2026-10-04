@@ -73,7 +73,13 @@ pub fn run(ctx: &Ctx) -> CmdResult {
     if let Some(config) = &config {
         let storage = &config.storage.base_path;
         #[cfg(feature = "ocr")]
+        results.push(check_backend(storage));
+        #[cfg(feature = "ocr")]
         results.push(check_models(&config.storage.layout().models()));
+        #[cfg(feature = "ocr")]
+        if let Some(c) = check_packages(config) {
+            results.push(c);
+        }
         results.push(check_disk(storage));
         results.push(check_port(&config.server.host, config.server.port));
         results.push(check_failures(storage));
@@ -194,6 +200,184 @@ fn check_onnx_runtime() -> Check {
             Some("Local OCR is unavailable; remote processors still work. Reinstall this build or use the lite build.".into()),
         ),
     }
+}
+
+/// The OCR backend pack for this machine (install-ocr): present, complete, host
+/// libraries there.
+#[cfg(feature = "ocr")]
+fn check_backend(storage: &Path) -> Check {
+    use super::install_ocr::{backends_dir, missing_system_libs, pack_complete};
+    use bunko_update::backend::{PACK_JSON, PackManifest};
+    let hw = crate::hwdetect::detect();
+    let want = crate::hwdetect::choose(&hw, bunko_update::TARGET);
+    let root = backends_dir(storage);
+    // The pack the OCR runtime will open: MOKURO_TORCH_PACK, else bunko-engines'
+    // discovery order (a GPU pack whose driver is present, then cpu).
+    let pinned = std::env::var_os(bunko_engines::torch::PACK_ENV)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from);
+    let Some(dir) = pinned
+        .clone()
+        .or_else(|| bunko_engines::torch::discover(&root).into_iter().next())
+    else {
+        return Check::warn(
+            "OCR backend",
+            format!(
+                "no backend pack installed in {} ({})",
+                root.display(),
+                want.reason
+            ),
+            Some(format!(
+                "Run 'mokuro-bunko install-ocr' (installs the {} pack). Without it hayai-nova and paddle-manga cannot run here; ppocr-manga and remote processors still work.",
+                want.variant
+            )),
+        );
+    };
+    let how = if pinned.is_some() {
+        "MOKURO_TORCH_PACK"
+    } else {
+        "installed"
+    };
+    let m = match std::fs::read(dir.join(PACK_JSON))
+        .map_err(|e| e.to_string())
+        .and_then(|b| PackManifest::parse(&b).map_err(|e| e.to_string()))
+    {
+        Ok(m) => m,
+        Err(e) => {
+            return Check::fail(
+                "OCR backend",
+                format!("{} ({how}): {e}", dir.display()),
+                Some("Run 'mokuro-bunko install-ocr --force'.".into()),
+            );
+        }
+    };
+    let detail = format!(
+        "{} in use ({how}) at {}; this machine: {}",
+        m.name,
+        dir.display(),
+        want.reason
+    );
+    if !pack_complete(&dir, &m) {
+        return Check::fail(
+            "OCR backend",
+            format!("{detail}; files are missing or damaged"),
+            Some("Run 'mokuro-bunko install-ocr --force'.".into()),
+        );
+    }
+    let missing = missing_system_libs(&m.requires.system_libs);
+    if !missing.is_empty() {
+        return Check::warn(
+            "OCR backend",
+            format!("{detail}; missing host libraries: {}", missing.join(", ")),
+            Some(
+                "Install them with the system package manager (install-ocr prints the package names)."
+                    .into(),
+            ),
+        );
+    }
+    // A GPU pack also runs on the CPU; only a GPU this pack cannot drive is worth a word.
+    if want.variant != "cpu" && m.variant != want.variant {
+        return Check::warn(
+            "OCR backend",
+            format!(
+                "{detail}; the {} pack would use this machine's GPU",
+                want.variant
+            ),
+            Some(format!(
+                "mokuro-bunko install-ocr --variant {}",
+                want.variant
+            )),
+        );
+    }
+    Check::pass("OCR backend", detail)
+}
+
+/// The compiled libtorch packages the enabled generations need on this machine's
+/// device (`EnginePipeline::package_status_for`, each row's precision mode), and what
+/// the backend set for its runtime (an RX 6600's `HSA_OVERRIDE_GFX_VERSION`). FAIL
+/// when a row's package (with the weights it binds) or one of its host files is not on
+/// disk (OCR would have to download it first), or nothing here can run it; None when no
+/// enabled row uses a recognizer or no backend pack is installed (the OCR backend check
+/// reports that).
+#[cfg(feature = "ocr")]
+fn check_packages(config: &bunko_core::Config) -> Option<Check> {
+    use bunko_engines::models;
+    let rows: Vec<(String, String)> = config
+        .ocr
+        .generations
+        .iter()
+        .filter(|g| g.enabled && g.retired.is_none())
+        .filter(|g| g.engine == models::HAYAI || g.engine == models::PADDLE)
+        .map(|g| (g.engine.clone(), g.precision.clone()))
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let pipeline = bunko_engines::EnginePipeline::new(bunko_engines::EngineConfig::new(
+        config.storage.layout().models(),
+        bunko_engines::Backend::parse(config.ocr.effective_backend()),
+    ));
+    // No backend pack: the OCR backend check already says so (and how to install one).
+    let tb = pipeline.torch().ok()?;
+    let notes: Vec<String> = tb
+        .pack
+        .env
+        .iter()
+        .filter(|(k, _)| k == "HSA_OVERRIDE_GFX_VERSION")
+        .map(|(k, v)| format!("{k}={v} set (the card runs its family's ROCm target)"))
+        .collect();
+    let (mut present, mut missing, mut cannot) = (Vec::new(), Vec::new(), Vec::new());
+    for (engine, mode) in &rows {
+        match pipeline.package_status_for(engine, mode) {
+            Ok(st) if st.ready() => present.push(format!(
+                "{engine} {} on {} ({})",
+                st.need.precision, st.need.device, st.need.label
+            )),
+            Ok(st) => {
+                let mut what = Vec::new();
+                if st.package.is_none() {
+                    what.push(format!("package: one of {}", st.need.targets.join(", ")));
+                }
+                if !st.missing_host_files.is_empty() {
+                    what.push(st.missing_host_files.join(", "));
+                }
+                missing.push(format!(
+                    "{engine} {} on {} ({})",
+                    st.need.precision,
+                    st.need.device,
+                    what.join("; ")
+                ))
+            }
+            Err(e) => cannot.push(format!("{engine}: {e}")),
+        }
+    }
+    let mut detail = Vec::new();
+    if !present.is_empty() {
+        detail.push(format!("present: {}", present.join("; ")));
+    }
+    if !missing.is_empty() {
+        detail.push(format!("NOT DOWNLOADED: {}", missing.join("; ")));
+    }
+    if !cannot.is_empty() {
+        detail.push(format!("NOT RUNNABLE HERE: {}", cannot.join("; ")));
+    }
+    detail.extend(notes);
+    let detail = detail.join("; ");
+    Some(if !cannot.is_empty() {
+        Check::fail(
+            "Compiled packages",
+            detail,
+            Some("Run 'mokuro-bunko install-ocr' for this machine's OCR backend; if it is installed, the models release has no package for this device.".into()),
+        )
+    } else if !missing.is_empty() {
+        Check::fail(
+            "Compiled packages",
+            detail,
+            Some("Run: mokuro-bunko models download".into()),
+        )
+    } else {
+        Check::pass("Compiled packages", detail)
+    })
 }
 
 #[cfg(feature = "ocr")]

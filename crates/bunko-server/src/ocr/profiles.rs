@@ -7,9 +7,11 @@
 //! panel writes pools through its own handle), atomic via `.tmp` + rename,
 //! `json.dumps(indent=2)` spelling.
 //!
-//! Deviation: 0.5.2's precision staleness of a stored benchmark (`stale_bench_reason`) is
-//! torch-shaped and not ported; a bench is current while its recipe matches.
+//! A stored benchmark counts only while it describes the row's precision mode on that
+//! machine (`stale_bench_reason`, `bunko_sched::precision`): a stale one reads as absent
+//! (`stale_bench`), is said once, and is dropped from the file at its next save.
 
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
@@ -25,6 +27,41 @@ pub const POOL_TABLES: [&str; 3] = ["stage_workers", "queue_capacity", "stage_de
 pub const POOL_AUTO: &str = "auto";
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+/// Stale benchmarks seen by a read, dropped at the machine's next save:
+/// `profile file -> {row id -> the bench's "at"}` (`_STALE_PENDING`, keyed by the file
+/// rather than the name so two stores never mix).
+static STALE_PENDING: Mutex<Option<HashMap<String, HashMap<String, String>>>> = Mutex::new(None);
+/// `(name, row id, at)` already logged (`_STALE_LOGGED`).
+static STALE_LOGGED: Mutex<Option<HashSet<(String, String, String)>>> = Mutex::new(None);
+
+/// What a machine's model device computes in, for judging a stored benchmark.
+#[derive(Clone, Copy, Debug)]
+pub enum Formats<'a> {
+    /// Read from what the machine registered (`recorded_formats`).
+    Recorded,
+    /// As the caller knows it (None: not reported).
+    Known(Option<&'a BTreeSet<String>>),
+}
+
+/// `recorded_formats(bench, profile)`: a benchmark whose recognizer ran on the CPU says
+/// fp32; else the machine's registered catalog, where the model sits by default.
+pub fn recorded_formats(
+    bench: &Map<String, Value>,
+    profile: &Map<String, Value>,
+    mode: &str,
+) -> Option<BTreeSet<String>> {
+    let engine = bench
+        .get("host")
+        .and_then(|h| h.get("devices"))
+        .and_then(|d| d.get("engine"))
+        .and_then(Value::as_str);
+    if engine == Some("cpu") {
+        return Some(BTreeSet::from(["fp32".to_string()]));
+    }
+    let catalog: bunko_proto::Catalog =
+        serde_json::from_value(profile.get("catalog")?.clone()).ok()?;
+    crate::ocr::sched::supported_for(&catalog, "auto", mode).map(|s| s.into_iter().collect())
+}
 
 /// The profile key of a machine name (`"local"` is this server).
 pub fn profile_key(machine: &str) -> &str {
@@ -87,8 +124,11 @@ pub fn recipe_value(recipe: &(String, String, Option<u32>)) -> Value {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RowProfile {
     pub pools: Map<String, Value>,
+    /// None also when the stored one no longer describes the row's mode here.
     pub bench: Option<Map<String, Value>>,
     pub runs: Map<String, Value>,
+    /// A benchmark is stored but stale (the pair is unmeasured there).
+    pub stale_bench: bool,
 }
 
 impl RowProfile {
@@ -183,12 +223,36 @@ impl Profiles {
         Self::read(&self.path(name))
     }
 
-    /// `row(name, id, recipe=...)`: None when absent or measured for another recipe.
+    /// The entry as stored (None when absent or measured for another recipe), its
+    /// benchmark not judged: for reads that never look at the benchmark's rate.
     pub fn row(
         &self,
         name: &str,
         generation_id: &str,
         recipe: Option<&(String, String, Option<u32>)>,
+    ) -> Option<RowProfile> {
+        self.read_row(name, generation_id, recipe, None)
+    }
+
+    /// `row(name, id, recipe=..., mode=..., supported=...)`: the benchmark reads as
+    /// absent (`stale_bench`) when it no longer describes `mode` on that machine.
+    pub fn row_for(
+        &self,
+        name: &str,
+        generation_id: &str,
+        recipe: Option<&(String, String, Option<u32>)>,
+        mode: &str,
+        formats: Formats<'_>,
+    ) -> Option<RowProfile> {
+        self.read_row(name, generation_id, recipe, Some((mode, formats)))
+    }
+
+    fn read_row(
+        &self,
+        name: &str,
+        generation_id: &str,
+        recipe: Option<&(String, String, Option<u32>)>,
+        judge: Option<(&str, Formats<'_>)>,
     ) -> Option<RowProfile> {
         let profile = self.load(name);
         let entry = profile
@@ -204,6 +268,33 @@ impl Profiles {
             return None;
         }
         let pools = entry.get("pools");
+        let mut bench = entry.get("bench").and_then(Value::as_object).cloned();
+        let mut stale = false;
+        if let (Some(b), Some((mode, formats))) = (&bench, judge) {
+            let engine = stored
+                .and_then(Value::as_array)
+                .and_then(|r| r.first())
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| recipe.map(|r| r.0.clone()));
+            let wanted = bunko_sched::precision::normalize_mode(Some(mode))
+                .unwrap_or(bunko_sched::precision::DEFAULT_MODE);
+            let recorded;
+            let supported = match formats {
+                Formats::Known(s) => s,
+                Formats::Recorded => {
+                    recorded = recorded_formats(b, &profile, wanted);
+                    recorded.as_ref()
+                }
+            };
+            if let Some(reason) =
+                bunko_sched::precision::stale_bench_reason(engine.as_deref(), b, wanted, supported)
+            {
+                note_stale(&self.path(name), name, generation_id, b, &reason);
+                bench = None;
+                stale = true;
+            }
+        }
         Some(RowProfile {
             pools: if holds_pools(pools) {
                 pools
@@ -216,12 +307,13 @@ impl Profiles {
             } else {
                 Map::new()
             },
-            bench: entry.get("bench").and_then(Value::as_object).cloned(),
+            bench,
             runs: entry
                 .get("runs")
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default(),
+            stale_bench: stale,
         })
     }
 
@@ -260,6 +352,7 @@ impl Profiles {
         if !profile.get("rows").is_some_and(Value::is_object) {
             profile.insert("rows".into(), json!({}));
         }
+        drop_stale_benches(&path, &mut profile);
         edit(&mut profile);
         let text = ascii_escape(&bunko_sched::pyjson::dumps_indent2(&Value::Object(profile)));
         if let Err(e) = std::fs::create_dir_all(&self.dir)
@@ -457,6 +550,71 @@ impl Profiles {
     }
 }
 
+/// `_note_stale`: say a stale benchmark once, and have it dropped at the next save.
+fn note_stale(
+    file: &Path,
+    name: &str,
+    generation_id: &str,
+    bench: &Map<String, Value>,
+    reason: &str,
+) {
+    let stamp = bench
+        .get("at")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    STALE_PENDING
+        .lock()
+        .get_or_insert_with(HashMap::new)
+        .entry(file.to_string_lossy().into_owned())
+        .or_default()
+        .insert(generation_id.to_string(), stamp.clone());
+    let said = (name.to_string(), generation_id.to_string(), stamp.clone());
+    if !STALE_LOGGED
+        .lock()
+        .get_or_insert_with(HashSet::new)
+        .insert(said)
+    {
+        return;
+    }
+    tracing::info!(
+        "Ignoring the stale benchmark of {generation_id} on {} ({}): {reason}; it is re-measured where autobench is on, and dropped from the profile at its next save",
+        if name == LOCAL_PROFILE {
+            crate::ocr::types::LOCAL_DISPLAY
+        } else {
+            name
+        },
+        if stamp.is_empty() { "undated" } else { &stamp }
+    );
+}
+
+/// `_drop_stale_benches`: remove the benchmarks a read found stale, if they are still
+/// the ones stored (matched by `at`: a re-measurement written since is kept).
+fn drop_stale_benches(file: &Path, profile: &mut Map<String, Value>) {
+    let key = file.to_string_lossy();
+    let Some(pending) = STALE_PENDING
+        .lock()
+        .as_mut()
+        .and_then(|p| p.remove(key.as_ref()))
+    else {
+        return;
+    };
+    let Some(rows) = profile.get_mut("rows").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for (generation_id, stamp) in pending {
+        if let Some(Value::Object(entry)) = rows.get_mut(&generation_id) {
+            let same = entry
+                .get("bench")
+                .and_then(Value::as_object)
+                .is_some_and(|b| b.get("at").and_then(Value::as_str).unwrap_or("") == stamp);
+            if same {
+                entry.remove("bench");
+            }
+        }
+    }
+}
+
 /// Python's default `ensure_ascii` over an already-serialised document: every non-ASCII
 /// character can only be inside a string, so escaping it there is the same output.
 pub fn ascii_escape(text: &str) -> String {
@@ -484,6 +642,70 @@ mod tests {
         assert_eq!(profile_filename(LOCAL_PROFILE), "@local.json");
         let f = profile_filename("Tower 1");
         assert!(f.starts_with("Tower_1~") && f.ends_with(".json"), "{f}");
+    }
+
+    #[test]
+    fn a_stale_benchmark_reads_as_absent_and_is_dropped_at_the_next_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Profiles::new(dir.path());
+        let recipe = (
+            "hayai-nova".to_string(),
+            "ppocr-manga".to_string(),
+            Some(512),
+        );
+        let bench = json!({
+            "pages_per_second": 5.0, "at": "2026-10-01T12:00:00Z",
+            "precision": "bf16", "precision_mode": "auto-balanced",
+            "precision_trials": [{"precision": "bf16", "pages_per_second": 5.0},
+                                 {"precision": "fp32", "pages_per_second": 2.0}],
+        });
+        p.set_bench("box", "g-1", bench.as_object().unwrap(), Some(&recipe));
+        let gpu: BTreeSet<String> = ["fp32", "fp16", "bf16"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let fresh = p
+            .row_for(
+                "box",
+                "g-1",
+                Some(&recipe),
+                "auto-balanced",
+                Formats::Known(Some(&gpu)),
+            )
+            .unwrap();
+        assert!(fresh.bench.is_some() && !fresh.stale_bench);
+        // The row's mode changed: the benchmark no longer describes it.
+        let stale = p
+            .row_for(
+                "box",
+                "g-1",
+                Some(&recipe),
+                "auto-speed",
+                Formats::Known(Some(&gpu)),
+            )
+            .unwrap();
+        assert!(stale.bench.is_none() && stale.stale_bench);
+        // A raw read still sees it; the next save of that machine drops it.
+        assert!(p.row("box", "g-1", Some(&recipe)).unwrap().bench.is_some());
+        p.record_run("box", "g-1", 10, 5.0, None, Some(&recipe), false, 100.0);
+        assert!(p.row("box", "g-1", Some(&recipe)).unwrap().bench.is_none());
+        // Judged on the formats the machine registered.
+        p.set_identity(
+            "box",
+            &json!({}),
+            &json!({"devices": [{"id": "gpu:0", "label": "GPU", "formats": ["fp32", "fp16", "bf16"], "provider": "cuda", "arch": "sm_86"}]}),
+        );
+        p.set_bench("box", "g-1", bench.as_object().unwrap(), Some(&recipe));
+        let recorded = p
+            .row_for(
+                "box",
+                "g-1",
+                Some(&recipe),
+                "auto-balanced",
+                Formats::Recorded,
+            )
+            .unwrap();
+        assert!(recorded.bench.is_some());
     }
 
     #[test]

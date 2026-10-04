@@ -118,6 +118,7 @@ fn hayai_case(precision: Precision) {
     match precision {
         Precision::Fp32 => assert_eq!(same, refs.len()),
         Precision::Fp16 => assert!(same + 3 >= refs.len(), "fp16 {same}/{}", refs.len()),
+        Precision::Bf16 => unreachable!("no bf16 ONNX export"),
     }
 }
 
@@ -179,6 +180,7 @@ fn paddle_case(sub: &str) {
     match precision {
         Precision::Fp32 => assert_eq!((same_norm, same_raw), (names.len(), names.len())),
         Precision::Fp16 => assert!(same_norm + 3 >= names.len()),
+        Precision::Bf16 => unreachable!("no bf16 ONNX export"),
     }
 }
 

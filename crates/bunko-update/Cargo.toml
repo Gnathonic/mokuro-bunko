@@ -23,6 +23,8 @@ self-replace = "1"
 flate2 = "1"
 tar = "0.4"
 zip = { workspace = true }
+# OCR backend packs (.tar.zst).
+zstd = "0.13"
 
 [dev-dependencies]
 tempfile.workspace = true

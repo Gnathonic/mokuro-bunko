@@ -38,17 +38,45 @@ fn unknown_command_is_usage_error() {
     Env::new().cmd().arg("frobnicate").assert().code(2);
 }
 
+#[cfg(feature = "ocr")]
 #[test]
-fn install_ocr_is_a_deprecated_alias() {
+fn install_ocr_lists_and_checks_its_sources() {
+    let env = Env::new();
+    env.write_config("");
+    // --list: detected hardware and the pack it would install, no network.
+    env.cmd()
+        .args(["install-ocr", "--list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Would install: "));
+    // 0.5.2's --backend values map to variants; unknown ones are refused.
+    env.cmd()
+        .args(["install-ocr", "--backend", "opencl"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown backend 'opencl'"));
+    // --from a directory without a pack archive fails visibly (0.5.2 scripts used `|| true`).
+    let empty = tempfile::tempdir().unwrap();
+    env.cmd()
+        .args(["install-ocr", "--backend", "cpu", "--no-models", "--from"])
+        .arg(empty.path())
+        .arg("--dir")
+        .arg(empty.path().join("backends"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("torch-cpu.tar.zst"));
+}
+
+#[cfg(not(feature = "ocr"))]
+#[test]
+fn install_ocr_on_lite_says_so() {
     let env = Env::new();
     env.write_config("");
     env.cmd()
-        .args(["install-ocr", "--backend", "cuda", "--force"])
+        .args(["install-ocr", "--backend", "cuda"])
         .assert()
         .success()
-        .stdout(predicate::str::starts_with(
-            "install-ocr is deprecated: OCR is built into mokuro-bunko",
-        ));
+        .stdout(predicate::str::contains("This is the lite build"));
 }
 
 #[test]

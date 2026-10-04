@@ -1,32 +1,38 @@
 //! ONNX Runtime set-up and what this machine offers: version and providers (for
 //! `doctor`), the device catalog filtered by the configured backend, the host block
 //! of a registration, and where a session's recognizer runs.
+//!
+//! The device catalog comes from the libtorch backend pack when one is loaded (feature
+//! `torch`: CUDA / ROCm GPUs as libtorch numbers them), else from ONNX Runtime's
+//! compiled-in execution providers (the CPU only in a release build).
 
 use std::ffi::CStr;
 
 use bunko_proto::{Device, HostInfo};
-use bunko_vlm::Provider;
 
-/// `ocr.backend` (local) or the processor's choice: which execution providers may
-/// be used. `Auto` takes the first compiled-in GPU provider that has a device.
+/// `ocr.backend` (local) or the processor's choice: which devices may be used. `Auto`
+/// takes the first GPU there is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Auto,
     Cpu,
     Cuda,
+    /// AMD GPUs through libtorch's ROCm build (0.5.2's `rocm`).
+    Rocm,
     WebGpu,
     DirectMl,
     CoreMl,
 }
 
 impl Backend {
-    /// `auto|cpu|cuda|rocm|webgpu|directml|coreml` (`rocm` is 0.5's AMD spelling, which
-    /// is WebGPU in 0.7). `skip` never reaches here (no local processor is started).
+    /// `auto|cpu|cuda|rocm|webgpu|directml|coreml`. `skip` never reaches here (no local
+    /// processor is started).
     pub fn parse(s: &str) -> Backend {
         match s.trim().to_ascii_lowercase().as_str() {
             "cpu" => Backend::Cpu,
             "cuda" => Backend::Cuda,
-            "webgpu" | "rocm" => Backend::WebGpu,
+            "rocm" | "hip" => Backend::Rocm,
+            "webgpu" => Backend::WebGpu,
             "directml" | "dml" => Backend::DirectMl,
             "coreml" => Backend::CoreMl,
             _ => Backend::Auto,
@@ -34,15 +40,25 @@ impl Backend {
     }
 
     /// The provider name this backend is limited to (`None`: any; `Some("cpu")`: none).
-    fn only(self) -> Option<&'static str> {
+    pub fn only(self) -> Option<&'static str> {
         match self {
             Backend::Auto => None,
             Backend::Cpu => Some("cpu"),
             Backend::Cuda => Some("cuda"),
+            Backend::Rocm => Some("rocm"),
             Backend::WebGpu => Some("webgpu"),
             Backend::DirectMl => Some("directml"),
             Backend::CoreMl => Some("coreml"),
         }
+    }
+
+    /// Whether a device of `provider` (`cpu`, `cuda`, `rocm`, ...) may be used.
+    pub fn allows(self, provider: &str) -> bool {
+        provider == "cpu"
+            || match self.only() {
+                None => true,
+                Some(p) => p == provider,
+            }
     }
 }
 
@@ -127,18 +143,13 @@ pub fn devices(backend: Backend) -> Vec<Device> {
     init();
     bunko_ocr::runtime::device_catalog()
         .into_iter()
-        .filter(|d| {
-            d.id == "cpu"
-                || match backend.only() {
-                    None => true,
-                    Some(p) => d.provider.as_deref() == Some(p),
-                }
-        })
+        .filter(|d| d.id == "cpu" || backend.allows(d.provider.as_deref().unwrap_or("")))
         .map(|d| Device {
             id: d.id,
             label: d.label,
             formats: d.formats,
             provider: d.provider,
+            arch: None,
         })
         .collect()
 }
@@ -154,18 +165,35 @@ fn cpu_name() -> String {
     std::env::consts::ARCH.to_string()
 }
 
-/// The `host` block of a registration.
-pub fn host_info(devices: &[Device]) -> HostInfo {
+/// 0.5.2's `bench.cpu_label`: the CPU's name with its physical core count,
+/// `"AMD Ryzen 7 5800X 8-Core Processor (8 cores)"` (the server reads the count back).
+pub fn cpu_label(name: &str, cores: usize) -> String {
+    if cores == 0 {
+        return name.to_string();
+    }
+    format!("{name} ({cores} core{})", if cores == 1 { "" } else { "s" })
+}
+
+/// The `host` block of a registration. `torch`: the loaded libtorch's version; `cpu`:
+/// the CPU's name as the backend found it (else `/proc/cpuinfo`).
+pub fn host_info(devices: &[Device], torch: Option<&str>, cpu: Option<&str>) -> HostInfo {
     let gpu = devices.iter().find(|d| d.id != "cpu");
     let version = env!("CARGO_PKG_VERSION");
+    let mut runtimes = format!("onnxruntime {}", ort_version());
+    if let Some(t) = torch {
+        runtimes.push_str(&format!(", libtorch {t}"));
+    }
     HostInfo {
-        cpu: cpu_name(),
+        cpu: cpu_label(
+            &cpu.map_or_else(cpu_name, str::to_string),
+            crate::plan::physical_cpu_count(),
+        ),
         gpu: gpu.map(|d| d.label.clone()),
         backend: gpu
             .and_then(|d| d.provider.clone())
             .unwrap_or_else(|| "cpu".into()),
         version: version.into(),
-        runner_build: format!("mokuro-bunko {version} (onnxruntime {})", ort_version()),
+        runner_build: format!("mokuro-bunko {version} ({runtimes})"),
         os: Some(std::env::consts::OS.into()),
         cores: std::thread::available_parallelism()
             .ok()
@@ -178,8 +206,10 @@ pub fn host_info(devices: &[Device]) -> HostInfo {
 pub struct Placement {
     /// `cpu` or `gpu:<n>` (reported in `ready.stage_device`).
     pub device: String,
+    /// The device as the recognizer backend numbers it (per provider).
     pub vlm_device: bunko_vlm::Device,
-    pub provider: Provider,
+    /// `cpu`, `cuda`, `rocm`, `webgpu`, `directml`, `coreml`.
+    pub provider: String,
 }
 
 impl Placement {
@@ -187,24 +217,30 @@ impl Placement {
         Placement {
             device: "cpu".into(),
             vlm_device: bunko_vlm::Device::Cpu,
-            provider: Provider::Cpu,
+            provider: "cpu".into(),
         }
     }
 
     pub fn is_gpu(&self) -> bool {
         self.device != "cpu"
     }
-}
 
-fn provider_of(name: &str) -> Option<Provider> {
-    match name {
-        "cuda" => Some(Provider::Cuda),
-        "webgpu" => Some(Provider::WebGpu),
-        "directml" => Some(Provider::DirectMl),
-        "coreml" => Some(Provider::CoreMl),
-        _ => None,
+    /// The ONNX Runtime execution provider of this placement.
+    #[cfg(feature = "onnx-vlm")]
+    pub fn ort_provider(&self) -> Option<bunko_vlm::Provider> {
+        use bunko_vlm::Provider;
+        match self.provider.as_str() {
+            "cpu" => Some(Provider::Cpu),
+            "cuda" => Some(Provider::Cuda),
+            "webgpu" => Some(Provider::WebGpu),
+            "directml" => Some(Provider::DirectMl),
+            "coreml" => Some(Provider::CoreMl),
+            _ => None,
+        }
     }
 }
+
+const GPU_PROVIDERS: [&str; 5] = ["cuda", "rocm", "webgpu", "directml", "coreml"];
 
 /// Resolve `pools.stage_device.engine` (`auto`, `cpu`, `gpu:<n>`) against the devices:
 /// `auto` = `gpu:0` when there is one, else the CPU. A GPU the catalog does not list
@@ -226,7 +262,11 @@ pub fn place(asked: Option<&str>, devices: &[Device]) -> (Placement, Option<Stri
             Some(format!("{want} is not a device of this machine")),
         );
     };
-    let Some(provider) = dev.provider.as_deref().and_then(provider_of) else {
+    let Some(provider) = dev
+        .provider
+        .as_deref()
+        .filter(|p| GPU_PROVIDERS.contains(p))
+    else {
         return (
             Placement::cpu(),
             Some(format!("{want} has no usable execution provider")),
@@ -243,10 +283,35 @@ pub fn place(asked: Option<&str>, devices: &[Device]) -> (Placement, Option<Stri
         Placement {
             device: want,
             vlm_device: bunko_vlm::Device::Gpu(ordinal),
-            provider,
+            provider: provider.to_string(),
         },
         None,
     )
+}
+
+/// [`place`], then the CPU when the chosen GPU cannot run the engine in any format
+/// (no compiled package for its architecture here): the engine keeps running, on the
+/// CPU packages, with the reason logged.
+pub fn place_runnable(
+    asked: Option<&str>,
+    devices: &[Device],
+    formats: impl Fn(&Placement) -> Vec<&'static str>,
+) -> (Placement, Option<String>) {
+    let (p, why) = place(asked, devices);
+    if p.is_gpu() && formats(&p).is_empty() {
+        let label = devices
+            .iter()
+            .find(|d| d.id == p.device)
+            .map_or_else(String::new, |d| format!(" ({})", d.label));
+        return (
+            Placement::cpu(),
+            Some(format!(
+                "{}{label} has no compiled package for this engine here",
+                p.device
+            )),
+        );
+    }
+    (p, why)
 }
 
 #[cfg(test)]
@@ -259,6 +324,7 @@ mod tests {
             label: id.into(),
             formats: vec!["fp32".into()],
             provider: Some(provider.into()),
+            arch: None,
         }
     }
 
@@ -277,12 +343,25 @@ mod tests {
         ];
         let (p, _) = place(Some("auto"), &gpus);
         assert_eq!(p.device, "gpu:0");
-        assert_eq!(p.provider, Provider::Cuda);
+        assert_eq!(p.provider, "cuda");
         let (p, _) = place(Some("gpu:2"), &gpus);
-        assert_eq!(p.provider, Provider::WebGpu);
+        assert_eq!(p.provider, "webgpu");
         assert_eq!(p.vlm_device, bunko_vlm::Device::Gpu(1));
         assert_eq!(place(Some("cpu"), &gpus).0, Placement::cpu());
-        assert_eq!(Backend::parse("ROCm"), Backend::WebGpu);
+        // libtorch numbers its GPUs itself: gpu:<n> is torch device n.
+        let rocm = vec![
+            dev("cpu", "cpu"),
+            dev("gpu:0", "rocm"),
+            dev("gpu:1", "rocm"),
+        ];
+        let (p, _) = place(Some("gpu:1"), &rocm);
+        assert_eq!(
+            (p.provider.as_str(), p.vlm_device),
+            ("rocm", bunko_vlm::Device::Gpu(1))
+        );
+        assert_eq!(Backend::parse("ROCm"), Backend::Rocm);
+        assert!(Backend::Rocm.allows("rocm") && Backend::Rocm.allows("cpu"));
+        assert!(!Backend::Cuda.allows("rocm"));
         assert_eq!(Backend::parse("whatever"), Backend::Auto);
     }
 
@@ -299,8 +378,19 @@ mod tests {
         let devices = devices(Backend::Cpu);
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id, "cpu");
-        let host = host_info(&devices);
+        let host = host_info(&devices, Some("2.13.0+cpu"), Some("Test CPU"));
+        assert!(
+            host.cpu.starts_with("Test CPU (") && host.cpu.ends_with(")"),
+            "{}",
+            host.cpu
+        );
+        assert_eq!(
+            cpu_label("Threadripper 7960X", 24),
+            "Threadripper 7960X (24 cores)"
+        );
+        assert_eq!(cpu_label("Atom", 1), "Atom (1 core)");
         assert_eq!(host.backend, "cpu");
         assert!(host.runner_build.contains("onnxruntime 1."));
+        assert!(host.runner_build.ends_with(", libtorch 2.13.0+cpu)"));
     }
 }

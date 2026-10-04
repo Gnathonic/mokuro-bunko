@@ -508,27 +508,56 @@ async fn leaving_says_nothing_more() {
     assert!(link.events.recv().await.is_none(), "the hub is gone");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bench_is_refused_with_its_event_names() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bench_runs_beside_sessions_and_a_repeated_bid_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut link, _fake) = start(FakeConfig::default(), &dir.path().join("results"));
-    send(
-        &link,
-        Op::Bench(BenchOp {
-            bid: "bench-1".into(),
-            spec: row("fake"),
-            sample: "/x".into(),
-            pages: 4,
-            precision_only: false,
-        }),
-    )
-    .await;
-    let done = next_event(&mut link.events, 5).await;
-    assert!(
-        matches!(&done, Event::BenchDone { bid, detail } if bid == "bench-1" && detail["error"] == "benchmarks are not implemented yet")
+    let sample = write_volume(dir.path(), "bench-1.cbz", 8);
+    let a = write_volume(dir.path(), "a.cbz", 3);
+    let config = FakeConfig {
+        page_delay: Duration::from_millis(2),
+        ..Default::default()
+    };
+    let fake = FakePipeline::new(config);
+    let quick = bunko_processor::BenchConfig {
+        rules: bunko_sched::bench::WindowRules {
+            min_window_seconds: 0.1,
+            short_window_seconds: 0.05,
+            ..Default::default()
+        },
+        workers_budget: Some(1),
+        ..Default::default()
+    };
+    let mut link = LocalProcessor::spawn_with(
+        Arc::new(fake),
+        LocalConfig {
+            results_dir: dir.path().join("results"),
+        },
+        quick,
     );
-    assert!(
-        matches!(next_event(&mut link.events, 5).await, Event::Exit { sid, returncode: None } if sid == "bench-1")
-    );
+    let op = Op::Bench(BenchOp {
+        bid: "bench-1".into(),
+        spec: row("fake"),
+        sample: sample.to_string_lossy().into_owned(),
+        pages: 8,
+        precision_only: false,
+    });
+    send(&link, op.clone()).await;
+    send(&link, op).await;
+    send(&link, open("s1")).await;
+    send(&link, volume_op("s1", "v1", &a)).await;
+    send(&link, Op::CloseSession { sid: "s1".into() }).await;
+    let mut exits = Vec::new();
+    let mut done = 0;
+    while exits.len() < 2 {
+        match next_event(&mut link.events, 60).await {
+            Event::Exit { sid, .. } => exits.push(sid),
+            Event::BenchDone { bid, .. } if bid == "bench-1" => done += 1,
+            _ => {}
+        }
+    }
+    exits.sort();
+    assert_eq!(exits, ["bench-1", "s1"]);
+    assert_eq!(done, 1, "one benchmark for one bid");
+    quiet_for(&mut link.events, 300).await;
     link.shutdown().await;
 }

@@ -1,6 +1,6 @@
 [package]
 name = "bunko-vlm"
-description = "hayai-nova and paddle-manga line recognizers on ONNX Runtime"
+description = "hayai-nova and paddle-manga line recognizers: crops, model facts and host helpers (ONNX Runtime recognizers behind `onnx-vlm`)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,14 +9,17 @@ repository.workspace = true
 
 [features]
 default = []
+# The ONNX Runtime recognizers (HayaiNova, PaddleManga, RecognizerCache). Deferred in 0.7:
+# the release runs the recognizers on libtorch (bunko-torch). Kept compiling, not shipped.
+onnx-vlm = ["dep:ort"]
 # GPU execution providers, forwarded to `ort` (each makes `ort` fetch a matching ONNX Runtime build).
-cuda = ["ort/cuda"]
-webgpu = ["ort/webgpu"]
-directml = ["ort/directml"]
-coreml = ["ort/coreml"]
+cuda = ["onnx-vlm", "ort/cuda"]
+webgpu = ["onnx-vlm", "ort/webgpu"]
+directml = ["onnx-vlm", "ort/directml"]
+coreml = ["onnx-vlm", "ort/coreml"]
 
 [dependencies]
-ort = { workspace = true, features = ["std", "ndarray", "half", "download-binaries", "copy-dylibs", "tracing", "tls-rustls"] }
+ort = { workspace = true, optional = true, features = ["std", "ndarray", "half", "download-binaries", "copy-dylibs", "tracing", "tls-rustls"] }
 half = { version = "2", default-features = false, features = ["std"] }
 serde_json.workspace = true
 thiserror.workspace = true
@@ -26,3 +29,11 @@ tracing.workspace = true
 anyhow.workspace = true
 image = { workspace = true }
 unicode-normalization = "0.1.24"
+
+[[example]]
+name = "bench"
+required-features = ["onnx-vlm"]
+
+[[test]]
+name = "parity"
+required-features = ["onnx-vlm"]

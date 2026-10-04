@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 bunko-proto.workspace = true
+bunko-sched.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

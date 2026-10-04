@@ -85,6 +85,14 @@ pub trait VolumeRunner: Send + Sync {
     fn stats(&self) -> Option<PipelineReport> {
         None
     }
+
+    /// The widest each stage may run in this session on this host, by stage key: how
+    /// far a benchmark's width search may widen it (0.5.2's structural ceiling and host
+    /// budget). Empty: the engine does not say, and the benchmark estimates it
+    /// ([`crate::bench::estimated_ceiling`]).
+    fn width_ceilings(&self) -> BTreeMap<String, u32> {
+        BTreeMap::new()
+    }
 }
 
 /// Everything about a volume the sidecar needs besides its pages.

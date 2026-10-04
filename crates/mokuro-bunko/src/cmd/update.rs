@@ -6,7 +6,6 @@
 //! binary's `serve` (same global options), for scripts that update and start in one go.
 
 use super::Ctx;
-use crate::FLAVOR;
 use crate::cfgfile;
 use crate::cli::UpdateCmd;
 use crate::out::{CmdResult, Fail, exit_with, runtime};
@@ -19,7 +18,7 @@ pub fn run(ctx: &Ctx, cmd: UpdateCmd) -> CmdResult {
     let updater = Updater::new(
         config.update.manifest_url.clone(),
         config.update.channel.clone(),
-        FLAVOR,
+        crate::update_flavor(),
     );
     match cmd {
         UpdateCmd::Check => check(&updater),
@@ -105,7 +104,8 @@ fn apply(ctx: &Ctx, updater: &Updater, yes: bool, restart: bool) -> CmdResult {
     }
     if !status.can_apply {
         return Err(Fail::msg(format!(
-            "release {latest} has no {FLAVOR} build for {}",
+            "release {latest} has no {} build for {}",
+            crate::update_flavor(),
             bunko_update::TARGET
         )));
     }

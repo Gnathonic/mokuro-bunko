@@ -2,7 +2,7 @@
 //! Phase A refuses cheaply, phase B proposes the queue in order and prices the walk
 //! (earliest-finish, warm sessions, backoffs, autobench gating), phase C takes.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bunko_core::generations::Generation;
 use bunko_proto::{PoolsSpec, RowSpec};
@@ -17,7 +17,7 @@ use bunko_sched::plan::{LanePricing, MachineBench, Pricing};
 use serde_json::{Map, Value};
 
 use super::{Claimed, Lane, Scheduler};
-use crate::ocr::profiles::{machine_pools, profile_key, runner_pools};
+use crate::ocr::profiles::{Formats, RowProfile, machine_pools, profile_key, runner_pools};
 use crate::ocr::types::{Job, LOCAL, stamp_of};
 
 /// The pseudo row id upgrade jobs are ordered under: after every real row.
@@ -30,26 +30,50 @@ pub struct EftOutcome {
     pub skip: HashSet<Job>,
 }
 
-/// `supported_for(device)` on a processor's reported devices: what the model device
-/// computes in. `None`: the card is not reported.
-pub fn supported_for(catalog: &bunko_proto::Catalog, device: &str) -> Option<HashSet<String>> {
-    let fp32 = || HashSet::from(["fp32".to_string()]);
-    let with = |formats: &[String]| {
-        let mut s = fp32();
-        s.extend(formats.iter().cloned());
-        s
+/// `supported_for(device)` on a processor's reported devices: what the row's model
+/// device computes in for a row asking `mode`, as the engines there will resolve it
+/// (`bunko_sched::precision::device_formats`: bf16 only where native for the auto
+/// modes, wherever it exists for a forced `bf16`). `auto` is the first GPU that can run
+/// a recognizer at all, else the CPU. `None`: the card is not reported.
+pub fn supported_for(
+    catalog: &bunko_proto::Catalog,
+    device: &str,
+    mode: &str,
+) -> Option<HashSet<String>> {
+    let of = |d: &bunko_proto::Device| -> HashSet<String> {
+        bunko_sched::precision::device_formats(
+            mode,
+            &d.formats,
+            d.provider
+                .as_deref()
+                .or(Some(if d.id == "cpu" { "cpu" } else { "" })),
+            d.arch.as_deref(),
+        )
+        .into_iter()
+        .collect()
     };
-    match device {
-        "cpu" => Some(fp32()),
-        "" | "auto" => match catalog.devices.iter().find(|d| d.id.starts_with("gpu:")) {
-            Some(gpu) => Some(with(&gpu.formats)),
-            None => Some(fp32()),
-        },
-        id => catalog
+    let fp32 = || HashSet::from(["fp32".to_string()]);
+    let cpu = || {
+        catalog
             .devices
             .iter()
-            .find(|d| d.id == id)
-            .map(|d| with(&d.formats)),
+            .find(|d| d.id == "cpu")
+            .map(of)
+            .unwrap_or_else(fp32)
+    };
+    match device {
+        "cpu" => Some(cpu()),
+        // The engines place an automatic row on the first GPU with a package for it,
+        // else on the CPU (`runtime::place_runnable`).
+        "" | "auto" => Some(
+            catalog
+                .devices
+                .iter()
+                .find(|d| d.id.starts_with("gpu:") && !d.formats.is_empty())
+                .map(of)
+                .unwrap_or_else(cpu),
+        ),
+        id => catalog.devices.iter().find(|d| d.id == id).map(of),
     }
 }
 
@@ -67,7 +91,7 @@ pub fn precision_refusal(
         .and_then(Value::as_str)
         .unwrap_or("auto");
     let mode = &row.precision;
-    match supported_for(catalog, device) {
+    match supported_for(catalog, device, mode) {
         Some(s) if s.contains(mode.as_str()) => None,
         Some(_) => Some(format!("it cannot run {mode} ({mode} not supported)")),
         None if mode == "fp32" => None,
@@ -104,6 +128,16 @@ pub fn catalog_can_run(
     precision_refusal(row, catalog, stage_device)
 }
 
+/// `model_device(row, None)`: where the row's model sits under its own placement.
+pub fn model_device(row: &Generation) -> &str {
+    row.pools
+        .stage_device
+        .get("engine")
+        .map(String::as_str)
+        .filter(|d| !d.is_empty())
+        .unwrap_or("auto")
+}
+
 /// `resolve_device(asked, gpu)`: what `auto` means on a machine.
 fn resolve_device(asked: &str, has_gpu: bool) -> String {
     match asked {
@@ -116,6 +150,32 @@ fn resolve_device(asked: &str, has_gpu: bool) -> String {
         }
         other => other.to_string(),
     }
+}
+
+/// `_precision_pick_needed`: a balanced/speed row with candidates to choose between
+/// on that machine and no current pick.
+pub fn precision_pick_needed(
+    row: &Generation,
+    profile: Option<&RowProfile>,
+    supported: Option<&BTreeSet<String>>,
+) -> bool {
+    use bunko_sched::precision as policy;
+    if !row.precision_applies() || !policy::is_benched(&row.precision) {
+        return false;
+    }
+    let Some(supported) = supported else {
+        return false;
+    };
+    if policy::resolve_mode(&row.engine, &row.precision, Some(supported), None, "")
+        .usable
+        .len()
+        < 2
+    {
+        return false;
+    }
+    policy::bench_pick(profile.and_then(|p| p.bench.as_ref()), &row.precision)
+        .0
+        .is_none()
 }
 
 impl Scheduler {
@@ -246,7 +306,127 @@ impl Scheduler {
         catalog_can_run(&machine.catalog, row, &stage_device)
     }
 
-    /// The row as that machine runs it (its pools, the row's precision).
+    /// `_machine_formats(machine, row)`: what that machine's model device computes in,
+    /// as it reported it; None when the machine is not here.
+    pub fn machine_formats(
+        &self,
+        machine_name: &str,
+        row: &Generation,
+    ) -> Option<BTreeSet<String>> {
+        let machine = self.machine_by_name(machine_name)?;
+        supported_for(&machine.catalog, model_device(row), &row.precision)
+            .map(|s| s.into_iter().collect())
+    }
+
+    /// The machine's profile entry for the row, its benchmark judged for the row's mode
+    /// on that machine's device (a stale one reads as absent).
+    pub fn machine_profile(&self, machine_name: &str, row: &Generation) -> Option<RowProfile> {
+        let formats = self.machine_formats(machine_name, row);
+        self.profiles.row_for(
+            profile_key(machine_name),
+            &row.id,
+            Some(&row.output_affecting()),
+            &row.precision,
+            Formats::Known(formats.as_ref()),
+        )
+    }
+
+    /// `_machine_pick`: this machine's benchmarked pick for a balanced/speed row.
+    pub fn machine_pick(&self, machine_name: &str, row: &Generation) -> (Option<String>, String) {
+        if !row.precision_applies() || !bunko_sched::precision::is_benched(&row.precision) {
+            return (None, String::new());
+        }
+        let bench = self
+            .machine_profile(machine_name, row)
+            .and_then(|p| p.bench);
+        bunko_sched::precision::bench_pick(bench.as_ref(), &row.precision)
+    }
+
+    /// `precision_on(row, machines, unpicked)`: what EVERY mode comes to on every
+    /// machine that may run the row (this server when it runs OCR of its own, each
+    /// connected processor), for the admin panel. A balanced/speed mode with more than
+    /// one candidate there also says where its pick stands (`bench`).
+    pub fn precision_on(&self, row: &Generation) -> Map<String, Value> {
+        use bunko_sched::precision as policy;
+        let mut out = Map::new();
+        if !row.precision_applies() {
+            return out;
+        }
+        for machine in self.machines.values() {
+            if machine.local && !self.settings.local_processing {
+                continue;
+            }
+            if !machine.connected() {
+                continue;
+            }
+            let name = if machine.local {
+                LOCAL.to_string()
+            } else {
+                machine.name.clone()
+            };
+            let profile = self.machine_profile(&machine.name, row);
+            let placement: BTreeMap<String, String> = if machine.local {
+                row.pools.stage_device.clone()
+            } else {
+                let stored = profile
+                    .as_ref()
+                    .map(|p| p.pools.clone())
+                    .unwrap_or_default();
+                machine_pools(&stored, &row.pools.to_value())
+                    .get("stage_device")
+                    .and_then(Value::as_object)
+                    .map(|t| {
+                        t.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let device = placement
+                .get("engine")
+                .map(String::as_str)
+                .filter(|d| !d.is_empty())
+                .unwrap_or("auto");
+            let bench = profile.and_then(|p| p.bench);
+            let key = (profile_key(&machine.name).to_string(), row.id.clone());
+            let unpicked = if !self.settings.autobench {
+                "off"
+            } else if self.autobench.failed.contains(&key) {
+                "failed"
+            } else {
+                "pending"
+            };
+            let mut modes = Map::new();
+            for mode in policy::engine_modes(&row.engine) {
+                // What the engines there resolve THIS mode on that device.
+                let supported: Option<BTreeSet<String>> =
+                    supported_for(&machine.catalog, device, mode).map(|s| s.into_iter().collect());
+                let (pick, why) = policy::bench_pick(bench.as_ref(), mode);
+                let resolved = policy::resolve_mode(
+                    &row.engine,
+                    mode,
+                    supported.as_ref(),
+                    pick.as_deref(),
+                    &why,
+                );
+                let mut entry = policy::resolution_entry(&resolved, bench.as_ref(), mode);
+                if policy::is_benched(mode) && resolved.usable.len() > 1 {
+                    let done = pick.as_ref().is_some_and(|p| resolved.usable.contains(p));
+                    entry.insert(
+                        "bench".into(),
+                        Value::String(if done { "done" } else { unpicked }.to_string()),
+                    );
+                }
+                modes.insert(mode.to_string(), Value::Object(entry));
+            }
+            out.insert(name, Value::Object(modes));
+        }
+        out
+    }
+
+    /// The row as that machine runs it (its pools, the row's precision, and its
+    /// benchmarked pick for a balanced/speed mode, which the runner there takes while
+    /// its device still supports it).
     pub fn row_spec(&self, machine_name: &str, row: &Generation) -> RowSpec {
         let pools = self.machine_row_pools(machine_name, row);
         let table_u32 = |key: &str| -> BTreeMap<String, u32> {
@@ -269,6 +449,7 @@ impl Scheduler {
                     .collect()
             })
             .unwrap_or_default();
+        let pick = self.machine_pick(machine_name, row);
         RowSpec {
             id: row.id.clone(),
             name: row.name.clone(),
@@ -281,8 +462,8 @@ impl Scheduler {
                 queue_capacity: table_u32("queue_capacity"),
                 stage_device,
             },
-            precision_pick: None,
-            precision_why: String::new(),
+            precision_pick: pick.0,
+            precision_why: pick.1,
             primary: row.primary,
         }
     }
@@ -354,7 +535,12 @@ impl Scheduler {
         digest[..16].to_string()
     }
 
-    /// `autobench_kind`: `"full"` when the pair was never measured on this machine.
+    /// `autobench_kind`: which benchmark the (row, machine) pair needs before it runs
+    /// there. `"full"`: no profile entry for the row's current recipe, or a stale
+    /// benchmark (widths, and the precision trials of a balanced/speed mode).
+    /// `"precision"`: hand-set pools switch width tuning off but not the pick — a
+    /// balanced/speed row with more than one candidate here and no current pick gets a
+    /// precision-only benchmark at the machine's pools. None: nothing to measure.
     pub fn autobench_kind(&self, pid: &str, row: &Generation) -> Option<&'static str> {
         if !self.settings.autobench {
             return None;
@@ -367,18 +553,20 @@ impl Scheduler {
         if self.autobench.failed.contains(&key) {
             return None;
         }
-        let hand_set = machine.local && !row.pools.is_empty();
-        if hand_set {
-            return None;
-        }
-        match self.profiles.row(
+        let supported = self.machine_formats(&machine.name, row);
+        let profile = self.profiles.row_for(
             profile_key(&machine.name),
             &row.id,
             Some(&row.output_affecting()),
-        ) {
-            None => Some("full"),
-            Some(_) => None,
+            &row.precision,
+            Formats::Known(supported.as_ref()),
+        );
+        let hand_set = machine.local && !row.pools.is_empty();
+        let full = !hand_set && profile.as_ref().is_none_or(|p| p.stale_bench);
+        if full {
+            return Some("full");
         }
+        precision_pick_needed(row, profile.as_ref(), supported.as_ref()).then_some("precision")
     }
 
     pub fn want_autobench(&mut self, pid: &str, row: &Generation) {
@@ -394,12 +582,11 @@ impl Scheduler {
         self.autobench.wanted.push(key);
     }
 
-    /// The machine's saved benchmark of a row (its rate/startup prior).
+    /// The machine's saved benchmark of a row (its rate/startup prior), for the row's
+    /// current recipe and mode.
     pub fn machine_bench(&self, gid: &str, machine: &str) -> Option<MachineBench> {
         let row = self.settings.rows.iter().find(|r| r.id == gid)?;
-        let profile =
-            self.profiles
-                .row(profile_key(machine), gid, Some(&row.output_affecting()))?;
+        let profile = self.machine_profile(machine, row)?;
         Some(MachineBench {
             pages_per_second: profile.bench_pages_per_second(),
             startup_seconds: profile.bench_startup_seconds(),

@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use bunko_core::generations::Generation;
 use bunko_sched::outlook::{OwedRow, pending_entries};
 use bunko_sched::plan::{PlanInputs, QueuePlan, job_identity, plan_queue};
 use bunko_sched::speed::{RowRef, SPEED_WINDOW_SECONDS, speed_report};
@@ -670,5 +671,157 @@ impl Scheduler {
             }
         }
         (held, volumes, pending_volumes)
+    }
+}
+
+/// One (machine, layer) line of the admin speed list (`_speed_layer`), or None when
+/// there is nothing to say. `bench_flat`: a profile's bench (its own
+/// `pages_per_second`), else a `.ocr-bench.json` result (`best`, then `baseline`).
+fn speed_layer(
+    row: &Generation,
+    found: Option<bunko_sched::throughput::Throughput>,
+    bench: Option<&Map<String, Value>>,
+    bench_flat: bool,
+) -> Option<Value> {
+    let blocks: Vec<Option<&Value>> = match bench {
+        None => Vec::new(),
+        Some(b) if bench_flat => vec![b.get("pages_per_second")],
+        Some(b) => vec![
+            b.get("best").and_then(|v| v.get("pages_per_second")),
+            b.get("baseline").and_then(|v| v.get("pages_per_second")),
+        ],
+    };
+    let bench_pps = blocks
+        .into_iter()
+        .flatten()
+        .filter(|v| v.is_number())
+        .filter_map(Value::as_f64)
+        .find(|v| *v > 0.0);
+    if found.is_none() && bench_pps.is_none() {
+        return None;
+    }
+    Some(json!({
+        "generation_id": row.id,
+        "generation": row.name,
+        "pages_per_minute": found.map(|f| bunko_sched::py::round_to(f.pages_per_minute(), 1)),
+        "volumes": found.map_or(0, |f| f.volumes),
+        "last_at": found.and_then(|f| f.last_at),
+        "bench_pages_per_minute": bench_pps.map(|p| bunko_sched::py::round_to(p * 60.0, 1)),
+    }))
+}
+
+/// `_hardware(host)`: `{cpu, gpu}` as text, or None for nothing to show.
+fn hardware(host: Option<&Value>) -> Value {
+    let Some(Value::Object(h)) = host else {
+        return Value::Null;
+    };
+    let pick = |k: &str| match h.get(k) {
+        Some(v) if bunko_sched::py::truthy(Some(v)) => match v {
+            Value::String(s) => json!(s),
+            other => json!(other.to_string()),
+        },
+        _ => Value::Null,
+    };
+    let (cpu, gpu) = (pick("cpu"), pick("gpu"));
+    if cpu.is_null() && gpu.is_null() {
+        Value::Null
+    } else {
+        json!({"cpu": cpu, "gpu": gpu})
+    }
+}
+
+impl Scheduler {
+    /// `_processor_speed`: per machine, per row it has run, what it really delivers
+    /// (real throughput) beside its own benchmark — this server first (while it does
+    /// OCR), then every connected processor, then every remembered one.
+    pub fn admin_speed(&self, local_host: Option<&Value>) -> Vec<Value> {
+        use bunko_sched::throughput::{RECENT_VOLUMES, profile_throughput, records_throughput};
+        let rows: Vec<Generation> = self
+            .settings
+            .rows
+            .iter()
+            .filter(|r| r.enabled)
+            .cloned()
+            .collect();
+        if rows.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if self.settings.local_processing {
+            let history = self.congestion.load();
+            let saved = bunko_sched::bench_file::BenchFile::new(&self.storage()).load();
+            let mut layers = Vec::new();
+            for row in &rows {
+                let records: Vec<Value> = history
+                    .iter()
+                    .find(|(id, _)| *id == row.id)
+                    .map(|(_, runs)| runs.iter().cloned().map(Value::Object).collect())
+                    .unwrap_or_default();
+                let found = records_throughput(&records, RECENT_VOLUMES);
+                let mine = saved.get(&row.id).and_then(Value::as_object);
+                let measured_here = mine.is_some_and(|m| {
+                    matches!(m.get("processor"), None | Some(Value::Null))
+                        || m.get("processor")
+                            .and_then(Value::as_str)
+                            .is_some_and(|p| p.is_empty() || p == LOCAL)
+                });
+                let layer = if measured_here {
+                    speed_layer(row, found, mine, false)
+                } else {
+                    let profile = self.machine_profile(LOCAL, row);
+                    speed_layer(row, found, profile.and_then(|p| p.bench).as_ref(), true)
+                };
+                layers.extend(layer);
+            }
+            out.push(json!({"name": LOCAL, "local": true, "connected": true,
+                "host": local_host.cloned().unwrap_or(Value::Null), "layers": layers}));
+        }
+        let connected: Vec<&super::Machine> = self
+            .machines
+            .values()
+            .filter(|m| !m.local && m.connected())
+            .collect();
+        let mut names: Vec<String> = connected.iter().map(|m| m.name.clone()).collect();
+        let mut remembered: Vec<String> = self
+            .profiles
+            .names()
+            .into_iter()
+            .filter(|n| !names.contains(n))
+            .collect();
+        remembered.sort();
+        names.extend(remembered);
+        for name in names {
+            let live = connected.iter().find(|m| m.name == name);
+            let mut layers = Vec::new();
+            for row in &rows {
+                let profile = match live {
+                    Some(_) => self.machine_profile(&name, row),
+                    None => self.profiles.row_for(
+                        &name,
+                        &row.id,
+                        Some(&row.output_affecting()),
+                        &row.precision,
+                        crate::ocr::profiles::Formats::Recorded,
+                    ),
+                };
+                let Some(profile) = profile else { continue };
+                let runs = Value::Object(profile.runs.clone());
+                layers.extend(speed_layer(
+                    row,
+                    profile_throughput(Some(&runs)),
+                    profile.bench.as_ref(),
+                    true,
+                ));
+            }
+            let host = match live {
+                Some(m) => Some(m.host_value.clone()),
+                None => self.profiles.load(&name).get("host").cloned(),
+            };
+            out.push(
+                json!({"name": name, "local": false, "connected": live.is_some(),
+                "host": hardware(host.as_ref()), "layers": layers}),
+            );
+        }
+        out
     }
 }

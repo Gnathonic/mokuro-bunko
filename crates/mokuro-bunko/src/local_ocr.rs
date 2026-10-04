@@ -1,9 +1,10 @@
 //! Local OCR: the in-process processor over the real engines (full build only).
 //!
-//! `ocr.backend` picks the execution providers: `cpu` keeps everything on the CPU,
-//! `cuda`/`webgpu`/`directml`/`coreml` (`rocm` = webgpu) limit the recognizer to that
-//! provider's devices, `auto` takes the first GPU this build can drive. `skip` turns
-//! local processing off (the server never starts the processor then).
+//! `ocr.backend` picks the devices: `cpu` keeps everything on the CPU, `cuda` / `rocm`
+//! limit the recognizer to the libtorch backend pack's NVIDIA / AMD GPUs
+//! (`webgpu`/`directml`/`coreml` are the deferred ONNX Runtime providers), `auto` takes
+//! the first GPU the installed pack can drive. `skip` turns local processing off (the
+//! server never starts the processor then).
 
 use bunko_server::ocr::LocalProcessorFactory;
 use std::sync::Arc;
@@ -55,18 +56,22 @@ mod full {
                     machine.catalog.engines.join(", ")
                 }
             );
-            let link = LocalProcessor::spawn(
+            let mut link = LocalProcessor::spawn(
                 pipeline,
                 LocalConfig {
                     results_dir: results_dir.to_path_buf(),
                 },
             );
-            // Dropping the op sender (when the server stops) is the processor leaving.
+            // Dropping the op sender (when the server stops) is the processor leaving;
+            // the server's stop then awaits `finished`, so the sessions' threads are
+            // joined and their models freed before `main` returns.
+            let finished = link.take_finished();
             Ok(LocalChannels {
                 ops: link.ops,
                 events: link.events,
                 catalog: machine.catalog,
                 host: machine.host,
+                finished,
             })
         }
     }

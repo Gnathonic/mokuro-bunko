@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
+use crate::bench::BenchConfig;
 use crate::client::{ClientError, LibraryClient, WebSocket, http_client};
 use crate::config::ProcessorConfig;
 use crate::fetch::{ArchiveFetcher, FetchTiming};
@@ -50,11 +51,18 @@ pub struct ServeOptions {
     pub verbose: bool,
     /// The first reconnect wait (doubles up to [`BACKOFF_MAX`]); tests shorten it.
     pub backoff_start: Duration,
+    /// The numbers benchmarks run by (`jobs` = this processor's sessions).
+    pub bench: BenchConfig,
 }
 
 impl ServeOptions {
     pub fn new(config: ProcessorConfig, pipeline: Arc<dyn PagePipeline>) -> ServeOptions {
+        let bench = BenchConfig {
+            jobs: config.processor.max_sessions.max(1) as usize,
+            ..BenchConfig::default()
+        };
         ServeOptions {
+            bench,
             config,
             pipeline,
             timing: FetchTiming::default(),
@@ -254,7 +262,13 @@ async fn run_connection(
         work: work_dir(&options.config),
         lost: lost.clone(),
     }));
-    let hub = Hub::new(options.pipeline.clone(), link, tx, leaving.clone());
+    let hub = Hub::new(
+        options.pipeline.clone(),
+        link,
+        tx,
+        leaving.clone(),
+        options.bench.clone(),
+    );
     let mut last_heard = Instant::now();
     let mut last_sent = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_secs(1));

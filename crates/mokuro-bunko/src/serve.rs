@@ -31,7 +31,7 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
         .thread_name("bunko")
         .enable_all()
         .build()?;
-    let flavor = crate::FLAVOR;
+    let flavor = crate::update_flavor();
     runtime
         .block_on(async move {
             info!("mokuro-bunko {} ({flavor})", bunko_core::VERSION);

@@ -71,6 +71,17 @@ pub struct ModelFile {
     /// SPDX licence id.
     pub license: String,
     pub source: Source,
+    /// libtorch packages (`tools/torch_export`'s `torch-models.json`): the compile
+    /// target of an AOTInductor graph (`linux-cuda-sm_89`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The store directory a `.pt2` (a stored zip) is unpacked into at install; the
+    /// runtime loads that directory in place and the zip is not kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unpack_to: Option<String>,
+    /// Manifest ids of the files a graph needs besides itself (its shared weights).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
 }
 
 /// The list of model files this build knows.
@@ -136,6 +147,9 @@ impl Manifest {
                 revision: PPOCR_REVISION.into(),
                 path: file.into(),
             },
+            target: None,
+            unpack_to: None,
+            requires: Vec::new(),
         };
         let mut files = vec![
             ppocr(
@@ -185,8 +199,12 @@ impl Manifest {
                     revision: revision.into(),
                     path: format!("{}/{}", crate::models_release::RELEASE, f.file),
                 },
+                target: None,
+                unpack_to: None,
+                requires: Vec::new(),
             });
         }
+        files.extend(torch_release_files());
         Manifest { files }
     }
 
@@ -319,11 +337,30 @@ impl ModelStore {
         {
             return Some(found);
         }
+        if let Some(dir) = self.unpacked_dir(file) {
+            return Some(dir);
+        }
         let path = self.store_path(file);
         fs::metadata(&path)
             .ok()
             .filter(|m| m.is_file() && m.len() == file.size)
             .map(|_| path)
+    }
+
+    /// For a package entry (`unpack_to`): its unpacked directory, when the unpack of
+    /// exactly the manifest's bytes completed (stamp `.unpacked` = its sha256).
+    fn unpacked_dir(&self, file: &ModelFile) -> Option<PathBuf> {
+        let dir = self.opts.root.join(file.unpack_to.as_deref()?);
+        let stamp = fs::read_to_string(dir.join(UNPACKED_STAMP)).ok()?;
+        let mut lines = stamp.lines();
+        if lines.next().map(str::trim) != Some(file.sha256.as_str()) {
+            return None;
+        }
+        if lines.next().map(str::trim) != Some(UNPACK_LAYOUT) {
+            // Unpacked before the archive's top folder was stripped: move it up.
+            flatten_unpacked(&dir, &file.sha256);
+        }
+        Some(dir)
     }
 
     /// Whether missing files may be fetched (the `download` feature and
@@ -346,12 +383,17 @@ impl ModelStore {
         Ok(Some((path, ok)))
     }
 
-    /// Local path of `id`, downloading it if needed and allowed.
+    /// Local path of `id`, downloading it if needed and allowed. A package entry
+    /// (`unpack_to`) resolves to its unpacked directory: the downloaded zip is verified,
+    /// unpacked and deleted (one copy on disk).
     pub fn ensure(&self, id: &str) -> Result<Resolved> {
         let file = self.manifest.get(id).ok_or_else(|| Error::Model {
             id: id.into(),
             msg: "not in the manifest".into(),
         })?;
+        if file.unpack_to.is_some() {
+            return self.ensure_unpacked(file);
+        }
         for candidate in self.override_candidates(file) {
             if candidate.is_file() {
                 let verified = override_verified(&candidate, &file.sha256)?;
@@ -387,6 +429,53 @@ impl ModelStore {
         self.fetch(file, &path)?;
         Ok(Resolved {
             path,
+            verified: true,
+        })
+    }
+
+    fn ensure_unpacked(&self, file: &ModelFile) -> Result<Resolved> {
+        if let Some(dir) = self.unpacked_dir(file) {
+            return Ok(Resolved {
+                path: dir,
+                verified: true,
+            });
+        }
+        // An override directory's zip is used as it is (the runtime unpacks it).
+        for candidate in self.override_candidates(file) {
+            if candidate.is_file() {
+                let verified = override_verified(&candidate, &file.sha256)?;
+                return Ok(Resolved {
+                    path: candidate,
+                    verified,
+                });
+            }
+        }
+        let zip = self.store_path(file);
+        let have = zip.is_file() && self.is_verified(file, &zip)?;
+        if !have {
+            if !self.opts.download {
+                return Err(Error::Model {
+                    id: file.id.clone(),
+                    msg: format!(
+                        "missing from {} and downloading is disabled; fetch {}",
+                        zip.display(),
+                        file.url
+                    ),
+                });
+            }
+            self.fetch(file, &zip)?;
+        }
+        let rel = file.unpack_to.as_deref().unwrap_or_default();
+        let dir = self.opts.root.join(rel);
+        unpack_zip(&zip, &dir, &file.sha256).map_err(|msg| Error::Model {
+            id: file.id.clone(),
+            msg,
+        })?;
+        let _ = fs::remove_file(&zip);
+        let _ = fs::remove_file(stamp_of(&zip));
+        info!(id = %file.id, dir = %dir.display(), "package unpacked");
+        Ok(Resolved {
+            path: dir,
             verified: true,
         })
     }
@@ -475,6 +564,113 @@ fn override_verified(path: &Path, sha256: &str) -> Result<bool> {
         .unwrap_or_else(|p| p.into_inner())
         .insert(key, ok);
     Ok(ok)
+}
+
+/// The stamp an unpacked package directory carries: the sha256 of the zip it came from.
+pub const UNPACKED_STAMP: &str = ".unpacked";
+/// The stamp's second line: the layout of the unpack. `2`: the archive's one top folder
+/// (`<role>/`, which `unpack_to` already names) stripped, so `data/aotinductor/` sits
+/// right in `unpack_to`. A stamp without it is a 1 (`<role>/<role>/data/...`).
+const UNPACK_LAYOUT: &str = "layout 2";
+
+fn stamp_text(sha256: &str) -> String {
+    format!("{sha256}\n{UNPACK_LAYOUT}\n")
+}
+
+/// The single top folder every entry of `names` sits in, when there is one and it is
+/// not the package's own `data/` (strip it).
+fn common_top<'a>(names: impl Iterator<Item = &'a Path>) -> Option<std::ffi::OsString> {
+    let mut top: Option<std::ffi::OsString> = None;
+    let mut nested = false;
+    for n in names {
+        let mut c = n.components();
+        let first = c.next()?.as_os_str().to_owned();
+        nested |= c.next().is_some();
+        match &top {
+            None => top = Some(first),
+            Some(t) if *t == first => {}
+            Some(_) => return None,
+        }
+    }
+    top.filter(|t| nested && t != "data")
+}
+
+/// A layout-1 unpack (`<dir>/<role>/data/...`) moved to layout 2 in place; the stamp is
+/// rewritten last. Best effort: a failure leaves the old layout, which still loads on
+/// Linux and macOS.
+fn flatten_unpacked(dir: &Path, sha256: &str) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    let entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    let subdirs: Vec<&PathBuf> = entries
+        .iter()
+        .filter(|p| p.file_name().is_some_and(|n| n != UNPACKED_STAMP))
+        .collect();
+    let [inner] = subdirs.as_slice() else { return };
+    if !inner.is_dir() || dir.join("data").exists() {
+        return;
+    }
+    let moved = (|| -> std::io::Result<()> {
+        for e in fs::read_dir(inner)?.flatten() {
+            fs::rename(e.path(), dir.join(e.file_name()))?;
+        }
+        fs::remove_dir(inner)
+    })();
+    if moved.is_ok() {
+        let _ = fs::write(dir.join(UNPACKED_STAMP), stamp_text(sha256));
+    }
+}
+
+/// Unpacks `zip` into `dest` (replacing what is there): into a sibling temp directory
+/// first (zip-slip checked), then renamed; the stamp is written last.
+fn unpack_zip(zip: &Path, dest: &Path, sha256: &str) -> std::result::Result<(), String> {
+    let parent = dest.parent().ok_or("no parent directory")?;
+    fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = parent.join(format!(".{name}.part-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    let result = (|| {
+        let f = File::open(zip).map_err(|e| format!("{}: {e}", zip.display()))?;
+        let mut archive = zip::ZipArchive::new(f).map_err(|e| format!("{}: {e}", zip.display()))?;
+        // A `.pt2` holds one top folder named after its role, which `dest` already is.
+        let names: Vec<PathBuf> = (0..archive.len())
+            .map(|i| {
+                let e = archive.by_index_raw(i).map_err(|e| e.to_string())?;
+                e.enclosed_name()
+                    .ok_or_else(|| format!("unsafe entry {:?} in {}", e.name(), zip.display()))
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        let top = common_top(names.iter().map(PathBuf::as_path));
+        for (i, rel) in names.iter().enumerate() {
+            let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+            let rel = match &top {
+                Some(t) => rel.strip_prefix(t).unwrap_or(rel),
+                None => rel.as_path(),
+            };
+            if rel.as_os_str().is_empty() {
+                continue;
+            }
+            let out = tmp.join(rel);
+            if entry.is_dir() {
+                fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+                continue;
+            }
+            if let Some(p) = out.parent() {
+                fs::create_dir_all(p).map_err(|e| e.to_string())?;
+            }
+            let mut w = File::create(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+            std::io::copy(&mut entry, &mut w).map_err(|e| format!("{}: {e}", out.display()))?;
+        }
+        fs::write(tmp.join(UNPACKED_STAMP), stamp_text(sha256)).map_err(|e| e.to_string())?;
+        let _ = fs::remove_dir_all(dest);
+        fs::rename(&tmp, dest).map_err(|e| format!("{}: {e}", dest.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&tmp);
+    }
+    result
 }
 
 fn stamp_of(path: &Path) -> PathBuf {
@@ -586,6 +782,430 @@ impl ModelStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// libtorch (AOTInductor) packages, docs/rust-port/TORCH-BACKEND.md
+
+/// Torch packages live under `<storage>/models/torch/<engine>/<precision>/<target>/`.
+pub const TORCH_DIR: &str = "torch";
+/// Dev/test override: a directory laid out like `<storage>/models/torch/`, searched
+/// before the store (files there are used as they are).
+pub const TORCH_MODELS_DIR_ENV: &str = "MOKURO_TORCH_MODELS_DIR";
+/// The graphs of one package, each the `.pt2` zip AOTInductor writes or that zip
+/// unpacked into a directory of the same name (loaded in place, nothing extracted).
+pub const TORCH_GRAPHS: [&str; 3] = ["vision.pt2", "prefill.pt2", "step.pt2"];
+
+/// `tools/torch_export`'s `torch-models.json` of the release this build uses (the
+/// compiled libtorch packages and their shared weights), compiled in like
+/// [`crate::models_release`]. Refresh it with each `torch-models-*` release.
+const TORCH_MODELS_JSON: &str = include_str!("torch_models.json");
+
+#[derive(Deserialize)]
+struct TorchRelease {
+    release: String,
+    files: Vec<TorchReleaseFile>,
+}
+
+#[derive(Deserialize)]
+struct TorchReleaseFile {
+    engine: String,
+    file: String,
+    url: String,
+    size: u64,
+    sha256: String,
+    #[serde(default)]
+    licence: String,
+    #[serde(default)]
+    sources: Vec<TorchReleaseSource>,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    precision: Option<String>,
+    id: String,
+    path: String,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    unpack_to: Option<String>,
+    #[serde(default)]
+    requires: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TorchReleaseSource {
+    repo: String,
+    revision: String,
+}
+
+fn torch_release() -> Option<TorchRelease> {
+    serde_json::from_str(TORCH_MODELS_JSON).ok()
+}
+
+/// The torch package release this build fetches from (`torch-models-v1`), for the
+/// sidecars' `ocr_engine.weights` provenance.
+pub fn torch_release_name() -> String {
+    torch_release().map_or_else(|| "unknown".into(), |r| r.release)
+}
+
+/// A mirror of the torch package release, tried before GitHub: a base URL, or a
+/// directory holding the release assets under their flat names (air-gapped hosts,
+/// a local copy of the release, tests).
+pub const TORCH_MIRROR_ENV: &str = "MOKURO_TORCH_MODELS_MIRROR";
+
+/// The compiled packages as manifest entries (id = store path). None when the
+/// compiled-in release does not load (a broken build: a test keeps it loading), logged.
+fn torch_release_files() -> Vec<ModelFile> {
+    torch_release_files_from(TORCH_MODELS_JSON).unwrap_or_else(|e| {
+        tracing::error!("the compiled-in torch package release does not load: {e}");
+        Vec::new()
+    })
+}
+
+/// [`torch_release_files`] of one `torch-models.json`. Each `requires` entry names
+/// another file of the release by id (as `tools/torch_export` writes it) or by its
+/// flat release file name; one that names neither fails the load, so a package
+/// never silently loses the weights it binds.
+fn torch_release_files_from(json: &str) -> std::result::Result<Vec<ModelFile>, String> {
+    let rel: TorchRelease =
+        serde_json::from_str(json).map_err(|e| format!("torch-models.json: {e}"))?;
+    let mirror = std::env::var(TORCH_MIRROR_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| {
+            let v = v.trim().trim_end_matches('/').to_string();
+            if v.contains("://") {
+                v
+            } else {
+                format!("file://{}", expand_home(Path::new(&v)).display())
+            }
+        });
+    let ids: std::collections::HashSet<&str> = rel.files.iter().map(|f| f.id.as_str()).collect();
+    let by_file: std::collections::HashMap<&str, &str> = rel
+        .files
+        .iter()
+        .map(|f| (f.file.as_str(), f.id.as_str()))
+        .collect();
+    rel.files
+        .iter()
+        .map(|f| {
+            let requires = f
+                .requires
+                .iter()
+                .map(|r| {
+                    if ids.contains(r.as_str()) {
+                        Ok(r.clone())
+                    } else if let Some(id) = by_file.get(r.as_str()) {
+                        Ok(id.to_string())
+                    } else {
+                        Err(format!(
+                            "{} requires {r}, which is not a file of the release",
+                            f.id
+                        ))
+                    }
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let src = f.sources.first();
+            Ok(ModelFile {
+                engine: f.engine.clone(),
+                role: f.role.clone(),
+                precision: f.precision.clone(),
+                part_of: None,
+                id: f.id.clone(),
+                path: f.path.clone(),
+                url: f.url.clone(),
+                mirrors: mirror.iter().map(|m| format!("{m}/{}", f.file)).collect(),
+                sha256: f.sha256.clone(),
+                size: f.size,
+                license: if f.licence.is_empty() {
+                    "Apache-2.0".into()
+                } else {
+                    f.licence.clone()
+                },
+                source: Source {
+                    repo: src.map(|s| s.repo.clone()).unwrap_or_default(),
+                    revision: src.map(|s| s.revision.clone()).unwrap_or_default(),
+                    path: format!("{}/{}", rel.release, f.file),
+                },
+                target: f.target.clone(),
+                unpack_to: f.unpack_to.clone(),
+                requires,
+            })
+        })
+        .collect()
+}
+
+/// `torch/<engine>/<precision>/<target>`: a package directory relative to the store.
+pub fn torch_package_rel(engine: &str, precision: &str, target: &str) -> String {
+    format!("{TORCH_DIR}/{engine}/{precision}/{target}")
+}
+
+/// The manifest id (and store path) of one file of a package:
+/// `torch/<engine>/<precision>/<target>/<file>`. The shared weights of GPU packages are
+/// `torch/<engine>/<precision>/weights-<group>.safetensors`.
+pub fn torch_manifest_id(engine: &str, precision: &str, target: &str, file: &str) -> String {
+    format!("{}/{file}", torch_package_rel(engine, precision, target))
+}
+
+/// CUDA architectures `tools/torch_export` compiles for (SASS + PTX each), newest first.
+pub const TORCH_CUDA_ARCHS: [u32; 6] = [120, 90, 89, 86, 80, 75];
+
+/// The compiled-package targets that run on a device, best first. Names are
+/// `tools/torch_export`'s `<os>-<backend>-<arch>` (`os` = `std::env::consts::OS`):
+///
+/// * CUDA (`kind` `cuda`, `arch` `sm_89`): `<os>-cuda-sm_89`, then every older
+///   architecture's package (their PTX is JIT-compiled by the driver for newer cards).
+/// * ROCm (`rocm`, `gfx1201`): `linux-rocm-gfx1201` only (gfx code is not portable).
+/// * x86-64 CPU: fp32 `<os>-cpu-x86_64-v3` (AVX2+FMA hosts); bf16
+///   `<os>-cpu-x86_64-v4bf16` (AVX-512 with AVX512_BF16).
+/// * arm64 CPU: `<os>-cpu-arm64`.
+pub fn torch_targets(kind: &str, arch: &str, isa: &[String], precision: &str) -> Vec<String> {
+    let os = std::env::consts::OS;
+    let has = |f: &str| isa.iter().any(|i| i == f);
+    match kind {
+        "cuda" => {
+            let Some(sm) = arch.strip_prefix("sm_").and_then(|n| n.parse::<u32>().ok()) else {
+                return Vec::new();
+            };
+            TORCH_CUDA_ARCHS
+                .iter()
+                .filter(|&&a| a <= sm)
+                .map(|a| format!("{os}-cuda-sm_{a}"))
+                .collect()
+        }
+        "rocm" if !arch.is_empty() => vec![format!("{os}-rocm-{arch}")],
+        "cpu" => match arch {
+            "x86_64" if precision == "bf16" => {
+                let v4 = ["avx512f", "avx512bw", "avx512vl", "avx512dq"];
+                if v4.iter().all(|f| has(f)) && has("avx512_bf16") {
+                    vec![format!("{os}-cpu-x86_64-v4bf16")]
+                } else {
+                    Vec::new()
+                }
+            }
+            "x86_64" if has("avx2") && has("fma") => vec![format!("{os}-cpu-x86_64-v3")],
+            "aarch64" => vec![format!("{os}-cpu-arm64")],
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// A package directory that has every graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TorchPackage {
+    pub dir: PathBuf,
+    pub target: String,
+}
+
+fn torch_override_dir() -> Option<PathBuf> {
+    std::env::var_os(TORCH_MODELS_DIR_ENV)
+        .filter(|v| !v.is_empty())
+        .map(|v| expand_home(Path::new(&v)))
+}
+
+/// A graph of a package directory: `<role>.pt2` (zip or unpacked directory), or the
+/// directory the installer unpacked it to (`<role>/`).
+pub fn torch_graph_path(dir: &Path, graph: &str) -> Option<PathBuf> {
+    let unpacked = dir.join(graph.trim_end_matches(".pt2"));
+    let has_data = |d: &Path| {
+        d.join("data").is_dir()
+            || fs::read_dir(d).is_ok_and(|rd| rd.flatten().any(|e| e.path().join("data").is_dir()))
+    };
+    if unpacked.join(UNPACKED_STAMP).is_file() || (unpacked.is_dir() && has_data(&unpacked)) {
+        return Some(unpacked);
+    }
+    let p = dir.join(graph);
+    p.exists().then_some(p)
+}
+
+fn has_graphs(dir: &Path) -> bool {
+    TORCH_GRAPHS
+        .iter()
+        .all(|g| torch_graph_path(dir, g).is_some())
+}
+
+impl ModelStore {
+    /// The package directory of `target` in the store (whether or not it exists).
+    pub fn torch_package_dir(&self, engine: &str, precision: &str, target: &str) -> PathBuf {
+        self.opts
+            .root
+            .join(torch_package_rel(engine, precision, target))
+    }
+
+    /// File names of the shared weights the release's package of `target` binds (its
+    /// graphs' `requires`; none for CPU packages and packages not in the release).
+    fn torch_bound_weights(&self, engine: &str, precision: &str, target: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .torch_manifest_graphs(engine, precision, target)
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|g| g.requires.iter())
+            .filter_map(|r| self.manifest.get(r))
+            .filter_map(|w| w.path.rsplit('/').next().map(str::to_string))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Whether `dir` holds a whole package: its three graphs, and the shared weights
+    /// the release binds to it beside it (`<engine>/<precision>/weights-*`, where the
+    /// loader looks).
+    fn torch_package_complete(
+        &self,
+        dir: &Path,
+        engine: &str,
+        precision: &str,
+        target: &str,
+    ) -> bool {
+        has_graphs(dir)
+            && dir.parent().is_some_and(|p| {
+                self.torch_bound_weights(engine, precision, target)
+                    .iter()
+                    .all(|w| p.join(w).is_file())
+            })
+    }
+
+    /// The first of `targets` whose package is wholly on disk, the weights its graphs
+    /// bind included (the override directory first, then the store). No hashing, no
+    /// downloads.
+    pub fn locate_torch_package(
+        &self,
+        engine: &str,
+        precision: &str,
+        targets: &[String],
+    ) -> Option<TorchPackage> {
+        let over = torch_override_dir();
+        for t in targets {
+            let rel = format!("{engine}/{precision}/{t}");
+            if let Some(o) = &over
+                && self.torch_package_complete(&o.join(&rel), engine, precision, t)
+            {
+                return Some(TorchPackage {
+                    dir: o.join(&rel),
+                    target: t.clone(),
+                });
+            }
+            let dir = self.torch_package_dir(engine, precision, t);
+            if self.torch_package_complete(&dir, engine, precision, t) {
+                return Some(TorchPackage {
+                    dir,
+                    target: t.clone(),
+                });
+            }
+        }
+        None
+    }
+
+    /// The manifest entries of one package's graphs, when the manifest has all three.
+    fn torch_manifest_graphs(
+        &self,
+        engine: &str,
+        precision: &str,
+        target: &str,
+    ) -> Option<Vec<&ModelFile>> {
+        TORCH_GRAPHS
+            .iter()
+            .map(|g| {
+                self.manifest
+                    .get(&torch_manifest_id(engine, precision, target, g))
+            })
+            .collect()
+    }
+
+    /// Whether a package for one of `targets` is on disk, or listed in the manifest
+    /// and downloads are allowed.
+    pub fn torch_package_obtainable(
+        &self,
+        engine: &str,
+        precision: &str,
+        targets: &[String],
+    ) -> bool {
+        self.locate_torch_package(engine, precision, targets)
+            .is_some()
+            || (self.can_download()
+                && targets
+                    .iter()
+                    .any(|t| self.torch_manifest_graphs(engine, precision, t).is_some()))
+    }
+
+    /// Whether the package for one of `targets` is fully here, its shared weights
+    /// included (no download needed): `doctor`.
+    pub fn torch_package_present(
+        &self,
+        engine: &str,
+        precision: &str,
+        targets: &[String],
+    ) -> Option<TorchPackage> {
+        for t in targets {
+            if let Some(graphs) = self.torch_manifest_graphs(engine, precision, t) {
+                let all_here = graphs.iter().all(|g| {
+                    self.locate(&g.id).is_some()
+                        && g.requires.iter().all(|r| self.locate(r).is_some())
+                });
+                if all_here {
+                    return Some(TorchPackage {
+                        dir: self.torch_package_dir(engine, precision, t),
+                        target: t.clone(),
+                    });
+                }
+            }
+        }
+        self.locate_torch_package(engine, precision, targets)
+    }
+
+    /// The package for the first of `targets` in the override directory, the manifest
+    /// (fetched, verified and unpacked as needed, with exactly the shared weights its
+    /// graphs bind: none for CPU packages) or the store.
+    pub fn ensure_torch_package(
+        &self,
+        engine: &str,
+        precision: &str,
+        targets: &[String],
+    ) -> Result<TorchPackage> {
+        if let Some(o) = torch_override_dir() {
+            for t in targets {
+                let dir = o.join(format!("{engine}/{precision}/{t}"));
+                if self.torch_package_complete(&dir, engine, precision, t) {
+                    return Ok(TorchPackage {
+                        dir,
+                        target: t.clone(),
+                    });
+                }
+            }
+        }
+        for t in targets {
+            let Some(graphs) = self.torch_manifest_graphs(engine, precision, t) else {
+                continue;
+            };
+            let mut ids: Vec<&str> = Vec::new();
+            for g in &graphs {
+                ids.push(&g.id);
+                ids.extend(g.requires.iter().map(String::as_str));
+            }
+            ids.dedup();
+            for id in ids {
+                self.ensure(id)?;
+            }
+            return Ok(TorchPackage {
+                dir: self.torch_package_dir(engine, precision, t),
+                target: t.clone(),
+            });
+        }
+        if let Some(p) = self.locate_torch_package(engine, precision, targets) {
+            return Ok(p);
+        }
+        Err(Error::Model {
+            id: format!("{TORCH_DIR}/{engine}/{precision}"),
+            msg: format!(
+                "no compiled {engine} {precision} package for this device (looked for {}) in {} or the {} release",
+                targets.join(", "),
+                self.opts.root.join(TORCH_DIR).display(),
+                torch_release_name()
+            ),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,8 +1231,333 @@ mod tests {
                     revision: "r".into(),
                     path: "dir/one.bin".into(),
                 },
+                target: None,
+                unpack_to: None,
+                requires: Vec::new(),
             }],
         }
+    }
+
+    #[test]
+    fn packages_unpack_once_and_keep_no_zip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("vision.pt2");
+        {
+            let f = File::create(&src).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let o = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            z.add_directory("vision/", o).unwrap();
+            z.start_file("vision/data/aotinductor/model/m.so", o)
+                .unwrap();
+            z.write_all(b"so").unwrap();
+            z.finish().unwrap();
+        }
+        let bytes = fs::read(&src).unwrap();
+        let mut m = tiny_manifest(&src);
+        m.files[0].id = "torch/e/fp32/linux-cpu-x86_64-v3/vision.pt2".into();
+        m.files[0].path = m.files[0].id.clone();
+        m.files[0].unpack_to = Some("torch/e/fp32/linux-cpu-x86_64-v3/vision/".into());
+        m.files[0].mirrors.clear();
+        assert_eq!(m.files[0].size, bytes.len() as u64);
+        let store = ModelStore::new(
+            StoreOptions {
+                root: tmp.path().join("models"),
+                override_dir: None,
+                download: true,
+            },
+            m,
+        );
+        let id = "torch/e/fp32/linux-cpu-x86_64-v3/vision.pt2";
+        assert!(store.locate(id).is_none());
+        let r = store.ensure(id).unwrap();
+        let dir = tmp
+            .path()
+            .join("models/torch/e/fp32/linux-cpu-x86_64-v3/vision");
+        assert_eq!(r.path, dir);
+        // the archive's top `vision/` is stripped: `data/` sits right in `unpack_to`
+        assert!(dir.join("data/aotinductor/model/m.so").is_file());
+        assert!(!dir.join("vision").exists());
+        assert!(
+            !store.store_path(&store.manifest().files[0]).exists(),
+            "zip removed"
+        );
+        assert_eq!(store.locate(id), Some(dir.clone()));
+        let pkg = dir.parent().unwrap();
+        assert_eq!(torch_graph_path(pkg, "vision.pt2"), Some(dir.clone()));
+        // the source is gone: a second ensure must not need it
+        fs::remove_file(&src).unwrap();
+        assert!(store.ensure(id).is_ok());
+
+        // An unpack of the old layout (`vision/vision/data`, stamp without a layout line)
+        // still counts, and is moved to the new layout in place.
+        let sha = store.manifest().files[0].sha256.clone();
+        fs::remove_dir_all(&dir).unwrap();
+        fs::create_dir_all(dir.join("vision/data/aotinductor/model")).unwrap();
+        fs::write(dir.join("vision/data/aotinductor/model/m.so"), b"so").unwrap();
+        fs::write(dir.join(UNPACKED_STAMP), &sha).unwrap();
+        assert_eq!(store.locate(id), Some(dir.clone()));
+        assert!(dir.join("data/aotinductor/model/m.so").is_file());
+        assert!(!dir.join("vision").exists());
+        assert_eq!(
+            fs::read_to_string(dir.join(UNPACKED_STAMP)).unwrap(),
+            stamp_text(&sha)
+        );
+    }
+
+    #[test]
+    fn common_top_strips_only_a_single_role_folder() {
+        let p = |v: &[&str]| v.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let top = |v: &[PathBuf]| common_top(v.iter().map(PathBuf::as_path));
+        assert_eq!(
+            top(&p(&["vision/data/a", "vision/data/b"])),
+            Some("vision".into())
+        );
+        assert_eq!(top(&p(&["data/a", "data/b"])), None);
+        assert_eq!(top(&p(&["vision/a", "step/b"])), None);
+        assert_eq!(top(&p(&["a.so"])), None);
+    }
+
+    #[test]
+    fn the_torch_release_is_compiled_in() {
+        let m = Manifest::builtin();
+        let graphs: Vec<&ModelFile> = m.files.iter().filter(|f| f.unpack_to.is_some()).collect();
+        assert!(!graphs.is_empty());
+        for g in &graphs {
+            assert!(g.id.starts_with("torch/") && g.id == g.path, "{}", g.id);
+            assert!(g.target.is_some(), "{}", g.id);
+            for r in &g.requires {
+                assert!(m.get(r).is_some(), "{} requires {r}", g.id);
+            }
+            if g.target.as_deref().is_some_and(|t| t.contains("-cpu-")) {
+                assert!(
+                    g.requires.is_empty(),
+                    "CPU packages carry their own weights"
+                );
+            }
+        }
+        assert!(torch_release_name().starts_with("torch-models"));
+    }
+
+    #[test]
+    fn every_gpu_package_resolves_its_weights() {
+        let files = torch_release_files_from(TORCH_MODELS_JSON).expect("compiled-in release loads");
+        let m = Manifest::builtin();
+        // GPU packages (Linux and Windows) are weightless: they bind the shared weights
+        // files. CPU packages carry their weights.
+        let gpu: Vec<&ModelFile> = files
+            .iter()
+            .filter(|f| {
+                f.unpack_to.is_some()
+                    && f.target
+                        .as_deref()
+                        .is_some_and(|t| t.contains("-cuda-") || t.contains("-rocm-"))
+            })
+            .collect();
+        assert!(!gpu.is_empty());
+        assert!(
+            gpu.iter().any(|g| g
+                .target
+                .as_deref()
+                .is_some_and(|t| t.starts_with("windows-"))),
+            "Windows GPU packages are in the release"
+        );
+        for g in gpu {
+            assert!(!g.requires.is_empty(), "{} binds no weights", g.id);
+            for r in &g.requires {
+                let w = m.get(r).unwrap_or_else(|| panic!("{} requires {r}", g.id));
+                assert!(w.path.ends_with(".safetensors"), "{r}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_release_requires_entry_resolves_by_id_or_file_name_or_fails() {
+        let rel = |requires: &str| {
+            format!(
+                r#"{{"release":"torch-models-test","files":[
+                {{"engine":"hayai-nova","file":"w.safetensors","id":"torch/hayai-nova/bf16/weights-vision.safetensors",
+                  "path":"torch/hayai-nova/bf16/weights-vision.safetensors","url":"u","sha256":"00","size":1}},
+                {{"engine":"hayai-nova","file":"g.pt2","id":"torch/hayai-nova/bf16/linux-cuda-sm_80/vision.pt2",
+                  "path":"torch/hayai-nova/bf16/linux-cuda-sm_80/vision.pt2","url":"u","sha256":"00","size":1,
+                  "target":"linux-cuda-sm_80","unpack_to":"vision.pt2","requires":["{requires}"]}}]}}"#
+            )
+        };
+        let want = "torch/hayai-nova/bf16/weights-vision.safetensors";
+        for by in [want, "w.safetensors"] {
+            let files = torch_release_files_from(&rel(by)).unwrap();
+            assert_eq!(files[1].requires, vec![want.to_string()], "by {by}");
+        }
+        let err = torch_release_files_from(&rel("torch/hayai-nova/bf16/weights-nope.safetensors"))
+            .unwrap_err();
+        assert!(err.contains("weights-nope"), "{err}");
+    }
+
+    #[test]
+    fn torch_targets_per_device() {
+        let os = std::env::consts::OS;
+        let isa = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let t = |v: &[&str]| v.iter().map(|s| format!("{os}-{s}")).collect::<Vec<_>>();
+        assert_eq!(
+            torch_targets("cuda", "sm_89", &[], "bf16"),
+            t(&["cuda-sm_89", "cuda-sm_86", "cuda-sm_80", "cuda-sm_75"])
+        );
+        assert_eq!(
+            torch_targets("cuda", "sm_75", &[], "fp16"),
+            t(&["cuda-sm_75"])
+        );
+        assert!(torch_targets("cuda", "sm_61", &[], "fp32").is_empty());
+        assert_eq!(
+            torch_targets("rocm", "gfx1201", &[], "fp32"),
+            t(&["rocm-gfx1201"])
+        );
+        assert!(torch_targets("rocm", "", &[], "fp32").is_empty());
+        let v3 = isa(&["avx2", "fma"]);
+        let zen4 = isa(&[
+            "avx2",
+            "fma",
+            "avx512f",
+            "avx512bw",
+            "avx512vl",
+            "avx512dq",
+            "avx512_bf16",
+        ]);
+        assert_eq!(
+            torch_targets("cpu", "x86_64", &v3, "fp32"),
+            t(&["cpu-x86_64-v3"])
+        );
+        assert!(torch_targets("cpu", "x86_64", &v3, "bf16").is_empty());
+        assert_eq!(
+            torch_targets("cpu", "x86_64", &zen4, "bf16"),
+            t(&["cpu-x86_64-v4bf16"])
+        );
+        assert_eq!(
+            torch_targets("cpu", "x86_64", &zen4, "fp32"),
+            t(&["cpu-x86_64-v3"])
+        );
+        assert!(torch_targets("cpu", "x86_64", &isa(&["sse4.2"]), "fp32").is_empty());
+        assert_eq!(
+            torch_targets("cpu", "aarch64", &[], "fp32"),
+            t(&["cpu-arm64"])
+        );
+    }
+
+    #[test]
+    fn torch_packages_on_disk_and_in_the_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("g.pt2");
+        fs::write(&src, b"graph").unwrap();
+        let sha = hex::encode(Sha256::digest(b"graph"));
+        let mut manifest = Manifest { files: Vec::new() };
+        for g in TORCH_GRAPHS {
+            let id = torch_manifest_id("hayai-nova", "bf16", "rocm-gfx1201", g);
+            manifest.files.push(ModelFile {
+                engine: "hayai-nova".into(),
+                role: "graph".into(),
+                precision: Some("bf16".into()),
+                part_of: None,
+                path: id.clone(),
+                id,
+                url: format!("file://{}", src.display()),
+                mirrors: Vec::new(),
+                sha256: sha.clone(),
+                size: 5,
+                license: "Apache-2.0".into(),
+                source: Source {
+                    repo: "x/y".into(),
+                    revision: "r".into(),
+                    path: g.into(),
+                },
+                target: Some("rocm-gfx1201".into()),
+                unpack_to: None,
+                requires: vec!["torch/hayai-nova/bf16/weights-decoder.safetensors".into()],
+            });
+        }
+        let weights = "torch/hayai-nova/bf16/weights-decoder.safetensors".to_string();
+        let mut w = manifest.files[0].clone();
+        w.id = weights.clone();
+        w.path = weights.clone();
+        w.requires = Vec::new();
+        manifest.files.push(w);
+        // a weights file nothing requires is never fetched
+        let mut unused = manifest.files[3].clone();
+        unused.id = "torch/hayai-nova/bf16/weights-vision.safetensors".into();
+        unused.path = unused.id.clone();
+        manifest.files.push(unused);
+        let opts = |download| StoreOptions {
+            root: tmp.path().join("models"),
+            override_dir: None,
+            download,
+        };
+        let targets = vec!["rocm-gfx1100".to_string(), "rocm-gfx1201".to_string()];
+        let offline = ModelStore::new(opts(false), manifest.clone());
+        assert!(
+            offline
+                .locate_torch_package("hayai-nova", "bf16", &targets)
+                .is_none()
+        );
+        assert!(!offline.torch_package_obtainable("hayai-nova", "bf16", &targets));
+        assert!(
+            offline
+                .ensure_torch_package("hayai-nova", "bf16", &targets)
+                .is_err()
+        );
+        let online = ModelStore::new(opts(true), manifest);
+        assert!(online.torch_package_obtainable("hayai-nova", "bf16", &targets));
+        assert!(!online.torch_package_obtainable("hayai-nova", "fp16", &targets));
+        let p = online
+            .ensure_torch_package("hayai-nova", "bf16", &targets)
+            .unwrap();
+        assert_eq!(p.target, "rocm-gfx1201");
+        assert!(
+            tmp.path().join("models").join(&weights).is_file(),
+            "shared weights fetched"
+        );
+        assert!(
+            !tmp.path()
+                .join("models/torch/hayai-nova/bf16/weights-vision.safetensors")
+                .exists(),
+            "weights no graph requires are not fetched"
+        );
+        assert_eq!(
+            p.dir,
+            tmp.path().join("models/torch/hayai-nova/bf16/rocm-gfx1201")
+        );
+        // now on disk: found without the manifest, by an offline store too
+        let found = offline
+            .locate_torch_package("hayai-nova", "bf16", &targets)
+            .unwrap();
+        assert_eq!(found, p);
+        // graphs without the weights they bind are not a package
+        let w_path = tmp.path().join("models").join(&weights);
+        let w_bytes = fs::read(&w_path).unwrap();
+        fs::remove_file(&w_path).unwrap();
+        assert!(
+            offline
+                .locate_torch_package("hayai-nova", "bf16", &targets)
+                .is_none()
+        );
+        assert!(
+            offline
+                .torch_package_present("hayai-nova", "bf16", &targets)
+                .is_none()
+        );
+        fs::write(&w_path, w_bytes).unwrap();
+        // an unpacked graph directory counts as a graph
+        let dir = tmp
+            .path()
+            .join("models/torch/paddle-manga/fp32/cpu-x86_64-v3");
+        for g in TORCH_GRAPHS {
+            fs::create_dir_all(dir.join(g)).unwrap();
+        }
+        let cpu = vec!["cpu-x86_64-v3".to_string()];
+        assert_eq!(
+            offline
+                .locate_torch_package("paddle-manga", "fp32", &cpu)
+                .unwrap()
+                .dir,
+            dir
+        );
     }
 
     #[test]
@@ -720,9 +1665,15 @@ mod tests {
                     .1
             )));
         }
-        let hayai = m.engine_files("hayai-nova");
+        let models_v1 = |e: &str| -> Vec<&ModelFile> {
+            m.engine_files(e)
+                .into_iter()
+                .filter(|f| !f.id.starts_with("torch/"))
+                .collect()
+        };
+        let hayai = models_v1("hayai-nova");
         assert_eq!(hayai.len(), 8);
-        let paddle = m.engine_files("paddle-manga");
+        let paddle = models_v1("paddle-manga");
         assert_eq!(paddle.len(), 12);
         let data = m.get("paddle-manga/decoder-data-fp16").unwrap();
         assert_eq!(data.part_of.as_deref(), Some("paddle-manga/decoder-fp16"));

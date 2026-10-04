@@ -511,6 +511,38 @@ fn a_replaced_archive_cancels_its_session() {
     );
 }
 
+fn bench_op(ops: &[Op]) -> Option<bunko_proto::BenchOp> {
+    ops.iter().find_map(|o| match o {
+        Op::Bench(b) => Some(b.clone()),
+        _ => None,
+    })
+}
+
+fn detail(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    v.as_object().unwrap().clone()
+}
+
+/// Enqueue a benchmark of `key` on `machine` and run what it caused (the sample is
+/// packed inline): the op the processor got.
+fn bench_on(
+    h: &mut H,
+    p: &mut Proc,
+    key: &str,
+    spec: Option<serde_json::Value>,
+) -> bunko_proto::BenchOp {
+    let req = bunko_server::ocr::sched::BenchRequest {
+        key: key.into(),
+        processor: p.name.clone(),
+        spec,
+        ..Default::default()
+    };
+    let v = h.s.bench_enqueue(req).expect("bench queued");
+    assert_eq!(v["state"], "running");
+    assert_eq!(v["waiting_for_queue"], false);
+    h.at(0.0);
+    bench_op(&p.drain()).expect("the bench op was sent")
+}
+
 #[test]
 fn bench_preempts_and_holds_its_machine() {
     let mut h = harness(vec![primary()]);
@@ -527,44 +559,45 @@ fn bench_preempts_and_holds_its_machine() {
     };
     let v = h.s.bench_enqueue(req).expect("bench queued");
     assert_eq!(v["state"], "running");
+    h.at(0.0);
     let ops = p.drain();
     assert!(
         ops.iter()
             .any(|o| matches!(o, Op::Cancel { sid: Some(s), .. } if *s == sid)),
         "the machine's OCR was pre-empted: {ops:?}"
     );
-    assert!(ops.iter().any(|o| matches!(o, Op::Bench(_))), "{ops:?}");
+    let op = bench_op(&ops).expect("bench sent");
+    assert!(
+        op.sample.ends_with(&format!("/bench/{}/sample", op.bid)),
+        "{}",
+        op.sample
+    );
+    assert_eq!(op.pages, 4, "two 2-page volumes: every page");
+    let sample = h
+        .storage()
+        .join(".processing")
+        .join(format!("{}.cbz", op.bid));
+    assert!(sample.is_file(), "the sample waits for the processor");
     assert!(h.s.claims.is_empty());
     assert!(h.s.failures.is_empty());
     assert_eq!(h.s.queue_hold(), Some("benchmarking"));
-    let bid = ops
-        .iter()
-        .find_map(|o| {
-            if let Op::Bench(b) = o {
-                Some(b.bid.clone())
-            } else {
-                None
-            }
-        })
-        .unwrap();
-    let mut detail = std::collections::BTreeMap::new();
-    detail.insert(
-        "baseline".to_string(),
-        serde_json::json!({"pages_per_second": 4.0}),
-    );
-    detail.insert(
-        "best".to_string(),
-        serde_json::json!({"pages_per_second": 5.0, "same_as_spec": true}),
-    );
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["sample"], serde_json::json!({"pages": 4, "volumes": 2}));
+    assert_eq!(got["host"]["gpu"], "Test GPU");
+    assert_eq!(got["preempted"][0]["volume"], "V1");
     h.event(
         &p,
         Event::BenchDone {
-            bid: bid.clone(),
-            detail,
+            bid: op.bid.clone(),
+            detail: detail(serde_json::json!({
+                "baseline": {"pages_per_second": 4.0},
+                "best": {"trial": 1, "pages_per_second": 5.0, "stage_workers": {}, "queue_capacity": {}, "stage_device": {}},
+            })),
         },
     );
     let got = h.s.bench_get("g-1", "box");
     assert_eq!(got["state"], "done");
+    assert!(!sample.exists(), "the sample is removed with the run");
     assert!(
         h.s.queue_hold().is_none(),
         "the hold is released when the line empties"
@@ -573,12 +606,239 @@ fn bench_preempts_and_holds_its_machine() {
         !opened(&p.drain()).is_empty(),
         "OCR resumes on that machine"
     );
-    // The machine's profile now carries its bench.
+    // The machine's profile now carries its bench (never `.ocr-bench.json`).
     let prof = bunko_server::ocr::profiles::Profiles::new(&h.storage());
     let row = prof
         .row("box", "g-1", Some(&primary().output_affecting()))
         .unwrap();
     assert_eq!(row.bench_pages_per_second(), Some(5.0));
+    assert!(!h.storage().join(".ocr-bench.json").exists());
+}
+
+#[test]
+fn bench_done_is_completed_and_stored_as_0_5_2_did() {
+    let mut row = primary();
+    row.precision = "auto-balanced".into();
+    row.pools.stage_workers.insert("detect".into(), 3);
+    row.pools.stage_workers.insert("post".into(), 2);
+    row.pools
+        .stage_device
+        .insert("engine".into(), "gpu:0".into());
+    let mut h = harness(vec![row.clone()]);
+    h.add("A/V1.cbz", 6);
+    h.add("B/V1.cbz", 6);
+    h.at(0.0);
+    let mut p = h.connect_gpu("box", &["fp32", "fp16", "bf16"]);
+    p.drain();
+    let op = bench_on(&mut h, &mut p, "g-1", None);
+    // The measured row's own pools go out; the processor strips the widths.
+    assert_eq!(op.spec.pools.stage_workers.get("detect"), Some(&3));
+    assert_eq!(op.spec.precision, "auto-balanced");
+    assert_eq!(op.spec.precision_pick, None);
+    let bid = op.bid.clone();
+    h.event(
+        &p,
+        Event::BenchReady {
+            bid: bid.clone(),
+            detail: detail(serde_json::json!({
+                "startup_seconds": 9.952, "model_load_seconds": 7.1, "min_window_seconds": 20.0,
+                "pages": 12, "tunable": true, "max_trials": 10,
+                "stage_keys": ["detect", "engine", "post"],
+                "stage_device": {"detect": "cpu", "engine": "gpu:0"},
+            })),
+        },
+    );
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["progress"]["max_trials"], 10);
+    assert_eq!(got["progress"]["trial"], 0);
+    assert_eq!(got["host"]["devices"]["engine"], "gpu:0");
+    assert_eq!(got["startup_seconds"], 9.952);
+    h.event(
+        &p,
+        Event::BenchProgress {
+            bid: bid.clone(),
+            detail: detail(serde_json::json!({"trial": 1, "pass_index": 2, "pages_done": 7, "pages": 24,
+                "stage_workers": {"detect": 3}, "pages_per_second": 4.9, "window_seconds": 3.1, "pages_measured": 6})),
+        },
+    );
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["progress"]["pass_index"], 2);
+    assert_eq!(got["progress"]["max_trials"], 10);
+    for (n, fmt, pps, accepted) in [(1, "bf16", 5.1157, true), (2, "fp32", 1.5431, false)] {
+        h.event(
+            &p,
+            Event::BenchTrial {
+                bid: bid.clone(),
+                detail: detail(serde_json::json!({
+                    "n": n, "note": format!("precision {fmt}"),
+                    "stage_workers": {"detect": 3, "engine": 1, "post": 1},
+                    "queue_capacity": {"detect": 4, "engine": 1, "post": 1},
+                    "stage_device": {"detect": "cpu", "engine": "gpu:0"},
+                    "seconds": 35.155, "pages_per_second": pps, "window_seconds": 27.758,
+                    "pages_measured": 143, "passes": 5, "short_window": false,
+                    "first_emission_at": 17.688, "last_emission_at": 45.445,
+                    "accepted": accepted, "verdict": null, "bottleneck": "engine",
+                    "stages": [], "queues": [], "precision": fmt,
+                    "gpu_busy_pct": 80.8, "cpu_busy_pct": 54.5,
+                })),
+            },
+        );
+    }
+    h.event(
+        &p,
+        Event::BenchDone {
+            bid: bid.clone(),
+            detail: detail(serde_json::json!({
+                "baseline": {"pages_per_second": 5.1157, "seconds_per_page": 0.1955, "window_seconds": 27.758},
+                "best": {"trial": 1, "stage_workers": {}, "queue_capacity": {}, "stage_device": {},
+                         "pages_per_second": 5.1157, "seconds_per_page": 0.1955, "speedup": 1.0,
+                         "window_seconds": 27.758, "precision": "bf16"},
+                "precision": "bf16", "precision_mode": "auto-balanced",
+                "precision_trials": [{"precision": "bf16", "pages_per_second": 5.1157, "chosen": true},
+                                     {"precision": "fp32", "pages_per_second": 1.5431, "chosen": false}],
+                "precision_why": "benchmark: bf16 5.12 p/s beat fp32 1.54 p/s",
+                "peak_rss_mb": 4809, "peak_vram_mb": 994,
+            })),
+        },
+    );
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["state"], "done", "{got:#}");
+    let best = &got["best"];
+    // The pins the search left alone, as they ran: detect ran at 3, post did not.
+    assert_eq!(
+        best["stage_workers"],
+        serde_json::json!({"detect": 3, "post": "auto"})
+    );
+    assert_eq!(best["queue_capacity"], serde_json::json!({}));
+    assert_eq!(best["stage_device"], serde_json::json!({"engine": "gpu:0"}));
+    assert_eq!(best["same_as_spec"], false);
+    assert!(
+        best.get("precision").is_none(),
+        "a precision is never a pool"
+    );
+    assert_eq!(
+        best["gpu_busy_pct"], 80.8,
+        "the winning trial's busy numbers"
+    );
+    assert_eq!(got["precision"], "bf16");
+    assert_eq!(got["precision_mode"], "auto-balanced");
+    assert_eq!(got["precision_trials"].as_array().unwrap().len(), 2);
+    assert_eq!(got["peak_vram_mb"], 994);
+    assert_eq!(got["progress"], serde_json::Value::Null);
+    assert_eq!(got["estimates"]["volume_200_pages_seconds"], 39);
+    assert_eq!(got["estimates"]["remaining_pages"], 12);
+    assert_eq!(got["estimates"]["remaining_seconds"], 2);
+    // The machine's profile: the 0.5.2 bench summary.
+    let prof = bunko_server::ocr::profiles::Profiles::new(&h.storage());
+    let stored = prof
+        .row("box", "g-1", Some(&row.output_affecting()))
+        .unwrap();
+    let bench = stored.bench.unwrap();
+    let keys: Vec<&str> = bench.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        [
+            "pages_per_second",
+            "window_seconds",
+            "gpu_busy_pct",
+            "cpu_busy_pct",
+            "startup_seconds",
+            "host",
+            "at",
+            "precision",
+            "precision_mode",
+            "precision_trials",
+            "precision_why"
+        ]
+    );
+    assert_eq!(bench["host"]["devices"]["engine"], "gpu:0");
+    assert_eq!(bench["at"], got["finished_at"]);
+    // ... and the machine now runs the row at its pick.
+    let spec = h.s.row_spec("box", &row);
+    assert_eq!(spec.precision_pick.as_deref(), Some("bf16"));
+    assert_eq!(
+        spec.precision_why,
+        "benchmark: bf16 5.12 p/s beat fp32 1.54 p/s"
+    );
+    // Where the precision stands on that machine, for every mode.
+    let on = h.s.precision_on(&row);
+    assert_eq!(on["box"]["auto-balanced"]["precision"], "bf16");
+    assert_eq!(on["box"]["auto-balanced"]["bench"], "done");
+    assert_eq!(on["box"]["auto-balanced"]["trials"][1]["precision"], "fp32");
+    assert_eq!(
+        on["box"]["auto-speed"]["bench"], "off",
+        "autobench is off here"
+    );
+    assert_eq!(on["box"]["auto-accuracy"]["precision"], "bf16");
+    assert!(on["box"]["auto-accuracy"].get("bench").is_none());
+    assert_eq!(on["box"]["fp16"]["eligible"], true);
+    // A mode change makes the stored bench stale: no pick any more.
+    let mut speed = row.clone();
+    speed.precision = "auto-speed".into();
+    assert_eq!(h.s.row_spec("box", &speed).precision_pick, None);
+}
+
+#[test]
+fn a_failed_benchmark_says_why_with_the_processors_words() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 4);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    p.drain();
+    let op = bench_on(&mut h, &mut p, "g-1", None);
+    h.event(
+        &p,
+        Event::Fatal {
+            sid: op.bid.clone(),
+            error: "could not load hayai-nova: no package".into(),
+        },
+    );
+    assert_eq!(
+        h.s.bench_get("g-1", "box")["state"],
+        "running",
+        "fatal waits for exit"
+    );
+    h.event(&p, exit(&op.bid, None));
+    let got = h.s.bench_get("g-1", "box");
+    assert_eq!(got["state"], "failed");
+    assert_eq!(
+        got["error"],
+        "the hayai-nova benchmark ended: could not load hayai-nova: no package"
+    );
+    // Without a fatal, with a status.
+    let op = bench_on(&mut h, &mut p, "g-1", None);
+    h.event(&p, exit(&op.bid, Some(1)));
+    assert_eq!(
+        h.s.bench_get("g-1", "box")["error"],
+        "the hayai-nova benchmark ended with status 1 before it produced a result"
+    );
+}
+
+#[test]
+fn a_draft_is_measured_from_its_spec_and_kept_in_memory_only() {
+    let mut h = harness(vec![primary()]);
+    h.add("A/V1.cbz", 4);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    p.drain();
+    let spec = serde_json::json!({"engine": "ppocr-manga", "pools": {"stage_device": {}}});
+    let op = bench_on(&mut h, &mut p, "draft-x1", Some(spec));
+    assert_eq!(op.spec.engine, "ppocr-manga");
+    h.event(
+        &p,
+        Event::BenchDone {
+            bid: op.bid,
+            detail: detail(serde_json::json!({"best": {"trial": 1, "pages_per_second": 9.0}})),
+        },
+    );
+    let got = h.s.bench_get("draft-x1", "box");
+    assert_eq!(got["state"], "done");
+    assert_eq!(got["spec"]["engine"], "ppocr-manga");
+    let prof = bunko_server::ocr::profiles::Profiles::new(&h.storage());
+    assert!(
+        prof.row("box", "draft-x1", None).is_none(),
+        "a draft is never kept"
+    );
 }
 
 #[test]
@@ -588,31 +848,127 @@ fn autobench_runs_first_then_the_row_runs_untuned_when_it_fails() {
     h.add("A/V1.cbz", 2);
     h.at(0.0);
     let mut p = h.connect("box", 1);
+    h.at(0.0);
     let ops = p.drain();
     assert!(
         opened(&ops).is_empty(),
         "an unmeasured row is not offered: {ops:?}"
     );
-    let bid = ops
-        .iter()
-        .find_map(|o| {
-            if let Op::Bench(b) = o {
-                Some(b.bid.clone())
-            } else {
-                None
-            }
-        })
-        .expect("autobench sent");
+    let op = bench_op(&ops).expect("autobench sent");
+    assert!(!op.precision_only);
+    assert!(h.s.bench_get("g-1", "box")["autobench"] == true);
     h.event(
         &p,
         Event::Fatal {
-            sid: bid,
-            error: "benchmarks are not implemented yet".into(),
+            sid: op.bid.clone(),
+            error: "the models would not load".into(),
         },
     );
+    h.event(&p, exit(&op.bid, None));
     // Failed: the pair runs untuned from now on.
     let ops = p.drain();
     assert_eq!(opened(&ops).len(), 1, "{ops:?}");
+}
+
+#[test]
+fn autobench_applies_best_where_nobody_set_pools_and_then_offers_the_row() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    h.at(0.0);
+    let op = bench_op(&p.drain()).expect("autobench sent");
+    h.event(
+        &p,
+        Event::BenchDone {
+            bid: op.bid.clone(),
+            detail: detail(serde_json::json!({
+                "baseline": {"pages_per_second": 4.0},
+                "best": {"trial": 2, "stage_workers": {"detect": 2}, "queue_capacity": {}, "stage_device": {}, "pages_per_second": 5.0},
+                "precision": "fp32", "precision_mode": "auto-accuracy",
+            })),
+        },
+    );
+    let prof = bunko_server::ocr::profiles::Profiles::new(&h.storage());
+    let stored = prof
+        .row("box", "g-1", Some(&primary().output_affecting()))
+        .unwrap();
+    assert_eq!(
+        stored.pools["stage_workers"],
+        serde_json::json!({"detect": 2})
+    );
+    let raw = prof.load("box");
+    assert_eq!(raw["rows"]["g-1"]["pools_autobench"], serde_json::json!({}));
+    // Measured: the row is offered there now, with the found pools.
+    h.at(1.0);
+    let ops = p.drain();
+    let open = ops.iter().find_map(|o| match o {
+        Op::OpenSession { generation, .. } => Some(generation.clone()),
+        _ => None,
+    });
+    let open = open.expect("the row runs there now");
+    assert_eq!(open.pools.stage_workers.get("detect"), Some(&2));
+}
+
+#[test]
+fn hand_set_pools_get_a_precision_only_autobench_and_keep_their_pools() {
+    let mut row = primary();
+    row.precision = "auto-balanced".into();
+    let mut h = harness(vec![row.clone()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 2);
+    // A person set this machine's pools: no width tuning there, but a pick is owed.
+    let prof = bunko_server::ocr::profiles::Profiles::new(&h.storage());
+    let pools = serde_json::json!({"stage_workers": {"detect": 1}, "queue_capacity": {}, "stage_device": {}});
+    prof.set_pools(
+        "gpubox",
+        "g-1",
+        pools.as_object().unwrap(),
+        Some(&row.output_affecting()),
+        false,
+        false,
+    );
+    h.at(0.0);
+    let mut p = h.connect_gpu("gpubox", &["fp32", "fp16", "bf16"]);
+    h.at(0.0);
+    let op = bench_op(&p.drain()).expect("a precision bench");
+    assert!(op.precision_only);
+    assert_eq!(
+        op.spec.pools.stage_workers.get("detect"),
+        Some(&1),
+        "its pools as set"
+    );
+    h.event(
+        &p,
+        Event::BenchDone {
+            bid: op.bid.clone(),
+            detail: detail(serde_json::json!({
+                "baseline": {"pages_per_second": 5.0},
+                "best": {"trial": 1, "stage_workers": {}, "queue_capacity": {}, "stage_device": {}, "pages_per_second": 5.0},
+                "precision": "bf16", "precision_mode": "auto-balanced",
+                "precision_trials": [{"precision": "bf16", "pages_per_second": 5.0, "chosen": true},
+                                     {"precision": "fp32", "pages_per_second": 2.0, "chosen": false}],
+                "precision_why": "benchmark: bf16 5.00 p/s beat fp32 2.00 p/s",
+            })),
+        },
+    );
+    let stored = prof
+        .row("gpubox", "g-1", Some(&row.output_affecting()))
+        .unwrap();
+    assert_eq!(
+        stored.pools["stage_workers"],
+        serde_json::json!({"detect": 1}),
+        "never a pool from a precision-only run"
+    );
+    assert_eq!(stored.bench.unwrap()["precision"], "bf16");
+    h.at(1.0);
+    let open = p.drain().into_iter().find_map(|o| match o {
+        Op::OpenSession { generation, .. } => Some(generation),
+        _ => None,
+    });
+    let open = open.expect("the row runs there now");
+    assert_eq!(open.precision_pick.as_deref(), Some("bf16"));
 }
 
 /// Regression (review finding): a mismatched result name used to be joined under
@@ -657,4 +1013,264 @@ fn a_mismatched_result_name_removes_only_its_claim_directory() {
     });
     assert!(keep.join("precious").is_file());
     assert!(claim_dir.is_dir());
+}
+
+/// This server's own hardware: a local machine on a channel, as `LocalUp` makes it.
+fn local_up(h: &mut H, formats: &[&str]) -> tokio::sync::mpsc::UnboundedReceiver<Op> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let catalog: bunko_proto::Catalog = serde_json::from_value(serde_json::json!({
+        "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+        "detectors": ["ppocr-manga"],
+        "devices": [{"id": "cpu", "label": "CPU"},
+                    {"id": "gpu:0", "label": "GPU 0", "formats": formats, "provider": "rocm", "arch": "gfx1201"}],
+    }))
+    .unwrap();
+    let host = bunko_proto::HostInfo {
+        cpu: "Test CPU".into(),
+        gpu: Some("Test GPU".into()),
+        backend: "rocm".into(),
+        ..Default::default()
+    };
+    h.s.handle(Msg::LocalUp {
+        ops: tx,
+        catalog,
+        host,
+    });
+    rx
+}
+
+fn drain_rx(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) -> Vec<Op> {
+    let mut out = Vec::new();
+    while let Ok(op) = rx.try_recv() {
+        out.push(op);
+    }
+    out
+}
+
+#[test]
+fn this_servers_autobench_lands_in_its_own_profile_and_bench_file() {
+    let mut row = primary();
+    row.precision = "auto-speed".into();
+    let mut h = harness(vec![row.clone()]);
+    h.s.settings.autobench = true;
+    h.s.settings.local_processing = true;
+    h.add("A/V1.cbz", 6);
+    h.at(0.0);
+    let mut ops = local_up(&mut h, &["fp32", "fp16", "bf16"]);
+    h.at(0.0);
+    let sent = drain_rx(&mut ops);
+    assert!(opened(&sent).is_empty(), "measured first: {sent:?}");
+    let op = bench_op(&sent).expect("an autobench of this server");
+    assert!(!op.precision_only);
+    assert!(
+        std::path::Path::new(&op.sample).is_file(),
+        "the in-process processor reads the sample in place: {}",
+        op.sample
+    );
+    let local = h.s.machines.values().find(|m| m.local).unwrap().pid.clone();
+    let event = |h: &mut H, event: Event| {
+        h.s.handle(Msg::Event {
+            pid: local.clone(),
+            event,
+        })
+    };
+    event(
+        &mut h,
+        Event::BenchDone {
+            bid: op.bid.clone(),
+            detail: detail(serde_json::json!({
+                "baseline": {"pages_per_second": 8.0},
+                "best": {"trial": 4, "stage_workers": {"detect": 8}, "queue_capacity": {}, "stage_device": {}, "pages_per_second": 10.0},
+                "precision": "fp16", "precision_mode": "auto-speed",
+                "precision_trials": [{"precision": "bf16", "pages_per_second": 8.1, "chosen": false},
+                                     {"precision": "fp16", "pages_per_second": 8.6, "chosen": true},
+                                     {"precision": "fp32", "pages_per_second": 1.9, "chosen": false}],
+                "precision_why": "benchmark: fp16 8.60 p/s beat bf16 8.10 p/s, fp32 1.90 p/s",
+            })),
+        },
+    );
+    let got = h.s.bench_get("g-1", "local");
+    assert_eq!(got["state"], "done");
+    assert_eq!(
+        got["host"]["cpu"]
+            .as_str()
+            .map(|c| c.starts_with("Test CPU")),
+        Some(true)
+    );
+    // This server's result: `.ocr-bench.json` AND (an autobench) its own profile.
+    let saved = bunko_sched::bench_file::BenchFile::new(&h.storage()).load();
+    assert_eq!(saved["g-1"]["precision"], "fp16");
+    let prof = bunko_server::ocr::profiles::Profiles::new(&h.storage());
+    let mine = prof
+        .row(
+            bunko_server::ocr::profiles::LOCAL_PROFILE,
+            "g-1",
+            Some(&row.output_affecting()),
+        )
+        .unwrap();
+    assert_eq!(
+        mine.pools["stage_workers"],
+        serde_json::json!({"detect": 8})
+    );
+    assert_eq!(mine.bench.as_ref().unwrap()["precision"], "fp16");
+    // ... and runs the row with them, at its pick.
+    h.at(1.0);
+    let sent = drain_rx(&mut ops);
+    let open = sent.iter().find_map(|o| match o {
+        Op::OpenSession { generation, .. } => Some(generation.clone()),
+        _ => None,
+    });
+    let open = open.expect("the row runs here now");
+    assert_eq!(open.precision_pick.as_deref(), Some("fp16"));
+    assert_eq!(open.pools.stage_workers.get("detect"), Some(&8));
+    // Its rate prior is the benchmark's until real runs come in.
+    let bench = h.s.machine_bench("g-1", "local").unwrap();
+    assert_eq!(bench.pages_per_second, Some(10.0));
+}
+
+#[test]
+fn hand_set_pools_on_this_server_are_never_width_tuned() {
+    let mut row = primary();
+    row.pools.stage_workers.insert("detect".into(), 2);
+    let mut h = harness(vec![row.clone()]);
+    h.s.settings.autobench = true;
+    h.s.settings.local_processing = true;
+    h.add("A/V1.cbz", 6);
+    h.at(0.0);
+    let mut ops = local_up(&mut h, &["fp32", "fp16", "bf16"]);
+    h.at(0.0);
+    let sent = drain_rx(&mut ops);
+    assert!(bench_op(&sent).is_none(), "{sent:?}");
+    assert_eq!(opened(&sent).len(), 1, "the table is used as written");
+}
+
+/// One autobench round on a device whose auto modes run fp32 (bf16 emulated or a CPU),
+/// then the row runs there; the fp32 benchmark stays current through later scans.
+fn fp32_device_autobenches_once(device: serde_json::Value) {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.autobench = true;
+    h.add("A/V1.cbz", 4);
+    h.add("A/V2.cbz", 4);
+    h.at(0.0);
+    let catalog = serde_json::json!({
+        "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+        "detectors": ["ppocr-manga"],
+        "devices": [{"id": "cpu", "label": "CPU", "formats": ["fp32", "bf16"], "provider": "cpu", "arch": "x86_64"}, device.clone()],
+    });
+    let mut p = h.connect_catalog("box", 1, catalog);
+    h.at(0.0);
+    let op = bench_op(&p.drain()).expect("one autobench");
+    // auto-accuracy on this device is fp32: what the engines there will run.
+    let row = primary();
+    let on = h.s.precision_on(&row);
+    assert_eq!(
+        on["box"]["auto-accuracy"]["precision"], "fp32",
+        "{device}: {on:#?}"
+    );
+    h.event(
+        &p,
+        Event::BenchDone {
+            bid: op.bid.clone(),
+            detail: detail(serde_json::json!({
+                "baseline": {"pages_per_second": 2.7},
+                "best": {"trial": 1, "stage_workers": {}, "queue_capacity": {}, "stage_device": {}, "pages_per_second": 2.7},
+                "precision": "fp32", "precision_mode": "auto-accuracy",
+            })),
+        },
+    );
+    h.event(&p, exit(&op.bid, None));
+    let prof = bunko_server::ocr::profiles::Profiles::new(&h.storage());
+    let judged = h.s.machine_profile("box", &row).unwrap();
+    assert!(!judged.stale_bench && judged.bench.is_some(), "{device}");
+    assert!(
+        prof.row("box", "g-1", Some(&row.output_affecting()))
+            .unwrap()
+            .bench
+            .is_some()
+    );
+    // The volume runs there now, and later scans ask for no benchmark again.
+    let mut benches = 0;
+    let mut opened_any = false;
+    for t in [1.0, 31.0, 62.0, 93.0] {
+        h.at(t);
+        let ops = p.drain();
+        benches += ops.iter().filter(|o| matches!(o, Op::Bench(_))).count();
+        opened_any |= !opened(&ops).is_empty();
+        for sid in opened(&ops) {
+            h.event(&p, ready(&sid));
+        }
+    }
+    assert_eq!(benches, 0, "{device}: benchmarked again");
+    assert!(opened_any, "{device}: the row never ran");
+}
+
+#[test]
+fn rdna2_with_bf16_packages_runs_auto_modes_at_fp32_and_benchmarks_once() {
+    fp32_device_autobenches_once(serde_json::json!(
+        {"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16", "bf16"], "provider": "rocm", "arch": "gfx1030"}
+    ));
+    fp32_device_autobenches_once(serde_json::json!(
+        {"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16", "bf16"], "provider": "rocm", "arch": "gfx1032"}
+    ));
+}
+
+#[test]
+fn turing_runs_auto_modes_at_fp32_and_benchmarks_once() {
+    fp32_device_autobenches_once(serde_json::json!(
+        {"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16"], "provider": "cuda", "arch": "sm_75"}
+    ));
+}
+
+#[test]
+fn a_bf16_cpu_runs_auto_modes_at_fp32_and_benchmarks_once() {
+    // A GPU with no package for it: the engines run the row on the CPU (AVX512_BF16,
+    // a bf16 package), and the CPU's auto modes are fp32.
+    fp32_device_autobenches_once(serde_json::json!(
+        {"id": "gpu:0", "label": "no package", "formats": [], "provider": "cuda", "arch": "sm_89"}
+    ));
+}
+
+#[test]
+fn forced_bf16_still_runs_where_a_package_exists() {
+    let mut row = primary();
+    row.precision = "bf16".into();
+    let h = {
+        let mut h = harness(vec![row.clone()]);
+        h.add("A/V1.cbz", 4);
+        h.at(0.0);
+        h
+    };
+    let mut h = h;
+    let rdna2 = serde_json::json!({
+        "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "devices": [{"id": "cpu", "label": "CPU", "provider": "cpu", "arch": "x86_64", "formats": ["fp32"]},
+                    {"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16", "bf16"], "provider": "rocm", "arch": "gfx1030"}],
+    });
+    let mut p = h.connect_catalog("rdna2", 1, rdna2);
+    let on = h.s.precision_on(&row);
+    assert_eq!(on["rdna2"]["bf16"]["eligible"], true);
+    assert_eq!(on["rdna2"]["auto-accuracy"]["precision"], "fp32");
+    h.at(1.0);
+    assert_eq!(
+        opened(&p.drain()).len(),
+        1,
+        "a forced bf16 row runs on RDNA2"
+    );
+    let turing = serde_json::json!({
+        "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "devices": [{"id": "gpu:0", "label": "GPU 0", "formats": ["fp32", "fp16"], "provider": "cuda", "arch": "sm_75"}],
+    });
+    let _q = h.connect_catalog("turing", 1, turing);
+    let on = h.s.precision_on(&row);
+    assert_eq!(on["turing"]["bf16"]["eligible"], false, "{on:#?}");
+    // A CPU with a bf16 package runs a forced bf16 row (the engines allow it there).
+    let cpu = serde_json::json!({
+        "engines": ["hayai-nova", "ppocr-manga"], "detectors": ["ppocr-manga"],
+        "devices": [{"id": "cpu", "label": "CPU", "formats": ["fp32", "bf16"], "provider": "cpu", "arch": "x86_64"},
+                    {"id": "gpu:0", "label": "no package", "formats": [], "provider": "cuda", "arch": "sm_89"}],
+    });
+    let _c = h.connect_catalog("zen4", 1, cpu);
+    let on = h.s.precision_on(&row);
+    assert_eq!(on["zen4"]["bf16"]["eligible"], true, "{on:#?}");
+    assert_eq!(on["zen4"]["auto-accuracy"]["precision"], "fp32");
 }

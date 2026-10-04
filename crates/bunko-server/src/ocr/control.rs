@@ -46,7 +46,16 @@ pub struct LocalChannels {
     pub events: mpsc::UnboundedReceiver<Event>,
     pub catalog: Catalog,
     pub host: HostInfo,
+    /// Ends once the processor has left (its op sender dropped) and its sessions wound
+    /// down, their models freed (bunko-processor's `LocalLink::take_finished`). The
+    /// server's stop awaits it, so no OCR thread is still running, and no model still
+    /// held, when the process exits.
+    pub finished: Option<tokio::task::JoinHandle<()>>,
 }
+
+/// How long the server's stop waits for its local processor to wind down (the
+/// processor itself gives its sessions 10 s; a stage finishing its page can add to it).
+const LOCAL_STOP_WAIT: Duration = Duration::from_secs(15);
 
 /// The binary's hook that starts `bunko_processor::LocalProcessor` over the real engines.
 /// The lite build passes none: `ocr.local_processing` is then off.
@@ -75,6 +84,8 @@ struct Inner {
     pending: Mutex<Option<(Scheduler, std::sync::mpsc::Receiver<Msg>)>>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     local: Option<Arc<dyn LocalProcessorFactory>>,
+    /// The running local processor's end ([`LocalChannels::finished`]).
+    local_finished: Mutex<Option<tokio::task::JoinHandle<()>>>,
     upgrade: Arc<upgrade::Upgrade>,
     queue_file: queue_file::QueueFile,
     status: queue_api::StatusCache,
@@ -173,6 +184,7 @@ impl OcrControl {
             pending: Mutex::new(Some((sched, rx))),
             thread: Mutex::new(None),
             local: deps.local,
+            local_finished: Mutex::new(None),
             upgrade: up,
             queue_file: queue_file::QueueFile::default(),
             status: queue_api::StatusCache::default(),
@@ -243,6 +255,9 @@ impl OcrControl {
                 return;
             }
         };
+        if let Some(f) = channels.finished {
+            *self.0.local_finished.lock() = Some(f);
+        }
         let (ops_tx, mut ops_rx) = mpsc::unbounded_channel::<Op>();
         let bounded = channels.ops;
         tokio::spawn(async move {
@@ -278,12 +293,23 @@ impl OcrControl {
         });
     }
 
-    /// Stop the scheduler (in-flight volumes go back unrecorded) and wait for it.
+    /// Stop the scheduler (in-flight volumes go back unrecorded) and wait for it, then
+    /// for the local processor it let go of: its sessions wind down and free their
+    /// models before this returns (bounded), not under the process exit.
     pub async fn stop(&self) {
         self.send(Msg::Stop);
         let handle = self.0.thread.lock().take();
         if let Some(h) = handle {
             let _ = tokio::task::spawn_blocking(move || h.join()).await;
+        }
+        let local = self.0.local_finished.lock().take();
+        if let Some(f) = local
+            && tokio::time::timeout(LOCAL_STOP_WAIT, f).await.is_err()
+        {
+            tracing::warn!(
+                "this server's OCR was still stopping after {}s; exiting anyway",
+                LOCAL_STOP_WAIT.as_secs()
+            );
         }
     }
 

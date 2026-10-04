@@ -1,6 +1,6 @@
 [package]
 name = "bunko-engines"
-description = "mokuro-bunko's OCR engines as a processor pipeline: ppocr-manga, hayai-nova and paddle-manga on ONNX Runtime"
+description = "mokuro-bunko's OCR engines as a processor pipeline: ppocr-manga on ONNX Runtime, hayai-nova and paddle-manga on libtorch (a backend pack loaded at run time)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,21 +8,31 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = []
+default = ["torch"]
+# The recognizers on libtorch: opens a backend pack (`<storage>/backends/torch-*`) at run
+# time with libloading. Needs no libtorch to build (the pack's cdylib is built apart).
+torch = ["dep:bunko-torch", "dep:libloading"]
+# The ONNX Runtime recognizers (deferred in 0.7; used only when no pack is loaded).
+onnx-vlm = ["bunko-vlm/onnx-vlm"]
 # libjpeg-turbo JPEG decoding (bit-identical pages to 0.5.2's Pillow).
 libjpeg = ["bunko-ocr/libjpeg"]
-# Execution providers: forwarded to both ONNX consumers (and so to ort).
-cuda = ["bunko-ocr/cuda", "bunko-vlm/cuda"]
-webgpu = ["bunko-ocr/webgpu", "bunko-vlm/webgpu"]
-directml = ["bunko-ocr/directml", "bunko-vlm/directml"]
-coreml = ["bunko-ocr/coreml", "bunko-vlm/coreml"]
+# ONNX Runtime GPU execution providers (deferred in 0.7, not built for release):
+# forwarded to both ONNX consumers (and so to ort); they bring the ONNX recognizers.
+cuda = ["onnx-vlm", "bunko-ocr/cuda", "bunko-vlm/cuda"]
+webgpu = ["onnx-vlm", "bunko-ocr/webgpu", "bunko-vlm/webgpu"]
+directml = ["onnx-vlm", "bunko-ocr/directml", "bunko-vlm/directml"]
+coreml = ["onnx-vlm", "bunko-ocr/coreml", "bunko-vlm/coreml"]
 
 [dependencies]
 bunko-ocr.workspace = true
 bunko-vlm.workspace = true
+bunko-torch = { path = "../bunko-torch", optional = true }
+libloading = { version = "0.9", optional = true }
+thiserror.workspace = true
 bunko-layout.workspace = true
 bunko-processor.workspace = true
 bunko-proto.workspace = true
+bunko-sched.workspace = true
 ort = { workspace = true, features = ["std"] }
 serde_json.workspace = true
 tracing.workspace = true
@@ -37,3 +47,7 @@ image.workspace = true
 tracing-subscriber.workspace = true
 # The example measures memory under the same allocator as the `mokuro-bunko` binary.
 mimalloc = { version = "0.1", default-features = false }
+
+[[example]]
+name = "torch_crops"
+required-features = ["torch"]

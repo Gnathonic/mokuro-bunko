@@ -36,10 +36,11 @@ use bunko_proto::{
     BenchOp, Event, MAX_OUTSTANDING_VOLUMES, Op, RowSpec, VolumeOp, return_class, valid_id,
 };
 use parking_lot::Mutex;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::bench::{BenchAbort, BenchConfig, BenchRun};
 use crate::client::{LibraryClient, sha256_file};
 use crate::fetch::{ArchiveFetcher, FetchError, FetchedArchive, TransferFault};
 use crate::hostload::{HostMeter, HostSample, cpu_pressure, other_cpu_share};
@@ -50,8 +51,8 @@ use crate::pipeline::{
 
 /// How often `stats` may go out while pages flow.
 const STATS_INTERVAL: Duration = Duration::from_secs(2);
-/// What a `bench` op is answered with until benchmarks are ported.
-pub const BENCH_NOT_IMPLEMENTED: &str = "benchmarks are not implemented yet";
+/// How long a benchmark waits for this machine's cancelled sessions to wind down.
+const QUIET_WAIT: Duration = Duration::from_secs(60);
 /// A volume_done whose sidecar did not reach the library becomes this failure.
 pub const SIDECAR_NOT_SENT: &str = "the finished sidecar could not be sent from the processor";
 
@@ -100,6 +101,19 @@ pub(crate) struct LocalLink {
 pub(crate) enum Link {
     Remote(Box<RemoteLink>),
     Local(LocalLink),
+}
+
+/// Why a benchmark's sample is not there.
+enum SampleError {
+    Abort(BenchAbort),
+    /// The library refused the account: the connection ends, nothing is said.
+    Lost(String),
+}
+
+/// A running benchmark: cancel it, and hear when it is over.
+struct BenchHandle {
+    cancel: CancellationToken,
+    finished: CancellationToken,
 }
 
 impl Link {
@@ -213,6 +227,53 @@ impl Link {
         }
     }
 
+    /// A benchmark's scratch directory.
+    fn bench_dir(&self, bid: &str) -> PathBuf {
+        match self {
+            Link::Remote(r) => r.work.join(bid),
+            Link::Local(l) => l.results_dir.join(bid),
+        }
+    }
+
+    /// The benchmark's sample archive: fetched from the library like a volume (held
+    /// until the benchmark ends), or read in place by the local processor.
+    async fn bench_sample(
+        &self,
+        op: &BenchOp,
+        cancel: &CancellationToken,
+    ) -> Result<(PathBuf, Option<FetchedArchive>), SampleError> {
+        match self {
+            Link::Remote(remote) => {
+                let label = format!("the benchmark sample {}", op.bid);
+                match remote
+                    .fetcher
+                    .fetch(&op.sample, None, cancel, None, &label)
+                    .await
+                {
+                    Ok(fetched) => Ok((fetched.path().to_path_buf(), Some(fetched))),
+                    Err(FetchError::Cancelled) => Err(SampleError::Abort(BenchAbort::Cancelled)),
+                    Err(FetchError::LostLibrary(reason)) => Err(SampleError::Lost(reason)),
+                    Err(FetchError::Fault(fault)) => Err(SampleError::Abort(BenchAbort::Fatal(
+                        format!("could not fetch the benchmark sample: {fault}")
+                            .chars()
+                            .take(300)
+                            .collect(),
+                    ))),
+                }
+            }
+            Link::Local(_) => {
+                let path = PathBuf::from(&op.sample);
+                match tokio::fs::metadata(&path).await {
+                    Ok(m) if m.is_file() => Ok((path, None)),
+                    _ => Err(SampleError::Abort(BenchAbort::Fatal(format!(
+                        "could not fetch the benchmark sample: there is no {}",
+                        op.sample
+                    )))),
+                }
+            }
+        }
+    }
+
     fn lost_library(&self, reason: &str, leaving: &AtomicBool) {
         if let Link::Remote(r) = self {
             tracing::error!("the library could not be read from ({reason}); registering again");
@@ -234,6 +295,8 @@ pub(crate) struct Hub {
     tx: mpsc::UnboundedSender<Event>,
     leaving: Arc<AtomicBool>,
     sessions: Sessions,
+    benches: Mutex<HashMap<String, BenchHandle>>,
+    bench_config: BenchConfig,
 }
 
 impl Hub {
@@ -242,6 +305,7 @@ impl Hub {
         link: Link,
         tx: mpsc::UnboundedSender<Event>,
         leaving: Arc<AtomicBool>,
+        bench_config: BenchConfig,
     ) -> Arc<Hub> {
         Arc::new(Hub {
             pipeline,
@@ -249,6 +313,8 @@ impl Hub {
             tx,
             leaving,
             sessions: Arc::default(),
+            benches: Mutex::new(HashMap::new()),
+            bench_config,
         })
     }
 
@@ -300,9 +366,13 @@ impl Hub {
                     volume.sid
                 ),
             },
-            Op::Cancel { bid: Some(bid), .. } => {
-                tracing::info!("cancel for benchmark {bid}: benchmarks are not implemented here");
-            }
+            Op::Cancel { bid: Some(bid), .. } => match self.benches.lock().get(&bid) {
+                Some(handle) => {
+                    tracing::info!("benchmark {bid}: cancelled");
+                    handle.cancel.cancel();
+                }
+                None => tracing::info!("cancel for benchmark {bid}, which is not running here"),
+            },
             Op::Cancel {
                 sid: Some(sid),
                 claim,
@@ -328,18 +398,175 @@ impl Hub {
         }
     }
 
-    fn bench(&self, bench: BenchOp) {
-        tracing::warn!("benchmark {} refused: {BENCH_NOT_IMPLEMENTED}", bench.bid);
-        let mut detail = BTreeMap::new();
-        detail.insert("error".to_string(), json!(BENCH_NOT_IMPLEMENTED));
-        self.say(Event::BenchDone {
-            bid: bench.bid.clone(),
-            detail,
+    /// A `bench` op: measure the row on this machine (see [`crate::bench`]). Runs on a
+    /// dedicated OS thread; every benchmark ends with `exit` (after `bench_done`, or
+    /// after `fatal`), except when this processor is leaving.
+    fn bench(self: &Arc<Self>, op: BenchOp) {
+        if self.leaving.load(Ordering::SeqCst) {
+            return;
+        }
+        let cancel = CancellationToken::new();
+        let finished = CancellationToken::new();
+        {
+            let mut benches = self.benches.lock();
+            if benches.contains_key(&op.bid) {
+                tracing::warn!("benchmark {} is already running here", op.bid);
+                return;
+            }
+            benches.insert(
+                op.bid.clone(),
+                BenchHandle {
+                    cancel: cancel.clone(),
+                    finished: finished.clone(),
+                },
+            );
+        }
+        tracing::info!(
+            "benchmark {}: {} ({}) over a sample of {} pages{}",
+            op.bid,
+            op.spec.name,
+            op.spec.engine,
+            op.pages,
+            if op.precision_only {
+                ", precision only"
+            } else {
+                ""
+            }
+        );
+        let hub = self.clone();
+        tokio::spawn(async move {
+            let local = matches!(&*hub.link, Link::Local(_));
+            let workspace = hub.link.bench_dir(&op.bid);
+            // The library cancelled this machine's sessions for the benchmark: measure
+            // only once they are gone (0.5.2 waited for the machine to go quiet), so no
+            // winding-down pipeline shares the device with the warm-up.
+            hub.quiet(QUIET_WAIT, &op.bid).await;
+            let result = match hub.link.bench_sample(&op, &cancel).await {
+                Err(SampleError::Lost(reason)) => {
+                    hub.link
+                        .lost_library(&format!("benchmark {}: {reason}", op.bid), &hub.leaving);
+                    hub.benches.lock().remove(&op.bid);
+                    finished.cancel();
+                    return;
+                }
+                Err(SampleError::Abort(abort)) => Err(abort),
+                Ok((sample, held)) => match tokio::fs::create_dir_all(&workspace).await {
+                    Err(e) => Err(BenchAbort::Fatal(format!(
+                        "could not make the benchmark workspace {}: {e}",
+                        workspace.display()
+                    ))),
+                    Ok(()) => {
+                        hub.run_bench(op.clone(), sample, held, workspace.clone(), cancel)
+                            .await
+                    }
+                },
+            };
+            let _ = tokio::fs::remove_dir_all(&workspace).await;
+            match &result {
+                Ok(()) => tracing::info!("benchmark {}: done", op.bid),
+                Err(BenchAbort::Cancelled) => tracing::info!("benchmark {}: cancelled", op.bid),
+                Err(BenchAbort::Fatal(e)) => tracing::error!("benchmark {} failed: {e}", op.bid),
+            }
+            let error = match result {
+                Ok(()) => None,
+                Err(BenchAbort::Cancelled) => Some("cancelled".to_string()),
+                Err(BenchAbort::Fatal(e)) => Some(e),
+            };
+            // 0.5.2: the local runner exited 0 or 1; the remote bridge said no status.
+            let returncode = local.then_some(i32::from(error.is_some()));
+            if let Some(error) = error {
+                hub.say(Event::Fatal {
+                    sid: op.bid.clone(),
+                    error,
+                });
+            }
+            hub.say(Event::Exit {
+                sid: op.bid.clone(),
+                returncode,
+            });
+            hub.benches.lock().remove(&op.bid);
+            finished.cancel();
         });
-        self.say(Event::Exit {
-            sid: bench.bid,
-            returncode: None,
-        });
+    }
+
+    /// Wait (up to `wait`) for every open session to end.
+    async fn quiet(&self, wait: Duration, bid: &str) {
+        let sessions: Vec<CancellationToken> = self
+            .sessions
+            .lock()
+            .values()
+            .map(|s| s.finished.clone())
+            .collect();
+        if sessions.is_empty() {
+            return;
+        }
+        let all = futures_util::future::join_all(
+            sessions
+                .into_iter()
+                .map(|f| async move { f.cancelled().await }),
+        );
+        if tokio::time::timeout(wait, all).await.is_err() {
+            tracing::warn!(
+                "benchmark {bid}: sessions were still open after {}s; measuring anyway",
+                wait.as_secs()
+            );
+        }
+    }
+
+    /// The measurement itself, on its own OS thread (model loads and page feeds block).
+    async fn run_bench(
+        self: &Arc<Self>,
+        op: BenchOp,
+        sample: PathBuf,
+        held: Option<FetchedArchive>,
+        workspace: PathBuf,
+        cancel: CancellationToken,
+    ) -> Result<(), BenchAbort> {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let pipeline = self.pipeline.clone();
+        let config = self.bench_config.clone();
+        let tx = self.tx.clone();
+        let leaving = self.leaving.clone();
+        let bid = op.bid.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("ocr-{bid}"))
+            .spawn(move || {
+                let say = move |event: Event| {
+                    if !leaving.load(Ordering::SeqCst) {
+                        let _ = tx.send(event);
+                    }
+                };
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    BenchRun::new(
+                        pipeline.as_ref(),
+                        &op,
+                        sample,
+                        workspace,
+                        &config,
+                        &cancel,
+                        &say,
+                    )
+                    .run()
+                }))
+                .unwrap_or_else(|p| {
+                    Err(BenchAbort::Fatal(format!(
+                        "the benchmark panicked: {}",
+                        panic_text(&*p)
+                    )))
+                });
+                drop(held);
+                let _ = done_tx.send(result);
+            });
+        if let Err(e) = spawned {
+            return Err(BenchAbort::Fatal(format!(
+                "could not start the benchmark thread: {e}"
+            )));
+        }
+        done_rx.await.unwrap_or_else(|_| {
+            Err(BenchAbort::Fatal(format!(
+                "the benchmark {bid} ended without a word"
+            )))
+        })
     }
 
     fn open_session(self: &Arc<Self>, sid: String, generation: RowSpec) {
@@ -412,7 +639,22 @@ impl Hub {
         for session in &sessions {
             session.abandon();
         }
-        let all = futures_util::future::join_all(sessions.iter().map(|s| s.finished.cancelled()));
+        let benches: Vec<CancellationToken> = self
+            .benches
+            .lock()
+            .values()
+            .map(|b| {
+                b.cancel.cancel();
+                b.finished.clone()
+            })
+            .collect();
+        let all = futures_util::future::join_all(
+            sessions
+                .iter()
+                .map(|s| s.finished.clone())
+                .chain(benches)
+                .map(|f| async move { f.cancelled().await }),
+        );
         if tokio::time::timeout(wait, all).await.is_err() {
             tracing::warn!(
                 "some sessions were still winding down after {}s; leaving them",
@@ -883,6 +1125,11 @@ impl RunnerCtx {
             let _ = handle.join();
         }
         let fatal = shared.fatal.lock().take();
+        // The session's models (and its stage threads) go before it says it ended:
+        // whoever waits for the end -- the processor leaving, the server stopping before
+        // the process exits -- finds them freed, not freed under the exit.
+        drop(shared);
+        drop(runner);
         if let Some(error) = fatal {
             let _ = reports.send(Msg::Fatal(error));
             let _ = reports.send(Msg::Exit(Some(1)));

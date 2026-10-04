@@ -41,7 +41,8 @@ use super::owed::OwedIndex;
 use super::profiles::Profiles;
 use super::types::{Job, LibraryFacts, PathLocks};
 
-pub use bench::{BenchRequest, BenchState};
+pub use bench::{BenchRequest, BenchState, cpu_label, physical_cores};
+pub use claim::{catalog_can_run, supported_for};
 pub use registry::{
     FailedLogin, Machine, PublicNames, RegisterInput, RegisterOutcome, SocketRefusal, TransferStats,
 };
@@ -175,6 +176,12 @@ pub enum Msg {
     },
     ArchiveArrived(PathBuf),
     ArchiveRemoved(PathBuf),
+    /// A benchmark's sample was packed on a helper thread: `(pages, volumes)`.
+    BenchSample {
+        machine: String,
+        bid: String,
+        result: Result<(i64, i64), String>,
+    },
     Apply {
         settings: Box<Settings>,
         reply: Option<Reply<()>>,
@@ -201,6 +208,7 @@ impl std::fmt::Debug for Msg {
             Msg::OwnCopyRead { .. } => "OwnCopyRead",
             Msg::ArchiveArrived(_) => "ArchiveArrived",
             Msg::ArchiveRemoved(_) => "ArchiveRemoved",
+            Msg::BenchSample { .. } => "BenchSample",
             Msg::Apply { .. } => "Apply",
             Msg::Query(_) => "Query",
             Msg::Stop => "Stop",
@@ -510,6 +518,11 @@ impl Scheduler {
             Msg::OwnCopyRead { job, error, then } => self.own_copy_read(job, error, *then),
             Msg::ArchiveArrived(path) => self.archive_arrived(&path),
             Msg::ArchiveRemoved(path) => self.archive_removed(&path),
+            Msg::BenchSample {
+                machine,
+                bid,
+                result,
+            } => self.bench_sample_built(&machine, &bid, result),
             Msg::Apply { settings, reply } => {
                 self.apply_settings(*settings);
                 if let Some(r) = reply {

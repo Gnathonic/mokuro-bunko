@@ -117,6 +117,14 @@ impl Npy {
             .collect())
     }
 
+    /// An f32 or f16 array as f32 (f16 widened, which is exact).
+    pub fn into_f32_widened(self) -> Result<Vec<f32>, VlmError> {
+        match self.dtype {
+            NpyDtype::F16 => Ok(self.into_f16()?.into_iter().map(f32::from).collect()),
+            _ => self.into_f32(),
+        }
+    }
+
     pub fn into_f16(self) -> Result<Vec<half::f16>, VlmError> {
         self.expect(NpyDtype::F16)?;
         Ok(self

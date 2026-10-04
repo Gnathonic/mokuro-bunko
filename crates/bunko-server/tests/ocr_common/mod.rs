@@ -162,11 +162,33 @@ impl H {
     }
 
     pub fn connect_with(&mut self, name: &str, sessions: u32, engines: serde_json::Value) -> Proc {
+        let catalog = json!({"engines": engines, "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}]});
+        self.connect_catalog(name, sessions, catalog)
+    }
+
+    /// A processor with a GPU computing in `formats`, running every engine.
+    pub fn connect_gpu(&mut self, name: &str, formats: &[&str]) -> Proc {
+        let catalog = json!({
+            "engines": ["hayai-nova", "paddle-manga", "ppocr-manga"],
+            "detectors": ["ppocr-manga"],
+            "devices": [{"id": "cpu", "label": "CPU"},
+                        {"id": "gpu:0", "label": "GPU 0", "formats": formats, "provider": "cuda", "arch": "sm_89"}],
+        });
+        self.connect_catalog(name, 1, catalog)
+    }
+
+    pub fn connect_catalog(
+        &mut self,
+        name: &str,
+        sessions: u32,
+        catalog: serde_json::Value,
+    ) -> Proc {
         let (reply, mut rx) = tokio::sync::oneshot::channel();
         let body = json!({
             "protocol": 3,
             "name": name,
-            "catalog": {"engines": engines, "detectors": ["ppocr-manga"], "devices": [{"id": "cpu", "label": "CPU"}]},
+            "host": {"cpu": "Test CPU (8 cores)", "gpu": "Test GPU", "backend": "cuda"},
+            "catalog": catalog,
             "max_sessions": sessions,
         });
         self.s.handle(Msg::Register {

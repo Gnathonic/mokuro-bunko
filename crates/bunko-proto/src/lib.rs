@@ -15,7 +15,7 @@
 //!   (`Range` / `If-Range` against a strong `ETag`).
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 pub const PROTOCOL_VERSION: u32 = 3;
@@ -89,6 +89,11 @@ pub struct Device {
     /// The execution provider behind a GPU id (`cuda`, `webgpu`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// The device's architecture (`sm_89`, `gfx1030`, `x86_64`): with `provider` it
+    /// decides which formats the auto precision modes take there
+    /// (`bunko_sched::precision::bf16_native`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
 }
 
 /// What a processor can run. Empty `engines` means "still installing" (models
@@ -342,25 +347,29 @@ pub enum Event {
         #[serde(flatten)]
         detail: BTreeMap<String, Value>,
     },
+    /// The models are loaded and warmed up (`startup_seconds`, `model_load_seconds`,
+    /// `min_window_seconds`, `pages`, `tunable`, `max_trials`, `stage_keys`,
+    /// `stage_device`). Bench details keep their keys in the order they were written
+    /// (0.5.2's dict order), hence `Map` rather than `BTreeMap`.
     BenchReady {
         bid: String,
         #[serde(flatten)]
-        detail: BTreeMap<String, Value>,
+        detail: Map<String, Value>,
     },
     BenchProgress {
         bid: String,
         #[serde(flatten)]
-        detail: BTreeMap<String, Value>,
+        detail: Map<String, Value>,
     },
     BenchTrial {
         bid: String,
         #[serde(flatten)]
-        detail: BTreeMap<String, Value>,
+        detail: Map<String, Value>,
     },
     BenchDone {
         bid: String,
         #[serde(flatten)]
-        detail: BTreeMap<String, Value>,
+        detail: Map<String, Value>,
     },
     /// Catalog changed (models finished downloading, device lost).
     Catalog {
