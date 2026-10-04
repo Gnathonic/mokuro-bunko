@@ -1,16 +1,17 @@
 # Mokuro Bunko on Windows: GPU OCR
 
 mokuro-bunko 0.7 is one native program with no Python, uv or CUDA toolkit to
-install. On Windows there are two ways to run OCR on a GPU:
+install. On Windows the **full** build runs OCR; its recognizers (hayai-nova,
+paddle-manga) run on libtorch, which `mokuro-bunko install-ocr` installs once
+as a *backend pack* for the hardware it finds:
 
-| Build | GPU API | Hardware | Extra requirements |
-|---|---|---|---|
-| **full** (default) | DirectML | Any DirectX 12 GPU: NVIDIA, AMD, Intel | A current graphics driver. Nothing else. |
-| **full-cuda** | CUDA (DirectML remains available) | NVIDIA | NVIDIA driver **580 or newer**, plus the CUDA 13 and cuDNN 9 libraries on the system `PATH` |
+| Pack | Hardware | Extra requirements |
+|---|---|---|
+| `cu130` | NVIDIA, Turing (GTX 16xx / RTX 20xx) or newer | NVIDIA driver **580 or newer**. Nothing else: the pack brings the CUDA libraries. |
+| `cpu` | Everything else (AMD and Intel GPUs run OCR on the CPU on Windows) | Nothing. |
 
-Start with the default `full` build; it works on every DirectX 12 GPU. Use
-`full-cuda` when you have an NVIDIA card and want CUDA's speed. The CPU is
-always the fallback.
+ppocr-manga and the PP-OCR text detector run on the CPU in either case. The
+CPU is always the fallback.
 
 > [!TIP]
 > Run `mokuro-bunko.exe doctor` (or `doctor.bat` in the portable zip) first
@@ -22,23 +23,21 @@ always the fallback.
 powershell -c "irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1 | iex"
 ```
 
-For the CUDA build:
+It installs the full build into `%LOCALAPPDATA%\mokuro-bunko\app`, keeps your
+library, config and logs in `%LOCALAPPDATA%\mokuro-bunko`, adds Start-menu
+shortcuts, runs `doctor` and starts the server. No administrator is needed.
+Add `-Startup` to start the server at every logon, `-Portable` to keep
+everything beside the program:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1))) -Flavor full-cuda
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1))) -Startup
 ```
 
-It installs into `%LOCALAPPDATA%\mokuro-bunko\app`, keeps your library,
-config and logs in `%LOCALAPPDATA%\mokuro-bunko`, adds Start-menu shortcuts,
-runs `doctor` and starts the server. No administrator is needed. Add
-`-Startup` to start the server at every logon, `-Portable` to keep
-everything beside the program.
-
 Prefer a zip? Download
-`mokuro-bunko-<version>-x86_64-pc-windows-msvc-full.zip` (or `-full-cuda.zip`)
-from the [releases page](https://github.com/Gnathonic/mokuro-bunko/releases),
-extract it anywhere and run `run.bat`. In the portable zip everything stays
-in `data\` next to it.
+`mokuro-bunko-<version>-x86_64-pc-windows-msvc-full.zip` from the
+[releases page](https://github.com/Gnathonic/mokuro-bunko/releases), extract
+it anywhere and run `run.bat`. In the portable zip everything stays in
+`data\` next to it.
 
 ## 2. Check the GPU driver
 
@@ -48,35 +47,55 @@ Open a terminal and run:
 nvidia-smi
 ```
 
-For the CUDA build the "Driver Version" must be **580 or newer**, and the CUDA 13 and cuDNN 9 runtime libraries
-must be found on the `PATH` (the `bin` folders of the CUDA 13 toolkit and
-cuDNN 9 installs). The CUDA Toolkit's compiler is not needed; only its
-runtime DLLs are. The default DirectML build does not need any of this: a
-current driver for your GPU is enough.
+The "Driver Version" must be **580 or newer** for the CUDA pack. The CUDA
+Toolkit and cuDNN are not needed: the pack carries the CUDA libraries it uses.
+With an older driver `install-ocr` installs the CPU pack and tells you to
+update the driver.
 
-## 3. Start the server and choose the provider
+## 3. Install the OCR backend
+
+From a terminal in the install folder (`%LOCALAPPDATA%\mokuro-bunko\app`, or
+the folder you extracted the zip into):
+
+```powershell
+.\mokuro-bunko.exe install-ocr --list    # what it detects and would install
+.\mokuro-bunko.exe install-ocr
+```
+
+On an NVIDIA GPU it installs the `cu130` pack: the pack from the release plus
+about 1.3 GB of CUDA libraries from NVIDIA's own packages on PyPI, each
+checked against its pinned sha256 (about 1.9 GB on disk). Otherwise it
+installs the `cpu` pack (about 0.3 GB on disk). The pack goes into
+`backends\` under your data folder, and the models are fetched right after.
+Then restart the server (close its window and run `run.bat` or the
+Start-menu shortcut again).
+
+## 4. Start the server and choose the backend
 
 Run `run.bat`, or use the Start-menu shortcut, and finish setup in the
 browser that opens (`http://127.0.0.1:8080`).
 
-`ocr.backend: auto` (the default) picks the best provider the build offers.
-To force one, set it in `config.yaml` or from the command line:
+`ocr.backend: auto` (the default) uses the pack's GPU when there is one, else
+the CPU. To keep OCR off the GPU, set it in `config.yaml` or from the command
+line:
 
 ```powershell
-mokuro-bunko.exe serve --ocr directml      # or: cuda, cpu
-mokuro-bunko.exe config set ocr.backend cuda
+mokuro-bunko.exe serve --ocr cpu      # or: auto, cuda
+mokuro-bunko.exe config set ocr.backend cpu
 ```
 
-If the provider you ask for cannot start (missing driver or libraries), the
-server logs a warning in `%LOCALAPPDATA%\mokuro-bunko\logs\server.log` and
-runs OCR on the CPU.
+If the GPU cannot be used (an old driver, say), the server logs why in
+`%LOCALAPPDATA%\mokuro-bunko\logs\server.log` and runs OCR on the CPU.
+Without any pack, hayai-nova and paddle-manga do not run at all (only
+ppocr-manga does) until you run `install-ocr`.
 
-## 4. First OCR run: models
+## 5. First OCR run: models
 
-The OCR models (a few hundred MB for hayai-nova, about 2 GB more for
-paddle-manga if you enable it) are downloaded the first time a volume is
-OCR'd, into `models\` under your data folder, and verified. To fetch them
-up front:
+The OCR models are fetched by `install-ocr`, or the first time a volume is
+OCR'd, into `models\` under your data folder, and verified: about 0.5 GB for
+hayai-nova (its compiled package for your GPU or CPU), about 2 GB more for
+paddle-manga if you enable it. To fetch them up front later (for example
+after enabling paddle-manga):
 
 ```powershell
 mokuro-bunko.exe models download
@@ -88,10 +107,13 @@ the reader) and watch it appear on `http://127.0.0.1:8080/queue`. A
 
 ## Using this PC as an OCR processor for another library
 
-If the library runs on another (small) server, make this PC its processor:
+If the library runs on another (small) server, make this PC its processor. A
+processor keeps its pack and models in `%LOCALAPPDATA%\mokuro-bunko-processor`,
+so install the pack there first:
 
 ```powershell
-mokuro-bunko.exe processor setup
+$env:MOKURO_STORAGE = "$env:LOCALAPPDATA\mokuro-bunko-processor"; .\mokuro-bunko.exe install-ocr
+.\mokuro-bunko.exe processor setup
 ```
 
 It asks for the library URL and a `processor` account, writes
@@ -100,14 +122,19 @@ entry). See [deployment.md](deployment.md#remote-ocr-processors).
 
 ## Troubleshooting
 
-- `doctor` should show the build as `full` and the models as present.
-- The server log says which execution provider started and why a requested
-  one did not.
-- CUDA build: confirm the driver is 580 or newer and the CUDA 13 and cuDNN 9
-  DLLs are on the `PATH`; or use the default DirectML build.
+- `doctor` should show the build as `full`, an `OCR backend` line naming the
+  `cu130` pack in use, and the models as present. A WARN line saying "the
+  cu130 pack would use this machine's GPU" means the CPU pack is installed:
+  run `mokuro-bunko.exe install-ocr --variant cu130`.
+- The server log lists the devices the pack found when it loaded
+  (`libtorch backend cu130 ... loaded`), and why a GPU was not used.
+- `install-ocr` says the driver is too old: update the NVIDIA driver to 580 or
+  newer, then run `install-ocr` again.
+- After an update, if the pack no longer loads ("install the pack of this
+  release"), run `mokuro-bunko.exe install-ocr --force`.
 - Windows SmartScreen may warn about the downloaded executable; the binaries
   are not Authenticode signed. Choose "More info", then "Run anyway".
-- Antivirus software that quarantines `mokuro-bunko.exe` or the provider DLLs
-  next to it breaks the install; add an exception for the install folder.
+- Antivirus software that quarantines `mokuro-bunko.exe` or the pack's DLLs
+  breaks the install; add an exception for the install and data folders.
 - Updates come from the admin panel's Updates card (signed, checksum-verified)
   or by running `install.ps1` again; your data is kept.

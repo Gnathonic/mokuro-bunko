@@ -257,14 +257,15 @@ jobs:
   # (crates/bunko-android, cargo ndk for arm64-v8a + x86_64) in the Kotlin app under
   # packaging/android. A release asset only: it is not in release.json (the app updates
   # by store/sideload; the updater reports InstallKind::Mobile). On by default; set the
-  # repository variable BUILD_ANDROID to "false" to skip it.
+  # repository variable BUILD_ANDROID to "true" to build it.
   #
   # Signing: the secrets ANDROID_KEYSTORE_BASE64 (base64 of a .jks/.keystore),
   # ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD. Without them the
   # APK is signed with a throwaway debug key, and users cannot update it in place.
   android:
     needs: prepare
-    if: vars.BUILD_ANDROID != 'false'
+    # Android is out of 0.7's scope (owner, 2026-10-03): opt in with BUILD_ANDROID=true.
+    if: vars.BUILD_ANDROID == 'true'
     runs-on: ubuntu-latest
     env:
       SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
@@ -331,7 +332,7 @@ jobs:
 
   release:
     needs: [prepare, test, build, build-linux-full, packs, packs-linux, android]
-    # android may be skipped (BUILD_ANDROID=false); everything else must have passed.
+    # android is skipped unless BUILD_ANDROID=true; everything else must have passed.
     if: >-
       ${{ !cancelled() && needs.prepare.result == 'success' && needs.test.result == 'success'
       && needs.build.result == 'success' && needs.build-linux-full.result == 'success'

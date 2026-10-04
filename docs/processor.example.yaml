@@ -66,5 +66,7 @@ processor:
   archive_memory_mb: 2048
 
 # The 0.5 `ocr:` section (ocr.backend picked a torch build) is accepted and
-# ignored: the processor carries its engines. The execution provider is chosen
-# automatically (`processor setup --backend` can force one).
+# ignored. The processor runs on the OCR backend pack in its storage
+# (`mokuro-bunko install-ocr` with MOKURO_STORAGE set to this storage) and uses
+# every device it can run; MOKURO_OCR_BACKEND=cuda|rocm|cpu in its environment
+# narrows that.

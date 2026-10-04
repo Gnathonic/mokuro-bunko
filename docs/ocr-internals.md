@@ -14,11 +14,11 @@ what they do. The design documents it summarises are in
 |---|---|---|
 | Scheduler | the server process (all builds) | One actor that owns every piece of OCR state: it keeps an index of what is owed, claims `(volume, generation)` jobs for each lane, collects sidecars, records failures. Its state is mutated one message at a time, with no locks around scheduling. |
 | Processor | the server process (full build, "local") or another machine (`mokuro-bunko processor serve`) | Receives open-session and volume operations, runs the OCR pipeline, answers with events and the finished sidecar. The local processor is the same code as a remote one, wired over in-process channels, and the scheduler treats it as a machine named `local`. |
-| Engines | inside a processor (full build only) | `hayai-nova`, `paddle-manga` and `ppocr-manga` on ONNX Runtime, plus the layout step that turns reads into the sidecar. |
+| Engines | inside a processor (full build only) | `hayai-nova` and `paddle-manga` on libtorch (the backend pack `install-ocr` installs), `ppocr-manga` and the PP-OCR detector on ONNX Runtime on the CPU, plus the layout step that turns reads into the sidecar. |
 
 The lite build has no engines: `ocr.local_processing` is forced off, the
 queue holds with "no processor" until a remote processor connects, and the
-server never links ONNX Runtime. OCR inference runs on dedicated OS threads,
+server never links ONNX Runtime or loads libtorch. OCR inference runs on dedicated OS threads,
 never on the async server's workers.
 
 ## Generations
@@ -79,7 +79,7 @@ cancel: they do not change what is written.
 (the primary row keyed by the bare relative path, other rows suffixed with
 their name) and retried after `poll_interval × 4^(attempts−1)`, capped at one
 hour. Replacing the archive (a newer mtime) clears the record. A generation
-that will not start on a machine (a missing model, a provider that fails) is
+that will not start on a machine (a missing model, a backend pack that does not load) is
 backed off the same way per `(row, machine)`, without blaming any volume.
 
 **Incomplete archives.** The metadata compiler cross-checks every `.mokuro`
@@ -168,7 +168,7 @@ row from the average of the row's last five completed runs
 ## Devices
 
 A device id is `cpu` or `gpu:<n>`, the same spelling whatever the vendor
-(`webgpu`, `cuda`, `directml`, ... is the execution provider behind it). An
+(CUDA or ROCm, through the installed backend pack, is behind it). An
 absent key is `auto`: card 0 when there is one, else the CPU. A processor
 reports the devices it really has when it registers, and the admin panel
 offers only those. Only a stage holding a model takes a device, and the
@@ -195,12 +195,13 @@ machine: `auto-accuracy` (the default), `auto-balanced`, `auto-speed`, or a
 forced `fp32` / `bf16` / `fp16`. `ppocr-manga` fixes its own and ignores it.
 
 - **Support is probed, never listed.** A device reports the formats it
-  supports: fp32 always (the CPU supports only that); a GPU provider adds
-  the others it can run. No architecture list decides anything, so a card
-  that emulates a format slowly still reports it, and only a benchmark shows
-  it slow. The 0.7 ONNX exports are fp32 and fp16 graphs (the fp16 hayai
-  graphs keep the RMSNorm chains and softmax in fp32 for headroom); there
-  are no bf16 graphs.
+  computes in (the backend pack's report): fp32 always; a GPU adds fp16 and
+  bf16; the CPU adds bf16 only with AVX512-BF16. A format also needs a
+  compiled package for the device (packages exist in fp32, bf16 and fp16 for
+  the GPUs, no bf16 for Turing, and in fp32, plus bf16 for hayai-nova, for the CPU); one without
+  is not supported there. The automatic modes take bf16 only where the
+  hardware runs it natively (NVIDIA Ampere and newer, AMD RDNA3/4), so RDNA2
+  and the CPU run fp32 unless a row forces bf16.
 - `auto-accuracy` takes the first candidate the machine supports (fixed, no
   benchmark). `auto-balanced` and `auto-speed` take the machine's benchmark
   pick: each machine benchmarks the row automatically before its first
@@ -424,14 +425,17 @@ rare kanji the small recognizer gets wrong.
 
 ## Models, provenance and pins
 
-The recognizers are ONNX exports of Apache-2.0 weights, produced by
-`tools/onnx_export/` (a Python development tool that never runs on a user's
-machine) and published as the `models-v1` release assets with a manifest of
-sha256 hashes and the source model revisions. A full build downloads what it
-needs into `<storage>/models/` and verifies it (see
-[`rust-port/MODELS.md`](rust-port/MODELS.md)). Every source repo is pinned to
-a commit; a changed export is a new release (`models-v2`), never a re-upload
-under the same tag, because sidecars record the export id.
+The recognizers are compiled libtorch packages of Apache-2.0 weights, one
+per engine, precision and device type, produced by `tools/torch_export/` (a
+Python development tool that never runs on a user's machine) and published
+as the `torch-models-v1` release assets with a manifest of sha256 hashes and
+the source model revisions; the PP-OCR files and the recognizers' host files
+are in the `models-v1` release. A full build downloads what it needs into
+`<storage>/models/`, verifies it and unpacks the packages there (see
+[configuration](configuration.md#ocr-models) and
+[`rust-port/TORCH-BACKEND.md`](rust-port/TORCH-BACKEND.md)). Every source
+repo is pinned to a commit; a changed export is a new release, never a
+re-upload under the same tag.
 
 Every sidecar a composed engine writes carries a top-level `ocr_engine`
 block, and the server stamps one onto every non-primary layer that lacks it;

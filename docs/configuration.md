@@ -505,7 +505,6 @@ depends on how mokuro-bunko was installed:
 | A tarball, `install.sh` as a user (`~/.local/lib/mokuro-bunko`), the Windows zip, portable folder or `install.ps1` | One click: download, verify, swap the executable, restart (on Windows `run.bat` restarts it). |
 | `install.sh` as root with the system unit, a distro package, Homebrew, Nix | Notice only; update through the package manager or re-run `install.sh`. |
 | Docker (`/.dockerenv`, or `MOKURO_INSTALL_KIND=docker`) | Notice with the image to pull. |
-| Android | Notice only. |
 
 `MOKURO_INSTALL_KIND` (`self`, `docker`, or a manager's name) overrides the
 detection. `mokuro-bunko update check` and `update apply [--yes] [--restart]`
@@ -591,9 +590,10 @@ does, the queue holds and the queue page says "No processor connected
 since …". A server that must never have OCR done simply has no `processor`
 account: that role is only ever given by an admin.
 
-A provider that is not available falls back to the CPU, and the server log
-says why. `mokuro-bunko doctor` shows what the build contains and whether
-the models are on disk.
+A GPU that cannot be used (only the CPU pack installed, an old driver, a hidden
+device) leaves the CPU. `mokuro-bunko doctor` shows which pack is in use and
+which this machine would want, and whether the models and compiled packages
+are on disk; the server log lists the devices the pack found when it loaded.
 
 #### `ocr.generations`: the OCR recipes, in the order they run
 
@@ -982,9 +982,13 @@ registers anyway and shows as installing.
 | `processor.archive_memory_mb` | `2048` | RAM for the archives being read and the one on deck, shared by every session (in-memory files on Linux); an archive that does not fit goes to `storage`. `0` keeps every archive on disk. Other platforms always use `storage`. |
 
 A 0.5 `ocr:` section in the file (`ocr.backend` chose a torch build) is
-accepted and ignored. `processor setup --backend` picks the devices (`auto`,
-`cuda`, `rocm`, `cpu`); run `mokuro-bunko install-ocr` on the processor machine
-first (as 0.5.2 needed its OCR environment).
+accepted and ignored. The processor uses every device its backend pack and
+hardware can run; `MOKURO_OCR_BACKEND` (`cuda`, `rocm`, `cpu`) in its
+environment narrows that (`processor setup --backend` is accepted for 0.5
+scripts and only says so). Install the pack first (as 0.5.2 needed its OCR
+environment), into the processor's own storage:
+`MOKURO_STORAGE=<processor.storage> mokuro-bunko install-ocr` (see
+[deployment](deployment.md#3-the-processor-machine)).
 
 **How work is shared.** Each volume goes to the machine predicted to finish
 it first, counting what that machine is already doing, whether it has to

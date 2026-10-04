@@ -3,7 +3,7 @@
 A self-hosted manga library server with WebDAV, built-in OCR processing, and multi-user support. Designed as a backend for [Mokuro Reader](https://reader.mokuro.app).
 
 > [!NOTE]
-> **0.7 is a rewrite in Rust.** It replaces the Python 0.5 line as a drop-in: the same `config.yaml`, database and library tree, the same reader-facing APIs. One native binary, no Python, OCR on the same libtorch 0.5.2 used (installed as a backend pack by `mokuro-bunko install-ocr`, for NVIDIA CUDA, AMD ROCm or the CPU) with Apache-2.0 models only, release packages for Linux, Windows, macOS, Docker and Android, and one-click updates. Coming from 0.5.2? Read [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
+> **0.7 is a rewrite in Rust.** It replaces the Python 0.5 line as a drop-in: the same `config.yaml`, database and library tree, the same reader-facing APIs. One native binary, no Python, OCR on the same libtorch 0.5.2 used (installed as a backend pack by `mokuro-bunko install-ocr`, for NVIDIA CUDA, AMD ROCm or the CPU) with Apache-2.0 models only, release packages for Linux, Windows, macOS and Docker, and one-click updates. Coming from 0.5.2? Read [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 
 ## What it does
 
@@ -105,7 +105,7 @@ docker run -d --name mokuro-bunko --gpus all -p 8080:8080 \
 | `MOKURO_OCR_BACKEND` | `auto` (default), `cuda`, `cpu`, or `skip` (no OCR here; remote processors only). |
 | `MOKURO_*` | Any config key (`MOKURO_<SECTION>_<KEY>`), see [docs/configuration.md](docs/configuration.md). |
 
-The containers need write access to `/tmp` with room for the compiled models (they are unpacked there when loaded). `docker exec mokuro-bunko mokuro-bunko doctor` checks the setup, including the OCR backend.
+The compiled models are unpacked once into the data volume (`/data/models`) and loaded from there. `docker exec mokuro-bunko mokuro-bunko doctor` checks the setup, including the OCR backend.
 
 **Upgrading from the 0.5.2 images**: keep your volumes and variables and change the image: `deploy/Dockerfile` users to `:latest`, the Unraid `unraid-cuda` image to `:latest-cuda` (in the Unraid template, edit *Repository*). Then:
 
@@ -116,10 +116,6 @@ The containers need write access to `/tmp` with room for the compiled models (th
 - 0.5.2 processors cannot talk to a 0.7 library: update them too (see the [migration guide](docs/MIGRATING-0.7.md)).
 
 Systemd units and reverse-proxy examples are in [`deploy/`](deploy/) and described in [docs/deployment.md](docs/deployment.md).
-
-### Android
-
-The release also carries an **APK** (`mokuro-bunko-<version>-android.apk`, arm64-v8a and x86_64) that runs the lite server on the phone as a foreground service; OCR for it comes from remote processors. It is sideloaded and is not part of the in-app updater (it updates like any APK you install). Best effort: see the release notes for its state.
 
 ### From source
 
@@ -195,7 +191,6 @@ The server checks `releases/latest` for a signed `release.json` every 12 hours (
 |---|---|
 | Tarball, `install.sh` as a user, Windows zip or `install.ps1` | One click: downloads the archive, checks the ed25519 signature of the manifest and the sha256, swaps the executable and restarts. |
 | `install.sh` as root (system unit), Docker, distro packages | Notice only: re-run `install.sh`, or pull the new image. |
-| Android | Notice only. |
 
 From a terminal: `mokuro-bunko update check` and `mokuro-bunko update apply [--yes] [--restart]`. A processor machine updates with the same commands. Turn the background check off with `update.check: false`.
 

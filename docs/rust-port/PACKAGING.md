@@ -53,7 +53,7 @@ Release matrix (`.github/workflows/release.yml`):
 | `x86_64-pc-windows-msvc` | ✔ | ✔ | `cpu`, `cu130` | native, windows-latest |
 | `aarch64-apple-darwin` | ✔ | ✔ | `cpu` | native, macos-latest |
 | `x86_64-apple-darwin` | ✔ | — | | cross from macos-latest |
-| `aarch64-linux-android` + `x86_64-linux-android` | ✔ APK (`mokuro-bunko-<ver>-android.apk`, not in release.json) | | | job `android`: cargo-ndk + Gradle (`packaging/android/build.sh`); skip with `vars.BUILD_ANDROID == 'false'`; see MOBILE.md |
+| `aarch64-linux-android` + `x86_64-linux-android` | (APK `mokuro-bunko-<ver>-android.apk`, not in release.json; not released in 0.7) | | | job `android`: cargo-ndk + Gradle (`packaging/android/build.sh`); out of 0.7's scope, opt-in only with `vars.BUILD_ANDROID == 'true'`; see MOBILE.md |
 
 Dropped against the ONNX-only design: `full-cuda` (Linux, Windows), Linux arm64 full
 and the DirectML/CoreML defaults — there is no libtorch pack for Linux arm64 or Intel
@@ -210,8 +210,8 @@ Container contract (kept from 0.5.2, `spec/config-cli-ops.md` §11.2):
   --no-models` as PUID:PGID before `serve`: a no-op when a pack is baked in or already
   in `/data/backends`. Retired variables `MOKURO_BUNKO_OCR_ENV`,
   `MOKURO_BUNKO_OCR_ENGINES_ENV`, `MOKURO_BUNKO_MOKURO_SPEC` are accepted and ignored.
-- `/tmp` in the container must be writable and have room for the compiled model
-  packages: AOTInductor unpacks each `.pt2` into the temp directory when it loads it.
+- The compiled model packages are unpacked once into `/data/models` (the data volume)
+  and loaded in place, not into `/tmp` (`bunko-torch`'s `unpack.rs`).
 - `HEALTHCHECK` runs `mokuro-bunko healthcheck` (GET `/api/health`; no curl in the images).
 - Labels: `org.opencontainers.image.licenses=MPL-2.0` (0.5 said MIT; spec Q9).
 
