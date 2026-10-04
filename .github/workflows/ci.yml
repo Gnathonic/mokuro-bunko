@@ -37,6 +37,8 @@ jobs:
       # The full build (default features, links ONNX Runtime) and the lite build.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p mokuro-bunko --all-targets --locked --no-default-features -- -D warnings
+      # The ONNX Runtime GPU execution providers are not released in 0.7 but must keep compiling.
+      - run: cargo clippy -p mokuro-bunko --locked --features cuda,webgpu -- -D warnings
       - run: cargo clippy --locked --manifest-path packaging/docker-init/Cargo.toml -- -D warnings
 
   msrv:
@@ -112,9 +114,29 @@ jobs:
           set -eux
           cargo run -q -p xtask --locked -- licenses --target x86_64-unknown-linux-musl --flavor lite
           cargo run -q -p xtask --locked -- licenses --target x86_64-unknown-linux-gnu --flavor full
-          cargo run -q -p xtask --locked -- licenses --target x86_64-unknown-linux-gnu --flavor full --ep cuda
           cargo run -q -p xtask --locked -- licenses --target x86_64-pc-windows-msvc --flavor full
           cargo run -q -p xtask --locked -- licenses --target aarch64-apple-darwin --flavor full
+
+  # The CPU OCR backend pack: libtorch download, trim, libbunko_torch build, closure
+  # check, archive; then install-ocr installs and verifies it offline (--from).
+  cpu-pack:
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    env:
+      CARGO_HOME: /github/home/.cargo
+      RUSTUP_HOME: /github/home/.rustup
+    steps:
+      - uses: actions/checkout@v4
+      - name: xtask torch-pack --variant cpu (manylinux_2_28)
+        run: OUT=dist packaging/manylinux/build.sh cpu
+      - name: install-ocr --from dist
+        run: |
+          set -eux
+          export PATH="$CARGO_HOME/bin:$PATH"
+          cargo run -p mokuro-bunko --locked -- -c "$RUNNER_TEMP/c.yaml" install-ocr --variant cpu \
+            --from dist --dir "$RUNNER_TEMP/backends" --no-models
+          test -f "$RUNNER_TEMP/backends/torch-cpu-2.13.0/pack.json"
+          test -f "$RUNNER_TEMP/backends/torch-cpu-2.13.0/libbunko_torch.so"
 
   scripts:
     runs-on: ubuntu-latest

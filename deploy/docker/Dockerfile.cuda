@@ -1,33 +1,53 @@
 # syntax=docker/dockerfile:1.7
 #
-# mokuro-bunko FULL image with the CUDA execution provider (NVIDIA GPUs), plus the
-# optional nginx X-Accel offload. Successor of the 0.5 `Dockerfile.unraid`.
+# mokuro-bunko CUDA image (NVIDIA GPUs): the full image with the cu130 OCR backend
+# pack (libtorch 2.13.0+cu130, libbunko_torch and the CUDA 13.0 libraries libtorch
+# needs) built in. Successor of the 0.5.2 `Dockerfile.unraid` image; Unraid defaults
+# (PUID 99, PGID 100, /config).
 #
 #   docker build -f deploy/docker/Dockerfile.cuda -t mokuro-bunko:cuda .
-#   docker run --gpus all -p 8080:8080 -v ./data:/data mokuro-bunko:cuda
+#   docker run --gpus all -p 8080:8080 -v ./data:/data -v ./config:/config mokuro-bunko:cuda
 #
-# ort's prebuilt ONNX Runtime CUDA provider targets CUDA 13 + cuDNN 9, which needs an
-# NVIDIA driver >= 580 on the host. The provider libraries ship next to the binary in
-# /opt/mokuro-bunko (found through its $ORIGIN runpath); CUDA and cuDNN come from the
-# base image. linux/amd64 only (ort has no aarch64 CUDA build).
+# Host: an NVIDIA driver >= 580 (CUDA 13.0) and the NVIDIA Container Toolkit. The
+# image needs no CUDA base image: libtorch, cuBLAS, cuDNN, ... are in the pack under
+# /opt/mokuro-bunko/backends; only the driver (libcuda) comes from the host, mounted
+# by the toolkit.
+#
+# The NVIDIA libraries are taken from NVIDIA's PyPI wheels (pinned by sha256) at build
+# time: only those their licence texts list as redistributable; cuFile, NVSHMEM and
+# nvJitLink (linked by libtorch, never called by OCR) are replaced by generated stubs.
+# PACKAGING.md §8 has the terms. BAKE_PACK=0 builds the image without the pack;
+# then set OCR_AUTO_INSTALL=true and the container installs it into /data/backends on
+# its first start (`mokuro-bunko install-ocr`: the release's pack + NVIDIA's wheels
+# from PyPI), as 0.5.2's image installed its CUDA torch on first start.
+#
+# BIN_FROM=source (default) compiles in the build stage; the release workflow uses
+# BIN_FROM=prebuilt (dist/docker/amd64/cuda/ from `xtask docker-context`).
+# linux/amd64 only.
 
 ARG BIN_FROM=source
-ARG CUDA_IMAGE=nvidia/cuda:13.0.3-cudnn-runtime-ubuntu24.04
 
-# bookworm's glibc (2.36) <= ubuntu 24.04's (2.39).
-FROM rust:1-slim-bookworm AS source
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gcc g++ make perl pkg-config \
+# trixie = the runtime base's glibc (2.41); ONNX Runtime 1.28's static libraries need
+# libstdc++ from GCC >= 13 (bookworm has 12).
+FROM rust:1-slim-trixie AS source
+ARG BAKE_PACK=1
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gcc g++ make perl pkg-config \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/root/.cache/ort.pyke.io \
+    --mount=type=cache,target=/root/.cache/torch-pack \
     --mount=type=cache,target=/src/target \
     set -eux; \
     host="$(rustc -vV | sed -n 's/^host: //p')"; \
-    cargo run --release --locked -p xtask -- dist --locked --target "$host" --flavor full --ep cuda --out /tmp/dist; \
-    mkdir -p /out; \
+    cargo run --release --locked -p xtask -- dist --locked --target "$host" --flavor full --out /tmp/dist; \
+    mkdir -p /out/backends; \
     tar -xzf /tmp/dist/*.tar.gz -C /out --strip-components=1; \
+    if [ "$BAKE_PACK" = "1" ]; then \
+        BUNKO_PACK_CACHE=/root/.cache/torch-pack cargo run --release --locked -p xtask -- \
+            torch-pack --locked --variant cu130 --bundle-external --no-archive --out /out/backends; \
+    fi; \
     cargo build --release --locked --manifest-path packaging/docker-init/Cargo.toml --target-dir target/docker-init; \
     cp target/docker-init/release/bunko-init /out/
 
@@ -37,15 +57,14 @@ COPY dist/docker/${TARGETARCH}/cuda/ /out/
 
 FROM ${BIN_FROM} AS bin
 
-FROM ${CUDA_IMAGE}
+FROM debian:trixie-slim
 ARG VERSION=dev
 LABEL org.opencontainers.image.source="https://github.com/Gnathonic/mokuro-bunko" \
       org.opencontainers.image.title="mokuro-bunko (CUDA)" \
-      org.opencontainers.image.description="Self-hosted manga library server for Mokuro Reader with local OCR on NVIDIA GPUs (ONNX Runtime CUDA)" \
+      org.opencontainers.image.description="Self-hosted manga library server for Mokuro Reader with local OCR on NVIDIA GPUs (libtorch, CUDA 13)" \
       org.opencontainers.image.licenses="MPL-2.0" \
       org.opencontainers.image.version="${VERSION}"
 
-ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini nginx gettext-base \
     && rm -rf /var/lib/apt/lists/* /etc/nginx/sites-enabled/default
 
@@ -53,14 +72,18 @@ COPY --from=bin /out/ /opt/mokuro-bunko/
 COPY deploy/nginx-internal.conf.template /etc/nginx/nginx-internal.conf.template
 COPY deploy/docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
+# MOKURO_TORCH_PACK names the baked pack; when it is not there (BAKE_PACK=0) the
+# entrypoint drops it and the loader searches /data/backends.
 ENV PATH="/opt/mokuro-bunko:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     MOKURO_INSTALL_KIND="docker" \
+    MOKURO_UPDATE_FLAVOR="full-cuda" \
     MOKURO_HOST="0.0.0.0" \
     MOKURO_PORT="8080" \
     MOKURO_BACKEND_PORT="8081" \
     MOKURO_STORAGE="/data" \
     MOKURO_CONFIG="/config/config.yaml" \
     MOKURO_NGINX_ACCEL="0" \
+    MOKURO_TORCH_PACK="/opt/mokuro-bunko/backends/torch-cu130-2.13.0" \
     PUID="99" \
     PGID="100" \
     UMASK="002" \

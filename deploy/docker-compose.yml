@@ -1,5 +1,7 @@
-# mokuro-bunko with local OCR (CPU). For an NVIDIA GPU use docker-compose.unraid-cuda.yml
-# (image :latest-cuda); for a small server without OCR use docker-compose.lite.yml.
+# mokuro-bunko with local OCR on the CPU (the image carries the CPU OCR backend pack;
+# the models are downloaded into the data volume on first use). For an NVIDIA GPU use
+# docker-compose.unraid-cuda.yml (image :latest-cuda); for a small server without OCR
+# use docker-compose.lite.yml.
 #
 #   docker compose -f deploy/docker-compose.yml up -d
 services:
