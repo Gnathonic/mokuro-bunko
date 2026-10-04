@@ -5,7 +5,13 @@
 #    nginx takes the public ${MOKURO_PORT} and serves library files with sendfile();
 #    mokuro-bunko moves to 127.0.0.1:${MOKURO_BACKEND_PORT} and answers library GETs
 #    with "X-Accel-Redirect: /internal-library/<path>". Same topology as 0.5.
-# 2. exec bunko-init, which applies PUID/PGID/UMASK/TAKE_OWNERSHIP and execs the
+# 2. OCR backend pack: MOKURO_TORCH_PACK names the pack baked into the image; it is
+#    dropped when that directory has no pack (a CUDA image built with BAKE_PACK=0), so
+#    the server finds packs under ${MOKURO_STORAGE}/backends. OCR_AUTO_INSTALL=true
+#    (0.5.2's variable) runs `mokuro-bunko install-ocr --no-models` as PUID:PGID before
+#    the server starts: a no-op when a pack is there, otherwise it downloads the one
+#    for this machine into ${MOKURO_STORAGE}/backends (persisted).
+# 3. exec bunko-init, which applies PUID/PGID/UMASK/TAKE_OWNERSHIP and execs the
 #    server (see packaging/docker-init).
 set -eu
 
@@ -56,6 +62,20 @@ case "${MOKURO_NGINX_ACCEL:-}" in
 	;;
 *)
 	unset MOKURO_NGINX_ACCEL
+	;;
+esac
+
+if [ -n "${MOKURO_TORCH_PACK:-}" ] && [ ! -f "${MOKURO_TORCH_PACK}/pack.json" ]; then
+	unset MOKURO_TORCH_PACK
+fi
+
+case "${OCR_AUTO_INSTALL:-}" in
+1 | true | TRUE | True | yes)
+	if [ "${1:-serve}" = "serve" ]; then
+		echo "[entrypoint] OCR_AUTO_INSTALL: mokuro-bunko install-ocr --no-models"
+		/opt/mokuro-bunko/bunko-init install-ocr --no-models ||
+			echo "[entrypoint] install-ocr failed; the server starts without a GPU backend (see the log above)" >&2
+	fi
 	;;
 esac
 

@@ -3,7 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
-dist/
+# Release output at the top only (packaging/dist/ holds sources).
+/dist/
 build/
 *.egg
 

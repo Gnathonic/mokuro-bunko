@@ -11,8 +11,9 @@
 //! * `MOKURO_NGINX_ACCEL=1|true` is honoured only when the image's nginx is running
 //!   (`BUNKO_NGINX_RUNNING=1`, set by the nginx entrypoint). Otherwise it is removed
 //!   with a warning: without nginx the X-Accel-Redirect responses would be empty.
-//! * `OCR_AUTO_INSTALL`, `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`,
-//!   `MOKURO_BUNKO_MOKURO_SPEC` (0.5 Python OCR environments) are accepted and ignored.
+//! * `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`, `MOKURO_BUNKO_MOKURO_SPEC`
+//!   (0.5 Python OCR environments) are accepted and ignored. `OCR_AUTO_INSTALL` is
+//!   handled by the full/cuda images' entrypoint.sh (`install-ocr` before the server).
 //!
 //! Then it `exec`s `mokuro-bunko` (`BUNKO_EXEC`) with the container's arguments
 //! (default: `serve`). Started as a non-root user (`docker run --user`), it only sets
@@ -26,7 +27,6 @@ use std::process::Command;
 
 const DEFAULT_EXEC: &str = "/opt/mokuro-bunko/mokuro-bunko";
 const RETIRED: &[&str] = &[
-    "OCR_AUTO_INSTALL",
     "MOKURO_BUNKO_OCR_ENV",
     "MOKURO_BUNKO_OCR_ENGINES_ENV",
     "MOKURO_BUNKO_MOKURO_SPEC",

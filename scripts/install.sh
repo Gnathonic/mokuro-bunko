@@ -16,7 +16,8 @@
 #      system unit running as the `mokuro` user).
 #
 # Options:
-#   --flavor lite|full|full-cuda   default: full where it exists, else lite
+#   --flavor lite|full             default: full where it exists, else lite
+#                                  (then run `mokuro-bunko install-ocr` for the OCR backend)
 #   --version X.Y.Z                default: the latest release
 #   --prefix DIR                   install under DIR/lib/mokuro-bunko and DIR/bin
 #   --systemd                      install + enable the server unit
@@ -189,7 +190,7 @@ if [ -z "$FLAVOR" ]; then
 fi
 case "$FLAVOR" in
 lite | full | full-*) ;;
-*) die "--flavor must be lite, full or full-cuda" ;;
+*) die "--flavor must be lite or full" ;;
 esac
 if [ "$os" = Linux ] && [ "$FLAVOR" != lite ] && [ "$glibc" = 0 ]; then
 	die "the $FLAVOR build needs glibc; this system uses musl (use --flavor lite)"
@@ -237,7 +238,7 @@ cp -R "$src" "$libdir.new"
 # Run it before replacing anything (e.g. a glibc too old for a full build).
 if ! "$libdir.new/mokuro-bunko" --version; then
 	rm -rf "$libdir.new"
-	die "the $FLAVOR build does not run on this system; nothing was changed${glibc:+ (a full build needs glibc 2.35+; try --flavor lite)}"
+	die "the $FLAVOR build does not run on this system; nothing was changed${glibc:+ (a full build needs glibc 2.28+; try --flavor lite)}"
 fi
 if [ -d "$libdir" ]; then mv "$libdir" "$libdir.old"; fi
 mv "$libdir.new" "$libdir"

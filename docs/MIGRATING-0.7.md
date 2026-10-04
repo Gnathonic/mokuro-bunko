@@ -14,7 +14,12 @@ exist, and how OCR processors talk to the library.
 - Plan to update **processors at the same time**. A 0.5.2 processor cannot
   talk to a 0.7 library (see [Processors](#processors)).
 - Decide on a build. **Lite** is the server only (OCR by remote processors)
-  and fits a 1 GB VPS. **Full** adds local OCR and the `processor` command.
+  and fits a 1 GB VPS. **Full** adds local OCR and the `processor` command; run
+  `mokuro-bunko install-ocr` once after installing it (as with 0.5.2). The Linux full
+  build is x86_64 only and runs on glibc 2.28+ (Debian 11+, Ubuntu 20.04+, RHEL 8+).
+  **arm64 Linux gets the lite build only** for now (0.5.2's pip install ran OCR there):
+  OCR for an arm64 library comes from a processor on an x86_64 (or Windows/macOS)
+  machine.
   See the [README](../README.md#editions).
 
 ## What carries over unchanged
@@ -89,8 +94,8 @@ Remote processors speak **protocol v3**: one WebSocket per processor
 (`/_processor/<id>/socket`) plus plain `PUT`s for results. 0.5.2 processors
 (protocol v2) and 0.7 libraries refuse each other at registration. Update
 the library and every processor to 0.7 together, and install the **full**
-build on processor machines; they no longer need Python, uv, git or a
-checkout. Your `processor.yaml` keeps working (its `ocr:` section is ignored).
+build on processor machines (then `mokuro-bunko install-ocr`); they no longer
+need Python, uv, git or a checkout. Your `processor.yaml` keeps working (its `ocr:` section is ignored).
 Processor accounts, names and per-machine profiles are unchanged.
 
 **Reverse proxies must pass the WebSocket upgrade for `/_processor/`.**
@@ -101,22 +106,32 @@ location; the bundled `deploy/nginx-internal.conf.template` already does.
 Request buffering off and no body size limit for that location still apply.
 See [Remote OCR processors behind a proxy](deployment.md#remote-ocr-processors-behind-a-proxy).
 
-### OCR models are downloaded, not installed
+### OCR: `install-ocr` installs a backend pack instead of a Python environment
 
-`mokuro-bunko install-ocr` is deprecated. OCR no longer uses Python
-environments. The command still exists so existing scripts and container
-entrypoints do not break: it always exits 0 and, on a full build, just runs
-`models download`. The models are ONNX files downloaded on first use into
-`<storage>/models/` and verified by sha256 (`mokuro-bunko models download` to
-fetch them up front). The old `.ocr-env`, `.ocr-engines-env`, Hugging Face
-cache and torch downloads are no longer used and can be deleted.
+The recognizers still run on torch — libtorch 2.13, the C++ half of the torch 0.5.2
+used — but without Python, pip or venvs. `mokuro-bunko install-ocr` (same command
+name as 0.5.2) now downloads a **backend pack** for the hardware it finds into
+`<storage>/backends/`: `cu130` for NVIDIA GPUs (driver 580 or newer, as 0.5.2's
+CUDA 13 torch needed), `rocm7.1` for supported AMD GPUs on Linux, or `cpu`. Every
+file is checked against the signed release manifest; NVIDIA's CUDA libraries come
+from NVIDIA's own packages on PyPI, as they did with pip. On the CPU, OCR runs in fp32
+as in 0.5.2 (bf16 is an opt-in). `MOKURO_BACKENDS_DIR` moves the packs elsewhere. `--backend cuda|rocm|cpu|auto`
+still works (it maps to `--variant cu130|rocm7.1|cpu|auto`); `--engines` and
+`--detector` are ignored. Unlike 0.5.2 it fails visibly (non-zero exit) when it cannot
+install. The Docker images have their pack built in.
+
+The models are downloaded on first use into `<storage>/models/` (or up front by
+`install-ocr` / `mokuro-bunko models download`) and verified by sha256. The old
+`.ocr-env`, `.ocr-engines-env`, `.pip-cache`, Hugging Face cache and torch
+downloads are no longer used and can be deleted.
 
 ### Environment variables
 
 | 0.5.2 | 0.7 |
 |---|---|
 | `MOKURO_THREADS` (request threads, default 50) | Not read. The server is async; `server.threads` (default `min(cores, 4)`) sets the worker threads. |
-| `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`, `MOKURO_BUNKO_MOKURO_SPEC`, `OCR_AUTO_INSTALL` | Accepted by the Docker entrypoint and ignored. |
+| `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`, `MOKURO_BUNKO_MOKURO_SPEC` | Accepted by the Docker entrypoint and ignored. |
+| `OCR_AUTO_INSTALL` | Docker images: `true` runs `install-ocr --no-models` before the server starts (a no-op when the image has its pack built in). |
 | `MOKURO_PPOCR_MODELS`, `MOKURO_PPOCR_DOWNLOAD` | Still honoured as aliases of `MOKURO_MODELS_DIR` (a directory of model files to use) and `MOKURO_MODELS_DOWNLOAD` (`0` forbids downloads). |
 | `MOKURO_DEBUG`, `MOKURO_EFT_TRACE` | Not read. Use `MOKURO_LOG` (a log filter such as `debug`, or `info,bunko_server=debug`) or `-v`. |
 | `MOKURO_PPOCR_THREADS` / `_SIDE` / `_TILE` / `_PRECISION`, `MOKURO_OCR_STAGE_*` | Not read. Pools and devices are per-row settings (`pools`). |
@@ -124,8 +139,7 @@ cache and torch downloads are no longer used and can be deleted.
 New: `server.threads`, `server.cache_mb`, `update.check`, `update.channel`,
 `update.manifest_url` (each also settable as `MOKURO_<SECTION>_<KEY>`) and
 `ocr.upgrade.*` (`config.yaml` only). `ocr.sessions` is accepted and ignored;
-`ocr.backend` now names an ONNX Runtime execution provider (`auto`, `cuda`,
-`rocm` (alias of `webgpu`), `webgpu`, `directml`, `coreml`, `cpu`, `skip`).
+`ocr.backend` keeps 0.5.2's values (`auto`, `cuda`, `rocm`, `cpu`, `skip`).
 The 0.5 refusals of `ocr.engines`, `ocr.detector`, `ocr.patch_budget` and
 `ocr.char_map` still apply.
 
@@ -135,24 +149,30 @@ Images are published as `ghcr.io/gnathonic/mokuro-bunko`:
 
 | Tag | What | Replaces |
 |---|---|---|
-| `latest-lite`, `<ver>-lite` | Server only, no OCR, no nginx (29 MB, ~16 MiB RSS idle) | new |
-| `latest`, `<ver>` | Server + CPU OCR + nginx for downloads | the generic `deploy/Dockerfile` image |
-| `latest-cuda`, `<ver>-cuda` | As above with the CUDA execution provider (NVIDIA driver 580 or newer) | the `unraid-cuda` image |
+| `latest`, `<ver>` | Server + OCR on the CPU (CPU backend pack built in) + nginx for downloads; amd64 | the generic `deploy/Dockerfile` image |
+| `latest-cuda`, `<ver>-cuda` | As above with the CUDA backend pack built in (NVIDIA driver 580 or newer, NVIDIA container toolkit); amd64 | the `unraid-cuda` image (`Dockerfile.unraid`) |
+| `latest-lite`, `<ver>-lite` | Server only, no OCR, no nginx (29 MB, ~16 MiB RSS idle); amd64 + arm64 | new |
 
 `PUID`, `PGID`, `UMASK`, `TAKE_OWNERSHIP`, `MOKURO_CONFIG` and the other
 `MOKURO_*` variables work as before. Defaults: PUID/PGID 1000:1000 (99:100 in
-the CUDA image, as the Unraid image had). Two differences:
+the CUDA image, as the Unraid image had). Differences:
 
+- OCR works without a first-start install: nothing is pip-installed into `/data` any
+  more (0.5.2 put its torch environments there); only the models are downloaded,
+  into `/data/models`, on first use. The CUDA image no longer derives from
+  `nvidia/cuda` — the CUDA libraries are in the pack — so it is smaller, but still
+  needs the NVIDIA driver (≥ 580) and container toolkit on the host.
 - `MOKURO_NGINX_ACCEL` now defaults to **off** in the images (the async
   server does not need it for throughput). Set it to `1` to keep nginx in
   front, as the Unraid production setup does. The lite image has no nginx and
   ignores it with a warning.
 - The container health check is `mokuro-bunko healthcheck`; there is no curl
-  in the images. The image licence label now says MPL-2.0.
+  or Python in the images. The image licence label now says MPL-2.0.
 
 Unraid: switch the template's repository to
 `ghcr.io/gnathonic/mokuro-bunko:latest-cuda` (templates in `deploy/unraid/`).
-No volume or variable needs to change.
+No volume or variable needs to change. The README's [Docker section](../README.md#docker)
+has the full list of volumes, variables and GPU prerequisites.
 
 ### Installing and updating
 

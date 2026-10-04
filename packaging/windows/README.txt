@@ -11,10 +11,12 @@ GETTING STARTED
    Create your admin account there.
 3. Close the server window to stop the server.
 
-OCR models (a few hundred MB) are downloaded the first time a volume is
-OCR'd, into data\models. The "full" build runs OCR on this PC, using the
-GPU through DirectML when there is one (the "full-cuda" build uses CUDA on
-NVIDIA cards); otherwise the CPU.
+The "full" build runs OCR on this PC. Install the OCR backend once with
+    mokuro-bunko.exe install-ocr
+(in this folder): it uses an NVIDIA GPU through CUDA (driver 580 or newer,
+about 2 GB to download) or the CPU, and goes into data\backends. OCR models
+(a few hundred MB) are downloaded into data\models the first time a volume
+is OCR'd.
 
 ADDING MANGA
 ------------

@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/Gnathonic/mokuro-bunko/issues</Support>
   <Project>https://github.com/Gnathonic/mokuro-bunko</Project>
-  <Overview>Mokuro Bunko: self-hosted manga library server for Mokuro Reader (WebDAV, catalog, accounts) with OCR on an NVIDIA GPU (ONNX Runtime CUDA). Needs the Nvidia-Driver plugin with a driver &gt;= 580 (CUDA 13). For a server without GPU OCR use the mokuro-bunko-lite template. Tags: latest-cuda follows releases; pin a version with e.g. 0.7.0-cuda. Settings left empty fall back to config.yaml.</Overview>
+  <Overview>Mokuro Bunko: self-hosted manga library server for Mokuro Reader (WebDAV, catalog, accounts) with OCR on an NVIDIA GPU (libtorch CUDA 13, built into the image; the OCR models download into Library Data on first use). Needs the Nvidia-Driver plugin with a driver &gt;= 580 and a Turing (GTX 16xx / RTX 20xx) or newer GPU; without a GPU it runs OCR on the CPU. For a server without GPU OCR use the mokuro-bunko-lite template. Tags: latest-cuda follows releases; pin a version with e.g. 0.7.0-cuda. Settings left empty fall back to config.yaml.</Overview>
   <Category>MediaServer:Books Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/deploy/unraid/mokuro-bunko.xml</TemplateURL>

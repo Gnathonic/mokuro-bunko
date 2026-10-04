@@ -15,15 +15,15 @@
     Run from anywhere:
         powershell -c "irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1 | iex"
     With options:
-        & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1))) -Flavor full-cuda -Startup
+        & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1))) -Flavor full -Startup
 
     Updating: the admin panel installs new releases itself (signed manifest +
     checksum). Running this script again also updates; your data is kept.
 
 .PARAMETER Flavor
-    full (default: local OCR, GPU through DirectML), full-cuda (NVIDIA CUDA; needs
-    the NVIDIA driver, CUDA 13 and cuDNN 9 on the system) or lite (server only,
-    OCR by remote processors).
+    full (default: local OCR; then run `mokuro-bunko install-ocr`, which installs
+    CUDA support for an NVIDIA GPU with driver 580+ or the CPU backend) or lite
+    (server only, OCR by remote processors).
 
 .PARAMETER Version
     Release to install, e.g. 0.7.0 (default: the latest release).
@@ -51,7 +51,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet("full", "full-cuda", "lite")]
+    [ValidateSet("full", "lite")]
     [string]$Flavor = "full",
     [string]$Version = "",
     [string]$InstallDir = "",

@@ -72,7 +72,8 @@ base_path/
 │   └── alice/volume-data.json, profiles.json, goals.json
 ├── logs/                    # server.log, and logs/ocr/ per volume
 ├── processors/              # Per-machine OCR profiles (remote processors)
-├── models/                  # Downloaded ONNX OCR models (full build)
+├── backends/                # OCR backend pack: libtorch for CUDA / ROCm / CPU (install-ocr; full build)
+├── models/                  # Downloaded OCR models: compiled libtorch packages, PP-OCR ONNX (full build)
 └── mokuro.db                # SQLite database
 ```
 
@@ -544,7 +545,7 @@ run on this machine.
 
 | Option | Type | Default | What it does | When to change it |
 |--------|------|---------|--------------|-------------------|
-| `backend` | string | `auto` | Which ONNX Runtime execution provider OCR on this machine uses: `auto`, `cuda`, `webgpu`, `directml`, `coreml`, `cpu`, or `skip` (see [Backends](#ocr-backends)). `rocm` is accepted as an alias of `webgpu`. | To force a provider `auto` did not pick, or `skip` for a server that should run no OCR itself. |
+| `backend` | string | `auto` | Which devices OCR on this machine uses: `auto`, `cuda`, `rocm`, `cpu`, or `skip` (see [Backends](#ocr-backends)). | To keep OCR off a GPU (`cpu`), or `skip` for a server that should run no OCR itself. |
 | `poll_interval` | integer | `30` | Seconds between library scans for volumes missing a sidecar or a thumbnail. Also the base of the retry backoff for failed volumes. | Raise it on a very large library where a scan is expensive. |
 | `concurrency` | integer | `1` | How many OCR jobs this machine runs at once (1–8). Not a pool size. At startup. | See [Concurrency](#concurrency). |
 | `sessions` | boolean | `true` | Accepted so old files load, and ignored: models always stay loaded between volumes. | Never. |
@@ -560,20 +561,28 @@ covers what you set.
 
 #### OCR backends
 
-`ocr.backend` (and `serve --ocr`) picks the ONNX Runtime execution provider.
-Which ones exist depends on the build: Linux full builds have CPU, the CUDA
-build adds `cuda`; Windows builds have `directml` (and `cuda` in the CUDA
-build); macOS builds have `coreml`.
+The recognizers (hayai-nova, paddle-manga) run on **libtorch** — the torch 0.5.2 used,
+without Python — from a *backend pack* that `mokuro-bunko install-ocr` installs into
+`<storage>/backends/`: `cu130` (NVIDIA, Linux and Windows), `rocm7.1` (AMD, Linux) or
+`cpu`. ppocr-manga and the PP-OCR text detector run on ONNX Runtime on the CPU, as in
+0.5.2. The Docker images carry their pack (`latest`: cpu, `latest-cuda`: cu130).
+
+`ocr.backend` (and `serve --ocr`) picks the devices:
 
 | Backend | Description |
 |---------|-------------|
-| `auto` | The best provider this build and machine offer, else the CPU. |
-| `cuda` | NVIDIA GPU. Needs the CUDA build, an NVIDIA driver 580 or newer, and CUDA 13 and cuDNN 9 libraries (the CUDA Docker image has them). |
-| `directml` | Any DirectX 12 GPU on Windows. The default of the Windows full build. |
-| `coreml` | Apple silicon. |
-| `webgpu` | GPUs through WebGPU, where a build includes it (`rocm` is an alias: ONNX Runtime has no ROCm provider any more). |
+| `auto` | The installed pack's GPUs, else the CPU. |
+| `cuda` | NVIDIA GPUs (the `cu130` pack): Turing (GTX 16xx / RTX 20xx) or newer, driver 580 or newer. Nothing else to install: the pack brings the CUDA libraries. |
+| `rocm` | AMD GPUs on Linux (the `rocm7.1` pack): Radeon RX 6000 (gfx1030; RX 6600/6700 too: `HSA_OVERRIDE_GFX_VERSION=10.3.0` is set automatically), RX 7000, RX 9000. Needs `libnuma` from the system (Debian/Ubuntu: `libnuma-dev`). |
 | `cpu` | CPU only (slower). |
 | `skip` | This server runs no OCR of its own, the same as `local_processing: false`. |
+
+`webgpu`, `directml` and `coreml` are still accepted: they name ONNX Runtime GPU
+providers, which 0.7 releases do not include, so on a released build they leave only
+the CPU (use `auto`).
+`mokuro-bunko install-ocr --list` and `doctor` show which pack this machine wants and
+which is installed. Without a pack, hayai-nova and paddle-manga are not offered on the
+machine (ppocr-manga still is, and remote processors still work).
 
 `skip` is not "no OCR at all": it means none on this machine. The server
 still owns the queue and still serves cover thumbnails; a
@@ -713,7 +722,8 @@ The admin API serves a census and per-volume actions
 
 #### OCR engines
 
-All engines are Apache-2.0 and run on ONNX Runtime.
+All engines are Apache-2.0. hayai-nova and paddle-manga run on libtorch (the backend
+pack), ppocr-manga on ONNX Runtime on the CPU.
 
 | Engine | What it is | Runs on | Use it for |
 |--------|-----------|---------|------------|
@@ -729,17 +739,25 @@ are.
 
 #### OCR models
 
-The ONNX files are not shipped in the archives. A full build downloads what
-the configured generations need into `<storage>/models/` the first time they
-run, verifies each file's sha256 and only then moves it into place;
-`mokuro-bunko models list|download [--engine E]|verify` do it by hand, for
-example to fetch everything before going offline. Sizes: hayai-nova a few
-hundred MB, ppocr-manga about 23 MB, paddle-manga about 2 GB (more in fp32).
+Models are not shipped in the archives. A full build downloads what the
+configured generations need into `<storage>/models/` the first time they run,
+verifies each file's sha256 and only then moves it into place: the PP-OCR ONNX
+files, hayai-nova's and paddle-manga's host tables (tokenizer, embeddings), and
+the **compiled libtorch packages** for this machine's devices
+(`models/torch/<engine>/<precision>/<target>/`, e.g. `linux-cuda-sm_89`,
+`linux-rocm-gfx1201`, `linux-cpu-x86_64-v3`, with the shared weights next to them).
+`mokuro-bunko install-ocr` and `models download [--engine E]` fetch them up front
+(for example before going offline); `models list|verify` inspect them. Sizes:
+hayai-nova about 0.5 GB per precision, ppocr-manga about 23 MB, paddle-manga
+about 2 GB per precision.
 
 | Setting | Meaning |
 |---|---|
 | `MOKURO_MODELS_DIR` | A directory of model files to use instead of the store (also `MOKURO_PPOCR_MODELS`). Files found there are used as they are. |
 | `MOKURO_MODELS_DOWNLOAD` | `0`, `false`, `no` or `off` forbids downloads (also `MOKURO_PPOCR_DOWNLOAD`). A model that is not on disk then makes the generation fail. |
+| `MOKURO_TORCH_MODELS_DIR` | A directory laid out like `<storage>/models/torch/` searched first (development, air-gapped hosts). |
+| `MOKURO_TORCH_PACK`, `MOKURO_BACKENDS_DIR` | Use this backend pack directory / look for packs here instead of `<storage>/backends/` (the Docker images set `MOKURO_TORCH_PACK`). |
+| `MOKURO_TORCH_THREADS` | CPU threads of a CPU recognizer (default: the session's share of the physical cores). |
 
 #### OCR detectors
 
@@ -819,9 +837,12 @@ never width-tuned, but still gets this precision-only benchmark. Only with
 automatic benchmarks off (`ocr.autobench: false`), or when a machine's
 benchmark failed, does it run the first candidate its card supports.
 
-The CPU supports fp32 only; a GPU provider reports the formats it supports.
-The 0.7 ONNX exports are fp32 and fp16 graphs (no bf16), so a machine never
-reports bf16. A **forced** mode (`fp32`, `bf16`, `fp16`) runs only on machines
+Each device reports the formats it computes in (the backend pack's
+`bt_devices`): GPUs fp32, fp16 and bf16 (as 0.5.2's torch probe said); the CPU
+fp32, plus bf16 on CPUs with AVX512-BF16 (Zen 4/5, Sapphire Rapids and newer).
+A format also needs its compiled package for the device; one without is "not
+supported" there. On the CPU, `auto-accuracy` runs fp32, as 0.5.2 did; bf16 on
+the CPU is an opt-in (force `bf16`). A **forced** mode (`fp32`, `bf16`, `fp16`) runs only on machines
 that support it; every other machine is not eligible for the row and is never
 offered its volumes. When no connected machine can run it, the row is
 **held**: the admin card, the queue page (for admins) and `.mokuro-queue.json`
@@ -833,30 +854,55 @@ precision it was read at.
 
 Every row in the admin panel (OCR → Generations) has a **Benchmark & tune**
 button. It measures the row **as currently edited**, saved or not, on the
-selected machine and on pages sampled from your own library (32 by default).
+selected machine (this server, or a connected processor) and on pages sampled
+from your own library: 32 by default (4–512), a few interior pages from each of
+several volumes with the series taking turns, so covers and ads do not flatter
+the result.
 
 - It **pauses that machine's OCR** for the duration: jobs running there are
   stopped and simply run again afterwards; they are not recorded as
   failures. Other machines keep working. The queue page shows the machine as
   "Benchmarking …" (or "Auto configuring …" for an automatic benchmark).
-- It loads the models once, then tries pool widths following the pipeline's
-  own bottleneck, keeping a change only when it clearly helps.
+- It loads the models once, as the row would run, and warms up on the first
+  pages. The load appears only as "first page after X s"; it is never part of
+  a speed.
+- For an `auto-balanced` or `auto-speed` row it first runs one trial per format
+  the machine's card supports (see [Precision modes](#precision-modes)); the
+  fastest wins, and two within 5% count as a tie that goes to the more
+  accurate format. A format with no compiled package for the card is skipped.
+- It then tries pool widths, following the pipeline's own bottleneck: it
+  widens the stage the pipeline says is in the way while that gains at least
+  3%, then gives back workers that are not needed while the speed stays within
+  1% of the best. The detector always runs on the CPU, so there is no
+  placement to search. At most 8 width trials (plus the format trials) and
+  15 minutes.
+- Every speed is timed by when pages come out of the pipeline: each trial
+  feeds the sample again, as one continuous run, until it has at least 20
+  seconds of output to measure. A trial measured over less than 10 seconds is
+  shown but flagged, and never decides anything.
 - It reports pages per second, what a 200-page volume would take, how long
-  the rest of the queue would take at that rate, how busy each device was,
-  and peak memory. **Apply** writes the widths it found into the row you are
-  editing (or into that processor's settings); you still save.
+  the rest of the queue would take at that rate, how busy the GPU and CPU
+  were during each trial (sampled on the machine that ran it), the process's
+  peak memory and how far the card's VRAM use rose. **Apply** writes the
+  widths it found into the row you are editing (or into that processor's
+  settings); you still save.
 - Benchmarks queue: several can be requested at once and run one at a time
-  per machine.
+  per machine; different machines' benchmarks run side by side.
 
-The last result of each saved row is kept in `<storage>/.ocr-bench.json`.
+The last result of each saved row on this server is kept in
+`<storage>/.ocr-bench.json`; a processor's results are kept in its profile
+(`<storage>/processors/`). A benchmark of an unsaved row is kept in memory
+only, until a restart.
 
 With `ocr.autobench: true`, a row that has never been measured on a machine
-is benchmarked there automatically before that machine is offered its
+(or whose measurement no longer matches its precision mode or that machine's
+card) is benchmarked there automatically before that machine is offered its
 volumes, and the widths found are kept in that machine's profile
 (`<storage>/processors/`), never in `config.yaml`. On this server that
 happens only for a row whose pools table is empty; set any value in the
 table and the table is used as written, though a balanced/speed row still
-gets its precision-only benchmark.
+gets its precision-only benchmark. A machine whose automatic benchmark fails
+runs the row untuned (and on its first supported format) rather than never.
 
 #### Concurrency
 
@@ -936,8 +982,9 @@ registers anyway and shows as installing.
 | `processor.archive_memory_mb` | `2048` | RAM for the archives being read and the one on deck, shared by every session (in-memory files on Linux); an archive that does not fit goes to `storage`. `0` keeps every archive on disk. Other platforms always use `storage`. |
 
 A 0.5 `ocr:` section in the file (`ocr.backend` chose a torch build) is
-accepted and ignored. `processor setup --backend` picks the execution
-provider (`auto`, `cuda`, `webgpu`, `directml`, `coreml`, `cpu`).
+accepted and ignored. `processor setup --backend` picks the devices (`auto`,
+`cuda`, `rocm`, `cpu`); run `mokuro-bunko install-ocr` on the processor machine
+first (as 0.5.2 needed its OCR environment).
 
 **How work is shared.** Each volume goes to the machine predicted to finish
 it first, counting what that machine is already doing, whether it has to
@@ -976,11 +1023,24 @@ request buffering off and no body size limit; see
 [Deployment](deployment.md#remote-ocr-processors) has a complete walkthrough
 for Linux, Windows, macOS and Docker.
 
-#### `install-ocr` (deprecated)
+#### `install-ocr`
 
-`mokuro-bunko install-ocr` remains only so old scripts and entrypoints keep
-working. It accepts its old options, always exits 0, and on a full build runs
-`models download`. There is no OCR environment to install or rebuild.
+`mokuro-bunko install-ocr` installs the OCR backend pack for this machine and
+fetches the models, like 0.5.2's command installed its OCR environment:
+
+```
+mokuro-bunko install-ocr [--variant auto|cpu|cu130|rocm7.1] [--from DIR] [--dir DIR]
+                         [--no-models] [--force] [--list]
+```
+
+`auto` (default) picks `cu130` for an NVIDIA driver 580 or newer, `rocm7.1` for
+a supported AMD GPU on Linux, else `cpu`. The pack comes from this version's
+release, checked against the signed release manifest; the `cu130` pack's NVIDIA
+CUDA libraries are fetched from NVIDIA's own packages on PyPI (about 1.6 GB),
+each file pinned by sha256. `--from DIR` installs from downloaded files (air-gapped
+hosts); `--list` shows the detected hardware and the installed packs. 0.5.2's
+`--backend cuda|rocm|cpu|auto` still works; `--engines`/`--detector` are ignored.
+Unlike 0.5.2 it fails visibly (non-zero exit) when it cannot install.
 
 #### OCR files and logs
 
@@ -991,7 +1051,8 @@ working. It accepts its old options, always exits 0, and on a full build runs
 | `<storage>/.ocr-bench.json` | The last benchmark of each saved row. |
 | `<storage>/.ocr-congestion.json` | The last few runs of each row, shown as the Congestion column. |
 | `<storage>/processors/*.json` | Each machine's profile: hardware, per-generation pools and benchmarks (`@local.json` is this server's own). |
-| `<storage>/models/` | The downloaded ONNX models. |
+| `<storage>/backends/` | The OCR backend pack (`install-ocr`). |
+| `<storage>/models/` | The downloaded models: compiled libtorch packages and PP-OCR ONNX files. |
 
 ## Compiled metadata files
 
@@ -1136,7 +1197,7 @@ admin:
   enabled: true
 
 ocr:
-  backend: "cuda"   # the CUDA build; "auto" picks it as well
+  backend: "cuda"   # the cu130 pack's NVIDIA GPUs; "auto" picks them as well
   poll_interval: 60
 ```
 

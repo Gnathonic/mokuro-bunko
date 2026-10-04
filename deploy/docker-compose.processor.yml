@@ -1,6 +1,9 @@
 # A remote OCR processor on a GPU machine, working for a mokuro-bunko library
 # elsewhere (protocol: docs/rust-port/PROTOCOL.md). processor.yaml (library URL,
-# processor account) goes in ./processor/; models are cached in the volume.
+# processor account) goes in ./processor/; models are cached in the volume. The
+# :latest-cuda image runs OCR on an NVIDIA GPU (driver >= 580, NVIDIA container
+# toolkit); :latest (CPU) works too, without `gpus`. AMD GPUs: run the processor
+# natively (install-ocr installs the ROCm pack), there is no ROCm image.
 #
 #   docker compose -f deploy/docker-compose.processor.yml up -d
 services:
