@@ -94,7 +94,8 @@ Remote processors speak **protocol v3**: one WebSocket per processor
 (`/_processor/<id>/socket`) plus plain `PUT`s for results. 0.5.2 processors
 (protocol v2) and 0.7 libraries refuse each other at registration. Update
 the library and every processor to 0.7 together, and install the **full**
-build on processor machines (then `mokuro-bunko install-ocr`); they no longer
+build on processor machines (then `mokuro-bunko install-ocr` into the processor's
+storage, see [deployment](deployment.md#3-the-processor-machine)); they no longer
 need Python, uv, git or a checkout. Your `processor.yaml` keeps working (its `ocr:` section is ignored).
 Processor accounts, names and per-machine profiles are unchanged.
 

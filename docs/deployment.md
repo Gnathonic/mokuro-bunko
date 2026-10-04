@@ -16,20 +16,35 @@ Pick a build:
 | Build | Contains | Use it for |
 |---|---|---|
 | **lite** | The server only; OCR is done by remote processors. | A small VPS, NAS or Raspberry Pi (1 GB of RAM is enough). |
-| **full** | Lite plus ONNX Runtime, the OCR engines and `processor`. | A machine that does OCR: the library host itself, or a processor. |
-| **full-cuda** | Full with the CUDA execution provider. | NVIDIA GPUs on Linux and Windows. |
+| **full** | Lite plus the OCR engines, local OCR and `processor`. | A machine that does OCR: the library host itself, or a processor. |
 
-Platform support of the release archives: Linux x86_64 and aarch64 (lite: a
-static binary for any distribution; full: glibc 2.35 or newer, i.e. Debian
-12, Ubuntu 22.04, RHEL 10; `full-cuda`: x86_64 only), Windows x86_64
-(`full` uses DirectML), macOS Apple silicon (`full` uses CoreML) and macOS
-Intel (lite only), plus an Android APK of the lite server.
+There is one full build per platform, whatever the GPU: the GPU support comes
+from the OCR backend pack that `mokuro-bunko install-ocr` installs afterwards
+(see [OCR backend](#ocr-backend-install-ocr)).
 
-**GPU prerequisites.** `full-cuda` needs an NVIDIA driver **580 or newer**
-(`nvidia-smi` should work) plus CUDA 13 and cuDNN 9 libraries on the system;
-the CUDA Docker image brings them. The Windows `full` build needs only a
-DirectX 12 GPU with a current driver. Nothing else is installed on the host;
-the OCR models are downloaded by mokuro-bunko itself (see below).
+Platform support of the release archives:
+
+- **Linux x86_64**: lite (a static binary for any distribution) and full
+  (glibc 2.28 or newer: Debian 11+, Ubuntu 20.04+, RHEL 8+).
+- **Linux aarch64 (arm64)**: lite only. OCR for an arm64 library comes from a
+  [remote processor](#remote-ocr-processors) on an x86_64, Windows or macOS
+  machine.
+- **Windows x86_64**: lite and full.
+- **macOS Apple silicon**: lite and full (OCR on the CPU).
+- **macOS Intel**: lite only.
+
+**GPU prerequisites.** Only the GPU driver comes from the host; the backend
+pack brings libtorch and, for NVIDIA, the CUDA libraries:
+
+| Pack | Hardware | Host needs |
+|---|---|---|
+| `cu130` | NVIDIA GPUs, Turing (GTX 16xx / RTX 20xx) or newer; Linux and Windows | An NVIDIA driver **580 or newer** (`nvidia-smi` shows it). No CUDA toolkit, no cuDNN. |
+| `rocm7.1` | AMD Radeon RX 6000 (gfx1030; the RX 6600/6700 class, gfx1031/1032, runs the gfx1030 kernels with `HSA_OVERRIDE_GFX_VERSION=10.3.0`, which is set automatically), RX 7000 and RX 9000; Linux only | The amdgpu kernel driver (`/dev/kfd`), access to the GPU (`video` and `render` groups) and `libnuma` (Debian/Ubuntu: `libnuma-dev`, Arch: `numactl`). No ROCm install. |
+| `cpu` | Everything else, including macOS on Apple silicon, AMD and Intel GPUs on Windows, and older NVIDIA drivers | Nothing. The recognizers on the CPU need an x86_64 CPU with AVX2 and FMA (x86-64-v3), or arm64. |
+
+ppocr-manga and the PP-OCR text detector run on ONNX Runtime on the CPU,
+which is linked into the full build: nothing to install for them. The OCR
+models are downloaded by mokuro-bunko itself (see below).
 
 ### Linux and macOS: `install.sh`
 
@@ -39,7 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts
 ```
 
 The script picks the archive for your OS, CPU and flavor (`--flavor
-lite|full|full-cuda`, default: full where it exists, else lite), checks the
+lite|full`, default: full where it exists, else lite), checks the
 signature of the release manifest (needs OpenSSL 3; `--require-signature`
 fails without it) and the archive's sha256, and installs into
 `~/.local/lib/mokuro-bunko` with a link in `~/.local/bin` (as root:
@@ -48,13 +63,14 @@ it). A full binary built for a newer glibc than yours is caught before
 anything is replaced. `--systemd` installs and starts a service (see
 [Systemd](#systemd-service)), `--processor` installs the OCR processor unit
 (needs a full flavor), `--version X.Y.Z` pins a release, `--dry-run` shows
-what would happen. Run it again to update.
+what would happen. Run it again to update. On a full build, run
+`mokuro-bunko install-ocr` once afterwards (see
+[OCR backend](#ocr-backend-install-ocr)).
 
 Without the script: unpack `mokuro-bunko-<version>-<target>-<flavor>.tar.gz`
-and run `./mokuro-bunko serve`. Keep the files of the archive together; in a
-`full-cuda` build the CUDA provider libraries next to the executable are
-loaded from there. On macOS a tarball downloaded in a browser is quarantined:
-`xattr -d com.apple.quarantine mokuro-bunko` (the script is not affected).
+and run `./mokuro-bunko serve`. On macOS a tarball downloaded in a browser is
+quarantined: `xattr -d com.apple.quarantine mokuro-bunko` (the script is not
+affected).
 
 ### Windows: `install.ps1` or the portable zip
 
@@ -65,12 +81,13 @@ powershell -c "irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main
 Installs into `%LOCALAPPDATA%\mokuro-bunko\app` (no admin rights, nothing in
 the registry), adds Start-menu shortcuts, runs `mokuro-bunko doctor` and
 starts the server. Your data stays in `%LOCALAPPDATA%\mokuro-bunko`. Options
-are `-Flavor full|full-cuda|lite`, `-Version`, `-InstallDir`, `-Portable`,
+are `-Flavor full|lite`, `-Version`, `-InstallDir`, `-Portable`,
 `-Startup` (start at logon), `-NoShortcut`, `-NoStart`; see the top of
 [`scripts/install.ps1`](../scripts/install.ps1). It verifies the archive's
 sha256 (PowerShell cannot verify the ed25519 signature; the in-app updater
 does). Windows SmartScreen may warn: the executable is not Authenticode
-signed.
+signed. Then run `mokuro-bunko.exe install-ocr` once from the install folder
+(the `cu130` pack on an NVIDIA GPU, else the CPU pack).
 
 The **portable zip** (`mokuro-bunko-<version>-x86_64-pc-windows-msvc-<flavor>.zip`)
 needs no installer: extract it anywhere and run `run.bat`. While `PORTABLE.txt`
@@ -87,28 +104,60 @@ See [Docker](#docker) below.
 ```bash
 git clone https://github.com/Gnathonic/mokuro-bunko.git
 cd mokuro-bunko
-cargo build --release -p mokuro-bunko                        # full, CPU
-cargo build --release -p mokuro-bunko --no-default-features  # lite
-cargo build --release -p mokuro-bunko --features cuda        # NVIDIA CUDA
+cargo build --release -p mokuro-bunko                           # full
+cargo build --release -p mokuro-bunko --no-default-features     # lite
+cargo run -p xtask -- torch-pack --variant cpu --out dist       # an OCR backend pack (cpu|cu130|rocm7.1)
+./target/release/mokuro-bunko install-ocr --from dist           # install it
 ./target/release/mokuro-bunko serve
 ```
 
-### OCR models
+### OCR backend (`install-ocr`)
 
-A full build downloads the ONNX models for the configured OCR generations the
-first time they run, into `<storage>/models/`, checking every file's sha256.
-To fetch them ahead of time, for example before moving to a network without
-internet access:
+The OCR recognizers (hayai-nova, paddle-manga) run on libtorch, which a full
+build does not contain: `mokuro-bunko install-ocr` downloads it once as a
+*backend pack* for the hardware it finds, `cu130`, `rocm7.1` or `cpu` (see
+the table above), into `<storage>/backends/`, then fetches the models.
 
 ```bash
-mokuro-bunko models download                    # everything
+mokuro-bunko install-ocr                  # detect the hardware, install its pack and the models
+mokuro-bunko install-ocr --list           # what it detects, which pack it would install, what is installed
+mokuro-bunko install-ocr --variant cpu    # pick the pack yourself (auto, cpu, cu130, rocm7.1)
+```
+
+The pack comes from the release of the same version, checked against the
+signed release manifest; the `cu130` pack's CUDA libraries (about 1.6 GB) are
+fetched from NVIDIA's own packages on PyPI, each pinned by sha256. Sizes on
+disk: `cpu` 0.4 GB, `cu130` 2.5 GB, `rocm7.1` 6.8 GB. `--from DIR` installs
+from files downloaded elsewhere (the pack archive, optionally `release.json`
+and its `.sig`, and the NVIDIA wheels) on a host without internet,
+`--no-models` skips the models, `--force` reinstalls. The full and CUDA
+Docker images have their pack built in. `MOKURO_BACKENDS_DIR` moves the packs elsewhere.
+
+Without a pack the server still starts and serves; hayai-nova and
+paddle-manga are not offered on the machine (ppocr-manga still is, and remote
+processors still work), and `mokuro-bunko doctor` says which pack to install.
+
+### OCR models
+
+A full build downloads what the configured OCR generations need the first
+time they run, into `<storage>/models/`, checking every file's sha256: the
+PP-OCR ONNX files, hayai-nova's and paddle-manga's host files (tokenizer,
+embeddings) and the **compiled libtorch packages** for this machine's device,
+which are unpacked there once and loaded in place. `install-ocr` fetches them
+up front; so does `models download`, for example before moving to a network
+without internet access:
+
+```bash
+mokuro-bunko models download                    # what the enabled generations need here
 mokuro-bunko models download --engine hayai-nova
 mokuro-bunko models list                        # what exists and what is on disk
 mokuro-bunko models verify
 ```
 
-`MOKURO_MODELS_DIR` points at a directory of model files for air-gapped
-hosts, and `MOKURO_MODELS_DOWNLOAD=0` forbids downloads.
+Sizes: hayai-nova about 0.5 GB per precision, paddle-manga about 2 GB per
+precision, ppocr-manga about 23 MB. `MOKURO_MODELS_DIR` points at a directory
+of model files for air-gapped hosts, and `MOKURO_MODELS_DOWNLOAD=0` forbids
+downloads (see [configuration](configuration.md#ocr-models)).
 
 ### Updating
 
@@ -120,6 +169,10 @@ installs them. From a terminal: `mokuro-bunko update check` and
 Docker only get a notice ("re-run `install.sh`", "pull the new image"). Your
 data is never touched by an update. Set `update.check: false` to stop the
 background check. See [configuration](configuration.md#updates).
+
+An update replaces the executable only; the installed backend pack stays. If
+`doctor` or the server log then says the pack implements another backend ABI
+("install the pack of this release"), run `mokuro-bunko install-ocr --force`.
 
 ## First start
 
@@ -397,12 +450,27 @@ the server is async, so several processors do not need any tuning.
 ### 3. The processor machine
 
 A processor is the **same `mokuro-bunko` executable**, full build, of the
-same release as the library. There is nothing else to install: no Python, no
-git, no checkout. Install it as in [Installing](#installing) (`install.sh
---flavor full` or `full-cuda`, `install.ps1`, a Docker image), then one
-command, `processor setup`, does the rest. A processor machine needs the GPU
-driver only (NVIDIA driver 580 or newer for the CUDA build; any DirectX 12
-driver for DirectML on Windows).
+same release as the library. There is no Python, git or checkout to install.
+Install it as in [Installing](#installing) (`install.sh --flavor full`,
+`install.ps1`, a Docker image), install the OCR backend pack, then one
+command, `processor setup`, does the rest. From the host the processor needs
+the GPU driver only (see the [GPU prerequisites](#installing)).
+
+A processor keeps its packs and models in its own storage, `processor.storage`
+(`~/.local/share/mokuro-bunko-processor` on Linux and macOS,
+`%LOCALAPPDATA%\mokuro-bunko-processor` on Windows), not in the library
+storage that `install-ocr` uses by default. Point `install-ocr` there with
+`MOKURO_STORAGE` (it then fetches the pack's models there too):
+
+```bash
+MOKURO_STORAGE=~/.local/share/mokuro-bunko-processor mokuro-bunko install-ocr
+```
+
+```powershell
+$env:MOKURO_STORAGE = "$env:LOCALAPPDATA\mokuro-bunko-processor"; .\mokuro-bunko.exe install-ocr
+```
+
+(The Docker images have their pack built in and need no step.) Then:
 
 ```bash
 mokuro-bunko processor setup
@@ -414,7 +482,8 @@ order, it:
 1. logs in to the library and checks that the account has the `processor`
    role and that the library speaks this release's processor protocol,
    before it writes anything and without registering the machine;
-2. detects the hardware and the execution provider `auto` resolves to;
+2. shows this machine's CPU and GPU and the engines it can run (from its
+   backend pack and models);
 3. writes `processor.yaml` with only the settings that differ from the
    defaults, readable by you only (mode 600);
 4. offers to run the processor as a service (see
@@ -423,15 +492,18 @@ order, it:
 Every answer can also be given as an option, for a script: `--url`,
 `--username`, `--password-stdin` (the password from the first line of
 standard input; there is deliberately no `--password`), `--name` (how the
-library shows this machine; default the hostname), `--backend` (`auto`,
-`cuda`, `rocm`, `webgpu`, `directml`, `coreml`, `cpu`), `--tls-verify`
+library shows this machine; default the hostname), `--tls-verify`
 (`true`, `false`, or a certificate's path), `--config` (where to write the
 file, default `processor.yaml`), `--yes` (accept every default),
 `--no-service`, and `--force` (overwrite an existing file).
-`mokuro-bunko processor setup --help` lists them.
+`mokuro-bunko processor setup --help` lists them. `--backend` is accepted for
+0.5 scripts and changes nothing: the processor uses what its pack and
+hardware can run, and `MOKURO_OCR_BACKEND` (`cuda`, `rocm`, `cpu`) in its
+environment narrows that.
 
-The OCR models for the library's generations are downloaded the first time
-they run (or up front with `mokuro-bunko models download`). Within a few
+The OCR models for the library's generations are downloaded into the
+processor's storage the first time they run (or up front by `install-ocr` as
+above). Within a few
 seconds of starting, the processor appears in the library's admin panel (the
 OCR section's **Processors** card) and starts taking volumes; with
 `ocr.autobench` on, each generation is first benchmarked on it once.
@@ -440,17 +512,20 @@ did.
 
 #### Linux
 
-Install a full flavor (`install.sh --flavor full`, or `full-cuda` for NVIDIA)
-and run `mokuro-bunko processor setup`. NVIDIA needs the driver, CUDA 13 and
-cuDNN 9 libraries for the CUDA build. The release builds on Linux have
-CUDA and CPU execution providers only, so an AMD GPU processor runs on the
-CPU unless you build from source with `--features webgpu` and pass
-`--backend webgpu`.
+Install the full build (`install.sh --flavor full`; x86_64 only, arm64 Linux
+has no full build and cannot be a processor), install the pack into the
+processor's storage as above and run `mokuro-bunko processor setup`. NVIDIA
+gets the `cu130` pack (driver 580 or newer, nothing else). A supported AMD
+GPU gets the `rocm7.1` pack; it needs `libnuma` from the system
+(`install-ocr` prints the package names of any host library it misses) and
+the user running the processor must be in the `video` and `render` groups.
+Anything else runs on the CPU.
 
 #### Windows
 
-Install with `install.ps1` (the `full` flavor uses DirectML on any DirectX 12
-GPU; `-Flavor full-cuda` for NVIDIA with CUDA) and run
+Install with `install.ps1` (the `full` flavor), install the pack into the
+processor's storage as above (the `cu130` pack on an NVIDIA GPU; AMD and Intel
+GPUs run OCR on the CPU) and run
 `mokuro-bunko.exe processor setup` from a terminal in the install folder (or
 the Start-menu shortcut's folder). The questions are the same.
 `processor.yaml` is restricted to your account, and the last question is
@@ -459,17 +534,21 @@ processor keeps its storage in `%LOCALAPPDATA%\mokuro-bunko-processor`.
 
 #### macOS
 
-Use the `aarch64-apple-darwin` full build (CoreML) and run
+Use the `aarch64-apple-darwin` full build (Apple silicon; OCR on the CPU with
+the `cpu` pack), install the pack as above and run
 `mokuro-bunko processor setup`. `processor service` installs a launchd agent.
+Intel Macs have no full build.
 
 #### Docker (NVIDIA)
 
 [`deploy/docker-compose.processor.yml`](../deploy/docker-compose.processor.yml)
 runs the CUDA image as a processor: put `processor.yaml` in `./processor/`
 and start it with `docker compose -f deploy/docker-compose.processor.yml up -d`
-(it needs the NVIDIA container runtime and a driver 580 or newer). Models are
-cached in the compose volume. The password can come from the environment
-instead of the file: `MOKURO_PROCESSOR_PASSWORD`.
+(it needs the NVIDIA container toolkit and a driver 580 or newer). The CUDA
+backend pack is built into the image; models are cached in the compose
+volume. The `:latest` image (CPU) works too, without `gpus`. There is no ROCm
+image: run an AMD processor natively. The password can come from the
+environment instead of the file: `MOKURO_PROCESSOR_PASSWORD`.
 
 #### By hand
 
@@ -555,10 +634,17 @@ the GPU (the `video` group, and `render` for some AMD setups), and its
 `ExecStart` is
 `/usr/local/bin/mokuro-bunko processor serve --config /etc/mokuro-bunko/processor.yaml`.
 
+Install the backend pack as that user, into its processor storage (the
+default `processor.storage` under its home, unless `processor.yaml` sets
+another):
+
 ```bash
 sudo useradd -r -m -d /var/lib/mokuro-bunko -s /usr/sbin/nologin mokuro   # if it does not exist
 sudo usermod -aG video,render mokuro
 sudo install -D -m 600 -o mokuro processor.yaml /etc/mokuro-bunko/processor.yaml
+sudo -u mokuro env HOME=/var/lib/mokuro-bunko \
+  MOKURO_STORAGE=/var/lib/mokuro-bunko/.local/share/mokuro-bunko-processor \
+  /usr/local/bin/mokuro-bunko install-ocr
 sudo systemctl enable --now mokuro-bunko-processor
 journalctl -u mokuro-bunko-processor -f
 ```
@@ -669,16 +755,26 @@ as a user it installs a user unit under `~/.config/systemd/user/`. By hand:
    ```
    With `ProtectHome=yes` nothing can be written under a home directory,
    which is why the config and storage live under `/var/lib/mokuro-bunko`.
-   A full build keeps its models in `<storage>/models`, so no extra setting
-   is needed.
+   A full build keeps its backend pack in `<storage>/backends` and its models
+   in `<storage>/models`, so no extra setting is needed.
 
-3. **Enable and start**:
+3. **Install the OCR backend** (full build), as the service user and with
+   the service's storage and config:
+   ```bash
+   sudo -u mokuro env MOKURO_STORAGE=/var/lib/mokuro-bunko/storage \
+     MOKURO_CONFIG=/var/lib/mokuro-bunko/config.yaml \
+     /usr/local/bin/mokuro-bunko install-ocr
+   ```
+   For an AMD GPU also add the user to the GPU groups:
+   `sudo usermod -aG video,render mokuro`.
+
+4. **Enable and start**:
    ```bash
    sudo systemctl daemon-reload
    sudo systemctl enable --now mokuro-bunko
    ```
 
-4. **Check status**:
+5. **Check status**:
    ```bash
    sudo systemctl status mokuro-bunko
    journalctl -u mokuro-bunko -f
@@ -693,8 +789,11 @@ Images are published at `ghcr.io/gnathonic/mokuro-bunko`:
 | Tag | Dockerfile | What | Size |
 |---|---|---|---|
 | `latest-lite`, `<ver>-lite` | `deploy/docker/Dockerfile.lite` | Server only, distroless, no OCR, no nginx. amd64, arm64. | 29 MB; idles at ~16 MiB RSS |
-| `latest`, `<ver>` | `deploy/docker/Dockerfile` | Server + CPU OCR + nginx and tini. amd64, arm64. | ~172 MB |
-| `latest-cuda`, `<ver>-cuda` | `deploy/docker/Dockerfile.cuda` | As `latest`, with the CUDA execution provider (NVIDIA driver 580 or newer, NVIDIA container runtime). amd64. | a few GB (NVIDIA base) |
+| `latest`, `<ver>` | `deploy/docker/Dockerfile` | Server + OCR on the CPU (the `cpu` backend pack is built in) + nginx and tini. amd64. | ~177 MB download (~600 MB unpacked) |
+| `latest-cuda`, `<ver>-cuda` | `deploy/docker/Dockerfile.cuda` | As `latest`, with the `cu130` backend pack built in (libtorch and the CUDA 13 libraries; no CUDA base image). Needs an NVIDIA driver 580 or newer, the NVIDIA container toolkit and a Turing or newer GPU; without a GPU it runs OCR on the CPU. amd64. | ~1.8 GB download (~2.85 GB unpacked) |
+
+There are no arm64 OCR images (arm64 hosts run the lite image and OCR on a
+processor elsewhere) and no ROCm image (run an AMD processor natively).
 
 Everything lives under `/data` (library, database, `config.yaml`, models), so
 mount a volume there. All images start as root and `bunko-init` drops to
@@ -721,7 +820,8 @@ docker run -d \
   ghcr.io/gnathonic/mokuro-bunko:latest
 ```
 
-The `latest` image has no GPU runtime, so OCR in it runs on the CPU. For GPU
+The `latest` image carries the CPU backend pack, so OCR in it runs on the
+CPU; the models are downloaded into `/data/models` on first use. For GPU
 OCR use the CUDA image below, or run the lite image (or `latest` with
 `MOKURO_OCR_LOCAL_PROCESSING=false`) and a
 [remote processor](#remote-ocr-processors) on the GPU machine. The first
@@ -763,10 +863,16 @@ produces empty downloads.
 docker compose -f deploy/docker-compose.unraid-cuda.yml up -d
 ```
 
-It needs the NVIDIA container runtime and a driver 580 or newer, runs as
-`PUID`/`PGID` (default 99/100), keeps its config in `/config`
-(`MOKURO_CONFIG=/config/config.yaml`) and its data, including the downloaded
-models, in `/data`.
+It needs the NVIDIA container toolkit, a driver 580 or newer and a Turing
+(GTX 16xx / RTX 20xx) or newer GPU, runs as `PUID`/`PGID` (default 99/100),
+keeps its config in `/config` (`MOKURO_CONFIG=/config/config.yaml`) and its
+data, including the downloaded models, in `/data`. The CUDA libraries are in
+the image's backend pack; only the driver comes from the host. To check what
+the container sees:
+
+```bash
+docker run --rm --gpus all ghcr.io/gnathonic/mokuro-bunko:latest-cuda install-ocr --list
+```
 
 ### Unraid + NVIDIA GPU
 
@@ -799,9 +905,11 @@ Optional:
   listens on `MOKURO_BACKEND_PORT` (default 8081) inside the container.
 - `TAKE_OWNERSHIP=true`: chown `/data` and `/config` at boot.
 
-The 0.5 variables `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`,
-`MOKURO_BUNKO_MOKURO_SPEC` and `OCR_AUTO_INSTALL` are accepted and ignored,
-so an existing template keeps working after you change its repository.
+The 0.5 variables `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV` and
+`MOKURO_BUNKO_MOKURO_SPEC` are accepted and ignored, and `OCR_AUTO_INSTALL=true`
+runs `install-ocr --no-models` before the server starts (a no-op, as the
+image has its pack built in), so an existing template keeps working after you
+change its repository.
 
 ## Admin Setup
 

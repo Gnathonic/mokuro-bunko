@@ -118,15 +118,15 @@ update:
   manifest_url: "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json"
 
 ocr:
-  # Execution provider for OCR on THIS machine (a full build; a lite build has
+  # Which devices OCR uses on THIS machine (a full build, after
+  # `mokuro-bunko install-ocr` installed its backend pack; a lite build has
   # no local OCR):
-  # - auto:     the best one this build and machine offer
-  # - cuda:     NVIDIA GPU (the CUDA build; driver 580 or newer)
-  # - directml: any DirectX 12 GPU (Windows)
-  # - coreml:   Apple silicon (macOS)
-  # - webgpu:   GPUs through WebGPU (rocm is accepted as an alias: ONNX
-  #             Runtime has no ROCm provider any more)
+  # - auto:     the installed pack's GPUs, else the CPU
+  # - cuda:     NVIDIA GPUs (the cu130 pack; Turing or newer, driver 580+)
+  # - rocm:     AMD GPUs on Linux (the rocm7.1 pack; RX 6000/7000/9000)
   # - cpu:      CPU only
+  # (webgpu, directml and coreml are accepted for old files; no release has
+  # those runtimes, so they leave only the CPU)
   # - skip:     no OCR on THIS machine (the same as local_processing: false);
   #             a processor that logs in runs the queue, which holds until one does
   backend: auto

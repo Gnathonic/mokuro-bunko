@@ -13,13 +13,23 @@ It prints PASS / WARN / FAIL lines, with a fix hint under anything wrong:
 
 - the build (lite or full, and its target)
 - config validity (and any note about a migrated 0.5 setting) and storage writability
-- ONNX Runtime (full build): whether local OCR can start
-- whether the OCR models are downloaded
+- ONNX Runtime (full build): the CPU runtime ppocr-manga and the PP-OCR
+  detector run on
+- OCR backend (full build): which backend pack is in use and where, whether
+  its files are complete and its host libraries present, and whether another
+  pack would use this machine's GPU
+- Models (full build): whether the PP-OCR and host model files are downloaded
+- Compiled packages (full build, when a hayai-nova or paddle-manga
+  generation is enabled): whether the compiled package each one needs on
+  this machine's device is on disk, and whether anything here can run it
 - free disk space (warns under 2 GB)
 - whether the configured port is already in use
 - volumes currently failing OCR
 
-Exit code is 0 unless a `FAIL` is found, so scripts can gate on it.
+Exit code is 0 unless a `FAIL` is found, so scripts can gate on it. On a
+processor machine, run it with `MOKURO_STORAGE` set to the processor's
+storage (see [deployment](deployment.md#3-the-processor-machine)) so that it
+checks the processor's pack and models.
 
 ## Where the logs are
 
@@ -47,9 +57,9 @@ inside the folder). `mokuro-bunko config path` prints the real locations.
    1 hour between attempts, so they don't hammer your GPU forever.)
 3. Read `<storage>/logs/server.log` around the failure for the engine's
    full error.
-4. Run `mokuro-bunko doctor`. The usual causes are models that could not be
-   downloaded (no internet, a full disk) or an execution provider that does
-   not work on this machine.
+4. Run `mokuro-bunko doctor`. The usual causes are no OCR backend pack (then
+   hayai-nova and paddle-manga cannot run here; see below) or models that
+   could not be downloaded (no internet, a full disk).
 5. To force a retry immediately: fix the cause, then either replace the
    `.cbz` file (updating its timestamp resets the failure record) or
    restart the server.
@@ -66,19 +76,159 @@ on a machine with a full build, see
 [deployment](deployment.md#remote-ocr-processors)) or use a full build with
 local processing on and restart.
 
+## "No backend pack installed"
+
+`doctor` warns `OCR backend: no backend pack installed in <storage>/backends
+(...)`, the server log says `no libtorch backend pack in ... (install one with
+'mokuro-bunko install-ocr')`, and `models download` reports `compiled
+packages: FAILED: the OCR backend is not installed`. The full build does not
+contain libtorch, which hayai-nova and paddle-manga run on; until a pack is
+installed they are not offered on this machine (ppocr-manga still runs, and
+remote processors still work). Run:
+
+```bash
+mokuro-bunko install-ocr
+```
+
+It prints the pack it chose and why (`OCR backend: cu130 (NVIDIA GeForce RTX
+4090 (driver 595.58.03))`), downloads it, checks it against the signed
+release manifest and fetches the models. Then restart the server: the pack
+is opened once per process. `install-ocr --list` shows what it detects
+without installing anything.
+
+- **"release X has no <variant> backend pack for <target>"**: there are packs
+  for Linux x86_64 (`cpu`, `cu130`, `rocm7.1`), Windows x86_64 (`cpu`,
+  `cu130`) and macOS on Apple silicon (`cpu`) only.
+- **"... is release X, this is mokuro-bunko Y"**: the pack must come from the
+  release of the running version. A source build of an unreleased version
+  needs its own pack (`cargo run -p xtask -- torch-pack`, then
+  `install-ocr --from dist`).
+- **A host without internet**: download the pack archive
+  (`mokuro-bunko-<version>-<target>-torch-<variant>.tar.zst`, or its numbered
+  parts), `release.json` with `release.json.sig`, and for `cu130` the NVIDIA
+  wheels it lists, into one directory elsewhere, then
+  `mokuro-bunko install-ocr --from <dir>`.
+- **A processor machine**: `install-ocr` installs into the library storage by
+  default, but the processor looks in its own `processor.storage`. Install it
+  there (`MOKURO_STORAGE=<processor storage> mokuro-bunko install-ocr`, see
+  [deployment](deployment.md#3-the-processor-machine)).
+- **Docker**: the `latest` and `latest-cuda` images have their pack built in
+  (`MOKURO_TORCH_PACK`). A CUDA image built with `BAKE_PACK=0` needs
+  `OCR_AUTO_INSTALL=true`, which installs it into `/data/backends` on start.
+- **"OCR backend: ... files are missing or damaged"** (a FAIL), or a pack
+  that fails to load: `mokuro-bunko install-ocr --force` downloads and checks
+  it again.
+
+## The wrong pack for this GPU, or the GPU is not used
+
+- `doctor` warns `...; the cu130 pack would use this machine's GPU` (or
+  `rocm7.1`): a CPU pack (or the other vendor's) is installed. Install the
+  right one with the command it prints, e.g.
+  `mokuro-bunko install-ocr --variant cu130`, and restart. A GPU pack also
+  runs on the CPU, so the other direction needs nothing.
+- **NVIDIA driver too old**: `install-ocr` says `OCR backend: cpu (<GPU> with
+  driver 550.120: too old for CUDA 13)` and `Update the NVIDIA driver to
+  580.65 or newer to OCR on the GPU, then run install-ocr again.` The `cu130`
+  pack needs driver 580 or newer (`nvidia-smi` shows it). With an older
+  driver an installed `cu130` pack runs on the CPU only, and the server log
+  has a `libtorch backend:` warning saying why.
+- **GPUs older than Turing** (GTX 10xx and older): there are no compiled
+  packages for them. OCR runs on the CPU; `models download` says
+  `note: running on the CPU: ...`.
+- **AMD**: only Linux, and only RX 6000 (gfx1030, gfx1031, gfx1032, gfx1034), RX 7000
+  (gfx1100 to gfx1102) and RX 9000 (gfx1200, gfx1201). Another card gives
+  `AMD gfx906 is not one of the supported ROCm GPUs (...)` and the `cpu`
+  pack. On Windows an AMD or Intel GPU runs OCR on the CPU.
+- **A hidden GPU**: `install-ocr` says `no GPU visible: AMD gfx1201 (hidden by
+  HIP_VISIBLE_DEVICES="")`. `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES` or
+  `ROCR_VISIBLE_DEVICES` set to an empty value or `-1` hide every GPU of that
+  vendor; unset them.
+- `ocr.backend` (or `serve --ocr`) limits the devices: `cuda`, `rocm` or
+  `cpu` (the CPU is always allowed). `webgpu`, `directml` and `coreml` are
+  accepted for old configs, but no release has those runtimes, so they leave
+  only the CPU: use `auto`.
+- In Docker, the container needs `--gpus all` / `--runtime=nvidia` and
+  `NVIDIA_DRIVER_CAPABILITIES=compute,utility` (the CUDA image sets the
+  latter). `docker run --rm --gpus all
+  ghcr.io/gnathonic/mokuro-bunko:latest-cuda install-ocr --list` shows the
+  driver and GPU the container sees.
+- `mokuro-bunko --version` prints the build; `doctor`'s `OCR backend` line
+  shows the pack in use and what this machine would want, and the server log
+  lists the devices the pack found when it loaded (`libtorch backend <variant>
+  (...) loaded in ...: ...`).
+
+## ROCm: missing host libraries, RX 6600/6700
+
+- `install-ocr` warns `this rocm7.1 pack needs these libraries from the
+  system, which were not found: libnuma.so ...` and `doctor` warns
+  `missing host libraries: ...`. The ROCm runtime needs `libnuma`, including
+  the unversioned `libnuma.so`. Install it (Debian/Ubuntu:
+  `sudo apt install libnuma-dev`, Arch: `sudo pacman -S numactl`;
+  `install-ocr` prints the package names of whatever is missing) and restart.
+- The user running the server or processor must be able to open the GPU:
+  add it to the `video` and `render` groups and log in again.
+- An RX 6400 to 6700-class card (gfx1031, gfx1032, gfx1034) runs the gfx1030 kernels. The
+  backend sets `HSA_OVERRIDE_GFX_VERSION=10.3.0` itself when the variable is
+  unset (`doctor`'s `Compiled packages` line says
+  `HSA_OVERRIDE_GFX_VERSION=10.3.0 set`); nothing to configure. A different
+  value you set yourself is kept, and `install-ocr` warns about it: unset it
+  or set `10.3.0`.
+
+## `doctor`: "Compiled packages" FAIL
+
+The recognizers load **compiled packages**, one per engine, precision and
+device type (e.g. `linux-cuda-sm_89`, `linux-rocm-gfx1201`,
+`linux-cpu-x86_64-v3`), downloaded into `<storage>/models/torch/`.
+
+- **`NOT DOWNLOADED: hayai-nova bf16 on gpu:0 (...)`**: the package an enabled
+  generation needs is not on disk yet. OCR would download it on first use;
+  `mokuro-bunko models download` fetches it now.
+- **`NOT RUNNABLE HERE: ...`**: no device here can run that row, e.g. a forced
+  precision the hardware lacks, or an x86_64 CPU without AVX2 and FMA (the CPU
+  packages are built for x86-64-v3). If no pack is installed, run
+  `mokuro-bunko install-ocr`; otherwise use another precision for the row, or
+  a processor on other hardware.
+
 ## Models do not download
 
-The first OCR run (or `mokuro-bunko models download`) fetches the ONNX files
-into `<storage>/models/` and verifies each file's sha256. If it fails:
+The first OCR run (or `mokuro-bunko install-ocr`, or
+`mokuro-bunko models download`) fetches the PP-OCR ONNX files, the
+recognizers' host files and the compiled packages for this machine's device
+into `<storage>/models/`, verifies each file's sha256 and unpacks the
+packages there. `models download` lists each file as `ok` or `FAILED: ...` and
+exits non-zero when anything failed. If it fails:
 
 - check the machine can reach the internet (GitHub release assets and, for
-  upstream files, Hugging Face), and that the disk has room (paddle-manga
-  needs about 2 GB or more);
+  upstream files, Hugging Face), and that the disk has room (hayai-nova about
+  0.5 GB per precision, paddle-manga about 2 GB per precision);
+- **"no compiled <engine> <precision> package for this device (looked for
+  ...)"**: the release has no package for this device type; see
+  ["Compiled packages" FAIL](#doctor-compiled-packages-fail) above;
 - on a host without internet, download the files elsewhere and point
   `MOKURO_MODELS_DIR` at the directory, or copy them into `<storage>/models/`;
+  `MOKURO_TORCH_MODELS_MIRROR` names a directory (or a base URL) holding the
+  compiled packages' release assets under their release names;
 - `mokuro-bunko models verify` re-checks every file; delete a damaged one
-  and download again;
-- `MOKURO_MODELS_DOWNLOAD=0` forbids downloading (unset it).
+  (`MISMATCH`) and download again;
+- `MOKURO_MODELS_DOWNLOAD=0` forbids downloading (unset it); `doctor` then
+  says `downloads are off (MOKURO_MODELS_DOWNLOAD)`.
+
+## The pack stopped loading after an update
+
+The updater replaces the executable only. When a new release changes the
+backend's interface, the log says `... implements backend ABI N, this
+mokuro-bunko needs ABI M: install the pack of this release`. Run
+`mokuro-bunko install-ocr --force` (it replaces the old pack) and restart.
+Other load errors:
+
+- **`libtorch libraries from outside the pack were loaded (...)`**: another
+  libtorch on `LD_LIBRARY_PATH` or `LD_PRELOAD` was picked up; remove it from
+  the server's environment.
+- **`<library> is missing: neither the pack nor this system provides it`**:
+  reinstall the pack (`install-ocr --force`); `doctor` lists missing host
+  libraries.
+- **`built for a newer system: needs GLIBC_2.xx`**: the full build and the
+  Linux packs need glibc 2.28 or newer (Debian 11+, Ubuntu 20.04+, RHEL 8+).
 
 ## A processor connects but never does any work
 
@@ -99,9 +249,12 @@ Also check:
 - `MOKURO_NGINX_ACCEL=1` is set only where nginx really serves downloads.
   Without it every archive download comes back empty, and the processor
   gives the volumes back.
-- The processor can run what the library asks for: the models are
-  downloaded and the execution provider works. A processor is only offered
-  rows it can run (a forced `fp16`, say, is not given to a CPU-only machine).
+- The processor can run what the library asks for: a processor is only
+  offered rows it can run (a forced `fp16`, say, is not given to a CPU-only
+  machine). Without a backend pack in its own storage it can run no
+  hayai-nova or paddle-manga row at all; `processor setup` shows
+  `engines: ...` for the machine, and see
+  ["No backend pack installed"](#no-backend-pack-installed).
 - The admin panel's Processors card shows each processor's state, its last
   refused login and how its downloads have gone.
 
@@ -119,24 +272,6 @@ Also check:
 - **"another processor is running on …"**: two processors share one
   `processor.storage`; give each its own.
 - **The lite build cannot run a processor**: `processor` needs a full build.
-
-## A GPU is not being used
-
-- Check which build you have: `mokuro-bunko --version` prints the flavor and
-  target. The CUDA provider is only in `full-cuda` builds and the CUDA Docker
-  image; plain `full` on Linux is CPU only (Windows `full` uses DirectML,
-  macOS `full` uses CoreML).
-- **NVIDIA / CUDA**: the driver must be 580 or newer (`nvidia-smi`), and the
-  CUDA 13 and cuDNN 9 libraries must be installed (the Docker image has
-  them). A missing library makes the server log a provider failure at start
-  and fall back to the CPU. Keep the provider libraries next to the
-  executable (they are part of the `full-cuda` archive).
-- **Windows**: DirectML needs a DirectX 12 GPU with a current driver.
-- `ocr.backend` (or `serve --ocr`) forces a provider; if the one you ask for
-  is unavailable the server logs a warning and uses the CPU. Check
-  `<storage>/logs/server.log`.
-- In Docker, the container needs `--gpus all` / `--runtime=nvidia` and
-  `NVIDIA_DRIVER_CAPABILITIES=compute,utility`.
 
 ## `processor status` says "never connected"
 
@@ -168,7 +303,7 @@ card and the queue page's detailed level show each machine's speeds; see
 
 - **No Update button, only a notice.** The install is not one the server may
   replace: Docker (pull the new image), a root-owned system install (re-run
-  `install.sh`), a distro package, or the Android app. A copy installed by
+  `install.sh`) or a distro package. A copy installed by
   `install.sh` as a user, the Windows zip or `install.ps1` has the button.
 - **"signature does not verify" / checksum errors.** The download was
   tampered with or truncated, or `update.manifest_url` points at a mirror

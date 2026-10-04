@@ -2,18 +2,23 @@
 
 ## [0.7.0] - Unreleased
 
-A rewrite of the server in Rust, as a drop-in over 0.5.2 storage (same
-`config.yaml`, `mokuro.db` and library tree). See
-[docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
+A rewrite in Rust, as a drop-in over 0.5.2 storage (same `config.yaml`,
+`mokuro.db` and library tree, same reader-facing APIs) and at parity with 0.5.2's
+features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 
 ### Added
-- One native `mokuro-bunko` binary: no Python, uv, venvs or torch anywhere.
+- One native `mokuro-bunko` binary: no Python, uv or venvs.
 - Lite and full builds. Lite is the server only and runs in 1 GB of RAM (about
   16 MiB idle in Docker); full adds local OCR and the `processor` command.
-- OCR on ONNX Runtime: CUDA, DirectML (Windows), CoreML (macOS), WebGPU or CPU.
-- Release packages: Linux tarballs (static lite, glibc full, CUDA), Windows zip
-  with a portable mode, macOS tarballs, an Android APK of the lite server, and
-  Docker images `:latest-lite`, `:latest` and `:latest-cuda` (multi-arch except CUDA).
+- OCR recognizers on libtorch, the same torch 0.5.2 used, from compiled model
+  packages: `install-ocr` installs a *backend pack* for the hardware it finds —
+  NVIDIA CUDA (Turing or newer, Linux and Windows), AMD ROCm (RX 6000/7000/9000,
+  Linux) or the CPU (all platforms) — and the packages for the GPU, verified
+  against the signed release manifest.
+- Release packages: Linux x86_64 full (glibc 2.28+) and static lite (x86_64,
+  arm64), Windows x86_64 zip with a portable mode, macOS on Apple silicon, and
+  Docker images `:latest` (CPU OCR built in), `:latest-cuda` (NVIDIA OCR built in)
+  and `:latest-lite` (amd64 + arm64).
 - `scripts/install.sh` and `scripts/install.ps1` install a release, checking its
   signed manifest and sha256.
 - One-click updates: the admin panel's Updates card checks for new releases
@@ -21,9 +26,7 @@ A rewrite of the server in Rust, as a drop-in over 0.5.2 storage (same
   `mokuro-bunko update check|apply`, and `update.*` settings.
 - Processor protocol v3: one WebSocket per processor plus streamed result
   uploads, replacing 0.5's long-lived chunked streams.
-- `mokuro-bunko models list|download|verify`: OCR models are ONNX files downloaded
-  on first use, sha256-verified.
-- `mokuro-bunko healthcheck` for container health checks.
+- `mokuro-bunko models list|download|verify` and `mokuro-bunko healthcheck`.
 - A processor needs no checkout or Python: `processor setup` and `processor serve` come
   with the binary, and `processor service` also installs a launchd agent on macOS.
 - `server.threads` and `server.cache_mb` settings.
@@ -33,18 +36,23 @@ A rewrite of the server in Rust, as a drop-in over 0.5.2 storage (same
 ### Changed
 - OCR engines are `hayai-nova` (the new default primary), `paddle-manga` and
   `ppocr-manga`, all Apache-2.0. A fresh config has one `hayai-nova` primary row.
-- `ocr.backend` names an ONNX Runtime execution provider (`auto`, `cuda`,
-  `webgpu`, `directml`, `coreml`, `cpu`, `skip`); `rocm` is an alias of `webgpu`.
+  At fp32 their text is identical to 0.5.2's; default speed is above a tuned 0.5.2
+  on every GPU tested (e.g. RTX 4090 13.9 vs 10.5 pages/s, RX 6900 XT 4.35 vs 2.75).
+- `ocr.backend` is `auto`, `cuda`, `rocm`, `cpu` or `skip`. Automatic precision
+  picks bf16 only where the hardware runs it natively (NVIDIA Ampere and newer,
+  AMD RDNA3/4); RDNA2 and the CPU run fp32 like 0.5.2.
+- RX 6600/6700-class cards (gfx1031/1032) get `HSA_OVERRIDE_GFX_VERSION=10.3.0`
+  automatically, as in 0.5.2.
 - Old configs are migrated at load: a `mokuro` row is retired (kept, disabled),
   rows on removed detectors move to `ppocr-manga`, and a `hayai-nova` primary is
   added when none is left. Existing `.mokuro` files are kept and served.
-- `install-ocr` is a deprecated no-op that downloads models on a full build.
 - The licence is MPL-2.0 everywhere, including the image labels (0.5 images said MIT).
 - nginx download offload is off by default in the images; `MOKURO_NGINX_ACCEL=1`
   still turns it on. The in-image nginx passes WebSockets for `/_processor/`.
 - Request threads are gone: the server is async, `MOKURO_THREADS` is no longer read.
 - Memory: the server streams downloads and uploads from and to disk, and caches
-  are byte-bounded (`server.cache_mb`).
+  are byte-bounded (`server.cache_mb`); OCR uses less RAM than 0.5.2 on every
+  platform measured.
 
 ### Removed
 - The `mokuro` engine (manga-ocr and its GPL detector).
@@ -52,10 +60,12 @@ A rewrite of the server in Rust, as a drop-in over 0.5.2 storage (same
 - Python packaging: the PyPI package, zipapp, `uv` portable zip, `setup-windows.ps1`
   source install (it forwards to `install.ps1`), `docs/make_volume.py`.
 - Python OCR environments and `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`,
-  `MOKURO_BUNKO_MOKURO_SPEC`, `OCR_AUTO_INSTALL`, `MOKURO_PPOCR_THREADS`,
-  `MOKURO_EFT_TRACE`, `MOKURO_DEBUG` (use `MOKURO_LOG` or `-v`).
+  `MOKURO_BUNKO_MOKURO_SPEC`, `MOKURO_PPOCR_THREADS`, `MOKURO_EFT_TRACE`,
+  `MOKURO_DEBUG` (use `MOKURO_LOG` or `-v`).
 - `processor install` and the install step of `processor setup`.
 - Protocol v2: 0.5.2 processors cannot connect to a 0.7 library, nor the reverse.
+- OCR on arm64 Linux (that platform gets the lite build; OCR from a remote x86_64
+  processor) and on Intel Macs.
 
 ### Fixed
 - WebDAV `MOVE`/`COPY` between a reader's own files and library files, of a file
@@ -67,12 +77,19 @@ A rewrite of the server in Rust, as a drop-in over 0.5.2 storage (same
   longer write `MOKURO_*` overrides into `config.yaml` (Docker's `MOKURO_STORAGE=/data`
   or the nginx backend port used to be saved).
 - The server shuts down gracefully on SIGTERM (`docker stop`, systemd), not only on
-  Ctrl+C; 0.5.2 was simply killed.
+  Ctrl+C, also while OCR is running; 0.5.2 was simply killed.
 - Removing a folder over WebDAV no longer forgets upload ownership of other
   folders whose names matched by `_` or case.
 - Invites with an unreadable expiry are treated as expired instead of causing a 500,
   and an invite and its audit row are written together.
 - The failed-login limiter's table is bounded in size.
+
+### Known issues
+- On a Mac (Apple silicon, CPU OCR) hayai-nova runs about 3–4% slower than 0.5.2
+  (0.497 vs 0.516 pages/s on an M2 Pro, consistent across runs); its text matches
+  the reference exactly, where 0.5.2's differed on arm64.
+- Windows packs are not yet tested on a machine without the VC++ runtime installed
+  (they ship it app-local).
 
 ## [0.5.2] - 2026-10-01
 

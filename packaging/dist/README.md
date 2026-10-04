@@ -25,8 +25,8 @@ Library, database and logs: `~/.local/share/mokuro-bunko` (`MOKURO_STORAGE`).
 These are the same locations as mokuro-bunko 0.5, so an existing library is
 picked up as it is.
 
-The full Linux build needs glibc 2.39 and libstdc++ from GCC 13 or newer
-(Ubuntu 24.04, Debian 13, Fedora 39, Arch).
+The full Linux build is x86_64 only and needs glibc 2.28 or newer (Debian 11+,
+Ubuntu 20.04+, RHEL 8+). arm64 Linux and Intel Macs have the lite build only.
 
 ## Install, service, updates
 
