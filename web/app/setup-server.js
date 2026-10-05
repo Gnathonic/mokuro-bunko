@@ -173,6 +173,7 @@
       const i = await info();
       state.info = i;
       $('storage').value = i.server_storage || '';
+      if (!i.config_exists) window.App.storageNote($('storage-note'), $('storage'), i.server_storage_check);
       if (i.config_exists) {
         const c = await get('/app/api/server/config');
         const f = c.file;

@@ -62,14 +62,25 @@ pub fn processor_default_storage(env: &dyn Env) -> PathBuf {
     data_base(env).join("mokuro-bunko-processor")
 }
 
-/// Where `mokuro-bunko gui` keeps its `.control.json` when both storages are taken
-/// (`mokuro_bunko::gui::paths::gui_fallback_storage`): `$XDG_RUNTIME_DIR` on Linux
-/// when set, else the local data dir; private to this user, never the shared temp dir.
-pub fn gui_fallback_storage(env: &dyn Env) -> PathBuf {
-    match env.path("XDG_RUNTIME_DIR") {
-        Some(run) if cfg!(target_os = "linux") && run.is_absolute() => run.join("mokuro-bunko-gui"),
-        _ => server_default_storage(env).join("gui"),
+/// Where `mokuro-bunko gui` keeps its `.control.json` when neither storage can take it
+/// (`mokuro_bunko::gui::paths::gui_fallback_storages`, same order): `$XDG_RUNTIME_DIR`
+/// on Linux when set, the local data dir, on macOS `~/Library/Application Support`,
+/// then the config dir; private to this user, never the shared temp dir.
+pub fn gui_fallback_storages(env: &dyn Env) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(run) = env.path("XDG_RUNTIME_DIR")
+        && cfg!(target_os = "linux")
+        && run.is_absolute()
+    {
+        out.push(run.join("mokuro-bunko-gui"));
     }
+    out.push(server_default_storage(env).join("gui"));
+    if cfg!(target_os = "macos") {
+        out.push(home(env).join("Library/Application Support/mokuro-bunko/gui"));
+    }
+    out.push(config_base(env).join("mokuro-bunko").join("gui"));
+    out.dedup();
+    out
 }
 
 /// The tray's last place for its lock and logs: a folder only this user can reach.
@@ -283,17 +294,20 @@ mod tests {
         } else {
             FakeEnv::default().with("HOME", "/home/a")
         };
-        let got = gui_fallback_storage(&env);
-        assert_eq!(got, data_base(&env).join("mokuro-bunko").join("gui"));
-        assert!(!got.starts_with(&tmp), "{}", got.display());
+        let got = gui_fallback_storages(&env);
+        assert_eq!(got[0], data_base(&env).join("mokuro-bunko").join("gui"));
+        assert_eq!(
+            got.last(),
+            Some(&config_base(&env).join("mokuro-bunko").join("gui"))
+        );
         let env = env.with("XDG_RUNTIME_DIR", "/run/user/1000");
-        let got = gui_fallback_storage(&env);
+        let got = gui_fallback_storages(&env);
         if cfg!(target_os = "linux") {
-            assert_eq!(got, PathBuf::from("/run/user/1000/mokuro-bunko-gui"));
+            assert_eq!(got[0], PathBuf::from("/run/user/1000/mokuro-bunko-gui"));
         }
-        assert!(!got.starts_with(&tmp), "{}", got.display());
-        // The real environment too.
-        assert!(!gui_fallback_storage(&ProcessEnv).starts_with(&tmp));
+        for g in got.iter().chain(&gui_fallback_storages(&ProcessEnv)) {
+            assert!(!g.starts_with(&tmp), "{}", g.display());
+        }
     }
 
     #[test]

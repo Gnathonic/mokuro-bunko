@@ -29,7 +29,7 @@ pub fn run(ctx: &Ctx, args: GuiArgs) -> CmdResult {
         .thread_name("gui")
         .build()?;
     runtime.block_on(async move {
-        let storage = control_storage(&ctx.config_path);
+        let storage = control_storage(&ctx.config_path)?;
         let name = hostname();
         let control = Control::new(ControlConfig::new(
             Role::Gui,
@@ -101,24 +101,49 @@ fn hostname() -> String {
 }
 
 /// Where the `gui` instance writes its `.control.json`: the library's storage, else
-/// the processor's, whichever has no live server/processor (never over theirs), else
-/// a private per-user directory ([`gui::paths::gui_fallback_storage`]).
-fn control_storage(config_path: &std::path::Path) -> PathBuf {
+/// the processor's, whichever has no live server/processor (never over theirs) and can
+/// be written, else the first private per-user directory that can
+/// ([`gui::paths::gui_fallback_storages`]). A default storage this user cannot write
+/// (a `~/.local` owned by root) is skipped instead of failing: the wizard is where
+/// that gets fixed.
+fn control_storage(config_path: &std::path::Path) -> Result<PathBuf, Fail> {
     let candidates = [
         gui::paths::server_storage(config_path),
         gui::paths::processor_storage(&gui::paths::processor_config_path()),
     ];
-    for dir in &candidates {
-        match bunko_control::read_control_file(dir) {
-            Some(f) if f.role != Role::Gui && gui::spawn::pid_alive(f.pid) => continue,
-            _ => return dir.clone(),
+    pick_control_storage(&candidates, &gui::paths::gui_fallback_storages())
+}
+
+fn pick_control_storage(candidates: &[PathBuf], fallbacks: &[PathBuf]) -> Result<PathBuf, Fail> {
+    for dir in candidates {
+        if let Some(f) = bunko_control::read_control_file(dir)
+            && f.role != Role::Gui
+            && gui::spawn::pid_alive(f.pid)
+        {
+            continue;
+        }
+        match gui::paths::ensure_writable(dir) {
+            Ok(()) => return Ok(dir.clone()),
+            Err(e) => tracing::warn!(
+                "{} is not usable ({e}); trying the next folder",
+                dir.display()
+            ),
         }
     }
-    let dir = gui::paths::gui_fallback_storage();
-    if let Err(e) = gui::paths::create_private_dir(&dir) {
-        tracing::warn!("could not create {}: {e}", dir.display());
+    let mut tried = Vec::new();
+    for dir in fallbacks {
+        match gui::paths::create_private_dir(dir).and_then(|()| gui::paths::ensure_writable(dir)) {
+            Ok(()) => return Ok(dir.clone()),
+            Err(e) => {
+                tracing::warn!("{} is not usable ({e})", dir.display());
+                tried.push(format!("{} ({e})", dir.display()));
+            }
+        }
     }
-    dir
+    Err(Fail::msg(format!(
+        "no folder this user can write for the setup app: {}",
+        tried.join("; ")
+    )))
 }
 
 /// Open `url` in the default browser.
@@ -145,4 +170,44 @@ pub fn open_browser(url: &str) -> std::io::Result<()> {
         let _ = child.wait();
     });
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod storage_tests {
+    use super::*;
+
+    /// A default storage under a folder this user cannot write (the owner's root-owned
+    /// `~/.local`) is skipped, and the first writable private fallback is used.
+    #[test]
+    fn unwritable_candidates_are_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::getuid() } == 0 {
+            return; // root writes anywhere
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join(".local");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let server = local.join("share/mokuro-bunko");
+        let processor = local.join("share/mokuro-bunko-processor");
+        let bad_fallback = local.join("share/mokuro-bunko/gui");
+        let good_fallback = dir.path().join("config/mokuro-bunko/gui");
+        let got = pick_control_storage(
+            &[server.clone(), processor],
+            &[bad_fallback.clone(), good_fallback.clone()],
+        )
+        .unwrap();
+        assert_eq!(got, good_fallback);
+        assert!(!server.exists());
+        // Nothing usable at all: an error naming what was tried, not a panic.
+        let err = pick_control_storage(&[server], &[bad_fallback]).unwrap_err();
+        assert!(matches!(err, Fail::Error(ref m) if m.contains("no folder")));
+        // A writable candidate is used as before.
+        let ok = dir.path().join("lib");
+        assert_eq!(
+            pick_control_storage(std::slice::from_ref(&ok), &[]).unwrap(),
+            ok
+        );
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }

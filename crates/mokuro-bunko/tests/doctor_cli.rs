@@ -145,3 +145,37 @@ fn failures_and_busy_port_warn() {
         "{s}"
     );
 }
+
+/// A `~/.local` this user cannot write (the owner's Mac had it owned by root): doctor
+/// names the folder in the way and gives the one-line chown.
+#[cfg(unix)]
+#[test]
+fn unwritable_storage_parent_names_the_fix() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = Env::new();
+    let local = env.root().join(".local");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(
+        env.config_path(),
+        format!(
+            "storage:\n  base_path: {}\n",
+            local.join("share/mokuro-bunko").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // root writes anyway: nothing to report then.
+    let probe = std::fs::write(local.join("probe"), "x").is_ok();
+    let out = env.cmd().arg("doctor").output().unwrap();
+    std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if probe {
+        return;
+    }
+    let s = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{s}");
+    assert!(
+        s.contains(" FAIL  Storage: ") && s.contains("~/.local isn't writable by you"),
+        "{s}"
+    );
+    assert!(s.contains("sudo chown -R \"$USER\" ~/.local"), "{s}");
+}

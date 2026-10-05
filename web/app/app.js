@@ -314,9 +314,30 @@
     return i.library_url + (i.admin_path || '/_admin') + (tab ? '#' + tab : '');
   }
 
+  // A default storage folder this user cannot write (e.g. a ~/.local owned by root,
+  // `/app/api/info`'s *_storage_check): say so, put the writable alternative in the
+  // field, and show the one-line fix that keeps the default.
+  function storageNote(note, input, check) {
+    if (!note || !check || check.writable !== false) return;
+    if (input.value && input.value !== String(check.path)) return; // not the default
+    let html = esc(check.problem) + ', so <code>' + esc(check.path) + '</code> cannot be used.';
+    if (check.suggestion) {
+      input.value = check.suggestion;
+      html += ' The folder above is proposed instead (any folder you can write works).';
+    } else {
+      html += ' Choose a folder you can write.';
+    }
+    if (check.fix) {
+      html += ' Or fix the permissions once in a terminal and keep the default: <code>' + esc(check.fix) + '</code>';
+    }
+    note.innerHTML = html;
+    note.hidden = false;
+  }
+
   window.App = {
     esc, api, get, post, info, toast, header, heartbeat, setBusy, showError,
     runJob, jobBox, attachJob, pick, wirePickers, wizard, fmtBytes, adminLink,
+    storageNote,
   };
 
   document.addEventListener('DOMContentLoaded', () => {
