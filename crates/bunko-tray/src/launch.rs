@@ -26,6 +26,44 @@ impl EarlyExit {
     }
 }
 
+/// `line` with sign-in secrets blanked: the value after `c=`, `t=` or `token=` and
+/// any run of 32+ hex digits (a helper may echo the URL it was given, and its stderr
+/// ends up in the log, the menu and a notification).
+pub fn redact(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while !rest.is_empty() {
+        let key = ["c=", "t=", "token="].iter().find(|k| {
+            rest.starts_with(*k) && (out.is_empty() || out.ends_with(['?', '&', ' ', '"', '\'']))
+        });
+        if let Some(k) = key {
+            out.push_str(k);
+            let n = rest[k.len()..]
+                .find(['&', ' ', '"', '\'', '#'])
+                .unwrap_or(rest.len() - k.len());
+            if n > 0 {
+                out.push('…');
+            }
+            rest = &rest[k.len() + n..];
+            continue;
+        }
+        let hex = rest.bytes().take_while(u8::is_ascii_hexdigit).count();
+        if hex >= 32 {
+            out.push('…');
+            rest = &rest[hex..];
+            continue;
+        }
+        let step = if hex > 0 {
+            hex
+        } else {
+            rest.chars().next().map_or(1, char::len_utf8)
+        };
+        out.push_str(&rest[..step]);
+        rest = &rest[step..];
+    }
+    out
+}
+
 /// How long after the start an error exit counts as "it did not come up".
 pub const EARLY: Duration = Duration::from_secs(10);
 
@@ -48,7 +86,7 @@ pub fn spawn_watched(
         let lines = lines.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(err).lines().map_while(Result::ok) {
-                let line = line.trim().to_string();
+                let line = redact(line.trim());
                 if line.is_empty() {
                     continue;
                 }
@@ -163,5 +201,22 @@ mod tests {
         spawn_watched(sh("exit 2"), EARLY, move |e| tx.send(e).unwrap()).unwrap();
         let e = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(e.reason(), "exit code 2");
+    }
+
+    #[test]
+    fn sign_in_secrets_are_blanked() {
+        let code = "0123456789abcdef0123456789abcdef";
+        let line = format!("open http://127.0.0.1:9/app/login?c={code}&next=/app/ failed");
+        let r = redact(&line);
+        assert!(!r.contains(code), "{r}");
+        assert_eq!(r, "open http://127.0.0.1:9/app/login?c=…&next=/app/ failed");
+        assert_eq!(redact(&format!("token {code}")), "token …");
+        assert_eq!(redact("t=abc next"), "t=… next");
+        assert_eq!(
+            redact("Error: Permission denied (os error 13)"),
+            "Error: Permission denied (os error 13)"
+        );
+        // Words that merely contain "c=" or short hex stay.
+        assert_eq!(redact("abc=1 deadbeef"), "abc=1 deadbeef");
     }
 }
