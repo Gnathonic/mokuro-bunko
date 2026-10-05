@@ -41,6 +41,7 @@ pub fn run(ctx: &Ctx, args: GuiArgs) -> CmdResult {
         let state = Arc::new(AppState::new(
             Role::Gui,
             listener.token().to_string(),
+            listener.login_codes(),
             ctx.config_path.clone(),
             None,
         ));
@@ -100,7 +101,8 @@ fn hostname() -> String {
 }
 
 /// Where the `gui` instance writes its `.control.json`: the library's storage, else
-/// the processor's, whichever has no live server/processor (never over theirs).
+/// the processor's, whichever has no live server/processor (never over theirs), else
+/// a private per-user directory ([`gui::paths::gui_fallback_storage`]).
 fn control_storage(config_path: &std::path::Path) -> PathBuf {
     let candidates = [
         gui::paths::server_storage(config_path),
@@ -112,7 +114,11 @@ fn control_storage(config_path: &std::path::Path) -> PathBuf {
             _ => return dir.clone(),
         }
     }
-    std::env::temp_dir().join("mokuro-bunko-gui")
+    let dir = gui::paths::gui_fallback_storage();
+    if let Err(e) = gui::paths::create_private_dir(&dir) {
+        tracing::warn!("could not create {}: {e}", dir.display());
+    }
+    dir
 }
 
 /// Open `url` in the default browser.

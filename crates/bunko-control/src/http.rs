@@ -2,20 +2,26 @@
 //! bearer token in `<storage>/.control.json` (0600), removed on a clean exit.
 //!
 //! Routes: `GET /control/status`, `POST /control/pause`, `POST /control/resume`,
-//! `GET /control/events` (SSE), `POST /control/stop`, plus the app pages a caller
-//! mounts (stream G2's `/app` router). Without an app router the listener serves
-//! `/app/login?t=<token>` itself (the cookie exchange); with one, the app router
-//! answers it (the same exchange, see [`login`]).
+//! `GET /control/events` (SSE), `POST /control/stop`, `POST /control/login-code`, plus
+//! the app pages a caller mounts (stream G2's `/app` router). Without an app router the
+//! listener serves `/app/login?c=<code>` itself (the cookie exchange); with one, the
+//! app router answers it (the same exchange, see [`login`]).
 //!
 //! Every `/control` request needs `Authorization: Bearer <token>` or the cookie
 //! [`COOKIE`] (or `bunko_control_<port>`) holding the token; `Host` must name a
 //! loopback address (no DNS rebinding); a cookie-authenticated state change must come
 //! with this listener's own `Origin` (SameSite does not separate localhost ports).
+//!
+//! The token never goes into a URL: a browser signs in with a single-use code
+//! ([`LoginCodes`]) that a bearer-token holder asks for (`POST /control/login-code`),
+//! since a URL ends up in the browser launcher's command line, the history and the
+//! terminal.
 
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
@@ -46,6 +52,53 @@ pub fn new_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+/// How long a sign-in code works.
+pub const LOGIN_CODE_TTL: Duration = Duration::from_secs(300);
+/// At most this many codes wait to be used; minting another drops the oldest.
+pub const LOGIN_CODES_MAX: usize = 64;
+
+/// Single-use sign-in codes for `/app/login?c=<code>`: 16 random bytes (hex), good
+/// once and for [`LOGIN_CODE_TTL`]. One store per listener, shared with the app
+/// router (clones share it).
+#[derive(Clone, Default)]
+pub struct LoginCodes(Arc<parking_lot::Mutex<Vec<(String, Instant)>>>);
+
+impl LoginCodes {
+    /// A fresh code.
+    pub fn mint(&self) -> String {
+        use rand::RngCore;
+        let mut bytes = [0u8; 16];
+        rand::rng().fill_bytes(&mut bytes);
+        let code = hex::encode(bytes);
+        let now = Instant::now();
+        let mut codes = self.0.lock();
+        codes.retain(|(_, at)| now.duration_since(*at) < LOGIN_CODE_TTL);
+        if codes.len() >= LOGIN_CODES_MAX {
+            codes.remove(0);
+        }
+        codes.push((code.clone(), now));
+        code
+    }
+
+    /// Use up `code`: true once, if it was minted here and has not expired.
+    pub fn redeem(&self, code: &str) -> bool {
+        self.redeem_at(code, Instant::now())
+    }
+
+    fn redeem_at(&self, code: &str, now: Instant) -> bool {
+        let mut codes = self.0.lock();
+        codes.retain(|(_, at)| now.saturating_duration_since(*at) < LOGIN_CODE_TTL);
+        // Compare against every code (constant time each), then remove the match.
+        let mut found = None;
+        for (i, (c, _)) in codes.iter().enumerate() {
+            if token_matches(code, c) {
+                found = Some(i);
+            }
+        }
+        found.map(|i| codes.remove(i)).is_some()
+    }
 }
 
 /// Constant-time comparison of a presented token with ours.
@@ -130,6 +183,7 @@ fn json_error(status: StatusCode, message: &str) -> Response {
 struct AppState {
     control: Control,
     token: String,
+    codes: LoginCodes,
     stop: CancellationToken,
 }
 
@@ -237,6 +291,22 @@ fn status_stream(
     )
 }
 
+/// `POST /control/login-code`: a single-use code for `/app/login?c=`. Bearer only: a
+/// page signed in with the cookie cannot mint codes.
+async fn login_code(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if !bearer(&headers).is_some_and(|t| token_matches(t, &st.token)) {
+        return json_error(
+            StatusCode::UNAUTHORIZED,
+            "a sign-in code needs Authorization: Bearer (from .control.json)",
+        );
+    }
+    axum::Json(serde_json::json!({
+        "code": st.codes.mint(),
+        "expires_in": LOGIN_CODE_TTL.as_secs(),
+    }))
+    .into_response()
+}
+
 async fn events(State(st): State<AppState>) -> Response {
     Sse::new(status_stream(st.control.clone(), st.stop.clone()))
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
@@ -245,7 +315,8 @@ async fn events(State(st): State<AppState>) -> Response {
 
 #[derive(Deserialize)]
 pub struct LoginQuery {
-    pub t: Option<String>,
+    /// A single-use code from `POST /control/login-code`.
+    pub c: Option<String>,
     pub next: Option<String>,
 }
 
@@ -264,10 +335,10 @@ pub fn safe_next(next: Option<&str>) -> String {
     }
 }
 
-/// `GET /app/login?t=<token>&next=/app/...`: the one-time link the tray / `gui` opens.
-/// Sets [`COOKIE`] (HttpOnly, SameSite=Strict, Path=/) and redirects, so the token
-/// leaves the address bar at once.
-pub fn login(headers: &HeaderMap, query: &LoginQuery, token: &str) -> Response {
+/// `GET /app/login?c=<code>&next=/app/...`: the one-time link the tray / `gui` opens.
+/// Uses up the code, sets the cookie (`bunko_control_<port>`, HttpOnly,
+/// SameSite=Strict, Path=/; its value is the token) and redirects to `next`.
+pub fn login(headers: &HeaderMap, query: &LoginQuery, token: &str, codes: &LoginCodes) -> Response {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
@@ -275,18 +346,27 @@ pub fn login(headers: &HeaderMap, query: &LoginQuery, token: &str) -> Response {
     if !is_loopback_host(host) {
         return (StatusCode::FORBIDDEN, "this page is for this machine only").into_response();
     }
-    if !query.t.as_deref().is_some_and(|t| token_matches(t, token)) {
+    if !query.c.as_deref().is_some_and(|c| codes.redeem(c)) {
         return (
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
             "<!DOCTYPE html><meta charset=utf-8><title>Mokuro Bunko</title>\
+             <link rel=stylesheet href=\"/_static/shared.css\">\
              <body style=\"font-family:sans-serif;padding:2rem\"><h1>Mokuro Bunko</h1>\
              <p>This sign-in link is not valid (any more). Open the page again from the tray, \
              or run <code>mokuro-bunko gui</code>.</p></body>",
         )
             .into_response();
     }
-    let cookie = format!("{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/");
+    // Per port: cookies do not separate ports, and the tray may open the pages of two
+    // instances (server and processor) in one browser.
+    let port = host.rsplit_once(':').map(|(_, p)| p).unwrap_or("");
+    let name = if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
+        format!("{COOKIE}_{port}")
+    } else {
+        COOKIE.to_string()
+    };
+    let cookie = format!("{name}={token}; HttpOnly; SameSite=Strict; Path=/");
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, safe_next(query.next.as_deref()))
@@ -302,7 +382,7 @@ async fn login_route(
     headers: HeaderMap,
     Query(q): Query<LoginQuery>,
 ) -> Response {
-    login(&headers, &q, &st.token)
+    login(&headers, &q, &st.token, &st.codes)
 }
 
 /// The `/control` routes (and, without an app router, `/app/login`).
@@ -313,6 +393,7 @@ fn router(state: AppState, app: Option<Router>) -> Router {
         .route("/control/resume", post(resume))
         .route("/control/events", get(events))
         .route("/control/stop", post(stop))
+        .route("/control/login-code", post(login_code))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state.clone());
     match app {
@@ -330,6 +411,7 @@ fn router(state: AppState, app: Option<Router>) -> Router {
 pub struct ControlListener {
     listener: TcpListener,
     token: String,
+    codes: LoginCodes,
     port: u16,
 }
 
@@ -341,12 +423,19 @@ impl ControlListener {
         Ok(ControlListener {
             listener,
             token: new_token(),
+            codes: LoginCodes::default(),
             port,
         })
     }
 
     pub fn token(&self) -> &str {
         &self.token
+    }
+
+    /// The sign-in codes this listener accepts (an app router answering
+    /// `/app/login` takes a clone).
+    pub fn login_codes(&self) -> LoginCodes {
+        self.codes.clone()
     }
 
     pub fn port(&self) -> u16 {
@@ -401,6 +490,7 @@ impl ControlListener {
             AppState {
                 control,
                 token: self.token.clone(),
+                codes: self.codes.clone(),
                 stop: stop.clone(),
             },
             app,
@@ -421,6 +511,7 @@ impl ControlListener {
         Ok(ControlServer {
             storage,
             token: self.token,
+            codes: self.codes,
             port: self.port,
             url,
             stop,
@@ -434,6 +525,7 @@ impl ControlListener {
 pub struct ControlServer {
     storage: PathBuf,
     token: String,
+    codes: LoginCodes,
     port: u16,
     url: String,
     stop: CancellationToken,
@@ -453,9 +545,10 @@ impl ControlServer {
         &self.url
     }
 
-    /// The browser's one-time sign-in link (`next` defaults to `/app/`).
+    /// The browser's one-time sign-in link with a fresh code (`next` defaults to
+    /// `/app/`).
     pub fn login_url(&self, next: Option<&str>) -> String {
-        let mut url = format!("{}/app/login?t={}", self.url, self.token);
+        let mut url = format!("{}/app/login?c={}", self.url, self.codes.mint());
         if let Some(n) = next {
             url.push_str("&next=");
             url.push_str(&percent_encode(n));
@@ -599,5 +692,30 @@ mod tests {
         assert!(!token_matches("", ""));
         assert_eq!(safe_next(Some("//evil")), "/app/");
         assert_eq!(safe_next(Some("/app/dashboard")), "/app/dashboard");
+    }
+
+    #[test]
+    fn login_codes_work_once_and_expire() {
+        let codes = LoginCodes::default();
+        let a = codes.mint();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!codes.redeem("0".repeat(32).as_str()));
+        assert!(!codes.redeem(""));
+        assert!(codes.redeem(&a));
+        assert!(!codes.redeem(&a), "single use");
+
+        // Expired: refused (and dropped).
+        let b = codes.mint();
+        let later = Instant::now() + LOGIN_CODE_TTL + Duration::from_secs(1);
+        assert!(!codes.redeem_at(&b, later));
+        assert!(!codes.redeem(&b));
+
+        // Bounded: the oldest code goes first.
+        let first = codes.mint();
+        let rest: Vec<String> = (0..LOGIN_CODES_MAX).map(|_| codes.mint()).collect();
+        assert_eq!(codes.0.lock().len(), LOGIN_CODES_MAX);
+        assert!(!codes.redeem(&first));
+        assert!(rest.iter().all(|c| codes.redeem(c)));
     }
 }

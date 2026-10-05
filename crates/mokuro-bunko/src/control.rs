@@ -46,6 +46,7 @@ pub async fn start(
     let app = crate::gui::app(
         control.role(),
         listener.token(),
+        listener.login_codes(),
         config_path,
         processor_config,
     );

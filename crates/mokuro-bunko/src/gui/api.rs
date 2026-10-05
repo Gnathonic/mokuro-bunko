@@ -23,6 +23,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/app/api/info", get(info))
         .route("/app/api/ping", get(|| async { Json(json!({"ok": true})) }))
         .route("/app/api/instances", get(instances))
+        .route(
+            "/app/api/instances/{slot}/dashboard",
+            get(instance_dashboard),
+        )
         .route("/app/api/fs", get(fs_list))
         .route(
             "/app/api/server/config",
@@ -115,43 +119,34 @@ async fn info(State(state): S) -> Response {
     ok(v)
 }
 
-/// Running instances on this machine (their `.control.json`), with a sign-in link to
-/// each one's own pages.
+/// Running instances on this machine (their `.control.json`), with a link to each
+/// one's own dashboard ([`instance_dashboard`]: the browser never gets their token).
 async fn instances(State(state): S) -> Response {
     let st = state.clone();
     let found = blocking(move || {
         let mut out = Vec::new();
-        for (role, storage) in [
+        for (slot, storage) in [
             ("server", paths::server_storage(&st.config_path)),
             ("processor", paths::processor_storage(&st.processor_config)),
         ] {
-            let file = storage.join(paths::CONTROL_FILE);
-            let Some(v) = std::fs::read_to_string(&file)
-                .ok()
-                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            else {
+            let Some(f) = bunko_control::read_control_file(&storage) else {
                 continue;
             };
-            let port = v["port"].as_u64().unwrap_or(0);
-            let pid = v["pid"].as_u64().unwrap_or(0) as u32;
-            let token = v["token"].as_str().unwrap_or("");
-            let alive = pid != 0
-                && spawn::pid_alive(pid)
+            let alive = f.pid != 0
+                && spawn::pid_alive(f.pid)
                 && std::net::TcpStream::connect_timeout(
-                    &std::net::SocketAddr::from(([127, 0, 0, 1], port as u16)),
+                    &std::net::SocketAddr::from(([127, 0, 0, 1], f.port)),
                     Duration::from_millis(300),
                 )
                 .is_ok();
             out.push(json!({
-                "role": v["role"].as_str().unwrap_or(role),
-                "pid": pid,
-                "port": port,
-                "version": v["version"],
-                "started_at": v["started_at"],
+                "role": f.role.as_str(),
+                "pid": f.pid,
+                "port": f.port,
+                "version": f.version,
+                "started_at": f.started_at,
                 "alive": alive,
-                "dashboard": if alive && !token.is_empty() {
-                    Some(format!("http://127.0.0.1:{port}/app/login?t={token}&next=/app/dashboard"))
-                } else { None },
+                "dashboard": alive.then(|| format!("/app/api/instances/{slot}/dashboard")),
             }));
         }
         out
@@ -163,6 +158,57 @@ async fn instances(State(state): S) -> Response {
         None => Value::Null,
     };
     ok(json!({"instances": found, "library": library}))
+}
+
+/// `GET /app/api/instances/{server|processor}/dashboard`: sign the browser in to the
+/// instance running on that storage. A single-use code is asked of it with its bearer
+/// token (from its `.control.json`), and the browser is sent to its
+/// `/app/login?c=<code>` on `http://127.0.0.1:<port>`.
+async fn instance_dashboard(State(state): S, UrlPath(slot): UrlPath<String>) -> Response {
+    let role = match slot.as_str() {
+        "server" => Role::Server,
+        "processor" => Role::Processor,
+        _ => return fail(StatusCode::NOT_FOUND, "no such instance"),
+    };
+    let storage = role_storage(&state, role);
+    let Some(f) = blocking(move || bunko_control::read_control_file(&storage))
+        .await
+        .flatten()
+    else {
+        return fail(StatusCode::NOT_FOUND, "that instance is not running");
+    };
+    match login_code(f.port, &f.token).await {
+        Some(code) => axum::response::Redirect::to(&format!(
+            "http://127.0.0.1:{}/app/login?c={code}&next=/app/dashboard",
+            f.port
+        ))
+        .into_response(),
+        None => fail(
+            StatusCode::BAD_GATEWAY,
+            "that instance did not answer; open its dashboard from the tray",
+        ),
+    }
+}
+
+/// A sign-in code from the control listener on `port` (`POST /control/login-code`).
+async fn login_code(port: u16, token: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .no_proxy()
+        .build()
+        .ok()?;
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/control/login-code"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: Value = resp.json().await.ok()?;
+    let code = v["code"].as_str()?;
+    (code.len() == 32 && code.bytes().all(|b| b.is_ascii_hexdigit())).then(|| code.to_string())
 }
 
 #[derive(Deserialize)]

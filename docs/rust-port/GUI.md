@@ -22,10 +22,15 @@ and *everything that is a flag in the CLI*; tray pause offers both "after this v
   (library server, incl. its local OCR), `processor serve`, and the new `gui` command — listens
   on `127.0.0.1:<ephemeral>` and writes `<storage>/.control.json`
   `{role, pid, port, token, version, started_at}` (mode 0600; removed on clean exit). Requests
-  carry `Authorization: Bearer <token>`; the browser gets a one-time `/app/login?t=<token>`
-  that sets an HttpOnly, SameSite=Strict cookie scoped to the loopback origin. Never bound to a
-  non-loopback address. The tray discovers instances through the default storage dirs
-  (server and processor) plus `MOKURO_STORAGE` / `processor.yaml`.
+  carry `Authorization: Bearer <token>`. The token never goes into a URL (a URL ends up in
+  the browser launcher's command line, which other local users can read, in the history and
+  in terminal output): the browser gets a one-time `/app/login?c=<code>`, a single-use code
+  valid for 5 minutes that a token holder asks for (`POST /control/login-code`), and the
+  login sets an HttpOnly, SameSite=Strict cookie scoped to the loopback origin. Never bound
+  to a non-loopback address. The tray discovers instances through the default storage dirs
+  (server and processor) plus `MOKURO_STORAGE` / `processor.yaml`, and trusts a
+  `.control.json` only when (on Unix) it is a regular file owned by the user with no
+  group/other permission bits.
 - **`mokuro-bunko gui`**: starts the control API + app pages with no server/processor running
   (first run, or reconfiguring a stopped machine), opens the browser, exits when the wizard
   hands off to a started service or the tab is closed for 10 min. On Windows/macOS,
@@ -69,11 +74,13 @@ All JSON. `GET /control/status`:
 **As built (stream G1; additions to the contract above, all backward compatible):**
 
 - Crate `bunko-control` (`crates/bunko-control`): `types` (the JSON above, `.control.json`,
-  `read_control_file`; no features, what the tray links with `default-features = false`),
+  `read_control_file`, `read_private_file`; no features, what the tray links with
+  `default-features = false`),
   `pause`, `activity`, `control::Control`, `http::{ControlListener, ControlServer}`.
   Integration: `Control::new(ControlConfig::new(role, name, VERSION, &storage))` →
   `ControlListener::bind()` → `listener.serve(control, Some(gui::app(role, listener.token(),
-  config_path, processor_config)))` → `server.shutdown().await` on exit. `serve` and
+  listener.login_codes(), config_path, processor_config)))` → `server.shutdown().await` on
+  exit. `serve` and
   `processor serve` do this through `crates/mokuro-bunko/src/control.rs`.
 - Extra status fields: `pause.since` (when the pause began), `library.error` (why a
   processor is not connected: login refused, unreachable), `managed` (stop allowed),
@@ -92,11 +99,26 @@ All JSON. `GET /control/status`:
   (rates, ETA); the stream ends when the instance shuts down.
 - `POST /control/stop`: 202 and the instance shuts down cleanly when it was started with
   `MOKURO_CONTROL_MANAGED=1` (the tray sets it on what it starts); 409 otherwise.
+- `POST /control/login-code` → `{"code": "<32 hex>", "expires_in": 300}`: a sign-in code
+  for `GET /app/login?c=<code>&next=/app/...`. Bearer only (the cookie is refused: 401, so a
+  page cannot mint codes). A code works once, for 5 minutes; at most 64 wait (minting more
+  drops the oldest). `/app/login` uses it up, sets the cookie `bunko_control_<port>` (value:
+  the token; HttpOnly, SameSite=Strict, Path=/) and redirects 303 to `next` (under `/app/`
+  only); a wrong, used or expired code is 401. `?t=<token>` is not accepted.
+  `ControlServer::login_url` mints a code in-process (what `gui` opens); the tray asks for
+  one and opens the link; the app's "open its dashboard" link for another instance is
+  `/app/api/instances/{server|processor}/dashboard`, which asks that instance for a code
+  with its bearer token and redirects to its login, so its token never reaches the browser.
 - Auth: `Authorization: Bearer <token>`, or the login cookie (`bunko_control`, or
-  `bunko_control_<port>` as G2's `/app/login` sets it); the `Host` header must be a loopback
+  `bunko_control_<port>` as `/app/login` sets it); the `Host` header must be a loopback
   name (DNS-rebinding guard) and a cookie-authenticated POST must carry our own `Origin`
   (CSRF). Wrong/missing token: 401; foreign Host/Origin: 403.
-- `.control.json` also carries `url` (`http://127.0.0.1:<port>`) and `managed`. One live
+- `.control.json` also carries `url` (`http://127.0.0.1:<port>`) and `managed`. Readers
+  build addresses from `port` (always `http://127.0.0.1:<port>`), never from `url`, and
+  ignore a file that is a symlink, not owned by the user, or group/other-accessible (Unix).
+  `gui` writes its file into the server's storage, else the processor's, else (both taken)
+  a private per-user directory: `$XDG_RUNTIME_DIR/mokuro-bunko-gui` on Linux when set,
+  otherwise `<local data dir>/mokuro-bunko/gui`, created 0700 (never the shared temp dir). One live
   owner per storage: a second instance does not overwrite a live one's file (it runs without
   the control API and says so in its log), except that `serve` / `processor serve` take over
   from a `gui` (setup) instance. `processor serve` only starts it when it holds the storage
@@ -173,7 +195,9 @@ starts a second instance when a service-managed one is running.
   (repeatable), portable `data\`, `$MOKURO_STORAGE`, the storage of `$MOKURO_CONFIG` / the
   default `config.yaml` / the configs named by service files (systemd units, launchd plists,
   Windows Startup `.cmd`), the server default storage, the processor configs' storage, the
-  processor default storage, `<temp>/mokuro-bunko-gui`, and (Linux) `/var/lib/mokuro-bunko/storage`.
+  processor default storage, `gui`'s private fallback (`$XDG_RUNTIME_DIR/mokuro-bunko-gui`
+  on Linux, else `<data>/mokuro-bunko/gui`), and (Linux) `/var/lib/mokuro-bunko/storage`.
+  A control file that is a symlink, not the user's, or group/other-accessible is ignored.
   Rescanned every 3 s; a control file counts once `GET /control/status` answers. Each
   instance is followed by SSE, else polled every 2 s; 3 failures in a row drop it.
 - **Tray-managed running is `tray.json`** next to `config.yaml` (`~/.config/mokuro-bunko/`,
@@ -201,7 +225,8 @@ starts a second instance when a service-managed one is running.
   `until`. Pages open through the server's control host, else the processor's, else
   `mokuro-bunko gui --open <page>`: dashboard `/app/dashboard`, Settings… `/app/settings`
   (update available: `/app/settings#update`), Setup wizard… `/app/setup`, via
-  `/app/login?t=<token>&next=…`. Check for updates runs `mokuro-bunko update check`.
+  `POST /control/login-code` then `/app/login?c=<code>&next=…`. Check for updates runs
+  `mokuro-bunko update check`.
 - One tray per user (`.tray.lock` in the log folder). Logs: `<server storage>/logs/
   mokuro-bunko-tray.<date>.log` (portable `data\logs`; falls back to
   `<config>/mokuro-bunko/logs`, then the temp folder, when that cannot be created).

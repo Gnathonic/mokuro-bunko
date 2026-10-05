@@ -13,9 +13,11 @@ use std::path::{Path, PathBuf};
 
 pub const CONTROL_FILE: &str = ".control.json";
 
-/// Read `<storage>/.control.json` (None when absent or unreadable).
+/// Read `<storage>/.control.json` (None when absent or unreadable, or on Unix when it
+/// is a symlink, not ours, or readable by others: see
+/// `bunko_control::read_private_file`).
 pub fn read_control(storage: &Path) -> Option<ControlFile> {
-    let text = std::fs::read_to_string(storage.join(CONTROL_FILE)).ok()?;
+    let text = bunko_control::read_private_file(&storage.join(CONTROL_FILE))?;
     serde_json::from_str(&text).ok()
 }
 
@@ -56,7 +58,7 @@ pub fn candidate_storages(
     }
     out.push(paths::processor_default_storage(env));
     // `mokuro-bunko gui` with no storage of its own to use.
-    out.push(std::env::temp_dir().join("mokuro-bunko-gui"));
+    out.push(paths::gui_fallback_storage(env));
     if cfg!(target_os = "linux") {
         // install.sh --systemd as root: the system units' storage.
         out.push(PathBuf::from("/var/lib/mokuro-bunko/storage"));
@@ -372,30 +374,56 @@ mod tests {
         assert!(got.contains(&PathBuf::from("/srv/proc")));
         assert!(got.contains(&paths::server_default_storage(&env)));
         assert!(got.contains(&paths::processor_default_storage(&env)));
+        assert!(got.contains(&paths::gui_fallback_storage(&env)));
+        let tmp = std::env::temp_dir();
+        assert!(
+            !got.iter()
+                .any(|p| p.starts_with(&tmp) && !p.starts_with(dir.path())),
+            "{got:?}"
+        );
         let mut dedup = got.clone();
         dedup.dedup();
         assert_eq!(dedup.len(), got.len());
+    }
+
+    /// Write a control file as an instance does (0600 on Unix).
+    fn write_private(path: &Path, text: &str) {
+        std::fs::write(path, text).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
 
     #[test]
     fn reads_control_files_of_live_processes() {
         let dir = tempfile::tempdir().unwrap();
         let me = std::process::id();
-        std::fs::write(
-            dir.path().join(CONTROL_FILE),
-            format!(r#"{{"role":"processor","pid":{me},"port":4321,"token":"abc","version":"0.7.0","started_at":"x"}}"#),
-        )
-        .unwrap();
+        let file = dir.path().join(CONTROL_FILE);
+        let text = format!(
+            r#"{{"role":"processor","pid":{me},"port":4321,"token":"abc","version":"0.7.0","started_at":"x"}}"#
+        );
+        write_private(&file, &text);
         let got = found(&[dir.path().to_path_buf()]);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].1.port, 4321);
-        if cfg!(unix) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Planted: readable by others, or a symlink to a good file.
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(found(&[dir.path().to_path_buf()]).is_empty());
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let other = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(&file, other.path().join(CONTROL_FILE)).unwrap();
+            assert!(found(&[other.path().to_path_buf()]).is_empty());
+
             // A pid that cannot exist (beyond pid_max) is filtered out.
-            std::fs::write(
-                dir.path().join(CONTROL_FILE),
+            write_private(
+                &file,
                 r#"{"role":"processor","pid":2147483600,"port":1,"token":"t"}"#,
-            )
-            .unwrap();
+            );
             assert!(found(&[dir.path().to_path_buf()]).is_empty());
         }
     }

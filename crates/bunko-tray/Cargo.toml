@@ -38,6 +38,9 @@ tao = { version = "0.34", default-features = false, features = ["rwh_06"] }
 open = "5"
 # One tray per user (a lock file), as bunko-processor locks its storage.
 fs4 = { version = "1", default-features = false, features = ["sync"] }
+# The control API's wire types and its `.control.json` checks (no runtime: no axum or
+# tokio); tests/contract.rs checks the tray reads exactly what the instances send.
+bunko-control = { path = "../bunko-control", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # tao runs a GTK main loop on Linux; the tray menu is a GTK menu (dbusmenu via appindicator).
@@ -52,6 +55,3 @@ mslnk = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true
-# The control API's own wire types (no runtime): tests/contract.rs checks the tray reads
-# exactly what the instances send.
-bunko-control = { path = "../bunko-control", default-features = false }

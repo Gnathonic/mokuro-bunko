@@ -235,8 +235,11 @@ impl Monitor {
             if let Err(e) = &res {
                 tracing::debug!("{}: events: {e}; polling", control.role);
             }
-            if started.elapsed() > Duration::from_secs(5) {
-                failures = 0; // the stream worked for a while: retry it at once
+            // Only a stream that worked for a while is retried at once; one that ends
+            // straight away (or fails) falls back to polling until RETRY_STREAM.
+            let lasted = started.elapsed() > Duration::from_secs(5);
+            if lasted {
+                failures = 0;
             }
             // Poll until it is time to try the stream again.
             let until = Instant::now() + RETRY_STREAM;
@@ -248,7 +251,7 @@ impl Monitor {
                             e.live.status = Some(s);
                             e.live.error = None;
                         });
-                        if res.is_ok() {
+                        if res.is_ok() && lasted {
                             break; // the stream ended cleanly: reconnect
                         }
                     }
@@ -268,5 +271,72 @@ impl Monitor {
                 std::thread::sleep(POLL);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::atomic::AtomicUsize;
+
+    /// An instance whose event stream answers and ends at once is polled, not
+    /// reconnected in a tight loop.
+    #[test]
+    fn a_stream_that_ends_at_once_is_not_hammered() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let streams = Arc::new(AtomicUsize::new(0));
+        let seen = streams.clone();
+        std::thread::spawn(move || {
+            for s in listener.incoming() {
+                let Ok(mut s) = s else { return };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !String::from_utf8_lossy(&buf).contains("\r\n\r\n") {
+                    match s.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let (ctype, body) = if String::from_utf8_lossy(&buf).contains("/control/events") {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    ("text/event-stream", "")
+                } else {
+                    ("application/json", r#"{"role":"processor","state":"idle"}"#)
+                };
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        let control = ControlFile {
+            role: "processor".into(),
+            pid: std::process::id(),
+            port,
+            token: "t".into(),
+            version: String::new(),
+            started_at: String::new(),
+        };
+        let m = Arc::new(Monitor {
+            entries: Mutex::new(Vec::new()),
+            discovered: AtomicBool::new(true),
+            quit: AtomicBool::new(false),
+            candidates: Box::new(Vec::new),
+            on_change: Arc::new(|| {}),
+            notice: Mutex::new(None),
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (me, st, c) = (m.clone(), stop.clone(), control.clone());
+        let watcher = std::thread::spawn(move || {
+            me.watch(PathBuf::from("/x"), c.clone(), Client::new(&c), st)
+        });
+        std::thread::sleep(Duration::from_secs(3));
+        stop.store(true, Ordering::SeqCst);
+        watcher.join().unwrap();
+        let n = streams.load(Ordering::SeqCst);
+        assert!(n <= 2, "{n} event-stream connections in 3 s");
     }
 }

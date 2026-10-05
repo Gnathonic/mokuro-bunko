@@ -17,7 +17,7 @@
 //! let control = Control::new(ControlConfig::new(Role::Processor, name, VERSION, &storage));
 //! control.set_stop(shutdown_token.clone());        // POST /control/stop (managed only)
 //! let listener = ControlListener::bind().await?;   // 127.0.0.1:<ephemeral>, new token
-//! let app = gui::router(..., listener.token());    // optional: the /app pages (G2)
+//! let app = gui::app(role, listener.token(), listener.login_codes(), ...); // optional: /app pages (G2)
 //! let server = listener.serve(control.clone(), Some(app))?;   // writes .control.json
 //! ... run, keeping control current (set_link / set_library / set_problems) ...
 //! server.shutdown().await;                         // removes .control.json
