@@ -137,7 +137,11 @@ impl Manifest {
             url: hf(PPOCR_REPO, PPOCR_REVISION, file),
             // The models-v1 release carries the same bytes under a flat name.
             mirrors: release_name(id)
-                .map(|f| vec![format!("{}/{f}", crate::models_release::RELEASE_BASE_URL)])
+                .map(|f| {
+                    let mut m = local_mirror(f);
+                    m.push(format!("{}/{f}", crate::models_release::RELEASE_BASE_URL));
+                    m
+                })
                 .unwrap_or_default(),
             sha256: sha256.into(),
             size,
@@ -190,7 +194,7 @@ impl Manifest {
                 // Flat, as released: an `.onnx` finds its external data beside it by name.
                 path: f.file.into(),
                 url: format!("{}/{}", crate::models_release::RELEASE_BASE_URL, f.file),
-                mirrors: Vec::new(),
+                mirrors: local_mirror(f.file),
                 sha256: f.sha256.into(),
                 size: f.size,
                 license: "Apache-2.0".into(),
@@ -844,6 +848,28 @@ fn torch_release() -> Option<TorchRelease> {
 /// sidecars' `ocr_engine.weights` provenance.
 pub fn torch_release_name() -> String {
     torch_release().map_or_else(|| "unknown".into(), |r| r.release)
+}
+
+/// A mirror of the `models-v1` release (and the PP-OCR files under their release
+/// names), tried first: a base URL, or a directory holding the release assets under
+/// their flat names (air-gapped hosts, an offline package).
+pub const MODELS_MIRROR_ENV: &str = "MOKURO_MODELS_MIRROR";
+
+/// `[<MOKURO_MODELS_MIRROR>/<file>]`, or nothing when the variable is unset.
+fn local_mirror(file: &str) -> Vec<String> {
+    std::env::var(MODELS_MIRROR_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| {
+            let v = v.trim().trim_end_matches('/').to_string();
+            let base = if v.contains("://") {
+                v
+            } else {
+                format!("file://{}", expand_home(Path::new(&v)).display())
+            };
+            vec![format!("{base}/{file}")]
+        })
+        .unwrap_or_default()
 }
 
 /// A mirror of the torch package release, tried before GitHub: a base URL, or a
