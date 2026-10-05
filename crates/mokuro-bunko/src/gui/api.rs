@@ -600,6 +600,9 @@ async fn ocr_hardware(State(state): S) -> Response {
                 "hint": choice.hint,
                 "variants": ["cpu", "cu130", "rocm7.1"],
                 "packs": packs,
+                // The offline OCR files shipped with this app (macOS disk image):
+                // install-ocr takes them when no folder is given.
+                "bundled_offline": crate::cmd::install_ocr::bundled_offline_dir(),
                 "engines": bunko_engines::models::ENGINES,
             })
         })

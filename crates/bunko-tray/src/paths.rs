@@ -189,20 +189,23 @@ pub fn cli_name() -> &'static str {
 }
 
 /// The `mokuro-bunko` executable: next to the tray (archives, the Windows folder, the
-/// macOS bundle's `Contents/MacOS`), the CLI next to an unpacked `mokuro-bunko.app`,
-/// then `PATH`, then `~/.local/bin`.
+/// macOS app's `Contents/MacOS`), the CLI next to an unpacked `mokuro-bunko.app`,
+/// then `PATH`, then `~/.local/bin`. The installed app (`Mokuro Bunko.app` from the
+/// disk image) always uses its own copy.
 pub fn cli_exe(exe_dir: &Path, env: &dyn Env) -> Option<PathBuf> {
     let name = cli_name();
     let mut candidates = vec![exe_dir.join(name)];
-    // mokuro-bunko.app/Contents/MacOS → the archive folder holding the .app. The CLI there
-    // comes first: `mokuro-bunko update` replaces that file, and the copy inside the bundle
-    // (a hard link when unpacked) keeps the old version.
+    // mokuro-bunko.app/Contents/MacOS in an unpacked release archive → the archive folder
+    // holding the .app. The CLI there comes first: `mokuro-bunko update` replaces that
+    // file, and the copy inside the bundle (a hard link when unpacked) keeps the old
+    // version. Only for the archive's bundle name: the app installed from the disk image
+    // ("Mokuro Bunko.app", wherever it was dragged) carries the only CLI it should run.
     let in_bundle = exe_dir.ends_with("Contents/MacOS")
         && exe_dir
             .ancestors()
             .nth(2)
-            .and_then(|a| a.extension())
-            .is_some_and(|e| e == "app");
+            .and_then(|a| a.file_name())
+            .is_some_and(|n| n == "mokuro-bunko.app");
     if let Some(outer) = exe_dir.ancestors().nth(3) {
         if in_bundle {
             candidates.insert(0, outer.join(name));
@@ -347,5 +350,14 @@ mod tests {
         std::fs::create_dir_all(&plain).unwrap();
         std::fs::write(plain.join(cli_name()), "").unwrap();
         assert_eq!(cli_exe(&plain, &env), Some(plain.join(cli_name())));
+        // The app from the disk image uses its own CLI, even with one next to it.
+        let app = dir
+            .path()
+            .join("Mokuro Bunko.app")
+            .join("Contents")
+            .join("MacOS");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join(cli_name()), "").unwrap();
+        assert_eq!(cli_exe(&app, &env), Some(app.join(cli_name())));
     }
 }

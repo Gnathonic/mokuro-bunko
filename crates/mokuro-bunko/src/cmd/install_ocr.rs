@@ -93,6 +93,18 @@ mod full {
             println!("  {h}");
         }
 
+        // No `--from`: the offline OCR files bundled with this copy (the macOS app), if
+        // any, else the network.
+        let from: Option<PathBuf> = match &args.from {
+            Some(f) => Some(f.clone()),
+            None => bundled_offline_dir().inspect(|d| {
+                println!(
+                    "Installing from the OCR files bundled with this app: {}",
+                    d.display()
+                )
+            }),
+        };
+
         // Already there (installed, or baked into a Docker image)?
         let pack_dir = if !args.force
             && let Some((dir, m)) = find_installed(&search, &variant)
@@ -106,7 +118,7 @@ mod full {
             dir
         } else {
             let rt = crate::out::runtime()?;
-            let dir = rt.block_on(install(&root, &variant, target, args.from.as_deref()))?;
+            let dir = rt.block_on(install(&root, &variant, target, from.as_deref()))?;
             println!("Installed {}", dir.display());
             dir
         };
@@ -134,9 +146,9 @@ mod full {
         // reads the environment (the install runtime above has shut down); only this
         // process sees it.
         unsafe { std::env::set_var(bunko_engines::torch::PACK_ENV, &pack_dir) };
-        // `--from <dir>`: the same folder may hold the model files under their release
-        // names (an offline package); try it before the network.
-        if let Some(from) = args.from.as_deref() {
+        // `--from <dir>` (or the bundled folder): it may hold the model files under their
+        // release names (an offline package); try it before the network.
+        if let Some(from) = from.as_deref() {
             let from = std::path::absolute(from).unwrap_or_else(|_| from.to_path_buf());
             for var in [
                 bunko_ocr::models::TORCH_MIRROR_ENV,
@@ -211,6 +223,39 @@ mod full {
             deb.join(" "),
             arch.join(" ")
         )
+    }
+
+    /// The offline OCR files (pack archive + model files, what `--from` takes) shipped
+    /// with this copy of the program: inside the macOS app
+    /// (`Mokuro Bunko.app/Contents/Resources/ocr-offline`), or `ocr-offline` next to the
+    /// executable. `install-ocr` and the setup wizard use it when no `--from` is given.
+    pub fn bundled_offline_dir() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        bundled_offline_in(exe.parent()?)
+    }
+
+    /// [`bundled_offline_dir`] for an executable in `exe_dir`: a folder counts when it
+    /// holds a backend pack archive (`*-torch-*.tar.zst`, or its first part).
+    pub fn bundled_offline_in(exe_dir: &Path) -> Option<PathBuf> {
+        let mut candidates = Vec::new();
+        if exe_dir.ends_with("Contents/MacOS")
+            && let Some(contents) = exe_dir.parent()
+        {
+            candidates.push(contents.join("Resources").join("ocr-offline"));
+        }
+        candidates.push(exe_dir.join("ocr-offline"));
+        candidates.into_iter().find(|d| holds_pack_archive(d))
+    }
+
+    fn holds_pack_archive(dir: &Path) -> bool {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.filter_map(|e| e.ok()).any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.contains("-torch-")
+                    && (name.ends_with(".tar.zst") || name.ends_with(".tar.zst.001"))
+                    && e.path().is_file()
+            })
+        })
     }
 
     /// Packs baked into a Docker image or shipped next to the executable.
@@ -608,5 +653,49 @@ mod full {
         }
         let _ = std::fs::remove_dir_all(&downloads);
         Ok(dir)
+    }
+}
+
+#[cfg(all(test, feature = "ocr"))]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn touch(p: &Path) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, b"x").unwrap();
+    }
+
+    #[test]
+    fn finds_the_ocr_files_bundled_with_the_program() {
+        let dir = tempfile::tempdir().unwrap();
+        // The macOS app: Contents/MacOS/mokuro-bunko + Contents/Resources/ocr-offline.
+        let app = dir.path().join("Mokuro Bunko.app/Contents");
+        let macos = app.join("MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        assert_eq!(bundled_offline_in(&macos), None);
+        let offline = app.join("Resources/ocr-offline");
+        // A folder without a pack archive does not count.
+        touch(&offline.join("hayai-nova_config.json"));
+        assert_eq!(bundled_offline_in(&macos), None);
+        touch(&offline.join("mokuro-bunko-0.7.0-aarch64-apple-darwin-torch-cpu.tar.zst"));
+        assert_eq!(bundled_offline_in(&macos), Some(offline));
+
+        // Elsewhere: ocr-offline next to the executable (split archives count too).
+        let plain = dir.path().join("mb");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(bundled_offline_in(&plain), None);
+        touch(&plain.join(
+            "ocr-offline/mokuro-bunko-0.7.0-x86_64-unknown-linux-gnu-torch-rocm7.1.tar.zst.001",
+        ));
+        assert_eq!(bundled_offline_in(&plain), Some(plain.join("ocr-offline")));
+        // `Resources/` is only looked at inside an app bundle.
+        let outside = dir.path().join("lib/bin");
+        std::fs::create_dir_all(&outside).unwrap();
+        touch(
+            &dir.path()
+                .join("lib/Resources/ocr-offline/x-torch-cpu.tar.zst"),
+        );
+        assert_eq!(bundled_offline_in(&outside), None);
     }
 }

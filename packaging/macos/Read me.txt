@@ -1,0 +1,51 @@
+Mokuro Bunko @VERSION@ for macOS (Apple silicon)
+================================================
+
+Install
+-------
+Drag "Mokuro Bunko" onto the Applications folder in this window, then open it
+from Applications (or Launchpad). A book icon appears in the menu bar; there is
+no Dock icon. The first time, the setup wizard opens in your browser.
+
+The wizard sets up a library server (folder, port, admin account), or a
+processor that does OCR for a library on another machine, or both. Its OCR step
+installs from the files that come with the app: nothing is downloaded, just
+click Install. It can also start everything when you log in.
+
+Click the menu-bar icon for status, pause/resume, the dashboard, settings, the
+library, logs and "Start at login".
+
+Opening it on another Mac
+-------------------------
+The app is not signed by Apple. Copied from this disk image on this Mac it opens
+normally. If the disk image or the app reaches another Mac by download, AirDrop
+or a browser, macOS may say it "cannot be opened" or is "damaged". Then either
+right-click the app, choose Open and confirm with Open, or run once in Terminal:
+  xattr -dr com.apple.quarantine "/Applications/Mokuro Bunko.app"
+
+Terminal (optional)
+-------------------
+The command-line program is inside the app:
+  "/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko" --help
+To type just `mokuro-bunko`, link it into a folder on your PATH, for example:
+  mkdir -p ~/.local/bin
+  ln -sf "/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko" ~/.local/bin/
+(and add ~/.local/bin to PATH in ~/.zprofile if it is not there yet).
+
+Where things are
+----------------
+  ~/.local/share/mokuro-bunko/     library, database, logs, OCR backend and models
+  ~/.config/mokuro-bunko/          config.yaml, processor.yaml, tray.json
+  ~/Library/LaunchAgents/io.github.gnathonic.mokuro-bunko*.plist
+                                   start-at-login entries
+
+Uninstall: choose Quit in the menu-bar menu, then move the app to the Trash. To
+remove your data too, delete the two folders and the LaunchAgents files above.
+
+OCR in this package: the CPU backend (libtorch) and the hayai-nova model
+compiled for Apple silicon, plus the PP-OCR manga detector. Measured on an
+M2 Pro: a 20-page volume in 36 seconds (about 0.55 pages per second).
+
+This is a pre-release (@VERSION@): "Check for updates" finds nothing until a
+release is published. Licences: LICENSE and THIRD-PARTY-LICENSES.md in
+Mokuro Bunko.app/Contents/Resources.

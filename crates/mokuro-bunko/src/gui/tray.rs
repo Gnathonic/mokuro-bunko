@@ -70,6 +70,8 @@ pub fn tray_exe(exe: &Path) -> Option<PathBuf> {
         dir.join(tray_name()),
         dir.join("mokuro-bunko.app/Contents/MacOS")
             .join(tray_name()),
+        dir.join("Mokuro Bunko.app/Contents/MacOS")
+            .join(tray_name()),
     ];
     if let Some(path) = std::env::var_os("PATH") {
         candidates.extend(std::env::split_paths(&path).map(|d| d.join(tray_name())));
