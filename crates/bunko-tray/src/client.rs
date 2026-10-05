@@ -288,6 +288,25 @@ mod tests {
                     }
                     buf.extend_from_slice(&chunk[..n]);
                 }
+                // Read the body too: closing a socket with unread bytes sends a reset,
+                // which the client may see before the response (a flaky test).
+                let text = String::from_utf8_lossy(&buf).into_owned();
+                let head_len = text.find("\r\n\r\n").map_or(buf.len(), |i| i + 4);
+                let body_len = text
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                while buf.len() < head_len + body_len {
+                    let n = s.read(&mut chunk).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
                 requests.push(String::from_utf8_lossy(&buf).into_owned());
                 let (code, body) = answer;
                 write!(
