@@ -440,7 +440,7 @@ mod full {
             .unwrap_or(25);
         let mut last = 0u64;
         move |done, total| {
-            let pct = if total > 0 { done * 100 / total } else { 100 };
+            let pct = (done * 100).checked_div(total).unwrap_or(100);
             if pct >= last + step || (done == total && last < 100) {
                 last = pct;
                 println!("  {label}: {pct}% of {}", mb(total));

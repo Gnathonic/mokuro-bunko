@@ -112,8 +112,10 @@ impl Npy {
         self.expect(NpyDtype::F32)?;
         Ok(self
             .bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect())
     }
 
@@ -129,8 +131,10 @@ impl Npy {
         self.expect(NpyDtype::F16)?;
         Ok(self
             .bytes
-            .chunks_exact(2)
-            .map(|b| half::f16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| half::f16::from_le_bytes(*b))
             .collect())
     }
 
@@ -143,8 +147,10 @@ impl Npy {
         self.expect(NpyDtype::I64)?;
         Ok(self
             .bytes
-            .chunks_exact(8)
-            .map(|b| i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|b| i64::from_le_bytes(*b))
             .collect())
     }
 }

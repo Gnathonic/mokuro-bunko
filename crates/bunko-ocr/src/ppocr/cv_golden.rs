@@ -211,7 +211,9 @@ fn db_postprocess_matches_python() {
     let (w, h) = (n(&d["w"]), n(&d["h"]));
     let raw = bytes(&d["prob"]);
     let prob: Vec<f32> = raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
     let ours = db_postprocess(&ProbMap {

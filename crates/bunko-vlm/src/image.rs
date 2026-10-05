@@ -102,7 +102,7 @@ impl Bgr {
     /// Channel swap (`cv2.cvtColor(BGR2RGB)`), lossless.
     pub fn to_rgb(&self) -> Rgb {
         let mut data = self.data.clone();
-        for p in data.chunks_exact_mut(3) {
+        for p in data.as_chunks_mut::<3>().0 {
             p.swap(0, 2);
         }
         Rgb {
@@ -116,7 +116,9 @@ impl Bgr {
     /// `(B*3735 + G*19235 + R*9798 + 16384) >> 15` (spec §3.4, verified bit-exact).
     pub fn gray(&self) -> Vec<u8> {
         self.data
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|p| {
                 let v = u32::from(p[0]) * 3735
                     + u32::from(p[1]) * 19235
@@ -132,7 +134,7 @@ impl Rgb {
     /// Channel swap back to BGR.
     pub fn to_bgr(&self) -> Bgr {
         let mut data = self.data.clone();
-        for p in data.chunks_exact_mut(3) {
+        for p in data.as_chunks_mut::<3>().0 {
             p.swap(0, 2);
         }
         Bgr {
