@@ -456,21 +456,26 @@ Install it as in [Installing](#installing) (`install.sh --flavor full`,
 command, `processor setup`, does the rest. From the host the processor needs
 the GPU driver only (see the [GPU prerequisites](#installing)).
 
-A processor keeps its packs and models in its own storage, `processor.storage`
+A processor keeps its pack and models in its own storage, `processor.storage`
 (`~/.local/share/mokuro-bunko-processor` on Linux and macOS,
-`%LOCALAPPDATA%\mokuro-bunko-processor` on Windows), not in the library
-storage that `install-ocr` uses by default. Point `install-ocr` there with
-`MOKURO_STORAGE` (it then fetches the pack's models there too):
+`%LOCALAPPDATA%\mokuro-bunko-processor` on Windows). `install-ocr` puts them
+there by itself on a machine that has a `processor.yaml` and no library
+configuration; `install-ocr --processor` asks for it explicitly. A pack
+installed before `processor setup` lands in the default library storage
+instead, and the processor finds it there too. Look for packs in this order:
+
+1. `MOKURO_BACKENDS_DIR`;
+2. its own storage;
+3. the library storage.
+
+So either order works:
 
 ```bash
-MOKURO_STORAGE=~/.local/share/mokuro-bunko-processor mokuro-bunko install-ocr
+mokuro-bunko install-ocr        # or, after processor setup: install-ocr --processor
 ```
 
-```powershell
-$env:MOKURO_STORAGE = "$env:LOCALAPPDATA\mokuro-bunko-processor"; .\mokuro-bunko.exe install-ocr
-```
-
-(The Docker images have their pack built in and need no step.) Then:
+(The Docker images have their pack built in and need no step.) The desktop
+app's processor setup offers the same install, with progress. Then:
 
 ```bash
 mokuro-bunko processor setup
@@ -634,17 +639,16 @@ the GPU (the `video` group, and `render` for some AMD setups), and its
 `ExecStart` is
 `/usr/local/bin/mokuro-bunko processor serve --config /etc/mokuro-bunko/processor.yaml`.
 
-Install the backend pack as that user, into its processor storage (the
-default `processor.storage` under its home, unless `processor.yaml` sets
-another):
+Install the backend pack as that user, into the storage its `processor.yaml`
+names (`--processor` reads that file):
 
 ```bash
 sudo useradd -r -m -d /var/lib/mokuro-bunko -s /usr/sbin/nologin mokuro   # if it does not exist
 sudo usermod -aG video,render mokuro
 sudo install -D -m 600 -o mokuro processor.yaml /etc/mokuro-bunko/processor.yaml
 sudo -u mokuro env HOME=/var/lib/mokuro-bunko \
-  MOKURO_STORAGE=/var/lib/mokuro-bunko/.local/share/mokuro-bunko-processor \
-  /usr/local/bin/mokuro-bunko install-ocr
+  MOKURO_PROCESSOR_CONFIG=/etc/mokuro-bunko/processor.yaml \
+  /usr/local/bin/mokuro-bunko install-ocr --processor
 sudo systemctl enable --now mokuro-bunko-processor
 journalctl -u mokuro-bunko-processor -f
 ```

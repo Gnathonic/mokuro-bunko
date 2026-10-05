@@ -93,6 +93,19 @@ impl LocalProcessor {
         config: LocalConfig,
         bench: BenchConfig,
     ) -> LocalLink {
+        Self::spawn_controlled(pipeline, config, bench, None)
+    }
+
+    /// [`LocalProcessor::spawn_with`] under a control API (GUI.md §3): the server's own
+    /// OCR obeys the same pause as a remote processor (announced on `events` as
+    /// `availability` / `released`) and reports into the control's activity (the
+    /// caller labels its devices: `Control::set_devices` with the described catalog).
+    pub fn spawn_controlled(
+        pipeline: Arc<dyn PagePipeline>,
+        config: LocalConfig,
+        bench: BenchConfig,
+        control: Option<bunko_control::Control>,
+    ) -> LocalLink {
         let (ops_tx, mut ops_rx) = mpsc::channel::<Op>(64);
         let (events_tx, events_rx) = mpsc::unbounded_channel::<Event>();
         let shutdown = CancellationToken::new();
@@ -105,6 +118,7 @@ impl LocalProcessor {
             events_tx,
             leaving,
             bench,
+            control,
         );
         let stop = shutdown.clone();
         let task = tokio::spawn(async move {

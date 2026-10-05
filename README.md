@@ -123,6 +123,16 @@ See [Building from source](#building-from-source).
 
 **Something not working?** Run `mokuro-bunko doctor`: it checks your build, config, the OCR backend pack and models, free disk space and port, with fix hints. See [docs/troubleshooting.md](docs/troubleshooting.md).
 
+## Desktop app
+
+`mokuro-bunko gui` opens the setup and settings pages in your browser. On Windows and macOS, double-clicking the program does the same. The pages are served on this machine only (`127.0.0.1`, with a one-time sign-in link), and they cover:
+
+- **Setup**: a library server (folder, admin account, registration, remote access, HTTPS), a processor for another library (with a connection test), the OCR backend install with live progress, and starting either one with the machine.
+- **Settings**: server, HTTPS, remote access, processor, OCR and models, start-up, logs, diagnostics (`doctor`), updates, and any `config.yaml` key. Users, invites and the library's own settings stay in the server's admin panel, which the app links to.
+- **Dashboard**: what this machine is reading now, today's totals, problems, and pause / resume (after this volume, now, for an hour, until morning).
+
+A running `serve` or `processor serve` serves the same pages on its loopback control port, which is what the tray icon opens. Everything the app does is also a CLI command; [docs/rust-port/GUI-COVERAGE.md](docs/rust-port/GUI-COVERAGE.md) maps each command and flag to its page.
+
 ## Configuration
 
 `mokuro-bunko setup` (or the first visit in a browser) creates an admin account and writes a config file. After that, edit `config.yaml` directly, use `mokuro-bunko config set <section.key> <value>`, or use the admin panel at `/_admin`.
@@ -227,6 +237,7 @@ mokuro-bunko models         # list, download [--engine E], verify   (full build)
 mokuro-bunko processor      # serve, setup, status, service         (full build)
 mokuro-bunko healthcheck    # probe /api/health, for container HEALTHCHECKs
 mokuro-bunko install-ocr    # install the OCR backend pack for this GPU/CPU + the models (full build)
+mokuro-bunko gui            # the desktop app: setup, settings and dashboard in the browser
 ```
 
 Global options: `-c, --config <PATH>` (or `MOKURO_CONFIG`), `-v, --verbose`, `--version` (prints the version, build flavor and target). `mokuro-bunko <command> --help` has the details.

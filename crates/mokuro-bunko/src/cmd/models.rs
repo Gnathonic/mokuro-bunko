@@ -3,44 +3,45 @@
 //! builtin manifest (PP-OCR pinned on Hugging Face, hayai-nova / paddle-manga from the
 //! `models-v1` release). `MOKURO_MODELS_DIR` names a directory used instead of the store
 //! for the files it holds; `MOKURO_MODELS_DOWNLOAD=0` forbids downloads.
+//!
+//! `<storage>` is the library server's, or the processor's with `--processor` (or on a
+//! processor-only machine): see [`crate::ocr_target`].
 
 use super::Ctx;
-use crate::cfgfile;
 use crate::cli::ModelsCmd;
+use crate::ocr_target::{self, OcrTarget, Role};
 use crate::out::{CmdResult, Fail};
-use bunko_engines::{Backend, EngineConfig, models};
+use bunko_engines::{Backend, models};
 use bunko_ocr::models::ModelStore;
-use std::path::PathBuf;
 
 pub fn run(ctx: &Ctx, cmd: ModelsCmd) -> CmdResult {
     crate::logging::init_console(ctx.verbose);
     match cmd {
-        ModelsCmd::List => {
-            let dir = models_dir(ctx)?;
-            println!("Models directory: {}", dir.display());
-            list(&store(dir))
+        ModelsCmd::List { target } => {
+            let target = ocr_target::resolve(ctx, target.processor)?;
+            println!("{}", target.describe());
+            println!("Models directory: {}", target.models_dir().display());
+            list(&target)
         }
-        ModelsCmd::Download { engine } => download(ctx, engine.as_deref()),
-        ModelsCmd::Verify => verify(&store(models_dir(ctx)?)),
+        ModelsCmd::Download { engine, target } => {
+            let target = ocr_target::resolve(ctx, target.processor)?;
+            println!("{}", target.describe());
+            download(&target, engine.as_deref())
+        }
+        ModelsCmd::Verify { target } => {
+            let target = ocr_target::resolve(ctx, target.processor)?;
+            println!("{}", target.describe());
+            verify(&target.engine_config(Backend::Auto).store())
+        }
     }
-}
-
-fn models_dir(ctx: &Ctx) -> Result<PathBuf, Fail> {
-    Ok(cfgfile::load_effective(&ctx.config_path)?
-        .storage
-        .layout()
-        .models())
-}
-
-fn store(dir: PathBuf) -> ModelStore {
-    EngineConfig::new(dir, Backend::Auto).store()
 }
 
 fn mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1e6)
 }
 
-fn list(store: &ModelStore) -> CmdResult {
+fn list(target: &OcrTarget) -> CmdResult {
+    let store = &target.engine_config(Backend::Auto).store();
     if let Some(dir) = &store.options().override_dir {
         println!("Override directory (MOKURO_MODELS_DIR): {}", dir.display());
     }
@@ -60,10 +61,7 @@ fn list(store: &ModelStore) -> CmdResult {
         }
     }
     // The compiled libtorch packages this machine's default rows need.
-    let pipeline = bunko_engines::EnginePipeline::new(EngineConfig::new(
-        store.options().root.clone(),
-        Backend::Auto,
-    ));
+    let pipeline = bunko_engines::EnginePipeline::new(target.engine_config(Backend::Auto));
     println!(
         "compiled packages ({}):",
         bunko_ocr::models::torch_release_name()
@@ -105,29 +103,29 @@ fn list(store: &ModelStore) -> CmdResult {
     Ok(())
 }
 
-/// Also used by the deprecated `install-ocr`.
-pub fn download(ctx: &Ctx, engine: Option<&str>) -> CmdResult {
+/// Also used by `install-ocr`.
+pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
     if let Some(e) = engine.filter(|e| !models::ENGINES.contains(e)) {
         return Err(Fail::msg(format!(
             "Unknown engine '{e}' (expected one of: {})",
             models::ENGINES.join(", ")
         )));
     }
-    let dir = models_dir(ctx)?;
-    let store = store(dir);
+    let store = target.engine_config(Backend::Auto).store();
     bunko_engines::runtime::init();
-    // What to fetch for: `--engine` (its default row), else the enabled generations
-    // (each at its precision mode), else (no config) every engine's default row.
-    let rows: Vec<(String, String)> = match (engine, cfgfile::load_effective(&ctx.config_path)) {
+    // What to fetch for: `--engine` (its default row), else the library's enabled
+    // generations (each at its precision mode), else (a processor, which runs whatever
+    // its library asks for) every engine's default row.
+    let rows: Vec<(String, String)> = match (engine, target.library.as_ref()) {
         (Some(e), _) => vec![(e.to_string(), "auto-accuracy".to_string())],
-        (None, Ok(cfg)) => cfg
+        (None, Some(cfg)) if target.role == Role::Library => cfg
             .ocr
             .generations
             .iter()
             .filter(|g| g.enabled && g.retired.is_none())
             .map(|g| (g.engine.clone(), g.precision.clone()))
             .collect(),
-        (None, Err(_)) => models::ENGINES
+        (None, _) => models::ENGINES
             .iter()
             .map(|e| (e.to_string(), "auto-accuracy".to_string()))
             .collect(),
@@ -190,10 +188,7 @@ pub fn download(ctx: &Ctx, engine: Option<&str>) -> CmdResult {
     if !recognizer_rows.is_empty() {
         // The compiled libtorch packages depend on this machine's devices: the backend
         // pack (install-ocr) says which.
-        let pipeline = bunko_engines::EnginePipeline::new(EngineConfig::new(
-            store.options().root.clone(),
-            Backend::Auto,
-        ));
+        let pipeline = bunko_engines::EnginePipeline::new(target.engine_config(Backend::Auto));
         match pipeline.torch() {
             Err(e) => {
                 println!(

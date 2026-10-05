@@ -60,9 +60,11 @@ document.addEventListener('DOMContentLoaded', () => {
         loadUsers();
     }
     loadInvites();
-    // A refresh on the Audit tab comes back to it, filters and all.
-    if (!isInviter && (window.location.hash || '').startsWith('#audit')) {
-        const tab = document.querySelector(".tab[data-tab='audit']");
+    // A refresh on the Audit tab comes back to it, filters and all; the desktop
+    // app links straight to a tab (#settings, #connectivity, ...).
+    const hashTab = (window.location.hash || '').slice(1).split('?')[0];
+    if (!isInviter && /^[a-z]+$/.test(hashTab)) {
+        const tab = document.querySelector(".tab[data-tab='" + hashTab + "']");
         if (tab) tab.click();
     }
 });
@@ -603,6 +605,20 @@ function processorTransfer(transfer) {
     return '';
 }
 
+// A processor that paused itself (from its tray or desktop app): "paused
+// until 18:00", or "paused" with no end. The owner lifts it; an admin
+// cannot. `pause` is absent on servers before 0.7.
+function processorPause(pause) {
+    if (!pause || !pause.paused) return '';
+    const until = typeof pause.until === 'string' ? Date.parse(pause.until) : NaN;
+    const when = isFinite(until)
+        ? ' until ' + processorClock(until / 1000, until - Date.now() > 20 * 3600 * 1000)
+        : '';
+    return '<div class="processor-transfer processor-transfer--paused" title="' +
+        escapeHtml('paused by its owner' + (pause.reason === 'schedule' ? ' (schedule)' : '') +
+            '; it takes no new work until it resumes') + '">paused' + escapeHtml(when) + '</div>';
+}
+
 // Rows whose runner keeps failing to START on this machine: the library
 // spaces the attempts out (every poll interval x4, up to an hour) instead of
 // retrying every scan. One line each: which row, the next try, and why.
@@ -683,11 +699,12 @@ function processorRowHtml(p, machine) {
         '<span class="processors-machine__name">' + escapeHtml(name) + '</span>' +
         (online ? '' : ' <span class="processors-machine__offline">offline</span>') +
         (installing ? ' <span class="processors-machine__installing">installing</span>' : '') +
+        (p && p.pause && p.pause.paused ? ' <span class="processors-machine__paused">paused</span>' : '') +
         (p && !local
             ? '<div class="processors-machine__since" title="' +
               escapeHtml('connected ' + processorClock(p.connected_since, true)) + '">connected</div>'
             : '') +
-        (p ? processorTransfer(p.transfer) + processorCannotStart(p.cannot_start) : '') +
+        (p ? processorPause(p.pause) + processorTransfer(p.transfer) + processorCannotStart(p.cannot_start) : '') +
         '</td>' +
         '<td class="processors-host" data-label="Hardware">' + escapeHtml(host) + '</td>' +
         '<td class="processors-rates-cell" data-label="Pages/min">' + processorRatesHtml(machine) + '</td>' +

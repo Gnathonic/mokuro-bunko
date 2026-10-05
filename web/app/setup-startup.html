@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Start with the machine - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/app/app.css">
+</head>
+<body>
+    <header class="mokuro-header" id="app-header" data-current="setup"></header>
+    <main class="app-main app-main--narrow">
+        <h1 class="page-title">Start with the machine</h1>
+        <p class="page-lede">Run the library server or the processor whenever you log in, as your user (no administrator rights).</p>
+        <div class="wizard-card">
+            <fieldset class="form-group">
+                <legend class="form-label">What to start</legend>
+                <div class="radio-cards">
+                    <label class="radio-card"><input type="radio" name="role" value="server" checked><div class="radio-card__content"><strong>The library server</strong><span id="role-server-cfg"></span></div></label>
+                    <label class="radio-card"><input type="radio" name="role" value="processor"><div class="radio-card__content"><strong>The processor</strong><span id="role-proc-cfg"></span></div></label>
+                </div>
+            </fieldset>
+
+            <fieldset class="form-group">
+                <legend class="form-label">How</legend>
+                <div class="radio-cards">
+                    <label class="radio-card"><input type="radio" name="how" value="tray" id="how-tray"><div class="radio-card__content"><strong>Run from the tray when I log in <span class="badge badge--success" id="rec-tray" hidden>recommended</span></strong><span id="how-tray-text">The tray icon starts it, restarts it if it stops, and shows its progress; pause and resume from its menu.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="how" value="service" id="how-service"><div class="radio-card__content"><strong>As a background service <span class="badge badge--success" id="rec-service" hidden>recommended</span></strong><span id="kind-desc"></span></div></label>
+                </div>
+            </fieldset>
+
+            <div id="tray-opts">
+                <dl class="kv" id="tray-kv"></dl>
+                <label class="check mt-3"><input type="checkbox" id="tray-autostart" checked> Start the tray when I log in</label>
+                <label class="check"><input type="checkbox" id="tray-start" checked> Start the tray now</label>
+                <label class="check" id="tray-conflict-row" hidden><input type="checkbox" id="tray-remove-service" checked> <span id="tray-conflict-text"></span></label>
+            </div>
+
+            <div id="svc-opts" hidden>
+                <dl class="kv" id="svc-kv"></dl>
+                <details class="mt-3"><summary class="form-label" style="cursor:pointer">The file that is written</summary><pre class="unit-text" id="svc-text"></pre></details>
+                <label class="check mt-3"><input type="checkbox" id="start-now" checked> Also start it now (and enable it)</label>
+                <p class="form-hint" id="start-note"></p>
+                <label class="check" id="svc-conflict-row" hidden><input type="checkbox" id="svc-remove-tray" checked> <span id="svc-conflict-text"></span></label>
+            </div>
+
+            <p class="form-error" id="err-svc" role="alert" hidden></p>
+            <div id="svc-result" aria-live="polite"></div>
+            <div class="wizard-actions"><a class="btn btn--ghost" href="/app/setup">Back</a><span class="spacer"></span><button type="button" class="btn btn--danger" id="remove-btn" hidden>Remove</button><button type="button" class="btn btn--primary" id="install-btn">Set it up</button></div>
+            <p class="cli-hint">CLI: <code>mokuro-bunko processor service --install --config …</code> writes the processor's service; the tray's own menu has <em>Start at login</em>.</p>
+        </div>
+    </main>
+    <script src="/app/app.js"></script>
+    <script src="/app/setup-startup.js"></script>
+</body>
+</html>

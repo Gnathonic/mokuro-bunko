@@ -11,6 +11,7 @@
 //! Lanes hold no state of their own beyond "which session is open on me": every claim,
 //! drain, strike, backoff, collection and cancellation is decided here.
 
+mod availability;
 mod bench;
 mod claim;
 mod registry;
@@ -41,6 +42,7 @@ use super::owed::OwedIndex;
 use super::profiles::Profiles;
 use super::types::{Job, LibraryFacts, PathLocks};
 
+pub use availability::availability_of;
 pub use bench::{BenchRequest, BenchState, cpu_label, physical_cores};
 pub use claim::{catalog_can_run, supported_for};
 pub use registry::{

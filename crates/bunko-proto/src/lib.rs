@@ -121,6 +121,23 @@ pub struct RegisterRequest {
     pub catalog: Catalog,
     #[serde(default = "one")]
     pub max_sessions: u32,
+    /// The processor's own pause at registration (0.7 v3 addition, optional): a paused
+    /// processor is offered no work from its first frame on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<Availability>,
+}
+
+/// A processor's own pause (GUI.md §3). The library stops offering work to a paused
+/// processor and shows "paused until …"; an admin can see it but not override it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Availability {
+    pub paused: bool,
+    /// When the pause lifts by itself (RFC 3339), if it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    /// `user` or `schedule`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 fn one() -> u32 {
@@ -375,6 +392,15 @@ pub enum Event {
     Catalog {
         catalog: Catalog,
     },
+    /// The processor paused or resumed itself (0.7 v3 addition). Paused: no new
+    /// sessions or volumes are offered; open sessions drain and close.
+    Availability(Availability),
+    /// Claims the processor gives back because it paused (0.7 v3 addition): they go
+    /// back to the queue at once and no failure is recorded. Nothing more is said
+    /// about them.
+    Released {
+        claims: Vec<String>,
+    },
     Ping,
 }
 
@@ -465,6 +491,32 @@ mod tests {
         }
         let p: Event = serde_json::from_str(r#"{"event":"ping"}"#).unwrap();
         assert_eq!(p, Event::Ping);
+        let a = Event::Availability(Availability {
+            paused: true,
+            until: Some("2026-10-04T18:00:00Z".into()),
+            reason: Some("user".into()),
+        });
+        let text = serde_json::to_string(&a).unwrap();
+        assert_eq!(
+            text,
+            r#"{"event":"availability","paused":true,"until":"2026-10-04T18:00:00Z","reason":"user"}"#
+        );
+        assert_eq!(serde_json::from_str::<Event>(&text).unwrap(), a);
+        let resumed: Event =
+            serde_json::from_str(r#"{"event":"availability","paused":false}"#).unwrap();
+        assert_eq!(resumed, Event::Availability(Availability::default()));
+        let r: Event =
+            serde_json::from_str(r#"{"event":"released","claims":["v1","v2"]}"#).unwrap();
+        assert_eq!(
+            r,
+            Event::Released {
+                claims: vec!["v1".into(), "v2".into()]
+            }
+        );
+        assert_eq!(r.sid(), None);
+        // A 0.7-alpha registration without `availability` still reads.
+        let reg: RegisterRequest = serde_json::from_str(r#"{"protocol":3}"#).unwrap();
+        assert_eq!(reg.availability, None);
         assert!(valid_id("v-12_a"));
         assert!(!valid_id("../x"));
     }

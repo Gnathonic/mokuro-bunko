@@ -611,7 +611,11 @@ impl Scheduler {
         };
         let pid = lane.pid.clone();
         // Phase A.
-        if self.stopping || self.held(&mname) || self.breaker_open(&pid) {
+        if self.stopping
+            || self.held(&mname)
+            || self.breaker_open(&pid)
+            || self.machine_paused(&pid)
+        {
             return (None, false);
         }
         let unavailable: HashSet<Job> = self

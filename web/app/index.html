@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/app/app.css">
+</head>
+<body>
+    <header class="mokuro-header" id="app-header" data-current="home"></header>
+    <main class="app-main">
+        <h1 class="page-title">This machine</h1>
+        <p class="page-lede" id="home-lede">Loading…</p>
+        <div class="alert alert--error" id="home-error" hidden></div>
+
+        <section aria-labelledby="running-title" class="panel" id="running-panel">
+            <h2 id="running-title">Running here</h2>
+            <p class="panel__lede" id="running-none">Nothing is running on this machine yet.</p>
+            <ul class="link-list" id="running-list"></ul>
+        </section>
+
+        <h2 class="section-title">Set up</h2>
+        <div class="choice-grid" id="home-choices">
+            <a class="choice" href="/app/setup/server" id="choice-server">
+                <span class="choice__title">Library server</span>
+                <span class="choice__text">Keep the manga library on this machine and share it with Mokuro Reader.</span>
+                <span class="choice__state" id="state-server"></span>
+            </a>
+            <a class="choice" href="/app/setup/processor" id="choice-processor">
+                <span class="choice__title">Processor</span>
+                <span class="choice__text">Lend this machine's GPU or CPU to a library elsewhere: it reads the text of its volumes.</span>
+                <span class="choice__state" id="state-processor"></span>
+            </a>
+            <a class="choice" href="/app/setup/ocr" id="choice-ocr">
+                <span class="choice__title">OCR on this machine</span>
+                <span class="choice__text">Install the OCR backend for this machine's hardware and fetch the models.</span>
+                <span class="choice__state" id="state-ocr"></span>
+            </a>
+            <a class="choice" href="/app/setup/startup" id="choice-startup">
+                <span class="choice__title">Start with the machine</span>
+                <span class="choice__text">Run the library server or the processor whenever you log in.</span>
+                <span class="choice__state" id="state-startup"></span>
+            </a>
+        </div>
+    </main>
+    <script src="/app/app.js"></script>
+    <script src="/app/home.js"></script>
+</body>
+</html>

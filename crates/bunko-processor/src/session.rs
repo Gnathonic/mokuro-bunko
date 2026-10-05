@@ -32,8 +32,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use bunko_control::{Activity, Control, PauseMode, PauseState};
 use bunko_proto::{
-    BenchOp, Event, MAX_OUTSTANDING_VOLUMES, Op, RowSpec, VolumeOp, return_class, valid_id,
+    Availability, BenchOp, Event, MAX_OUTSTANDING_VOLUMES, Op, RowSpec, VolumeOp, return_class,
+    valid_id,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -55,6 +57,32 @@ const STATS_INTERVAL: Duration = Duration::from_secs(2);
 const QUIET_WAIT: Duration = Duration::from_secs(60);
 /// A volume_done whose sidecar did not reach the library becomes this failure.
 pub const SIDECAR_NOT_SENT: &str = "the finished sidecar could not be sent from the processor";
+/// What a pause says in a `fatal` to a benchmark it refuses.
+const PAUSED: &str = "this processor is paused by its owner";
+
+/// The event channel to the library, with the control API's activity tap: every event
+/// that actually goes out is also what the local status is built from.
+#[derive(Clone)]
+pub(crate) struct Outbox {
+    tx: mpsc::UnboundedSender<Event>,
+    activity: Option<Arc<Activity>>,
+}
+
+impl Outbox {
+    pub(crate) fn new(tx: mpsc::UnboundedSender<Event>, control: Option<&Control>) -> Outbox {
+        Outbox {
+            tx,
+            activity: control.and_then(|c| c.activity().cloned()),
+        }
+    }
+
+    fn send(&self, event: Event) {
+        if let Some(a) = &self.activity {
+            a.event(&event);
+        }
+        let _ = self.tx.send(event);
+    }
+}
 
 // --- where archives come from and sidecars go -----------------------------------------------
 
@@ -125,7 +153,12 @@ impl Link {
         }
     }
 
-    async fn fetch(&self, op: &VolumeOp, session: &Arc<Session>) -> Result<Delivered, FetchError> {
+    async fn fetch(
+        &self,
+        op: &VolumeOp,
+        session: &Arc<Session>,
+        cancel: &CancellationToken,
+    ) -> Result<Delivered, FetchError> {
         match self {
             Link::Remote(remote) => {
                 let claim = op.claim.clone();
@@ -154,13 +187,7 @@ impl Link {
                 let label = format!("{} {}", op.claim, where_);
                 let fetched = remote
                     .fetcher
-                    .fetch(
-                        &op.archive,
-                        op.size,
-                        &session.stopping,
-                        Some(&progress),
-                        &label,
-                    )
+                    .fetch(&op.archive, op.size, cancel, Some(&progress), &label)
                     .await?;
                 let note = fetched.damaged_note();
                 Ok(Delivered {
@@ -292,30 +319,122 @@ type Sessions = Arc<Mutex<HashMap<String, Arc<Session>>>>;
 pub(crate) struct Hub {
     pipeline: Arc<dyn PagePipeline>,
     link: Arc<Link>,
-    tx: mpsc::UnboundedSender<Event>,
+    tx: Outbox,
     leaving: Arc<AtomicBool>,
     sessions: Sessions,
     benches: Mutex<HashMap<String, BenchHandle>>,
     bench_config: BenchConfig,
+    control: Option<Control>,
+    /// The pause in force (GUI.md §3), as this hub last applied it. Held while the
+    /// pause is applied, so an op handled meanwhile sees it complete.
+    paused: Mutex<Option<PauseMode>>,
+    /// Ends the pause watcher with the hub.
+    watcher: CancellationToken,
 }
 
 impl Hub {
+    /// With a `control`, the hub reports into its activity and obeys its pause: a
+    /// pause in force is announced (`availability`) before anything else is said.
+    /// Must be called inside a tokio runtime.
     pub(crate) fn new(
         pipeline: Arc<dyn PagePipeline>,
         link: Link,
         tx: mpsc::UnboundedSender<Event>,
         leaving: Arc<AtomicBool>,
         bench_config: BenchConfig,
+        control: Option<Control>,
     ) -> Arc<Hub> {
-        Arc::new(Hub {
+        let hub = Arc::new(Hub {
             pipeline,
             link: Arc::new(link),
-            tx,
+            tx: Outbox::new(tx, control.as_ref()),
             leaving,
             sessions: Arc::default(),
             benches: Mutex::new(HashMap::new()),
             bench_config,
-        })
+            control,
+            paused: Mutex::new(None),
+            watcher: CancellationToken::new(),
+        });
+        hub.watch_pause();
+        hub
+    }
+
+    /// Apply the control's pause now and on every change, until the hub leaves.
+    fn watch_pause(self: &Arc<Self>) {
+        let Some(ctl) = self.control.as_ref().and_then(|c| c.pause_ctl()) else {
+            return;
+        };
+        let mut rx = ctl.subscribe();
+        let initial = rx.borrow_and_update().clone();
+        if let Some(state) = &initial {
+            self.apply_pause(Some(state));
+        }
+        let weak = Arc::downgrade(self);
+        let stop = self.watcher.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    changed = rx.changed() => if changed.is_err() { return },
+                }
+                let state = rx.borrow_and_update().clone();
+                let Some(hub) = weak.upgrade() else { return };
+                if hub.leaving.load(Ordering::SeqCst) {
+                    return;
+                }
+                hub.apply_pause(state.as_ref());
+            }
+        });
+    }
+
+    /// A pause began, changed or ended (GUI.md §3):
+    ///
+    /// * `availability` tells the library first (it stops offering work);
+    /// * `after_volume`: claims the runner has not started go back (`released`), the
+    ///   running ones finish and upload; the library closes the sessions after them;
+    /// * `now`: every claim goes back (`released`), then every session and benchmark is
+    ///   abandoned (each session says only its `exit`).
+    fn apply_pause(&self, state: Option<&PauseState>) {
+        let mut paused = self.paused.lock();
+        let before = *paused;
+        *paused = state.map(|s| s.mode);
+        let Some(state) = state else {
+            if before.is_some() {
+                tracing::info!("Resumed: taking work again");
+                self.say(Event::Availability(Availability::default()));
+            }
+            return;
+        };
+        self.say(Event::Availability(state.availability()));
+        if before == Some(PauseMode::Now) {
+            return;
+        }
+        let now = state.mode == PauseMode::Now;
+        if before == Some(PauseMode::AfterVolume) && !now {
+            return;
+        }
+        let sessions: Vec<Arc<Session>> = self.sessions.lock().values().cloned().collect();
+        let mut released: Vec<String> = sessions.iter().flat_map(|s| s.release(now)).collect();
+        released.sort();
+        if !released.is_empty() {
+            tracing::info!(
+                "Paused ({}): giving back {}",
+                state.mode.as_str(),
+                released.join(", ")
+            );
+            self.say(Event::Released { claims: released });
+        } else {
+            tracing::info!("Paused ({})", state.mode.as_str());
+        }
+        if now {
+            for session in &sessions {
+                session.abandon();
+            }
+            for bench in self.benches.lock().values() {
+                bench.cancel.cancel();
+            }
+        }
     }
 
     pub(crate) fn session_count(&self) -> usize {
@@ -324,7 +443,7 @@ impl Hub {
 
     fn say(&self, event: Event) {
         if !self.leaving.load(Ordering::SeqCst) {
-            let _ = self.tx.send(event);
+            self.tx.send(event);
         }
     }
 
@@ -354,6 +473,48 @@ impl Hub {
                 tracing::error!("dropping an op: its {key} {value:?} is not an id");
                 return;
             }
+        }
+        // Work offered while paused (it crossed the `availability` on the wire) goes
+        // straight back; the library blames nobody for it. The lock is held through
+        // the op, so a pause applied meanwhile never misses a claim being offered.
+        let paused = self.paused.lock();
+        {
+            if paused.is_some() {
+                match &op {
+                    Op::Volume(v) => {
+                        tracing::info!("volume {}: paused, giving it back", v.claim);
+                        self.say(Event::Released {
+                            claims: vec![v.claim.clone()],
+                        });
+                        return;
+                    }
+                    Op::OpenSession { sid, .. } => {
+                        tracing::info!("session {sid}: paused, not opening it");
+                        self.say(Event::Exit {
+                            sid: sid.clone(),
+                            returncode: None,
+                        });
+                        return;
+                    }
+                    Op::Bench(b) => {
+                        tracing::info!("benchmark {}: paused, not running it", b.bid);
+                        self.say(Event::Fatal {
+                            sid: b.bid.clone(),
+                            error: PAUSED.to_string(),
+                        });
+                        self.say(Event::Exit {
+                            sid: b.bid.clone(),
+                            returncode: None,
+                        });
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let _paused = paused;
+        if let Some(a) = self.control.as_ref().and_then(|c| c.activity()) {
+            a.op(&op);
         }
         match op {
             Op::Heartbeat => {}
@@ -533,7 +694,7 @@ impl Hub {
             .spawn(move || {
                 let say = move |event: Event| {
                     if !leaving.load(Ordering::SeqCst) {
-                        let _ = tx.send(event);
+                        tx.send(event);
                     }
                 };
                 let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -635,6 +796,11 @@ impl Hub {
     /// up to `wait` for the sessions to wind down.
     pub(crate) async fn leave(&self, wait: Duration) {
         self.leaving.store(true, Ordering::SeqCst);
+        self.watcher.cancel();
+        // The library takes back whatever this link held: nothing is in flight here.
+        if let Some(a) = self.control.as_ref().and_then(|c| c.activity()) {
+            a.clear();
+        }
         let sessions: Vec<Arc<Session>> = self.sessions.lock().values().cloned().collect();
         for session in &sessions {
             session.abandon();
@@ -674,6 +840,12 @@ struct Book {
     seen: HashSet<String>,
     /// Claims whose archive was proven damaged at the library, and the note.
     damaged: HashMap<String, String>,
+    /// Claims a runner worker has taken (a pause after the volume lets them finish).
+    started: HashSet<String>,
+    /// Claims a pause gave back (`released`): never run, never reported again.
+    released: HashSet<String>,
+    /// Each fetching claim's own cancel (a pause cuts its download).
+    cancels: HashMap<String, CancellationToken>,
 }
 
 struct Intake {
@@ -686,7 +858,7 @@ struct Intake {
 
 pub(crate) struct Session {
     sid: String,
-    tx: mpsc::UnboundedSender<Event>,
+    tx: Outbox,
     /// The processor is leaving: nothing more is said.
     leaving: Arc<AtomicBool>,
     /// Cancelled: nothing more is said but `exit`.
@@ -708,8 +880,33 @@ impl Session {
 
     fn say(&self, event: Event) {
         if !self.silenced(&event) {
-            let _ = self.tx.send(event);
+            self.tx.send(event);
         }
+    }
+
+    /// A pause gives claims back: every outstanding one (`all`, pause now) or those no
+    /// runner worker has started (pause after the volume). They are marked so nothing
+    /// runs or reports them; their downloads are cut. Returns them.
+    fn release(&self, all: bool) -> Vec<String> {
+        let mut book = self.book.lock();
+        let claims: Vec<String> = book
+            .outstanding
+            .iter()
+            .filter(|c| all || !book.started.contains(*c))
+            .filter(|c| !book.released.contains(*c))
+            .cloned()
+            .collect();
+        for claim in &claims {
+            book.released.insert(claim.clone());
+            if let Some(cancel) = book.cancels.get(claim) {
+                cancel.cancel();
+            }
+        }
+        claims
+    }
+
+    fn is_released(&self, claim: &str) -> bool {
+        self.book.lock().released.contains(claim)
     }
 
     fn talking(&self) -> bool {
@@ -786,12 +983,20 @@ impl Session {
         let mut book = self.book.lock();
         book.outstanding.remove(claim);
         book.damaged.remove(claim);
+        book.started.remove(claim);
+        book.released.remove(claim);
+        book.cancels.remove(claim);
     }
 
     /// Tell the library this claim never reached the pipeline, and why — unless the
     /// session is stopping (the library settles its own claims then).
     fn give_back(&self, claim: &str, fault: &TransferFault) {
+        let released = self.is_released(claim);
         self.settle(claim);
+        if released {
+            tracing::info!("volume {claim}: given back by the pause");
+            return;
+        }
         if self.stopping.is_cancelled() || !self.talking() {
             tracing::info!(
                 "volume {claim}: not returned ({}): its session is ending",
@@ -826,6 +1031,11 @@ impl Session {
             stem: archive_stem(&op.archive, &op.volume_title),
             sidecar_name: sidecar_name.clone(),
         };
+        if self.is_released(&claim) {
+            tracing::info!("volume {claim}: never fed: the pause gave it back");
+            self.settle(&claim);
+            return;
+        }
         let mut intake = self.intake.lock();
         let accepting = !self.stopping.is_cancelled();
         let Some((jobs, reports)) = intake.runner.as_ref().filter(|_| accepting) else {
@@ -910,21 +1120,27 @@ async fn feed(
 ) {
     while let Some(op) = volumes.recv().await {
         let claim = op.claim.clone();
-        if session.stopping.is_cancelled() {
+        if session.stopping.is_cancelled() || session.is_released(&claim) {
             tracing::info!(
-                "volume {claim:?} was never fed: session {} had already ended",
+                "volume {claim:?} was never fed: session {} had already ended or paused",
                 session.sid
             );
             session.settle(&claim);
             continue;
         }
+        let cancel = session.stopping.child_token();
+        session
+            .book
+            .lock()
+            .cancels
+            .insert(claim.clone(), cancel.clone());
         // Each fetch on its own task: a panic in it is a `local` return, not a dead
         // feeder (a dead feeder would leave every later claim to the wedge timer).
         let task = {
             let (session, link, op) = (session.clone(), link.clone(), op.clone());
             tokio::spawn(async move {
                 let dir = link.claim_dir(&session.sid, &op.claim);
-                let fetched = link.fetch(&op, &session).await;
+                let fetched = link.fetch(&op, &session, &cancel).await;
                 (fetched, dir)
             })
         };
@@ -978,6 +1194,8 @@ struct Job {
 
 struct Terminal {
     seq: u64,
+    /// A pause gave it back before a worker started it: settled without a word.
+    released: bool,
     claim: String,
     sidecar_name: String,
     out: PathBuf,
@@ -1170,8 +1388,18 @@ fn work(shared: &Shared) {
         let claim = job.meta.claim.clone();
         let fed_at = Instant::now();
         let fatal = shared.fatal.lock().clone();
+        let released = {
+            let mut book = shared.session.book.lock();
+            if book.released.contains(&claim) {
+                true
+            } else {
+                book.started.insert(claim.clone());
+                false
+            }
+        };
         let mut terminal = Terminal {
             seq: job.seq,
+            released,
             claim: claim.clone(),
             sidecar_name: job.meta.sidecar_name.clone(),
             out: job.out.clone(),
@@ -1182,6 +1410,11 @@ fn work(shared: &Shared) {
             cpu_pressure: None,
             other_cpu: None,
         };
+        if released {
+            drop(job.archive);
+            let _ = shared.reports.send(Msg::Terminal(Box::new(terminal)));
+            continue;
+        }
         if let Some(error) = fatal {
             // Accepted but never run: failed with the session's error, once.
             terminal.result = Err(RunError::Volume(error));
@@ -1334,6 +1567,10 @@ async fn report(
                 pending.insert(terminal.seq, terminal);
                 while let Some(terminal) = pending.remove(&next_seq) {
                     next_seq += 1;
+                    if terminal.released {
+                        finish_volume(&session, &link, *terminal, 0.0).await;
+                        continue;
+                    }
                     let end =
                         previous_end.map_or(terminal.finished_at, |p| p.max(terminal.finished_at));
                     let start = previous_end.map_or(terminal.fed_at, |p| p.max(terminal.fed_at));
@@ -1384,7 +1621,7 @@ async fn finish_volume(session: &Session, link: &Link, terminal: Terminal, secon
     // The slot is free before the terminal event goes: the library may answer it
     // with the next volume at once.
     session.settle(&claim);
-    if !session.talking() {
+    if terminal.released || !session.talking() {
         link.discard(&sid, &claim, false).await;
         return;
     }

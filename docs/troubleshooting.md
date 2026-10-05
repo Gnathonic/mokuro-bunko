@@ -27,9 +27,10 @@ It prints PASS / WARN / FAIL lines, with a fix hint under anything wrong:
 - volumes currently failing OCR
 
 Exit code is 0 unless a `FAIL` is found, so scripts can gate on it. On a
-processor machine, run it with `MOKURO_STORAGE` set to the processor's
-storage (see [deployment](deployment.md#3-the-processor-machine)) so that it
-checks the processor's pack and models.
+processor machine (a `processor.yaml` and no library configuration) it
+checks the processor instead: its `processor.yaml`, the backend pack the
+processor will load, its models and its disk. `doctor --processor` does
+that on a machine that has both.
 
 ## Where the logs are
 
@@ -108,10 +109,11 @@ without installing anything.
   parts), `release.json` with `release.json.sig`, and for `cu130` the NVIDIA
   wheels it lists, into one directory elsewhere, then
   `mokuro-bunko install-ocr --from <dir>`.
-- **A processor machine**: `install-ocr` installs into the library storage by
-  default, but the processor looks in its own `processor.storage`. Install it
-  there (`MOKURO_STORAGE=<processor storage> mokuro-bunko install-ocr`, see
-  [deployment](deployment.md#3-the-processor-machine)).
+- **A processor machine**: `install-ocr` installs into the processor's own
+  storage when the machine has a `processor.yaml` and no library
+  configuration, or with `install-ocr --processor`. The processor also finds
+  a pack in the default library storage, for example one installed before
+  `processor setup` (see [deployment](deployment.md#3-the-processor-machine)).
 - **Docker**: the `latest` and `latest-cuda` images have their pack built in
   (`MOKURO_TORCH_PACK`). A CUDA image built with `BAKE_PACK=0` needs
   `OCR_AUTO_INSTALL=true`, which installs it into `/data/backends` on start.

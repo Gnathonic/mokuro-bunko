@@ -293,6 +293,47 @@ impl Drop for Sampler {
     }
 }
 
+/// The control API's live load (GUI.md §2 `stats.gpu_busy` / `cpu_cores`; stream G1):
+/// a [`Sampler`] on card 0 every `interval` for the life of the instance, read as the
+/// mean of the last few ticks. Starts sampling on the first read, so an instance nobody
+/// looks at never polls `nvidia-smi`.
+pub struct LiveLoad {
+    interval: Duration,
+    sampler: Mutex<Option<Sampler>>,
+}
+
+impl LiveLoad {
+    pub fn new(interval: Duration) -> LiveLoad {
+        LiveLoad {
+            interval,
+            sampler: Mutex::new(None),
+        }
+    }
+
+    /// `(gpu busy %, CPU cores busy)` over the last three ticks.
+    pub fn read(&self) -> (Option<f64>, Option<f64>) {
+        let mut slot = self.sampler.lock();
+        let sampler =
+            slot.get_or_insert_with(|| Sampler::start(None, Instant::now(), self.interval));
+        let now = sampler.now();
+        let window = self.interval.as_secs_f64() * 3.5;
+        let (gpu, cpu) = sampler.means(Some((now - window).max(0.0)), Some(now));
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get() as f64)
+            .unwrap_or(1.0);
+        (
+            gpu,
+            cpu.map(|pct| bunko_sched::py::round_to(pct * cores / 100.0, 1)),
+        )
+    }
+}
+
+impl bunko_control::LoadProbe for LiveLoad {
+    fn sample(&self) -> (Option<f64>, Option<f64>) {
+        self.read()
+    }
+}
+
 /// This process at its largest, in MiB (`ru_maxrss`), or None off Linux.
 pub fn peak_rss_mb() -> Option<i64> {
     #[cfg(target_os = "linux")]

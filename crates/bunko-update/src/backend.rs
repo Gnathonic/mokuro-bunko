@@ -303,14 +303,16 @@ fn check(what: &str, got: (String, u64), sha256: &str, size: u64) -> Result<()> 
 }
 
 /// Reads the parts of an archive back to back while hashing them.
-struct Concat {
+struct Concat<'a> {
     files: Vec<PathBuf>,
     cur: Option<BufReader<File>>,
     hasher: Sha256,
     total: u64,
+    /// Called with the archive bytes read so far.
+    on_read: &'a mut dyn FnMut(u64),
 }
 
-impl Read for Concat {
+impl Read for Concat<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         loop {
             if self.cur.is_none() {
@@ -327,6 +329,7 @@ impl Read for Concat {
             }
             self.hasher.update(&buf[..n]);
             self.total += n as u64;
+            (self.on_read)(self.total);
             return Ok(n);
         }
     }
@@ -341,11 +344,30 @@ pub fn unpack_archive(
     whole: Option<(&str, u64)>,
     staging: &Path,
 ) -> Result<PackManifest> {
+    unpack_archive_progress(parts, whole, staging, |_, _| {})
+}
+
+/// [`unpack_archive`], calling `progress(read, total)` with the archive bytes read so
+/// far and the parts' total size (an install from a local folder has no download to
+/// show progress for, and a GPU pack takes a while to unpack).
+pub fn unpack_archive_progress(
+    parts: &[PathBuf],
+    whole: Option<(&str, u64)>,
+    staging: &Path,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<PackManifest> {
+    let size: u64 = parts
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
+    let mut on_read = |read: u64| progress(read, size);
     let mut concat = Concat {
         files: parts.to_vec(),
         cur: None,
         hasher: Sha256::new(),
         total: 0,
+        on_read: &mut on_read,
     };
     std::fs::create_dir_all(staging)?;
     let mut seen = BTreeSet::new();
@@ -734,6 +756,14 @@ mod tests {
             unpack_archive(&parts, Some((&"0".repeat(64), whole_size)), &staging2),
             Err(PackError::Checksum { .. })
         ));
+        // Progress: the bytes read across the parts, up to their total size.
+        let mut seen: Vec<(u64, u64)> = Vec::new();
+        let staging3 = tmp.path().join("staging3");
+        unpack_archive_progress(&parts, None, &staging3, |r, t| seen.push((r, t))).unwrap();
+        assert!(!seen.is_empty());
+        assert!(seen.iter().all(|&(_, t)| t == whole_size));
+        assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0));
+        assert_eq!(seen.last().unwrap().0, whole_size);
     }
 
     #[test]

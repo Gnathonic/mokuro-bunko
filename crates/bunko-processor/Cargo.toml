@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 bunko-proto.workspace = true
+# The local control API's pause + activity (GUI.md §2-3) the session hub obeys and feeds.
+bunko-control = { path = "../bunko-control" }
 bunko-sched.workspace = true
 thiserror.workspace = true
 serde.workspace = true

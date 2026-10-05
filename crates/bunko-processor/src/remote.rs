@@ -53,6 +53,9 @@ pub struct ServeOptions {
     pub backoff_start: Duration,
     /// The numbers benchmarks run by (`jobs` = this processor's sessions).
     pub bench: BenchConfig,
+    /// The local control API (GUI.md §2-3): its pause is obeyed, its activity and link
+    /// state kept current. None: no control API (tests, `MOKURO_CONTROL=off`).
+    pub control: Option<bunko_control::Control>,
 }
 
 impl ServeOptions {
@@ -69,6 +72,7 @@ impl ServeOptions {
             shutdown: CancellationToken::new(),
             verbose: false,
             backoff_start: BACKOFF_START,
+            control: None,
         }
     }
 }
@@ -118,6 +122,13 @@ pub async fn serve(options: ServeOptions) -> Result<(), ServeError> {
     result
 }
 
+/// Keep the control API's view of the link current.
+fn link_state(options: &ServeOptions, phase: bunko_control::LinkPhase, error: Option<&str>) {
+    if let Some(c) = &options.control {
+        c.set_link(phase, Some(&options.config.library.url), error);
+    }
+}
+
 async fn pause(shutdown: &CancellationToken, wait: Duration) -> bool {
     tokio::select! {
         _ = shutdown.cancelled() => false,
@@ -143,6 +154,11 @@ async fn serve_loop(options: &ServeOptions, spool: Arc<ArchiveSpool>) -> Result<
         let next = match connect(options).await {
             Err(ClientError::LoginRefused(e)) => {
                 write_status(storage, State::Refused, url, None, Some(&e));
+                link_state(
+                    options,
+                    bunko_control::LinkPhase::Refused,
+                    Some(&format!("login refused: {e}")),
+                );
                 tracing::error!("Login refused: {e}");
                 return Err(ServeError::LoginRefused(e));
             }
@@ -152,6 +168,7 @@ async fn serve_loop(options: &ServeOptions, spool: Arc<ArchiveSpool>) -> Result<
             }
             Err(ClientError::Library(e)) => {
                 write_status(storage, State::Unreachable, url, None, Some(&e));
+                link_state(options, bunko_control::LinkPhase::Disconnected, Some(&e));
                 tracing::warn!("{e}; retrying in {}s", backoff.as_secs());
                 Next::Backoff
             }
@@ -164,6 +181,7 @@ async fn serve_loop(options: &ServeOptions, spool: Arc<ArchiveSpool>) -> Result<
                     Some(&config.processor.name),
                     None,
                 );
+                link_state(options, bunko_control::LinkPhase::Connected, None);
                 tracing::info!(
                     "Connected to {url} as {} ({engines} engine(s), {} session slot(s)); library {}",
                     config.processor.name,
@@ -172,6 +190,11 @@ async fn serve_loop(options: &ServeOptions, spool: Arc<ArchiveSpool>) -> Result<
                 );
                 let ended = run_connection(options, &client, &reply, ws, spool.clone()).await;
                 write_status(storage, State::Disconnected, url, None, None);
+                let why = match &ended {
+                    Ended::Shutdown => None,
+                    Ended::Lost(r) | Ended::Closed(r) => Some(r.as_str()),
+                };
+                link_state(options, bunko_control::LinkPhase::Disconnected, why);
                 match ended {
                     Ended::Shutdown => return Ok(()),
                     Ended::Lost(reason) | Ended::Closed(reason) => {
@@ -213,6 +236,16 @@ async fn connect(
         info.host.version = env!("CARGO_PKG_VERSION").to_string();
     }
     let engines = info.catalog.engines.len();
+    if let Some(c) = &options.control {
+        c.set_devices(&info.catalog.devices);
+    }
+    // A paused processor says so in its registration: it is offered nothing at all.
+    let availability = options
+        .control
+        .as_ref()
+        .and_then(|c| c.pause_ctl())
+        .and_then(|p| p.current())
+        .map(|s| s.availability());
     let request = RegisterRequest {
         protocol: PROTOCOL_VERSION,
         name: Some(config.processor.name.clone()),
@@ -220,6 +253,7 @@ async fn connect(
         host: info.host,
         catalog: info.catalog,
         max_sessions: config.processor.max_sessions,
+        availability,
     };
     let reply = tokio::select! {
         _ = options.shutdown.cancelled() => return Err(ClientError::Library("stopping".into())),
@@ -268,6 +302,7 @@ async fn run_connection(
         tx,
         leaving.clone(),
         options.bench.clone(),
+        options.control.clone(),
     );
     let mut last_heard = Instant::now();
     let mut last_sent = Instant::now();

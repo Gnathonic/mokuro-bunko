@@ -78,6 +78,10 @@ pub struct EngineConfig {
     pub jobs: usize,
     /// `ocr_engine.generator`: `"mokuro-bunko <version>"`.
     pub generator: String,
+    /// More directories backend packs may be installed in, searched after
+    /// [`EngineConfig::backends_dir`] (a processor also uses a pack `install-ocr` put in
+    /// the library's default storage).
+    pub fallback_backends: Vec<PathBuf>,
 }
 
 impl EngineConfig {
@@ -87,6 +91,7 @@ impl EngineConfig {
             backend,
             jobs: 1,
             generator: format!("mokuro-bunko {}", env!("CARGO_PKG_VERSION")),
+            fallback_backends: Vec::new(),
         }
     }
 
@@ -100,6 +105,26 @@ impl EngineConfig {
             .parent()
             .map(|p| p.join("backends"))
             .unwrap_or_else(|| PathBuf::from("backends"))
+    }
+
+    /// Every directory packs are looked for in, in order: `MOKURO_BACKENDS_DIR`, the
+    /// sibling `backends/` of `models_dir`, then [`EngineConfig::fallback_backends`]
+    /// (each once).
+    pub fn backends_dirs(&self) -> Vec<PathBuf> {
+        let sibling = self
+            .models_dir
+            .parent()
+            .map(|p| p.join("backends"))
+            .unwrap_or_else(|| PathBuf::from("backends"));
+        let mut dirs = vec![self.backends_dir(), sibling];
+        dirs.extend(self.fallback_backends.iter().cloned());
+        let mut out: Vec<PathBuf> = Vec::new();
+        for d in dirs {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+        out
     }
 
     /// The model store: `models_dir`, with the `MOKURO_MODELS_DIR` override and the
@@ -192,8 +217,8 @@ impl EnginePipeline {
     /// The libtorch backend of this process (opened on first use; see [`torch`]).
     #[cfg(feature = "torch")]
     pub fn torch(&self) -> Result<Arc<torch::TorchBackend>, String> {
-        torch::backend(
-            &self.config.backends_dir(),
+        torch::backend_in(
+            &self.config.backends_dirs(),
             self.config.backend == Backend::Cpu,
         )
     }
@@ -827,5 +852,24 @@ impl PagePipeline for EnginePipeline {
     fn open(&self, spec: &RowSpec) -> Result<Box<dyn VolumeRunner>, String> {
         self.open_session(spec)
             .map(|r| Box::new(r) as Box<dyn VolumeRunner>)
+    }
+}
+
+#[cfg(test)]
+mod backends_dirs_tests {
+    use super::*;
+
+    #[test]
+    fn sibling_then_fallbacks_each_once() {
+        if std::env::var_os(BACKENDS_DIR_ENV).is_some() {
+            return; // the override would come first; covered by its doc
+        }
+        let mut c = EngineConfig::new(PathBuf::from("/p/models"), Backend::Auto);
+        c.fallback_backends = vec![PathBuf::from("/lib/backends"), PathBuf::from("/p/backends")];
+        assert_eq!(c.backends_dir(), PathBuf::from("/p/backends"));
+        assert_eq!(
+            c.backends_dirs(),
+            vec![PathBuf::from("/p/backends"), PathBuf::from("/lib/backends")]
+        );
     }
 }

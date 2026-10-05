@@ -51,10 +51,33 @@ mimalloc = { version = "0.1", default-features = false }
 x509-parser = "0.16"
 # Hidden password prompts on a terminal.
 rpassword = "7"
-# `doctor` disk-space check (statvfs / GetDiskFreeSpaceEx).
-fs4 = { version = "1", default-features = false }
+# `doctor` disk-space check (statvfs / GetDiskFreeSpaceEx); `gui` asks whether a tray
+# holds its lock.
+fs4 = { version = "1", default-features = false, features = ["sync"] }
+# `gui`: the desktop app pages' backend (same axum as bunko-server), its SSE streams,
+# the control token.
+bunko-control = { path = "../bunko-control" }
+axum.workspace = true
+serde.workspace = true
+futures-util.workspace = true
+rand.workspace = true
+parking_lot.workspace = true
+# `serve` / `processor serve` control API pollers (the servers' stop tokens).
+tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# `gui`: stopping the user's running tray so it re-reads tray.json.
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# `gui` on a double-click: is this console ours alone (started from Explorer)?
+windows-sys = { version = "0.60", features = ["Win32_System_Console"] }
+# The tray's Startup-folder shortcut (the same `Mokuro Bunko.lnk` the tray and
+# install.ps1 -Startup write).
+mslnk = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }
 assert_cmd = "2"
 predicates = "3"
