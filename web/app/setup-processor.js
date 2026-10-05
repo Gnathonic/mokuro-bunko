@@ -197,6 +197,7 @@
       } else {
         $('name').value = c.defaults.name;
         $('pstorage').value = c.defaults.storage;
+        window.App.storageNote($('pstorage-note'), $('pstorage'), i.processor_storage_check);
         $('archive-mb').value = c.defaults.archive_memory_mb;
       }
     } catch (e) {

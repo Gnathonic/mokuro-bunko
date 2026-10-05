@@ -7,6 +7,7 @@ use bunko_tray::autostart;
 use bunko_tray::client::{Client, PauseRequest};
 use bunko_tray::discover;
 use bunko_tray::icons;
+use bunko_tray::launch;
 use bunko_tray::model::{self, IconState, InstanceView, MenuModel, UpdateView};
 use bunko_tray::monitor::{Live, Monitor};
 use bunko_tray::paths::{self, Env, Layout, ProcessEnv};
@@ -449,23 +450,18 @@ impl App {
         };
         let mut cmd = std::process::Command::new(cli);
         cmd.args(["gui", "--open", next])
-            .envs(self.child_env.iter().map(|(k, v)| (k, v)))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .envs(self.child_env.iter().map(|(k, v)| (k, v)));
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
-        match cmd.spawn() {
-            Ok(mut child) => {
-                tracing::info!("started `mokuro-bunko gui` (pid {})", child.id());
-                // Reap it when it exits.
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-            }
+        let monitor = self.monitor.clone();
+        let watched = launch::spawn_watched(cmd, launch::EARLY, move |e| {
+            report_failure(&monitor, "Couldn't open the setup app", &e);
+        });
+        match watched {
+            Ok(pid) => tracing::info!("started `mokuro-bunko gui` (pid {pid})"),
             Err(e) => self
                 .monitor
                 .set_notice(format!("could not start mokuro-bunko gui: {e}")),
@@ -488,11 +484,16 @@ impl App {
     fn open_page(&self, next: &str) {
         match self.page_host() {
             Some(live) => {
+                tracing::info!(
+                    "opening {next} on the {} instance (pid {})",
+                    live.control.role,
+                    live.control.pid
+                );
                 let monitor = self.monitor.clone();
                 let next = next.to_string();
                 std::thread::spawn(
                     move || match Client::new(&live.control).sign_in_url(&next) {
-                        Ok(url) => open_url(&url),
+                        Ok(url) => open_url(&url, &monitor),
                         Err(e) => {
                             tracing::error!("sign-in code from {}: {e}", live.control.role);
                             monitor.set_notice(format!("could not open the page: {e}"));
@@ -610,6 +611,7 @@ impl App {
 
     /// Returns true to exit.
     fn on_menu(&mut self, id: &str) -> bool {
+        tracing::info!("menu: {id}");
         let now = chrono::Local::now();
         match id {
             id::PAUSE_AFTER => self.pause_all(Some(PauseRequest {
@@ -638,7 +640,7 @@ impl App {
             }
             id::LIBRARY => {
                 if let Some(url) = self.model.as_ref().and_then(|m| m.library_url.clone()) {
-                    open_url(&url);
+                    open_url(&url, &self.monitor);
                 }
             }
             id::SETTINGS => self.open_page("/app/settings"),
@@ -656,10 +658,54 @@ impl App {
     }
 }
 
-fn open_url(url: &str) {
+/// A helper that failed right after a menu click: logged, shown as the menu notice,
+/// and on macOS as a notification.
+fn report_failure(monitor: &Monitor, what: &str, e: &launch::EarlyExit) {
+    tracing::error!("{what}: {} ({})", e.reason(), e.status);
+    // A menu item is one line: keep it short, the log has the whole message.
+    let mut reason = e.reason();
+    if reason.chars().count() > 90 {
+        reason = reason.chars().take(89).collect::<String>() + "…";
+    }
+    monitor.set_notice(format!("{what}: {reason} (see logs)"));
+    launch::notify("Mokuro Bunko", &format!("{what}: {}", e.reason()));
+}
+
+fn open_url(url: &str, monitor: &Arc<Monitor>) {
     // Never log the URL itself: it carries a sign-in code.
+    #[cfg(unix)]
+    {
+        // The desktop's opener (`open` on macOS, xdg-open & co. on Linux), watched so
+        // that a failure is shown instead of nothing happening.
+        // macOS: `open` from PATH, as `mokuro-bunko gui` does (the `open` crate runs
+        // /usr/bin/open by absolute path, which a test's stand-in cannot catch).
+        let commands = if cfg!(target_os = "macos") {
+            let mut c = std::process::Command::new("open");
+            c.arg(url);
+            vec![c]
+        } else {
+            open::commands(url)
+        };
+        for cmd in commands {
+            let m = monitor.clone();
+            match launch::spawn_watched(cmd, launch::EARLY, move |e| {
+                report_failure(&m, "Couldn't open the browser", &e)
+            }) {
+                Ok(_) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    tracing::error!("could not open the browser: {e}");
+                    monitor.set_notice(format!("Couldn't open the browser: {e}"));
+                    return;
+                }
+            }
+        }
+        monitor.set_notice("Couldn't open the browser: no opener found (xdg-open)".into());
+    }
+    #[cfg(not(unix))]
     if let Err(e) = open::that_detached(url) {
         tracing::error!("could not open the browser: {e}");
+        monitor.set_notice(format!("Couldn't open the browser: {e}"));
     }
 }
 

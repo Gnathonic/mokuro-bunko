@@ -107,6 +107,10 @@ async fn info(State(state): S) -> Response {
             "processor_config_exists": processor_exists,
             "server_storage": paths::server_storage(&st.config_path),
             "processor_storage": paths::processor_storage(&st.processor_config),
+            // Can this user write them? (A root-owned ~/.local cannot.) With a
+            // writable alternative and the one-line fix for the pages to offer.
+            "server_storage_check": paths::storage_check(&paths::server_storage(&st.config_path)),
+            "processor_storage_check": paths::storage_check(&paths::processor_storage(&st.processor_config)),
             "library_url": lib.as_ref().map(|l| l.0.clone()),
             "admin_path": lib.as_ref().map(|l| l.1.admin.path.clone()),
             "service_kind": kind.as_str(),

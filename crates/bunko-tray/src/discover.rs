@@ -58,7 +58,7 @@ pub fn candidate_storages(
     }
     out.push(paths::processor_default_storage(env));
     // `mokuro-bunko gui` with no storage of its own to use.
-    out.push(paths::gui_fallback_storage(env));
+    out.extend(paths::gui_fallback_storages(env));
     if cfg!(target_os = "linux") {
         // install.sh --systemd as root: the system units' storage.
         out.push(PathBuf::from("/var/lib/mokuro-bunko/storage"));
@@ -374,7 +374,9 @@ mod tests {
         assert!(got.contains(&PathBuf::from("/srv/proc")));
         assert!(got.contains(&paths::server_default_storage(&env)));
         assert!(got.contains(&paths::processor_default_storage(&env)));
-        assert!(got.contains(&paths::gui_fallback_storage(&env)));
+        for g in paths::gui_fallback_storages(&env) {
+            assert!(got.contains(&g));
+        }
         let tmp = std::env::temp_dir();
         assert!(
             !got.iter()

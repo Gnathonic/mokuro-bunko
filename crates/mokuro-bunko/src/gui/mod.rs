@@ -257,6 +257,59 @@ mod tests {
         assert_eq!(safe_next(Some("https://x/app/")), "/app/");
     }
 
+    /// `/app/api/info` tells the pages when the library folder cannot be written (a
+    /// `~/.local` owned by root), with the folder in the way and the fix.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn info_reports_an_unwritable_storage() {
+        use std::os::unix::fs::PermissionsExt;
+        use tower::ServiceExt;
+        if unsafe { libc::getuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join(".local");
+        std::fs::create_dir_all(&local).unwrap();
+        let storage = local.join("share/mokuro-bunko");
+        let config = dir.path().join("config.yaml");
+        std::fs::write(
+            &config,
+            format!("storage:\n  base_path: {}\n", storage.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let state = Arc::new(AppState::new(
+            Role::Gui,
+            "secret-token".into(),
+            LoginCodes::default(),
+            config,
+            Some(dir.path().join("processor.yaml")),
+        ));
+        let req = Request::builder()
+            .uri("/app/api/info")
+            .header("host", "127.0.0.1:4567")
+            .header("authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router(state).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let check = &v["server_storage_check"];
+        assert_eq!(check["writable"], false, "{v}");
+        assert_eq!(check["blocker"], local.display().to_string());
+        assert!(
+            check["problem"]
+                .as_str()
+                .unwrap()
+                .ends_with("isn't writable by you (its permissions do not allow writing)"),
+            "{check}"
+        );
+    }
+
     /// The guard on every page and API route: loopback Host, the token (bearer or
     /// cookie), and a same-origin `Origin` on cookie-authenticated POSTs.
     #[tokio::test]

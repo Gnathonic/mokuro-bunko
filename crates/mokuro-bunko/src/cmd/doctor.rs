@@ -171,7 +171,9 @@ fn processor_checks(ctx: &Ctx, flag: bool) -> Vec<Check> {
     if let Some(c) = check_packages(&target, &bunko_core::Config::default()) {
         results.push(c);
     }
-    let _ = std::fs::create_dir_all(&target.storage);
+    if let Some(c) = check_processor_storage(&target.storage) {
+        results.push(c);
+    }
     results.push(check_disk(&target.storage));
     results
 }
@@ -236,6 +238,32 @@ fn check_build() -> Check {
     }
 }
 
+/// Why a storage folder cannot be used and what to do: the folder in the way (e.g. a
+/// `~/.local` owned by root), the one-line `chown`, a writable alternative.
+fn unwritable_storage(base: &Path, e: &std::io::Error, key: &str) -> (String, String) {
+    let check = crate::gui::paths::storage_check(base);
+    let mut detail = format!("{} is not writable: {e}", base.display());
+    if let Some(p) = check["problem"].as_str() {
+        detail.push_str(&format!(" - {p}"));
+    }
+    let mut hint = format!("Point {key} at a writable directory.");
+    if let Some(alt) = check["suggestion"].as_str() {
+        hint.push_str(&format!(" For example: {alt}."));
+    }
+    if let Some(fix) = check["fix"].as_str() {
+        hint.push_str(&format!(" Or fix the permissions: {fix}"));
+    }
+    (detail, hint)
+}
+
+/// A processor storage this user can create and write.
+#[cfg(feature = "ocr")]
+fn check_processor_storage(storage: &Path) -> Option<Check> {
+    let e = crate::gui::paths::ensure_writable(storage).err()?;
+    let (detail, hint) = unwritable_storage(storage, &e, "processor.storage in processor.yaml");
+    Some(Check::fail("Processor storage", detail, Some(hint)))
+}
+
 fn check_config(path: &Path) -> (Check, Option<Config>) {
     let config = match bunko_core::config::load_config(Some(path)) {
         Ok(c) => c,
@@ -259,14 +287,8 @@ fn check_config(path: &Path) -> (Check, Option<Config>) {
         .and_then(|_| std::fs::write(&probe, "ok"))
         .and_then(|_| std::fs::remove_file(&probe));
     if let Err(e) = writable {
-        return (
-            Check::fail(
-                "Storage",
-                format!("{} is not writable: {e}", base.display()),
-                Some("Point storage.base_path at a writable directory.".into()),
-            ),
-            Some(config),
-        );
+        let (detail, hint) = unwritable_storage(&base, &e, "storage.base_path");
+        return (Check::fail("Storage", detail, Some(hint)), Some(config));
     }
     let exists = if path.exists() {
         ""

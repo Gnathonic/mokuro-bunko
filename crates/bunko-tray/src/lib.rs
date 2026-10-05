@@ -8,6 +8,7 @@ pub mod autostart;
 pub mod client;
 pub mod discover;
 pub mod icons;
+pub mod launch;
 pub mod model;
 pub mod monitor;
 pub mod paths;
