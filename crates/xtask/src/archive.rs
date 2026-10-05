@@ -30,6 +30,7 @@ pub fn is_executable(rel: &Path) -> bool {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     name == crate::names::BIN
+        || name == crate::names::TRAY_BIN
         || name.ends_with(".exe")
         || name.ends_with(".sh")
         || name.ends_with(".dll")
@@ -58,9 +59,29 @@ pub fn write_tar_gz(stage: &Path, top: &str, out: &Path, mtime: u64) -> Result<(
     dir.set_mtime(mtime);
     dir.set_cksum();
     tar.append_data(&mut dir, format!("{top}/"), std::io::empty())?;
+    // Files staged as hard links of an earlier file (the macOS bundle's copy of the
+    // CLI) become tar hard-link entries: no second copy in the download. The earlier
+    // file sorts first, so readers that take the first entry by name (bunko-update's
+    // extract_binary) get the real file.
+    let mut seen: std::collections::HashMap<(u64, u64), String> = Default::default();
     for rel in list_files(stage)? {
         let path = stage.join(&rel);
         let meta = std::fs::metadata(&path)?;
+        let name = format!("{top}/{}", unix_path(&rel));
+        if let Some(key) = inode(&meta) {
+            if let Some(first) = seen.get(&key) {
+                let mut h = tar::Header::new_gnu();
+                h.set_entry_type(tar::EntryType::Link);
+                h.set_size(0);
+                h.set_mode(if is_executable(&rel) { 0o755 } else { 0o644 });
+                h.set_mtime(mtime);
+                h.set_uid(0);
+                h.set_gid(0);
+                tar.append_link(&mut h, &name, first)?;
+                continue;
+            }
+            seen.insert(key, name.clone());
+        }
         let mut h = tar::Header::new_gnu();
         h.set_size(meta.len());
         h.set_mode(if is_executable(&rel) { 0o755 } else { 0o644 });
@@ -68,14 +89,22 @@ pub fn write_tar_gz(stage: &Path, top: &str, out: &Path, mtime: u64) -> Result<(
         h.set_uid(0);
         h.set_gid(0);
         h.set_cksum();
-        tar.append_data(
-            &mut h,
-            format!("{top}/{}", unix_path(&rel)),
-            std::fs::File::open(&path)?,
-        )?;
+        tar.append_data(&mut h, &name, std::fs::File::open(&path)?)?;
     }
     tar.into_inner()?.finish()?.flush()?;
     Ok(())
+}
+
+/// `(device, inode)` of a file with more than one link (Unix), else None.
+#[cfg(unix)]
+fn inode(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    (meta.nlink() > 1).then(|| (meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn inode(_meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 /// `out` = zip of `stage` with every entry under `top/`.
@@ -216,5 +245,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The macOS layout: the CLI at the top and, hard-linked, inside the .app. The
+    /// archive holds it once; the updater and `tar -x` both get the real file.
+    #[cfg(unix)]
+    #[test]
+    fn bundle_hard_link_is_stored_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let macos = stage.join("mokuro-bunko.app/Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let big: Vec<u8> = (0..200_000u32).map(|i| (i * 7919 % 251) as u8).collect();
+        std::fs::write(stage.join("mokuro-bunko"), &big).unwrap();
+        std::fs::hard_link(stage.join("mokuro-bunko"), macos.join("mokuro-bunko")).unwrap();
+        std::fs::write(macos.join("mokuro-bunko-tray"), b"tray").unwrap();
+        let tgz = dir.path().join("m.tar.gz");
+        write_tar_gz(&stage, "top", &tgz, 0).unwrap();
+
+        let mut kinds = Vec::new();
+        let mut t = tar::Archive::new(flate2::read::GzDecoder::new(
+            std::fs::File::open(&tgz).unwrap(),
+        ));
+        for e in t.entries().unwrap() {
+            let e = e.unwrap();
+            kinds.push((
+                e.path().unwrap().to_string_lossy().to_string(),
+                e.header().entry_type(),
+                e.size(),
+            ));
+        }
+        assert_eq!(kinds[1].0, "top/mokuro-bunko");
+        assert_eq!(kinds[1].2, big.len() as u64);
+        let link = kinds
+            .iter()
+            .find(|k| k.0 == "top/mokuro-bunko.app/Contents/MacOS/mokuro-bunko")
+            .unwrap();
+        assert_eq!(link.1, tar::EntryType::Link);
+        assert_eq!(link.2, 0);
+
+        let out = dir.path().join("out");
+        bunko_update::extract_binary(&tgz, "https://x/m.tar.gz", "mokuro-bunko", &out).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), big);
+        // A real tar recreates the link.
+        let x = dir.path().join("x");
+        std::fs::create_dir_all(&x).unwrap();
+        let ok = std::process::Command::new("tar")
+            .arg("-xzf")
+            .arg(&tgz)
+            .arg("-C")
+            .arg(&x)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        assert_eq!(
+            std::fs::read(x.join("top/mokuro-bunko.app/Contents/MacOS/mokuro-bunko")).unwrap(),
+            big
+        );
     }
 }

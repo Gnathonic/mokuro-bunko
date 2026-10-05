@@ -80,6 +80,8 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # bunko-tray links GTK 3 on Linux (the desktop tray; the CLI does not).
+      - run: sudo apt-get update -q && sudo apt-get install -y -q libgtk-3-dev
       - run: cargo test --workspace --locked
 
   build:
@@ -89,8 +91,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux lite: fully static musl, cross-built with zig.
-          - { name: linux-x64-lite, os: ubuntu-latest, target: x86_64-unknown-linux-musl, flavor: lite, zig: true }
+          # Linux lite: fully static musl, cross-built with zig. x86_64 lite is the
+          # `build-linux-x64-lite` job: it takes the tray from the manylinux job.
           - { name: linux-arm64-lite, os: ubuntu-latest, target: aarch64-unknown-linux-musl, flavor: lite, zig: true }
           # Full: one binary per platform (ONNX Runtime on the CPU for PP-OCR; the
           # recognizers come from the backend packs). Linux x86_64 full is built by the
@@ -162,10 +164,54 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.tag }}
       - name: build (xtask dist, then show the glibc/GLIBCXX versions the binary needs)
-        run: packaging/manylinux/build.sh full
+        run: packaging/manylinux/build.sh full tray
       - uses: actions/upload-artifact@v4
         with:
           name: dist-linux-x64-full
+          path: dist/*.tar.gz
+          if-no-files-found: error
+      # The desktop tray (glibc 2.28 + GTK 3) for the x86_64 lite archive.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tray-linux-x64
+          path: dist/mokuro-bunko-tray
+          if-no-files-found: error
+
+  # Linux x86_64 lite: the static musl CLI (zig), plus the manylinux job's glibc tray
+  # (a tray needs glibc and GTK 3 anyway; the CLI stays static).
+  build-linux-x64-lite:
+    needs: [prepare, build-linux-full]
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x64-lite
+      - uses: actions/download-artifact@v4
+        with:
+          name: tray-linux-x64
+          path: tray
+      - name: xtask dist
+        run: |
+          set -eux
+          chmod +x tray/mokuro-bunko-tray
+          cargo run -p xtask --locked -- dist --locked --zig --target x86_64-unknown-linux-musl \
+            --flavor lite --tray-bin tray/mokuro-bunko-tray --out dist
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-x64-lite
           path: dist/*.tar.gz
           if-no-files-found: error
 
@@ -331,11 +377,12 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [prepare, test, build, build-linux-full, packs, packs-linux, android]
+    needs: [prepare, test, build, build-linux-full, build-linux-x64-lite, packs, packs-linux, android]
     # android is skipped unless BUILD_ANDROID=true; everything else must have passed.
     if: >-
       ${{ !cancelled() && needs.prepare.result == 'success' && needs.test.result == 'success'
       && needs.build.result == 'success' && needs.build-linux-full.result == 'success'
+      && needs.build-linux-x64-lite.result == 'success'
       && needs.packs.result == 'success' && needs.packs-linux.result == 'success'
       && (needs.android.result == 'success' || needs.android.result == 'skipped') }}
     runs-on: ubuntu-latest
@@ -400,7 +447,7 @@ jobs:
           fi
 
   docker:
-    needs: [prepare, test, build-linux-full, build, packs-linux]
+    needs: [prepare, test, build-linux-full, build-linux-x64-lite, build, packs-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -107,10 +107,16 @@ pub fn run(args: &DockerContextArgs) -> Result<()> {
             if dest.exists() {
                 std::fs::remove_dir_all(&dest)?;
             }
-            let files = archive::extract_flat(&path, &dest)?;
+            let mut files = archive::extract_flat(&path, &dest)?;
             if !dest.join(names::BIN).is_file() {
                 bail!("{name} has no {} at its top level", names::BIN);
             }
+            // Images have no desktop: drop the tray and its desktop entries/icons.
+            let _ = std::fs::remove_file(dest.join(names::TRAY_BIN));
+            let _ = std::fs::remove_dir_all(dest.join("share"));
+            files.retain(|f| {
+                f.as_path() != std::path::Path::new(names::TRAY_BIN) && !f.starts_with("share")
+            });
             eprintln!("    {arch}/{flavor_dir}: {} files from {name}", files.len());
             slots.push((arch.to_string(), dest));
         }

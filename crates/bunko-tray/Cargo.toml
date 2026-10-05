@@ -1,0 +1,57 @@
+[package]
+name = "bunko-tray"
+description = "mokuro-bunko desktop tray: status, pause/resume, open the app pages, supervise a tray-managed server or processor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# A separate executable on purpose (GUI.md §1): on Linux it links GTK 3 and loads
+# libayatana-appindicator3 at run time; the `mokuro-bunko` CLI/server binaries and the
+# Docker images never depend on either.
+[[bin]]
+name = "mokuro-bunko-tray"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+# Loopback HTTP to the control API (plain http, no TLS stack).
+ureq = { version = "3", default-features = false }
+# Local wall-clock times for "pause until tomorrow 08:00" and status lines.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Decoding the embedded tray icons to RGBA.
+png = "0.18"
+# The native tray: tray-icon + muda menus + the tao event loop (MIT/Apache-2.0).
+# libxdo (muda's predefined copy/paste items on Linux) is not needed.
+tray-icon = { version = "0.24", default-features = false, features = ["gtk"] }
+tao = { version = "0.34", default-features = false, features = ["rwh_06"] }
+# Opening the app pages and the logs folder with the desktop's default handler.
+open = "5"
+# One tray per user (a lock file), as bunko-processor locks its storage.
+fs4 = { version = "1", default-features = false, features = ["sync"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# tao runs a GTK main loop on Linux; the tray menu is a GTK menu (dbusmenu via appindicator).
+gtk = "0.18"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# The Startup-folder shortcut that "Start at login" toggles (the same file install.ps1 -Startup writes).
+mslnk = "0.1"
+
+[dev-dependencies]
+tempfile.workspace = true
+# The control API's own wire types (no runtime): tests/contract.rs checks the tray reads
+# exactly what the instances send.
+bunko-control = { path = "../bunko-control", default-features = false }

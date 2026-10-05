@@ -44,6 +44,14 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 - `install-ocr`, `doctor` and `models` take `--processor` to act on the
   processor's storage (picked automatically on a processor-only machine), and a
   processor also uses a backend pack installed for the library on the same machine.
+- `mokuro-bunko-tray`, a tray icon for Windows, macOS and Linux: what the server
+  or processor is doing (volume, pages, rate), statistics, pause after this
+  volume / now / for an hour / until tomorrow, resume, and links to the
+  dashboard, library, settings and logs. It can start the server or processor at
+  login and restart it if it crashes. It ships next to the CLI (Windows zip, a
+  `mokuro-bunko.app` on macOS, Linux full and lite archives with a `.desktop`
+  entry); Linux needs GTK 3 and AppIndicator, which `doctor` checks. Docker
+  images have no tray.
 
 ### Changed
 - OCR engines are `hayai-nova` (the new default primary), `paddle-manga` and

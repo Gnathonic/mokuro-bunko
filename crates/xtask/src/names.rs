@@ -10,6 +10,9 @@
 use std::fmt;
 
 pub const BIN: &str = "mokuro-bunko";
+/// The desktop tray (crate `bunko-tray`), shipped next to the CLI in desktop archives.
+pub const TRAY_BIN: &str = "mokuro-bunko-tray";
+pub const TRAY_PKG: &str = "bunko-tray";
 pub const DEFAULT_DOCKER_REPO: &str = "ghcr.io/gnathonic/mokuro-bunko";
 pub const DEFAULT_GITHUB_REPO: &str = "Gnathonic/mokuro-bunko";
 
@@ -130,6 +133,28 @@ impl Build {
     }
 }
 
+/// The target the tray is built for when packaging `target`, or None when that archive
+/// has no tray. The tray links GTK 3 on Linux, so it is always a glibc build: the musl
+/// lite archive for x86_64 carries the same glibc tray as the full one (GUI.md §6:
+/// Linux x86_64 full and lite). No tray for arm64 Linux, Android.
+pub fn tray_target(target: &str) -> Option<String> {
+    match target {
+        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => {
+            Some("x86_64-unknown-linux-gnu".into())
+        }
+        t if t.ends_with("-pc-windows-msvc") || t.ends_with("-apple-darwin") => Some(t.into()),
+        _ => None,
+    }
+}
+
+pub fn tray_exe_name(target: &str) -> String {
+    if target.contains("windows") {
+        format!("{TRAY_BIN}.exe")
+    } else {
+        TRAY_BIN.to_string()
+    }
+}
+
 pub fn exe_name(target: &str) -> String {
     if target.contains("windows") {
         format!("{BIN}.exe")
@@ -246,6 +271,24 @@ mod tests {
             None
         );
         assert_eq!(parse_archive_name("release.json", "0.7.0"), None);
+    }
+
+    #[test]
+    fn tray_targets() {
+        assert_eq!(
+            tray_target("x86_64-unknown-linux-musl").as_deref(),
+            Some("x86_64-unknown-linux-gnu")
+        );
+        assert_eq!(
+            tray_target("aarch64-apple-darwin").as_deref(),
+            Some("aarch64-apple-darwin")
+        );
+        assert_eq!(tray_target("aarch64-unknown-linux-musl"), None);
+        assert_eq!(tray_target("aarch64-linux-android"), None);
+        assert_eq!(
+            tray_exe_name("x86_64-pc-windows-msvc"),
+            "mokuro-bunko-tray.exe"
+        );
     }
 
     #[test]

@@ -8,6 +8,11 @@
     Start-menu shortcuts (and optionally a logon shortcut), runs
     'mokuro-bunko doctor' and starts the server.
 
+    With the tray in the zip (0.7+), "Mokuro Bunko" in the Start menu starts the tray
+    (mokuro-bunko-tray.exe): an icon by the clock with status, pause/resume and the
+    settings, which runs the server for you (tray.json). "Mokuro Bunko server
+    (console)" keeps the old console window (run.bat).
+
     No admin rights, no Python, nothing in the registry. The library, config
     and logs stay in %LOCALAPPDATA%\mokuro-bunko (where mokuro-bunko 0.5 kept
     them), unless -Portable keeps them in a data\ folder next to the program.
@@ -35,7 +40,9 @@
     Keep PORTABLE.txt: config, library and logs go to <InstallDir>\data.
 
 .PARAMETER Startup
-    Also start the server when you log in (shortcut in the Startup folder).
+    Also start Mokuro Bunko when you log in: the tray (mokuro-bunko-tray.exe), which
+    runs the server, through a shortcut in the Startup folder (the same shortcut as the
+    tray's "Start at login").
 
 .PARAMETER NoShortcut
     Don't create Start-menu shortcuts.
@@ -130,8 +137,9 @@ try {
     # --- 3. Install ---------------------------------------------------------
     Write-Step "Installing into $InstallDir"
     $exe = Join-Path $InstallDir "mokuro-bunko.exe"
-    $running = Get-Process -Name "mokuro-bunko" -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -and ($_.Path -ieq $exe) }
+    $trayExe = Join-Path $InstallDir "mokuro-bunko-tray.exe"
+    $running = Get-Process -Name "mokuro-bunko", "mokuro-bunko-tray" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and (($_.Path -ieq $exe) -or ($_.Path -ieq $trayExe)) }
     if ($running) {
         if (-not $NonInteractive) {
             $answer = Read-Host "    mokuro-bunko is running from $InstallDir. Stop it to update? [Y/n]"
@@ -154,26 +162,48 @@ try {
     # --- 4. Shortcuts -------------------------------------------------------
     $runBat = Join-Path $InstallDir "run.bat"
     $shell = New-Object -ComObject WScript.Shell
+    $hasTray = Test-Path $trayExe
+    $iconFile = Join-Path $InstallDir "mokuro-bunko.ico"
+    if (-not (Test-Path $iconFile)) { $iconFile = $exe }
     function New-Shortcut([string]$Path, [string]$Target, [string]$Description, [int]$WindowStyle = 1) {
         $s = $shell.CreateShortcut($Path)
         $s.TargetPath = $Target
         $s.WorkingDirectory = $InstallDir
         $s.Description = $Description
         $s.WindowStyle = $WindowStyle
-        $icon = Join-Path $InstallDir "mokuro-bunko.exe"
-        $s.IconLocation = "$icon,0"
+        $s.IconLocation = "$iconFile,0"
         $s.Save()
+    }
+    if ($hasTray) {
+        # What the tray runs (GUI.md §5): the library server, as the Start-menu shortcut
+        # did before the tray. Kept if it exists (the setup wizard may have changed it).
+        $trayDir = if ($Portable) { Join-Path $InstallDir "data" } else { Join-Path $env:LOCALAPPDATA "mokuro-bunko" }
+        $trayJson = Join-Path $trayDir "tray.json"
+        if (-not (Test-Path $trayJson)) {
+            New-Item -ItemType Directory -Force -Path $trayDir | Out-Null
+            Set-Content -Path $trayJson -Encoding ASCII -Value '{ "managed": [ { "role": "server" } ] }'
+            Write-Ok "The tray runs the server: $trayJson"
+        }
     }
     if (-not $NoShortcut) {
         $menu = Join-Path ([Environment]::GetFolderPath("Programs")) "Mokuro Bunko"
         New-Item -ItemType Directory -Force -Path $menu | Out-Null
-        New-Shortcut (Join-Path $menu "Mokuro Bunko.lnk") $runBat "Start the Mokuro Bunko manga library server"
+        if ($hasTray) {
+            New-Shortcut (Join-Path $menu "Mokuro Bunko.lnk") $trayExe "Mokuro Bunko: status, pause and settings (tray icon)"
+            New-Shortcut (Join-Path $menu "Mokuro Bunko server (console).lnk") $runBat "Run the Mokuro Bunko server in a console window"
+        } else {
+            New-Shortcut (Join-Path $menu "Mokuro Bunko.lnk") $runBat "Start the Mokuro Bunko manga library server"
+        }
         New-Shortcut (Join-Path $menu "Mokuro Bunko diagnostics.lnk") (Join-Path $InstallDir "doctor.bat") "Diagnose Mokuro Bunko problems"
         Write-Ok "Start-menu shortcuts: $menu"
     }
     $startupLink = Join-Path ([Environment]::GetFolderPath("Startup")) "Mokuro Bunko.lnk"
     if ($Startup) {
-        New-Shortcut $startupLink $runBat "Start the Mokuro Bunko server at logon" 7   # 7 = minimized
+        if ($hasTray) {
+            New-Shortcut $startupLink $trayExe "Start Mokuro Bunko (tray) at logon"
+        } else {
+            New-Shortcut $startupLink $runBat "Start the Mokuro Bunko server at logon" 7   # 7 = minimized
+        }
         Write-Ok "Starts at logon: $startupLink"
     }
 
@@ -188,15 +218,26 @@ try {
 
     # --- 6. Start -------------------------------------------------------------
     if (-not $NoStart) {
-        Write-Step "Starting the server (it opens your browser when ready)"
-        Start-Process -FilePath $runBat -WorkingDirectory $InstallDir
+        if ($hasTray) {
+            Write-Step "Starting Mokuro Bunko (tray icon by the clock; it starts the server)"
+            Start-Process -FilePath $trayExe -WorkingDirectory $InstallDir
+            # Open the browser once the server answers, as run.bat does.
+            Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile", "-Command", "for(`$i=0;`$i -lt 120;`$i++){try{`$r=Invoke-WebRequest -Uri 'http://127.0.0.1:8080' -UseBasicParsing -TimeoutSec 2; if(`$r.StatusCode -lt 500){Start-Process 'http://127.0.0.1:8080'; break}}catch{}; Start-Sleep -Seconds 1}"
+        } else {
+            Write-Step "Starting the server (it opens your browser when ready)"
+            Start-Process -FilePath $runBat -WorkingDirectory $InstallDir
+        }
     }
 
     $dataDir = if ($Portable) { Join-Path $InstallDir "data" } else { Join-Path $env:LOCALAPPDATA "mokuro-bunko" }
     Write-Host ""
     Write-Host "Installed mokuro-bunko $($manifest.version) ($Flavor)." -ForegroundColor Green
     Write-Host "  Program     : $InstallDir"
-    Write-Host "  Start       : Start menu > Mokuro Bunko, or $runBat"
+    if ($hasTray) {
+        Write-Host "  Start       : Start menu > Mokuro Bunko (tray icon), or $runBat (console)"
+    } else {
+        Write-Host "  Start       : Start menu > Mokuro Bunko, or $runBat"
+    }
     Write-Host "  Web UI      : http://127.0.0.1:8080  (first visit creates your admin account)"
     Write-Host "  Data        : $dataDir  (library, config.yaml, logs)"
     Write-Host "  Uninstall   : delete $InstallDir and the Start-menu folder 'Mokuro Bunko'"

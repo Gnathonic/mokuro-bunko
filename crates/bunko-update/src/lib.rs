@@ -419,7 +419,11 @@ impl Updater {
             extract_binary(&download, &url, &binary, &unpacked)?;
             let r = self_replace::self_replace(&unpacked).map_err(UpdateError::Io);
             let _ = std::fs::remove_file(&unpacked);
-            r
+            r?;
+            if let Some(dir) = download.parent() {
+                update_companions(&download, &url, dir);
+            }
+            Ok(())
         })
         .await
         .map_err(|e| UpdateError::Unpack(e.to_string()))?
@@ -496,6 +500,71 @@ fn set_executable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Executables installed next to `mokuro-bunko` from the same archive, which an update
+/// replaces too when they are there: the desktop tray (GUI.md §6). In the macOS archive
+/// the tray is inside `mokuro-bunko.app`.
+pub const COMPANIONS: &[&str] = &[if cfg!(windows) {
+    "mokuro-bunko-tray.exe"
+} else {
+    "mokuro-bunko-tray"
+}];
+
+/// Where the installed copies of companion `name` are, under the executable's `dir`.
+fn companion_paths(dir: &Path, name: &str) -> Vec<PathBuf> {
+    [
+        dir.join(name),
+        dir.join("mokuro-bunko.app")
+            .join("Contents")
+            .join("MacOS")
+            .join(name),
+    ]
+    .into_iter()
+    .filter(|p| p.is_file())
+    .collect()
+}
+
+/// Replace the installed [`COMPANIONS`] under `dir` with the ones in the downloaded
+/// archive. Best effort, after the main executable was replaced: a failure is logged and
+/// the old companion keeps working. A running tray goes on running its old copy until it
+/// is started again. Returns the paths replaced.
+pub fn update_companions(archive: &Path, url: &str, dir: &Path) -> Vec<PathBuf> {
+    let mut done = Vec::new();
+    for name in COMPANIONS {
+        for target in companion_paths(dir, name) {
+            let new = target.with_file_name(format!(".{name}.new"));
+            let result = extract_binary(archive, url, name, &new)
+                .and_then(|()| replace_file(&new, &target).map_err(UpdateError::Io));
+            match result {
+                Ok(()) => done.push(target),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&new);
+                    tracing::warn!("update: {} not replaced: {e}", target.display());
+                }
+            }
+        }
+    }
+    done
+}
+
+/// Put `new` in place of `target`. Windows cannot overwrite a running executable but can
+/// rename it, so the old one moves aside (`.old`, removed now or by the next update).
+fn replace_file(new: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let old = target.with_extension("exe.old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(target, &old)?;
+        if let Err(e) = std::fs::rename(new, target) {
+            let _ = std::fs::rename(&old, target);
+            return Err(e);
+        }
+        let _ = std::fs::remove_file(&old);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    std::fs::rename(new, target)
+}
+
 /// Exit code the portable launcher (`run.bat`) treats as "start me again".
 pub const RESTART_EXIT_CODE: i32 = 75;
 
@@ -549,6 +618,62 @@ fn now_iso() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn update_replaces_installed_companions_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let tray = COMPANIONS[0];
+        // The archive: top/mokuro-bunko + top/<tray> + the macOS bundle's copy.
+        let archive = dir.path().join("a.tar.gz");
+        {
+            let gz = flate2::write::GzEncoder::new(
+                std::fs::File::create(&archive).unwrap(),
+                flate2::Compression::fast(),
+            );
+            let mut tar = tar::Builder::new(gz);
+            for (path, body) in [
+                ("top/mokuro-bunko", &b"cli-new"[..]),
+                (&*format!("top/{tray}"), &b"tray-new"[..]),
+            ] {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(body.len() as u64);
+                h.set_mode(0o755);
+                h.set_cksum();
+                tar.append_data(&mut h, path, body).unwrap();
+            }
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let install = dir.path().join("install");
+        std::fs::create_dir_all(&install).unwrap();
+        // No tray installed: nothing to do.
+        assert!(update_companions(&archive, "x.tar.gz", &install).is_empty());
+        std::fs::write(install.join(tray), b"tray-old").unwrap();
+        let bundle = install.join("mokuro-bunko.app/Contents/MacOS");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join(tray), b"tray-old").unwrap();
+        let done = update_companions(&archive, "x.tar.gz", &install);
+        assert_eq!(done.len(), 2);
+        assert_eq!(std::fs::read(install.join(tray)).unwrap(), b"tray-new");
+        assert_eq!(std::fs::read(bundle.join(tray)).unwrap(), b"tray-new");
+        assert!(!install.join(format!(".{tray}.new")).exists());
+        // An archive without the tray leaves the installed one alone.
+        let bare = dir.path().join("b.tar.gz");
+        {
+            let gz = flate2::write::GzEncoder::new(
+                std::fs::File::create(&bare).unwrap(),
+                flate2::Compression::fast(),
+            );
+            let mut tar = tar::Builder::new(gz);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(3);
+            h.set_cksum();
+            tar.append_data(&mut h, "top/mokuro-bunko", &b"cli"[..])
+                .unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        assert!(update_companions(&bare, "x.tar.gz", &install).is_empty());
+        assert_eq!(std::fs::read(install.join(tray)).unwrap(), b"tray-new");
+    }
+
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
