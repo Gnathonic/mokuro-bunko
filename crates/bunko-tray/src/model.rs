@@ -1,0 +1,580 @@
+//! What the menu and the icon show, computed from what the tray knows (GUI.md §5).
+//! Pure: the UI layer only copies these strings and flags into native menu items.
+
+use crate::status::Status;
+use crate::trayconf::role_label;
+use chrono::{DateTime, Local, NaiveDate};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IconState {
+    Idle,
+    Working,
+    Paused,
+    Attention,
+}
+
+impl IconState {
+    pub fn name(self) -> &'static str {
+        match self {
+            IconState::Idle => "idle",
+            IconState::Working => "working",
+            IconState::Paused => "paused",
+            IconState::Attention => "attention",
+        }
+    }
+}
+
+/// One instance as the tray sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstanceView {
+    pub role: String,
+    /// The last status received (None: not answering yet).
+    pub status: Option<Status>,
+    /// Why the last request failed, when it did.
+    pub error: Option<String>,
+    /// Started by this tray (Quit stops it) rather than by a service or a terminal.
+    pub tray_started: bool,
+}
+
+/// A tray-managed role that is not up (starting, crashed, waiting to restart).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisedView {
+    pub role: String,
+    pub text: String,
+    pub failing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UpdateView {
+    pub checking: bool,
+    pub latest: Option<String>,
+    pub available: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuModel {
+    pub status_lines: Vec<String>,
+    pub stats_lines: Vec<String>,
+    pub icon: IconState,
+    pub tooltip: String,
+    pub can_pause_after: bool,
+    pub can_pause_now: bool,
+    pub can_resume: bool,
+    pub can_open_dashboard: bool,
+    pub library_url: Option<String>,
+    pub update_text: String,
+    pub quit_text: String,
+}
+
+fn n(v: Option<f64>) -> String {
+    v.map(|x| group(x.round() as i64))
+        .unwrap_or_else(|| "?".into())
+}
+
+/// 7310 → "7,310".
+fn group(v: i64) -> String {
+    let digits = v.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if v < 0 { format!("-{out}") } else { out }
+}
+
+fn plural(v: Option<f64>, one: &str, many: &str) -> String {
+    let word = if v.map(|x| x.round() as i64) == Some(1) {
+        one
+    } else {
+        many
+    };
+    format!("{} {word}", n(v))
+}
+
+fn shorten(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// "Series/Dr Stone 01" → "Dr Stone 01".
+fn volume_name(v: &str) -> &str {
+    v.trim_end_matches('/')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(v)
+}
+
+/// `until` as local time: "18:00" today, "Mon 08:00" within a week, else the date.
+pub fn until_text(until: &str, now: DateTime<Local>) -> String {
+    let Ok(t) = DateTime::parse_from_rfc3339(until) else {
+        return until.to_string();
+    };
+    let t = t.with_timezone(&Local);
+    let days = t
+        .date_naive()
+        .signed_duration_since(now.date_naive())
+        .num_days();
+    match days {
+        0 => t.format("%H:%M").to_string(),
+        1 => format!("tomorrow {}", t.format("%H:%M")),
+        2..=6 => t.format("%a %H:%M").to_string(),
+        _ => t.format("%Y-%m-%d %H:%M").to_string(),
+    }
+}
+
+fn state_text(s: &Status, now: DateTime<Local>) -> String {
+    let queue = s
+        .library
+        .as_ref()
+        .and_then(|l| l.queue_pending)
+        .map(|q| format!(" — {} in queue", n(Some(q))));
+    match s.state.as_str() {
+        "working" => match s.current.first() {
+            Some(c) => {
+                let mut parts = vec![format!("Working: {}", volume_name(&c.volume))];
+                if c.pages_done.is_some() || c.pages_total.is_some() {
+                    parts.push(format!("{}/{}", n(c.pages_done), n(c.pages_total)));
+                }
+                if let Some(r) = c.pages_per_second {
+                    parts.push(format!("{r:.1} p/s"));
+                }
+                let mut text = parts.join(" · ");
+                if s.current.len() > 1 {
+                    text.push_str(&format!(" (+{} more)", s.current.len() - 1));
+                }
+                text
+            }
+            None => "Working".into(),
+        },
+        "idle" => format!("Idle{}", queue.unwrap_or_default()),
+        "paused" | "pausing" => {
+            let base = if s.state == "pausing" {
+                "Pausing after this volume"
+            } else {
+                "Paused"
+            };
+            match s.pause.until.as_deref().filter(|u| !u.is_empty()) {
+                Some(u) => format!("{base} until {}", until_text(u, now)),
+                None => base.to_string(),
+            }
+        }
+        "connecting" => "Connecting to the library…".into(),
+        "disconnected" => match s.library.as_ref().and_then(|l| l.error.as_deref()) {
+            Some(e) if !e.is_empty() => format!("Can't reach library ({})", shorten(e, 60)),
+            _ => "Can't reach library".into(),
+        },
+        "error" => match s.problems.first() {
+            Some(p) => format!("Error: {}", p.text),
+            None => "Error".into(),
+        },
+        "setup" => "Not set up yet — open the setup wizard".into(),
+        "" => "Running".into(),
+        other => {
+            let mut c = other.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                .unwrap_or_default()
+        }
+    }
+}
+
+pub struct Inputs<'a> {
+    pub instances: &'a [InstanceView],
+    pub supervised: &'a [SupervisedView],
+    pub update: &'a UpdateView,
+    /// A short-lived message (an action that failed).
+    pub notice: Option<&'a str>,
+    pub now: DateTime<Local>,
+}
+
+pub fn build(inp: &Inputs) -> MenuModel {
+    let mut status_lines = Vec::new();
+    let mut stats_lines = Vec::new();
+    let mut attention = false;
+    let mut working = false;
+    let mut paused_any = false;
+    let mut pausable_running = false; // can still be paused (not paused/pausing)
+    let mut pausable_not_fully_paused = false; // pausing counts: "now" still helps
+    let mut library_url = None;
+    let mut dashboard = false;
+    let multi = inp.instances.len() + inp.supervised.len() > 1;
+
+    for inst in inp.instances {
+        let label = role_label(&inst.role);
+        match &inst.status {
+            Some(s) => {
+                dashboard = true;
+                let text = state_text(s, inp.now);
+                status_lines.push(format!("{label}: {text}"));
+                if matches!(s.state.as_str(), "error" | "disconnected")
+                    || s.problems.iter().any(|p| p.severity == "fail")
+                {
+                    attention = true;
+                }
+                // Say why the icon asks for attention ("error" already names its problem).
+                let fails: Vec<_> = s.problems.iter().filter(|p| p.severity == "fail").collect();
+                if s.state != "error"
+                    && let Some(p) = fails.first()
+                {
+                    let more = match fails.len() {
+                        1 => String::new(),
+                        n => format!(" (+{} more under Statistics)", n - 1),
+                    };
+                    status_lines.push(format!("✖ {}{more}", shorten(&p.text, 70)));
+                }
+                if s.state == "working" {
+                    working = true;
+                }
+                if s.is_paused() || s.is_pausing() {
+                    paused_any = true;
+                }
+                if s.can_pause() {
+                    if !s.is_paused() && !s.is_pausing() {
+                        pausable_running = true;
+                    }
+                    if !s.is_paused() {
+                        pausable_not_fully_paused = true;
+                    }
+                }
+                if library_url.is_none() {
+                    library_url = s.library_url().map(str::to_string);
+                }
+                stats_lines.extend(stats_for(s, multi.then_some(label)));
+            }
+            None => {
+                attention = attention || inst.error.is_some();
+                status_lines.push(format!(
+                    "{label}: {}",
+                    if inst.error.is_some() {
+                        "not responding"
+                    } else {
+                        "starting…"
+                    }
+                ));
+            }
+        }
+    }
+    for sup in inp.supervised {
+        status_lines.push(format!("{}: {}", role_label(&sup.role), sup.text));
+        attention = attention || sup.failing;
+    }
+    if status_lines.is_empty() {
+        status_lines.push("Not running".into());
+    }
+    if let Some(n) = inp.notice {
+        status_lines.push(format!("⚠ {n}"));
+    }
+    if stats_lines.is_empty() {
+        stats_lines.push("No statistics yet".into());
+    }
+
+    let icon = if attention {
+        IconState::Attention
+    } else if working {
+        IconState::Working
+    } else if paused_any {
+        IconState::Paused
+    } else {
+        IconState::Idle
+    };
+
+    let update_text = if inp.update.checking {
+        "Checking for updates…".to_string()
+    } else if inp.update.available {
+        format!(
+            "Update available: {} …",
+            inp.update.latest.as_deref().unwrap_or("new version")
+        )
+    } else if let Some(latest) = &inp.update.latest {
+        format!("Up to date ({latest}) — check again")
+    } else if inp.update.error.is_some() {
+        "Update check failed — try again".to_string()
+    } else {
+        "Check for updates".to_string()
+    };
+
+    let external: Vec<&str> = inp
+        .instances
+        .iter()
+        .filter(|i| !i.tray_started && i.role != "gui")
+        .map(|i| role_label(&i.role))
+        .collect();
+    let quit_text = if external.is_empty() {
+        "Quit".to_string()
+    } else {
+        format!(
+            "Quit (the {} {} running)",
+            external.join(" and ").to_lowercase(),
+            if external.len() > 1 { "keep" } else { "keeps" }
+        )
+    };
+
+    let tooltip = format!("mokuro-bunko — {}", status_lines.join("; "));
+    MenuModel {
+        status_lines,
+        stats_lines,
+        icon,
+        tooltip,
+        can_pause_after: pausable_running,
+        can_pause_now: pausable_not_fully_paused,
+        can_resume: paused_any,
+        can_open_dashboard: dashboard,
+        library_url,
+        update_text,
+        quit_text,
+    }
+}
+
+fn stats_for(s: &Status, prefix: Option<&str>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(st) = &s.stats {
+        if let Some(t) = &st.today {
+            lines.push(format!(
+                "Today: {}, {}",
+                plural(t.volumes, "volume", "volumes"),
+                plural(t.pages, "page", "pages")
+            ));
+        }
+        if let Some(t) = &st.total {
+            lines.push(format!(
+                "Total: {}, {}",
+                plural(t.volumes, "volume", "volumes"),
+                plural(t.pages, "page", "pages")
+            ));
+        }
+        if let Some(r) = st.rate_pages_per_minute {
+            lines.push(format!("Rate: {} pages/min", n(Some(r))));
+        }
+        if let Some(g) = st.gpu_busy_percent {
+            lines.push(format!("GPU busy: {}%", n(Some(g))));
+        }
+        if let Some(c) = st.cpu_cores_busy {
+            lines.push(format!("CPU: {c:.1} cores busy"));
+        }
+    }
+    if let Some(b) = &s.backend {
+        if let Some(p) = &b.pack {
+            lines.push(format!("Backend: {p}"));
+        }
+        for d in &b.devices {
+            lines.push(format!("Device: {d}"));
+        }
+    }
+    if let Some(lib) = &s.library
+        && let Some(q) = lib.queue_pending
+    {
+        lines.push(format!("Queue: {} waiting", n(Some(q))));
+    }
+    for p in &s.problems {
+        let mark = if p.severity == "fail" { "✖" } else { "⚠" };
+        lines.push(format!("{mark} {}", p.text));
+    }
+    match prefix {
+        Some(label) => lines
+            .into_iter()
+            .map(|l| format!("{label} · {l}"))
+            .collect(),
+        None => lines,
+    }
+}
+
+/// "Pause until tomorrow 08:00": the next day's 08:00 local time, ISO-8601 with offset.
+pub fn tomorrow_at_8(now: DateTime<Local>) -> String {
+    let date: NaiveDate = now.date_naive().succ_opt().unwrap_or(now.date_naive());
+    let naive = date.and_hms_opt(8, 0, 0).unwrap_or_default();
+    // A DST gap at 08:00 is not a thing anywhere in practice; fall back to +1 day.
+    naive
+        .and_local_timezone(Local)
+        .earliest()
+        .unwrap_or(now + chrono::Duration::days(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+}
+
+/// "Pause for 1 hour".
+pub fn in_one_hour(now: DateTime<Local>) -> String {
+    (now + chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::status::tests::CONTRACT_EXAMPLE;
+    use chrono::TimeZone;
+
+    fn now() -> DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 10, 4, 12, 30, 0).unwrap()
+    }
+
+    fn status(json: &str) -> Status {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn inst(s: Status, tray_started: bool) -> InstanceView {
+        InstanceView {
+            role: s.role.clone(),
+            status: Some(s),
+            error: None,
+            tray_started,
+        }
+    }
+
+    fn model(instances: &[InstanceView]) -> MenuModel {
+        build(&Inputs {
+            instances,
+            supervised: &[],
+            update: &UpdateView::default(),
+            notice: None,
+            now: now(),
+        })
+    }
+
+    #[test]
+    fn working_processor() {
+        let mut s = status(CONTRACT_EXAMPLE);
+        s.problems.clear();
+        s.current[0].volume = "Dr Stone/Dr Stone 01".into();
+        let m = model(&[inst(s, true)]);
+        assert_eq!(
+            m.status_lines,
+            ["Processor: Working: Dr Stone 01 · 37/196 · 4.2 p/s"]
+        );
+        assert_eq!(m.icon, IconState::Working);
+        assert!(m.can_pause_after && m.can_pause_now && !m.can_resume);
+        assert_eq!(
+            m.stats_lines,
+            [
+                "Today: 3 volumes, 512 pages",
+                "Total: 41 volumes, 7,310 pages",
+                "Rate: 252 pages/min",
+                "GPU busy: 71%",
+                "CPU: 6.5 cores busy",
+                "Backend: torch-cu130-2.13.0",
+                "Device: gpu:0 RTX 4090 sm_89",
+                "Queue: 12 waiting",
+            ]
+        );
+        assert_eq!(m.library_url.as_deref(), Some("https://lib.example"));
+        assert_eq!(m.quit_text, "Quit");
+    }
+
+    #[test]
+    fn paused_until_and_pausing() {
+        let until = Local
+            .with_ymd_and_hms(2026, 10, 4, 18, 0, 0)
+            .unwrap()
+            .to_rfc3339();
+        let s = status(&format!(
+            r#"{{"role":"processor","state":"paused","pause":{{"mode":"now","until":"{until}","reason":"user"}}}}"#
+        ));
+        let m = model(&[inst(s, false)]);
+        assert_eq!(m.status_lines, ["Processor: Paused until 18:00"]);
+        assert_eq!(m.icon, IconState::Paused);
+        assert!(!m.can_pause_after && !m.can_pause_now && m.can_resume);
+        assert_eq!(m.quit_text, "Quit (the processor keeps running)");
+        let lib = status(r#"{"role":"server","state":"idle"}"#);
+        let m = model(&[
+            inst(lib, false),
+            inst(status(r#"{"role":"processor","state":"idle"}"#), false),
+        ]);
+        assert_eq!(m.quit_text, "Quit (the library and processor keep running)");
+
+        let s = status(
+            r#"{"role":"server","state":"pausing","pause":{"mode":"after_volume"},"current":[{"volume":"a/b"}]}"#,
+        );
+        let m = model(&[inst(s, true)]);
+        assert_eq!(m.status_lines, ["Library: Pausing after this volume"]);
+        assert!(!m.can_pause_after && m.can_pause_now && m.can_resume);
+
+        let tomorrow = tomorrow_at_8(now());
+        assert!(tomorrow.starts_with("2026-10-05T08:00:00"), "{tomorrow}");
+        let s = status(&format!(
+            r#"{{"role":"processor","state":"paused","pause":{{"until":"{tomorrow}"}}}}"#
+        ));
+        assert_eq!(
+            model(&[inst(s, true)]).status_lines,
+            ["Processor: Paused until tomorrow 08:00"]
+        );
+    }
+
+    #[test]
+    fn idle_disconnected_and_problems() {
+        let s = status(r#"{"role":"processor","state":"idle","library":{"queue_pending":0}}"#);
+        let m = model(&[inst(s, true)]);
+        assert_eq!(m.status_lines, ["Processor: Idle — 0 in queue"]);
+        assert_eq!(m.icon, IconState::Idle);
+        let s = status(r#"{"role":"processor","state":"disconnected"}"#);
+        let m = model(&[inst(s, true)]);
+        assert_eq!(m.status_lines, ["Processor: Can't reach library"]);
+        assert_eq!(m.icon, IconState::Attention);
+        let s = status(
+            r#"{"role":"server","state":"idle","problems":[{"severity":"fail","text":"OCR backend failed to load"}]}"#,
+        );
+        let m = model(&[inst(s, true)]);
+        assert_eq!(m.icon, IconState::Attention);
+        assert_eq!(
+            m.status_lines,
+            ["Library: Idle", "✖ OCR backend failed to load"]
+        );
+        assert!(
+            m.stats_lines
+                .contains(&"✖ OCR backend failed to load".to_string())
+        );
+    }
+
+    #[test]
+    fn nothing_running_and_supervision() {
+        let m = model(&[]);
+        assert_eq!(m.status_lines, ["Not running"]);
+        assert!(!m.can_pause_now && !m.can_resume && !m.can_open_dashboard);
+        let m = build(&Inputs {
+            instances: &[],
+            supervised: &[SupervisedView {
+                role: "processor".into(),
+                text: "stopped (exit code 1), restarting in 8 s".into(),
+                failing: true,
+            }],
+            update: &UpdateView {
+                available: true,
+                latest: Some("0.7.1".into()),
+                ..Default::default()
+            },
+            notice: Some("pause failed"),
+            now: now(),
+        });
+        assert_eq!(
+            m.status_lines,
+            [
+                "Processor: stopped (exit code 1), restarting in 8 s",
+                "⚠ pause failed"
+            ]
+        );
+        assert_eq!(m.icon, IconState::Attention);
+        assert_eq!(m.update_text, "Update available: 0.7.1 …");
+    }
+
+    #[test]
+    fn two_instances_prefix_their_statistics() {
+        let a =
+            status(r#"{"role":"server","state":"idle","stats":{"today":{"volumes":1,"pages":1}}}"#);
+        let b = status(r#"{"role":"processor","state":"working","current":[]}"#);
+        let m = model(&[inst(a, true), inst(b, true)]);
+        assert_eq!(m.status_lines, ["Library: Idle", "Processor: Working"]);
+        assert_eq!(m.stats_lines, ["Library · Today: 1 volume, 1 page"]);
+        assert_eq!(m.icon, IconState::Working);
+    }
+
+    #[test]
+    fn number_grouping() {
+        assert_eq!(group(0), "0");
+        assert_eq!(group(999), "999");
+        assert_eq!(group(1000), "1,000");
+        assert_eq!(group(1234567), "1,234,567");
+    }
+}

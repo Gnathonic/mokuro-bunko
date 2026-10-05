@@ -63,6 +63,9 @@ struct LicensesArgs {
     /// Write the THIRD-PARTY-LICENSES.md text here.
     #[arg(long)]
     out: Option<PathBuf>,
+    /// Leave the desktop tray's crates out (as `dist --no-tray`).
+    #[arg(long)]
+    no_tray: bool,
 }
 
 fn main() -> Result<()> {
@@ -86,7 +89,12 @@ fn licenses_cmd(a: &LicensesArgs) -> Result<()> {
     };
     let build = names::Build::new(&target, a.flavor, a.ep)?;
     let version = util::workspace_version(&root)?;
-    let report = licenses::collect(&root, &build, &version, &[])?;
+    let tray = if a.no_tray {
+        None
+    } else {
+        names::tray_target(&target)
+    };
+    let report = licenses::collect(&root, &build, &version, &[], tray.as_deref())?;
     let mut counts = std::collections::BTreeMap::<&str, usize>::new();
     for c in &report.components {
         *counts.entry(c.license.as_str()).or_default() += 1;

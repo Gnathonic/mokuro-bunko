@@ -2,7 +2,7 @@
 
 use crate::archive;
 use crate::licenses;
-use crate::names::{BIN, Build, Ep, Flavor};
+use crate::names::{self, BIN, Build, Ep, Flavor, TRAY_BIN, TRAY_PKG};
 use crate::util;
 use anyhow::{Context, Result, bail};
 use std::io::BufRead;
@@ -47,6 +47,14 @@ pub struct DistArgs {
     /// left out (TensorRT providers: unused and very large).
     #[arg(long, value_delimiter = ',', default_value = "tensorrt")]
     pub exclude_lib: Vec<String>,
+    /// Leave the desktop tray (`mokuro-bunko-tray`, its icons, desktop entries, the
+    /// macOS .app) out. The Dockerfiles pass this: images have no tray.
+    #[arg(long)]
+    pub no_tray: bool,
+    /// Package this prebuilt tray executable instead of building it (the Linux musl
+    /// lite archive takes the glibc tray built in the manylinux container).
+    #[arg(long, value_name = "FILE", conflicts_with = "no_tray")]
+    pub tray_bin: Option<PathBuf>,
 }
 
 /// Returns the archive written.
@@ -80,8 +88,44 @@ pub fn run(args: &DistArgs) -> Result<PathBuf> {
         cargo_build(&root, &build, args)?
     };
 
+    // The desktop tray: built for the tray target (glibc on Linux), or taken prebuilt.
+    let tray_target = if args.no_tray {
+        None
+    } else {
+        names::tray_target(&target)
+    };
+    let tray_exe = match (&tray_target, &args.tray_bin) {
+        (None, _) => None,
+        (Some(_), Some(bin)) => {
+            if !bin.is_file() {
+                bail!("--tray-bin: {} does not exist", bin.display());
+            }
+            Some(bin.clone())
+        }
+        (Some(t), None) if args.no_build => {
+            let exe = util::target_dir(&root)
+                .join(t)
+                .join("release")
+                .join(names::tray_exe_name(t));
+            if !exe.is_file() {
+                bail!(
+                    "--no-build: {} does not exist (or pass --no-tray)",
+                    exe.display()
+                );
+            }
+            Some(exe)
+        }
+        (Some(t), None) => Some(cargo_build_tray(&root, t, args.locked)?),
+    };
+
     // Licences first: a copyleft dependency stops the release before anything is written.
-    let report = licenses::collect(&root, &build, &version, &native_dirs)?;
+    let report = licenses::collect(
+        &root,
+        &build,
+        &version,
+        &native_dirs,
+        tray_target.as_deref(),
+    )?;
     for c in report.unknown() {
         eprintln!(
             "warning: {} {} has an unreviewed licence: {}",
@@ -150,6 +194,35 @@ pub fn run(args: &DistArgs) -> Result<PathBuf> {
         }
     }
     stage_docs(&root, &build, &version, &stage, &third_party)?;
+    if let (Some(t), Some(exe)) = (&tray_target, &tray_exe) {
+        stage_tray(&root, &build, &version, &stage, exe)?;
+        if !args.no_smoke && util::can_run(&host, t) {
+            let staged = tray_path(&build, &stage);
+            let out = std::process::Command::new(&staged)
+                .arg("--version")
+                .output();
+            match out {
+                Ok(o)
+                    if o.status.success()
+                        && String::from_utf8_lossy(&o.stdout).contains(&version) =>
+                {
+                    eprintln!(
+                        "    smoke test: {}",
+                        String::from_utf8_lossy(&o.stdout).trim()
+                    );
+                }
+                // A build host without GTK's run-time libraries cannot start it; that is
+                // not a packaging error.
+                Ok(o) => eprintln!(
+                    "warning: `{} --version`: {} {}",
+                    staged.display(),
+                    o.status,
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ),
+                Err(e) => eprintln!("warning: could not run {}: {e}", staged.display()),
+            }
+        }
+    }
 
     if !args.no_smoke && util::can_run(&host, &target) {
         smoke_test(&stage.join(build.exe_name()), &version, &build)?;
@@ -313,6 +386,135 @@ fn shared_libs(dir: &Path, exclude: &[String], ep: Ep, windows: bool) -> Result<
     }
     libs.sort();
     Ok(libs)
+}
+
+/// Build `mokuro-bunko-tray` for `target`; returns the executable.
+fn cargo_build_tray(root: &Path, target: &str, locked: bool) -> Result<PathBuf> {
+    let mut cmd = util::cargo();
+    cmd.current_dir(root).args([
+        "build",
+        "--release",
+        "-p",
+        TRAY_PKG,
+        "--bin",
+        TRAY_BIN,
+        "--target",
+        target,
+        "--message-format=json-render-diagnostics",
+    ]);
+    if locked {
+        cmd.arg("--locked");
+    }
+    cmd.stdout(Stdio::piped());
+    eprintln!("+ {cmd:?}");
+    let mut child = cmd.spawn().context("starting cargo")?;
+    let stdout = child.stdout.take().context("cargo stdout")?;
+    let mut exe = None;
+    for line in std::io::BufReader::new(stdout).lines() {
+        let line = line?;
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if msg["reason"] == "compiler-artifact"
+            && msg["target"]["name"] == TRAY_BIN
+            && let Some(e) = msg["executable"].as_str()
+        {
+            exe = Some(PathBuf::from(e));
+        }
+    }
+    let status = child.wait()?;
+    if !status.success() {
+        bail!(
+            "building the tray failed: {status} (Linux needs GTK 3 development files: \
+             libgtk-3-dev / gtk3-devel; or pass --no-tray)"
+        );
+    }
+    exe.context("cargo reported no mokuro-bunko-tray executable")
+}
+
+/// Where the tray executable sits in the staged archive.
+fn tray_path(build: &Build, stage: &Path) -> PathBuf {
+    if build.target.contains("apple-darwin") {
+        stage.join(MAC_APP).join("Contents/MacOS").join(TRAY_BIN)
+    } else {
+        stage.join(names::tray_exe_name(&build.target))
+    }
+}
+
+const MAC_APP: &str = "mokuro-bunko.app";
+
+/// Stage the tray and its desktop integration (GUI.md §6):
+/// * Windows: `mokuro-bunko-tray.exe` + `mokuro-bunko.ico` (shortcuts use it);
+/// * macOS: `mokuro-bunko.app` (LSUIElement agent) with the tray, the CLI (a hard link
+///   of the top-level one: stored once in the archive) and the icon;
+/// * Linux: `mokuro-bunko-tray`, `share/applications/` + `share/autostart/` desktop
+///   entries (`install.sh` points their Exec at the installed path) and the hicolor icons.
+fn stage_tray(root: &Path, build: &Build, version: &str, stage: &Path, exe: &Path) -> Result<()> {
+    let icons = root.join("packaging/icons");
+    let dest = tray_path(build, stage);
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::copy(exe, &dest).with_context(|| format!("copying {}", exe.display()))?;
+    eprintln!("    tray: {}", exe.display());
+    if build.is_windows() {
+        std::fs::copy(
+            icons.join("mokuro-bunko.ico"),
+            stage.join("mokuro-bunko.ico"),
+        )?;
+    } else if build.target.contains("apple-darwin") {
+        let contents = stage.join(MAC_APP).join("Contents");
+        let cli = contents.join("MacOS").join(BIN);
+        if std::fs::hard_link(stage.join(BIN), &cli).is_err() {
+            std::fs::copy(stage.join(BIN), &cli)?;
+        }
+        std::fs::create_dir_all(contents.join("Resources"))?;
+        std::fs::copy(
+            icons.join("mokuro-bunko.icns"),
+            contents.join("Resources/mokuro-bunko.icns"),
+        )?;
+        let plist = std::fs::read_to_string(root.join("packaging/macos/Info.plist"))
+            .context("reading packaging/macos/Info.plist")?;
+        let v = names::strip_v(version);
+        // CFBundleShortVersionString is numbers and dots only.
+        let short = v.split(['-', '+']).next().unwrap_or(v);
+        std::fs::write(
+            contents.join("Info.plist"),
+            plist
+                .replace("@SHORT_VERSION@", short)
+                .replace("@VERSION@", v),
+        )?;
+        std::fs::write(contents.join("PkgInfo"), "APPL????")?;
+    } else {
+        let template =
+            std::fs::read_to_string(root.join("packaging/linux/mokuro-bunko-tray.desktop"))
+                .context("reading packaging/linux/mokuro-bunko-tray.desktop")?;
+        let entry = template.replace("@EXEC@", TRAY_BIN);
+        let share = stage.join("share");
+        std::fs::create_dir_all(share.join("applications"))?;
+        std::fs::create_dir_all(share.join("autostart"))?;
+        std::fs::write(share.join("applications/mokuro-bunko-tray.desktop"), &entry)?;
+        std::fs::write(
+            share.join("autostart/mokuro-bunko-tray.desktop"),
+            format!("{entry}X-GNOME-Autostart-enabled=true\nX-KDE-autostart-after=panel\n"),
+        )?;
+        copy_tree(&icons.join("hicolor"), &share.join("icons/hicolor"))?;
+    }
+    Ok(())
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
+        let e = e?;
+        let p = e.path();
+        if e.file_type()?.is_dir() {
+            copy_tree(&p, &to.join(e.file_name()))?;
+        } else {
+            std::fs::copy(&p, to.join(e.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 fn stage_docs(

@@ -34,6 +34,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # bunko-tray links GTK 3 on Linux (the desktop tray; the CLI does not).
+      - run: sudo apt-get update -q && sudo apt-get install -y -q libgtk-3-dev
       # The full build (default features, links ONNX Runtime) and the lite build.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p mokuro-bunko --all-targets --locked --no-default-features -- -D warnings
@@ -47,6 +49,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
+      # bunko-tray links GTK 3 on Linux (the desktop tray; the CLI does not).
+      - run: sudo apt-get update -q && sudo apt-get install -y -q libgtk-3-dev
       - run: cargo check --workspace --locked
 
   test:
@@ -59,6 +63,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libgtk-3-dev
       - run: cargo test --workspace --locked
       - name: lite build compiles and tests on every OS
         run: cargo test -p mokuro-bunko --locked --no-default-features
@@ -77,7 +83,9 @@ jobs:
         with:
           tool: cargo-zigbuild
       - uses: Swatinem/rust-cache@v2
-      - name: xtask dist (runs `--version` on the packaged binary)
+      # The archive carries the desktop tray (glibc + GTK 3; the release builds it in manylinux).
+      - run: sudo apt-get update -q && sudo apt-get install -y -q libgtk-3-dev
+      - name: xtask dist (runs `--version` on the packaged binary and tray)
         run: cargo run -p xtask --locked -- dist --locked --zig --target x86_64-unknown-linux-musl --flavor lite --out dist
       - name: static, and runs from the archive
         run: |
@@ -87,6 +95,8 @@ jobs:
           bin=$(echo "$RUNNER_TEMP"/x/mokuro-bunko-*/mokuro-bunko)
           file "$bin" | grep -q 'statically linked'
           "$bin" --version | tee /dev/stderr | grep -q lite
+          "$(dirname "$bin")/mokuro-bunko-tray" --version
+          if ldd "$bin" 2>&1 | grep -q gtk; then exit 1; fi
           ls -l "$bin" dist/
       - name: manifest, sign, verify
         run: |

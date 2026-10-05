@@ -41,7 +41,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     set -eux; \
     host="$(rustc -vV | sed -n 's/^host: //p')"; \
-    cargo run --release --locked -p xtask -- dist --locked --target "$host" --flavor full --out /tmp/dist; \
+    cargo run --release --locked -p xtask -- dist --locked --no-tray --target "$host" --flavor full --out /tmp/dist; \
     mkdir -p /out/backends; \
     tar -xzf /tmp/dist/*.tar.gz -C /out --strip-components=1; \
     if [ "$BAKE_PACK" = "1" ]; then \

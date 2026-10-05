@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Mokuro Bunko
+GenericName=Manga library tray
+Comment=Status, pause and settings of the mokuro-bunko library and OCR processor
+Exec=@EXEC@
+Icon=mokuro-bunko
+Terminal=false
+Categories=Utility;
+Keywords=manga;library;OCR;mokuro;
+StartupNotify=false

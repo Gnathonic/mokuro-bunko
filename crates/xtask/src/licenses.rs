@@ -6,7 +6,7 @@
 //! the licence files each crate ships. Copyleft licences fail the build: the project's
 //! rule is that nothing GPL/LGPL/AGPL ends up in a release artifact.
 
-use crate::names::{BIN, Build, Ep, Flavor};
+use crate::names::{BIN, Build, Ep, Flavor, TRAY_PKG};
 use crate::util;
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -169,9 +169,56 @@ pub fn collect(
     build: &Build,
     version: &str,
     native_dirs: &[PathBuf],
+    tray_target: Option<&str>,
 ) -> Result<Report> {
     let (no_default, features) = build.cargo_features();
-    let mut args = vec!["--filter-platform".to_string(), build.target.clone()];
+    let mut components = crates_of(root, BIN, &build.target, no_default, &features)?;
+    // The desktop tray ships in the same archive: its crates are listed too (for the
+    // Linux musl lite archive, those of its glibc build).
+    if let Some(t) = tray_target {
+        for c in crates_of(root, TRAY_PKG, t, false, &[])? {
+            if !components
+                .iter()
+                .any(|o| o.name == c.name && o.version == c.version)
+            {
+                components.push(c);
+            }
+        }
+    }
+    components.sort_by(|a, b| {
+        (a.name.as_str(), a.version.as_str()).cmp(&(b.name.as_str(), b.version.as_str()))
+    });
+
+    // Only when ONNX Runtime is really in this build's graph (the binary's `ocr` feature
+    // pulls it in through bunko-ocr).
+    let ort_version = components
+        .iter()
+        .find(|c| c.name == "ort-sys")
+        .map(|c| c.version.as_str());
+    let markdown = render(
+        build,
+        version,
+        &components,
+        ort_version,
+        native_dirs,
+        tray_target,
+    );
+    Ok(Report {
+        components,
+        markdown,
+    })
+}
+
+/// The third-party crates in the normal-dependency graph of workspace package `pkg`
+/// for `target` and the given features.
+fn crates_of(
+    root: &Path,
+    pkg: &str,
+    target: &str,
+    no_default: bool,
+    features: &[&str],
+) -> Result<Vec<Component>> {
+    let mut args = vec!["--filter-platform".to_string(), target.to_string()];
     if no_default {
         args.push("--no-default-features".into());
     }
@@ -180,7 +227,7 @@ pub fn collect(
         args.push(
             features
                 .iter()
-                .map(|f| format!("{BIN}/{f}"))
+                .map(|f| format!("{pkg}/{f}"))
                 .collect::<Vec<_>>()
                 .join(","),
         );
@@ -200,9 +247,9 @@ pub fn collect(
         .collect();
     let root_id = packages
         .iter()
-        .find(|(_, p)| p["name"] == BIN && p["source"].is_null())
+        .find(|(_, p)| p["name"] == pkg && p["source"].is_null())
         .map(|(id, _)| *id)
-        .context("mokuro-bunko is not in the metadata")?;
+        .with_context(|| format!("{pkg} is not in the metadata"))?;
 
     // Normal (non-dev, non-build) dependencies reachable from the binary.
     let mut seen = BTreeSet::new();
@@ -264,21 +311,7 @@ pub fn collect(
             texts,
         });
     }
-    components.sort_by(|a, b| {
-        (a.name.as_str(), a.version.as_str()).cmp(&(b.name.as_str(), b.version.as_str()))
-    });
-
-    // Only when ONNX Runtime is really in this build's graph (the binary's `ocr` feature
-    // pulls it in through bunko-ocr).
-    let ort_version = components
-        .iter()
-        .find(|c| c.name == "ort-sys")
-        .map(|c| c.version.as_str());
-    let markdown = render(build, version, &components, ort_version, native_dirs);
-    Ok(Report {
-        components,
-        markdown,
-    })
+    Ok(components)
 }
 
 fn licence_files(dir: &Path) -> Vec<(String, String)> {
@@ -327,6 +360,7 @@ fn render(
     components: &[Component],
     ort_version: Option<&str>,
     native_dirs: &[PathBuf],
+    tray_target: Option<&str>,
 ) -> String {
     let mut md = String::new();
     let _ = writeln!(md, "# Third-party licences\n");
@@ -339,6 +373,25 @@ fn render(
         build.manifest_flavor()
     );
     let full = build.flavor == Flavor::Full && ort_version.is_some();
+    if let Some(t) = tray_target {
+        let _ = writeln!(md, "## Desktop tray (`mokuro-bunko-tray`)\n");
+        let _ = writeln!(
+            md,
+            "The archive also holds `mokuro-bunko-tray` ({t}), the desktop tray; its crates \
+             are in the table below. Its icons are original artwork of this project \
+             (`packaging/icons/`, MPL-2.0)."
+        );
+        if t.contains("linux") {
+            let _ = writeln!(
+                md,
+                "\nOn Linux it uses the system's **GTK 3** (and its GLib, Pango, Cairo, \
+                 GDK-Pixbuf, ATK) and **libayatana-appindicator3** (or libappindicator3), \
+                 dynamically linked / loaded at run time from the distribution's packages \
+                 (LGPL-2.1+/LGPL-3); none of them is shipped in this archive."
+            );
+        }
+        let _ = writeln!(md);
+    }
     if full {
         let _ = writeln!(md, "## Native components\n");
         let _ = writeln!(
