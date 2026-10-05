@@ -147,15 +147,30 @@ impl Client {
         Ok(())
     }
 
-    /// The browser URL that logs in with this instance's token and lands on `next`
-    /// (GUI.md §1: the one-time `/app/login?t=`).
-    pub fn login_url(&self, token: &str, next: &str) -> String {
+    /// A single-use sign-in code (`POST /control/login-code`, bearer only).
+    pub fn login_code(&self) -> Result<String, ClientError> {
+        #[derive(serde::Deserialize)]
+        struct Code {
+            code: String,
+        }
+        let code: Code = serde_json::from_str(&self.post("/control/login-code", "{}")?)?;
+        Ok(code.code)
+    }
+
+    /// The browser URL that signs in with `code` and lands on `next` (GUI.md §1:
+    /// `/app/login?c=`). The token itself never goes into a URL.
+    pub fn login_url(&self, code: &str, next: &str) -> String {
         format!(
-            "{}/app/login?t={}&next={}",
+            "{}/app/login?c={}&next={}",
             self.base,
-            url_escape(token),
+            url_escape(code),
             url_escape(next)
         )
+    }
+
+    /// A fresh code, then its sign-in URL: what "Open dashboard" opens.
+    pub fn sign_in_url(&self, next: &str) -> Result<String, ClientError> {
+        Ok(self.login_url(&self.login_code()?, next))
     }
 }
 
@@ -243,7 +258,64 @@ mod tests {
         let c = Client::with_base("http://127.0.0.1:9".into(), "t");
         assert_eq!(
             c.login_url("a+b/c=", "/app/settings?x=1"),
-            "http://127.0.0.1:9/app/login?t=a%2Bb/c%3D&next=/app/settings%3Fx%3D1"
+            "http://127.0.0.1:9/app/login?c=a%2Bb/c%3D&next=/app/settings%3Fx%3D1"
         );
+    }
+
+    /// "Open dashboard": ask for a code with the bearer token, then a URL with the code
+    /// (never the token).
+    #[test]
+    fn sign_in_asks_for_a_code_first() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for answer in [
+                (
+                    200,
+                    r#"{"code":"0123456789abcdef0123456789abcdef","expires_in":300}"#,
+                ),
+                (401, r#"{"error":"no"}"#),
+            ] {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !String::from_utf8_lossy(&buf).contains("\r\n\r\n") {
+                    let n = s.read(&mut chunk).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                requests.push(String::from_utf8_lossy(&buf).into_owned());
+                let (code, body) = answer;
+                write!(
+                    s,
+                    "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            requests
+        });
+        let c = Client::with_base(format!("http://127.0.0.1:{port}"), "the-token");
+        let url = c.sign_in_url("/app/dashboard").unwrap();
+        assert_eq!(
+            url,
+            format!(
+                "http://127.0.0.1:{port}/app/login?c=0123456789abcdef0123456789abcdef&next=/app/dashboard"
+            )
+        );
+        assert!(!url.contains("the-token"));
+        // Refused (an old instance, a wrong token): no URL to open.
+        assert!(matches!(
+            c.sign_in_url("/app/"),
+            Err(ClientError::Status { status: 401, .. })
+        ));
+        let requests = server.join().unwrap();
+        let first = requests[0].to_ascii_lowercase();
+        assert!(first.starts_with("post /control/login-code "), "{first}");
+        assert!(first.contains("authorization: bearer the-token"), "{first}");
     }
 }

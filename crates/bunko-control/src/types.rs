@@ -219,14 +219,57 @@ pub const STATS_FILE: &str = ".stats.json";
 pub const MANAGED_ENV: &str = "MOKURO_CONTROL_MANAGED";
 /// `MOKURO_CONTROL=off` starts no control listener (Docker, tests).
 pub const ENABLE_ENV: &str = "MOKURO_CONTROL";
-/// The cookie `/app/login?t=<token>` sets. A per-port variant
-/// `bunko_control_<port>` is accepted too (cookies do not separate ports).
+/// The cookie `/app/login?c=<code>` sets (named `bunko_control_<port>` on a
+/// listener's own port: cookies do not separate ports). Its value is the token.
 pub const COOKIE: &str = "bunko_control";
 
-/// Read `<storage>/.control.json` (None: absent or unreadable).
+/// Read `<storage>/.control.json` (None: absent, unreadable, or not safe to trust,
+/// see [`read_private_file`]).
 pub fn read_control_file(storage: &std::path::Path) -> Option<ControlFile> {
-    let text = std::fs::read_to_string(storage.join(CONTROL_FILE)).ok()?;
+    let text = read_private_file(&storage.join(CONTROL_FILE))?;
     serde_json::from_str(&text).ok()
+}
+
+/// Read a file only another process of this user could have written. On Unix it must
+/// be a regular file (not a symlink), owned by our effective uid, with no group or
+/// other permission bits; otherwise None, as if it were absent. Another local user
+/// could plant one in a shared directory and point the tray at their own port.
+pub fn read_private_file(path: &std::path::Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        let trusted = |m: &std::fs::Metadata| {
+            m.file_type().is_file() && m.uid() == euid() && m.mode() & 0o077 == 0
+        };
+        let before = std::fs::symlink_metadata(path).ok()?;
+        if !trusted(&before) {
+            return None;
+        }
+        let mut file = std::fs::File::open(path).ok()?;
+        // The file opened is the one checked (not swapped for a symlink in between).
+        let opened = file.metadata().ok()?;
+        if !trusted(&opened) || opened.dev() != before.dev() || opened.ino() != before.ino() {
+            return None;
+        }
+        let mut text = String::new();
+        file.read_to_string(&mut text).ok()?;
+        Some(text)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::read_to_string(path).ok()
+    }
+}
+
+/// This process's effective uid.
+#[cfg(unix)]
+fn euid() -> u32 {
+    // uid_t is a u32 on every Unix target Rust supports (libc is not a dependency here).
+    unsafe extern "C" {
+        safe fn geteuid() -> u32;
+    }
+    geteuid()
 }
 
 #[cfg(test)]
@@ -242,5 +285,30 @@ mod tests {
         assert_eq!(v["mode"], serde_json::Value::Null);
         assert_eq!(serde_json::to_value(State::Pausing).unwrap(), "pausing");
         assert_eq!(serde_json::to_value(Role::Processor).unwrap(), "processor");
+    }
+
+    /// A planted control file is ignored: readable by others, or a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn control_file_must_be_private_and_ours() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONTROL_FILE);
+        let text = r#"{"role":"server","pid":1,"port":4000,"token":"t","version":"0.7.0","started_at":"x"}"#;
+        std::fs::write(&path, text).unwrap();
+        let chmod = |mode| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
+        chmod(0o600).unwrap();
+        assert_eq!(read_control_file(dir.path()).unwrap().port, 4000);
+        for mode in [0o644, 0o640, 0o604, 0o660] {
+            chmod(mode).unwrap();
+            assert!(read_control_file(dir.path()).is_none(), "{mode:o}");
+        }
+        chmod(0o600).unwrap();
+
+        // A symlink to a private file of ours is still refused.
+        let other = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&path, other.path().join(CONTROL_FILE)).unwrap();
+        assert!(read_control_file(other.path()).is_none());
+        assert!(read_control_file(dir.path()).is_some());
     }
 }

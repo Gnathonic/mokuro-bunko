@@ -98,21 +98,33 @@ async fn login_sets_the_cookie_and_the_cookie_authorizes() {
     let (_control, server, _stop) = start(dir.path(), Role::Gui, false).await;
     let c = client();
     let bad = c
-        .get(format!("{}/app/login?t=nope", server.url()))
+        .get(format!("{}/app/login?c=nope", server.url()))
         .send()
         .await
         .unwrap();
     assert_eq!(bad.status(), 401);
-    let login = c
-        .get(server.login_url(Some("/app/dashboard")))
+    // The token itself is no sign-in link.
+    let token = c
+        .get(format!("{}/app/login?t={}", server.url(), server.token()))
         .send()
         .await
         .unwrap();
+    assert_eq!(token.status(), 401);
+    let link = server.login_url(Some("/app/dashboard"));
+    assert!(!link.contains(server.token()), "{link}");
+    let login = c.get(&link).send().await.unwrap();
     assert_eq!(login.status(), 303);
     assert_eq!(login.headers()["location"], "/app/dashboard");
     let cookie = login.headers()["set-cookie"].to_str().unwrap().to_string();
     assert!(cookie.contains("HttpOnly"), "{cookie}");
     assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+    assert!(
+        cookie.starts_with(&format!("bunko_control_{}=", server.port())),
+        "{cookie}"
+    );
+    // The link works once.
+    let again = c.get(&link).send().await.unwrap();
+    assert_eq!(again.status(), 401);
     let pair = cookie.split(';').next().unwrap().to_string();
     let status = c
         .get(format!("{}/control/status", server.url()))
@@ -142,6 +154,59 @@ async fn login_sets_the_cookie_and_the_cookie_authorizes() {
         .await
         .unwrap();
     assert_eq!(same.status(), 409);
+    server.shutdown().await;
+}
+
+/// `POST /control/login-code`: the bearer token only (not the cookie, not nothing);
+/// each code signs in once.
+#[tokio::test]
+async fn login_codes_need_the_bearer_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_control, server, _stop) = start(dir.path(), Role::Processor, false).await;
+    let c = client();
+    let url = format!("{}/control/login-code", server.url());
+    assert_eq!(c.post(&url).send().await.unwrap().status(), 401);
+    let cookie = format!("bunko_control_{}={}", server.port(), server.token());
+    // The cookie: refused, even with this listener's own Origin (which passes the
+    // guard for other state changes).
+    let no_origin = c.post(&url).header("cookie", &cookie).send().await.unwrap();
+    assert_eq!(no_origin.status(), 403);
+    let same_origin = c
+        .post(&url)
+        .header("cookie", &cookie)
+        .header("origin", server.url())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(same_origin.status(), 401);
+    assert_eq!(
+        c.post(&url)
+            .bearer_auth("not-the-token")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let resp = c
+        .post(&url)
+        .bearer_auth(server.token())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["expires_in"], 300);
+    let code = v["code"].as_str().unwrap().to_string();
+    assert_eq!(code.len(), 32);
+    let login = format!("{}/app/login?c={code}&next=/app/settings", server.url());
+    let first = c.get(&login).send().await.unwrap();
+    assert_eq!(first.status(), 303);
+    assert_eq!(first.headers()["location"], "/app/settings");
+    assert!(first.headers().contains_key("set-cookie"));
+    let second = c.get(&login).send().await.unwrap();
+    assert_eq!(second.status(), 401);
+    assert!(!second.headers().contains_key("set-cookie"));
     server.shutdown().await;
 }
 

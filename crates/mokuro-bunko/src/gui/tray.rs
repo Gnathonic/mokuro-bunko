@@ -298,11 +298,19 @@ fn lock_dirs(exe: &Path) -> Vec<PathBuf> {
         .parent()
         .map(|d| d.join("logs"))
         .unwrap_or_default();
-    vec![
-        first,
-        config_logs,
-        std::env::temp_dir().join(format!("mokuro-bunko-tray-{user}")),
-    ]
+    let mut dirs = vec![first, config_logs];
+    // bunko-tray `last_resort_dir`: never the shared /tmp on Linux.
+    if cfg!(target_os = "linux") {
+        dirs.extend(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .filter(|run| run.is_absolute())
+                .map(|run| run.join("mokuro-bunko-tray")),
+        );
+    } else {
+        dirs.push(std::env::temp_dir().join(format!("mokuro-bunko-tray-{user}")));
+    }
+    dirs
 }
 
 /// A tray holds its lock (it runs for this user).

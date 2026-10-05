@@ -62,6 +62,29 @@ pub fn processor_default_storage(env: &dyn Env) -> PathBuf {
     data_base(env).join("mokuro-bunko-processor")
 }
 
+/// Where `mokuro-bunko gui` keeps its `.control.json` when both storages are taken
+/// (`mokuro_bunko::gui::paths::gui_fallback_storage`): `$XDG_RUNTIME_DIR` on Linux
+/// when set, else the local data dir; private to this user, never the shared temp dir.
+pub fn gui_fallback_storage(env: &dyn Env) -> PathBuf {
+    match env.path("XDG_RUNTIME_DIR") {
+        Some(run) if cfg!(target_os = "linux") && run.is_absolute() => run.join("mokuro-bunko-gui"),
+        _ => server_default_storage(env).join("gui"),
+    }
+}
+
+/// The tray's last place for its lock and logs: a folder only this user can reach.
+/// On Linux that is `$XDG_RUNTIME_DIR` (`/tmp` is shared: another user could make the
+/// folder first and hold the lock); elsewhere the temp folder is per user already.
+pub fn last_resort_dir(env: &dyn Env, user: &str) -> Option<PathBuf> {
+    if cfg!(target_os = "linux") {
+        env.path("XDG_RUNTIME_DIR")
+            .filter(|run| run.is_absolute())
+            .map(|run| run.join("mokuro-bunko-tray"))
+    } else {
+        Some(std::env::temp_dir().join(format!("mokuro-bunko-tray-{user}")))
+    }
+}
+
 /// The server's default `config.yaml` (`bunko_core::storage::default_config_path`).
 pub fn server_default_config(env: &dyn Env) -> PathBuf {
     config_base(env).join("mokuro-bunko").join("config.yaml")
@@ -114,18 +137,18 @@ impl Layout {
     }
 
     /// [`Self::log_dir`], created; when that cannot be made (a folder above it is not
-    /// writable), `<config>/mokuro-bunko/logs`, then the temp folder: the tray keeps its
-    /// lock and logs somewhere rather than not starting.
+    /// writable), `<config>/mokuro-bunko/logs`, then [`last_resort_dir`]: the tray keeps
+    /// its lock and logs somewhere rather than not starting.
     pub fn writable_log_dir(&self, env: &dyn Env) -> PathBuf {
         let user = env
             .var(if cfg!(windows) { "USERNAME" } else { "USER" })
             .map(|u| u.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let candidates = [
+        let mut candidates = vec![
             self.log_dir(env),
             config_base(env).join("mokuro-bunko").join("logs"),
-            std::env::temp_dir().join(format!("mokuro-bunko-tray-{user}")),
         ];
+        candidates.extend(last_resort_dir(env, &user));
         for dir in &candidates {
             if std::fs::create_dir_all(dir).is_ok() {
                 return dir.clone();
@@ -247,6 +270,27 @@ mod tests {
                 PathBuf::from("/x/mokuro-bunko")
             );
         }
+    }
+
+    #[test]
+    fn gui_fallback_is_private_not_temp() {
+        let tmp = std::env::temp_dir();
+        let env = if cfg!(windows) {
+            FakeEnv::default().with("LOCALAPPDATA", r"C:\Users\a\AppData\Local")
+        } else {
+            FakeEnv::default().with("HOME", "/home/a")
+        };
+        let got = gui_fallback_storage(&env);
+        assert_eq!(got, data_base(&env).join("mokuro-bunko").join("gui"));
+        assert!(!got.starts_with(&tmp), "{}", got.display());
+        let env = env.with("XDG_RUNTIME_DIR", "/run/user/1000");
+        let got = gui_fallback_storage(&env);
+        if cfg!(target_os = "linux") {
+            assert_eq!(got, PathBuf::from("/run/user/1000/mokuro-bunko-gui"));
+        }
+        assert!(!got.starts_with(&tmp), "{}", got.display());
+        // The real environment too.
+        assert!(!gui_fallback_storage(&ProcessEnv).starts_with(&tmp));
     }
 
     #[test]

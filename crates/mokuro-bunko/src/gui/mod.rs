@@ -5,7 +5,8 @@
 //! instance (`gui`, `serve`, `processor serve`; bunko-control's `ControlListener::serve`
 //! takes it): 127.0.0.1 only, same origin as `/control/...`. Every page and API route
 //! needs the control token, as `Authorization: Bearer` (the tray) or the cookie that
-//! `/app/login?t=<token>` sets (`bunko_control_<port>`, HttpOnly, SameSite=Strict).
+//! `/app/login?c=<code>` sets (`bunko_control_<port>`, HttpOnly, SameSite=Strict); the
+//! code is single use, from `POST /control/login-code` (bearer only).
 //! The guard (bunko-control's `check_request`) is applied here too, so the pages do
 //! not rely on how they are mounted:
 //!
@@ -31,7 +32,6 @@ pub mod tray;
 mod coverage;
 
 use axum::Router;
-use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -42,14 +42,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use bunko_control::Role;
-use bunko_control::http::{check_request, is_loopback_host, safe_next, token_matches};
-use bunko_control::types::COOKIE;
+use bunko_control::http::{LoginCodes, check_request};
 
 /// What the pages' backend works with.
 pub struct AppState {
     pub role: Role,
     /// The control token (also the cookie's value).
     pub token: String,
+    /// The listener's sign-in codes (`/app/login?c=`).
+    pub codes: LoginCodes,
     /// This executable (child processes run it).
     pub exe: PathBuf,
     /// The library server's `config.yaml` (resolved: `-c`, `MOKURO_CONFIG`, default;
@@ -70,6 +71,7 @@ impl AppState {
     pub fn new(
         role: Role,
         token: String,
+        codes: LoginCodes,
         config_path: PathBuf,
         processor_config: Option<PathBuf>,
     ) -> AppState {
@@ -77,6 +79,7 @@ impl AppState {
         AppState {
             role,
             token,
+            codes,
             exe,
             config_path,
             processor_config: processor_config
@@ -101,18 +104,21 @@ pub fn now_secs() -> u64 {
 }
 
 /// The app router for a control listener (what `serve` and `processor serve` mount):
-/// `token` is the listener's (`ControlListener::token`), `config_path` the library's
-/// config.yaml, `processor_config` the processor.yaml in use (processor role).
+/// `token` and `codes` are the listener's (`ControlListener::token`, `login_codes`),
+/// `config_path` the library's config.yaml, `processor_config` the processor.yaml in
+/// use (processor role).
 // Mounted by `serve` and `processor serve` on their control listeners (control.rs).
 pub fn app(
     role: Role,
     token: &str,
+    codes: LoginCodes,
     config_path: PathBuf,
     processor_config: Option<PathBuf>,
 ) -> Router {
     router(Arc::new(AppState::new(
         role,
         token.to_string(),
+        codes,
         config_path,
         processor_config,
     )))
@@ -168,54 +174,18 @@ async fn guard(State(state): State<Arc<AppState>>, req: Request, next: Next) -> 
     resp
 }
 
-/// `GET /app/login?t=<token>&next=/app/...`: set the cookie, go to the page (the token
-/// leaves the address bar at once).
+/// `GET /app/login?c=<code>&next=/app/...`: use up the code, set the cookie, go to the
+/// page (bunko-control's [`bunko_control::http::login`]).
 async fn login(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<bunko_control::http::LoginQuery>,
 ) -> Response {
-    let host = headers
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    if !is_loopback_host(host) {
-        return (StatusCode::FORBIDDEN, "this page is for this machine only").into_response();
+    let resp = bunko_control::http::login(&headers, &q, &state.token, &state.codes);
+    if resp.status().is_redirection() {
+        state.touch();
     }
-    if !q
-        .t
-        .as_deref()
-        .is_some_and(|t| token_matches(t, &state.token))
-    {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            "<!DOCTYPE html><meta charset=utf-8><title>Mokuro Bunko</title>\
-             <link rel=stylesheet href=\"/_static/shared.css\">\
-             <body style=\"padding:2rem\"><h1>Mokuro Bunko</h1>\
-             <p>This sign-in link is not valid (any more). Open the page again from the tray, \
-             or run <code>mokuro-bunko gui</code>.</p></body>",
-        )
-            .into_response();
-    }
-    state.touch();
-    // Per port: cookies do not separate ports, and the tray may open the pages of two
-    // instances (server and processor) in one browser.
-    let port = host.rsplit_once(':').map(|(_, p)| p).unwrap_or("");
-    let name = if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
-        format!("{COOKIE}_{port}")
-    } else {
-        COOKIE.to_string()
-    };
-    let cookie = format!("{name}={}; HttpOnly; SameSite=Strict; Path=/", state.token);
-    Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, safe_next(q.next.as_deref()))
-        .header(header::SET_COOKIE, cookie)
-        .header(header::CACHE_CONTROL, "no-store")
-        .header("Referrer-Policy", "no-referrer")
-        .body(Body::empty())
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    resp
 }
 
 /// The embedded file for an `/app/...` path: `/app/` is `index.html`, a page path
@@ -262,6 +232,8 @@ async fn page(path: Option<axum::extract::Path<String>>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use bunko_control::http::safe_next;
 
     #[test]
     fn page_paths() {
@@ -291,9 +263,11 @@ mod tests {
     async fn every_route_is_guarded() {
         use tower::ServiceExt;
         let dir = tempfile::tempdir().unwrap();
+        let codes = LoginCodes::default();
         let state = Arc::new(AppState::new(
             Role::Gui,
             "secret-token".into(),
+            codes.clone(),
             dir.path().join("config.yaml"),
             Some(dir.path().join("processor.yaml")),
         ));
@@ -397,20 +371,30 @@ mod tests {
         .await;
         assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
-        // Login: the right token sets the per-port cookie and goes to an /app page.
-        let r = send("GET", "/app/login?t=nope&next=/app/dashboard", &[host], "").await;
+        // Login: a code (single use) sets the per-port cookie and goes to an /app page;
+        // the token itself, a wrong code or a used one do not.
+        let r = send("GET", "/app/login?c=nope&next=/app/dashboard", &[host], "").await;
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = send("GET", "/app/login?t=secret-token", &[host], "").await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert!(!r.headers().contains_key("set-cookie"));
+        let code = codes.mint();
         let r = send(
             "GET",
-            "/app/login?t=secret-token&next=//evil.example/",
-            &[host],
+            &format!("/app/login?c={code}&next=/app/dashboard"),
+            &[("host", "evil.example:4567")],
             "",
         )
         .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let link = format!("/app/login?c={code}&next=//evil.example/");
+        let r = send("GET", &link, &[host], "").await;
         assert_eq!(r.status(), StatusCode::SEE_OTHER);
         assert_eq!(r.headers()["location"], "/app/");
         let set = r.headers()["set-cookie"].to_str().unwrap().to_string();
         assert!(set.starts_with("bunko_control_4567=secret-token;"), "{set}");
         assert!(set.contains("HttpOnly") && set.contains("SameSite=Strict"));
+        let r = send("GET", &link, &[host], "").await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
     }
 }

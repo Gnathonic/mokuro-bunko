@@ -485,12 +485,22 @@ impl App {
         })
     }
 
+    /// Open `next` on the page host, signed in with a fresh single-use code (asked for
+    /// off the UI thread).
     fn open_page(&self, next: &str) {
         match self.page_host() {
             Some(live) => {
-                let client = Client::new(&live.control);
-                let url = client.login_url(&live.control.token, next);
-                open_url(&url);
+                let monitor = self.monitor.clone();
+                let next = next.to_string();
+                std::thread::spawn(
+                    move || match Client::new(&live.control).sign_in_url(&next) {
+                        Ok(url) => open_url(&url),
+                        Err(e) => {
+                            tracing::error!("sign-in code from {}: {e}", live.control.role);
+                            monitor.set_notice(format!("could not open the page: {e}"));
+                        }
+                    },
+                );
             }
             None => self.spawn_gui(next),
         }
@@ -649,7 +659,7 @@ impl App {
 }
 
 fn open_url(url: &str) {
-    // Never log the URL itself: it carries the instance's token.
+    // Never log the URL itself: it carries a sign-in code.
     if let Err(e) = open::that_detached(url) {
         tracing::error!("could not open the browser: {e}");
     }
