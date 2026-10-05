@@ -1,0 +1,47 @@
+[package]
+name = "bunko-control"
+description = "The local control API of a running mokuro-bunko instance (127.0.0.1, bearer token): status, pause/resume, events, stop; the pause state machine and machine stats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# `runtime`: the listener, the pause state machine, activity/stats (what `serve`,
+# `processor serve` and `gui` link). Without it only the wire types and the
+# `.control.json` reader remain — what the tray needs.
+default = ["runtime"]
+runtime = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:futures-util",
+    "dep:bunko-proto",
+    "dep:parking_lot",
+    "dep:rand",
+    "dep:hex",
+    "dep:tracing",
+]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Wall-clock pause deadlines and the local day "today" counts against (time's local
+# offset is refused in a multi-threaded process on Unix).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+axum = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+bunko-proto = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+reqwest.workspace = true
+bytes.workspace = true

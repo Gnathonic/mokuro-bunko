@@ -53,6 +53,21 @@ Proxies: Caddy forwards WebSockets as-is. The bundled nginx template sets
    unrecorded, and no row is struck. If the socket closes while a session is still open,
    that is a disconnect, never a runner crash. This keeps v2's `_ended_without_exit`
    rule.
+9. **Owner pause** (0.7, additive; docs/rust-port/GUI.md §3). A processor whose owner
+   paused it sends `availability{paused, until, reason}` (wire:
+   `{"event":"availability","paused":true,"until":"<RFC 3339>|null","reason":"user"|"schedule"|null}`),
+   and `availability{paused:false}` when it resumes. `RegisterRequest.availability`
+   (optional) carries the same object, so a processor that restarts paused is offered
+   nothing from its first moment. The library stops offering a paused machine work
+   (no lanes, no benchmarks: queueing one is 409) and shows the pause in
+   `/_admin/api/processors` (`pause`). `released{claims:[…]}` hands claims back: with
+   `after_volume` the claims not yet in the pipeline, with `now` all of them (the
+   processor also abandons its sessions and sends their `exit`). The library requeues
+   released claims at once and records nothing for them; a session that ends while its
+   machine is paused is not blamed (no strike, no start-failure backoff). While paused a
+   processor answers `volume` with `released`, `open_session` with `exit`, and a bench
+   with `fatal` + `exit`. Older libraries ignore both events (unknown events are logged
+   and dropped), so the claims time out as before.
 
 ## Local processing
 

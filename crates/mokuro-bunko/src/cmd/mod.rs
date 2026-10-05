@@ -4,6 +4,7 @@ pub mod admin;
 pub mod config;
 pub mod doctor;
 pub mod dyndns;
+pub mod gui;
 pub mod healthcheck;
 pub mod install_ocr;
 #[cfg(feature = "ocr")]

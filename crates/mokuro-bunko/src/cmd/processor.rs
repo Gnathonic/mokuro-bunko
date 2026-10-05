@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 pub fn run(ctx: &Ctx, cmd: ProcessorCmd) -> CmdResult {
     match cmd {
-        ProcessorCmd::Serve { config, verbose } => serve(&config, verbose || ctx.verbose),
+        ProcessorCmd::Serve { config, verbose } => serve(ctx, &config, verbose || ctx.verbose),
         ProcessorCmd::Setup(args) => setup(ctx, args),
         ProcessorCmd::Status { config } => {
             let cfg = load_processor_config(&config).map_err(Fail::msg)?;
@@ -37,17 +37,20 @@ pub fn run(ctx: &Ctx, cmd: ProcessorCmd) -> CmdResult {
 }
 
 /// The engines of a processor: models under `<storage>/models`, every provider this
-/// build has (`MOKURO_OCR_BACKEND` narrows it), cores shared by its sessions.
+/// build has (`MOKURO_OCR_BACKEND` narrows it), cores shared by its sessions. Backend
+/// packs: `MOKURO_BACKENDS_DIR`, `<storage>/backends`, then the library storage's
+/// (`install-ocr` without `--processor` on this machine put it there).
 fn pipeline(storage: &Path, sessions: u32) -> EnginePipeline {
     let backend = std::env::var("MOKURO_OCR_BACKEND")
         .map(|b| Backend::parse(&b))
         .unwrap_or(Backend::Auto);
     let mut config = EngineConfig::new(storage.join("models"), backend);
     config.jobs = sessions.max(1) as usize;
+    config.fallback_backends = crate::ocr_target::library_fallback_backends();
     EnginePipeline::new(config)
 }
 
-fn serve(config: &Path, verbose: bool) -> CmdResult {
+fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
     let cfg = load_processor_config(config).map_err(Fail::msg)?;
     crate::logging::init_server(&cfg.processor.storage, verbose);
     tracing::info!(
@@ -57,21 +60,68 @@ fn serve(config: &Path, verbose: bool) -> CmdResult {
         cfg.library.url
     );
     let engines = Arc::new(pipeline(&cfg.processor.storage, cfg.processor.max_sessions));
+    let backends = engines.config().backends_dirs();
+    let (name, storage, library_url) = (
+        cfg.processor.name.clone(),
+        cfg.processor.storage.clone(),
+        cfg.library.url.clone(),
+    );
     let mut options = ServeOptions::new(cfg, engines);
     options.verbose = verbose;
     let shutdown = options.shutdown.clone();
+    let config_path = ctx.config_path.clone();
+    let processor_config = std::path::absolute(config).unwrap_or_else(|_| config.to_path_buf());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .thread_name("processor")
         .build()?;
     let result = runtime.block_on(async move {
+        let signal = shutdown.clone();
         tokio::spawn(async move {
             bunko_server::serve::shutdown_signal().await;
             tracing::info!("Stopping the processor");
-            shutdown.cancel();
+            signal.cancel();
         });
-        bunko_processor::serve(options).await
+        // The local control API (GUI.md §2): pause/resume, status, the app pages. Only
+        // the instance holding the storage lock serves it (a second one fails below).
+        let control_server = if bunko_control::enabled_from_env() && storage_free(&storage) {
+            let control = bunko_control::Control::new(crate::control::config(
+                bunko_control::Role::Processor,
+                name,
+                &storage,
+                true,
+            ));
+            control.set_stop(shutdown.clone());
+            control.set_library_url(&library_url);
+            control.set_backend_pack(crate::control::pack_name(&backends));
+            control.set_load_probe(Arc::new(bunko_processor::utilization::LiveLoad::new(
+                std::time::Duration::from_secs(5),
+            )));
+            let target = crate::ocr_target::OcrTarget {
+                role: crate::ocr_target::Role::Processor,
+                storage: storage.clone(),
+                processor_config: Some(processor_config.clone()),
+                library: None,
+                reason: String::new(),
+            };
+            crate::control::watch_problems(control.clone(), shutdown.clone(), move || {
+                let mut problems: Vec<_> = super::doctor::backend_problem(&target)
+                    .into_iter()
+                    .collect();
+                problems.extend(super::doctor::control_problems(&target.storage, false));
+                problems
+            });
+            options.control = Some(control.clone());
+            crate::control::start(&control, config_path, Some(processor_config)).await
+        } else {
+            None
+        };
+        let result = bunko_processor::serve(options).await;
+        if let Some(server) = control_server {
+            server.shutdown().await;
+        }
+        result
     });
     match result {
         Ok(()) => Ok(()),
@@ -82,6 +132,12 @@ fn serve(config: &Path, verbose: bool) -> CmdResult {
         }
         Err(e) => Err(Fail::msg(e)),
     }
+}
+
+/// Nobody else serves this storage (`bunko_processor::lock`): probed and released, the
+/// processor's loop takes it for real.
+fn storage_free(storage: &Path) -> bool {
+    matches!(bunko_processor::lock::lock_storage(storage), Ok(Some(_)))
 }
 
 /// The wizard's terminal: click-style prompts, scriptable through stdin.

@@ -32,6 +32,18 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 - `server.threads` and `server.cache_mb` settings.
 - Generation upgrade (`ocr.upgrade`, off by default) replaces old primary OCR
   with the current primary generation and keeps the old file as a layer.
+- Desktop app in the browser (`mokuro-bunko gui`; double-clicking the program on
+  Windows or macOS opens it): a setup wizard for a library server, a processor,
+  the OCR install (with progress) and starting with the machine, settings pages
+  covering every command-line option, and a live dashboard. Every running server
+  and processor serves it on 127.0.0.1 only, behind a per-run token.
+- Pause OCR on a processor or on the server's own OCR: after the running volume,
+  now, or until a time; the pause survives restarts. Pausing now hands the claimed
+  volumes straight back to the queue without counting a failure, and the admin
+  panel's processor list shows who is paused until when.
+- `install-ocr`, `doctor` and `models` take `--processor` to act on the
+  processor's storage (picked automatically on a processor-only machine), and a
+  processor also uses a backend pack installed for the library on the same machine.
 
 ### Changed
 - OCR engines are `hayai-nova` (the new default primary), `paddle-manga` and

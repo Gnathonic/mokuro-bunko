@@ -2104,6 +2104,12 @@ details[open] > .bench-res__summary::before {
     font-style: italic;
 }
 
+.processors-machine__paused {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--warning, #b7791f);
+}
+
 .processors-row--offline .processors-machine__name {
     color: var(--text-secondary);
 }
@@ -2251,6 +2257,10 @@ details[open] > .bench-res__summary::before {
 }
 
 .processor-transfer--held {
+    color: var(--warning, #b7791f);
+}
+
+.processor-transfer--paused {
     color: var(--warning, #b7791f);
 }
 

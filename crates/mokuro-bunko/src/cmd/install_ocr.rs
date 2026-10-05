@@ -11,6 +11,10 @@
 //! 4. Swap the verified pack into `<storage>/backends/torch-<variant>-<torch>/`.
 //! 5. `models download` (the configured engines' models).
 //!
+//! Whose storage: the library server's, or with `--processor` (automatic on a machine
+//! with a processor.yaml and no library configuration) the processor's
+//! ([`crate::ocr_target`]). A processor also uses a pack found in the library's storage.
+//!
 //! `--from <dir>` installs from local files instead (air-gapped hosts, tests): the pack
 //! archive (or its parts), optionally `release.json` + `.sig` (then checked like a
 //! download) and the wheels. The 0.5.2 options `--backend cuda|rocm|cpu|auto` map to
@@ -35,7 +39,6 @@ pub use full::*;
 #[cfg(feature = "ocr")]
 mod full {
     use super::*;
-    use crate::cfgfile;
     use crate::hwdetect;
     use crate::out::Fail;
     use bunko_update::backend::{self as pack, BackendArtifact, PackManifest};
@@ -50,11 +53,15 @@ mod full {
         if args.engines.is_some() || args.detector.is_some() {
             println!("Note: --engines/--detector are 0.5 options and are ignored.");
         }
-        let config = cfgfile::load_effective(&ctx.config_path)?;
-        let root = args
-            .dir
-            .clone()
-            .unwrap_or_else(|| backends_dir(&config.storage.base_path));
+        let ocr = crate::ocr_target::resolve(ctx, args.processor)?;
+        println!("{}", ocr.describe());
+        let root = args.dir.clone().unwrap_or_else(|| ocr.backends_dir());
+        // Where an installed pack counts: `--dir` alone, else every directory this
+        // role's OCR runtime searches.
+        let search = match &args.dir {
+            Some(d) => vec![d.clone()],
+            None => ocr.backends_dirs(),
+        };
         let target = bunko_update::TARGET;
         let hw = hwdetect::detect();
         let auto = hwdetect::choose(&hw, target);
@@ -69,7 +76,7 @@ mod full {
             requested.clone()
         };
         if args.list {
-            print_status(&hw, &auto, &root);
+            print_status(&hw, &auto, &root, &search);
             return Ok(());
         }
         println!(
@@ -88,7 +95,7 @@ mod full {
 
         // Already there (installed, or baked into a Docker image)?
         let pack_dir = if !args.force
-            && let Some((dir, m)) = find_installed(&root, &variant)
+            && let Some((dir, m)) = find_installed(&search, &variant)
         {
             println!(
                 "Already installed: {} ({}, mokuro-bunko {})",
@@ -103,7 +110,7 @@ mod full {
             println!("Installed {}", dir.display());
             dir
         };
-        if let Some((_, m)) = find_installed(&root, &variant) {
+        if let Some((_, m)) = find_installed(&search, &variant) {
             let missing = missing_system_libs(&m.requires.system_libs);
             if !missing.is_empty() {
                 println!(
@@ -127,7 +134,7 @@ mod full {
         // reads the environment (the install runtime above has shut down); only this
         // process sees it.
         unsafe { std::env::set_var(bunko_engines::torch::PACK_ENV, &pack_dir) };
-        super::super::models::download(ctx, None)
+        super::super::models::download(&ocr, None)
     }
 
     /// The pack's host libraries that the dynamic loader cannot find (`ldconfig -p`,
@@ -192,13 +199,6 @@ mod full {
         )
     }
 
-    /// Where install-ocr puts packs and the processor finds them: `<storage>/backends`
-    /// (`MOKURO_BACKENDS_DIR` overrides it), as bunko-engines' loader looks.
-    pub fn backends_dir(storage: &Path) -> PathBuf {
-        bunko_engines::EngineConfig::new(storage.join("models"), bunko_engines::Backend::Auto)
-            .backends_dir()
-    }
-
     /// Packs baked into a Docker image or shipped next to the executable.
     pub fn bundled_dir() -> Option<PathBuf> {
         std::env::current_exe()
@@ -226,10 +226,11 @@ mod full {
         })
     }
 
-    /// An installed pack of `variant` for this target, in `root` or the bundled
-    /// directory, whose files are all present with the right sizes (hashing gigabytes
-    /// on every call would be slow; `install-ocr --force` re-verifies everything).
-    pub fn find_installed(root: &Path, variant: &str) -> Option<(PathBuf, PackManifest)> {
+    /// An installed pack of `variant` for this target, in `roots` (in order) or the
+    /// bundled directory, whose files are all present with the right sizes (hashing
+    /// gigabytes on every call would be slow; `install-ocr --force` re-verifies
+    /// everything).
+    pub fn find_installed(roots: &[PathBuf], variant: &str) -> Option<(PathBuf, PackManifest)> {
         // MOKURO_TORCH_PACK (the loader's override; set by the Docker images) first.
         let pinned = std::env::var_os("MOKURO_TORCH_PACK")
             .map(PathBuf::from)
@@ -241,8 +242,8 @@ mod full {
             })
             .into_iter()
             .collect();
-        for r in [Some(root.to_path_buf()), bundled_dir()].iter().flatten() {
-            candidates.extend(pack::installed(r));
+        for r in roots.iter().cloned().chain(bundled_dir()) {
+            candidates.extend(pack::installed(&r));
         }
         {
             for (dir, m) in candidates {
@@ -271,7 +272,12 @@ mod full {
             .all(|(p, size)| std::fs::metadata(dir.join(p)).is_ok_and(|md| md.len() == size))
     }
 
-    fn print_status(hw: &hwdetect::Hardware, auto: &hwdetect::Choice, root: &Path) {
+    fn print_status(
+        hw: &hwdetect::Hardware,
+        auto: &hwdetect::Choice,
+        root: &Path,
+        search: &[PathBuf],
+    ) {
         println!("Target: {}", bunko_update::TARGET);
         match &hw.nvidia_driver {
             Some(d) => println!(
@@ -302,8 +308,13 @@ mod full {
         }
         println!("Variants: cpu, cu130 (NVIDIA, Linux/Windows), rocm7.1 (AMD, Linux)");
         let mut any = false;
-        for r in [Some(root.to_path_buf()), bundled_dir()].iter().flatten() {
-            for (dir, m) in pack::installed(r) {
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for r in search.iter().cloned().chain(bundled_dir()) {
+            if seen.contains(&r) {
+                continue;
+            }
+            seen.push(r.clone());
+            for (dir, m) in pack::installed(&r) {
                 any = true;
                 println!(
                     "Installed: {} ({} {}, ABI {}, built by mokuro-bunko {})",
@@ -419,11 +430,18 @@ mod full {
         whole.into_iter().last().into_iter().collect()
     }
 
+    /// A line every 25% (`MOKURO_PROGRESS_STEP` sets the step: the desktop app asks for
+    /// 2 to drive its progress bar).
     fn progress(label: String) -> impl FnMut(u64, u64) {
+        let step = std::env::var("MOKURO_PROGRESS_STEP")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|s| (1..=100).contains(s))
+            .unwrap_or(25);
         let mut last = 0u64;
         move |done, total| {
             let pct = if total > 0 { done * 100 / total } else { 100 };
-            if pct >= last + 25 || (done == total && last < 100) {
+            if pct >= last + step || (done == total && last < 100) {
                 last = pct;
                 println!("  {label}: {pct}% of {}", mb(total));
             }
@@ -516,10 +534,11 @@ mod full {
         println!("Unpacking and verifying...");
         let staging2 = staging.clone();
         let manifest = tokio::task::spawn_blocking(move || {
-            pack::unpack_archive(
+            pack::unpack_archive_progress(
                 &parts,
                 whole.as_ref().map(|(s, n)| (s.as_str(), *n)),
                 &staging2,
+                progress("unpacking".into()),
             )
         })
         .await

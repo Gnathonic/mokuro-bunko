@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/app/app.css">
+</head>
+<body>
+    <header class="mokuro-header" id="app-header" data-current="dashboard"></header>
+    <main class="app-main">
+        <div class="alert alert--error" id="dash-error" hidden></div>
+        <div class="dash-head">
+            <h1 class="page-title" id="dash-name">This machine</h1>
+            <span class="state-pill" id="dash-state" data-state="connecting">Connecting…</span>
+            <span class="live-dot" id="dash-live">not live</span>
+            <span class="spacer"></span>
+            <div class="pause-controls" id="pause-controls" hidden>
+                <button type="button" class="btn btn--secondary btn--sm" data-pause="after_volume">Pause after this volume</button>
+                <button type="button" class="btn btn--secondary btn--sm" data-pause="now">Pause now</button>
+                <button type="button" class="btn btn--secondary btn--sm" data-pause="hour">Pause 1 hour</button>
+                <button type="button" class="btn btn--secondary btn--sm" data-pause="morning">Pause until 08:00</button>
+                <button type="button" class="btn btn--primary btn--sm" id="resume" hidden>Resume</button>
+            </div>
+        </div>
+        <p class="text-muted" id="dash-pause" hidden></p>
+        <div class="alert alert--info" id="dash-setup" hidden>Nothing is running on this machine yet. <a href="/app/setup">Set it up</a>, or start the library server or the processor from the tray.</div>
+
+        <div class="tiles" id="tiles"></div>
+
+        <div class="panel">
+            <h2>Reading now</h2>
+            <div id="current"><p class="text-muted">Nothing.</p></div>
+        </div>
+
+        <div class="panel" id="problems-panel" hidden>
+            <h2>Problems</h2>
+            <div id="problems"></div>
+        </div>
+
+        <div class="panel">
+            <h2>Details</h2>
+            <dl class="kv" id="details"></dl>
+            <div class="panel__footer">
+                <a class="btn btn--ghost btn--sm" href="/app/settings/logs">Logs</a>
+                <a class="btn btn--ghost btn--sm" href="/app/settings/doctor">Diagnostics</a>
+                <a class="btn btn--ghost btn--sm" href="/app/settings">Settings</a>
+                <a class="btn btn--ghost btn--sm" id="lib-link" target="_blank" rel="noopener" hidden>Open the library &#8599;</a>
+            </div>
+        </div>
+    </main>
+    <script src="/app/app.js"></script>
+    <script src="/app/dashboard.js"></script>
+</body>
+</html>

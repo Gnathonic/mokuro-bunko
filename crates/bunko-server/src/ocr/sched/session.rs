@@ -294,6 +294,9 @@ impl Scheduler {
         if self.held(&s.machine) {
             return Some("the queue is held".into());
         }
+        if self.machine_paused(&s.pid) {
+            return Some("its owner paused it".into());
+        }
         if self
             .stopped
             .contains(&(s.row.id.clone(), s.machine.clone()))
@@ -507,6 +510,14 @@ impl Scheduler {
                 self.catalog_changed(pid, catalog.clone());
                 return;
             }
+            Event::Availability(a) => {
+                self.set_availability(pid, a.clone());
+                return;
+            }
+            Event::Released { claims } => {
+                self.released(pid, claims);
+                return;
+            }
             Event::BenchReady { .. }
             | Event::BenchProgress { .. }
             | Event::BenchTrial { .. }
@@ -683,14 +694,14 @@ impl Scheduler {
         }
     }
 
-    fn pop_job(&mut self, sid: &str, claim: &str) -> Option<SessionJob> {
+    pub(super) fn pop_job(&mut self, sid: &str, claim: &str) -> Option<SessionJob> {
         let s = self.sessions.get_mut(sid)?;
         let entry = s.jobs.remove(claim)?;
         s.order.retain(|c| c != claim);
         Some(entry)
     }
 
-    fn drop_result(&mut self, sid: &str, claim: &str) {
+    pub(super) fn drop_result(&mut self, sid: &str, claim: &str) {
         if let Some((path, _)) = self.results.remove(&(sid.to_string(), claim.to_string()))
             && let Some(dir) = path.parent()
         {
@@ -886,12 +897,16 @@ impl Scheduler {
         }
         let fatal_error = s.fatal_error.clone();
         let processor_left = !self.machines.contains_key(&s.pid);
+        // A processor that paused itself ends its sessions on purpose: nothing that
+        // ends with them is anybody's failure, and its runner did not fail to start.
+        let paused = self.machine_paused(&s.pid);
         let cancelled = s.jobs.values().any(|j| self.cancelled.contains(&j.job));
         let ready = s.ready_at.is_some();
         if !ready
             && !killed
             && fatal_error.is_some()
             && !processor_left
+            && !paused
             && !cancelled
             && !self.stopping
         {
@@ -908,6 +923,7 @@ impl Scheduler {
             if let Some(error) = &fatal_error
                 && s.completed == 0
                 && !processor_left
+                && !paused
                 && !killed
             {
                 self.strike(&s.row, &s.machine, error);
@@ -920,7 +936,7 @@ impl Scheduler {
                 s.row.name
             )
         });
-        let blame_oldest = !self.stopping && !processor_left;
+        let blame_oldest = !self.stopping && !processor_left && !paused;
         let environment = (!s.local && !ready) || precision_refused(fatal_error.as_deref());
         let oldest = s
             .order

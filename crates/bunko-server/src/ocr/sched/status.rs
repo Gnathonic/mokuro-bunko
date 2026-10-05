@@ -61,7 +61,8 @@ impl Scheduler {
                 continue;
             }
             seen = true;
-            let held = self.held(&m.name) || (!m.local && self.breaker_open(&m.pid));
+            let held =
+                self.held(&m.name) || m.pause.is_some() || (!m.local && self.breaker_open(&m.pid));
             if !held {
                 return false;
             }

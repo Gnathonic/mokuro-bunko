@@ -11,19 +11,29 @@ use std::sync::Arc;
 
 /// The lite build has no local OCR: the server waits for remote processors.
 #[cfg(not(feature = "ocr"))]
-pub fn factory(_config: &bunko_core::Config) -> Option<Arc<dyn LocalProcessorFactory>> {
+pub fn factory(
+    _config: &bunko_core::Config,
+    _control: Option<bunko_control::Control>,
+) -> Option<Arc<dyn LocalProcessorFactory>> {
     None
 }
 
 /// Full build: `bunko_processor::LocalProcessor` over `bunko_engines::EnginePipeline`.
+/// Under the control API (`control`), the local OCR obeys its pause and reports into
+/// its status (GUI.md §2, §3).
 #[cfg(feature = "ocr")]
-pub fn factory(config: &bunko_core::Config) -> Option<Arc<dyn LocalProcessorFactory>> {
+pub fn factory(
+    config: &bunko_core::Config,
+    control: Option<bunko_control::Control>,
+) -> Option<Arc<dyn LocalProcessorFactory>> {
     Some(Arc::new(full::Factory {
+        control,
         engines: bunko_engines::EngineConfig {
             models_dir: config.storage.layout().models(),
             backend: bunko_engines::Backend::parse(config.ocr.effective_backend()),
             jobs: config.ocr.concurrency.max(1) as usize,
             generator: format!("mokuro-bunko {}", bunko_core::VERSION),
+            fallback_backends: Vec::new(),
         },
     }))
 }
@@ -39,6 +49,7 @@ mod full {
 
     pub struct Factory {
         pub engines: EngineConfig,
+        pub control: Option<bunko_control::Control>,
     }
 
     impl LocalProcessorFactory for Factory {
@@ -56,11 +67,16 @@ mod full {
                     machine.catalog.engines.join(", ")
                 }
             );
-            let mut link = LocalProcessor::spawn(
+            if let Some(c) = &self.control {
+                c.set_devices(&machine.catalog.devices);
+            }
+            let mut link = LocalProcessor::spawn_controlled(
                 pipeline,
                 LocalConfig {
                     results_dir: results_dir.to_path_buf(),
                 },
+                bunko_processor::BenchConfig::default(),
+                self.control.clone(),
             );
             // Dropping the op sender (when the server stops) is the processor leaving;
             // the server's stop then awaits `finished`, so the sessions' threads are

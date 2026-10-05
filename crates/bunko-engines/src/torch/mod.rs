@@ -9,7 +9,10 @@
 //!
 //! Which pack: `MOKURO_TORCH_PACK=<dir>` if set; else among the installed packs, a GPU
 //! variant whose vendor's driver is present (`/dev/kfd` → ROCm, the NVIDIA driver →
-//! CUDA), then `cpu`, then any other. A GPU pack also runs on the CPU.
+//! CUDA), then `cpu`, then any other. A GPU pack also runs on the CPU. When packs may
+//! be installed in more than one directory (a processor also looks in the library's
+//! default `backends/`, see `EngineConfig::backends_dirs`), the directories are tried
+//! in order, each in that order ([`discover_all`]).
 
 pub mod loader;
 pub mod recognizer;
@@ -94,13 +97,36 @@ struct Key {
     threads: u32,
 }
 
+/// [`discover`] over several directories: the first directory's packs first; a pack
+/// reached twice (the same directory listed twice) once.
+pub fn discover_all(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        for pack in discover(dir) {
+            let key = std::fs::canonicalize(&pack).unwrap_or_else(|_| pack.clone());
+            if !seen
+                .iter()
+                .any(|s| std::fs::canonicalize(s).unwrap_or_else(|_| s.clone()) == key)
+            {
+                seen.push(pack);
+            }
+        }
+    }
+    seen
+}
+
 static BACKEND: OnceLock<Result<Arc<TorchBackend>, String>> = OnceLock::new();
 
 /// The process's backend: the first pack of [`discover`] (or `MOKURO_TORCH_PACK`)
 /// that opens. Decided once; later calls return the same result whatever they pass.
 pub fn backend(backends_dir: &Path, cpu_only: bool) -> Result<Arc<TorchBackend>, String> {
+    backend_in(&[backends_dir.to_path_buf()], cpu_only)
+}
+
+/// [`backend`] searching several directories in order ([`discover_all`]).
+pub fn backend_in(backends_dirs: &[PathBuf], cpu_only: bool) -> Result<Arc<TorchBackend>, String> {
     BACKEND
-        .get_or_init(|| open_backend(backends_dir, cpu_only))
+        .get_or_init(|| open_backend(backends_dirs, cpu_only))
         .clone()
 }
 
@@ -109,15 +135,19 @@ pub fn backend_if_open() -> Option<Arc<TorchBackend>> {
     BACKEND.get().and_then(|r| r.as_ref().ok().cloned())
 }
 
-fn open_backend(backends_dir: &Path, cpu_only: bool) -> Result<Arc<TorchBackend>, String> {
+fn open_backend(backends_dirs: &[PathBuf], cpu_only: bool) -> Result<Arc<TorchBackend>, String> {
     let candidates = match std::env::var_os(PACK_ENV).filter(|v| !v.is_empty()) {
         Some(p) => vec![PathBuf::from(p)],
-        None => discover(backends_dir),
+        None => discover_all(backends_dirs),
     };
     if candidates.is_empty() {
         let msg = format!(
             "no libtorch backend pack in {} (install one with `mokuro-bunko install-ocr`)",
-            backends_dir.display()
+            backends_dirs
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" or ")
         );
         info!("{msg}");
         return Err(msg);
@@ -504,5 +534,29 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["torch-cpu-2.13.0", "torch-zz-2.13.0"]);
         assert!(discover(&tmp.path().join("missing")).is_empty());
+
+        // Several directories: the first one's packs first, a repeated dir once.
+        let other = tempfile::tempdir().unwrap();
+        let d = other.path().join("torch-cu130-2.13.0");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join(PACK_JSON),
+            serde_json::json!({"variant": "cu130"}).to_string(),
+        )
+        .unwrap();
+        let all = discover_all(&[
+            other.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            other.path().to_path_buf(),
+            tmp.path().join("missing"),
+        ]);
+        let names: Vec<String> = all
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["torch-cu130-2.13.0", "torch-cpu-2.13.0", "torch-zz-2.13.0"]
+        );
     }
 }

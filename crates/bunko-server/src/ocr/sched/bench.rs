@@ -478,6 +478,19 @@ impl Scheduler {
                 }
             }
         };
+        if self.machine_paused(&pid) {
+            return Err(bench_error(
+                409,
+                format!(
+                    "{} is paused by its owner; benchmarks run once it resumes",
+                    if machine == LOCAL {
+                        "this server's OCR"
+                    } else {
+                        machine.as_str()
+                    }
+                ),
+            ));
+        }
         let saved = self.settings.rows.iter().find(|r| r.id == req.key).cloned();
         let draft = is_draft(&req.key);
         if saved.is_none() && !draft {

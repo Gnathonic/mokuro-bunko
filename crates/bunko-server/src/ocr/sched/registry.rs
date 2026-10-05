@@ -152,6 +152,8 @@ pub struct Machine {
     pub ops: Option<mpsc::UnboundedSender<Op>>,
     pub account_stamp: Option<String>,
     pub transfer: TransferStats,
+    /// The processor paused itself (`availability`, GUI.md §3): no lanes, no work.
+    pub pause: Option<bunko_proto::Availability>,
 }
 
 impl Machine {
@@ -203,6 +205,8 @@ impl Machine {
             "local": self.local,
             "public_name": self.public_name,
             "transfer": self.transfer.to_value(),
+            // 0.7: the processor's own pause, `{paused, until, reason}` or null.
+            "pause": self.pause.as_ref().map(|a| json!({"paused": true, "until": a.until, "reason": a.reason})),
         })
     }
 }
@@ -453,12 +457,21 @@ impl Scheduler {
             ops: None,
             account_stamp: input.account_stamp,
             transfer: TransferStats::default(),
+            pause: super::availability::availability_of(body),
         };
         self.public_names.assign(&name, public_name.as_deref());
         self.profiles
             .set_identity(&name, &host_value, &catalog_value);
         self.machines.insert(pid.clone(), machine);
-        self.log(format!("Processor {name} registered ({pid})"));
+        let paused = self.machines.get(&pid).is_some_and(|m| m.pause.is_some());
+        self.log(format!(
+            "Processor {name} registered ({pid}){}",
+            if paused {
+                "; it is paused by its owner"
+            } else {
+                ""
+            }
+        ));
         RegisterOutcome::Ok(RegisterReply {
             protocol: PROTOCOL_VERSION,
             processor_id: pid.clone(),
@@ -551,6 +564,7 @@ impl Scheduler {
             ops: Some(ops),
             account_stamp: None,
             transfer: TransferStats::default(),
+            pause: None,
         };
         self.machines.shift_insert(0, LOCAL.into(), machine);
         self.rebuild_lanes();
@@ -562,7 +576,7 @@ impl Scheduler {
     fn wanted_lanes(&self) -> Vec<(String, usize)> {
         let mut out = Vec::new();
         for m in self.machines.values() {
-            if !m.connected() || m.installing() {
+            if !m.connected() || m.installing() || m.pause.is_some() {
                 continue;
             }
             if m.local {

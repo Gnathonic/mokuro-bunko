@@ -4,15 +4,20 @@
 mod cfgfile;
 mod cli;
 mod cmd;
+mod control;
 #[cfg(feature = "ocr")]
 mod hwdetect;
 // `init_server` is for `serve.rs` (orchestrator) and `processor serve`. logging.rs is
 // not this CLI's file; its one collapsible `if` is left to its owner.
+mod gui;
 #[allow(dead_code)]
 mod local_ocr;
 mod logging;
+mod machine;
 #[cfg(feature = "ocr")]
 mod ocr_probe;
+#[cfg(feature = "ocr")]
+mod ocr_target;
 mod out;
 mod prompt;
 mod serve;
@@ -49,7 +54,14 @@ pub fn update_flavor() -> &'static str {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // A double-click (Windows Explorer, a macOS app bundle) has no arguments and no
+    // terminal of its own: open the desktop app. From a terminal, no arguments still
+    // print the help.
+    let cli = if std::env::args_os().len() == 1 && double_clicked() {
+        Cli::parse_from(["mokuro-bunko", "gui"])
+    } else {
+        Cli::parse()
+    };
     if cli.version {
         println!("mokuro-bunko, version {}", bunko_core::VERSION);
         println!("flavor: {FLAVOR}, target: {}", bunko_update::TARGET);
@@ -81,7 +93,7 @@ fn run(cli: Cli) -> out::CmdResult {
     match command {
         Command::Serve(args) => cmd::serve::run(&ctx, args),
         Command::Setup { skip_if_exists } => cmd::setup::run(&ctx, skip_if_exists),
-        Command::Doctor => cmd::doctor::run(&ctx),
+        Command::Doctor { processor } => cmd::doctor::run(&ctx, processor),
         Command::Admin(c) => cmd::admin::run(&ctx, c),
         Command::Config(c) => cmd::config::run(&ctx, c),
         Command::Ssl(c) => cmd::ssl::run(&ctx, c),
@@ -94,5 +106,30 @@ fn run(cli: Cli) -> out::CmdResult {
         #[cfg(feature = "ocr")]
         Command::Processor(c) => cmd::processor::run(&ctx, c),
         Command::Healthcheck { url } => cmd::healthcheck::run(&ctx, url),
+        Command::Gui(args) => cmd::gui::run(&ctx, args),
+    }
+}
+
+/// Started without a terminal to talk to: on Windows the console is this process's
+/// alone (Explorer made it), on macOS stdin is not a terminal (Finder, an app bundle).
+fn double_clicked() -> bool {
+    #[cfg(windows)]
+    {
+        use std::io::IsTerminal;
+        let mut ids = [0u32; 4];
+        // SAFETY: the buffer and its length match; the call only writes into it.
+        let n = unsafe {
+            windows_sys::Win32::System::Console::GetConsoleProcessList(ids.as_mut_ptr(), 4)
+        };
+        n == 1 || !std::io::stdin().is_terminal()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::IsTerminal;
+        !std::io::stdin().is_terminal()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        false
     }
 }

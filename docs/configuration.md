@@ -985,9 +985,11 @@ A 0.5 `ocr:` section in the file (`ocr.backend` chose a torch build) is
 accepted and ignored. The processor uses every device its backend pack and
 hardware can run; `MOKURO_OCR_BACKEND` (`cuda`, `rocm`, `cpu`) in its
 environment narrows that (`processor setup --backend` is accepted for 0.5
-scripts and only says so). Install the pack first (as 0.5.2 needed its OCR
-environment), into the processor's own storage:
-`MOKURO_STORAGE=<processor.storage> mokuro-bunko install-ocr` (see
+scripts and only says so). Install the pack first, as 0.5.2 needed its OCR
+environment. `install-ocr --processor` installs it into `processor.storage`, and
+that is automatic on a machine with a `processor.yaml` and no library
+configuration. The processor also looks in the default library storage's
+`backends/`, after `MOKURO_BACKENDS_DIR` and its own storage (see
 [deployment](deployment.md#3-the-processor-machine)).
 
 **How work is shared.** Each volume goes to the machine predicted to finish

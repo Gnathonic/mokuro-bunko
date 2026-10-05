@@ -6,9 +6,10 @@
 .DESCRIPTION
     mokuro-bunko 0.7 is a single program: there is no source download, Python or OCR
     environment to set up any more. This forwards to scripts/install.ps1, mapping the
-    0.5 options: -Backend cuda installs the full-cuda build, any other backend the
-    full build; -Ref and -SkipOcr are ignored. -InstallDir is passed through only when
-    given (0.5's default, %LOCALAPPDATA%\Programs\mokuro-bunko, held a source tree).
+    0.5 options: every -Backend installs the full build (`mokuro-bunko install-ocr`
+    then picks the OCR pack: CUDA on an NVIDIA machine); -Ref and -SkipOcr are
+    ignored. -InstallDir is passed through only when given (0.5's default,
+    %LOCALAPPDATA%\Programs\mokuro-bunko, held a source tree).
 #>
 [CmdletBinding()]
 param(
@@ -23,7 +24,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$params = @{ Flavor = $(if ($Backend -eq "cuda") { "full-cuda" } else { "full" }) }
+# 0.7 has one full build for every GPU (install.ps1 takes full or lite); the CUDA
+# or ROCm part is the OCR pack that `mokuro-bunko install-ocr` downloads.
+$params = @{ Flavor = "full" }
+if ($Backend -ne "auto") { Write-Host "Note: -Backend $Backend now means the full build; run 'mokuro-bunko install-ocr' afterwards to install the OCR pack for this machine." -ForegroundColor Yellow }
 if ($InstallDir) { $params.InstallDir = $InstallDir }
 if ($NoShortcut) { $params.NoShortcut = $true }
 if ($NoStart) { $params.NoStart = $true }

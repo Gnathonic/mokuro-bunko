@@ -55,7 +55,13 @@ pub enum Command {
         skip_if_exists: bool,
     },
     /// Diagnose common installation and OCR problems.
-    Doctor,
+    Doctor {
+        /// Check this machine's processor (its processor.yaml, backend pack and
+        /// models) instead of the library server; automatic on a machine with a
+        /// processor.yaml and no library configuration (full build)
+        #[arg(long)]
+        processor: bool,
+    },
     /// Admin commands for user management.
     #[command(subcommand)]
     Admin(AdminCmd),
@@ -74,7 +80,7 @@ pub enum Command {
     /// Check for and install new releases.
     #[command(subcommand)]
     Update(UpdateCmd),
-    /// Manage the ONNX OCR models (full build).
+    /// Manage the OCR models and the compiled recognizer packages (full build).
     #[cfg(feature = "ocr")]
     #[command(subcommand)]
     Models(ModelsCmd),
@@ -91,6 +97,20 @@ pub enum Command {
         #[arg(long)]
         url: Option<String>,
     },
+    /// Open the desktop app in the browser: setup wizard, settings and dashboard.
+    /// (Double-clicking the program on Windows or macOS does the same.)
+    Gui(GuiArgs),
+}
+
+/// `gui` options.
+#[derive(Args, Debug, Clone, Default)]
+pub struct GuiArgs {
+    /// Print the address instead of opening the browser
+    #[arg(long)]
+    pub no_browser: bool,
+    /// The page to open first, e.g. /app/settings or /app/setup/processor
+    #[arg(long, value_name = "PAGE", default_value = "/app/")]
+    pub open: String,
 }
 
 /// `serve` options. Every flag is optional: a flag that is passed always wins over the
@@ -310,15 +330,34 @@ pub enum UpdateCmd {
 #[derive(Subcommand, Debug)]
 pub enum ModelsCmd {
     /// List the models this build knows and which are on disk.
-    List,
+    List {
+        #[command(flatten)]
+        target: OcrTargetArgs,
+    },
     /// Download (and verify) models into <storage>/models.
     Download {
         /// Only the models this engine needs (hayai-nova, paddle-manga, ppocr-manga)
         #[arg(long)]
         engine: Option<String>,
+        #[command(flatten)]
+        target: OcrTargetArgs,
     },
     /// Check the sha256 of every downloaded model.
-    Verify,
+    Verify {
+        #[command(flatten)]
+        target: OcrTargetArgs,
+    },
+}
+
+/// Whose storage the OCR tools work on.
+#[cfg(feature = "ocr")]
+#[derive(Args, Debug, Clone, Copy, Default)]
+pub struct OcrTargetArgs {
+    /// Use this machine's processor storage (processor.storage of its processor.yaml,
+    /// found through MOKURO_PROCESSOR_CONFIG) instead of the library's; automatic on a
+    /// machine with a processor.yaml and no library configuration
+    #[arg(long)]
+    pub processor: bool,
 }
 
 /// `install-ocr` options (the 0.5.2 ones are accepted: `--backend` maps to `--variant`).
@@ -343,6 +382,11 @@ pub struct InstallOcrArgs {
     /// Show the detected hardware, the pack it would install and the installed packs
     #[arg(long, alias = "list-backends")]
     pub list: bool,
+    /// Install for this machine's processor (into its storage, from its processor.yaml
+    /// found through MOKURO_PROCESSOR_CONFIG) instead of the library server; automatic
+    /// on a machine with a processor.yaml and no library configuration
+    #[arg(long)]
+    pub processor: bool,
     /// 0.5.2: auto, cuda, rocm, cpu (same as --variant)
     #[arg(long, hide = true)]
     pub backend: Option<String>,
@@ -401,7 +445,9 @@ pub struct ProcessorSetupArgs {
     /// How the library shows this machine.  [default: the hostname]
     #[arg(long)]
     pub name: Option<String>,
-    /// Which execution provider to use; auto picks by the hardware found.
+    /// Accepted for 0.5 scripts: the processor uses the devices of the installed OCR
+    /// backend pack (install-ocr picks the pack); anything but auto prints how to
+    /// narrow it with MOKURO_OCR_BACKEND.
     #[arg(long, default_value = "auto", value_parser = PossibleValuesParser::new(OCR_BACKENDS))]
     pub backend: String,
     /// true, false, or the path of the library's certificate (a self-signed one).

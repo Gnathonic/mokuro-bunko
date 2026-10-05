@@ -267,6 +267,13 @@ impl OcrControl {
                 }
             }
         });
+        // `LocalUp` goes first: the processor's first events (a pause in force says
+        // `availability` at once) must find the `local` machine registered.
+        self.send(Msg::LocalUp {
+            ops: ops_tx,
+            catalog: channels.catalog,
+            host: channels.host,
+        });
         let tx = self.0.tx.clone();
         let mut events = channels.events;
         tokio::spawn(async move {
@@ -285,11 +292,6 @@ impl OcrControl {
                 pid: types::LOCAL.into(),
                 reason: "the local processor stopped".into(),
             });
-        });
-        self.send(Msg::LocalUp {
-            ops: ops_tx,
-            catalog: channels.catalog,
-            host: channels.host,
         });
     }
 

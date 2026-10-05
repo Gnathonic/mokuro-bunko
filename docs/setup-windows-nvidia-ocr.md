@@ -107,14 +107,19 @@ the reader) and watch it appear on `http://127.0.0.1:8080/queue`. A
 
 ## Using this PC as an OCR processor for another library
 
-If the library runs on another (small) server, make this PC its processor. A
-processor keeps its pack and models in `%LOCALAPPDATA%\mokuro-bunko-processor`,
-so install the pack there first:
+If the library runs on another (small) server, make this PC its processor.
+Install the pack, then set the processor up (or use the desktop app's
+processor setup, which does both):
 
 ```powershell
-$env:MOKURO_STORAGE = "$env:LOCALAPPDATA\mokuro-bunko-processor"; .\mokuro-bunko.exe install-ocr
+.\mokuro-bunko.exe install-ocr
 .\mokuro-bunko.exe processor setup
 ```
+
+The processor keeps its pack and models in `%LOCALAPPDATA%\mokuro-bunko-processor`.
+It also finds a pack installed in the library's default storage, as the one
+above is. Once `processor.yaml` exists, `install-ocr --processor` installs
+into the processor's own storage.
 
 It asks for the library URL and a `processor` account, writes
 `processor.yaml` and can start the processor at every logon (a Startup
