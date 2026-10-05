@@ -163,6 +163,21 @@ server and processor still run on a headless box, NAS or container.
   the updater extracts). The tray prefers the CLI outside the bundle (`../../../`)
   because that is the file `mokuro-bunko update` replaces. Not signed/notarized in 0.7:
   first start is right-click → Open (same as the CLI).
+- **macOS disk image** (`packaging/macos/make-dmg.sh <full .tar.gz> <ocr-offline dir>
+  <out.dmg>`, run on a Mac with `pip install dmgbuild`): the window shows only
+  `Mokuro Bunko.app` and an Applications alias on a "drag to install" background
+  (`dmg-background.svg` → `.png`/`@2x.png`), plus a small `Read me.txt`. The app is the
+  archive's bundle renamed, its CLI a real file (not a link), and the offline OCR files
+  (pack archive + model files, what `install-ocr --from` takes) in
+  `Contents/Resources/ocr-offline`. `install-ocr` without `--from` (and so the wizard's
+  OCR step, which shows "Source: Bundled with this app") installs from that folder by
+  itself (`bundled_offline_dir`: `<exe>/../Resources/ocr-offline` inside an app bundle,
+  else `<exe>/ocr-offline`, when it holds a `*-torch-*.tar.zst`). The tray in an app not
+  named `mokuro-bunko.app` always runs the CLI inside its own bundle; the updater
+  replaces both binaries there (the tray is the CLI's sibling). Terminal users run
+  `/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko`. Measured on an M2 Pro
+  (2026-10-05): 834 MB dmg; the wizard's OCR install takes the bundled files with no
+  download; a 20-page volume OCRs in 36 s with hayai-nova fp32 on the CPU.
 - **Linux**: the tray links `libgtk-3.so.0` and dlopens `libayatana-appindicator3.so.1`
   (or `libappindicator3.so.1`) at run time; both LGPL system libraries, not shipped.
   `mokuro-bunko doctor` checks for them when the tray is installed next to it and names

@@ -517,6 +517,11 @@ fn companion_paths(dir: &Path, name: &str) -> Vec<PathBuf> {
             .join("Contents")
             .join("MacOS")
             .join(name),
+        // The app from the macOS disk image, should a CLI live next to it.
+        dir.join("Mokuro Bunko.app")
+            .join("Contents")
+            .join("MacOS")
+            .join(name),
     ]
     .into_iter()
     .filter(|p| p.is_file())

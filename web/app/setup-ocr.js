@@ -15,7 +15,14 @@
       '<dt>Platform</dt><dd>' + esc(hw.target) + '</dd>' +
       '<dt>GPU</dt><dd>' + esc(gpus.length ? gpus.join('; ') : 'none found (the CPU pack works everywhere)') + '</dd>' +
       (hw.hidden.length ? '<dt>Hidden</dt><dd>' + esc(hw.hidden.join(', ')) + '</dd>' : '') +
-      '<dt>Recommended</dt><dd><strong>' + esc(hw.auto_variant) + '</strong> — ' + esc(hw.reason) + '</dd>';
+      '<dt>Recommended</dt><dd><strong>' + esc(hw.auto_variant) + '</strong> — ' + esc(hw.reason) + '</dd>' +
+      '<dt>Source</dt><dd>' + (hw.bundled_offline
+        ? '<strong>Bundled with this app</strong> (nothing to download)'
+        : 'Download from the release') + '</dd>';
+    // Bundled files: Install takes them on its own; the folder field stays for others.
+    if (hw.bundled_offline) {
+      $('from').placeholder = 'Bundled with this app: ' + hw.bundled_offline;
+    }
     $('hw-hint').hidden = !hw.hint;
     $('hw-hint').textContent = hw.hint || '';
     const opt = $('variant').querySelector('option[value="auto"]');
