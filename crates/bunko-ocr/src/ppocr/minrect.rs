@@ -212,14 +212,14 @@ pub fn min_area_rect(pts: &[[i32; 2]]) -> RotatedRect {
         h: 0.0,
         angle: 0.0,
     };
-    let angle_rad: f32;
-    if n > 2 {
+
+    let angle_rad: f32 = if n > 2 {
         let out = rotating_calipers(&hull);
         rect.cx = out[0][0] + (out[1][0] + out[2][0]) * 0.5;
         rect.cy = out[0][1] + (out[1][1] + out[2][1]) * 0.5;
         rect.w = ((out[1][0] as f64).powi(2) + (out[1][1] as f64).powi(2)).sqrt() as f32;
         rect.h = ((out[2][0] as f64).powi(2) + (out[2][1] as f64).powi(2)).sqrt() as f32;
-        angle_rad = (out[1][1] as f64).atan2(out[1][0] as f64) as f32;
+        (out[1][1] as f64).atan2(out[1][0] as f64) as f32
     } else if n == 2 {
         rect.cx = (hull[0][0] + hull[1][0]) * 0.5;
         rect.cy = (hull[0][1] + hull[1][1]) * 0.5;
@@ -227,14 +227,14 @@ pub fn min_area_rect(pts: &[[i32; 2]]) -> RotatedRect {
         let dy = (hull[1][1] - hull[0][1]) as f64;
         rect.w = (dx * dx + dy * dy).sqrt() as f32;
         rect.h = 0.0;
-        angle_rad = dy.atan2(dx) as f32;
+        dy.atan2(dx) as f32
     } else {
         if n == 1 {
             rect.cx = hull[0][0];
             rect.cy = hull[0][1];
         }
-        angle_rad = 0.0;
-    }
+        0.0
+    };
     // `box.angle*180/CV_PI`: float * int, then divided in double.
     rect.angle = ((angle_rad * 180.0) as f64 / std::f64::consts::PI) as f32;
     rect

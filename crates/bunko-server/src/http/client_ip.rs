@@ -48,8 +48,7 @@ impl TrustedProxies {
             && let Some(ip) = xff
                 .split(',')
                 .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .next_back()
+                .rfind(|s| !s.is_empty())
                 .and_then(|s| s.parse::<IpAddr>().ok())
         {
             return canonical(ip);
@@ -72,11 +71,7 @@ impl TrustedProxies {
                 return real.to_string();
             }
             if let Some(xff) = header("x-forwarded-for")
-                && let Some(last) = xff
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .next_back()
+                && let Some(last) = xff.split(',').map(str::trim).rfind(|s| !s.is_empty())
             {
                 return last.to_string();
             }

@@ -135,7 +135,7 @@ fn recognizer_tensor(crop: &BgrImage) -> RecTensor {
     let resized = crate::image::resize_linear(crop.view(), width, REC_HEIGHT);
     let plane = width * REC_HEIGHT;
     let mut data = vec![0.0f32; 3 * plane];
-    for (i, px) in resized.as_raw().chunks_exact(3).enumerate() {
+    for (i, px) in resized.as_raw().as_chunks::<3>().0.iter().enumerate() {
         for c in 0..3 {
             data[c * plane + i] = (px[c] as f32 / 255.0 - 0.5) / 0.5;
         }

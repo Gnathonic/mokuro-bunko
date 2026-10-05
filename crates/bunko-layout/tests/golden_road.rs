@@ -257,7 +257,7 @@ fn volume_sidecars_and_normalization_match_python() {
         if !b(get(case, "runner_modified")) && runner_bytes != s(get(case, "runner_bytes")) {
             errs.push(format!(
                 "{name}: runner bytes\n got {}\nwant {}",
-                &runner_bytes,
+                runner_bytes,
                 s(get(case, "runner_bytes"))
             ));
         }

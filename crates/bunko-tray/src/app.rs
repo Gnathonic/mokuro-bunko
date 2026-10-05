@@ -328,10 +328,8 @@ pub fn run(setup: Setup) -> Result<()> {
                 app.update = v;
                 app.refresh();
             }
-            Event::UserEvent(UserEvent::Menu(e)) => {
-                if app.on_menu(e.id.as_ref()) {
-                    *control_flow = ControlFlow::Exit;
-                }
+            Event::UserEvent(UserEvent::Menu(e)) if app.on_menu(e.id.as_ref()) => {
+                *control_flow = ControlFlow::Exit;
             }
             _ => {}
         }

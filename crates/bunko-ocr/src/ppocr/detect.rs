@@ -52,7 +52,7 @@ pub fn detector_tensor(bgr: ImageView<'_>, size: (usize, usize)) -> Vec<f32> {
     let resized = resize_linear(bgr, size.0, size.1);
     let plane = size.0 * size.1;
     let mut x = vec![0.0f32; 3 * plane];
-    for (i, px) in resized.as_raw().chunks_exact(3).enumerate() {
+    for (i, px) in resized.as_raw().as_chunks::<3>().0.iter().enumerate() {
         for c in 0..3 {
             x[c * plane + i] = (px[c] as f32 / 255.0 - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
         }

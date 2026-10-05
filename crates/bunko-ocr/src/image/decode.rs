@@ -29,7 +29,7 @@ pub fn decode_bgr(bytes: &[u8]) -> Result<BgrImage> {
     let rgb = dynamic.into_rgb8();
     let (width, height) = (rgb.width() as usize, rgb.height() as usize);
     let mut data = rgb.into_raw();
-    for px in data.chunks_exact_mut(3) {
+    for px in data.as_chunks_mut::<3>().0 {
         px.swap(0, 2);
     }
     Ok(BgrImage {
