@@ -134,6 +134,20 @@ mod full {
         // reads the environment (the install runtime above has shut down); only this
         // process sees it.
         unsafe { std::env::set_var(bunko_engines::torch::PACK_ENV, &pack_dir) };
+        // `--from <dir>`: the same folder may hold the model files under their release
+        // names (an offline package); try it before the network.
+        if let Some(from) = args.from.as_deref() {
+            let from = std::path::absolute(from).unwrap_or_else(|_| from.to_path_buf());
+            for var in [
+                bunko_ocr::models::TORCH_MIRROR_ENV,
+                bunko_ocr::models::MODELS_MIRROR_ENV,
+            ] {
+                if std::env::var_os(var).is_none_or(|v| v.is_empty()) {
+                    // SAFETY: as above.
+                    unsafe { std::env::set_var(var, &from) };
+                }
+            }
+        }
         super::super::models::download(&ocr, None)
     }
 

@@ -209,7 +209,11 @@ exits non-zero when anything failed. If it fails:
 - on a host without internet, download the files elsewhere and point
   `MOKURO_MODELS_DIR` at the directory, or copy them into `<storage>/models/`;
   `MOKURO_TORCH_MODELS_MIRROR` names a directory (or a base URL) holding the
-  compiled packages' release assets under their release names;
+  compiled packages' release assets under their release names, and
+  `MOKURO_MODELS_MIRROR` does the same for the `models-v1` files. Simplest: put
+  the backend pack archive and all those files in one folder and run
+  `mokuro-bunko install-ocr --from <folder>`, which uses the folder for both
+  (the wizard's "Install from a folder" does the same);
 - `mokuro-bunko models verify` re-checks every file; delete a damaged one
   (`MISMATCH`) and download again;
 - `MOKURO_MODELS_DOWNLOAD=0` forbids downloading (unset it); `doctor` then
