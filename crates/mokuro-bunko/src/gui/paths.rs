@@ -78,10 +78,11 @@ fn gui_fallback_storages_from(
 /// Whether this user can create files in `dir`, creating it (and its parents) first.
 pub fn ensure_writable(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let probe = dir.join(format!(".mokuro-write-test-{}", std::process::id()));
-    std::fs::write(&probe, b"ok")?;
-    let _ = std::fs::remove_file(&probe);
-    Ok(())
+    probe_write(dir)
+}
+
+fn probe_write(dir: &Path) -> std::io::Result<()> {
+    bunko_core::storage::probe_writable(dir)
 }
 
 /// Whether `dir` could be used as a storage, without creating anything: it is
@@ -107,14 +108,7 @@ fn dir_writable(dir: &Path) -> bool {
     if !dir.is_dir() {
         return false;
     }
-    let probe = dir.join(format!(".mokuro-write-test-{}", std::process::id()));
-    match std::fs::write(&probe, b"ok") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
+    probe_write(dir).is_ok()
 }
 
 /// `~/x` for paths under the home folder (what the pages show).

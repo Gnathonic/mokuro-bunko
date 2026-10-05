@@ -58,11 +58,30 @@ impl StorageLayout {
                 path.display()
             ));
         }
-        let probe = path.join(".mokuro-write-test");
-        std::fs::write(&probe, b"ok")
-            .and_then(|_| std::fs::remove_file(&probe))
+        probe_writable(path)
             .map_err(|_| format!("Directory is not writable ({label}): {}", path.display()))
     }
+}
+
+/// Whether this user can create files in `dir`: creates and removes a probe file.
+/// The probe is created exclusively under a fresh name (`create_new` never follows a
+/// symlink planted at that name nor overwrites an existing file).
+pub fn probe_writable(dir: &Path) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let probe = dir.join(format!(
+        ".mokuro-write-test-{}-{nanos:x}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)?;
+    std::fs::remove_file(&probe)
 }
 
 fn env_path(var: &str) -> Option<PathBuf> {
@@ -115,4 +134,38 @@ pub fn expand_user(path: &Path) -> PathBuf {
         return home_dir().join(rest);
     }
     path.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The probe leaves nothing behind, never touches an existing file, and fails
+    /// in a folder this user cannot write.
+    #[test]
+    fn probe_writable_is_exclusive_and_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = dir.path().join(".mokuro-write-test");
+        std::fs::write(&keep, b"mine").unwrap();
+        probe_writable(dir.path()).unwrap();
+        probe_writable(dir.path()).unwrap();
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from(".mokuro-write-test")]);
+        assert_eq!(std::fs::read(&keep).unwrap(), b"mine");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let ro = dir.path().join("ro");
+            std::fs::create_dir(&ro).unwrap();
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+            // root ignores permissions; the check only means something for a user.
+            if probe_writable(&ro).is_ok() {
+                return;
+            }
+            assert!(probe_writable(&ro).is_err());
+        }
+    }
 }

@@ -279,13 +279,11 @@ fn check_config(path: &Path) -> (Check, Option<Config>) {
         }
     };
     let base = config.storage.base_path.clone();
-    let probe = base.join(".mokuro-doctor-probe");
     let writable = config
         .storage
         .layout()
         .ensure_directories()
-        .and_then(|_| std::fs::write(&probe, "ok"))
-        .and_then(|_| std::fs::remove_file(&probe));
+        .and_then(|_| bunko_core::storage::probe_writable(&base));
     if let Err(e) = writable {
         let (detail, hint) = unwritable_storage(&base, &e, "storage.base_path");
         return (Check::fail("Storage", detail, Some(hint)), Some(config));
