@@ -364,19 +364,20 @@ fn worker<T: Send + 'static>(
             }
         };
         let busy = busy_from.elapsed().as_secs_f64();
-        let blocked_from = Instant::now();
-        let closed = match out {
-            Some(out) => outq.put(out).is_err(),
-            None => false,
-        };
-        let blocked = blocked_from.elapsed().as_secs_f64();
+        // Counted before the hand-off: once the item is downstream, a report must
+        // already include it.
         {
             let mut c = info.counters.lock();
             c.items += 1;
             c.busy += busy;
             c.starved += starved;
-            c.blocked += blocked;
         }
+        let blocked_from = Instant::now();
+        let closed = match out {
+            Some(out) => outq.put(out).is_err(),
+            None => false,
+        };
+        info.counters.lock().blocked += blocked_from.elapsed().as_secs_f64();
         if closed {
             return;
         }
