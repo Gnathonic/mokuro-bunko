@@ -266,6 +266,33 @@ class TestCaseInsensitiveHost:
         )
         assert mapper.destination_to_physical("/mokuro-reader/../escape") is None
 
+    def test_a_destination_symlink_leading_outside_is_refused(
+        self, client: WSGITestClient, test_storage: Path, tmp_path: Path
+    ) -> None:
+        """The last segment is not resolved (see above), but a COPY writes
+        THROUGH a symlink at the destination: where it leads must still be
+        inside the library, as `virtual_to_physical` required."""
+        outside = tmp_path / "outside.cbz"
+        outside.write_bytes(b"untouched")
+        (test_storage / "library" / "series" / "link.cbz").symlink_to(outside)
+        mapper = MokuroDAVProvider(test_storage).path_mapper
+        assert mapper.destination_to_physical("/mokuro-reader/series/link.cbz") is None
+
+        # wsgidav reports a refused per-resource copy as done (it ignores
+        # `copy_move_single`'s False), so the status says nothing here: what
+        # matters is that nothing was written through the link.
+        client.request(
+            "COPY",
+            "/mokuro-reader/manga1.cbz",
+            headers={
+                **ADMIN,
+                "Destination": "http://localhost:8080/mokuro-reader/series/link.cbz",
+                "Overwrite": "T",
+            },
+        )
+        assert outside.read_bytes() == b"untouched"
+        assert (test_storage / "library" / "series" / "link.cbz").is_symlink()
+
 
 class TestCanonicalizer:
     @pytest.fixture(params=[True, False], ids=["case-sensitive", "case-insensitive"])
