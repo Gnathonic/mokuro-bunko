@@ -28,6 +28,14 @@ pub fn is_restarting(state: &str) -> bool {
     matches!(state, "installing" | "restarting")
 }
 
+/// States of an update attempt in progress (its outcome, and any problem, still to come).
+pub fn is_attempt(state: &str) -> bool {
+    matches!(
+        state,
+        "waiting" | "downloading" | "installing" | "restarting"
+    )
+}
+
 /// A problem only the owner can fix, to be shown as a desktop notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Alarm {
@@ -49,7 +57,10 @@ impl Alarm {
 }
 
 /// Remembers which (role, text) alarms were already shown. A problem that goes away
-/// is forgotten, so the same one coming back is announced again.
+/// is forgotten, so the same one coming back is announced again — but not while the
+/// instance is only trying again: a retry clears its problem for the attempt and the
+/// same failure returns a few seconds later (seen on macOS: the update to a release
+/// whose pack does not load, retried on its backoff, notified on every attempt).
 #[derive(Debug, Default)]
 pub struct Notified {
     seen: HashSet<(String, String)>,
@@ -63,8 +74,11 @@ impl Notified {
             .iter()
             .filter(|p| p.kind.as_deref() == Some("update") && p.severity == "fail")
             .collect();
-        self.seen
-            .retain(|(r, t)| r != role || current.iter().any(|p| p.text == *t));
+        let attempting = status.update.as_ref().is_some_and(|u| is_attempt(&u.state));
+        if !attempting {
+            self.seen
+                .retain(|(r, t)| r != role || current.iter().any(|p| p.text == *t));
+        }
         let mut out = Vec::new();
         for p in current {
             if self.seen.insert((role.to_string(), p.text.clone())) {
@@ -156,6 +170,28 @@ mod tests {
         assert_eq!(new.len(), 1);
         assert_eq!(new[0].text, "B");
         assert_eq!(new[0].body(), "B");
+    }
+
+    #[test]
+    fn a_retry_of_the_same_failure_is_not_announced_again() {
+        let mut n = Notified::default();
+        let blocked = st(
+            r#"{"update":{"state":"blocked","version":"0.7.1"},"problems":[{"severity":"fail","text":"A","kind":"update"}]}"#,
+        );
+        assert_eq!(n.observe("server", &blocked).len(), 1);
+        // The retry: the attempt clears the problem while it runs...
+        for state in ["waiting", "downloading", "installing"] {
+            let trying = st(&format!(
+                r#"{{"update":{{"state":"{state}","version":"0.7.1"}},"problems":[]}}"#
+            ));
+            assert!(n.observe("server", &trying).is_empty(), "{state}");
+        }
+        // ...and fails the same way: no second notification.
+        assert!(n.observe("server", &blocked).is_empty());
+        // Fixed for real (the update went through), then a new failure later: announced.
+        let updated = st(r#"{"update":{"state":"updated","version":"0.7.1"},"problems":[]}"#);
+        assert!(n.observe("server", &updated).is_empty());
+        assert_eq!(n.observe("server", &blocked).len(), 1);
     }
 
     #[test]

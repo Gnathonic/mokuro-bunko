@@ -627,7 +627,7 @@ impl App {
     }
 
     fn check_updates(&mut self) {
-        if self.update.available {
+        if self.update.available || self.model.as_ref().is_some_and(|m| m.update_available) {
             self.open_page("/app/settings#update");
             return;
         }

@@ -64,6 +64,9 @@ pub struct MenuModel {
     pub can_open_dashboard: bool,
     pub library_url: Option<String>,
     pub update_text: String,
+    /// The update item leads to the Updates settings (a newer release is known) rather
+    /// than running a check.
+    pub update_available: bool,
     pub quit_text: String,
 }
 
@@ -218,6 +221,25 @@ fn updating_line(s: &Status) -> Option<String> {
     }
 }
 
+/// An automatic update of this instance is installing or restarting it, or finished
+/// less than a minute ago (its processors may not have reconnected yet).
+fn update_restarting(s: &Status, now: DateTime<Local>) -> bool {
+    let Some(u) = s.update.as_ref() else {
+        return false;
+    };
+    match u.state.as_str() {
+        "installing" | "restarting" => true,
+        "updated" => u
+            .since
+            .as_deref()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .is_some_and(|t| {
+                now.signed_duration_since(t.with_timezone(&Local)) < chrono::Duration::seconds(60)
+            }),
+        _ => false,
+    }
+}
+
 /// Extra lines under the state: the result of the last automatic update.
 fn update_result_line(s: &Status, now: DateTime<Local>) -> Option<String> {
     let u = s.update.as_ref()?;
@@ -254,6 +276,17 @@ pub fn build(inp: &Inputs) -> MenuModel {
     let multi = inp.instances.len() + inp.supervised.len() > 1;
 
     let grace = |role: &str| inp.updating.iter().find(|(r, _)| r == role);
+    // The library on this machine is restarting for its update (or came back from it
+    // within the last minute): a processor here that lost it for those seconds is
+    // expected, not something to flag (seen on macOS: one "Can't reach library" sample
+    // while the server exec'd into the new release).
+    let library_restarting = grace("server").is_some()
+        || inp.instances.iter().any(|i| {
+            i.role == "server"
+                && i.status
+                    .as_ref()
+                    .is_some_and(|s| update_restarting(s, inp.now))
+        });
     for inst in inp.instances {
         let label = role_label(&inst.role);
         if inst.status.is_none()
@@ -265,7 +298,13 @@ pub fn build(inp: &Inputs) -> MenuModel {
         match &inst.status {
             Some(s) => {
                 dashboard = true;
-                let text = updating_line(s).unwrap_or_else(|| state_text(s, inp.now));
+                let text = updating_line(s).unwrap_or_else(|| {
+                    if s.state == "disconnected" && inst.role == "processor" && library_restarting {
+                        "Reconnecting (the library is restarting for its update)".into()
+                    } else {
+                        state_text(s, inp.now)
+                    }
+                });
                 status_lines.push(format!("{label}: {text}"));
                 if let Some(l) = update_result_line(s, inp.now) {
                     status_lines.push(if l.starts_with('⚠') || !multi {
@@ -274,7 +313,9 @@ pub fn build(inp: &Inputs) -> MenuModel {
                         format!("{label}: {l}")
                     });
                 }
-                if matches!(s.state.as_str(), "error" | "disconnected")
+                let expected_gap =
+                    s.state == "disconnected" && inst.role == "processor" && library_restarting;
+                if (matches!(s.state.as_str(), "error" | "disconnected") && !expected_gap)
                     || s.problems.iter().any(|p| p.severity == "fail")
                 {
                     attention = true;
@@ -359,12 +400,26 @@ pub fn build(inp: &Inputs) -> MenuModel {
         IconState::Idle
     };
 
+    // An instance whose own check found a newer release it will not install by itself
+    // (`update.auto` off): say so here too, until a manual check here says otherwise.
+    let reported = inp.instances.iter().find_map(|i| {
+        let u = i.status.as_ref()?.update.as_ref()?;
+        (u.state == "available").then(|| u.version.clone().unwrap_or_default())
+    });
+    let unchecked = inp.update.latest.is_none() && inp.update.error.is_none();
+    let update_available = inp.update.available || (unchecked && reported.is_some());
     let update_text = if inp.update.checking {
         "Checking for updates…".to_string()
-    } else if inp.update.available {
+    } else if update_available {
+        let v = inp
+            .update
+            .latest
+            .clone()
+            .or(reported)
+            .filter(|v| !v.is_empty());
         format!(
             "Update available: {} …",
-            inp.update.latest.as_deref().unwrap_or("new version")
+            v.as_deref().unwrap_or("new version")
         )
     } else if let Some(latest) = &inp.update.latest {
         format!("Up to date ({latest}) — check again")
@@ -402,6 +457,7 @@ pub fn build(inp: &Inputs) -> MenuModel {
         can_open_dashboard: dashboard,
         library_url,
         update_text,
+        update_available,
         quit_text,
     }
 }
@@ -540,6 +596,75 @@ mod tests {
         // No usable time: do not claim it is recent.
         let m = model(&[inst(with_update("updated", ""), false)]);
         assert_eq!(m.status_lines, ["Library: Idle"]);
+    }
+
+    #[test]
+    fn an_update_the_library_only_reports_shows_in_the_update_item() {
+        let m = model(&[inst(with_update("available", ""), true)]);
+        assert_eq!(m.update_text, "Update available: 0.7.1 …");
+        assert!(m.update_available);
+        assert_eq!(m.icon, IconState::Idle);
+        // A manual check here wins.
+        let m = build(&Inputs {
+            instances: &[inst(with_update("available", ""), true)],
+            supervised: &[],
+            update: &UpdateView {
+                latest: Some("0.7.1".into()),
+                ..Default::default()
+            },
+            updating: &[],
+            notice: None,
+            now: now(),
+        });
+        assert!(!m.update_available);
+        let m = model(&[inst(with_update("updated", ""), true)]);
+        assert_eq!(m.update_text, "Check for updates");
+    }
+
+    #[test]
+    fn a_processor_losing_the_restarting_library_is_not_flagged() {
+        // What the Mac run showed: the library exec'd into its update, the processor
+        // here briefly could not reach it.
+        let gap = || {
+            status(
+                r#"{"role":"processor","state":"disconnected","library":{"connected":false,"error":"the library closed the socket"}}"#,
+            )
+        };
+        let just = (now() - chrono::Duration::seconds(5)).to_rfc3339();
+        for server in [with_update("restarting", ""), with_update("updated", &just)] {
+            let m = model(&[inst(server, true), inst(gap(), true)]);
+            assert_eq!(m.icon, IconState::Idle, "{:?}", m.status_lines);
+            assert!(
+                m.status_lines.contains(
+                    &"Processor: Reconnecting (the library is restarting for its update)"
+                        .to_string()
+                ),
+                "{:?}",
+                m.status_lines
+            );
+        }
+        // In the restart grace the server may not answer at all.
+        let gone = InstanceView {
+            role: "server".into(),
+            status: None,
+            error: Some("connection refused".into()),
+            tray_started: true,
+        };
+        let m = build(&Inputs {
+            instances: &[gone, inst(gap(), true)],
+            supervised: &[],
+            update: &UpdateView::default(),
+            updating: &[("server".to_string(), Some("0.7.1".to_string()))],
+            notice: None,
+            now: now(),
+        });
+        assert_eq!(m.icon, IconState::Idle, "{:?}", m.status_lines);
+        // Long after the update, or with no update at all: a lost library is flagged.
+        let old = (now() - chrono::Duration::minutes(5)).to_rfc3339();
+        let m = model(&[inst(with_update("updated", &old), true), inst(gap(), true)]);
+        assert_eq!(m.icon, IconState::Attention);
+        let m = model(&[inst(gap(), true)]);
+        assert_eq!(m.icon, IconState::Attention);
     }
 
     #[test]
