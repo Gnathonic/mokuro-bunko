@@ -154,6 +154,10 @@ pub struct Machine {
     pub transfer: TransferStats,
     /// The processor paused itself (`availability`, GUI.md §3): no lanes, no work.
     pub pause: Option<bunko_proto::Availability>,
+    /// Its version differs from the library's (told in the registration reply).
+    pub version_mismatch: Option<bunko_proto::VersionMismatch>,
+    /// Where its automatic update stands (`update_status`), if it said.
+    pub update: Option<bunko_proto::UpdateReport>,
 }
 
 impl Machine {
@@ -207,6 +211,10 @@ impl Machine {
             "transfer": self.transfer.to_value(),
             // 0.7: the processor's own pause, `{paused, until, reason}` or null.
             "pause": self.pause.as_ref().map(|a| json!({"paused": true, "until": a.until, "reason": a.reason})),
+            // 0.7: `{library_version, processor_version, relation}` or null.
+            "version_mismatch": self.version_mismatch,
+            // 0.7: `{state, version?, message?, action?}` (its automatic update) or null.
+            "update": self.update,
         })
     }
 }
@@ -407,6 +415,8 @@ impl Scheduler {
         }
         let catalog = lenient_catalog(&catalog_value);
         let host: HostInfo = serde_json::from_value(host_value.clone()).unwrap_or_default();
+        let version_mismatch =
+            bunko_proto::VersionMismatch::between(&self.deps.version, &host.version);
         // Doomed: the same name (a reconnect), silent socketless registrations, then the
         // oldest of this account beyond the limit (socketless first).
         let now = self.now();
@@ -458,6 +468,8 @@ impl Scheduler {
             account_stamp: input.account_stamp,
             transfer: TransferStats::default(),
             pause: super::availability::availability_of(body),
+            version_mismatch: version_mismatch.clone(),
+            update: None,
         };
         self.public_names.assign(&name, public_name.as_deref());
         self.profiles
@@ -465,11 +477,22 @@ impl Scheduler {
         self.machines.insert(pid.clone(), machine);
         let paused = self.machines.get(&pid).is_some_and(|m| m.pause.is_some());
         self.log(format!(
-            "Processor {name} registered ({pid}){}",
+            "Processor {name} registered ({pid}){}{}",
             if paused {
                 "; it is paused by its owner"
             } else {
                 ""
+            },
+            match &version_mismatch {
+                Some(v) if v.library_newer() => format!(
+                    "; it runs {}, older than this library ({}): told so",
+                    v.processor_version, v.library_version
+                ),
+                Some(v) => format!(
+                    "; it runs {}, not this library's {}: told so",
+                    v.processor_version, v.library_version
+                ),
+                None => String::new(),
             }
         ));
         RegisterOutcome::Ok(RegisterReply {
@@ -479,6 +502,7 @@ impl Scheduler {
             results: format!("{PROCESSOR_ROOT}/{pid}/results/{{sid}}/{{claim}}"),
             archives: bunko_proto::ARCHIVES_ROOT.to_string(),
             version: self.deps.version.clone(),
+            version_mismatch,
         })
     }
 
@@ -565,6 +589,8 @@ impl Scheduler {
             account_stamp: None,
             transfer: TransferStats::default(),
             pause: None,
+            version_mismatch: None,
+            update: None,
         };
         self.machines.shift_insert(0, LOCAL.into(), machine);
         self.rebuild_lanes();

@@ -367,6 +367,76 @@ impl ModelStore {
         Some(dir)
     }
 
+    /// Files and directories in the store that this build's manifest no longer names
+    /// (a model a later release replaced), for [`ModelStore::prune`]. Kept: everything
+    /// a manifest entry names (its file, its `.verified` stamp, its unpacked package
+    /// directory and what is inside), hidden files and downloads in progress
+    /// (`.part`), and every file outside the known layout's top level that is not a
+    /// model (nothing else is ever written there by the store).
+    pub fn unreferenced(&self) -> Vec<PathBuf> {
+        let root = &self.opts.root;
+        let mut keep_files: std::collections::HashSet<PathBuf> = Default::default();
+        let mut keep_dirs: Vec<PathBuf> = Vec::new();
+        for f in &self.manifest.files {
+            let p = root.join(&f.path);
+            let mut stamp = p.clone().into_os_string();
+            stamp.push(".verified");
+            keep_files.insert(PathBuf::from(stamp));
+            keep_files.insert(p);
+            if let Some(u) = &f.unpack_to {
+                keep_dirs.push(root.join(u));
+            }
+        }
+        let mut out = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let path = e.path();
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || name.ends_with(".part") {
+                    continue;
+                }
+                if keep_dirs.iter().any(|k| path.starts_with(k)) {
+                    continue;
+                }
+                let Ok(ft) = e.file_type() else { continue };
+                if ft.is_dir() {
+                    // A directory some kept path lives under: look inside it.
+                    if keep_files.iter().any(|k| k.starts_with(&path))
+                        || keep_dirs.iter().any(|k| k.starts_with(&path))
+                    {
+                        stack.push(path);
+                    } else if dir != *root || name == TORCH_DIR {
+                        out.push(path);
+                    }
+                } else if !keep_files.contains(&path) {
+                    out.push(path);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Delete [`ModelStore::unreferenced`] (after an update proved itself, so nothing
+    /// running still needs the old files). Returns what was removed.
+    pub fn prune(&self) -> Vec<PathBuf> {
+        let mut removed = Vec::new();
+        for p in self.unreferenced() {
+            let r = if p.is_dir() {
+                fs::remove_dir_all(&p)
+            } else {
+                fs::remove_file(&p)
+            };
+            match r {
+                Ok(()) => removed.push(p),
+                Err(e) => warn!(path = %p.display(), "could not remove an old model file: {e}"),
+            }
+        }
+        removed
+    }
+
     /// Whether missing files may be fetched (the `download` feature and
     /// `MOKURO_MODELS_DOWNLOAD`).
     pub fn can_download(&self) -> bool {
@@ -1329,6 +1399,58 @@ mod tests {
             fs::read_to_string(dir.join(UNPACKED_STAMP)).unwrap(),
             stamp_text(&sha)
         );
+    }
+
+    #[test]
+    fn prune_keeps_what_the_manifest_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = ModelStore::new(
+            StoreOptions {
+                root: root.clone(),
+                override_dir: None,
+                download: false,
+            },
+            Manifest::builtin(),
+        );
+        let touch = |rel: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, b"x").unwrap();
+            p
+        };
+        let m = Manifest::builtin();
+        let kept_file = m
+            .files
+            .iter()
+            .find(|f| f.unpack_to.is_none() && !f.path.contains('/'))
+            .unwrap();
+        let pkg = m.files.iter().find(|f| f.unpack_to.is_some()).unwrap();
+        let keep = [
+            touch(&kept_file.path),
+            touch(&format!("{}.verified", kept_file.path)),
+            touch(&format!("{}/data/a.so", pkg.unpack_to.as_deref().unwrap())),
+            touch("hayai-nova_tokenizer.json.part"),
+            touch(".lock"),
+        ];
+        let gone = [
+            touch("hayai-nova_tokenizer-r0.json"),
+            touch("hayai-nova_tokenizer-r0.json.verified"),
+            touch("torch/hayai-nova/fp32/linux-cpu-x86_64-v0/vision/x.so"),
+        ];
+        let removed = store.prune();
+        for p in &keep {
+            assert!(p.exists(), "kept {}", p.display());
+        }
+        for p in &gone[..2] {
+            assert!(!p.exists(), "removed {}", p.display());
+        }
+        assert!(
+            !root
+                .join("torch/hayai-nova/fp32/linux-cpu-x86_64-v0")
+                .exists()
+        );
+        assert_eq!(removed.len(), 3, "{removed:?}");
     }
 
     #[test]

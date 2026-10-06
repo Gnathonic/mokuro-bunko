@@ -4,20 +4,24 @@
 use crate::Options;
 use anyhow::{Context, Result};
 use bunko_tray::autostart;
+use bunko_tray::autoupdate::{self, Alarm, Notified};
 use bunko_tray::client::{Client, PauseRequest};
 use bunko_tray::discover;
 use bunko_tray::icons;
 use bunko_tray::launch;
 use bunko_tray::model::{self, IconState, InstanceView, MenuModel, UpdateView};
 use bunko_tray::monitor::{Live, Monitor};
+use bunko_tray::notify;
 use bunko_tray::paths::{self, Env, Layout, ProcessEnv};
+use bunko_tray::status::Status;
 use bunko_tray::supervise::{self, Launch, Supervisor, World};
 use bunko_tray::trayconf::TrayConfig;
 use bunko_tray::updates;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -221,6 +225,10 @@ struct App {
     icon_state: Option<IconState>,
     model: Option<MenuModel>,
     first_run_checked: bool,
+    /// Each role's last status that came from a live answer, and when (restart grace).
+    last_good: HashMap<String, (Status, Instant)>,
+    /// Which "the update needs you" alarms were already shown.
+    notified: Notified,
 }
 
 pub fn run(setup: Setup) -> Result<()> {
@@ -312,6 +320,8 @@ pub fn run(setup: Setup) -> Result<()> {
         icon_state: None,
         model: None,
         first_run_checked: false,
+        last_good: HashMap::new(),
+        notified: Notified::default(),
     };
     let _lock = lock;
     event_loop.run(move |event, _, control_flow| {
@@ -338,18 +348,63 @@ pub fn run(setup: Setup) -> Result<()> {
 }
 
 impl App {
-    fn current_model(&self) -> MenuModel {
+    fn current_model(&mut self) -> MenuModel {
         let lives = self.monitor.instances();
+        let now = Instant::now();
+        // Remember each role's last answer; a role that stops answering during its own
+        // update restart keeps showing "Updating to X…" for a few minutes.
+        for l in &lives {
+            if let (Some(s), None) = (&l.status, &l.error) {
+                self.last_good
+                    .insert(l.control.role.clone(), (s.clone(), now));
+            }
+        }
+        let grace = |last_good: &HashMap<String, (Status, Instant)>, role: &str| {
+            last_good
+                .get(role)
+                .and_then(|(s, at)| autoupdate::restart_grace(Some(s), now.duration_since(*at)))
+        };
+        let mut updating: Vec<(String, Option<String>)> = Vec::new();
+        let mut roles: Vec<&str> = lives.iter().map(|l| l.control.role.as_str()).collect();
+        let slot_roles: Vec<String> = self
+            .supervisor
+            .as_ref()
+            .map(|s| s.slots.iter().map(|x| x.managed.role.clone()).collect())
+            .unwrap_or_default();
+        roles.extend(slot_roles.iter().map(String::as_str));
+        roles.extend(self.last_good.keys().map(String::as_str));
+        roles.sort_unstable();
+        roles.dedup();
+        for role in roles {
+            let answering = lives
+                .iter()
+                .any(|l| l.control.role == role && l.error.is_none() && l.status.is_some());
+            if !answering && let Some(v) = grace(&self.last_good, role) {
+                updating.push((role.to_string(), v));
+            }
+        }
         let instances: Vec<InstanceView> = lives
             .iter()
-            .map(|l| InstanceView {
-                role: l.control.role.clone(),
-                status: l.status.clone(),
-                error: l.error.clone(),
-                tray_started: self
-                    .supervisor
-                    .as_ref()
-                    .is_some_and(|s| s.is_child(l.control.pid)),
+            .map(|l| {
+                let mut status = l.status.clone();
+                // An old status that said "restarting" is only trusted for the grace.
+                if l.error.is_some()
+                    && status
+                        .as_ref()
+                        .and_then(|s| s.update.as_ref())
+                        .is_some_and(|u| autoupdate::is_restarting(&u.state))
+                {
+                    status = None;
+                }
+                InstanceView {
+                    role: l.control.role.clone(),
+                    status,
+                    error: l.error.clone(),
+                    tray_started: self
+                        .supervisor
+                        .as_ref()
+                        .is_some_and(|s| s.is_child(l.control.pid)),
+                }
             })
             .collect();
         let visible: Vec<&str> = lives.iter().map(|l| l.control.role.as_str()).collect();
@@ -363,9 +418,24 @@ impl App {
             instances: &instances,
             supervised: &supervised,
             update: &self.update,
+            updating: &updating,
             notice: notice.as_deref(),
             now: chrono::Local::now(),
         })
+    }
+
+    /// One desktop notification per distinct "the update needs you" problem. These are
+    /// alarms: they ignore `tray.json`'s `notifications` switch.
+    fn notify_update_problems(&mut self) {
+        for l in self.monitor.instances() {
+            let (Some(s), None) = (&l.status, &l.error) else {
+                continue;
+            };
+            for a in self.notified.observe(&l.control.role, s) {
+                tracing::warn!("update needs the owner ({}): {}", a.role, a.text);
+                notify::alarm(Alarm::TITLE, &a.body());
+            }
+        }
     }
 
     fn create_tray(&mut self) -> Result<()> {
@@ -388,8 +458,12 @@ impl App {
 
     fn refresh(&mut self) {
         self.maybe_first_run();
-        let Some(tray) = &self.tray else { return };
+        self.notify_update_problems();
+        if self.tray.is_none() {
+            return;
+        }
         let m = self.current_model();
+        let Some(tray) = &self.tray else { return };
         if self.model.as_ref() == Some(&m) {
             return;
         }

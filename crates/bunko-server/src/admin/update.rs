@@ -8,23 +8,74 @@
 //!   verify and install through [`UpdateSource::apply`], answer
 //!   `{ok, success, version, restarting}`, then call the restart hook.
 //!
-//! [`UpdateService`] also checks in the background every 12 h while `update.check` is on,
-//! and logs when a newer release appears.
+//! * `POST /_admin/api/update/settings` → `{auto, check}`: turn automatic updates
+//!   (`update.auto`) and background checks on or off; saved to the config file.
+//!
+//! [`UpdateService`] also checks in the background every 12 h while `update.check` (or
+//! `update.auto`) is on, and logs when a newer release appears. With `update.auto` on
+//! and a self-managed install it installs a newer release by itself
+//! ([`UpdateService::try_auto`]): new OCR claims stop everywhere, the claims in flight
+//! and the uploads finish, the [`ReleaseInstaller`] fetches and switches the release
+//! (binary + backend pack + models), and the restart hook restarts the server. Docker
+//! and package-managed installs only report (a `fail` problem: the owner must act).
 
+use bunko_control::{Problem, UpdateView};
 use bunko_core::Config;
+use bunko_update::auto::{Blocked, InstallFailure, ReleaseInstaller, Retry};
 use bunko_update::{InstallKind, UpdateStatus};
 use futures_util::future::BoxFuture;
 use parking_lot::{Mutex, RwLock};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 /// Background check period, and the age after which a cached status is re-checked.
 pub const CHECK_EVERY: Duration = Duration::from_secs(12 * 3600);
 /// Delay before the first background check (keeps it off the startup path).
 pub const FIRST_CHECK_AFTER: Duration = Duration::from_secs(60);
+/// How often a waiting automatic update looks for its quiet moment.
+const QUIET_POLL: Duration = Duration::from_secs(5);
+
+/// `MOKURO_UPDATE_CHECK_SECONDS`: the background check period (and at most the first
+/// delay), for tests and mirrors that publish often. Default 12 h (first after 60 s).
+pub fn check_period() -> (Duration, Duration) {
+    match std::env::var("MOKURO_UPDATE_CHECK_SECONDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+    {
+        Some(s) => {
+            let d = Duration::from_secs(s);
+            (d.min(FIRST_CHECK_AFTER), d)
+        }
+        None => (FIRST_CHECK_AFTER, CHECK_EVERY),
+    }
+}
+
+/// What the automatic update needs to know about the rest of the server.
+pub trait Quiet: Send + Sync + 'static {
+    /// Stop (`true`) or allow again (`false`) new OCR claims on every machine.
+    fn drain(&self, on: bool);
+    /// What a restart would break right now (OCR claims in flight, uploads), or None.
+    fn busy(&self) -> BoxFuture<'_, Option<String>>;
+}
+
+/// Wired by `serve_router` / the binary: without it `update.auto` only reports.
+pub struct AutoDeps {
+    pub installer: Arc<dyn ReleaseInstaller>,
+    pub quiet: Arc<dyn Quiet>,
+    /// Restart the server gracefully into the installed release.
+    pub restart: Arc<dyn Fn() + Send + Sync>,
+    /// Where `.update-blocked.json` lives (the storage base path).
+    pub storage: PathBuf,
+}
+
+/// Receives every change of the automatic update's state (the control API's
+/// `status.update` and its problems).
+pub type Reporter = Arc<dyn Fn(Option<UpdateView>, Vec<Problem>) + Send + Sync>;
 
 /// Where release information comes from: [`bunko_update::Updater`] in the server, a fake
 /// in tests.
@@ -62,6 +113,13 @@ struct Inner {
     applying: AtomicBool,
     stop: Mutex<Option<CancellationToken>>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    auto: Mutex<Option<Arc<AutoDeps>>>,
+    /// The automatic update as the status shows it, and the problems it raised.
+    view: Mutex<(Option<UpdateView>, Vec<Problem>)>,
+    reporter: Mutex<Option<Reporter>>,
+    retry: Mutex<Retry>,
+    /// "Check now" in the panel: look at the automatic update again at once.
+    kick: tokio::sync::Notify,
 }
 
 impl UpdateService {
@@ -75,25 +133,109 @@ impl UpdateService {
                 applying: AtomicBool::new(false),
                 stop: Mutex::new(None),
                 task: Mutex::new(None),
+                auto: Mutex::new(None),
+                view: Mutex::new((None, Vec::new())),
+                reporter: Mutex::new(None),
+                retry: Mutex::new(Retry::default()),
+                kick: tokio::sync::Notify::new(),
             }),
         }
+    }
+
+    /// Let `update.auto` install (without this it only reports).
+    pub fn set_auto(&self, deps: AutoDeps) {
+        *self.inner.auto.lock() = Some(Arc::new(deps));
+    }
+
+    /// Where every change of the automatic update's state goes (the control API).
+    pub fn set_reporter(&self, reporter: Reporter) {
+        let (view, problems) = self.inner.view.lock().clone();
+        reporter(view, problems);
+        *self.inner.reporter.lock() = Some(reporter);
+    }
+
+    pub fn auto_enabled(&self) -> bool {
+        self.inner.config.read().update.auto
+    }
+
+    /// The automatic update's state and problems.
+    pub fn auto_view(&self) -> (Option<UpdateView>, Vec<Problem>) {
+        self.inner.view.lock().clone()
+    }
+
+    /// Set what the status shows about the automatic update (also used at start to say
+    /// "Updated to X" or "rolled back").
+    pub fn set_view(&self, view: Option<UpdateView>, problems: Vec<Problem>) {
+        {
+            let mut v = self.inner.view.lock();
+            if v.0 == view && v.1 == problems {
+                return;
+            }
+            *v = (view.clone(), problems.clone());
+        }
+        let reporter = self.inner.reporter.lock().clone();
+        if let Some(r) = reporter {
+            r(view, problems);
+        }
+    }
+
+    fn set_state(
+        &self,
+        state: &str,
+        version: Option<&str>,
+        message: Option<String>,
+        problems: Vec<Problem>,
+    ) {
+        let old = self.inner.view.lock().0.clone();
+        let same_state = old.as_ref().is_some_and(|o| o.state == state);
+        let view = UpdateView {
+            state: state.into(),
+            version: version.map(str::to_string),
+            from: (state == "updated")
+                .then(|| old.as_ref().and_then(|o| o.from.clone()))
+                .flatten(),
+            message,
+            auto: self.auto_enabled(),
+            since: if same_state {
+                old.and_then(|o| o.since)
+            } else {
+                Some(bunko_update::auto::now_rfc3339())
+            },
+        };
+        self.set_view(Some(view), problems);
     }
 
     /// The real updater for this build (`flavor` is `full` or `lite`), from `update.*`.
     pub fn from_config(config: Arc<RwLock<Config>>, flavor: &str) -> Self {
         let updater = {
             let c = config.read();
+            let (key, custom) = bunko_update::auto::release_key(&c.update.public_key);
+            if custom {
+                warn!(
+                    "{}",
+                    bunko_update::auto::custom_key_warning(
+                        &key,
+                        "update.public_key in the config file"
+                    )
+                );
+            }
             bunko_update::Updater::new(
                 c.update.manifest_url.clone(),
                 c.update.channel.clone(),
                 flavor,
             )
+            .with_public_key(key)
         };
         Self::new(Arc::new(updater), config)
     }
 
     pub fn checks_enabled(&self) -> bool {
         self.inner.config.read().update.check
+    }
+
+    /// Re-evaluate the automatic update now (a setting changed, "Check now").
+    pub fn kick(&self) {
+        self.inner.kick.notify_one();
     }
 
     pub fn is_applying(&self) -> bool {
@@ -129,7 +271,12 @@ impl UpdateService {
             .as_ref()
             .is_some_and(|(at, _)| at.elapsed() < CHECK_EVERY);
         if refresh || (!fresh && self.checks_enabled()) {
-            return self.check_now().await;
+            let status = self.check_now().await;
+            if refresh {
+                // The automatic update looks at the new result at once.
+                self.inner.kick.notify_one();
+            }
+            return status;
         }
         cached.map(|(_, s)| s).unwrap_or_else(unchecked_status)
     }
@@ -160,35 +307,303 @@ impl UpdateService {
             return Err((409, cannot_apply_reason(&status)));
         }
         let from = status.current.clone();
-        let version = self
-            .inner
-            .source
-            .apply()
-            .await
-            .map_err(|e| (500, format!("The update failed: {e}")))?;
+        // With the binary's installer (the release as one unit: binary, backend pack,
+        // models), the same way the automatic update does; else the plain updater.
+        let installer = self.inner.auto.lock().as_ref().map(|d| d.installer.clone());
+        let version = match (installer, status.latest.clone()) {
+            (Some(i), Some(latest)) => {
+                let v = i
+                    .install(latest)
+                    .await
+                    .map_err(|e| (500, format!("The update failed: {e}")))?;
+                if let Some(deps) = self.inner.auto.lock().as_ref() {
+                    Blocked::clear(&deps.storage);
+                }
+                v
+            }
+            _ => self
+                .inner
+                .source
+                .apply()
+                .await
+                .map_err(|e| (500, format!("The update failed: {e}")))?,
+        };
         info!("installed mokuro-bunko {version} (was {from})");
         Ok((from, version))
     }
 
-    /// Check every [`CHECK_EVERY`] while `update.check` is on, until `stop` fires.
+    /// Check every [`CHECK_EVERY`] while `update.check` or `update.auto` is on, until
+    /// `stop` fires; with `update.auto`, install what the check found
+    /// ([`UpdateService::try_auto`]).
     pub fn start(&self, stop: CancellationToken) {
         let child = stop.child_token();
         *self.inner.stop.lock() = Some(child.clone());
         let me = self.clone();
         let handle = tokio::spawn(async move {
-            let mut wait = FIRST_CHECK_AFTER;
+            let (first, period) = check_period();
+            let mut wait = first;
             loop {
-                tokio::select! {
+                let kicked = tokio::select! {
                     _ = child.cancelled() => break,
-                    _ = tokio::time::sleep(wait) => {}
-                }
-                if me.checks_enabled() {
-                    me.check_now().await;
-                }
-                wait = CHECK_EVERY;
+                    _ = tokio::time::sleep(wait) => false,
+                    _ = me.inner.kick.notified() => true,
+                };
+                let status = if kicked {
+                    me.cached().unwrap_or_else(unchecked_status)
+                } else if me.checks_enabled() || me.auto_enabled() {
+                    me.check_now().await
+                } else {
+                    wait = period;
+                    continue;
+                };
+                me.try_auto(&status, &child).await;
+                // A failed automatic update comes back when its retry is due.
+                let retry_in =
+                    me.inner.retry.lock().next_try().map(|t| {
+                        t.saturating_duration_since(Instant::now()) + Duration::from_secs(1)
+                    });
+                wait = match retry_in {
+                    Some(r) if me.auto_enabled() => r.min(period),
+                    _ => period,
+                };
             }
         });
         *self.inner.task.lock() = Some(handle);
+    }
+
+    /// With `update.auto` on: act on a check's result. A newer release on the channel is
+    /// installed at a quiet moment (no OCR claim and no upload in flight; new claims are
+    /// stopped meanwhile), then the server restarts. Docker and managed installs, a
+    /// blocked (rolled back) version and a failing install only report.
+    pub async fn try_auto(&self, status: &UpdateStatus, stop: &CancellationToken) {
+        if !self.auto_enabled() {
+            // Off: nothing is installed. "Updated"/"rolled back" from the start stays.
+            let keep = self
+                .inner
+                .view
+                .lock()
+                .0
+                .as_ref()
+                .is_some_and(|v| matches!(v.state.as_str(), "updated" | "blocked"));
+            if !keep {
+                let state = if status.available {
+                    "available"
+                } else {
+                    "idle"
+                };
+                self.set_state(state, status.latest.as_deref(), None, Vec::new());
+            }
+            return;
+        }
+        if let Some(e) = &status.error {
+            let failures = {
+                let mut r = self.inner.retry.lock();
+                r.failed("check", e, Instant::now());
+                r.failures()
+            };
+            let problems = if failures >= bunko_update::auto::RETRY_TELL_AFTER {
+                vec![Problem::update_needs_you(
+                    format!(
+                        "Automatic updates: the release server has not answered {failures} times in a row: {e}"
+                    ),
+                    "Check the network, or update.manifest_url in config.yaml (a mirror).",
+                )]
+            } else {
+                Vec::new()
+            };
+            self.set_state(
+                "failed",
+                None,
+                Some(format!("could not check for updates: {e}")),
+                problems,
+            );
+            return;
+        }
+        let Some(latest) = status.latest.clone().filter(|_| status.available) else {
+            let keep_updated = self
+                .inner
+                .view
+                .lock()
+                .0
+                .as_ref()
+                .is_some_and(|v| matches!(v.state.as_str(), "updated" | "blocked"));
+            if !keep_updated {
+                self.set_state("idle", None, None, Vec::new());
+            }
+            return;
+        };
+        if !status.can_apply {
+            let reason = cannot_apply_reason(status);
+            info!(
+                "mokuro-bunko {latest} is available; automatic update not possible here: {reason}"
+            );
+            self.set_state(
+                "blocked",
+                Some(&latest),
+                Some(reason.clone()),
+                vec![Problem::update_needs_you(
+                    format!(
+                        "mokuro-bunko {latest} is available, but this install cannot update itself"
+                    ),
+                    reason,
+                )],
+            );
+            return;
+        }
+        let Some(deps) = self.inner.auto.lock().clone() else {
+            self.set_state("available", Some(&latest), None, Vec::new());
+            return;
+        };
+        if let Some(b) = Blocked::read(&deps.storage).filter(|b| b.blocks(&latest)) {
+            self.set_state(
+                "blocked",
+                Some(&latest),
+                Some(b.reason.clone()),
+                vec![Problem::update_needs_you(
+                    format!("The update to {latest} was rolled back: {}", b.reason),
+                    format!(
+                        "This machine stays on {}. Fix the cause, then install it by hand (admin panel → Updates, or 'mokuro-bunko update apply'); automatic updates skip {latest} until a newer release.",
+                        bunko_core::VERSION
+                    ),
+                )],
+            );
+            return;
+        }
+        if !self.inner.retry.lock().may_try(&latest, Instant::now()) {
+            return;
+        }
+        if self.inner.applying.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let installed = self.auto_install(&latest, &deps, stop).await;
+        if !installed {
+            self.inner.applying.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Drain, install, restart. Returns whether the restart was asked for.
+    async fn auto_install(&self, latest: &str, deps: &AutoDeps, stop: &CancellationToken) -> bool {
+        info!(
+            "Automatic update: mokuro-bunko {latest} found; installing it once nothing is running"
+        );
+        self.set_state(
+            "waiting",
+            Some(latest),
+            Some(
+                "new OCR work is held; installing once the running volumes and uploads finish"
+                    .into(),
+            ),
+            Vec::new(),
+        );
+        deps.quiet.drain(true);
+        let mut said = String::new();
+        loop {
+            if stop.is_cancelled() || !self.auto_enabled() {
+                deps.quiet.drain(false);
+                info!("Automatic update to {latest}: called off");
+                self.set_state("available", Some(latest), None, Vec::new());
+                return false;
+            }
+            match deps.quiet.busy().await {
+                None => break,
+                Some(what) => {
+                    if what != said {
+                        info!("Automatic update to {latest}: waiting for {what}");
+                        self.set_state(
+                            "waiting",
+                            Some(latest),
+                            Some(format!("waiting for {what}")),
+                            Vec::new(),
+                        );
+                        said = what;
+                    }
+                }
+            }
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                _ = tokio::time::sleep(QUIET_POLL) => {}
+            }
+        }
+        info!("Automatic update: quiet; installing mokuro-bunko {latest}");
+        self.set_state(
+            "installing",
+            Some(latest),
+            Some("downloading and checking the release".into()),
+            Vec::new(),
+        );
+        match deps.installer.install(latest.to_string()).await {
+            Ok(version) => {
+                self.inner.retry.lock().succeeded();
+                info!(
+                    "Automatic update: installed mokuro-bunko {version} (was {}); restarting",
+                    bunko_core::VERSION
+                );
+                self.set_state(
+                    "restarting",
+                    Some(&version),
+                    Some(format!("restarting into {version}")),
+                    Vec::new(),
+                );
+                // An upload that began meanwhile finishes first (bounded).
+                for _ in 0..12 {
+                    if deps.quiet.busy().await.is_none() {
+                        break;
+                    }
+                    tokio::time::sleep(QUIET_POLL).await;
+                }
+                (deps.restart)();
+                true
+            }
+            Err(f) => {
+                deps.quiet.drain(false);
+                self.install_failed(latest, &f);
+                false
+            }
+        }
+    }
+
+    fn install_failed(&self, latest: &str, f: &InstallFailure) {
+        let (wait, keeps) = {
+            let mut r = self.inner.retry.lock();
+            let wait = r.failed(latest, &f.message, Instant::now());
+            (wait, r.keeps_failing())
+        };
+        error!(
+            "Automatic update to {latest} failed: {}; still running {}, trying again in {} min",
+            f.message,
+            bunko_core::VERSION,
+            wait.as_secs().div_ceil(60)
+        );
+        let problems = if f.needs_owner {
+            vec![Problem::update_needs_you(
+                format!("The automatic update to {latest} needs you: {}", f.message),
+                f.action
+                    .clone()
+                    .unwrap_or_else(|| "See the server log.".into()),
+            )]
+        } else if keeps {
+            vec![Problem::update_needs_you(
+                format!(
+                    "The automatic update to {latest} keeps failing: {}",
+                    f.message
+                ),
+                "See the server log; 'mokuro-bunko update apply' shows the error too.",
+            )]
+        } else {
+            vec![Problem::update_warning(
+                format!(
+                    "The automatic update to {latest} failed (trying again later): {}",
+                    f.message
+                ),
+                None,
+            )]
+        };
+        self.set_state(
+            if f.needs_owner { "blocked" } else { "failed" },
+            Some(latest),
+            Some(f.message.clone()),
+            problems,
+        );
     }
 
     pub async fn stop(&self) {
@@ -251,11 +666,16 @@ pub(super) mod http {
     /// How long the restart waits so the apply response reaches the browser first.
     const RESTART_DELAY: Duration = Duration::from_millis(750);
 
-    fn body(status: &UpdateStatus, checks_enabled: bool, applying: bool) -> Value {
+    fn body(status: &UpdateStatus, updates: &super::UpdateService) -> Value {
         let mut v = serde_json::to_value(status).unwrap_or_else(|_| json!({}));
         if let Value::Object(m) = &mut v {
-            m.insert("checks_enabled".into(), json!(checks_enabled));
-            m.insert("applying".into(), json!(applying));
+            m.insert("checks_enabled".into(), json!(updates.checks_enabled()));
+            m.insert("applying".into(), json!(updates.is_applying()));
+            // 0.7.0-alpha.2: automatic updates (`update.auto`) and where one stands.
+            let (view, problems) = updates.auto_view();
+            m.insert("auto".into(), json!(updates.auto_enabled()));
+            m.insert("auto_state".into(), json!(view));
+            m.insert("problems".into(), json!(problems));
             if status.available && !status.can_apply {
                 m.insert(
                     "cannot_apply_reason".into(),
@@ -274,11 +694,46 @@ pub(super) mod http {
         let refresh = query_one(&q, "refresh")
             .is_some_and(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"));
         let status = updates.status(refresh).await;
-        ok(body(
-            &status,
-            updates.checks_enabled(),
-            updates.is_applying(),
-        ))
+        ok(body(&status, updates))
+    }
+
+    /// `POST /update/settings {auto?, check?}`: saved to the config file.
+    pub async fn settings(s: &AdminState, req: &ApiRequest) -> Response {
+        let Some(updates) = s.deps.updates.clone() else {
+            return not_found();
+        };
+        let data = match req.json() {
+            Ok(d) => d.clone(),
+            Err(r) => return r,
+        };
+        let s2 = s.clone();
+        let saved = blocking(move || {
+            let _guard = s2.config_lock.lock();
+            {
+                let mut cfg = s2.core().config.write();
+                if let Some(v) = data.get("auto") {
+                    cfg.update.auto = bunko_db::pyfmt::truthy(v);
+                }
+                if let Some(v) = data.get("check") {
+                    cfg.update.check = bunko_db::pyfmt::truthy(v);
+                }
+            }
+            crate::admin::save_config(&s2)
+        })
+        .await;
+        match saved {
+            Ok(Ok(())) => {}
+            Ok(Err(r)) | Err(r) => return r,
+        }
+        let (auto, check) = (updates.auto_enabled(), updates.checks_enabled());
+        tracing::info!(
+            "Updates: automatic install {}, background checks {} (admin panel)",
+            if auto { "on" } else { "off" },
+            if check { "on" } else { "off" }
+        );
+        // Look again now (turning auto on acts on the last check at once).
+        updates.kick();
+        ok(json!({"success": true, "auto": auto, "check": check}))
     }
 
     pub async fn apply(s: &AdminState, req: &ApiRequest) -> Response {
@@ -319,5 +774,208 @@ pub(super) mod http {
         ok(
             json!({"ok": true, "success": true, "version": version, "previous": from, "restarting": restarting}),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct Source {
+        install: InstallKind,
+        latest: &'static str,
+    }
+
+    impl UpdateSource for Source {
+        fn check(&self) -> BoxFuture<'_, UpdateStatus> {
+            Box::pin(async move {
+                let available = bunko_update::auto::is_newer(self.latest, bunko_core::VERSION);
+                UpdateStatus {
+                    current: bunko_core::VERSION.into(),
+                    latest: Some(self.latest.into()),
+                    available,
+                    notes_url: None,
+                    can_apply: available && self.install.can_apply(),
+                    install: self.install.clone(),
+                    docker_image: None,
+                    checked_at: Some("now".into()),
+                    error: None,
+                }
+            })
+        }
+        fn apply(&self) -> BoxFuture<'_, Result<String, String>> {
+            Box::pin(async { Err("not this way".into()) })
+        }
+    }
+
+    #[derive(Default)]
+    struct Log(Mutex<Vec<String>>);
+
+    impl Log {
+        fn push(&self, s: impl Into<String>) {
+            self.0.lock().push(s.into());
+        }
+        fn get(&self) -> Vec<String> {
+            self.0.lock().clone()
+        }
+    }
+
+    struct Installer {
+        log: Arc<Log>,
+        fail: bool,
+    }
+
+    impl ReleaseInstaller for Installer {
+        fn install(&self, version: String) -> BoxFuture<'static, Result<String, InstallFailure>> {
+            self.log.push(format!("install {version}"));
+            let fail = self.fail;
+            Box::pin(async move {
+                if fail {
+                    Err(InstallFailure::retry("the download failed"))
+                } else {
+                    Ok(version)
+                }
+            })
+        }
+    }
+
+    /// Busy for the first `busy` looks, then quiet.
+    struct FakeQuiet {
+        log: Arc<Log>,
+        busy: AtomicUsize,
+    }
+
+    impl Quiet for FakeQuiet {
+        fn drain(&self, on: bool) {
+            self.log.push(format!("drain {on}"));
+        }
+        fn busy(&self) -> BoxFuture<'_, Option<String>> {
+            let left = self.busy.load(Ordering::SeqCst);
+            if left > 0 {
+                self.busy.fetch_sub(1, Ordering::SeqCst);
+                self.log.push("busy");
+            }
+            Box::pin(
+                async move { (left > 0).then(|| "1 OCR volume(s) in flight (tower)".to_string()) },
+            )
+        }
+    }
+
+    fn service(
+        auto: bool,
+        install: InstallKind,
+        fail: bool,
+        busy: usize,
+    ) -> (UpdateService, Arc<Log>, tempfile::TempDir) {
+        let mut config = Config::default();
+        config.update.auto = auto;
+        let svc = UpdateService::new(
+            Arc::new(Source {
+                install,
+                latest: "99.0.0",
+            }),
+            Arc::new(RwLock::new(config)),
+        );
+        let log = Arc::new(Log::default());
+        let dir = tempfile::tempdir().unwrap();
+        let l = log.clone();
+        svc.set_auto(AutoDeps {
+            installer: Arc::new(Installer {
+                log: log.clone(),
+                fail,
+            }),
+            quiet: Arc::new(FakeQuiet {
+                log: log.clone(),
+                busy: AtomicUsize::new(busy),
+            }),
+            restart: Arc::new(move || l.push("restart")),
+            storage: dir.path().to_path_buf(),
+        });
+        (svc, log, dir)
+    }
+
+    fn self_managed() -> InstallKind {
+        InstallKind::SelfManaged {
+            exe: "/opt/bunko/mokuro-bunko".into(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auto_off_installs_nothing() {
+        let (svc, log, _d) = service(false, self_managed(), false, 0);
+        let status = svc.check_now().await;
+        svc.try_auto(&status, &CancellationToken::new()).await;
+        assert!(log.get().is_empty(), "{:?}", log.get());
+        assert_eq!(svc.auto_view().0.unwrap().state, "available");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn newer_release_waits_for_quiet_then_installs_and_restarts() {
+        let (svc, log, _d) = service(true, self_managed(), false, 2);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        svc.set_reporter(Arc::new(move |v: Option<UpdateView>, _| {
+            if let Some(v) = v {
+                s2.lock().push(v.state);
+            }
+        }));
+        let status = svc.check_now().await;
+        svc.try_auto(&status, &CancellationToken::new()).await;
+        assert_eq!(
+            log.get(),
+            ["drain true", "busy", "busy", "install 99.0.0", "restart"],
+            "drain first, install only once quiet"
+        );
+        let states = seen.lock().clone();
+        assert!(
+            states.ends_with(&["waiting".into(), "installing".into(), "restarting".into()]),
+            "{states:?}"
+        );
+        assert!(svc.is_applying(), "no second attempt while restarting");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_install_keeps_running_and_backs_off() {
+        let (svc, log, _d) = service(true, self_managed(), true, 0);
+        let status = svc.check_now().await;
+        svc.try_auto(&status, &CancellationToken::new()).await;
+        assert_eq!(log.get(), ["drain true", "install 99.0.0", "drain false"]);
+        let (view, problems) = svc.auto_view();
+        assert_eq!(view.unwrap().state, "failed");
+        assert_eq!(problems[0].severity, bunko_control::Severity::Warn);
+        assert!(!svc.is_applying());
+        // Not again before the backoff is over, whatever triggers it.
+        svc.try_auto(&status, &CancellationToken::new()).await;
+        assert_eq!(log.get().len(), 3, "{:?}", log.get());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn docker_and_blocked_versions_only_report() {
+        let (svc, log, _d) = service(true, InstallKind::Docker, false, 0);
+        let status = svc.check_now().await;
+        svc.try_auto(&status, &CancellationToken::new()).await;
+        assert!(log.get().is_empty());
+        let (view, problems) = svc.auto_view();
+        assert_eq!(view.unwrap().state, "blocked");
+        assert_eq!(problems[0].severity, bunko_control::Severity::Fail);
+        assert_eq!(problems[0].kind.as_deref(), Some("update"));
+
+        let (svc, log, dir) = service(true, self_managed(), false, 0);
+        Blocked {
+            version: "99.0.0".into(),
+            reason: "its OCR backend failed to load on this machine: x".into(),
+            at: "t".into(),
+        }
+        .write(dir.path())
+        .unwrap();
+        let status = svc.check_now().await;
+        svc.try_auto(&status, &CancellationToken::new()).await;
+        assert!(log.get().is_empty(), "a rolled-back version is not retried");
+        assert!(
+            svc.auto_view().1[0]
+                .text
+                .starts_with("The update to 99.0.0 was rolled back")
+        );
     }
 }

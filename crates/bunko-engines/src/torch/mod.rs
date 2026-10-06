@@ -42,6 +42,12 @@ pub fn discover(backends_dir: &Path) -> Vec<PathBuf> {
     let mut packs: Vec<(u8, String, PathBuf)> = rd
         .flatten()
         .map(|e| e.path())
+        // `.staging-*`, `.prev-*`: an install or an automatic update in progress or kept
+        // for a rollback, never a pack to open.
+        .filter(|p| {
+            !p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        })
         .filter(|p| p.join(PACK_JSON).is_file())
         .filter_map(|p| {
             let name = p.file_name()?.to_string_lossy().into_owned();
@@ -165,8 +171,13 @@ fn open_backend(backends_dirs: &[PathBuf], cpu_only: bool) -> Result<Arc<TorchBa
                         info!("libtorch backend: set {k}={v}");
                     }
                     info!(
-                        "libtorch backend {} ({}, torch {}) loaded in {:.1}s: {}",
+                        "libtorch backend {} for {} ({}, torch {}) loaded in {:.1}s: {}",
                         pack.manifest.variant,
+                        if pack.manifest.bunko_version.is_empty() {
+                            "a development build"
+                        } else {
+                            pack.manifest.bunko_version.as_str()
+                        },
                         dir.display(),
                         report.torch,
                         t0.elapsed().as_secs_f64(),

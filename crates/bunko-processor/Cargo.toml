@@ -10,6 +10,10 @@ bunko-proto.workspace = true
 # The local control API's pause + activity (GUI.md §2-3) the session hub obeys and feeds.
 bunko-control = { path = "../bunko-control" }
 bunko-sched.workspace = true
+# Automatic updates (`processor.auto_update`): the retry/marker rules and the installer
+# trait the binary implements.
+bunko-update.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

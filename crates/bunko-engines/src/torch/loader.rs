@@ -90,6 +90,10 @@ impl std::fmt::Debug for Pack {
     }
 }
 
+/// The mokuro-bunko release this build is (the workspace version): the only release
+/// whose backend packs it opens (a development pack, with no release, passes too).
+pub const RELEASE: &str = env!("CARGO_PKG_VERSION");
+
 /// Reads and checks `<dir>/pack.json`.
 pub fn read_manifest(dir: &Path) -> Result<PackManifest, PackLoadError> {
     let path = dir.join(PACK_JSON);
@@ -107,10 +111,13 @@ pub fn read_manifest(dir: &Path) -> Result<PackManifest, PackLoadError> {
         path: path.clone(),
         msg: e.to_string(),
     })?;
-    m.check().map_err(|e| PackLoadError::Manifest {
-        path,
-        msg: e.to_string(),
-    })?;
+    // A pack belongs to exactly one release; then the ABI and the platform.
+    m.check_release(RELEASE)
+        .and_then(|()| m.check())
+        .map_err(|e| PackLoadError::Manifest {
+            path,
+            msg: e.to_string(),
+        })?;
     Ok(m)
 }
 

@@ -518,6 +518,23 @@ impl Scheduler {
                 self.released(pid, claims);
                 return;
             }
+            Event::UpdateStatus(report) => {
+                if let Some(m) = self.machines.get_mut(pid)
+                    && m.update.as_ref() != Some(report)
+                {
+                    let label = m.label();
+                    let text = match (&report.version, &report.message) {
+                        (Some(v), Some(msg)) => format!("{} {v}: {msg}", report.state),
+                        (Some(v), None) => format!("{} {v}", report.state),
+                        (None, Some(msg)) => format!("{}: {msg}", report.state),
+                        (None, None) => report.state.clone(),
+                    };
+                    m.update = Some(report.clone());
+                    self.log(format!("{label}: automatic update {text}"));
+                    self.bump_page();
+                }
+                return;
+            }
             Event::BenchReady { .. }
             | Event::BenchProgress { .. }
             | Event::BenchTrial { .. }

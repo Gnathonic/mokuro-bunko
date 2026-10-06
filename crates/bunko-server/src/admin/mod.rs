@@ -36,7 +36,7 @@ use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
 pub use ocr::{NoOcr, OcrAdmin};
-pub use update::{UpdateService, UpdateSource};
+pub use update::{AutoDeps, Quiet, UpdateService, UpdateSource};
 
 /// Max JSON body (0.5.2 `MAX_JSON_BODY_BYTES`).
 pub const MAX_JSON_BODY_BYTES: usize = 65_536;
@@ -353,6 +353,7 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
 
         ["update"] if get => update::http::get(s, &req).await,
         ["update", "apply"] if post => update::http::apply(s, &req).await,
+        ["update", "settings"] if post => update::http::settings(s, &req).await,
 
         _ => not_found(),
     }

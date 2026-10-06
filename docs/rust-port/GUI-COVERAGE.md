@@ -14,6 +14,10 @@ clap tree and fails when:
 - a row links an `/app/` page or a settings section that does not exist;
 - a row names something the CLI no longer has (checked in the full build).
 
+Hidden flags and subcommands (internal ones such as `update prefetch` and
+`install-ocr --probe`, and the 0.5 spellings) are walked like any other, so each has a
+row, saying "CLI-only because it is internal (hidden)".
+
 When you add a flag, add its row. Rows use the CLI's spelling, such as
 `install-ocr --from` or `admin add-user <USERNAME>`. Global flags have no command in
 front (`--config`).
@@ -131,6 +135,9 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 | `update check` | [Updates](/app/settings/update) checks when it opens; "Check again" |
 | `update apply` | [Updates](/app/settings/update) → "Install the update" (live output) |
 | `update apply --yes` | [Updates](/app/settings/update): the button is the confirmation |
+| `update prefetch` | CLI-only because it is internal (hidden): an automatic update runs it from the downloaded release before installing it. The app shows the result as the [dashboard](/app/dashboard)'s update line, and turns automatic updates on in [Updates](/app/settings/update) → "Install updates automatically" |
+| `update prefetch --processor-config` | CLI-only because `update prefetch` is |
+| `update prefetch --manifest-url` | CLI-only because `update prefetch` is |
 | `update apply --restart` | CLI-only because it replaces the calling process with the new `serve`. From the app, restart the server from the tray after updating |
 
 ## OCR backend and models
@@ -145,6 +152,7 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 | `install-ocr --force` | [OCR install](/app/setup/ocr) → Advanced → Reinstall |
 | `install-ocr --list` | [OCR & models](/app/settings/ocr) shows the hardware and the installed packs; "Packs and hardware" runs it |
 | `install-ocr --processor` | [OCR install](/app/setup/ocr) → For: the processor (preselected from the processor setup) |
+| `install-ocr --probe` | CLI-only because it is internal (hidden): an automatic update loads a new backend pack in a child process to check it works before switching to it |
 | `install-ocr --backend` | CLI-only because it is the hidden 0.5 spelling of `--variant`, kept for old scripts |
 | `install-ocr --engines` | CLI-only because it is a hidden 0.5 flag that 0.7 accepts and ignores (the models follow the configured engines) |
 | `install-ocr --detector` | CLI-only because it is a hidden 0.5 flag that 0.7 accepts and ignores |
@@ -173,6 +181,7 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 | `processor setup --name` | [Processor setup](/app/setup/processor) → Name; [Processor](/app/settings/processor) → Name |
 | `processor setup --backend` | [OCR install](/app/setup/ocr) → Pack: the processor uses the devices of the pack installed for it |
 | `processor setup --tls-verify` | [Processor setup](/app/setup/processor) → Certificate check; [Processor](/app/settings/processor) |
+| `processor setup --auto-update` | [Processor setup](/app/setup/processor) → "Update this processor automatically when its library updates" (off by default); [Updates](/app/settings/update) and [Processor](/app/settings/processor) change it later (`processor.auto_update`) |
 | `processor setup --yes` | CLI-only because it answers terminal prompts, and the app has no prompts |
 | `processor setup --no-install` | [Processor setup](/app/setup/processor) never installs; the OCR pack is the separate [OCR install](/app/setup/ocr) step |
 | `processor setup --no-service` | [Processor setup](/app/setup/processor) sets up no service; [Start with the machine](/app/setup/startup) is a separate, optional step |

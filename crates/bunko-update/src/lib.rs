@@ -11,6 +11,7 @@
 //! * Docker: only report the image tag to pull;
 //! * a system package or app store: only report.
 
+pub mod auto;
 pub mod backend;
 
 use base64::Engine as _;
@@ -54,6 +55,52 @@ pub enum UpdateError {
     Io(#[from] std::io::Error),
     #[error("could not unpack the update: {0}")]
     Unpack(String),
+    #[error("{0}")]
+    NoSpace(String),
+}
+
+impl UpdateError {
+    /// Only the owner can fix it: retrying will not help (a bad signature, a managed
+    /// install, no room on the disk, no build for this platform).
+    pub fn needs_owner(&self) -> bool {
+        matches!(
+            self,
+            UpdateError::BadSignature
+                | UpdateError::Managed(_)
+                | UpdateError::NoSpace(_)
+                | UpdateError::NoArtifact { .. }
+        )
+    }
+}
+
+/// A verified new executable waiting next to the running one ([`Updater::stage`]).
+#[derive(Debug)]
+pub struct Staged {
+    pub version: String,
+    /// The new executable (runnable: prefetch steps run it before it is installed).
+    pub binary: PathBuf,
+    /// The verified archive (companions come out of it on commit).
+    pub archive: PathBuf,
+    url: String,
+    exe_dir: PathBuf,
+}
+
+impl Staged {
+    /// Swap the new executable in for the running one (and the installed companions).
+    pub fn commit(self) -> Result<String, UpdateError> {
+        let r = self_replace::self_replace(&self.binary).map_err(UpdateError::Io);
+        if r.is_ok() {
+            update_companions(&self.archive, &self.url, &self.exe_dir);
+        }
+        let _ = std::fs::remove_file(&self.binary);
+        let _ = std::fs::remove_file(&self.archive);
+        r.map(|()| self.version)
+    }
+
+    pub fn discard(self) {
+        let _ = std::fs::remove_file(&self.binary);
+        let _ = std::fs::remove_file(&self.archive);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +138,35 @@ pub struct Manifest {
     /// (`install-ocr`; [`backend`]). Absent in manifests before 0.7.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub backends: BTreeMap<String, BTreeMap<String, backend::BackendArtifact>>,
+}
+
+/// Read `loc`: an http(s) URL, a `file://` URL or a plain path (mirrors on disk, tests).
+pub async fn read_location(client: &reqwest::Client, loc: &str) -> Result<Vec<u8>, UpdateError> {
+    if loc.contains("://") && !loc.starts_with("file://") {
+        Ok(client
+            .get(loc)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?
+            .to_vec())
+    } else {
+        let p = loc.strip_prefix("file://").unwrap_or(loc);
+        std::fs::read(p)
+            .map_err(|e| UpdateError::Io(std::io::Error::new(e.kind(), format!("{p}: {e}"))))
+    }
+}
+
+/// Fetch and verify the signed manifest at `loc` (and `<loc>.sig`).
+pub async fn fetch_signed(
+    client: &reqwest::Client,
+    loc: &str,
+    public_key: &str,
+) -> Result<Manifest, UpdateError> {
+    let body = read_location(client, loc).await?;
+    let sig = read_location(client, &format!("{loc}.sig")).await?;
+    parse_manifest(&body, &String::from_utf8_lossy(&sig), public_key)
 }
 
 impl Manifest {
@@ -184,7 +260,7 @@ impl InstallKind {
         if cfg!(any(target_os = "android", target_os = "ios")) {
             return InstallKind::Mobile;
         }
-        match std::env::current_exe() {
+        match current_exe() {
             Ok(exe) => {
                 let s = exe.to_string_lossy();
                 if s.starts_with("/usr/bin")
@@ -261,23 +337,98 @@ impl Updater {
 
     pub async fn fetch_manifest(&self) -> Result<Manifest, UpdateError> {
         let url = self.manifest_location().await?;
-        let body = self
-            .client
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
-        let sig = self
-            .client
-            .get(format!("{url}.sig"))
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
-        parse_manifest(&body, &sig, &self.public_key)
+        fetch_signed(&self.client, &url, &self.public_key).await
+    }
+
+    /// The signed manifest of exactly `version` ([`auto::release_manifest_url`]); an
+    /// error when it names another version.
+    pub async fn fetch_version(&self, version: &str) -> Result<Manifest, UpdateError> {
+        let url = auto::release_manifest_url(&self.manifest_url, version);
+        let m = fetch_signed(&self.client, &url, &self.public_key).await?;
+        if m.version.trim_start_matches('v') != version.trim_start_matches('v') {
+            return Err(UpdateError::Manifest(format!(
+                "{url} is release {}, not {version}",
+                m.version
+            )));
+        }
+        Ok(m)
+    }
+
+    pub fn manifest_url(&self) -> &str {
+        &self.manifest_url
+    }
+
+    pub fn public_key(&self) -> &str {
+        &self.public_key
+    }
+
+    pub fn flavor(&self) -> &str {
+        &self.flavor
+    }
+
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
+    /// Download and verify the new executable of `manifest` next to the running one,
+    /// without installing it: [`Staged::commit`] swaps it in, [`Staged::discard`]
+    /// throws it away. Refuses anything not newer than this binary (never a downgrade)
+    /// and anything but a self-managed install.
+    pub async fn stage(&self, manifest: &Manifest) -> Result<Staged, UpdateError> {
+        let exe = match InstallKind::detect() {
+            InstallKind::SelfManaged { exe } => exe,
+            InstallKind::Docker => {
+                return Err(UpdateError::Managed("Docker (pull the new image)".into()));
+            }
+            InstallKind::Managed { by } => return Err(UpdateError::Managed(by)),
+            InstallKind::Mobile => return Err(UpdateError::Managed("the app store".into())),
+        };
+        if !auto::is_newer(&manifest.version, bunko_core::VERSION) {
+            return Err(UpdateError::Manifest(format!(
+                "{} is not newer than {}: never a downgrade",
+                manifest.version,
+                bunko_core::VERSION
+            )));
+        }
+        let artifact = manifest.artifact(TARGET, &self.flavor)?.clone();
+        let dir = exe
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        if let Err(e) = auto::check_space(&dir, artifact.size.saturating_mul(3)) {
+            return Err(UpdateError::NoSpace(e));
+        }
+        let archive = dir.join(format!(".mokuro-bunko-update-{}.part", manifest.version));
+        let binary = dir.join(format!(
+            ".mokuro-bunko-update-{}{}",
+            manifest.version,
+            std::env::consts::EXE_SUFFIX
+        ));
+        let result = async {
+            self.download_verified(&artifact, &archive).await?;
+            let (a, u, b, out) = (
+                archive.clone(),
+                artifact.url.clone(),
+                artifact.binary.clone(),
+                binary.clone(),
+            );
+            tokio::task::spawn_blocking(move || extract_binary(&a, &u, &b, &out))
+                .await
+                .map_err(|e| UpdateError::Unpack(e.to_string()))?
+        }
+        .await;
+        if let Err(e) = result {
+            let _ = std::fs::remove_file(&archive);
+            let _ = std::fs::remove_file(&binary);
+            return Err(e);
+        }
+        Ok(Staged {
+            version: manifest.version.clone(),
+            binary,
+            archive,
+            url: artifact.url,
+            exe_dir: dir,
+        })
     }
 
     /// Where `release.json` is. GitHub's `releases/latest/download/` never points at a
@@ -383,6 +534,46 @@ impl Updater {
         let result = self.download_and_install(&artifact, &download).await;
         let _ = tokio::fs::remove_file(&download).await;
         result.map(|_| manifest.version)
+    }
+
+    /// Download `artifact` to `download` and check its sha256 against the manifest.
+    async fn download_verified(
+        &self,
+        artifact: &Artifact,
+        download: &Path,
+    ) -> Result<(), UpdateError> {
+        if !artifact.url.contains("://") || artifact.url.starts_with("file://") {
+            let src = artifact
+                .url
+                .strip_prefix("file://")
+                .unwrap_or(&artifact.url);
+            tokio::fs::copy(src, download).await?;
+        } else {
+            let mut resp = self
+                .client
+                .get(&artifact.url)
+                .send()
+                .await?
+                .error_for_status()?;
+            let mut file = tokio::fs::File::create(download).await?;
+            while let Some(chunk) = resp.chunk().await? {
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
+        let path = download.to_path_buf();
+        let got = tokio::task::spawn_blocking(move || backend::sha256_file(&path))
+            .await
+            .map_err(|e| UpdateError::Unpack(e.to_string()))?
+            .map_err(|e| UpdateError::Unpack(e.to_string()))?
+            .0;
+        if !got.eq_ignore_ascii_case(&artifact.sha256) {
+            return Err(UpdateError::Checksum {
+                got,
+                want: artifact.sha256.clone(),
+            });
+        }
+        Ok(())
     }
 
     async fn download_and_install(
@@ -570,6 +761,99 @@ fn replace_file(new: &Path, target: &Path) -> std::io::Result<()> {
     std::fs::rename(new, target)
 }
 
+/// This process's executable path. On Linux, once an update has replaced the file,
+/// `/proc/self/exe` reads `<path> (deleted)`: the suffix is dropped, so a restart starts
+/// the new file at the same path.
+pub fn current_exe() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    #[cfg(target_os = "linux")]
+    if let Some(s) = exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        return Ok(PathBuf::from(s));
+    }
+    Ok(exe)
+}
+
+/// Where [`backup_running`] keeps the executable an automatic update replaces, until the
+/// new release has proven itself (its backend pack loads).
+pub fn previous_exe_path() -> std::io::Result<PathBuf> {
+    let exe = current_exe()?;
+    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+    Ok(dir.join(format!(
+        ".mokuro-bunko-previous{}",
+        std::env::consts::EXE_SUFFIX
+    )))
+}
+
+/// The installed [`COMPANIONS`] next to the running executable and where their copies go.
+fn companion_backups() -> Vec<(PathBuf, PathBuf)> {
+    let Some(dir) = current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    else {
+        return Vec::new();
+    };
+    COMPANIONS
+        .iter()
+        .flat_map(|name| companion_paths(&dir, name))
+        .map(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let backup = p.with_file_name(format!(".{name}.previous"));
+            (p, backup)
+        })
+        .collect()
+}
+
+/// Copy the running executable aside ([`previous_exe_path`]) before an update replaces
+/// it, and the installed companions (the tray) beside theirs.
+pub fn backup_running() -> std::io::Result<PathBuf> {
+    let exe = current_exe()?;
+    let prev = previous_exe_path()?;
+    let _ = std::fs::remove_file(&prev);
+    std::fs::copy(&exe, &prev)?;
+    for (installed, backup) in companion_backups() {
+        let _ = std::fs::remove_file(&backup);
+        if let Err(e) = std::fs::copy(&installed, &backup) {
+            tracing::warn!("update: no copy of {} kept: {e}", installed.display());
+        }
+    }
+    Ok(prev)
+}
+
+/// Put the backed-up executable (and companions) back in place of the running one (a
+/// rollback).
+pub fn restore_previous() -> std::io::Result<()> {
+    let prev = previous_exe_path()?;
+    if !prev.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no previous executable at {}", prev.display()),
+        ));
+    }
+    self_replace::self_replace(&prev)?;
+    let _ = std::fs::remove_file(&prev);
+    for (installed, backup) in companion_backups() {
+        if backup.is_file()
+            && let Err(e) = replace_file(&backup, &installed)
+        {
+            tracing::warn!("rollback: {} not restored: {e}", installed.display());
+        }
+    }
+    Ok(())
+}
+
+/// The new release proved itself: the backups are not needed any more.
+pub fn drop_previous() {
+    if let Ok(p) = previous_exe_path() {
+        let _ = std::fs::remove_file(p);
+    }
+    for (_, backup) in companion_backups() {
+        let _ = std::fs::remove_file(backup);
+    }
+}
+
 /// Exit code the portable launcher (`run.bat`) treats as "start me again".
 pub const RESTART_EXIT_CODE: i32 = 75;
 
@@ -577,7 +861,7 @@ pub const RESTART_EXIT_CODE: i32 = 75;
 /// On Unix this is `exec` (same pid, so systemd and Docker keep supervising it); on
 /// Windows a new process is started and this one exits.
 pub fn restart() -> std::io::Result<std::convert::Infallible> {
-    let exe = std::env::current_exe()?;
+    let exe = current_exe()?;
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     #[cfg(unix)]
     {
@@ -596,7 +880,7 @@ pub fn restart() -> std::io::Result<std::convert::Infallible> {
     }
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

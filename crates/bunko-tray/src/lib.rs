@@ -5,12 +5,14 @@
 //! to the native tray (tray-icon + muda menus on a tao event loop).
 
 pub mod autostart;
+pub mod autoupdate;
 pub mod client;
 pub mod discover;
 pub mod icons;
 pub mod launch;
 pub mod model;
 pub mod monitor;
+pub mod notify;
 pub mod paths;
 pub mod status;
 pub mod supervise;

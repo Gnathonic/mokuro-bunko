@@ -31,7 +31,8 @@ installed — as 0.5.2's server ran before `install-ocr`. libtorch arrives as a 
     <storage>/backends/torch-<variant>-<torch version>/
         lib/            libtorch runtime libraries (+ CUDA/ROCm libs it bundles)
         libbunko_torch.so|.dll|.dylib   our cdylib, linked against exactly this libtorch
-        pack.json       variant, torch version, ABI version, file list with sha256
+        pack.json       variant, torch version, ABI version, the mokuro-bunko release
+                        it belongs to (bunko_version), file list with sha256
 
 `variant` ∈ `cpu`, `cu130`, `rocm7.1` (Linux), `cu130`/`cpu` (Windows), `cpu` (macOS arm64).
 
@@ -53,6 +54,11 @@ Images are passed as RGB8 crops already cut by bunko-vlm's crop code (so croppin
 bit-identical across backends); preprocessing that 0.5.2 did in torch happens inside the cdylib.
 
 ### Main-binary side (`bunko-engines`, feature `torch`, on in `full`)
+
+Release lock (0.7.0-alpha.2): the loader opens only a pack whose `pack.json`
+`bunko_version` equals its own version (`torch::loader::RELEASE`; empty = a development
+pack, accepted), then checks the ABI. A release and its pack are installed, updated and
+rolled back together (PACKAGING.md §4, docs/configuration.md "Automatic updates").
 
 `libloading` opens the pack's `libbunko_torch`, checks `bt_abi_version`, and wraps the handle
 in a `Recognizer` (the existing trait). Device catalog, placement and precision selection use

@@ -324,6 +324,19 @@ pub enum UpdateCmd {
         #[arg(long)]
         restart: bool,
     },
+    /// Internal (automatic updates): run by a downloaded release BEFORE it is
+    /// installed, to fetch, verify and load-check its own backend pack (for the variant
+    /// installed here) and its models, so that switching to it leaves nothing to fetch.
+    /// Prints one JSON line; exit 0 ok, 3 the owner must act, 1 try again later.
+    #[command(hide = true)]
+    Prefetch {
+        /// For this machine's processor (its processor.yaml) instead of the library
+        #[arg(long, value_name = "PATH")]
+        processor_config: Option<PathBuf>,
+        /// The latest-release manifest URL to derive this release's from
+        #[arg(long)]
+        manifest_url: String,
+    },
 }
 
 #[cfg(feature = "ocr")]
@@ -387,6 +400,11 @@ pub struct InstallOcrArgs {
     /// on a machine with a processor.yaml and no library configuration
     #[arg(long)]
     pub processor: bool,
+    /// Internal: load the backend pack this role would use (or the one in --dir) in
+    /// this process and list its devices, without installing anything; exit 1 when it
+    /// does not load (automatic updates check a new pack this way)
+    #[arg(long, hide = true)]
+    pub probe: bool,
     /// 0.5.2: auto, cuda, rocm, cpu (same as --variant)
     #[arg(long, hide = true)]
     pub backend: Option<String>,
@@ -465,6 +483,11 @@ pub struct ProcessorSetupArgs {
     /// Overwrite an existing config file.
     #[arg(long)]
     pub force: bool,
+    /// Update automatically to the library's version when it reports a newer one
+    /// (processor.auto_update: true): the running volume finishes first. Never a
+    /// downgrade.
+    #[arg(long)]
+    pub auto_update: bool,
 }
 
 #[cfg(test)]

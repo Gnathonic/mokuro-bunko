@@ -24,6 +24,7 @@
       max_sessions: parseInt($('sessions').value, 10) || 1,
       storage: $('pstorage').value.trim(),
       archive_memory_mb: parseInt($('archive-mb').value, 10),
+      auto_update: $('auto-update').checked,
       overwrite: $('p-overwrite').checked,
     };
   }
@@ -68,6 +69,7 @@
       ['Volumes at once', f.max_sessions],
       ['Working folder', f.storage],
       ['Archive RAM', f.archive_memory_mb + ' MB'],
+      ['Automatic updates', f.auto_update ? 'on' : 'off'],
     ];
     $('p-summary').innerHTML = rows.map(([k, v]) => '<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>').join('');
   }
@@ -185,6 +187,7 @@
         $('sessions').value = c.max_sessions;
         $('pstorage').value = c.storage;
         $('archive-mb').value = c.archive_memory_mb;
+        $('auto-update').checked = !!c.auto_update;
         if (c.tls_verify === 'false') document.querySelector('input[name="tls"][value="false"]').checked = true;
         else if (c.tls_verify !== 'true') {
           document.querySelector('input[name="tls"][value="cert"]').checked = true;

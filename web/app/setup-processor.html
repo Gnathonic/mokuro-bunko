@@ -74,6 +74,10 @@
                     </div>
                 </div>
                 <div class="form-group">
+                    <label class="check"><input type="checkbox" id="auto-update"> Update this processor automatically when its library updates</label>
+                    <p class="form-hint">Off by default. The running volume finishes first; never a downgrade. <span class="cli-hint">processor.auto_update</span></p>
+                </div>
+                <div class="form-group">
                     <label class="form-label" for="pstorage">Working folder (logs, downloads, OCR backend, models)</label>
                     <div class="input-row"><input class="form-input" id="pstorage"><button type="button" class="btn btn--secondary" data-pick="pstorage" data-title="Choose the processor's folder">Browse…</button></div>
                     <div class="alert alert--warning" id="pstorage-note" role="status" hidden></div>

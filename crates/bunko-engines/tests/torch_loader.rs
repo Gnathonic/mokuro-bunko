@@ -84,6 +84,24 @@ fn bad_pack_json() {
     let err = Pack::open(&d, true).unwrap_err().to_string();
     assert!(err.contains("plan9"), "{err}");
 
+    // A pack belongs to one release: another release's is refused, before its ABI.
+    let mut m = manifest(BT_ABI_VERSION + 1, std::env::consts::OS);
+    m["bunko_version"] = "0.6.9".into();
+    let d = pack_dir(tmp.path(), &m);
+    let err = Pack::open(&d, true).unwrap_err().to_string();
+    assert!(
+        err.contains(&format!(
+            "the backend pack is from mokuro-bunko 0.6.9, this is {}",
+            bunko_engines::torch::loader::RELEASE
+        )),
+        "{err}"
+    );
+    // This release's pack (or a development pack without one) gets past it.
+    m["bunko_version"] = bunko_engines::torch::loader::RELEASE.into();
+    let d = pack_dir(tmp.path(), &m);
+    let err = Pack::open(&d, true).unwrap_err().to_string();
+    assert!(err.contains("ABI"), "{err}");
+
     let mut m = manifest(BT_ABI_VERSION, std::env::consts::OS);
     m["library"] = "../../escape.so".into();
     let d = pack_dir(tmp.path(), &m);

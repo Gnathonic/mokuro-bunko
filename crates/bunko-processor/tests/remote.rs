@@ -278,7 +278,9 @@ fn config(url: &str, storage: &std::path::Path) -> ProcessorConfig {
             max_sessions: 2,
             storage: storage.to_path_buf(),
             archive_memory_mb: 0,
+            auto_update: false,
         },
+        update: Default::default(),
     }
 }
 
@@ -411,7 +413,7 @@ async fn register_socket_volume_upload_done_close_exit() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(ended, Ok(()));
+    assert_eq!(ended, Ok(bunko_processor::ServeExit::Stopped));
     assert_eq!(
         bunko_processor::status::read_status(dir.path())["state"],
         "stopped"

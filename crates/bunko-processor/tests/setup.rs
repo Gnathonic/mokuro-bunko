@@ -213,6 +213,10 @@ async fn the_wizard_checks_then_writes_only_non_defaults() {
     assert!(text.contains(&format!("url: {url}")), "{text}");
     assert!(text.contains("name: tower-x"));
     assert!(!text.contains("tls_verify"));
+    // Asked, default No: off, with the way to turn it on left as a comment.
+    let loaded = bunko_processor::config::load_processor_config(&config).unwrap();
+    assert!(!loaded.processor.auto_update, "{text}");
+    assert!(text.contains("#   auto_update: true"), "{text}");
     assert!(ui.said.iter().any(|l| l.starts_with("No scheme given")));
     assert!(
         ui.said
@@ -247,4 +251,87 @@ async fn the_wizard_checks_then_writes_only_non_defaults() {
     .await
     .unwrap_err();
     assert!(e.0.contains("already exists; pass --force"), "{e}");
+}
+
+/// Answers the automatic-update question with `yes` (and everything else with its default).
+struct Auto {
+    yes: bool,
+    asked: bool,
+}
+
+impl Prompter for Auto {
+    fn say(&mut self, _line: &str) {}
+    fn ask(&mut self, prompt: &str, _hidden: bool) -> std::io::Result<String> {
+        Ok(if prompt.contains("assword") {
+            "pw"
+        } else {
+            "gpu"
+        }
+        .into())
+    }
+    fn confirm(&mut self, question: &str, default: bool) -> std::io::Result<bool> {
+        if question.starts_with("Update this processor automatically") {
+            self.asked = true;
+            return Ok(self.yes);
+        }
+        Ok(default)
+    }
+}
+
+#[tokio::test]
+async fn auto_update_is_asked_defaults_off_and_the_flag_skips_the_question() {
+    let url = library(lib()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let base = |name: &str| SetupOptions {
+        config: dir.path().join(name),
+        url: Some(url.clone()),
+        service: false,
+        command: "mokuro-bunko".into(),
+        ..Default::default()
+    };
+    let load = |name: &str| {
+        bunko_processor::config::load_processor_config(&dir.path().join(name))
+            .unwrap()
+            .processor
+            .auto_update
+    };
+
+    // Asked, and answered yes.
+    let mut ui = Auto {
+        yes: true,
+        asked: false,
+    };
+    run(&base("yes.yaml"), &mut ui, None).await.unwrap();
+    assert!(ui.asked);
+    assert!(load("yes.yaml"));
+    let text = std::fs::read_to_string(dir.path().join("yes.yaml")).unwrap();
+    assert!(text.contains("  auto_update: true"), "{text}");
+
+    // --auto-update: not asked.
+    let mut ui = Auto {
+        yes: false,
+        asked: false,
+    };
+    let flagged = SetupOptions {
+        auto_update: true,
+        ..base("flag.yaml")
+    };
+    run(&flagged, &mut ui, None).await.unwrap();
+    assert!(!ui.asked);
+    assert!(load("flag.yaml"));
+
+    // --yes with no flag: off, not asked.
+    let mut ui = Auto {
+        yes: true,
+        asked: false,
+    };
+    let quiet = SetupOptions {
+        yes: true,
+        username: Some("gpu".into()),
+        password: Some("pw".into()),
+        ..base("quiet.yaml")
+    };
+    run(&quiet, &mut ui, None).await.unwrap();
+    assert!(!ui.asked);
+    assert!(!load("quiet.yaml"));
 }

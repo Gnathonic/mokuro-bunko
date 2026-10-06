@@ -13,16 +13,82 @@ use crate::prompt;
 use bunko_update::{InstallKind, UpdateStatus, Updater};
 
 pub fn run(ctx: &Ctx, cmd: UpdateCmd) -> CmdResult {
+    if let UpdateCmd::Prefetch {
+        processor_config,
+        manifest_url,
+    } = cmd
+    {
+        return prefetch(ctx, processor_config, &manifest_url);
+    }
     let config = cfgfile::load_effective(&ctx.config_path)?;
     crate::logging::init_console(ctx.verbose);
+    let (key, custom) = bunko_update::auto::release_key(&config.update.public_key);
+    if custom {
+        eprintln!(
+            "Warning: {}",
+            bunko_update::auto::custom_key_warning(&key, "update.public_key in the config file")
+        );
+    }
     let updater = Updater::new(
         config.update.manifest_url.clone(),
         config.update.channel.clone(),
         crate::update_flavor(),
-    );
+    )
+    .with_public_key(key);
     match cmd {
         UpdateCmd::Check => check(&updater),
-        UpdateCmd::Apply { yes, restart } => apply(ctx, &updater, yes, restart),
+        UpdateCmd::Apply { yes, restart } => apply(ctx, &config, &updater, yes, restart),
+        UpdateCmd::Prefetch { .. } => unreachable!("handled above"),
+    }
+}
+
+/// `update prefetch` (hidden): see `crate::autoupdate`. One JSON result line last.
+fn prefetch(
+    ctx: &Ctx,
+    processor_config: Option<std::path::PathBuf>,
+    manifest_url: &str,
+) -> CmdResult {
+    crate::logging::init_console(ctx.verbose);
+    #[cfg(feature = "ocr")]
+    let result = {
+        let target = match &processor_config {
+            Some(p) => {
+                let cfg = bunko_processor::load_processor_config(p).map_err(Fail::msg)?;
+                crate::ocr_target::OcrTarget {
+                    role: crate::ocr_target::Role::Processor,
+                    storage: cfg.processor.storage,
+                    processor_config: Some(p.clone()),
+                    library: None,
+                    reason: String::new(),
+                }
+            }
+            None => {
+                let config = cfgfile::load_effective(&ctx.config_path)?;
+                crate::ocr_target::OcrTarget {
+                    role: crate::ocr_target::Role::Library,
+                    storage: config.storage.base_path.clone(),
+                    processor_config: None,
+                    library: Some(config),
+                    reason: String::new(),
+                }
+            }
+        };
+        super::install_ocr::prefetch(&target, manifest_url)
+    };
+    #[cfg(not(feature = "ocr"))]
+    let result = {
+        // The lite build has no OCR backend or models to bring along.
+        let _ = (processor_config, manifest_url);
+        crate::autoupdate::PrefetchResult {
+            ok: true,
+            ..Default::default()
+        }
+    };
+    println!("{}", serde_json::to_string(&result).unwrap_or_default());
+    match (result.ok, result.needs_owner) {
+        (true, _) => Ok(()),
+        (false, true) => Err(Fail::Exit(crate::autoupdate::PREFETCH_NEEDS_OWNER)),
+        (false, false) => Err(Fail::Exit(1)),
     }
 }
 
@@ -87,7 +153,13 @@ fn refusal(kind: &InstallKind) -> Option<String> {
     }
 }
 
-fn apply(ctx: &Ctx, updater: &Updater, yes: bool, restart: bool) -> CmdResult {
+fn apply(
+    ctx: &Ctx,
+    config: &bunko_core::Config,
+    updater: &Updater,
+    yes: bool,
+    restart: bool,
+) -> CmdResult {
     let kind = InstallKind::detect();
     if let Some(why) = refusal(&kind) {
         return Err(Fail::msg(why));
@@ -118,8 +190,28 @@ fn apply(ctx: &Ctx, updater: &Updater, yes: bool, restart: bool) -> CmdResult {
         println!("Update cancelled.");
         return Ok(());
     }
-    println!("Downloading mokuro-bunko {latest}...");
-    let installed = rt.block_on(updater.apply()).map_err(Fail::msg)?;
+    println!("Downloading mokuro-bunko {latest} (with its OCR backend pack and models)...");
+    // The release as one unit, as the automatic update installs it: the binary, its
+    // backend pack for the variant installed here, its models.
+    let installer = crate::autoupdate::Installer::new(
+        &config.update.manifest_url,
+        &config.update.channel,
+        &config.update.public_key,
+        crate::autoupdate::Who::Library {
+            cli_config: Some(ctx.config_path.clone()),
+        },
+        &config.storage.base_path,
+    );
+    let installed = rt
+        .block_on(bunko_update::auto::ReleaseInstaller::install(
+            &installer,
+            latest.clone(),
+        ))
+        .map_err(|f| match f.action {
+            Some(a) => Fail::msg(format!("{} ({a})", f.message)),
+            None => Fail::msg(f.message),
+        })?;
+    bunko_update::auto::Blocked::clear(&config.storage.base_path);
     println!("Installed mokuro-bunko {installed}.");
     if !restart {
         println!("Restart mokuro-bunko to run the new version.");

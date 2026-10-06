@@ -339,6 +339,7 @@ pub fn render_config(
     name: Option<&str>,
     tls_verify: &TlsVerify,
     hostname: &str,
+    auto_update: bool,
 ) -> String {
     let mut library = Mapping::new();
     library.insert("url".into(), url.into());
@@ -358,13 +359,28 @@ pub fn render_config(
     }
     let mut data = Mapping::new();
     data.insert("library".into(), Yaml::Mapping(library));
+    let mut processor = Mapping::new();
     if let Some(name) = name.filter(|n| !n.is_empty() && *n != hostname) {
-        let mut processor = Mapping::new();
         processor.insert("name".into(), name.into());
+    }
+    if auto_update {
+        processor.insert("auto_update".into(), Yaml::Bool(true));
+    }
+    if !processor.is_empty() {
         data.insert("processor".into(), Yaml::Mapping(processor));
     }
     let body = serde_yaml_ng::to_string(&Yaml::Mapping(data)).unwrap_or_default();
-    format!("{HEADER}{body}")
+    // The default (off) is written out as a comment, so the choice can be found and
+    // flipped in the file.
+    let note = if auto_update {
+        "\n# processor.auto_update: true updates this processor when its library updates\n\
+         # (the running volume finishes first; never a downgrade).\n"
+    } else {
+        "\n# To update this processor automatically when its library updates (the running\n\
+         # volume finishes first; never a downgrade), add under `processor:`:\n\
+         #   auto_update: true\n"
+    };
+    format!("{HEADER}{body}{note}")
 }
 
 /// Mode 600, or the Windows equivalent. A warning when it cannot be done.
@@ -485,6 +501,8 @@ pub struct SetupOptions {
     /// Offer the service step.
     pub service: bool,
     pub force: bool,
+    /// `--auto-update`: write `processor.auto_update: true` without asking.
+    pub auto_update: bool,
     /// What this machine offers (printed; from the pipeline's `describe`).
     pub machine: Option<MachineInfo>,
     /// The command prefix that runs this binary, for the printed hints.
@@ -629,6 +647,16 @@ pub async fn run(
         ));
     }
 
+    let auto_update = options.auto_update
+        || (!options.yes
+            && ui
+                .confirm(
+                    "Update this processor automatically when its library updates? \
+                     (the running volume finishes first; never a downgrade)",
+                    false,
+                )
+                .map_err(|e| fail(format!("could not read the answer: {e}")))?);
+
     let hostname = default_name();
     let name = options
         .name
@@ -644,6 +672,7 @@ pub async fn run(
         Some(&name),
         &options.tls_verify,
         &hostname,
+        auto_update,
     );
     let warning = write_config(&path, &text, overwrite)?;
     ui.say(&format!(
@@ -773,9 +802,10 @@ mod tests {
             Some("tower"),
             &TlsVerify::No,
             "tower",
+            false,
         );
         assert!(text.starts_with(HEADER));
-        assert!(!text.contains("processor:"), "{text}");
+        assert!(!text.contains("\nprocessor:"), "{text}");
         assert!(text.contains("tls_verify: false"));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("processor.yaml");
@@ -805,8 +835,12 @@ mod tests {
             Some("other"),
             &TlsVerify::Yes,
             "tower",
+            true,
         );
-        assert!(named.contains("processor:\n  name: other"), "{named}");
+        assert!(
+            named.contains("processor:\n  name: other\n  auto_update: true"),
+            "{named}"
+        );
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
             1,

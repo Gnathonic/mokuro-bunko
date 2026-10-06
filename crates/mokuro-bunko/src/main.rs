@@ -1,6 +1,7 @@
 //! `mokuro-bunko` — the command-line entry point: one binary for the server, its admin
 //! tools and (full build) the OCR processor. See `cli.rs` for the command tree.
 
+mod autoupdate;
 mod cfgfile;
 mod cli;
 mod cmd;

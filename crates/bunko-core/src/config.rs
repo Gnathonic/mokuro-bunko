@@ -312,6 +312,13 @@ pub struct UpdateConfig {
     pub channel: String,
     /// Release manifest URL (override for mirrors/testing).
     pub manifest_url: String,
+    /// Install a newer release on the channel by itself, at a quiet moment, and
+    /// restart (self-managed installs only; opt-in).
+    pub auto: bool,
+    /// The ed25519 key (base64) releases are checked against, for a fork or a test
+    /// release; empty: the key compiled into this build. Read from the config FILE only:
+    /// no environment variable, `config set`, admin API or app page sets it.
+    pub public_key: String,
 }
 
 impl Default for UpdateConfig {
@@ -322,6 +329,8 @@ impl Default for UpdateConfig {
             manifest_url:
                 "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json"
                     .into(),
+            auto: false,
+            public_key: String::new(),
         }
     }
 }
@@ -728,7 +737,12 @@ impl Config {
         c.update.check = get_bool(&s, "update", "check", true)?;
         c.update.channel = get_str(&s, "channel", "stable");
         c.update.manifest_url = get_str(&s, "manifest_url", &UpdateConfig::default().manifest_url);
-        let update_extra = leftovers(s, &["check", "channel", "manifest_url"]);
+        c.update.auto = get_bool(&s, "update", "auto", false)?;
+        c.update.public_key = get_str(&s, "public_key", "");
+        let update_extra = leftovers(
+            s,
+            &["check", "channel", "manifest_url", "auto", "public_key"],
+        );
 
         // Preserve whatever we did not understand.
         let known_sections = [
@@ -927,7 +941,13 @@ impl Config {
                 "update".into(),
                 merge(
                     "update",
-                    json!({"check": self.update.check, "channel": self.update.channel, "manifest_url": self.update.manifest_url}),
+                    {
+                        let mut u = json!({"check": self.update.check, "channel": self.update.channel, "manifest_url": self.update.manifest_url, "auto": self.update.auto});
+                        if !self.update.public_key.is_empty() {
+                            u["public_key"] = json!(self.update.public_key);
+                        }
+                        u
+                    },
                 ),
             );
         }
@@ -1069,6 +1089,7 @@ impl Config {
             "update.check" => self.update.check = b()?,
             "update.channel" => self.update.channel = value.to_string(),
             "update.manifest_url" => self.update.manifest_url = value.to_string(),
+            "update.auto" => self.update.auto = b()?,
             _ => {
                 let section_ok = [
                     "server",
@@ -1139,6 +1160,8 @@ impl Config {
         "update.check",
         "update.channel",
         "update.manifest_url",
+        "update.auto",
+        // Not `update.public_key`: a key is trusted only from the config file itself.
     ];
 
     /// Apply `MOKURO_<SECTION>_<KEY>` variables plus the `MOKURO_HOST`/`PORT`/`STORAGE` aliases.

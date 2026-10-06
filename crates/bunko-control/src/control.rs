@@ -11,7 +11,8 @@ use tokio_util::sync::CancellationToken;
 use crate::activity::{Activity, Changes};
 use crate::pause::{PauseCtl, PauseError};
 use crate::types::{
-    BackendView, LibraryView, PauseBody, PauseMode, Problem, Role, State, Stats, Status, Urls,
+    BackendView, LibraryView, PauseBody, PauseMode, Problem, Role, State, Stats, Status,
+    UpdateView, Urls,
 };
 
 /// GPU busy (%) and CPU cores busy right now, from whatever the platform offers.
@@ -114,6 +115,9 @@ struct Inner {
     link: Mutex<LinkState>,
     backend: Mutex<BackendView>,
     problems: Mutex<Vec<Problem>>,
+    /// The automatic update's state and the problems it raised (kept apart from the
+    /// doctor's, which `set_problems` replaces wholesale).
+    update: Mutex<(Option<UpdateView>, Vec<Problem>)>,
     urls: Mutex<Urls>,
     load: Mutex<Option<Arc<dyn LoadProbe>>>,
     stop: Mutex<Option<CancellationToken>>,
@@ -173,6 +177,7 @@ impl Control {
             }),
             backend: Mutex::new(BackendView::default()),
             problems: Mutex::new(Vec::new()),
+            update: Mutex::new((None, Vec::new())),
             load: Mutex::new(None),
             stop: Mutex::new(None),
         }))
@@ -272,6 +277,30 @@ impl Control {
         }
     }
 
+    /// The automatic update's state (`status.update`).
+    pub fn set_update(&self, view: Option<UpdateView>) {
+        let mut u = self.0.update.lock();
+        if u.0 != view {
+            u.0 = view;
+            drop(u);
+            self.0.changes.bump();
+        }
+    }
+
+    pub fn update_view(&self) -> Option<UpdateView> {
+        self.0.update.lock().0.clone()
+    }
+
+    /// The problems the automatic update raised (listed after the doctor's).
+    pub fn set_update_problems(&self, problems: Vec<Problem>) {
+        let mut u = self.0.update.lock();
+        if u.1 != problems {
+            u.1 = problems;
+            drop(u);
+            self.0.changes.bump();
+        }
+    }
+
     pub fn set_urls(&self, urls: Urls) {
         *self.0.urls.lock() = urls;
         self.0.changes.bump();
@@ -348,10 +377,15 @@ impl Control {
                 cpu_cores_busy: cpu,
             },
             backend: self.0.backend.lock().clone(),
-            problems: self.0.problems.lock().clone(),
+            problems: {
+                let mut p = self.0.problems.lock().clone();
+                p.extend(self.0.update.lock().1.iter().cloned());
+                p
+            },
             urls: self.0.urls.lock().clone(),
             managed: c.managed,
             can_pause: self.0.pause.is_some(),
+            update: self.0.update.lock().0.clone(),
         }
     }
 

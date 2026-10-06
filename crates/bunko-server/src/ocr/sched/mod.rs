@@ -309,6 +309,9 @@ pub struct Scheduler {
     /// Ended sessions per processor, for late events: sid → when.
     pub ended_sessions: HashMap<String, f64>,
     pub hold_logged: bool,
+    /// An automatic update is waiting for a quiet moment: no machine gets a new claim
+    /// (`held` is true everywhere); what is in flight finishes.
+    pub update_drain: bool,
     pub last_poll_tick: f64,
     /// When the per-scan state (attempted, strikes, stopped rows...) was last reset.
     pub scan_reset_at: f64,
@@ -375,6 +378,7 @@ impl Scheduler {
             results: HashMap::new(),
             ended_sessions: HashMap::new(),
             hold_logged: false,
+            update_drain: false,
             last_poll_tick: f64::NEG_INFINITY,
             scan_reset_at: f64::NEG_INFINITY,
             deps,

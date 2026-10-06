@@ -17,6 +17,15 @@ pub enum Fail {
 
 pub type CmdResult = Result<(), Fail>;
 
+impl std::fmt::Display for Fail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Fail::Error(m) => f.write_str(m),
+            Fail::Exit(code) => write!(f, "exit code {code}"),
+        }
+    }
+}
+
 impl Fail {
     pub fn msg(m: impl Display) -> Fail {
         Fail::Error(m.to_string())

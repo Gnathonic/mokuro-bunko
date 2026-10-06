@@ -456,6 +456,9 @@
                     <h3 class="settings-section__title">Updates</h3>
                     <p class="form-hint" id="update-summary">-</p>
                     <p class="form-hint" id="update-hint" hidden></p>
+                    <p class="form-hint" id="update-auto-state" role="status" hidden></p>
+                    <div id="update-problems"></div>
+                    <label class="check"><input type="checkbox" id="update-auto" onchange="saveUpdateAuto()"> Install updates automatically (at a quiet moment, then restart)</label>
                     <div class="connectivity-section__actions">
                         <button class="btn btn--secondary btn--sm" onclick="loadUpdate(true)">Check now</button>
                         <button class="btn btn--primary btn--sm" id="update-apply-btn" onclick="applyUpdate()" style="display:none">Update and restart</button>

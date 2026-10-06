@@ -97,6 +97,67 @@ pub struct Services {
     pub stop: CancellationToken,
     /// Set by the admin "Update and restart" action: the binary re-execs after shutdown.
     pub restart_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// Requests that write (uploads, moves, deletes, processor results) being served
+    /// now: an automatic update restarts only when there are none.
+    pub writes: WritesInFlight,
+}
+
+/// Counts the writing requests in flight ([`Services::writes`]).
+#[derive(Clone, Default, Debug)]
+pub struct WritesInFlight(Arc<std::sync::atomic::AtomicUsize>);
+
+impl WritesInFlight {
+    pub fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+struct WriteGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for WriteGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+async fn count_writes(
+    axum::extract::State(w): axum::extract::State<WritesInFlight>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let writes = !matches!(
+        req.method().as_str(),
+        "GET" | "HEAD" | "OPTIONS" | "PROPFIND"
+    );
+    let _guard = writes.then(|| {
+        w.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        WriteGuard(w.0.clone())
+    });
+    next.run(req).await
+}
+
+/// The automatic update's view of this server: OCR claims and writing requests.
+struct ServerQuiet {
+    ocr: crate::ocr::OcrControl,
+    writes: WritesInFlight,
+}
+
+impl crate::admin::Quiet for ServerQuiet {
+    fn drain(&self, on: bool) {
+        let ocr = self.ocr.clone();
+        tokio::spawn(async move { ocr.set_update_drain(on).await });
+    }
+
+    fn busy(&self) -> futures_util::future::BoxFuture<'_, Option<String>> {
+        Box::pin(async move {
+            let mut parts: Vec<String> = self.ocr.in_flight().await.into_iter().collect();
+            let w = self.writes.count();
+            if w > 0 {
+                parts.push(format!("{w} upload(s) or other write(s)"));
+            }
+            (!parts.is_empty()).then(|| parts.join(", "))
+        })
+    }
 }
 
 impl Services {
@@ -174,6 +235,7 @@ impl Services {
             thumbs,
             stop: CancellationToken::new(),
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            writes: WritesInFlight::default(),
         })
     }
 }
@@ -388,6 +450,16 @@ pub fn build_router_with(
 
 /// Bind, serve until SIGINT/SIGTERM, shut down in order.
 pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()> {
+    serve_router_with(services, app, None).await
+}
+
+/// [`serve_router`] with the automatic update's installer (`update.auto`; the binary
+/// supplies it).
+pub async fn serve_router_with(
+    services: &Services,
+    app: Router,
+    installer: Option<Arc<dyn bunko_update::auto::ReleaseInstaller>>,
+) -> anyhow::Result<()> {
     let (host, port, ssl) = {
         let c = services.core.config.read();
         (c.server.host.clone(), c.server.port, c.ssl.clone())
@@ -413,6 +485,21 @@ pub async fn serve_router(services: &Services, app: Router) -> anyhow::Result<()
     });
     if services.core.config.read().dyndns.enabled {
         services.dyndns.start();
+    }
+    if let Some(installer) = installer {
+        let (flag, stop2) = (services.restart_requested.clone(), stop.clone());
+        services.updates.set_auto(crate::admin::AutoDeps {
+            installer,
+            quiet: Arc::new(ServerQuiet {
+                ocr: services.ocr.clone(),
+                writes: services.writes.clone(),
+            }),
+            restart: Arc::new(move || {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                stop2.cancel();
+            }),
+            storage: services.core.layout.base.clone(),
+        });
     }
     services.updates.start(stop.clone());
     services.library.start();
@@ -517,6 +604,7 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
     };
     let dav = dav_handler(services.dav.clone(), services.dav_hooks.clone());
     let catalog = library.clone();
+    let writes = services.writes.clone();
     build_router_with(
         services.core.clone(),
         modules,
@@ -527,6 +615,7 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
                 queue_file,
                 crate::ocr::queue_file::middleware,
             ))
+            .layer(axum::middleware::from_fn_with_state(writes, count_writes))
             .layer(axum::middleware::from_fn_with_state(
                 catalog,
                 crate::library::catalog_middleware,

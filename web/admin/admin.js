@@ -615,8 +615,46 @@ function processorPause(pause) {
         ? ' until ' + processorClock(until / 1000, until - Date.now() > 20 * 3600 * 1000)
         : '';
     return '<div class="processor-transfer processor-transfer--paused" title="' +
-        escapeHtml('paused by its owner' + (pause.reason === 'schedule' ? ' (schedule)' : '') +
-            '; it takes no new work until it resumes') + '">paused' + escapeHtml(when) + '</div>';
+        escapeHtml(pause.reason === 'update'
+            ? 'paused for its automatic update; it takes no new work, finishes its running volume and comes back on the new version'
+            : 'paused by its owner' + (pause.reason === 'schedule' ? ' (schedule)' : '') +
+                '; it takes no new work until it resumes') + '">' +
+        (pause.reason === 'update' ? 'updating' : 'paused') + escapeHtml(when) + '</div>';
+}
+
+// The processor's version against the library's (0.7: the registration
+// reply tells it; a processor with auto_update on follows a newer library),
+// and where its automatic update stands.
+function processorVersion(mismatch, update) {
+    let html = '';
+    if (mismatch) {
+        const text = mismatch.relation === 'library_newer'
+            ? 'runs ' + mismatch.processor_version + ' (library: ' + mismatch.library_version + ')'
+            : mismatch.relation === 'library_older'
+                ? 'runs ' + mismatch.processor_version + ', newer than this library (' + mismatch.library_version + ')'
+                : 'runs ' + (mismatch.processor_version || 'an unknown version') + ' (library: ' + mismatch.library_version + ')';
+        const hint = mismatch.relation === 'library_older'
+            ? 'A processor never downgrades itself: update this library'
+            : 'With auto_update on in its processor.yaml it updates itself to the library\'s version';
+        html += '<div class="processor-transfer processor-transfer--held" data-version-mismatch="' +
+            escapeHtml(mismatch.relation) + '" title="' + escapeHtml(hint) + '">' + escapeHtml(text) + '</div>';
+    }
+    if (update && update.state && update.state !== 'idle' && update.state !== 'off') {
+        const words = {
+            waiting: 'finishing its volume, then updating',
+            downloading: 'downloading', installing: 'installing',
+            restarting: 'restarting into', failed: 'update failed', blocked: 'update needs its owner',
+        };
+        const text = (words[update.state] || update.state) +
+            (update.version ? ' ' + update.version : '') +
+            (update.message ? ' — ' + update.message : '');
+        html += '<div class="processor-transfer' +
+            (update.state === 'failed' || update.state === 'blocked' ? ' processor-transfer--held' : '') +
+            '" data-update-state="' + escapeHtml(update.state) + '"' +
+            (update.action ? ' title="' + escapeHtml(update.action) + '"' : '') + '>' +
+            escapeHtml(text) + '</div>';
+    }
+    return html;
 }
 
 // Rows whose runner keeps failing to START on this machine: the library
@@ -704,7 +742,7 @@ function processorRowHtml(p, machine) {
             ? '<div class="processors-machine__since" title="' +
               escapeHtml('connected ' + processorClock(p.connected_since, true)) + '">connected</div>'
             : '') +
-        (p ? processorPause(p.pause) + processorTransfer(p.transfer) + processorCannotStart(p.cannot_start) : '') +
+        (p ? processorPause(p.pause) + processorVersion(p.version_mismatch, p.update) + processorTransfer(p.transfer) + processorCannotStart(p.cannot_start) : '') +
         '</td>' +
         '<td class="processors-host" data-label="Hardware">' + escapeHtml(host) + '</td>' +
         '<td class="processors-rates-cell" data-label="Pages/min">' + processorRatesHtml(machine) + '</td>' +
@@ -4234,6 +4272,53 @@ async function loadUpdate(refresh) {
     const notes = document.getElementById('update-notes');
     notes.style.display = data.notes_url ? '' : 'none';
     if (data.notes_url) notes.href = data.notes_url;
+    const auto = document.getElementById('update-auto');
+    auto.checked = !!data.auto;
+    auto.disabled = false;
+    const line = updateAutoLine(data.auto_state);
+    const state = document.getElementById('update-auto-state');
+    state.textContent = line;
+    state.hidden = !line;
+    const problems = document.getElementById('update-problems');
+    problems.replaceChildren();
+    for (const p of data.problems || []) {
+        const el = document.createElement('p');
+        el.className = 'form-hint';
+        el.textContent = p.text + (p.hint ? ' ' + p.hint : '');
+        problems.appendChild(el);
+    }
+}
+
+// One line for the automatic update's state (null: nothing to say).
+function updateAutoLine(s) {
+    if (!s) return null;
+    const version = s.version ? ' ' + s.version : '';
+    switch (s.state) {
+        case 'waiting':
+            return 'Waiting: ' + (s.message || 'for a quiet moment (running volumes and uploads finish first)');
+        case 'downloading': case 'installing': case 'restarting':
+            return 'Updating to' + version + '\u2026' + (s.message ? ' ' + s.message : '');
+        case 'updated':
+            return 'Updated to' + version + (s.from ? ' (from ' + s.from + ')' : '');
+        case 'failed':
+            return 'Update to' + version + ' failed' + (s.message ? ': ' + s.message : '') + ' \u2014 will retry';
+        default:
+            return null; // blocked: its problem is listed below
+    }
+}
+
+async function saveUpdateAuto() {
+    const box = document.getElementById('update-auto');
+    box.disabled = true;
+    try {
+        const result = await apiPost('/update/settings', { auto: box.checked });
+        showToast(result.auto ? 'Automatic updates are on.' : 'Automatic updates are off.', 'success');
+    } catch (err) {
+        box.checked = !box.checked;
+        showToast('Could not save: ' + err.message, 'error');
+    } finally {
+        box.disabled = false;
+    }
 }
 
 async function applyUpdate() {

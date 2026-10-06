@@ -52,8 +52,32 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
   `mokuro-bunko.app` on macOS, Linux full and lite archives with a `.desktop`
   entry); Linux needs GTK 3 and AppIndicator, which `doctor` checks. Docker
   images have no tray.
+- Opt-in automatic updates. `update.auto: true` (config, admin panel Updates card,
+  app Settings) installs a newer release on the channel by itself: new OCR work is
+  held, the running volumes and uploads finish, the release is fetched and checked
+  as one unit — the program, its OCR backend pack for the installed variant and its
+  models — before anything is switched, then the server restarts (exec under the
+  tray, a service or a terminal; exit 75 under the Windows tray or `run.bat`). If the
+  new release's pack does not load after the switch, program and pack roll back
+  together. A processor with `processor.auto_update: true` (`processor setup
+  --auto-update`) follows its library: when the library reports a newer version it
+  finishes its running volume, installs exactly that release, restarts and
+  reconnects; it never downgrades. Self-managed installs only; Docker and package
+  installs are told what to do. `/control/status` has an `update` block, the tray
+  shows "Updating to X…" / "Updated to X", and anything that needs the owner (a
+  driver, disk space, a bad signature, a rollback, a library older than its
+  processor, a changed GPU) raises a `fail` problem the tray flags and announces
+  once with a desktop notification.
+- Processor protocol v3 additions: `version_mismatch` in the registration reply
+  and the `update_status` event; the admin panel's processor list shows both.
+- `update.public_key` (config file only, logged loudly) for fork and test releases.
 
 ### Changed
+- A backend pack belongs to exactly one release: the program refuses a pack from
+  another release ("the backend pack is from mokuro-bunko A, this is B: run
+  install-ocr"), and `doctor`, `/control/status` and the tray name the pack as
+  "<variant> for <release>". The admin panel's Update button and `update apply`
+  install the release's pack and models together with the program.
 - OCR engines are `hayai-nova` (the new default primary), `paddle-manga` and
   `ppocr-manga`, all Apache-2.0. A fresh config has one `hayai-nova` primary row.
   At fp32 their text is identical to 0.5.2's; default speed is above a tuned 0.5.2
