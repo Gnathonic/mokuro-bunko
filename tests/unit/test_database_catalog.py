@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -46,15 +47,17 @@ class TestCatalogSeries:
         assert stored["missing_pages"] == 7
         assert stored["damaged_volumes"] == 1
 
-    def test_a_table_from_before_the_damage_columns_reads_as_undamaged(
+    def test_the_0_5_2_series_keyed_table_is_left_for_a_rollback(
         self, tmp_path: Path
     ) -> None:
-        """The ALTER TABLE path: an older database opens, and its rows say
-        zero damage until the next pass rewrites them."""
+        """0.5.2 materialized into `catalog_series`, keyed by the folded
+        series key. This build neither reads nor writes it: the startup pass
+        rebuilds every row anyway (the listing falls back to the scanning
+        index until then), and leaving the table exactly as it was means a
+        rollback to 0.5.2 finds what its own `ON CONFLICT(series_key)` upsert
+        needs."""
         path = tmp_path / "legacy.db"
-        legacy = Database(path)
-        with legacy._connection() as conn:  # noqa: SLF001 - exercising migration
-            conn.execute("DROP TABLE catalog_series")
+        with sqlite3.connect(path) as conn:
             conn.execute(
                 """
                 CREATE TABLE catalog_series (
@@ -65,6 +68,8 @@ class TestCatalogSeries:
                     latest_volume_modified REAL NOT NULL DEFAULT 0,
                     total_pages INTEGER NOT NULL DEFAULT 0,
                     total_chars INTEGER NOT NULL DEFAULT 0,
+                    missing_pages INTEGER NOT NULL DEFAULT 0,
+                    damaged_volumes INTEGER NOT NULL DEFAULT 0,
                     scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )
                 """
@@ -74,18 +79,49 @@ class TestCatalogSeries:
                 "VALUES ('dr stone', 'Dr Stone', 3)"
             )
 
-        reopened = Database(path)
-        [stored] = reopened.list_catalog_series()
-        assert stored["missing_pages"] == 0
-        assert stored["damaged_volumes"] == 0
+        upgraded = Database(path)
+        assert upgraded.list_catalog_series() == []
+        upgraded.upsert_catalog_series(row(volume_count=5))
 
-    def test_upsert_replaces_by_series_key(self, db: Database) -> None:
+        with sqlite3.connect(path) as conn:
+            # 0.5.2's own upsert, verbatim in shape, still works on its table.
+            conn.execute(
+                "INSERT INTO catalog_series (series_key, folder_name, volume_count) "
+                "VALUES ('dr stone', 'Dr Stone', 4) "
+                "ON CONFLICT(series_key) DO UPDATE SET volume_count = excluded.volume_count"
+            )
+            legacy_rows = conn.execute(
+                "SELECT folder_name, volume_count FROM catalog_series"
+            ).fetchall()
+        assert legacy_rows == [("Dr Stone", 4)]
+        assert [r["volume_count"] for r in upgraded.list_catalog_series()] == [5]
+
+    def test_upsert_replaces_by_folder_name(self, db: Database) -> None:
         db.upsert_catalog_series(row())
         db.upsert_catalog_series(row(volume_count=4, cover_path=None))
         rows = db.list_catalog_series()
         assert len(rows) == 1
         assert rows[0]["volume_count"] == 4
         assert rows[0]["cover_path"] is None
+
+    def test_case_variant_folders_sharing_a_series_key_keep_separate_rows(
+        self, db: Database
+    ) -> None:
+        """Prod 2026-10-06: `Kingdom/` (79 volumes) and a stray `kingdom/`
+        (volume 80) shared the key `kingdom`; one row meant the catalog
+        showed only volume 80."""
+        db.upsert_catalog_series(row(series_key="kingdom", folder_name="Kingdom", volume_count=79))
+        db.upsert_catalog_series(row(series_key="kingdom", folder_name="kingdom", volume_count=1))
+        assert [(r["folder_name"], r["volume_count"]) for r in db.list_catalog_series()] == [
+            ("Kingdom", 79),
+            ("kingdom", 1),
+        ]
+
+    def test_prune_keeps_by_folder_name_not_series_key(self, db: Database) -> None:
+        db.upsert_catalog_series(row(series_key="kingdom", folder_name="Kingdom"))
+        db.upsert_catalog_series(row(series_key="kingdom", folder_name="kingdom"))
+        assert db.prune_catalog_series({"Kingdom"}) == 1
+        assert [r["folder_name"] for r in db.list_catalog_series()] == ["Kingdom"]
 
     def test_list_orders_by_folder_name(self, db: Database) -> None:
         db.upsert_catalog_series(row(series_key="b", folder_name="Beta"))
@@ -95,7 +131,7 @@ class TestCatalogSeries:
     def test_prune_drops_everything_not_kept(self, db: Database) -> None:
         db.upsert_catalog_series(row(series_key="a", folder_name="Alpha"))
         db.upsert_catalog_series(row(series_key="b", folder_name="Beta"))
-        removed = db.prune_catalog_series({"a"})
+        removed = db.prune_catalog_series({"Alpha"})
         assert removed == 1
         assert [r["series_key"] for r in db.list_catalog_series()] == ["a"]
 
