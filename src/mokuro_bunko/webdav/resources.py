@@ -296,7 +296,14 @@ def _try_acquire_all(paths: list[Path]) -> list[Path] | None:
     """
     ordered = sorted(paths, key=lambda p: str(p.resolve()).casefold())
     acquired: list[Path] = []
+    keys: set[tuple[str, ...]] = set()
     for path in ordered:
+        # A rename that only changes case names one entry twice, and the
+        # keys are case-folded: lock it once, or it conflicts with itself.
+        key = _PATH_WRITE_LOCKS._parts(path)  # noqa: SLF001 - same module
+        if key in keys:
+            continue
+        keys.add(key)
         if not _PATH_WRITE_LOCKS.acquire(path):
             for held in reversed(acquired):
                 _PATH_WRITE_LOCKS.release(held)
@@ -451,6 +458,36 @@ class PathMapper:
 
         return None
 
+    def destination_to_physical(
+        self,
+        virtual_path: str,
+        username: str | None = None,
+    ) -> Path | None:
+        """Where a MOVE/COPY to ``virtual_path`` puts what it moves.
+
+        `virtual_to_physical`, except that for a library path the last
+        segment is taken as written instead of resolved: on a
+        case-insensitive filesystem resolving `Kingdom` can hand back the
+        source's own on-disk `kingdom`, turning a rename that fixes the case
+        into a rename onto itself.
+        """
+        if self.get_path_type(virtual_path) != "library":
+            return self.virtual_to_physical(virtual_path, username)
+        parent_virtual, _, name = ("/" + virtual_path.strip("/")).rpartition("/")
+        if name in ("", ".", ".."):
+            return None
+        if parent_virtual == f"/{self.READER_ROOT}":
+            parent = self.library_path.resolve()
+        else:
+            resolved_parent = self.virtual_to_physical(parent_virtual, username)
+            if resolved_parent is None:
+                return None
+            parent = resolved_parent
+        candidate = parent / name
+        if not candidate.is_relative_to(self.library_path.resolve()):
+            return None
+        return candidate
+
     def physical_to_virtual(
         self,
         physical_path: Path,
@@ -590,7 +627,7 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
         dest_type = mapper.get_path_type(dest_path)
         if source_type not in {"library", "progress"} or dest_type != source_type:
             return None
-        return mapper.virtual_to_physical(dest_path, self._get_actor_username())
+        return mapper.destination_to_physical(dest_path, self._get_actor_username())
 
     def _audit(self, action: str, *, details: dict[str, Any] | None = None) -> None:
         db = self._get_database()
@@ -907,7 +944,7 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
             if mapper is not None:
                 try:
                     new_rel = str(
-                        dest_physical.resolve().relative_to(mapper.library_path.resolve())
+                        dest_physical.relative_to(mapper.library_path.resolve())
                     )
                 except ValueError:
                     new_rel = None
@@ -971,7 +1008,7 @@ class MokuroFileResource(DAVNonCollection):  # type: ignore[misc]
                     old_rel = self._relative_under_library()
                     try:
                         new_rel = str(
-                            dest_physical.resolve().relative_to(mapper.library_path.resolve())
+                            dest_physical.relative_to(mapper.library_path.resolve())
                         )
                     except ValueError:
                         new_rel = None
@@ -1094,7 +1131,7 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
     def _resolve_destination_path(self, dest_path: str) -> Path | None:
         if self.path_mapper.get_path_type(dest_path) != "library":
             return None
-        return self.path_mapper.virtual_to_physical(dest_path, self._get_actor_username())
+        return self.path_mapper.destination_to_physical(dest_path, self._get_actor_username())
 
     def _get_library_volume_paths(self) -> list[str]:
         """Collect CBZ paths relative to the library root before a folder move."""
@@ -1409,7 +1446,7 @@ class MokuroFolderResource(DAVCollection):  # type: ignore[misc]
             new_rel_prefix = None
             try:
                 new_rel_prefix = str(
-                    dest_physical.resolve().relative_to(self.path_mapper.library_path.resolve())
+                    dest_physical.relative_to(self.path_mapper.library_path.resolve())
                 )
             except ValueError:
                 new_rel_prefix = None

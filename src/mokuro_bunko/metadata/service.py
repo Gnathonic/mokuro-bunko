@@ -220,7 +220,7 @@ class MetadataService:
     def _materialize_catalog_row(
         self, folder: SeriesFolder, volumes: Sequence[VolumeEntry]
     ) -> None:
-        """Upsert this series' render-ready row in `catalog_series`.
+        """Upsert this folder's render-ready catalog row (`catalog_folders`).
 
         One scandir gathers what the compiled entries don't carry — archive
         mtimes (freshness) and which cover sidecars exist. Everything else
@@ -356,9 +356,7 @@ class MetadataService:
                     # simply didn't reach, so both are skipped on abort — the
                     # next full pass settles them.
                     self.database.prune_series_entry_cache(keep)
-                    self.database.prune_catalog_series(
-                        normalize_volume_title_key(folder.title) for folder in folders
-                    )
+                    self.database.prune_catalog_series(folder.title for folder in folders)
                     try:
                         changed += 1 if self._publish_catalog(catalog_entries) else 0
                     except MetadataWriteBusy:
