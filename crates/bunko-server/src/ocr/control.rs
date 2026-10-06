@@ -446,6 +446,16 @@ impl OcrControl {
 
     // --- holds -------------------------------------------------------------------------------
 
+    /// An automatic update waits: no machine gets new claims (`false`: they do again).
+    pub async fn set_update_drain(&self, on: bool) {
+        let _ = self.ask(move |s| s.set_update_drain(on)).await;
+    }
+
+    /// What OCR has in flight that a restart would break (None: nothing).
+    pub async fn in_flight(&self) -> Option<String> {
+        self.ask(|s| s.in_flight()).await.flatten()
+    }
+
     pub async fn hold(&self, machine: &str) {
         let m = machine.to_string();
         let _ = self.ask(move |s| s.hold_queue(&m)).await;

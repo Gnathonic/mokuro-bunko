@@ -371,6 +371,21 @@ depends on `bunko_update::InstallKind::detect()`:
 | distro package, Homebrew, Nix (`/usr/bin`, `Cellar`, `/nix/store`) | managed | notice | the package manager |
 | Android / iOS | mobile | notice | the app store |
 
+A self-managed install updates the release as one unit (the binary, the tray next to
+it, the release's backend pack for the installed variant, the models its compiled-in
+manifests name): the new binary is staged next to the running one and runs its own
+hidden `update prefetch` (stages + load-checks its pack in `backends/.staging-<variant>`,
+fetches its models) before anything is switched; then the binary and the pack switch
+together, the old ones kept (`.mokuro-bunko-previous`, `backends/.prev-<name>`) until the
+new release's pack has loaded after the restart (`install-ocr --probe` in a child), and
+rolled back together when it does not. Opt-in automatic updates (`update.auto`,
+`processor.auto_update`) do the same unattended at a quiet moment
+(docs/configuration.md "Automatic updates"); a version's manifest is derived from
+`update.manifest_url` (`…/releases/download/v<ver>/release.json`), so a mirror must keep
+every version it serves under `v<ver>/`. A test or fork release signed with another key
+is trusted only through `update.public_key` in the config FILE (never the environment,
+never the admin API), logged loudly at every start.
+
 `install.sh` verifies the same signature with OpenSSL 3 when available (warns or, with
 `--require-signature`, fails without it) and always checks the sha256.
 `install.ps1` checks the sha256 over HTTPS but cannot check ed25519 (Windows
@@ -555,7 +570,19 @@ by a SONAME carried under another file name, and it runs in the manylinux contai
 which has no `/opt/rocm`.
 
 Which pack a process uses: `MOKURO_TORCH_PACK=<dir>` (the images set it), else the
-loader scans `<storage>/backends/` (bunko-engines `torch::discover`).
+loader scans `<storage>/backends/` (bunko-engines `torch::discover`; names starting with
+`.` — `.staging-*`, `.prev-*` — are never opened).
+
+**A pack is locked to its release.** `bunko_version` (written by `xtask torch-pack` from
+the workspace version) must equal the loading binary's version: the loader refuses any
+other release's pack (`the backend pack is from mokuro-bunko A, this is B: each release
+runs only its own pack; run 'mokuro-bunko install-ocr'`) before it checks the ABI, and
+`install-ocr` installs only the pack listed in its own release's `release.json` (an
+installed pack of another release does not count as installed). A pack without
+`bunko_version` (built outside a release) is a development pack and any build opens it.
+`doctor`, `/control/status` (`backend.pack`) and the tray name the pack as
+`<variant> for <release> (<dir name>)`. The `release.json` entry also carries the pack's
+`requires` (e.g. `nvidia_driver`), so an installer can refuse before downloading.
 
 ### Archives, release.json, trust chain
 

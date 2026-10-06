@@ -57,6 +57,10 @@ pub struct ProcessorSettings {
     pub storage: PathBuf,
     /// RAM queued archives may use across all sessions; 0 = always disk.
     pub archive_memory_mb: u64,
+    /// Follow the library: when it reports a newer version, finish the running volume,
+    /// install exactly that release (binary, backend pack, models) and restart. Opt-in;
+    /// never a downgrade.
+    pub auto_update: bool,
 }
 
 impl Default for ProcessorSettings {
@@ -67,6 +71,30 @@ impl Default for ProcessorSettings {
             max_sessions: 1,
             storage: default_storage_path(),
             archive_memory_mb: DEFAULT_ARCHIVE_MEMORY_MB,
+            auto_update: false,
+        }
+    }
+}
+
+/// `update:`: where releases come from (only `processor.auto_update` uses it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateSettings {
+    /// The latest release's `release.json` (a mirror or fork); the exact version's is
+    /// derived from it (`bunko_update::auto::release_manifest_url`).
+    pub manifest_url: String,
+    /// A fork's or test release's ed25519 key (base64); empty: the compiled-in key.
+    /// Only ever read from this file.
+    pub public_key: String,
+}
+
+pub const DEFAULT_MANIFEST_URL: &str =
+    "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json";
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        UpdateSettings {
+            manifest_url: DEFAULT_MANIFEST_URL.into(),
+            public_key: String::new(),
         }
     }
 }
@@ -75,6 +103,7 @@ impl Default for ProcessorSettings {
 pub struct ProcessorConfig {
     pub library: LibrarySettings,
     pub processor: ProcessorSettings,
+    pub update: UpdateSettings,
 }
 
 /// The machine's hostname (`processor.name`'s default).
@@ -201,7 +230,7 @@ pub fn parse_processor_config(raw: &str, origin: &Path) -> Result<ProcessorConfi
     let mut unknown: Vec<String> = data
         .keys()
         .map(key_text)
-        .filter(|k| !matches!(k.as_str(), "library" | "processor" | "ocr"))
+        .filter(|k| !matches!(k.as_str(), "library" | "processor" | "ocr" | "update"))
         .collect();
     unknown.sort();
     if let Some(first) = unknown.first() {
@@ -243,8 +272,26 @@ pub fn parse_processor_config(raw: &str, origin: &Path) -> Result<ProcessorConfi
             "max_sessions",
             "storage",
             "archive_memory_mb",
+            "auto_update",
         ],
     )?;
+    let auto_update = match get(processor, "auto_update") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(err("processor.auto_update: true or false")),
+    };
+    let update = section(&data, "update", &["manifest_url", "public_key"])?;
+    let update = UpdateSettings {
+        manifest_url: {
+            let u = text(get(update, "manifest_url"));
+            if u.trim().is_empty() {
+                DEFAULT_MANIFEST_URL.to_string()
+            } else {
+                u.trim().to_string()
+            }
+        },
+        public_key: text(get(update, "public_key")).trim().to_string(),
+    };
     let public_name = match get(processor, "public_name") {
         None => None,
         Some(Value::String(s)) => {
@@ -319,7 +366,9 @@ pub fn parse_processor_config(raw: &str, origin: &Path) -> Result<ProcessorConfi
             max_sessions: u32::try_from(max_sessions).unwrap_or(u32::MAX),
             storage,
             archive_memory_mb,
+            auto_update,
         },
+        update,
     })
 }
 
@@ -396,7 +445,7 @@ mod tests {
         let e = parse(&format!("{MINIMAL}processor:\n  nmae: x\n")).unwrap_err();
         assert_eq!(
             e.0,
-            "processor.nmae: no such setting (expected one of name, public_name, max_sessions, storage, archive_memory_mb)"
+            "processor.nmae: no such setting (expected one of name, public_name, max_sessions, storage, archive_memory_mb, auto_update)"
         );
         assert_eq!(
             parse("library:\n  url: x\n  username: u\n").unwrap_err().0,
@@ -438,6 +487,31 @@ mod tests {
         assert_eq!(ok.processor.archive_memory_mb, 0);
         assert_eq!(ok.processor.storage, PathBuf::from("/data/p"));
         assert_eq!(ok.processor.name, "tower");
+        assert!(!ok.processor.auto_update, "opt-in");
+        assert_eq!(ok.update, UpdateSettings::default());
+    }
+
+    #[test]
+    fn auto_update_and_update_section() {
+        let c = parse(&format!(
+            "{MINIMAL}processor:\n  auto_update: true\nupdate:\n  manifest_url: http://127.0.0.1:8000/release.json\n  public_key: abc=\n"
+        ))
+        .unwrap();
+        assert!(c.processor.auto_update);
+        assert_eq!(c.update.manifest_url, "http://127.0.0.1:8000/release.json");
+        assert_eq!(c.update.public_key, "abc=");
+        assert_eq!(
+            parse(&format!("{MINIMAL}processor:\n  auto_update: yes please\n"))
+                .unwrap_err()
+                .0,
+            "processor.auto_update: true or false"
+        );
+        assert!(
+            parse(&format!("{MINIMAL}update:\n  channel: x\n"))
+                .unwrap_err()
+                .0
+                .starts_with("update.channel: no such setting")
+        );
     }
 
     #[test]

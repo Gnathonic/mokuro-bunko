@@ -45,5 +45,5 @@ pub use pipeline::{
     CancelToken, MachineInfo, PagePipeline, PageProgress, PipelineReport, QueueReport, ReadyInfo,
     RunError, StageReport, VolumeMeta, VolumeOutcome, VolumeRunner,
 };
-pub use remote::{ServeError, ServeOptions, serve};
+pub use remote::{ServeError, ServeExit, ServeOptions, serve};
 pub use session::SIDECAR_NOT_SENT;

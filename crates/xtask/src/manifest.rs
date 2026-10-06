@@ -239,6 +239,7 @@ fn collect_backends(
                 parts,
                 external_size: pack.external_size(),
                 installed_size: pack.installed_size(),
+                requires: (pack.requires != Default::default()).then(|| pack.requires.clone()),
             },
         );
     }

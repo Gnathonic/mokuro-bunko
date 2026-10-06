@@ -51,11 +51,20 @@ fn full_status() -> bc::Status {
             pack: Some("torch-cu130-2.13.0".into()),
             devices: vec!["gpu:0 RTX 4090 sm_89".into()],
         },
-        problems: vec![bc::Problem {
-            severity: bc::Severity::Warn,
-            text: "slow disk".into(),
-            hint: None,
-        }],
+        problems: vec![
+            bc::Problem {
+                severity: bc::Severity::Warn,
+                text: "slow disk".into(),
+                hint: None,
+                kind: None,
+            },
+            bc::Problem {
+                severity: bc::Severity::Fail,
+                text: "The automatic update to 0.7.1 needs you: not enough disk space".into(),
+                hint: Some("Free 2 GB.".into()),
+                kind: Some("update".into()),
+            },
+        ],
         urls: bc::Urls {
             dashboard: "/app/dashboard".into(),
             library: Some("https://lib.example".into()),
@@ -63,6 +72,14 @@ fn full_status() -> bc::Status {
         },
         managed: true,
         can_pause: true,
+        update: Some(bc::UpdateView {
+            state: "updated".into(),
+            version: Some("0.7.1".into()),
+            from: Some("0.7.0".into()),
+            message: Some("updated".into()),
+            auto: true,
+            since: Some("2026-10-05T10:00:00Z".into()),
+        }),
     }
 }
 
@@ -81,6 +98,15 @@ fn status_round_trips_into_the_tray_types() {
         Some(7310.0)
     );
     assert_eq!(s.problems[0].severity, "warn");
+    assert_eq!(s.problems[1].severity, "fail");
+    assert_eq!(s.problems[1].kind.as_deref(), Some("update"));
+    assert_eq!(s.problems[1].hint.as_deref(), Some("Free 2 GB."));
+    let u = s.update.as_ref().unwrap();
+    assert_eq!(u.state, "updated");
+    assert_eq!(u.version.as_deref(), Some("0.7.1"));
+    assert_eq!(u.from.as_deref(), Some("0.7.0"));
+    assert_eq!(u.auto, Some(true));
+    assert_eq!(u.since.as_deref(), Some("2026-10-05T10:00:00Z"));
     assert_eq!(s.urls.dashboard.as_deref(), Some("/app/dashboard"));
     assert!(s.managed);
     assert!(s.can_pause());
@@ -94,10 +120,12 @@ fn status_round_trips_into_the_tray_types() {
         }],
         supervised: &[],
         update: &UpdateView::default(),
+        updating: &[],
         notice: None,
         now: chrono::Local::now(),
     });
-    assert_eq!(m.icon, IconState::Paused);
+    // The update's "needs you" problem is a fail: attention beats paused.
+    assert_eq!(m.icon, IconState::Attention);
     assert!(m.status_lines[0].starts_with("Processor: Paused until "));
     assert!(m.can_resume && !m.can_pause_now);
 }

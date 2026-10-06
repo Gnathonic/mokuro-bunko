@@ -64,6 +64,22 @@ processor:
   # goes to `storage` on disk instead. 0 = always disk. Other platforms always
   # use the disk.
   archive_memory_mb: 2048
+  # Follow the library's version (off by default). When the library reports a
+  # newer mokuro-bunko than this one (it compares the two at registration),
+  # the processor finishes and uploads its running volume, takes no new work,
+  # installs exactly the library's release (program, OCR backend pack, models),
+  # restarts and reconnects. Never a downgrade: a library that is older is only
+  # reported. Only a self-managed install updates itself.
+  auto_update: false
+
+# Where releases come from (only auto_update uses this section).
+# update:
+#   # The latest release's release.json: a mirror or a fork. The library's
+#   # version's manifest is derived from it.
+#   manifest_url: "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json"
+#   # A fork's or a test release's signing key; read from this file only, and
+#   # logged loudly at every start. Leave it out to trust the official key only.
+#   # public_key: ""
 
 # The 0.5 `ocr:` section (ocr.backend picked a torch build) is accepted and
 # ignored. The processor runs on the OCR backend pack in its storage

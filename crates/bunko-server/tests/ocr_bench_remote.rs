@@ -100,7 +100,9 @@ async fn a_remote_processor_is_benchmarked_through_the_admin_api() {
                 max_sessions: 1,
                 storage: dir.path().join("processor"),
                 archive_memory_mb: 64,
+                auto_update: false,
             },
+            update: Default::default(),
         },
         std::sync::Arc::new(fake),
     );

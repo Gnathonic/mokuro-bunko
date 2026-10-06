@@ -189,9 +189,56 @@ pub struct Inputs<'a> {
     pub instances: &'a [InstanceView],
     pub supervised: &'a [SupervisedView],
     pub update: &'a UpdateView,
+    /// Roles inside the restart grace (an automatic update is restarting them), with
+    /// the version being installed: shown as "Updating to X…", never as a crash.
+    pub updating: &'a [(String, Option<String>)],
     /// A short-lived message (an action that failed).
     pub notice: Option<&'a str>,
     pub now: DateTime<Local>,
+}
+
+/// How long "Updated to X" stays in the menu.
+const UPDATED_SHOWN_FOR_MINUTES: i64 = 15;
+
+fn updating_text(version: Option<&str>) -> String {
+    match version.filter(|v| !v.is_empty()) {
+        Some(v) => format!("Updating to {v}…"),
+        None => "Updating…".into(),
+    }
+}
+
+/// The status line that replaces the state text while an automatic update runs.
+fn updating_line(s: &Status) -> Option<String> {
+    let u = s.update.as_ref()?;
+    let base = updating_text(u.version.as_deref());
+    match u.state.as_str() {
+        "waiting" => Some(format!("{base} (after the running volume)")),
+        "downloading" | "installing" | "restarting" => Some(base),
+        _ => None,
+    }
+}
+
+/// Extra lines under the state: the result of the last automatic update.
+fn update_result_line(s: &Status, now: DateTime<Local>) -> Option<String> {
+    let u = s.update.as_ref()?;
+    match u.state.as_str() {
+        "updated" => {
+            let since = DateTime::parse_from_rfc3339(u.since.as_deref()?).ok()?;
+            let age = now.signed_duration_since(since.with_timezone(&Local));
+            if age > chrono::Duration::minutes(UPDATED_SHOWN_FOR_MINUTES) {
+                return None;
+            }
+            Some(match u.version.as_deref().filter(|v| !v.is_empty()) {
+                Some(v) => format!("Updated to {v}"),
+                None => "Updated".into(),
+            })
+        }
+        "failed" => Some(match u.version.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) => format!("⚠ Update to {v} failed — will retry"),
+            None => "⚠ Update failed — will retry".into(),
+        }),
+        _ => None,
+    }
 }
 
 pub fn build(inp: &Inputs) -> MenuModel {
@@ -206,13 +253,27 @@ pub fn build(inp: &Inputs) -> MenuModel {
     let mut dashboard = false;
     let multi = inp.instances.len() + inp.supervised.len() > 1;
 
+    let grace = |role: &str| inp.updating.iter().find(|(r, _)| r == role);
     for inst in inp.instances {
         let label = role_label(&inst.role);
+        if inst.status.is_none()
+            && let Some((_, v)) = grace(&inst.role)
+        {
+            status_lines.push(format!("{label}: {}", updating_text(v.as_deref())));
+            continue;
+        }
         match &inst.status {
             Some(s) => {
                 dashboard = true;
-                let text = state_text(s, inp.now);
+                let text = updating_line(s).unwrap_or_else(|| state_text(s, inp.now));
                 status_lines.push(format!("{label}: {text}"));
+                if let Some(l) = update_result_line(s, inp.now) {
+                    status_lines.push(if l.starts_with('⚠') || !multi {
+                        l
+                    } else {
+                        format!("{label}: {l}")
+                    });
+                }
                 if matches!(s.state.as_str(), "error" | "disconnected")
                     || s.problems.iter().any(|p| p.severity == "fail")
                 {
@@ -261,7 +322,20 @@ pub fn build(inp: &Inputs) -> MenuModel {
             }
         }
     }
+    // A role that is restarting for its update but is not (yet) in discovery at all.
+    for (role, v) in inp.updating {
+        if !inp.instances.iter().any(|i| i.role == *role) {
+            status_lines.push(format!(
+                "{}: {}",
+                role_label(role),
+                updating_text(v.as_deref())
+            ));
+        }
+    }
     for sup in inp.supervised {
+        if grace(&sup.role).is_some() {
+            continue; // the deliberate restart, not "stopped (exit code 75)"
+        }
         status_lines.push(format!("{}: {}", role_label(&sup.role), sup.text));
         attention = attention || sup.failing;
     }
@@ -430,9 +504,103 @@ mod tests {
             instances,
             supervised: &[],
             update: &UpdateView::default(),
+            updating: &[],
             notice: None,
             now: now(),
         })
+    }
+
+    fn with_update(state: &str, since: &str) -> Status {
+        status(&format!(
+            r#"{{"role":"server","state":"idle","update":{{"state":"{state}","version":"0.7.1","from":"0.7.0","since":"{since}"}}}}"#
+        ))
+    }
+
+    #[test]
+    fn updating_replaces_the_state_text() {
+        for state in ["downloading", "installing", "restarting"] {
+            let m = model(&[inst(with_update(state, ""), false)]);
+            assert_eq!(m.status_lines, ["Library: Updating to 0.7.1…"], "{state}");
+        }
+        let m = model(&[inst(with_update("waiting", ""), false)]);
+        assert_eq!(
+            m.status_lines,
+            ["Library: Updating to 0.7.1… (after the running volume)"]
+        );
+        assert_eq!(m.icon, IconState::Idle);
+    }
+
+    #[test]
+    fn updated_is_shown_for_fifteen_minutes() {
+        let at = |mins: i64| (now() - chrono::Duration::minutes(mins)).to_rfc3339();
+        let m = model(&[inst(with_update("updated", &at(5)), false)]);
+        assert_eq!(m.status_lines, ["Library: Idle", "Updated to 0.7.1"]);
+        let m = model(&[inst(with_update("updated", &at(16)), false)]);
+        assert_eq!(m.status_lines, ["Library: Idle"]);
+        // No usable time: do not claim it is recent.
+        let m = model(&[inst(with_update("updated", ""), false)]);
+        assert_eq!(m.status_lines, ["Library: Idle"]);
+    }
+
+    #[test]
+    fn a_failed_update_says_it_will_retry_without_raising_attention() {
+        let m = model(&[inst(with_update("failed", ""), false)]);
+        assert_eq!(
+            m.status_lines,
+            ["Library: Idle", "⚠ Update to 0.7.1 failed — will retry"]
+        );
+        assert_eq!(m.icon, IconState::Idle);
+    }
+
+    #[test]
+    fn blocked_updates_drive_attention_through_their_problem() {
+        let mut s = with_update("blocked", "");
+        s.problems = vec![crate::status::Problem {
+            severity: "fail".into(),
+            text: "The automatic update to 0.7.1 needs you: not enough disk space".into(),
+            hint: None,
+            kind: Some("update".into()),
+        }];
+        let m = model(&[inst(s, false)]);
+        assert_eq!(m.icon, IconState::Attention);
+        assert!(m.status_lines[1].starts_with("✖ The automatic update"));
+    }
+
+    #[test]
+    fn the_restart_grace_hides_a_missing_instance_and_a_restarting_slot() {
+        let updating = [("server".to_string(), Some("0.7.1".to_string()))];
+        let gone = InstanceView {
+            role: "server".into(),
+            status: None,
+            error: Some("connection refused".into()),
+            tray_started: true,
+        };
+        let sup = SupervisedView {
+            role: "server".into(),
+            text: "stopped (exit code 75), restarting in 0 s".into(),
+            failing: true,
+        };
+        let run = |instances: &[InstanceView], supervised: &[SupervisedView]| {
+            build(&Inputs {
+                instances,
+                supervised,
+                update: &UpdateView::default(),
+                updating: &updating,
+                notice: None,
+                now: now(),
+            })
+        };
+        let m = run(std::slice::from_ref(&gone), std::slice::from_ref(&sup));
+        assert_eq!(m.status_lines, ["Library: Updating to 0.7.1…"]);
+        assert_eq!(m.icon, IconState::Idle);
+        // Not in discovery at all (the control file is being rewritten).
+        let m = run(&[], &[sup]);
+        assert_eq!(m.status_lines, ["Library: Updating to 0.7.1…"]);
+        assert_eq!(m.icon, IconState::Idle);
+        // Without the grace the same view is "not responding" + attention.
+        let m = model(&[gone]);
+        assert_eq!(m.status_lines, ["Library: not responding"]);
+        assert_eq!(m.icon, IconState::Attention);
     }
 
     #[test]
@@ -545,6 +713,7 @@ mod tests {
                 latest: Some("0.7.1".into()),
                 ..Default::default()
             },
+            updating: &[],
             notice: Some("pause failed"),
             now: now(),
         });

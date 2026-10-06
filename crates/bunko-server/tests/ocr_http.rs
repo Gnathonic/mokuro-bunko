@@ -520,6 +520,17 @@ async fn remote_round_trip_over_a_websocket() {
         format!("/_processor/{pid}/results/{{sid}}/{{claim}}")
     );
     assert_eq!(reg["archives"], "/mokuro-reader/");
+    // 0.7: the library compares the registered version with its own and says so.
+    let ours = bunko_core::VERSION;
+    let relation = if bunko_update::auto::is_newer(ours, "0.7.0") {
+        "library_newer"
+    } else {
+        "library_older"
+    };
+    assert_eq!(
+        reg["version_mismatch"],
+        json!({"library_version": ours, "processor_version": "0.7.0", "relation": relation})
+    );
 
     let mut req = format!("ws://{addr}/_processor/{pid}/socket")
         .into_client_request()
@@ -540,6 +551,37 @@ async fn remote_round_trip_over_a_websocket() {
     assert_eq!(vol.sidecar_name, "Vol 1.mokuro");
     assert_eq!(vol.title, "Series");
     assert_eq!(vol.size, Some(std::fs::metadata(&cbz).unwrap().len()));
+    // Where its automatic update stands reaches the admin's processor list.
+    ws_send(
+        &mut tx,
+        &Event::UpdateStatus(bunko_proto::UpdateReport {
+            state: "waiting".into(),
+            version: Some(ours.into()),
+            message: None,
+            action: None,
+        }),
+    )
+    .await;
+    let mut listed = Value::Null;
+    for _ in 0..50 {
+        listed = e
+            .ocr
+            .ask(|s| {
+                s.machines
+                    .values()
+                    .find(|m| m.name == "tower")
+                    .map(|m| m.to_value(0))
+            })
+            .await
+            .flatten()
+            .unwrap_or(Value::Null);
+        if listed["update"]["state"] == "waiting" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(listed["update"]["state"], "waiting", "{listed}");
+    assert_eq!(listed["version_mismatch"]["relation"], relation);
     ws_send(
         &mut tx,
         &Event::Ready {

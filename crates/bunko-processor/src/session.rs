@@ -330,6 +330,9 @@ pub(crate) struct Hub {
     paused: Mutex<Option<PauseMode>>,
     /// Ends the pause watcher with the hub.
     watcher: CancellationToken,
+    /// Draining for an automatic update: paused after the running volumes whatever the
+    /// owner's pause says (only a `now` pause goes further).
+    draining: std::sync::atomic::AtomicBool,
 }
 
 impl Hub {
@@ -355,6 +358,7 @@ impl Hub {
             control,
             paused: Mutex::new(None),
             watcher: CancellationToken::new(),
+            draining: std::sync::atomic::AtomicBool::new(false),
         });
         hub.watch_pause();
         hub
@@ -382,6 +386,12 @@ impl Hub {
                 let Some(hub) = weak.upgrade() else { return };
                 if hub.leaving.load(Ordering::SeqCst) {
                     return;
+                }
+                if hub.draining.load(Ordering::SeqCst)
+                    && state.as_ref().map(|s| s.mode) != Some(PauseMode::Now)
+                {
+                    // The update's drain stays; the owner's pause applies after it.
+                    continue;
                 }
                 hub.apply_pause(state.as_ref());
             }
@@ -439,6 +449,65 @@ impl Hub {
 
     pub(crate) fn session_count(&self) -> usize {
         self.sessions.lock().len()
+    }
+
+    /// Drain for an automatic update (after-volume semantics, announced as a pause with
+    /// reason `update`): no new work; the volumes the runner started finish and upload,
+    /// the others go back to the library at once.
+    pub(crate) fn drain_for_update(&self) {
+        if self.draining.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let state = PauseState {
+            mode: PauseMode::AfterVolume,
+            until: None,
+            reason: "update".into(),
+            since: chrono::Utc::now(),
+        };
+        // An owner's `now` pause already in force stays as it is.
+        if *self.paused.lock() != Some(PauseMode::Now) {
+            self.apply_pause(Some(&state));
+        }
+    }
+
+    /// The update is not happening (it failed): back to the owner's pause, or to work.
+    pub(crate) fn end_drain(&self) {
+        if !self.draining.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let owner = self
+            .control
+            .as_ref()
+            .and_then(|c| c.pause_ctl())
+            .and_then(|p| p.current());
+        match owner {
+            Some(state) => self.apply_pause(Some(&state)),
+            None => self.apply_pause(None),
+        }
+    }
+
+    /// Say `event` to the library (nothing while leaving).
+    pub(crate) fn tell(&self, event: Event) {
+        self.say(event);
+    }
+
+    /// Volumes still running here (claims not given back) and benchmarks: what an
+    /// update waits for.
+    pub(crate) fn in_flight(&self) -> usize {
+        let sessions: usize = self
+            .sessions
+            .lock()
+            .values()
+            .map(|s| {
+                let book = s.book.lock();
+                book.outstanding
+                    .iter()
+                    .filter(|c| !book.released.contains(*c))
+                    .count()
+                    + s.finishing.load(Ordering::SeqCst)
+            })
+            .sum();
+        sessions + self.benches.lock().len()
     }
 
     fn say(&self, event: Event) {
@@ -756,6 +825,7 @@ impl Hub {
             }),
             book: Mutex::new(Book::default()),
             finished: CancellationToken::new(),
+            finishing: std::sync::atomic::AtomicUsize::new(0),
         });
         self.sessions.lock().insert(sid.clone(), session.clone());
         tracing::info!(
@@ -870,6 +940,18 @@ pub(crate) struct Session {
     intake: Mutex<Intake>,
     book: Mutex<Book>,
     finished: CancellationToken,
+    /// Volumes past the runner whose sidecar upload and terminal event are still under
+    /// way (their claim is already settled): an update waits for them too.
+    finishing: std::sync::atomic::AtomicUsize,
+}
+
+/// Counts a volume in [`Session::finishing`] until dropped.
+struct Finishing<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for Finishing<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Session {
@@ -1615,6 +1697,8 @@ async fn end_session(session: &Session, link: &Link, sessions: &Sessions, return
 }
 
 async fn finish_volume(session: &Session, link: &Link, terminal: Terminal, seconds: f64) {
+    session.finishing.fetch_add(1, Ordering::SeqCst);
+    let _finishing = Finishing(&session.finishing);
     let sid = session.sid.clone();
     let claim = terminal.claim.clone();
     let note = session.book.lock().damaged.get(&claim).cloned();

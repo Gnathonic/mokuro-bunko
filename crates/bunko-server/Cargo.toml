@@ -44,6 +44,8 @@ which = "7"
 rand.workspace = true
 # admin module: update checks/apply, disk usage for /_admin/api/status
 bunko-update.workspace = true
+# The control API's wire types (status.update, problems) the automatic update reports in.
+bunko-control = { path = "../bunko-control", default-features = false }
 fs4 = { version = "1", default-features = false }
 # ocr module: scheduler math (bunko-sched), collection (bunko-library, bunko-layout),
 # the DAV write locks (bunko-dav), result hashing, the gzip queue file, bench samples
@@ -64,6 +66,8 @@ notify.workspace = true
 bunko-thumb = { path = "../bunko-thumb" }
 
 [dev-dependencies]
+# admin::update tests: the automatic update's quiet-moment polling in paused time.
+tokio = { workspace = true, features = ["test-util"] }
 # ocr tests: a processor speaking the v3 WebSocket; the in-process processor over a
 # fake engine (dev only: the server itself never links the processor runtime)
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }

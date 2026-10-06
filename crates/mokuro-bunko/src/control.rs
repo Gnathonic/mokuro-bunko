@@ -117,7 +117,7 @@ pub fn library_url(config: &bunko_core::Config) -> String {
 }
 
 /// The backend pack the OCR runtime opens from `dirs` (`MOKURO_TORCH_PACK`, else
-/// discovery order): its manifest name, else its directory name.
+/// discovery order): "<variant> for <release> (<name>)", else its directory name.
 #[cfg(feature = "ocr")]
 pub fn pack_name(dirs: &[PathBuf]) -> Option<String> {
     use bunko_update::backend::{PACK_JSON, PackManifest};
@@ -128,8 +128,20 @@ pub fn pack_name(dirs: &[PathBuf]) -> Option<String> {
     std::fs::read(dir.join(PACK_JSON))
         .ok()
         .and_then(|b| PackManifest::parse(&b).ok())
-        .map(|m| m.name)
+        .map(|m| pack_label(&m))
         .or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
+}
+
+/// `rocm7.1 for 0.7.0-alpha.2 (torch-rocm7.1-2.13.0)`: which release the pack belongs
+/// to, so an OCR error is traceable to one version.
+#[cfg(feature = "ocr")]
+pub fn pack_label(m: &bunko_update::backend::PackManifest) -> String {
+    let release = if m.bunko_version.trim().is_empty() {
+        "a development build".to_string()
+    } else {
+        m.bunko_version.trim().to_string()
+    };
+    format!("{} for {release} ({})", m.variant, m.name)
 }
 
 /// The role's control config (`ocr`: this instance reads OCR itself).

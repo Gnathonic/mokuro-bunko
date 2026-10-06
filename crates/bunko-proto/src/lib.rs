@@ -155,6 +155,68 @@ pub struct RegisterReply {
     pub archives: String,
     /// The library's version, for the processor's log and update hints.
     pub version: String,
+    /// Set when the processor's `host.version` differs from the library's (0.7 v3
+    /// addition, optional): the trigger for a processor's opt-in automatic update
+    /// (`auto_update`). Older processors ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_mismatch: Option<VersionMismatch>,
+}
+
+/// `RegisterReply.version_mismatch`: the library's verdict on the processor's version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionMismatch {
+    /// The library's version (what a processor updates to).
+    pub library_version: String,
+    /// The processor's version as it registered.
+    pub processor_version: String,
+    /// `library_newer`, `library_older`, or `unknown` (a version that does not parse).
+    pub relation: String,
+}
+
+impl VersionMismatch {
+    pub const LIBRARY_NEWER: &'static str = "library_newer";
+    pub const LIBRARY_OLDER: &'static str = "library_older";
+    pub const UNKNOWN: &'static str = "unknown";
+
+    /// The library's verdict for `processor` against `library` (None: the same version).
+    /// Versions compare as semver precedence (a leading `v` ignored, build metadata
+    /// too); anything else is `unknown`.
+    pub fn between(library: &str, processor: &str) -> Option<VersionMismatch> {
+        let parse = |v: &str| semver::Version::parse(v.trim().trim_start_matches('v')).ok();
+        let relation = match (parse(library), parse(processor)) {
+            (Some(l), Some(p)) if l.cmp_precedence(&p).is_eq() => return None,
+            (Some(l), Some(p)) if l.cmp_precedence(&p).is_gt() => Self::LIBRARY_NEWER,
+            (Some(_), Some(_)) => Self::LIBRARY_OLDER,
+            _ if library.trim() == processor.trim() => return None,
+            _ => Self::UNKNOWN,
+        };
+        Some(VersionMismatch {
+            library_version: library.to_string(),
+            processor_version: processor.to_string(),
+            relation: relation.to_string(),
+        })
+    }
+
+    pub fn library_newer(&self) -> bool {
+        self.relation == Self::LIBRARY_NEWER
+    }
+}
+
+/// `update_status`: where a processor's automatic update stands (0.7 v3 addition).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateReport {
+    /// `idle`, `waiting` (draining before it), `downloading`, `installing`,
+    /// `restarting`, `failed`, `blocked` (needs its owner), `off` (auto_update off).
+    pub state: String,
+    /// The version it is updating to (or would).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// What went wrong / what its owner must do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The exact fix, when the owner must act.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
 }
 
 /// 400 body when `protocol` does not match.
@@ -401,6 +463,9 @@ pub enum Event {
     Released {
         claims: Vec<String>,
     },
+    /// Where the processor's automatic update stands (0.7 v3 addition): shown in the
+    /// admin's processor list. Older libraries log and drop it.
+    UpdateStatus(UpdateReport),
     Ping,
 }
 
@@ -519,5 +584,65 @@ mod tests {
         assert_eq!(reg.availability, None);
         assert!(valid_id("v-12_a"));
         assert!(!valid_id("../x"));
+        let u = Event::UpdateStatus(UpdateReport {
+            state: "waiting".into(),
+            version: Some("0.7.1".into()),
+            message: None,
+            action: None,
+        });
+        let text = serde_json::to_string(&u).unwrap();
+        assert_eq!(
+            text,
+            r#"{"event":"update_status","state":"waiting","version":"0.7.1"}"#
+        );
+        assert_eq!(serde_json::from_str::<Event>(&text).unwrap(), u);
+    }
+
+    #[test]
+    fn version_mismatch_verdicts() {
+        assert_eq!(VersionMismatch::between("0.7.0", "0.7.0"), None);
+        assert_eq!(VersionMismatch::between("v0.7.0", "0.7.0"), None);
+        let newer = VersionMismatch::between("0.7.0-alpha.2", "0.7.0-alpha.1").unwrap();
+        assert!(newer.library_newer());
+        assert_eq!(newer.library_version, "0.7.0-alpha.2");
+        assert_eq!(newer.processor_version, "0.7.0-alpha.1");
+        assert!(
+            VersionMismatch::between("0.7.0", "0.7.0-rc.1")
+                .unwrap()
+                .library_newer()
+        );
+        assert!(
+            VersionMismatch::between("0.7.0-alpha.10", "0.7.0-alpha.9")
+                .unwrap()
+                .library_newer()
+        );
+        assert!(
+            VersionMismatch::between("0.7.0-beta", "0.7.0-alpha.9")
+                .unwrap()
+                .library_newer()
+        );
+        let older = VersionMismatch::between("0.6.9", "0.7.0").unwrap();
+        assert_eq!(older.relation, VersionMismatch::LIBRARY_OLDER);
+        assert!(!older.library_newer());
+        assert_eq!(
+            VersionMismatch::between("0.7.0", "").unwrap().relation,
+            VersionMismatch::UNKNOWN
+        );
+        // The wire: an old reply (no field) reads; a new one round-trips.
+        let old: RegisterReply = serde_json::from_str(
+            r#"{"protocol":3,"processor_id":"p","socket":"/s","results":"/r","archives":"/a","version":"0.7.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.version_mismatch, None);
+        let reply = RegisterReply {
+            version_mismatch: Some(newer.clone()),
+            ..old
+        };
+        let text = serde_json::to_string(&reply).unwrap();
+        assert!(
+            text.contains(r#""version_mismatch":{"library_version":"0.7.0-alpha.2","processor_version":"0.7.0-alpha.1","relation":"library_newer"}"#),
+            "{text}"
+        );
+        assert_eq!(serde_json::from_str::<RegisterReply>(&text).unwrap(), reply);
     }
 }

@@ -32,6 +32,36 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
         .enable_all()
         .build()?;
     let flavor = crate::update_flavor();
+    // An automatic update the previous run made: check the new release's OCR backend
+    // (a rollback restarts into the previous release and does not return).
+    let who = crate::autoupdate::Who::Library {
+        cli_config: Some(config_path.clone()),
+    };
+    let started =
+        crate::autoupdate::after_restart(&config.storage.base_path, config.update.auto, || {
+            if cfg!(feature = "ocr") {
+                crate::autoupdate::probe_child(&who)
+            } else {
+                Ok(())
+            }
+        });
+    if started.proven {
+        crate::autoupdate::prune_models(&config.storage.base_path);
+    }
+    if config.update.auto {
+        info!(
+            "Automatic updates are on (update.auto): a newer {} release installs itself when nothing is running",
+            config.update.channel
+        );
+    }
+    let installer: std::sync::Arc<dyn bunko_update::auto::ReleaseInstaller> =
+        std::sync::Arc::new(crate::autoupdate::Installer::new(
+            &config.update.manifest_url,
+            &config.update.channel,
+            &config.update.public_key,
+            who,
+            &config.storage.base_path,
+        ));
     runtime
         .block_on(async move {
             info!("mokuro-bunko {} ({flavor})", bunko_core::VERSION);
@@ -65,13 +95,23 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
                 .map(|_| ControlSetup::of(&config, ocr_here));
             let services = Services::new(config, Some(config_path.clone()), &opts)?;
             app::announce_setup(&services);
+            services.updates.set_view(started.view, started.problems);
+            if let Some(c) = &control {
+                let c = c.clone();
+                services
+                    .updates
+                    .set_reporter(std::sync::Arc::new(move |view, problems| {
+                        c.set_update(view);
+                        c.set_update_problems(problems);
+                    }));
+            }
             let control_server = match (&control, control_setup) {
                 (Some(c), Some(setup)) => setup.start(c, &services, config_path).await,
                 _ => None,
             };
             let router = app::assemble(&services, &opts);
             println!("Press Ctrl+C to stop");
-            let served = app::serve_router(&services, router).await;
+            let served = app::serve_router_with(&services, router, Some(installer)).await;
             if let Some(server) = control_server {
                 server.shutdown().await;
             }

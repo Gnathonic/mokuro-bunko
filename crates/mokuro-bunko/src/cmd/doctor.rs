@@ -30,6 +30,9 @@ struct Check {
     label: &'static str,
     detail: String,
     hint: Option<String>,
+    /// A warning here, but in a running instance's status a `fail` problem of kind
+    /// `update` (the tray flags it and notifies): something only the owner can do.
+    needs_you: bool,
 }
 
 impl Check {
@@ -39,6 +42,7 @@ impl Check {
             label,
             detail: detail.into(),
             hint: None,
+            needs_you: false,
         }
     }
     fn warn(label: &'static str, detail: impl Into<String>, hint: Option<String>) -> Check {
@@ -47,6 +51,18 @@ impl Check {
             label,
             detail: detail.into(),
             hint,
+            needs_you: false,
+        }
+    }
+    #[cfg_attr(not(feature = "ocr"), allow(dead_code))]
+    fn warn_needs_you(
+        label: &'static str,
+        detail: impl Into<String>,
+        hint: Option<String>,
+    ) -> Check {
+        Check {
+            needs_you: true,
+            ..Check::warn(label, detail, hint)
         }
     }
     fn fail(label: &'static str, detail: impl Into<String>, hint: Option<String>) -> Check {
@@ -55,6 +71,7 @@ impl Check {
             label,
             detail: detail.into(),
             hint,
+            needs_you: false,
         }
     }
 }
@@ -375,10 +392,24 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
     };
     let detail = format!(
         "{} in use ({how}) at {}; this machine: {}",
-        m.name,
+        crate::control::pack_label(&m),
         dir.display(),
         want.reason
     );
+    // A pack belongs to exactly one release.
+    if !bunko_engines::torch::abi::same_release(&m.bunko_version, bunko_core::VERSION) {
+        return Check::fail(
+            "OCR backend",
+            format!(
+                "{detail}; the backend pack is from mokuro-bunko {}, this is {}: each release runs only its own pack",
+                m.bunko_version,
+                bunko_core::VERSION
+            ),
+            Some(format!(
+                "Run 'mokuro-bunko install-ocr{flag}' (with automatic updates on, an update installs the right pack itself)."
+            )),
+        );
+    }
     if !pack_complete(&dir, &m) {
         return Check::fail(
             "OCR backend",
@@ -399,11 +430,28 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
     }
     // A GPU pack also runs on the CPU; only a GPU this pack cannot drive is worth a word.
     if want.variant != "cpu" && m.variant != want.variant {
-        return Check::warn(
+        // The GPU changed since the pack went in (the install recorded what the hardware
+        // called for then): the owner should switch. Without a record, or when the
+        // hardware called for this already (a deliberate choice), only a warning.
+        let changed = dir
+            .parent()
+            .and_then(super::install_ocr::HardwareRecord::read)
+            .is_some_and(|r| r.auto_variant != want.variant);
+        let make = if changed {
+            Check::warn_needs_you
+        } else {
+            Check::warn
+        };
+        return make(
             "OCR backend",
             format!(
-                "{detail}; the {} pack would use this machine's GPU",
-                want.variant
+                "{detail}; the {} pack would use this machine's GPU{}",
+                want.variant,
+                if changed {
+                    " (the GPU changed since the pack was installed)"
+                } else {
+                    ""
+                }
             ),
             Some(format!(
                 "mokuro-bunko install-ocr{flag} --variant {}",
@@ -630,6 +678,7 @@ pub fn backend_problem(target: &crate::ocr_target::OcrTarget) -> Option<bunko_co
 fn as_problem(c: Check) -> Option<bunko_control::Problem> {
     let severity = match c.status {
         Status::Pass => return None,
+        _ if c.needs_you => bunko_control::Severity::Fail,
         Status::Warn => bunko_control::Severity::Warn,
         Status::Fail => bunko_control::Severity::Fail,
     };
@@ -637,6 +686,9 @@ fn as_problem(c: Check) -> Option<bunko_control::Problem> {
         severity,
         text: format!("{}: {}", c.label, c.detail),
         hint: c.hint,
+        kind: c
+            .needs_you
+            .then(|| bunko_control::Problem::KIND_UPDATE.to_string()),
     })
 }
 

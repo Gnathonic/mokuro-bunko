@@ -156,7 +156,9 @@ Flows (choose a role first; a machine can be both):
    access (tunnel / dynamic DNS / HTTPS: `ssl`, `tunnel`, `dyndns` commands), OCR on this
    machine (§4.3), start with the machine.
 2. **Processor**: library URL, login (user/password or token), connection test, name,
-   max sessions, storage, TLS verify — today's `processor setup` — then §4.3 and start-up.
+   max sessions, storage, TLS verify, and the opt-in "Update this processor automatically
+   when its library updates" (unchecked; `processor.auto_update`, CLI `--auto-update`) —
+   today's `processor setup` — then §4.3 and start-up.
 3. **OCR install with progress**: detected hardware (`install-ocr --list`), pack choice
    (`--variant`), download/verify/unpack progress, models download, `doctor`, first benchmark.
 4. **Start with the machine**: `processor service --install` / systemd user unit / launchd
@@ -170,6 +172,17 @@ dyndns, generations, processors, updates) are linked, not duplicated; machine-lo
 (OCR pack, models, processor.yaml, service, logs, doctor, update apply, SSL files) get new
 `/app/settings` pages. Styling reuses `web/_static/shared.css`; no front-end framework or
 build step (plain JS like the existing pages).
+
+**Automatic updates** are opt-in and off by default. Settings → Updates has "Install
+updates automatically" for each config the machine has: the library server's
+`update.auto` (written through the settings write path) and the processor's
+`processor.auto_update` (in processor.yaml; also a checkbox in Settings → Processor, so
+saving that form keeps it). `update.public_key` is never settable from a page. The
+admin panel's Updates card has the same switch (`POST /_admin/api/update/settings`).
+The dashboard shows `status.update` as one line: "Updating to X…" (waiting,
+downloading, installing, restarting), "Updated to X (from Y)", or "Update to X failed:
+… — will retry"; a `blocked` update (needs the owner) is a problem in the Problems
+panel instead.
 
 ## 5. Tray
 
@@ -214,7 +227,9 @@ starts a second instance when a service-managed one is running.
   and deleted; or the role taken out of `tray.json`, the tray restarted and its copy stopped). With no `tray.json`,
   no instance and no config at all, the tray opens the setup wizard once (`gui --open /app/`).
 - Supervision: children get `MOKURO_CONTROL_MANAGED=1` (so `POST /control/stop` is allowed) and
-  `MOKURO_LAUNCHER=tray` (an update exits 75 → restarted at once); console output goes to
+  `MOKURO_LAUNCHER=tray` (after an update, on Windows the child exits 75 → restarted at
+  once, never counted as a crash; on Linux/macOS it execs the new program in place, same
+  pid, verified with a tray-run server 0.7.0-alpha.1 → alpha.2 and a rollback); console output goes to
   `<logs>/tray-<role>-console.log`. Backoff 1, 2, 4 … 60 s, reset after 60 s up. A role is
   not started while an instance of it answers or `systemctl [--user] is-active` /
   `launchctl print gui/<uid>/<label>` says its service runs. Quit: `POST /control/stop`, then
@@ -232,7 +247,30 @@ starts a second instance when a service-managed one is running.
   `<config>/mokuro-bunko/logs`, then the temp folder, when that cannot be created).
   Start at login: `~/.config/autostart/mokuro-bunko-tray.desktop`, LaunchAgent
   `io.github.gnathonic.mokuro-bunko-tray`, or Startup `Mokuro Bunko.lnk`.
-- Not built: notifications (off by default in the spec).
+- Automatic updates (opt-in, `status.update` / `problems[].kind == "update"`):
+  - Status lines: `waiting`/`downloading`/`installing`/`restarting` show "Updating to X…"
+  (waiting: "… (after the running volume)") in place of the state; `updated` adds
+  "Updated to X" for 15 minutes after `since`; `failed` adds "⚠ Update to X failed — will
+  retry". `fail` problems keep driving the attention icon and the "✖ …" line.
+  - Restart grace: the tray remembers each role's last answered status. If the instance
+  then stops answering, leaves discovery or its supervised slot is restarting (Windows
+  exit 75; on Unix the instance exec()s and its control port/token change) while that
+  status said `installing`/`restarting` less than 3 minutes ago, the menu says "Updating
+  to X…" with no "not responding", no "stopped (exit code 75)" and no attention icon.
+  After 3 minutes it is treated as an ordinary failure again. (`autoupdate::restart_grace`.)
+  - Notifications: a `fail` problem of kind `update` raises ONE desktop notification
+  ("Mokuro Bunko needs you", body = text + newline + hint) per distinct (role, text); it
+  is repeated only if the problem goes away and comes back. These are "action needed"
+  alarms and fire regardless of `tray.json`'s `notifications`. Linux: freedesktop
+  `Notifications.Notify` through `gdbus call --session` (critical urgency; arguments are
+  separate argv entries, GVariant-quoted), else `notify-send -u critical`, else a warning
+  in the log. macOS: `osascript display notification`. Windows: a toast through
+  `powershell -NoProfile -NonInteractive -WindowStyle Hidden` (Windows.UI.Notifications,
+  the PowerShell AppUserModelID, no console window) -- **unverified on a real Windows
+  machine**. Spawned off the UI thread; `launch::notify` (rate-limited, macOS only) is
+  unchanged.
+- Other notifications (library unreachable, OCR failure, update available; the
+  `notifications` switch): not built.
 
 ## 6. Packaging
 

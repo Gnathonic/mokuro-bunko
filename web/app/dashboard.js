@@ -28,6 +28,21 @@
       '</div>' + (sub ? '<div class="tile__sub">' + esc(sub) + '</div>' : '') + '</div>';
   }
 
+  // `status.update`: the automatic update, as one line (null: nothing to say).
+  function updateLine(u) {
+    if (!u) return null;
+    const v = u.version ? ' ' + u.version : '';
+    switch (u.state) {
+      case 'waiting':
+        return 'Updating to' + v + '… waiting for a quiet moment' + (u.message ? ' (' + u.message + ')' : '') + '.';
+      case 'downloading': case 'installing': case 'restarting':
+        return 'Updating to' + v + '…' + (u.message ? ' ' + u.message : '');
+      case 'updated': return 'Updated to' + v + (u.from ? ' (from ' + u.from + ')' : '') + '.';
+      case 'failed': return 'Update to' + v + ' failed' + (u.message ? ': ' + u.message : '') + ' — will retry.';
+      default: return null;
+    }
+  }
+
   function render(s) {
     last = s;
     showError($('dash-error'), null);
@@ -49,6 +64,13 @@
         (p.until ? ', until ' + new Date(p.until).toLocaleString() : ', until resumed') +
         (p.reason && p.reason !== 'user' ? ' (' + p.reason + ')' : '') +
         (p.since ? ' — since ' + new Date(p.since).toLocaleTimeString() : '') + '.';
+    }
+
+    const line = updateLine(s.update);
+    $('dash-update').hidden = !line;
+    if (line) {
+      $('dash-update').textContent = line;
+      $('dash-update').className = 'alert alert--' + (s.update.state === 'failed' ? 'warning' : 'info');
     }
 
     const st = s.stats || { today: {}, total: {} };

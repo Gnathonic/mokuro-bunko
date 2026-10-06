@@ -211,6 +211,19 @@ pub struct PackManifest {
     /// What the host must provide (only the fields the loader reads).
     #[serde(default)]
     pub requires: PackRequires,
+    /// The mokuro-bunko release the pack belongs to. A pack runs only with the binary
+    /// of the same release ([`PackManifest::check`]); empty in a pack built outside a
+    /// release (a development pack), which any build accepts.
+    #[serde(default)]
+    pub bunko_version: String,
+}
+
+/// Whether a pack built by mokuro-bunko `pack_version` belongs with this build
+/// (`release`): the same version, a leading `v` ignored; an empty version is a
+/// development pack and passes.
+pub fn same_release(pack_version: &str, release: &str) -> bool {
+    let p = pack_version.trim().trim_start_matches('v');
+    p.is_empty() || p == release.trim().trim_start_matches('v')
 }
 
 /// `pack.json` `requires` (the loader's part of it).
@@ -242,6 +255,10 @@ pub enum PackError {
     Malformed(String),
     #[error("pack.json format {0} is not supported (this build reads format {PACK_FORMAT})")]
     Format(u32),
+    #[error(
+        "the backend pack is from mokuro-bunko {found}, this is {wanted}: each release runs only its own pack; run 'mokuro-bunko install-ocr' (with automatic updates on, an update installs it)"
+    )]
+    Release { found: String, wanted: String },
     #[error("the pack implements backend ABI {found}, this mokuro-bunko needs ABI {wanted}")]
     Abi { found: u32, wanted: u32 },
     #[error("the pack is for {found}, this machine is {wanted}")]
@@ -270,6 +287,9 @@ impl PackManifest {
         if self.format != PACK_FORMAT {
             return Err(PackError::Format(self.format));
         }
+        // The ABI is the second line after the release (`check_release`, which the
+        // loader runs first with its own version): a development pack (no release) of
+        // another generation still cannot be called into.
         if self.abi != BT_ABI_VERSION {
             return Err(PackError::Abi {
                 found: self.abi,
@@ -293,6 +313,19 @@ impl PackManifest {
             }
         }
         Ok(())
+    }
+
+    /// [`same_release`] against `release` (the loading binary's version; the loader in
+    /// bunko-engines runs this before [`PackManifest::check`]).
+    pub fn check_release(&self, release: &str) -> Result<(), PackError> {
+        if same_release(&self.bunko_version, release) {
+            Ok(())
+        } else {
+            Err(PackError::Release {
+                found: self.bunko_version.trim().to_string(),
+                wanted: release.to_string(),
+            })
+        }
     }
 
     /// The directory name packs are installed under: `torch-<variant>-<torch>`.
@@ -590,7 +623,40 @@ mod tests {
                 sha256: "00".into(),
             }],
             requires: PackRequires::default(),
+            bunko_version: RELEASE.into(),
         }
+    }
+
+    const RELEASE: &str = "0.7.0-test.1";
+
+    #[test]
+    fn packs_are_locked_to_their_release() {
+        let mut m = manifest();
+        m.check_release(RELEASE).unwrap();
+        m.bunko_version = format!("v{RELEASE}");
+        m.check_release(RELEASE).unwrap();
+        // A development pack (built outside a release) passes.
+        m.bunko_version = String::new();
+        m.check_release(RELEASE).unwrap();
+        m.bunko_version = "0.6.9".into();
+        let e = m.check_release(RELEASE).unwrap_err();
+        assert_eq!(
+            e,
+            PackError::Release {
+                found: "0.6.9".into(),
+                wanted: RELEASE.into()
+            }
+        );
+        let text = e.to_string();
+        assert!(
+            text.starts_with(&format!(
+                "the backend pack is from mokuro-bunko 0.6.9, this is {RELEASE}: "
+            )),
+            "{text}"
+        );
+        assert!(text.contains("install-ocr"), "{text}");
+        assert!(same_release("0.7.0", "v0.7.0"));
+        assert!(!same_release("0.7.0-alpha.1", "0.7.0-alpha.2"));
     }
 
     #[test]

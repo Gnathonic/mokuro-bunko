@@ -69,6 +69,31 @@ Proxies: Caddy forwards WebSockets as-is. The bundled nginx template sets
    with `fatal` + `exit`. Older libraries ignore both events (unknown events are logged
    and dropped), so the claims time out as before.
 
+10. **Version mismatch** (0.7.0-alpha.2, additive). The library compares the
+   version the processor registers with (`host.version`, which every processor
+   already sends) with its own, as semver precedence, and when they differ adds
+   `version_mismatch` to the `RegisterReply`:
+   `{"library_version":"0.7.1","processor_version":"0.7.0","relation":"library_newer"}`
+   (`relation`: `library_newer`, `library_older`, or `unknown` when a version does
+   not parse). Equal versions: the field is absent. A field in the reply rather than
+   an op on the socket because the versions only change across a reconnect (a
+   library that updates restarts, so every processor registers again) and an older
+   processor ignores an unknown reply field, where an unknown op would be an
+   unreadable frame. It is the trigger of a processor's opt-in automatic update
+   (`processor.auto_update`): with `library_newer` the processor drains (an
+   `availability{paused:true, reason:"update"}`, after-volume semantics, so the
+   claims not yet in the pipeline come back as `released` and the running volumes
+   finish and upload), installs exactly `library_version`, closes the socket and
+   restarts; it re-registers on the new version. With `library_older` it never
+   downgrades and only reports. The processor reports progress with the event
+   `update_status` (wire: `{"event":"update_status","state":"waiting","version":"0.7.1",
+   "message":"…","action":"…"}`; `state`: `waiting`, `installing`, `restarting`,
+   `failed`, `blocked`, `off`, `idle`), sent only to a library that sent
+   `version_mismatch`. The library keeps the last one per registration and shows it,
+   with the mismatch, in `/_admin/api/processors` (`version_mismatch`, `update`).
+   Older libraries send no field (nothing happens: a processor compares only to
+   report) and log and drop the event.
+
 ## Local processing
 
 The full build runs the same `bunko-processor` code in-process. Ops and events travel over

@@ -203,6 +203,7 @@
       tls_verify: $('p-tls').value.trim() || 'true', name: $('p-name').value.trim(),
       public_name: $('p-public').value.trim(), max_sessions: n('p-sessions'),
       storage: $('p-storage').value.trim(), archive_memory_mb: n('p-mem'),
+      auto_update: $('p-auto').checked,
     };
   }
 
@@ -226,6 +227,7 @@
       $('p-name').value = p.name; $('p-public').value = p.public_name || '';
       $('p-sessions').value = p.max_sessions; $('p-mem').value = p.archive_memory_mb;
       $('p-storage').value = p.storage;
+      $('p-auto').checked = !!p.auto_update;
       $('p-pass').placeholder = p.password_set ? '(saved)' : '';
       $('pstatus').textContent = statusLine(p.status);
     } catch (e) { showError($('err-proc'), e); }
@@ -354,6 +356,52 @@
         (u.docker_image ? '<dt>Docker</dt><dd><code>docker pull ' + esc(u.docker_image) + '</code></dd>' : '');
       $('update-apply').disabled = !(u.available && u.can_apply);
     } catch (e) { $('update-kv').innerHTML = '<dt>Problem</dt><dd>' + esc(e.message) + '</dd>'; }
+    await loadAutoUpdate();
+  }
+
+  // The opt-in: the library server's update.auto and/or the processor's
+  // processor.auto_update, whichever this machine has.
+  async function loadAutoUpdate() {
+    showError($('err-update-auto'), null);
+    try {
+      const i = await info(true);
+      $('update-auto-server-row').hidden = !i.config_exists;
+      $('update-auto-proc-row').hidden = !i.processor_config_exists;
+      if (i.config_exists) {
+        const c = await get('/app/api/server/config');
+        $('update-auto-server').checked = byKey(c.file, 'update.auto') === true || (byKey(c.file, 'update.auto') === undefined && byKey(c.effective, 'update.auto') === true);
+      }
+      if (i.processor_config_exists) {
+        const p = await get('/app/api/processor/config');
+        $('update-auto-proc').checked = !!p.auto_update;
+      }
+    } catch (e) { showError($('err-update-auto'), e); }
+  }
+
+  async function saveAutoServer() {
+    const box = $('update-auto-server');
+    showError($('err-update-auto'), null);
+    try {
+      await post('/app/api/server/config', { set: { 'update.auto': box.checked } });
+      loaded.server = false; loaded.advanced = false;
+      toast(box.checked ? 'Automatic updates on. Restart the server to apply.' : 'Automatic updates off. Restart the server to apply.');
+    } catch (e) { box.checked = !box.checked; showError($('err-update-auto'), e); }
+  }
+
+  async function saveAutoProcessor() {
+    const box = $('update-auto-proc');
+    showError($('err-update-auto'), null);
+    try {
+      // The processor settings are saved as a whole; the saved ones are sent back as they are.
+      const p = await get('/app/api/processor/config');
+      await post('/app/api/processor/config', {
+        url: p.url, username: p.username, password: '', tls_verify: p.tls_verify, name: p.name,
+        public_name: p.public_name || '', max_sessions: p.max_sessions, storage: p.storage,
+        archive_memory_mb: p.archive_memory_mb, auto_update: box.checked,
+      });
+      loaded.processor = false;
+      toast(box.checked ? 'Automatic updates on. Restart the processor to apply.' : 'Automatic updates off. Restart the processor to apply.');
+    } catch (e) { box.checked = !box.checked; showError($('err-update-auto'), e); }
   }
 
   // ---- advanced ---------------------------------------------------------
@@ -434,6 +482,8 @@
       if ($('log-follow').checked) followTimer = setInterval(tail, 3000);
     };
     $('update-check').onclick = loadUpdate;
+    $('update-auto-server').onchange = saveAutoServer;
+    $('update-auto-proc').onchange = saveAutoProcessor;
     $('adv-key').onchange = fillAdvValue;
     $('adv-set').onclick = setAny;
     $('cfg-init').onclick = initConfig;

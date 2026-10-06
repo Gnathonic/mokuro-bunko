@@ -252,6 +252,10 @@ pub struct BackendArtifact {
     /// Bytes on disk once installed.
     #[serde(default)]
     pub installed_size: u64,
+    /// What the host must provide (`pack.json`'s `requires`), so an installer can say
+    /// "update your driver" before downloading gigabytes. Absent before 0.7.0-alpha.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires: Option<Requires>,
 }
 
 /// Reject absolute paths, `..`, and anything that is not a plain relative path.

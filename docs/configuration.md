@@ -485,15 +485,19 @@ dyndns:
 ```yaml
 update:
   check: true
+  auto: false
   channel: stable
   manifest_url: "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json"
+  # public_key: ""   # forks and test releases only; config file only
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `check` | boolean | `true` | Look for new releases in the background (first check a minute after start, then every 12 hours) and show the result in the admin panel's **Updates** card (Status tab). With `false`, nothing is fetched unless you press **Check now**. |
 | `channel` | string | `stable` | `stable` or `prerelease`. Note that GitHub's `releases/latest` never points at a pre-release, so `prerelease` sees nothing newer until a separate manifest URL is published. |
-| `manifest_url` | string | the GitHub `releases/latest` `release.json` | Where the release manifest comes from. Change it for a mirror or a fork (a fork also needs its own signing key compiled in). |
+| `auto` | boolean | `false` | Install a newer release on the channel by itself, at a quiet moment, then restart. See [Automatic updates](#automatic-updates). Also settable in the admin panel's **Updates** card and the app's Settings → Updates. |
+| `manifest_url` | string | the GitHub `releases/latest` `release.json` | Where the release manifest comes from. Change it for a mirror or a fork (a fork also needs its own signing key: compiled in, or `public_key`). |
+| `public_key` | string | empty (the compiled-in key) | The ed25519 public key (base64) release manifests are checked against, for a fork or a test release. Read **only from the config file**: no `MOKURO_UPDATE_*` variable, `config set`, admin API or app page can set it, and every start (server, CLI, processor) logs `UPDATES ARE TRUSTED FROM A NON-DEFAULT SIGNING KEY …`. Anyone who can write the config file can already replace the program, so this adds no new way in; an attacker who only controls the environment of a release build cannot use it. |
 
 The manifest is signed (ed25519, with a public key compiled into the
 binary) and every archive's sha256 comes from it, so a compromised download
@@ -508,7 +512,98 @@ depends on how mokuro-bunko was installed:
 
 `MOKURO_INSTALL_KIND` (`self`, `docker`, or a manager's name) overrides the
 detection. `mokuro-bunko update check` and `update apply [--yes] [--restart]`
-do the same from a terminal.
+do the same from a terminal. The button and `update apply` install a release the
+same way the automatic update does (below): the program, its OCR backend pack and
+its models together.
+
+#### Automatic updates
+
+Opt-in: `update.auto: true` on the library server, `processor.auto_update: true`
+in a processor's `processor.yaml` (`processor setup --auto-update`, the setup
+wizard, or Settings → Updates in the app).
+
+**A release is one unit.** An OCR backend pack belongs to exactly one
+mokuro-bunko release: release X's program opens only release X's pack (its
+`pack.json` says `bunko_version`; a pack built outside a release, without one,
+is accepted as a development pack). Another release's pack is refused with
+`the backend pack is from mokuro-bunko A, this is B: each release runs only its
+own pack; run 'mokuro-bunko install-ocr'`, and `doctor`, `/control/status` and
+the tray name the pack in use as `<variant> for <release>`. The models a release
+uses are named by manifests compiled into its program, so new model files only
+ever arrive with a new release. An update therefore installs, together: the
+program (and the tray next to it), the release's pack for the variant installed
+here, and the release's model files.
+
+**Server.** With `auto` on, every check (12 h; `MOKURO_UPDATE_CHECK_SECONDS`
+shortens it) that finds a newer release on the channel starts an update:
+
+1. New OCR work stops on every machine (the scheduler hands out no new claims);
+   the volumes in flight (on this server and on remote processors) and the
+   uploads finish. The Updates card, `/control/status` (`update.state:
+   "waiting"`) and the tray say "Updating to X…".
+2. The release's `release.json` (signature checked) and archive (sha256 checked)
+   are downloaded; the new program is unpacked next to the running one but not
+   installed. It then runs its own `update prefetch` (internal): it downloads and
+   checks its pack for the installed variant into `backends/.staging-<variant>`
+   (signature, sha256, every file; the host requirements such as the NVIDIA
+   driver version; the free disk space), loads it (a GPU pack must find its GPU),
+   and fetches its model files with it. Nothing installed has changed yet.
+3. The switch: the running program is copied aside (`.mokuro-bunko-previous`,
+   the tray too), the installed pack moves to `backends/.prev-<name>`, the staged
+   pack takes its place, the program is replaced, and `<storage>/.update.json`
+   records it. The server restarts.
+4. The new release checks its pack in a child process (`install-ocr --probe`,
+   the pack it will really open, with its real environment). If it loads, the
+   kept copies and the model files the release no longer names are deleted, and
+   the status says "Updated to X". If it does not, the program **and** the pack
+   are rolled back, the previous release starts again and raises a `fail`
+   problem ("The update to X was rolled back: its OCR backend failed to load on
+   this machine: …"); X is marked in `.update-blocked.json` and not tried again
+   automatically (install it by hand once the cause is fixed).
+
+A failed attempt keeps the running release and is tried again after 10 min,
+doubling to 12 h (`MOKURO_UPDATE_RETRY_SECONDS` sets the first wait); never twice
+in a row without that wait. When only the owner can fix it, the status carries
+a `fail` problem with the exact fix (`kind: "update"`), which the tray flags and
+announces once with a desktop notification:
+
+| Case | What the problem says to do |
+|---|---|
+| The pack needs a newer NVIDIA driver (`requires.nvidia_driver`) | Update the driver to the version named |
+| Not enough disk space for the program or the pack | Free the space named |
+| The release does not verify (bad signature) | Nothing is installed; check `manifest_url`/`public_key` |
+| The new pack does not load here (pre-switch check) | Stay on this release; check `doctor` |
+| Rolled back after the switch | Fix the cause, then install by hand |
+| Three failed attempts in a row (downloads) | See the log |
+| Docker or a package-managed install | Pull the image / update through the package manager |
+| The GPU changed so another variant fits (recorded at `install-ocr` time in `backends/.hardware.json`) | `mokuro-bunko install-ocr --variant <variant>` |
+
+How the restart happens, per launcher: under the tray (`MOKURO_LAUNCHER=tray`)
+and under a systemd/launchd service or a terminal on Linux and macOS the process
+`exec`s the new program (same pid: the tray and the service manager keep
+supervising it; the tray shows "Updating to X…" and does not count it as a
+crash); on Windows the process exits with code 75 under the tray or `run.bat`
+(which start it again at once) and otherwise starts the new program and exits.
+
+**Processor.** The library compares the version a processor registers with
+(`host.version`) to its own and says so in the registration reply
+(`version_mismatch`, [PROTOCOL.md](rust-port/PROTOCOL.md)). With `auto_update`
+on and the library newer, the processor drains (it pauses itself after the
+running volumes, with reason `update`: they finish and upload, unstarted claims
+go back at once), installs exactly the library's release the same way (from
+`<manifest_url base>/v<library version>/release.json`), restarts and reconnects.
+A library that is older is only reported (a `fail` problem: a processor never
+downgrades); with `auto_update` off a newer library is reported as a warning.
+Its progress reaches the library (`update_status`) and shows in the admin
+panel's processor list.
+
+**Mirrors and test releases.** A version's manifest is derived from
+`manifest_url` (which names the latest one): GitHub
+`…/releases/latest/download/release.json` → `…/releases/download/v<version>/release.json`;
+a URL with a `latest` path segment gets `v<version>` there; a URL containing
+`{version}` gets the version substituted; otherwise `<dir>/v<version>/<file>`.
+A test or fork release signed with another key needs `update.public_key` (see
+above) in the config file of every machine that should trust it.
 
 ### OCR
 
@@ -980,6 +1075,8 @@ registers anyway and shows as installing.
 | `processor.max_sessions` | `1` | How many OCR pipelines this machine runs at once: one per card is the rule, like `ocr.concurrency`. |
 | `processor.storage` | `$XDG_DATA_HOME/mokuro-bunko-processor` (`~/.local/share/...`) on Linux and macOS, `%LOCALAPPDATA%\mokuro-bunko-processor` on Windows | Logs, working directories, archives too big for memory, and the status file. One per processor; a second processor on the same storage refuses to start. |
 | `processor.archive_memory_mb` | `2048` | RAM for the archives being read and the one on deck, shared by every session (in-memory files on Linux); an archive that does not fit goes to `storage`. `0` keeps every archive on disk. Other platforms always use `storage`. |
+| `processor.auto_update` | `false` | Follow the library: when it reports a newer version, finish the running volume, install exactly the library's release and restart (never a downgrade). See [Automatic updates](#automatic-updates). |
+| `update.manifest_url`, `update.public_key` | GitHub latest, empty | Only for `auto_update`: a mirror or fork's latest `release.json`, and its signing key (from this file only; logged loudly). |
 
 A 0.5 `ocr:` section in the file (`ocr.backend` chose a torch build) is
 accepted and ignored. The processor uses every device its backend pack and
@@ -1142,6 +1239,8 @@ Other variables:
 | `MOKURO_NGINX_ACCEL` | unset | `1` when an nginx in front serves library downloads via `X-Accel-Redirect`. Set by the Docker images only when their nginx runs; never set it without that nginx. |
 | `MOKURO_SETUP_TOKEN` | generated | The one-time token that lets first-run setup (`/setup?token=…`) be opened from a browser that is not on the server machine, e.g. under Docker bridge networking. Unset, the server creates `<storage>/.setup-token` and logs the setup URL at startup while no admin exists; the file is removed when setup completes. |
 | `MOKURO_INSTALL_KIND` | detected | `self`, `docker` or a package manager's name; decides what the updater does (see [Updates](#updates)). |
+| `MOKURO_UPDATE_CHECK_SECONDS` | `43200` | The background release check's period (and, up to 60 s, its first delay), for mirrors that publish often and tests. |
+| `MOKURO_UPDATE_RETRY_SECONDS` | `600` | The first wait after a failed automatic update (doubling to 12 h). |
 | `MOKURO_MODELS_DIR`, `MOKURO_MODELS_DOWNLOAD` | — | A directory of model files to use; `0` forbids model downloads (see [OCR models](#ocr-models)). The 0.5 names `MOKURO_PPOCR_MODELS` and `MOKURO_PPOCR_DOWNLOAD` still work. |
 | `MOKURO_PROCESSOR_CONFIG` | — | `processor.yaml` path for the `processor` commands (the same as `--config`). |
 | `MOKURO_PROCESSOR_PASSWORD` | — | The processor's password; overrides `library.password` and `password_file`. |

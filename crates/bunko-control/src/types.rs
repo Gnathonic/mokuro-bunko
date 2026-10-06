@@ -140,6 +140,60 @@ pub struct Problem {
     pub text: String,
     #[serde(default)]
     pub hint: Option<String>,
+    /// What raised it, when a tray should treat it specially: `update` (an automatic
+    /// update that needs its owner: the tray notifies once per distinct text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+impl Problem {
+    pub const KIND_UPDATE: &'static str = "update";
+
+    /// A `fail` problem of kind `update`: something only the owner can fix.
+    pub fn update_needs_you(text: impl Into<String>, hint: impl Into<String>) -> Problem {
+        Problem {
+            severity: Severity::Fail,
+            text: text.into(),
+            hint: Some(hint.into()),
+            kind: Some(Self::KIND_UPDATE.into()),
+        }
+    }
+
+    /// A `warn` problem of kind `update` (it retries by itself).
+    pub fn update_warning(text: impl Into<String>, hint: Option<String>) -> Problem {
+        Problem {
+            severity: Severity::Warn,
+            text: text.into(),
+            hint,
+            kind: Some(Self::KIND_UPDATE.into()),
+        }
+    }
+}
+
+/// `status.update`: the automatic update of this instance (binary, OCR backend pack,
+/// models). Absent from instances before 0.7.0-alpha.2.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateView {
+    /// `idle`, `available` (found, auto off or not installable here), `waiting` (for a
+    /// quiet moment: the running volume finishes first), `downloading`, `installing`,
+    /// `restarting`, `updated` (this run is the result of one), `failed` (retries
+    /// later), `blocked` (needs its owner: see `problems`).
+    pub state: String,
+    /// The version (or `backend pack <name>`) being installed / just installed.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The version it came from (`updated`).
+    #[serde(default)]
+    pub from: Option<String>,
+    /// What happened, in a sentence.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Automatic updates are on here (`update.auto` / `auto_update`).
+    #[serde(default)]
+    pub auto: bool,
+    /// When this state began (RFC 3339, UTC).
+    #[serde(default)]
+    pub since: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -188,6 +242,9 @@ pub struct Status {
     /// `gui`).
     #[serde(default)]
     pub can_pause: bool,
+    /// The automatic update (0.7.0-alpha.2): null when this instance has nothing to say.
+    #[serde(default)]
+    pub update: Option<UpdateView>,
 }
 
 /// `<storage>/.control.json`: how a tray or browser finds a running instance.
@@ -213,6 +270,8 @@ pub const CONTROL_FILE: &str = ".control.json";
 pub const PAUSE_FILE: &str = ".pause.json";
 /// Volumes and pages read on this machine (today / total).
 pub const STATS_FILE: &str = ".stats.json";
+/// What an automatic update left for the next start (`bunko_update::auto::Marker`).
+pub const UPDATE_FILE: &str = ".update.json";
 /// The env var a supervisor (the tray) sets on instances it starts: `POST /control/stop`
 /// then stops them. Unset: the instance is a service or was started by hand, and stop
 /// is refused.

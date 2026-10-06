@@ -43,6 +43,24 @@ pub struct Status {
     /// Whether pause/resume apply (false: a lite server, `gui`). Older instances may
     /// not send it; then the role decides.
     pub can_pause: Option<bool>,
+    /// The automatic update (absent from instances before 0.7.0-alpha.2).
+    pub update: Option<UpdateInfo>,
+}
+
+/// `status.update`: where the instance's automatic update stands. Every field is
+/// optional so an older or newer instance never breaks the tray.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct UpdateInfo {
+    /// idle | available | waiting | downloading | installing | restarting | updated |
+    /// failed | blocked | off
+    pub state: String,
+    pub version: Option<String>,
+    pub from: Option<String>,
+    pub message: Option<String>,
+    pub auto: Option<bool>,
+    /// RFC 3339: when this state began.
+    pub since: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -108,6 +126,8 @@ pub struct Problem {
     pub severity: String,
     pub text: String,
     pub hint: Option<String>,
+    /// What raised it (`update`: an automatic update that needs its owner).
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -171,6 +191,25 @@ pub(crate) mod tests {
         assert_eq!(s.stats.as_ref().unwrap().cpu_cores_busy, Some(6.5));
         assert_eq!(s.library_url(), Some("https://lib.example"));
         assert!(s.can_pause());
+    }
+
+    #[test]
+    fn reads_the_update_and_problem_kind() {
+        let s: Status = serde_json::from_str(
+            r#"{"role":"server","update":{"state":"updated","version":"0.7.1","from":"0.7.0","since":"2026-10-05T10:00:00Z"},
+                "problems":[{"severity":"fail","text":"t","hint":"h","kind":"update"}]}"#,
+        )
+        .unwrap();
+        let u = s.update.unwrap();
+        assert_eq!(
+            (u.state.as_str(), u.version.as_deref()),
+            ("updated", Some("0.7.1"))
+        );
+        assert_eq!(u.from.as_deref(), Some("0.7.0"));
+        assert_eq!(s.problems[0].kind.as_deref(), Some("update"));
+        // Older instances send neither.
+        let old: Status = serde_json::from_str(CONTRACT_EXAMPLE).unwrap();
+        assert!(old.update.is_none() && old.problems[0].kind.is_none());
     }
 
     #[test]

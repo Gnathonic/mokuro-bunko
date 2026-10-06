@@ -568,7 +568,9 @@ dependencies = [
  "bunko-control",
  "bunko-proto",
  "bunko-sched",
+ "bunko-update",
  "bytes",
+ "chrono",
  "crc32fast",
  "fs4",
  "futures-util",
@@ -602,6 +604,7 @@ dependencies = [
 name = "bunko-proto"
 version = "0.7.0-alpha.1"
 dependencies = [
+ "semver",
  "serde",
  "serde_json",
 ]
@@ -623,6 +626,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "bunko-control",
  "bunko-core",
  "bunko-dav",
  "bunko-db",
@@ -731,8 +735,10 @@ version = "0.7.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
  "bunko-core",
+ "bunko-proto",
  "ed25519-dalek",
  "flate2",
+ "fs4",
  "futures-util",
  "hex",
  "rand_core 0.6.4",

@@ -170,6 +170,7 @@
                         </div>
                         <div class="form-group"><label class="form-label" for="p-storage">Working folder</label>
                             <div class="input-row"><input class="form-input" id="p-storage"><button type="button" class="btn btn--secondary" data-pick="p-storage" data-title="Working folder">Browse…</button></div></div>
+                        <label class="check"><input type="checkbox" id="p-auto"> Install updates automatically when the library updates <span class="cli-hint">processor.auto_update</span></label>
                         <p class="form-error" id="err-proc" role="alert" hidden></p>
                         <div id="ptest"></div>
                         <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="processor-status">Last status</button><button type="button" class="btn btn--secondary" data-job="processor-service">Show its service file</button><button type="button" class="btn btn--secondary" id="p-start">Start it</button><span class="spacer"></span><button type="button" class="btn btn--secondary" id="p-test">Test the connection</button><button type="button" class="btn btn--primary" id="p-save">Save</button></div>
@@ -236,6 +237,12 @@
                     <h2 id="h-update">Updates</h2>
                     <p class="panel__lede">Signed releases from GitHub (<code>mokuro-bunko update</code>). Installing replaces this program; restart what runs afterwards.</p>
                     <dl class="kv" id="update-kv"><dt>Status</dt><dd>Checking…</dd></dl>
+                    <div class="form-group" id="update-auto-box">
+                        <label class="check" id="update-auto-server-row" hidden><input type="checkbox" id="update-auto-server"> Install updates automatically <span class="cli-hint">update.auto</span></label>
+                        <label class="check" id="update-auto-proc-row" hidden><input type="checkbox" id="update-auto-proc"> Install updates automatically (processor) <span class="cli-hint">processor.auto_update</span></label>
+                        <p class="form-hint">Off by default. When on, an update is held until nothing is running (the running volume or upload finishes first), installed, and the program restarts. Never a downgrade.</p>
+                        <p class="form-error" id="err-update-auto" role="alert" hidden></p>
+                    </div>
                     <div class="panel__footer"><button type="button" class="btn btn--secondary" id="update-check">Check again</button><button type="button" class="btn btn--primary" data-job="update-apply" id="update-apply" disabled>Install the update</button></div>
                     <div id="job-update"></div>
                 </div>

@@ -240,6 +240,8 @@ pub struct ProcessorForm {
     pub max_sessions: Option<u32>,
     pub storage: String,
     pub archive_memory_mb: Option<u64>,
+    /// `processor.auto_update`: install the library's updates (opt-in).
+    pub auto_update: bool,
     pub overwrite: bool,
 }
 
@@ -329,6 +331,11 @@ mod full {
                 p.remove("archive_memory_mb");
             }
         }
+        if form.auto_update {
+            p.insert("auto_update".into(), Yaml::Bool(true));
+        } else {
+            p.remove("auto_update");
+        }
         if !p.is_empty() {
             data.insert("processor".into(), Yaml::Mapping(p));
         }
@@ -362,6 +369,7 @@ mod full {
             None,
             &tls(&form.tls_verify)?,
             &default_name(),
+            false,
         );
         let mut data: Mapping = serde_yaml_ng::from_str(&text).map_err(|e| e.to_string())?;
         put_processor_keys(&mut data, form)?;
@@ -395,6 +403,7 @@ mod full {
             "max_sessions": c.processor.max_sessions,
             "storage": c.processor.storage,
             "archive_memory_mb": c.processor.archive_memory_mb,
+            "auto_update": c.processor.auto_update,
             "status": bunko_processor::status::read_status(&c.processor.storage),
         }))
     }
@@ -479,6 +488,7 @@ mod full {
                 max_sessions: Some(3),
                 storage: "/srv/p".into(),
                 archive_memory_mb: Some(512),
+                auto_update: true,
                 ..ProcessorForm::default()
             };
             put_processor_keys(&mut data, &form).unwrap();
@@ -489,6 +499,7 @@ mod full {
                 "max_sessions: 3",
                 "storage: /srv/p",
                 "archive_memory_mb: 512",
+                "auto_update: true",
             ] {
                 assert!(text.contains(k), "{text}");
             }

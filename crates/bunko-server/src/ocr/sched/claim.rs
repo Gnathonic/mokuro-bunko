@@ -489,7 +489,65 @@ impl Scheduler {
     }
 
     pub fn held(&self, machine_name: &str) -> bool {
-        self.holds.get(machine_name).copied().unwrap_or(0) > 0
+        self.update_drain || self.holds.get(machine_name).copied().unwrap_or(0) > 0
+    }
+
+    /// Hold (or release) every machine for an automatic update: no new claims; the
+    /// claims in flight finish and upload.
+    pub fn set_update_drain(&mut self, on: bool) {
+        if self.update_drain == on {
+            return;
+        }
+        self.update_drain = on;
+        self.log(if on {
+            "OCR holds new work: an automatic update installs once the volumes in flight finish"
+        } else {
+            "OCR takes new work again (the automatic update is not happening now)"
+        });
+        self.bump();
+        self.bump_page();
+        if !on {
+            for lane in &mut self.lanes {
+                lane.idle_at = None;
+            }
+            self.maybe_start_scan();
+        }
+    }
+
+    /// What a restart would break now: claims in flight (with their machines) and
+    /// uploaded results waiting for their `volume_done`. None: nothing.
+    pub fn in_flight(&self) -> Option<String> {
+        let mut machines: Vec<String> = self
+            .claims
+            .values()
+            .map(|c| {
+                if c.machine == crate::ocr::types::LOCAL {
+                    "this server".to_string()
+                } else {
+                    c.machine.clone()
+                }
+            })
+            .collect();
+        machines.sort();
+        machines.dedup();
+        let mut parts = Vec::new();
+        if !self.claims.is_empty() {
+            parts.push(format!(
+                "{} OCR volume(s) in flight ({})",
+                self.claims.len(),
+                machines.join(", ")
+            ));
+        }
+        if !self.results.is_empty() {
+            parts.push(format!(
+                "{} OCR result(s) being received",
+                self.results.len()
+            ));
+        }
+        if !self.autobench.inflight.is_empty() || self.paused_for_benchmark().is_some() {
+            parts.push("a benchmark".to_string());
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
     }
 
     /// `_backed_off_rows`: rows whose runner would not start here lately.

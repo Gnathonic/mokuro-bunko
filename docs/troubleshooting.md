@@ -221,10 +221,19 @@ exits non-zero when anything failed. If it fails:
 
 ## The pack stopped loading after an update
 
-The updater replaces the executable only. When a new release changes the
-backend's interface, the log says `... implements backend ABI N, this
-mokuro-bunko needs ABI M: install the pack of this release`. Run
-`mokuro-bunko install-ocr --force` (it replaces the old pack) and restart.
+A backend pack belongs to exactly one release: release X's program opens only
+release X's pack. After a manual copy of a new executable (or an old pack pinned
+with `MOKURO_TORCH_PACK`) the log, `doctor` and `/control/status` say
+`the backend pack is from mokuro-bunko A, this is B: each release runs only its
+own pack`. Run `mokuro-bunko install-ocr` (it installs this release's pack and
+replaces the old one) and restart. The admin panel's **Update** button,
+`update apply` and automatic updates install the program and its pack together,
+so this does not happen with them; an automatic update whose new pack does not
+load rolls back to the previous release and says so (see
+[Automatic updates](configuration.md#automatic-updates)). The backend's
+interface version is checked second (`... implements backend ABI N, this
+mokuro-bunko needs ABI M`). A pack built outside a release (no `bunko_version`
+in its `pack.json`) is accepted by any build, for development.
 Other load errors:
 
 - **`libtorch libraries from outside the pack were loaded (...)`**: another
@@ -318,6 +327,20 @@ card and the queue page's detailed level show each machine's speeds; see
   works. The server needs outbound HTTPS to GitHub.
 - On Windows `run.bat` restarts the server after an update; if you started
   `mokuro-bunko.exe` by hand, start it again if it does not come back.
+- **Automatic update "waiting" for a long time.** It installs only when no OCR
+  volume is in flight anywhere (on this server and on remote processors) and no
+  upload is running; new OCR work is held meanwhile. The Updates card and the
+  tray say what it waits for. Turning `update.auto` off releases the hold.
+- **"The update to X was rolled back".** X's OCR backend did not load on this
+  machine after the switch, so the previous release and its pack came back. X is
+  not tried again automatically (`<storage>/.update-blocked.json`); fix the cause
+  shown (often a `MOKURO_TORCH_PACK` pinning another release's pack, a driver, a
+  missing host library), then install it by hand. A newer release clears the block.
+- **"The automatic update to X needs you".** Only you can fix it: the message
+  says how (a newer NVIDIA driver, free disk space, a signature that does not
+  verify, a Docker or package-managed install). It is tried again later anyway.
+- **A processor "cannot follow its library".** The library runs an older version
+  than the processor; processors never downgrade. Update the library.
 
 ## Port already in use
 

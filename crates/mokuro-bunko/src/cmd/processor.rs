@@ -59,6 +59,32 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
         crate::FLAVOR,
         cfg.library.url
     );
+    // An automatic update the previous run made: check the new release's OCR backend
+    // (a rollback restarts into the previous release and does not return).
+    let processor_yaml = std::path::absolute(config).unwrap_or_else(|_| config.to_path_buf());
+    let who = crate::autoupdate::Who::Processor {
+        config: processor_yaml,
+    };
+    let started =
+        crate::autoupdate::after_restart(&cfg.processor.storage, cfg.processor.auto_update, || {
+            crate::autoupdate::probe_child(&who)
+        });
+    if started.proven {
+        crate::autoupdate::prune_models(&cfg.processor.storage);
+    }
+    if cfg.processor.auto_update {
+        tracing::info!(
+            "Automatic updates are on (processor.auto_update): this processor follows its library's version"
+        );
+    }
+    let installer: Arc<dyn bunko_update::auto::ReleaseInstaller> =
+        Arc::new(crate::autoupdate::Installer::new(
+            &cfg.update.manifest_url,
+            "stable",
+            &cfg.update.public_key,
+            who,
+            &cfg.processor.storage,
+        ));
     let engines = Arc::new(pipeline(&cfg.processor.storage, cfg.processor.max_sessions));
     let backends = engines.config().backends_dirs();
     let (name, storage, library_url) = (
@@ -68,6 +94,7 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
     );
     let mut options = ServeOptions::new(cfg, engines);
     options.verbose = verbose;
+    options.installer = Some(installer);
     let shutdown = options.shutdown.clone();
     let config_path = ctx.config_path.clone();
     let processor_config = std::path::absolute(config).unwrap_or_else(|_| config.to_path_buf());
@@ -112,6 +139,8 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
                 problems.extend(super::doctor::control_problems(&target.storage, false));
                 problems
             });
+            control.set_update(started.view);
+            control.set_update_problems(started.problems);
             options.control = Some(control.clone());
             crate::control::start(&control, config_path, Some(processor_config)).await
         } else {
@@ -124,7 +153,18 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
         result
     });
     match result {
-        Ok(()) => Ok(()),
+        Ok(bunko_processor::ServeExit::Stopped) => Ok(()),
+        Ok(bunko_processor::ServeExit::Updated(version)) => {
+            // The storage lock and the control listener are released: start the new
+            // release in this process's place (exec on Unix, so a service manager or
+            // the tray keeps supervising the same pid; exit 75 under the Windows tray).
+            drop(runtime);
+            tracing::info!("Restarting into mokuro-bunko {version}");
+            let Err(e) = bunko_update::restart();
+            Err(Fail::msg(format!(
+                "installed {version} but could not restart: {e}; start the processor again"
+            )))
+        }
         Err(e @ ServeError::LoginRefused(_)) => {
             tracing::error!("{e}");
             eprintln!("{e}");
@@ -207,6 +247,7 @@ fn setup(ctx: &Ctx, args: ProcessorSetupArgs) -> CmdResult {
         yes: args.yes,
         service: !args.no_service,
         force: args.force,
+        auto_update: args.auto_update,
         machine,
         command: exe,
     };
