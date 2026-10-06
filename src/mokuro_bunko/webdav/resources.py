@@ -484,7 +484,15 @@ class PathMapper:
                 return None
             parent = resolved_parent
         candidate = parent / name
-        if not candidate.is_relative_to(self.library_path.resolve()):
+        # The literal name is what is returned, but where it LEADS must stay
+        # inside the library too: a COPY writes through a symlink sitting at
+        # the destination, exactly as `virtual_to_physical`'s resolve() saw.
+        library = self.library_path.resolve()
+        try:
+            leads_to = candidate.resolve()
+        except (OSError, ValueError):
+            return None
+        if not (candidate.is_relative_to(library) and leads_to.is_relative_to(library)):
             return None
         return candidate
 
