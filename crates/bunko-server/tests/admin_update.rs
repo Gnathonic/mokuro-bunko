@@ -51,6 +51,7 @@ impl UpdateSource for Fake {
                 docker_image: Some("ghcr.io/example/bunko:9.9.9".into()),
                 checked_at: Some("2026-10-01T00:00:00Z".into()),
                 error: None,
+                note: None,
             }
         })
     }

@@ -4258,6 +4258,8 @@ async function loadUpdate(refresh) {
         summary += 'Version ' + data.latest + ' is available.';
     } else if (data.latest) {
         summary += 'This is the latest release.';
+    } else if (data.note) {
+        summary += data.note;
     } else {
         summary += data.checks_enabled === false ? 'Automatic update checks are off.' : 'Not checked yet.';
     }

@@ -105,8 +105,13 @@ fn print_status(s: &UpdateStatus) {
     println!("Current version: {}", s.current);
     println!(
         "Latest version:  {}",
-        s.latest.as_deref().unwrap_or("unknown")
+        s.latest
+            .as_deref()
+            .unwrap_or(if s.note.is_some() { "none" } else { "unknown" })
     );
+    if let Some(note) = &s.note {
+        println!("Note: {note}");
+    }
     println!(
         "Update available: {}",
         if s.available { "yes" } else { "no" }

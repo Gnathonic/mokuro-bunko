@@ -37,6 +37,9 @@ pub const TARGET: &str = env!("BUNKO_TARGET");
 pub enum UpdateError {
     #[error("could not reach the release server: {0}")]
     Http(#[from] reqwest::Error),
+    /// The release server answered 404: nothing is published there (yet).
+    #[error("no release has been published yet ({0} does not exist)")]
+    NotPublished(String),
     #[error("the release manifest is not valid: {0}")]
     Manifest(String),
     #[error("the release manifest signature does not verify")]
@@ -143,14 +146,11 @@ pub struct Manifest {
 /// Read `loc`: an http(s) URL, a `file://` URL or a plain path (mirrors on disk, tests).
 pub async fn read_location(client: &reqwest::Client, loc: &str) -> Result<Vec<u8>, UpdateError> {
     if loc.contains("://") && !loc.starts_with("file://") {
-        Ok(client
-            .get(loc)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?
-            .to_vec())
+        let resp = client.get(loc).send().await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(UpdateError::NotPublished(loc.to_string()));
+        }
+        Ok(resp.error_for_status()?.bytes().await?.to_vec())
     } else {
         let p = loc.strip_prefix("file://").unwrap_or(loc);
         std::fs::read(p)
@@ -299,6 +299,8 @@ pub struct UpdateStatus {
     pub docker_image: Option<String>,
     pub checked_at: Option<String>,
     pub error: Option<String>,
+    /// Not a failure, but worth saying: e.g. no release has been published yet.
+    pub note: Option<String>,
 }
 
 pub struct Updater {
@@ -485,6 +487,7 @@ impl Updater {
             docker_image: None,
             checked_at: Some(now_iso()),
             error: None,
+            note: None,
         };
         match self.fetch_manifest().await {
             Ok(m) => {
@@ -498,6 +501,11 @@ impl Updater {
                 status.can_apply = status.available
                     && install.can_apply()
                     && m.artifact(TARGET, &self.flavor).is_ok();
+            }
+            // Nothing published (yet): the check worked, there is just nothing to
+            // update to. Not an error, so automatic updates do not count it as one.
+            Err(UpdateError::NotPublished(_)) => {
+                status.note = Some("No release has been published yet.".into())
             }
             Err(e) => status.error = Some(e.to_string()),
         }

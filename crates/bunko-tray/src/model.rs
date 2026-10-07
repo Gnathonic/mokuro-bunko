@@ -50,6 +50,8 @@ pub struct UpdateView {
     pub latest: Option<String>,
     pub available: bool,
     pub error: Option<String>,
+    /// Not a failure (e.g. no release published yet).
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -406,7 +408,8 @@ pub fn build(inp: &Inputs) -> MenuModel {
         let u = i.status.as_ref()?.update.as_ref()?;
         (u.state == "available").then(|| u.version.clone().unwrap_or_default())
     });
-    let unchecked = inp.update.latest.is_none() && inp.update.error.is_none();
+    let unchecked =
+        inp.update.latest.is_none() && inp.update.error.is_none() && inp.update.note.is_none();
     let update_available = inp.update.available || (unchecked && reported.is_some());
     let update_text = if inp.update.checking {
         "Checking for updates…".to_string()
@@ -423,6 +426,8 @@ pub fn build(inp: &Inputs) -> MenuModel {
         )
     } else if let Some(latest) = &inp.update.latest {
         format!("Up to date ({latest}) — check again")
+    } else if inp.update.note.is_some() {
+        "No release published yet — check again".to_string()
     } else if inp.update.error.is_some() {
         "Update check failed — try again".to_string()
     } else {
