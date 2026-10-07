@@ -69,7 +69,7 @@ Proxies: Caddy forwards WebSockets as-is. The bundled nginx template sets
    with `fatal` + `exit`. Older libraries ignore both events (unknown events are logged
    and dropped), so the claims time out as before.
 
-10. **Version mismatch** (0.7.0-alpha.2, additive). The library compares the
+10. **Version mismatch** (0.7, additive). The library compares the
    version the processor registers with (`host.version`, which every processor
    already sends) with its own, as semver precedence, and when they differ adds
    `version_mismatch` to the `RegisterReply`:

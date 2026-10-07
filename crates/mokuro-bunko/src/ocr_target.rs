@@ -7,7 +7,7 @@
 //! `--processor` picks the processor; without it, a machine with a `processor.yaml`
 //! and no library configuration is a processor machine. A processor also looks for
 //! packs in the library's storage ([`library_fallback_backends`]), so a pack installed
-//! the 0.7.0-alpha way (into the library storage) is not wasted.
+//! the earlier 0.7 development builds' way (into the library storage) is not wasted.
 
 use crate::cfgfile;
 use crate::cmd::Ctx;
