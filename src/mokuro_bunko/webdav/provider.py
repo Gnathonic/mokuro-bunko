@@ -8,11 +8,13 @@ The reader expects a /mokuro-reader/ folder containing:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from wsgidav.dav_provider import DAVProvider
 
+from mokuro_bunko.webdav.path_case import fold_name
 from mokuro_bunko.webdav.resources import (
     MokuroFileResource,
     MokuroFolderResource,
@@ -63,6 +65,11 @@ class MokuroDAVProvider(DAVProvider):  # type: ignore[misc]
         user_data = environ.get("mokuro.user")
         if user_data:
             username = user_data.get("username")
+
+        if environ.get("REQUEST_METHOD") == "MOVE" and self._is_rename_of_source(
+            path, environ, username
+        ):
+            return None
 
         # Root folder (virtual)
         if path == "/":
@@ -117,6 +124,29 @@ class MokuroDAVProvider(DAVProvider):  # type: ignore[misc]
             return None
 
         return None
+
+    def _is_rename_of_source(
+        self, path: str, environ: dict[str, Any], username: str | None
+    ) -> bool:
+        """Is ``path`` this MOVE's own source, spelled with different case?
+
+        Then it is the name the source is being renamed to, not a resource
+        that already exists there -- even on a case-insensitive filesystem
+        (NTFS, APFS), where it opens the source itself. Reported as existing,
+        wsgidav would honour `Overwrite: T` by deleting the destination
+        first: the folder being renamed.
+        """
+        source = "/" + str(environ.get("PATH_INFO", "")).strip("/")
+        if path == source or fold_name(path) != fold_name(source):
+            return False
+        destination = self.path_mapper.virtual_to_physical(path, username)
+        origin = self.path_mapper.virtual_to_physical(source, username)
+        if destination is None or origin is None:
+            return False
+        try:
+            return os.path.samefile(destination, origin)
+        except OSError:
+            return False
 
     def is_readonly(self) -> bool:
         """Return False to allow writes."""

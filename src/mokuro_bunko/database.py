@@ -225,7 +225,7 @@ class CommunityDetailsRow(TypedDict):
     """Server-fetched community details (AniList/MAL) for one series.
 
     Separate from `series_facts` (client-merged, client-clocked) and from
-    `catalog_series` (rebuilt wholesale by every pass): this row's lifecycle
+    `catalog_folders` (rebuilt wholesale by every pass): this row's lifecycle
     is the enrichment fetcher's alone, keyed by the same series identity.
     """
 
@@ -620,10 +620,16 @@ class Database:
                 )
             """)
 
+            # One row per series FOLDER. Up to 0.5.2 this was `catalog_series`,
+            # keyed by the folded series key, so `Kingdom/` and `kingdom/`
+            # shared one row and whichever the pass reached last hid the
+            # other's volumes from the catalog. That table is left as it is,
+            # neither read nor written: rolling back to 0.5.2 finds it in the
+            # shape its own upsert needs, and its first pass refreshes it.
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS catalog_series (
-                    series_key TEXT PRIMARY KEY,
-                    folder_name TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS catalog_folders (
+                    folder_name TEXT PRIMARY KEY,
+                    series_key TEXT NOT NULL,
                     cover_path TEXT,
                     volume_count INTEGER NOT NULL,
                     latest_volume_modified REAL NOT NULL DEFAULT 0,
@@ -696,19 +702,6 @@ class Database:
             """)
             if version_row is not None and not had_identities:
                 self._backfill_volume_identities(conn)
-
-            # `catalog_series` predates these two columns on any database that
-            # ran an earlier build. Adding them with a 0 default reads as "no
-            # damage known yet", which is true until the next metadata pass
-            # rewrites every row wholesale -- and the pass recompiles every
-            # cached entry anyway (see `_entry_from_dict`), so the real numbers
-            # land on the first pass after startup, not eventually.
-            for column in ("missing_pages", "damaged_volumes"):
-                if not self._column_exists(conn, "catalog_series", column):
-                    conn.execute(
-                        f"ALTER TABLE catalog_series ADD COLUMN {column} "
-                        "INTEGER NOT NULL DEFAULT 0"
-                    )
 
             if not self._column_exists(conn, "users", "notes"):
                 conn.execute("ALTER TABLE users ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
@@ -2358,17 +2351,17 @@ class Database:
     # --- materialized catalog -------------------------------------------
 
     def upsert_catalog_series(self, row: CatalogSeriesRow) -> None:
-        """Insert or replace one series' materialized catalog entry."""
+        """Insert or replace one series folder's materialized catalog entry."""
         with self._connection() as conn:
             conn.execute(
                 """
-                INSERT INTO catalog_series (
+                INSERT INTO catalog_folders (
                     series_key, folder_name, cover_path, volume_count,
                     latest_volume_modified, total_pages, total_chars,
                     missing_pages, damaged_volumes, scanned_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                ON CONFLICT(series_key) DO UPDATE SET
-                    folder_name = excluded.folder_name,
+                ON CONFLICT(folder_name) DO UPDATE SET
+                    series_key = excluded.series_key,
                     cover_path = excluded.cover_path,
                     volume_count = excluded.volume_count,
                     latest_volume_modified = excluded.latest_volume_modified,
@@ -2395,7 +2388,7 @@ class Database:
         """Every materialized catalog row, ordered by folder name."""
         with self._connection() as conn:
             cursor = conn.execute(
-                "SELECT * FROM catalog_series ORDER BY folder_name"
+                "SELECT * FROM catalog_folders ORDER BY folder_name"
             )
             return [
                 CatalogSeriesRow(
@@ -2412,21 +2405,21 @@ class Database:
                 for raw in cursor.fetchall()
             ]
 
-    def prune_catalog_series(self, keep_series_keys: Iterable[str]) -> int:
-        """Drop catalog rows for series that no longer exist. Returns the count.
+    def prune_catalog_series(self, keep_folder_names: Iterable[str]) -> int:
+        """Drop catalog rows for folders that no longer exist. Returns the count.
 
         Same one-lock scan-then-delete shape as `prune_series_entry_cache`.
         """
-        keep = set(keep_series_keys)
+        keep = set(keep_folder_names)
         with self._connection() as conn:
-            cursor = conn.execute("SELECT series_key FROM catalog_series")
+            cursor = conn.execute("SELECT folder_name FROM catalog_folders")
             stale = [
-                str(raw["series_key"])
+                str(raw["folder_name"])
                 for raw in cursor.fetchall()
-                if str(raw["series_key"]) not in keep
+                if str(raw["folder_name"]) not in keep
             ]
-            for series_key in stale:
-                conn.execute("DELETE FROM catalog_series WHERE series_key = ?", (series_key,))
+            for folder_name in stale:
+                conn.execute("DELETE FROM catalog_folders WHERE folder_name = ?", (folder_name,))
             return len(stale)
 
     def upsert_community_details(self, row: CommunityDetailsRow) -> None:

@@ -795,6 +795,35 @@ class TestCatalogMaterialization:
         assert [r["folder_name"] for r in database.list_catalog_series()] == ["Dr Stone"]
         service.stop()
 
+    def test_case_variant_folders_each_keep_their_own_row(
+        self, library: Path, tmp_path: Path
+    ) -> None:
+        """`Kingdom/` and `kingdom/` fold to one series key but are two
+        folders on a case-sensitive host: neither row may overwrite the other
+        (prod 2026-10-06: a stray one-volume `kingdom/` hid all 79 volumes of
+        `Kingdom/` from the catalog)."""
+        write_volume(library, "Kingdom", "Volume 01")
+        write_volume(library, "Kingdom", "Volume 02")
+        write_volume(library, "kingdom", "Volume 80")
+        database = Database(tmp_path / "test.db")
+        service = MetadataService(library, database)
+
+        service.regenerate_all()
+        by_name = {r["folder_name"]: r for r in database.list_catalog_series()}
+        assert by_name["Kingdom"]["volume_count"] == 2
+        assert by_name["kingdom"]["volume_count"] == 1
+        assert by_name["Kingdom"]["series_key"] == by_name["kingdom"]["series_key"]
+
+        service.regenerate_series("kingdom")
+        by_name = {r["folder_name"]: r for r in database.list_catalog_series()}
+        assert by_name["Kingdom"]["volume_count"] == 2
+        assert by_name["kingdom"]["volume_count"] == 1
+
+        shutil.rmtree(library / "kingdom")
+        service.regenerate_all()
+        assert [r["folder_name"] for r in database.list_catalog_series()] == ["Kingdom"]
+        service.stop()
+
     def test_series_regen_updates_only_its_row(self, library: Path, tmp_path: Path) -> None:
         write_volume(library, "Dr Stone", "Volume 01")
         write_volume(library, "Frieren", "Volume 01")
