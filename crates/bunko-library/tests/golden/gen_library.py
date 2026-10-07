@@ -357,16 +357,28 @@ def archives_json(root: Path) -> dict:
 
 
 PAGEDIR = HERE / "pagedir"
+# Names Windows cannot hold (a trailing dot), so git cannot check them out there: not
+# committed; the reference run and the Rust test add them to a temporary copy.
+PAGEDIR_UNCOMMITTED = ["e.jpg."]
 
 
 def build_pagedir() -> None:
     if PAGEDIR.exists():
         shutil.rmtree(PAGEDIR)
     for rel in ["10.jpg", "9.jpg", "sub/1.png", "sub/deeper/2.webp", "x.txt", ".hidden.jpg", "b.JPEG", "c.avif",
-                "d.gif", "e.jpg.", ".jpg", JP + "/1.jpg", "pagedir.webp"]:
+                "d.gif", ".jpg", JP + "/1.jpg", "pagedir.webp"]:
         path = PAGEDIR / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(img(rel))
+
+
+def pagedir_pages() -> list[str]:
+    with tempfile.TemporaryDirectory(dir=Path.home() / ".cache/mokuro-bunko-demo/tmp") as tmp:
+        copy = Path(tmp) / "pagedir"
+        shutil.copytree(PAGEDIR, copy)
+        for rel in PAGEDIR_UNCOMMITTED:
+            (copy / rel).write_bytes(img(rel))
+        return [p.as_posix() for p in list_pages(copy)]
 
 
 def run_reference() -> None:
@@ -406,8 +418,7 @@ def run_reference() -> None:
         (EXPECTED / "db.json").write_text(json.dumps(dump_db(db_path), ensure_ascii=True, indent=1), encoding="ascii")
         (EXPECTED / "index.json").write_text(json.dumps(snapshot_json(index), ensure_ascii=True, indent=1), encoding="ascii")
         (EXPECTED / "manifests.json").write_text(json.dumps(manifests, ensure_ascii=True, indent=1), encoding="ascii")
-        (EXPECTED / "pagedir.json").write_text(json.dumps([p.as_posix() for p in list_pages(PAGEDIR)], ensure_ascii=True),
-                                               encoding="ascii")
+        (EXPECTED / "pagedir.json").write_text(json.dumps(pagedir_pages(), ensure_ascii=True), encoding="ascii")
         (EXPECTED / "archives.json").write_text(json.dumps(archives_json(root), ensure_ascii=True, indent=1), encoding="ascii")
     print(f"wrote {EXPECTED}")
 

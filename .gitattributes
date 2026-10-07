@@ -1,0 +1,7 @@
+# Check every file out byte for byte as committed, on every OS (no core.autocrlf
+# conversion): golden fixtures, expected outputs and embedded assets are compared
+# and hashed byte for byte.
+* -text
+# cmd.exe scripts get CRLF line endings everywhere, including archives built off Windows.
+*.bat text eol=crlf
+*.cmd text eol=crlf

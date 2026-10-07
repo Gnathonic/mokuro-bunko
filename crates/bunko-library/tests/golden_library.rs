@@ -472,7 +472,13 @@ fn store_trait_is_object_safe() {
 
 #[test]
 fn directory_volumes_list_pages_like_python() {
-    let dir = common::golden_dir().join("pagedir");
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("pagedir");
+    common::copy_tree(&common::golden_dir().join("pagedir"), &dir);
+    // Not committed (git cannot check it out on Windows), but part of the reference run:
+    // a trailing dot is not an image extension. Windows strips it from new names.
+    #[cfg(not(windows))]
+    std::fs::write(dir.join("e.jpg."), b"IMG:e.jpg.e.jpg.e.jpg.").unwrap();
     let volume = Volume::open(&dir).unwrap();
     let pages: Vec<&str> = volume
         .pages()
