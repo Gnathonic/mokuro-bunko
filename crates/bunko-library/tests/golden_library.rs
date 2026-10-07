@@ -409,10 +409,14 @@ fn archive_listings_and_pages_match_python() {
         let siblings: Vec<String> = bunko_library::sidecar::sidecar_siblings(&path)
             .iter()
             .map(|p| {
-                p.strip_prefix(&root)
+                // Python recorded POSIX paths.
+                let parts: Vec<String> = p
+                    .strip_prefix(&root)
                     .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                parts.join("/")
             })
             .collect();
         let expected_siblings: Vec<String> = case

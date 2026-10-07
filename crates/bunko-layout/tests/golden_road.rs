@@ -261,9 +261,14 @@ fn volume_sidecars_and_normalization_match_python() {
                 s(get(case, "runner_bytes"))
             ));
         }
+        let n = get(case, "normalize");
+        if cfg!(windows) && s(get(n, "cbz")).contains('\\') {
+            // A recorded POSIX path with a backslash in a name: on Windows that is a
+            // separator, and no NTFS name can hold one.
+            continue;
+        }
         // normalise the bytes Python's runner wrote
         std::fs::write(&path, s(get(case, "runner_bytes"))).expect("write");
-        let n = get(case, "normalize");
         let cbz = std::path::Path::new(s(get(n, "cbz")));
         let series = derive_series_name(
             cbz,
