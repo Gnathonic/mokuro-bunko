@@ -55,13 +55,24 @@ fn kingdom_library() -> (tempfile::TempDir, std::path::PathBuf) {
     (dir, lib)
 }
 
-/// Both a case-sensitive and a case-insensitive host's resolution, over one tree.
+/// Whether this host's filesystem tells `Kingdom` from `KINGDOM` (Linux: yes; APFS and
+/// NTFS: no).
+fn host_is_case_sensitive(lib: &std::path::Path) -> bool {
+    !lib.join("KINGDOM").exists()
+}
+
+/// Both a case-sensitive and a case-insensitive host's resolution, over one tree. A
+/// case-insensitive filesystem has only the second: there the probe never says
+/// "case-sensitive", and a lookup by any spelling finds the folder.
 fn canonicalizers() -> Vec<(tempfile::TempDir, LibraryPathCanonicalizer)> {
     [true, false]
         .into_iter()
-        .map(|sensitive| {
+        .filter_map(|sensitive| {
             let (dir, lib) = kingdom_library();
-            (dir, LibraryPathCanonicalizer::new(lib, Some(sensitive)))
+            if sensitive && !host_is_case_sensitive(&lib) {
+                return None;
+            }
+            Some((dir, LibraryPathCanonicalizer::new(lib, Some(sensitive))))
         })
         .collect()
 }
@@ -93,7 +104,8 @@ fn existing_segments_take_their_on_disk_spelling() {
 fn a_decomposed_spelling_matches_the_composed_folder() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("Pok\u{e9}mon")).unwrap(); // composed é
-    let c = LibraryPathCanonicalizer::new(dir.path(), Some(true));
+    // Probed: case-sensitive on Linux (folded by the directory scan), insensitive on APFS.
+    let c = LibraryPathCanonicalizer::new(dir.path(), None);
     let decomposed = "POKE\u{301}MON/v1.cbz";
     assert_eq!(c.canonicalize(decomposed, None), "Pok\u{e9}mon/v1.cbz");
 }
@@ -169,12 +181,14 @@ fn the_request_rewrite_keeps_the_query_and_the_destination_shape() {
 
 /// WebDAV deletes an existing MOVE destination first (`Overwrite: T`); on a
 /// case-insensitive host that destination IS the source. A hard link reproduces "two
-/// spellings, one file" on a case-sensitive test host.
+/// spellings, one file" on a case-sensitive test host; elsewhere the filesystem does.
 #[tokio::test]
 async fn a_moves_case_variant_destination_is_not_an_existing_resource() {
     let env = Env::new();
     let series = env.lib("series");
-    std::fs::hard_link(series.join("vol1.cbz"), series.join("VOL1.cbz")).unwrap();
+    if !series.join("VOL1.cbz").exists() {
+        std::fs::hard_link(series.join("vol1.cbz"), series.join("VOL1.cbz")).unwrap();
+    }
     std::fs::write(series.join("vol1.mokuro"), b"{}").unwrap();
 
     // Not a MOVE: the other spelling is a resource like any other.

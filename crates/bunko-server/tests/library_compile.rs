@@ -330,6 +330,17 @@ async fn case_variant_folders_each_keep_their_own_catalog_row() {
             .map(|r| (r.folder_name, r.volume_count, r.series_key))
             .collect()
     };
+    if env.library.join("KINGDOM").exists() {
+        // A case-insensitive host (APFS, NTFS): `kingdom/` IS `Kingdom/`, so the two
+        // folders cannot exist and the third volume landed in the one there is.
+        env.runtime.recompile_all_now().await;
+        assert_eq!(
+            rows(&env),
+            [("Kingdom".to_string(), 3, "kingdom".to_string())]
+        );
+        env.runtime.stop().await;
+        return;
+    }
     let both = vec![
         ("Kingdom".to_string(), 2, "kingdom".to_string()),
         ("kingdom".to_string(), 1, "kingdom".to_string()),
