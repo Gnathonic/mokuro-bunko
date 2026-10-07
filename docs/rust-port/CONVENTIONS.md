@@ -40,7 +40,7 @@ be MIT/Apache-2.0/BSD/ISC/Zlib/MPL-2.0/Unicode/IJG — no GPL/LGPL/AGPL.
 Several agents build at once. Always use your own target dir to avoid lock contention:
 
 ```
-CARGO_TARGET_DIR=/home/nathan/Projects/mokuro-webdav-library-worktrees/rust-0.7/target/agent-<crate> cargo test -p <crate>
+CARGO_TARGET_DIR=target/agent-<crate> cargo test -p <crate>
 ```
 
 Never touch another crate's files except to read them. Do not commit; the orchestrator

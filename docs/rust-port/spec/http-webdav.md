@@ -6,9 +6,9 @@ security_headers), `security.py`, `static/`, plus the parts of **WsgiDAV 4.3.5**
 that the Python server silently inherits (the Rust server must re-implement those: they ARE the
 protocol behaviour clients see).
 
-Source root: `/home/nathan/Projects/mokuro-webdav-library-worktrees/rust-0.7/src/mokuro_bunko`
+Source root: `src/mokuro_bunko` (the Python 0.5.2 tree)
 (paths below are relative to it). Tests: `../../tests` relative to that, i.e.
-`/home/nathan/Projects/mokuro-webdav-library-worktrees/rust-0.7/tests`.
+`tests` (the Python 0.5.2 tree).
 
 Contents: 0 Conventions - 1 Process model/startup/shutdown - 2 App assembly, middleware order, route index - 3 Request primitives (path encoding, client IP, containment, limiter) - 4 Auth (authn, permission matrix, decision procedure) - 5 CORS - 6 Security/cache headers - 7 Static files and UI mounts - 8 WebDAV semantics (tree, properties, every method, conditionals, errors, audit, write locks, writers, nginx offload) - 9 Upload middleware (verdicts) - 10 PROPFIND cache - 11 Virtual queue file - 12 Watcher, invalidation, background timings - 13 Request log - 14 Quirks catalogue - 15 DROP list - 16 Test index - 17 Open questions.
 

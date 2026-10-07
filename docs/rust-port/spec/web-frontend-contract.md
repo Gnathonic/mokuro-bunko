@@ -1,6 +1,6 @@
 # Web frontend contract (mokuro-bunko 0.5.2 -> Rust server)
 
-Source of truth: `/home/nathan/Projects/mokuro-webdav-library-worktrees/rust-0.7/src/mokuro_bunko`
+Source of truth: `src/mokuro_bunko` (the Python 0.5.2 tree)
 (commit 199cff5, 0.5.2). The static frontends are reused UNCHANGED, so the Rust server must
 serve them byte-for-byte and answer every request below with the shapes the JS reads.
 Everything here was derived from the JS/HTML (what the page does) cross-checked against the
