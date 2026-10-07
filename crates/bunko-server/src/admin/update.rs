@@ -629,6 +629,7 @@ fn unchecked_status() -> UpdateStatus {
         docker_image: None,
         checked_at: None,
         error: None,
+        note: None,
     }
 }
 
@@ -801,6 +802,7 @@ mod tests {
                     docker_image: None,
                     checked_at: Some("now".into()),
                     error: None,
+                    note: None,
                 }
             })
         }
@@ -908,6 +910,24 @@ mod tests {
         svc.try_auto(&status, &CancellationToken::new()).await;
         assert!(log.get().is_empty(), "{:?}", log.get());
         assert_eq!(svc.auto_view().0.unwrap().state, "available");
+    }
+
+    /// Nothing published yet is not a failed check: no backoff, no problem for the owner.
+    #[tokio::test(start_paused = true)]
+    async fn nothing_published_is_not_a_failure() {
+        let (svc, log, _d) = service(true, self_managed(), false, 0);
+        let status = UpdateStatus {
+            install: self_managed(),
+            note: Some("No release has been published yet.".into()),
+            ..unchecked_status()
+        };
+        for _ in 0..5 {
+            svc.try_auto(&status, &CancellationToken::new()).await;
+        }
+        assert!(log.get().is_empty(), "{:?}", log.get());
+        let (view, problems) = svc.auto_view();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_ne!(view.map(|v| v.state).as_deref(), Some("failed"));
     }
 
     #[tokio::test(start_paused = true)]

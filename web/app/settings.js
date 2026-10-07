@@ -353,6 +353,7 @@
         '<dt>Installed as</dt><dd>' + esc(u.install) + '</dd>' +
         '<dt>Channel</dt><dd>' + esc(u.channel) + (u.check ? '' : ' (automatic checks off)') + '</dd>' +
         (u.error ? '<dt>Problem</dt><dd>' + esc(u.error) + '</dd>' : '') +
+        (u.note ? '<dt>Note</dt><dd>' + esc(u.note) + '</dd>' : '') +
         (u.docker_image ? '<dt>Docker</dt><dd><code>docker pull ' + esc(u.docker_image) + '</code></dd>' : '');
       $('update-apply').disabled = !(u.available && u.can_apply);
     } catch (e) { $('update-kv').innerHTML = '<dt>Problem</dt><dd>' + esc(e.message) + '</dd>'; }

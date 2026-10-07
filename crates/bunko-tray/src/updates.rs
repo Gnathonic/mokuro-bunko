@@ -12,17 +12,30 @@ pub fn parse_check(stdout: &str) -> UpdateView {
     for line in stdout.lines() {
         if let Some(v) = line.strip_prefix("Latest version:") {
             let v = v.trim();
-            if !v.is_empty() && v != "unknown" {
+            if !v.is_empty() && v != "unknown" && v != "none" {
                 view.latest = Some(v.to_string());
             }
         } else if let Some(v) = line.strip_prefix("Update available:") {
             view.available = v.trim() == "yes";
+        } else if let Some(v) = line.strip_prefix("Note:") {
+            view.note = Some(v.trim().to_string());
         }
     }
-    if view.latest.is_none() && !view.available {
+    if view.latest.is_none() && !view.available && view.note.is_none() {
         view.error = Some("no answer from the update check".into());
     }
     view
+}
+
+/// The reason a failed `update check` printed (its last stderr line, without the
+/// "Error: could not check for updates:" lead-in), if any.
+pub fn failure_reason(stderr: &str) -> Option<String> {
+    let line = stderr.lines().map(str::trim).rfind(|l| !l.is_empty())?;
+    let line = line.strip_prefix("Error:").map_or(line, str::trim);
+    let line = line
+        .strip_prefix("could not check for updates:")
+        .map_or(line, str::trim);
+    Some(line.to_string())
 }
 
 pub fn check(cli: &Path, env: &[(String, OsString)]) -> UpdateView {
@@ -38,8 +51,10 @@ pub fn check(cli: &Path, env: &[(String, OsString)]) -> UpdateView {
     match cmd.output() {
         Ok(out) => {
             let mut view = parse_check(&String::from_utf8_lossy(&out.stdout));
-            if !out.status.success() && view.error.is_none() && view.latest.is_none() {
-                view.error = Some(String::from_utf8_lossy(&out.stderr).trim().to_string());
+            if !out.status.success()
+                && let Some(why) = failure_reason(&String::from_utf8_lossy(&out.stderr))
+            {
+                view.error = Some(why);
             }
             view
         }
@@ -67,5 +82,31 @@ mod tests {
         let v =
             parse_check("Current version: 0.7.0\nLatest version:  unknown\nUpdate available: no\n");
         assert!(v.error.is_some());
+    }
+
+    #[test]
+    fn a_failed_check_says_why() {
+        let err = "Error: could not check for updates: no release has been published yet \
+                   (https://x/releases/latest/download/release.json does not exist)\n";
+        assert_eq!(
+            failure_reason(err).as_deref(),
+            Some(
+                "no release has been published yet \
+                 (https://x/releases/latest/download/release.json does not exist)"
+            )
+        );
+        assert_eq!(failure_reason("\n  \n"), None);
+    }
+
+    #[test]
+    fn nothing_published_is_a_note_not_an_error() {
+        let v = parse_check(
+            "Current version: 0.7.0\nLatest version:  none\nNote: No release has been published yet.\nUpdate available: no\n",
+        );
+        assert!(v.error.is_none() && !v.available && v.latest.is_none());
+        assert_eq!(
+            v.note.as_deref(),
+            Some("No release has been published yet.")
+        );
     }
 }
