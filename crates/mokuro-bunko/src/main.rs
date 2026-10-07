@@ -113,9 +113,9 @@ fn run(cli: Cli) -> out::CmdResult {
 }
 
 /// Started without a terminal to talk to: on Windows the console is this process's
-/// alone (Explorer or a shortcut made it), on macOS stdin is not a terminal (Finder, an
-/// app bundle). On Windows stdin is not looked at: a script, `ssh host mokuro-bunko`
-/// or a test harness pipes it from inside a console it shares, and gets the help.
+/// alone (Explorer or a shortcut made it), on macOS LaunchServices started it (Finder,
+/// the Dock, `open`: a child of launchd, stdin not a terminal). A script, `ssh host
+/// mokuro-bunko` or a test harness without a terminal is neither, and gets the help.
 fn double_clicked() -> bool {
     #[cfg(windows)]
     {
@@ -129,7 +129,8 @@ fn double_clicked() -> bool {
     #[cfg(target_os = "macos")]
     {
         use std::io::IsTerminal;
-        !std::io::stdin().is_terminal()
+        // SAFETY: getppid has no preconditions.
+        !std::io::stdin().is_terminal() && unsafe { libc::getppid() } == 1
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
