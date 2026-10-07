@@ -103,6 +103,23 @@ fn sleep_cancellable(duration: Duration, cancel: &CancelToken) -> bool {
     !cancel.is_cancelled()
 }
 
+/// Sleep `delay` less what earlier sleeps overslept (`debt`), and add to `debt` what
+/// this one oversleeps: pages come out at the configured rate however late the OS timer
+/// wakes (a macOS runner turns a 4 ms sleep into ~25 ms), a few at once after a late
+/// wake, as from a device that kept working meanwhile.
+fn paced_sleep(delay: Duration, debt: &mut Duration, cancel: &CancelToken) -> bool {
+    let credit = (*debt).min(delay);
+    *debt -= credit;
+    let target = delay - credit;
+    if target.is_zero() {
+        return !cancel.is_cancelled();
+    }
+    let start = Instant::now();
+    let finished = sleep_cancellable(target, cancel);
+    *debt += start.elapsed().saturating_sub(target);
+    finished
+}
+
 impl PagePipeline for FakePipeline {
     fn describe(&self) -> MachineInfo {
         let config = &self.inner.config;
@@ -208,6 +225,7 @@ impl PagePipeline for FakePipeline {
             engine: spec.engine.clone(),
             started: Instant::now(),
             items: AtomicU64::new(0),
+            overslept: Mutex::new(Duration::ZERO),
             device,
             precision,
             width,
@@ -220,6 +238,8 @@ struct FakeRunner {
     engine: String,
     started: Instant,
     items: AtomicU64,
+    /// What the page sleeps overslept, owed to the next pages ([`paced_sleep`]).
+    overslept: Mutex<Duration>,
     device: String,
     precision: String,
     width: u32,
@@ -323,8 +343,9 @@ impl VolumeRunner for FakeRunner {
         }
         let total = names.len() as u32;
         let mut out_pages = Vec::new();
+        let mut debt = std::mem::take(&mut *self.overslept.lock());
         for (i, name) in names.iter().enumerate() {
-            if !sleep_cancellable(self.page_delay(), cancel) {
+            if !paced_sleep(self.page_delay(), &mut debt, cancel) {
                 return Err(RunError::Cancelled);
             }
             if config.fatal_volumes.contains(&meta.claim)
@@ -341,6 +362,7 @@ impl VolumeRunner for FakeRunner {
                 total,
             });
         }
+        *self.overslept.lock() += debt;
         if config.fail_volumes.contains(&meta.claim) || config.fail_volumes.contains(&meta.stem) {
             return Err(RunError::Volume("every page failed".to_string()));
         }

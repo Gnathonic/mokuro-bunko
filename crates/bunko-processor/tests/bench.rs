@@ -210,16 +210,14 @@ async fn the_width_search_widens_what_the_verdict_names_while_it_pays() {
     assert_eq!(done["best"]["stage_workers"], json!({"engine": 2}));
     assert_eq!(done["best"]["queue_capacity"], json!({}));
     assert_eq!(done["best"]["stage_device"], json!({}));
-    // Wall-clock figures. The fake's page times are sleeps, only as exact as the host's
-    // timer (a macOS runner turns a 4 ms page into ~25 ms), so what is checked is that
-    // the accepted width paid and that the bench's arithmetic agrees with itself.
     let best = f(&done["best"]["pages_per_second"]);
     let baseline = f(&done["baseline"]["pages_per_second"]);
-    assert!(baseline > 0.0 && best > baseline, "{done:?}");
     assert!(
         (f(&done["best"]["speedup"]) - best / baseline).abs() < 1e-3,
         "{done:?}"
     );
+    assert!(f(&done["best"]["speedup"]) > 1.5, "{done:?}");
+    assert!(baseline > 50.0, "{done:?}");
     assert_eq!(done["precision"], "fp32");
     assert_eq!(done["precision_mode"], "auto-accuracy");
     assert!(!done.contains_key("precision_trials"));
