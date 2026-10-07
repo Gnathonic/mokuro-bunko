@@ -158,3 +158,77 @@ mod tests {
         assert!(!destination_is_clean("/mokuro-reader/A/x%ff.cbz"));
     }
 }
+
+/// 0.5.2 `test_security_headers.py`: volume files are revalidated every time.
+#[cfg(test)]
+mod cache_control_tests {
+    use super::security_headers;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::response::IntoResponse;
+    use http::{Request, header};
+    use tower::ServiceExt;
+
+    async fn cache_control(method: &str, path: &str, content_type: &'static str) -> Vec<String> {
+        let app = Router::new()
+            .fallback(move || async move {
+                ([(header::CONTENT_TYPE, content_type)], "x").into_response()
+            })
+            .layer(axum::middleware::from_fn(security_headers));
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        resp.headers()
+            .get_all(header::CACHE_CONTROL)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A re-OCR rewrites `.mokuro` in place: a heuristically fresh cached copy would hand
+    /// a reader the old OCR, so volume files must revalidate (the ETag keeps that a 304).
+    #[tokio::test]
+    async fn volume_files_are_revalidated_every_time() {
+        for (path, content_type) in [
+            (
+                "/mokuro-reader/S/Vol%201.mokuro",
+                "application/octet-stream",
+            ),
+            (
+                "/mokuro-reader/S/Vol%201.hayai-nova.mokuro.gz",
+                "application/gzip",
+            ),
+            ("/mokuro-reader/S/Vol%201.CBZ", "application/zip"),
+        ] {
+            for method in ["GET", "HEAD"] {
+                assert_eq!(
+                    cache_control(method, path, content_type).await,
+                    ["no-cache"],
+                    "{method} {path}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn other_downloads_keep_no_forced_cache_control() {
+        let got = cache_control(
+            "GET",
+            "/mokuro-reader/S/notes.txt",
+            "application/octet-stream",
+        )
+        .await;
+        assert!(got.is_empty(), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn a_preflight_or_put_answer_about_a_volume_file_is_left_alone() {
+        for method in ["OPTIONS", "PUT"] {
+            let got = cache_control(method, "/mokuro-reader/S/Vol%201.cbz", "text/plain").await;
+            assert!(got.is_empty(), "{method}: {got:?}");
+        }
+    }
+}

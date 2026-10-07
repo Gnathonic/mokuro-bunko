@@ -1,7 +1,7 @@
 # Migrating from 0.5.2 to 0.7
 
-0.7 is a rewrite of the server in Rust. It is a **drop-in over 0.5.2
-storage**: point it at the same `config.yaml`, `mokuro.db` and library tree
+0.7 is a rewrite of the server in Rust. It is a **drop-in over 0.5.2 and
+0.5.3 storage** (everything said here about 0.5.2 holds for 0.5.3): point it at the same `config.yaml`, `mokuro.db` and library tree
 and it carries on. Readers (Mokuro Reader) keep working against the same
 WebDAV and JSON APIs. What changes is how it is installed, which OCR engines
 exist, and how OCR processors talk to the library.
@@ -27,7 +27,7 @@ exist, and how OCR processors talk to the library.
 | Thing | Notes |
 |---|---|
 | `config.yaml` | Same location and format. Every 0.5.2 key still loads. |
-| `mokuro.db` | Opened and upgraded in place by 0.5.2's own idempotent steps. |
+| `mokuro.db` | Opened and upgraded in place by 0.5.3's own idempotent steps (a 0.5.2 database gains 0.5.3's `catalog_folders` table; its `catalog_series` is left as it was). |
 | Library tree | `library/`, `inbox/`, `users/`, sidecars (`.mokuro`, `.<name>.mokuro`), `.webp` covers, compiled `series.json` / `catalog.json`. |
 | Storage defaults | `~/.local/share/mokuro-bunko` (Linux, macOS), `%LOCALAPPDATA%\mokuro-bunko` (Windows); config in `~/.config/mokuro-bunko/config.yaml`. |
 | Accounts, invites, tokens, audit log | In the database. Passwords and bearer tokens keep working. |
@@ -184,6 +184,20 @@ Tarball and Windows installs update themselves from the admin panel's
 Updates card (signed manifest, checksum, one click); Docker installs are told
 which image to pull.
 
+### Library paths are case-insensitive (as since 0.5.3)
+
+As on Windows, `kingdom/` and `Kingdom/` are one folder: a request in any case
+reaches the spelling already on disk, an upload spelled in another case lands in the
+existing folder, and a folder or file can be renamed to fix its case. Coming straight
+from 0.5.2 on a case-sensitive host (Linux, Docker), check the library for folders
+whose names differ only in case (`ls library | sort -f | uniq -di`): both stay
+listed in the catalog, but a request in a third spelling reaches only one of them,
+and the library cannot be copied to Windows or macOS as it is. Merge them while the
+server is stopped (move the volumes into one folder; the next metadata pass picks it
+up). Upload ownership is keyed by path, so a merged volume needs its
+`volume_uploads`, `ocr_sidecars` and `volume_identities` rows renamed too, or
+re-uploaded by its uploader.
+
 ### Behaviour fixes you may notice
 
 0.5.2 quirks that were fixed rather than ported (full list in the
@@ -194,8 +208,9 @@ overrides into `config.yaml`, and the server stops cleanly on SIGTERM
 
 ## Rolling back
 
-0.5.2 can still open the database 0.7 has touched (same schema text, row
-formats and JSON spellings), and the library files are ordinary files. To
+0.5.3 and 0.5.2 can still open the database 0.7 has touched (same schema text, row
+formats and JSON spellings; 0.5.2 finds its own `catalog_series` table as it left it,
+or creates it, and refreshes it on its first pass), and the library files are ordinary files. To
 go back:
 
 1. Stop 0.7 (and its processors).

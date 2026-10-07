@@ -308,7 +308,24 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         ));
     }
 
-    let dest = lookup(inner, &dest_path, user).await?;
+    let src_norm = paths::normalize(&req.path);
+    let dest_norm = paths::normalize(&dest_path);
+    // A MOVE to the source's own path spelled in another case renames it (0.5.3). On a
+    // case-insensitive filesystem the destination opens the source itself: reported as
+    // existing, `Overwrite: T` would delete it first -- the very file or folder being
+    // renamed (0.5.3 `_is_rename_of_source`).
+    let renames_source = is_move
+        && src_norm != dest_norm
+        && crate::fold_name(&src_norm) == crate::fold_name(&dest_norm);
+    let mut dest = lookup(inner, &dest_path, user).await?;
+    if renames_source
+        && let (Some(s), Some(d)) = (src.phys(), dest.as_ref().and_then(Resource::phys))
+    {
+        let (s, d) = (s.to_path_buf(), d.to_path_buf());
+        if blocking(move || crate::path_case::same_file(&s, &d)).await? {
+            dest = None;
+        }
+    }
     let dest_parent = match paths::uri_parent(&dest_path) {
         Some(p) => lookup(inner, &p, user).await?,
         None => None,
@@ -333,8 +350,6 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         None => check_dav_locks(inner, req, &resource_key(&dest_parent, user), false)?,
         Some(d) => check_dav_locks(inner, req, &resource_key(d, user), true)?,
     }
-    let src_norm = paths::normalize(&req.path);
-    let dest_norm = paths::normalize(&dest_path);
     if src_norm == dest_norm {
         return Err(DavError::new(
             StatusCode::FORBIDDEN,
@@ -363,10 +378,6 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         ));
     }
 
-    // A file MOVE that only changes letter case is the same file on a case-insensitive
-    // filesystem, and a rename does the right thing there.
-    let case_only_rename =
-        is_move && !src.is_collection() && src_norm.to_lowercase() == dest_norm.to_lowercase();
     let dest_name = paths::uri_name(&dest_path).to_string();
     let (inner2, req2) = (inner.clone(), req.clone());
     let dest_exists = dest.is_some();
@@ -374,14 +385,18 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         let Some((dest_phys, _)) =
             inner2
                 .roots
-                .member_path(&dest_parent, &dest_name, req2.username())
+                .destination_path(&dest_parent, &dest_name, req2.username())
         else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
         // The virtual paths differed; the files may not (`a//x`, `a/./x`, a symlink, a
-        // case-insensitive filesystem). Overwriting the source with itself deletes it.
-        if let Some(src_phys) = src.phys() {
-            if !case_only_rename && same_physical(src_phys, &dest_phys) {
+        // case-insensitive filesystem). Overwriting the source with itself deletes it. A
+        // rename that only changes the case is the source on a case-insensitive filesystem
+        // and a rename does the right thing there.
+        if let Some(src_phys) = src.phys()
+            && !renames_source
+        {
+            if same_physical(src_phys, &dest_phys) {
                 return Err(DavError::new(
                     StatusCode::FORBIDDEN,
                     "Cannot copy/move source onto itself",
@@ -473,20 +488,7 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
 /// Do `a` and `b` name the same file or folder on disk (equal paths, the same inode, or
 /// the same canonical path)? Missing paths are only equal to themselves.
 fn same_physical(a: &Path, b: &Path) -> bool {
-    if a == b {
-        return true;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
-            return x.dev() == y.dev() && x.ino() == y.ino();
-        }
-    }
-    matches!(
-        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
-        (Ok(x), Ok(y)) if x == y
-    )
+    a == b || crate::path_case::same_file(a, b)
 }
 
 /// Is `dest` (which may not exist yet) inside the folder `src` on disk?

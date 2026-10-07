@@ -1,9 +1,14 @@
-//! Rust -> Python 0.5.2: build a database with bunko-db, then let the Python `Database`
-//! class open and check it (`tests/golden/check_rust_db.py`), as a rollback would; then
-//! read back what Python wrote into it.
+//! Rust -> Python: build a database with bunko-db, then let the Python `Database` class
+//! open and check it (`tests/golden/check_rust_db.py`), as a rollback would; then read
+//! back what Python wrote into it.
 //!
-//! Needs the 0.5.2 reference interpreter: `$BUNKO_REF_PYTHON`, else
-//! `~/.cache/mokuro-bunko-demo/ref052/bin/python`. Without one the test is skipped with a
+//! Two rollbacks: to 0.5.3 (what prod ran before 0.7; the schema must be byte-identical)
+//! and on to 0.5.2 (0.5.3's own rollback: 0.5.2 adds its `catalog_series` table and must
+//! read everything else).
+//!
+//! Needs the reference interpreters: `$BUNKO_REF_PYTHON` (0.5.3), else
+//! `~/.cache/mokuro-bunko-demo/ref053/bin/python`; `$BUNKO_REF052_PYTHON`, else
+//! `~/.cache/mokuro-bunko-demo/ref052/bin/python`. Without one its test is skipped with a
 //! message, unless `BUNKO_REQUIRE_REF_PYTHON=1` (then it fails).
 
 use bunko_core::Role;
@@ -15,12 +20,12 @@ use serde_json::{Map, Number, Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn ref_python() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("BUNKO_REF_PYTHON") {
+fn ref_python(var: &str, env: &str) -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os(var) {
         return Some(PathBuf::from(p));
     }
     let home = std::env::var_os("HOME")?;
-    let p = Path::new(&home).join(".cache/mokuro-bunko-demo/ref052/bin/python");
+    let p = Path::new(&home).join(format!(".cache/mokuro-bunko-demo/{env}/bin/python"));
     p.exists().then_some(p)
 }
 
@@ -85,13 +90,22 @@ const USERS: &[(&str, &str, Role, UserStatus, &str)] = &[
 ];
 
 #[test]
+fn python_053_reads_and_writes_a_rust_database() {
+    reads_and_writes("BUNKO_REF_PYTHON", "ref053", "0.5.3");
+}
+
+#[test]
 fn python_052_reads_and_writes_a_rust_database() {
-    let Some(python) = ref_python() else {
+    reads_and_writes("BUNKO_REF052_PYTHON", "ref052", "0.5.2");
+}
+
+fn reads_and_writes(var: &str, env: &str, version: &str) {
+    let Some(python) = ref_python(var, env) else {
         assert!(
             std::env::var_os("BUNKO_REQUIRE_REF_PYTHON").is_none(),
-            "BUNKO_REQUIRE_REF_PYTHON is set but no reference interpreter was found"
+            "BUNKO_REQUIRE_REF_PYTHON is set but no {version} reference interpreter was found"
         );
-        eprintln!("SKIPPED: no Python 0.5.2 reference interpreter (set BUNKO_REF_PYTHON)");
+        eprintln!("SKIPPED: no Python {version} reference interpreter (set {var})");
         return;
     };
     let dir = tempfile::tempdir().unwrap();
@@ -447,6 +461,16 @@ fn python_052_reads_and_writes_a_rust_database() {
         damaged_volumes: 1,
     })
     .unwrap();
+    // Case-variant folders sharing a series key: one row each (0.5.3).
+    for (folder, volumes) in [("Kingdom", 79), ("kingdom", 1)] {
+        db.upsert_catalog_series(&CatalogSeries {
+            series_key: "kingdom".into(),
+            folder_name: folder.into(),
+            volume_count: volumes,
+            ..Default::default()
+        })
+        .unwrap();
+    }
     m.insert(
         "catalog_series".into(),
         serde_json::to_value(db.list_catalog_series().unwrap()).unwrap(),
@@ -466,7 +490,7 @@ fn python_052_reads_and_writes_a_rust_database() {
     );
     drop(db);
 
-    // -- hand over to Python 0.5.2 ----------------------------------------------------
+    // -- hand over to Python ---------------------------------------------------------
     let manifest = dir.path().join("manifest.json");
     std::fs::write(
         &manifest,

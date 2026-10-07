@@ -311,3 +311,42 @@ async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
     );
     env.runtime.stop().await;
 }
+
+/// 0.5.3 `test_case_variant_folders_each_keep_their_own_row`: `Kingdom/` and `kingdom/`
+/// fold to one series key but are two folders on a case-sensitive host; neither catalog row
+/// may overwrite the other (prod 2026-10-06: a stray one-volume `kingdom/` hid all 79
+/// volumes of `Kingdom/` from the catalog).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn case_variant_folders_each_keep_their_own_catalog_row() {
+    let env = Env::new(|_| {});
+    write_cbz(&env.series_dir("Kingdom").join("Volume 01.cbz"), 1);
+    write_cbz(&env.series_dir("Kingdom").join("Volume 02.cbz"), 1);
+    write_cbz(&env.series_dir("kingdom").join("Volume 80.cbz"), 1);
+    let rows = |env: &Env| -> Vec<(String, i64, String)> {
+        env.db
+            .list_catalog_series()
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.folder_name, r.volume_count, r.series_key))
+            .collect()
+    };
+    let both = vec![
+        ("Kingdom".to_string(), 2, "kingdom".to_string()),
+        ("kingdom".to_string(), 1, "kingdom".to_string()),
+    ];
+
+    env.runtime.recompile_all_now().await;
+    assert_eq!(rows(&env), both);
+
+    let service = env.runtime.service().clone();
+    tokio::task::spawn_blocking(move || service.recompile_series("kingdom").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(rows(&env), both);
+
+    std::fs::remove_dir_all(env.library.join("kingdom")).unwrap();
+    env.runtime.recompile_all_now().await;
+    let names: Vec<String> = rows(&env).into_iter().map(|r| r.0).collect();
+    assert_eq!(names, ["Kingdom"]);
+    env.runtime.stop().await;
+}

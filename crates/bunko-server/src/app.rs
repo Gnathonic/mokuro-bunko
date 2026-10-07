@@ -136,6 +136,32 @@ async fn count_writes(
     next.run(req).await
 }
 
+/// Library paths resolve as on NTFS (0.5.3 `PathCaseMiddleware`): a request spelled
+/// `kingdom/` reaches the `Kingdom/` already on disk, so no layer above the filesystem
+/// ever sees -- or creates -- a second spelling of one folder. Rewrites the path of a
+/// `/mokuro-reader/<library path>` request and a MOVE/COPY `Destination`; segments naming
+/// nothing on disk keep the client's spelling.
+pub async fn path_case_middleware(
+    State(path_case): State<bunko_dav::PathCase>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let (parts, body) = req.into_parts();
+    if !bunko_dav::PathCase::may_rewrite(&parts) {
+        return next.run(Request::from_parts(parts, body)).await;
+    }
+    let rewritten = tokio::task::spawn_blocking(move || {
+        let mut parts = parts;
+        path_case.rewrite_request(&mut parts);
+        parts
+    })
+    .await;
+    match rewritten {
+        Ok(parts) => next.run(Request::from_parts(parts, body)).await,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 /// The automatic update's view of this server: OCR claims and writing requests.
 struct ServerQuiet {
     ocr: crate::ocr::OcrControl,
@@ -605,6 +631,7 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
     let dav = dav_handler(services.dav.clone(), services.dav_hooks.clone());
     let catalog = library.clone();
     let writes = services.writes.clone();
+    let path_case = services.dav.path_case().clone();
     build_router_with(
         services.core.clone(),
         modules,
@@ -614,6 +641,12 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
             r.layer(axum::middleware::from_fn_with_state(
                 queue_file,
                 crate::ocr::queue_file::middleware,
+            ))
+            // 0.5.3 PathCaseMiddleware, in its place: inside the catalog, outside the
+            // queue file, the auth gate, the series.json PUT and WebDAV.
+            .layer(axum::middleware::from_fn_with_state(
+                path_case,
+                path_case_middleware,
             ))
             .layer(axum::middleware::from_fn_with_state(writes, count_writes))
             .layer(axum::middleware::from_fn_with_state(

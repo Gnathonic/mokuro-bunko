@@ -1,0 +1,1658 @@
+{
+ "generator": "mokuro-bunko 0.5.3",
+ "bcrypt": "4.3.0",
+ "users": [
+  {
+   "username": "root",
+   "password": "password123",
+   "expected": {
+    "id": 1,
+    "username": "root",
+    "role": "admin",
+    "status": "active",
+    "notes": "",
+    "created_at": "2026-10-07 01:41:36"
+   }
+  },
+  {
+   "username": "alice",
+   "password": "pässwörd-日本語",
+   "expected": {
+    "id": 2,
+    "username": "alice",
+    "role": "uploader",
+    "status": "active",
+    "notes": "ノート",
+    "created_at": "2026-10-07 01:41:36"
+   }
+  },
+  {
+   "username": "longpw",
+   "password": "éééééééééééééééééééééééééééééééééééééééééééééééééé",
+   "expected": {
+    "id": 3,
+    "username": "longpw",
+    "role": "registered",
+    "status": "active",
+    "notes": "",
+    "created_at": "2026-10-07 01:41:36"
+   }
+  },
+  {
+   "username": "nulpw",
+   "password": "abc\u0000defghij",
+   "expected": {
+    "id": 4,
+    "username": "nulpw",
+    "role": "editor",
+    "status": "active",
+    "notes": "",
+    "created_at": "2026-10-07 01:41:36"
+   }
+  },
+  {
+   "username": "proc1",
+   "password": "processor-pass",
+   "expected": {
+    "id": 5,
+    "username": "proc1",
+    "role": "processor",
+    "status": "active",
+    "notes": "",
+    "created_at": "2026-10-07 01:41:36"
+   }
+  },
+  {
+   "username": "inv1",
+   "password": "inviter-pass",
+   "expected": {
+    "id": 6,
+    "username": "inv1",
+    "role": "inviter",
+    "status": "active",
+    "notes": "",
+    "created_at": "2026-10-07 01:41:37"
+   }
+  },
+  {
+   "username": "pend",
+   "password": "pending-pass",
+   "expected": {
+    "id": 7,
+    "username": "pend",
+    "role": "registered",
+    "status": "pending",
+    "notes": "",
+    "created_at": "2026-10-07 01:41:37"
+   }
+  },
+  {
+   "username": "dis",
+   "password": "disabled-pass",
+   "expected": {
+    "id": 8,
+    "username": "dis",
+    "role": "registered",
+    "status": "disabled",
+    "notes": "",
+    "created_at": "2026-10-07 01:41:37"
+   }
+  },
+  {
+   "username": "gone",
+   "password": "deleted-pass",
+   "expected": {
+    "id": 9,
+    "username": "gone",
+    "role": "registered",
+    "status": "deleted",
+    "notes": "",
+    "created_at": "2026-10-07 01:41:37"
+   }
+  },
+  {
+   "username": "yuser",
+   "password": "ypassword1",
+   "expected": {
+    "id": 10,
+    "username": "yuser",
+    "role": "registered",
+    "status": "active",
+    "notes": "",
+    "created_at": "2026-10-07 01:41:37"
+   }
+  }
+ ],
+ "authenticates": [
+  [
+   "root",
+   "password123"
+  ],
+  [
+   "alice",
+   "pässwörd-日本語"
+  ],
+  [
+   "longpw",
+   "éééééééééééééééééééééééééééééééééééééééééééééééééé"
+  ],
+  [
+   "nulpw",
+   "abc\u0000defghij"
+  ],
+  [
+   "proc1",
+   "processor-pass"
+  ],
+  [
+   "inv1",
+   "inviter-pass"
+  ],
+  [
+   "longpw",
+   "éééééééééééééééééééééééééééééééééééé"
+  ],
+  [
+   "yuser",
+   "ypassword1"
+  ]
+ ],
+ "refuses": [
+  [
+   "root",
+   "password124"
+  ],
+  [
+   "longpw",
+   "ééééééééééééééééééééééééééééééééééé"
+  ],
+  [
+   "nulpw",
+   "abc"
+  ],
+  [
+   "pend",
+   "pending-pass"
+  ],
+  [
+   "dis",
+   "disabled-pass"
+  ],
+  [
+   "gone",
+   "deleted-pass"
+  ],
+  [
+   "nobody",
+   "password123"
+  ]
+ ],
+ "processor_stamps": {
+  "proc1": "575e99cf5ae0ce50c72712fa6fb8ae04",
+  "root": null,
+  "nobody": null
+ },
+ "user_list": [
+  "inv1",
+  "pend",
+  "dis",
+  "gone",
+  "yuser",
+  "root",
+  "alice",
+  "longpw",
+  "nulpw",
+  "proc1"
+ ],
+ "tokens": [
+  {
+   "token": "2gW3hvNE1c30boLKcs4r-J3QImztx-uGIw_YyNNvQKU",
+   "username": "root",
+   "kind": "web",
+   "label": "",
+   "expires_at": 1791942100.1132934,
+   "resolves_to": "root"
+  },
+  {
+   "token": "YlCdb0t5RxFeekloRKXchYM8pdJ1iudPgBr_7nCoH3U",
+   "username": "alice",
+   "kind": "reader",
+   "label": "Mokuro Reader 日本",
+   "expires_at": 1799113300.1265588,
+   "resolves_to": "alice"
+  },
+  {
+   "token": "zF34fuRgqQRlmoBItUa-lrpnZgaDh59patdOSOKqxcY",
+   "username": "proc1",
+   "kind": "processor",
+   "label": "gpu-box",
+   "expires_at": 1793929300.128771,
+   "resolves_to": "proc1"
+  },
+  {
+   "token": "7IX5-jf5HHGWjBObgQkJkiyNOeBW-b6XLLcP7-GHHzE",
+   "username": "alice",
+   "kind": "web",
+   "label": "",
+   "expires_at": 1791337290.1310735,
+   "resolves_to": null
+  },
+  {
+   "token": "0GGXD6Td2JGoLRlfuxken5HXqU338m84TYzq_Dvmq8I",
+   "username": "dis",
+   "kind": "web",
+   "label": "",
+   "expires_at": 1791942100.1331792,
+   "resolves_to": null
+  }
+ ],
+ "invites": [
+  {
+   "code": "eKfms7p56Aa97-ClsNeejg",
+   "valid": true,
+   "info": {
+    "code": "eKfms7p56Aa97-ClsNeejg",
+    "role": "uploader",
+    "status": "valid",
+    "created_at": "2026-10-07 01:41:40",
+    "expires_at": "2036-09-23T18:41:40.135504",
+    "used_by": null,
+    "invited_by": "inv1"
+   }
+  },
+  {
+   "code": "11Bc-ftqSr36nSM7soJWDw",
+   "valid": false,
+   "info": {
+    "code": "11Bc-ftqSr36nSM7soJWDw",
+    "role": "registered",
+    "status": "used",
+    "created_at": "2026-10-07 01:41:40",
+    "expires_at": "2036-09-23T18:41:40.140043",
+    "used_by": "alice",
+    "invited_by": "root"
+   }
+  },
+  {
+   "code": "iB2lA1alTMybI-noU9mI-w",
+   "valid": false,
+   "info": {
+    "code": "iB2lA1alTMybI-noU9mI-w",
+    "role": "editor",
+    "status": "expired",
+    "created_at": "2026-10-07 01:41:40",
+    "expires_at": "2026-10-03T18:41:40.149122",
+    "used_by": null,
+    "invited_by": null
+   }
+  }
+ ],
+ "detail_vectors": [
+  {
+   "pairs": [
+    [
+     "existed_before",
+     false
+    ]
+   ],
+   "json": "{\"existed_before\":false}"
+  },
+  {
+   "pairs": [
+    [
+     "name",
+     "漢字 😀"
+    ],
+    [
+     "n",
+     3
+    ],
+    [
+     "f",
+     1e-05
+    ],
+    [
+     "big",
+     1e+16
+    ],
+    [
+     "ok",
+     true
+    ],
+    [
+     "none",
+     null
+    ],
+    [
+     "q",
+     "a\"b\\c\n\t"
+    ]
+   ],
+   "json": "{\"name\":\"\\u6f22\\u5b57 \\ud83d\\ude00\",\"n\":3,\"f\":1e-05,\"big\":1e+16,\"ok\":true,\"none\":null,\"q\":\"a\\\"b\\\\c\\u007f\\n\\t\"}"
+  },
+  {
+   "pairs": [
+    [
+     "destination",
+     "/mokuro-reader/S/V2.cbz"
+    ],
+    [
+     "path",
+     "100%_sure"
+    ]
+   ],
+   "json": "{\"destination\":\"/mokuro-reader/S/V2.cbz\",\"path\":\"100%_sure\"}"
+  },
+  {
+   "pairs": [
+    [
+     "generation",
+     "Hayai"
+    ],
+    [
+     "generation_id",
+     "g1"
+    ],
+    [
+     "machine",
+     "local"
+    ],
+    [
+     "pages",
+     12
+    ],
+    [
+     "failed_pages",
+     0
+    ],
+    [
+     "seconds",
+     12.5
+    ]
+   ],
+   "json": "{\"generation\":\"Hayai\",\"generation_id\":\"g1\",\"machine\":\"local\",\"pages\":12,\"failed_pages\":0,\"seconds\":12.5}"
+  }
+ ],
+ "audit_rows": [
+  {
+   "id": 12,
+   "actor_username": "alice",
+   "action": "edit",
+   "target_type": "progress",
+   "target_path": "/mokuro-reader/profiles.json",
+   "target_username": null,
+   "details": null,
+   "created_at": "2026-09-06 12:00:00"
+  },
+  {
+   "id": 11,
+   "actor_username": null,
+   "action": "mkdir",
+   "target_type": null,
+   "target_path": "/x",
+   "target_username": null,
+   "details": null,
+   "created_at": "2026-09-06 11:00:00"
+  },
+  {
+   "id": 9,
+   "actor_username": "proc1",
+   "action": "ocr_sidecar_written",
+   "target_type": "sidecar",
+   "target_path": "/mokuro-reader/S/V1.mokuro",
+   "target_username": null,
+   "details": "{\"generation\":\"Hayai\",\"generation_id\":\"g1\",\"machine\":\"local\",\"pages\":12,\"failed_pages\":0,\"seconds\":12.5}",
+   "created_at": "2026-09-05 12:00:00"
+  },
+  {
+   "id": 10,
+   "actor_username": "root",
+   "action": "admin_create_user",
+   "target_type": "user",
+   "target_path": null,
+   "target_username": "alice",
+   "details": "{\"role\":\"uploader\"}",
+   "created_at": "2026-09-05 10:00:00"
+  },
+  {
+   "id": 8,
+   "actor_username": "root",
+   "action": "move",
+   "target_type": "library_folder",
+   "target_path": "/mokuro-reader/S",
+   "target_username": null,
+   "details": "{\"destination\":\"/mokuro-reader/S/V2.cbz\",\"path\":\"100%_sure\"}",
+   "created_at": "2026-09-04 11:00:00"
+  },
+  {
+   "id": 7,
+   "actor_username": "alice",
+   "action": "delete",
+   "target_type": "library",
+   "target_path": "/mokuro-reader/S/V2.cbz",
+   "target_username": null,
+   "details": "{\"name\":\"\\u6f22\\u5b57 \\ud83d\\ude00\",\"n\":3,\"f\":1e-05,\"big\":1e+16,\"ok\":true,\"none\":null,\"q\":\"a\\\"b\\\\c\\u007f\\n\\t\"}",
+   "created_at": "2026-09-04 10:00:00"
+  },
+  {
+   "id": 6,
+   "actor_username": "bob",
+   "action": "edit",
+   "target_type": "progress",
+   "target_path": "/mokuro-reader/volume-data.json",
+   "target_username": null,
+   "details": null,
+   "created_at": "2026-09-03 12:00:00"
+  },
+  {
+   "id": 5,
+   "actor_username": "alice",
+   "action": "upload",
+   "target_type": "library",
+   "target_path": "/mokuro-reader/S/V1.cbz",
+   "target_username": null,
+   "details": "{\"existed_before\":false}",
+   "created_at": "2026-09-03 11:00:00"
+  },
+  {
+   "id": 3,
+   "actor_username": null,
+   "action": "invite_created",
+   "target_type": "invite",
+   "target_path": "iB2lA1alTMybI-noU9mI-w",
+   "target_username": null,
+   "details": "{\"role\":\"editor\",\"expires\":\"1h\"}",
+   "created_at": "2026-09-02 12:00:00"
+  },
+  {
+   "id": 4,
+   "actor_username": "alice",
+   "action": "invite_used",
+   "target_type": "invite",
+   "target_path": "11Bc-ftqSr36nSM7soJWDw",
+   "target_username": "alice",
+   "details": "{\"invited_by\":\"root\",\"role\":\"registered\"}",
+   "created_at": "2026-09-02 10:00:00"
+  },
+  {
+   "id": 2,
+   "actor_username": "root",
+   "action": "invite_created",
+   "target_type": "invite",
+   "target_path": "11Bc-ftqSr36nSM7soJWDw",
+   "target_username": null,
+   "details": "{\"role\":\"registered\",\"expires\":\"520w\"}",
+   "created_at": "2026-09-01 11:00:00"
+  },
+  {
+   "id": 1,
+   "actor_username": "inv1",
+   "action": "invite_created",
+   "target_type": "invite",
+   "target_path": "eKfms7p56Aa97-ClsNeejg",
+   "target_username": null,
+   "details": "{\"role\":\"uploader\",\"expires\":\"520w\"}",
+   "created_at": "2026-09-01 10:00:00"
+  }
+ ],
+ "audit_queries": [
+  {
+   "query": {},
+   "pages": [
+    {
+     "ids": [
+      11,
+      9,
+      10,
+      8,
+      7,
+      5,
+      3,
+      4,
+      2,
+      1
+     ],
+     "next_cursor": null,
+     "total": 10
+    }
+   ]
+  },
+  {
+   "query": {
+    "include_progress": true
+   },
+   "pages": [
+    {
+     "ids": [
+      12,
+      11,
+      9,
+      10,
+      8,
+      7,
+      6,
+      5,
+      3,
+      4,
+      2,
+      1
+     ],
+     "next_cursor": null,
+     "total": 12
+    }
+   ]
+  },
+  {
+   "query": {
+    "actor": "alice"
+   },
+   "pages": [
+    {
+     "ids": [
+      7,
+      5,
+      4
+     ],
+     "next_cursor": null,
+     "total": 3
+    }
+   ]
+  },
+  {
+   "query": {
+    "actions": [
+     "upload",
+     "mkdir",
+     ""
+    ]
+   },
+   "pages": [
+    {
+     "ids": [
+      11,
+      5
+     ],
+     "next_cursor": null,
+     "total": 2
+    }
+   ]
+  },
+  {
+   "query": {
+    "target_types": [
+     "progress"
+    ]
+   },
+   "pages": [
+    {
+     "ids": [
+      12,
+      6
+     ],
+     "next_cursor": null,
+     "total": 2
+    }
+   ]
+  },
+  {
+   "query": {
+    "since": "2026-09-02",
+    "until": "2026-09-04T10:00:00Z"
+   },
+   "pages": [
+    {
+     "ids": [
+      5,
+      3,
+      4
+     ],
+     "next_cursor": null,
+     "total": 3
+    }
+   ]
+  },
+  {
+   "query": {
+    "until": "2026-09-01T15:00:01+05:00",
+    "include_progress": true
+   },
+   "pages": [
+    {
+     "ids": [
+      1
+     ],
+     "next_cursor": null,
+     "total": 1
+    }
+   ]
+  },
+  {
+   "query": {
+    "search": "ALICE"
+   },
+   "pages": [
+    {
+     "ids": [
+      7,
+      5,
+      4
+     ],
+     "next_cursor": null,
+     "total": 3
+    }
+   ]
+  },
+  {
+   "query": {
+    "search": "漢字"
+   },
+   "pages": [
+    {
+     "ids": [
+      7
+     ],
+     "next_cursor": null,
+     "total": 1
+    }
+   ]
+  },
+  {
+   "query": {
+    "search": "100%_"
+   },
+   "pages": [
+    {
+     "ids": [
+      8
+     ],
+     "next_cursor": null,
+     "total": 1
+    }
+   ]
+  },
+  {
+   "query": {
+    "search": "invite"
+   },
+   "pages": [
+    {
+     "ids": [
+      3,
+      4,
+      2,
+      1
+     ],
+     "next_cursor": null,
+     "total": 4
+    }
+   ]
+  },
+  {
+   "query": {
+    "limit": 3
+   },
+   "pages": [
+    {
+     "ids": [
+      11,
+      9,
+      10
+     ],
+     "next_cursor": "WyIyMDI2LTA5LTA1IDEwOjAwOjAwIiwxMF0",
+     "total": 10
+    },
+    {
+     "ids": [
+      8,
+      7,
+      5
+     ],
+     "next_cursor": "WyIyMDI2LTA5LTAzIDExOjAwOjAwIiw1XQ",
+     "total": null
+    },
+    {
+     "ids": [
+      3,
+      4,
+      2
+     ],
+     "next_cursor": "WyIyMDI2LTA5LTAxIDExOjAwOjAwIiwyXQ",
+     "total": null
+    },
+    {
+     "ids": [
+      1
+     ],
+     "next_cursor": null,
+     "total": null
+    }
+   ]
+  },
+  {
+   "query": {
+    "limit": 3,
+    "include_progress": true,
+    "search": "e"
+   },
+   "pages": [
+    {
+     "ids": [
+      12,
+      9,
+      10
+     ],
+     "next_cursor": "WyIyMDI2LTA5LTA1IDEwOjAwOjAwIiwxMF0",
+     "total": 11
+    },
+    {
+     "ids": [
+      8,
+      7,
+      6
+     ],
+     "next_cursor": "WyIyMDI2LTA5LTAzIDEyOjAwOjAwIiw2XQ",
+     "total": null
+    },
+    {
+     "ids": [
+      5,
+      3,
+      4
+     ],
+     "next_cursor": "WyIyMDI2LTA5LTAyIDEwOjAwOjAwIiw0XQ",
+     "total": null
+    },
+    {
+     "ids": [
+      2,
+      1
+     ],
+     "next_cursor": null,
+     "total": null
+    }
+   ]
+  }
+ ],
+ "audit_errors": [
+  {
+   "query": {
+    "since": "yesterday"
+   },
+   "error": "since is not a date: 'yesterday'"
+  },
+  {
+   "query": {
+    "until": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "error": "until is not a date: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
+  },
+  {
+   "query": {
+    "cursor": "!!!"
+   },
+   "error": "cursor is not one this server gave out"
+  }
+ ],
+ "audit_facets": {
+  "actors": [
+   "alice",
+   "bob",
+   "inv1",
+   "proc1",
+   "root"
+  ],
+  "actions": [
+   "admin_create_user",
+   "delete",
+   "edit",
+   "invite_created",
+   "invite_used",
+   "mkdir",
+   "move",
+   "ocr_sidecar_written",
+   "upload"
+  ],
+  "target_types": [
+   "invite",
+   "library",
+   "library_folder",
+   "progress",
+   "sidecar",
+   "user"
+  ]
+ },
+ "owners": {
+  "Dr Stone/V1.cbz": "alice",
+  "Dr Stone/V1.webp": "alice",
+  "Untracked/V1.cbz": null,
+  "Old/V1.cbz": null,
+  "Old/Vol 1.cbz": "root",
+  "Mixed/V2.mokuro.gz": "root",
+  "readme.txt": null
+ },
+ "can_delete": [
+  [
+   "alice",
+   "/mokuro-reader/Dr Stone/V1.cbz",
+   true
+  ],
+  [
+   "alice",
+   "/mokuro-reader/Dr Stone/V1.hayai-nova.mokuro.gz",
+   true
+  ],
+  [
+   "root",
+   "/mokuro-reader/Dr Stone/V1.cbz",
+   false
+  ],
+  [
+   "alice",
+   "/mokuro-reader/Dr Stone",
+   false
+  ],
+  [
+   "alice",
+   "/mokuro-reader/Dr Stone/V01.5.mokuro",
+   false
+  ]
+ ],
+ "can_edit": [
+  [
+   "alice",
+   "dr  STONE",
+   true
+  ],
+  [
+   "alice",
+   "Mixed",
+   false
+  ],
+  [
+   "root",
+   "Mixed",
+   false
+  ],
+  [
+   "alice",
+   "Café",
+   true
+  ],
+  [
+   "alice",
+   "Untracked",
+   false
+  ],
+  [
+   "alice",
+   "Dr_Stone",
+   false
+  ]
+ ],
+ "owned_series": {
+  "alice": [
+   "Café",
+   "Dr Stone"
+  ],
+  "root": [
+   "Old"
+  ],
+  "x": []
+ },
+ "ocr_sidecars": [
+  {
+   "sidecar_path": "Dr Stone/V1.mokuro",
+   "volume_key": "Dr Stone/V1.cbz",
+   "generation_id": "g1",
+   "generation_name": "Hayai",
+   "machine": "local",
+   "account": null,
+   "engine": "hayai-nova",
+   "detector": "ctd",
+   "precision": "fp16",
+   "runner_build": null,
+   "pages": 20,
+   "failed_pages": 1,
+   "archive_size": 123456789,
+   "archive_mtime_ns": 1700000000123456789,
+   "written_at": "2026-10-07 01:41:40"
+  },
+  {
+   "sidecar_path": "Dr Stone/V1.paddle.mokuro.gz",
+   "volume_key": "Dr Stone/V1.cbz",
+   "generation_id": "g2",
+   "generation_name": "Paddle",
+   "machine": "gpu-box",
+   "account": "proc1",
+   "engine": null,
+   "detector": null,
+   "precision": null,
+   "runner_build": "b1",
+   "pages": null,
+   "failed_pages": null,
+   "archive_size": null,
+   "archive_mtime_ns": null,
+   "written_at": "2026-10-07 01:41:40"
+  },
+  {
+   "sidecar_path": "Kingdom/第80巻.mokuro",
+   "volume_key": "Kingdom/第80巻.cbz",
+   "generation_id": "g1",
+   "generation_name": "Hayai",
+   "machine": "local",
+   "account": null,
+   "engine": "hayai-nova",
+   "detector": null,
+   "precision": null,
+   "runner_build": null,
+   "pages": 200,
+   "failed_pages": 0,
+   "archive_size": null,
+   "archive_mtime_ns": null,
+   "written_at": "2026-10-07 01:41:40"
+  }
+ ],
+ "ocr_producers": [
+  [
+   "g1",
+   "Dr Stone/V1.cbz",
+   "local"
+  ],
+  [
+   "g2",
+   "Dr Stone/V1.cbz",
+   "gpu-box"
+  ],
+  [
+   "g1",
+   "Kingdom/第80巻.cbz",
+   "local"
+  ]
+ ],
+ "series_facts": [
+  {
+   "series_key": "dr stone",
+   "series_title": "Dr. STONE ドクター",
+   "external_ids": {
+    "anilist": 98416,
+    "mal": 104
+   },
+   "titles": {
+    "en": "Dr. \"Stone\"",
+    "ja": "ドクター・ストーン"
+   },
+   "synonyms": [
+    "DS",
+    "😀"
+   ],
+   "tag": "shounen",
+   "unit": "volume",
+   "facts_updated_at": "2026-09-01T00:00:00.000Z",
+   "spine_offset": -40,
+   "volume_offsets": {
+    "V1.cbz": 2.5,
+    "V2.cbz": -3
+   },
+   "updated_by": "alice",
+   "updated_at": "2026-10-07 01:41:40"
+  },
+  {
+   "series_key": "mixed",
+   "series_title": "Mixed",
+   "external_ids": {},
+   "titles": {},
+   "synonyms": [],
+   "tag": null,
+   "unit": null,
+   "facts_updated_at": "1970-01-01T00:00:00.000Z",
+   "spine_offset": 2.5,
+   "volume_offsets": {},
+   "updated_by": null,
+   "updated_at": "2026-10-07 01:41:40"
+  },
+  {
+   "series_key": "none",
+   "series_title": "None",
+   "external_ids": {},
+   "titles": {},
+   "synonyms": [],
+   "tag": null,
+   "unit": null,
+   "facts_updated_at": "1970-01-01T00:00:00.000Z",
+   "spine_offset": null,
+   "volume_offsets": {},
+   "updated_by": null,
+   "updated_at": "2026-10-07 01:41:40"
+  }
+ ],
+ "series_facts_raw": [
+  [
+   "dr stone",
+   "{\"anilist\": 98416, \"mal\": 104}",
+   "{\"en\": \"Dr. \\\"Stone\\\"\", \"ja\": \"ドクター・ストーン\"}",
+   "[\"DS\", \"😀\"]",
+   "{\"V1.cbz\": 2.5, \"V2.cbz\": -3}",
+   "integer"
+  ],
+  [
+   "mixed",
+   "{}",
+   "{}",
+   "[]",
+   "{}",
+   "real"
+  ],
+  [
+   "none",
+   "{}",
+   "{}",
+   "[]",
+   "{}",
+   "null"
+  ]
+ ],
+ "entry_cache": [
+  {
+   "volume_key": "Dr Stone/V2.cbz",
+   "cbz_size": 1048576,
+   "cbz_mtime": 1700000000.123456,
+   "sidecar_key": "V2.mokuro:123:456",
+   "entry": {
+    "mokuro_sha256": "abababababababababababababababababababababababababababababababab",
+    "title": "V2 é",
+    "volume_uuid": "uuid-v2"
+   }
+  },
+  {
+   "volume_key": "Dr Stone/V3.cbz",
+   "cbz_size": 5,
+   "cbz_mtime": 1.0,
+   "sidecar_key": "",
+   "entry": {
+    "mokuro_size": 10,
+    "mokuro_version": "0.2.1",
+    "volume_uuid": "uuid-v3"
+   }
+  },
+  {
+   "volume_key": "Mixed/V1.cbz",
+   "cbz_size": 7,
+   "cbz_mtime": 2.5,
+   "sidecar_key": "k",
+   "entry": {
+    "pages": 3,
+    "volume_uuid": "derived-uuid"
+   }
+  }
+ ],
+ "entry_cache_raw": {
+  "Dr Stone/V2.cbz": "{\"mokuro_sha256\": \"abababababababababababababababababababababababababababababababab\", \"title\": \"V2 é\", \"volume_uuid\": \"uuid-v2\"}",
+  "Dr Stone/V3.cbz": "{\"mokuro_size\": 10, \"mokuro_version\": \"0.2.1\", \"volume_uuid\": \"uuid-v3\"}",
+  "Mixed/V1.cbz": "{\"pages\": 3, \"volume_uuid\": \"derived-uuid\"}"
+ },
+ "catalog_series": [
+  {
+   "series_key": "dr stone",
+   "folder_name": "Dr Stone",
+   "cover_path": "Dr Stone/V1.webp",
+   "volume_count": 3,
+   "latest_volume_modified": 1700000000.5,
+   "total_pages": 600,
+   "total_chars": 123456,
+   "missing_pages": 2,
+   "damaged_volumes": 1
+  },
+  {
+   "series_key": "kingdom",
+   "folder_name": "Kingdom",
+   "cover_path": "Kingdom/第01巻.webp",
+   "volume_count": 79,
+   "latest_volume_modified": 1790000000.25,
+   "total_pages": 15800,
+   "total_chars": 1234567,
+   "missing_pages": 0,
+   "damaged_volumes": 0
+  },
+  {
+   "series_key": "mixed",
+   "folder_name": "Mixed",
+   "cover_path": null,
+   "volume_count": 2,
+   "latest_volume_modified": 0.0,
+   "total_pages": 0,
+   "total_chars": 0,
+   "missing_pages": 0,
+   "damaged_volumes": 0
+  },
+  {
+   "series_key": "kingdom",
+   "folder_name": "kingdom",
+   "cover_path": null,
+   "volume_count": 1,
+   "latest_volume_modified": 1790100000.5,
+   "total_pages": 200,
+   "total_chars": 15000,
+   "missing_pages": 0,
+   "damaged_volumes": 0
+  }
+ ],
+ "community_details": [
+  {
+   "series_key": "dr stone",
+   "score": 8.25,
+   "tags": [
+    "Time Skip",
+    "日本"
+   ],
+   "genres": [
+    "Sci-Fi"
+   ],
+   "source": "anilist",
+   "fetched_at": "2026-09-01T00:00:00Z"
+  }
+ ],
+ "community_raw": [
+  "[\"Time Skip\", \"\\u65e5\\u672c\"]",
+  "[\"Sci-Fi\"]"
+ ],
+ "identities": {
+  "Dr Stone/V1.cbz": "uuid-v1",
+  "Dr Stone/V2.cbz": "uuid-v2",
+  "Dr Stone/V3.cbz": "uuid-v3",
+  "Mixed/V1.cbz": null
+ },
+ "kingdom_renamed": {
+  "ocr_sidecars": 1,
+  "volume_identities": 1
+ },
+ "kingdom_owners": {
+  "Kingdom/第80巻.cbz": "alice",
+  "kingdom/第80巻.cbz": null,
+  "Kingdom/第80巻.mokuro": "alice",
+  "Kingdom/第01巻.cbz": "root",
+  "KINGDOM/第01巻.cbz": null
+ },
+ "kingdom_identities": {
+  "Kingdom/第80巻.cbz": "0aebfb59-0000-4000-8000-000000000080",
+  "kingdom/第80巻.cbz": null,
+  "Kingdom/第80巻.mokuro": "0aebfb59-0000-4000-8000-000000000080",
+  "Kingdom/第01巻.cbz": "uuid-kingdom-01",
+  "KINGDOM/第01巻.cbz": null
+ },
+ "kingdom_can_delete": [
+  [
+   "alice",
+   "/mokuro-reader/Kingdom/第80巻.cbz",
+   true
+  ],
+  [
+   "alice",
+   "/mokuro-reader/Kingdom/第80巻.mokuro",
+   true
+  ],
+  [
+   "alice",
+   "/mokuro-reader/kingdom/第80巻.cbz",
+   false
+  ],
+  [
+   "alice",
+   "/mokuro-reader/Kingdom/第01巻.cbz",
+   false
+  ],
+  [
+   "root",
+   "/mokuro-reader/Kingdom/第01巻.cbz",
+   true
+  ]
+ ],
+ "kingdom_can_edit": [
+  [
+   "alice",
+   "Kingdom",
+   false
+  ],
+  [
+   "alice",
+   "kingdom",
+   false
+  ],
+  [
+   "root",
+   "Kingdom",
+   false
+  ]
+ ],
+ "legacy_catalog_series": [
+  [
+   "kingdom",
+   "kingdom",
+   1,
+   200
+  ]
+ ],
+ "schema": [
+  [
+   "table",
+   "schema_version",
+   "schema_version",
+   "CREATE TABLE schema_version (\n                    version INTEGER PRIMARY KEY\n                )"
+  ],
+  [
+   "table",
+   "users",
+   "users",
+   "CREATE TABLE users (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    username TEXT UNIQUE NOT NULL,\n                    password_hash TEXT NOT NULL,\n                    role TEXT NOT NULL DEFAULT 'registered',\n                    status TEXT NOT NULL DEFAULT 'active',\n                    notes TEXT NOT NULL DEFAULT '',\n                    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_users_1",
+   "users",
+   null
+  ],
+  [
+   "table",
+   "sqlite_sequence",
+   "sqlite_sequence",
+   "CREATE TABLE sqlite_sequence(name,seq)"
+  ],
+  [
+   "table",
+   "invites",
+   "invites",
+   "CREATE TABLE invites (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    code TEXT UNIQUE NOT NULL,\n                    role TEXT NOT NULL DEFAULT 'registered',\n                    invited_by TEXT,\n                    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n                    expires_at TEXT NOT NULL,\n                    used_by TEXT,\n                    used_at TEXT\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_invites_1",
+   "invites",
+   null
+  ],
+  [
+   "table",
+   "audit_logs",
+   "audit_logs",
+   "CREATE TABLE audit_logs (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    actor_username TEXT,\n                    action TEXT NOT NULL,\n                    target_type TEXT,\n                    target_path TEXT,\n                    target_username TEXT,\n                    details TEXT,\n                    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "table",
+   "volume_uploads",
+   "volume_uploads",
+   "CREATE TABLE volume_uploads (\n                    volume_key TEXT PRIMARY KEY,\n                    uploader_username TEXT NOT NULL,\n                    uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),\n                    last_modified_by TEXT,\n                    last_modified_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_volume_uploads_1",
+   "volume_uploads",
+   null
+  ],
+  [
+   "table",
+   "series_facts",
+   "series_facts",
+   "CREATE TABLE series_facts (\n                    series_key TEXT PRIMARY KEY,\n                    series_title TEXT NOT NULL,\n                    external_ids TEXT NOT NULL DEFAULT '{}',\n                    titles TEXT NOT NULL DEFAULT '{}',\n                    synonyms TEXT NOT NULL DEFAULT '[]',\n                    tag TEXT,\n                    unit TEXT,\n                    facts_updated_at TEXT NOT NULL,\n                    spine_offset NUMERIC,\n                    volume_offsets TEXT NOT NULL DEFAULT '{}',\n                    updated_by TEXT,\n                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_series_facts_1",
+   "series_facts",
+   null
+  ],
+  [
+   "table",
+   "series_entry_cache",
+   "series_entry_cache",
+   "CREATE TABLE series_entry_cache (\n                    volume_key TEXT PRIMARY KEY,\n                    series_key TEXT NOT NULL,\n                    entry_json TEXT NOT NULL,\n                    cbz_size INTEGER NOT NULL,\n                    cbz_mtime REAL NOT NULL,\n                    sidecar_key TEXT NOT NULL DEFAULT '',\n                    computed_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_series_entry_cache_1",
+   "series_entry_cache",
+   null
+  ],
+  [
+   "table",
+   "community_details",
+   "community_details",
+   "CREATE TABLE community_details (\n                    series_key TEXT PRIMARY KEY,\n                    score REAL,\n                    tags TEXT NOT NULL DEFAULT '[]',\n                    genres TEXT NOT NULL DEFAULT '[]',\n                    source TEXT NOT NULL,\n                    fetched_at TEXT NOT NULL\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_community_details_1",
+   "community_details",
+   null
+  ],
+  [
+   "table",
+   "catalog_folders",
+   "catalog_folders",
+   "CREATE TABLE catalog_folders (\n                    folder_name TEXT PRIMARY KEY,\n                    series_key TEXT NOT NULL,\n                    cover_path TEXT,\n                    volume_count INTEGER NOT NULL,\n                    latest_volume_modified REAL NOT NULL DEFAULT 0,\n                    total_pages INTEGER NOT NULL DEFAULT 0,\n                    total_chars INTEGER NOT NULL DEFAULT 0,\n                    missing_pages INTEGER NOT NULL DEFAULT 0,\n                    damaged_volumes INTEGER NOT NULL DEFAULT 0,\n                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_catalog_folders_1",
+   "catalog_folders",
+   null
+  ],
+  [
+   "table",
+   "auth_tokens",
+   "auth_tokens",
+   "CREATE TABLE auth_tokens (\n                    token_hash TEXT PRIMARY KEY,\n                    username TEXT NOT NULL,\n                    kind TEXT NOT NULL,\n                    label TEXT NOT NULL DEFAULT '',\n                    created_at REAL NOT NULL,\n                    expires_at REAL NOT NULL,\n                    last_used_at REAL NOT NULL\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_auth_tokens_1",
+   "auth_tokens",
+   null
+  ],
+  [
+   "index",
+   "idx_auth_tokens_username",
+   "auth_tokens",
+   "CREATE INDEX idx_auth_tokens_username\n                ON auth_tokens(username)\n            "
+  ],
+  [
+   "table",
+   "ocr_sidecars",
+   "ocr_sidecars",
+   "CREATE TABLE ocr_sidecars (\n                    sidecar_path TEXT PRIMARY KEY,\n                    volume_key TEXT NOT NULL,\n                    generation_id TEXT NOT NULL,\n                    generation_name TEXT NOT NULL,\n                    machine TEXT NOT NULL,\n                    account TEXT,\n                    engine TEXT,\n                    detector TEXT,\n                    precision TEXT,\n                    runner_build TEXT,\n                    pages INTEGER,\n                    failed_pages INTEGER,\n                    archive_size INTEGER,\n                    archive_mtime_ns INTEGER,\n                    written_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_ocr_sidecars_1",
+   "ocr_sidecars",
+   null
+  ],
+  [
+   "index",
+   "idx_ocr_sidecars_volume",
+   "ocr_sidecars",
+   "CREATE INDEX idx_ocr_sidecars_volume\n                ON ocr_sidecars(volume_key)\n            "
+  ],
+  [
+   "table",
+   "volume_identities",
+   "volume_identities",
+   "CREATE TABLE volume_identities (\n                    volume_key TEXT PRIMARY KEY,\n                    volume_uuid TEXT NOT NULL,\n                    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_volume_identities_1",
+   "volume_identities",
+   null
+  ],
+  [
+   "index",
+   "idx_users_username",
+   "users",
+   "CREATE INDEX idx_users_username\n                ON users(username)\n            "
+  ],
+  [
+   "index",
+   "idx_invites_code",
+   "invites",
+   "CREATE INDEX idx_invites_code\n                ON invites(code)\n            "
+  ],
+  [
+   "index",
+   "idx_audit_created_at",
+   "audit_logs",
+   "CREATE INDEX idx_audit_created_at\n                ON audit_logs(created_at DESC)\n            "
+  ],
+  [
+   "index",
+   "idx_audit_actor",
+   "audit_logs",
+   "CREATE INDEX idx_audit_actor\n                ON audit_logs(actor_username)\n            "
+  ],
+  [
+   "index",
+   "idx_audit_type_created",
+   "audit_logs",
+   "CREATE INDEX idx_audit_type_created\n                ON audit_logs(target_type, created_at)\n            "
+  ],
+  [
+   "index",
+   "idx_audit_action_created",
+   "audit_logs",
+   "CREATE INDEX idx_audit_action_created\n                ON audit_logs(action, created_at)\n            "
+  ],
+  [
+   "index",
+   "idx_audit_actor_created",
+   "audit_logs",
+   "CREATE INDEX idx_audit_actor_created\n                ON audit_logs(actor_username, created_at)\n            "
+  ],
+  [
+   "index",
+   "idx_volume_uploads_uploader",
+   "volume_uploads",
+   "CREATE INDEX idx_volume_uploads_uploader\n                ON volume_uploads(uploader_username)\n            "
+  ],
+  [
+   "index",
+   "idx_series_entry_cache_series",
+   "series_entry_cache",
+   "CREATE INDEX idx_series_entry_cache_series\n                ON series_entry_cache(series_key)\n            "
+  ],
+  [
+   "table",
+   "catalog_series",
+   "catalog_series",
+   "CREATE TABLE catalog_series (\n                    series_key TEXT PRIMARY KEY,\n                    folder_name TEXT NOT NULL,\n                    cover_path TEXT,\n                    volume_count INTEGER NOT NULL,\n                    latest_volume_modified REAL NOT NULL DEFAULT 0,\n                    total_pages INTEGER NOT NULL DEFAULT 0,\n                    total_chars INTEGER NOT NULL DEFAULT 0,\n                    missing_pages INTEGER NOT NULL DEFAULT 0,\n                    damaged_volumes INTEGER NOT NULL DEFAULT 0,\n                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_catalog_series_1",
+   "catalog_series",
+   null
+  ]
+ ],
+ "fresh_schema": [
+  [
+   "table",
+   "schema_version",
+   "schema_version",
+   "CREATE TABLE schema_version (\n                    version INTEGER PRIMARY KEY\n                )"
+  ],
+  [
+   "table",
+   "users",
+   "users",
+   "CREATE TABLE users (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    username TEXT UNIQUE NOT NULL,\n                    password_hash TEXT NOT NULL,\n                    role TEXT NOT NULL DEFAULT 'registered',\n                    status TEXT NOT NULL DEFAULT 'active',\n                    notes TEXT NOT NULL DEFAULT '',\n                    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_users_1",
+   "users",
+   null
+  ],
+  [
+   "table",
+   "sqlite_sequence",
+   "sqlite_sequence",
+   "CREATE TABLE sqlite_sequence(name,seq)"
+  ],
+  [
+   "table",
+   "invites",
+   "invites",
+   "CREATE TABLE invites (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    code TEXT UNIQUE NOT NULL,\n                    role TEXT NOT NULL DEFAULT 'registered',\n                    invited_by TEXT,\n                    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n                    expires_at TEXT NOT NULL,\n                    used_by TEXT,\n                    used_at TEXT\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_invites_1",
+   "invites",
+   null
+  ],
+  [
+   "table",
+   "audit_logs",
+   "audit_logs",
+   "CREATE TABLE audit_logs (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    actor_username TEXT,\n                    action TEXT NOT NULL,\n                    target_type TEXT,\n                    target_path TEXT,\n                    target_username TEXT,\n                    details TEXT,\n                    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "table",
+   "volume_uploads",
+   "volume_uploads",
+   "CREATE TABLE volume_uploads (\n                    volume_key TEXT PRIMARY KEY,\n                    uploader_username TEXT NOT NULL,\n                    uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),\n                    last_modified_by TEXT,\n                    last_modified_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_volume_uploads_1",
+   "volume_uploads",
+   null
+  ],
+  [
+   "table",
+   "series_facts",
+   "series_facts",
+   "CREATE TABLE series_facts (\n                    series_key TEXT PRIMARY KEY,\n                    series_title TEXT NOT NULL,\n                    external_ids TEXT NOT NULL DEFAULT '{}',\n                    titles TEXT NOT NULL DEFAULT '{}',\n                    synonyms TEXT NOT NULL DEFAULT '[]',\n                    tag TEXT,\n                    unit TEXT,\n                    facts_updated_at TEXT NOT NULL,\n                    spine_offset NUMERIC,\n                    volume_offsets TEXT NOT NULL DEFAULT '{}',\n                    updated_by TEXT,\n                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_series_facts_1",
+   "series_facts",
+   null
+  ],
+  [
+   "table",
+   "series_entry_cache",
+   "series_entry_cache",
+   "CREATE TABLE series_entry_cache (\n                    volume_key TEXT PRIMARY KEY,\n                    series_key TEXT NOT NULL,\n                    entry_json TEXT NOT NULL,\n                    cbz_size INTEGER NOT NULL,\n                    cbz_mtime REAL NOT NULL,\n                    sidecar_key TEXT NOT NULL DEFAULT '',\n                    computed_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_series_entry_cache_1",
+   "series_entry_cache",
+   null
+  ],
+  [
+   "table",
+   "community_details",
+   "community_details",
+   "CREATE TABLE community_details (\n                    series_key TEXT PRIMARY KEY,\n                    score REAL,\n                    tags TEXT NOT NULL DEFAULT '[]',\n                    genres TEXT NOT NULL DEFAULT '[]',\n                    source TEXT NOT NULL,\n                    fetched_at TEXT NOT NULL\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_community_details_1",
+   "community_details",
+   null
+  ],
+  [
+   "table",
+   "catalog_folders",
+   "catalog_folders",
+   "CREATE TABLE catalog_folders (\n                    folder_name TEXT PRIMARY KEY,\n                    series_key TEXT NOT NULL,\n                    cover_path TEXT,\n                    volume_count INTEGER NOT NULL,\n                    latest_volume_modified REAL NOT NULL DEFAULT 0,\n                    total_pages INTEGER NOT NULL DEFAULT 0,\n                    total_chars INTEGER NOT NULL DEFAULT 0,\n                    missing_pages INTEGER NOT NULL DEFAULT 0,\n                    damaged_volumes INTEGER NOT NULL DEFAULT 0,\n                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_catalog_folders_1",
+   "catalog_folders",
+   null
+  ],
+  [
+   "table",
+   "auth_tokens",
+   "auth_tokens",
+   "CREATE TABLE auth_tokens (\n                    token_hash TEXT PRIMARY KEY,\n                    username TEXT NOT NULL,\n                    kind TEXT NOT NULL,\n                    label TEXT NOT NULL DEFAULT '',\n                    created_at REAL NOT NULL,\n                    expires_at REAL NOT NULL,\n                    last_used_at REAL NOT NULL\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_auth_tokens_1",
+   "auth_tokens",
+   null
+  ],
+  [
+   "index",
+   "idx_auth_tokens_username",
+   "auth_tokens",
+   "CREATE INDEX idx_auth_tokens_username\n                ON auth_tokens(username)\n            "
+  ],
+  [
+   "table",
+   "ocr_sidecars",
+   "ocr_sidecars",
+   "CREATE TABLE ocr_sidecars (\n                    sidecar_path TEXT PRIMARY KEY,\n                    volume_key TEXT NOT NULL,\n                    generation_id TEXT NOT NULL,\n                    generation_name TEXT NOT NULL,\n                    machine TEXT NOT NULL,\n                    account TEXT,\n                    engine TEXT,\n                    detector TEXT,\n                    precision TEXT,\n                    runner_build TEXT,\n                    pages INTEGER,\n                    failed_pages INTEGER,\n                    archive_size INTEGER,\n                    archive_mtime_ns INTEGER,\n                    written_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_ocr_sidecars_1",
+   "ocr_sidecars",
+   null
+  ],
+  [
+   "index",
+   "idx_ocr_sidecars_volume",
+   "ocr_sidecars",
+   "CREATE INDEX idx_ocr_sidecars_volume\n                ON ocr_sidecars(volume_key)\n            "
+  ],
+  [
+   "table",
+   "volume_identities",
+   "volume_identities",
+   "CREATE TABLE volume_identities (\n                    volume_key TEXT PRIMARY KEY,\n                    volume_uuid TEXT NOT NULL,\n                    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+  ],
+  [
+   "index",
+   "sqlite_autoindex_volume_identities_1",
+   "volume_identities",
+   null
+  ],
+  [
+   "index",
+   "idx_users_username",
+   "users",
+   "CREATE INDEX idx_users_username\n                ON users(username)\n            "
+  ],
+  [
+   "index",
+   "idx_invites_code",
+   "invites",
+   "CREATE INDEX idx_invites_code\n                ON invites(code)\n            "
+  ],
+  [
+   "index",
+   "idx_audit_created_at",
+   "audit_logs",
+   "CREATE INDEX idx_audit_created_at\n                ON audit_logs(created_at DESC)\n            "
+  ],
+  [
+   "index",
+   "idx_audit_actor",
+   "audit_logs",
+   "CREATE INDEX idx_audit_actor\n                ON audit_logs(actor_username)\n            "
+  ],
+  [
+   "index",
+   "idx_audit_type_created",
+   "audit_logs",
+   "CREATE INDEX idx_audit_type_created\n                ON audit_logs(target_type, created_at)\n            "
+  ],
+  [
+   "index",
+   "idx_audit_action_created",
+   "audit_logs",
+   "CREATE INDEX idx_audit_action_created\n                ON audit_logs(action, created_at)\n            "
+  ],
+  [
+   "index",
+   "idx_audit_actor_created",
+   "audit_logs",
+   "CREATE INDEX idx_audit_actor_created\n                ON audit_logs(actor_username, created_at)\n            "
+  ],
+  [
+   "index",
+   "idx_volume_uploads_uploader",
+   "volume_uploads",
+   "CREATE INDEX idx_volume_uploads_uploader\n                ON volume_uploads(uploader_username)\n            "
+  ],
+  [
+   "index",
+   "idx_series_entry_cache_series",
+   "series_entry_cache",
+   "CREATE INDEX idx_series_entry_cache_series\n                ON series_entry_cache(series_key)\n            "
+  ]
+ ]
+}

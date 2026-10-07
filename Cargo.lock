@@ -454,6 +454,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "unicode-normalization",
  "zip 2.4.2",
 ]
 
@@ -653,6 +654,7 @@ dependencies = [
  "notify",
  "parking_lot",
  "percent-encoding",
+ "quick-xml",
  "rand 0.9.5",
  "rcgen",
  "reqwest",

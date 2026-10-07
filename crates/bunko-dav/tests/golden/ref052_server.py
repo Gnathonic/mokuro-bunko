@@ -1,7 +1,8 @@
-"""Start the Python 0.5.2 reference server over a prepared storage tree.
+"""Start the Python 0.5.2 (or 0.5.3) reference server over a prepared storage tree.
 
-Used by `tests/differential.rs`: creates the users the request script signs in as
-(password `pass1234` for all) and serves `create_app(config)` -- the full 0.5.2 HTTP
+Serves whichever `mokuro_bunko` the interpreter imports: `tests/differential.rs` runs it
+with the 0.5.2 env, `bunko-server/tests/differential_053.rs` with the 0.5.3 one. Creates
+the users the request scripts sign in as (password `pass1234` for all) and serves `create_app(config)` -- the full 0.5.2 HTTP
 stack -- on cheroot, the way `create_ssl_server` does, but WITHOUT `run_server`'s OCR
 worker: its thumbnail loop writes `.nocover`/`.webp` files into the library on its own,
 which would make the two trees diverge; the metadata compiler and library watcher are
@@ -27,7 +28,7 @@ def main() -> None:
     from mokuro_bunko.server import create_app, shutdown_app
 
     db = Database(base / "mokuro.db")
-    for name, role in (("reader", "registered"), ("uploader", "uploader"), ("editor", "editor"), ("admin", "admin")):
+    for name, role in (("reader", "registered"), ("uploader", "uploader"), ("editor", "editor"), ("admin", "admin"), ("uploader2", "uploader")):
         db.create_user(name, "pass1234", role)
     config = Config(server=ServerConfig(host="127.0.0.1", port=port), storage=StorageConfig(base_path=base))
     app = create_app(config)

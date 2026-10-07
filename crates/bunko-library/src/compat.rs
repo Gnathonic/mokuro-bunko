@@ -109,7 +109,7 @@ pub fn normalize_series_key(title: &str) -> String {
 }
 
 /// Client `normalizeVolumeTitleKey`: NFC, then the series fold. The identity
-/// of `series_facts` / `catalog_series` rows.
+/// of `series_facts` rows (and the `series_key` column of `catalog_folders`).
 pub fn normalize_volume_title_key(title: &str) -> String {
     normalize_series_key(&pyunicode::nfc(title))
 }

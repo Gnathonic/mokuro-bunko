@@ -62,6 +62,10 @@ impl PathWriteLocks {
     pub fn try_lock_all(&self, paths: &[&Path]) -> Option<WriteLockGuard> {
         let mut keys: Vec<Key> = paths.iter().map(|p| key_of(p)).collect();
         keys.sort();
+        // A rename that only changes case names one entry twice, and the keys are
+        // case-folded: lock it once, or it conflicts with itself (0.5.2 answered 423;
+        // 0.5.3 `_try_acquire_all`).
+        keys.dedup();
         let mut held = self.held.lock();
         for (i, key) in keys.iter().enumerate() {
             if held.iter().any(|h| conflicts(h, key)) {
@@ -107,6 +111,24 @@ mod tests {
         drop(folder);
         assert!(locks.try_lock(&a).is_some());
         assert_eq!(locks.held_count(), 0);
+    }
+
+    #[test]
+    fn a_case_only_rename_locks_its_entry_once() {
+        let locks = PathWriteLocks::new();
+        let both = locks
+            .try_lock_all(&[Path::new("/lib/kingdom"), Path::new("/lib/Kingdom")])
+            .expect("a case-only rename does not conflict with itself");
+        assert_eq!(locks.held_count(), 1);
+        assert!(locks.try_lock(Path::new("/lib/KINGDOM/v.cbz")).is_none());
+        drop(both);
+        assert_eq!(locks.held_count(), 0);
+        // An ancestor and its descendant in one operation still conflict.
+        assert!(
+            locks
+                .try_lock_all(&[Path::new("/lib/a"), Path::new("/lib/A/b")])
+                .is_none()
+        );
     }
 
     #[test]

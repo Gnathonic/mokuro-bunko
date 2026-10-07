@@ -1,0 +1,619 @@
+{
+ "py052": {
+  "schema": [
+   [
+    "table",
+    "schema_version",
+    "schema_version",
+    "CREATE TABLE schema_version (\n                    version INTEGER PRIMARY KEY\n                )"
+   ],
+   [
+    "table",
+    "users",
+    "users",
+    "CREATE TABLE users (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    username TEXT UNIQUE NOT NULL,\n                    password_hash TEXT NOT NULL,\n                    role TEXT NOT NULL DEFAULT 'registered',\n                    status TEXT NOT NULL DEFAULT 'active',\n                    notes TEXT NOT NULL DEFAULT '',\n                    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_users_1",
+    "users",
+    null
+   ],
+   [
+    "table",
+    "sqlite_sequence",
+    "sqlite_sequence",
+    "CREATE TABLE sqlite_sequence(name,seq)"
+   ],
+   [
+    "table",
+    "invites",
+    "invites",
+    "CREATE TABLE invites (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    code TEXT UNIQUE NOT NULL,\n                    role TEXT NOT NULL DEFAULT 'registered',\n                    invited_by TEXT,\n                    created_at TEXT NOT NULL DEFAULT (datetime('now')),\n                    expires_at TEXT NOT NULL,\n                    used_by TEXT,\n                    used_at TEXT\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_invites_1",
+    "invites",
+    null
+   ],
+   [
+    "table",
+    "audit_logs",
+    "audit_logs",
+    "CREATE TABLE audit_logs (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    actor_username TEXT,\n                    action TEXT NOT NULL,\n                    target_type TEXT,\n                    target_path TEXT,\n                    target_username TEXT,\n                    details TEXT,\n                    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "table",
+    "volume_uploads",
+    "volume_uploads",
+    "CREATE TABLE volume_uploads (\n                    volume_key TEXT PRIMARY KEY,\n                    uploader_username TEXT NOT NULL,\n                    uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),\n                    last_modified_by TEXT,\n                    last_modified_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_volume_uploads_1",
+    "volume_uploads",
+    null
+   ],
+   [
+    "table",
+    "series_facts",
+    "series_facts",
+    "CREATE TABLE series_facts (\n                    series_key TEXT PRIMARY KEY,\n                    series_title TEXT NOT NULL,\n                    external_ids TEXT NOT NULL DEFAULT '{}',\n                    titles TEXT NOT NULL DEFAULT '{}',\n                    synonyms TEXT NOT NULL DEFAULT '[]',\n                    tag TEXT,\n                    unit TEXT,\n                    facts_updated_at TEXT NOT NULL,\n                    spine_offset NUMERIC,\n                    volume_offsets TEXT NOT NULL DEFAULT '{}',\n                    updated_by TEXT,\n                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_series_facts_1",
+    "series_facts",
+    null
+   ],
+   [
+    "table",
+    "series_entry_cache",
+    "series_entry_cache",
+    "CREATE TABLE series_entry_cache (\n                    volume_key TEXT PRIMARY KEY,\n                    series_key TEXT NOT NULL,\n                    entry_json TEXT NOT NULL,\n                    cbz_size INTEGER NOT NULL,\n                    cbz_mtime REAL NOT NULL,\n                    sidecar_key TEXT NOT NULL DEFAULT '',\n                    computed_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_series_entry_cache_1",
+    "series_entry_cache",
+    null
+   ],
+   [
+    "table",
+    "community_details",
+    "community_details",
+    "CREATE TABLE community_details (\n                    series_key TEXT PRIMARY KEY,\n                    score REAL,\n                    tags TEXT NOT NULL DEFAULT '[]',\n                    genres TEXT NOT NULL DEFAULT '[]',\n                    source TEXT NOT NULL,\n                    fetched_at TEXT NOT NULL\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_community_details_1",
+    "community_details",
+    null
+   ],
+   [
+    "table",
+    "catalog_series",
+    "catalog_series",
+    "CREATE TABLE catalog_series (\n                    series_key TEXT PRIMARY KEY,\n                    folder_name TEXT NOT NULL,\n                    cover_path TEXT,\n                    volume_count INTEGER NOT NULL,\n                    latest_volume_modified REAL NOT NULL DEFAULT 0,\n                    total_pages INTEGER NOT NULL DEFAULT 0,\n                    total_chars INTEGER NOT NULL DEFAULT 0,\n                    missing_pages INTEGER NOT NULL DEFAULT 0,\n                    damaged_volumes INTEGER NOT NULL DEFAULT 0,\n                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_catalog_series_1",
+    "catalog_series",
+    null
+   ],
+   [
+    "table",
+    "auth_tokens",
+    "auth_tokens",
+    "CREATE TABLE auth_tokens (\n                    token_hash TEXT PRIMARY KEY,\n                    username TEXT NOT NULL,\n                    kind TEXT NOT NULL,\n                    label TEXT NOT NULL DEFAULT '',\n                    created_at REAL NOT NULL,\n                    expires_at REAL NOT NULL,\n                    last_used_at REAL NOT NULL\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_auth_tokens_1",
+    "auth_tokens",
+    null
+   ],
+   [
+    "index",
+    "idx_auth_tokens_username",
+    "auth_tokens",
+    "CREATE INDEX idx_auth_tokens_username\n                ON auth_tokens(username)\n            "
+   ],
+   [
+    "table",
+    "ocr_sidecars",
+    "ocr_sidecars",
+    "CREATE TABLE ocr_sidecars (\n                    sidecar_path TEXT PRIMARY KEY,\n                    volume_key TEXT NOT NULL,\n                    generation_id TEXT NOT NULL,\n                    generation_name TEXT NOT NULL,\n                    machine TEXT NOT NULL,\n                    account TEXT,\n                    engine TEXT,\n                    detector TEXT,\n                    precision TEXT,\n                    runner_build TEXT,\n                    pages INTEGER,\n                    failed_pages INTEGER,\n                    archive_size INTEGER,\n                    archive_mtime_ns INTEGER,\n                    written_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_ocr_sidecars_1",
+    "ocr_sidecars",
+    null
+   ],
+   [
+    "index",
+    "idx_ocr_sidecars_volume",
+    "ocr_sidecars",
+    "CREATE INDEX idx_ocr_sidecars_volume\n                ON ocr_sidecars(volume_key)\n            "
+   ],
+   [
+    "table",
+    "volume_identities",
+    "volume_identities",
+    "CREATE TABLE volume_identities (\n                    volume_key TEXT PRIMARY KEY,\n                    volume_uuid TEXT NOT NULL,\n                    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_volume_identities_1",
+    "volume_identities",
+    null
+   ],
+   [
+    "index",
+    "idx_users_username",
+    "users",
+    "CREATE INDEX idx_users_username\n                ON users(username)\n            "
+   ],
+   [
+    "index",
+    "idx_invites_code",
+    "invites",
+    "CREATE INDEX idx_invites_code\n                ON invites(code)\n            "
+   ],
+   [
+    "index",
+    "idx_audit_created_at",
+    "audit_logs",
+    "CREATE INDEX idx_audit_created_at\n                ON audit_logs(created_at DESC)\n            "
+   ],
+   [
+    "index",
+    "idx_audit_actor",
+    "audit_logs",
+    "CREATE INDEX idx_audit_actor\n                ON audit_logs(actor_username)\n            "
+   ],
+   [
+    "index",
+    "idx_audit_type_created",
+    "audit_logs",
+    "CREATE INDEX idx_audit_type_created\n                ON audit_logs(target_type, created_at)\n            "
+   ],
+   [
+    "index",
+    "idx_audit_action_created",
+    "audit_logs",
+    "CREATE INDEX idx_audit_action_created\n                ON audit_logs(action, created_at)\n            "
+   ],
+   [
+    "index",
+    "idx_audit_actor_created",
+    "audit_logs",
+    "CREATE INDEX idx_audit_actor_created\n                ON audit_logs(actor_username, created_at)\n            "
+   ],
+   [
+    "index",
+    "idx_volume_uploads_uploader",
+    "volume_uploads",
+    "CREATE INDEX idx_volume_uploads_uploader\n                ON volume_uploads(uploader_username)\n            "
+   ],
+   [
+    "index",
+    "idx_series_entry_cache_series",
+    "series_entry_cache",
+    "CREATE INDEX idx_series_entry_cache_series\n                ON series_entry_cache(series_key)\n            "
+   ],
+   [
+    "table",
+    "catalog_folders",
+    "catalog_folders",
+    "CREATE TABLE catalog_folders (\n                    folder_name TEXT PRIMARY KEY,\n                    series_key TEXT NOT NULL,\n                    cover_path TEXT,\n                    volume_count INTEGER NOT NULL,\n                    latest_volume_modified REAL NOT NULL DEFAULT 0,\n                    total_pages INTEGER NOT NULL DEFAULT 0,\n                    total_chars INTEGER NOT NULL DEFAULT 0,\n                    missing_pages INTEGER NOT NULL DEFAULT 0,\n                    damaged_volumes INTEGER NOT NULL DEFAULT 0,\n                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_catalog_folders_1",
+    "catalog_folders",
+    null
+   ]
+  ],
+  "contents": {
+   "schema_version": [
+    [
+     6
+    ]
+   ],
+   "users": [
+    [
+     1,
+     "root",
+     "admin",
+     "active",
+     ""
+    ],
+    [
+     2,
+     "alice",
+     "uploader",
+     "active",
+     "ノート"
+    ],
+    [
+     3,
+     "longpw",
+     "registered",
+     "active",
+     ""
+    ],
+    [
+     4,
+     "nulpw",
+     "editor",
+     "active",
+     ""
+    ],
+    [
+     5,
+     "proc1",
+     "processor",
+     "active",
+     ""
+    ],
+    [
+     6,
+     "inv1",
+     "inviter",
+     "active",
+     ""
+    ],
+    [
+     7,
+     "pend",
+     "registered",
+     "pending",
+     ""
+    ],
+    [
+     8,
+     "dis",
+     "registered",
+     "disabled",
+     ""
+    ],
+    [
+     9,
+     "gone",
+     "registered",
+     "deleted",
+     ""
+    ],
+    [
+     10,
+     "yuser",
+     "registered",
+     "active",
+     ""
+    ]
+   ],
+   "invites": [
+    [
+     "xMh0kA2mId4BRPQKm50SqQ",
+     "uploader",
+     "inv1",
+     "2036-09-18T11:36:55.126656"
+    ],
+    [
+     "zATp95bp7InWfuw8I7jn9g",
+     "registered",
+     "root",
+     "2036-09-18T11:36:55.130959"
+    ],
+    [
+     "c8BYFuKGEy6a-EH7PkEm5g",
+     "editor",
+     null,
+     "2026-09-28T11:36:55.143142"
+    ]
+   ],
+   "catalog_series": [
+    [
+     "dr stone",
+     "Dr Stone",
+     3
+    ],
+    [
+     "mixed",
+     "Mixed",
+     2
+    ]
+   ],
+   "catalog_folders": [],
+   "volume_identities": [
+    [
+     "Dr Stone/V1.cbz",
+     "uuid-v1"
+    ],
+    [
+     "Dr Stone/V2.cbz",
+     "uuid-v2"
+    ],
+    [
+     "Dr Stone/V3.cbz",
+     "uuid-v3"
+    ]
+   ]
+  },
+  "catalog": []
+ },
+ "legacy": {
+  "schema": [
+   [
+    "table",
+    "schema_version",
+    "schema_version",
+    "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)"
+   ],
+   [
+    "table",
+    "users",
+    "users",
+    "CREATE TABLE users (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        username TEXT UNIQUE NOT NULL,\n        password_hash TEXT NOT NULL,\n        role TEXT NOT NULL DEFAULT 'registered',\n        status TEXT NOT NULL DEFAULT 'active',\n        created_at TEXT NOT NULL DEFAULT (datetime('now')),\n        updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , notes TEXT NOT NULL DEFAULT '')"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_users_1",
+    "users",
+    null
+   ],
+   [
+    "table",
+    "sqlite_sequence",
+    "sqlite_sequence",
+    "CREATE TABLE sqlite_sequence(name,seq)"
+   ],
+   [
+    "table",
+    "invites",
+    "invites",
+    "CREATE TABLE invites (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        code TEXT UNIQUE NOT NULL,\n        role TEXT NOT NULL DEFAULT 'registered',\n        created_at TEXT NOT NULL DEFAULT (datetime('now')),\n        expires_at TEXT NOT NULL,\n        used_by TEXT,\n        used_at TEXT\n    , invited_by TEXT)"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_invites_1",
+    "invites",
+    null
+   ],
+   [
+    "table",
+    "audit_logs",
+    "audit_logs",
+    "CREATE TABLE audit_logs (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        actor_username TEXT,\n        action TEXT NOT NULL,\n        target_type TEXT,\n        target_path TEXT,\n        target_username TEXT,\n        details TEXT,\n        created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+   ],
+   [
+    "table",
+    "series_entry_cache",
+    "series_entry_cache",
+    "CREATE TABLE series_entry_cache (\n        volume_key TEXT PRIMARY KEY,\n        series_key TEXT NOT NULL,\n        entry_json TEXT NOT NULL,\n        cbz_size INTEGER NOT NULL,\n        cbz_mtime REAL NOT NULL,\n        sidecar_key TEXT NOT NULL DEFAULT '',\n        computed_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_series_entry_cache_1",
+    "series_entry_cache",
+    null
+   ],
+   [
+    "table",
+    "catalog_series",
+    "catalog_series",
+    "CREATE TABLE catalog_series (\n        series_key TEXT PRIMARY KEY,\n        folder_name TEXT NOT NULL,\n        cover_path TEXT,\n        volume_count INTEGER NOT NULL,\n        latest_volume_modified REAL NOT NULL DEFAULT 0,\n        total_pages INTEGER NOT NULL DEFAULT 0,\n        total_chars INTEGER NOT NULL DEFAULT 0,\n        scanned_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_catalog_series_1",
+    "catalog_series",
+    null
+   ],
+   [
+    "index",
+    "idx_users_username",
+    "users",
+    "CREATE INDEX idx_users_username ON users(username)"
+   ],
+   [
+    "table",
+    "volume_uploads",
+    "volume_uploads",
+    "CREATE TABLE volume_uploads (\n                    volume_key TEXT PRIMARY KEY,\n                    uploader_username TEXT NOT NULL,\n                    uploaded_at TEXT NOT NULL DEFAULT (datetime('now')),\n                    last_modified_by TEXT,\n                    last_modified_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_volume_uploads_1",
+    "volume_uploads",
+    null
+   ],
+   [
+    "table",
+    "series_facts",
+    "series_facts",
+    "CREATE TABLE series_facts (\n                    series_key TEXT PRIMARY KEY,\n                    series_title TEXT NOT NULL,\n                    external_ids TEXT NOT NULL DEFAULT '{}',\n                    titles TEXT NOT NULL DEFAULT '{}',\n                    synonyms TEXT NOT NULL DEFAULT '[]',\n                    tag TEXT,\n                    unit TEXT,\n                    facts_updated_at TEXT NOT NULL,\n                    spine_offset NUMERIC,\n                    volume_offsets TEXT NOT NULL DEFAULT '{}',\n                    updated_by TEXT,\n                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_series_facts_1",
+    "series_facts",
+    null
+   ],
+   [
+    "table",
+    "community_details",
+    "community_details",
+    "CREATE TABLE community_details (\n                    series_key TEXT PRIMARY KEY,\n                    score REAL,\n                    tags TEXT NOT NULL DEFAULT '[]',\n                    genres TEXT NOT NULL DEFAULT '[]',\n                    source TEXT NOT NULL,\n                    fetched_at TEXT NOT NULL\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_community_details_1",
+    "community_details",
+    null
+   ],
+   [
+    "table",
+    "catalog_folders",
+    "catalog_folders",
+    "CREATE TABLE catalog_folders (\n                    folder_name TEXT PRIMARY KEY,\n                    series_key TEXT NOT NULL,\n                    cover_path TEXT,\n                    volume_count INTEGER NOT NULL,\n                    latest_volume_modified REAL NOT NULL DEFAULT 0,\n                    total_pages INTEGER NOT NULL DEFAULT 0,\n                    total_chars INTEGER NOT NULL DEFAULT 0,\n                    missing_pages INTEGER NOT NULL DEFAULT 0,\n                    damaged_volumes INTEGER NOT NULL DEFAULT 0,\n                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_catalog_folders_1",
+    "catalog_folders",
+    null
+   ],
+   [
+    "table",
+    "auth_tokens",
+    "auth_tokens",
+    "CREATE TABLE auth_tokens (\n                    token_hash TEXT PRIMARY KEY,\n                    username TEXT NOT NULL,\n                    kind TEXT NOT NULL,\n                    label TEXT NOT NULL DEFAULT '',\n                    created_at REAL NOT NULL,\n                    expires_at REAL NOT NULL,\n                    last_used_at REAL NOT NULL\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_auth_tokens_1",
+    "auth_tokens",
+    null
+   ],
+   [
+    "index",
+    "idx_auth_tokens_username",
+    "auth_tokens",
+    "CREATE INDEX idx_auth_tokens_username\n                ON auth_tokens(username)\n            "
+   ],
+   [
+    "table",
+    "ocr_sidecars",
+    "ocr_sidecars",
+    "CREATE TABLE ocr_sidecars (\n                    sidecar_path TEXT PRIMARY KEY,\n                    volume_key TEXT NOT NULL,\n                    generation_id TEXT NOT NULL,\n                    generation_name TEXT NOT NULL,\n                    machine TEXT NOT NULL,\n                    account TEXT,\n                    engine TEXT,\n                    detector TEXT,\n                    precision TEXT,\n                    runner_build TEXT,\n                    pages INTEGER,\n                    failed_pages INTEGER,\n                    archive_size INTEGER,\n                    archive_mtime_ns INTEGER,\n                    written_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_ocr_sidecars_1",
+    "ocr_sidecars",
+    null
+   ],
+   [
+    "index",
+    "idx_ocr_sidecars_volume",
+    "ocr_sidecars",
+    "CREATE INDEX idx_ocr_sidecars_volume\n                ON ocr_sidecars(volume_key)\n            "
+   ],
+   [
+    "table",
+    "volume_identities",
+    "volume_identities",
+    "CREATE TABLE volume_identities (\n                    volume_key TEXT PRIMARY KEY,\n                    volume_uuid TEXT NOT NULL,\n                    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
+   ],
+   [
+    "index",
+    "sqlite_autoindex_volume_identities_1",
+    "volume_identities",
+    null
+   ],
+   [
+    "index",
+    "idx_invites_code",
+    "invites",
+    "CREATE INDEX idx_invites_code\n                ON invites(code)\n            "
+   ],
+   [
+    "index",
+    "idx_audit_created_at",
+    "audit_logs",
+    "CREATE INDEX idx_audit_created_at\n                ON audit_logs(created_at DESC)\n            "
+   ],
+   [
+    "index",
+    "idx_audit_actor",
+    "audit_logs",
+    "CREATE INDEX idx_audit_actor\n                ON audit_logs(actor_username)\n            "
+   ],
+   [
+    "index",
+    "idx_audit_type_created",
+    "audit_logs",
+    "CREATE INDEX idx_audit_type_created\n                ON audit_logs(target_type, created_at)\n            "
+   ],
+   [
+    "index",
+    "idx_audit_action_created",
+    "audit_logs",
+    "CREATE INDEX idx_audit_action_created\n                ON audit_logs(action, created_at)\n            "
+   ],
+   [
+    "index",
+    "idx_audit_actor_created",
+    "audit_logs",
+    "CREATE INDEX idx_audit_actor_created\n                ON audit_logs(actor_username, created_at)\n            "
+   ],
+   [
+    "index",
+    "idx_volume_uploads_uploader",
+    "volume_uploads",
+    "CREATE INDEX idx_volume_uploads_uploader\n                ON volume_uploads(uploader_username)\n            "
+   ],
+   [
+    "index",
+    "idx_series_entry_cache_series",
+    "series_entry_cache",
+    "CREATE INDEX idx_series_entry_cache_series\n                ON series_entry_cache(series_key)\n            "
+   ]
+  ],
+  "contents": {
+   "schema_version": [
+    [
+     6
+    ]
+   ],
+   "users": [
+    [
+     1,
+     "scribe",
+     "uploader",
+     "active",
+     ""
+    ],
+    [
+     2,
+     "boss",
+     "admin",
+     "active",
+     ""
+    ]
+   ],
+   "invites": [
+    [
+     "legacyCode1",
+     "uploader",
+     null,
+     "2036-09-18T11:36:55.499518"
+    ]
+   ],
+   "catalog_series": [
+    [
+     "s",
+     "S",
+     5
+    ]
+   ],
+   "catalog_folders": [],
+   "volume_identities": [
+    [
+     "S/V1.cbz",
+     "legacy-u1"
+    ],
+    [
+     "S/V2.cbz",
+     "legacy-u2"
+    ]
+   ]
+  },
+  "catalog": []
+ }
+}

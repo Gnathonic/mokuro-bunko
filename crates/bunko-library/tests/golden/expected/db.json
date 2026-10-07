@@ -629,7 +629,7 @@
    }
   ]
  ],
- "catalog_series": [
+ "catalog_folders": [
   [
    {
     "type": "str",
@@ -666,6 +666,44 @@
    {
     "type": "int",
     "value": 1
+   }
+  ],
+  [
+   {
+    "type": "str",
+    "value": "dr stone"
+   },
+   {
+    "type": "str",
+    "value": "Dr  stone"
+   },
+   {
+    "type": "NoneType",
+    "value": null
+   },
+   {
+    "type": "int",
+    "value": 1
+   },
+   {
+    "type": "float",
+    "value": "1700008000.9876542"
+   },
+   {
+    "type": "int",
+    "value": 1
+   },
+   {
+    "type": "int",
+    "value": 0
+   },
+   {
+    "type": "int",
+    "value": 0
+   },
+   {
+    "type": "int",
+    "value": 0
    }
   ],
   [
@@ -946,7 +984,7 @@
  "schema": [
   "CREATE TABLE series_facts (\n                    series_key TEXT PRIMARY KEY,\n                    series_title TEXT NOT NULL,\n                    external_ids TEXT NOT NULL DEFAULT '{}',\n                    titles TEXT NOT NULL DEFAULT '{}',\n                    synonyms TEXT NOT NULL DEFAULT '[]',\n                    tag TEXT,\n                    unit TEXT,\n                    facts_updated_at TEXT NOT NULL,\n                    spine_offset NUMERIC,\n                    volume_offsets TEXT NOT NULL DEFAULT '{}',\n                    updated_by TEXT,\n                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )",
   "CREATE TABLE series_entry_cache (\n                    volume_key TEXT PRIMARY KEY,\n                    series_key TEXT NOT NULL,\n                    entry_json TEXT NOT NULL,\n                    cbz_size INTEGER NOT NULL,\n                    cbz_mtime REAL NOT NULL,\n                    sidecar_key TEXT NOT NULL DEFAULT '',\n                    computed_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )",
-  "CREATE TABLE catalog_series (\n                    series_key TEXT PRIMARY KEY,\n                    folder_name TEXT NOT NULL,\n                    cover_path TEXT,\n                    volume_count INTEGER NOT NULL,\n                    latest_volume_modified REAL NOT NULL DEFAULT 0,\n                    total_pages INTEGER NOT NULL DEFAULT 0,\n                    total_chars INTEGER NOT NULL DEFAULT 0,\n                    missing_pages INTEGER NOT NULL DEFAULT 0,\n                    damaged_volumes INTEGER NOT NULL DEFAULT 0,\n                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )",
+  "CREATE TABLE catalog_folders (\n                    folder_name TEXT PRIMARY KEY,\n                    series_key TEXT NOT NULL,\n                    cover_path TEXT,\n                    volume_count INTEGER NOT NULL,\n                    latest_volume_modified REAL NOT NULL DEFAULT 0,\n                    total_pages INTEGER NOT NULL DEFAULT 0,\n                    total_chars INTEGER NOT NULL DEFAULT 0,\n                    missing_pages INTEGER NOT NULL DEFAULT 0,\n                    damaged_volumes INTEGER NOT NULL DEFAULT 0,\n                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )",
   "CREATE TABLE volume_identities (\n                    volume_key TEXT PRIMARY KEY,\n                    volume_uuid TEXT NOT NULL,\n                    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))\n                )"
  ]
 }

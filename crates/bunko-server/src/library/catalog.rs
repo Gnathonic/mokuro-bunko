@@ -189,7 +189,7 @@ fn community_by_key(deps: &LibraryDeps) -> std::collections::HashMap<String, Val
 fn list_library(deps: &LibraryDeps) -> String {
     let facts = display_facts(deps);
     let rows = deps.db.list_catalog_series().unwrap_or_else(|error| {
-        tracing::warn!(%error, "catalog: catalog_series unavailable; listing from the index");
+        tracing::warn!(%error, "catalog: catalog_folders unavailable; listing from the index");
         Vec::new()
     });
     let mut series: Vec<Value> = Vec::new();

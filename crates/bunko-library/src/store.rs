@@ -1,8 +1,8 @@
 //! The database access the metadata compiler needs, as a trait the server
 //! implements on top of `bunko-db` (this crate must not depend on it).
 //!
-//! Semantics follow 0.5.2's `database.py` (spec `db-auth-admin.md` §10.4, §11)
-//! for the tables `series_facts`, `series_entry_cache`, `catalog_series` and
+//! Semantics follow 0.5.3's `database.py` (spec `db-auth-admin.md` §10.4, §11)
+//! for the tables `series_facts`, `series_entry_cache`, `catalog_folders` and
 //! `volume_identities`. Everything that decides *meaning* (cache validity,
 //! JSON shapes, identity rule) is done in this crate; implementations only
 //! move rows. Helpers here produce/consume the exact column texts Python
@@ -150,7 +150,9 @@ pub struct CachedEntryWrite<'a> {
     pub identity: Option<&'a str>,
 }
 
-/// A `catalog_series` row (`scanned_at` is stamped by the database).
+/// A `catalog_folders` row (`scanned_at` is stamped by the database): one per series
+/// folder, so case-variant folders sharing a `series_key` keep separate rows (0.5.3; 0.5.2
+/// keyed `catalog_series` by `series_key`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogSeriesRow {
     pub series_key: String,
@@ -187,10 +189,10 @@ pub trait MetadataStore: Send + Sync {
     /// returns the number deleted.
     fn prune_series_entry_cache(&self, keep: &HashSet<String>) -> StoreResult<usize>;
 
-    /// Upsert a `catalog_series` row (`scanned_at = datetime('now')`).
+    /// Upsert a `catalog_folders` row by `folder_name` (`scanned_at = datetime('now')`).
     fn upsert_catalog_series(&self, row: &CatalogSeriesRow) -> StoreResult<()>;
 
-    /// Delete every `catalog_series` row whose key is not in `keep`.
+    /// Delete every `catalog_folders` row whose `folder_name` is not in `keep`.
     fn prune_catalog_series(&self, keep: &HashSet<String>) -> StoreResult<usize>;
 }
 

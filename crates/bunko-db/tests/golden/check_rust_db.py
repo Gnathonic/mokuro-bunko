@@ -1,11 +1,15 @@
-"""Rust -> Python 0.5.2: check a database written by bunko-db with the Python code.
+"""Rust -> Python 0.5.3 / 0.5.2: check a database written by bunko-db with the Python code.
 
 Run by `tests/golden_rust_to_py.rs` (or by hand):
 
+    ~/.cache/mokuro-bunko-demo/ref053/bin/python check_rust_db.py <mokuro.db> <manifest.json> <out.json>
     ~/.cache/mokuro-bunko-demo/ref052/bin/python check_rust_db.py <mokuro.db> <manifest.json> <out.json>
 
 `manifest.json` is what the Rust test wrote and expects Python to see. The script
-- compares the schema text with a fresh Python database's (byte equality);
+- under 0.5.3 (the version bunko-db tracks), compares the schema text with a fresh Python
+  database's (byte equality); under 0.5.2 (0.5.3's rollback), checks that its open only
+  ADDS its own `catalog_series` table (empty: it reads its catalog from there until its
+  first pass) and leaves every table bunko-db made as it was;
 - opens the file with Python's `Database` (running its migrations over it);
 - checks passwords, tokens, invites, audit details (ASCII JSON spelling), audit pages
   and cursors, ownership, OCR rows, identities and the series tables, including that
@@ -23,6 +27,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from mokuro_bunko import __version__ as VERSION
 from mokuro_bunko.database import Database
 from mokuro_bunko.registration.invites import InviteManager
 
@@ -54,10 +59,20 @@ def main() -> None:
         fresh = Path(tmp) / "fresh.db"
         Database(fresh)._conn.close()
         python_schema = schema_rows(fresh)
-    check(rust_schema == python_schema, "schema text differs from a fresh Python database")
+    rollback_052 = VERSION == "0.5.2"
+    if rollback_052:
+        # 0.5.2 keys its catalog by series (`catalog_series`); bunko-db, like 0.5.3, by
+        # folder (`catalog_folders`), which 0.5.2 never touches.
+        legacy = [r for r in python_schema if r[2] == "catalog_series"]
+        check(len(legacy) == 2, f"0.5.2's catalog_series rows {legacy}")
+        expected_schema = rust_schema + legacy
+        m = {**m, "catalog_series": []}
+    else:
+        check(rust_schema == python_schema, "schema text differs from a fresh Python database")
+        expected_schema = python_schema
 
     db = Database(db_path)
-    check(schema_rows(db_path) == python_schema, "Python's open changed the schema")
+    check(schema_rows(db_path) == expected_schema, "Python's open changed the schema")
     version = [tuple(r) for r in db._conn.execute("SELECT version FROM schema_version")]
     check(version == [(6,)], f"schema_version {version}")
 
@@ -138,7 +153,7 @@ def main() -> None:
     check(db.list_catalog_series() == m["catalog_series"], "catalog_series")
     check(db.list_community_details() == m["community_details"], "community_details")
 
-    # Write as a rolled-back 0.5.2 server would; the Rust test reads these back.
+    # Write as a rolled-back server would; the Rust test reads these back.
     db.create_user("pyuser", "py-password1", "uploader", notes="from python")
     code = db.create_invite("editor", "2w", invited_by="pyuser")
     token, _ = db.create_auth_token("pyuser", "reader", label="py")
@@ -159,7 +174,7 @@ def main() -> None:
         "event_details": json.dumps({"existed_before": False, "n": "é"},
                                     separators=(",", ":"), ensure_ascii=True),
     }))
-    print("python 0.5.2 accepted the Rust database")
+    print(f"python {VERSION} accepted the Rust database")
 
 
 if __name__ == "__main__":

@@ -5,44 +5,23 @@
 //!
 //! Needs `~/.cache/mokuro-bunko-demo/ref052/bin/python` (the 0.5.2 reference env, see
 //! CONVENTIONS.md); skipped with a message when it is absent. `BUNKO_DAV_DIFF_REPORT=1`
-//! prints every step.
+//! prints every step. The harness itself is `common/diff.rs` (shared with
+//! `bunko-server/tests/differential_053.rs`).
 
 mod common;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use axum::body::Body;
 use bunko_core::Role;
 use bunko_dav::{DavContext, DavHooks, NoHooks};
-use common::{Resp, cbz_bytes, damaged_cbz, digest_header};
+use common::diff::{self, Step, Tally, set_mtime, step};
+use common::{cbz_bytes, damaged_cbz, digest_header};
 use http::Request;
-use quick_xml::events::Event;
-use quick_xml::name::ResolveResult;
-use quick_xml::reader::NsReader;
 
 const PYTHON: &str = ".cache/mokuro-bunko-demo/ref052/bin/python";
-/// A fixed mtime with sub-microsecond digits, so ETag float formatting is exercised.
-const MTIME_SECS: u64 = 1_790_878_208;
-const MTIME_NANOS: u32 = 881_310_123;
-
-struct Server(Child);
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn set_mtime(path: &Path) {
-    let t = UNIX_EPOCH + Duration::new(MTIME_SECS, MTIME_NANOS);
-    let f = std::fs::File::open(path).unwrap();
-    f.set_times(std::fs::FileTimes::new().set_modified(t).set_accessed(t))
-        .unwrap();
-}
 
 /// The storage fixture (both trees are built by this, with identical mtimes).
 fn build_tree(base: &Path) {
@@ -77,71 +56,6 @@ fn build_tree(base: &Path) {
     }
     for d in ["thumbnails", "series", "Series Ω", "Empty"] {
         set_mtime(&lib.join(d));
-    }
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-struct Step {
-    name: &'static str,
-    user: Option<&'static str>,
-    method: &'static str,
-    path: &'static str,
-    headers: Vec<(&'static str, String)>,
-    body: Vec<u8>,
-    /// Response header to remember (per side) as `{var}` for later steps.
-    capture: Vec<(&'static str, &'static str)>,
-    /// Compare ETag/Last-Modified values exactly (only before any write).
-    exact_times: bool,
-    /// The intended difference, if this step is one of the fixes.
-    intended: Option<&'static str>,
-}
-
-fn step(
-    name: &'static str,
-    user: Option<&'static str>,
-    method: &'static str,
-    path: &'static str,
-) -> Step {
-    Step {
-        name,
-        user,
-        method,
-        path,
-        headers: Vec::new(),
-        body: Vec::new(),
-        capture: Vec::new(),
-        exact_times: false,
-        intended: None,
-    }
-}
-
-impl Step {
-    fn h(mut self, k: &'static str, v: impl Into<String>) -> Self {
-        self.headers.push((k, v.into()));
-        self
-    }
-    fn body(mut self, b: impl Into<Vec<u8>>) -> Self {
-        self.body = b.into();
-        self
-    }
-    fn exact(mut self) -> Self {
-        self.exact_times = true;
-        self
-    }
-    fn capture(mut self, header: &'static str, var: &'static str) -> Self {
-        self.capture.push((header, var));
-        self
-    }
-    fn intended(mut self, why: &'static str) -> Self {
-        self.intended = Some(why);
-        self
     }
 }
 
@@ -263,207 +177,6 @@ fn script() -> Vec<Step> {
 }
 
 /// One side's answer, normalised for comparison.
-#[derive(Debug, PartialEq)]
-struct Answer {
-    status: u16,
-    headers: BTreeMap<String, String>,
-    body: String,
-}
-
-/// Headers clients act on (value-normalised where the two sides legitimately differ).
-const COMPARED: [&str; 14] = [
-    "content-type",
-    "allow",
-    "dav",
-    "ms-author-via",
-    "accept-ranges",
-    "content-range",
-    "x-mokuro-upload",
-    "x-mokuro-size",
-    "x-mokuro-put",
-    "x-mokuro-digest-verified",
-    "x-accel-redirect",
-    "lock-token",
-    "etag",
-    "content-length",
-];
-
-fn normalise(r: &Resp, exact: bool, method: &str) -> Answer {
-    let mut headers = BTreeMap::new();
-    for name in COMPARED {
-        if let Some(v) = r.header(name) {
-            let v = match name {
-                "content-type" => v.to_ascii_lowercase().replace("; ", ";"),
-                "lock-token" => "<present>".to_string(),
-                "etag" if !exact => normalise_etag(v.trim_matches('"')),
-                "content-length" if r.status.as_u16() >= 400 && !v.is_empty() => "<n>".to_string(),
-                // XML/HTML documents: their bytes are compared normalised (or not at all).
-                "content-length"
-                    if r.header("content-type")
-                        .is_some_and(|t| t.contains("xml") || t.contains("html")) =>
-                {
-                    "<n>".to_string()
-                }
-                _ => v.to_string(),
-            };
-            headers.insert(name.to_string(), v);
-        }
-    }
-    let ctype = r.header("content-type").unwrap_or("");
-    let body = if ctype.contains("xml") {
-        canonical_xml(&r.body, exact)
-    } else if ctype.contains("json") {
-        serde_json::from_slice::<serde_json::Value>(&r.body)
-            .map(|v| v.to_string())
-            .unwrap_or_else(|_| r.text())
-    } else if r.status.is_success() && (method == "GET" || method == "HEAD") {
-        format!("{} bytes, sha {:x}", r.body.len(), {
-            use sha2::Digest;
-            sha2::Sha256::digest(&r.body)
-        })
-    } else {
-        String::new() // status pages: clients read only the status
-    };
-    Answer {
-        status: r.status.as_u16(),
-        headers,
-        body,
-    }
-}
-
-/// `1790878208.881310-123` -> `<mtime>-123`.
-fn normalise_etag(v: &str) -> String {
-    let (time, size) = match v.split_once('-') {
-        Some((t, s)) => (t, Some(s)),
-        None => (v, None),
-    };
-    let ok = time.split_once('.').is_some_and(|(a, b)| {
-        a.chars().all(|c| c.is_ascii_digit())
-            && b.len() == 6
-            && b.chars().all(|c| c.is_ascii_digit())
-    });
-    let t = if ok { "<mtime>" } else { "<BAD-ETAG>" };
-    match size {
-        Some(s) => format!("{t}-{s}"),
-        None => t.to_string(),
-    }
-}
-
-#[derive(Debug)]
-struct El {
-    name: String,
-    text: String,
-    children: Vec<El>,
-}
-
-fn parse_xml(body: &[u8]) -> Option<El> {
-    let mut reader = NsReader::from_reader(body);
-    reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
-    let mut stack: Vec<El> = Vec::new();
-    let mut root = None;
-    loop {
-        let (ns, ev) = reader.read_resolved_event_into(&mut buf).ok()?;
-        let name_of = |local: &[u8]| {
-            let ns = match &ns {
-                ResolveResult::Bound(n) => String::from_utf8_lossy(n.as_ref()).into_owned(),
-                _ => String::new(),
-            };
-            format!("{{{ns}}}{}", String::from_utf8_lossy(local))
-        };
-        match ev {
-            Event::Start(s) => stack.push(El {
-                name: name_of(s.local_name().as_ref()),
-                text: String::new(),
-                children: vec![],
-            }),
-            Event::Empty(s) => {
-                let el = El {
-                    name: name_of(s.local_name().as_ref()),
-                    text: String::new(),
-                    children: vec![],
-                };
-                match stack.last_mut() {
-                    Some(p) => p.children.push(el),
-                    None => root = Some(el),
-                }
-            }
-            Event::End(_) => {
-                let el = stack.pop()?;
-                match stack.last_mut() {
-                    Some(p) => p.children.push(el),
-                    None => root = Some(el),
-                }
-            }
-            Event::Text(t) => {
-                if let Some(top) = stack.last_mut() {
-                    top.text.push_str(&t.unescape().ok()?);
-                }
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    root
-}
-
-fn canon(el: &El, exact: bool, href: &str) -> String {
-    let local = el.name.rsplit('}').next().unwrap_or("");
-    let virtual_root = href == "/" || href == "/mokuro-reader/";
-    let text = match local {
-        "creationdate" => "<date>".to_string(),
-        "getlastmodified" if !exact || virtual_root => "<date>".to_string(),
-        "getetag" if !exact => normalise_etag(&el.text),
-        "timeout" => "<timeout>".to_string(),
-        _ if el.text.starts_with("opaquelocktoken:") => "<token>".to_string(),
-        _ => el.text.clone(),
-    };
-    let href_here = el
-        .children
-        .iter()
-        .find(|c| c.name == "{DAV:}href")
-        .map(|c| c.text.as_str())
-        .unwrap_or(href);
-    let mut kids: Vec<String> = el
-        .children
-        .iter()
-        // Compiled metadata (`<Series>/series.json`, root `catalog.json`) is written by the
-        // Python stack's background compiler, not by DAV: never part of the comparison.
-        .filter(|c| !(c.name == "{DAV:}response" && is_compiled_href(c)))
-        .map(|c| canon(c, exact, href_here))
-        .collect();
-    kids.sort();
-    format!("<{}>{}{}</>", el.name, text, kids.concat())
-}
-
-fn is_compiled_href(response: &El) -> bool {
-    response
-        .children
-        .iter()
-        .find(|c| c.name == "{DAV:}href")
-        .and_then(|h| {
-            percent_encoding::percent_decode_str(&h.text)
-                .decode_utf8()
-                .ok()
-        })
-        .is_some_and(|p| bunko_dav::is_compiled_metadata_path(&p))
-}
-
-fn canonical_xml(body: &[u8], exact: bool) -> String {
-    match parse_xml(body) {
-        Some(root) => canon(&root, exact, ""),
-        None => format!("<unparsable: {}>", String::from_utf8_lossy(body)),
-    }
-}
-
-fn substitute(v: &str, vars: &HashMap<String, String>) -> String {
-    let mut out = v.to_string();
-    for (k, val) in vars {
-        out = out.replace(&format!("{{{k}}}"), val);
-    }
-    out
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rust_matches_python_052() {
@@ -478,48 +191,18 @@ async fn rust_matches_python_052() {
         );
         return;
     }
-    let report = std::env::var_os("BUNKO_DAV_DIFF_REPORT").is_some();
     let work = tempfile::tempdir().unwrap();
     let py_base = work.path().join("py/storage");
     let rs_base = work.path().join("rs/storage");
     build_tree(&py_base);
     build_tree(&rs_base);
 
-    let port = free_port();
-    let worktree = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let _server = Server(
-        Command::new(&python)
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/ref052_server.py"))
-            .arg(&py_base)
-            .arg(port.to_string())
-            .current_dir(&worktree)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("start the Python reference server"),
-    );
-    let client = reqwest::Client::builder()
-        .no_gzip()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()
-        .unwrap();
+    let port = diff::free_port();
+    let client = diff::http_client();
+    let _server = diff::start_reference(&python, &py_base, port, &client)
+        .await
+        .expect("the Python reference server did not come up");
     let origin = format!("http://127.0.0.1:{port}");
-    let mut up = false;
-    for _ in 0..120 {
-        if client
-            .get(format!("{origin}/api/health"))
-            .send()
-            .await
-            .is_ok_and(|r| r.status().is_success())
-        {
-            up = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    assert!(up, "the Python reference server did not come up");
     let dav = bunko_dav::Dav::new(
         &bunko_core::StorageLayout::new(&rs_base),
         bunko_dav::DavConfig::default(),
@@ -531,27 +214,10 @@ async fn rust_matches_python_052() {
     let mut py_vars: HashMap<String, String> =
         HashMap::from([("host".to_string(), origin.clone())]);
     let mut rs_vars = py_vars.clone();
-    let mut unexpected = Vec::new();
-    let mut intended_seen = Vec::new();
+    let mut tally = Tally::new();
     for s in script() {
         // Python, over HTTP.
-        let method = reqwest::Method::from_bytes(s.method.as_bytes()).unwrap();
-        let mut rb = client.request(method, format!("{origin}{}", s.path));
-        if let Some(u) = s.user {
-            rb = rb.basic_auth(u, Some("pass1234"));
-        }
-        for (k, v) in &s.headers {
-            rb = rb.header(*k, substitute(v, &py_vars));
-        }
-        let pr = rb.body(s.body.clone()).send().await.unwrap();
-        let status = pr.status();
-        let headers = pr.headers().clone();
-        let body = pr.bytes().await.unwrap().to_vec();
-        let py = Resp {
-            status,
-            headers,
-            body,
-        };
+        let py = diff::python_send(&client, &origin, &s, &py_vars).await;
 
         // Rust, in process (the server has authorised the request already).
         let mut b = Request::builder()
@@ -559,7 +225,7 @@ async fn rust_matches_python_052() {
             .uri(s.path)
             .header("host", format!("127.0.0.1:{port}"));
         for (k, v) in &s.headers {
-            b = b.header(*k, substitute(v, &rs_vars));
+            b = b.header(*k, diff::substitute(v, &rs_vars));
         }
         if !s.body.is_empty() {
             b = b.header("content-length", s.body.len().to_string());
@@ -578,57 +244,17 @@ async fn rust_matches_python_052() {
                 hooks.clone(),
             ),
         };
-        let rs = Resp::read(
+        let rs = common::Resp::read(
             dav.handle(b.body(Body::from(s.body.clone())).unwrap(), ctx)
                 .await,
         )
         .await;
-
-        for (header, var) in s.capture.iter().copied() {
-            for (resp, vars) in [(&py, &mut py_vars), (&rs, &mut rs_vars)] {
-                if let Some(v) = resp.header(header) {
-                    vars.insert(
-                        var.to_string(),
-                        v.trim_matches(|c| c == '<' || c == '>').to_string(),
-                    );
-                }
-            }
-        }
-        let (a, b) = (
-            normalise(&py, s.exact_times, s.method),
-            normalise(&rs, s.exact_times, s.method),
-        );
-        let same = a == b;
-        if report || !same {
-            eprintln!(
-                "== {} ({} {}): python {} / rust {}{}",
-                s.name,
-                s.method,
-                s.path,
-                a.status,
-                b.status,
-                if same { "" } else { "  DIFFERENT" }
-            );
-            if !same {
-                if a.headers != b.headers {
-                    eprintln!(
-                        "   python headers {:?}\n   rust   headers {:?}",
-                        a.headers, b.headers
-                    );
-                }
-                if a.body != b.body {
-                    eprintln!("   python body {}\n   rust   body {}", a.body, b.body);
-                }
-            }
-        }
-        match (same, s.intended) {
-            (false, None) => unexpected.push(s.name),
-            (false, Some(why)) => intended_seen.push(format!("{}: {why}", s.name)),
-            (true, Some(why)) => {
-                eprintln!("   (intended difference did not show: {} -- {why})", s.name)
-            }
-            (true, None) => {}
-        }
+        let rs = diff::Resp {
+            status: rs.status,
+            headers: rs.headers,
+            body: rs.body,
+        };
+        tally.step(&s, &py, &rs, &mut py_vars, &mut rs_vars);
     }
     // The PUT-overwrite ETag fix, checked per side.
     eprintln!(
@@ -637,13 +263,6 @@ async fn rust_matches_python_052() {
         rs_vars.get("replace_etag") == rs_vars.get("get_etag")
     );
     assert_eq!(rs_vars.get("replace_etag"), rs_vars.get("get_etag"));
-    eprintln!("intended differences ({}):", intended_seen.len());
-    for d in &intended_seen {
-        eprintln!("  - {d}");
-    }
     eprintln!("script ran in {:?}", started.elapsed().unwrap_or_default());
-    assert!(
-        unexpected.is_empty(),
-        "unexpected differences from 0.5.2: {unexpected:?}"
-    );
+    tally.finish("0.5.2");
 }

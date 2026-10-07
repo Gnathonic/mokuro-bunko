@@ -1,16 +1,26 @@
-"""Generate the Python 0.5.2 golden fixtures for bunko-db's cross-compat tests.
+"""Generate the Python golden fixtures for bunko-db's cross-compat tests.
 
-Run with the 0.5.2 reference environment (it imports `mokuro_bunko` from this worktree):
+What it writes depends on the `mokuro_bunko` it imports:
 
     ~/.cache/mokuro-bunko-demo/ref052/bin/python crates/bunko-db/tests/golden/make_golden.py
+    ~/.cache/mokuro-bunko-demo/ref053/bin/python crates/bunko-db/tests/golden/make_golden.py
 
-Writes, next to this script:
+Under 0.5.2, next to this script:
 - py052.db / py052.json: a database populated through Python's `Database` class, and a
   manifest of what Rust must find in it (plaintext passwords, tokens and invite codes,
   expected rows, audit query results with cursors, the schema text).
 - legacy.db / legacy.json: a hand-built pre-0.3 database (no `notes`/`invited_by`/
   damage columns, no tokens/OCR/identity tables, `writer` roles, schema_version 2), and
   what Python's `Database()` makes of a copy of it (schema + migrated rows).
+
+Under 0.5.3 (the version bunko-db now tracks: the catalog is `catalog_folders`, keyed by
+folder, and `catalog_series` is neither created nor touched):
+- py053.db / py053.json: the same population through 0.5.3, plus data shaped like prod
+  after the 0.5.3 cutover (case-variant `Kingdom`/`kingdom` catalog rows sharing a series
+  key, rows prefix-renamed from `kingdom/` to `Kingdom/`, the 0.5.2 `catalog_series`
+  table left behind with its last row) and the schema of a FRESH 0.5.3 database.
+- upgrade053.json: what 0.5.3's `Database()` makes of copies of the checked-in py052.db
+  and legacy.db (schema + rows), which is what Rust must make of them too.
 
 The fixtures are checked in; regenerate only when the Python side changes. Secrets in
 them are random test values.
@@ -28,6 +38,7 @@ from pathlib import Path
 
 import bcrypt
 
+from mokuro_bunko import __version__ as VERSION
 from mokuro_bunko.database import Database
 from mokuro_bunko.registration.invites import InviteManager
 
@@ -84,12 +95,12 @@ def page_json(page: dict) -> dict:
     }
 
 
-def make_py052() -> None:
-    path = HERE / "py052.db"
+def make_python_db(tag: str) -> None:
+    path = HERE / f"py{tag}.db"
     for suffix in ("", "-wal", "-shm"):
         Path(str(path) + suffix).unlink(missing_ok=True)
     db = Database(path)
-    manifest: dict = {"generator": "mokuro-bunko 0.5.2", "bcrypt": bcrypt.__version__}
+    manifest: dict = {"generator": f"mokuro-bunko {VERSION}", "bcrypt": bcrypt.__version__}
 
     # -- users ---------------------------------------------------------------
     for username, password, role, status, notes in USERS:
@@ -335,9 +346,105 @@ def make_py052() -> None:
         for p in ("Dr Stone/V1.cbz", "Dr Stone/V2.cbz", "Dr Stone/V3.cbz", "Mixed/V1.cbz")
     }
 
+    if tag == "053":
+        add_prod_shape_053(db, manifest)
+
     checkpoint(db)
     manifest["schema"] = schema_rows(path)
-    (HERE / "py052.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n")
+    if tag == "053":
+        with tempfile.TemporaryDirectory() as tmp:
+            fresh = Path(tmp) / "fresh.db"
+            checkpoint(Database(fresh))
+            manifest["fresh_schema"] = schema_rows(fresh)
+    (HERE / f"py{tag}.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n")
+
+
+# 0.5.2's `catalog_series` DDL, byte for byte as 0.5.2 left it in prod's `sqlite_master`.
+CATALOG_SERIES_052_DDL = """
+                CREATE TABLE IF NOT EXISTS catalog_series (
+                    series_key TEXT PRIMARY KEY,
+                    folder_name TEXT NOT NULL,
+                    cover_path TEXT,
+                    volume_count INTEGER NOT NULL,
+                    latest_volume_modified REAL NOT NULL DEFAULT 0,
+                    total_pages INTEGER NOT NULL DEFAULT 0,
+                    total_chars INTEGER NOT NULL DEFAULT 0,
+                    missing_pages INTEGER NOT NULL DEFAULT 0,
+                    damaged_volumes INTEGER NOT NULL DEFAULT 0,
+                    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """
+
+
+def add_prod_shape_053(db: Database, manifest: dict) -> None:
+    """Prod's database after the 0.5.3 cutover (2026-10-06).
+
+    0.5.2 had kept ONE `catalog_series` row for `Kingdom/` + the stray `kingdom/` (the
+    one-volume folder its pass reached last); 0.5.3 leaves that table alone and keeps one
+    `catalog_folders` row per folder. The cutover merged `kingdom/` into `Kingdom/` and
+    prefix-renamed the rows keyed by library path, as `rename_*` do.
+    """
+    with db._connection() as conn:
+        conn.execute(CATALOG_SERIES_052_DDL)
+        conn.execute(
+            "INSERT INTO catalog_series (series_key, folder_name, volume_count, total_pages) "
+            "VALUES ('kingdom', 'kingdom', 1, 200)"
+        )
+    for row in [
+        {"series_key": "kingdom", "folder_name": "Kingdom", "cover_path": "Kingdom/第01巻.webp",
+         "volume_count": 79, "latest_volume_modified": 1790000000.25, "total_pages": 15800,
+         "total_chars": 1234567, "missing_pages": 0, "damaged_volumes": 0},
+        {"series_key": "kingdom", "folder_name": "kingdom", "cover_path": None,
+         "volume_count": 1, "latest_volume_modified": 1790100000.5, "total_pages": 200,
+         "total_chars": 15000, "missing_pages": 0, "damaged_volumes": 0},
+    ]:
+        db.upsert_catalog_series(row)
+    manifest["catalog_series"] = db.list_catalog_series()
+
+    db.record_volume_upload("Kingdom/第01巻.cbz", "root")
+    db.record_volume_upload("kingdom/第80巻.cbz", "alice")
+    db.record_ocr_sidecar(
+        {"sidecar_path": "kingdom/第80巻.mokuro", "volume_key": "kingdom/第80巻.cbz",
+         "generation_id": "g1", "generation_name": "Hayai", "machine": "local",
+         "engine": "hayai-nova", "pages": 200, "failed_pages": 0}
+    )
+    db.remember_volume_uuid("kingdom/第80巻.mokuro", "0aebfb59-0000-4000-8000-000000000080")
+    db.remember_volume_uuid("Kingdom/第01巻.mokuro", "uuid-kingdom-01")
+    # The cutover's merge of `kingdom/` into `Kingdom/`.
+    db.rename_volume_upload("kingdom/第80巻.cbz", "Kingdom/第80巻.cbz")
+    manifest["kingdom_renamed"] = {
+        "ocr_sidecars": db.rename_ocr_sidecars_under_prefix("kingdom", "Kingdom"),
+        "volume_identities": db.rename_volume_uuids_under_prefix("kingdom", "Kingdom"),
+    }
+
+    paths = ["Kingdom/第80巻.cbz", "kingdom/第80巻.cbz", "Kingdom/第80巻.mokuro",
+             "Kingdom/第01巻.cbz", "KINGDOM/第01巻.cbz"]
+    manifest["kingdom_owners"] = {p: db.get_volume_owner(p) for p in paths}
+    manifest["kingdom_identities"] = {p: db.remembered_volume_uuid(p) for p in paths}
+    manifest["kingdom_can_delete"] = [
+        [u, p, db.can_user_delete_library_path(u, p)]
+        for u, p in [
+            ("alice", "/mokuro-reader/Kingdom/第80巻.cbz"),
+            ("alice", "/mokuro-reader/Kingdom/第80巻.mokuro"),
+            ("alice", "/mokuro-reader/kingdom/第80巻.cbz"),
+            ("alice", "/mokuro-reader/Kingdom/第01巻.cbz"),
+            ("root", "/mokuro-reader/Kingdom/第01巻.cbz"),
+        ]
+    ]
+    manifest["kingdom_can_edit"] = [
+        [u, s, db.can_user_edit_series(u, s)]
+        for u, s in [("alice", "Kingdom"), ("alice", "kingdom"), ("root", "Kingdom")]
+    ]
+    manifest["ocr_sidecars"] = db.list_ocr_sidecars()
+    manifest["ocr_producers"] = [list(t) for t in db.ocr_sidecar_producers()]
+    manifest["owned_series"] = {u: db.list_series_owned_by(u) for u in ("alice", "root", "x")}
+    with db._connection() as conn:
+        manifest["legacy_catalog_series"] = [
+            list(r) for r in conn.execute(
+                "SELECT series_key, folder_name, volume_count, total_pages "
+                "FROM catalog_series ORDER BY series_key"
+            )
+        ]
 
 
 LEGACY_DDL = [
@@ -397,14 +504,20 @@ def migrated_contents(path: Path) -> dict:
     conn = sqlite3.connect(path)
     try:
         q = lambda sql: [list(r) for r in conn.execute(sql)]  # noqa: E731
+        # 0.5.2 gave the legacy `catalog_series` its damage columns; 0.5.3 leaves it as is.
+        damage = ", missing_pages, damaged_volumes" if VERSION == "0.5.2" else ""
         return {
             "schema_version": q("SELECT version FROM schema_version"),
             "users": q("SELECT id, username, role, status, notes FROM users ORDER BY id"),
             "invites": q("SELECT code, role, invited_by, expires_at FROM invites ORDER BY id"),
             "catalog_series": q(
-                "SELECT series_key, folder_name, volume_count, missing_pages, damaged_volumes "
+                f"SELECT series_key, folder_name, volume_count{damage} "
                 "FROM catalog_series ORDER BY series_key"
             ),
+            "catalog_folders": q(
+                "SELECT series_key, folder_name, volume_count FROM catalog_folders "
+                "ORDER BY folder_name"
+            ) if VERSION != "0.5.2" else [],
             "volume_identities": q(
                 "SELECT volume_key, volume_uuid FROM volume_identities ORDER BY volume_key"
             ),
@@ -465,7 +578,31 @@ def make_legacy() -> None:
     (HERE / "legacy.json").write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n")
 
 
+def make_upgrades_053() -> None:
+    """What 0.5.3 makes of the checked-in 0.5.2-era fixtures (they are not regenerated)."""
+    out = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in ("py052", "legacy"):
+            copy = Path(tmp) / f"{name}.db"
+            shutil.copy(HERE / f"{name}.db", copy)
+            db = Database(copy)
+            catalog = db.list_catalog_series()
+            checkpoint(db)
+            out[name] = {
+                "schema": schema_rows(copy),
+                "contents": migrated_contents(copy),
+                "catalog": catalog,
+            }
+    (HERE / "upgrade053.json").write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n")
+
+
 if __name__ == "__main__":
-    make_py052()
-    make_legacy()
+    if VERSION == "0.5.2":
+        make_python_db("052")
+        make_legacy()
+    elif VERSION == "0.5.3":
+        make_python_db("053")
+        make_upgrades_053()
+    else:
+        raise SystemExit(f"no fixtures defined for mokuro-bunko {VERSION}")
     print("wrote", *(p.name for p in sorted(HERE.glob("*.db"))), file=sys.stderr)

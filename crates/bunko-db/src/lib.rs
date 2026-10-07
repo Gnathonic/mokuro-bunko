@@ -20,7 +20,7 @@
 //! | [`uploads`] | `volume_uploads` (volume and series ownership) |
 //! | [`ocr`] | `ocr_sidecars` |
 //! | [`identities`] | `volume_identities` |
-//! | [`series`] | `series_facts`, `series_entry_cache`, `catalog_series`, `community_details` |
+//! | [`series`] | `series_facts`, `series_entry_cache`, `catalog_folders`, `community_details` |
 //! | [`schema`] | DDL, migrations, `schema_version` |
 
 pub mod audit;

@@ -1,6 +1,9 @@
-//! Schema creation and the 0.5.2 migration steps (spec §2), run on every open.
+//! Schema creation and the 0.5.3 migration steps (spec §2), run on every open.
 //!
-//! The DDL strings are 0.5.2's byte for byte, indentation included: SQLite keeps the
+//! 0.5.3 is 0.5.2 with the materialized catalog keyed by folder (`catalog_folders`, see
+//! `CATALOG_FOLDERS_DDL`) instead of by folded series key (`catalog_series`).
+//!
+//! The DDL strings are 0.5.3's byte for byte, indentation included: SQLite keeps the
 //! statement text in `sqlite_master.sql`, so a database created here is
 //! indistinguishable from one Python created (pinned by the golden schema test).
 //!
@@ -17,7 +20,7 @@ use crate::identities::identity_from_entry;
 use crate::series::load_json_object;
 use rusqlite::{Connection, OptionalExtension, params};
 
-/// `Database.SCHEMA_VERSION` of 0.5.2.
+/// `Database.SCHEMA_VERSION` of 0.5.2 (unchanged in 0.5.3).
 pub const SCHEMA_VERSION: i64 = 6;
 
 const SCHEMA_VERSION_DDL: &str = "
@@ -116,10 +119,15 @@ const COMMUNITY_DETAILS_DDL: &str = "
                 )
             ";
 
-const CATALOG_SERIES_DDL: &str = "
-                CREATE TABLE IF NOT EXISTS catalog_series (
-                    series_key TEXT PRIMARY KEY,
-                    folder_name TEXT NOT NULL,
+/// One row per series FOLDER (0.5.3). Up to 0.5.2 this was `catalog_series`, keyed by the
+/// folded series key, so `Kingdom/` and `kingdom/` shared one row and whichever the pass
+/// reached last hid the other's volumes from the catalog. That table is no longer created,
+/// read or written: one an older build left behind stays exactly as it was, so a rollback to
+/// 0.5.2 finds it in the shape its own `ON CONFLICT(series_key)` upsert needs.
+const CATALOG_FOLDERS_DDL: &str = "
+                CREATE TABLE IF NOT EXISTS catalog_folders (
+                    folder_name TEXT PRIMARY KEY,
+                    series_key TEXT NOT NULL,
                     cover_path TEXT,
                     volume_count INTEGER NOT NULL,
                     latest_volume_modified REAL NOT NULL DEFAULT 0,
@@ -222,7 +230,7 @@ const INDEXES: &[&str] = &[
             ",
 ];
 
-/// 0.5.2 `_init_schema`, step for step (spec §2.4). Runs inside the caller's write
+/// 0.5.3 `_init_schema`, step for step (spec §2.4). Runs inside the caller's write
 /// transaction.
 pub(crate) fn init(conn: &Connection) -> Result<()> {
     // 1. Tables up to and including ocr_sidecars.
@@ -235,7 +243,7 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
         SERIES_FACTS_DDL,
         SERIES_ENTRY_CACHE_DDL,
         COMMUNITY_DETAILS_DDL,
-        CATALOG_SERIES_DDL,
+        CATALOG_FOLDERS_DDL,
         AUTH_TOKENS_DDL,
         AUTH_TOKENS_INDEX,
         OCR_SIDECARS_DDL,
@@ -262,17 +270,8 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
         backfill_volume_identities(conn)?;
     }
 
-    // 3-5. Columns older databases lack.
-    for column in ["missing_pages", "damaged_volumes"] {
-        if !column_exists(conn, "catalog_series", column)? {
-            conn.execute(
-                &format!(
-                    "ALTER TABLE catalog_series ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
-                ),
-                [],
-            )?;
-        }
-    }
+    // 3-5. Columns older databases lack. (0.5.2 also gave `catalog_series` its
+    //      `missing_pages`/`damaged_volumes`; 0.5.3 no longer touches that table.)
     if !column_exists(conn, "users", "notes")? {
         conn.execute(
             "ALTER TABLE users ADD COLUMN notes TEXT NOT NULL DEFAULT ''",

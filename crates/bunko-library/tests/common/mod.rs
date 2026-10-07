@@ -1,4 +1,4 @@
-//! Test support: a `MetadataStore` over SQLite with 0.5.2's schema — also a
+//! Test support: a `MetadataStore` over SQLite with 0.5.3's schema — also a
 //! reference for the server's implementation over `bunko-db`.
 
 #![allow(dead_code)]
@@ -64,7 +64,7 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// SQLite-backed store with 0.5.2's table definitions.
+/// SQLite-backed store with 0.5.3's table definitions.
 pub struct SqliteStore {
     pub conn: Mutex<Connection>,
     pub cache_writes: AtomicUsize,
@@ -199,10 +199,10 @@ impl MetadataStore for SqliteStore {
 
     fn upsert_catalog_series(&self, row: &CatalogSeriesRow) -> StoreResult<()> {
         self.conn.lock().execute(
-            "INSERT INTO catalog_series (series_key, folder_name, cover_path, volume_count, latest_volume_modified, \
+            "INSERT INTO catalog_folders (series_key, folder_name, cover_path, volume_count, latest_volume_modified, \
              total_pages, total_chars, missing_pages, damaged_volumes, scanned_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) ON CONFLICT(series_key) DO UPDATE SET \
-             folder_name = excluded.folder_name, cover_path = excluded.cover_path, volume_count = excluded.volume_count, \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) ON CONFLICT(folder_name) DO UPDATE SET \
+             series_key = excluded.series_key, cover_path = excluded.cover_path, volume_count = excluded.volume_count, \
              latest_volume_modified = excluded.latest_volume_modified, total_pages = excluded.total_pages, \
              total_chars = excluded.total_chars, missing_pages = excluded.missing_pages, \
              damaged_volumes = excluded.damaged_volumes, scanned_at = excluded.scanned_at",
@@ -222,7 +222,7 @@ impl MetadataStore for SqliteStore {
     }
 
     fn prune_catalog_series(&self, keep: &HashSet<String>) -> StoreResult<usize> {
-        prune(&self.conn.lock(), "catalog_series", "series_key", keep)
+        prune(&self.conn.lock(), "catalog_folders", "folder_name", keep)
     }
 }
 

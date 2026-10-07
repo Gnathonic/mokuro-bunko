@@ -1,6 +1,11 @@
-//! Python 0.5.2 -> Rust: open databases made by the Python `Database` class
+//! Python -> Rust: open databases made by the Python `Database` class
 //! (`tests/golden/make_golden.py`) and check that every value, password, token, invite,
 //! audit page (cursors included) and JSON spelling reads back as Python saw it.
+//!
+//! Two generations of fixture: `py052` (made by 0.5.2, before the catalog was keyed by
+//! folder) and `py053` (made by 0.5.3, the version bunko-db tracks, with data shaped like
+//! prod after the 0.5.3 cutover). Every content check runs over both; what opening a
+//! 0.5.2-era file does to it is pinned against what 0.5.3 does (`upgrade053.json`).
 
 use bunko_db::{AuditDetails, AuditQuery, CommunityDetails, Database, DbOptions, SeriesFacts};
 use serde_json::{Value, json};
@@ -53,33 +58,100 @@ fn s(v: &Value) -> &str {
     v.as_str().unwrap()
 }
 
+/// Every row of `sql` as JSON arrays (as Python's `[list(r) for r in conn.execute(sql)]`).
+fn query(conn: &rusqlite::Connection, sql: &str) -> Value {
+    let mut stmt = conn.prepare(sql).unwrap();
+    let n = stmt.column_count();
+    let rows: Vec<Value> = stmt
+        .query_map([], |r| {
+            let mut cols = Vec::with_capacity(n);
+            for i in 0..n {
+                cols.push(match r.get_ref(i)? {
+                    rusqlite::types::ValueRef::Null => Value::Null,
+                    rusqlite::types::ValueRef::Integer(v) => json!(v),
+                    rusqlite::types::ValueRef::Real(v) => json!(v),
+                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+                    rusqlite::types::ValueRef::Blob(_) => Value::Null,
+                });
+            }
+            Ok(Value::Array(cols))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    Value::Array(rows)
+}
+
+/// One `#[test]` per fixture generation for each content check.
+macro_rules! per_fixture {
+    ($($check:ident),* $(,)?) => {
+        mod py052 {
+            $(#[test] fn $check() { super::$check("py052") })*
+        }
+        mod py053 {
+            $(#[test] fn $check() { super::$check("py053") })*
+        }
+    };
+}
+
+per_fixture!(
+    users_and_passwords,
+    tokens,
+    invites,
+    audit_log,
+    ownership,
+    ocr_and_identities,
+    series_tables_read_back_and_rewrite_byte_identically,
+);
+
 #[test]
 fn a_fresh_rust_schema_is_byte_identical_to_python() {
-    let m = manifest("py052.json");
+    let m = manifest("py053.json");
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mokuro.db");
     drop(open(&path));
-    assert_eq!(schema_rows(&path), m["schema"]);
+    assert_eq!(schema_rows(&path), m["fresh_schema"]);
 }
 
+/// A 0.5.3 database opens unchanged; a 0.5.2 one gains exactly what 0.5.3 gives it
+/// (`catalog_folders`, nothing else: its `catalog_series` is left as it was).
 #[test]
-fn a_python_database_opens_unchanged() {
-    let m = manifest("py052.json");
-    let (_dir, path) = copy_fixture("py052.db");
-    let db = open(&path);
-    drop(db);
-    assert_eq!(schema_rows(&path), m["schema"]);
-    let version: i64 = rusqlite::Connection::open(&path)
-        .unwrap()
-        .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(version, 6);
+fn a_python_database_opens_as_python_053_opens_it() {
+    for (tag, want) in [
+        ("py053", manifest("py053.json")["schema"].clone()),
+        (
+            "py052",
+            manifest("upgrade053.json")["py052"]["schema"].clone(),
+        ),
+    ] {
+        let (_dir, path) = copy_fixture(&format!("{tag}.db"));
+        let before = schema_rows(&path);
+        drop(open(&path));
+        assert_eq!(schema_rows(&path), want, "{tag}");
+        assert_legacy_table_untouched(&before, &schema_rows(&path), tag);
+        let version: i64 = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
+    }
 }
 
-#[test]
-fn users_and_passwords() {
-    let m = manifest("py052.json");
-    let (_dir, path) = copy_fixture("py052.db");
+/// The 0.5.2 `catalog_series` DDL, where a file has one, is byte-identical after an open.
+fn assert_legacy_table_untouched(before: &Value, after: &Value, tag: &str) {
+    let legacy = |rows: &Value| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r[1] == "catalog_series")
+            .cloned()
+    };
+    assert_eq!(legacy(before), legacy(after), "{tag}: catalog_series DDL");
+}
+
+fn users_and_passwords(tag: &str) {
+    let m = manifest(&format!("{tag}.json"));
+    let (_dir, path) = copy_fixture(&format!("{tag}.db"));
     let db = open(&path);
     for u in m["users"].as_array().unwrap() {
         let user = db.get_user(s(&u["username"])).unwrap().unwrap();
@@ -127,10 +199,9 @@ fn users_and_passwords() {
     assert_eq!(ours, theirs);
 }
 
-#[test]
-fn tokens() {
-    let m = manifest("py052.json");
-    let (_dir, path) = copy_fixture("py052.db");
+fn tokens(tag: &str) {
+    let m = manifest(&format!("{tag}.json"));
+    let (_dir, path) = copy_fixture(&format!("{tag}.db"));
     let db = open(&path);
     for t in m["tokens"].as_array().unwrap() {
         let user = db.resolve_auth_token(s(&t["token"])).unwrap();
@@ -150,10 +221,9 @@ fn tokens() {
     );
 }
 
-#[test]
-fn invites() {
-    let m = manifest("py052.json");
-    let (_dir, path) = copy_fixture("py052.db");
+fn invites(tag: &str) {
+    let m = manifest(&format!("{tag}.json"));
+    let (_dir, path) = copy_fixture(&format!("{tag}.db"));
     let db = open(&path);
     for inv in m["invites"].as_array().unwrap() {
         let code = s(&inv["code"]);
@@ -192,10 +262,9 @@ fn query_from(v: &Value) -> AuditQuery {
     }
 }
 
-#[test]
-fn audit_log() {
-    let m = manifest("py052.json");
-    let (_dir, path) = copy_fixture("py052.db");
+fn audit_log(tag: &str) {
+    let m = manifest(&format!("{tag}.json"));
+    let (_dir, path) = copy_fixture(&format!("{tag}.db"));
     let db = open(&path);
     for vector in m["detail_vectors"].as_array().unwrap() {
         let details: AuditDetails = vector["pairs"]
@@ -236,10 +305,9 @@ fn audit_log() {
     );
 }
 
-#[test]
-fn ownership() {
-    let m = manifest("py052.json");
-    let (_dir, path) = copy_fixture("py052.db");
+fn ownership(tag: &str) {
+    let m = manifest(&format!("{tag}.json"));
+    let (_dir, path) = copy_fixture(&format!("{tag}.db"));
     let db = open(&path);
     for (p, owner) in m["owners"].as_object().unwrap() {
         assert_eq!(
@@ -265,10 +333,9 @@ fn ownership() {
     }
 }
 
-#[test]
-fn ocr_and_identities() {
-    let m = manifest("py052.json");
-    let (_dir, path) = copy_fixture("py052.db");
+fn ocr_and_identities(tag: &str) {
+    let m = manifest(&format!("{tag}.json"));
+    let (_dir, path) = copy_fixture(&format!("{tag}.db"));
     let db = open(&path);
     assert_eq!(
         serde_json::to_value(db.list_ocr_sidecars().unwrap()).unwrap(),
@@ -287,10 +354,9 @@ fn ocr_and_identities() {
     }
 }
 
-#[test]
-fn series_tables_read_back_and_rewrite_byte_identically() {
-    let m = manifest("py052.json");
-    let (_dir, path) = copy_fixture("py052.db");
+fn series_tables_read_back_and_rewrite_byte_identically(tag: &str) {
+    let m = manifest(&format!("{tag}.json"));
+    let (_dir, path) = copy_fixture(&format!("{tag}.db"));
     let db = open(&path);
     for want in m["series_facts"].as_array().unwrap() {
         let got = db
@@ -350,10 +416,43 @@ fn series_tables_read_back_and_rewrite_byte_identically() {
         assert_eq!(raw, s(&m["entry_cache_raw"][key]), "{key}");
     }
 
+    // The catalog: 0.5.3 reads `catalog_folders` only. A 0.5.2 file's rows are in
+    // `catalog_series`, which is left exactly as it was (the first pass rebuilds the folder
+    // rows; the listing falls back to the scanning index until then).
+    let (catalog, legacy) = if tag == "py052" {
+        let rows = |v: &Value| -> Value {
+            Value::Array(
+                v.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| {
+                        json!([
+                            r["series_key"],
+                            r["folder_name"],
+                            r["volume_count"],
+                            r["total_pages"]
+                        ])
+                    })
+                    .collect(),
+            )
+        };
+        (
+            manifest("upgrade053.json")["py052"]["catalog"].clone(),
+            rows(&m["catalog_series"]),
+        )
+    } else {
+        (
+            m["catalog_series"].clone(),
+            m["legacy_catalog_series"].clone(),
+        )
+    };
     assert_eq!(
         serde_json::to_value(db.list_catalog_series().unwrap()).unwrap(),
-        m["catalog_series"]
+        catalog
     );
+    let legacy_sql = "SELECT series_key, folder_name, volume_count, total_pages \
+                      FROM catalog_series ORDER BY series_key";
+    assert_eq!(query(&conn, legacy_sql), legacy);
     let community = db.list_community_details().unwrap();
     assert_eq!(
         serde_json::to_value(&community).unwrap(),
@@ -370,12 +469,13 @@ fn series_tables_read_back_and_rewrite_byte_identically() {
 }
 
 #[test]
-fn a_legacy_database_is_migrated_as_python_migrates_it() {
-    let m = manifest("legacy.json");
+fn a_legacy_database_is_migrated_as_python_053_migrates_it() {
+    let m = manifest("upgrade053.json")["legacy"].clone();
+    let password = manifest("legacy.json")["password"].clone();
     let (_dir, path) = copy_fixture("legacy.db");
     let db = open(&path);
     let scribe = db
-        .authenticate_user("scribe", s(&m["password"]))
+        .authenticate_user("scribe", s(&password))
         .unwrap()
         .unwrap();
     assert_eq!(scribe.role, bunko_core::Role::Uploader);
@@ -387,28 +487,7 @@ fn a_legacy_database_is_migrated_as_python_migrates_it() {
     assert_eq!(schema_rows(&path), m["schema"]);
 
     let conn = rusqlite::Connection::open(&path).unwrap();
-    let q = |sql: &str| -> Value {
-        let mut stmt = conn.prepare(sql).unwrap();
-        let n = stmt.column_count();
-        let rows: Vec<Value> = stmt
-            .query_map([], |r| {
-                let mut cols = Vec::with_capacity(n);
-                for i in 0..n {
-                    cols.push(match r.get_ref(i)? {
-                        rusqlite::types::ValueRef::Null => Value::Null,
-                        rusqlite::types::ValueRef::Integer(v) => json!(v),
-                        rusqlite::types::ValueRef::Real(v) => json!(v),
-                        rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
-                        rusqlite::types::ValueRef::Blob(_) => Value::Null,
-                    });
-                }
-                Ok(Value::Array(cols))
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        Value::Array(rows)
-    };
+    let q = |sql: &str| query(&conn, sql);
     let c = &m["contents"];
     assert_eq!(q("SELECT version FROM schema_version"), c["schema_version"]);
     assert_eq!(
@@ -419,12 +498,14 @@ fn a_legacy_database_is_migrated_as_python_migrates_it() {
         q("SELECT code, role, invited_by, expires_at FROM invites ORDER BY id"),
         c["invites"]
     );
+    // 0.5.2 gave the legacy table its damage columns; 0.5.3 leaves it as it was.
     assert_eq!(
-        q(
-            "SELECT series_key, folder_name, volume_count, missing_pages, damaged_volumes \
-           FROM catalog_series ORDER BY series_key"
-        ),
+        q("SELECT series_key, folder_name, volume_count FROM catalog_series ORDER BY series_key"),
         c["catalog_series"]
+    );
+    assert_eq!(
+        q("SELECT series_key, folder_name, volume_count FROM catalog_folders ORDER BY folder_name"),
+        c["catalog_folders"]
     );
     assert_eq!(
         q("SELECT volume_key, volume_uuid FROM volume_identities ORDER BY volume_key"),
@@ -435,4 +516,85 @@ fn a_legacy_database_is_migrated_as_python_migrates_it() {
     // Idempotent: opening again changes nothing.
     drop(open(&path));
     assert_eq!(schema_rows(&path), m["schema"]);
+}
+
+/// Prod's Kingdom after the 0.5.3 cutover: `kingdom/` merged into `Kingdom/`, the rows
+/// keyed by library path prefix-renamed (volume 80 keeps its uploader and its uuid), and
+/// both case-variant folders' catalog rows still there until the next pass prunes the
+/// folder that is gone.
+#[test]
+fn the_kingdom_cutover_reads_back_as_python_053_left_it() {
+    let m = manifest("py053.json");
+    let (_dir, path) = copy_fixture("py053.db");
+    let db = open(&path);
+    for (p, owner) in m["kingdom_owners"].as_object().unwrap() {
+        assert_eq!(
+            db.get_volume_owner(p).unwrap().as_deref(),
+            owner.as_str(),
+            "{p}"
+        );
+    }
+    for (p, uuid) in m["kingdom_identities"].as_object().unwrap() {
+        assert_eq!(
+            db.remembered_volume_uuid(p).unwrap().as_deref(),
+            uuid.as_str(),
+            "{p}"
+        );
+    }
+    for c in m["kingdom_can_delete"].as_array().unwrap() {
+        let got = db.can_user_delete_library_path(s(&c[0]), s(&c[1])).unwrap();
+        assert_eq!(got, c[2].as_bool().unwrap(), "{c}");
+    }
+    for c in m["kingdom_can_edit"].as_array().unwrap() {
+        let got = db.can_user_edit_series(s(&c[0]), s(&c[1])).unwrap();
+        assert_eq!(got, c[2].as_bool().unwrap(), "{c}");
+    }
+    assert_eq!(
+        db.get_volume_owner("Kingdom/第80巻.cbz")
+            .unwrap()
+            .as_deref(),
+        Some("alice")
+    );
+    let kingdom: Vec<(String, i64)> = db
+        .list_catalog_series()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.series_key == "kingdom")
+        .map(|r| (r.folder_name, r.volume_count))
+        .collect();
+    assert_eq!(
+        kingdom,
+        [("Kingdom".to_string(), 79), ("kingdom".to_string(), 1)]
+    );
+
+    // The next pass finds only `Kingdom/` (80 volumes now) and prunes by folder name.
+    db.upsert_catalog_series(&bunko_db::CatalogSeries {
+        series_key: "kingdom".into(),
+        folder_name: "Kingdom".into(),
+        volume_count: 80,
+        ..Default::default()
+    })
+    .unwrap();
+    let keep: std::collections::HashSet<String> = ["Dr Stone", "Kingdom", "Mixed"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(db.prune_catalog_series(&keep).unwrap(), 1);
+    let kingdom: Vec<(String, i64)> = db
+        .list_catalog_series()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.series_key == "kingdom")
+        .map(|r| (r.folder_name, r.volume_count))
+        .collect();
+    assert_eq!(kingdom, [("Kingdom".to_string(), 80)]);
+    // 0.5.2's table still holds what 0.5.2 last wrote, for a rollback.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        query(
+            &conn,
+            "SELECT series_key, folder_name, volume_count, total_pages FROM catalog_series"
+        ),
+        m["legacy_catalog_series"]
+    );
 }
