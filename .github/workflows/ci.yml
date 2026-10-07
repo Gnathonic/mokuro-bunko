@@ -143,6 +143,9 @@ jobs:
         run: |
           set -eux
           export PATH="$CARGO_HOME/bin:$PATH"
+          # Linked the way the release links it in this image: ONNX Runtime's static
+          # libraries need the glibc >= 2.32 symbols that build.sh compiled in glibc_compat.o.
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=$PWD/target/glibc_compat.o"
           cargo run -p mokuro-bunko --locked -- -c "$RUNNER_TEMP/c.yaml" install-ocr --variant cpu \
             --from dist --dir "$RUNNER_TEMP/backends" --no-models
           test -f "$RUNNER_TEMP/backends/torch-cpu-2.13.0/pack.json"
