@@ -9,6 +9,18 @@ use bunko_layout::py;
 use common::*;
 use unicode_normalization::UnicodeNormalization;
 
+/// How far (in units in the last place) a libm other than glibc's may land from the
+/// recorded glibc results.
+const TRIG_ULPS_OFF_GLIBC: u64 = 2;
+
+/// The distance between two finite floats of one sign, in units in the last place.
+fn ulps(a: f64, b: f64) -> u64 {
+    if a.is_sign_negative() != b.is_sign_negative() || !a.is_finite() || !b.is_finite() {
+        return u64::MAX;
+    }
+    a.to_bits().abs_diff(b.to_bits())
+}
+
 #[test]
 fn float_semantics_match_cpython() {
     let v = load("cases/pyfloat.json.gz");
@@ -52,6 +64,14 @@ fn float_semantics_match_cpython() {
             errs.push(format!("repr: {got} != {}", s(&c[1])));
         }
     }
+    // atan2/cos/sin/pow come from the platform's libm, as they do for CPython. The cases
+    // were recorded with glibc's, and only glibc must match them bit for bit; the
+    // others (Apple's libm, the Windows CRT) round differently in the last place.
+    let trig_ulps = if cfg!(all(target_os = "linux", target_env = "gnu")) {
+        0
+    } else {
+        TRIG_ULPS_OFF_GLIBC
+    };
     for c in arr(get(&v, "trig")) {
         let c: Vec<f64> = arr(c).iter().map(f).collect();
         let (x, y) = (c[0], c[1]);
@@ -63,7 +83,7 @@ fn float_semantics_match_cpython() {
             py::pow(x, 2.0),
         ];
         for (k, g) in got.iter().enumerate() {
-            if !same(*g, c[k + 2]) {
+            if !same(*g, c[k + 2]) && ulps(*g, c[k + 2]) > trig_ulps {
                 errs.push(format!("trig[{k}]({x:e}, {y:e}) = {g:e} != {:e}", c[k + 2]));
             }
         }
