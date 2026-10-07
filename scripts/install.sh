@@ -240,7 +240,7 @@ say "Checksum OK"
 mkdir -p "$tmp/x"
 tar -xzf "$archive" -C "$tmp/x"
 src="$(find "$tmp/x" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-[ -n "$src" ] && [ -x "$src/mokuro-bunko" ] || die "the archive has no mokuro-bunko executable"
+if [ -z "$src" ] || [ ! -x "$src/mokuro-bunko" ]; then die "the archive has no mokuro-bunko executable"; fi
 
 mkdir -p "$PREFIX/lib" "$bindir"
 rm -rf "$libdir.new" "$libdir.old"
@@ -273,8 +273,12 @@ if [ "$os" = Linux ] && [ -x "$tray" ]; then
 				mkdir -p "$share/icons/$(dirname "$icon")"
 				cp "$libdir/share/icons/$icon" "$share/icons/$icon"
 			done
-			command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q "$share/applications" 2>/dev/null || true
-			command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t "$share/icons/hicolor" 2>/dev/null || true
+			if command -v update-desktop-database >/dev/null 2>&1; then
+				update-desktop-database -q "$share/applications" 2>/dev/null || true
+			fi
+			if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+				gtk-update-icon-cache -q -t "$share/icons/hicolor" 2>/dev/null || true
+			fi
 			say "Desktop: 'Mokuro Bunko' in the applications menu ($share/applications)"
 		fi
 		if [ "$AUTOSTART" = 1 ]; then
