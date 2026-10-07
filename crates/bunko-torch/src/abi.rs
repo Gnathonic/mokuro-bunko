@@ -468,6 +468,22 @@ pub fn explain_load_error(msg: &str) -> Option<String> {
             "the library asks for an executable stack, which this system refuses (glibc 2.41+, SELinux or a hardened kernel); it must be rebuilt with -z noexecstack ({msg})"
         ));
     }
+    // Windows `LoadLibraryExW` errors (libloading's chain ends in "(os error N)").
+    if msg.contains("(os error 126)") {
+        return Some(format!(
+            "a DLL it needs is missing: neither the pack's lib folder nor Windows provides it (reinstall the pack with 'mokuro-bunko install-ocr') ({msg})"
+        ));
+    }
+    if msg.contains("(os error 193)") {
+        return Some(format!(
+            "not a valid 64-bit Windows DLL: the file is damaged or for another platform (reinstall the pack with 'mokuro-bunko install-ocr') ({msg})"
+        ));
+    }
+    if msg.contains("(os error 1114)") {
+        return Some(format!(
+            "the DLL's start-up code failed (Windows error 1114): reinstall the pack with 'mokuro-bunko install-ocr --force'; if it keeps failing, damaged Windows system files ('sfc /scannow') or security software blocking it are the usual causes ({msg})"
+        ));
+    }
     None
 }
 
@@ -717,6 +733,23 @@ mod tests {
         .unwrap();
         assert!(e.starts_with("libamd_comgr.so.3 is missing"), "{e}");
         assert!(explain_load_error("undefined symbol: foo").is_none());
+        // Windows: the OS error number at the end of libloading's chain.
+        let e = explain_load_error("C:\\p\\lib\\torch_cpu.dll: LoadLibraryExW failed: A dynamic link library (DLL) initialization routine failed. (os error 1114)").unwrap();
+        assert!(
+            e.starts_with("the DLL's start-up code failed (Windows error 1114)"),
+            "{e}"
+        );
+        assert!(e.contains("torch_cpu.dll"), "{e}");
+        let e = explain_load_error(
+            "x.dll: LoadLibraryExW failed: The specified module could not be found. (os error 126)",
+        )
+        .unwrap();
+        assert!(e.starts_with("a DLL it needs is missing"), "{e}");
+        let e = explain_load_error(
+            "x.dll: LoadLibraryExW failed: %1 is not a valid Win32 application. (os error 193)",
+        )
+        .unwrap();
+        assert!(e.starts_with("not a valid 64-bit Windows DLL"), "{e}");
     }
 
     #[test]

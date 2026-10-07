@@ -731,26 +731,28 @@ impl EnginePipeline {
             match self.recognizer(spec, &placement, r.precision) {
                 Ok(rec) => recognizer = Some(rec),
                 Err(e) if placement.is_gpu() => {
-                    warn!(
-                        "{engine} could not start on {} ({e}); falling back to the CPU",
-                        placement.device
-                    );
+                    let gpu = placement.device.clone();
+                    warn!("{engine} could not start on {gpu} ({e}); falling back to the CPU");
                     placement = Placement::cpu();
                     let formats = precision::auto_formats(
                         &spec.precision,
                         self.formats(engine, &placement),
                         false,
                     );
+                    // When the CPU cannot take it either, the GPU's error is the one to
+                    // fix (a model download, a driver): say both, the GPU's first.
+                    let both = |cpu: String| gpu_then_cpu_error(engine, &gpu, &e, &cpu);
                     let again = precision::resolve(
                         engine,
                         &spec.precision,
                         &formats,
                         spec.precision_pick.as_deref(),
                         &spec.precision_why,
-                    )?;
+                    )
+                    .map_err(both)?;
                     resolved = again;
                     let p = resolved.as_ref().map_or(Precision::Fp32, |r| r.precision);
-                    recognizer = Some(self.recognizer(spec, &placement, p)?);
+                    recognizer = Some(self.recognizer(spec, &placement, p).map_err(both)?);
                 }
                 Err(e) => return Err(e),
             }
@@ -855,9 +857,33 @@ impl PagePipeline for EnginePipeline {
     }
 }
 
+/// A recognizer that failed on the GPU and then on the CPU fallback: the GPU's error
+/// first (it is the one to fix: a model download, the driver), then the CPU's, whose
+/// text keeps the scheduler's classification (e.g. a precision refusal).
+fn gpu_then_cpu_error(engine: &str, gpu: &str, on_gpu: &str, on_cpu: &str) -> String {
+    format!("{engine} could not start on {gpu}: {on_gpu}; nor on the CPU: {on_cpu}")
+}
+
 #[cfg(test)]
 mod backends_dirs_tests {
     use super::*;
+
+    /// The GPU's error leads; the CPU's refusal text survives for the scheduler.
+    #[test]
+    fn a_failed_fallback_names_the_gpu_error_first() {
+        let cpu = precision::PRECISION_REFUSAL.to_string() + ": paddle-manga is asked for bf16";
+        let msg = gpu_then_cpu_error(
+            "paddle-manga",
+            "gpu:0",
+            "download failed: sha256 x != y",
+            &cpu,
+        );
+        assert!(
+            msg.starts_with("paddle-manga could not start on gpu:0: download failed"),
+            "{msg}"
+        );
+        assert!(msg.contains(precision::PRECISION_REFUSAL), "{msg}");
+    }
 
     #[test]
     fn sibling_then_fallbacks_each_once() {

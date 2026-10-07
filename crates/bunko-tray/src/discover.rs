@@ -267,7 +267,9 @@ fn split_words(line: &str) -> Vec<String> {
     words
 }
 
-/// Whether process `pid` exists (Unix; elsewhere the HTTP probe decides).
+/// Whether process `pid` exists and has not exited (`None`: cannot tell; the HTTP
+/// probe decides). On Windows a process that has exited but whose handle someone still
+/// holds (the tray holds its children's) can still be opened: its exit code decides.
 pub fn pid_alive(pid: u32) -> Option<bool> {
     #[cfg(unix)]
     {
@@ -282,7 +284,30 @@ pub fn pid_alive(pid: u32) -> Option<bool> {
         let err = std::io::Error::last_os_error().raw_os_error();
         Some(err == Some(libc::EPERM))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: plain Win32 calls on a handle this function owns and closes.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                // No such process, or one of another user's that we may not open.
+                let err = std::io::Error::last_os_error().raw_os_error();
+                return Some(err == Some(ERROR_ACCESS_DENIED as i32));
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code);
+            CloseHandle(h);
+            if ok == 0 {
+                return None;
+            }
+            Some(code == STILL_ACTIVE as u32)
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         None
@@ -303,6 +328,29 @@ mod tests {
     use super::*;
     use crate::paths::test_env::FakeEnv;
     use crate::trayconf::Managed;
+
+    /// A child that exited is dead at once, even while its handle is still held (on
+    /// Windows the tray keeps its children's): a crashed server is restarted without
+    /// waiting for the status probe to time out.
+    #[test]
+    fn an_exited_child_is_not_alive() {
+        assert_eq!(pid_alive(std::process::id()), Some(true));
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/c", "exit 3"])
+                .spawn()
+                .unwrap()
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", "exit 3"])
+                .spawn()
+                .unwrap()
+        };
+        let pid = child.id();
+        assert_eq!(child.wait().unwrap().code(), Some(3));
+        // `child` (and its handle on Windows) is still alive here.
+        assert_eq!(pid_alive(pid), Some(false));
+    }
 
     #[test]
     fn service_files_name_their_config() {

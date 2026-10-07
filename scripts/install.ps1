@@ -220,6 +220,7 @@ try {
     if (-not $NoStart) {
         if ($hasTray) {
             Write-Step "Starting Mokuro Bunko (tray icon by the clock; it starts the server)"
+            Write-Host "    Windows 11 may put the icon under the ^ by the clock (hidden icons): drag it onto the taskbar to keep it in view." -ForegroundColor Gray
             Start-Process -FilePath $trayExe -WorkingDirectory $InstallDir
             # Open the browser once the server answers, as run.bat does.
             Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile", "-Command", "for(`$i=0;`$i -lt 120;`$i++){try{`$r=Invoke-WebRequest -Uri 'http://127.0.0.1:8080' -UseBasicParsing -TimeoutSec 2; if(`$r.StatusCode -lt 500){Start-Process 'http://127.0.0.1:8080'; break}}catch{}; Start-Sleep -Seconds 1}"
@@ -240,7 +241,12 @@ try {
     }
     Write-Host "  Web UI      : http://127.0.0.1:8080  (first visit creates your admin account)"
     Write-Host "  Data        : $dataDir  (library, config.yaml, logs)"
-    Write-Host "  Uninstall   : delete $InstallDir and the Start-menu folder 'Mokuro Bunko'"
+    Write-Host "  Uninstall   : quit the tray, then delete $InstallDir, the Start-menu folder 'Mokuro Bunko'"
+    if ($Portable) {
+        Write-Host "                and the shortcut 'Mokuro Bunko' in shell:startup if it is there (copy data\ first: it is your library)"
+    } else {
+        Write-Host "                and the shortcut 'Mokuro Bunko' in shell:startup if it is there ($dataDir is your library)"
+    }
 } catch {
     Write-Host ""
     Write-Host "INSTALL FAILED: $($_.Exception.Message)" -ForegroundColor Red

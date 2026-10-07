@@ -112,17 +112,18 @@ fn run(cli: Cli) -> out::CmdResult {
 }
 
 /// Started without a terminal to talk to: on Windows the console is this process's
-/// alone (Explorer made it), on macOS stdin is not a terminal (Finder, an app bundle).
+/// alone (Explorer or a shortcut made it), on macOS stdin is not a terminal (Finder, an
+/// app bundle). On Windows stdin is not looked at: a script, `ssh host mokuro-bunko`
+/// or a test harness pipes it from inside a console it shares, and gets the help.
 fn double_clicked() -> bool {
     #[cfg(windows)]
     {
-        use std::io::IsTerminal;
         let mut ids = [0u32; 4];
         // SAFETY: the buffer and its length match; the call only writes into it.
         let n = unsafe {
             windows_sys::Win32::System::Console::GetConsoleProcessList(ids.as_mut_ptr(), 4)
         };
-        n == 1 || !std::io::stdin().is_terminal()
+        n == 1
     }
     #[cfg(target_os = "macos")]
     {

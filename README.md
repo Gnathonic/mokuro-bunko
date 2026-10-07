@@ -131,7 +131,7 @@ See [Building from source](#building-from-source).
 - **Settings**: server, HTTPS, remote access, processor, OCR and models, start-up, logs, diagnostics (`doctor`), updates, and any `config.yaml` key. Users, invites and the library's own settings stay in the server's admin panel, which the app links to.
 - **Dashboard**: what this machine is reading now, today's totals, problems, and pause / resume (after this volume, now, for an hour, until morning).
 
-A running `serve` or `processor serve` serves the same pages on its loopback control port, which is what the tray icon opens. Everything the app does is also a CLI command; [docs/rust-port/GUI-COVERAGE.md](docs/rust-port/GUI-COVERAGE.md) maps each command and flag to its page.
+A running `serve` or `processor serve` serves the same pages on its loopback control port, which is what the tray icon opens. Windows 11 puts a new tray icon in the hidden-icons overflow (the **^** by the clock) at first: drag it onto the taskbar, or turn **Mokuro Bunko** on under Settings → Personalization → Taskbar → Other system tray icons. Everything the app does is also a CLI command; [docs/rust-port/GUI-COVERAGE.md](docs/rust-port/GUI-COVERAGE.md) maps each command and flag to its page.
 
 ## Configuration
 

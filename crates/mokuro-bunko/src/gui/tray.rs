@@ -437,7 +437,13 @@ mod tests {
         std::fs::write(&path, r#"{ "managed": [ { "role": "server" } ] }"#).unwrap();
         let mut conf = load(&path).unwrap();
         assert!(manages(&conf, "server"));
-        let p = entry(Role::Processor, Path::new("/srv/p/processor.yaml"));
+        // An absolute path on this platform (entry() makes a relative one absolute).
+        let cfg = if cfg!(windows) {
+            r"C:\srv\p\processor.yaml"
+        } else {
+            "/srv/p/processor.yaml"
+        };
+        let p = entry(Role::Processor, Path::new(cfg));
         set_role(&mut conf, "processor", Some(p));
         save(&path, &conf).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -448,7 +454,7 @@ mod tests {
                 "managed": [
                     {"role": "server"},
                     {"role": "processor",
-                     "args": ["processor", "serve", "--config", "/srv/p/processor.yaml"]}
+                     "args": ["processor", "serve", "--config", cfg]}
                 ],
                 "notifications": false
             })
@@ -476,8 +482,13 @@ mod tests {
 
     #[test]
     fn server_entry_names_a_non_default_config() {
-        let e = entry(Role::Server, Path::new("/srv/lib/config.yaml"));
-        assert_eq!(e.args, vec!["-c", "/srv/lib/config.yaml", "serve"]);
+        let cfg = if cfg!(windows) {
+            r"C:\srv\lib\config.yaml"
+        } else {
+            "/srv/lib/config.yaml"
+        };
+        let e = entry(Role::Server, Path::new(cfg));
+        assert_eq!(e.args, vec!["-c", cfg, "serve"]);
         let d = entry(Role::Server, &bunko_core::storage::default_config_path());
         assert!(d.args.is_empty(), "{d:?}");
     }

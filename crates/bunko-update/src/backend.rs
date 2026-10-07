@@ -495,6 +495,41 @@ pub fn unpack_external(archive: &Path, ext: &ExternalArchive, pack_dir: &Path) -
     Ok(())
 }
 
+/// Take external archive `ext`'s files from an installed pack that already has every one
+/// of them (same path, size and sha256) instead of downloading the archive again: an
+/// update to a release whose pack names the same NVIDIA wheel then fetches nothing
+/// from PyPI. The files are hard-linked (copied where links fail) into `pack_dir` and
+/// checked. False when no pack in `installed` has them all; nothing is written then.
+pub fn reuse_external(
+    installed: &[PathBuf],
+    ext: &ExternalArchive,
+    pack_dir: &Path,
+) -> Result<bool> {
+    'packs: for dir in installed {
+        for f in &ext.files {
+            let have = sha256_file(&dir.join(safe_rel_path(&f.path)?));
+            if !matches!(&have, Ok((h, n)) if *n == f.size && h.eq_ignore_ascii_case(&f.sha256)) {
+                continue 'packs;
+            }
+        }
+        for f in &ext.files {
+            let rel = safe_rel_path(&f.path)?;
+            let (src, dest) = (dir.join(&rel), pack_dir.join(&rel));
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let _ = std::fs::remove_file(&dest);
+            if std::fs::hard_link(&src, &dest).is_err() {
+                std::fs::copy(&src, &dest)?;
+                set_mode(&dest, 0o755)?;
+            }
+            check(&f.path, sha256_file(&dest)?, &f.sha256, f.size)?;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Verify an installed pack: pack.json, every archive file and every external file.
 pub fn verify_installed(dir: &Path) -> Result<PackManifest> {
     let m = PackManifest::parse(&std::fs::read(dir.join(PACK_JSON))?)?;
@@ -646,6 +681,45 @@ fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An update whose pack names the same NVIDIA files as the installed one takes them
+    /// from it (no download); a pack missing one, or with other bytes, does not.
+    #[test]
+    fn external_files_are_reused_from_an_installed_pack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (old, other, new) = (
+            tmp.path().join("old"),
+            tmp.path().join("other"),
+            tmp.path().join("new"),
+        );
+        let body = b"cublas bytes";
+        let sha = hex::encode(sha2::Sha256::digest(body));
+        let ext = ExternalArchive {
+            name: "nvidia-cublas".into(),
+            version: "13".into(),
+            url: "https://example.invalid/w.whl".into(),
+            sha256: "0".repeat(64),
+            size: 1,
+            license: "x".into(),
+            files: vec![ExternalFile {
+                from: "nvidia/cublas.dll".into(),
+                path: "lib/cublas.dll".into(),
+                sha256: sha.clone(),
+                size: body.len() as u64,
+            }],
+        };
+        std::fs::create_dir_all(other.join("lib")).unwrap();
+        std::fs::write(other.join("lib/cublas.dll"), b"other bytes!").unwrap();
+        assert!(!reuse_external(std::slice::from_ref(&other), &ext, &new).unwrap());
+        assert!(!new.join("lib/cublas.dll").exists(), "nothing written");
+        std::fs::create_dir_all(old.join("lib")).unwrap();
+        std::fs::write(old.join("lib/cublas.dll"), body).unwrap();
+        assert!(reuse_external(&[other, old.clone()], &ext, &new).unwrap());
+        assert_eq!(std::fs::read(new.join("lib/cublas.dll")).unwrap(), body);
+        // The installed pack can go (a rollback keeps it, a proven update deletes it).
+        std::fs::remove_dir_all(&old).unwrap();
+        assert_eq!(std::fs::read(new.join("lib/cublas.dll")).unwrap(), body);
+    }
 
     fn sha(bytes: &[u8]) -> String {
         hex::encode(Sha256::digest(bytes))

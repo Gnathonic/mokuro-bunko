@@ -729,6 +729,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "ureq",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
