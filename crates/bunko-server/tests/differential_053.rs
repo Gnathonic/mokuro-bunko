@@ -44,8 +44,8 @@ fn cbz(pages: usize) -> Vec<u8> {
     buf.into_inner()
 }
 
-/// The storage fixture: prod's shape after the 0.5.3 cutover (`Kingdom/` holding the
-/// volumes, `第80巻.mokuro` among them), a folder whose name only differs in case from
+/// The storage fixture: the shape of a library after 0.5.3's case merge (`Kingdom/` holding the
+/// volumes, `第13巻.mokuro` among them), a folder whose name only differs in case from
 /// a request's, a non-ASCII and an NFC-composed folder, a case-sensitive library that
 /// already holds two spellings (`Both/`, `both/`), and a symlink leading out.
 fn build_tree(base: &Path) {
@@ -72,7 +72,7 @@ fn build_tree(base: &Path) {
         ("library/series/vol1.mokuro", b"{}".to_vec()),
         ("library/Kingdom/第01巻.cbz", cbz(1)),
         (
-            "library/Kingdom/第80巻.mokuro",
+            "library/Kingdom/第13巻.mokuro",
             b"{\"title\": \"Kingdom\"}".to_vec(),
         ),
         ("library/Both/a.cbz", cbz(1)),
@@ -94,13 +94,13 @@ fn build_tree(base: &Path) {
 
 fn script() -> Vec<Step> {
     let lockinfo = r#"<?xml version="1.0"?><D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner>me</D:owner></D:lockinfo>"#;
-    let v80_mokuro = "/mokuro-reader/kingdom/%E7%AC%AC80%E5%B7%BB.mokuro";
+    let v13_mokuro = "/mokuro-reader/kingdom/%E7%AC%AC13%E5%B7%BB.mokuro";
     vec![
         // --- reads reach the on-disk spelling -------------------------------------------
-        step("get a sidecar by the old spelling", None, "GET", v80_mokuro).exact(),
+        step("get a sidecar by the old spelling", None, "GET", v13_mokuro).exact(),
         step("get an archive in upper case", None, "GET", "/mokuro-reader/KINGDOM/%E7%AC%AC01%E5%B7%BB.CBZ").exact(),
         step("head a case variant", None, "HEAD", "/mokuro-reader/Series/VOL1.cbz").exact(),
-        step("signed-in get by the old spelling", Some("reader"), "GET", v80_mokuro).exact(),
+        step("signed-in get by the old spelling", Some("reader"), "GET", v13_mokuro).exact(),
         step("propfind a case-variant folder d1", None, "PROPFIND", "/mokuro-reader/SERIES/").h("depth", "1").exact(),
         step("propfind a case-variant folder d0", None, "PROPFIND", "/mokuro-reader/kingdom").h("depth", "0").exact(),
         step("propfind a decomposed spelling", None, "PROPFIND", "/mokuro-reader/POKE%CC%81MON").h("depth", "0").exact(),
@@ -119,7 +119,7 @@ fn script() -> Vec<Step> {
         step("the owner's volume by another case", Some("uploader"), "PUT", "/mokuro-reader/NEWONE/V1.cbz").body(cbz(4))
             .intended("the ETag of an overwrite is the new file's (0.5.2/0.5.3 returned the old one, spec 14.4)"),
         step("propfind the new folder", None, "PROPFIND", "/mokuro-reader/NewOne").h("depth", "1"),
-        step("put into a non-ASCII case variant", Some("uploader"), "PUT", "/mokuro-reader/%C3%A9lan/%E7%AC%AC80%E5%B7%BB.cbz").body(cbz(1)),
+        step("put into a non-ASCII case variant", Some("uploader"), "PUT", "/mokuro-reader/%C3%A9lan/%E7%AC%AC13%E5%B7%BB.cbz").body(cbz(1)),
         step("put a volume into kingdom/", Some("uploader"), "PUT", "/mokuro-reader/kingdom/%E7%AC%AC02%E5%B7%BB.cbz").body(cbz(2)),
         step("put a sidecar into KINGDOM/", Some("admin"), "PUT", "/mokuro-reader/KINGDOM/%E7%AC%AC02%E5%B7%BB.MOKURO").body("{\"pages\": []}"),
         step("the library has no new spelling", None, "PROPFIND", "/mokuro-reader/").h("depth", "1"),

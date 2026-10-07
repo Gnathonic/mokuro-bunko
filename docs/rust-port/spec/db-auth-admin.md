@@ -320,7 +320,7 @@ API JSON exposes these strings verbatim (users `created_at`, invites `created_at
   `checkpw` raise `ValueError` -> unhandled 500 in Python; Rust should return "invalid credentials".
 - bcrypt only uses the first 72 BYTES of the password. Validation allows up to 128 CHARACTERS
   (`validation.py`), so longer passwords are possible. bcrypt 4.x truncates silently (hash created from
-  the first 72 bytes); bcrypt >= 5.0 raises `ValueError` for > 72 bytes. Existing hashes in prod were made
+  the first 72 bytes); bcrypt >= 5.0 raises `ValueError` for > 72 bytes. Existing installs' hashes were made
   with whichever version ran; Rust must verify against the first 72 bytes only (truncate before verify)
   to be compatible with 4.x-made hashes, and should hash the truncated 72 bytes too.
 - Timing: `authenticate_user` skips bcrypt entirely for an unknown user, a non-`active` user, so those
@@ -1399,7 +1399,7 @@ styles.css}`, plus `S/static/nav.js` (shared nav/auth helper, served by StaticMi
 ## 24. Open questions
 
 1. **bcrypt version / >72-byte passwords.** Passwords may be 8-128 chars (up to 512 bytes UTF-8); bcrypt
-   uses 72 bytes. bcrypt 4.x truncates silently, 5.x raises. Which version produced prod hashes? Proposed:
+   uses 72 bytes. bcrypt 4.x truncates silently, 5.x raises. Which bcrypt version produced existing installs' hashes? Proposed:
    Rust truncates to 72 bytes on verify and hash (compatible with 4.x). Also: NUL bytes in a password
    (the Rust bcrypt crate errors; Python <5 accepts).
 2. **Schema-version downgrade.** Python unconditionally writes 6. If a future/other build writes >6, should

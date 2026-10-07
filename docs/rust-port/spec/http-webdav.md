@@ -61,7 +61,7 @@ is no separate non-SSL path).
 **Idle-socket consequence:** a client that stalls for more than ~10 s mid-request (slow upload, no
 bytes) is cut by cheroot. The production image puts nginx in front (`proxy_request_buffering off`,
 `client_max_body_size 2048M`, `proxy_read_timeout 300s`; `deploy/nginx-internal.conf.template`), so
-the effective limits in prod are nginx's. Open question Q1: what read/idle timeouts the Rust server
+the effective limits behind the bundled nginx are nginx's. Open question Q1: what read/idle timeouts the Rust server
 should use.
 
 TLS details:
@@ -1502,7 +1502,7 @@ Not covered by any test (so unpinned; decide freely): LOCK/UNLOCK success paths,
 ## 17. Open questions
 
 * **Q1 (timeouts/limits).** cheroot idles/stalls at 10 s, no body/header limits, 50 worker threads. What read/idle/keep-alive timeouts
-  and max body should the Rust server enforce (nginx's `client_max_body_size 2048M`, `proxy_read_timeout 300s` are the prod values)?
+  and max body should the Rust server enforce (nginx's `client_max_body_size 2048M`, `proxy_read_timeout 300s` are the bundled nginx config's values)?
 * **Q2 (nginx).** Keep nginx + `X-Accel-Redirect` in front (then Rust must emit `Content-Length: 0` + `X-Accel-Redirect` exactly and ignore
   `Range`), or serve files directly with ranges/sendfile (then drop 8.10 and the `MOKURO_NGINX_ACCEL` flag)? Also: should the Rust
   server honour the CORS-in-nginx split, or emit its own on every path?

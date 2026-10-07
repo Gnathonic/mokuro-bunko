@@ -304,9 +304,9 @@ nginx template changes: the `/_processor/` location now passes the WebSocket upg
 keep-alive) with 3600 s timeouts, for protocol v3's processor socket, and keeps
 unbuffered, uncapped `PUT` uploads.
 
-**Production (Unraid, `MOKURO_NGINX_ACCEL=1`)**: switch the template's repository to
+**Unraid with `MOKURO_NGINX_ACCEL=1`**: switch the template's repository to
 `ghcr.io/gnathonic/mokuro-bunko:<ver>-cuda` (or `latest-cuda`). Every existing variable
-keeps working; `MOKURO_NGINX_ACCEL=1` keeps nginx. The Unraid host needs driver ≥ 580
+keeps working; `MOKURO_NGINX_ACCEL=1` keeps nginx. An Unraid host needs driver ≥ 580
 for the CUDA 13 pack (the 0.5.2 image's torch cu130 needed the same); with OCR on another machine, `:<ver>-lite` (template
 `mokuro-bunko-lite.xml`) is enough, but it has no nginx.
 

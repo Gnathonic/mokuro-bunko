@@ -2,7 +2,7 @@
 //! open and check it (`tests/golden/check_rust_db.py`), as a rollback would; then read
 //! back what Python wrote into it.
 //!
-//! Two rollbacks: to 0.5.3 (what prod ran before 0.7; the schema must be byte-identical)
+//! Two rollbacks: to 0.5.3 (the version before 0.7; the schema must be byte-identical)
 //! and on to 0.5.2 (0.5.3's own rollback: 0.5.2 adds its `catalog_series` table and must
 //! read everything else).
 //!
@@ -462,7 +462,7 @@ fn reads_and_writes(var: &str, env: &str, version: &str) {
     })
     .unwrap();
     // Case-variant folders sharing a series key: one row each (0.5.3).
-    for (folder, volumes) in [("Kingdom", 79), ("kingdom", 1)] {
+    for (folder, volumes) in [("Kingdom", 12), ("kingdom", 1)] {
         db.upsert_catalog_series(&CatalogSeries {
             series_key: "kingdom".into(),
             folder_name: folder.into(),

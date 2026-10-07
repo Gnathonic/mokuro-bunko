@@ -15,8 +15,8 @@ Under 0.5.2, next to this script:
 
 Under 0.5.3 (the version bunko-db now tracks: the catalog is `catalog_folders`, keyed by
 folder, and `catalog_series` is neither created nor touched):
-- py053.db / py053.json: the same population through 0.5.3, plus data shaped like prod
-  after the 0.5.3 cutover (case-variant `Kingdom`/`kingdom` catalog rows sharing a series
+- py053.db / py053.json: the same population through 0.5.3, plus data shaped like a library
+  that went through 0.5.3's case merge (case-variant `Kingdom`/`kingdom` catalog rows sharing a series
   key, rows prefix-renamed from `kingdom/` to `Kingdom/`, the 0.5.2 `catalog_series`
   table left behind with its last row) and the schema of a FRESH 0.5.3 database.
 - upgrade053.json: what 0.5.3's `Database()` makes of copies of the checked-in py052.db
@@ -347,7 +347,7 @@ def make_python_db(tag: str) -> None:
     }
 
     if tag == "053":
-        add_prod_shape_053(db, manifest)
+        add_case_merged_shape_053(db, manifest)
 
     checkpoint(db)
     manifest["schema"] = schema_rows(path)
@@ -359,7 +359,7 @@ def make_python_db(tag: str) -> None:
     (HERE / f"py{tag}.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n")
 
 
-# 0.5.2's `catalog_series` DDL, byte for byte as 0.5.2 left it in prod's `sqlite_master`.
+# 0.5.2's `catalog_series` DDL, byte for byte as 0.5.2 left it in `sqlite_master`.
 CATALOG_SERIES_052_DDL = """
                 CREATE TABLE IF NOT EXISTS catalog_series (
                     series_key TEXT PRIMARY KEY,
@@ -376,12 +376,12 @@ CATALOG_SERIES_052_DDL = """
             """
 
 
-def add_prod_shape_053(db: Database, manifest: dict) -> None:
-    """Prod's database after the 0.5.3 cutover (2026-10-06).
+def add_case_merged_shape_053(db: Database, manifest: dict) -> None:
+    """A database after 0.5.3's case merge of `kingdom/` into `Kingdom/`.
 
     0.5.2 had kept ONE `catalog_series` row for `Kingdom/` + the stray `kingdom/` (the
     one-volume folder its pass reached last); 0.5.3 leaves that table alone and keeps one
-    `catalog_folders` row per folder. The cutover merged `kingdom/` into `Kingdom/` and
+    `catalog_folders` row per folder. The merge folded `kingdom/` into `Kingdom/` and
     prefix-renamed the rows keyed by library path, as `rename_*` do.
     """
     with db._connection() as conn:
@@ -392,8 +392,8 @@ def add_prod_shape_053(db: Database, manifest: dict) -> None:
         )
     for row in [
         {"series_key": "kingdom", "folder_name": "Kingdom", "cover_path": "Kingdom/第01巻.webp",
-         "volume_count": 79, "latest_volume_modified": 1790000000.25, "total_pages": 15800,
-         "total_chars": 1234567, "missing_pages": 0, "damaged_volumes": 0},
+         "volume_count": 12, "latest_volume_modified": 1790000000.25, "total_pages": 2400,
+         "total_chars": 120000, "missing_pages": 0, "damaged_volumes": 0},
         {"series_key": "kingdom", "folder_name": "kingdom", "cover_path": None,
          "volume_count": 1, "latest_volume_modified": 1790100000.5, "total_pages": 200,
          "total_chars": 15000, "missing_pages": 0, "damaged_volumes": 0},
@@ -402,31 +402,31 @@ def add_prod_shape_053(db: Database, manifest: dict) -> None:
     manifest["catalog_series"] = db.list_catalog_series()
 
     db.record_volume_upload("Kingdom/第01巻.cbz", "root")
-    db.record_volume_upload("kingdom/第80巻.cbz", "alice")
+    db.record_volume_upload("kingdom/第13巻.cbz", "alice")
     db.record_ocr_sidecar(
-        {"sidecar_path": "kingdom/第80巻.mokuro", "volume_key": "kingdom/第80巻.cbz",
+        {"sidecar_path": "kingdom/第13巻.mokuro", "volume_key": "kingdom/第13巻.cbz",
          "generation_id": "g1", "generation_name": "Hayai", "machine": "local",
          "engine": "hayai-nova", "pages": 200, "failed_pages": 0}
     )
-    db.remember_volume_uuid("kingdom/第80巻.mokuro", "0aebfb59-0000-4000-8000-000000000080")
+    db.remember_volume_uuid("kingdom/第13巻.mokuro", "00000000-0000-4000-8000-00000000c013")
     db.remember_volume_uuid("Kingdom/第01巻.mokuro", "uuid-kingdom-01")
-    # The cutover's merge of `kingdom/` into `Kingdom/`.
-    db.rename_volume_upload("kingdom/第80巻.cbz", "Kingdom/第80巻.cbz")
+    # The merge of `kingdom/` into `Kingdom/`.
+    db.rename_volume_upload("kingdom/第13巻.cbz", "Kingdom/第13巻.cbz")
     manifest["kingdom_renamed"] = {
         "ocr_sidecars": db.rename_ocr_sidecars_under_prefix("kingdom", "Kingdom"),
         "volume_identities": db.rename_volume_uuids_under_prefix("kingdom", "Kingdom"),
     }
 
-    paths = ["Kingdom/第80巻.cbz", "kingdom/第80巻.cbz", "Kingdom/第80巻.mokuro",
+    paths = ["Kingdom/第13巻.cbz", "kingdom/第13巻.cbz", "Kingdom/第13巻.mokuro",
              "Kingdom/第01巻.cbz", "KINGDOM/第01巻.cbz"]
     manifest["kingdom_owners"] = {p: db.get_volume_owner(p) for p in paths}
     manifest["kingdom_identities"] = {p: db.remembered_volume_uuid(p) for p in paths}
     manifest["kingdom_can_delete"] = [
         [u, p, db.can_user_delete_library_path(u, p)]
         for u, p in [
-            ("alice", "/mokuro-reader/Kingdom/第80巻.cbz"),
-            ("alice", "/mokuro-reader/Kingdom/第80巻.mokuro"),
-            ("alice", "/mokuro-reader/kingdom/第80巻.cbz"),
+            ("alice", "/mokuro-reader/Kingdom/第13巻.cbz"),
+            ("alice", "/mokuro-reader/Kingdom/第13巻.mokuro"),
+            ("alice", "/mokuro-reader/kingdom/第13巻.cbz"),
             ("alice", "/mokuro-reader/Kingdom/第01巻.cbz"),
             ("root", "/mokuro-reader/Kingdom/第01巻.cbz"),
         ]

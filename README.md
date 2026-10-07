@@ -111,7 +111,7 @@ The compiled models are unpacked once into the data volume (`/data/models`) and 
 
 - The Python OCR environments in the data volume (`.ocr-env`, `.ocr-engines-env`, `.pip-cache`, `.tmp`) are no longer used and can be deleted; nothing is installed into the volume any more except the models (`/data/models`).
 - `OCR_AUTO_INSTALL` is no longer needed (the pack is in the image); `true` is harmless (it runs `install-ocr`, which finds the built-in pack). `MOKURO_BUNKO_OCR_ENV` / `_ENGINES_ENV` are ignored.
-- `MOKURO_NGINX_ACCEL` now defaults to off; set it to `1` to keep nginx in front (the Unraid production setup does).
+- `MOKURO_NGINX_ACCEL` now defaults to off; set it to `1` to keep nginx in front (useful when nginx serves downloads).
 - The health check is `mokuro-bunko healthcheck` (no curl or Python in the image).
 - 0.5.2 processors cannot talk to a 0.7 library: update them too (see the [migration guide](docs/MIGRATING-0.7.md)).
 

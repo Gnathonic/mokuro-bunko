@@ -165,7 +165,7 @@ the CUDA image, as the Unraid image had). Differences:
   needs the NVIDIA driver (≥ 580) and container toolkit on the host.
 - `MOKURO_NGINX_ACCEL` now defaults to **off** in the images (the async
   server does not need it for throughput). Set it to `1` to keep nginx in
-  front, as the Unraid production setup does. The lite image has no nginx and
+  front (useful when nginx serves downloads). The lite image has no nginx and
   ignores it with a warning.
 - The container health check is `mokuro-bunko healthcheck`; there is no curl
   or Python in the images. The image licence label now says MPL-2.0.

@@ -154,13 +154,13 @@ fn upsert_replaces_by_folder_name() {
     assert_eq!(rows[0].cover_path, None);
 }
 
-/// Prod 2026-10-06: `Kingdom/` (79 volumes) and a stray `kingdom/` (volume 80) shared the
-/// key `kingdom`; one row meant the catalog showed only volume 80.
+/// `Kingdom/` (many volumes) and a stray one-volume `kingdom/` shared the key `kingdom`;
+/// one row meant the catalog showed only the stray folder's volume.
 #[test]
 fn case_variant_folders_sharing_a_series_key_keep_separate_rows() {
     let (_dir, db) = db();
     db.upsert_catalog_series(&CatalogSeries {
-        volume_count: 79,
+        volume_count: 12,
         ..keyed("kingdom", "Kingdom")
     })
     .unwrap();
@@ -177,7 +177,7 @@ fn case_variant_folders_sharing_a_series_key_keep_separate_rows() {
         .collect();
     assert_eq!(
         rows,
-        [("Kingdom".to_string(), 79), ("kingdom".to_string(), 1)]
+        [("Kingdom".to_string(), 12), ("kingdom".to_string(), 1)]
     );
 }
 

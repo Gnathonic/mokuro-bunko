@@ -4,7 +4,7 @@
 //!
 //! Two generations of fixture: `py052` (made by 0.5.2, before the catalog was keyed by
 //! folder) and `py053` (made by 0.5.3, the version bunko-db tracks, with data shaped like
-//! prod after the 0.5.3 cutover). Every content check runs over both; what opening a
+//! a library that went through 0.5.3's case merge). Every content check runs over both; what opening a
 //! 0.5.2-era file does to it is pinned against what 0.5.3 does (`upgrade053.json`).
 
 use bunko_db::{AuditDetails, AuditQuery, CommunityDetails, Database, DbOptions, SeriesFacts};
@@ -518,12 +518,12 @@ fn a_legacy_database_is_migrated_as_python_053_migrates_it() {
     assert_eq!(schema_rows(&path), m["schema"]);
 }
 
-/// Prod's Kingdom after the 0.5.3 cutover: `kingdom/` merged into `Kingdom/`, the rows
-/// keyed by library path prefix-renamed (volume 80 keeps its uploader and its uuid), and
+/// A `Kingdom/` after 0.5.3's case merge: `kingdom/` merged into `Kingdom/`, the rows
+/// keyed by library path prefix-renamed (volume 13 keeps its uploader and its uuid), and
 /// both case-variant folders' catalog rows still there until the next pass prunes the
 /// folder that is gone.
 #[test]
-fn the_kingdom_cutover_reads_back_as_python_053_left_it() {
+fn a_case_merged_library_reads_back_as_python_053_left_it() {
     let m = manifest("py053.json");
     let (_dir, path) = copy_fixture("py053.db");
     let db = open(&path);
@@ -550,7 +550,7 @@ fn the_kingdom_cutover_reads_back_as_python_053_left_it() {
         assert_eq!(got, c[2].as_bool().unwrap(), "{c}");
     }
     assert_eq!(
-        db.get_volume_owner("Kingdom/第80巻.cbz")
+        db.get_volume_owner("Kingdom/第13巻.cbz")
             .unwrap()
             .as_deref(),
         Some("alice")
@@ -564,14 +564,14 @@ fn the_kingdom_cutover_reads_back_as_python_053_left_it() {
         .collect();
     assert_eq!(
         kingdom,
-        [("Kingdom".to_string(), 79), ("kingdom".to_string(), 1)]
+        [("Kingdom".to_string(), 12), ("kingdom".to_string(), 1)]
     );
 
-    // The next pass finds only `Kingdom/` (80 volumes now) and prunes by folder name.
+    // The next pass finds only `Kingdom/` (13 volumes now) and prunes by folder name.
     db.upsert_catalog_series(&bunko_db::CatalogSeries {
         series_key: "kingdom".into(),
         folder_name: "Kingdom".into(),
-        volume_count: 80,
+        volume_count: 13,
         ..Default::default()
     })
     .unwrap();
@@ -587,7 +587,7 @@ fn the_kingdom_cutover_reads_back_as_python_053_left_it() {
         .filter(|r| r.series_key == "kingdom")
         .map(|r| (r.folder_name, r.volume_count))
         .collect();
-    assert_eq!(kingdom, [("Kingdom".to_string(), 80)]);
+    assert_eq!(kingdom, [("Kingdom".to_string(), 13)]);
     // 0.5.2's table still holds what 0.5.2 last wrote, for a rollback.
     let conn = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(

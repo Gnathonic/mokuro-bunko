@@ -5,13 +5,13 @@
 //! NTFS (and APFS) `Kingdom/` and `kingdom/` are one folder, so a library holding both
 //! cannot be copied to, synced with, or served from Windows. On a case-sensitive host they
 //! are two folders, and an upload spelled `kingdom/` used to create the second one beside
-//! the first (prod 2026-10-06: the catalog then showed one of them and hid the other's
+//! the first (the catalog then showed one of them and hid the other's
 //! volumes).
 //!
 //! [`PathCase::rewrite_request`] closes that at the edge, before anything else reads the
 //! request path: every segment of a library request path that names something already on
 //! disk takes the on-disk spelling, so a PUT, MKCOL, PROPFIND or GET for
-//! `kingdom/Vol 80.cbz` lands in (or reads) `Kingdom/`, and every layer below -- the auth
+//! `kingdom/Vol 13.cbz` lands in (or reads) `Kingdom/`, and every layer below -- the auth
 //! gate's ownership checks, the series.json PUT, the DAV handler, the database rows keyed
 //! by library path -- sees one spelling for one file. A segment that names nothing on disk
 //! keeps the client's spelling: that is the case-preserving half.

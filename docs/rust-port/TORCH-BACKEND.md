@@ -354,7 +354,7 @@ Open questions B answers first, because they decide the pipeline:
 3. Speed ≥ tuned 0.5.2 on every fleet machine (desktop 9070 XT, beast 4090, lily 4060,
    server/steven/patrick RDNA2, pimax 3070 Windows, Mac M2 Pro CPU).
 4. Docker: CPU image and CUDA image run a full volume end to end.
-5. Dry run against a copy of the production library + database.
+5. Dry run against a copy of a real library + database.
 
 ## A. Runtime as built (stream A, 2026-10-02)
 

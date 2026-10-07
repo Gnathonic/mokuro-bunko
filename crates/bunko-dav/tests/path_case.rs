@@ -3,9 +3,9 @@
 //! and the DAV half of `TestCaseOnlyRenames`; the full-stack half, with auth and the
 //! database, is `bunko-server/tests/dav_path_case.rs`).
 //!
-//! Prod 2026-10-06: an upload spelled `kingdom/` created a second folder beside `Kingdom/`
-//! on the case-sensitive host, and the catalog then showed only the stray folder's one
-//! volume. On NTFS that request lands in `Kingdom/`.
+//! A library on a case-sensitive filesystem can end up with `Kingdom/` and a stray `kingdom/`
+//! (an upload spelled in another case), and the catalog then showed only the stray folder's
+//! one volume. On NTFS that request lands in `Kingdom/`.
 
 mod common;
 
@@ -344,26 +344,26 @@ async fn a_new_folder_keeps_the_spelling_it_was_created_with() {
     assert_eq!(mkcol("/mokuro-reader/kingdom").await.code(), 405);
     for path in [
         "/mokuro-reader/Kingdom/v01.cbz",
-        "/mokuro-reader/kingdom/v80.cbz",
+        "/mokuro-reader/kingdom/v13.cbz",
     ] {
         let r = req(&env, Some("uploader"), "PUT", path, &[], &cbz_bytes(1)).await;
         assert!(matches!(r.code(), 200 | 201 | 204), "{path}: {}", r.text());
     }
-    assert_eq!(names(&env.lib("Kingdom")), ["v01.cbz", "v80.cbz"]);
+    assert_eq!(names(&env.lib("Kingdom")), ["v01.cbz", "v13.cbz"]);
     assert!(!names(&env.lib("")).contains(&"kingdom".to_string()));
 }
 
-/// The prod scenario after the 0.5.3 cutover: `Kingdom/` holds every volume, and a reader
+/// A library that went through 0.5.3's case merge: `Kingdom/` holds every volume, and a reader
 /// still asks for `kingdom/...`.
 #[tokio::test]
 async fn the_kingdom_scenario() {
     let env = Env::new();
     std::fs::create_dir(env.lib("Kingdom")).unwrap();
-    for v in 1..=80 {
+    for v in 1..=13 {
         std::fs::write(env.lib(&format!("Kingdom/第{v:02}巻.cbz")), b"cbz").unwrap();
     }
     std::fs::write(
-        env.lib("Kingdom/第80巻.mokuro"),
+        env.lib("Kingdom/第13巻.mokuro"),
         b"{\"title\": \"Kingdom\"}",
     )
     .unwrap();
@@ -371,7 +371,7 @@ async fn the_kingdom_scenario() {
         &env,
         None,
         "GET",
-        "/mokuro-reader/kingdom/%E7%AC%AC80%E5%B7%BB.mokuro",
+        "/mokuro-reader/kingdom/%E7%AC%AC13%E5%B7%BB.mokuro",
         &[],
         b"",
     )
@@ -389,14 +389,14 @@ async fn the_kingdom_scenario() {
     .await;
     assert_eq!(listing.code(), 207);
     let text = listing.text();
-    // The folder and its 81 files, every href in the on-disk spelling.
+    // The folder and its 14 files, every href in the on-disk spelling.
     assert_eq!(
         text.matches("/mokuro-reader/Kingdom/").count(),
-        82,
+        15,
         "{text}"
     );
     assert!(!text.contains("/mokuro-reader/kingdom"));
-    assert!(text.contains("/mokuro-reader/Kingdom/%E7%AC%AC80%E5%B7%BB.mokuro"));
+    assert!(text.contains("/mokuro-reader/Kingdom/%E7%AC%AC13%E5%B7%BB.mokuro"));
 }
 
 // --- case-only renames (DAV level) -----------------------------------------------------

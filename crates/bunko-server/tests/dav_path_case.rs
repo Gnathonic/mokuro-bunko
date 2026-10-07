@@ -3,9 +3,9 @@
 //! rewrite sits in front of the auth gate, so ownership checks, uploads and the database
 //! rows keyed by library path all see one spelling for one file.
 //!
-//! Prod 2026-10-06: an upload spelled `kingdom/` created a second folder beside `Kingdom/`
-//! on the case-sensitive host, and the catalog then showed only the stray folder's one
-//! volume.
+//! A library on a case-sensitive filesystem can end up with `Kingdom/` and a stray `kingdom/`
+//! (an upload spelled in another case), and the catalog then showed only the stray folder's
+//! one volume.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -179,14 +179,14 @@ async fn a_new_folder_keeps_the_spelling_it_was_created_with() {
     );
     for path in [
         "/mokuro-reader/Kingdom/v01.cbz",
-        "/mokuro-reader/kingdom/v80.cbz",
+        "/mokuro-reader/kingdom/v13.cbz",
     ] {
         let (status, _) = env.req(up, "PUT", path, &[], cbz()).await;
         assert!(written(status), "{path}: {status}");
     }
-    assert_eq!(names(&env.lib("Kingdom")), ["v01.cbz", "v80.cbz"]);
+    assert_eq!(names(&env.lib("Kingdom")), ["v01.cbz", "v13.cbz"]);
     assert!(!env.library_names().contains(&"kingdom".into()));
-    assert_eq!(env.owner("Kingdom/v80.cbz").as_deref(), Some("uploader"));
+    assert_eq!(env.owner("Kingdom/v13.cbz").as_deref(), Some("uploader"));
 }
 
 #[tokio::test]
@@ -236,13 +236,13 @@ async fn a_non_ascii_case_variant_is_rewritten() {
         .req(
             Some("uploader"),
             "PUT",
-            "/mokuro-reader/%C3%A9lan/%E7%AC%AC80%E5%B7%BB.cbz",
+            "/mokuro-reader/%C3%A9lan/%E7%AC%AC13%E5%B7%BB.cbz",
             &[],
             cbz(),
         )
         .await;
     assert!(written(status), "{status}");
-    assert!(env.lib("\u{c9}lan/第80巻.cbz").is_file());
+    assert!(env.lib("\u{c9}lan/第13巻.cbz").is_file());
     assert!(!env.library_names().contains(&"\u{e9}lan".into()));
 }
 
@@ -452,15 +452,15 @@ async fn a_destination_symlink_leading_outside_is_refused() {
     );
 }
 
-// --- the prod data after the 0.5.3 cutover -----------------------------------------------
+// --- data after 0.5.3's case merge --------------------------------------------------------
 
-/// `Kingdom/` holds volumes 1-80 after the merge (the stray `kingdom/` folded in, its
+/// `Kingdom/` holds volumes 1-13 after the merge (the stray `kingdom/` folded in, its
 /// rows prefix-renamed), and a reader that cached `kingdom/` paths still asks for them.
 #[tokio::test]
 async fn the_kingdom_scenario() {
     let env = Env::new();
     std::fs::create_dir(env.lib("Kingdom")).unwrap();
-    for v in 1..=80 {
+    for v in 1..=13 {
         let rel = format!("Kingdom/第{v:02}巻.cbz");
         std::fs::write(env.lib(&rel), cbz()).unwrap();
         env.services
@@ -468,7 +468,7 @@ async fn the_kingdom_scenario() {
             .record_volume_upload(&rel, "uploader")
             .unwrap();
     }
-    std::fs::write(env.lib("Kingdom/第80巻.mokuro"), "{\"title\": \"Kingdom\"}").unwrap();
+    std::fs::write(env.lib("Kingdom/第13巻.mokuro"), "{\"title\": \"Kingdom\"}").unwrap();
 
     // Anonymous and signed-in reads of the old spelling.
     for user in [None, Some("admin")] {
@@ -476,7 +476,7 @@ async fn the_kingdom_scenario() {
             .req(
                 user,
                 "GET",
-                "/mokuro-reader/kingdom/%E7%AC%AC80%E5%B7%BB.mokuro",
+                "/mokuro-reader/kingdom/%E7%AC%AC13%E5%B7%BB.mokuro",
                 &[],
                 vec![],
             )
@@ -495,14 +495,14 @@ async fn the_kingdom_scenario() {
         .await;
     assert_eq!(status, 207);
     let text = String::from_utf8_lossy(&body);
-    assert_eq!(text.matches("/mokuro-reader/Kingdom/").count(), 82);
+    assert_eq!(text.matches("/mokuro-reader/Kingdom/").count(), 15);
 
     // The owner replacing a volume through the old spelling replaces it in place.
     let (status, _) = env
         .req(
             Some("uploader"),
             "PUT",
-            "/mokuro-reader/kingdom/%E7%AC%AC80%E5%B7%BB.cbz",
+            "/mokuro-reader/kingdom/%E7%AC%AC13%E5%B7%BB.cbz",
             &[],
             cbz(),
         )
@@ -515,6 +515,6 @@ async fn the_kingdom_scenario() {
             .count(),
         1
     );
-    assert_eq!(env.owner("Kingdom/第80巻.cbz").as_deref(), Some("uploader"));
-    assert_eq!(env.owner("kingdom/第80巻.cbz"), None);
+    assert_eq!(env.owner("Kingdom/第13巻.cbz").as_deref(), Some("uploader"));
+    assert_eq!(env.owner("kingdom/第13巻.cbz"), None);
 }
