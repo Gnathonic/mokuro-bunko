@@ -80,7 +80,8 @@ async fn propfind_file_depth0_matches_the_python_shape() {
     assert!(t.contains("<D:getcontenttype>application/vnd.comicbook+zip</D:getcontenttype>"));
     assert!(t.contains("<D:displayname>vol1.cbz</D:displayname>"));
     assert!(t.contains("-8</D:getetag>"));
-    assert!(!t.contains("404"));
+    // A missing property would get a 404 propstat (the etag may contain "404" by chance).
+    assert!(!t.contains("404 Not Found"));
 }
 
 #[tokio::test]
@@ -211,7 +212,7 @@ async fn propfind_named_and_propname() {
         .await;
     assert!(r.text().contains("<D:getetag />"));
     assert!(r.text().contains("HTTP/1.1 200 OK"));
-    assert!(!r.text().contains("404"));
+    assert!(!r.text().contains("404 Not Found"));
     // allprop + propname together: 400.
     let both = br#"<D:propfind xmlns:D="DAV:"><D:allprop/><D:propname/></D:propfind>"#;
     assert_eq!(
