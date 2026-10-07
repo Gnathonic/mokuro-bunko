@@ -119,7 +119,7 @@ build does not contain: `mokuro-bunko install-ocr` downloads it once as a
 the table above), into `<storage>/backends/`, then fetches the models.
 
 ```bash
-mokuro-bunko install-ocr                  # detect the hardware, install its pack and the models
+mokuro-bunko install-ocr                  # the pack ocr.backend asks for on this hardware, and the models
 mokuro-bunko install-ocr --list           # what it detects, which pack it would install, what is installed
 mokuro-bunko install-ocr --variant cpu    # pick the pack yourself (auto, cpu, cu130, rocm7.1)
 ```
@@ -130,8 +130,13 @@ fetched from NVIDIA's own packages on PyPI, each pinned by sha256. Sizes on
 disk: `cpu` 0.4 GB, `cu130` 2.5 GB, `rocm7.1` 6.8 GB. `--from DIR` installs
 from files downloaded elsewhere (the pack archive, optionally `release.json`
 and its `.sig`, and the NVIDIA wheels) on a host without internet,
-`--no-models` skips the models, `--force` reinstalls. The full and CUDA
-Docker images have their pack built in. `MOKURO_BACKENDS_DIR` moves the packs elsewhere.
+`--no-models` skips the models, `--force` reinstalls. Without `--variant` it
+follows `ocr.backend`: `auto` takes the GPU it finds, `cpu` stays on the CPU
+even with a GPU, `cuda`/`rocm` take that GPU (or `cpu`, with a hint, when it is
+not there); `--variant auto` looks at the hardware only. The full Docker image
+carries no pack: it runs `install-ocr --if-needed` on every start, which
+installs the pack and models on the first one and does nothing later
+([Docker](#docker)). `MOKURO_BACKENDS_DIR` moves the packs elsewhere.
 
 Without a pack the server still starts and serves; hayai-nova and
 paddle-manga are not offered on the machine (ppocr-manga still is, and remote
@@ -474,7 +479,7 @@ So either order works:
 mokuro-bunko install-ocr        # or, after processor setup: install-ocr --processor
 ```
 
-(The Docker images have their pack built in and need no step.) The desktop
+(The full Docker image installs it on start and needs no step.) The desktop
 app's processor setup offers the same install, with progress. Then:
 
 ```bash
@@ -544,16 +549,17 @@ the `cpu` pack), install the pack as above and run
 `mokuro-bunko processor setup`. `processor service` installs a launchd agent.
 Intel Macs have no full build.
 
-#### Docker (NVIDIA)
+#### Docker
 
 [`deploy/docker-compose.processor.yml`](../deploy/docker-compose.processor.yml)
-runs the CUDA image as a processor: put `processor.yaml` in `./processor/`
-and start it with `docker compose -f deploy/docker-compose.processor.yml up -d`
-(it needs the NVIDIA container toolkit and a driver 580 or newer). The CUDA
-backend pack is built into the image; models are cached in the compose
-volume. The `:latest` image (CPU) works too, without `gpus`. There is no ROCm
-image: run an AMD processor natively. The password can come from the
-environment instead of the file: `MOKURO_PROCESSOR_PASSWORD`.
+runs the full image as a processor: put `processor.yaml` in `./processor/`
+and start it with `docker compose -f deploy/docker-compose.processor.yml up -d`.
+Before `processor serve` the entrypoint installs the backend pack for the GPU
+the container is given (`gpus: all` for NVIDIA, with the container toolkit and
+a driver 580 or newer; `devices: [/dev/kfd, /dev/dri]` for AMD; neither: the
+CPU) into the volume, with the models; later starts reuse them.
+`MOKURO_OCR_BACKEND` (`cpu`, `cuda`, `rocm`) overrides the choice. The password
+can come from the environment instead of the file: `MOKURO_PROCESSOR_PASSWORD`.
 
 #### By hand
 
@@ -688,8 +694,8 @@ everywhere else. With **Caddy**, WebSockets work without configuration; give
 **Cloudflare** and most CDNs forward WebSockets, but cap request bodies on
 some plans. The Docker images' own nginx already carries these settings.
 
-Set `MOKURO_NGINX_ACCEL=1` only when nginx really is in front (the full and
-CUDA images set it up themselves when you ask for it): without that nginx,
+Set `MOKURO_NGINX_ACCEL=1` only when nginx really is in front (the full
+image sets it up itself when you ask for it): without that nginx,
 every download is an empty answer, and processors give such volumes back.
 
 ### Updating a library and its processors
@@ -793,23 +799,62 @@ Images are published at `ghcr.io/gnathonic/mokuro-bunko`:
 | Tag | Dockerfile | What | Size |
 |---|---|---|---|
 | `latest-lite`, `<ver>-lite` | `deploy/docker/Dockerfile.lite` | Server only, distroless, no OCR, no nginx. amd64, arm64. | 29 MB; idles at ~16 MiB RSS |
-| `latest`, `<ver>` | `deploy/docker/Dockerfile` | Server + OCR on the CPU (the `cpu` backend pack is built in) + nginx and tini. amd64. | ~177 MB download (~600 MB unpacked) |
-| `latest-cuda`, `<ver>-cuda` | `deploy/docker/Dockerfile.cuda` | As `latest`, with the `cu130` backend pack built in (libtorch and the CUDA 13 libraries; no CUDA base image). Needs an NVIDIA driver 580 or newer, the NVIDIA container toolkit and a Turing or newer GPU; without a GPU it runs OCR on the CPU. amd64. | ~1.8 GB download (~2.85 GB unpacked) |
+| `latest`, `<ver>` | `deploy/docker/Dockerfile` | Server + local OCR + nginx and tini. amd64. No OCR backend inside: the first start downloads the one for the GPU the container is given (CPU, NVIDIA or AMD). | see [PACKAGING.md §2](rust-port/PACKAGING.md#2-docker-images-ghcriognathonicmokuro-bunko) |
+| `latest-cuda`, `<ver>-cuda` | — | The same image as `latest`, under the name of the 0.5.2 CUDA image, so templates written for it keep working. | same image |
 
 There are no arm64 OCR images (arm64 hosts run the lite image and OCR on a
-processor elsewhere) and no ROCm image (run an AMD processor natively).
+processor elsewhere).
 
-Everything lives under `/data` (library, database, `config.yaml`, models), so
-mount a volume there. All images start as root and `bunko-init` drops to
-`PUID:PGID` (1000:1000; 99:100 in the CUDA image, as on Unraid), sets `UMASK`
-(002) and chowns the storage and config directories (recursively with
-`TAKE_OWNERSHIP=true`). `docker run --user ...` works too. `MOKURO_*`
-variables work as everywhere else; `MOKURO_INSTALL_KIND=docker` is set, so the
-updater only reports the image to pull. The health check is
-`mokuro-bunko healthcheck`.
+Everything lives under `/data` (library, database, `config.yaml`, the OCR
+backend in `/data/backends`, the models in `/data/models`), so mount a volume
+there. `MOKURO_CONFIG` defaults to `/data/config.yaml` (the Unraid template
+sets `/config/config.yaml`). All images start as root and `bunko-init` drops to
+`PUID:PGID` (1000:1000 by default; the Unraid template passes 99:100), keeping
+the groups that own GPU device nodes passed in, sets `UMASK` (002) and chowns
+the storage and config directories (recursively with `TAKE_OWNERSHIP=true`).
+`docker run --user ...` works too. `MOKURO_*` variables work as everywhere
+else; `MOKURO_INSTALL_KIND=docker` is set, so the updater only reports the
+image to pull. The health check is `mokuro-bunko healthcheck`.
 
 To build an image yourself, `docker build -f deploy/docker/Dockerfile.lite
--t mokuro-bunko:lite .` (the Dockerfiles compile the binary inside).
+-t mokuro-bunko:lite .` (the Dockerfiles compile the binary inside). For a
+host without internet, `docker build -f deploy/docker/Dockerfile
+--build-arg BAKE_PACK=1 --build-arg PACK_VARIANT=cpu .` (or `cu130`, `rocm7.1`)
+builds a backend pack into the image; it is used until a pack of the same
+release is installed into `/data/backends`. Published images never carry one.
+
+### OCR backend on first start
+
+Before `serve` (and before `processor serve`) the full image runs
+`mokuro-bunko install-ocr --if-needed`:
+
+1. Nothing happens when local OCR is off (`ocr.backend: skip` or
+   `ocr.local_processing: false`, also through `MOKURO_OCR_BACKEND` /
+   `MOKURO_OCR_LOCAL_PROCESSING`) or `MOKURO_OCR_AUTO_INSTALL=false`.
+2. It looks at the GPUs the container was given: an NVIDIA GPU passed in by
+   the NVIDIA container toolkit (`--gpus all`, or `--runtime=nvidia` with
+   `NVIDIA_VISIBLE_DEVICES`), an AMD GPU passed in as `--device /dev/kfd
+   --device /dev/dri`. A GPU the host has but the container was not given is
+   ignored, and `install-ocr --list` / `doctor` say which flag would pass it in.
+3. It applies `ocr.backend` (`MOKURO_OCR_BACKEND`): `auto` takes that GPU,
+   `cpu` stays on the CPU, `cuda` / `rocm` take that vendor's GPU, or the CPU
+   with a note when it is not there.
+4. It downloads the matching backend pack of this release into
+   `/data/backends` (~100 MB for the CPU; ~350 MB plus ~1.6 GB of NVIDIA's CUDA
+   libraries from PyPI; ~3 GB for AMD) and the models of the enabled OCR
+   engines into `/data/models`, then starts the server.
+
+Later starts find the pack and download nothing. Started with a different GPU
+(or with `MOKURO_OCR_BACKEND` asking for a GPU it now sees) the container
+installs that GPU's pack and removes the one it replaces; started without its
+GPU it keeps the GPU pack, which runs on the CPU too. An image update installs
+the new release's pack on its first start. If the download fails, the server
+starts anyway (ppocr-manga and remote processors work; hayai-nova and
+paddle-manga wait for the pack) and the next start tries again.
+`MOKURO_OCR_AUTO_INSTALL=false` leaves the install to you:
+`docker exec mokuro-bunko mokuro-bunko install-ocr`, then restart. 0.5.2's
+`OCR_AUTO_INSTALL=true` still works; its `OCR_AUTO_INSTALL=false` is ignored,
+as it never stopped 0.5.2 from installing OCR on start.
 
 ### Basic Docker
 
@@ -824,10 +869,9 @@ docker run -d \
   ghcr.io/gnathonic/mokuro-bunko:latest
 ```
 
-The `latest` image carries the CPU backend pack, so OCR in it runs on the
-CPU; the models are downloaded into `/data/models` on first use. For GPU
-OCR use the CUDA image below, or run the lite image (or `latest` with
-`MOKURO_OCR_LOCAL_PROCESSING=false`) and a
+Without a GPU OCR runs on the CPU; the first start downloads the CPU backend
+and the models into `/data`. For GPU OCR pass the GPU in (below), or run the
+lite image (or `latest` with `MOKURO_OCR_LOCAL_PROCESSING=false`) and a
 [remote processor](#remote-ocr-processors) on the GPU machine. The first
 visit to the setup page from the host needs the setup token (see
 [First start](#first-start)): `docker logs mokuro-bunko` shows the URL.
@@ -835,13 +879,13 @@ visit to the setup page from the host needs the setup token (see
 ### Docker Compose
 
 - [`deploy/docker-compose.yml`](../deploy/docker-compose.yml): the `latest`
-  image (CPU OCR).
+  image (CPU OCR; commented lines for an NVIDIA or AMD GPU).
 - [`deploy/docker-compose.lite.yml`](../deploy/docker-compose.lite.yml): the
   lite image, no OCR; pair it with a processor.
 - [`deploy/docker-compose.processor.yml`](../deploy/docker-compose.processor.yml):
-  a CUDA OCR processor for a library elsewhere.
+  an OCR processor for a library elsewhere (NVIDIA, AMD or CPU).
 - [`deploy/docker-compose.unraid-cuda.yml`](../deploy/docker-compose.unraid-cuda.yml):
-  the CUDA image with Unraid paths.
+  the full image with an NVIDIA GPU and Unraid paths.
 - [`deploy/docker-compose.cloudflared.yml`](../deploy/docker-compose.cloudflared.yml)
   adds a Cloudflare tunnel (`CLOUDFLARE_TUNNEL_TOKEN` from the Zero Trust
   dashboard) and exposes no port.
@@ -850,7 +894,7 @@ visit to the setup page from the host needs the setup token (see
 docker compose -f deploy/docker-compose.lite.yml up -d
 ```
 
-### nginx download offload (full and CUDA images)
+### nginx download offload (full image)
 
 `MOKURO_NGINX_ACCEL=1` makes the entrypoint start nginx on `MOKURO_PORT` and
 move the server to `127.0.0.1:MOKURO_BACKEND_PORT` (8081); nginx then serves
@@ -868,35 +912,53 @@ docker compose -f deploy/docker-compose.unraid-cuda.yml up -d
 ```
 
 It needs the NVIDIA container toolkit, a driver 580 or newer and a Turing
-(GTX 16xx / RTX 20xx) or newer GPU, runs as `PUID`/`PGID` (default 99/100),
-keeps its config in `/config` (`MOKURO_CONFIG=/config/config.yaml`) and its
-data, including the downloaded models, in `/data`. The CUDA libraries are in
-the image's backend pack; only the driver comes from the host. To check what
-the container sees:
+(GTX 16xx / RTX 20xx) or newer GPU. The first start downloads the `cu130`
+pack (about 2 GB with NVIDIA's CUDA libraries) into `/data/backends`; only the
+driver comes from the host. To check what the container sees and which pack it
+would install:
 
 ```bash
-docker run --rm --gpus all ghcr.io/gnathonic/mokuro-bunko:latest-cuda install-ocr --list
+docker run --rm --gpus all ghcr.io/gnathonic/mokuro-bunko:latest install-ocr --list
 ```
 
-### Unraid + NVIDIA GPU
+### Docker with an AMD GPU
+
+```bash
+docker run -d --name mokuro-bunko --device /dev/kfd --device /dev/dri \
+  -p 8080:8080 -v /path/to/storage:/data ghcr.io/gnathonic/mokuro-bunko:latest
+```
+
+Supported: Radeon RX 6000 (gfx1030; RX 6600/6700 run its kernels), RX 7000
+and RX 9000 on Linux, with the amdgpu kernel driver; nothing from ROCm is
+needed on the host. The first start downloads the `rocm7.1` pack (about 3 GB;
+6.8 GB unpacked). The server keeps the groups that own `/dev/kfd` and
+`/dev/dri/renderD*` when it drops to `PUID:PGID`; with `docker run --user`,
+add them with `--group-add`.
+
+### Unraid
 
 The Unraid templates are [`deploy/unraid/mokuro-bunko.xml`](../deploy/unraid/mokuro-bunko.xml)
-(CUDA image, `ghcr.io/gnathonic/mokuro-bunko:latest-cuda`) and
-[`deploy/unraid/mokuro-bunko-lite.xml`](../deploy/unraid/mokuro-bunko-lite.xml)
+(full image, `ghcr.io/gnathonic/mokuro-bunko:latest`; `latest-cuda` is the same
+image) and [`deploy/unraid/mokuro-bunko-lite.xml`](../deploy/unraid/mokuro-bunko-lite.xml)
 (lite image).
 
-1. Install the Unraid NVIDIA driver plugin (a driver of 580 or newer for the
-   CUDA 13 image).
-2. Import the template, and confirm `Extra Parameters` includes
-   `--runtime=nvidia`.
+1. For an NVIDIA GPU, install the Unraid NVIDIA driver plugin (a driver of 580
+   or newer for the CUDA 13 pack) and keep `--runtime=nvidia` in
+   `Extra Parameters`. For an AMD GPU, replace it with
+   `--device=/dev/kfd --device=/dev/dri`. Without a GPU, clear it.
+2. Import the template.
 3. Map:
    - `/data` -> `/mnt/user/appdata/mokuro-bunko/data`
    - `/config` -> `/mnt/user/appdata/mokuro-bunko/config`
 4. Environment variables:
    - `MOKURO_CONFIG=/config/config.yaml`
-   - `MOKURO_OCR_BACKEND=auto` (or `cuda`)
+   - `MOKURO_OCR_BACKEND=auto` (or `cuda`, `rocm`, `cpu`)
    - `NVIDIA_VISIBLE_DEVICES=all`
    - `NVIDIA_DRIVER_CAPABILITIES=compute,utility`
+
+The first start downloads the OCR backend for the GPU the container sees into
+`/data/backends` before the web UI comes up (about 2 GB for NVIDIA); the log
+shows the progress.
 
 Optional:
 - `MOKURO_OCR_GENERATIONS`: the OCR generations as JSON, e.g.
@@ -904,16 +966,17 @@ Optional:
   Leave it empty to use `config.yaml`; the admin panel (OCR → Generations)
   is the easier way to edit them.
 - `MOKURO_OCR_LOCAL_PROCESSING=false`: no OCR in the container; a remote
-  processor runs the queue.
+  processor runs the queue (nothing is downloaded).
+- `MOKURO_OCR_AUTO_INSTALL=false`: no automatic OCR backend install.
 - `MOKURO_NGINX_ACCEL=1`: put nginx in front for downloads; the server then
   listens on `MOKURO_BACKEND_PORT` (default 8081) inside the container.
 - `TAKE_OWNERSHIP=true`: chown `/data` and `/config` at boot.
 
 The 0.5 variables `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV` and
-`MOKURO_BUNKO_MOKURO_SPEC` are accepted and ignored, and `OCR_AUTO_INSTALL=true`
-runs `install-ocr --no-models` before the server starts (a no-op, as the
-image has its pack built in), so an existing template keeps working after you
-change its repository.
+`MOKURO_BUNKO_MOKURO_SPEC` are accepted and ignored, `OCR_AUTO_INSTALL=true`
+keeps the install on start on and `OCR_AUTO_INSTALL=false` is ignored (0.5.2
+installed OCR on start either way), so an existing template keeps working
+after you change its repository.
 
 ## Admin Setup
 
@@ -1047,7 +1110,7 @@ If you see "database is locked" errors:
 - A lite server needs little: it streams downloads and uploads from and to
   disk and keeps byte-bounded caches. For a very large library raise
   `server.cache_mb`; on a one-core host set `server.threads: 1`.
-- Put a reverse proxy (nginx/Caddy) in front, and in the full and CUDA images
+- Put a reverse proxy (nginx/Caddy) in front, and in the full image
   let nginx serve library downloads (`MOKURO_NGINX_ACCEL=1`, with the repo's
   `deploy/nginx-internal.conf.template`, which the images use) so large
   downloads never touch the server process.

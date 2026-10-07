@@ -1,14 +1,15 @@
 # Unraid / NVIDIA: mokuro-bunko with OCR on an NVIDIA GPU (successor of the 0.5
-# unraid-cuda image). The image carries the cu130 OCR backend pack (libtorch + the
-# CUDA 13 libraries); the host needs an NVIDIA driver >= 580 and the NVIDIA container
-# toolkit (Unraid: the Nvidia-Driver plugin). The OCR models are downloaded into the
-# data volume on first use. Turing (RTX 20xx / GTX 16xx) or newer.
+# unraid-cuda image; :latest-cuda is the same image as :latest). The first start
+# downloads the cu130 OCR backend pack (libtorch + the CUDA 13 libraries, about 2 GB)
+# into /data/backends and the enabled engines' models into /data/models; later starts
+# reuse them. The host needs an NVIDIA driver >= 580 and the NVIDIA container toolkit
+# (Unraid: the Nvidia-Driver plugin). Turing (RTX 20xx / GTX 16xx) or newer.
 services:
   mokuro-bunko:
-    image: ghcr.io/gnathonic/mokuro-bunko:latest-cuda
+    image: ghcr.io/gnathonic/mokuro-bunko:latest
     # build:
     #   context: ..
-    #   dockerfile: deploy/docker/Dockerfile.cuda
+    #   dockerfile: deploy/docker/Dockerfile
     container_name: mokuro-bunko
     restart: unless-stopped
     ports:
@@ -22,9 +23,8 @@ services:
       - UMASK=002
       - MOKURO_CONFIG=/config/config.yaml
       - MOKURO_OCR_BACKEND=auto
-      # Image built with BAKE_PACK=0 (no pack inside): install it into /data/backends
-      # on first start, as the 0.5 image installed its CUDA torch:
-      # - OCR_AUTO_INSTALL=true
+      # No automatic OCR backend download on start (then run install-ocr yourself):
+      # - MOKURO_OCR_AUTO_INSTALL=false
       # OCR generations as JSON (or leave unset and edit them in the admin
       # panel, which saves config.yaml). Engines: hayai-nova, paddle-manga, ppocr-manga.
       # - 'MOKURO_OCR_GENERATIONS=[{"name":"ppocr-manga","engine":"ppocr-manga","primary":true}]'

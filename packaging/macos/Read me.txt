@@ -8,9 +8,17 @@ from Applications (or Launchpad). A book icon appears in the menu bar; there is
 no Dock icon. The first time, the setup wizard opens in your browser.
 
 The wizard sets up a library server (folder, port, admin account), or a
-processor that does OCR for a library on another machine, or both. Its OCR step
-installs from the files that come with the app: nothing is downloaded, just
-click Install. It can also start everything when you log in.
+processor that does OCR for a library on another machine, or both. It can also
+start everything when you log in.
+@IF_DOWNLOAD@
+Its OCR step detects this Mac's hardware and downloads the OCR backend and the
+models of the OCR engines you turn on (a few hundred MB), checked against the
+signed release.
+@END@
+@IF_BUNDLED@
+Its OCR step installs from the files that come with the app: nothing is
+downloaded, just click Install.
+@END@
 
 Click the menu-bar icon for status, pause/resume, the dashboard, settings, the
 library, logs and "Start at login".
@@ -42,9 +50,16 @@ Where things are
 Uninstall: choose Quit in the menu-bar menu, then move the app to the Trash. To
 remove your data too, delete the two folders and the LaunchAgents files above.
 
+@IF_DOWNLOAD@
+OCR runs on the CPU backend (libtorch), downloaded by the OCR step, with
+hayai-nova compiled for Apple silicon and the PP-OCR manga detector. Measured on
+an M2 Pro: a 20-page volume in 36 seconds (about 0.55 pages per second).
+@END@
+@IF_BUNDLED@
 OCR in this package: the CPU backend (libtorch) and the hayai-nova model
 compiled for Apple silicon, plus the PP-OCR manga detector. Measured on an
 M2 Pro: a 20-page volume in 36 seconds (about 0.55 pages per second).
+@END@
 
 This is a pre-release (@VERSION@): "Check for updates" finds nothing until a
 release is published. Licences: LICENSE and THIRD-PARTY-LICENSES.md in

@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>mokuro-bunko</Name>
-  <Repository>ghcr.io/gnathonic/mokuro-bunko:latest-cuda</Repository>
+  <Repository>ghcr.io/gnathonic/mokuro-bunko:latest</Repository>
   <Registry>https://github.com/Gnathonic/mokuro-bunko/pkgs/container/mokuro-bunko</Registry>
   <Network>bridge</Network>
   <MyIP/>
@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/Gnathonic/mokuro-bunko/issues</Support>
   <Project>https://github.com/Gnathonic/mokuro-bunko</Project>
-  <Overview>Mokuro Bunko: self-hosted manga library server for Mokuro Reader (WebDAV, catalog, accounts) with OCR on an NVIDIA GPU (libtorch CUDA 13, built into the image; the OCR models download into Library Data on first use). Needs the Nvidia-Driver plugin with a driver &gt;= 580 and a Turing (GTX 16xx / RTX 20xx) or newer GPU; without a GPU it runs OCR on the CPU. For a server without GPU OCR use the mokuro-bunko-lite template. Tags: latest-cuda follows releases; pin a version with e.g. 0.7.0-cuda. Settings left empty fall back to config.yaml.</Overview>
+  <Overview>Mokuro Bunko: self-hosted manga library server for Mokuro Reader (WebDAV, catalog, accounts) with local OCR. The image carries no OCR backend: on first start it detects the GPU the container is given and downloads the matching backend into Library Data (about 2 GB for an NVIDIA GPU, 3 GB for AMD, 100 MB for the CPU), then the OCR models; later starts reuse them. NVIDIA: keep --runtime=nvidia in Extra Parameters and install the Nvidia-Driver plugin (driver &gt;= 580, Turing / GTX 16xx / RTX 20xx or newer). AMD (RX 6000/7000/9000): replace Extra Parameters with --device=/dev/kfd --device=/dev/dri. No GPU: clear Extra Parameters; OCR runs on the CPU. For a server without local OCR use the mokuro-bunko-lite template. Tags: latest follows releases (latest-cuda is the same image, for templates made for the 0.5.2 CUDA image); pin a version with e.g. 0.7.0. Settings left empty fall back to config.yaml.</Overview>
   <Category>MediaServer:Books Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/deploy/unraid/mokuro-bunko.xml</TemplateURL>
@@ -20,10 +20,10 @@
   <DateInstalled>0</DateInstalled>
   <DonateText/>
   <DonateLink/>
-  <Requires>Unraid Nvidia-Driver plugin (driver &gt;= 580) for CUDA OCR.</Requires>
+  <Requires>For NVIDIA OCR: the Unraid Nvidia-Driver plugin (driver &gt;= 580). For AMD OCR: the amdgpu driver (/dev/kfd).</Requires>
 
   <Config Name="Web UI Port" Target="8080" Default="8080" Mode="tcp" Description="HTTP port for mokuro-bunko" Type="Port" Display="always" Required="true" Mask="false"/>
-  <Config Name="Library Data" Target="/data" Default="/mnt/user/appdata/mokuro-bunko/data" Mode="rw" Description="Persistent library storage (library, database, logs, OCR models)" Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Library Data" Target="/data" Default="/mnt/user/appdata/mokuro-bunko/data" Mode="rw" Description="Persistent library storage (library, database, logs, OCR backend and models)" Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="Config Path" Target="/config" Default="/mnt/user/appdata/mokuro-bunko/config" Mode="rw" Description="Config directory (config.yaml lives here)" Type="Path" Display="always" Required="true" Mask="false"/>
 
   <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID to run as (Unraid nobody=99)" Type="Variable" Display="always" Required="true" Mask="false"/>
@@ -37,10 +37,11 @@
   <Config Name="MOKURO_STORAGE" Target="MOKURO_STORAGE" Default="/data" Mode="" Description="Storage base path inside container" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="nginx download offload" Target="MOKURO_NGINX_ACCEL" Default="0" Mode="" Description="1: run the bundled nginx in front and serve library downloads with X-Accel-Redirect (as in 0.5); 0: the server serves them itself" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
-  <Config Name="OCR Backend" Target="MOKURO_OCR_BACKEND" Default="auto" Mode="" Description="auto|cuda|cpu|skip" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="OCR Backend" Target="MOKURO_OCR_BACKEND" Default="auto" Mode="" Description="auto|cuda|rocm|cpu|skip: auto uses the GPU the container is given; cpu stays on the CPU; skip runs no OCR here (nothing is downloaded). Decides which OCR backend the first start downloads." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="OCR Auto Install" Target="MOKURO_OCR_AUTO_INSTALL" Default="true" Mode="" Description="true: download the OCR backend for this container's GPU on start when it is missing; false: no OCR backend until you run install-ocr in the container" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="OCR Generations" Target="MOKURO_OCR_GENERATIONS" Default="" Mode="" Description="Leave empty to use config.yaml, or the JSON list of OCR generations. Engines: hayai-nova, paddle-manga, ppocr-manga. Easier to edit in the admin panel (OCR - Generations)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="OCR Local Processing" Target="MOKURO_OCR_LOCAL_PROCESSING" Default="true" Mode="" Description="false: this container runs no OCR and waits for a remote processor (mokuro-bunko processor serve) to log in" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
-  <Config Name="NVIDIA_VISIBLE_DEVICES" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="GPU visibility for NVIDIA runtime" Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="NVIDIA_VISIBLE_DEVICES" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="GPU visibility for the NVIDIA runtime (NVIDIA only)" Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="NVIDIA_DRIVER_CAPABILITIES" Target="NVIDIA_DRIVER_CAPABILITIES" Default="compute,utility" Mode="" Description="NVIDIA driver capabilities" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 </Container>

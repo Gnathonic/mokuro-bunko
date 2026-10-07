@@ -1,8 +1,10 @@
 //! `install-ocr`: install the OCR backend pack for this machine (TORCH-BACKEND.md,
 //! PACKAGING.md §8) and fetch the models.
 //!
-//! 1. Pick the pack variant: `cu130` (NVIDIA, driver ≥ 580), `rocm7.1` (supported AMD
-//!    GPU, Linux) or `cpu` ([`crate::hwdetect`]); `--variant` overrides.
+//! 1. Pick the pack variant: what the owner's `ocr.backend` asks for on this hardware
+//!    ([`crate::hwdetect::preferred`]: `cu130` for NVIDIA with driver ≥ 580, `rocm7.1`
+//!    for a supported AMD GPU on Linux, else `cpu`; in a container only GPUs passed in
+//!    count); `--variant` overrides (`--variant auto`: the hardware alone).
 //! 2. Find it in the signed `release.json` of **this** version (`backends[target]`;
 //!    a pack belongs to exactly one release: this binary opens no other release's),
 //!    download the archive (resuming), check its sha256, unpack it into
@@ -15,6 +17,11 @@
 //! Whose storage: the library server's, or with `--processor` (automatic on a machine
 //! with a processor.yaml and no library configuration) the processor's
 //! ([`crate::ocr_target`]). A processor also uses a pack found in the library's storage.
+//!
+//! `--if-needed` (the Docker image's entrypoint runs it on every start): nothing when
+//! local OCR is off, `MOKURO_OCR_AUTO_INSTALL=false`, or a pack of this release that
+//! serves the choice is there (for `cpu`, a GPU pack also serves); otherwise the steps
+//! above, then the packs the new one replaces are removed.
 //!
 //! `--from <dir>` installs from local files instead (air-gapped hosts, tests): the pack
 //! archive (or its parts), optionally `release.json` + `.sig` (then checked like a
@@ -54,7 +61,25 @@ mod full {
         if args.engines.is_some() || args.detector.is_some() {
             println!("Note: --engines/--detector are 0.5 options and are ignored.");
         }
+        if args.if_needed {
+            let (on, note) = auto_install_setting(|n| std::env::var(n).ok());
+            if let Some(n) = note {
+                println!("{n}");
+            }
+            if !on {
+                println!(
+                    "Automatic OCR install is off (MOKURO_OCR_AUTO_INSTALL=false): local OCR has no backend until 'mokuro-bunko install-ocr' is run."
+                );
+                return Ok(());
+            }
+        }
         let ocr = crate::ocr_target::resolve(ctx, args.processor)?;
+        if args.if_needed
+            && let Some(why) = ocr.local_ocr_off()
+        {
+            println!("Local OCR is off ({why}): no OCR backend to install.");
+            return Ok(());
+        }
         println!("{}", ocr.describe());
         let root = args.dir.clone().unwrap_or_else(|| ocr.backends_dir());
         // Where an installed pack counts: `--dir` alone, else every directory this
@@ -66,18 +91,25 @@ mod full {
         let target = bunko_update::TARGET;
         let hw = hwdetect::detect();
         let auto = hwdetect::choose(&hw, target);
+        // No --variant: what the owner's `ocr.backend` asks for on this hardware.
+        let pref = ocr.backend_preference();
+        let wanted = hwdetect::preferred(&pref, &hw, target);
         let requested = match (&args.variant, args.backend.as_deref()) {
-            (Some(v), _) => v.clone(),
-            (None, Some(b)) => legacy_backend(b)?.to_string(),
-            (None, None) => "auto".into(),
+            (Some(v), _) => Some(v.clone()),
+            (None, Some(b)) => Some(legacy_backend(b)?.to_string()),
+            (None, None) => None,
         };
-        let variant = if requested == "auto" {
-            auto.variant.to_string()
-        } else {
-            requested.clone()
+        let choice = match requested.as_deref() {
+            None => Some(&wanted),
+            Some("auto") => Some(&auto),
+            Some(_) => None,
+        };
+        let variant = match choice {
+            Some(c) => c.variant.to_string(),
+            None => requested.clone().unwrap_or_default(),
         };
         if args.list {
-            print_status(&hw, &auto, &root, &search);
+            print_status(&hw, &wanted, &root, &search);
             return Ok(());
         }
         if args.probe {
@@ -85,16 +117,21 @@ mod full {
         }
         println!(
             "OCR backend: {variant}{}",
-            if requested == "auto" {
-                format!(" ({})", auto.reason)
-            } else {
-                String::new()
+            match choice {
+                Some(c) => format!(" ({})", c.reason),
+                None => String::new(),
             }
         );
-        if requested == "auto"
-            && let Some(h) = &auto.hint
-        {
+        if let Some(h) = choice.and_then(|c| c.hint.as_ref()) {
             println!("  {h}");
+        }
+
+        if args.if_needed
+            && !args.force
+            && let Some(kept) = already_fits(&search, &variant)
+        {
+            println!("{kept}");
+            return Ok(());
         }
 
         // No `--from`: the offline OCR files bundled with this copy (the macOS app), if
@@ -127,6 +164,26 @@ mod full {
                 .block_on(install(&root, &variant, target, from.as_deref(), &source))
                 .map_err(|f| Fail::msg(f.to_string()))?;
             println!("Installed {}", dir.display());
+            if args.if_needed {
+                // The packs this one replaces (another GPU, a GPU that is gone, another
+                // release): never opened again, often gigabytes.
+                for (other, m) in pack::installed(&root) {
+                    if other != dir {
+                        println!(
+                            "Removing {} ({} for mokuro-bunko {}): replaced by {}",
+                            other.display(),
+                            m.variant,
+                            if m.bunko_version.is_empty() {
+                                "a development build"
+                            } else {
+                                m.bunko_version.as_str()
+                            },
+                            variant
+                        );
+                        let _ = std::fs::remove_dir_all(&other);
+                    }
+                }
+            }
             dir
         };
         // What this machine's GPU called for when the pack went in: a later change of
@@ -190,23 +247,9 @@ mod full {
             .find_map(|c| std::process::Command::new(c).arg("-p").output().ok())
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();
-        let dirs = [
-            "/lib",
-            "/lib64",
-            "/usr/lib",
-            "/usr/lib64",
-            "/lib/x86_64-linux-gnu",
-            "/usr/lib/x86_64-linux-gnu",
-            "/usr/local/lib",
-        ];
         libs.iter()
             .filter(|l| l.as_str() != "libcuda.so.1")
-            .filter(|l| {
-                !cache
-                    .lines()
-                    .any(|line| line.trim_start().starts_with(&format!("{l} ")))
-                    && !dirs.iter().any(|d| Path::new(d).join(l.as_str()).exists())
-            })
+            .filter(|l| !hwdetect::library_in(&cache, l, |p| p.exists()))
             .cloned()
             .collect()
     }
@@ -300,6 +343,70 @@ mod full {
         })
     }
 
+    /// `install-ocr --if-needed`: a pack of this release that serves `variant` is
+    /// installed (the message to print), or None. For `cpu` an installed GPU pack
+    /// counts too: it runs on the CPU as well, and keeping it costs no download when
+    /// the container next starts with its GPU again.
+    pub fn already_fits(roots: &[PathBuf], variant: &str) -> Option<String> {
+        if let Some((dir, m)) = find_installed(roots, variant) {
+            return Some(format!(
+                "Already installed: {} ({}, mokuro-bunko {}); nothing to download",
+                dir.display(),
+                m.name,
+                m.bunko_version
+            ));
+        }
+        if variant != "cpu" {
+            return None;
+        }
+        ["cu130", "rocm7.1"].into_iter().find_map(|gpu| {
+            find_installed(roots, gpu).map(|(dir, m)| {
+                format!(
+                    "Keeping the installed {} pack ({}): it runs on the CPU too; nothing to download",
+                    m.variant,
+                    dir.display()
+                )
+            })
+        })
+    }
+
+    /// Whether `install-ocr --if-needed` may install (default yes), and a note to print.
+    /// `MOKURO_OCR_AUTO_INSTALL=false` turns it off. 0.5.2's `OCR_AUTO_INSTALL=true`
+    /// still turns it on; its `OCR_AUTO_INSTALL=false` (the 0.5.2 Unraid template's
+    /// default) never stopped 0.5.2's server from installing OCR on start, so it does
+    /// not stop this one either.
+    pub fn auto_install_setting(var: impl Fn(&str) -> Option<String>) -> (bool, Option<String>) {
+        fn parse(v: &str) -> Option<bool> {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => Some(true),
+                "0" | "false" | "no" | "off" => Some(false),
+                _ => None,
+            }
+        }
+        // The 0.5.2 variable's `false` is worth a word whenever the install goes ahead
+        // (the image sets MOKURO_OCR_AUTO_INSTALL=true itself).
+        let legacy_off = var("OCR_AUTO_INSTALL").as_deref().and_then(parse) == Some(false);
+        let legacy_note = || {
+            legacy_off.then(|| {
+                "Note: OCR_AUTO_INSTALL=false (0.5.2's setting) does not turn the automatic OCR install off, as it did not in 0.5.2; set MOKURO_OCR_AUTO_INSTALL=false for that."
+                    .to_string()
+            })
+        };
+        match var("MOKURO_OCR_AUTO_INSTALL").filter(|v| !v.trim().is_empty()) {
+            Some(v) => match parse(&v) {
+                Some(false) => (false, None),
+                Some(true) => (true, legacy_note()),
+                None => (
+                    true,
+                    Some(format!(
+                        "MOKURO_OCR_AUTO_INSTALL={v:?} is not true/false: installing as by default"
+                    )),
+                ),
+            },
+            None => (true, legacy_note()),
+        }
+    }
+
     /// An installed pack of `variant` for this target, in `roots` (in order) or the
     /// bundled directory, whose files are all present with the right sizes (hashing
     /// gigabytes on every call would be slow; `install-ocr --force` re-verifies
@@ -352,7 +459,7 @@ mod full {
 
     fn print_status(
         hw: &hwdetect::Hardware,
-        auto: &hwdetect::Choice,
+        wanted: &hwdetect::Choice,
         root: &Path,
         search: &[PathBuf],
     ) {
@@ -380,8 +487,8 @@ mod full {
         for h in &hw.hidden {
             println!("Hidden: {h}");
         }
-        println!("Would install: {} ({})", auto.variant, auto.reason);
-        if let Some(h) = &auto.hint {
+        println!("Would install: {} ({})", wanted.variant, wanted.reason);
+        if let Some(h) = &wanted.hint {
             println!("  {h}");
         }
         println!("Variants: cpu, cu130 (NVIDIA, Linux/Windows), rocm7.1 (AMD, Linux)");
@@ -1135,6 +1242,99 @@ mod tests {
             find_installed(&roots, "cpu").is_some(),
             "a development pack"
         );
+    }
+
+    fn lookup<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |n| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == n)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn automatic_install_is_on_unless_turned_off() {
+        assert_eq!(auto_install_setting(lookup(&[])), (true, None));
+        for off in ["false", "0", "no", "OFF"] {
+            assert_eq!(
+                auto_install_setting(lookup(&[("MOKURO_OCR_AUTO_INSTALL", off)])),
+                (false, None),
+                "{off}"
+            );
+        }
+        assert_eq!(
+            auto_install_setting(lookup(&[("MOKURO_OCR_AUTO_INSTALL", "true")])),
+            (true, None)
+        );
+        // 0.5.2's variable: true still means on; its template's `false` never stopped
+        // 0.5.2 from installing, so it is noted and ignored.
+        assert_eq!(
+            auto_install_setting(lookup(&[("OCR_AUTO_INSTALL", "true")])),
+            (true, None)
+        );
+        let (on, note) = auto_install_setting(lookup(&[("OCR_AUTO_INSTALL", "false")]));
+        assert!(on);
+        assert!(note.unwrap().contains("MOKURO_OCR_AUTO_INSTALL=false"));
+        // The new variable decides when both are set; the image sets it to true, and
+        // the old `false` is still noted then.
+        assert_eq!(
+            auto_install_setting(lookup(&[
+                ("OCR_AUTO_INSTALL", "true"),
+                ("MOKURO_OCR_AUTO_INSTALL", "false")
+            ])),
+            (false, None)
+        );
+        let (on, note) = auto_install_setting(lookup(&[
+            ("OCR_AUTO_INSTALL", "false"),
+            ("MOKURO_OCR_AUTO_INSTALL", "true"),
+        ]));
+        assert!(on && note.is_some());
+        let (on, note) = auto_install_setting(lookup(&[("MOKURO_OCR_AUTO_INSTALL", "maybe")]));
+        assert!(on && note.is_some());
+    }
+
+    #[test]
+    fn if_needed_keeps_a_fitting_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = vec![dir.path().to_path_buf()];
+        let add = |variant: &str, version: &str| {
+            let pack = dir.path().join(format!("torch-{variant}-2.13.0"));
+            std::fs::create_dir_all(&pack).unwrap();
+            let m = serde_json::json!({
+                "format": 1, "name": format!("torch-{variant}-2.13.0"), "variant": variant,
+                "torch": "2.13.0", "target": bunko_update::TARGET, "os": "linux",
+                "arch": "x86_64", "abi": 1, "library": "", "bunko_version": version,
+                "files": []
+            });
+            std::fs::write(pack.join("pack.json"), m.to_string()).unwrap();
+        };
+        // Nothing installed: install.
+        assert!(already_fits(&roots, "cpu").is_none());
+        assert!(already_fits(&roots, "rocm7.1").is_none());
+        // Another release's pack does not count.
+        add("rocm7.1", "0.0.1");
+        assert!(already_fits(&roots, "rocm7.1").is_none());
+        assert!(already_fits(&roots, "cpu").is_none());
+        // This release's GPU pack serves its GPU, and the CPU too (no cpu download)...
+        add("rocm7.1", bunko_core::VERSION);
+        assert!(
+            already_fits(&roots, "rocm7.1")
+                .unwrap()
+                .starts_with("Already installed")
+        );
+        let kept = already_fits(&roots, "cpu").unwrap();
+        assert!(
+            kept.starts_with("Keeping the installed rocm7.1 pack"),
+            "{kept}"
+        );
+        // ...but not another GPU: a new GPU gets its own pack.
+        assert!(already_fits(&roots, "cu130").is_none());
+        // A cpu pack serves cpu only.
+        std::fs::remove_dir_all(dir.path().join("torch-rocm7.1-2.13.0")).unwrap();
+        add("cpu", bunko_core::VERSION);
+        assert!(already_fits(&roots, "cpu").is_some());
+        assert!(already_fits(&roots, "rocm7.1").is_none());
     }
 
     #[test]

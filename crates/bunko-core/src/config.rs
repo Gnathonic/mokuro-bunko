@@ -36,7 +36,10 @@ fn invalid(msg: impl Into<String>) -> ConfigError {
 pub const REGISTRATION_MODES: &[&str] = &["disabled", "self", "invite", "approval"];
 pub const DEFAULT_ROLES: &[&str] = &["registered", "uploader", "inviter", "editor"];
 pub const QUEUE_DISPLAY_LEVELS: &[&str] = &["minimal", "normal", "detailed"];
-/// `rocm` is accepted as an alias of `webgpu` (onnxruntime dropped its ROCm provider).
+/// `ocr.backend`: which devices local OCR may use and so which backend pack
+/// `install-ocr` and the Docker images fetch (`cuda`: NVIDIA, `rocm`: AMD, `cpu`, `auto`:
+/// the hardware decides; `skip`: no local OCR). `webgpu`, `directml`, `coreml` are the
+/// unreleased ONNX Runtime providers.
 pub const OCR_BACKENDS: &[&str] = &[
     "auto", "cuda", "rocm", "webgpu", "directml", "coreml", "cpu", "skip",
 ];
@@ -1245,13 +1248,11 @@ impl OcrConfig {
         Ok(())
     }
 
-    /// `rocm` is the 0.5 spelling of the AMD path, which is WebGPU in 0.7.
+    /// The backend the engines get: `rocm` is the AMD path again in 0.7 (libtorch's
+    /// ROCm build in the `rocm7.1` pack), not an alias of WebGPU as in the ONNX-only
+    /// design, which made `ocr.backend: rocm` hide the AMD GPU.
     pub fn effective_backend(&self) -> &str {
-        if self.backend == "rocm" {
-            "webgpu"
-        } else {
-            &self.backend
-        }
+        &self.backend
     }
 }
 

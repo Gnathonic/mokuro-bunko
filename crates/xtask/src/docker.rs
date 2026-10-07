@@ -2,11 +2,12 @@
 //! `BIN_FROM=prebuilt` stage, so images reuse the signed release builds instead of
 //! compiling again (and arm64 images need no emulated compile).
 //!
-//! Layout: `<out>/<amd64|arm64>/<lite|full|cuda>/` holding the archive's files plus
-//! `bunko-init` (the PUID/PGID entrypoint from `packaging/docker-init`). The full and
-//! cuda images run the same `full` binary; each also gets its OCR backend pack,
-//! installed complete under `backends/` (full: `cpu`, cuda: `cu130` with the NVIDIA
-//! libraries fetched from PyPI and baked in).
+//! Layout: `<out>/<amd64|arm64>/<lite|full>/` holding the archive's files plus
+//! `bunko-init` (the PUID/PGID entrypoint from `packaging/docker-init`). The images
+//! carry no OCR backend pack: the full image downloads the one its container's GPU
+//! needs on first start (`install-ocr --if-needed`). `--bake-pack <variant>` (opt-in,
+//! never in a release) installs that pack, complete (cu130 with NVIDIA's libraries
+//! from PyPI), under `full/backends/` for an air-gapped self-build.
 
 use crate::archive;
 use crate::names;
@@ -31,6 +32,11 @@ pub struct DockerContextArgs {
     /// Don't build bunko-init (it must then be copied in by hand).
     #[arg(long)]
     pub no_init: bool,
+    /// Bake this backend pack (cpu, cu130, rocm7.1; its archive must be in --dir) into
+    /// the full image, for an air-gapped self-build. Releases bake nothing: the image
+    /// downloads the pack its GPU needs on first start.
+    #[arg(long, value_name = "VARIANT")]
+    pub bake_pack: Option<String>,
 }
 
 fn docker_arch(target: &str) -> Option<&'static str> {
@@ -52,22 +58,20 @@ fn slots(target: &str, flavor: &str) -> Vec<(&'static str, &'static str)> {
         target.ends_with("-unknown-linux-gnu"),
     ) {
         ("lite", true, _) => vec![(arch, "lite")],
-        // The CUDA image is the full binary with the cu130 pack (amd64 only).
-        ("full", _, true) if arch == "amd64" => vec![(arch, "full"), (arch, "cuda")],
+        // One full image for every GPU (`-cuda` is a tag of it, not another build).
         ("full", _, true) => vec![(arch, "full")],
         _ => vec![],
     }
 }
 
-/// The image flavor dir a backend pack goes into.
+/// The image flavor dir a baked backend pack goes into (`--bake-pack`).
 fn pack_slot(target: &str, variant: &str) -> Option<(&'static str, &'static str)> {
     if !target.ends_with("-unknown-linux-gnu") {
         return None;
     }
     let arch = docker_arch(target)?;
     match variant {
-        "cpu" => Some((arch, "full")),
-        "cu130" if arch == "amd64" => Some((arch, "cuda")),
+        "cpu" | "cu130" | "rocm7.1" => Some((arch, "full")),
         _ => None,
     }
 }
@@ -121,17 +125,28 @@ pub fn run(args: &DockerContextArgs) -> Result<()> {
             slots.push((arch.to_string(), dest));
         }
     }
-    // Backend packs, after the binaries (whose extraction resets the slot dirs).
+    // The baked backend pack, if asked for, after the binaries (whose extraction
+    // resets the slot dirs).
     let mut packs: std::collections::BTreeMap<(String, String), Vec<PathBuf>> =
         std::collections::BTreeMap::new();
     for e in std::fs::read_dir(&dir)?.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        if let Some((target, variant, _)) = crate::torch_pack::parse_pack_name(&name, &version) {
+        if let Some((target, variant, _)) = crate::torch_pack::parse_pack_name(&name, &version)
+            && args.bake_pack.as_deref() == Some(variant)
+        {
             packs
                 .entry((target.to_string(), variant.to_string()))
                 .or_default()
                 .push(e.path());
         }
+    }
+    if let Some(v) = &args.bake_pack
+        && packs.is_empty()
+    {
+        bail!(
+            "--bake-pack {v}: no mokuro-bunko-{version}-*-torch-{v}.tar.zst in {}",
+            dir.display()
+        );
     }
     let cache = crate::torch_pack::default_cache(&root);
     for ((target, variant), mut parts) in packs {
@@ -205,7 +220,7 @@ mod tests {
         );
         assert_eq!(
             slots("x86_64-unknown-linux-gnu", "full"),
-            vec![("amd64", "full"), ("amd64", "cuda")]
+            vec![("amd64", "full")]
         );
         assert_eq!(
             slots("aarch64-unknown-linux-gnu", "full"),
@@ -220,9 +235,13 @@ mod tests {
         );
         assert_eq!(
             pack_slot("x86_64-unknown-linux-gnu", "cu130"),
-            Some(("amd64", "cuda"))
+            Some(("amd64", "full"))
         );
-        assert_eq!(pack_slot("x86_64-unknown-linux-gnu", "rocm7.1"), None);
+        assert_eq!(
+            pack_slot("x86_64-unknown-linux-gnu", "rocm7.1"),
+            Some(("amd64", "full"))
+        );
+        assert_eq!(pack_slot("x86_64-unknown-linux-gnu", "rocm9"), None);
         assert_eq!(pack_slot("x86_64-pc-windows-msvc", "cpu"), None);
     }
 }

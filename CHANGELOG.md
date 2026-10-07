@@ -17,8 +17,8 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
   against the signed release manifest.
 - Release packages: Linux x86_64 full (glibc 2.28+) and static lite (x86_64,
   arm64), Windows x86_64 zip with a portable mode, macOS on Apple silicon, and
-  Docker images `:latest` (CPU OCR built in), `:latest-cuda` (NVIDIA OCR built in)
-  and `:latest-lite` (amd64 + arm64).
+  Docker images `:latest` (local OCR; the backend for the container's GPU is
+  downloaded on first start) and `:latest-lite` (amd64 + arm64).
 - `scripts/install.sh` and `scripts/install.ps1` install a release, checking its
   signed manifest and sha256.
 - One-click updates: the admin panel's Updates card checks for new releases
@@ -87,6 +87,32 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
   `ppocr-manga`, all Apache-2.0. A fresh config has one `hayai-nova` primary row.
   At fp32 their text is identical to 0.5.2's; default speed is above a tuned 0.5.2
   on every GPU tested (e.g. RTX 4090 13.9 vs 10.5 pages/s, RX 6900 XT 4.35 vs 2.75).
+- OCR backends and models are downloaded on demand, after hardware detection and
+  by the owner's preference, never baked into a release:
+  - The full Docker image carries no backend pack and no model. On every start it
+    runs `install-ocr --if-needed`: it detects the GPU the container was given
+    (NVIDIA through the container toolkit, AMD through `/dev/kfd` + `/dev/dri`, a
+    host GPU not passed in does not count), applies `ocr.backend`, downloads the
+    matching pack into `/data/backends` and the enabled engines' models into
+    `/data/models`, and does nothing on later starts. A new GPU gets its pack (the
+    replaced one is removed). `MOKURO_OCR_AUTO_INSTALL=false` turns it off;
+    0.5.2's `OCR_AUTO_INSTALL=false` is ignored, as it never stopped 0.5.2 from
+    installing. `processor serve` in Docker does the same.
+  - AMD GPUs work in Docker (`--device /dev/kfd --device /dev/dri`); the server keeps
+    the device nodes' groups when it drops to `PUID:PGID`.
+  - `:latest-cuda` / `:<ver>-cuda` is a second tag of the full image (the 0.7 CUDA
+    image with its pack built in is gone), so templates written for the 0.5.2 CUDA
+    image keep working (they set `PUID`/`PGID` and `MOKURO_CONFIG` themselves).
+    `BAKE_PACK=1` builds a pack into a self-built image for hosts without internet.
+  - `install-ocr` without `--variant` installs the pack `ocr.backend` asks for on
+    this hardware: `cpu` stays on the CPU with a GPU present, `cuda`/`rocm` fall back
+    to `cpu` with a hint when that GPU is not usable; `--variant auto` is the hardware
+    alone. `doctor` judges the installed pack the same way. Model downloads follow
+    the enabled generations: a library that only enables hayai-nova never fetches
+    paddle-manga.
+  - The macOS disk image no longer bundles the OCR backend and models: the setup
+    wizard's OCR step detects the Mac's hardware and downloads them, as on the other
+    platforms (`make-dmg.sh --bundle-ocr <dir>` still builds an offline image).
 - `ocr.backend` is `auto`, `cuda`, `rocm`, `cpu` or `skip`. Automatic precision
   picks bf16 only where the hardware runs it natively (NVIDIA Ampere and newer,
   AMD RDNA3/4); RDNA2 and the CPU run fp32 like 0.5.2.
@@ -132,6 +158,8 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 - Invites with an unreadable expiry are treated as expired instead of causing a 500,
   and an invite and its audit row are written together.
 - The failed-login limiter's table is bounded in size.
+- `ocr.backend: rocm` drives the AMD GPU again: pre-release 0.7 builds read it as
+  WebGPU (an ONNX Runtime provider releases do not have), which left the GPU unused.
 
 ### Known issues
 - On a Mac (Apple silicon, CPU OCR) hayai-nova runs about 3–4% slower than 0.5.2

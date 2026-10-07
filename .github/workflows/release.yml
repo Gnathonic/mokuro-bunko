@@ -447,7 +447,7 @@ jobs:
           fi
 
   docker:
-    needs: [prepare, test, build-linux-full, build-linux-x64-lite, build, packs-linux]
+    needs: [prepare, test, build-linux-full, build-linux-x64-lite, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -472,17 +472,12 @@ jobs:
           pattern: dist-linux-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: pack-linux-*
-          path: dist
-          merge-multiple: true
-      # The images reuse the release binaries and packs (BIN_FROM=prebuilt): no second
-      # compile, and the arm64 lite image needs no emulated build. docker-context
-      # installs the cpu pack into the full image and the cu130 pack, completed with
-      # NVIDIA's wheels from PyPI, into the cuda image (see PACKAGING.md §8 on the
-      # NVIDIA licences before pushing the cuda image).
-      - name: docker context (release binaries + packs + bunko-init per arch)
+      # The images reuse the release binaries (BIN_FROM=prebuilt): no second compile,
+      # and the arm64 lite image needs no emulated build. No backend pack and no model
+      # goes into any image: the full image downloads the pack its container's GPU
+      # needs from this release on first start (PACKAGING.md §2). Never pass
+      # --bake-pack here.
+      - name: docker context (release binaries + bunko-init per arch)
         run: cargo run -q -p xtask --locked -- docker-context --version "$VERSION" --dir dist --out dist/docker --zig
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -502,7 +497,9 @@ jobs:
             VERSION=${{ env.VERSION }}
           tags: ${{ env.IMAGE }}:${{ env.VERSION }}-lite
           push: true
-      - name: full (CPU OCR pack, with optional nginx)
+      # One full image for CPU, NVIDIA and AMD (the pack is downloaded on first start),
+      # also tagged -cuda so templates written for the 0.5.2 CUDA image keep working.
+      - name: full (local OCR, backend downloaded on first start; optional nginx)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -510,17 +507,9 @@ jobs:
           platforms: linux/amd64
           build-args: |
             BIN_FROM=prebuilt
+            BAKE_PACK=0
             VERSION=${{ env.VERSION }}
-          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
-          push: true
-      - name: cuda (cu130 OCR pack, amd64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile.cuda
-          platforms: linux/amd64
-          build-args: |
-            BIN_FROM=prebuilt
-            VERSION=${{ env.VERSION }}
-          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-cuda
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.IMAGE }}:${{ env.VERSION }}-cuda
           push: true

@@ -1,7 +1,8 @@
-# mokuro-bunko with local OCR on the CPU (the image carries the CPU OCR backend pack;
-# the models are downloaded into the data volume on first use). For an NVIDIA GPU use
-# docker-compose.unraid-cuda.yml (image :latest-cuda); for a small server without OCR
-# use docker-compose.lite.yml.
+# mokuro-bunko with local OCR. The image carries no OCR backend: the first start
+# detects the GPU the container is given and downloads the matching backend pack into
+# the data volume (CPU about 100 MB, NVIDIA about 2 GB, AMD about 3 GB), then the
+# enabled engines' models; later starts reuse them. Uncomment the NVIDIA or AMD lines
+# below for GPU OCR; for a small server without OCR use docker-compose.lite.yml.
 #
 #   docker compose -f deploy/docker-compose.yml up -d
 services:
@@ -30,7 +31,18 @@ services:
       - MOKURO_REGISTRATION_MODE=self
       # nginx in front, serving library downloads via X-Accel-Redirect:
       # - MOKURO_NGINX_ACCEL=1
-    # The image has a HEALTHCHECK (`mokuro-bunko healthcheck`).
+      # auto (default: the GPU the container is given), cuda, rocm, cpu, or skip:
+      # - MOKURO_OCR_BACKEND=cpu
+      # No automatic OCR backend download on start (then run install-ocr yourself):
+      # - MOKURO_OCR_AUTO_INSTALL=false
+    # NVIDIA GPU (driver >= 580 and the NVIDIA container toolkit on the host):
+    # gpus: all
+    # AMD GPU (Radeon RX 6000/7000/9000, Linux):
+    # devices:
+    #   - /dev/kfd
+    #   - /dev/dri
+    # The image has a HEALTHCHECK (`mokuro-bunko healthcheck`); its start period
+    # covers the first start's OCR backend download.
 
 volumes:
   mokuro-data:

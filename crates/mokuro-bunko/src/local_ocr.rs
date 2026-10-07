@@ -33,7 +33,7 @@ pub fn factory(
             backend: bunko_engines::Backend::parse(config.ocr.effective_backend()),
             jobs: config.ocr.concurrency.max(1) as usize,
             generator: format!("mokuro-bunko {}", bunko_core::VERSION),
-            fallback_backends: Vec::new(),
+            fallback_backends: crate::ocr_target::shipped_backends().into_iter().collect(),
         },
     }))
 }

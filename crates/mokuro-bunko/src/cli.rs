@@ -377,8 +377,15 @@ pub struct OcrTargetArgs {
 #[derive(Args, Debug, Default)]
 pub struct InstallOcrArgs {
     /// Backend pack: auto (detect the GPU), cpu, cu130 (NVIDIA), rocm7.1 (AMD, Linux)
+    /// [default: what ocr.backend in the config asks for on this hardware]
     #[arg(long, value_parser = PossibleValuesParser::new(["auto", "cpu", "cu130", "rocm7.1"]))]
     pub variant: Option<String>,
+    /// Only when needed (what the Docker images run on start): nothing when local OCR
+    /// is off or a fitting pack of this release is installed; otherwise install the
+    /// pack and the enabled engines' models, and remove the packs it replaces.
+    /// MOKURO_OCR_AUTO_INSTALL=false turns it off
+    #[arg(long)]
+    pub if_needed: bool,
     /// Install from a directory holding the pack archive (and optionally the signed
     /// release.json and the NVIDIA wheels) instead of downloading
     #[arg(long, value_name = "DIR")]

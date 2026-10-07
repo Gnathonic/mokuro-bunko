@@ -55,7 +55,37 @@ impl OcrTarget {
         if self.role == Role::Processor {
             c.fallback_backends = library_fallback_backends();
         }
+        c.fallback_backends.extend(shipped_backends());
         c
+    }
+
+    /// The owner's device preference (`ocr.backend`): the library's configuration
+    /// (with its `MOKURO_OCR_BACKEND` override); for a processor `MOKURO_OCR_BACKEND`,
+    /// as `processor serve` reads it, else `auto` (what its hardware offers).
+    pub fn backend_preference(&self) -> String {
+        match (&self.role, &self.library) {
+            (Role::Library, Some(c)) => c.ocr.effective_backend().to_string(),
+            _ => std::env::var("MOKURO_OCR_BACKEND")
+                .ok()
+                .filter(|b| !b.trim().is_empty())
+                .unwrap_or_else(|| "auto".into()),
+        }
+    }
+
+    /// Why this role runs no local OCR (`ocr.backend: skip`, `ocr.local_processing:
+    /// false`), or None. A processor always runs OCR.
+    pub fn local_ocr_off(&self) -> Option<String> {
+        let c = self
+            .library
+            .as_ref()
+            .filter(|_| self.role == Role::Library)?;
+        if c.ocr.backend == "skip" {
+            Some("ocr.backend is skip".into())
+        } else if !c.ocr.local_processing {
+            Some("ocr.local_processing is false (remote processors do the OCR)".into())
+        } else {
+            None
+        }
     }
 
     /// Where `install-ocr` installs (`MOKURO_BACKENDS_DIR`, else `<storage>/backends`).
@@ -89,6 +119,15 @@ impl OcrTarget {
             ),
         }
     }
+}
+
+/// Packs shipped next to the executable (`<exe dir>/backends`: a Docker image built
+/// with `BAKE_PACK=1`), searched after the storage's, so a pack installed into the
+/// storage (`install-ocr`, the images' automatic install) comes first. None when there
+/// is no such directory.
+pub fn shipped_backends() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.join("backends");
+    dir.is_dir().then_some(dir)
 }
 
 /// The library's backends directories a processor also searches: the configured
@@ -160,6 +199,39 @@ mod tests {
         assert_eq!(decide(false, true, true), Role::Library);
         assert_eq!(decide(false, true, false), Role::Library);
         assert_eq!(decide(false, false, false), Role::Library);
+    }
+
+    #[test]
+    fn preference_and_local_ocr_switches() {
+        let lib = |f: &dyn Fn(&mut bunko_core::Config)| {
+            let mut c = bunko_core::Config::default();
+            f(&mut c);
+            OcrTarget {
+                role: Role::Library,
+                storage: PathBuf::from("/srv/lib"),
+                processor_config: None,
+                library: Some(c),
+                reason: String::new(),
+            }
+        };
+        let t = lib(&|_| {});
+        assert_eq!(t.backend_preference(), "auto");
+        assert_eq!(t.local_ocr_off(), None);
+        let t = lib(&|c| c.ocr.backend = "rocm".into());
+        // The AMD GPU, not WebGPU (the ONNX-only design's alias).
+        assert_eq!(t.backend_preference(), "rocm");
+        let t = lib(&|c| c.ocr.backend = "cpu".into());
+        assert_eq!(t.backend_preference(), "cpu");
+        let t = lib(&|c| c.ocr.backend = "skip".into());
+        assert!(t.local_ocr_off().unwrap().contains("skip"));
+        let t = lib(&|c| c.ocr.local_processing = false);
+        assert!(t.local_ocr_off().unwrap().contains("local_processing"));
+        // A processor always runs OCR.
+        let p = OcrTarget {
+            role: Role::Processor,
+            ..lib(&|c| c.ocr.backend = "skip".into())
+        };
+        assert_eq!(p.local_ocr_off(), None);
     }
 
     #[test]

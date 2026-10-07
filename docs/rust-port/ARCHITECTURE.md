@@ -137,5 +137,6 @@ JSON-over-stdio, and remote processors used an HTTP API. 0.7 has one path:
 
 See `docs/rust-port/PACKAGING.md` (to be written after the server builds): GitHub Actions
 matrix → tar.gz/zip per target, an MSI or zip for Windows, a macOS universal tarball,
-Docker images (`lite` distroless-static, `full`, `full-cuda`), and an Android APK. A
+Docker images (`lite` distroless-static and `full`, which downloads its OCR backend pack on first
+start; `-cuda` is a tag of `full`), and an Android APK. A
 signed `release.json` manifest drives the updater.
