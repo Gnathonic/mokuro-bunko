@@ -254,13 +254,13 @@ def build_library() -> None:
     (LIBRARY / "sidecar-only" / "orphan.mokuro").write_bytes(dumps(mokuro([page("1.jpg")])))
     write_zip(LIBRARY / "loose.cbz", ["1.jpg"])
 
-    # --- mtimes: deterministic, some with sub-second parts.
+    # --- mtimes: deterministic, some with sub-second parts (whole 100 ns: NTFS keeps no finer).
     mtimes = {}
     files = sorted(p for p in LIBRARY.rglob("*") if p.is_file())
     for index, path in enumerate(files):
         rel = path.relative_to(LIBRARY).as_posix()
         seconds = BASE_MTIME + index * 1000
-        nanos = 0 if index % 3 == 0 else (index * 123_456_789) % 1_000_000_000
+        nanos = 0 if index % 3 == 0 else (index * 123_456_789) % 1_000_000_000 // 100 * 100
         mtimes[rel] = [seconds, nanos]
     (HERE / "mtimes.json").write_text(json.dumps(mtimes, ensure_ascii=True, indent=1, sort_keys=True), encoding="ascii")
 

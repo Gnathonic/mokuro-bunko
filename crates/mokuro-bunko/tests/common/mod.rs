@@ -31,7 +31,8 @@ impl Env {
         self.root().join("storage")
     }
 
-    /// `XDG_DATA_HOME/mokuro-bunko` (default storage and auto-cert dir).
+    /// `XDG_DATA_HOME/mokuro-bunko`, on Windows `%LOCALAPPDATA%\mokuro-bunko` (default
+    /// storage and auto-cert dir).
     pub fn data_dir(&self) -> PathBuf {
         self.root().join("data").join("mokuro-bunko")
     }
@@ -45,6 +46,15 @@ impl Env {
             .env("MOKURO_CONFIG", self.config_path())
             .env("NO_COLOR", "1")
             .current_dir(self.root());
+        if cfg!(windows) {
+            // Windows' counterparts of HOME and XDG_DATA_HOME, and SYSTEMROOT, without
+            // which Winsock and other system DLLs fail to initialise.
+            c.env("USERPROFILE", self.root())
+                .env("LOCALAPPDATA", self.root().join("data"));
+            if let Some(root) = std::env::var_os("SYSTEMROOT") {
+                c.env("SYSTEMROOT", root);
+            }
+        }
         c
     }
 
