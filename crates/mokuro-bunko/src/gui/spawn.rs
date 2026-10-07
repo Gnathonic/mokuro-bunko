@@ -98,8 +98,8 @@ pub fn pid_alive(pid: u32) -> bool {
             return false;
         };
         // SAFETY: signal 0 only checks for existence and permission.
-        unsafe { libc::kill(pid, 0) == 0 }
-        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        let alive = unsafe { libc::kill(pid, 0) == 0 };
+        alive || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
     #[cfg(windows)]
     {
