@@ -302,6 +302,41 @@ impl Roots {
         }
     }
 
+    /// Where a MOVE/COPY puts the member `name` of the collection `parent` (0.5.3
+    /// `PathMapper.destination_to_physical`). [`Roots::member_path`], except that a library
+    /// member is taken as written instead of resolved: on a case-insensitive filesystem
+    /// resolving `Kingdom` can hand back the source's own `kingdom`, turning a rename that
+    /// fixes the case into a rename onto itself. Where the literal path LEADS must still be
+    /// inside the library (a COPY writes through a symlink sitting at the destination).
+    pub fn destination_path(
+        &self,
+        parent: &Resource,
+        name: &str,
+        username: Option<&str>,
+    ) -> Option<(PathBuf, FileKind)> {
+        let dir = match parent {
+            Resource::Virtual { path } if paths::normalize(path) == format!("/{READER_ROOT}") => {
+                if paths::is_per_user_name(name) {
+                    return self.member_path(parent, name, username);
+                }
+                self.library.as_path()
+            }
+            Resource::Folder { phys, .. } => phys.as_path(),
+            _ => return None,
+        };
+        if matches!(name, "" | "." | "..") || name.contains('/') || name.contains('\0') {
+            return None;
+        }
+        #[cfg(windows)]
+        if name.contains('\\') {
+            return None;
+        }
+        let candidate = dir.join(name);
+        let rel = self.library_rel(&candidate)?;
+        paths::resolve_under(&self.library, &rel)?;
+        Some((candidate, FileKind::Library))
+    }
+
     /// Members of a collection: `(virtual path, resource)`, in listing order (spec §8.2).
     /// Blocking.
     pub fn members(&self, res: &Resource, username: Option<&str>) -> Vec<Resource> {

@@ -351,7 +351,8 @@ impl MetadataService {
         }
     }
 
-    /// `_materialize_catalog_row`: the render-ready `catalog_series` row.
+    /// `_materialize_catalog_row`: this folder's render-ready catalog row
+    /// (`catalog_folders`, keyed by folder name).
     fn materialize_catalog_row(
         &self,
         folder: &SeriesFolder,
@@ -470,11 +471,11 @@ impl MetadataService {
             if !aborted && !self.is_stopped() {
                 let _guard = self.pass_lock.lock();
                 self.store.prune_series_entry_cache(&keep)?;
-                let series_keys: HashSet<String> = folders
-                    .iter()
-                    .map(|folder| normalize_volume_title_key(&folder.title))
-                    .collect();
-                self.store.prune_catalog_series(&series_keys)?;
+                // Kept by FOLDER (0.5.3): case-variant folders share a series key but
+                // each has its own catalog row.
+                let folder_names: HashSet<String> =
+                    folders.iter().map(|folder| folder.title.clone()).collect();
+                self.store.prune_catalog_series(&folder_names)?;
                 changed += self.publish_catalog_logged(&catalog_entries);
             }
         }

@@ -31,6 +31,8 @@ flate2 = "1"
 crc32fast = "1"
 # HTTP-date parsing/formatting (RFC 1123, RFC 850 and asctime, as WsgiDAV accepts).
 httpdate = "1"
+# NTFS-style path folding (0.5.3 `fold_name`: NFC, then lowercase).
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true

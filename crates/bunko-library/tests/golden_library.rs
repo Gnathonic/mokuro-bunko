@@ -1,4 +1,4 @@
-//! End-to-end golden test against Python 0.5.2 (`tests/golden/gen_library.py`):
+//! End-to-end golden test against Python 0.5.3 (`tests/golden/gen_library.py`):
 //! the same fixture library, the same full passes and client PUTs, and every
 //! compiled file must come out byte-identical; the database rows, the library
 //! index, the manifests and the archive page lists must match too.
@@ -31,8 +31,8 @@ const TABLES: &[(&str, &str, &[&str])] = &[
     ),
     ("series_entry_cache", "volume_key", &["volume_key", "series_key", "entry_json", "cbz_size", "cbz_mtime", "sidecar_key"]),
     (
-        "catalog_series",
-        "series_key",
+        "catalog_folders",
+        "folder_name",
         &[
             "series_key", "folder_name", "cover_path", "volume_count", "latest_volume_modified", "total_pages",
             "total_chars", "missing_pages", "damaged_volumes",
@@ -91,7 +91,7 @@ fn assert_files(root: &Path, step: &JsonValue, label: &str) {
     for (path, text) in &expected {
         assert_eq!(
             &actual[path], text,
-            "{label}: {path} differs from Python 0.5.2"
+            "{label}: {path} differs from Python 0.5.3"
         );
     }
 }

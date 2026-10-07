@@ -2,8 +2,8 @@
 
 ## [0.7.0] - Unreleased
 
-A rewrite in Rust, as a drop-in over 0.5.2 storage (same `config.yaml`,
-`mokuro.db` and library tree, same reader-facing APIs) and at parity with 0.5.2's
+A rewrite in Rust, as a drop-in over 0.5.2 and 0.5.3 storage (same `config.yaml`,
+`mokuro.db` and library tree, same reader-facing APIs) and at parity with 0.5.3's
 features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 
 ### Added
@@ -73,6 +73,11 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 - `update.public_key` (config file only, logged loudly) for fork and test releases.
 
 ### Changed
+- Library paths are case-insensitive, as on Windows and as in 0.5.3: `kingdom/` reaches
+  `Kingdom/`, an upload spelled in another case lands in the existing folder, renaming
+  a folder or file to fix its case works (0.5.2 refused it as locked), and the catalog
+  keeps one row per series folder, so case-variant folders that already exist no longer
+  hide each other.
 - A backend pack belongs to exactly one release: the program refuses a pack from
   another release ("the backend pack is from mokuro-bunko A, this is B: run
   install-ocr"), and `doctor`, `/control/status` and the tray name the pack as
@@ -134,6 +139,17 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
   the reference exactly, where 0.5.2's differed on arm64.
 - Windows packs are not yet tested on a machine without the VC++ runtime installed
   (they ship it app-local).
+
+## [0.5.3] - 2026-10-06
+
+### Changed
+- Library paths are case-insensitive, as on Windows: `kingdom/` reaches `Kingdom/`.
+
+### Fixed
+- Uploads spelled in another case land in the existing folder, not a new one.
+- The catalog lists every series folder; case-variant folders no longer hide each other.
+- Renaming a folder or file to fix its case works (it was refused as locked).
+- A case-fixing rename on a Windows or macOS server no longer deletes the folder.
 
 ## [0.5.2] - 2026-10-01
 

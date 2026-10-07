@@ -1,6 +1,9 @@
-"""Build the golden fixture library and record what Python 0.5.2 makes of it.
+"""Build the golden fixture library and record what Python 0.5.3 makes of it.
 
-    ~/.cache/mokuro-bunko-demo/ref052/bin/python crates/bunko-library/tests/golden/gen_library.py
+    ~/.cache/mokuro-bunko-demo/ref053/bin/python crates/bunko-library/tests/golden/gen_library.py
+
+(Generated with 0.5.2 up to the 0.5.3 port; 0.5.3 changed only the catalog table,
+`catalog_series` keyed by series key -> `catalog_folders` keyed by folder name.)
 
 1. (Re)builds `library/` next to this script: synthetic `.cbz` archives (some
    hand-crafted byte by byte: prepended data, duplicate names, CP437 names,
@@ -10,7 +13,7 @@
    Japanese, colliding series keys). Writes `mtimes.json` (git does not keep
    mtimes; the Rust test re-applies them).
 2. Copies the library to a temporary directory, applies the mtimes, and runs
-   0.5.2 there: a cold full pass, a sequence of client PUTs, a final full pass.
+   0.5.3 there: a cold full pass, a sequence of client PUTs, a final full pass.
    Records every compiled file after every step, the database tables, the
    library index snapshot, every volume manifest, and the archive page lists.
 
@@ -309,8 +312,8 @@ def dump_db(db_path: Path) -> dict:
         "series_facts": ("series_key", ["series_key", "series_title", "external_ids", "titles", "synonyms", "tag", "unit",
                                         "facts_updated_at", "spine_offset", "volume_offsets", "updated_by"]),
         "series_entry_cache": ("volume_key", ["volume_key", "series_key", "entry_json", "cbz_size", "cbz_mtime", "sidecar_key"]),
-        "catalog_series": ("series_key", ["series_key", "folder_name", "cover_path", "volume_count", "latest_volume_modified",
-                                          "total_pages", "total_chars", "missing_pages", "damaged_volumes"]),
+        "catalog_folders": ("folder_name", ["series_key", "folder_name", "cover_path", "volume_count", "latest_volume_modified",
+                                           "total_pages", "total_chars", "missing_pages", "damaged_volumes"]),
         "volume_identities": ("volume_key", ["volume_key", "volume_uuid"]),
     }
     out = {}
@@ -319,7 +322,7 @@ def dump_db(db_path: Path) -> dict:
         out[table] = [[{"type": type(row[c]).__name__, "value": row[c] if not isinstance(row[c], float) else repr(row[c])}
                        for c in columns] for row in rows]
     schema = [r[0] for r in conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name IN "
-                                          "('series_facts','series_entry_cache','catalog_series','volume_identities')")]
+                                          "('series_facts','series_entry_cache','catalog_folders','volume_identities')")]
     conn.close()
     out["schema"] = schema
     return out

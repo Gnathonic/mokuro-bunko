@@ -55,6 +55,15 @@ reviews and commits.
   code and open it from Rust; compile series.json with Python and compare bytes). Put
   generator scripts in `crates/<crate>/tests/golden/` with the fixtures they produce, so
   they can be regenerated.
+- Production runs 0.5.3 (NTFS-style case-insensitive library paths, the catalog keyed
+  by folder), and 0.7 is held to it: a Python 0.5.3 reference environment exists at
+  `~/.cache/mokuro-bunko-demo/ref053` (a uv venv with `mokuro_bunko` installed editable
+  from the scratch worktree `../ref-0.5.3`, a detached checkout of commit `4016476`;
+  never check it out in a main worktree). Recreate it with `git worktree add --detach
+  ../ref-0.5.3 4016476` and `uv venv --python 3.12 ~/.cache/mokuro-bunko-demo/ref053`
+  then `VIRTUAL_ENV=~/.cache/mokuro-bunko-demo/ref053 uv pip install -e ../ref-0.5.3
+  pytest httpx`. It drives `bunko-server/tests/differential_053.rs` and the 0.5.3
+  golden DB (`bunko-db/tests/golden/py053.*`).
 - Keep `/tmp` usage small (it is a RAM disk); put large scratch data under
   `~/.cache/mokuro-bunko-demo/tmp`.
 - Real manga samples with shipped `.mokuro` files are in `~/Downloads` (read-only; never

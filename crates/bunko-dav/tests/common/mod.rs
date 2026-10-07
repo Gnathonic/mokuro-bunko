@@ -2,6 +2,8 @@
 //! `DavHooks`, request builders and archive makers.
 #![allow(dead_code)]
 
+pub mod diff;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

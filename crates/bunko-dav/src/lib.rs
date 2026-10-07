@@ -18,6 +18,7 @@ mod conditional;
 mod hooks;
 mod locks;
 mod methods;
+mod path_case;
 mod paths;
 mod propfind;
 mod resource;
@@ -37,6 +38,7 @@ use http::{HeaderMap, Request, Response, StatusCode};
 
 pub use cache::{CacheConfig, PropfindCache};
 pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
+pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};
 pub use write_locks::{PathWriteLocks, WriteLockGuard};
 
@@ -97,6 +99,7 @@ pub(crate) struct Inner {
     pub dead: DeadProps,
     pub damage: DamageMemory,
     pub cache: Arc<PropfindCache>,
+    pub path_case: PathCase,
 }
 
 /// The WebDAV handler. Cheap to clone; build one per server.
@@ -122,6 +125,7 @@ impl Dav {
             users: std::fs::canonicalize(layout.users())?,
         };
         let cache = PropfindCache::new(config.propfind_cache, roots.clone());
+        let path_case = PathCase::new(LibraryPathCanonicalizer::new(roots.library.clone(), None));
         Ok(Dav {
             inner: Arc::new(Inner {
                 roots,
@@ -130,6 +134,7 @@ impl Dav {
                 dead: DeadProps::default(),
                 damage: DamageMemory::default(),
                 cache,
+                path_case,
             }),
         })
     }
@@ -160,6 +165,30 @@ impl Dav {
             paths::Target::Library(rel) => paths::resolve_under(&self.inner.roots.library, &rel),
             _ => None,
         }
+    }
+
+    /// Library paths resolve as on NTFS (0.5.3): the request-edge rewrite of a library
+    /// path (and a MOVE/COPY `Destination`) to the spelling already on disk. The server
+    /// applies it to every request before authorising it; [`Dav::handle`] does not.
+    pub fn path_case(&self) -> &PathCase {
+        &self.inner.path_case
+    }
+
+    /// Where a MOVE/COPY to the library path `virtual_path` puts what it moves (0.5.3
+    /// `PathMapper.destination_to_physical`): the parent resolved, the last segment as
+    /// written (on a case-insensitive filesystem resolving it could hand back the source's
+    /// own spelling), and where it leads still inside the library. `None` for anything else
+    /// or a destination leading outside. Blocking.
+    pub fn destination_physical(&self, virtual_path: &str) -> Option<PathBuf> {
+        let paths::Target::Library(_) = paths::classify(virtual_path) else {
+            return None;
+        };
+        let parent = paths::uri_parent(&paths::normalize(virtual_path))?;
+        let parent = self.inner.roots.lookup(&parent, None)?;
+        self.inner
+            .roots
+            .destination_path(&parent, paths::uri_name(virtual_path), None)
+            .map(|(p, _)| p)
     }
 
     /// Stop background work (shutdown).

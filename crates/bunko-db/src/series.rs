@@ -44,7 +44,9 @@ pub struct SeriesFacts {
     pub updated_at: String,
 }
 
-/// One series' render-ready catalog entry (filesystem-derived; rebuilt every pass).
+/// One series folder's render-ready catalog entry (`catalog_folders`; filesystem-derived,
+/// rebuilt every pass). Case-variant folders (`Kingdom/`, `kingdom/`) share a `series_key`
+/// but each keeps its own row (0.5.3).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CatalogSeries {
     pub series_key: String,
@@ -333,16 +335,17 @@ impl Database {
         self.prune_keyed("series_entry_cache", "volume_key", keep)
     }
 
-    /// Insert or replace one series' catalog entry (`scanned_at` = now).
+    /// Insert or replace one series folder's catalog entry (`scanned_at` = now), keyed by
+    /// `folder_name` (0.5.3 `catalog_folders`).
     pub fn upsert_catalog_series(&self, row: &CatalogSeries) -> Result<()> {
         self.write(|conn| {
             conn.prepare_cached(
-                "INSERT INTO catalog_series (series_key, folder_name, cover_path, volume_count, \
+                "INSERT INTO catalog_folders (series_key, folder_name, cover_path, volume_count, \
                  latest_volume_modified, total_pages, total_chars, missing_pages, \
                  damaged_volumes, scanned_at) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) \
-                 ON CONFLICT(series_key) DO UPDATE SET \
-                 folder_name = excluded.folder_name, \
+                 ON CONFLICT(folder_name) DO UPDATE SET \
+                 series_key = excluded.series_key, \
                  cover_path = excluded.cover_path, \
                  volume_count = excluded.volume_count, \
                  latest_volume_modified = excluded.latest_volume_modified, \
@@ -374,7 +377,7 @@ impl Database {
                 .prepare_cached(
                     "SELECT series_key, folder_name, cover_path, volume_count, \
                      latest_volume_modified, total_pages, total_chars, missing_pages, \
-                     damaged_volumes FROM catalog_series ORDER BY folder_name",
+                     damaged_volumes FROM catalog_folders ORDER BY folder_name",
                 )?
                 .query_map([], |r| {
                     Ok(CatalogSeries {
@@ -393,9 +396,9 @@ impl Database {
         })
     }
 
-    /// Drop catalog rows for series not in `keep`; how many.
+    /// Drop catalog rows for folders whose name is not in `keep`; how many.
     pub fn prune_catalog_series(&self, keep: &HashSet<String>) -> Result<usize> {
-        self.prune_keyed("catalog_series", "series_key", keep)
+        self.prune_keyed("catalog_folders", "folder_name", keep)
     }
 
     fn prune_keyed(&self, table: &str, key: &str, keep: &HashSet<String>) -> Result<usize> {
@@ -626,7 +629,7 @@ mod tests {
         );
         assert_eq!(rows[0].latest_volume_modified, 1700000000.25);
         assert_eq!(
-            db.prune_catalog_series(&HashSet::from(["a".to_string()]))
+            db.prune_catalog_series(&HashSet::from(["Alpha".to_string()]))
                 .unwrap(),
             1
         );
