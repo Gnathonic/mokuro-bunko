@@ -672,7 +672,7 @@ pub(super) mod http {
         if let Value::Object(m) = &mut v {
             m.insert("checks_enabled".into(), json!(updates.checks_enabled()));
             m.insert("applying".into(), json!(updates.is_applying()));
-            // 0.7.0-alpha.2: automatic updates (`update.auto`) and where one stands.
+            // 0.7: automatic updates (`update.auto`) and where one stands.
             let (view, problems) = updates.auto_view();
             m.insert("auto".into(), json!(updates.auto_enabled()));
             m.insert("auto_state".into(), json!(view));

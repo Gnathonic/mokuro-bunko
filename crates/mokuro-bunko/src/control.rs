@@ -132,7 +132,7 @@ pub fn pack_name(dirs: &[PathBuf]) -> Option<String> {
         .or_else(|| dir.file_name().map(|n| n.to_string_lossy().into_owned()))
 }
 
-/// `rocm7.1 for 0.7.0-alpha.2 (torch-rocm7.1-2.13.0)`: which release the pack belongs
+/// `rocm7.1 for 0.7.0 (torch-rocm7.1-2.13.0)`: which release the pack belongs
 /// to, so an OCR error is traceable to one version.
 #[cfg(feature = "ocr")]
 pub fn pack_label(m: &bunko_update::backend::PackManifest) -> String {

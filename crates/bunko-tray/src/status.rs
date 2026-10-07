@@ -43,7 +43,7 @@ pub struct Status {
     /// Whether pause/resume apply (false: a lite server, `gui`). Older instances may
     /// not send it; then the role decides.
     pub can_pause: Option<bool>,
-    /// The automatic update (absent from instances before 0.7.0-alpha.2).
+    /// The automatic update (added in 0.7; absent from older instances).
     pub update: Option<UpdateInfo>,
 }
 

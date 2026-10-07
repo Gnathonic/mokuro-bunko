@@ -171,7 +171,7 @@ impl Problem {
 }
 
 /// `status.update`: the automatic update of this instance (binary, OCR backend pack,
-/// models). Absent from instances before 0.7.0-alpha.2.
+/// models). Added in 0.7; absent from older instances.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateView {
     /// `idle`, `available` (found, auto off or not installable here), `waiting` (for a
@@ -242,7 +242,7 @@ pub struct Status {
     /// `gui`).
     #[serde(default)]
     pub can_pause: bool,
-    /// The automatic update (0.7.0-alpha.2): null when this instance has nothing to say.
+    /// The automatic update (0.7): null when this instance has nothing to say.
     #[serde(default)]
     pub update: Option<UpdateView>,
 }

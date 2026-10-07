@@ -253,7 +253,7 @@ pub struct BackendArtifact {
     #[serde(default)]
     pub installed_size: u64,
     /// What the host must provide (`pack.json`'s `requires`), so an installer can say
-    /// "update your driver" before downloading gigabytes. Absent before 0.7.0-alpha.2.
+    /// "update your driver" before downloading gigabytes. Added in 0.7.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<Requires>,
 }

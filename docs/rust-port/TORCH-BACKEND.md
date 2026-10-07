@@ -55,7 +55,7 @@ bit-identical across backends); preprocessing that 0.5.2 did in torch happens in
 
 ### Main-binary side (`bunko-engines`, feature `torch`, on in `full`)
 
-Release lock (0.7.0-alpha.2): the loader opens only a pack whose `pack.json`
+Release lock (0.7): the loader opens only a pack whose `pack.json`
 `bunko_version` equals its own version (`torch::loader::RELEASE`; empty = a development
 pack, accepted), then checks the ABI. A release and its pack are installed, updated and
 rolled back together (PACKAGING.md §4, docs/configuration.md "Automatic updates").
