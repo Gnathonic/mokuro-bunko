@@ -75,7 +75,9 @@ async fn a_remote_processor_is_benchmarked_through_the_admin_api() {
         Duration::from_secs(1),
     ));
 
-    // The processor: a card computing in every format, bf16 three times faster.
+    // The processor: a card computing in every format, bf16 three times faster, and a
+    // second engine worker a quarter slower (with widths changing nothing, timing noise
+    // alone could make the width search keep one).
     let fake = FakePipeline::new(FakeConfig {
         engines: vec!["hayai-nova".into(), "ppocr-manga".into()],
         gpu_formats: Some(vec!["fp32".into(), "fp16".into(), "bf16".into()]),
@@ -84,6 +86,7 @@ async fn a_remote_processor_is_benchmarked_through_the_admin_api() {
             ("fp32".to_string(), Duration::from_millis(9)),
         ]
         .into(),
+        useful_width: 1,
         ..Default::default()
     });
     let mut options = bunko_processor::ServeOptions::new(
@@ -185,7 +188,7 @@ async fn a_remote_processor_is_benchmarked_through_the_admin_api() {
             .all(|t| t["cpu_busy_pct"].is_number() == cfg!(target_os = "linux"))
     );
     assert!(result["best"]["pages_per_second"].as_f64().unwrap() > 0.0);
-    assert_eq!(result["best"]["same_as_spec"], true);
+    assert_eq!(result["best"]["same_as_spec"], true, "{result:#}");
     assert!(
         result["estimates"]["volume_200_pages_seconds"].is_number(),
         "{result:#}"
