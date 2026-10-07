@@ -446,6 +446,8 @@ pub fn install(config: &Path) -> Result<Installed, ServiceError> {
 mod tests {
     use super::*;
 
+    /// systemd units exist on Linux only; elsewhere these POSIX paths are not absolute.
+    #[cfg(unix)]
     #[test]
     fn unit_quotes_and_escapes() {
         let text = render_user_unit(

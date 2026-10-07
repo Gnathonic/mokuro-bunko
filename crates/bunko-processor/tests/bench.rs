@@ -199,7 +199,12 @@ async fn the_width_search_widens_what_the_verdict_names_while_it_pays() {
         "the sample is re-fed until the window is long enough: {first:?}"
     );
     assert!(first["passes"].as_u64().unwrap() >= 1);
-    assert!(first["cpu_busy_pct"].is_number(), "{first:?}");
+    // CPU busy (`/proc/stat`) and peak RSS (`getrusage`) are probed on Linux only.
+    assert_eq!(
+        first["cpu_busy_pct"].is_number(),
+        cfg!(target_os = "linux"),
+        "{first:?}"
+    );
     let done = seen.done.expect("bench_done");
     assert_eq!(done["best"]["trial"], 2);
     assert_eq!(done["best"]["stage_workers"], json!({"engine": 2}));
@@ -210,7 +215,11 @@ async fn the_width_search_widens_what_the_verdict_names_while_it_pays() {
     assert_eq!(done["precision"], "fp32");
     assert_eq!(done["precision_mode"], "auto-accuracy");
     assert!(!done.contains_key("precision_trials"));
-    assert!(done["peak_rss_mb"].as_i64().unwrap() > 0);
+    if cfg!(target_os = "linux") {
+        assert!(done["peak_rss_mb"].as_i64().unwrap() > 0);
+    } else {
+        assert!(done["peak_rss_mb"].is_null());
+    }
     assert!(done.contains_key("peak_vram_mb"));
     // Progress came at most every 20 ms, inside trials only.
     assert!(!seen.progress.is_empty());

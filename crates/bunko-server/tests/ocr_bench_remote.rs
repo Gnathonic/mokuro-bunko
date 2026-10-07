@@ -178,7 +178,12 @@ async fn a_remote_processor_is_benchmarked_through_the_admin_api() {
     let trials = result["trials"].as_array().unwrap();
     assert_eq!(trials[0]["note"], "precision bf16");
     assert_eq!(trials[1]["note"], "precision fp32");
-    assert!(trials.iter().all(|t| t["cpu_busy_pct"].is_number()));
+    // The processor probes CPU busy (`/proc/stat`) on Linux only.
+    assert!(
+        trials
+            .iter()
+            .all(|t| t["cpu_busy_pct"].is_number() == cfg!(target_os = "linux"))
+    );
     assert!(result["best"]["pages_per_second"].as_f64().unwrap() > 0.0);
     assert_eq!(result["best"]["same_as_spec"], true);
     assert!(
