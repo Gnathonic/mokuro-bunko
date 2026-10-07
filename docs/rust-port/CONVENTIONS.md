@@ -55,7 +55,7 @@ reviews and commits.
   code and open it from Rust; compile series.json with Python and compare bytes). Put
   generator scripts in `crates/<crate>/tests/golden/` with the fixtures they produce, so
   they can be regenerated.
-- Production runs 0.5.3 (NTFS-style case-insensitive library paths, the catalog keyed
+- The reference is 0.5.3 (NTFS-style case-insensitive library paths, the catalog keyed
   by folder), and 0.7 is held to it: a Python 0.5.3 reference environment exists at
   `~/.cache/mokuro-bunko-demo/ref053` (a uv venv with `mokuro_bunko` installed editable
   from the scratch worktree `../ref-0.5.3`, a detached checkout of commit `4016476`;

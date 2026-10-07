@@ -11,7 +11,7 @@
     "role": "admin",
     "status": "active",
     "notes": "",
-    "created_at": "2026-10-07 01:41:36"
+    "created_at": "2026-10-07 07:21:33"
    }
   },
   {
@@ -23,7 +23,7 @@
     "role": "uploader",
     "status": "active",
     "notes": "ノート",
-    "created_at": "2026-10-07 01:41:36"
+    "created_at": "2026-10-07 07:21:33"
    }
   },
   {
@@ -35,7 +35,7 @@
     "role": "registered",
     "status": "active",
     "notes": "",
-    "created_at": "2026-10-07 01:41:36"
+    "created_at": "2026-10-07 07:21:33"
    }
   },
   {
@@ -47,7 +47,7 @@
     "role": "editor",
     "status": "active",
     "notes": "",
-    "created_at": "2026-10-07 01:41:36"
+    "created_at": "2026-10-07 07:21:33"
    }
   },
   {
@@ -59,7 +59,7 @@
     "role": "processor",
     "status": "active",
     "notes": "",
-    "created_at": "2026-10-07 01:41:36"
+    "created_at": "2026-10-07 07:21:33"
    }
   },
   {
@@ -71,7 +71,7 @@
     "role": "inviter",
     "status": "active",
     "notes": "",
-    "created_at": "2026-10-07 01:41:37"
+    "created_at": "2026-10-07 07:21:34"
    }
   },
   {
@@ -83,7 +83,7 @@
     "role": "registered",
     "status": "pending",
     "notes": "",
-    "created_at": "2026-10-07 01:41:37"
+    "created_at": "2026-10-07 07:21:34"
    }
   },
   {
@@ -95,7 +95,7 @@
     "role": "registered",
     "status": "disabled",
     "notes": "",
-    "created_at": "2026-10-07 01:41:37"
+    "created_at": "2026-10-07 07:21:34"
    }
   },
   {
@@ -107,7 +107,7 @@
     "role": "registered",
     "status": "deleted",
     "notes": "",
-    "created_at": "2026-10-07 01:41:37"
+    "created_at": "2026-10-07 07:21:34"
    }
   },
   {
@@ -119,7 +119,7 @@
     "role": "registered",
     "status": "active",
     "notes": "",
-    "created_at": "2026-10-07 01:41:37"
+    "created_at": "2026-10-07 07:21:34"
    }
   }
  ],
@@ -188,7 +188,7 @@
   ]
  ],
  "processor_stamps": {
-  "proc1": "575e99cf5ae0ce50c72712fa6fb8ae04",
+  "proc1": "69d73f76225101c9ab621018693cbbae",
   "root": null,
   "nobody": null
  },
@@ -206,82 +206,82 @@
  ],
  "tokens": [
   {
-   "token": "2gW3hvNE1c30boLKcs4r-J3QImztx-uGIw_YyNNvQKU",
+   "token": "QGIrP_7YEjCSmN77OgKmb1TtUsw-YuobN7God3B3q_4",
    "username": "root",
    "kind": "web",
    "label": "",
-   "expires_at": 1791942100.1132934,
+   "expires_at": 1791962497.1112375,
    "resolves_to": "root"
   },
   {
-   "token": "YlCdb0t5RxFeekloRKXchYM8pdJ1iudPgBr_7nCoH3U",
+   "token": "pHPpx4gIHmL-BZs1HxS0RQdbs5Wbw2IGE-X3p2b9bsE",
    "username": "alice",
    "kind": "reader",
    "label": "Mokuro Reader 日本",
-   "expires_at": 1799113300.1265588,
+   "expires_at": 1799133697.1265965,
    "resolves_to": "alice"
   },
   {
-   "token": "zF34fuRgqQRlmoBItUa-lrpnZgaDh59patdOSOKqxcY",
+   "token": "X9ahMdmiAH-xKhLoxRPefiSP-DjjWmME6wtHRW6OeHg",
    "username": "proc1",
    "kind": "processor",
    "label": "gpu-box",
-   "expires_at": 1793929300.128771,
+   "expires_at": 1793949697.130168,
    "resolves_to": "proc1"
   },
   {
-   "token": "7IX5-jf5HHGWjBObgQkJkiyNOeBW-b6XLLcP7-GHHzE",
+   "token": "8vRJIscYz9mEyzDk1Qz3mLi-LLKDH_Gw_6OtEfLz78E",
    "username": "alice",
    "kind": "web",
    "label": "",
-   "expires_at": 1791337290.1310735,
+   "expires_at": 1791357687.1337862,
    "resolves_to": null
   },
   {
-   "token": "0GGXD6Td2JGoLRlfuxken5HXqU338m84TYzq_Dvmq8I",
+   "token": "vUSPeKxBVLtpM33-L13wyGy95c-zehqiQVVdalEjbpo",
    "username": "dis",
    "kind": "web",
    "label": "",
-   "expires_at": 1791942100.1331792,
+   "expires_at": 1791962497.1373932,
    "resolves_to": null
   }
  ],
  "invites": [
   {
-   "code": "eKfms7p56Aa97-ClsNeejg",
+   "code": "7rUAhnsKZuDmkyHk1hvnjA",
    "valid": true,
    "info": {
-    "code": "eKfms7p56Aa97-ClsNeejg",
+    "code": "7rUAhnsKZuDmkyHk1hvnjA",
     "role": "uploader",
     "status": "valid",
-    "created_at": "2026-10-07 01:41:40",
-    "expires_at": "2036-09-23T18:41:40.135504",
+    "created_at": "2026-10-07 07:21:37",
+    "expires_at": "2036-09-24T00:21:37.139814",
     "used_by": null,
     "invited_by": "inv1"
    }
   },
   {
-   "code": "11Bc-ftqSr36nSM7soJWDw",
+   "code": "MdS9vAj2pJixfise7VrUkA",
    "valid": false,
    "info": {
-    "code": "11Bc-ftqSr36nSM7soJWDw",
+    "code": "MdS9vAj2pJixfise7VrUkA",
     "role": "registered",
     "status": "used",
-    "created_at": "2026-10-07 01:41:40",
-    "expires_at": "2036-09-23T18:41:40.140043",
+    "created_at": "2026-10-07 07:21:37",
+    "expires_at": "2036-09-24T00:21:37.144365",
     "used_by": "alice",
     "invited_by": "root"
    }
   },
   {
-   "code": "iB2lA1alTMybI-noU9mI-w",
+   "code": "HfMd3Gz-5Gp0-023tW4wkQ",
    "valid": false,
    "info": {
-    "code": "iB2lA1alTMybI-noU9mI-w",
+    "code": "HfMd3Gz-5Gp0-023tW4wkQ",
     "role": "editor",
     "status": "expired",
-    "created_at": "2026-10-07 01:41:40",
-    "expires_at": "2026-10-03T18:41:40.149122",
+    "created_at": "2026-10-07 07:21:37",
+    "expires_at": "2026-10-04T00:21:37.150640",
     "used_by": null,
     "invited_by": null
    }
@@ -459,7 +459,7 @@
    "actor_username": null,
    "action": "invite_created",
    "target_type": "invite",
-   "target_path": "iB2lA1alTMybI-noU9mI-w",
+   "target_path": "HfMd3Gz-5Gp0-023tW4wkQ",
    "target_username": null,
    "details": "{\"role\":\"editor\",\"expires\":\"1h\"}",
    "created_at": "2026-09-02 12:00:00"
@@ -469,7 +469,7 @@
    "actor_username": "alice",
    "action": "invite_used",
    "target_type": "invite",
-   "target_path": "11Bc-ftqSr36nSM7soJWDw",
+   "target_path": "MdS9vAj2pJixfise7VrUkA",
    "target_username": "alice",
    "details": "{\"invited_by\":\"root\",\"role\":\"registered\"}",
    "created_at": "2026-09-02 10:00:00"
@@ -479,7 +479,7 @@
    "actor_username": "root",
    "action": "invite_created",
    "target_type": "invite",
-   "target_path": "11Bc-ftqSr36nSM7soJWDw",
+   "target_path": "MdS9vAj2pJixfise7VrUkA",
    "target_username": null,
    "details": "{\"role\":\"registered\",\"expires\":\"520w\"}",
    "created_at": "2026-09-01 11:00:00"
@@ -489,7 +489,7 @@
    "actor_username": "inv1",
    "action": "invite_created",
    "target_type": "invite",
-   "target_path": "eKfms7p56Aa97-ClsNeejg",
+   "target_path": "7rUAhnsKZuDmkyHk1hvnjA",
    "target_username": null,
    "details": "{\"role\":\"uploader\",\"expires\":\"520w\"}",
    "created_at": "2026-09-01 10:00:00"
@@ -915,7 +915,7 @@
    "failed_pages": 1,
    "archive_size": 123456789,
    "archive_mtime_ns": 1700000000123456789,
-   "written_at": "2026-10-07 01:41:40"
+   "written_at": "2026-10-07 07:21:37"
   },
   {
    "sidecar_path": "Dr Stone/V1.paddle.mokuro.gz",
@@ -932,11 +932,11 @@
    "failed_pages": null,
    "archive_size": null,
    "archive_mtime_ns": null,
-   "written_at": "2026-10-07 01:41:40"
+   "written_at": "2026-10-07 07:21:37"
   },
   {
-   "sidecar_path": "Kingdom/第80巻.mokuro",
-   "volume_key": "Kingdom/第80巻.cbz",
+   "sidecar_path": "Kingdom/第13巻.mokuro",
+   "volume_key": "Kingdom/第13巻.cbz",
    "generation_id": "g1",
    "generation_name": "Hayai",
    "machine": "local",
@@ -949,7 +949,7 @@
    "failed_pages": 0,
    "archive_size": null,
    "archive_mtime_ns": null,
-   "written_at": "2026-10-07 01:41:40"
+   "written_at": "2026-10-07 07:21:37"
   }
  ],
  "ocr_producers": [
@@ -965,7 +965,7 @@
   ],
   [
    "g1",
-   "Kingdom/第80巻.cbz",
+   "Kingdom/第13巻.cbz",
    "local"
   ]
  ],
@@ -994,7 +994,7 @@
     "V2.cbz": -3
    },
    "updated_by": "alice",
-   "updated_at": "2026-10-07 01:41:40"
+   "updated_at": "2026-10-07 07:21:37"
   },
   {
    "series_key": "mixed",
@@ -1008,7 +1008,7 @@
    "spine_offset": 2.5,
    "volume_offsets": {},
    "updated_by": null,
-   "updated_at": "2026-10-07 01:41:40"
+   "updated_at": "2026-10-07 07:21:37"
   },
   {
    "series_key": "none",
@@ -1022,7 +1022,7 @@
    "spine_offset": null,
    "volume_offsets": {},
    "updated_by": null,
-   "updated_at": "2026-10-07 01:41:40"
+   "updated_at": "2026-10-07 07:21:37"
   }
  ],
  "series_facts_raw": [
@@ -1106,10 +1106,10 @@
    "series_key": "kingdom",
    "folder_name": "Kingdom",
    "cover_path": "Kingdom/第01巻.webp",
-   "volume_count": 79,
+   "volume_count": 12,
    "latest_volume_modified": 1790000000.25,
-   "total_pages": 15800,
-   "total_chars": 1234567,
+   "total_pages": 2400,
+   "total_chars": 120000,
    "missing_pages": 0,
    "damaged_volumes": 0
   },
@@ -1166,33 +1166,33 @@
   "volume_identities": 1
  },
  "kingdom_owners": {
-  "Kingdom/第80巻.cbz": "alice",
-  "kingdom/第80巻.cbz": null,
-  "Kingdom/第80巻.mokuro": "alice",
+  "Kingdom/第13巻.cbz": "alice",
+  "kingdom/第13巻.cbz": null,
+  "Kingdom/第13巻.mokuro": "alice",
   "Kingdom/第01巻.cbz": "root",
   "KINGDOM/第01巻.cbz": null
  },
  "kingdom_identities": {
-  "Kingdom/第80巻.cbz": "0aebfb59-0000-4000-8000-000000000080",
-  "kingdom/第80巻.cbz": null,
-  "Kingdom/第80巻.mokuro": "0aebfb59-0000-4000-8000-000000000080",
+  "Kingdom/第13巻.cbz": "00000000-0000-4000-8000-00000000c013",
+  "kingdom/第13巻.cbz": null,
+  "Kingdom/第13巻.mokuro": "00000000-0000-4000-8000-00000000c013",
   "Kingdom/第01巻.cbz": "uuid-kingdom-01",
   "KINGDOM/第01巻.cbz": null
  },
  "kingdom_can_delete": [
   [
    "alice",
-   "/mokuro-reader/Kingdom/第80巻.cbz",
+   "/mokuro-reader/Kingdom/第13巻.cbz",
    true
   ],
   [
    "alice",
-   "/mokuro-reader/Kingdom/第80巻.mokuro",
+   "/mokuro-reader/Kingdom/第13巻.mokuro",
    true
   ],
   [
    "alice",
-   "/mokuro-reader/kingdom/第80巻.cbz",
+   "/mokuro-reader/kingdom/第13巻.cbz",
    false
   ],
   [
