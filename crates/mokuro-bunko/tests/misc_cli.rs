@@ -169,3 +169,56 @@ fn dyndns_status_enable_update() {
             )),
         );
 }
+
+/// The Windows portable zip: a command typed in its folder (README.txt's
+/// `mokuro-bunko.exe install-ocr`) uses `data\` next to it, as run.bat does, not
+/// %LOCALAPPDATA%; an explicit MOKURO_STORAGE / MOKURO_CONFIG still wins.
+#[cfg(windows)]
+#[test]
+fn portable_copy_keeps_its_data_next_to_it() {
+    let env = Env::new();
+    let dir = env.root().join("portable copy");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("mokuro-bunko.exe");
+    std::fs::copy(assert_cmd::cargo::cargo_bin("mokuro-bunko"), &exe).unwrap();
+    let local = env.root().join("local");
+    let path = |extra: &[(&str, &std::path::Path)]| {
+        let mut c = std::process::Command::new(&exe);
+        c.args(["config", "path"])
+            .env_clear()
+            .env("LOCALAPPDATA", &local)
+            .env("USERPROFILE", env.root())
+            .env("NO_COLOR", "1");
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            c.env("SystemRoot", root);
+        }
+        for (k, v) in extra {
+            c.env(k, v);
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", common::stderr(&out));
+        common::stdout(&out)
+    };
+    let installed = path(&[]);
+    assert!(
+        installed.contains(&*local.join("mokuro-bunko").display().to_string()),
+        "{installed}"
+    );
+    std::fs::write(dir.join("PORTABLE.txt"), "").unwrap();
+    let portable = path(&[]);
+    let data = dir.join("data");
+    assert!(
+        portable.contains(&*data.join("config.yaml").display().to_string()),
+        "{portable}"
+    );
+    assert!(
+        !portable.contains(&*local.display().to_string()),
+        "{portable}"
+    );
+    let elsewhere = env.root().join("elsewhere");
+    let pinned = path(&[("MOKURO_STORAGE", &elsewhere)]);
+    assert!(
+        pinned.contains(&*elsewhere.display().to_string()),
+        "{pinned}"
+    );
+}

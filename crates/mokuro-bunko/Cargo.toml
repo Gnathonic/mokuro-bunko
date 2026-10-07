@@ -70,8 +70,9 @@ tokio-util.workspace = true
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-# `gui` on a double-click: is this console ours alone (started from Explorer)?
-windows-sys = { version = "0.60", features = ["Win32_System_Console"] }
+# `gui` on a double-click: is this console ours alone (started from Explorer)? Whether a
+# process it started is still running (gui::spawn::pid_alive).
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 # The tray's Startup-folder shortcut (the same `Mokuro Bunko.lnk` the tray and
 # install.ps1 -Startup write).
 mslnk = "0.1"

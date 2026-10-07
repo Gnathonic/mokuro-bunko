@@ -101,8 +101,33 @@ pub fn home_dir() -> PathBuf {
     }
 }
 
-/// `~/.local/share/mokuro-bunko` (XDG_DATA_HOME), or `%LOCALAPPDATA%\mokuro-bunko`.
+/// The Windows portable zip: `PORTABLE.txt` next to `exe_dir`'s program means its
+/// defaults live in `<exe_dir>\data`.
+pub fn portable_data_in(exe_dir: &Path) -> Option<PathBuf> {
+    exe_dir
+        .join("PORTABLE.txt")
+        .is_file()
+        .then(|| exe_dir.join("data"))
+}
+
+/// The `data\` folder of a Windows portable copy (`PORTABLE.txt` next to the running
+/// program), the same folder `_env.cmd` points `run.bat` and `doctor.bat` at, so a
+/// command typed in that folder (`mokuro-bunko.exe install-ocr`, as its README.txt
+/// says) uses the portable data too. Never on other platforms.
+pub fn portable_data_dir() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    portable_data_in(exe.parent()?)
+}
+
+/// `~/.local/share/mokuro-bunko` (XDG_DATA_HOME), or `%LOCALAPPDATA%\mokuro-bunko`
+/// (a portable copy's `data\` folder: [`portable_data_dir`]).
 pub fn default_storage_path() -> PathBuf {
+    if let Some(data) = portable_data_dir() {
+        return data;
+    }
     if cfg!(windows) {
         env_path("LOCALAPPDATA")
             .unwrap_or_else(|| home_dir().join("AppData").join("Local"))
@@ -114,8 +139,12 @@ pub fn default_storage_path() -> PathBuf {
     }
 }
 
-/// `~/.config/mokuro-bunko/config.yaml` (XDG_CONFIG_HOME), or `%LOCALAPPDATA%\mokuro-bunko\config.yaml`.
+/// `~/.config/mokuro-bunko/config.yaml` (XDG_CONFIG_HOME), or `%LOCALAPPDATA%\mokuro-bunko\config.yaml`
+/// (a portable copy's `data\config.yaml`: [`portable_data_dir`]).
 pub fn default_config_path() -> PathBuf {
+    if let Some(data) = portable_data_dir() {
+        return data.join("config.yaml");
+    }
     let base = if cfg!(windows) {
         env_path("LOCALAPPDATA").unwrap_or_else(|| home_dir().join("AppData").join("Local"))
     } else {
@@ -139,6 +168,24 @@ pub fn expand_user(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `PORTABLE.txt` next to the program puts the defaults in its `data\` folder.
+    #[test]
+    fn portable_data_needs_the_marker_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(portable_data_in(dir.path()), None);
+        std::fs::create_dir(dir.path().join("PORTABLE.txt")).unwrap();
+        assert_eq!(
+            portable_data_in(dir.path()),
+            None,
+            "a folder is not the marker"
+        );
+        std::fs::remove_dir(dir.path().join("PORTABLE.txt")).unwrap();
+        std::fs::write(dir.path().join("PORTABLE.txt"), "").unwrap();
+        assert_eq!(portable_data_in(dir.path()), Some(dir.path().join("data")));
+        // The test binary itself is no portable copy.
+        assert_eq!(portable_data_dir(), None);
+    }
 
     /// The probe leaves nothing behind, never touches an existing file, and fails
     /// in a folder this user cannot write.

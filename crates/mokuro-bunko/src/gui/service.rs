@@ -413,15 +413,23 @@ mod tests {
 
     #[test]
     fn server_files() {
+        // An absolute path on the platform the test runs on.
+        let cfg = if cfg!(windows) {
+            r"C:\srv\my cfg\config.yaml"
+        } else {
+            "/srv/my cfg/config.yaml"
+        };
         let r = render_server(
             Kind::SystemdUser,
-            Path::new("/srv/my cfg/config.yaml"),
+            Path::new(cfg),
             Path::new("/opt/mokuro-bunko"),
         )
         .unwrap();
         assert!(
-            r.text
-                .contains("ExecStart=/opt/mokuro-bunko -c \"/srv/my cfg/config.yaml\" serve\n"),
+            r.text.contains(&format!(
+                "ExecStart=/opt/mokuro-bunko -c {} serve\n",
+                systemd_word(cfg).unwrap()
+            )),
             "{}",
             r.text
         );

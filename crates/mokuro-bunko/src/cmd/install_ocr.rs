@@ -1007,16 +1007,50 @@ mod full {
             return Err(f);
         }
 
-        if !manifest.external.is_empty() {
+        let local_wheel = |ext: &bunko_update::backend::ExternalArchive| {
+            let file = ext.url.rsplit('/').next().unwrap_or(&ext.name).to_string();
+            from.map(|d| d.join(&file)).filter(|p| p.is_file())
+        };
+        // The NVIDIA files an installed pack of this variant already has (an update to
+        // the next release): linked from it rather than downloaded again.
+        let installed: Vec<PathBuf> = pack::installed(root)
+            .into_iter()
+            .filter(|(_, m)| m.variant == variant)
+            .map(|(d, _)| d)
+            .collect();
+        let mut fetch = Vec::new();
+        for ext in &manifest.external {
+            let (e2, st, inst) = (ext.clone(), staging.clone(), installed.clone());
+            let reused = tokio::task::spawn_blocking(move || pack::reuse_external(&inst, &e2, &st))
+                .await
+                .map_err(PackFailure::retry)?
+                .unwrap_or(false);
+            if reused {
+                println!(
+                    "  {} {}: taken from the installed pack",
+                    ext.name, ext.version
+                );
+            } else {
+                fetch.push(ext.clone());
+            }
+        }
+        if !fetch.is_empty() {
+            let size: u64 = fetch.iter().map(|e| e.size).sum();
+            let offline = fetch.iter().all(|e| local_wheel(e).is_some());
             println!(
-                "Fetching {} from NVIDIA's packages on PyPI (NVIDIA licence terms; texts in {}/licenses/):",
-                mb(manifest.external_size()),
+                "{} {} {} (NVIDIA licence terms; texts in {}/licenses/):",
+                if offline { "Unpacking" } else { "Fetching" },
+                mb(size),
+                match from.filter(|_| offline) {
+                    Some(d) => format!("of NVIDIA's packages from {}", d.display()),
+                    None => "from NVIDIA's packages on PyPI".to_string(),
+                },
                 manifest.name
             );
         }
-        for ext in &manifest.external {
+        for ext in &fetch {
             let file = ext.url.rsplit('/').next().unwrap_or(&ext.name).to_string();
-            let local = from.map(|d| d.join(&file)).filter(|p| p.is_file());
+            let local = local_wheel(ext);
             let dest = downloads.join(&file);
             let src = match local {
                 Some(p) => p.display().to_string(),

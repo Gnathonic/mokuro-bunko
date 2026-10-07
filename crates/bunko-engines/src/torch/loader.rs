@@ -150,7 +150,9 @@ fn preload_core(lib_dir: &Path) -> Result<(), String> {
             use libloading::os::windows::{LOAD_WITH_ALTERED_SEARCH_PATH, Library};
             // SAFETY: as on unix.
             let lib = unsafe { Library::load_with_flags(&p, LOAD_WITH_ALTERED_SEARCH_PATH) }
-                .map_err(|e| format!("{}: {e}", p.display()))?;
+                // libloading's message alone is "LoadLibraryExW failed": the OS error
+                // is in its source (explained by `Pack::open`).
+                .map_err(|e| format!("{}: {}", p.display(), abi::error_chain(&e)))?;
             std::mem::forget(lib);
         }
     }

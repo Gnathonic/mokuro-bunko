@@ -1017,7 +1017,22 @@ cors:
 Some WebDAV clients require specific settings:
 
 - **davfs2** (Linux): May need to set `use_locks 0` in `/etc/davfs2/davfs2.conf`
-- **Windows**: Run `net use Z: http://server:8080/` in admin command prompt
+- **Windows** (Explorer's "Map network drive", or `net use Z: http://server:8080/mokuro-reader /user:NAME`
+  in an ordinary command prompt; no admin needed). Windows' WebDAV client has three
+  limits (measured on Windows 11, build 26200):
+  - It sends a password over plain `http://` only after
+    `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters` `BasicAuthLevel` is set
+    to `2` (as admin, then `net stop WebClient & net start WebClient`). Until then the drive
+    maps but is read-only: creating a folder fails with "The request is not supported".
+    Over `https://` with a certificate Windows trusts (a tunnel or reverse proxy) no change
+    is needed.
+  - Files over 50 MB (`FileSizeLimitInBytes`, default 50000000) cannot be copied in either
+    direction until that value is raised (e.g. to `4294967295`).
+  - Copying a **new** volume in does not work ("The parameter is incorrect"): Windows
+    first creates an empty file, which the server refuses because an empty file is not
+    a `.cbz`. Browsing, reading, renaming (also case-only), moving and deleting work. Add
+    volumes with Mokuro Reader, or put them into the library folder on the server
+    machine.
 
 ### Database Locked
 

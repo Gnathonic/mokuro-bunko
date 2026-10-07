@@ -84,13 +84,43 @@ pub async fn wait_healthy(url: &str, timeout: Duration) -> bool {
     }
 }
 
-/// Whether a process with this pid is alive (best effort).
+/// Whether a process with this pid is alive (best effort; true when it cannot tell).
+/// On Windows an exited process whose handle is still held can be opened: its exit
+/// code decides.
 pub fn pid_alive(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
         Path::new(&format!("/proc/{pid}")).exists()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        // SAFETY: signal 0 only checks for existence and permission.
+        unsafe { libc::kill(pid, 0) == 0 }
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: plain Win32 calls on a handle this function owns and closes.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return std::io::Error::last_os_error().raw_os_error()
+                    == Some(ERROR_ACCESS_DENIED as i32);
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code);
+            CloseHandle(h);
+            ok == 0 || code == STILL_ACTIVE as u32
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         true
@@ -124,6 +154,20 @@ pub fn stdout_log(storage: &Path, name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An exited child reads as dead even while its handle is still held (Windows).
+    #[test]
+    fn an_exited_child_is_not_alive() {
+        assert!(pid_alive(std::process::id()));
+        let mut child = if cfg!(windows) {
+            Command::new("cmd").args(["/c", "exit 3"]).spawn().unwrap()
+        } else {
+            Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap()
+        };
+        let pid = child.id();
+        assert_eq!(child.wait().unwrap().code(), Some(3));
+        assert!(!pid_alive(pid));
+    }
 
     #[test]
     fn tails() {
