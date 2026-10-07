@@ -26,6 +26,7 @@ from mokuro_bunko.metadata.service import MetadataService
 from mokuro_bunko.middleware.auth import AuthMiddleware
 from mokuro_bunko.middleware.cors import CorsMiddleware
 from mokuro_bunko.middleware.fs_watcher import LibraryWatcher, classify_change
+from mokuro_bunko.middleware.path_case import PathCaseMiddleware
 from mokuro_bunko.middleware.propfind_cache import PropfindCacheMiddleware
 from mokuro_bunko.middleware.queue_file import QueueFileMiddleware
 from mokuro_bunko.middleware.request_log import RequestLogMiddleware
@@ -219,6 +220,7 @@ def create_app(
     # 6. AuthMiddleware (sets mokuro.role in environ)
     # 6b. UploadMiddleware (queues a written .cbz for OCR at once; PUT headers)
     # 6c. QueueFileMiddleware (the virtual /mokuro-reader/.mokuro-queue.json)
+    # 6d. PathCaseMiddleware (library paths resolve case-insensitively, as on NTFS)
     # 7. CatalogAPI (public catalog, no auth required)
     # 8. QueueAPI (public queue status page)
     # 9. RegistrationAPI (handles /api/register without auth)
@@ -340,6 +342,10 @@ def create_app(
         ocr_control=ocr_control,
         read_gate=auth_middleware,
     )
+    # Library paths resolve as on NTFS: a request spelled `kingdom/` reaches
+    # the `Kingdom/` already on disk, so no layer above the filesystem ever
+    # sees -- or creates -- a second spelling of one folder.
+    app = PathCaseMiddleware(app, config.storage.library_path)
 
     # Wrap with catalog API (public catalog page). Its volume manifest is read
     # with the archive's own rules, so it is handed the auth gate itself.

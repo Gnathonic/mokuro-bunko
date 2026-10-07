@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.3] - 2026-10-06
+
+### Changed
+- Library paths are case-insensitive, as on Windows: `kingdom/` reaches `Kingdom/`.
+
+### Fixed
+- Uploads spelled in another case land in the existing folder, not a new one.
+- The catalog lists every series folder; case-variant folders no longer hide each other.
+- Renaming a folder or file to fix its case works (it was refused as locked).
+- A case-fixing rename on a Windows or macOS server no longer deletes the folder.
+
 ## [0.5.2] - 2026-10-01
 
 ### Added
