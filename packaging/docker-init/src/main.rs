@@ -12,8 +12,14 @@
 //!   (`BUNKO_NGINX_RUNNING=1`, set by the nginx entrypoint). Otherwise it is removed
 //!   with a warning: without nginx the X-Accel-Redirect responses would be empty.
 //! * `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`, `MOKURO_BUNKO_MOKURO_SPEC`
-//!   (0.5 Python OCR environments) are accepted and ignored. `OCR_AUTO_INSTALL` is
-//!   handled by the full/cuda images' entrypoint.sh (`install-ocr` before the server).
+//!   (0.5 Python OCR environments) are accepted and ignored. The OCR backend download
+//!   (`install-ocr --if-needed`, `MOKURO_OCR_AUTO_INSTALL`) is run through this program
+//!   by the full image's entrypoint.sh before the server, so it runs as PUID:PGID too.
+//!
+//! * GPU device nodes passed in (`--device /dev/kfd --device /dev/dri`, or the NVIDIA
+//!   toolkit's `/dev/nvidia*`) stay usable after the switch to PUID:PGID: the groups
+//!   that own them (`render`, `video` on the host) and the groups given with
+//!   `--group-add` are kept as supplementary groups (never group 0).
 //!
 //! Then it `exec`s `mokuro-bunko` (`BUNKO_EXEC`) with the container's arguments
 //! (default: `serve`). Started as a non-root user (`docker run --user`), it only sets
@@ -90,12 +96,67 @@ fn chown_tree(root: &Path, uid: u32, gid: u32) -> (u64, u64) {
     (ok, failed)
 }
 
-fn drop_privileges(uid: u32, gid: u32) -> Result<(), String> {
-    let groups = [gid as libc::gid_t];
+/// The supplementary groups the server keeps: `gid`, then the non-root groups this
+/// process already has (`docker run --group-add`), then the non-root groups owning the
+/// GPU device nodes in `devices` (ROCm needs `/dev/kfd` and `/dev/dri/renderD*`
+/// read-write; on most hosts they belong to `render`/`video`, 0660).
+fn supplementary_groups(gid: u32, current: &[u32], devices: &[(PathBuf, u32)]) -> Vec<u32> {
+    let mut out = vec![gid];
+    for g in current
+        .iter()
+        .copied()
+        .chain(devices.iter().map(|(_, g)| *g))
+    {
+        if g != 0 && !out.contains(&g) {
+            out.push(g);
+        }
+    }
+    out
+}
+
+/// GPU device nodes in this container and their owning group.
+fn gpu_devices() -> Vec<(PathBuf, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    let mut paths = vec![PathBuf::from("/dev/kfd")];
+    for dir in ["/dev/dri", "/dev"] {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let n = e.file_name().to_string_lossy().into_owned();
+                if (dir == "/dev/dri" && (n.starts_with("renderD") || n.starts_with("card")))
+                    || (dir == "/dev" && n.starts_with("nvidia"))
+                {
+                    paths.push(e.path());
+                }
+            }
+        }
+    }
+    paths
+        .into_iter()
+        .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m.gid())))
+        .collect()
+}
+
+fn current_groups() -> Vec<u32> {
+    // SAFETY: a size query, then a call with a buffer of that size.
+    unsafe {
+        let n = libc::getgroups(0, std::ptr::null_mut());
+        if n <= 0 {
+            return Vec::new();
+        }
+        // gid_t is u32 on Linux.
+        let mut buf = vec![0u32; n as usize];
+        let n = libc::getgroups(n, buf.as_mut_ptr().cast());
+        buf.truncate(n.max(0) as usize);
+        buf
+    }
+}
+
+fn drop_privileges(uid: u32, gid: u32, extra: &[u32]) -> Result<(), String> {
+    let groups = supplementary_groups(gid, extra, &[]);
     // SAFETY: plain syscalls with valid arguments; order matters (groups and gid
     // must be changed while we still have the privilege to).
     unsafe {
-        if libc::setgroups(1, groups.as_ptr()) != 0 {
+        if libc::setgroups(groups.len() as _, groups.as_ptr().cast()) != 0 {
             return Err(format!(
                 "setgroups({gid}): {}",
                 std::io::Error::last_os_error()
@@ -197,9 +258,23 @@ fn main() {
                 let _ = chown(dir, puid, pgid, true); // best effort, as in 0.5
             }
         }
+        let devices = gpu_devices();
+        let groups = supplementary_groups(pgid, &current_groups(), &devices);
+        if groups.len() > 1 && puid != 0 {
+            log(&format!(
+                "keeping supplementary groups {:?} (--group-add, GPU devices {})",
+                &groups[1..],
+                devices
+                    .iter()
+                    .filter(|(_, g)| *g != 0)
+                    .map(|(p, _)| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         if puid == 0 {
             log("PUID=0: running the server as root");
-        } else if let Err(e) = drop_privileges(puid, pgid) {
+        } else if let Err(e) = drop_privileges(puid, pgid, &groups[1..]) {
             log(&format!("cannot switch to {puid}:{pgid}: {e}"));
             std::process::exit(126);
         }
@@ -217,4 +292,26 @@ fn main() {
     let err = cmd.exec();
     log(&format!("cannot run {exec}: {err}"));
     std::process::exit(127);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_gpu_and_added_groups_never_root() {
+        let devices = vec![
+            (PathBuf::from("/dev/kfd"), 993),
+            (PathBuf::from("/dev/dri/renderD128"), 993),
+            (PathBuf::from("/dev/dri/card0"), 44),
+            (PathBuf::from("/dev/nvidiactl"), 0),
+        ];
+        // root's own group 0 never survives; --group-add 44 and the device groups do.
+        assert_eq!(
+            supplementary_groups(100, &[0, 44], &devices),
+            vec![100, 44, 993]
+        );
+        assert_eq!(supplementary_groups(1000, &[], &[]), vec![1000]);
+        assert_eq!(supplementary_groups(993, &[993], &devices), vec![993, 44]);
+    }
 }

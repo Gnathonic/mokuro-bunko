@@ -3,7 +3,8 @@
 #   * re-verifies release.json's signature against the key compiled into bunko-update,
 #   * un-drafts the GitHub release (so .../releases/latest/download/release.json, which
 #     every installed server polls, now points at it),
-#   * for a stable version, moves the `latest`, `latest-lite` and `latest-cuda` image tags.
+#   * for a stable version, moves the `latest`, `latest-lite` and `latest-cuda` image tags
+#     (`latest-cuda` is the full image under the name the 0.5.2 CUDA image used).
 name: Publish
 
 on:
@@ -63,4 +64,4 @@ jobs:
           image="ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/mokuro-bunko"
           docker buildx imagetools create -t "$image:latest" "$image:$version"
           docker buildx imagetools create -t "$image:latest-lite" "$image:$version-lite"
-          docker buildx imagetools create -t "$image:latest-cuda" "$image:$version-cuda"
+          docker buildx imagetools create -t "$image:latest-cuda" "$image:$version"

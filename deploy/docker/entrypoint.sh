@@ -1,18 +1,21 @@
 #!/bin/sh
-# Entrypoint of the Debian/Ubuntu-based images (full, cuda).
+# Entrypoint of the full image (Debian-based; also published as the `-cuda` alias).
 #
 # 1. Optional nginx X-Accel-Redirect download offload (MOKURO_NGINX_ACCEL=1|true):
 #    nginx takes the public ${MOKURO_PORT} and serves library files with sendfile();
 #    mokuro-bunko moves to 127.0.0.1:${MOKURO_BACKEND_PORT} and answers library GETs
 #    with "X-Accel-Redirect: /internal-library/<path>". Same topology as 0.5.
-# 2. OCR backend pack: MOKURO_TORCH_PACK names the pack baked into the image; it is
-#    dropped when that directory has no pack (a CUDA image built with BAKE_PACK=0), so
-#    the server finds packs under ${MOKURO_STORAGE}/backends. OCR_AUTO_INSTALL=true
-#    (0.5.2's variable) runs `mokuro-bunko install-ocr --no-models` as PUID:PGID before
-#    the server starts: a no-op when a pack is there, otherwise it downloads the one
-#    for this machine into ${MOKURO_STORAGE}/backends (persisted).
-# 3. exec bunko-init, which applies PUID/PGID/UMASK/TAKE_OWNERSHIP and execs the
-#    server (see packaging/docker-init).
+# 2. OCR backend, on demand: before `serve` (and `processor serve`) it runs
+#    `mokuro-bunko install-ocr --if-needed` as PUID:PGID. The image carries no pack and
+#    no model; that command detects the GPUs this container was given, applies
+#    ocr.backend (MOKURO_OCR_BACKEND) and installs the matching pack into
+#    ${MOKURO_STORAGE}/backends and the enabled engines' models into
+#    ${MOKURO_STORAGE}/models (persisted). It does nothing when local OCR is off
+#    (ocr.backend: skip, ocr.local_processing: false), when MOKURO_OCR_AUTO_INSTALL is
+#    false, or when a fitting pack of this release is already there. A failure is
+#    logged and the server starts anyway (without the recognizer engines).
+# 3. exec bunko-init, which applies PUID/PGID/UMASK/TAKE_OWNERSHIP (keeping the GPU
+#    device groups) and execs the server (see packaging/docker-init).
 set -eu
 
 PUID="${PUID:-1000}"
@@ -65,16 +68,41 @@ case "${MOKURO_NGINX_ACCEL:-}" in
 	;;
 esac
 
+# A pack pinned by hand that is not there would leave OCR without a backend.
 if [ -n "${MOKURO_TORCH_PACK:-}" ] && [ ! -f "${MOKURO_TORCH_PACK}/pack.json" ]; then
+	echo "[entrypoint] MOKURO_TORCH_PACK=${MOKURO_TORCH_PACK} holds no pack.json; ignored" >&2
 	unset MOKURO_TORCH_PACK
 fi
 
-case "${OCR_AUTO_INSTALL:-}" in
-1 | true | TRUE | True | yes)
-	if [ "${1:-serve}" = "serve" ]; then
-		echo "[entrypoint] OCR_AUTO_INSTALL: mokuro-bunko install-ocr --no-models"
-		/opt/mokuro-bunko/bunko-init install-ocr --no-models ||
-			echo "[entrypoint] install-ocr failed; the server starts without a GPU backend (see the log above)" >&2
+ocr_install() {
+	echo "[entrypoint] OCR backend: mokuro-bunko install-ocr --if-needed $*"
+	/opt/mokuro-bunko/bunko-init install-ocr --if-needed "$@" ||
+		echo "[entrypoint] install-ocr failed; the server starts without the recognizer engines (see above; retried on the next start)" >&2
+}
+
+case "${1:-serve}" in
+serve)
+	ocr_install
+	;;
+processor)
+	if [ "${2:-}" = "serve" ]; then
+		# The processor's config: --config PATH / --config=PATH, else MOKURO_PROCESSOR_CONFIG.
+		pconf="${MOKURO_PROCESSOR_CONFIG:-}"
+		prev=""
+		for a in "$@"; do
+			case "$a" in
+			--config=*) pconf="${a#--config=}" ;;
+			esac
+			if [ "$prev" = "--config" ]; then
+				pconf="$a"
+			fi
+			prev="$a"
+		done
+		(
+			MOKURO_PROCESSOR_CONFIG="$pconf"
+			export MOKURO_PROCESSOR_CONFIG
+			ocr_install --processor
+		)
 	fi
 	;;
 esac

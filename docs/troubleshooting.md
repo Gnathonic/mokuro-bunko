@@ -114,9 +114,13 @@ without installing anything.
   configuration, or with `install-ocr --processor`. The processor also finds
   a pack in the default library storage, for example one installed before
   `processor setup` (see [deployment](deployment.md#3-the-processor-machine)).
-- **Docker**: the `latest` and `latest-cuda` images have their pack built in
-  (`MOKURO_TORCH_PACK`). A CUDA image built with `BAKE_PACK=0` needs
-  `OCR_AUTO_INSTALL=true`, which installs it into `/data/backends` on start.
+- **Docker**: the full image installs the pack into `/data/backends` on
+  start (`install-ocr --if-needed`; its output is at the top of
+  `docker logs`). Nothing is installed when `MOKURO_OCR_AUTO_INSTALL=false`
+  or local OCR is off (`MOKURO_OCR_BACKEND=skip`,
+  `MOKURO_OCR_LOCAL_PROCESSING=false`); a failed download is retried on the
+  next start, or run `docker exec <container> mokuro-bunko install-ocr`
+  and restart the container.
 - **"OCR backend: ... files are missing or damaged"** (a FAIL), or a pack
   that fails to load: `mokuro-bunko install-ocr --force` downloads and checks
   it again.
@@ -149,11 +153,14 @@ without installing anything.
   `cpu` (the CPU is always allowed). `webgpu`, `directml` and `coreml` are
   accepted for old configs, but no release has those runtimes, so they leave
   only the CPU: use `auto`.
-- In Docker, the container needs `--gpus all` / `--runtime=nvidia` and
-  `NVIDIA_DRIVER_CAPABILITIES=compute,utility` (the CUDA image sets the
-  latter). `docker run --rm --gpus all
-  ghcr.io/gnathonic/mokuro-bunko:latest-cuda install-ocr --list` shows the
-  driver and GPU the container sees.
+- In Docker, a GPU the container was not given does not count: NVIDIA
+  needs `--gpus all` (or `--runtime=nvidia` with `NVIDIA_VISIBLE_DEVICES`)
+  and `NVIDIA_DRIVER_CAPABILITIES=compute,utility` (the image sets it); AMD
+  needs `--device /dev/kfd --device /dev/dri`. `install-ocr --list` names a
+  GPU the host has but the container cannot use under `Hidden:`, with the
+  flag that passes it in: `docker run --rm --gpus all
+  ghcr.io/gnathonic/mokuro-bunko:latest install-ocr --list`. After adding
+  the GPU, restart the container: it installs that GPU's pack on start.
 - `mokuro-bunko --version` prints the build; `doctor`'s `OCR backend` line
   shows the pack in use and what this machine would want, and the server log
   lists the devices the pack found when it loaded (`libtorch backend <variant>

@@ -150,6 +150,7 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 | `install-ocr --dir` | [OCR install](/app/setup/ocr) → Advanced → Install into |
 | `install-ocr --no-models` | [OCR install](/app/setup/ocr) → Advanced → Skip the models |
 | `install-ocr --force` | [OCR install](/app/setup/ocr) → Advanced → Reinstall |
+| `install-ocr --if-needed` | CLI-only because it is what the Docker image's entrypoint runs on every start (install the pack for the container's GPU and `ocr.backend` only when it is missing); in the desktop app the [OCR install](/app/setup/ocr) page is the deliberate way |
 | `install-ocr --list` | [OCR & models](/app/settings/ocr) shows the hardware and the installed packs; "Packs and hardware" runs it |
 | `install-ocr --processor` | [OCR install](/app/setup/ocr) → For: the processor (preselected from the processor setup) |
 | `install-ocr --probe` | CLI-only because it is internal (hidden): an automatic update loads a new backend pack in a child process to check it works before switching to it |

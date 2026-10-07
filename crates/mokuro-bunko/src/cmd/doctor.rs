@@ -117,7 +117,8 @@ pub fn run(ctx: &Ctx, processor: bool) -> CmdResult {
                 role: crate::ocr_target::Role::Library,
                 storage: storage.clone(),
                 processor_config: None,
-                library: None,
+                // `ocr.backend` decides which pack fits (check_backend).
+                library: Some(config.clone()),
                 reason: String::new(),
             };
             results.push(check_backend(&target));
@@ -339,7 +340,9 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
     use super::install_ocr::{missing_system_libs, pack_complete};
     use bunko_update::backend::{PACK_JSON, PackManifest};
     let hw = crate::hwdetect::detect();
-    let want = crate::hwdetect::choose(&hw, bunko_update::TARGET);
+    // What `install-ocr` (and the Docker images' automatic install) would pick: the
+    // owner's `ocr.backend` on this hardware.
+    let want = crate::hwdetect::preferred(&target.backend_preference(), &hw, bunko_update::TARGET);
     let dirs = target.backends_dirs();
     let flag = if target.role == crate::ocr_target::Role::Processor {
         " --processor"

@@ -3,31 +3,54 @@
 # background that says to drag one onto the other, plus a small "Read me".
 #
 #   packaging/macos/make-dmg.sh dist/mokuro-bunko-<ver>-aarch64-apple-darwin-full.tar.gz \
-#       <ocr-offline dir> dist/mokuro-bunko-<ver>-macos-arm64.dmg
+#       dist/mokuro-bunko-<ver>-macos-arm64.dmg
+#   packaging/macos/make-dmg.sh --bundle-ocr <ocr-offline dir> <full .tar.gz> <out.dmg>
 #
 # The app is the release archive's mokuro-bunko.app (tray + CLI, `xtask dist`),
-# renamed, with the offline OCR files (backend pack archive + model files: what
-# `install-ocr --from` takes) in Contents/Resources/ocr-offline, where install-ocr and
-# the setup wizard find them by themselves. Runs on macOS: hdiutil and dmgbuild
-# (`pip install dmgbuild`, BSD licence; it writes the Finder layout without driving
-# Finder). DMGBUILD may name its executable.
+# renamed. By default it carries no OCR backend and no model: the setup wizard's OCR
+# step (`install-ocr`) detects the Mac's hardware and downloads the backend pack of
+# this release and the models of the enabled engines, as on Linux and Windows. That is
+# the release build.
+#
+# --bundle-ocr DIR (opt-in: offline installs, local test builds) copies DIR, the
+# offline OCR files (backend pack archive + model files: what `install-ocr --from`
+# takes), into Contents/Resources/ocr-offline, where install-ocr and the wizard find
+# them by themselves and download nothing.
+#
+# Runs on macOS: hdiutil and dmgbuild (`pip install dmgbuild`, BSD licence; it writes
+# the Finder layout without driving Finder). DMGBUILD may name its executable.
+# MAKE_DMG_DRY_RUN=1 stops after staging and prints the staging directory (kept), for
+# checking the layout without hdiutil/dmgbuild.
 set -eu
 
-[ $# -eq 3 ] || { echo "usage: $0 <full .tar.gz> <ocr-offline dir> <out.dmg>" >&2; exit 2; }
+usage() {
+	echo "usage: $0 [--bundle-ocr <ocr-offline dir>] <full .tar.gz> <out.dmg>" >&2
+	exit 2
+}
+OFFLINE=
+if [ "${1:-}" = "--bundle-ocr" ]; then
+	[ $# -ge 2 ] || usage
+	OFFLINE=$2
+	shift 2
+fi
+[ $# -eq 2 ] || usage
 ARCHIVE=$1
-OFFLINE=$2
-OUT=$3
+OUT=$2
 HERE=$(cd "$(dirname "$0")" && pwd)
 DMGBUILD=${DMGBUILD:-dmgbuild}
 APP="Mokuro Bunko.app"
 
-ls "$OFFLINE"/*-torch-*.tar.zst >/dev/null 2>&1 || {
-	echo "$OFFLINE holds no *-torch-*.tar.zst backend pack" >&2
-	exit 1
-}
+if [ -n "$OFFLINE" ]; then
+	ls "$OFFLINE"/*-torch-*.tar.zst >/dev/null 2>&1 || {
+		echo "$OFFLINE holds no *-torch-*.tar.zst backend pack" >&2
+		exit 1
+	}
+fi
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT INT TERM
+if [ "${MAKE_DMG_DRY_RUN:-}" != "1" ]; then
+	trap 'rm -rf "$TMP"' EXIT INT TERM
+fi
 tar -xzf "$ARCHIVE" -C "$TMP"
 TOP=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)
 NAME=$(basename "$TOP")                                   # mokuro-bunko-<ver>-<target>-<flavor>
@@ -43,13 +66,29 @@ C="$STAGE/$APP/Contents"
 [ -f "$C/MacOS/mokuro-bunko" ] || cp "$TOP/mokuro-bunko" "$C/MacOS/mokuro-bunko"
 [ -f "$C/MacOS/mokuro-bunko-tray" ] || { echo "the app has no tray" >&2; exit 1; }
 mkdir -p "$C/Resources"
-cp -R "$OFFLINE" "$C/Resources/ocr-offline"
+if [ -n "$OFFLINE" ]; then
+	cp -R "$OFFLINE" "$C/Resources/ocr-offline"
+	MODE=bundled
+else
+	MODE=download
+fi
 for f in LICENSE THIRD-PARTY-LICENSES.md README.md; do
 	[ -f "$TOP/$f" ] && cp "$TOP/$f" "$C/Resources/$f"
 done
-sed "s/@VERSION@/$VERSION/g" "$HERE/Read me.txt" >"$STAGE/Read me.txt"
+# "Read me": the OCR paragraphs of this build (@IF_<mode>@ ... @END@ blocks).
+awk -v mode="$MODE" -v version="$VERSION" '
+	/^@IF_DOWNLOAD@$/ { keep = (mode == "download"); inblock = 1; next }
+	/^@IF_BUNDLED@$/ { keep = (mode == "bundled"); inblock = 1; next }
+	/^@END@$/ { inblock = 0; next }
+	inblock && !keep { next }
+	{ gsub(/@VERSION@/, version); print }
+' "$HERE/Read me.txt" >"$STAGE/Read me.txt"
 # Nothing from the build host's quarantine or Finder state.
 xattr -cr "$STAGE" 2>/dev/null || true
+if [ "${MAKE_DMG_DRY_RUN:-}" = "1" ]; then
+	echo "$STAGE"
+	exit 0
+fi
 
 cat >"$TMP/settings.py" <<EOF
 # dmgbuild settings (see make-dmg.sh)

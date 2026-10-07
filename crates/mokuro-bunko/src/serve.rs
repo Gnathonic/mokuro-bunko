@@ -148,11 +148,12 @@ impl ControlSetup {
             library_url: crate::control::library_url(config),
             // The backend pack only matters when this server reads OCR itself.
             #[cfg(feature = "ocr")]
+            // With the configuration: its `ocr.backend` decides which pack fits.
             target: ocr_here.then(|| crate::ocr_target::OcrTarget {
                 role: crate::ocr_target::Role::Library,
                 storage: config.storage.base_path.clone(),
                 processor_config: None,
-                library: None,
+                library: Some(config.clone()),
                 reason: String::new(),
             }),
         }

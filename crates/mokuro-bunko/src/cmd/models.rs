@@ -187,8 +187,11 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
     }
     if !recognizer_rows.is_empty() {
         // The compiled libtorch packages depend on this machine's devices: the backend
-        // pack (install-ocr) says which.
-        let pipeline = bunko_engines::EnginePipeline::new(target.engine_config(Backend::Auto));
+        // pack (install-ocr) says which, limited to the devices `ocr.backend` allows
+        // (`cpu` beside a GPU pack fetches the CPU packages).
+        let pipeline = bunko_engines::EnginePipeline::new(
+            target.engine_config(Backend::parse(&target.backend_preference())),
+        );
         match pipeline.torch() {
             Err(e) => {
                 println!(

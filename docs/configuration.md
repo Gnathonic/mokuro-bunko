@@ -639,7 +639,7 @@ run on this machine.
 
 | Option | Type | Default | What it does | When to change it |
 |--------|------|---------|--------------|-------------------|
-| `backend` | string | `auto` | Which devices OCR on this machine uses: `auto`, `cuda`, `rocm`, `cpu`, or `skip` (see [Backends](#ocr-backends)). | To keep OCR off a GPU (`cpu`), or `skip` for a server that should run no OCR itself. |
+| `backend` | string | `auto` | Which devices OCR on this machine uses, and so which backend pack `install-ocr` and the Docker image install: `auto`, `cuda`, `rocm`, `cpu`, or `skip` (see [Backends](#ocr-backends)). | To keep OCR off a GPU (`cpu`), or `skip` for a server that should run no OCR itself. |
 | `poll_interval` | integer | `30` | Seconds between library scans for volumes missing a sidecar or a thumbnail. Also the base of the retry backoff for failed volumes. | Raise it on a very large library where a scan is expensive. |
 | `concurrency` | integer | `1` | How many OCR jobs this machine runs at once (1–8). Not a pool size. At startup. | See [Concurrency](#concurrency). |
 | `sessions` | boolean | `true` | Accepted so old files load, and ignored: models always stay loaded between volumes. | Never. |
@@ -659,21 +659,28 @@ The recognizers (hayai-nova, paddle-manga) run on **libtorch** — the torch 0.5
 without Python — from a *backend pack* that `mokuro-bunko install-ocr` installs into
 `<storage>/backends/`: `cu130` (NVIDIA, Linux and Windows), `rocm7.1` (AMD, Linux) or
 `cpu`. ppocr-manga and the PP-OCR text detector run on ONNX Runtime on the CPU, as in
-0.5.2. The Docker images carry their pack (`latest`: cpu, `latest-cuda`: cu130).
+0.5.2. The full Docker image carries no pack: it installs one on first start
+(`install-ocr --if-needed`, see [Deployment](deployment.md#ocr-backend-on-first-start)).
 
-`ocr.backend` (and `serve --ocr`) picks the devices:
+`ocr.backend` (and `serve --ocr`) picks the devices, and with them the pack
+`install-ocr` (without `--variant`) and the Docker image install on this machine:
 
 | Backend | Description |
 |---------|-------------|
-| `auto` | The installed pack's GPUs, else the CPU. |
+| `auto` | The installed pack's GPUs, else the CPU. `install-ocr` installs the pack for the GPU it finds (`cu130`, `rocm7.1`, else `cpu`). |
 | `cuda` | NVIDIA GPUs (the `cu130` pack): Turing (GTX 16xx / RTX 20xx) or newer, driver 580 or newer. Nothing else to install: the pack brings the CUDA libraries. |
 | `rocm` | AMD GPUs on Linux (the `rocm7.1` pack): Radeon RX 6000 (gfx1030; RX 6600/6700 too: `HSA_OVERRIDE_GFX_VERSION=10.3.0` is set automatically), RX 7000, RX 9000. Needs `libnuma` from the system (Debian/Ubuntu: `libnuma-dev`). |
-| `cpu` | CPU only (slower). |
-| `skip` | This server runs no OCR of its own, the same as `local_processing: false`. |
+| `cpu` | CPU only (slower). `install-ocr` installs the `cpu` pack even with a GPU present (an installed GPU pack is kept and runs on the CPU). |
+| `skip` | This server runs no OCR of its own, the same as `local_processing: false`. The Docker image then installs nothing. |
+
+With `cuda` or `rocm` and no such GPU usable here (none, an old driver, a GPU the
+container was not given), `install-ocr` installs `cpu` and says why; run it again once
+the GPU is there (the Docker image does so on its next start).
 
 `webgpu`, `directml` and `coreml` are still accepted: they name ONNX Runtime GPU
 providers, which 0.7 releases do not include, so on a released build they leave only
-the CPU (use `auto`).
+the CPU (use `auto`; `install-ocr` treats them as `auto`). `rocm` is the AMD GPU again,
+as in 0.5.2 (early 0.7 builds read it as `webgpu`, which left an AMD GPU unused).
 `mokuro-bunko install-ocr --list` and `doctor` show which pack this machine wants and
 which is installed. Without a pack, hayai-nova and paddle-manga are not offered on the
 machine (ppocr-manga still is, and remote processors still work).
@@ -851,7 +858,7 @@ about 2 GB per precision.
 | `MOKURO_MODELS_DIR` | A directory of model files to use instead of the store (also `MOKURO_PPOCR_MODELS`). Files found there are used as they are. |
 | `MOKURO_MODELS_DOWNLOAD` | `0`, `false`, `no` or `off` forbids downloads (also `MOKURO_PPOCR_DOWNLOAD`). A model that is not on disk then makes the generation fail. |
 | `MOKURO_TORCH_MODELS_DIR` | A directory laid out like `<storage>/models/torch/` searched first (development, air-gapped hosts). |
-| `MOKURO_TORCH_PACK`, `MOKURO_BACKENDS_DIR` | Use this backend pack directory / look for packs here instead of `<storage>/backends/` (the Docker images set `MOKURO_TORCH_PACK`). |
+| `MOKURO_TORCH_PACK`, `MOKURO_BACKENDS_DIR` | Use this backend pack directory / look for packs here instead of `<storage>/backends/`. Neither is set by the Docker images (a pack built into a self-built image, `<exe dir>/backends`, is searched after `<storage>/backends/`). |
 | `MOKURO_TORCH_THREADS` | CPU threads of a CPU recognizer (default: the session's share of the physical cores). |
 
 #### OCR detectors
@@ -1244,13 +1251,14 @@ Other variables:
 | `MOKURO_MODELS_DIR`, `MOKURO_MODELS_DOWNLOAD` | — | A directory of model files to use; `0` forbids model downloads (see [OCR models](#ocr-models)). The 0.5 names `MOKURO_PPOCR_MODELS` and `MOKURO_PPOCR_DOWNLOAD` still work. |
 | `MOKURO_PROCESSOR_CONFIG` | — | `processor.yaml` path for the `processor` commands (the same as `--config`). |
 | `MOKURO_PROCESSOR_PASSWORD` | — | The processor's password; overrides `library.password` and `password_file`. |
+| `MOKURO_OCR_AUTO_INSTALL` | `true` (full Docker image) | `false`: the image does not install the OCR backend on start (`install-ocr --if-needed`); local OCR has no backend until `mokuro-bunko install-ocr` is run. 0.5.2's `OCR_AUTO_INSTALL=true` also keeps it on; `OCR_AUTO_INSTALL=false` is ignored. |
 
 The 0.5 variables `MOKURO_THREADS`, `MOKURO_DEBUG`, `MOKURO_EFT_TRACE`,
 `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`,
 `MOKURO_BUNKO_MOKURO_SPEC`, the `MOKURO_PPOCR_*` tuning variables and the
 `MOKURO_OCR_STAGE_*` / `MOKURO_OCR_CPU_WORKERS` pipeline overrides are no
 longer read. The Docker-only variables (`PUID`, `PGID`, `UMASK`,
-`TAKE_OWNERSHIP`, `MOKURO_BACKEND_PORT`) are described in
+`TAKE_OWNERSHIP`, `MOKURO_BACKEND_PORT`, `OCR_AUTO_INSTALL`) are described in
 [Deployment](deployment.md#docker).
 
 ## Example Configurations

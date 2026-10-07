@@ -18,7 +18,7 @@ hayai-nova, 1.2–1.5x on paddle-manga, exact crop parity with 0.5.2 at every pr
 | Linux x86_64 | CUDA, ROCm, CPU | libtorch cu130 / rocm7.1 / cpu |
 | Windows x86_64 | CUDA, CPU | libtorch cu130 / cpu |
 | macOS arm64 | CPU (its MPS option never reached the engines) | libtorch cpu |
-| Docker | `Dockerfile` (CPU), `Dockerfile.unraid` (CUDA) | full (CPU) + cuda images |
+| Docker | `Dockerfile` (CPU), `Dockerfile.unraid` (CUDA) | one full image; the cpu / cu130 / rocm7.1 pack is downloaded on first start for the GPU the container is given (`-cuda` is a tag of it) |
 
 Not in scope: Android/iOS, Windows AMD, pre-Turing NVIDIA, Intel GPUs, Intel Macs, Metal (MPS).
 The lite build is unchanged (no OCR, no ONNX Runtime, no libtorch).
@@ -353,7 +353,8 @@ Open questions B answers first, because they decide the pipeline:
    within 0.5.2's own fp32-vs-half differences.
 3. Speed ≥ tuned 0.5.2 on every fleet machine (desktop 9070 XT, beast 4090, lily 4060,
    server/steven/patrick RDNA2, pimax 3070 Windows, Mac M2 Pro CPU).
-4. Docker: CPU image and CUDA image run a full volume end to end.
+4. Docker: the full image (pack downloaded on first start) runs a full volume end to end on the
+   CPU and on a GPU.
 5. Dry run against a copy of a real library + database.
 
 ## A. Runtime as built (stream A, 2026-10-02)

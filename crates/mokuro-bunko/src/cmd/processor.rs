@@ -47,6 +47,9 @@ fn pipeline(storage: &Path, sessions: u32) -> EnginePipeline {
     let mut config = EngineConfig::new(storage.join("models"), backend);
     config.jobs = sessions.max(1) as usize;
     config.fallback_backends = crate::ocr_target::library_fallback_backends();
+    config
+        .fallback_backends
+        .extend(crate::ocr_target::shipped_backends());
     EnginePipeline::new(config)
 }
 

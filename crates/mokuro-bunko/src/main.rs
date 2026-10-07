@@ -44,8 +44,9 @@ pub const FLAVOR: &str = if cfg!(feature = "cuda") {
 };
 
 /// The flavor the updater looks up (`artifacts[target][flavor]`, `docker[flavor]`).
-/// `MOKURO_UPDATE_FLAVOR` overrides it: the CUDA Docker image runs the plain `full`
-/// binary but must be told to pull the `-cuda` image (it sets `full-cuda`).
+/// `MOKURO_UPDATE_FLAVOR` overrides it (a container that should be told to pull another
+/// tag, e.g. `full-cuda` for `:<ver>-cuda`; the release images no longer set it: `-cuda`
+/// is a tag of the full image).
 pub fn update_flavor() -> &'static str {
     static F: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     F.get_or_init(|| match std::env::var("MOKURO_UPDATE_FLAVOR") {
