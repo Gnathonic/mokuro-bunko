@@ -11,10 +11,6 @@ name: Release check
 
 on:
   workflow_dispatch:
-  # Temporary: registers the workflow so it can be dispatched (every job is skipped).
-  push:
-    branches: ["0.7"]
-    paths: [.github/workflows/release-check.yml]
 
 permissions:
   contents: read
@@ -29,7 +25,6 @@ env:
 
 jobs:
   prepare:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.v.outputs.ref }}
