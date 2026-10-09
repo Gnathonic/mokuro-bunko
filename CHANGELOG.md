@@ -92,8 +92,11 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 - The CPU's compiled model packages no longer carry their own copy of the weights:
   like the GPU packages they use the engine's shared weights files. hayai-nova on the
   CPU downloads 0.57 GB in fp32 (was 0.79 GB) and 0.29 GB in bf16 (was 0.40 GB), uses
-  about 200 MB less memory, and reads the same text at the same speed. The
-  compiled-models release shrinks from 25.6 GB to 8.9 GB.
+  about 200 MB less memory, and reads the same text at the same speed.
+  paddle-manga's CPU packages use its fp32 GPU packages' 3.6 GB of weights
+  instead of 4.65 GB each of their own (and about 1.3 GB less memory, same text,
+  same speed). The compiled-models release shrinks
+  from 25.6 GB to 8.96 GB.
 - Where the CPU is picked for paddle-manga, the setup wizard, the settings page
   and the admin panel's pools table say it is slow there (about 40 s a page on
   16 threads) and that hayai-nova is the CPU engine of choice.
