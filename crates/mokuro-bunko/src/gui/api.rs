@@ -779,13 +779,14 @@ async fn stop_tray_instance(state: &AppState, role: Role) -> Option<String> {
     ))
 }
 
-/// Start the tray program in the background; its pid.
-fn start_tray(state: &AppState, tray_exe: &Path) -> Result<u32, String> {
+/// Start the tray (`mokuro-bunko tray`; Windows: `Mokuro Bunko.exe`) in the background;
+/// its pid.
+fn start_tray(state: &AppState, tray: &(PathBuf, Vec<String>)) -> Result<u32, String> {
     let log = paths::server_storage(&state.config_path)
         .join("logs")
         .join("tray-start-console.log");
-    spawn::spawn_detached(tray_exe, &[], &log)
-        .map_err(|e| format!("could not start {}: {e}", tray_exe.display()))
+    spawn::spawn_detached(&tray.0, &tray.1, &log)
+        .map_err(|e| format!("could not start {}: {e}", tray.0.display()))
 }
 
 /// Take `role` out of tray.json and stop the copy the tray runs. A running tray reads
@@ -816,9 +817,9 @@ async fn untray(state: &Arc<AppState>, role: Role) -> Result<Vec<String>, String
         messages.push(m);
     }
     if stopped.is_some()
-        && let Some(exe) = tray::tray_exe(&state.exe)
+        && let Some(cmd) = tray::tray_command(&state.exe)
     {
-        let pid = start_tray(state, &exe)?;
+        let pid = start_tray(state, &cmd)?;
         messages.push(format!(
             "Started the tray again (pid {pid}) with the new tray.json."
         ));
@@ -829,7 +830,7 @@ async fn untray(state: &Arc<AppState>, role: Role) -> Result<Vec<String>, String
 async fn tray_get(State(state): S) -> Response {
     let st = state.clone();
     let v = blocking(move || {
-        let exe = tray::tray_exe(&st.exe);
+        let exe = tray::tray_command(&st.exe).map(|(p, _)| p);
         let path = tray::config_path(&st.exe);
         let conf = tray::load(&path);
         let headless = tray::headless();
@@ -902,13 +903,13 @@ async fn tray_post(State(state): S, Json(b): Json<TrayBody>) -> Response {
             }
         ));
     }
-    let Some(tray_exe) = tray::tray_exe(&state.exe) else {
+    let Some(tray_cmd) = tray::tray_command(&state.exe) else {
         return bad(format!(
-            "no {} next to {} (this package has no tray): use a service instead",
-            tray::tray_name(),
+            "{} has no tray (the lite build): use a service instead",
             state.exe.display()
         ));
     };
+    let tray_exe = tray_cmd.0.clone();
     let st = state.clone();
     let v = blocking(move || -> Result<Value, String> {
         let mut messages = Vec::new();
@@ -928,7 +929,7 @@ async fn tray_post(State(state): S, Json(b): Json<TrayBody>) -> Response {
             role.as_str()
         ));
         if let Some(on) = b.autostart
-            && let Some(p) = tray::set_autostart(&tray_exe, on)?
+            && let Some(p) = tray::set_autostart(&st.exe, on)?
         {
             messages.push(format!(
                 "{} {}",
@@ -946,7 +947,7 @@ async fn tray_post(State(state): S, Json(b): Json<TrayBody>) -> Response {
             if let Some(m) = tray::stop_tray(&st.exe)? {
                 messages.push(m);
             }
-            let pid = start_tray(&st, &tray_exe)?;
+            let pid = start_tray(&st, &tray_cmd)?;
             started = Some(pid);
             messages.push(format!("Started the tray (pid {pid})."));
         } else if tray::tray_running(&st.exe) {

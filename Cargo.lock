@@ -163,6 +163,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-broadcast"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "435a87a52755b8f27fcf321ac4f04b2802e337c8c4872923137471ec39c37532"
+dependencies = [
+ "event-listener",
+ "event-listener-strategy",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "async-compression"
 version = "0.4.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -172,6 +184,28 @@ dependencies = [
  "compression-core",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "async-recursion"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f8abc12baad266b1c8cec146854c195b5864b4221d4b2ca7296a7ae82d9e451"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
+name = "async-trait"
+version = "0.1.92"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -378,7 +412,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bunko-android"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "anyhow",
  "bunko-core",
@@ -394,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-control"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "axum",
  "bunko-proto",
@@ -416,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-core"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "ipnet",
  "serde",
@@ -429,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-dav"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -460,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-db"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -482,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-engines"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "anyhow",
  "bunko-layout",
@@ -493,7 +527,7 @@ dependencies = [
  "bunko-torch",
  "bunko-vlm",
  "image",
- "libloading 0.9.0",
+ "libloading",
  "mimalloc",
  "ort",
  "parking_lot",
@@ -508,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-layout"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "flate2",
  "serde",
@@ -520,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-library"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "bunko-core",
  "crc32fast",
@@ -537,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-ocr"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -562,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-processor"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -604,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-proto"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "semver",
  "serde",
@@ -613,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-sched"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -623,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-server"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -680,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-thumb"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -691,13 +725,13 @@ dependencies = [
 
 [[package]]
 name = "bunko-torch"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "anyhow",
  "bunko-vlm",
  "cc",
  "image",
- "libloading 0.9.0",
+ "libloading",
  "serde",
  "serde_json",
  "tch",
@@ -708,13 +742,13 @@ dependencies = [
 
 [[package]]
 name = "bunko-tray"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "anyhow",
  "bunko-control",
  "chrono",
  "fs4",
- "gtk",
+ "ksni",
  "libc",
  "mslnk",
  "open",
@@ -725,17 +759,19 @@ dependencies = [
  "tao",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
  "tray-icon",
  "ureq",
  "windows-sys 0.60.2",
+ "zbus",
 ]
 
 [[package]]
 name = "bunko-update"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "base64 0.22.1",
  "bunko-core",
@@ -763,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-vlm"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "anyhow",
  "half",
@@ -1336,6 +1372,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
+name = "endi"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
+
+[[package]]
+name = "enumflags2"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
+dependencies = [
+ "enumflags2_derive",
+ "serde",
+]
+
+[[package]]
+name = "enumflags2_derive"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "env_home"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1355,6 +1418,26 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "event-listener"
+version = "5.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+dependencies = [
+ "parking",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "event-listener-strategy"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
+dependencies = [
+ "event-listener",
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -1534,6 +1617,19 @@ name = "futures-io"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
+
+[[package]]
+name = "futures-lite"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f78e10609fe0e0b3f4157ffab1876319b5b0db102a2c60dc4626306dc46b44ad"
+dependencies = [
+ "fastrand",
+ "futures-core",
+ "futures-io",
+ "parking",
+ "pin-project-lite",
+]
 
 [[package]]
 name = "futures-macro"
@@ -2420,50 +2516,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ksni"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "814b44c24cd2cb236c3b8a41c7f08237b452a8e76ecaa81f1cec40b5b678215b"
+dependencies = [
+ "futures-util",
+ "pastey",
+ "serde",
+ "tokio",
+ "zbus",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
-name = "libappindicator"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03589b9607c868cc7ae54c0b2a22c8dc03dd41692d48f2d7df73615c6a95dc0a"
-dependencies = [
- "glib",
- "gtk",
- "gtk-sys",
- "libappindicator-sys",
- "log",
-]
-
-[[package]]
-name = "libappindicator-sys"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e9ec52138abedcc58dc17a7c6c0c00a2bdb4f3427c7f63fa97fd0d859155caf"
-dependencies = [
- "gtk-sys",
- "libloading 0.7.4",
- "once_cell",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
-
-[[package]]
-name = "libloading"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b67380fd3b2fbe7527a606e18729d21c6f3951633d0500574c4dc22d2d638b9f"
-dependencies = [
- "cfg-if",
- "winapi",
-]
 
 [[package]]
 name = "libloading"
@@ -2658,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "mokuro-bunko"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2671,6 +2746,7 @@ dependencies = [
  "bunko-processor",
  "bunko-proto",
  "bunko-server",
+ "bunko-tray",
  "bunko-update",
  "clap",
  "fs4",
@@ -2752,7 +2828,6 @@ checksum = "1dd04e60bc0b07438a6771710ee1698f98f6ebbc7f89b61264af1563b8aeb878"
 dependencies = [
  "crossbeam-channel",
  "dpi",
- "gtk",
  "keyboard-types",
  "objc2",
  "objc2-app-kit",
@@ -3049,6 +3124,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "ordered-stream"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "ort"
 version = "2.0.0-rc.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3100,6 +3185,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "parking"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3132,6 +3223,12 @@ dependencies = [
  "rand_core 0.6.4",
  "subtle",
 ]
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pbkdf2"
@@ -3936,6 +4033,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_repr"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d3b1629de253c70a0508c3899572da79ca359fdab27c7920ff00406df418906"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "serde_spanned"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4399,6 +4507,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -4674,7 +4783,6 @@ checksum = "045979e3f037cd18ad1cb2a419dfda133c5c29c9f3453370079f2255d46c257e"
 dependencies = [
  "crossbeam-channel",
  "dirs",
- "libappindicator",
  "muda",
  "objc2",
  "objc2-app-kit",
@@ -4716,6 +4824,17 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "uds_windows"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
+dependencies = [
+ "memoffset",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "unicase"
@@ -4823,6 +4942,7 @@ checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "sha1_smol",
  "wasm-bindgen",
 ]
@@ -5494,7 +5614,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5545,6 +5665,71 @@ dependencies = [
  "quote",
  "syn 3.0.6",
  "synstructure 0.14.0",
+]
+
+[[package]]
+name = "zbus"
+version = "5.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5db4be7c075cb421e4b7ee645541604239bd243ba7c357511f4ff3a74b555907"
+dependencies = [
+ "async-broadcast",
+ "async-recursion",
+ "async-trait",
+ "enumflags2",
+ "event-listener",
+ "futures-core",
+ "futures-lite",
+ "hex",
+ "libc",
+ "ordered-stream",
+ "rustix",
+ "serde",
+ "serde_repr",
+ "tokio",
+ "tracing",
+ "uds_windows",
+ "uuid",
+ "windows-sys 0.61.2",
+ "winnow 1.0.4",
+ "zbus_macros",
+ "zbus_names",
+ "zvariant",
+]
+
+[[package]]
+name = "zbus_macros"
+version = "5.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2990635d09ade6df1868f72f8cac69a876a90981e8bd3c40b1be413f8dc88f40"
+dependencies = [
+ "proc-macro-crate 3.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+ "zbus_names",
+ "zvariant",
+ "zvariant_utils",
+]
+
+[[package]]
+name = "zbus_names"
+version = "4.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8bf88b4a3ff53e883001e0e0115b297a9d53c31b9c1edd2bfdd853e3428624e"
+dependencies = [
+ "serde",
+ "winnow 1.0.4",
+ "zvariant",
+]
+
+[[package]]
+name = "zcheapstr"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1afec51604565183aeb5c54c20aeab286120d4e4460f7f76e3e8bb8c0d99473"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -5748,4 +5933,45 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
+]
+
+[[package]]
+name = "zvariant"
+version = "5.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1d34c27cc6cdd1f458427519dd6b8612f7b7e3f7b9a0b2355d041dda9869147"
+dependencies = [
+ "endi",
+ "enumflags2",
+ "serde",
+ "winnow 1.0.4",
+ "zcheapstr",
+ "zvariant_derive",
+ "zvariant_utils",
+]
+
+[[package]]
+name = "zvariant_derive"
+version = "5.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "864155e69b4352db0c7f374917bf45d1e0c8d17659c8b3dbf9795f3673f8c497"
+dependencies = [
+ "proc-macro-crate 3.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+ "zvariant_utils",
+]
+
+[[package]]
+name = "zvariant_utils"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bad0294361a320b694a328460dc73add56c306150f5cb6bfafc44446120008a3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn 3.0.6",
+ "winnow 1.0.4",
 ]

@@ -12,9 +12,8 @@
 #     -e CARGO_TARGET_DIR=/src/target/manylinux/build \
 #     quay.io/pypa/manylinux_2_28_x86_64 packaging/manylinux/build.sh full [cpu cu130 rocm7.1]
 #
-# Arguments: `full` (xtask dist, the full archive, with the desktop tray), `tray` (just
-# the tray executable, $OUT/mokuro-bunko-tray, for the musl lite archive's `--tray-bin`)
-# and/or pack variants (xtask torch-pack). Output in $OUT (default dist/). The release workflow runs it as a job
+# Arguments: `full` (xtask dist, the full archive, with the desktop tray: pure Rust,
+# no GTK) and/or pack variants (xtask torch-pack). Output in $OUT (default dist/). The release workflow runs it as a job
 # `container:`; it needs network access (rustup, crates, libtorch, nasm).
 set -eu
 
@@ -25,12 +24,6 @@ TARGET=x86_64-unknown-linux-gnu
 if ! command -v nasm >/dev/null 2>&1; then
 	dnf -y -q install nasm || yum -y -q install nasm
 fi
-# The desktop tray (bunko-tray) links GTK 3; libayatana-appindicator is loaded at run time.
-case " $* " in
-*" full "* | *" tray "*)
-	pkg-config --exists gtk+-3.0 2>/dev/null || dnf -y -q install gtk3-devel || yum -y -q install gtk3-devel
-	;;
-esac
 if ! command -v cargo >/dev/null 2>&1; then
 	if [ ! -x "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" ]; then
 		curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
@@ -54,12 +47,6 @@ for what in "$@"; do
 	full)
 		cargo run --release ${LOCKED:+"$LOCKED"} -p xtask -- dist ${LOCKED:+"$LOCKED"} --target "$TARGET" --flavor full --out "$OUT"
 		;;
-	tray)
-		cargo build --release ${LOCKED:+"$LOCKED"} -p bunko-tray --bin mokuro-bunko-tray --target "$TARGET"
-		mkdir -p "$OUT"
-		cp "${CARGO_TARGET_DIR:-target}/$TARGET/release/mokuro-bunko-tray" "$OUT/"
-		echo "$OUT/mokuro-bunko-tray: $(objdump -T "$OUT/mokuro-bunko-tray" | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -n1)"
-		;;
 	*)
 		cargo run --release ${LOCKED:+"$LOCKED"} -p xtask -- torch-pack ${LOCKED:+"$LOCKED"} --variant "$what" --target "$TARGET" --out "$OUT"
 		;;
@@ -67,7 +54,7 @@ for what in "$@"; do
 done
 
 # What the binaries need from the system: glibc <= 2.28 and GLIBCXX <= 3.4.25 (GCC 8).
-for f in "$OUT"/mokuro-bunko-*-"$TARGET"-full.tar.gz; do
+for f in "$OUT"/mokuro-bunko-*-linux-x64.tar.gz "$OUT"/mokuro-bunko-*-"$TARGET"-full.tar.gz; do
 	[ -e "$f" ] || continue
 	d=$(mktemp -d)
 	tar -xzf "$f" -C "$d"

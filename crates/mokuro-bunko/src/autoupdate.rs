@@ -174,20 +174,51 @@ impl Installer {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let out = cmd.output().await.map_err(|e| {
+        let mut child = cmd.spawn().map_err(|e| {
             InstallFailure::retry(format!("could not run {}: {e}", binary.display()))
         })?;
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        for line in stdout.lines().filter(|l| !l.starts_with('{')) {
-            tracing::info!("prefetch: {line}");
-        }
-        let result: Option<PrefetchResult> = stdout
-            .lines()
-            .rev()
-            .find(|l| l.starts_with('{'))
-            .and_then(|l| serde_json::from_str(l).ok());
+        // Its progress ("pack.tar.zst [1/2]: 25% of 900 MB") goes to the log as it comes,
+        // not all at once when it is done.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let lines = async {
+            let mut result: Option<PrefetchResult> = None;
+            if let Some(out) = stdout {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(out).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if line.starts_with('{') {
+                        if let Ok(r) = serde_json::from_str(&line) {
+                            result = Some(r);
+                        }
+                    } else if !line.trim().is_empty() {
+                        tracing::info!("prefetch: {line}");
+                    }
+                }
+            }
+            result
+        };
+        let errors = async {
+            let mut last = String::new();
+            if let Some(err) = stderr {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(err).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if !line.trim().is_empty() {
+                        tracing::debug!("prefetch (stderr): {line}");
+                        last = line;
+                    }
+                }
+            }
+            last
+        };
+        let (result, last_err) = tokio::join!(lines, errors);
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| InstallFailure::retry(format!("waiting for {}: {e}", binary.display())))?;
         match result {
-            Some(r) if r.ok && out.status.success() => Ok(r),
+            Some(r) if r.ok && status.success() => Ok(r),
             Some(r) => Err(InstallFailure {
                 message: r
                     .message
@@ -195,14 +226,15 @@ impl Installer {
                 needs_owner: r.needs_owner,
                 action: r.action,
             }),
-            None => {
-                let err = String::from_utf8_lossy(&out.stderr);
-                Err(InstallFailure::retry(format!(
-                    "the new release's prefetch failed ({}): {}",
-                    out.status,
-                    err.lines().last().unwrap_or("no output")
-                )))
-            }
+            None => Err(InstallFailure::retry(format!(
+                "the new release's prefetch failed ({}): {}",
+                status,
+                if last_err.is_empty() {
+                    "no output"
+                } else {
+                    &last_err
+                }
+            ))),
         }
     }
 }
@@ -370,6 +402,30 @@ pub struct StartReport {
     /// An update was switched to and its pack loads: the old release's model files may
     /// go ([`prune_models`]).
     pub proven: bool,
+}
+
+/// Exit so that the new tray starts this instance again (`migrate::Outcome::HandOver`).
+/// An update this start just finished is said again by the next one ("Updated to X"):
+/// its marker is written back without a pack, so nothing is checked twice.
+#[cfg_attr(not(feature = "tray"), allow(dead_code))]
+pub fn hand_over(storage: &Path, started: &StartReport) -> ! {
+    if let Some(v) = started.view.as_ref().filter(|v| v.state == "updated")
+        && let (Some(to), Some(from)) = (&v.version, &v.from)
+    {
+        let _ = Marker {
+            kind: "binary".into(),
+            from: from.clone(),
+            to: to.clone(),
+            at: bunko_update::auto::now_rfc3339(),
+            pack: None,
+            prev_pack: None,
+            pack_root: None,
+            reason: None,
+        }
+        .write(storage);
+    }
+    tracing::info!("handing over to the new tray: exiting; it starts this instance again");
+    std::process::exit(0)
 }
 
 /// After a proven update: delete the model files this release's manifest no longer

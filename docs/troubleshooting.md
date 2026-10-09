@@ -105,7 +105,7 @@ without installing anything.
   needs its own pack (`cargo run -p xtask -- torch-pack`, then
   `install-ocr --from dist`).
 - **A host without internet**: download the pack archive
-  (`mokuro-bunko-<version>-<target>-torch-<variant>.tar.zst`, or its numbered
+  (`mokuro-bunko-backend-<version>-<platform>-<variant>.tar.zst`, or its numbered
   parts), `release.json` with `release.json.sig`, and for `cu130` the NVIDIA
   wheels it lists, into one directory elsewhere, then
   `mokuro-bunko install-ocr --from <dir>`.

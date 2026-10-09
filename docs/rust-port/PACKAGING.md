@@ -49,14 +49,32 @@ paddle-manga on whatever pack `install-ocr` installed — `cpu`, `cu130` (NVIDIA
 Release matrix (`.github/workflows/release-build.yml`, run by `release.yml` and
 `release-check.yml`):
 
-| target | lite | full | backend packs | how |
-|---|---|---|---|---|
-| `x86_64-unknown-linux-musl` | ✔ static | | | `cargo zigbuild` |
-| `aarch64-unknown-linux-musl` | ✔ static | | | `cargo zigbuild` |
-| `x86_64-unknown-linux-gnu` | | ✔ | `cpu`, `cu130`, `rocm7.1` | manylinux_2_28 container (`packaging/manylinux/build.sh`): glibc ≥ 2.28 |
-| `x86_64-pc-windows-msvc` | ✔ | ✔ | `cpu`, `cu130` | native, windows-latest (the packs' C++ with clang-cl, below) |
-| `aarch64-apple-darwin` | ✔ + `.dmg` | ✔ + `.dmg` | `cpu` | native, macos-latest |
-| `x86_64-apple-darwin` | ✔ + `.dmg` | — | | cross from macos-latest |
+Four downloads per release, plus Docker (owner, 0.7.0-beta.3), named for people
+(`names::platform_label`):
+
+| release file | target / flavor | backend packs | how |
+|---|---|---|---|
+| `mokuro-bunko-<ver>-windows.zip` | `x86_64-pc-windows-msvc` full | `cpu`, `cu130` | native, windows-latest (the packs' C++ with clang-cl, below) |
+| `mokuro-bunko-<ver>-macos.dmg` (+ `mokuro-bunko-update-<ver>-macos.tar.gz`) | `aarch64-apple-darwin` full | `cpu` | native, macos-latest |
+| `mokuro-bunko-<ver>-linux-x64.tar.gz` | `x86_64-unknown-linux-gnu` full | `cpu`, `cu130`, `rocm7.1` | manylinux_2_28 container (`packaging/manylinux/build.sh`): glibc ≥ 2.28 |
+| `mokuro-bunko-<ver>-linux-arm64-server.tar.gz` | `aarch64-unknown-linux-musl` lite (static) | — | `cargo zigbuild` |
+| (not a release file) `mokuro-bunko-<ver>-linux-x64-server.tar.gz` | `x86_64-unknown-linux-musl` lite (static) | — | `cargo zigbuild`; only for the lite Docker image (workflow artifact `docker-linux-x64-server`) |
+
+No lite Windows or macOS download and no Intel macOS build since 0.7.0-beta.3; a lite
+x64 Linux install of beta.2 or earlier has no update (the updater says there is no
+build for it): the lite Docker image, or the full x64 build, replaces it.
+The backend packs are `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`
+(`.001`/`.002` parts above 1.9 GiB), after every download in GitHub's alphabetical
+file list; there are no per-file `.sha256` files (`SHA256SUMS` and the signed
+`release.json` have every checksum). A local build without a release name (another
+target, an unreleased flavor) keeps `mokuro-bunko-<ver>-<target>-<flavor>`.
+
+Every release's notes start with a two-column "Which file do I want?" table (system →
+its file, each linking `releases/download/<tag>/<file>`; Docker → the `docker pull`
+command), then "Other files install automatically." and the changelog link:
+`xtask release-notes --dir dist` writes it from the same names, and refuses a link to a
+file the release does not have; `scripts/release-links.sh <tag>` checks every link of
+the draft (and with `--public`, of the published release) answers 200/302.
 | `aarch64-linux-android` + `x86_64-linux-android` | (APK `mokuro-bunko-<ver>-android.apk`, not in release.json; not released in 0.7) | | | job `android`: cargo-ndk + Gradle (`packaging/android/build.sh`); out of 0.7's scope, opt-in only with `vars.BUILD_ANDROID == 'true'`; see MOBILE.md |
 
 Dropped against the ONNX-only design: `full-cuda` (Linux, Windows), Linux arm64 full
@@ -135,126 +153,112 @@ Why these choices:
   starts (and serves) with no pack, as 0.5.2's server did before `install-ocr`. CUDA
   packs need an NVIDIA driver ≥ 580 (CUDA 13.0) and nothing else from the host.
 
-Archive name: `mokuro-bunko-<version>-<target>-<flavor>.tar.gz` (`.zip` on Windows),
-each with a top directory of the same name holding:
+Each archive has a top directory of its own name holding:
 
 - unix: `mokuro-bunko`, provider libraries if any, `README.md`, `LICENSE`,
-  `THIRD-PARTY-LICENSES.md`; plus the desktop tray where there is one (below): x86_64
-  Linux `mokuro-bunko-tray` + `share/` (menu entry, autostart entry, hicolor icons),
-  macOS `mokuro-bunko.app`;
-- Windows (this *is* the portable build that replaces 0.5.2's uv zip): `mokuro-bunko.exe`,
-  DLLs if any, `run.bat`, `doctor.bat`, `_env.cmd`, `PORTABLE.txt`, `README.txt`,
-  `LICENSE.txt`, `THIRD-PARTY-LICENSES.md`, `mokuro-bunko-tray.exe`, `mokuro-bunko.ico`
-  (batch files get CRLF line endings).
+  `THIRD-PARTY-LICENSES.md`; with the desktop tray (the full build, below): Linux
+  `share/` (menu entry, autostart entry, hicolor icons), macOS `mokuro-bunko.app`;
+- Windows (this *is* the portable build that replaces 0.5.2's uv zip): `Mokuro Bunko.exe`
+  (the tray, below), `bin\mokuro-bunko.exe` (the command line) with the VC++ DLLs in
+  both folders, `run.bat`, `doctor.bat`, `_env.cmd`, `PORTABLE.txt`, `README.txt`,
+  `LICENSE.txt`, `THIRD-PARTY-LICENSES.md`, `mokuro-bunko.ico` (batch files get CRLF
+  line endings).
   With `PORTABLE.txt` present, `run.bat` keeps config/library/logs/models in `data\`
   next to it (0.5.2's portable guarantee: nothing in AppData or the registry).
   `install.ps1` deletes `PORTABLE.txt`, so an installed copy uses
   `%LOCALAPPDATA%\mokuro-bunko`, where 0.5.2 kept its library.
 
-Each archive gets a `<archive>.sha256`; the release also carries `SHA256SUMS`,
-`release.json` and `release.json.sig`.
+The release also carries `SHA256SUMS`, `release.json` and `release.json.sig`.
 
-### Desktop tray (`mokuro-bunko-tray`, GUI.md §5–§6)
+### Desktop tray (`mokuro-bunko tray`, GUI.md §5–§6)
 
-A second executable, built from `crates/bunko-tray` (tray-icon 0.24 + muda 0.19 + tao
-0.34, all MIT/Apache-2.0), shipped in the desktop archives. It stays a separate binary
-because on Linux it links GTK 3: **`mokuro-bunko` itself never links a GUI toolkit**
-(`cargo tree -p mokuro-bunko` has no gtk/tray-icon/muda/tao, lite or full), so the
-server and processor still run on a headless box, NAS or container.
+Since 0.7.0-beta.3 the tray is part of the program: `mokuro-bunko tray` (crate
+`bunko-tray`, feature `tray` of the mokuro-bunko crate, on in the full build; the
+static lite build has none). On Linux it is a StatusNotifierItem with a dbusmenu menu on
+the session D-Bus (ksni 0.3 on zbus 5, pure Rust: **no GTK or AppIndicator library**,
+so the full binary still starts on a headless box or in Docker); on Windows and macOS
+tray-icon + muda on a tao event loop (system frameworks only).
 
-| archive | tray | how it is built |
-|---|---|---|
-| `x86_64-unknown-linux-gnu` full | `mokuro-bunko-tray` + `share/` | same manylinux_2_28 container (`dnf install gtk3-devel`), glibc ≥ 2.28 |
-| `x86_64-unknown-linux-musl` lite | the same glibc tray (`dist --tray-bin`) | built in the manylinux job; the static CLI stays musl |
-| `aarch64-unknown-linux-musl` lite | — | no arm64 Linux desktop target in 0.7 |
-| `x86_64-pc-windows-msvc` lite + full | `mokuro-bunko-tray.exe`, `mokuro-bunko.ico` | native (`windows_subsystem = "windows"`: no console) |
-| `*-apple-darwin` lite + full | `mokuro-bunko.app` | native |
-
-- **macOS**: `mokuro-bunko.app/Contents/{Info.plist, PkgInfo, MacOS/mokuro-bunko-tray,
-  MacOS/mokuro-bunko, Resources/mokuro-bunko.icns}`, `LSUIElement` (menu-bar only, no
-  Dock icon), bundle id `io.github.gnathonic.mokuro-bunko.tray`, template
-  `packaging/macos/Info.plist`. The CLI inside the bundle is a **hard link** to the
-  top-level `mokuro-bunko` (the tar has one copy and a link entry, so the archive does
-  not grow by a second 30–60 MB binary; the top-level entry comes first, which is the one
-  the updater extracts). The tray prefers the CLI outside the bundle (`../../../`)
-  because that is the file `mokuro-bunko update` replaces. Not signed/notarized in 0.7:
-  first start is right-click → Open (same as the CLI).
+- **Windows**: one program built once, shipped twice: `bin\mokuro-bunko.exe` (console
+  subsystem: the command line) and `Mokuro Bunko.exe` at the top, the same bytes with
+  the PE header's subsystem set to GUI (`bunko_update::layout::set_pe_subsystem`: Rust
+  links both with `mainCRTStartup`, so that field is the only difference). It starts
+  with no console window; with no arguments it runs the tray (`main.rs` reads its own
+  PE header), which starts `bin\mokuro-bunko.exe` for the instances. The command line
+  double-clicked in Explorer starts `Mokuro Bunko.exe` and exits.
+- **macOS**: `mokuro-bunko.app/Contents/{Info.plist, PkgInfo, MacOS/mokuro-bunko,
+  Resources/mokuro-bunko.icns}`; `CFBundleExecutable` is `mokuro-bunko`: opened by the
+  Finder or launchd (no arguments, parent launchd, no terminal) it runs the tray, and
+  the tray opens the setup wizard on a Mac with nothing set up. `LSUIElement` (menu-bar
+  only), bundle id `io.github.gnathonic.mokuro-bunko.tray` (unchanged). In the archive
+  the bundle's program is a **hard link** to the top-level one (stored once; the
+  top-level entry comes first, the one older updaters extract).
 - **macOS disk image** (`packaging/macos/make-dmg.sh [--bundle-ocr <dir>] <full .tar.gz>
-  <out.dmg>`, run on a Mac with `pip install dmgbuild`): the window shows only
-  `Mokuro Bunko.app` and an Applications alias on a "drag to install" background
-  (`dmg-background.svg` → `.png`/`@2x.png`), plus a small `Read me.txt`. The app is the
-  archive's bundle renamed, its CLI a real file (not a link). **The release dmg carries
-  no OCR backend and no model**: the wizard's OCR step (`install-ocr`) detects the Mac's
-  hardware and downloads this release's `cpu` pack and the enabled engines' models, as
-  on Linux and Windows. `--bundle-ocr <dir>` (opt-in, for offline installs and local
-  test builds) copies the offline OCR files (pack archive + model files, what
-  `install-ocr --from` takes) into `Contents/Resources/ocr-offline`; `install-ocr`
-  without `--from` (and so the wizard, which then shows "Source: Bundled with this app")
-  installs from that folder by itself (`bundled_offline_dir`:
-  `<exe>/../Resources/ocr-offline` inside an app bundle, else `<exe>/ocr-offline`, when it
-  holds a `*-torch-*.tar.zst`). `Read me.txt` carries the paragraphs of the build
-  (`@IF_DOWNLOAD@` / `@IF_BUNDLED@` / `@IF_FULL@` / `@IF_LITE@` / `@IF_PRERELEASE@`
-  blocks; `@ARCH@` is "Apple silicon" or "Intel"); `MAKE_DMG_DRY_RUN=1` stops after
-  staging (checks the layout on any host).
-  **The release builds one disk image per macOS archive** (`release-build.yml`, the
-  macOS `build` jobs: dmgbuild 1.6.7 in a venv on the runner, then the image is
-  mounted there and checked for the app, its CLI and tray, the Applications link and
-  no `ocr-offline`): aarch64 full, aarch64 lite and x86_64 lite, each named like its
-  archive with `.dmg`, `mokuro-bunko-<ver>-<target>-<flavor>.dmg`
-  (`names::parse_dmg_name`). A lite image's `Read me.txt` says the app is a library
-  server without local OCR. **The disk images are release assets, not `release.json`
-  artifacts**: the updater picks one archive per target and flavor and replaces the
-  binaries from it (in a dmg install, the two inside the app), so the `.tar.gz` already
-  serves dmg installs, and the manifest has no place for a second file per target and
-  flavor; `install.sh` takes the `.tar.gz` too. `SHA256SUMS` lists them (`xtask
-  manifest` adds every `mokuro-bunko-<ver>-<target>-<flavor>.dmg` of an Apple target in
-  its directory); like `SHA256SUMS` itself they are not covered by the signature. The tray in an app not
-  named `mokuro-bunko.app` always runs the CLI inside its own bundle; the updater
-  replaces both binaries there (the tray is the CLI's sibling). Terminal users run
-  `/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko`. Measured on an M2 Pro
-  (2026-10-05, a `--bundle-ocr` build): 834 MB dmg; the wizard's OCR install takes the
-  bundled files with no download; a 20-page volume OCRs in 36 s with hayai-nova fp32 on
-  the CPU.
-- **Linux**: the tray links `libgtk-3.so.0` and dlopens `libayatana-appindicator3.so.1`
-  (or `libappindicator3.so.1`) at run time; both LGPL system libraries, not shipped.
-  `mokuro-bunko doctor` checks for them when the tray is installed next to it and names
-  the packages (Debian/Ubuntu `libgtk-3-0t64`/`libgtk-3-0` + `libayatana-appindicator3-1`,
-  Fedora `gtk3 libayatana-appindicator-gtk3`, Arch `gtk3 libayatana-appindicator`,
-  openSUSE `libgtk-3-0 libayatana-appindicator3-1`). GNOME shows tray icons only with
-  the "AppIndicator and KStatusNotifierItem Support" extension (Ubuntu ships it on).
-  `share/applications/mokuro-bunko-tray.desktop` and `share/autostart/…` are templates
-  (`Exec=@EXEC@`, from `packaging/linux/`); `share/icons/hicolor/<n>x<n>/apps/mokuro-bunko.png`
-  16–512 + scalable SVG.
-- **Icons**: original artwork, generated by `packaging/icons/generate.py` (Python +
-  `rsvg-convert`; outputs committed): the app icon (teal tile, open book) and tray
-  icons for idle / working / paused / attention at 16–64 px (44 px for the macOS menu
-  bar), `mokuro-bunko.ico` and `mokuro-bunko.icns`. The tray embeds its PNGs.
-- **xtask**: `dist` builds the tray for the archive's target when `names::tray_target`
-  has one (`cargo build -p bunko-tray --release --target …`) and stages it as above;
-  `--no-tray` leaves it out, `--tray-bin FILE` takes a prebuilt one (the musl lite
-  archive gets the manylinux job's binary). The tray runs `--version` as a smoke test
-  where the host can execute it. Docker builds pass `--no-tray` and `xtask docker`
-  drops `mokuro-bunko-tray`/`share/` from the context: **images carry no tray**.
-- **Licences**: `xtask licenses`/`dist` add the tray's crate graph (its own target and
-  features) to `THIRD-PARTY-LICENSES.md` under "Desktop tray", with the LGPL
-  system-library note on Linux; the copyleft gate applies to it the same way (gtk-rs
-  crates are MIT; `dlopen2_derive` and `libappindicator-sys` ship no licence file:
-  warnings, both permissive).
-- **Install scripts**: `install.sh` (Linux, glibc) links the tray next to the CLI in
-  the bin dir, installs the menu entry with an absolute `Exec`, the hicolor icons and,
-  with `--autostart`, `~/.config/autostart/mokuro-bunko-tray.desktop` (`--no-desktop`
-  skips the entry and icons); on macOS the archive's `.app` is opened or dragged to
-  Applications. `install.ps1` points the Start-menu shortcut "Mokuro Bunko" and
-  `-Startup` at the tray (plus "Mokuro Bunko server (console)" → `run.bat`) and writes
-  `tray.json` (`{"managed":[{"role":"server"}]}`) so the tray starts and supervises the
-  server. "Start at login" in the tray menu writes the same autostart entry (Linux),
-  a LaunchAgent `io.github.gnathonic.mokuro-bunko-tray` (macOS) or a Startup shortcut
-  (Windows).
-- **Updates**: `mokuro-bunko update` (bunko-update `update_companions`) also replaces an
-  installed `mokuro-bunko-tray` next to the executable or inside `mokuro-bunko.app`
-  from the same archive, best effort, after the CLI. A running tray keeps its old copy
-  until it is next started; the instances it supervises restart into the new version
-  (`MOKURO_LAUNCHER=tray`: exit code 75 restarts at once).
+  <out.dmg>`, run on a Mac with `pip install dmgbuild`): `Mokuro Bunko.app` and an
+  Applications alias on a "drag to install" background, plus `Read me.txt`. The app is
+  the archive's bundle renamed, its program a real file, **sealed ad hoc**
+  (`codesign --force --deep -s -`): `codesign --verify --deep --strict` passes on the
+  app as it comes out of the image. No OCR backend inside (`--bundle-ocr <dir>` adds
+  `Contents/Resources/ocr-offline` for offline installs). The release builds one image,
+  `mokuro-bunko-<ver>-macos.dmg`, listed in `release.json` as `bundles` (below): the
+  updater from 0.7.0-beta.3 on installs from it. The archive it is made from,
+  `mokuro-bunko-update-<ver>-macos.tar.gz`, stays a release file because the updaters
+  of 0.7.0-beta.2 and earlier read only `artifacts` and install from an archive (a
+  disk image there would be copied in as the program); `install.sh` takes it too.
+- **Linux**: `share/applications/mokuro-bunko-tray.desktop` and
+  `share/autostart/mokuro-bunko-tray.desktop` (`Exec=mokuro-bunko tray`; `install.sh`
+  writes the installed path), `share/icons/hicolor/<n>x<n>/apps/mokuro-bunko.png`
+  16–512 + scalable SVG. `mokuro-bunko doctor` (in a desktop session) checks the session
+  bus and a StatusNotifier host (`org.kde.StatusNotifierWatcher` with a registered
+  host); on GNOME it names the "AppIndicator and KStatusNotifierItem Support" extension
+  package.
+- **Login items** keep the names of the old tray: `~/.config/autostart/mokuro-bunko-tray.desktop`
+  (`Exec=<mokuro-bunko> tray`), LaunchAgent `io.github.gnathonic.mokuro-bunko-tray`
+  (`ProgramArguments`: the bundle's `mokuro-bunko`, `tray`), Startup `Mokuro Bunko.lnk`
+  (→ `Mokuro Bunko.exe`).
+- **Icons**: original artwork, generated by `packaging/icons/generate.py` (outputs
+  committed); the tray embeds its PNGs (idle / working / paused / attention, the
+  attention one with a "!"; on Linux the SNI status is `NeedsAttention` then).
+- **xtask**: `dist` stages the desktop files of a build with the tray
+  (`Build::has_tray`: full, not `--no-tray`); `--no-tray` (the Dockerfiles) builds
+  without the `tray` feature and stages none; `xtask docker` drops `share/`.
+- **Licences**: the tray's crates are in the program's crate graph and so in
+  `THIRD-PARTY-LICENSES.md` with a "Desktop tray" note (ksni is Unlicense, zbus MIT).
+- **Install scripts**: `install.sh` (Linux) installs the menu entry with an absolute
+  `Exec=<libdir>/mokuro-bunko tray`, the icons and, with `--autostart`, the autostart
+  entry; it removes the old `mokuro-bunko-tray` link and rewrites an existing menu or
+  autostart entry that started the old tray. `install.ps1` points the Start-menu
+  shortcut "Mokuro Bunko" and `-Startup` (and an existing Startup shortcut) at
+  `Mokuro Bunko.exe`, removes the old top-level `mokuro-bunko.exe` and
+  `mokuro-bunko-tray.exe`, and writes `tray.json` (`{"managed":[{"role":"server"}]}`).
+
+**Updates and the move from the separate tray (0.7.0-beta.2 → beta.3).** What an update
+replaces is `bunko_update::layout::Plan`: the running program; on Windows also the other
+of the pair (`bin\mokuro-bunko.exe` / `Mokuro Bunko.exe`, from the zip, or made from the
+command line with the GUI subsystem); on macOS the app bundle around it (`Info.plist`,
+`PkgInfo`, `Resources` from the new release, a leftover `mokuro-bunko-tray` removed, the
+bundle sealed again with `codesign`, which writes the program as a new file so the
+running one is not disturbed). An update of beta.2 to beta.3 runs beta.2's updater,
+which knows none of this: it replaces its own program from the beta.3 archive (found by
+file name: `bin/mokuro-bunko.exe` in the zip, the top-level `mokuro-bunko` in the
+tar.gz), tries the old tray, which the archive no longer has (a warning), and restarts.
+beta.3's first start then finishes the move (`crates/mokuro-bunko/src/migrate.rs`), after
+the update has proven itself (a rollback finds the old layout untouched), for this install
+only (paths, never names: another install of the same user, e.g. an app in
+`/Applications`, is left alone): login items that start this install's old tray (or an
+old tray that is gone) start `mokuro-bunko tray` (only the files; never `launchctl`); a
+bundle whose `CFBundleExecutable` is the old tray gets `mokuro-bunko`, this program, and
+a new seal; on Windows `bin\mokuro-bunko.exe` and `Mokuro Bunko.exe` are created next to
+an old layout, `run.bat`/`doctor.bat`/`_env.cmd` call `bin\` (`run.bat` only when it is
+not the launcher reading it), Startup/Start-menu shortcuts to the old tray point at
+`Mokuro Bunko.exe`, and the old top-level `mokuro-bunko.exe` goes once nothing runs or
+names it; a running old tray of this install is stopped (Linux: this process first stops
+its parent-death signal) and the new tray started in its place (Linux: with the old
+tray's environment, for its display and session bus); an instance the old tray was
+supervising then exits ("hand over") and the new tray starts it again (its "Updated to
+X" is kept for the next start); the old `mokuro-bunko-tray` (with its `.previous` backup)
+and `install.sh`'s link to it are removed. Every step checks the disk first, so later
+starts cost a few file checks.
 
 ### Licences
 
@@ -410,9 +414,17 @@ machine, `:<ver>-lite` (template `mokuro-bunko-lite.xml`) is enough, but it has 
   "published_at": "2026-10-01T18:54:27Z",
   "notes_url": "https://github.com/Gnathonic/mokuro-bunko/releases/tag/v0.7.0",
   "artifacts": {
-    "x86_64-unknown-linux-musl": {
-      "lite": { "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/v0.7.0/mokuro-bunko-0.7.0-x86_64-unknown-linux-musl-lite.tar.gz",
+    "aarch64-unknown-linux-musl": {
+      "lite": { "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/v0.7.0/mokuro-bunko-0.7.0-linux-arm64-server.tar.gz",
                 "sha256": "…", "size": 5814114, "binary": "mokuro-bunko" }
+    },
+    "aarch64-apple-darwin": {
+      "full": { "url": "…/mokuro-bunko-update-0.7.0-macos.tar.gz", "sha256": "…", "size": …, "binary": "mokuro-bunko" }
+    }
+  },
+  "bundles": {
+    "aarch64-apple-darwin": {
+      "full": { "url": "…/mokuro-bunko-0.7.0-macos.dmg", "sha256": "…", "size": … }
     }
   },
   "docker": { "full": "ghcr.io/gnathonic/mokuro-bunko:0.7.0",
@@ -421,8 +433,11 @@ machine, `:<ver>-lite` (template `mokuro-bunko-lite.xml`) is enough, but it has 
 }
 ```
 
-- Written by `xtask manifest` from the archives in a directory (names parsed back into
-  target and flavor), serialized with bunko-update's own `Manifest` type, pretty-printed
+- Written by `xtask manifest` from the archives, disk images and packs in a directory
+  (names parsed back into target and flavor; `bundles`, added in 0.7.0-beta.3, is the
+  macOS disk image the newer updaters install from; older updaters ignore unknown
+  fields, so fields are only ever added, and a disk image without its `artifacts`
+  archive is refused), serialized with bunko-update's own `Manifest` type, pretty-printed
   one key per line (what `install.sh` parses without jq).
 - `release.json.sig` = base64 ed25519 signature over the exact bytes of
   `release.json` (`xtask sign`). `bunko-update` verifies it with the public key compiled
@@ -466,8 +481,8 @@ depends on `bunko_update::InstallKind::detect()`:
 | distro package, Homebrew, Nix (`/usr/bin`, `Cellar`, `/nix/store`) | managed | notice | the package manager |
 | Android / iOS | mobile | notice | the app store |
 
-A self-managed install updates the release as one unit (the binary, the tray next to
-it, the release's backend pack for the installed variant, the models its compiled-in
+A self-managed install updates the release as one unit (the program and its other
+copies in the install, `layout::Plan` above, the release's backend pack for the installed variant, the models its compiled-in
 manifests name): the new binary is staged next to the running one and runs its own
 hidden `update prefetch` (stages + load-checks its pack in `backends/.staging-<variant>`,
 fetches its models) before anything is switched; then the binary and the pack switch
@@ -497,17 +512,21 @@ PowerShell has no ed25519); the in-app updater does check the signature.
    pre-release, and Publish leaves the `latest*` image tags alone.)
 2. `release.yml` runs: checks the tag equals the workspace version and that
    `BUNKO_SIGNING_KEY` exists; runs `release-build.yml` (tests, the archive matrix,
-   the macOS disk images, the backend packs); writes, signs and verifies
+   the macOS disk image, the backend packs); writes, signs and verifies
    `release.json`; creates a **draft** release with all assets (archives, disk
-   images, packs, `release.json` + `.sig`, `SHA256SUMS`); and, through
+   image, packs, `release.json` + `.sig`, `SHA256SUMS`) and its notes (the
+   "Which file do I want?" table, `xtask release-notes`, and the changelog link since
+   the previous `v*` tag), checks the notes' links name files of the draft
+   (`scripts/release-links.sh`); and, through
    `release-docker.yml`, pushes the versioned images `:<ver>-lite` and `:<ver>` (also
    tagged `:<ver>-cuda`; no pack, no model inside). The images are pushed once every
    build job has passed. A draft is invisible to
    `releases/latest/download/`, so no installed server sees it yet.
 3. Review the draft (notes, assets; `cargo run -p xtask -- verify release.json --dir .`
    on downloaded assets if you like).
-4. Run **Publish** (Actions → Publish → tag `v0.7.0`): re-verifies the manifest,
-   un-drafts the release (marks it latest), and for stable versions moves
+4. Run **Publish** (Actions → Publish → tag `v0.7.0`): re-verifies the manifest and
+   the notes' links, un-drafts the release (a pre-release stays a pre-release; a
+   stable one is marked latest), checks the links again as published, and for stable versions moves
    `latest`, `latest-lite`, `latest-cuda` (= `latest`). Installed servers see it on their next check.
 
 Re-running `release.yml` for the same tag (workflow_dispatch) replaces the draft's
@@ -769,7 +788,7 @@ installed pack of another release does not count as installed). A pack without
 
 ### Archives, release.json, trust chain
 
-`xtask torch-pack` writes `mokuro-bunko-<ver>-<target>-torch-<variant>.tar.zst`
+`xtask torch-pack` writes `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`
 (zstd 19, 128 MiB window + long-distance matching, multithreaded; `pack.json` is the
 first tar entry so tools read it without unpacking) and splits it into `.001`, `.002`,
 … parts above `--max-part` (1.9 GiB: GitHub release assets must stay under 2 GiB).

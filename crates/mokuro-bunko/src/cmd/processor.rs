@@ -75,6 +75,10 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
     if started.proven {
         crate::autoupdate::prune_models(&cfg.processor.storage);
     }
+    #[cfg(feature = "tray")]
+    if crate::migrate::run(crate::migrate::Caller::Processor) == crate::migrate::Outcome::HandOver {
+        crate::autoupdate::hand_over(&cfg.processor.storage, &started);
+    }
     if cfg.processor.auto_update {
         tracing::info!(
             "Automatic updates are on (processor.auto_update): this processor follows its library's version"

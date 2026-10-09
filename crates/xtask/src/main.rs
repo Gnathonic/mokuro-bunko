@@ -13,6 +13,7 @@ mod docker;
 mod licenses;
 mod manifest;
 mod names;
+mod notes;
 mod sign;
 mod torch_pack;
 mod torch_specs;
@@ -37,6 +38,8 @@ enum Cmd {
     Dist(dist::DistArgs),
     /// Write release.json (and SHA256SUMS) from the archives in a directory.
     Manifest(manifest::ManifestArgs),
+    /// Print the release notes: the "Which file do I want?" table, then a changelog.
+    ReleaseNotes(notes::NotesArgs),
     /// Sign a file (release.json) with the release ed25519 key; writes `<file>.sig`.
     Sign(sign::SignArgs),
     /// Verify release.json's signature (and optionally the archives' checksums).
@@ -63,7 +66,7 @@ struct LicensesArgs {
     /// Write the THIRD-PARTY-LICENSES.md text here.
     #[arg(long)]
     out: Option<PathBuf>,
-    /// Leave the desktop tray's crates out (as `dist --no-tray`).
+    /// Without the desktop tray (as `dist --no-tray`).
     #[arg(long)]
     no_tray: bool,
 }
@@ -72,6 +75,7 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Dist(a) => dist::run(&a).map(drop),
         Cmd::Manifest(a) => manifest::run(&a).map(drop),
+        Cmd::ReleaseNotes(a) => notes::run(&a),
         Cmd::Sign(a) => sign::sign(&a).map(drop),
         Cmd::Verify(a) => sign::verify(&a),
         Cmd::Keygen(a) => sign::keygen(&a),
@@ -87,14 +91,10 @@ fn licenses_cmd(a: &LicensesArgs) -> Result<()> {
         Some(t) => t.clone(),
         None => util::host_triple()?,
     };
-    let build = names::Build::new(&target, a.flavor, a.ep)?;
+    let mut build = names::Build::new(&target, a.flavor, a.ep)?;
+    build.no_tray = a.no_tray;
     let version = util::workspace_version(&root)?;
-    let tray = if a.no_tray {
-        None
-    } else {
-        names::tray_target(&target)
-    };
-    let report = licenses::collect(&root, &build, &version, &[], tray.as_deref())?;
+    let report = licenses::collect(&root, &build, &version, &[])?;
     let mut counts = std::collections::BTreeMap::<&str, usize>::new();
     for c in &report.components {
         *counts.entry(c.license.as_str()).or_default() += 1;

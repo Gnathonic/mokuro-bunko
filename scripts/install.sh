@@ -24,12 +24,14 @@
 #   --processor                    install the OCR processor unit (needs a full flavor)
 #   --require-signature            fail instead of warning when OpenSSL 3 is missing
 #   --dry-run                      resolve and print what would be installed
-#   --autostart                    start the desktop tray (mokuro-bunko-tray) at login
+#   --autostart                    start the desktop tray (`mokuro-bunko tray`) at login
 #   --no-desktop                   don't add the tray's menu entry and icons
 #
-# Desktop: archives for x86_64 Linux and macOS carry the tray. On Linux it is linked
-# into the bin dir and gets a menu entry + icons under <prefix>/share (it needs GTK 3
-# and libayatana-appindicator3 at run time: `mokuro-bunko doctor` names the packages).
+# Desktop: the full build has the tray (`mokuro-bunko tray`). On Linux it gets a menu
+# entry + icons under <prefix>/share; it shows in any panel with a system tray
+# (StatusNotifierItem over D-Bus: no GTK or AppIndicator library needed; GNOME needs the
+# AppIndicator extension, `mokuro-bunko doctor` says so). On macOS use the disk image
+# (mokuro-bunko-<ver>-macos.dmg) for the app; this script installs the command line.
 #
 # Environment: MOKURO_BUNKO_REPO (default Gnathonic/mokuro-bunko),
 #              MOKURO_BUNKO_BASE_URL (where release.json lives; default: the GitHub
@@ -256,41 +258,48 @@ rm -rf "$libdir.old"
 ln -sf "$libdir/mokuro-bunko" "$bindir/mokuro-bunko"
 
 # --- desktop tray (Linux) ------------------------------------------------------
-# The macOS archive holds mokuro-bunko.app instead: open it, or drag it to Applications.
-tray="$libdir/mokuro-bunko-tray"
-if [ "$os" = Linux ] && [ -x "$tray" ]; then
-	if [ "$glibc" = 0 ]; then
-		say "Skipping the desktop tray: it needs glibc and GTK 3 (this system uses musl)."
-	else
-		ln -sf "$tray" "$bindir/mokuro-bunko-tray"
-		if [ "$DESKTOP" = 1 ] && [ -d "$libdir/share/applications" ]; then
-			share="$PREFIX/share"
-			mkdir -p "$share/applications"
-			# Exec: the installed path (a menu entry cannot rely on ~/.local/bin being on PATH).
-			sed "s|^Exec=.*|Exec=$tray|" "$libdir/share/applications/mokuro-bunko-tray.desktop" \
-				>"$share/applications/mokuro-bunko-tray.desktop"
-			(cd "$libdir/share/icons" && find hicolor -type f) | while read -r icon; do
-				mkdir -p "$share/icons/$(dirname "$icon")"
-				cp "$libdir/share/icons/$icon" "$share/icons/$icon"
-			done
-			if command -v update-desktop-database >/dev/null 2>&1; then
-				update-desktop-database -q "$share/applications" 2>/dev/null || true
-			fi
-			if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-				gtk-update-icon-cache -q -t "$share/icons/hicolor" 2>/dev/null || true
-			fi
-			say "Desktop: 'Mokuro Bunko' in the applications menu ($share/applications)"
+# The tray is `mokuro-bunko tray` (0.7.0-beta.3+). Releases before had a separate
+# mokuro-bunko-tray program: its link goes, and login items that started it start the
+# new one (the program does the same on its first start).
+tray_cmd="$libdir/mokuro-bunko tray"
+old_tray="$libdir/mokuro-bunko-tray"
+if [ -L "$bindir/mokuro-bunko-tray" ] && [ "$(readlink "$bindir/mokuro-bunko-tray")" = "$old_tray" ]; then
+	rm -f "$bindir/mokuro-bunko-tray"
+fi
+if [ "$os" = Linux ] && [ -d "$libdir/share/applications" ]; then
+	autostart_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+	for entry in "$PREFIX/share/applications/mokuro-bunko-tray.desktop" "$autostart_dir/mokuro-bunko-tray.desktop"; do
+		if [ -f "$entry" ] && grep -qx "Exec=$old_tray" "$entry"; then
+			sed "s|^Exec=.*|Exec=$tray_cmd|" "$entry" >"$entry.new" && mv "$entry.new" "$entry"
+			say "Updated $entry: it starts '$tray_cmd' now"
 		fi
-		if [ "$AUTOSTART" = 1 ]; then
-			if [ "$(id -u)" = 0 ]; then
-				warn "--autostart is per user: run 'mokuro-bunko-tray' once and tick 'Start at login'"
-			else
-				autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
-				mkdir -p "$autostart"
-				sed "s|^Exec=.*|Exec=$tray|" "$libdir/share/autostart/mokuro-bunko-tray.desktop" \
-					>"$autostart/mokuro-bunko-tray.desktop"
-				say "The tray starts at login ($autostart/mokuro-bunko-tray.desktop)"
-			fi
+	done
+	if [ "$DESKTOP" = 1 ]; then
+		share="$PREFIX/share"
+		mkdir -p "$share/applications"
+		# Exec: the installed path (a menu entry cannot rely on ~/.local/bin being on PATH).
+		sed "s|^Exec=.*|Exec=$tray_cmd|" "$libdir/share/applications/mokuro-bunko-tray.desktop" \
+			>"$share/applications/mokuro-bunko-tray.desktop"
+		(cd "$libdir/share/icons" && find hicolor -type f) | while read -r icon; do
+			mkdir -p "$share/icons/$(dirname "$icon")"
+			cp "$libdir/share/icons/$icon" "$share/icons/$icon"
+		done
+		if command -v update-desktop-database >/dev/null 2>&1; then
+			update-desktop-database -q "$share/applications" 2>/dev/null || true
+		fi
+		if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+			gtk-update-icon-cache -q -t "$share/icons/hicolor" 2>/dev/null || true
+		fi
+		say "Desktop: 'Mokuro Bunko' in the applications menu ($share/applications)"
+	fi
+	if [ "$AUTOSTART" = 1 ]; then
+		if [ "$(id -u)" = 0 ]; then
+			warn "--autostart is per user: run 'mokuro-bunko tray' once and tick 'Start at login'"
+		else
+			mkdir -p "$autostart_dir"
+			sed "s|^Exec=.*|Exec=$tray_cmd|" "$libdir/share/autostart/mokuro-bunko-tray.desktop" \
+				>"$autostart_dir/mokuro-bunko-tray.desktop"
+			say "The tray starts at login ($autostart_dir/mokuro-bunko-tray.desktop)"
 		fi
 	fi
 fi

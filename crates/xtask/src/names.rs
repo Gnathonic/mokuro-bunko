@@ -1,5 +1,13 @@
 //! Build flavours, cargo features and release file names.
 //!
+//! Release downloads are named for people (0.7.0-beta.3): `mokuro-bunko-<ver>-windows.zip`,
+//! `-macos.dmg`, `-linux-x64.tar.gz`, `-linux-arm64-server.tar.gz` ([`platform_label`]).
+//! The OCR backend packs are `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`
+//! (after every download in GitHub's alphabetical list), and the macOS archive that the
+//! updater of 0.7.0-beta.2 and earlier installs from is `mokuro-bunko-update-<ver>-macos.tar.gz`.
+//! A build without a label (an unreleased flavor, a local build) keeps the old name
+//! `mokuro-bunko-<ver>-<target>-<flavor>`; [`parse_archive_name`] reads both.
+//!
 //! The release manifest keys artifacts by `target triple → flavor`, where the flavor is
 //! what the running server asks the updater for: `lite` or `full`. Since 0.7's libtorch
 //! backend (TORCH-BACKEND.md) one `full` binary serves every GPU: the recognizers come
@@ -10,9 +18,8 @@
 use std::fmt;
 
 pub const BIN: &str = "mokuro-bunko";
-/// The desktop tray (crate `bunko-tray`), shipped next to the CLI in desktop archives.
-pub const TRAY_BIN: &str = "mokuro-bunko-tray";
-pub const TRAY_PKG: &str = "bunko-tray";
+/// The Windows build of the program for the GUI subsystem (the tray, no console window).
+pub const WINDOWS_GUI_EXE: &str = bunko_update::layout::WINDOWS_GUI_EXE;
 pub const DEFAULT_DOCKER_REPO: &str = "ghcr.io/gnathonic/mokuro-bunko";
 pub const DEFAULT_GITHUB_REPO: &str = "Gnathonic/mokuro-bunko";
 
@@ -59,6 +66,8 @@ pub struct Build {
     pub target: String,
     pub flavor: Flavor,
     pub ep: Ep,
+    /// Built without the desktop tray (`xtask dist --no-tray`: the Docker images).
+    pub no_tray: bool,
 }
 
 impl Build {
@@ -74,6 +83,7 @@ impl Build {
             target: target.to_string(),
             flavor,
             ep,
+            no_tray: false,
         })
     }
 
@@ -86,10 +96,28 @@ impl Build {
         }
     }
 
+    /// The full build has the desktop tray (`mokuro-bunko tray`, the default `tray`
+    /// feature) on the desktop platforms; the lite build and `--no-tray` do not.
+    pub fn has_tray(&self) -> bool {
+        self.flavor == Flavor::Full
+            && !self.no_tray
+            && (self.target.contains("-linux-gnu")
+                || self.is_windows()
+                || self.target.contains("-apple-darwin"))
+    }
+
     /// `(no_default_features, features)` for `-p mokuro-bunko`.
     pub fn cargo_features(&self) -> (bool, Vec<&'static str>) {
         match self.flavor {
             Flavor::Lite => (true, vec![]),
+            Flavor::Full if self.no_tray => {
+                let (_, f) = Build {
+                    no_tray: false,
+                    ..self.clone()
+                }
+                .cargo_features();
+                (true, f)
+            }
             Flavor::Full => {
                 let mut f = vec!["ocr"];
                 match self.ep {
@@ -116,12 +144,7 @@ impl Build {
     }
 
     pub fn archive_stem(&self, version: &str) -> String {
-        format!(
-            "{BIN}-{}-{}-{}",
-            strip_v(version),
-            self.target,
-            self.manifest_flavor()
-        )
+        archive_stem(version, &self.target, &self.manifest_flavor())
     }
 
     pub fn archive_name(&self, version: &str) -> String {
@@ -133,26 +156,63 @@ impl Build {
     }
 }
 
-/// The target the tray is built for when packaging `target`, or None when that archive
-/// has no tray. The tray links GTK 3 on Linux, so it is always a glibc build: the musl
-/// lite archive for x86_64 carries the same glibc tray as the full one (GUI.md §6:
-/// Linux x86_64 full and lite). No tray for arm64 Linux, Android.
-pub fn tray_target(target: &str) -> Option<String> {
-    match target {
-        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl" => {
-            Some("x86_64-unknown-linux-gnu".into())
-        }
-        t if t.ends_with("-pc-windows-msvc") || t.ends_with("-apple-darwin") => Some(t.into()),
-        _ => None,
+/// The name a release download has for people: `windows`, `macos`, `linux-x64`,
+/// `linux-arm64-server`, and `linux-x64-server` (the static server the lite Docker image
+/// is made from; not a release download). `None`: no released build of that kind.
+pub fn platform_label(target: &str, flavor: &str) -> Option<&'static str> {
+    PLATFORMS
+        .iter()
+        .find(|(t, f, _)| *t == target && *f == flavor)
+        .map(|(_, _, l)| *l)
+}
+
+const PLATFORMS: &[(&str, &str, &str)] = &[
+    ("x86_64-pc-windows-msvc", "full", "windows"),
+    ("aarch64-apple-darwin", "full", "macos"),
+    ("x86_64-unknown-linux-gnu", "full", "linux-x64"),
+    ("aarch64-unknown-linux-musl", "lite", "linux-arm64-server"),
+    ("x86_64-unknown-linux-musl", "lite", "linux-x64-server"),
+];
+
+/// The prefix of the macOS archive the updater of 0.7.0-beta.2 and earlier takes (they
+/// cannot install from the disk image): after the downloads in the release's file list.
+pub const MACOS_UPDATE_PREFIX: &str = "mokuro-bunko-update";
+
+/// `mokuro-bunko-<ver>-<label>` (the macOS archive: `mokuro-bunko-update-<ver>-macos`),
+/// or `mokuro-bunko-<ver>-<target>-<flavor>` for a build without a label.
+pub fn archive_stem(version: &str, target: &str, flavor: &str) -> String {
+    let v = strip_v(version);
+    match platform_label(target, flavor) {
+        Some(l) if target.ends_with("-apple-darwin") => format!("{MACOS_UPDATE_PREFIX}-{v}-{l}"),
+        Some(l) => format!("{BIN}-{v}-{l}"),
+        None => format!("{BIN}-{v}-{target}-{flavor}"),
     }
 }
 
-pub fn tray_exe_name(target: &str) -> String {
-    if target.contains("windows") {
-        format!("{TRAY_BIN}.exe")
-    } else {
-        TRAY_BIN.to_string()
+/// The macOS disk image of a build: `mokuro-bunko-<ver>-macos.dmg` (no label:
+/// `mokuro-bunko-<ver>-<target>-<flavor>.dmg`).
+pub fn dmg_name(version: &str, target: &str, flavor: &str) -> String {
+    let v = strip_v(version);
+    match platform_label(target, flavor) {
+        Some(l) => format!("{BIN}-{v}-{l}.dmg"),
+        None => format!("{BIN}-{v}-{target}-{flavor}.dmg"),
     }
+}
+
+/// The OCR backend pack platform of `target` (`linux-x64`, `windows`, `macos`).
+pub fn pack_platform(target: &str) -> Option<&'static str> {
+    PLATFORMS
+        .iter()
+        .find(|(t, f, _)| *t == target && *f == "full")
+        .map(|(_, _, l)| *l)
+}
+
+/// The target of a pack platform name.
+pub fn pack_target(platform: &str) -> Option<&'static str> {
+    PLATFORMS
+        .iter()
+        .find(|(_, f, l)| *l == platform && *f == "full")
+        .map(|(t, _, _)| *t)
 }
 
 pub fn exe_name(target: &str) -> String {
@@ -175,28 +235,60 @@ pub fn strip_v(version: &str) -> &str {
     version.strip_prefix('v').unwrap_or(version)
 }
 
-/// Split `mokuro-bunko-<version>-<target>-<flavor>.<ext>` back into `(target, flavor)`.
-pub fn parse_archive_name<'a>(file: &'a str, version: &str) -> Option<(&'a str, &'a str)> {
-    let stem = file
-        .strip_suffix(".tar.gz")
-        .or_else(|| file.strip_suffix(".zip"))?;
+/// A release archive's `(target, flavor)` from its file name: a labelled name
+/// ([`archive_stem`]) or `mokuro-bunko-<version>-<target>-<flavor>.<ext>`.
+pub fn parse_archive_name(file: &str, version: &str) -> Option<(&'static str, String)> {
+    let (stem, ext) = if let Some(s) = file.strip_suffix(".tar.gz") {
+        (s, "tar.gz")
+    } else {
+        (file.strip_suffix(".zip")?, "zip")
+    };
+    let v = strip_v(version);
+    for (t, f, _) in PLATFORMS {
+        if archive_stem(v, t, f) == stem {
+            return (archive_ext(t) == ext).then(|| (*t, f.to_string()));
+        }
+    }
     let (target, flavor) = parse_stem(stem, version)?;
-    if archive_ext(target) != &file[file.len() - archive_ext(target).len()..] {
+    if archive_ext(target) != ext {
         return None;
     }
-    Some((target, flavor))
+    let target = leak_target(target);
+    Some((target, flavor.to_string()))
 }
 
-/// Split a macOS disk image name into `(target, flavor)` (Apple targets only). The disk
-/// image made from an archive (`packaging/macos/make-dmg.sh`, release-build.yml) is named
-/// like it with `.dmg`: `mokuro-bunko-<version>-<target>-<flavor>.dmg`. It is a release
-/// asset listed in `SHA256SUMS`, never a `release.json` artifact (the updater takes the
-/// `.tar.gz`).
-pub fn parse_dmg_name<'a>(file: &'a str, version: &str) -> Option<(&'a str, &'a str)> {
-    let (target, flavor) = parse_stem(file.strip_suffix(".dmg")?, version)?;
+/// A target triple named in a file, as a `'static` string (the known ones are
+/// constants; any other is leaked once, which xtask can afford).
+fn leak_target(target: &str) -> &'static str {
+    const KNOWN: &[&str] = &[
+        "x86_64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+    ];
+    KNOWN
+        .iter()
+        .find(|k| **k == target)
+        .copied()
+        .unwrap_or_else(|| Box::leak(target.to_string().into_boxed_str()))
+}
+
+/// A macOS disk image's `(target, flavor)` (Apple targets only): `mokuro-bunko-<ver>-macos.dmg`,
+/// or `mokuro-bunko-<version>-<target>-<flavor>.dmg` made from an unlabelled archive.
+pub fn parse_dmg_name(file: &str, version: &str) -> Option<(&'static str, String)> {
+    let stem = file.strip_suffix(".dmg")?;
+    for (t, f, _) in PLATFORMS {
+        if t.ends_with("-apple-darwin") && dmg_name(version, t, f) == file {
+            return Some((*t, f.to_string()));
+        }
+    }
+    let (target, flavor) = parse_stem(stem, version)?;
     target
         .ends_with("-apple-darwin")
-        .then_some((target, flavor))
+        .then(|| (leak_target(target), flavor.to_string()))
 }
 
 /// `mokuro-bunko-<version>-<target>-<flavor>` → `(target, flavor)`.
@@ -260,26 +352,64 @@ mod tests {
     fn archive_names_roundtrip() {
         for (target, flavor, ep) in [
             ("x86_64-unknown-linux-musl", Flavor::Lite, None),
+            ("aarch64-unknown-linux-musl", Flavor::Lite, None),
             ("x86_64-unknown-linux-gnu", Flavor::Full, None),
             ("x86_64-unknown-linux-gnu", Flavor::Full, Some(Ep::Cuda)),
+            ("x86_64-pc-windows-msvc", Flavor::Full, None),
             ("x86_64-pc-windows-msvc", Flavor::Full, Some(Ep::Cuda)),
+            ("x86_64-pc-windows-msvc", Flavor::Lite, None),
             ("aarch64-apple-darwin", Flavor::Full, None),
+            ("x86_64-apple-darwin", Flavor::Lite, None),
         ] {
             let b = Build::new(target, flavor, ep).unwrap();
             for v in ["0.7.0", "v0.7.0-alpha.1"] {
                 let name = b.archive_name(v);
                 assert_eq!(
                     parse_archive_name(&name, v),
-                    Some((target, b.manifest_flavor().as_str())),
+                    Some((target, b.manifest_flavor())),
                     "{name}"
                 );
             }
         }
+        let name = |t, f| Build::new(t, f, None).unwrap().archive_name("0.7.0-beta.3");
+        assert_eq!(
+            name("x86_64-pc-windows-msvc", Flavor::Full),
+            "mokuro-bunko-0.7.0-beta.3-windows.zip"
+        );
+        assert_eq!(
+            name("x86_64-unknown-linux-gnu", Flavor::Full),
+            "mokuro-bunko-0.7.0-beta.3-linux-x64.tar.gz"
+        );
+        assert_eq!(
+            name("aarch64-unknown-linux-musl", Flavor::Lite),
+            "mokuro-bunko-0.7.0-beta.3-linux-arm64-server.tar.gz"
+        );
+        assert_eq!(
+            name("aarch64-apple-darwin", Flavor::Full),
+            "mokuro-bunko-update-0.7.0-beta.3-macos.tar.gz"
+        );
+        // Unreleased kinds keep the triple.
+        assert_eq!(
+            name("x86_64-pc-windows-msvc", Flavor::Lite),
+            "mokuro-bunko-0.7.0-beta.3-x86_64-pc-windows-msvc-lite.zip"
+        );
+        // The names of beta.2 still parse (xtask verify of an old release directory).
+        assert_eq!(
+            parse_archive_name(
+                "mokuro-bunko-0.7.0-x86_64-unknown-linux-gnu-full.tar.gz",
+                "0.7.0"
+            ),
+            Some(("x86_64-unknown-linux-gnu", "full".into()))
+        );
         assert_eq!(
             parse_archive_name(
                 "mokuro-bunko-0.7.0-x86_64-unknown-linux-gnu-full.tar.gz",
                 "0.7.1"
             ),
+            None
+        );
+        assert_eq!(
+            parse_archive_name("mokuro-bunko-0.7.0-windows.tar.gz", "0.7.0"),
             None
         );
         assert_eq!(
@@ -290,26 +420,31 @@ mod tests {
             None
         );
         assert_eq!(parse_archive_name("release.json", "0.7.0"), None);
+        assert_eq!(
+            parse_archive_name("mokuro-bunko-backend-0.7.0-linux-x64-cpu.tar.zst", "0.7.0"),
+            None
+        );
     }
 
     #[test]
     fn dmg_names() {
-        let b = Build::new("aarch64-apple-darwin", Flavor::Full, None).unwrap();
-        let name = format!("{}.dmg", b.archive_stem("v0.7.0-beta.1"));
         assert_eq!(
-            name,
-            "mokuro-bunko-0.7.0-beta.1-aarch64-apple-darwin-full.dmg"
+            dmg_name("v0.7.0-beta.3", "aarch64-apple-darwin", "full"),
+            "mokuro-bunko-0.7.0-beta.3-macos.dmg"
         );
         assert_eq!(
-            parse_dmg_name(&name, "0.7.0-beta.1"),
-            Some(("aarch64-apple-darwin", "full"))
+            parse_dmg_name("mokuro-bunko-0.7.0-beta.3-macos.dmg", "0.7.0-beta.3"),
+            Some(("aarch64-apple-darwin", "full".into()))
         );
-        // Never an updater artifact.
-        assert_eq!(parse_archive_name(&name, "0.7.0-beta.1"), None);
-        let b = Build::new("x86_64-apple-darwin", Flavor::Lite, None).unwrap();
+        // Never an updater archive.
         assert_eq!(
-            parse_dmg_name(&format!("{}.dmg", b.archive_stem("0.7.0")), "0.7.0"),
-            Some(("x86_64-apple-darwin", "lite"))
+            parse_archive_name("mokuro-bunko-0.7.0-beta.3-macos.dmg", "0.7.0-beta.3"),
+            None
+        );
+        // Unlabelled builds (and beta.2's names).
+        assert_eq!(
+            parse_dmg_name("mokuro-bunko-0.7.0-x86_64-apple-darwin-lite.dmg", "0.7.0"),
+            Some(("x86_64-apple-darwin", "lite".into()))
         );
         assert_eq!(
             parse_dmg_name(
@@ -319,30 +454,19 @@ mod tests {
             None
         );
         assert_eq!(
-            parse_dmg_name(
-                "mokuro-bunko-0.7.0-aarch64-apple-darwin-full.tar.gz",
-                "0.7.0"
-            ),
+            parse_dmg_name("mokuro-bunko-update-0.7.0-macos.tar.gz", "0.7.0"),
             None
         );
     }
 
     #[test]
-    fn tray_targets() {
-        assert_eq!(
-            tray_target("x86_64-unknown-linux-musl").as_deref(),
-            Some("x86_64-unknown-linux-gnu")
-        );
-        assert_eq!(
-            tray_target("aarch64-apple-darwin").as_deref(),
-            Some("aarch64-apple-darwin")
-        );
-        assert_eq!(tray_target("aarch64-unknown-linux-musl"), None);
-        assert_eq!(tray_target("aarch64-linux-android"), None);
-        assert_eq!(
-            tray_exe_name("x86_64-pc-windows-msvc"),
-            "mokuro-bunko-tray.exe"
-        );
+    fn pack_platforms() {
+        assert_eq!(pack_platform("x86_64-unknown-linux-gnu"), Some("linux-x64"));
+        assert_eq!(pack_platform("x86_64-pc-windows-msvc"), Some("windows"));
+        assert_eq!(pack_platform("aarch64-apple-darwin"), Some("macos"));
+        assert_eq!(pack_platform("aarch64-unknown-linux-musl"), None);
+        assert_eq!(pack_target("linux-x64"), Some("x86_64-unknown-linux-gnu"));
+        assert_eq!(pack_target("linux-arm64-server"), None);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 # The build half of a release, shared by release.yml (a `v*` tag) and release-check.yml
-# (a dry run on any branch): tests, every platform archive, the macOS disk images, the
-# OCR backend packs and (opt-in) the Android APK, each uploaded as a workflow artifact
-# (`dist-*`, `pack-*`, `android-apk`). It signs, publishes and pushes nothing, uses no
+# (a dry run on any branch): tests, the four downloads (Windows zip, macOS disk image,
+# Linux x64, Linux arm64 server) and the macOS archive older updaters take, the OCR
+# backend packs and (opt-in) the Android APK, each uploaded as a workflow artifact
+# (`dist-*`, `pack-*`, `android-apk`), and the static x64 server the lite Docker image
+# is made from (`docker-*`: not a release file). It signs, publishes and pushes nothing, uses no
 # secret except the optional Android keystore, and needs only `contents: read`: the
 # caller's release job signs release.json and drafts the release from these artifacts.
 # See docs/rust-port/PACKAGING.md §5.
@@ -54,8 +56,6 @@ jobs:
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # bunko-tray links GTK 3 on Linux (the desktop tray; the CLI does not).
-      - run: sudo apt-get update -q && sudo apt-get install -y -q libgtk-3-dev
       - run: cargo test --workspace --locked
 
   build:
@@ -64,21 +64,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux lite: fully static musl, cross-built with zig. x86_64 lite is the
-          # `build-linux-x64-lite` job: it takes the tray from the manylinux job.
-          - { name: linux-arm64-lite, os: ubuntu-latest, target: aarch64-unknown-linux-musl, flavor: lite, zig: true }
+          # Linux arm64: the static server (musl, cross-built with zig); OCR runs on a
+          # processor elsewhere (no arm64 backend pack). Release file
+          # mokuro-bunko-<ver>-linux-arm64-server.tar.gz.
+          - { name: linux-arm64-server, os: ubuntu-latest, target: aarch64-unknown-linux-musl, flavor: lite, zig: true, artifact: dist }
+          # The static x86_64 server: only for the lite Docker image (release-docker.yml),
+          # not a release file.
+          - { name: linux-x64-server, os: ubuntu-latest, target: x86_64-unknown-linux-musl, flavor: lite, zig: true, artifact: docker }
           # Full: one binary per platform (ONNX Runtime on the CPU for PP-OCR; the
-          # recognizers come from the backend packs). Linux x86_64 full is built by the
-          # `build-linux-full` job (manylinux_2_28). The ONNX Runtime GPU flavors
-          # (full-cuda, DirectML, CoreML, WebGPU) are not released any more, and there is
-          # no Linux arm64 / Intel macOS full build (no backend pack for them).
-          - { name: windows-x64-full, os: windows-latest, target: x86_64-pc-windows-msvc, flavor: full }
-          - { name: windows-x64-lite, os: windows-latest, target: x86_64-pc-windows-msvc, flavor: lite }
-          # macOS: the .tar.gz (what the updater and install.sh take) and the
-          # drag-to-Applications disk image of the same build (packaging/macos/make-dmg.sh).
-          - { name: macos-arm64-full, os: macos-latest, target: aarch64-apple-darwin, flavor: full }
-          - { name: macos-arm64-lite, os: macos-latest, target: aarch64-apple-darwin, flavor: lite }
-          - { name: macos-x64-lite, os: macos-latest, target: x86_64-apple-darwin, flavor: lite }
+          # recognizers come from the backend packs), with the desktop tray. Linux x86_64
+          # full is the `build-linux-full` job (manylinux_2_28). No lite Windows/macOS
+          # download, no Intel macOS build (owner, 0.7.0-beta.3).
+          # Windows: mokuro-bunko-<ver>-windows.zip (Mokuro Bunko.exe + bin\mokuro-bunko.exe).
+          - { name: windows, os: windows-latest, target: x86_64-pc-windows-msvc, flavor: full, artifact: dist }
+          # macOS: the disk image mokuro-bunko-<ver>-macos.dmg (what people download and
+          # what the updater from 0.7.0-beta.3 on installs from), made from the archive
+          # mokuro-bunko-update-<ver>-macos.tar.gz (what the updaters up to 0.7.0-beta.2
+          # take; install.sh too).
+          - { name: macos, os: macos-latest, target: aarch64-apple-darwin, flavor: full, artifact: dist }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -110,21 +113,22 @@ jobs:
           if [ "$ZIG" = "true" ]; then args+=(--zig); fi
           cargo run -p xtask --locked -- dist "${args[@]}"
           ls -l dist
-      # The disk image: "Mokuro Bunko.app" + an Applications link, no OCR inside (the
-      # wizard downloads the backend pack and models on demand). Named like the archive
-      # it is made from: mokuro-bunko-<ver>-<target>-<flavor>.dmg. A release asset only,
-      # not in release.json: the updater replaces the binaries from the .tar.gz.
+      # The disk image: "Mokuro Bunko.app" (main program mokuro-bunko: opening it runs
+      # the tray) + an Applications link, no OCR inside (the wizard downloads the backend
+      # pack and models on demand), sealed ad hoc. In release.json as `bundles`: the
+      # updater from 0.7.0-beta.3 on installs from it.
       - name: disk image (dmgbuild)
         if: runner.os == 'macOS'
         env:
           # dmgbuild 1.6.7 (MIT; ds_store, mac_alias: MIT), pinned for the build only.
           DMGBUILD_VERSION: "1.6.7"
+          VERSION: ${{ inputs.version }}
         run: |
           set -eux
           python3 -m venv "$RUNNER_TEMP/dmgbuild"
           "$RUNNER_TEMP/dmgbuild/bin/pip" install -q --disable-pip-version-check "dmgbuild==$DMGBUILD_VERSION"
-          archive=$(ls dist/mokuro-bunko-*-"$TARGET"-"$FLAVOR".tar.gz)
-          dmg="${archive%.tar.gz}.dmg"
+          archive="dist/mokuro-bunko-update-$VERSION-macos.tar.gz"
+          dmg="dist/mokuro-bunko-$VERSION-macos.dmg"
           # hdiutil on hosted runners sometimes fails with "Resource busy": retry.
           for attempt in 1 2 3; do
             if DMGBUILD="$RUNNER_TEMP/dmgbuild/bin/dmgbuild" packaging/macos/make-dmg.sh "$archive" "$dmg"; then
@@ -134,22 +138,45 @@ jobs:
             sleep 15
           done
           hdiutil imageinfo "$dmg" | head -n 12
-          # The volume holds the app (with its CLI and tray) and the Applications link.
+          # The volume holds the app (the program is its main executable; no separate
+          # tray any more), sealed, and the Applications link.
           mnt=$(mktemp -d)
           hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
-          ls -la "$mnt"
+          ls -la "$mnt" "$mnt/Mokuro Bunko.app/Contents/MacOS"
           test -x "$mnt/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko"
-          test -x "$mnt/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko-tray"
+          test ! -e "$mnt/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko-tray"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$mnt/Mokuro Bunko.app/Contents/Info.plist")" = mokuro-bunko
+          codesign --verify --deep --strict --verbose=2 "$mnt/Mokuro Bunko.app"
           test "$(readlink "$mnt/Applications")" = /Applications
           test ! -e "$mnt/Mokuro Bunko.app/Contents/Resources/ocr-offline"
-          if [ "$TARGET" = aarch64-apple-darwin ]; then
-            "$mnt/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko" --version
-          fi
+          "$mnt/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko" --version
+          "$mnt/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko" tray --help
           hdiutil detach "$mnt"
           ls -l dist
+      # Windows: the zip's layout, and the tray program is a GUI-subsystem build (no
+      # console window) of the same program.
+      - name: the Windows layout
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist/*.zip | Select-Object -First 1
+          $x = Join-Path $env:RUNNER_TEMP "z"; Expand-Archive $zip.FullName -DestinationPath $x -Force
+          $top = Get-ChildItem $x -Directory | Select-Object -First 1
+          Get-ChildItem -Recurse $top.FullName | Select-Object FullName, Length | Format-Table -AutoSize
+          foreach ($f in "Mokuro Bunko.exe", "bin\mokuro-bunko.exe", "run.bat", "doctor.bat", "_env.cmd", "mokuro-bunko.ico") {
+            if (-not (Test-Path (Join-Path $top.FullName $f))) { throw "the zip has no $f" }
+          }
+          if (Test-Path (Join-Path $top.FullName "mokuro-bunko-tray.exe")) { throw "a separate tray is still in the zip" }
+          if (Test-Path (Join-Path $top.FullName "mokuro-bunko.exe")) { throw "the command line belongs in bin\" }
+          function Subsystem($p) { $b = [IO.File]::ReadAllBytes($p); $pe = [BitConverter]::ToInt32($b, 0x3c); [BitConverter]::ToUInt16($b, $pe + 24 + 68) }
+          $gui = Subsystem (Join-Path $top.FullName "Mokuro Bunko.exe"); $cli = Subsystem (Join-Path $top.FullName "bin\mokuro-bunko.exe")
+          Write-Host "subsystems: Mokuro Bunko.exe=$gui bin\mokuro-bunko.exe=$cli"
+          if ($gui -ne 2 -or $cli -ne 3) { throw "expected GUI (2) and console (3)" }
+          & (Join-Path $top.FullName "bin\mokuro-bunko.exe") --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.name }}
+          name: ${{ matrix.artifact }}-${{ matrix.name }}
           path: |
             dist/*.tar.gz
             dist/*.zip
@@ -175,61 +202,17 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: build (xtask dist, then show the glibc/GLIBCXX versions the binary needs)
-        run: packaging/manylinux/build.sh full tray
+        run: packaging/manylinux/build.sh full
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-linux-x64-full
-          path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: ${{ inputs.retention-days }}
-      # The desktop tray (glibc 2.28 + GTK 3) for the x86_64 lite archive.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tray-linux-x64
-          path: dist/mokuro-bunko-tray
-          if-no-files-found: error
-          retention-days: ${{ inputs.retention-days }}
-
-  # Linux x86_64 lite: the static musl CLI (zig), plus the manylinux job's glibc tray
-  # (a tray needs glibc and GTK 3 anyway; the CLI stays static).
-  build-linux-x64-lite:
-    needs: build-linux-full
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-      - uses: mlugg/setup-zig@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: linux-x64-lite
-      - uses: actions/download-artifact@v4
-        with:
-          name: tray-linux-x64
-          path: tray
-      - name: xtask dist
-        run: |
-          set -eux
-          chmod +x tray/mokuro-bunko-tray
-          cargo run -p xtask --locked -- dist --locked --zig --target x86_64-unknown-linux-musl \
-            --flavor lite --tray-bin tray/mokuro-bunko-tray --out dist
-          ls -l dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-linux-x64-lite
+          name: dist-linux-x64
           path: dist/*.tar.gz
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}
 
   # OCR backend packs (docs/rust-port/TORCH-BACKEND.md, PACKAGING.md §8): libtorch
   # 2.13.0 of each variant, trimmed, with libbunko_torch built against it, as
-  # mokuro-bunko-<ver>-<target>-torch-<variant>.tar.zst (split in .001/.002 parts
+  # mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst (split in .001/.002 parts
   # above 1.9 GiB). The NVIDIA libraries are not in the archives: pack.json lists
   # NVIDIA's PyPI wheels (pinned by sha256) and `install-ocr` fetches them.
   packs:

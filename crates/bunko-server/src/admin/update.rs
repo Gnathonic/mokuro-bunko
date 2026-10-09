@@ -120,6 +120,8 @@ struct Inner {
     retry: Mutex<Retry>,
     /// "Check now" in the panel: look at the automatic update again at once.
     kick: tokio::sync::Notify,
+    /// The newest release the log has announced (said once per version, not per check).
+    announced: Mutex<Option<String>>,
 }
 
 impl UpdateService {
@@ -138,6 +140,7 @@ impl UpdateService {
                 reporter: Mutex::new(None),
                 retry: Mutex::new(Retry::default()),
                 kick: tokio::sync::Notify::new(),
+                announced: Mutex::new(None),
             }),
         }
     }
@@ -251,16 +254,28 @@ impl UpdateService {
         let _one = self.inner.checking.lock().await;
         let status = self.inner.source.check().await;
         if status.available {
-            info!(
-                "mokuro-bunko {} is available (running {})",
-                status.latest.as_deref().unwrap_or("?"),
-                status.current
-            );
+            if self.announce(status.latest.as_deref().unwrap_or("?")) {
+                info!(
+                    "mokuro-bunko {} is available (running {})",
+                    status.latest.as_deref().unwrap_or("?"),
+                    status.current
+                );
+            }
         } else if let Some(e) = &status.error {
             warn!("update check failed: {e}");
         }
         *self.inner.cached.lock() = Some((Instant::now(), status.clone()));
         status
+    }
+
+    /// Whether `version` is news for the log (true once per version).
+    fn announce(&self, version: &str) -> bool {
+        let mut last = self.inner.announced.lock();
+        if last.as_deref() == Some(version) {
+            return false;
+        }
+        *last = Some(version.to_string());
+        true
     }
 
     /// The status the page shows: cached while fresh, re-checked when stale (if checks
@@ -809,6 +824,22 @@ mod tests {
         fn apply(&self) -> BoxFuture<'_, Result<String, String>> {
             Box::pin(async { Err("not this way".into()) })
         }
+    }
+
+    #[test]
+    fn a_new_release_is_announced_once_per_version() {
+        let svc = UpdateService::new(
+            Arc::new(Source {
+                install: InstallKind::Docker,
+                latest: "99.0.0",
+            }),
+            Arc::new(RwLock::new(Config::default())),
+        );
+        assert!(svc.announce("99.0.0"));
+        assert!(!svc.announce("99.0.0"));
+        assert!(!svc.announce("99.0.0"));
+        assert!(svc.announce("99.0.1"));
+        assert!(!svc.announce("99.0.1"));
     }
 
     #[derive(Default)]

@@ -1,6 +1,7 @@
 # The release's Docker images, shared by release.yml and release-check.yml: the lite
 # image (linux/amd64 + linux/arm64) and the full image (linux/amd64), built from the
-# release binaries of this run (the `dist-linux-*` artifacts of release-build.yml).
+# release binaries of this run (the `dist-linux-*` artifacts of release-build.yml, and
+# `docker-linux-x64-server`: the static x86_64 server, not a release file).
 #
 # Pushes only with `push: true`, which release.yml passes together with
 # `packages: write`. release-check.yml passes `push: false` and grants no package
@@ -52,6 +53,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: dist-linux-*
+          path: dist
+          merge-multiple: true
+      # The static x86_64 server of the lite image (not a release file).
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: docker-linux-*
           path: dist
           merge-multiple: true
       # The images reuse the release binaries (BIN_FROM=prebuilt): no second compile,

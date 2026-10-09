@@ -4,7 +4,7 @@ use crate::names::{self, DEFAULT_DOCKER_REPO, DEFAULT_GITHUB_REPO};
 use crate::util;
 use anyhow::{Context, Result, bail};
 use bunko_update::backend::{BackendArtifact, Part};
-use bunko_update::{Artifact, Manifest};
+use bunko_update::{Artifact, FileRef, Manifest};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -13,7 +13,7 @@ pub struct ManifestArgs {
     /// Release version (`0.7.0` or `v0.7.0`).
     #[arg(long)]
     pub version: String,
-    /// Directory holding the archives (`mokuro-bunko-<ver>-<target>-<flavor>.tar.gz|zip`).
+    /// Directory holding the archives, disk images and packs (crate::names).
     #[arg(long, default_value = "dist")]
     pub dir: PathBuf,
     /// URL prefix the archives are downloaded from (default: the GitHub release of the tag).
@@ -109,7 +109,7 @@ pub fn build_manifest(args: &ManifestArgs, version: &str, base: &str) -> Result<
         };
         let (sha256, size) = util::sha256_file(&path)?;
         let prev = artifacts.entry(target.to_string()).or_default().insert(
-            flavor.to_string(),
+            flavor.clone(),
             Artifact {
                 url: format!("{base}/{name}"),
                 sha256,
@@ -122,6 +122,21 @@ pub fn build_manifest(args: &ManifestArgs, version: &str, base: &str) -> Result<
         }
     }
     let backends = collect_backends(&args.dir, version, base)?;
+    let bundles = collect_bundles(&args.dir, version, base)?;
+    for (target, flavors) in &bundles {
+        for flavor in flavors.keys() {
+            // The updaters of 0.7.0-beta.2 and earlier read only `artifacts`: a macOS
+            // build needs its archive there too, or they could not update to it.
+            if !artifacts
+                .get(target)
+                .is_some_and(|f| f.contains_key(flavor))
+            {
+                bail!(
+                    "{target} {flavor}: a disk image without the archive the older updaters need"
+                );
+            }
+        }
+    }
     if artifacts.is_empty() {
         bail!(
             "no mokuro-bunko-{version}-*.tar.gz|zip archives in {}",
@@ -154,7 +169,43 @@ pub fn build_manifest(args: &ManifestArgs, version: &str, base: &str) -> Result<
         artifacts,
         docker,
         backends,
+        bundles,
     })
+}
+
+/// The macOS disk images in `dir`: target → flavor → file (`bundles`: what the updater
+/// from 0.7.0-beta.3 on installs from on a Mac).
+fn collect_bundles(
+    dir: &Path,
+    version: &str,
+    base: &str,
+) -> Result<BTreeMap<String, BTreeMap<String, FileRef>>> {
+    let mut out: BTreeMap<String, BTreeMap<String, FileRef>> = BTreeMap::new();
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let Some((target, flavor)) = names::parse_dmg_name(&name, version) else {
+            continue;
+        };
+        let (sha256, size) = util::sha256_file(&path)?;
+        out.entry(target.to_string()).or_default().insert(
+            flavor,
+            FileRef {
+                url: format!("{base}/{name}"),
+                sha256,
+                size,
+            },
+        );
+    }
+    Ok(out)
 }
 
 /// OCR backend packs (`xtask torch-pack` output, possibly split in parts) in `dir`:
@@ -254,54 +305,30 @@ pub fn to_bytes(m: &Manifest) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// `SHA256SUMS`: every archive and pack part of the manifest, plus the release assets
-/// that are not in it: the macOS disk images (`<archive stem>.dmg`).
+/// `SHA256SUMS`: every file of the manifest (archives, disk images, pack parts).
 fn write_sha256sums(dir: &Path, m: &Manifest) -> Result<()> {
-    let mut extra = Vec::new();
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_file())
-        .collect();
-    entries.sort();
-    for path in entries {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if names::parse_dmg_name(&name, &m.version).is_some() {
-            let (sha256, size) = util::sha256_file(&path)?;
-            eprintln!("    {name}: {size} bytes  {sha256} (SHA256SUMS only)");
-            extra.push(format!("{sha256}  {name}"));
-        }
-    }
+    let line = |sha: &str, url: &str| format!("{sha}  {}", url.rsplit('/').next().unwrap_or(url));
     let mut lines: Vec<String> = m
         .artifacts
         .values()
         .flat_map(|f| f.values())
-        .map(|a| {
-            format!(
-                "{}  {}",
-                a.sha256,
-                a.url.rsplit('/').next().unwrap_or(&a.url)
-            )
-        })
+        .map(|a| line(&a.sha256, &a.url))
+        .chain(
+            m.bundles
+                .values()
+                .flat_map(|f| f.values())
+                .map(|d| line(&d.sha256, &d.url)),
+        )
         .chain(
             m.backends
                 .values()
                 .flat_map(|v| v.values())
                 .flat_map(|b| &b.parts)
-                .map(|p| {
-                    format!(
-                        "{}  {}",
-                        p.sha256,
-                        p.url.rsplit('/').next().unwrap_or(&p.url)
-                    )
-                }),
+                .map(|p| line(&p.sha256, &p.url)),
         )
-        .chain(extra)
         .collect();
     lines.sort();
+    lines.dedup();
     std::fs::write(dir.join("SHA256SUMS"), lines.join("\n") + "\n")?;
     Ok(())
 }
@@ -313,79 +340,134 @@ mod tests {
     #[test]
     fn manifest_from_dir() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path()
-                .join("mokuro-bunko-0.7.0-x86_64-unknown-linux-musl-lite.tar.gz"),
-            b"lite",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path()
-                .join("mokuro-bunko-0.7.0-x86_64-pc-windows-msvc-full-cuda.zip"),
-            b"cuda",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path()
-                .join("mokuro-bunko-0.7.0-x86_64-pc-windows-msvc-full-cuda.zip.sha256"),
-            b"x",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path()
-                .join("mokuro-bunko-0.6.9-x86_64-unknown-linux-musl-lite.tar.gz"),
-            b"old",
-        )
-        .unwrap();
+        let v = "0.7.0-beta.3";
+        for (name, body) in [
+            (
+                "mokuro-bunko-0.7.0-beta.3-linux-arm64-server.tar.gz",
+                &b"arm"[..],
+            ),
+            ("mokuro-bunko-0.7.0-beta.3-linux-x64.tar.gz", b"x64"),
+            ("mokuro-bunko-0.7.0-beta.3-windows.zip", b"win"),
+            ("mokuro-bunko-update-0.7.0-beta.3-macos.tar.gz", b"mac-tgz"),
+            ("mokuro-bunko-0.7.0-beta.3-macos.dmg", b"dmg"),
+            // Not this release's.
+            (
+                "mokuro-bunko-0.7.0-beta.2-x86_64-unknown-linux-gnu-full.tar.gz",
+                b"old",
+            ),
+        ] {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
         let args = ManifestArgs {
-            version: "v0.7.0".into(),
+            version: format!("v{v}"),
             dir: dir.path().to_path_buf(),
             base_url: None,
             notes_url: None,
-            published_at: Some("2026-10-01T00:00:00Z".into()),
+            published_at: Some("2026-10-09T00:00:00Z".into()),
             docker_repo: DEFAULT_DOCKER_REPO.into(),
             docker_flavors: vec!["lite".into(), "full".into(), "full-cuda".into()],
             out: None,
         };
-        // A disk image: in SHA256SUMS, not in release.json.
-        std::fs::write(
-            dir.path()
-                .join("mokuro-bunko-0.7.0-aarch64-apple-darwin-full.dmg"),
-            b"dmg",
-        )
-        .unwrap();
-        let m = build_manifest(&args, "0.7.0", "https://example.test/dl").unwrap();
-        assert_eq!(m.artifacts.len(), 2);
-        assert!(m.artifact("aarch64-apple-darwin", "full").is_err());
+        let m = build_manifest(&args, v, "https://example.test/dl").unwrap();
+        let keys: Vec<String> = m
+            .artifacts
+            .iter()
+            .flat_map(|(t, f)| f.keys().map(move |k| format!("{t}/{k}")))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "aarch64-apple-darwin/full",
+                "aarch64-unknown-linux-musl/lite",
+                "x86_64-pc-windows-msvc/full",
+                "x86_64-unknown-linux-gnu/full"
+            ]
+        );
+        // What an updater of 0.7.0-beta.2 reads on a Mac: an archive.
+        let mac = m.artifact("aarch64-apple-darwin", "full").unwrap();
+        assert_eq!(
+            mac.url,
+            "https://example.test/dl/mokuro-bunko-update-0.7.0-beta.3-macos.tar.gz"
+        );
+        assert_eq!(mac.binary, "mokuro-bunko");
+        // What this release's updater reads: the disk image.
+        let d = m.download("aarch64-apple-darwin", "full").unwrap();
+        assert!(d.url.ends_with("/mokuro-bunko-0.7.0-beta.3-macos.dmg"));
+        assert_eq!(d.size, 3);
+        assert_eq!(
+            m.download("x86_64-pc-windows-msvc", "full").unwrap().binary,
+            "mokuro-bunko.exe"
+        );
         write_sha256sums(dir.path(), &m).unwrap();
         let sums = std::fs::read_to_string(dir.path().join("SHA256SUMS")).unwrap();
         let names: Vec<&str> = sums
             .lines()
             .map(|l| l.split_once("  ").unwrap().1)
             .collect();
-        assert_eq!(names.len(), 3, "{sums}");
-        assert!(names.contains(&"mokuro-bunko-0.7.0-aarch64-apple-darwin-full.dmg"));
-        assert!(names.contains(&"mokuro-bunko-0.7.0-x86_64-unknown-linux-musl-lite.tar.gz"));
-        let lite = m.artifact("x86_64-unknown-linux-musl", "lite").unwrap();
-        assert_eq!(
-            lite.url,
-            "https://example.test/dl/mokuro-bunko-0.7.0-x86_64-unknown-linux-musl-lite.tar.gz"
-        );
-        assert_eq!(lite.size, 4);
-        assert_eq!(lite.binary, "mokuro-bunko");
-        let cuda = m.artifact("x86_64-pc-windows-msvc", "full-cuda").unwrap();
-        assert_eq!(cuda.binary, "mokuro-bunko.exe");
+        assert_eq!(names.len(), 5, "{sums}");
+        assert!(names.contains(&"mokuro-bunko-0.7.0-beta.3-macos.dmg"));
         assert_eq!(
             m.docker["full-cuda"],
-            "ghcr.io/gnathonic/mokuro-bunko:0.7.0-cuda"
-        );
-        assert_eq!(
-            m.docker["lite"],
-            "ghcr.io/gnathonic/mokuro-bunko:0.7.0-lite"
+            "ghcr.io/gnathonic/mokuro-bunko:0.7.0-beta.3-cuda"
         );
         let bytes = to_bytes(&m).unwrap();
         let back: Manifest = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(back, m);
+        // A disk image without the archive the old updaters need is refused.
+        std::fs::remove_file(
+            dir.path()
+                .join("mokuro-bunko-update-0.7.0-beta.3-macos.tar.gz"),
+        )
+        .unwrap();
+        assert!(build_manifest(&args, v, "https://example.test/dl").is_err());
+    }
+
+    /// The manifest as the updater of 0.7.0-beta.2 parses it: its own `Manifest` had no
+    /// `bundles` and took unknown fields silently (serde's default).
+    #[test]
+    fn older_updaters_read_the_new_manifest() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Beta2Artifact {
+            url: String,
+            sha256: String,
+            size: u64,
+            #[serde(default)]
+            binary: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct Beta2Manifest {
+            version: String,
+            #[serde(default)]
+            artifacts: BTreeMap<String, BTreeMap<String, Beta2Artifact>>,
+            #[serde(default)]
+            docker: BTreeMap<String, String>,
+            #[serde(default)]
+            backends: BTreeMap<String, BTreeMap<String, bunko_update::backend::BackendArtifact>>,
+        }
+        let mut m = Manifest {
+            version: "0.7.0-beta.3".into(),
+            published_at: String::new(),
+            notes_url: String::new(),
+            artifacts: BTreeMap::new(),
+            docker: BTreeMap::new(),
+            backends: BTreeMap::new(),
+            bundles: BTreeMap::new(),
+        };
+        m.bundles
+            .entry("aarch64-apple-darwin".into())
+            .or_default()
+            .insert(
+                "full".into(),
+                FileRef {
+                    url: "https://x/mokuro-bunko-0.7.0-beta.3-macos.dmg".into(),
+                    sha256: "00".into(),
+                    size: 1,
+                },
+            );
+        let old: Beta2Manifest = serde_json::from_slice(&to_bytes(&m).unwrap()).unwrap();
+        assert_eq!(old.version, "0.7.0-beta.3");
     }
 
     #[test]

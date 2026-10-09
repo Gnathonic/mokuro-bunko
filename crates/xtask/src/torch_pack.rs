@@ -12,8 +12,8 @@
 //! 5. Licences: PyTorch's LICENSE + bundled third-party licences (from the CPU wheel's
 //!    dist-info; the zips carry none), the NVIDIA wheels' licence files.
 //! 6. Write `pack.json` (sha256 of every file; the NVIDIA wheels as `external` unless
-//!    `--bundle-external`) and `mokuro-bunko-<ver>-<target>-torch-<variant>.tar.zst`
-//!    (split in parts above `--max-part`).
+//!    `--bundle-external`) and `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`
+//!    (split in parts above `--max-part`; `<platform>`: `linux-x64`, `windows`, `macos`).
 
 use crate::archive;
 use crate::torch_specs::{self, Layout, Spec, Upstream, Wheel};
@@ -375,10 +375,7 @@ pub fn run(args: &TorchPackArgs) -> Result<PathBuf> {
     )?;
     let (sha256, size) = util::sha256_file(&archive)?;
     let file = format!("{stem}.tar.zst");
-    std::fs::write(
-        out_dir.join(format!("{file}.sha256")),
-        format!("{sha256}  {file}\n"),
-    )?;
+    // No `.sha256` file: SHA256SUMS and the signed release.json carry every checksum.
     let parts = split(&archive, args.max_part)?;
     eprintln!(
         "    {}: {} compressed ({} parts), {} unpacked",
@@ -399,19 +396,35 @@ fn abs(root: &Path, p: &Path) -> PathBuf {
     }
 }
 
+/// The prefix of the backend packs' file names: after every download in a release's
+/// alphabetical file list.
+pub const PACK_PREFIX: &str = "mokuro-bunko-backend";
+
+/// `mokuro-bunko-backend-<ver>-<platform>-<variant>` (`<platform>`:
+/// [`crate::names::pack_platform`]; a target without one keeps the triple).
 pub fn archive_stem(version: &str, target: &str, variant: &str) -> String {
+    let platform = crate::names::pack_platform(target).unwrap_or(target);
     format!(
-        "{}-{}-{target}-torch-{variant}",
-        crate::names::BIN,
+        "{PACK_PREFIX}-{}-{platform}-{variant}",
         crate::names::strip_v(version)
     )
 }
 
-/// `mokuro-bunko-<ver>-<target>-torch-<variant>.tar.zst[.NNN]` → `(target, variant, part)`.
+/// A pack archive (or part) name → `(target, variant, part)`:
+/// `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst[.NNN]`, or the name packs had
+/// up to 0.7.0-beta.2, `mokuro-bunko-<ver>-<target>-torch-<variant>.tar.zst[.NNN]`.
 pub fn parse_pack_name<'a>(file: &'a str, version: &str) -> Option<(&'a str, &'a str, u32)> {
-    let rest = file
-        .strip_prefix(crate::names::BIN)?
-        .strip_prefix('-')?
+    let (rest, new) = match file
+        .strip_prefix(PACK_PREFIX)
+        .and_then(|r| r.strip_prefix('-'))
+    {
+        Some(r) => (r, true),
+        None => (
+            file.strip_prefix(crate::names::BIN)?.strip_prefix('-')?,
+            false,
+        ),
+    };
+    let rest = rest
         .strip_prefix(crate::names::strip_v(version))?
         .strip_prefix('-')?;
     let (stem, part) = match rest.rsplit_once(".tar.zst") {
@@ -425,6 +438,20 @@ pub fn parse_pack_name<'a>(file: &'a str, version: &str) -> Option<(&'a str, &'a
         }
         None => return None,
     };
+    if new {
+        for platform in ["linux-x64", "windows", "macos"] {
+            if let Some(variant) = stem
+                .strip_prefix(platform)
+                .and_then(|v| v.strip_prefix('-'))
+                .filter(|v| !v.is_empty() && !v.contains('-'))
+            {
+                return Some((crate::names::pack_target(platform)?, variant, part));
+            }
+        }
+        let (target, variant) = stem.rsplit_once('-')?;
+        return (target.split('-').count() >= 3 && !variant.is_empty())
+            .then_some((target, variant, part));
+    }
     let (target, variant) = stem.rsplit_once("-torch-")?;
     if target.split('-').count() < 3 || variant.is_empty() {
         return None;
@@ -437,7 +464,7 @@ fn pack_parts(dir: &Path, stem: &str) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(dir)?.flatten() {
         let n = e.file_name().to_string_lossy().to_string();
-        if n.starts_with(&format!("{stem}.tar.zst")) && !n.ends_with(".sha256") {
+        if n.starts_with(&format!("{stem}.tar.zst")) {
             out.push(e.path());
         }
     }
@@ -1441,9 +1468,32 @@ mod tests {
     #[test]
     fn pack_names_roundtrip() {
         let stem = archive_stem("v0.7.0", "x86_64-unknown-linux-gnu", "rocm7.1");
+        assert_eq!(stem, "mokuro-bunko-backend-0.7.0-linux-x64-rocm7.1");
+        for (t, v, name) in [
+            (
+                "x86_64-pc-windows-msvc",
+                "cu130",
+                "mokuro-bunko-backend-0.7.0-beta.3-windows-cu130",
+            ),
+            (
+                "aarch64-apple-darwin",
+                "cpu",
+                "mokuro-bunko-backend-0.7.0-beta.3-macos-cpu",
+            ),
+        ] {
+            assert_eq!(archive_stem("0.7.0-beta.3", t, v), name);
+            assert_eq!(
+                parse_pack_name(&format!("{name}.tar.zst.001"), "0.7.0-beta.3"),
+                Some((t, v, 1))
+            );
+        }
+        // The names of 0.7.0-beta.2 and earlier.
         assert_eq!(
-            stem,
-            "mokuro-bunko-0.7.0-x86_64-unknown-linux-gnu-torch-rocm7.1"
+            parse_pack_name(
+                "mokuro-bunko-0.7.0-x86_64-unknown-linux-gnu-torch-cpu.tar.zst",
+                "0.7.0"
+            ),
+            Some(("x86_64-unknown-linux-gnu", "cpu", 0))
         );
         assert_eq!(
             parse_pack_name(&format!("{stem}.tar.zst"), "0.7.0"),

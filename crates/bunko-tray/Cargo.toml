@@ -1,6 +1,6 @@
 [package]
 name = "bunko-tray"
-description = "mokuro-bunko desktop tray: status, pause/resume, open the app pages, supervise a tray-managed server or processor"
+description = "mokuro-bunko desktop tray (`mokuro-bunko tray`): status, pause/resume, open the app pages, supervise a tray-managed server or processor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,12 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# A separate executable on purpose (GUI.md §1): on Linux it links GTK 3 and loads
-# libayatana-appindicator3 at run time; the `mokuro-bunko` CLI/server binaries and the
-# Docker images never depend on either.
-[[bin]]
-name = "mokuro-bunko-tray"
-path = "src/main.rs"
+# A library: `mokuro-bunko tray` (feature `tray` of the mokuro-bunko crate, on in the
+# full build) runs it in the main program (GUI.md §1). No GUI toolkit on Linux: the
+# tray is a StatusNotifierItem over D-Bus (ksni, pure Rust), so neither GTK nor
+# AppIndicator is needed and a headless full build still starts.
 
 [dependencies]
 anyhow.workspace = true
@@ -30,10 +28,6 @@ ureq = { version = "3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Decoding the embedded tray icons to RGBA.
 png = "0.18"
-# The native tray: tray-icon + muda menus + the tao event loop (MIT/Apache-2.0).
-# libxdo (muda's predefined copy/paste items on Linux) is not needed.
-tray-icon = { version = "0.24", default-features = false, features = ["gtk"] }
-tao = { version = "0.34", default-features = false, features = ["rwh_06"] }
 # Opening the app pages and the logs folder with the desktop's default handler.
 open = "5"
 # One tray per user (a lock file), as bunko-processor locks its storage.
@@ -43,8 +37,18 @@ fs4 = { version = "1", default-features = false, features = ["sync"] }
 bunko-control = { path = "../bunko-control", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# tao runs a GTK main loop on Linux; the tray menu is a GTK menu (dbusmenu via appindicator).
-gtk = "0.18"
+# The Linux tray: a KDE/freedesktop StatusNotifierItem + com.canonical.dbusmenu menu over
+# the session bus (zbus, pure Rust; ksni is Unlicense, zbus MIT). Shown by KDE, Xfce,
+# LXQt, Cinnamon, ... and by GNOME with the AppIndicator extension.
+ksni = { version = "0.3.6", default-features = false, features = ["tokio"] }
+# `mokuro-bunko doctor`: is there a session bus and a StatusNotifier host (session.rs).
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { workspace = true }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+# The Windows/macOS tray: tray-icon + muda menus + the tao event loop (MIT/Apache-2.0).
+tray-icon = { version = "0.24", default-features = false }
+tao = { version = "0.34", default-features = false, features = ["rwh_06"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

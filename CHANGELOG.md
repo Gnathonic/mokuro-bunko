@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.7.0-beta.3] - 2026-10-09
+
+A pre-release on the way to 0.7.0. Installs of beta.1 and beta.2 update to it
+(their updater reads this release's files as before); its first start then moves
+them to the new layout.
+
+### Changed
+- Release downloads: four, named for people: `mokuro-bunko-<ver>-windows.zip`,
+  `-macos.dmg` (Apple silicon), `-linux-x64.tar.gz` and
+  `-linux-arm64-server.tar.gz` (the server; OCR from a processor), plus the Docker
+  images. No lite Windows/macOS download and no Intel macOS build any more; the lite
+  x64 Linux archive is gone too (the lite Docker image stays). The OCR backend packs
+  are `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`; the per-file
+  `.sha256` files are gone (`SHA256SUMS` and the signed `release.json` have every
+  checksum). The macOS archive older updaters install from is
+  `mokuro-bunko-update-<ver>-macos.tar.gz`.
+- Every release's notes start with a "Which file do I want?" table linking each
+  system's file; the README has a Download section.
+- The tray is part of the program: `mokuro-bunko tray`. On Linux it is a
+  StatusNotifierItem over D-Bus and needs no GTK or AppIndicator library (`doctor`
+  checks for a session bus and a tray host; GNOME needs the AppIndicator extension).
+  On Windows the zip has `Mokuro Bunko.exe` (the tray, no console window) and the
+  command line in `bin\mokuro-bunko.exe`; `run.bat`, `doctor.bat`, `install.ps1` and the
+  shortcuts follow. On macOS the app's program is `mokuro-bunko`: opening the app runs
+  the tray (and the setup wizard the first time). The separate `mokuro-bunko-tray` is
+  gone.
+- The first start after an update from beta.2 or earlier moves an install over: login
+  items (autostart entry, menu entry, LaunchAgent, Startup and Start-menu shortcuts)
+  start the new tray, a running old tray is replaced by the new one (an instance it was
+  running is restarted under the new tray), the old tray program and its links are
+  removed, the macOS app gets its new main program, and a Windows install gets the
+  `bin\` layout.
+- The macOS updater installs from the disk image, and the app is sealed (ad hoc) when
+  built and again after an update: `codesign --verify` passes before and after.
+
+### Fixed
+- An automatic update's download progress reaches the log as it happens, not all at
+  once at the end.
+- A server with automatic updates off logs "X is available" once per version, not on
+  every check.
+
 ## [0.7.0-beta.2] - 2026-10-09
 
 A pre-release on the way to 0.7.0 (everything below under 0.7.0 applies): an
@@ -21,10 +62,9 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
   NVIDIA CUDA (Turing or newer, Linux and Windows), AMD ROCm (RX 6000/7000/9000,
   Linux) or the CPU (all platforms) — and the packages for the GPU, verified
   against the signed release manifest.
-- Release packages: Linux x86_64 full (glibc 2.28+) and static lite (x86_64,
-  arm64), Windows x86_64 zip with a portable mode, macOS on Apple silicon (lite
-  also for Intel Macs) as a drag-to-Applications disk image (`.dmg`) or a
-  `.tar.gz`, and Docker images `:latest` (local OCR; the backend for the
+- Release packages: Windows x86_64 zip with a portable mode, macOS on Apple silicon as a
+  drag-to-Applications disk image (`.dmg`), Linux x86_64 (glibc 2.28+), a static Linux
+  arm64 server, and Docker images `:latest` (local OCR; the backend for the
   container's GPU is downloaded on first start) and `:latest-lite` (amd64 +
   arm64).
 - `scripts/install.sh` and `scripts/install.ps1` install a release, checking its
@@ -55,14 +95,13 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 - `install-ocr`, `doctor` and `models` take `--processor` to act on the
   processor's storage (picked automatically on a processor-only machine), and a
   processor also uses a backend pack installed for the library on the same machine.
-- `mokuro-bunko-tray`, a tray icon for Windows, macOS and Linux: what the server
+- A tray icon for Windows, macOS and Linux (`mokuro-bunko tray`): what the server
   or processor is doing (volume, pages, rate), statistics, pause after this
   volume / now / for an hour / until tomorrow, resume, and links to the
   dashboard, library, settings and logs. It can start the server or processor at
-  login and restart it if it crashes. It ships next to the CLI (Windows zip, a
-  `mokuro-bunko.app` on macOS, Linux full and lite archives with a `.desktop`
-  entry); Linux needs GTK 3 and AppIndicator, which `doctor` checks. Docker
-  images have no tray.
+  login and restart it if it crashes. It is part of the full build (`Mokuro Bunko.exe`
+  on Windows, the app on macOS, a `.desktop` entry on Linux); the lite build and the
+  Docker images have none.
 - Opt-in automatic updates. `update.auto: true` (config, admin panel Updates card,
   app Settings) installs a newer release on the channel by itself: new OCR work is
   held, the running volumes and uploads finish, the release is fetched and checked

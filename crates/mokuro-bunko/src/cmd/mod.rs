@@ -14,6 +14,8 @@ pub mod processor;
 pub mod serve;
 pub mod setup;
 pub mod ssl;
+#[cfg(feature = "tray")]
+pub mod tray;
 pub mod tunnel;
 pub mod update;
 

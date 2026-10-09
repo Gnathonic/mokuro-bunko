@@ -26,7 +26,14 @@ These are the same locations as mokuro-bunko 0.5, so an existing library is
 picked up as it is.
 
 The full Linux build is x86_64 only and needs glibc 2.28 or newer (Debian 11+,
-Ubuntu 20.04+, RHEL 8+). arm64 Linux and Intel Macs have the lite build only.
+Ubuntu 20.04+, RHEL 8+). arm64 Linux has the server build only (OCR from a processor
+on another machine).
+
+The full build has the desktop tray: `./mokuro-bunko tray` puts an icon in the panel
+with the status, pause/resume, the dashboard and the settings, and runs the server or
+processor for you. It needs a desktop with a system tray (KDE Plasma, Xfce, LXQt,
+Cinnamon, ...; GNOME with the AppIndicator extension); `install.sh` adds it to the
+applications menu.
 
 ## Install, service, updates
 
@@ -35,7 +42,7 @@ signature checked) into `~/.local/lib/mokuro-bunko` (or `/usr/local/lib`
 as root) and can set up a systemd unit:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.sh | sh -s -- --systemd
+curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/v@VERSION@/scripts/install.sh | sh -s -- --version @VERSION@ --systemd
 ```
 
 A self-installed binary updates itself from the admin panel: it downloads the

@@ -19,48 +19,53 @@ A self-hosted manga library server with WebDAV, built-in OCR processing, and mul
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
+## Download
+
+**[Latest release](https://github.com/Gnathonic/mokuro-bunko/releases/latest)**: the table at the top of its notes links the file for your system (Windows zip, macOS disk image, Linux x64, Linux arm64 server). Pre-releases (betas) are on the [Releases page](https://github.com/Gnathonic/mokuro-bunko/releases) only: `releases/latest` skips them.
+
+One line instead:
+
+```bash
+# Linux (x64 or arm64; checks the release signature)
+curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.sh | sh
+```
+```powershell
+# Windows
+powershell -c "irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1 | iex"
+```
+```bash
+# Docker (`:latest-lite` for the server only)
+docker pull ghcr.io/gnathonic/mokuro-bunko:latest
+```
+
+These take the latest stable release. For a pre-release, use the script of its tag and name the version, e.g. `curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/v0.7.0-beta.3/scripts/install.sh | sh -s -- --version 0.7.0-beta.3`, `install.ps1 -Version 0.7.0-beta.3`, or `docker pull ghcr.io/gnathonic/mokuro-bunko:0.7.0-beta.3`.
+
 ## Editions
 
 Every release has two builds of the same `mokuro-bunko` executable:
 
 | Edition | Contains | Use it for |
 |---|---|---|
-| **lite** | Server, WebDAV, catalog, admin panel, OCR scheduler for remote processors, updater. No OCR engines. A static binary on Linux; idles around 16 MiB of RAM in Docker. | A 1 GB VPS, NAS or Raspberry Pi that serves the library while OCR runs on **remote processors**. |
-| **full** | Lite plus the OCR engines, local OCR and the `processor` command. | A desktop or GPU box: run the whole library locally, or act as a processor for a lite server elsewhere. |
+| **full** | The server, WebDAV, catalog, admin panel, local OCR, the `processor` command and the desktop tray. | Windows, macOS (Apple silicon), Linux x64, the Docker `:latest` image. |
+| **lite** (server) | The server without OCR engines: OCR comes from **remote processors**. A static binary; idles around 16 MiB of RAM in Docker. | Linux arm64 (Raspberry Pi, NAS), the Docker `:latest-lite` image, a 1 GB VPS. |
 
-There is one full build per platform (Linux x86_64, Windows x86_64, macOS on Apple silicon; arm64 Linux and Intel Macs get the lite build), whatever the GPU: the OCR recognizers run on **libtorch**, which `mokuro-bunko install-ocr` downloads as a *backend pack* for the hardware it finds — CUDA for NVIDIA GPUs (Linux, Windows; driver 580 or newer), ROCm for AMD Radeon RX 6000/7000/9000 (Linux), or the CPU (all platforms). In a lite build `ocr.local_processing` is off and the admin panel says so.
+The full build runs on any GPU: the OCR recognizers run on **libtorch**, which `mokuro-bunko install-ocr` (or the setup wizard) downloads as a *backend pack* for the hardware it finds — CUDA for NVIDIA GPUs (Linux, Windows; driver 580 or newer), ROCm for AMD Radeon RX 6000/7000/9000 (Linux), or the CPU (all platforms).
 
 ## Quick start
 
-Releases are on the [GitHub releases page](https://github.com/Gnathonic/mokuro-bunko/releases). The first browser visit to a new server (`http://localhost:8080`) walks you through creating the admin account; `mokuro-bunko setup` does the same in the console. From a browser on another machine (or through Docker's network) the setup page needs the one-time token the server prints in its log at startup (`/setup?token=...`, also in `<storage>/.setup-token`).
+The first browser visit to a new server (`http://localhost:8080`) walks you through creating the admin account; `mokuro-bunko setup` does the same in the console. From a browser on another machine (or through Docker's network) the setup page needs the one-time token the server prints in its log at startup (`/setup?token=...`, also in `<storage>/.setup-token`).
 
-### Linux (and macOS): install script
+### Linux
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.sh | sh
-# or, with options:
-curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.sh | sh -s -- --flavor lite --systemd
-```
-
-It downloads the release for your OS and CPU, checks the signed manifest and the archive's sha256, installs into `~/.local/lib/mokuro-bunko` (`/usr/local/lib/mokuro-bunko` as root) and links `mokuro-bunko` into `~/.local/bin`. Options: `--flavor lite|full`, `--version X.Y.Z`, `--systemd` (a systemd unit; a user unit, or a system unit when run as root), `--processor` (the OCR processor unit, needs a full flavor), `--prefix DIR`, `--dry-run`. The full Linux build is x86_64 only and needs glibc 2.28 or newer (Debian 11+, Ubuntu 20.04+, RHEL/Alma 8+; tested on Debian 12 and Ubuntu 22.04); the lite build is static and runs anywhere, including **arm64 Linux, which has the lite build only** (OCR there comes from a remote processor on an x86_64 machine). Then run `mokuro-bunko install-ocr` once (below).
-
-Or unpack a `mokuro-bunko-<version>-<target>-<flavor>.tar.gz` yourself and run `./mokuro-bunko serve`.
+`install.sh` downloads the release for your CPU, checks the signed manifest and the archive's sha256, installs into `~/.local/lib/mokuro-bunko` (`/usr/local/lib/mokuro-bunko` as root), links `mokuro-bunko` into `~/.local/bin` and adds the tray to the applications menu. Options: `--version X.Y.Z`, `--systemd` (a systemd unit; a user unit, or a system unit when run as root), `--processor` (the OCR processor unit), `--autostart` (the tray at login), `--prefix DIR`, `--dry-run`. The x64 build needs glibc 2.28 or newer (Debian 11+, Ubuntu 20.04+, RHEL/Alma 8+). Or unpack the archive yourself and run `./mokuro-bunko serve`, or `./mokuro-bunko tray` for the tray icon.
 
 ### Windows
 
-Install with PowerShell (no admin rights, no prerequisites):
-
-```powershell
-powershell -c "irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1 | iex"
-```
-
-It installs the **full** build, adds Start-menu shortcuts, runs `doctor` and starts the server; run `mokuro-bunko install-ocr` once for OCR (CUDA on an NVIDIA GPU, otherwise the CPU). Parameters (`-Flavor lite`, `-Portable`, `-Startup`, `-Version`, ...) are documented at the top of [`scripts/install.ps1`](scripts/install.ps1). Your data stays in `%LOCALAPPDATA%\mokuro-bunko`.
-
-**Portable zip:** download `mokuro-bunko-<version>-x86_64-pc-windows-msvc-<flavor>.zip` from the release, extract it anywhere and double-click `run.bat`. Config, library, logs and OCR models stay in a `data\` folder next to it; move it by copying the folder, uninstall by deleting it. `doctor.bat` diagnoses problems. For an NVIDIA GPU see [docs/setup-windows-nvidia-ocr.md](docs/setup-windows-nvidia-ocr.md).
+Unzip the release anywhere and double-click **`Mokuro Bunko.exe`**: a tray icon appears by the clock and the setup wizard opens in your browser the first time. The command line is `bin\mokuro-bunko.exe`; `run.bat` runs the server in a console window instead, `doctor.bat` diagnoses problems. Config, library, logs and OCR models stay in a `data\` folder next to it (portable mode). `install.ps1` installs into `%LOCALAPPDATA%\mokuro-bunko\app` instead, with Start-menu shortcuts (`-Startup` for the tray at logon; parameters at the top of [`scripts/install.ps1`](scripts/install.ps1)), and keeps your data in `%LOCALAPPDATA%\mokuro-bunko`. For an NVIDIA GPU see [docs/setup-windows-nvidia-ocr.md](docs/setup-windows-nvidia-ocr.md).
 
 ### macOS
 
-Download `mokuro-bunko-<version>-aarch64-apple-darwin-full.tar.gz` (Apple silicon, OCR on the CPU after `mokuro-bunko install-ocr`) or the `lite` build (Intel Macs have no full build; use a processor elsewhere for OCR), unpack it and run `./mokuro-bunko serve`. The `install.sh` script above works on macOS too. The binaries are not notarized: a tarball downloaded in a browser is quarantined, so run `xattr -d com.apple.quarantine mokuro-bunko` once (`curl | sh` installs are not affected).
+Open the disk image and drag **Mokuro Bunko** to Applications (Apple silicon). Opening it puts an icon in the menu bar and starts the setup wizard the first time. The app is not notarized: if macOS says it cannot be opened, right-click it and choose Open once. The command line is `/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko`. Intel Macs have no build: use the Docker image.
 
 ### Docker
 
@@ -136,7 +141,7 @@ See [Building from source](#building-from-source).
 
 ## Desktop app
 
-`mokuro-bunko gui` opens the setup and settings pages in your browser. On Windows and macOS, double-clicking the program does the same. The pages are served on this machine only (`127.0.0.1`, with a one-time sign-in link), and they cover:
+`mokuro-bunko gui` opens the setup and settings pages in your browser. The tray icon (`mokuro-bunko tray`; `Mokuro Bunko.exe` on Windows, the app on macOS) opens them too, shows what the server or processor is doing, pauses OCR and can start everything at login. On Linux it shows in any panel with a system tray (GNOME needs the AppIndicator extension); it needs no GTK or AppIndicator library. The pages are served on this machine only (`127.0.0.1`, with a one-time sign-in link), and they cover:
 
 - **Setup**: a library server (folder, admin account, registration, remote access, HTTPS), a processor for another library (with a connection test), the OCR backend install with live progress, and starting either one with the machine.
 - **Settings**: server, HTTPS, remote access, processor, OCR and models, start-up, logs, diagnostics (`doctor`), updates, and any `config.yaml` key. Users, invites and the library's own settings stay in the server's admin panel, which the app links to.

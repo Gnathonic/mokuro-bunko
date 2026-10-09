@@ -98,8 +98,27 @@ pub enum Command {
         url: Option<String>,
     },
     /// Open the desktop app in the browser: setup wizard, settings and dashboard.
-    /// (Double-clicking the program on Windows or macOS does the same.)
     Gui(GuiArgs),
+    /// Show the desktop tray: status, pause/resume, settings; starts and supervises the
+    /// instances tray.json lists. (Opening the app on macOS, or `Mokuro Bunko.exe` on
+    /// Windows, does the same.)
+    #[cfg(feature = "tray")]
+    Tray(TrayArgs),
+}
+
+/// `tray` options.
+#[cfg(feature = "tray")]
+#[derive(Args, Debug, Clone, Default)]
+pub struct TrayArgs {
+    /// Also look for an instance in DIR (repeatable)
+    #[arg(long = "storage", value_name = "DIR")]
+    pub storages: Vec<PathBuf>,
+    /// Do not start anything, only show and control what runs
+    #[arg(long)]
+    pub no_supervise: bool,
+    /// Log to stderr instead of the log file
+    #[arg(long)]
+    pub log_stderr: bool,
 }
 
 /// `gui` options.

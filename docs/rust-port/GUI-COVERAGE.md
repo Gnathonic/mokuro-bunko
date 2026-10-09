@@ -197,6 +197,10 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 
 | Command | Where |
 |---|---|
-| `gui` | [Home](/app/): this command serves the app and opens it. A double-click with no arguments does too, on Windows and macOS |
+| `gui` | [Home](/app/): this command serves the app and opens it. Double-clicking the Windows command line (`bin\mokuro-bunko.exe`) with no `Mokuro Bunko.exe` above it does too |
 | `gui --no-browser` | CLI-only because it starts the pages without opening a browser, for the tray and remote shells; it prints the sign-in link |
 | `gui --open` | [Home](/app/) is the default; any app page can be the start page (`--open /app/settings/update`) |
+| `tray` | [Start with the machine](/app/setup/startup) → How: "Run from the tray when I log in" starts it and adds its login item. Opening the macOS app or `Mokuro Bunko.exe` on Windows runs it too |
+| `tray --storage` | CLI-only because the tray finds the instances of this machine by itself (the default storages, the configs, the services); this adds another folder for a hand-made setup |
+| `tray --no-supervise` | CLI-only because it is for watching instances something else runs; the app's choice between the tray and a service ([Start with the machine](/app/setup/startup)) decides what the tray starts |
+| `tray --log-stderr` | CLI-only because it only moves the tray's log to the terminal; [Logs](/app/settings/logs) shows the tray's log file |

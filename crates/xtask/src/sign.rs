@@ -130,8 +130,27 @@ pub fn verify(args: &VerifyArgs) -> Result<()> {
     );
     let mut problems = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (target, flavors) in &m.artifacts {
-        for (flavor, a) in flavors {
+    let files = m
+        .artifacts
+        .iter()
+        .flat_map(|(t, f)| f.iter().map(move |(k, a)| (t, k.clone(), a.clone())))
+        .chain(m.bundles.iter().flat_map(|(t, f)| {
+            f.iter().map(move |(k, d)| {
+                (
+                    t,
+                    format!("{k} (dmg)"),
+                    bunko_update::Artifact {
+                        url: d.url.clone(),
+                        sha256: d.sha256.clone(),
+                        size: d.size,
+                        binary: String::new(),
+                    },
+                )
+            })
+        }))
+        .collect::<Vec<_>>();
+    for (target, flavor, a) in &files {
+        {
             let name = a.url.rsplit('/').next().unwrap_or(&a.url);
             if !seen.insert(name.to_string()) {
                 problems.push(format!("{name} is listed twice"));

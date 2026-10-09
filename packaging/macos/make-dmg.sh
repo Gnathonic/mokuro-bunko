@@ -2,16 +2,19 @@
 # Build the macOS disk image: "Mokuro Bunko.app" next to an Applications alias, on a
 # background that says to drag one onto the other, plus a small "Read me".
 #
-#   packaging/macos/make-dmg.sh dist/mokuro-bunko-<ver>-aarch64-apple-darwin-full.tar.gz \
-#       dist/mokuro-bunko-<ver>-aarch64-apple-darwin-full.dmg
+#   packaging/macos/make-dmg.sh dist/mokuro-bunko-update-<ver>-macos.tar.gz \
+#       dist/mokuro-bunko-<ver>-macos.dmg
 #   packaging/macos/make-dmg.sh --bundle-ocr <ocr-offline dir> <full .tar.gz> <out.dmg>
 #
-# The release names the image like its archive, with .dmg (crates/xtask/src/names.rs,
-# parse_dmg_name); release-build.yml makes one from each macOS archive (arm64 full,
-# arm64 lite, x86_64 lite).
+# The release names the image mokuro-bunko-<ver>-macos.dmg (crates/xtask/src/names.rs,
+# dmg_name); release-build.yml makes it from the arm64 full archive. A build without a
+# release name (mokuro-bunko-<ver>-<target>-<flavor>.tar.gz) works too.
 #
-# The app is the release archive's mokuro-bunko.app (tray + CLI, `xtask dist`),
-# renamed. By default it carries no OCR backend and no model: the setup wizard's OCR
+# The app is the release archive's mokuro-bunko.app (`xtask dist`: its main program is
+# mokuro-bunko, which runs the tray when the Finder opens it), renamed, with the
+# program as a file of its own, and sealed ad hoc (`codesign --force --deep -s -`) so
+# that `codesign --verify` passes; the updater seals it again after it replaces files
+# in it. By default it carries no OCR backend and no model: the setup wizard's OCR
 # step (`install-ocr`) detects the Mac's hardware and downloads the backend pack of
 # this release and the models of the enabled engines, as on Linux and Windows. That is
 # the release build. A lite archive gives a lite app (a library server, no local OCR),
@@ -58,8 +61,8 @@ if [ "${MAKE_DMG_DRY_RUN:-}" != "1" ]; then
 fi
 tar -xzf "$ARCHIVE" -C "$TMP"
 TOP=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-NAME=$(basename "$TOP")                                   # mokuro-bunko-<ver>-<target>-<flavor>
-VERSION=$(echo "$NAME" | sed -E 's/^mokuro-bunko-(.*)-aarch64-apple-darwin-.*$/\1/; s/^mokuro-bunko-(.*)-x86_64-apple-darwin-.*$/\1/')
+NAME=$(basename "$TOP")   # mokuro-bunko-update-<ver>-macos, or mokuro-bunko-<ver>-<target>-<flavor>
+VERSION=$(echo "$NAME" | sed -E 's/^mokuro-bunko-update-(.*)-macos$/\1/; s/^mokuro-bunko-(.*)-aarch64-apple-darwin-.*$/\1/; s/^mokuro-bunko-(.*)-x86_64-apple-darwin-.*$/\1/')
 [ -d "$TOP/mokuro-bunko.app" ] || { echo "$ARCHIVE has no mokuro-bunko.app" >&2; exit 1; }
 case "$NAME" in
 *-x86_64-apple-darwin-*) ARCH="Intel" ;;
@@ -85,7 +88,7 @@ mkdir -p "$STAGE"
 cp -R "$TOP/mokuro-bunko.app" "$STAGE/$APP"
 C="$STAGE/$APP/Contents"
 [ -f "$C/MacOS/mokuro-bunko" ] || cp "$TOP/mokuro-bunko" "$C/MacOS/mokuro-bunko"
-[ -f "$C/MacOS/mokuro-bunko-tray" ] || { echo "the app has no tray" >&2; exit 1; }
+grep -q '<string>mokuro-bunko</string>' "$C/Info.plist" || { echo "the app's main program is not mokuro-bunko" >&2; exit 1; }
 mkdir -p "$C/Resources"
 if [ -n "$OFFLINE" ]; then
 	cp -R "$OFFLINE" "$C/Resources/ocr-offline"
@@ -112,6 +115,12 @@ awk -v mode="$MODE" -v version="$VERSION" -v arch="$ARCH" -v pre="$PRE" '
 ' "$HERE/Read me.txt" >"$STAGE/Read me.txt"
 # Nothing from the build host's quarantine or Finder state.
 xattr -cr "$STAGE" 2>/dev/null || true
+# Seal the whole bundle (ad hoc: no Apple identity), so `codesign --verify` passes on
+# the app as it comes out of the image. Skipped in a dry run off macOS.
+if command -v codesign >/dev/null 2>&1; then
+	codesign --force --deep -s - "$STAGE/$APP"
+	codesign --verify --deep --strict "$STAGE/$APP"
+fi
 if [ "${MAKE_DMG_DRY_RUN:-}" = "1" ]; then
 	echo "$STAGE"
 	exit 0
