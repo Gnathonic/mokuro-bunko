@@ -7,9 +7,10 @@
 //! (`<engine>/<precision>/`). The runtime loads each weights file once onto the device
 //! and binds every package to those tensors (user-managed, no copy: the model library's
 //! `...UpdateUserManagedConstantBufferPairs`, see `shim/aoti_shim.cpp`),
-//! so vision, prefill and step share one copy. CPU packages are frozen and carry their
-//! weights (an empty map). Packages without the metadata (the shootout's) are I/O v1
-//! with embedded weights.
+//! so vision, prefill and step share one copy. CPU packages do the same (since
+//! 2026-10-08; packages built with `TORCH_EXPORT_CPU_EMBED=1` carry their weights: an
+//! empty map). Packages without the metadata (the shootout's) are I/O v1 with embedded
+//! weights.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -50,8 +51,11 @@ fn kind_of(dtype: &str) -> Option<Kind> {
 }
 
 impl Weights {
-    /// Loads every tensor of `files` onto `dev`, one tensor at a time (the host never
-    /// holds more than one tensor's bytes).
+    /// Loads every tensor of `files` onto `dev`. On a GPU one tensor at a time (the host
+    /// never holds more than one tensor's bytes). On the CPU each file's data is read
+    /// into ONE buffer and its tensors are views of it -- the layout a package with its
+    /// weights inside gets (AOTInductor's single constant blob), not hundreds of separate
+    /// allocations.
     pub fn load(files: &[PathBuf], dev: tch::Device) -> Result<Self, TorchError> {
         let mut tensors = HashMap::new();
         let mut aliases = HashMap::new();
@@ -69,6 +73,38 @@ impl Weights {
             let header: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_slice(&header).map_err(|e| err(e.to_string()))?;
             let base = 8 + n as u64;
+            // CPU: the whole data section in one buffer (the safetensors data offsets are
+            // relative to it); tensors whose offset suits their dtype are views of it.
+            let blob = if dev == tch::Device::Cpu {
+                let end = header
+                    .iter()
+                    .filter(|(k, _)| *k != "__metadata__")
+                    .filter_map(|(_, v)| v["data_offsets"].get(1).and_then(|e| e.as_u64()))
+                    .max()
+                    .unwrap_or(0);
+                let len = f.metadata().map_err(|e| err(e.to_string()))?.len();
+                if base + end > len {
+                    return Err(err(format!(
+                        "data ends at {} of a {len}-byte file",
+                        base + end
+                    )));
+                }
+                let blob = Tensor::f_empty([end as i64], (Kind::Uint8, dev))
+                    .map_err(|e| err(format!("{end} bytes: {e}")))?;
+                if end > 0 {
+                    f.seek(SeekFrom::Start(base))
+                        .map_err(|e| err(e.to_string()))?;
+                    // SAFETY: a fresh, contiguous uint8 CPU tensor of exactly `end` bytes,
+                    // not shared with anything yet.
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts_mut(blob.data_ptr().cast::<u8>(), end as usize)
+                    };
+                    f.read_exact(bytes).map_err(|e| err(e.to_string()))?;
+                }
+                Some(blob)
+            } else {
+                None
+            };
             for (name, v) in &header {
                 if name == "__metadata__" {
                     if let Some(m) = v.as_object() {
@@ -101,6 +137,16 @@ impl Weights {
                         "{name}: {} bytes for shape {shape:?}",
                         b.saturating_sub(a)
                     )));
+                }
+                let elt = kind.elt_size_in_bytes() as u64;
+                if let Some(blob) = blob.as_ref().filter(|_| a % elt == 0 && want > 0) {
+                    let t = blob
+                        .f_narrow(0, a as i64, (b - a) as i64)
+                        .and_then(|t| t.f_view_dtype(kind))
+                        .and_then(|t| t.f_view(shape.as_slice()))
+                        .map_err(|e| err(format!("{name}: {e}")))?;
+                    tensors.insert(name.clone(), t);
+                    continue;
                 }
                 let mut bytes = vec![0u8; (b - a) as usize];
                 f.seek(SeekFrom::Start(base + a))
