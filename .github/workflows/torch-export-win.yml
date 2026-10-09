@@ -129,6 +129,14 @@ jobs:
           python -m torch_export.verify "$env:GITHUB_WORKSPACE\out" $env:ENGINE $env:PREC $env:TARGET --device cpu --bench 20 |
             Tee-Object -FilePath "$env:GITHUB_WORKSPACE\out\$env:ENGINE\$env:PREC\$env:TARGET\verify.json"
           if ($LASTEXITCODE) { throw "verify failed (exit code $LASTEXITCODE)" }
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: torch-${{ inputs.engine }}-${{ inputs.precision }}-${{ inputs.target }}
+          # the package only: its shared weights are the release's files (checked above)
+          path: out/${{ inputs.engine }}/${{ inputs.precision }}/${{ inputs.target }}/
+          if-no-files-found: error
+          retention-days: 30
       - name: Build the embedded layout for comparison (TORCH_EXPORT_CPU_EMBED=1)
         if: inputs.compare_embedded
         working-directory: tools/torch_export
@@ -174,13 +182,14 @@ jobs:
         if: inputs.compare_embedded && inputs.ocr
       - name: "OCR: CPU backend pack + ocr_volume"
         if: inputs.compare_embedded && inputs.ocr
-        shell: bash
+        # pwsh, not bash: Git's /usr/bin/link would shadow MSVC's link.exe (VCINSTALLDIR is set)
         env:
-          BUNKO_PACK_CACHE: ${{ github.workspace }}/pack-cache
+          BUNKO_PACK_CACHE: ${{ github.workspace }}\pack-cache
         run: |
-          set -eux
-          cargo run -p xtask --locked -- torch-pack --locked --variant cpu --no-archive --out "$GITHUB_WORKSPACE/pack"
+          cargo run -p xtask --locked -- torch-pack --locked --variant cpu --no-archive --out "$env:GITHUB_WORKSPACE\pack"
+          if ($LASTEXITCODE) { throw "torch-pack failed" }
           cargo build --release --locked -p bunko-engines --example ocr_volume
+          if ($LASTEXITCODE) { throw "ocr_volume build failed" }
       - name: "OCR: both layouts through the Rust runtime (alternating)"
         if: inputs.compare_embedded && inputs.ocr
         run: |
@@ -214,23 +223,17 @@ jobs:
           "distinct .mokuro files: $($shas.Count)" | Tee-Object -Append -FilePath "$o\ocr.txt"
           if ($failed) { throw "ocr_volume failed" }
           if ($shas.Count -ne 1) { throw "the two layouts read different text" }
-      - name: Upload the OCR logs
-        if: always() && inputs.compare_embedded && inputs.ocr
+      - name: Upload the comparison logs
+        if: always() && inputs.compare_embedded
         uses: actions/upload-artifact@v4
         with:
-          name: torch-ocr-logs-${{ inputs.engine }}-${{ inputs.precision }}-${{ inputs.target }}
+          name: torch-compare-logs-${{ inputs.engine }}-${{ inputs.precision }}-${{ inputs.target }}
           path: |
+            out/${{ inputs.engine }}/${{ inputs.precision }}/${{ inputs.target }}/verify*.json
+            out/${{ inputs.engine }}/${{ inputs.precision }}/${{ inputs.target }}/embedded-sizes.txt
             ocr/*.txt
             ocr/*.log
             ocr/*.err
             ocr/*.mokuro
           if-no-files-found: ignore
-          retention-days: 30
-      - name: Upload the package
-        uses: actions/upload-artifact@v4
-        with:
-          name: torch-${{ inputs.engine }}-${{ inputs.precision }}-${{ inputs.target }}
-          # the package only: its shared weights are the release's files (checked above)
-          path: out/${{ inputs.engine }}/${{ inputs.precision }}/${{ inputs.target }}/
-          if-no-files-found: error
           retention-days: 30
