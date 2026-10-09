@@ -444,7 +444,10 @@ impl ModelStore {
     }
 
     /// Hash the local copy of `id` against the manifest (`models verify`): `None`
-    /// when there is no local copy.
+    /// when there is no local copy. An unpacked package (`unpack_to`) has no archive
+    /// left to hash: its archive was checked before the unpack, and the directory
+    /// counts only while its `.unpacked` stamp names the manifest's sha256 (which
+    /// [`ModelStore::locate`] already requires).
     pub fn verify(&self, id: &str) -> Result<Option<(PathBuf, bool)>> {
         let Some(path) = self.locate(id) else {
             return Ok(None);
@@ -453,7 +456,11 @@ impl ModelStore {
             id: id.into(),
             msg: "not in the manifest".into(),
         })?;
-        let ok = sha256_file(&path)? == file.sha256;
+        let ok = if path.is_dir() {
+            self.unpacked_dir(file).as_deref() == Some(path.as_path())
+        } else {
+            sha256_file(&path)? == file.sha256
+        };
         Ok(Some((path, ok)))
     }
 
@@ -1379,6 +1386,8 @@ mod tests {
             "zip removed"
         );
         assert_eq!(store.locate(id), Some(dir.clone()));
+        // `models verify` counts the unpacked package (no archive is left to hash)
+        assert_eq!(store.verify(id).unwrap(), Some((dir.clone(), true)));
         let pkg = dir.parent().unwrap();
         assert_eq!(torch_graph_path(pkg, "vision.pt2"), Some(dir.clone()));
         // the source is gone: a second ensure must not need it

@@ -196,6 +196,9 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 - `doctor` no longer asks for `install-ocr` and a model download when
   `ocr.local_processing` is off (one INFO line instead), and checks only the models
   of the engines the enabled generations use.
+- `models verify` accepts an unpacked libtorch model package (its archive was checked
+  before the unpack and its stamp names the manifest's sha256) instead of failing
+  with "Is a directory", as 0.7.0-beta.1 did after every `install-ocr`.
 - At start the server no longer logs "OCR is waiting for hardware" while its own OCR
   is still coming up, and prints each config migration warning once, not twice.
 
