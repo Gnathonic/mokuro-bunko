@@ -143,7 +143,10 @@ downloads are no longer used and can be deleted.
 | `MOKURO_PPOCR_THREADS` / `_SIDE` / `_TILE` / `_PRECISION`, `MOKURO_OCR_STAGE_*` | Not read. Pools and devices are per-row settings (`pools`). |
 
 New: `server.threads`, `server.cache_mb`, `update.check`, `update.channel`,
-`update.manifest_url` (each also settable as `MOKURO_<SECTION>_<KEY>`) and
+`update.manifest_url` (each also settable as `MOKURO_<SECTION>_<KEY>`;
+`update.channel` defaults to `auto`, which follows the installed build: a
+pre-release install sees later pre-releases, a stable install only stable
+releases) and
 `ocr.upgrade.*` (`config.yaml` only). `ocr.sessions` is accepted and ignored;
 `ocr.backend` keeps 0.5.2's values (`auto`, `cuda`, `rocm`, `cpu`, `skip`).
 The 0.5 refusals of `ocr.engines`, `ocr.detector`, `ocr.patch_budget` and

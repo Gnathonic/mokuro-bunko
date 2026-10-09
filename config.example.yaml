@@ -118,8 +118,10 @@ update:
   # install.sh as a user) updates itself; Docker and package-managed installs
   # are told what to do. See docs/configuration.md, "Automatic updates".
   auto: false
-  # stable, or prerelease
-  channel: stable
+  # Which releases count as updates: auto (follow the installed build: a
+  # pre-release such as 0.7.0-beta.1 sees betas, a stable release only stable
+  # releases), stable, or prerelease
+  channel: auto
   # Where the signed release manifest (release.json) comes from. Change it only
   # for a mirror or a fork. A given version's manifest is derived from it
   # (<base>/v<version>/release.json for a mirror; see docs/configuration.md).

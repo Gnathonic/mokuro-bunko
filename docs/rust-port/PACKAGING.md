@@ -451,7 +451,10 @@ machine, `:<ver>-lite` (template `mokuro-bunko-lite.xml`) is enough, but it has 
 ## 4. How updates work, per install kind
 
 The server polls `https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json`
-(+ `.sig`), verifies it, and compares versions (`update.channel`). What happens next
+(+ `.sig`), verifies it, and compares versions (`update.channel`; the default `auto`
+is `prerelease` for a pre-release build and `stable` otherwise; on `prerelease` the
+manifest comes from the newest published release carrying `release.json`, found through
+the releases API, because `releases/latest` skips pre-releases). What happens next
 depends on `bunko_update::InstallKind::detect()`:
 
 | install | detected as | admin panel | how it is applied |
@@ -563,9 +566,10 @@ cargo run -p xtask -- docker-context --dir dist          # then docker build --b
   `run.bat`'s console handling. When `MOKURO_LAUNCHER=run.bat` (set by `_env.cmd`), exit
   with code **75** instead; `run.bat` loops on 75.
 - Pre-release channel: `releases/latest/download/` never points at a GitHub pre-release,
-  so `update.channel = prerelease` sees nothing newer from that URL. Needs a separate
-  manifest URL (e.g. a rolling `channel-prerelease` release that the release workflow
-  also uploads `release.json` to) — not built yet.
+  so on `prerelease` (the `auto` default of a pre-release build) the updater asks the
+  releases API for the newest published release with a `release.json` (model releases
+  such as `models-v1` carry none and are skipped). The API is unauthenticated (60
+  requests an hour per address); the 12-hour check is far below that.
 - `MOKURO_NGINX_ACCEL` must stay tolerated by the server; inside images it is only set
   when nginx really runs. Cosmetic: in nginx mode the first-run log line prints the
   backend address (`http://127.0.0.1:8081/setup?token=…`) rather than the public port.

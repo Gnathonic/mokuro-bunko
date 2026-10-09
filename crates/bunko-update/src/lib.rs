@@ -311,8 +311,23 @@ pub struct Updater {
     flavor: String,
 }
 
+/// The channel an `update.channel` setting means for a build of `version`: `auto` (or
+/// empty) follows the build, so a pre-release build is on `prerelease` and a stable build
+/// on `stable`; an explicit `stable` or `prerelease` is taken as written.
+pub fn resolve_channel(setting: &str, version: &str) -> &'static str {
+    match setting.trim() {
+        "stable" => "stable",
+        "prerelease" => "prerelease",
+        _ => match semver::Version::parse(version.trim_start_matches('v')) {
+            Ok(v) if !v.pre.is_empty() => "prerelease",
+            _ => "stable",
+        },
+    }
+}
+
 impl Updater {
-    /// `flavor` is `full` or `lite`; `channel` is `stable` or `prerelease`.
+    /// `flavor` is `full` or `lite`; `channel` is `stable`, `prerelease` or `auto`
+    /// (see [`resolve_channel`]: this build's own channel).
     pub fn new(
         manifest_url: impl Into<String>,
         channel: impl Into<String>,
@@ -327,9 +342,14 @@ impl Updater {
             client,
             manifest_url: manifest_url.into(),
             public_key: RELEASE_PUBLIC_KEY.into(),
-            channel: channel.into(),
+            channel: resolve_channel(&channel.into(), bunko_core::VERSION).into(),
             flavor: flavor.into(),
         }
+    }
+
+    /// The channel this updater follows (`stable` or `prerelease`), `auto` resolved.
+    pub fn channel(&self) -> &str {
+        &self.channel
     }
 
     pub fn with_public_key(mut self, key: impl Into<String>) -> Self {
@@ -440,15 +460,10 @@ impl Updater {
         let Some((repo, file)) = prerelease_lookup(&self.manifest_url, &self.channel) else {
             return Ok(self.manifest_url.clone());
         };
-        #[derive(Deserialize)]
-        struct Release {
-            tag_name: String,
-            draft: bool,
-        }
-        let releases: Vec<Release> = self
+        let releases: Vec<GithubRelease> = self
             .client
             .get(format!(
-                "https://api.github.com/repos/{repo}/releases?per_page=10"
+                "https://api.github.com/repos/{repo}/releases?per_page=30"
             ))
             .header("Accept", "application/vnd.github+json")
             .send()
@@ -456,12 +471,8 @@ impl Updater {
             .error_for_status()?
             .json()
             .await?;
-        // Newest first; drafts are not downloadable.
-        Ok(match releases.into_iter().find(|r| !r.draft) {
-            Some(r) => format!(
-                "https://github.com/{repo}/releases/download/{}/{file}",
-                r.tag_name
-            ),
+        Ok(match newest_release_with(&releases, &file) {
+            Some(tag) => format!("https://github.com/{repo}/releases/download/{tag}/{file}"),
             None => self.manifest_url.clone(),
         })
     }
@@ -627,6 +638,37 @@ impl Updater {
         .await
         .map_err(|e| UpdateError::Unpack(e.to_string()))?
     }
+}
+
+/// A release as GitHub's releases API lists it (the fields the pre-release lookup reads).
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    assets: Vec<GithubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubAsset {
+    name: String,
+}
+
+/// The tag of the highest-versioned published release that carries `file`. Drafts are
+/// not downloadable, and a release without the manifest (a model release such as
+/// `models-v1`) is not an app release.
+fn newest_release_with(releases: &[GithubRelease], file: &str) -> Option<String> {
+    releases
+        .iter()
+        .filter(|r| !r.draft && r.assets.iter().any(|a| a.name == file))
+        .filter_map(|r| {
+            semver::Version::parse(r.tag_name.trim_start_matches('v'))
+                .ok()
+                .map(|v| (v, &r.tag_name))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, tag)| tag.clone())
 }
 
 /// `(owner/repo, file)` when `url` is a GitHub `releases/latest/download/<file>` URL and
@@ -1041,6 +1083,49 @@ mod tests {
         let out = dir.path().join("out");
         extract_binary(&tgz, "https://x/a.tar.gz", "mokuro-bunko", &out).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), b"#!/bin/sh\necho hi\n");
+    }
+
+    #[test]
+    fn auto_channel_follows_the_build() {
+        assert_eq!(resolve_channel("auto", "0.7.0-beta.1"), "prerelease");
+        assert_eq!(resolve_channel("", "0.7.0-rc.2"), "prerelease");
+        assert_eq!(resolve_channel("auto", "0.7.0"), "stable");
+        assert_eq!(resolve_channel("auto", "v0.7.1"), "stable");
+        // An explicit setting wins over the build.
+        assert_eq!(resolve_channel("stable", "0.7.0-beta.1"), "stable");
+        assert_eq!(resolve_channel("prerelease", "0.7.0"), "prerelease");
+        let u = Updater::new("http://x", "auto", "lite");
+        let expect = if semver::Version::parse(bunko_core::VERSION)
+            .unwrap()
+            .pre
+            .is_empty()
+        {
+            "stable"
+        } else {
+            "prerelease"
+        };
+        assert_eq!(u.channel(), expect);
+        assert_eq!(
+            Updater::new("http://x", "stable", "lite").channel(),
+            "stable"
+        );
+    }
+
+    #[test]
+    fn prerelease_lookup_skips_drafts_and_model_releases() {
+        let json = r#"[
+            {"tag_name": "v0.7.0-beta.3", "draft": true, "assets": [{"name": "release.json"}]},
+            {"tag_name": "torch-models-v1", "draft": false, "assets": [{"name": "torch-models.json"}]},
+            {"tag_name": "models-v1", "draft": false, "assets": [{"name": "comic-text-detector.onnx"}]},
+            {"tag_name": "v0.7.0-beta.1", "draft": false, "assets": [{"name": "release.json"}]},
+            {"tag_name": "v0.7.0-beta.2", "draft": false, "assets": [{"name": "release.json"}, {"name": "release.json.sig"}]}
+        ]"#;
+        let releases: Vec<GithubRelease> = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            newest_release_with(&releases, "release.json").as_deref(),
+            Some("v0.7.0-beta.2")
+        );
+        assert_eq!(newest_release_with(&releases[..3], "release.json"), None);
     }
 
     #[test]

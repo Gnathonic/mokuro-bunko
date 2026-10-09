@@ -311,7 +311,8 @@ impl Default for DynDnsConfig {
 pub struct UpdateConfig {
     /// Check for new releases in the background.
     pub check: bool,
-    /// `stable` or `prerelease`.
+    /// `auto` (follow this build: a pre-release build is on `prerelease`, a stable
+    /// build on `stable`), `stable` or `prerelease`.
     pub channel: String,
     /// Release manifest URL (override for mirrors/testing).
     pub manifest_url: String,
@@ -328,7 +329,7 @@ impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
             check: true,
-            channel: "stable".into(),
+            channel: "auto".into(),
             manifest_url:
                 "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json"
                     .into(),
@@ -738,7 +739,7 @@ impl Config {
 
         let s = section(data, "update")?;
         c.update.check = get_bool(&s, "update", "check", true)?;
-        c.update.channel = get_str(&s, "channel", "stable");
+        c.update.channel = get_str(&s, "channel", "auto");
         c.update.manifest_url = get_str(&s, "manifest_url", &UpdateConfig::default().manifest_url);
         c.update.auto = get_bool(&s, "update", "auto", false)?;
         c.update.public_key = get_str(&s, "public_key", "");
@@ -1381,6 +1382,11 @@ mod tests {
         assert!(!c.cors.is_origin_allowed("http://localhost:abc"));
         assert!(c.cors.is_origin_allowed("https://reader.mokuro.app"));
         assert_eq!(c.ocr.generations[0].engine, "hayai-nova");
+        // The update channel follows the build unless the file says otherwise.
+        assert_eq!(c.update.channel, "auto");
+        assert_eq!(UpdateConfig::default().channel, "auto");
+        let pinned = Config::from_value(&yaml("update: {channel: stable}")).unwrap();
+        assert_eq!(pinned.update.channel, "stable");
     }
 
     #[test]

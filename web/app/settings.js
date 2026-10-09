@@ -360,7 +360,7 @@
         '<dt>Latest</dt><dd>' + esc(u.latest || '—') + (u.available ? ' <span class="badge badge--info">update available</span>' : '') +
         (u.notes_url ? ' · <a href="' + esc(u.notes_url) + '" target="_blank" rel="noopener">release notes</a>' : '') + '</dd>' +
         '<dt>Installed as</dt><dd>' + esc(u.install) + '</dd>' +
-        '<dt>Channel</dt><dd>' + esc(u.channel) + (u.check ? '' : ' (automatic checks off)') + '</dd>' +
+        '<dt>Channel</dt><dd>' + esc(u.channel) + (u.channel_setting === 'auto' ? ' (follows this build)' : '') + (u.check ? '' : ' (automatic checks off)') + '</dd>' +
         (u.error ? '<dt>Problem</dt><dd>' + esc(u.error) + '</dd>' : '') +
         (u.note ? '<dt>Note</dt><dd>' + esc(u.note) + '</dd>' : '') +
         (u.docker_image ? '<dt>Docker</dt><dd><code>docker pull ' + esc(u.docker_image) + '</code></dd>' : '');

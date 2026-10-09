@@ -1080,7 +1080,8 @@ async fn update_check(State(state): S) -> Response {
         "can_apply": status.can_apply,
         "docker_image": status.docker_image,
         "error": status.error,
-        "channel": c.update.channel,
+        "channel": updater.channel(),
+        "channel_setting": c.update.channel,
         "check": c.update.check,
     }))
 }
