@@ -11,6 +11,10 @@ use tracing::{info, warn};
 
 pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Result<()> {
     if let Err(msg) = app::validate_startup(&config) {
+        // Logging is not up yet: the config's warnings would otherwise go unsaid.
+        for w in &config.warnings {
+            eprintln!("Warning: {w}");
+        }
         println!("Startup validation failed: {msg}");
         std::process::exit(2);
     }

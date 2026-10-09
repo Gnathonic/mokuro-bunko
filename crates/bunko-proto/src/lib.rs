@@ -45,6 +45,12 @@ pub const SESSION_WEDGE_SECONDS: u64 = 600;
 pub const HEADER_RESULT_SHA256: &str = "x-mokuro-sha256";
 /// Header carrying the sidecar file name of an uploaded result.
 pub const HEADER_RESULT_NAME: &str = "x-mokuro-sidecar-name";
+/// The file a claim's finished sidecar is held in on its way to the library: in the
+/// processor's claim folder and in the library's `.processing/<sid>/<claim>/`. Never the
+/// volume's own sidecar name, which may hold characters another OS refuses in a file
+/// name (`? : * " < > |`) or be a Windows device name (`CON.mokuro`); that name travels
+/// only in [`HEADER_RESULT_NAME`] and the volume op, and is compared, never joined.
+pub const RESULT_FILE: &str = "result.mokuro";
 
 /// Ids that become file names: `[A-Za-z0-9_-]{1,64}`.
 pub fn valid_id(id: &str) -> bool {

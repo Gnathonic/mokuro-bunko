@@ -27,6 +27,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 
 pub const MAX_GENERATION_NAME: usize = 32;
+/// The key a retired row that was the primary keeps in `config.yaml` (its `primary` is
+/// saved as false): its files are the bare `<Volume>.mokuro` ones. 0.5 ignores it.
+pub const RETIRED_FROM_PRIMARY: &str = "retired_from_primary";
 pub const RESERVED_NAMES: &[&str] = &["original", "gcv", "updated-ocr"];
 pub const RESERVED_PREFIXES: &[&str] = &["tr-"];
 pub const MAX_STAGE_WORKERS: u32 = 64;
@@ -153,6 +156,29 @@ impl Generation {
         } else {
             format!(".{}.mokuro", self.name)
         }
+    }
+
+    /// The suffix of the files this row's sidecars are on disk under. A row retired from
+    /// `primary` (a 0.5 `mokuro` primary) left bare `<Volume>.mokuro` files, which stay and
+    /// are still served: those are its files, not `<Volume>.<name>.mokuro` (which it never
+    /// wrote, and which [`sidecar_suffix`](Self::sidecar_suffix) names because a retired
+    /// row is no longer primary). Every other row: its `sidecar_suffix`.
+    pub fn files_suffix(&self) -> String {
+        if self.was_primary() {
+            ".mokuro".to_string()
+        } else {
+            self.sidecar_suffix()
+        }
+    }
+
+    /// Retired from `primary`: the enabled primary in the row as it was first read, or
+    /// marked [`RETIRED_FROM_PRIMARY`] when that row was saved (saving a retired row
+    /// clears its `primary`).
+    pub fn was_primary(&self) -> bool {
+        self.retired.is_some()
+            && self.raw.as_ref().is_some_and(|r| {
+                value_bool(r.get(RETIRED_FROM_PRIMARY), false) || is_enabled_primary(r)
+            })
     }
 
     /// What must not change under a running job: engine, effective detector, and the
@@ -336,6 +362,11 @@ fn value_str(v: Option<&Value>) -> String {
         Some(Value::String(s)) => s.trim().to_string(),
         Some(other) => other.to_string().trim_matches('"').trim().to_string(),
     }
+}
+
+/// A raw row that says `primary: true` and is not `enabled: false`.
+fn is_enabled_primary(row: &Map<String, Value>) -> bool {
+    value_bool(row.get("primary"), false) && value_bool(row.get("enabled"), true)
 }
 
 fn value_bool(v: Option<&Value>, default: bool) -> bool {
@@ -547,7 +578,13 @@ fn parse_row(
                 ),
             ));
         }
-        let was_primary = value_bool(row.get("primary"), false);
+        let was_primary = value_bool(row.get("primary"), false)
+            || value_bool(row.get(RETIRED_FROM_PRIMARY), false);
+        // Saved with `primary: false`: remember whose the bare files are.
+        let mut raw = row.clone();
+        if is_enabled_primary(row) {
+            raw.insert(RETIRED_FROM_PRIMARY.into(), Value::Bool(true));
+        }
         out.warnings.push(format!(
             "ocr.generations[{index}] '{name}': {why}. The row is kept but no longer runs{}.",
             if was_primary {
@@ -570,7 +607,7 @@ fn parse_row(
             precision_pick: None,
             precision_why: String::new(),
             retired: Some(why.to_string()),
-            raw: Some(row.clone()),
+            raw: Some(raw),
         });
     }
 
@@ -880,12 +917,10 @@ fn ensure_runnable_primary(out: &mut ParsedGenerations) {
         return;
     }
     let any_runnable_enabled = out.rows.iter().any(|g| g.runnable());
-    let lost_primary = out.rows.iter().any(|g| {
-        g.retired.is_some()
-            && g.raw.as_ref().is_some_and(|r| {
-                value_bool(r.get("primary"), false) && value_bool(r.get("enabled"), true)
-            })
-    });
+    let lost_primary = out
+        .rows
+        .iter()
+        .any(|g| g.retired.is_some() && g.raw.as_ref().is_some_and(is_enabled_primary));
     if !lost_primary && any_runnable_enabled {
         // Leave the ordinary "no primary" error to validate_primary.
         return;
@@ -991,6 +1026,27 @@ mod tests {
         let saved = p.rows[1].to_value();
         assert_eq!(saved["engine"], "mokuro");
         assert_eq!(saved["enabled"], false);
+        // Regression (upgrade test): its files are the bare `<Volume>.mokuro` it left, not
+        // `<Volume>.mokuro.mokuro` — also once saved (as `primary: false`) and read again.
+        assert!(p.rows[1].was_primary());
+        assert_eq!(p.rows[1].files_suffix(), ".mokuro");
+        assert_eq!(saved["primary"], false);
+        assert_eq!(saved[RETIRED_FROM_PRIMARY], true);
+        let again = parse_generation_list(&json!([p.rows[0].to_value(), saved])).unwrap();
+        assert_eq!(again.rows.len(), 2);
+        assert!(again.rows[0].primary);
+        assert!(again.rows[1].was_primary());
+        assert_eq!(again.rows[1].files_suffix(), ".mokuro");
+        assert_eq!(again.rows[1].to_value()[RETIRED_FROM_PRIMARY], true);
+        // A retired LAYER keeps its layer files.
+        let layer = parse_generation_list(&json!([
+            {"name": "hayai", "engine": "hayai-nova", "primary": true},
+            {"name": "old", "engine": "mokuro", "primary": false}
+        ]))
+        .unwrap();
+        assert!(!layer.rows[1].was_primary());
+        assert_eq!(layer.rows[1].files_suffix(), ".old.mokuro");
+        assert!(layer.rows[1].to_value().get(RETIRED_FROM_PRIMARY).is_none());
     }
 
     #[test]

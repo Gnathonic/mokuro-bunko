@@ -633,13 +633,17 @@ impl LibraryRuntime {
     }
 }
 
-/// `total_volumes` from the library index.
+/// `total_volumes` and `pending_ocr` from the library index.
 struct IndexCounts(Arc<LibraryIndexCache>);
 
 impl LibraryCounts for IndexCounts {
     fn total_volumes(&self) -> Result<u64, String> {
         let snapshot = self.0.get_snapshot();
         Ok(snapshot.series.iter().map(|s| s.volumes.len() as u64).sum())
+    }
+
+    fn pending_ocr(&self) -> Result<u64, String> {
+        Ok(self.0.get_snapshot().pending_ocr.len() as u64)
     }
 }
 

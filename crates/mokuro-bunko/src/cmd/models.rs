@@ -103,6 +103,46 @@ fn list(target: &OcrTarget) -> CmdResult {
     Ok(())
 }
 
+/// What to fetch for, as `(engine, precision mode)` rows: `--engine` (its default row),
+/// else the library's enabled generations (each at its precision mode), else (a
+/// processor, which runs whatever its library asks for) every engine's default row.
+pub fn wanted_rows(target: &OcrTarget, engine: Option<&str>) -> Vec<(String, String)> {
+    match (engine, target.library.as_ref()) {
+        (Some(e), _) => vec![(e.to_string(), "auto-accuracy".to_string())],
+        (None, Some(cfg)) if target.role == Role::Library => cfg
+            .ocr
+            .generations
+            .iter()
+            .filter(|g| g.runnable())
+            .map(|g| (g.engine.clone(), g.precision.clone()))
+            .collect(),
+        (None, _) => models::ENGINES
+            .iter()
+            .map(|e| (e.to_string(), "auto-accuracy".to_string()))
+            .collect(),
+    }
+}
+
+/// The device-independent files those rows need: PP-OCR (every engine reads lines with
+/// it) and the host files of the recognizer engines they use (fp32, and fp16 with `gpu`).
+/// `models download` fetches these and `doctor` checks them, so an engine no enabled
+/// generation runs is neither fetched nor missed.
+pub fn planned_ids(rows: &[(String, String)], gpu: bool) -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = Vec::new();
+    for e in models::ENGINES {
+        let wanted = e == models::PPOCR || rows.iter().any(|(r, _)| r == e);
+        if !wanted {
+            continue;
+        }
+        for id in models::download_plan(Some(e), gpu) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
 /// Also used by `install-ocr`.
 pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
     if let Some(e) = engine.filter(|e| !models::ENGINES.contains(e)) {
@@ -113,43 +153,14 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
     }
     let store = target.engine_config(Backend::Auto).store();
     bunko_engines::runtime::init();
-    // What to fetch for: `--engine` (its default row), else the library's enabled
-    // generations (each at its precision mode), else (a processor, which runs whatever
-    // its library asks for) every engine's default row.
-    let rows: Vec<(String, String)> = match (engine, target.library.as_ref()) {
-        (Some(e), _) => vec![(e.to_string(), "auto-accuracy".to_string())],
-        (None, Some(cfg)) if target.role == Role::Library => cfg
-            .ocr
-            .generations
-            .iter()
-            .filter(|g| g.enabled && g.retired.is_none())
-            .map(|g| (g.engine.clone(), g.precision.clone()))
-            .collect(),
-        (None, _) => models::ENGINES
-            .iter()
-            .map(|e| (e.to_string(), "auto-accuracy".to_string()))
-            .collect(),
-    };
+    let rows = wanted_rows(target, engine);
     let recognizer_rows: Vec<(&str, &str)> = rows
         .iter()
         .filter(|(e, _)| e == models::HAYAI || e == models::PADDLE)
         .map(|(e, m)| (e.as_str(), m.as_str()))
         .collect();
-    // Device-independent files: PP-OCR (every engine reads lines with it) and the host
-    // files of the recognizer engines those rows use.
     let gpu = bunko_ocr::runtime::ep_compiled().len() > 1;
-    let mut ids: Vec<&'static str> = Vec::new();
-    for e in models::ENGINES {
-        let wanted = e == models::PPOCR || recognizer_rows.iter().any(|(r, _)| *r == e);
-        if !wanted {
-            continue;
-        }
-        for id in models::download_plan(Some(e), gpu) {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-    }
+    let ids = planned_ids(&rows, gpu);
     let total: u64 = ids
         .iter()
         .filter(|id| store.locate(id).is_none())

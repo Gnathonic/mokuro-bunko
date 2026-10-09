@@ -14,12 +14,18 @@ impl LibraryCounts for Volumes {
     fn total_volumes(&self) -> Result<u64, String> {
         self.0.clone()
     }
+
+    /// Volumes without a primary sidecar: one less than there are.
+    fn pending_ocr(&self) -> Result<u64, String> {
+        self.0.clone().map(|n| n.saturating_sub(1))
+    }
 }
 
+/// The scheduler's block: 7 waiting `(volume, generation)` jobs.
 struct Ocr;
 impl HealthSource for Ocr {
     fn ocr_health(&self) -> Value {
-        json!({"backend": "cpu", "worker_alive": true, "pending": 2, "failed": 1})
+        json!({"backend": "cpu", "worker_alive": true, "pending": null, "failed": 1, "queued_jobs": 7})
     }
 }
 
@@ -80,9 +86,27 @@ async fn health_reports_ok_with_counts() {
     assert_eq!(b["total_users"], 5);
     assert_eq!(b["total_volumes"], 3);
     assert!(b["uptime_seconds"].is_u64());
+    // Regression (upgrade test): `pending` is 0.5.3's count of volumes without a primary
+    // sidecar (from the library index), not the scheduler's waiting jobs.
     assert_eq!(
         b["ocr"],
-        json!({"backend": "cpu", "worker_alive": true, "pending": 2, "failed": 1})
+        json!({"backend": "cpu", "worker_alive": true, "pending": 2, "failed": 1, "queued_jobs": 7})
+    );
+    let ocr_keys: Vec<&str> = b["ocr"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        ocr_keys,
+        [
+            "backend",
+            "worker_alive",
+            "pending",
+            "failed",
+            "queued_jobs"
+        ]
     );
     let keys: Vec<&str> = b.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(

@@ -68,7 +68,7 @@ pub fn compute(
     upgrade: Option<&dyn UpgradeProbe>,
 ) -> Option<OwedVolume> {
     let name = cbz.file_name()?.to_string_lossy().into_owned();
-    if !name.to_lowercase().ends_with(".cbz") {
+    if !bunko_library::sidecar::is_cbz_name(&name) {
         return None;
     }
     let meta = std::fs::metadata(cbz).ok()?;
@@ -138,7 +138,7 @@ pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
             if ft.is_dir() {
                 stack.push(path);
             } else if (ft.is_file() || ft.is_symlink())
-                && entry.file_name().to_string_lossy().ends_with(".cbz")
+                && bunko_library::sidecar::is_cbz_name(&entry.file_name().to_string_lossy())
             {
                 out.push(path);
             }
@@ -233,5 +233,36 @@ mod tests {
             vec!["g-1", "g-2"]
         );
         assert!(!index.volumes.contains_key("S/V2.cbz"));
+    }
+
+    /// Regression (upgrade test): `Vol.CBZ` is an archive to the catalog, uploads and
+    /// covers, but the OCR walk asked for exactly `.cbz` and never read it.
+    #[test]
+    fn upper_case_archives_are_owed_ocr() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        std::fs::create_dir_all(lib.join("S")).unwrap();
+        std::fs::write(lib.join("S/V1.CBZ"), b"PK").unwrap();
+        std::fs::write(lib.join("S/V2.Cbz"), b"PK").unwrap();
+        std::fs::write(lib.join("S/V2.mokuro"), b"{}").unwrap();
+        std::fs::write(lib.join("S/V3.cbz.txt"), b"x").unwrap();
+        assert_eq!(
+            list_archives(lib),
+            [lib.join("S/V1.CBZ"), lib.join("S/V2.Cbz")]
+        );
+        let index = walk(lib, &rows(), &FileFacts, None, &KnownPages::new());
+        let owed: Vec<(&str, Vec<String>)> = index
+            .volumes
+            .iter()
+            .map(|(rel, v)| (rel.as_str(), v.rows.iter().map(|r| r.to_string()).collect()))
+            .collect();
+        assert_eq!(
+            owed,
+            [
+                ("S/V1.CBZ", vec!["g-1".to_string(), "g-2".to_string()]),
+                ("S/V2.Cbz", vec!["g-2".to_string()])
+            ]
+        );
+        assert!(still_owed(lib, "S/V1.CBZ", &rows()[0], false));
     }
 }

@@ -19,9 +19,15 @@ pub fn resolve(cli: Option<&Path>) -> PathBuf {
 }
 
 pub fn load_effective(path: &Path) -> Result<Config, ConfigError> {
-    let config = config::load_config(Some(path))?;
+    let config = load_effective_quiet(path)?;
     print_warnings(&config);
     Ok(config)
+}
+
+/// [`load_effective`] without printing the loader's warnings: for `serve`, which logs
+/// them (console and log file) once logging is up.
+pub fn load_effective_quiet(path: &Path) -> Result<Config, ConfigError> {
+    config::load_config(Some(path))
 }
 
 /// The file's own settings (defaults when it does not exist), without env overrides.

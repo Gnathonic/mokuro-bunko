@@ -191,7 +191,7 @@ fn has_archive(library: &Path) -> bool {
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_dir() {
                 stack.push(entry.path());
-            } else if entry.file_name().to_string_lossy().ends_with(".cbz") {
+            } else if bunko_library::sidecar::is_cbz_name(&entry.file_name().to_string_lossy()) {
                 return true;
             }
         }

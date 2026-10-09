@@ -383,10 +383,8 @@ pub fn generation_entry(row: &Generation, devices: &Value) -> Map<String, Value>
     let mut put = |k: &str, v: Value| {
         entry.insert(k.to_string(), v);
     };
-    put(
-        "sidecar",
-        json!(format!("<Volume>{}", row.sidecar_suffix())),
-    );
+    // A row retired from primary: the bare files it left (`files_suffix`).
+    put("sidecar", json!(format!("<Volume>{}", row.files_suffix())));
     put(
         "effective_detector",
         if spec.is_some() {

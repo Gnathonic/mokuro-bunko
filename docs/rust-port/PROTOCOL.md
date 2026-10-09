@@ -41,7 +41,13 @@ Proxies: Caddy forwards WebSockets as-is. The bundled nginx template sets
    `fetch{state:"ready"}` once the verified archive is in the pipeline. After that it
    sends `volume_started`, `page`…, and `stats`. When the volume is finished it `PUT`s
    the sidecar (headers `x-mokuro-sidecar-name`, `x-mokuro-sha256`) and then sends
-   `volume_done{…, sidecar_sha256}`. If the upload fails, it sends `volume_failed` with
+   `volume_done{…, sidecar_sha256}`. The name (percent-encoded) must be exactly the
+   op's `sidecar_name`, which is the volume's own and may hold characters Windows
+   refuses (`? : * " < > |`) or be a device name (`CON.mokuro`). A name with a path
+   separator or NUL, or not ending `.mokuro`, is refused with 400; any other name that
+   is not the op's, with 409. Neither side uses it as a path: the processor holds the
+   file as `result.mokuro` in its claim folder, and the library stores the upload the
+   same way. If the upload fails, it sends `volume_failed` with
    "the finished sidecar could not be sent from the processor".
 6. A claim that never reached the pipeline is sent back as `volume_returned{class,…}`
    and never counts as a failure of the volume (see the v2 class table).

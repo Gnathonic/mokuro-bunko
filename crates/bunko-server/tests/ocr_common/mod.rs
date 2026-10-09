@@ -252,8 +252,9 @@ impl H {
     ) {
         let dir = self.storage().join(".processing").join(sid).join(claim);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(name), body).unwrap();
-        let sha = bunko_server::ocr::collect::sha256_file(&dir.join(name)).unwrap();
+        let stored = dir.join(bunko_proto::RESULT_FILE);
+        std::fs::write(&stored, body).unwrap();
+        let sha = bunko_server::ocr::collect::sha256_file(&stored).unwrap();
         self.s.handle(Msg::ResultStored {
             pid: p.pid.clone(),
             sid: sid.into(),

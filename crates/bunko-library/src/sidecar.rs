@@ -17,6 +17,15 @@ pub const VOLUME_ARCHIVE_EXTENSIONS: &[&str] = &[".cbz", ".cbr", ".zip", ".rar"]
 /// Suffixes of the files that belong to a volume besides layers.
 pub const VOLUME_SIDE_SUFFIXES: &[&str] = &[".mokuro", ".mokuro.gz", ".webp", ".nocover"];
 
+/// A volume archive's file name: ends `.cbz` in any case (`Vol 1.CBZ` is one too).
+/// Everything that recognises archives (covers, the catalog index, OCR, uploads) asks
+/// this; 0.5's directory walks (`rglob("*.cbz")`) were case-sensitive by accident while
+/// its other checks lowered the name first.
+pub fn is_cbz_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() >= 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".cbz")
+}
+
 /// `pathlib.PurePath.suffix` (3.12) of a file name.
 pub fn py_suffix(name: &str) -> &str {
     match name.rfind('.') {

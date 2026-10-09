@@ -141,6 +141,9 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 - Memory: the server streams downloads and uploads from and to disk, and caches
   are byte-bounded (`server.cache_mb`); OCR uses less RAM than 0.5.2 on every
   platform measured.
+- The admin panel's users list is newest first with a fixed order for accounts
+  created in the same second (the newer one first); 0.5 left those in whatever order
+  SQLite returned them.
 
 ### Removed
 - The `mokuro` engine (manga-ocr and its GPL detector).
@@ -173,6 +176,25 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 - The failed-login limiter's table is bounded in size.
 - `ocr.backend: rocm` drives the AMD GPU again: pre-release 0.7 builds read it as
   WebGPU (an ONNX Runtime provider releases do not have), which left the GPU unused.
+- A processor's result for a volume whose name holds `? : * " < > |` or is a Windows
+  device name (`CON`) is accepted again: 0.7.0-beta.1 refused it, so such volumes
+  never got OCR from a processor. A processor holds the finished file under a fixed
+  name, so a Windows processor can read them too, and the library logs every result
+  it refuses.
+- `/api/health`'s `ocr.pending` counts the volumes without a primary sidecar again,
+  as in 0.5 (0.7.0-beta.1 counted the waiting jobs); the job count is the new
+  `ocr.queued_jobs`.
+- The admin panel's generations list shows a retired `mokuro` primary's sidecar as
+  `<Volume>.mokuro` (it read `<Volume>.mokuro.mokuro`) and counts its files, and the
+  volume totals count series volumes as 0.5.3 did, not loose archives at the library
+  root.
+- Archives with an upper-case extension (`Vol 1.CBZ`) get a cover and OCR; 0.5 and
+  0.7.0-beta.1 listed them in the catalog but their library walks skipped them.
+- `doctor` no longer asks for `install-ocr` and a model download when
+  `ocr.local_processing` is off (one INFO line instead), and checks only the models
+  of the engines the enabled generations use.
+- At start the server no longer logs "OCR is waiting for hardware" while its own OCR
+  is still coming up, and prints each config migration warning once, not twice.
 
 ### Known issues
 - On a Mac (Apple silicon, CPU OCR) hayai-nova runs about 3–4% slower than 0.5.2

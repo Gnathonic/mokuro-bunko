@@ -20,12 +20,21 @@ pub trait LibraryCounts: Send + Sync {
     /// Sum of volumes over every series of the index snapshot. `Err` reports
     /// `library_status: "error"` (health) or 0 (stats).
     fn total_volumes(&self) -> Result<u64, String>;
+
+    /// Volumes without a primary sidecar (`<stem>.mokuro` or `.mokuro.gz`): the index
+    /// snapshot's `pending_ocr`, which is what 0.5.3's health `ocr.pending` counts. `Err`
+    /// (or a source that does not count them) reports `pending: null`.
+    fn pending_ocr(&self) -> Result<u64, String> {
+        Err("not counted".into())
+    }
 }
 
 /// The OCR side of `/api/health` (the OCR scheduler implements this).
 pub trait HealthSource: Send + Sync {
-    /// The `ocr` object: 0.5.2 `{"backend", "worker_alive", "pending", "failed"}`, or
-    /// `Value::Null`. May do small blocking reads; it is called off the async workers.
+    /// The `ocr` object: 0.5.2 `{"backend", "worker_alive", "pending", "failed"}` (plus
+    /// 0.7's `queued_jobs`), or `Value::Null`. `pending` is filled in from the library
+    /// index by the health handler. May do small blocking reads; it is called off the
+    /// async workers.
     fn ocr_health(&self) -> Value;
 }
 
@@ -128,11 +137,24 @@ async fn health(State(d): State<AccountsDeps>) -> Response {
                 }
             },
         };
-        let ocr = d
+        let mut ocr = d
             .health
             .as_ref()
             .map(|h| h.ocr_health())
             .unwrap_or_else(no_ocr);
+        // 0.5.3's `pending`: volumes without a primary sidecar, from the library index
+        // (not the scheduler's waiting jobs: those are `queued_jobs`). OCR off: null.
+        if let Value::Object(m) = &mut ocr
+            && m.contains_key("pending")
+            && m.get("backend").and_then(Value::as_str) != Some("skip")
+        {
+            let pending = d
+                .library
+                .as_ref()
+                .and_then(|l| l.pending_ocr().ok())
+                .map_or(Value::Null, Value::from);
+            m.insert("pending".into(), pending);
+        }
         json!({
             "status": if healthy { "ok" } else { "degraded" },
             "uptime_seconds": uptime,

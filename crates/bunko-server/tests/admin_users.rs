@@ -516,3 +516,38 @@ async fn the_last_active_admin_cannot_be_removed() {
         .await;
     assert_eq!(r.status.as_u16(), 200, "{}", r.text());
 }
+
+/// The users list is newest first, and accounts created in the same second (the
+/// `created_at` resolution) are in a fixed order too: the newer account (higher id)
+/// first. 0.5.3 sorted by `created_at` alone, leaving such ties in whatever order SQLite
+/// returned them; 0.7 keeps this deterministic order on purpose (upgrade test).
+#[tokio::test]
+async fn users_list_newest_first_with_a_stable_order_for_same_second_accounts() {
+    let h = Harness::new();
+    let admin = h.admin();
+    for name in ["user1", "user2", "user3", "user4"] {
+        h.db.create_user(
+            name,
+            "password123",
+            Role::Registered,
+            bunko_db::UserStatus::Active,
+            "",
+        )
+        .unwrap();
+    }
+    let list = || async {
+        h.call("GET", "/_admin/api/users", Some(&admin), None)
+            .await
+            .json()["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["username"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let first = list().await;
+    assert_eq!(first, ["user4", "user3", "user2", "user1", "boss"]);
+    for _ in 0..3 {
+        assert_eq!(list().await, first);
+    }
+}

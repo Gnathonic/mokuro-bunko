@@ -758,6 +758,183 @@ async fn remote_round_trip_over_a_websocket() {
     e.ocr.stop().await;
 }
 
+/// One remote claim of `Series/<stem>.cbz` over a real socket, answered with a result
+/// named `sent` (percent-encoded as a processor sends it). The upload's status, and the
+/// installed sidecar's text when the library took it.
+async fn answer_one_claim(stem: &str, sent: &str) -> (u16, Option<String>) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let e = env(|_| {});
+    e.db.create_user(
+        "proc-acct",
+        "processor-pass-1",
+        Role::Processor,
+        UserStatus::Active,
+        "",
+    )
+    .unwrap();
+    let lib = e.core.layout.library();
+    let cbz = lib.join("Series").join(format!("{stem}.cbz"));
+    ocr_common::write_cbz(&cbz, 2);
+    e.ocr.archive_arrived(&cbz);
+    let app = bunko_server::ocr::processor_router(e.ocr.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base = format!("http://{addr}");
+    let auth = basic("proc-acct", "processor-pass-1");
+    let http = reqwest::Client::new();
+    let reg: Value = http
+        .post(format!("{base}/_processor/register"))
+        .header("authorization", &auth)
+        .json(&json!({"protocol": 3, "name": "box", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "devices": []}, "max_sessions": 1}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pid = reg["processor_id"].as_str().unwrap().to_string();
+    let mut req = format!("ws://{addr}/_processor/{pid}/socket")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", auth.parse().unwrap());
+    let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let (mut tx, mut rx) = ws.split();
+    let Op::OpenSession { sid, .. } = next_op(&mut rx).await else {
+        panic!("expected open_session")
+    };
+    let Op::Volume(vol) = next_op(&mut rx).await else {
+        panic!("expected a volume")
+    };
+    assert_eq!(vol.sidecar_name, format!("{stem}.mokuro"));
+    ws_send(
+        &mut tx,
+        &Event::Ready {
+            sid: sid.clone(),
+            startup_seconds: 1.0,
+            weights: Default::default(),
+            stage_workers: Default::default(),
+            queue_capacity: Default::default(),
+            stage_device: Default::default(),
+            pipeline: "detect -> engine".into(),
+            precision: None,
+        },
+    )
+    .await;
+    ws_send(
+        &mut tx,
+        &Event::VolumeStarted {
+            sid: sid.clone(),
+            id: vol.claim.clone(),
+            pages: 2,
+        },
+    )
+    .await;
+    let sidecar = br#"{"version":"0.2.5","title":"x","volume":"x","ocr_engine":{"id":"hayai-nova","detector":"ppocr-manga"},"pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]}]}"#;
+    use sha2::Digest;
+    let sha = hex::encode(sha2::Sha256::digest(sidecar));
+    let put = http
+        .put(format!(
+            "{base}/_processor/{pid}/results/{sid}/{}",
+            vol.claim
+        ))
+        .header("authorization", &auth)
+        .header(
+            "x-mokuro-sidecar-name",
+            percent_encoding::utf8_percent_encode(sent, percent_encoding::NON_ALPHANUMERIC)
+                .to_string(),
+        )
+        .header("x-mokuro-sha256", &sha)
+        .body(sidecar.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let status = put.status().as_u16();
+    let mut installed = None;
+    if status == 200 {
+        ws_send(
+            &mut tx,
+            &Event::VolumeDone {
+                sid: sid.clone(),
+                id: vol.claim.clone(),
+                pages: 2,
+                failed_pages: 0,
+                seconds: 1.0,
+                stats: Value::Null,
+                cpu_pressure: None,
+                other_cpu: None,
+                sidecar_sha256: Some(sha.clone()),
+            },
+        )
+        .await;
+        let path = lib.join("Series").join(format!("{stem}.mokuro"));
+        for _ in 0..50 {
+            if path.is_file() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        installed = std::fs::read_to_string(&path).ok();
+    }
+    // Nothing the upload carried was ever written outside `.processing/`.
+    let stray: Vec<_> = walk(&lib)
+        .into_iter()
+        .filter(|p| {
+            let n = p.file_name().unwrap().to_string_lossy().into_owned();
+            n != format!("{stem}.cbz") && n != format!("{stem}.mokuro")
+        })
+        .collect();
+    assert!(stray.is_empty(), "{stray:?}");
+    e.stop.cancel();
+    e.ocr.stop().await;
+    (status, installed)
+}
+
+/// Regression (upgrade test): a processor's result for a volume named with a character
+/// Windows refuses (`? : * " < > |`) or with a Windows device name was refused with
+/// `400 x-mokuro-sidecar-name must be a sidecar file name`, so such volumes never got
+/// OCR from a processor. The name is the library's own choice; it only has to match.
+#[cfg(unix)]
+#[tokio::test]
+async fn results_for_volumes_with_names_windows_refuses_are_installed() {
+    for stem in [
+        "Who Is Ann? 1",
+        "Re:Zero 1",
+        "Vol *1*",
+        "\"Quoted\" 1",
+        "<Tag> 1",
+        "A|B 1",
+        "CON",
+    ] {
+        let (status, installed) = answer_one_claim(stem, &format!("{stem}.mokuro")).await;
+        assert_eq!(status, 200, "{stem}");
+        let v: Value = serde_json::from_str(&installed.expect(stem)).unwrap();
+        assert_eq!(v["volume"], stem);
+        assert_eq!(v["title"], "Series");
+    }
+}
+
+/// A name that could leave the claim's folder is still refused on sight, and one that is
+/// plain but not the library's choice is refused as a mismatch; neither is installed.
+#[tokio::test]
+async fn results_with_other_or_traversing_names_are_refused() {
+    for sent in [
+        "../Vol 1.mokuro",
+        "../../Series/Vol 1.mokuro",
+        "..\\Vol 1.mokuro",
+        "/tmp/Vol 1.mokuro",
+        "..",
+    ] {
+        let (status, installed) = answer_one_claim("Vol 1", sent).await;
+        assert_eq!(status, 400, "{sent}");
+        assert!(installed.is_none(), "{sent}");
+    }
+    let (status, installed) = answer_one_claim("Vol 1", "Vol 2.mokuro").await;
+    assert_eq!(status, 409);
+    assert!(installed.is_none());
+}
+
 #[tokio::test]
 async fn a_closed_socket_returns_the_claims() {
     let e = env(|_| {});
@@ -1101,6 +1278,73 @@ async fn the_admin_panel_reads_the_scheduler() {
     assert_eq!(census.1["enabled"], false);
     let outcome = outcome.unwrap();
     assert_eq!(outcome["applied"], true);
+    e.stop.cancel();
+    e.ocr.stop().await;
+}
+
+/// Regression (upgrade test): after a 0.5 library's `mokuro` primary was retired, the
+/// generations page showed its sidecar as `<Volume>.mokuro.mokuro` and 0 volumes done
+/// (its files are the bare `<Volume>.mokuro` it left), and the totals counted loose
+/// archives at the library root (0.5.3 counted the library index's series volumes).
+#[tokio::test]
+async fn generations_stats_count_series_volumes_and_a_retired_primarys_files() {
+    use bunko_server::admin::OcrAdmin;
+    // As saved by 0.7 after the migration: the retired row is no longer `primary`.
+    let first = bunko_core::generations::parse_generation_list(&json!([
+        {"id": "g-1", "name": "mokuro", "engine": "mokuro", "primary": true, "enabled": true},
+        {"id": "g-2", "name": "hayai", "engine": "hayai-nova", "primary": false, "enabled": true}
+    ]))
+    .unwrap();
+    let saved: Vec<Value> = first.rows.iter().map(|g| g.to_value()).collect();
+    assert_eq!(saved[0]["primary"], false);
+    let rows = bunko_core::generations::parse_generation_list(&Value::Array(saved))
+        .unwrap()
+        .rows;
+    let e = env(move |c| c.ocr.generations = rows);
+    let lib = e.core.layout.library();
+    for rel in [
+        "S/V1.cbz",
+        "S/V2.cbz",
+        "T/U/W1.cbz",
+        "loose.cbz",
+        ".hidden/H1.cbz",
+    ] {
+        ocr_common::write_cbz(&lib.join(rel), 1);
+    }
+    std::fs::write(lib.join("S/V1.mokuro"), b"{}").unwrap();
+    std::fs::write(lib.join("loose.mokuro"), b"{}").unwrap();
+    std::fs::write(lib.join("S/V2.hayai.mokuro"), b"{}").unwrap();
+    let ocr = e.ocr.clone();
+    let config = e.core.config.read().clone();
+    let (stats, payload) = tokio::task::spawn_blocking(move || {
+        let stats = ocr.generation_stats(&config);
+        let payload = ocr.generations_payload(&config);
+        (stats, payload)
+    })
+    .await
+    .unwrap();
+    let rows: Vec<(&str, &str)> = payload["generations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| (g["name"].as_str().unwrap(), g["sidecar"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        rows,
+        [("mokuro", "<Volume>.mokuro"), ("hayai", "<Volume>.mokuro")]
+    );
+    // Three volumes in series folders; `loose.cbz` and `.hidden/H1.cbz` are not counted.
+    let g = &stats["generations"];
+    assert_eq!(g["g-1"]["volumes_total"], 3, "{stats}");
+    assert_eq!(
+        g["g-1"]["volumes_done"], 1,
+        "the retired row's bare file: {stats}"
+    );
+    assert_eq!(g["g-2"]["volumes_total"], 3);
+    assert_eq!(
+        g["g-2"]["volumes_done"], 1,
+        "the primary's bare file: {stats}"
+    );
     e.stop.cancel();
     e.ocr.stop().await;
 }

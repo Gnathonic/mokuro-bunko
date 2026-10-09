@@ -216,7 +216,8 @@ re-uploaded by its uploader.
 [changelog](../CHANGELOG.md)): WebDAV `MOVE`/`COPY`/`DELETE` that used to wipe
 data are refused (403/409), the config commands no longer write environment
 overrides into `config.yaml`, and the server stops cleanly on SIGTERM
-(`docker stop`).
+(`docker stop`). Archives named with an upper-case extension (`Vol 1.CBZ`), which
+0.5 listed but never made a cover or OCR for, get both after the upgrade.
 
 ## Rolling back
 

@@ -127,12 +127,7 @@ async fn volumes_run_in_order_and_close_exits_cleanly() {
                 sidecar_sha256,
                 ..
             } => {
-                let name = if id == "v1" {
-                    "Vol 1.mokuro"
-                } else {
-                    "Vol 2.mokuro"
-                };
-                let path = results.join("s1").join(id).join(name);
+                let path = results.join("s1").join(id).join(bunko_proto::RESULT_FILE);
                 let bytes = std::fs::read(&path).unwrap();
                 assert_eq!(
                     sidecar_sha256.as_deref(),
@@ -284,7 +279,61 @@ async fn a_failed_volume_costs_that_volume_only() {
     }
     // A failed claim's directory is removed; the finished one waits for the server.
     assert!(!results.join("s1/v1").exists());
-    assert!(results.join("s1/v2/b.mokuro").exists());
+    assert!(
+        results
+            .join("s1/v2")
+            .join(bunko_proto::RESULT_FILE)
+            .exists()
+    );
+    link.shutdown().await;
+}
+
+/// Regression (upgrade test): the finished sidecar was written under the volume's own
+/// name, which Windows refuses for `Who Is Ann? 1.mokuro` (and for `CON.mokuro`, the
+/// console): such volumes could never be delivered from a Windows processor. The claim's
+/// folder holds it as `RESULT_FILE`; the name only travels with the result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_sidecar_is_held_under_a_safe_name_not_the_volumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let results = dir.path().join("results");
+    let a = write_volume(dir.path(), "a.cbz", 2);
+    let b = write_volume(dir.path(), "b.cbz", 2);
+    let (mut link, _fake) = start(FakeConfig::default(), &results);
+    send(&link, open("s1")).await;
+    for (claim, archive, volume) in [("v1", &a, "Who Is Ann? 1"), ("v2", &b, "CON")] {
+        let Op::Volume(mut op) = volume_op("s1", claim, archive) else {
+            unreachable!()
+        };
+        op.sidecar_name = format!("{volume}.mokuro");
+        op.volume_title = volume.into();
+        send(&link, Op::Volume(op)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    send(&link, Op::CloseSession { sid: "s1".into() }).await;
+    let events = until_exit(&mut link.events, "s1", 10).await;
+    let done: Vec<String> = names(&events)
+        .into_iter()
+        .filter(|n| n.starts_with("volume_done") || n.starts_with("volume_failed"))
+        .collect();
+    assert_eq!(done, ["volume_done:v1", "volume_done:v2"], "{events:#?}");
+    for (claim, volume) in [("v1", "Who Is Ann? 1"), ("v2", "CON")] {
+        let held: Vec<String> = std::fs::read_dir(results.join("s1").join(claim))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(held, [bunko_proto::RESULT_FILE], "{claim}");
+        let sidecar: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                results
+                    .join("s1")
+                    .join(claim)
+                    .join(bunko_proto::RESULT_FILE),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar["volume"], volume);
+    }
     link.shutdown().await;
 }
 

@@ -343,70 +343,35 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Names Windows reserves for devices, whatever the extension (`CON.mokuro` is the
-/// console). Compared case-insensitively against the part before the first dot.
-const WINDOWS_DEVICE_NAMES: &[&str] = &[
-    "CON",
-    "PRN",
-    "AUX",
-    "NUL",
-    "CONIN$",
-    "CONOUT$",
-    "COM0",
-    "COM1",
-    "COM2",
-    "COM3",
-    "COM4",
-    "COM5",
-    "COM6",
-    "COM7",
-    "COM8",
-    "COM9",
-    "COM\u{b9}",
-    "COM\u{b2}",
-    "COM\u{b3}",
-    "LPT0",
-    "LPT1",
-    "LPT2",
-    "LPT3",
-    "LPT4",
-    "LPT5",
-    "LPT6",
-    "LPT7",
-    "LPT8",
-    "LPT9",
-    "LPT\u{b9}",
-    "LPT\u{b2}",
-    "LPT\u{b3}",
-];
+/// Is `name` (the processor's `X-Mokuro-Sidecar-Name`, decoded) shaped like one file
+/// name: not empty, ending `.mokuro`, not `.`/`..`, no path separator (`/`, `\`) and no
+/// NUL. That is all it is asked here (0.5.3's `_install` asked only that it equal the
+/// expected name): it must still be exactly the name the library chose for the claim,
+/// which is the volume's own name and may hold `? : * " < > |` or be a Windows device
+/// name (`CON.mokuro`) — the library already holds that archive under that name. The
+/// upload is stored as [`bunko_proto::RESULT_FILE`] in a folder named by the server's
+/// own ids, so the name is compared, never joined.
+pub fn is_plain_result_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.ends_with(".mokuro")
+        && !name.contains(['/', '\\', '\0'])
+}
 
-/// Is `name` (the processor's `X-Mokuro-Sidecar-Name`, decoded) one plain file name on
-/// every OS the library runs on: exactly one `Normal` path component, none of the
-/// characters Windows refuses or reads as a drive/stream separator (`<>:"/\|?*`, control
-/// characters), no trailing dot or space, not a device name, not hidden, ending
-/// `.mokuro`. Non-ASCII letters are fine (volume names are often Japanese).
-pub fn is_safe_result_name(name: &str) -> bool {
-    if name.is_empty()
-        || name.len() > 255
-        || name.starts_with('.')
-        || !name.ends_with(".mokuro")
-        || name.ends_with(['.', ' '])
-        || name.chars().any(|c| {
-            c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
-        })
-    {
-        return false;
-    }
-    let mut parts = std::path::Path::new(name).components();
-    if !matches!(
-        (parts.next(), parts.next()),
-        (Some(std::path::Component::Normal(n)), None) if n == name
-    ) {
-        return false;
-    }
-    let base = name.split('.').next().unwrap_or("").trim_end_matches(' ');
-    let base = base.to_uppercase();
-    !WINDOWS_DEVICE_NAMES.iter().any(|d| *d == base)
+/// A refused result, in the library's log as well as in the answer.
+fn refuse_result(
+    status: u16,
+    username: &str,
+    claim: &str,
+    name: &str,
+    why: impl std::fmt::Display,
+) -> Response {
+    let shown: String = name.chars().take(120).collect();
+    tracing::warn!(
+        "Refused a result from processor account {username} for claim {claim} (sidecar name {shown:?}): {why}"
+    );
+    error(status, why.to_string())
 }
 
 /// What an upload is for, checked before a byte is read.
@@ -437,22 +402,43 @@ async fn result_upload(
     }) else {
         return error(400, format!("{HEADER_RESULT_NAME} is required"));
     };
-    if !is_safe_result_name(&name) {
-        return error(
+    if !is_plain_result_name(&name) {
+        return refuse_result(
             400,
+            &username,
+            &claim,
+            &name,
             format!("{HEADER_RESULT_NAME} must be a sidecar file name"),
         );
     }
     let Some(sha) = header_str(&headers, HEADER_RESULT_SHA256).map(str::to_ascii_lowercase) else {
-        return error(400, format!("{HEADER_RESULT_SHA256} is required"));
+        return refuse_result(
+            400,
+            &username,
+            &claim,
+            &name,
+            format!("{HEADER_RESULT_SHA256} is required"),
+        );
     };
     if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return error(400, format!("{HEADER_RESULT_SHA256} must be a hex sha256"));
+        return refuse_result(
+            400,
+            &username,
+            &claim,
+            &name,
+            format!("{HEADER_RESULT_SHA256} must be a hex sha256"),
+        );
     }
     if let Some(len) = header_str(&headers, "content-length").and_then(|v| v.parse::<u64>().ok())
         && len > MAX_RESULT_BYTES
     {
-        return error(413, "the result is larger than the library accepts");
+        return refuse_result(
+            413,
+            &username,
+            &claim,
+            &name,
+            "the result is larger than the library accepts",
+        );
     }
     let (p, s, c, u) = (pid.clone(), sid.clone(), claim.clone(), username.clone());
     let check = ocr
@@ -479,10 +465,20 @@ async fn result_upload(
         .await;
     let expected = match check {
         None => return error(503, "OCR is not running"),
-        Some(UploadCheck::Refused(status, msg, code)) => return refused(status, msg, code),
+        Some(UploadCheck::Refused(status, msg, code)) => {
+            // Usually a claim cancelled a moment ago: worth a line, not a warning.
+            tracing::info!(
+                "Refused a result from processor account {username} for claim {claim}: {msg}"
+            );
+            return refused(status, msg, code);
+        }
         Some(UploadCheck::Ok(expected)) => expected,
     };
     if expected != name {
+        tracing::warn!(
+            "Refused a result from processor account {username} for claim {claim}: its sidecar arrived as {:?}, not {expected:?}",
+            name.chars().take(120).collect::<String>()
+        );
         ocr.send(Msg::ResultStored {
             pid,
             sid,
@@ -500,8 +496,10 @@ async fn result_upload(
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return error(507, format!("could not store the result: {e}"));
     }
-    let part = dir.join(format!("{name}.part"));
-    let final_path = dir.join(&name);
+    // Under the server's own ids and a fixed name: the volume's name (which may hold
+    // characters this OS refuses) is never a path here.
+    let part = dir.join(format!("{}.part", bunko_proto::RESULT_FILE));
+    let final_path = dir.join(bunko_proto::RESULT_FILE);
     let mut file = match tokio::fs::File::create(&part).await {
         Ok(f) => f,
         Err(e) => return error(507, format!("could not store the result: {e}")),
@@ -530,7 +528,13 @@ async fn result_upload(
         received += chunk.len() as u64;
         if received > MAX_RESULT_BYTES {
             let _ = tokio::fs::remove_file(&part).await;
-            return error(413, "the result is larger than the library accepts");
+            return refuse_result(
+                413,
+                &username,
+                &claim,
+                &name,
+                "the result is larger than the library accepts",
+            );
         }
         hasher.update(&chunk);
         if let Err(e) = file.write_all(&chunk).await {
@@ -546,8 +550,11 @@ async fn result_upload(
     let actual = hex::encode(hasher.finalize());
     if actual != sha {
         let _ = tokio::fs::remove_file(&part).await;
-        return error(
+        return refuse_result(
             400,
+            &username,
+            &claim,
+            &name,
             format!("the body's sha256 is {actual}, not the {HEADER_RESULT_SHA256} sent"),
         );
     }
@@ -685,53 +692,52 @@ async fn bench_sample(
 mod tests {
     use super::*;
 
-    /// Regression (review finding): the result name is joined under `.processing/` and its
-    /// directory removed on a mismatch; anything but one plain, Windows-safe component
-    /// must be refused before that.
+    /// Regression (upgrade test): a volume named with `? : * " < > |`, or a Windows device
+    /// name, got no OCR from a processor — its result was refused with "must be a sidecar
+    /// file name" before the library compared it with the name it chose itself. Such
+    /// names are the library's own (it holds the archive under them): only a name that
+    /// could leave the claim's folder is refused on sight, and the upload is stored under
+    /// `RESULT_FILE`, never under the name.
     #[test]
-    fn result_names_must_be_one_windows_safe_component() {
+    fn result_names_are_compared_not_joined() {
         for ok in [
             "Vol 1.mokuro",
             "第1巻.mokuro",
             "Vol 1.hayai-nova.mokuro",
-            "Console.mokuro",
-            "COM10.mokuro",
+            "Who Is Ann? 1.mokuro",
+            "Re:Zero 1.mokuro",
+            "Vol *1*.mokuro",
+            "\"Quoted\" 1.mokuro",
+            "<Tag> 1.mokuro",
+            "A|B 1.mokuro",
+            "CON.mokuro",
+            "con.mokuro",
+            "LPT1.mokuro",
+            "x.mokuro.mokuro",
+            "..x.mokuro",
+            ".hidden.mokuro",
         ] {
-            assert!(is_safe_result_name(ok), "{ok}");
+            assert!(is_plain_result_name(ok), "{ok}");
         }
         for bad in [
             "",
-            ".mokuro",
-            ".hidden.mokuro",
+            ".",
+            "..",
             "a/b.mokuro",
             "a\\b.mokuro",
+            "../x.mokuro",
             "..\\x.mokuro",
-            "C:x.mokuro",
+            "../../etc/x.mokuro",
+            "/abs/x.mokuro",
             "C:\\x.mokuro",
             "\\\\server\\share\\x.mokuro",
-            "x.mokuro:stream",
-            "x:y.mokuro",
-            "x?.mokuro",
-            "x*.mokuro",
-            "x|y.mokuro",
-            "x\"y.mokuro",
-            "x<y>.mokuro",
             "x\u{0}.mokuro",
-            "x\n.mokuro",
-            "x.mokuro.",
-            "x.mokuro ",
             "x.json",
-            "CON.mokuro",
-            "con.mokuro",
-            "nul.mokuro",
-            "Aux .mokuro",
-            "LPT1.mokuro",
-            "COM\u{b9}.mokuro",
-            "conin$.mokuro",
+            "x.mokuro/..",
         ] {
-            assert!(!is_safe_result_name(bad), "{bad:?}");
+            assert!(!is_plain_result_name(bad), "{bad:?}");
         }
-        assert!(!is_safe_result_name(&format!("{}.mokuro", "a".repeat(250))));
+        assert_eq!(bunko_proto::RESULT_FILE, "result.mokuro");
     }
 
     #[test]

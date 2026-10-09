@@ -114,6 +114,66 @@ fn serve_applies_flags_then_hands_over() {
         .stderr(predicate::str::starts_with("Error: "));
 }
 
+/// Regression (upgrade test): the config migration's warnings (a retired `mokuro` row, a
+/// `ctd` detector switched to `ppocr-manga`, hayai made primary) were printed twice on
+/// the console at startup: by the config loader and again by the server's log.
+#[test]
+fn serve_says_each_config_warning_once() {
+    use std::io::{Read, Write};
+    let env = Env::new();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    env.write_config(&format!(
+        "server:\n  host: 127.0.0.1\n  port: {port}\nocr:\n  local_processing: false\n  autobench: false\n  generations:\n    - {{name: mokuro, engine: mokuro, primary: true, enabled: true}}\n    - {{name: hayai, engine: hayai-nova, detector: ctd, primary: false, enabled: true}}\n"
+    ));
+    let out_path = env.root().join("serve.out");
+    let err_path = env.root().join("serve.err");
+    let mut child = env
+        .std_cmd()
+        .arg("serve")
+        .stdout(std::fs::File::create(&out_path).unwrap())
+        .stderr(std::fs::File::create(&err_path).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut up = false;
+    while std::time::Instant::now() < deadline && !up {
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!(
+                "serve exited ({status}): {}{}",
+                std::fs::read_to_string(&out_path).unwrap_or_default(),
+                std::fs::read_to_string(&err_path).unwrap_or_default()
+            );
+        }
+        if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            let _ = s.write_all(b"GET /api/health HTTP/1.0\r\nHost: x\r\n\r\n");
+            let mut answer = String::new();
+            let _ = s.read_to_string(&mut answer);
+            up = answer.starts_with("HTTP/1.");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let _ = child.kill();
+    let _ = child.wait();
+    let console = format!(
+        "{}{}",
+        std::fs::read_to_string(&out_path).unwrap(),
+        std::fs::read_to_string(&err_path).unwrap()
+    );
+    assert!(up, "the server never answered: {console}");
+    for warning in [
+        "The row is kept but no longer runs",
+        "this row now reads with the ppocr-manga detector",
+        "is now the primary generation",
+    ] {
+        assert_eq!(console.matches(warning).count(), 1, "{warning}: {console}");
+    }
+}
+
 #[test]
 fn tunnel_status_without_cloudflared() {
     Env::new()

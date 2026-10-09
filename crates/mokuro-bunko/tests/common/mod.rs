@@ -38,7 +38,12 @@ impl Env {
     }
 
     pub fn cmd(&self) -> Command {
-        let mut c = Command::cargo_bin("mokuro-bunko").expect("binary");
+        Command::from_std(self.std_cmd())
+    }
+
+    /// The same, as a `std::process::Command` (for a process the test starts and stops).
+    pub fn std_cmd(&self) -> std::process::Command {
+        let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin("mokuro-bunko"));
         c.env_clear()
             .env("HOME", self.root())
             .env("XDG_CONFIG_HOME", self.root().join("xdg-config"))

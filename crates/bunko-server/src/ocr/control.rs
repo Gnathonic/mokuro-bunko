@@ -478,7 +478,11 @@ impl OcrControl {
 
     // --- health ------------------------------------------------------------------------------
 
-    /// The `ocr` block of `/api/health`: `{backend, worker_alive, pending, failed}`.
+    /// The `ocr` block of `/api/health`: `{backend, worker_alive, pending, failed,
+    /// queued_jobs}`. `pending` is null here: it is 0.5.3's count of volumes without a
+    /// primary sidecar, which the health handler takes from the library index.
+    /// `queued_jobs` (new in 0.7) is the scheduler's waiting `(volume, generation)`
+    /// jobs, one volume counting once per generation it is owed.
     pub fn health(&self) -> Value {
         let alive = self
             .0
@@ -491,11 +495,11 @@ impl OcrControl {
         });
         let backend = self.0.core.config.read().ocr.backend.clone();
         match counts {
-            Some((pending, failed)) => {
-                json!({"backend": backend, "worker_alive": alive, "pending": pending, "failed": failed})
+            Some((queued, failed)) => {
+                json!({"backend": backend, "worker_alive": alive, "pending": null, "failed": failed, "queued_jobs": queued})
             }
             None => {
-                json!({"backend": backend, "worker_alive": false, "pending": null, "failed": 0})
+                json!({"backend": backend, "worker_alive": false, "pending": null, "failed": 0, "queued_jobs": null})
             }
         }
     }

@@ -219,7 +219,7 @@ impl Scheduler {
                     .join(".processing")
                     .join(sid)
                     .join(&entry.claim)
-                    .join(&entry.sidecar_name),
+                    .join(bunko_proto::RESULT_FILE),
                 sidecar_sha256.clone(),
             ),
         };
@@ -287,10 +287,11 @@ impl Scheduler {
 
     /// A result upload landed for an outstanding claim.
     ///
-    /// `name` comes off the wire: it is compared, never joined. The result's directory is
-    /// built from the server's own ids only, and the file inside it from the name the
-    /// library chose (a Windows prefix such as `C:x.mokuro` would otherwise REPLACE the
-    /// joined path, and the cleanup below would `remove_dir_all` outside `.processing`).
+    /// `name` comes off the wire: it is compared, never joined. The result's path is
+    /// built from the server's own ids and [`bunko_proto::RESULT_FILE`] only (a Windows
+    /// prefix such as `C:x.mokuro` would otherwise REPLACE the joined path, and the cleanup
+    /// below would `remove_dir_all` outside `.processing`; and the volume's own name may
+    /// hold characters this OS refuses in a file name).
     pub fn result_stored(&mut self, pid: &str, sid: &str, claim: &str, name: &str, sha256: String) {
         if !bunko_proto::valid_id(sid) || !bunko_proto::valid_id(claim) {
             return;
@@ -304,7 +305,7 @@ impl Scheduler {
             .map(|j| j.sidecar_name.clone());
         match wanted {
             Some(expected) if expected == name => {
-                let path = dir.join(&expected);
+                let path = dir.join(bunko_proto::RESULT_FILE);
                 self.results
                     .insert((sid.to_string(), claim.to_string()), (path, sha256));
             }
@@ -601,7 +602,7 @@ impl Scheduler {
         let Some(rel) = rel_of(&library, path) else {
             return;
         };
-        if !rel.ends_with(".cbz") {
+        if !bunko_library::sidecar::is_cbz_name(&rel) {
             return;
         }
         self.cancel_stale_jobs(|r| r == rel);

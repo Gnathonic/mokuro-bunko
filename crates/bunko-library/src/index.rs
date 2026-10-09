@@ -24,7 +24,9 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeSnapshot {
     pub name: String,
-    /// Exactly `<name>.cbz` exists (case-sensitive, unlike volume detection).
+    /// The archive `<name>.cbz` exists, its extension in any case (0.5.3 asked for
+    /// exactly `.cbz`, so a `Vol 1.CBZ` was a volume with no archive: never pending OCR
+    /// or a cover).
     pub has_cbz: bool,
     pub has_mokuro: bool,
     pub has_mokuro_gz: bool,
@@ -122,11 +124,17 @@ fn scan_dir(
         layers_by_stem.entry(stem).or_default().insert(layer);
     }
 
+    // Stems with an archive, its extension in any case (`Vol 1.CBZ`).
+    let archive_stems: HashSet<&str> = filenames
+        .iter()
+        .filter(|name| crate::sidecar::is_cbz_name(name))
+        .map(|name| &name[..name.len() - 4])
+        .collect();
     let mut volumes = Vec::new();
     let mut series_cover = None;
     for volume_name in &volume_names {
         let has = |suffix: &str| filenames.contains(&format!("{volume_name}{suffix}"));
-        let has_cbz = has(".cbz");
+        let has_cbz = archive_stems.contains(volume_name.as_str());
         let has_mokuro = has(".mokuro");
         let has_mokuro_gz = has(".mokuro.gz");
         let has_webp = has(".webp");
