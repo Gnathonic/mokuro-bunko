@@ -105,6 +105,15 @@ pub fn catalog_can_run(
     row: &Generation,
     stage_device: &Map<String, Value>,
 ) -> Option<String> {
+    // A GPU-only engine (paddle-manga) on a machine with no GPU, or pinned to its CPU:
+    // say so rather than "not installed" (such a machine does not offer it).
+    if bunko_sched::precision::gpu_only(&row.engine) {
+        let has_gpu = catalog.devices.iter().any(|d| d.id.starts_with("gpu"));
+        let pinned_cpu = stage_device.get("engine").and_then(Value::as_str) == Some("cpu");
+        if !has_gpu || pinned_cpu {
+            return Some(bunko_sched::precision::needs_gpu(&row.engine));
+        }
+    }
     if !catalog.engines.contains(&row.engine) {
         return Some(format!("{} is not installed on this processor", row.engine));
     }

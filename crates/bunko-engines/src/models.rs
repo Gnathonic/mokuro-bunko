@@ -13,10 +13,11 @@
 //! The recognizers run on libtorch (feature `torch`): a compiled package per engine x
 //! precision x device target (`bunko_ocr::models::ModelStore::ensure_torch_package`)
 //! plus the host files listed by [`torch_host_ids`] (tokenizers, hayai-nova's position
-//! table and token embeddings; paddle-manga's input embeddings come with the GPU
-//! packages' weights, [`paddle_embed_id`] for packages without them). The ONNX graphs
-//! ([`engine_ids`]) are only used by the deferred ONNX recognizers (feature
-//! `onnx-vlm`).
+//! table and token embeddings; paddle-manga's input embeddings come with its packages'
+//! weights, [`paddle_embed_id`] for a package without them). paddle-manga runs on a GPU
+//! only (`bunko_sched::precision::gpu_only`): the release has no CPU packages for it.
+//! The ONNX graphs ([`engine_ids`]) are only used by the deferred ONNX recognizers
+//! (feature `onnx-vlm`).
 //!
 //! paddle-manga's input embeddings: the ONNX recognizer reads the fp16 table at both
 //! precisions (what bunko-vlm keeps in memory and measured parity on). The libtorch one
@@ -43,8 +44,8 @@ pub fn ppocr_ids() -> Vec<&'static str> {
 }
 
 /// Host files the libtorch recognizer of `engine` always reads besides its compiled
-/// package. paddle-manga's input embeddings come with the GPU packages' weights; only
-/// packages without them (CPU) also need [`paddle_embed_id`].
+/// package. paddle-manga's input embeddings come with its (GPU) packages' weights; only
+/// a package without them (an older or hand-made one) also needs [`paddle_embed_id`].
 pub fn torch_host_ids(engine: &str, _precision: Precision) -> Vec<&'static str> {
     match engine {
         HAYAI => vec![
@@ -170,7 +171,7 @@ pub fn recognizer_ids(engine: &str, precision: Precision) -> Vec<&'static str> {
 
 /// The manifest files `models list` shows for `engine` in this build: PP-OCR, the
 /// recognizer's host files (and the ONNX graphs only when the ONNX recognizers are
-/// built; paddle-manga's embedding tables only when a CPU package needs one). The compiled libtorch packages depend on the device and are reported per
+/// built). The compiled libtorch packages depend on the device and are reported per
 /// device (`EnginePipeline::package_status`).
 pub fn list_ids(engine: &str) -> Vec<&'static str> {
     if engine == PPOCR {

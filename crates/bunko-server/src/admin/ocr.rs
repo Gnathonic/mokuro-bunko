@@ -218,7 +218,9 @@ pub fn catalog(devices: Value) -> Value {
                 "patch_budget": e.patch_budget,
                 "precision": e.precision,
                 "precision_modes": if e.precision { engines::PRECISION_MODES.to_vec() } else { vec![] },
-                "devices": if e.cpu_only() { json!(["cpu"]) } else { json!("any") },
+                // `["cpu"]`, `"gpu"` (a GPU only: paddle-manga) or `"any"`.
+                "devices": if e.cpu_only() { json!(["cpu"]) } else if e.gpu_only() { json!("gpu") } else { json!("any") },
+                "gpu_only_reason": (!e.gpu_only_reason.is_empty()).then_some(e.gpu_only_reason),
             })
         })
         .collect();
@@ -280,6 +282,7 @@ pub fn stage_lock_reason(row: &Generation, key: &str) -> Option<String> {
 fn device_short(device: &str) -> String {
     match device {
         "cpu" => "CPU".into(),
+        "gpu" => "GPU".into(),
         d => match d.strip_prefix("gpu:") {
             Some(i) => format!("GPU {i}"),
             None => d.to_string(),
@@ -318,21 +321,38 @@ pub fn stage_rows(row: &Generation, devices: &Value) -> Vec<Value> {
         .map(|key| {
             let takes_device = road.device_stage_keys().contains(key);
             let locked = stage_lock_reason(row, key);
+            // A GPU-only engine (paddle-manga): its engine stage never offers the CPU,
+            // and `auto` means the first GPU (or "a GPU" when none is known here).
+            let needs_gpu = (*key == engines::STAGE_ENGINE)
+                .then(|| row.engine_spec().filter(|e| e.gpu_only()))
+                .flatten()
+                .map(|e| e.gpu_only_reason);
             let allowed: Vec<String> = if !takes_device {
                 vec![]
             } else if locked.is_some() {
                 vec!["auto".into(), "cpu".into()]
+            } else if needs_gpu.is_some() {
+                ids.iter().filter(|id| *id != "cpu").cloned().collect()
             } else {
                 ids.clone()
             };
             let device = match row.pools.stage_device.get(*key) {
                 Some(d) if takes_device && locked.is_none() && d != "auto" => d.clone(),
+                _ if needs_gpu.is_some() => ids
+                    .iter()
+                    .find(|id| id.starts_with("gpu:"))
+                    .cloned()
+                    .unwrap_or_else(|| "gpu".to_string()),
                 _ => "cpu".to_string(),
             };
             let options: Vec<Value> = allowed
                 .iter()
                 .map(|id| {
-                    let label = if id == "auto" {
+                    let label = if id == "auto" && needs_gpu.is_some() {
+                        // The first GPU (a pin does not change what `auto` means).
+                        let first = ids.iter().find(|i| i.starts_with("gpu:"));
+                        format!("Auto → {}", device_short(first.map_or("gpu", |s| s)))
+                    } else if id == "auto" {
                         "Auto → CPU".to_string()
                     } else {
                         label_of(id)
@@ -355,6 +375,7 @@ pub fn stage_rows(row: &Generation, devices: &Value) -> Vec<Value> {
                 "devices_allowed": allowed,
                 "device_options": options,
                 "device_locked_reason": locked,
+                "device_needs_gpu": needs_gpu,
                 "workers_means": means,
             })
         })
@@ -836,9 +857,60 @@ mod tests {
             json!("the PP-OCRv6 detector runs on the CPU")
         );
         assert_eq!(stages[1]["devices_allowed"], json!(["auto", "cpu"]));
+        assert_eq!(stages[1]["device_needs_gpu"], Value::Null);
         assert_eq!(stages[2]["devices_allowed"], json!([]));
         let first: Vec<&String> = e.keys().take(4).collect();
         assert_eq!(first, ["id", "name", "primary", "enabled"]);
+    }
+
+    /// paddle-manga runs on a GPU only: its engine stage never offers the CPU, and
+    /// `auto` shows the GPU it means.
+    #[test]
+    fn a_gpu_only_engine_stage_offers_no_cpu() {
+        let c = catalog(default_devices());
+        assert_eq!(c["engines"][1]["id"], json!("paddle-manga"));
+        assert_eq!(c["engines"][1]["devices"], json!("gpu"));
+        assert!(
+            c["engines"][1]["gpu_only_reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("paddle-manga needs a GPU")
+        );
+        assert_eq!(c["engines"][0]["gpu_only_reason"], Value::Null);
+        let parsed = generations::parse_generation_list(&json!([
+            {"name": "nova", "engine": "hayai-nova", "primary": true},
+            {"name": "vl", "engine": "paddle-manga"},
+        ]))
+        .unwrap();
+        let vl = &parsed.rows[1];
+        // No host facts: only `auto`, meaning "a GPU".
+        let stages = stage_rows(vl, &default_devices());
+        assert_eq!(stages[1]["devices_allowed"], json!(["auto"]));
+        assert_eq!(stages[1]["device"], json!("gpu"));
+        assert_eq!(stages[1]["device_options"][0]["label"], json!("Auto → GPU"));
+        assert!(
+            stages[1]["device_needs_gpu"]
+                .as_str()
+                .unwrap()
+                .contains("use hayai-nova on the CPU")
+        );
+        // A machine with cards: those, and `auto` on the first.
+        let devices = json!([
+            {"id": "auto", "label": "Auto"}, {"id": "cpu", "label": "CPU"},
+            {"id": "gpu:0", "label": "RTX 4090"}, {"id": "gpu:1", "label": "RX 6600"},
+        ]);
+        let stages = stage_rows(vl, &devices);
+        assert_eq!(
+            stages[1]["devices_allowed"],
+            json!(["auto", "gpu:0", "gpu:1"])
+        );
+        assert_eq!(stages[1]["device"], json!("gpu:0"));
+        assert_eq!(
+            stages[1]["device_options"][0]["label"],
+            json!("Auto → GPU 0")
+        );
+        // The detect stage stays on the CPU.
+        assert_eq!(stages[0]["devices_allowed"], json!(["auto", "cpu"]));
     }
 
     #[test]

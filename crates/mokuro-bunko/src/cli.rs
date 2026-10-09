@@ -349,7 +349,8 @@ pub enum ModelsCmd {
     },
     /// Download (and verify) models into <storage>/models.
     Download {
-        /// Only the models this engine needs (hayai-nova, paddle-manga, ppocr-manga)
+        /// Only the models this engine needs (hayai-nova, paddle-manga, ppocr-manga;
+        /// paddle-manga needs a GPU: NVIDIA CUDA or AMD ROCm)
         #[arg(long)]
         engine: Option<String>,
         #[command(flatten)]
@@ -376,7 +377,8 @@ pub struct OcrTargetArgs {
 /// `install-ocr` options (the 0.5.2 ones are accepted: `--backend` maps to `--variant`).
 #[derive(Args, Debug, Default)]
 pub struct InstallOcrArgs {
-    /// Backend pack: auto (detect the GPU), cpu, cu130 (NVIDIA), rocm7.1 (AMD, Linux)
+    /// Backend pack: auto (detect the GPU), cpu, cu130 (NVIDIA), rocm7.1 (AMD, Linux).
+    /// paddle-manga needs a GPU pack; the cpu pack runs hayai-nova and ppocr-manga
     /// [default: what ocr.backend in the config asks for on this hardware]
     #[arg(long, value_parser = PossibleValuesParser::new(["auto", "cpu", "cu130", "rocm7.1"]))]
     pub variant: Option<String>,

@@ -1487,6 +1487,25 @@ mod tests {
         assert!(torch_release_name().starts_with("torch-models"));
     }
 
+    /// paddle-manga runs on a GPU only: the release ships no CPU package for it (the
+    /// engines never ask for one; a regenerated `torch_models.json` must not bring one
+    /// back for users to download). hayai-nova keeps its CPU packages.
+    #[test]
+    fn the_release_has_no_cpu_package_for_paddle_manga() {
+        let files = torch_release_files_from(TORCH_MODELS_JSON).expect("compiled-in release loads");
+        let cpu = |f: &&ModelFile| f.target.as_deref().is_some_and(|t| t.contains("-cpu-"));
+        let paddle_cpu: Vec<&str> = files
+            .iter()
+            .filter(cpu)
+            .filter(|f| f.engine == "paddle-manga")
+            .map(|f| f.id.as_str())
+            .collect();
+        assert!(paddle_cpu.is_empty(), "{paddle_cpu:?}");
+        assert!(files.iter().filter(cpu).any(|f| f.engine == "hayai-nova"));
+        assert!(files.iter().any(|f| f.engine == "paddle-manga"
+            && f.target.as_deref().is_some_and(|t| t.contains("-cuda-"))));
+    }
+
     #[test]
     fn every_gpu_package_resolves_its_weights() {
         let files = torch_release_files_from(TORCH_MODELS_JSON).expect("compiled-in release loads");
@@ -1694,14 +1713,14 @@ mod tests {
         // an unpacked graph directory counts as a graph
         let dir = tmp
             .path()
-            .join("models/torch/paddle-manga/fp32/cpu-x86_64-v3");
+            .join("models/torch/hayai-nova/fp32/cpu-x86_64-v3");
         for g in TORCH_GRAPHS {
             fs::create_dir_all(dir.join(g)).unwrap();
         }
         let cpu = vec!["cpu-x86_64-v3".to_string()];
         assert_eq!(
             offline
-                .locate_torch_package("paddle-manga", "fp32", &cpu)
+                .locate_torch_package("hayai-nova", "fp32", &cpu)
                 .unwrap()
                 .dir,
             dir

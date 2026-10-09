@@ -20,12 +20,14 @@
 //!
 //! Recognizer backends: **libtorch** (feature `torch`, the release backend): a backend
 //! pack under `<storage>/backends/` loaded at run time ([`torch`]), CUDA / ROCm / CPU,
-//! fp32 / bf16 / fp16 as 0.5.2. The ONNX Runtime recognizers (feature `onnx-vlm`) are
-//! kept for reference and used only when no pack is loaded.
+//! fp32 / bf16 / fp16 as 0.5.2 (paddle-manga on a GPU only:
+//! [`bunko_sched::precision::gpu_only`]). The ONNX Runtime recognizers (feature
+//! `onnx-vlm`) are kept for reference and used only when no pack is loaded.
 //! Model files come from [`bunko_ocr::models::ModelStore`]; missing ones are downloaded
 //! when a session opens ([`models`]). Precision modes resolve per device
 //! ([`precision`]); the recognizer runs on the device `pools.stage_device.engine`
-//! names (or the first GPU), falling back to the CPU with a logged reason.
+//! names (or the first GPU), falling back to the CPU with a logged reason -- except a
+//! GPU-only engine, which fails with "needs a GPU" where no GPU may run it.
 //!
 //! Sidecars are written as 0.5.2's runner wrote them (`bunko-layout`'s writer:
 //! `title`/`volume`/uuids from the op, the `ocr_engine` block, version 0.2.5, default
@@ -247,8 +249,8 @@ impl EnginePipeline {
 
     /// The devices for the catalog: with the libtorch backend each device lists only the
     /// formats a recognizer can run on it here (its compute formats with a package on
-    /// disk or downloadable for hayai-nova or paddle-manga), not every format it computes
-    /// in (a Turing card computes bf16 but no bf16 package exists for it).
+    /// disk or downloadable for hayai-nova or, on a GPU, paddle-manga), not every format
+    /// it computes in (a Turing card computes bf16 but no bf16 package exists for it).
     pub fn catalog_devices(&self) -> Vec<Device> {
         #[cfg_attr(not(feature = "torch"), allow(unused_mut))]
         let mut devices = self.devices();
@@ -272,16 +274,66 @@ impl EnginePipeline {
     }
 
     /// The formats `engine` can run in on `placement`: what the device computes in
-    /// and what this machine has (or may download) the files for.
+    /// and what this machine has (or may download) the files for. None for a GPU-only
+    /// engine (paddle-manga) on the CPU.
     fn formats(&self, engine: &str, placement: &runtime::Placement) -> Vec<&'static str> {
+        if !placement.is_gpu() && bunko_sched::precision::gpu_only(engine) {
+            return Vec::new();
+        }
         #[cfg(feature = "torch")]
         if let Ok(tb) = self.torch() {
-            return torch::device_formats(&tb.report, &placement.device, |p, targets| {
+            return torch::device_formats(&tb.report, engine, &placement.device, |p, targets| {
                 self.store.torch_package_obtainable(engine, p, targets)
             });
         }
-        let _ = engine;
         precision::supported(placement.is_gpu()).to_vec()
+    }
+
+    /// `Err` ("paddle-manga needs a GPU ...") when `engine` runs on a GPU only and this
+    /// machine has none `ocr.backend` lets it use: nothing here can run it, and nothing
+    /// should be fetched for it. `Ok` otherwise (whether a package exists is another
+    /// question: [`need_for`](Self::need_for)). Meaningful once the backend pack is
+    /// loaded ([`torch`](Self::torch)): without it only `ocr.backend: cpu` is known.
+    pub fn device_for(&self, engine: &str) -> Result<(), String> {
+        runtime::engine_has_device(engine, &self.devices())
+    }
+
+    /// Where `engine`'s recognizer runs for a row asking `asked`
+    /// ([`runtime::place_engine`]: a GPU-only engine never falls back to the CPU).
+    fn place_engine(
+        &self,
+        engine: &str,
+        asked: Option<&str>,
+        devices: &[Device],
+    ) -> Result<(Placement, Option<String>), String> {
+        runtime::place_engine(engine, asked, devices, |pl| self.formats(engine, pl))
+    }
+
+    /// The error of a row whose engine has no compiled package for `placement`'s device
+    /// here or in the release.
+    fn no_package_error(&self, engine: &str, placement: &Placement, label: &str) -> String {
+        #[cfg(feature = "torch")]
+        let wanted = self
+            .torch()
+            .map(|tb| Self::torch_targets(&tb, &placement.device, Precision::Fp32))
+            .unwrap_or_default();
+        #[cfg(not(feature = "torch"))]
+        let wanted: Vec<String> = Vec::new();
+        format!(
+            "no compiled {engine} package for {} ({label}) here or in the {} release (it needs one of: {}){}",
+            placement.device,
+            bunko_ocr::models::torch_release_name(),
+            if wanted.is_empty() {
+                "none for this device".into()
+            } else {
+                wanted.join(", ")
+            },
+            if self.store.can_download() {
+                ""
+            } else {
+                "; downloads are off (MOKURO_MODELS_DOWNLOAD)"
+            }
+        )
     }
 
     /// Whether the libtorch backend serves the recognizers in this process.
@@ -294,6 +346,19 @@ impl EnginePipeline {
         {
             false
         }
+    }
+
+    /// Why no recognizer of `engine` can load in this process: no libtorch backend pack
+    /// loaded and no ONNX recognizers built in. None when one can.
+    fn no_recognizer_backend(&self, engine: &str) -> Option<String> {
+        if self.torch_loaded() || cfg!(feature = "onnx-vlm") {
+            return None;
+        }
+        #[cfg(feature = "torch")]
+        let why = self.torch().err().unwrap_or_default();
+        #[cfg(not(feature = "torch"))]
+        let why = "this build has no recognizer backend".to_string();
+        Some(format!("{engine} needs the libtorch backend: {why}"))
     }
 
     /// Whether the placement's device computes bf16 natively ([`precision::bf16_native`]).
@@ -329,8 +394,9 @@ impl EnginePipeline {
     }
 
     /// What a default row of `engine` (auto-accuracy, automatic device) runs on here:
-    /// the device (the GPU, or the CPU when the GPU has no package), the precision and
-    /// the package targets. `Err` when no device here can run it at all.
+    /// the device (the GPU, or the CPU when the GPU has no package; paddle-manga never
+    /// the CPU), the precision and the package targets. `Err` when no device here can run
+    /// it at all (for paddle-manga without a GPU: [`device_for`](Self::device_for)'s).
     #[cfg(feature = "torch")]
     pub fn default_need(&self, engine: &str) -> Result<EngineNeed, String> {
         self.need_for(engine, precision::MODE_ACCURACY)
@@ -347,8 +413,7 @@ impl EnginePipeline {
             other => return Err(format!("{other} has no recognizer")),
         };
         let devices = self.devices();
-        let (placement, fallback) =
-            runtime::place_runnable(None, &devices, |pl| self.formats(engine, pl));
+        let (placement, fallback) = self.place_engine(engine, None, &devices)?;
         let label = devices
             .iter()
             .find(|d| d.id == placement.device)
@@ -359,22 +424,7 @@ impl EnginePipeline {
             self.bf16_native(&placement),
         );
         if formats.is_empty() {
-            let wanted = Self::torch_targets(&tb, &placement.device, Precision::Fp32);
-            return Err(format!(
-                "no compiled {engine} package for {} ({label}) here or in the {} release (it needs one of: {}){}",
-                placement.device,
-                bunko_ocr::models::torch_release_name(),
-                if wanted.is_empty() {
-                    "none for this CPU".into()
-                } else {
-                    wanted.join(", ")
-                },
-                if self.store.can_download() {
-                    ""
-                } else {
-                    "; downloads are off (MOKURO_MODELS_DOWNLOAD)"
-                }
-            ));
+            return Err(self.no_package_error(engine, &placement, &label));
         }
         let precision = precision::resolve(engine, mode, &formats, None, "")?
             .map(|r| r.precision)
@@ -461,13 +511,14 @@ impl EnginePipeline {
             .map(|p| p.dir);
         let mut host: Vec<&str> = models::torch_host_ids(need.engine, need.precision);
         if need.engine == models::PADDLE {
-            // As `torch_host_files`: the embedding table is loaded unless the package's
-            // shared decoder weights carry it (CPU packages never do).
+            // As `torch_host_files`: the embedding table is loaded only for a package
+            // whose shared decoder weights do not carry it (the release's GPU packages
+            // all do; an older or hand-made package may not).
             let blob = package.as_ref().is_some_and(|d| {
                 d.parent()
                     .is_some_and(|p| p.join("weights-decoder.safetensors").is_file())
             });
-            if !blob && (package.is_some() || need.device == "cpu") {
+            if package.is_some() && !blob {
                 host.push(models::paddle_embed_id(need.precision));
             }
         }
@@ -537,17 +588,9 @@ impl EnginePipeline {
         #[cfg(not(feature = "onnx-vlm"))]
         {
             let _ = (placement, precision);
-            let why = {
-                #[cfg(feature = "torch")]
-                {
-                    self.torch().err().unwrap_or_default()
-                }
-                #[cfg(not(feature = "torch"))]
-                {
-                    "this build has no recognizer backend".to_string()
-                }
-            };
-            Err(format!("{} needs the libtorch backend: {why}", spec.engine))
+            Err(self
+                .no_recognizer_backend(&spec.engine)
+                .unwrap_or_else(|| format!("{} has no recognizer here", spec.engine)))
         }
     }
 
@@ -662,6 +705,9 @@ impl EnginePipeline {
         if let Some(why) = why {
             return Err(why);
         }
+        if !placement.is_gpu() && bunko_sched::precision::gpu_only(engine) {
+            return Err(bunko_sched::precision::needs_gpu(engine));
+        }
         let spec = RowSpec {
             id: "adhoc".into(),
             name: engine.into(),
@@ -700,23 +746,38 @@ impl EnginePipeline {
         let mut placement = Placement::cpu();
         let mut resolved = None;
         if road == Road::Reconciled {
-            let (p, why) = runtime::place_runnable(
+            // No recognizer backend: nothing here knows the GPUs (unless `ocr.backend:
+            // cpu` rules them out anyway), so that is the error to fix first.
+            if self.config.backend != Backend::Cpu
+                && let Some(e) = self.no_recognizer_backend(engine)
+            {
+                return Err(e);
+            }
+            // A GPU-only engine (paddle-manga) without a GPU fails here, clearly, before
+            // anything is fetched or loaded.
+            let (p, why) = self.place_engine(
+                engine,
                 spec.pools
                     .stage_device
                     .get(plan::STAGE_ENGINE)
                     .map(String::as_str),
                 &devices,
-                |pl| self.formats(engine, pl),
-            );
+            )?;
             if let Some(why) = why {
                 warn!("{engine}: running on the CPU: {why}");
             }
             placement = p;
-            let formats = precision::auto_formats(
-                &spec.precision,
-                self.formats(engine, &placement),
-                self.bf16_native(&placement),
-            );
+            let runnable = self.formats(engine, &placement);
+            if runnable.is_empty() && bunko_sched::precision::gpu_only(engine) {
+                // Its GPU has no package, and there is no CPU to fall back to.
+                let label = devices
+                    .iter()
+                    .find(|d| d.id == placement.device)
+                    .map_or_else(|| placement.device.clone(), |d| d.label.clone());
+                return Err(self.no_package_error(engine, &placement, &label));
+            }
+            let formats =
+                precision::auto_formats(&spec.precision, runnable, self.bf16_native(&placement));
             resolved = precision::resolve(
                 engine,
                 &spec.precision,
@@ -730,7 +791,8 @@ impl EnginePipeline {
         if let Some(r) = &resolved {
             match self.recognizer(spec, &placement, r.precision) {
                 Ok(rec) => recognizer = Some(rec),
-                Err(e) if placement.is_gpu() => {
+                // A GPU-only engine has no CPU to fall back to: the GPU's error stands.
+                Err(e) if placement.is_gpu() && !bunko_sched::precision::gpu_only(engine) => {
                     let gpu = placement.device.clone();
                     warn!("{engine} could not start on {gpu} ({e}); falling back to the CPU");
                     placement = Placement::cpu();

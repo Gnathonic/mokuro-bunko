@@ -205,7 +205,7 @@ impl Drop for EngineRunner {
 }
 
 /// A page that has not come back for this long is given up as failed (only a stage
-/// panic can lose a page; a slow CPU paddle-manga page takes tens of seconds).
+/// panic can lose a page; a slow CPU hayai-nova page takes seconds).
 const PAGE_LOST_AFTER: Duration = Duration::from_secs(1800);
 
 impl VolumeRunner for EngineRunner {

@@ -144,7 +144,7 @@ once.
 
 | Road | Rows | Stages |
 |------|------|--------|
-| `reconciled` | `hayai-nova` / `paddle-manga` (read the `ppocr-manga` detector's lines) | `detect` (CPU) → `engine` (card or CPU) → `post` (CPU) |
+| `reconciled` | `hayai-nova` / `paddle-manga` (read the `ppocr-manga` detector's lines) | `detect` (CPU) → `engine` (card or CPU; paddle-manga: card only) → `post` (CPU) |
 | `line` | the `ppocr-manga` engine | `detect` (CPU) → `layout` (CPU) |
 
 The stage holding the recognizer holds only the recognizer: boxing, the

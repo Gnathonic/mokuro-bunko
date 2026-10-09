@@ -1,7 +1,7 @@
 //! `doctor`'s compiled-package check: a package counts only with the shared weights its
-//! graphs bind and the recognizer's host files (paddle-manga's embedding table on the
-//! CPU). Runs over a fake backend pack (a `rustc`-built library that reports devices
-//! and loads nothing; skipped, with a note, when there is no `rustc`).
+//! graphs bind and the recognizer's host files; paddle-manga needs a GPU (also for
+//! `models download`). Runs over a fake backend pack (a `rustc`-built library that
+//! reports devices and loads nothing; skipped, with a note, when there is no `rustc`).
 #![cfg(feature = "ocr")]
 
 mod common;
@@ -106,11 +106,18 @@ fn packages_line(env: &Env) -> String {
     line
 }
 
+const NEEDS_GPU: &str =
+    "paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU";
+
+/// paddle-manga runs on a GPU only: on a host whose pack sees no GPU (or whose
+/// `ocr.backend: cpu` hides it) its generation is a WARN naming the GPU it needs (a
+/// processor with a GPU can still run it), whatever CPU files are on disk; hayai-nova's
+/// row there is checked as usual.
 #[test]
-fn paddle_on_the_cpu_needs_its_embedding_table() {
+fn paddle_on_a_cpu_only_host_needs_a_gpu() {
     let env = Env::new();
     env.write_config(
-        "server:\n  port: 0\nocr:\n  backend: cpu\n  generations:\n    - {id: g-1, name: paddle-manga, engine: paddle-manga, primary: true, enabled: true, precision: fp32}\n",
+        "server:\n  port: 0\nocr:\n  generations:\n    - {id: g-1, name: hayai-nova, engine: hayai-nova, primary: true, enabled: true, precision: fp32}\n    - {id: g-2, name: vl, engine: paddle-manga, enabled: true, precision: fp32}\n",
     );
     if !fake_pack(&env.storage(), false) {
         return;
@@ -120,16 +127,130 @@ fn paddle_on_the_cpu_needs_its_embedding_table() {
         "aarch64" => format!("{}-cpu-arm64", std::env::consts::OS),
         _ => format!("{}-cpu-x86_64-v3", std::env::consts::OS),
     };
+    // CPU files of both engines: paddle-manga's are never used.
     put_graphs(&models.join(format!("torch/paddle-manga/fp32/{target}")));
+    put_graphs(&models.join(format!("torch/hayai-nova/fp32/{target}")));
+    for id in [
+        "paddle-manga/tokenizer",
+        "paddle-manga/embed-fp32",
+        "hayai-nova/pos-table",
+        "hayai-nova/token-embeddings",
+        "hayai-nova/tokenizer",
+    ] {
+        put_id(&models, id);
+    }
+    let line = packages_line(&env);
+    assert!(
+        line.contains(" WARN  Compiled packages")
+            && line.contains("present: hayai-nova fp32 on cpu")
+            && line.contains(&format!("NO GPU HERE: {NEEDS_GPU}"))
+            && line.contains("processor with a GPU"),
+        "{line}"
+    );
+    // A GPU the configuration rules out (`ocr.backend: cpu`) is no GPU either.
+    let env = Env::new();
+    env.write_config(
+        "server:\n  port: 0\nocr:\n  backend: cpu\n  generations:\n    - {id: g-1, name: paddle-manga, engine: paddle-manga, primary: true, enabled: true, precision: fp32}\n",
+    );
+    if !fake_pack(&env.storage(), true) {
+        return;
+    }
+    let line = packages_line(&env);
+    assert!(
+        line.contains(" WARN  Compiled packages") && line.contains(NEEDS_GPU),
+        "{line}"
+    );
+}
+
+/// On a GPU host paddle-manga runs on the card: its package (graphs and the shared
+/// weights they bind, the decoder's carrying the input embeddings) and its tokenizer.
+#[cfg(target_os = "linux")]
+#[test]
+fn paddle_on_a_gpu_host_runs_on_the_card() {
+    let env = Env::new();
+    env.write_config(
+        "server:\n  port: 0\nocr:\n  generations:\n    - {id: g-1, name: paddle-manga, engine: paddle-manga, primary: true, enabled: true, precision: fp32}\n",
+    );
+    if !fake_pack(&env.storage(), true) {
+        return;
+    }
+    let models = env.storage().join("models");
+    let line = packages_line(&env);
+    assert!(
+        line.contains(" FAIL  Compiled packages")
+            && line.contains("NOT DOWNLOADED: paddle-manga fp32 on gpu:0")
+            && !line.contains(NEEDS_GPU),
+        "{line}"
+    );
+    put_graphs(&models.join("torch/paddle-manga/fp32/linux-cuda-sm_80"));
+    put(
+        &models,
+        "torch/paddle-manga/fp32/weights-vision.safetensors",
+        1,
+    );
+    put(
+        &models,
+        "torch/paddle-manga/fp32/weights-decoder.safetensors",
+        1,
+    );
     put_id(&models, "paddle-manga/tokenizer");
     let line = packages_line(&env);
     assert!(
-        line.contains(" FAIL  Compiled packages") && line.contains("paddle-manga/embed-fp32"),
+        line.contains(" PASS  Compiled packages") && line.contains("paddle-manga fp32 on gpu:0"),
         "{line}"
     );
-    put_id(&models, "paddle-manga/embed-fp32");
-    let line = packages_line(&env);
-    assert!(line.contains(" PASS  Compiled packages"), "{line}");
+}
+
+/// `models download` on a host without a GPU: a paddle-manga generation is not fetched
+/// for (a note, not a failure), and `--engine paddle-manga` fails with the reason and
+/// fetches nothing.
+#[test]
+fn models_download_fetches_no_paddle_without_a_gpu() {
+    let env = Env::new();
+    env.write_config(
+        "server:\n  port: 0\nocr:\n  generations:\n    - {id: g-1, name: ppocr-manga, engine: ppocr-manga, primary: true, enabled: true}\n    - {id: g-2, name: vl, engine: paddle-manga, enabled: true}\n",
+    );
+    if !fake_pack(&env.storage(), false) {
+        return;
+    }
+    let out = env
+        .cmd()
+        .env("MOKURO_MODELS_DOWNLOAD", "0")
+        .args(["models", "download"])
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    // Offline and empty, PP-OCR's files fail (and only they): paddle-manga is no failure.
+    let err = common::stderr(&out);
+    assert!(
+        err.contains("3 item(s) could not be fetched: ppocr-manga/") && !err.contains("paddle"),
+        "{err}"
+    );
+    assert!(
+        text.contains(&format!("paddle-manga   {NEEDS_GPU}: not fetched here"))
+            && !text.contains("paddle-manga/tokenizer")
+            && !text.contains("torch/paddle-manga"),
+        "{text}"
+    );
+    let out = env
+        .cmd()
+        .env("MOKURO_MODELS_DOWNLOAD", "0")
+        .args(["models", "download", "--engine", "paddle-manga"])
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("paddle-manga   FAILED: {NEEDS_GPU}"))
+            && !text.contains("ppocr-manga/det-v0.2")
+            && !text.contains("paddle-manga/tokenizer"),
+        "{text}"
+    );
+    assert!(
+        common::stderr(&out).contains("paddle-manga (needs a GPU)"),
+        "{}",
+        common::stderr(&out)
+    );
 }
 
 #[cfg(target_os = "linux")]

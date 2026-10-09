@@ -2376,10 +2376,14 @@ function genDeviceCellHtml(row, index, stage) {
         return '<option value="' + escapeHtml(id) + '"' + (id === chosen ? ' selected' : '') + '>' +
             escapeHtml(label) + '</option>';
     }).join('');
+    // A GPU-only engine (paddle-manga) offers no CPU; the cell says why.
+    const needsGpu = stage.device_needs_gpu
+        ? '<span class="pools__why">' + escapeHtml(stage.device_needs_gpu) + '</span>'
+        : '';
     return (
         '<td><select class="form-input pools__device-select" data-act="device" data-idx="' + index +
         '" data-stage="' + escapeHtml(stage.key) + '"' +
-        ' aria-label="' + escapeHtml(stage.key) + ' device">' + options + '</select></td>'
+        ' aria-label="' + escapeHtml(stage.key) + ' device">' + options + '</select>' + needsGpu + '</td>'
     );
 }
 

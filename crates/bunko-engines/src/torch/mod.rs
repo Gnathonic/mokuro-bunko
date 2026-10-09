@@ -343,19 +343,25 @@ impl TorchBackend {
     }
 }
 
-/// The formats a recognizer runs in on catalog device `id`: the device's formats for
-/// which `has_package(precision, targets)` holds (a compiled package for one of the
-/// device's targets is on disk or downloadable). A GPU pack without a usable GPU still
-/// lists the CPU, so the CPU packages keep the engines offered (0.5.2's CUDA image fell
-/// back to CPU torch the same way).
+/// The formats `engine`'s recognizer runs in on catalog device `id`: the device's
+/// formats for which `has_package(precision, targets)` holds (a compiled package for one
+/// of the device's targets is on disk or downloadable). A GPU pack without a usable GPU
+/// still lists the CPU, so the CPU packages keep hayai-nova offered (0.5.2's CUDA image
+/// fell back to CPU torch the same way). A GPU-only engine (paddle-manga,
+/// `bunko_sched::precision::gpu_only`) runs in no format on the CPU, whatever packages
+/// there are.
 pub fn device_formats(
     report: &DevicesReport,
+    engine: &str,
     id: &str,
     has_package: impl Fn(&str, &[String]) -> bool,
 ) -> Vec<&'static str> {
     let Some(dev) = report.devices.iter().find(|d| d.id == id) else {
         return Vec::new();
     };
+    if dev.kind == "cpu" && bunko_sched::precision::gpu_only(engine) {
+        return Vec::new();
+    }
     ["fp32", "bf16", "fp16"]
         .into_iter()
         .filter(|p| dev.formats.iter().any(|f| f == p))
@@ -367,7 +373,8 @@ pub fn device_formats(
 }
 
 /// The formats device `id` runs for any recognizer engine here: the union over
-/// hayai-nova and paddle-manga of [`device_formats`], in `fp32, bf16, fp16` order.
+/// hayai-nova and paddle-manga of [`device_formats`], in `fp32, bf16, fp16` order (on
+/// the CPU: hayai-nova's alone).
 pub fn runnable_formats(
     report: &DevicesReport,
     id: &str,
@@ -375,7 +382,7 @@ pub fn runnable_formats(
 ) -> Vec<String> {
     let mut out: Vec<&str> = Vec::new();
     for engine in [crate::models::HAYAI, crate::models::PADDLE] {
-        for f in device_formats(report, id, |p, t| has_package(engine, p, t)) {
+        for f in device_formats(report, engine, id, |p, t| has_package(engine, p, t)) {
             if !out.contains(&f) {
                 out.push(f);
             }
@@ -435,6 +442,7 @@ pub fn recognizer_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{HAYAI, PADDLE};
 
     fn entry(id: &str, kind: &str, arch: &str, isa: &[&str], formats: &[&str]) -> DeviceEntry {
         DeviceEntry {
@@ -469,10 +477,13 @@ mod tests {
         let r = report(vec![cpu]);
         // only the CPU fp32 package is here
         let has = |p: &str, t: &[String]| p == "fp32" && t.contains(&os("cpu-x86_64-v3"));
-        assert_eq!(device_formats(&r, "cpu", has), vec!["fp32"]);
-        assert!(device_formats(&r, "gpu:0", has).is_empty());
+        assert_eq!(device_formats(&r, HAYAI, "cpu", has), vec!["fp32"]);
+        assert!(device_formats(&r, HAYAI, "gpu:0", has).is_empty());
         // nothing compiled for this CPU: no format, the engine is not offered
-        assert!(device_formats(&r, "cpu", |_, _| false).is_empty());
+        assert!(device_formats(&r, HAYAI, "cpu", |_, _| false).is_empty());
+        // paddle-manga runs on a GPU only: no format on the CPU, even with a package.
+        assert!(device_formats(&r, PADDLE, "cpu", has).is_empty());
+        assert!(runnable_formats(&r, "cpu", |e, p, t| e == PADDLE && has(p, t)).is_empty());
     }
 
     #[test]
@@ -488,7 +499,12 @@ mod tests {
                 || (p == "fp32" && t.contains(&os("cpu-x86_64-v3")))
         };
         assert_eq!(runnable_formats(&r, "gpu:0", has), vec!["fp32", "fp16"]);
+        // The CPU lists hayai-nova's formats; paddle-manga's never count there.
         assert_eq!(runnable_formats(&r, "cpu", has), vec!["fp32"]);
+        let paddle_only =
+            |engine: &str, p: &str, t: &[String]| engine == PADDLE && has(engine, p, t);
+        assert_eq!(runnable_formats(&r, "gpu:0", paddle_only), vec!["fp32"]);
+        assert!(runnable_formats(&r, "cpu", paddle_only).is_empty());
         assert!(runnable_formats(&r, "gpu:0", |_, _, _| false).is_empty());
     }
 
@@ -510,16 +526,66 @@ mod tests {
                 arch: Some(d.arch.clone()),
             })
             .collect();
-        let fmts = |pl: &crate::runtime::Placement| device_formats(&r, &pl.device, cpu_only);
+        let fmts = |pl: &crate::runtime::Placement| device_formats(&r, HAYAI, &pl.device, cpu_only);
         let (p, why) = crate::runtime::place_runnable(None, &devices, fmts);
         assert_eq!(p, crate::runtime::Placement::cpu());
         assert!(why.unwrap().contains("gpu:0"));
+        // paddle-manga does not fall back: it stays on the GPU, which has no format
+        // for it (the caller reports the missing package for that GPU).
+        let fmts =
+            |pl: &crate::runtime::Placement| device_formats(&r, PADDLE, &pl.device, cpu_only);
+        let (p, why) = crate::runtime::place_engine(PADDLE, None, &devices, fmts).unwrap();
+        assert_eq!((p.device.as_str(), why), ("gpu:0", None));
+        assert!(device_formats(&r, PADDLE, "gpu:0", cpu_only).is_empty());
         // with an sm_86 package the sm_89 card runs it (PTX), in the formats it has
         let older = |p: &str, t: &[String]| p != "bf16" && t.contains(&os("cuda-sm_86"));
-        let fmts = |pl: &crate::runtime::Placement| device_formats(&r, &pl.device, older);
+        let fmts = |pl: &crate::runtime::Placement| device_formats(&r, HAYAI, &pl.device, older);
         let (p, why) = crate::runtime::place_runnable(Some("auto"), &devices, fmts);
         assert_eq!((p.device.as_str(), why), ("gpu:0", None));
-        assert_eq!(device_formats(&r, "gpu:0", older), vec!["fp32", "fp16"]);
+        assert_eq!(
+            device_formats(&r, HAYAI, "gpu:0", older),
+            vec!["fp32", "fp16"]
+        );
+        assert_eq!(
+            device_formats(&r, PADDLE, "gpu:0", older),
+            vec!["fp32", "fp16"]
+        );
+    }
+
+    /// A CPU-only host (a GPU pack that sees no GPU, or the CPU pack) with every CPU
+    /// package: hayai-nova runs on the CPU, paddle-manga is not placed anywhere.
+    #[test]
+    fn a_cpu_only_host_places_hayai_nova_and_refuses_paddle_manga() {
+        let r = report(vec![entry(
+            "cpu",
+            "cpu",
+            "x86_64",
+            &["avx2", "fma"],
+            &["fp32"],
+        )]);
+        let devices = vec![bunko_proto::Device {
+            id: "cpu".into(),
+            label: "CPU".into(),
+            formats: vec!["fp32".into()],
+            provider: Some("cpu".into()),
+            arch: Some("x86_64".into()),
+        }];
+        let any = |_: &str, t: &[String]| t.contains(&os("cpu-x86_64-v3"));
+        let rr = &r;
+        let fmts = |e: &'static str| {
+            move |pl: &crate::runtime::Placement| device_formats(rr, e, &pl.device, any)
+        };
+        let (p, why) = crate::runtime::place_engine(HAYAI, None, &devices, fmts(HAYAI)).unwrap();
+        assert_eq!((p, why), (crate::runtime::Placement::cpu(), None));
+        let err = crate::runtime::place_engine(PADDLE, None, &devices, fmts(PADDLE)).unwrap_err();
+        assert_eq!(
+            err,
+            "paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU"
+        );
+        assert_eq!(
+            runnable_formats(&r, "cpu", |_, p, t| any(p, t)),
+            vec!["fp32"]
+        );
     }
 
     #[test]

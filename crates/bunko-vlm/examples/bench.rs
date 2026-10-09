@@ -6,6 +6,7 @@
 //! ```
 //! Prints one JSON line per thread count. `--serial` forces one `Run` at a time
 //! (what `ort`'s `&mut self` API would give), `--no-spin` turns ORT spinning off.
+//! paddle-manga runs on a GPU only (as in mokuro-bunko): it needs `--device gpu:N`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -74,6 +75,11 @@ fn main() -> Result<()> {
             other => bail!("unknown flag {other}"),
         }
         i += 2;
+    }
+    if engine == "paddle" && device == Device::Cpu {
+        bail!(
+            "paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai on the CPU, or pass --device gpu:N"
+        );
     }
     let mut opts = SessionOptions::new(device)?;
     opts.intra_threads = intra;
