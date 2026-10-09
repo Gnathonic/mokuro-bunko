@@ -1477,12 +1477,8 @@ mod tests {
             for r in &g.requires {
                 assert!(m.get(r).is_some(), "{} requires {r}", g.id);
             }
-            if g.target.as_deref().is_some_and(|t| t.contains("-cpu-")) {
-                assert!(
-                    g.requires.is_empty(),
-                    "CPU packages carry their own weights"
-                );
-            }
+            // every package, CPU ones too, binds the shared weights files
+            assert!(!g.requires.is_empty(), "{} binds no weights", g.id);
         }
         assert!(torch_release_name().starts_with("torch-models"));
     }
@@ -1507,29 +1503,30 @@ mod tests {
     }
 
     #[test]
-    fn every_gpu_package_resolves_its_weights() {
+    fn every_package_resolves_its_weights() {
         let files = torch_release_files_from(TORCH_MODELS_JSON).expect("compiled-in release loads");
         let m = Manifest::builtin();
-        // GPU packages (Linux and Windows) are weightless: they bind the shared weights
-        // files. CPU packages carry their weights.
-        let gpu: Vec<&ModelFile> = files
-            .iter()
-            .filter(|f| {
-                f.unpack_to.is_some()
-                    && f.target
-                        .as_deref()
-                        .is_some_and(|t| t.contains("-cuda-") || t.contains("-rocm-"))
+        // Every package, GPU and CPU (Linux, Windows, macOS), is weightless: it binds the
+        // shared weights files of its engine x precision.
+        let packages: Vec<&ModelFile> = files.iter().filter(|f| f.unpack_to.is_some()).collect();
+        let has = |os_backend: &str| {
+            packages.iter().any(|g| {
+                g.target
+                    .as_deref()
+                    .is_some_and(|t| t.starts_with(os_backend))
             })
-            .collect();
-        assert!(!gpu.is_empty());
-        assert!(
-            gpu.iter().any(|g| g
-                .target
-                .as_deref()
-                .is_some_and(|t| t.starts_with("windows-"))),
-            "Windows GPU packages are in the release"
-        );
-        for g in gpu {
+        };
+        for t in [
+            "linux-cuda-",
+            "linux-rocm-",
+            "windows-cuda-",
+            "linux-cpu-",
+            "windows-cpu-",
+            "macos-cpu-",
+        ] {
+            assert!(has(t), "{t}* packages are in the release");
+        }
+        for g in packages {
             assert!(!g.requires.is_empty(), "{} binds no weights", g.id);
             for r in &g.requires {
                 let w = m.get(r).unwrap_or_else(|| panic!("{} requires {r}", g.id));

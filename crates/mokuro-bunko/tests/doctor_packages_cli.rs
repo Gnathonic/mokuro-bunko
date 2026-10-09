@@ -127,9 +127,17 @@ fn paddle_on_a_cpu_only_host_needs_a_gpu() {
         "aarch64" => format!("{}-cpu-arm64", std::env::consts::OS),
         _ => format!("{}-cpu-x86_64-v3", std::env::consts::OS),
     };
-    // CPU files of both engines: paddle-manga's are never used.
+    // CPU files of both engines: paddle-manga's are never used. A CPU package binds the
+    // shared weights files like a GPU one.
     put_graphs(&models.join(format!("torch/paddle-manga/fp32/{target}")));
     put_graphs(&models.join(format!("torch/hayai-nova/fp32/{target}")));
+    for w in ["weights-vision", "weights-decoder"] {
+        put(
+            &models,
+            &format!("torch/hayai-nova/fp32/{w}.safetensors"),
+            1,
+        );
+    }
     for id in [
         "paddle-manga/tokenizer",
         "paddle-manga/embed-fp32",

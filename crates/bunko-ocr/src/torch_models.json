@@ -7,99 +7,6 @@
  "files": [
   {
    "engine": "hayai-nova",
-   "file": "hayai-nova_bf16_linux-cpu-x86_64-v4bf16_vision.pt2",
-   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_bf16_linux-cpu-x86_64-v4bf16_vision.pt2",
-   "size": 177940784,
-   "sha256": "eb46da1df07e5eb352054900a0d0e802c8494404f21f3e687b7580d77d799428",
-   "licence": "Apache-2.0",
-   "sources": [
-    {
-     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
-     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
-     "licence": "Apache-2.0"
-    },
-    {
-     "repo": "google/siglip2-base-patch16-naflex",
-     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
-     "licence": "Apache-2.0"
-    }
-   ],
-   "export_tool_version": "0.1.0",
-   "kind": "aoti",
-   "role": "vision",
-   "precision": "bf16",
-   "target": "linux-cpu-x86_64-v4bf16",
-   "id": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/vision.pt2",
-   "path": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/vision.pt2",
-   "unpack_to": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/vision/",
-   "torch": "2.13.0+cpu",
-   "io": 2,
-   "requires": []
-  },
-  {
-   "engine": "hayai-nova",
-   "file": "hayai-nova_bf16_linux-cpu-x86_64-v4bf16_prefill.pt2",
-   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_bf16_linux-cpu-x86_64-v4bf16_prefill.pt2",
-   "size": 110325196,
-   "sha256": "cfac84b722033653d8248d4518b0aee1a625605f60ac74580bd57aa3140ed6f7",
-   "licence": "Apache-2.0",
-   "sources": [
-    {
-     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
-     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
-     "licence": "Apache-2.0"
-    },
-    {
-     "repo": "google/siglip2-base-patch16-naflex",
-     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
-     "licence": "Apache-2.0"
-    }
-   ],
-   "export_tool_version": "0.1.0",
-   "kind": "aoti",
-   "role": "prefill",
-   "precision": "bf16",
-   "target": "linux-cpu-x86_64-v4bf16",
-   "id": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/prefill.pt2",
-   "path": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/prefill.pt2",
-   "unpack_to": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/prefill/",
-   "torch": "2.13.0+cpu",
-   "io": 2,
-   "requires": []
-  },
-  {
-   "engine": "hayai-nova",
-   "file": "hayai-nova_bf16_linux-cpu-x86_64-v4bf16_step.pt2",
-   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_bf16_linux-cpu-x86_64-v4bf16_step.pt2",
-   "size": 110731509,
-   "sha256": "71c4d0200f08d37831b2cb389782d9b25b17dbeb2a5be1c576edc0cb4c4c569c",
-   "licence": "Apache-2.0",
-   "sources": [
-    {
-     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
-     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
-     "licence": "Apache-2.0"
-    },
-    {
-     "repo": "google/siglip2-base-patch16-naflex",
-     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
-     "licence": "Apache-2.0"
-    }
-   ],
-   "export_tool_version": "0.1.0",
-   "kind": "aoti",
-   "role": "step",
-   "precision": "bf16",
-   "target": "linux-cpu-x86_64-v4bf16",
-   "id": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/step.pt2",
-   "path": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/step.pt2",
-   "unpack_to": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/step/",
-   "torch": "2.13.0+cpu",
-   "io": 2,
-   "requires": []
-  },
-  {
-   "engine": "hayai-nova",
    "file": "hayai-nova_bf16_weights-decoder.safetensors",
    "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_bf16_weights-decoder.safetensors",
    "size": 107732536,
@@ -123,7 +30,7 @@
    "precision": "bf16",
    "id": "torch/hayai-nova/bf16/weights-decoder.safetensors",
    "path": "torch/hayai-nova/bf16/weights-decoder.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
   },
   {
@@ -151,8 +58,107 @@
    "precision": "bf16",
    "id": "torch/hayai-nova/bf16/weights-vision.safetensors",
    "path": "torch/hayai-nova/bf16/weights-vision.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "hayai-nova_bf16_linux-cpu-x86_64-v4bf16_vision.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_bf16_linux-cpu-x86_64-v4bf16_vision.pt2",
+   "size": 2910806,
+   "sha256": "2eef0285150975542c3cde22cb510d0e9e4268bcfd0cf31b8183d9ce4d1afc53",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "vision",
+   "precision": "bf16",
+   "target": "linux-cpu-x86_64-v4bf16",
+   "id": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/vision.pt2",
+   "path": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/vision.pt2",
+   "unpack_to": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/vision/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/hayai-nova/bf16/weights-vision.safetensors"
+   ]
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "hayai-nova_bf16_linux-cpu-x86_64-v4bf16_prefill.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_bf16_linux-cpu-x86_64-v4bf16_prefill.pt2",
+   "size": 2619404,
+   "sha256": "eca9d1e65f8b9a9bc45f57d98f29218acf96601b73a44b62e148916e666717f2",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "prefill",
+   "precision": "bf16",
+   "target": "linux-cpu-x86_64-v4bf16",
+   "id": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/prefill.pt2",
+   "path": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/prefill.pt2",
+   "unpack_to": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/prefill/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/hayai-nova/bf16/weights-decoder.safetensors"
+   ]
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "hayai-nova_bf16_linux-cpu-x86_64-v4bf16_step.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_bf16_linux-cpu-x86_64-v4bf16_step.pt2",
+   "size": 3025731,
+   "sha256": "223267b1d2c7924179b20e6d1592e567c203a215853487da44f3a37e68e4b2f9",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "step",
+   "precision": "bf16",
+   "target": "linux-cpu-x86_64-v4bf16",
+   "id": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/step.pt2",
+   "path": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/step.pt2",
+   "unpack_to": "torch/hayai-nova/bf16/linux-cpu-x86_64-v4bf16/step/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/hayai-nova/bf16/weights-decoder.safetensors"
+   ]
   },
   {
    "engine": "hayai-nova",
@@ -971,7 +977,7 @@
    "precision": "fp16",
    "id": "torch/hayai-nova/fp16/weights-decoder.safetensors",
    "path": "torch/hayai-nova/fp16/weights-decoder.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
   },
   {
@@ -999,7 +1005,7 @@
    "precision": "fp16",
    "id": "torch/hayai-nova/fp16/weights-vision.safetensors",
    "path": "torch/hayai-nova/fp16/weights-vision.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
   },
   {
@@ -1994,99 +2000,6 @@
   },
   {
    "engine": "hayai-nova",
-   "file": "hayai-nova_fp32_linux-cpu-x86_64-v3_vision.pt2",
-   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_linux-cpu-x86_64-v3_vision.pt2",
-   "size": 352618426,
-   "sha256": "7a84a6ee69f8e818b26bfe64908688ee4da075f629c6e81694365b56ecd1ca26",
-   "licence": "Apache-2.0",
-   "sources": [
-    {
-     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
-     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
-     "licence": "Apache-2.0"
-    },
-    {
-     "repo": "google/siglip2-base-patch16-naflex",
-     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
-     "licence": "Apache-2.0"
-    }
-   ],
-   "export_tool_version": "0.1.0",
-   "kind": "aoti",
-   "role": "vision",
-   "precision": "fp32",
-   "target": "linux-cpu-x86_64-v3",
-   "id": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/vision.pt2",
-   "path": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/vision.pt2",
-   "unpack_to": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/vision/",
-   "torch": "2.13.0+cpu",
-   "io": 2,
-   "requires": []
-  },
-  {
-   "engine": "hayai-nova",
-   "file": "hayai-nova_fp32_linux-cpu-x86_64-v3_prefill.pt2",
-   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_linux-cpu-x86_64-v3_prefill.pt2",
-   "size": 217813789,
-   "sha256": "8af99e0391de908e9f2a8bee91fd79fffd4551570765253bf76835ddf55e66cc",
-   "licence": "Apache-2.0",
-   "sources": [
-    {
-     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
-     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
-     "licence": "Apache-2.0"
-    },
-    {
-     "repo": "google/siglip2-base-patch16-naflex",
-     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
-     "licence": "Apache-2.0"
-    }
-   ],
-   "export_tool_version": "0.1.0",
-   "kind": "aoti",
-   "role": "prefill",
-   "precision": "fp32",
-   "target": "linux-cpu-x86_64-v3",
-   "id": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/prefill.pt2",
-   "path": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/prefill.pt2",
-   "unpack_to": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/prefill/",
-   "torch": "2.13.0+cpu",
-   "io": 2,
-   "requires": []
-  },
-  {
-   "engine": "hayai-nova",
-   "file": "hayai-nova_fp32_linux-cpu-x86_64-v3_step.pt2",
-   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_linux-cpu-x86_64-v3_step.pt2",
-   "size": 218215223,
-   "sha256": "548500caa3b4cb3ea16ba47582f2c37eb05674faba242b2c6ed852c527c2671d",
-   "licence": "Apache-2.0",
-   "sources": [
-    {
-     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
-     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
-     "licence": "Apache-2.0"
-    },
-    {
-     "repo": "google/siglip2-base-patch16-naflex",
-     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
-     "licence": "Apache-2.0"
-    }
-   ],
-   "export_tool_version": "0.1.0",
-   "kind": "aoti",
-   "role": "step",
-   "precision": "fp32",
-   "target": "linux-cpu-x86_64-v3",
-   "id": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/step.pt2",
-   "path": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/step.pt2",
-   "unpack_to": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/step/",
-   "torch": "2.13.0+cpu",
-   "io": 2,
-   "requires": []
-  },
-  {
-   "engine": "hayai-nova",
    "file": "hayai-nova_fp32_weights-decoder.safetensors",
    "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_weights-decoder.safetensors",
    "size": 215347136,
@@ -2110,7 +2023,7 @@
    "precision": "fp32",
    "id": "torch/hayai-nova/fp32/weights-decoder.safetensors",
    "path": "torch/hayai-nova/fp32/weights-decoder.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
   },
   {
@@ -2138,8 +2051,107 @@
    "precision": "fp32",
    "id": "torch/hayai-nova/fp32/weights-vision.safetensors",
    "path": "torch/hayai-nova/fp32/weights-vision.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "hayai-nova_fp32_linux-cpu-x86_64-v3_vision.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_linux-cpu-x86_64-v3_vision.pt2",
+   "size": 2702048,
+   "sha256": "d6143540b409b29e3639948a5185d1a79e1940dbd708c1e15c79d53f69d91e62",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "vision",
+   "precision": "fp32",
+   "target": "linux-cpu-x86_64-v3",
+   "id": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/vision.pt2",
+   "path": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/vision.pt2",
+   "unpack_to": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/vision/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/hayai-nova/fp32/weights-vision.safetensors"
+   ]
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "hayai-nova_fp32_linux-cpu-x86_64-v3_prefill.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_linux-cpu-x86_64-v3_prefill.pt2",
+   "size": 2493893,
+   "sha256": "9e351c32a12723a3a8d8d74baccbb5127c49bad60237d27f39e37f0e10705af3",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "prefill",
+   "precision": "fp32",
+   "target": "linux-cpu-x86_64-v3",
+   "id": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/prefill.pt2",
+   "path": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/prefill.pt2",
+   "unpack_to": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/prefill/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/hayai-nova/fp32/weights-decoder.safetensors"
+   ]
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "hayai-nova_fp32_linux-cpu-x86_64-v3_step.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_linux-cpu-x86_64-v3_step.pt2",
+   "size": 2895189,
+   "sha256": "1e1b448b61492171339f834e9f02a46565f9c07c063af6c79b55de286ecb9134",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "step",
+   "precision": "fp32",
+   "target": "linux-cpu-x86_64-v3",
+   "id": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/step.pt2",
+   "path": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/step.pt2",
+   "unpack_to": "torch/hayai-nova/fp32/linux-cpu-x86_64-v3/step/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/hayai-nova/fp32/weights-decoder.safetensors"
+   ]
   },
   {
    "engine": "hayai-nova",
@@ -2937,8 +2949,8 @@
    "engine": "hayai-nova",
    "file": "hayai-nova_fp32_macos-cpu-arm64_vision.pt2",
    "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_macos-cpu-arm64_vision.pt2",
-   "size": 350855037,
-   "sha256": "5c9419d1d93893a263c15a1bfc6af02f3030a99fc924234b615dde3a9a9213be",
+   "size": 939642,
+   "sha256": "1c708e418ea07da9fad9a83e90e2a1e5079af3b94d0240ca32ddb60003861fbd",
    "licence": "Apache-2.0",
    "sources": [
     {
@@ -2962,14 +2974,16 @@
    "unpack_to": "torch/hayai-nova/fp32/macos-cpu-arm64/vision/",
    "torch": "2.13.0",
    "io": 2,
-   "requires": []
+   "requires": [
+    "torch/hayai-nova/fp32/weights-vision.safetensors"
+   ]
   },
   {
    "engine": "hayai-nova",
    "file": "hayai-nova_fp32_macos-cpu-arm64_prefill.pt2",
    "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_macos-cpu-arm64_prefill.pt2",
-   "size": 216134661,
-   "sha256": "04a4555bee45131a2415781655cdc7e67cd598ed20238f75a4252ccbefbe8368",
+   "size": 815676,
+   "sha256": "10c7badd30cb002c92fc3d06e509b8a9418daaef7e6b2be44bfe2b657fc76f3c",
    "licence": "Apache-2.0",
    "sources": [
     {
@@ -2993,14 +3007,16 @@
    "unpack_to": "torch/hayai-nova/fp32/macos-cpu-arm64/prefill/",
    "torch": "2.13.0",
    "io": 2,
-   "requires": []
+   "requires": [
+    "torch/hayai-nova/fp32/weights-decoder.safetensors"
+   ]
   },
   {
    "engine": "hayai-nova",
    "file": "hayai-nova_fp32_macos-cpu-arm64_step.pt2",
    "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_macos-cpu-arm64_step.pt2",
-   "size": 216321803,
-   "sha256": "3e2b3d4fc7d67d5a3376d2600e535b813415feb4ce469500622ff94356487130",
+   "size": 1002824,
+   "sha256": "97c62eff1ee24f9107f69133827cc8769286ee359bb8994b1d0e81d1b7e023cc",
    "licence": "Apache-2.0",
    "sources": [
     {
@@ -3024,14 +3040,16 @@
    "unpack_to": "torch/hayai-nova/fp32/macos-cpu-arm64/step/",
    "torch": "2.13.0",
    "io": 2,
-   "requires": []
+   "requires": [
+    "torch/hayai-nova/fp32/weights-decoder.safetensors"
+   ]
   },
   {
    "engine": "hayai-nova",
    "file": "hayai-nova_fp32_windows-cpu-x86_64-v3_vision.pt2",
    "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_windows-cpu-x86_64-v3_vision.pt2",
-   "size": 351173736,
-   "sha256": "d5b27925751acc9f7f47c30ae66e0d397572d6dfe1b8465c2ee5a9d5437ecd66",
+   "size": 1257928,
+   "sha256": "d53ba1718ae2e0357c3bfe30dfe0cf514a4f1fcb1854c749de650ac0ef02d953",
    "licence": "Apache-2.0",
    "sources": [
     {
@@ -3055,14 +3073,16 @@
    "unpack_to": "torch/hayai-nova/fp32/windows-cpu-x86_64-v3/vision/",
    "torch": "2.13.0+cpu",
    "io": 2,
-   "requires": []
+   "requires": [
+    "torch/hayai-nova/fp32/weights-vision.safetensors"
+   ]
   },
   {
    "engine": "hayai-nova",
    "file": "hayai-nova_fp32_windows-cpu-x86_64-v3_prefill.pt2",
    "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_windows-cpu-x86_64-v3_prefill.pt2",
-   "size": 216432640,
-   "sha256": "8c0cefc5c474d3657cef5eb081239ac56a72e3be61d11b7379141f8a2a68b48f",
+   "size": 1113266,
+   "sha256": "ded989ab26d3c7b0c277b7d977fc58a8391e8c9b0e76bcf5911ef5e6b57d2ed9",
    "licence": "Apache-2.0",
    "sources": [
     {
@@ -3086,14 +3106,16 @@
    "unpack_to": "torch/hayai-nova/fp32/windows-cpu-x86_64-v3/prefill/",
    "torch": "2.13.0+cpu",
    "io": 2,
-   "requires": []
+   "requires": [
+    "torch/hayai-nova/fp32/weights-decoder.safetensors"
+   ]
   },
   {
    "engine": "hayai-nova",
    "file": "hayai-nova_fp32_windows-cpu-x86_64-v3_step.pt2",
    "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/hayai-nova_fp32_windows-cpu-x86_64-v3_step.pt2",
-   "size": 216608752,
-   "sha256": "91e4f165d27dd5d4973473facf0359b2366c1250874be0da9c9dbee460e2b7d8",
+   "size": 1289372,
+   "sha256": "bc4d67987bad46c9147d4cfeecafb5b8488178eb13d25ea207effc8529f75f8d",
    "licence": "Apache-2.0",
    "sources": [
     {
@@ -3117,7 +3139,9 @@
    "unpack_to": "torch/hayai-nova/fp32/windows-cpu-x86_64-v3/step/",
    "torch": "2.13.0+cpu",
    "io": 2,
-   "requires": []
+   "requires": [
+    "torch/hayai-nova/fp32/weights-decoder.safetensors"
+   ]
   },
   {
    "engine": "hayai-nova",
@@ -3342,7 +3366,7 @@
    "precision": "bf16",
    "id": "torch/paddle-manga/bf16/weights-decoder.safetensors",
    "path": "torch/paddle-manga/bf16/weights-decoder.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
   },
   {
@@ -3370,7 +3394,7 @@
    "precision": "bf16",
    "id": "torch/paddle-manga/bf16/weights-vision.safetensors",
    "path": "torch/paddle-manga/bf16/weights-vision.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
   },
   {
@@ -4190,7 +4214,7 @@
    "precision": "fp16",
    "id": "torch/paddle-manga/fp16/weights-decoder.safetensors",
    "path": "torch/paddle-manga/fp16/weights-decoder.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
   },
   {
@@ -4218,7 +4242,7 @@
    "precision": "fp16",
    "id": "torch/paddle-manga/fp16/weights-vision.safetensors",
    "path": "torch/paddle-manga/fp16/weights-vision.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
   },
   {
@@ -5236,7 +5260,7 @@
    "precision": "fp32",
    "id": "torch/paddle-manga/fp32/weights-decoder.safetensors",
    "path": "torch/paddle-manga/fp32/weights-decoder.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
   },
   {
@@ -5264,7 +5288,7 @@
    "precision": "fp32",
    "id": "torch/paddle-manga/fp32/weights-vision.safetensors",
    "path": "torch/paddle-manga/fp32/weights-vision.safetensors",
-   "torch": "2.13.0+cu130",
+   "torch": "2.13.0",
    "io": 2
   },
   {

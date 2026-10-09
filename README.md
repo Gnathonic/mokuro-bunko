@@ -108,7 +108,7 @@ The server keeps the groups that own those devices when it switches to `PUID:PGI
 
 | Path / variable | Purpose |
 |---|---|
-| `/data` | Library, database, logs, the OCR backend (`/data/backends`) and the OCR models (`/data/models`: 0.3–0.8 GB for hayai-nova depending on the device, a few GB more with paddle-manga, which needs a GPU). Keep it on a persistent volume. |
+| `/data` | Library, database, logs, the OCR backend (`/data/backends`) and the OCR models (`/data/models`: 0.3–0.6 GB for hayai-nova depending on the device and precision, a few GB more with paddle-manga, which needs a GPU). Keep it on a persistent volume. |
 | `/config` | Optional: with `MOKURO_CONFIG=/config/config.yaml` (as the Unraid template sets, like the 0.5.2 CUDA image) the config lives there; by default it is `/data/config.yaml`. |
 | `PUID`, `PGID`, `UMASK`, `TAKE_OWNERSHIP` | The user the server runs as (1000:1000 by default; the Unraid template passes 99:100), file mode mask, recursive chown on start. |
 | `MOKURO_NGINX_ACCEL=1` | Put the bundled nginx in front for library downloads (as in 0.5). |
