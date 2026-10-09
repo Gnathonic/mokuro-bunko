@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.0-beta.2] - 2026-10-09
+
+A pre-release on the way to 0.7.0 (everything below under 0.7.0 applies): an
+install of 0.7.0-beta.1 finds it on the pre-release channel and can update to
+it. Fixes `models verify` after `install-ocr` (see 0.7.0, Fixed).
+
 ## [0.7.0] - Unreleased
 
 A rewrite in Rust, as a drop-in over 0.5.2 and 0.5.3 storage (same `config.yaml`,

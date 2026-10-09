@@ -54,7 +54,7 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
     }
     if config.update.auto {
         info!(
-            "Automatic updates are on (update.auto): a newer {} release installs itself when nothing is running",
+            "Automatic updates are on (update.auto): a newer release on the {} channel installs itself when nothing is running",
             bunko_update::resolve_channel(&config.update.channel, bunko_core::VERSION)
         );
     }
