@@ -334,10 +334,14 @@
     note.hidden = false;
   }
 
+  // Shown where the CPU is picked for paddle-manga (setup, settings); the admin panel
+  // gets the same text from the engine catalog (bunko_core::engines::PADDLE_CPU_NOTE).
+  const PADDLE_CPU_NOTE = 'paddle-manga on the CPU is slow (about 40 s a page on 16 threads) and downloads 3.6 GB of weights; hayai-nova is the CPU engine of choice.';
+
   window.App = {
     esc, api, get, post, info, toast, header, heartbeat, setBusy, showError,
     runJob, jobBox, attachJob, pick, wirePickers, wizard, fmtBytes, adminLink,
-    storageNote,
+    storageNote, PADDLE_CPU_NOTE,
   };
 
   document.addEventListener('DOMContentLoaded', () => {

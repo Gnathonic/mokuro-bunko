@@ -189,7 +189,8 @@
                         <div class="form-group"><label class="form-label" for="ocr-role">For</label>
                             <select class="form-select" id="ocr-role"><option value="server">the library server</option><option value="processor">the processor</option></select></div>
                         <div class="form-group"><label class="form-label" for="ocr-engine">Engine (downloads)</label>
-                            <select class="form-select" id="ocr-engine"><option value="">the configured ones</option><option>hayai-nova</option><option value="paddle-manga">paddle-manga (needs a GPU)</option><option>ppocr-manga</option></select></div>
+                            <select class="form-select" id="ocr-engine"><option value="">the configured ones</option><option>hayai-nova</option><option>paddle-manga</option><option>ppocr-manga</option></select>
+                            <p class="form-hint" id="ocr-engine-note" hidden></p></div>
                     </div>
                     <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="install-ocr-list">Packs and hardware</button><button type="button" class="btn btn--secondary" data-job="models-list">List the models</button><button type="button" class="btn btn--secondary" data-job="models-verify">Verify them</button><button type="button" class="btn btn--primary" data-job="models-download">Download</button></div>
                     <div id="job-ocr"></div>

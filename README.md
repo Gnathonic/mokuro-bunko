@@ -108,7 +108,7 @@ The server keeps the groups that own those devices when it switches to `PUID:PGI
 
 | Path / variable | Purpose |
 |---|---|
-| `/data` | Library, database, logs, the OCR backend (`/data/backends`) and the OCR models (`/data/models`: 0.3–0.6 GB for hayai-nova depending on the device and precision, a few GB more with paddle-manga, which needs a GPU). Keep it on a persistent volume. |
+| `/data` | Library, database, logs, the OCR backend (`/data/backends`) and the OCR models (`/data/models`: 0.3–0.6 GB for hayai-nova depending on the device and precision, a few GB more with paddle-manga). Keep it on a persistent volume. |
 | `/config` | Optional: with `MOKURO_CONFIG=/config/config.yaml` (as the Unraid template sets, like the 0.5.2 CUDA image) the config lives there; by default it is `/data/config.yaml`. |
 | `PUID`, `PGID`, `UMASK`, `TAKE_OWNERSHIP` | The user the server runs as (1000:1000 by default; the Unraid template passes 99:100), file mode mask, recursive chown on start. |
 | `MOKURO_NGINX_ACCEL=1` | Put the bundled nginx in front for library downloads (as in 0.5). |
@@ -172,7 +172,7 @@ The recognizers (hayai-nova, paddle-manga) run on [libtorch](https://pytorch.org
 | Engine | What it is |
 |---|---|
 | `hayai-nova` (default) | [hayai-ocr v2.5 Nova](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova): reads each text line, strong on display lettering and sound effects. |
-| `paddle-manga` | [PaddleOCR-VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) with a [manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora): the most accurate and the slowest, about 2 GB of model files. Needs a GPU (NVIDIA CUDA or AMD ROCm); CPU-only machines use hayai-nova. |
+| `paddle-manga` | [PaddleOCR-VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) with a [manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora): the most accurate and the slowest, about 2 GB of model files (3.6 GB in fp32). It runs on the CPU too, at about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
 | `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector and CTC recognizer on the CPU: small, reads scanned novel pages too. Its detector also feeds the other two. |
 
 The 0.5 `mokuro` engine and the GPL `ctd`, `animetext` and `rtdetr` detectors are gone; see the [migration guide](docs/MIGRATING-0.7.md) for what happens to old configs and existing `.mokuro` files.

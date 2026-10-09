@@ -1,7 +1,7 @@
 // OCR install: hardware, pack choice, install-ocr with live progress, then doctor.
 (function () {
   'use strict';
-  const { esc, get, info, showError, setBusy, wirePickers, runJob, jobBox } = window.App;
+  const { esc, get, info, showError, setBusy, wirePickers, runJob, jobBox, PADDLE_CPU_NOTE } = window.App;
   const $ = (id) => document.getElementById(id);
   const role = () => (document.querySelector('input[name="for"]:checked') || {}).value;
   let hw = null;
@@ -13,7 +13,7 @@
     if (hw.amd_gfx.length) gpus.push('AMD ' + hw.amd_gfx.join(', '));
     $('hw').innerHTML =
       '<dt>Platform</dt><dd>' + esc(hw.target) + '</dd>' +
-      '<dt>GPU</dt><dd>' + esc(gpus.length ? gpus.join('; ') : 'none found (the CPU pack works everywhere: hayai-nova and ppocr-manga; paddle-manga needs a GPU)') + '</dd>' +
+      '<dt>GPU</dt><dd>' + esc(gpus.length ? gpus.join('; ') : 'none found (the CPU pack works everywhere)') + '</dd>' +
       (hw.hidden.length ? '<dt>Hidden</dt><dd>' + esc(hw.hidden.join(', ')) + '</dd>' : '') +
       '<dt>Recommended</dt><dd><strong>' + esc(hw.auto_variant) + '</strong> — ' + esc(hw.reason) + '</dd>' +
       '<dt>Source</dt><dd>' + (hw.bundled_offline
@@ -27,11 +27,20 @@
     $('hw-hint').textContent = hw.hint || '';
     const opt = $('variant').querySelector('option[value="auto"]');
     opt.textContent = 'Automatic (' + hw.auto_variant + ')';
+    renderCpuNote();
     const packs = hw.packs || [];
     $('packs').innerHTML = packs.length
       ? '<p class="form-label">Installed</p><ul class="notes">' + packs.map((p) =>
         '<li>' + esc(p.name) + ' for the ' + esc(p.role) + ' — ' + esc(p.dir) + (p.complete ? '' : ' <span class="badge badge--error">incomplete</span>') + '</li>').join('') + '</ul>'
       : '<p class="form-hint">No pack installed yet.</p>';
+  }
+
+  // The CPU pack (picked, or what Automatic means here): hayai-nova is its engine.
+  function renderCpuNote() {
+    const v = $('variant').value;
+    const cpu = v === 'cpu' || (v === 'auto' && !!hw && hw.auto_variant === 'cpu');
+    $('cpu-note').hidden = !cpu;
+    $('cpu-note').textContent = cpu ? PADDLE_CPU_NOTE : '';
   }
 
   async function install() {
@@ -74,6 +83,7 @@
   document.addEventListener('DOMContentLoaded', async () => {
     wirePickers();
     $('install-btn').addEventListener('click', install);
+    $('variant').addEventListener('change', renderCpuNote);
     try {
       const i = await info();
       if (!i.ocr_build) {

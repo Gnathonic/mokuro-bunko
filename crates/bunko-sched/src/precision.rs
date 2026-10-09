@@ -55,21 +55,6 @@ pub fn normalize_mode(value: Option<&str>) -> Option<&'static str> {
     MODES.iter().find(|m| **m == text).copied()
 }
 
-/// Engines that run on a GPU only (NVIDIA CUDA or AMD ROCm): never placed on the CPU,
-/// never offered by a machine without a GPU. paddle-manga: there are no CPU packages
-/// for it (a CPU read ~27 s a page on a 16-core desktop, from a 4.65 GB package per
-/// platform); a CPU-only machine runs hayai-nova. THE rule: the engines place and
-/// offer with it, the library judges which machine may run a row with it.
-pub fn gpu_only(engine: &str) -> bool {
-    engine == "paddle-manga"
-}
-
-/// Why a [`gpu_only`] engine cannot run where no GPU may run it (no GPU, `ocr.backend:
-/// cpu`): the error of a session, `models download` and `doctor`.
-pub fn needs_gpu(engine: &str) -> String {
-    format!("{engine} needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU")
-}
-
 /// `engine_modes(engine)`: every mode for a precision engine, none otherwise.
 pub fn engine_modes(engine: &str) -> &'static [&'static str] {
     if is_precision_engine(engine) {
@@ -480,16 +465,6 @@ mod tests {
     }
 
     #[test]
-    fn paddle_manga_alone_needs_a_gpu() {
-        assert!(gpu_only("paddle-manga"));
-        assert!(!gpu_only("hayai-nova") && !gpu_only("ppocr-manga"));
-        assert_eq!(
-            needs_gpu("paddle-manga"),
-            "paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU"
-        );
-    }
-
-    #[test]
     fn resolve_follows_the_policy() {
         let gpu = set(&[FP32, FP16, BF16]);
         let r = resolve_mode("hayai-nova", "auto-accuracy", Some(&gpu), None, "");
@@ -504,7 +479,6 @@ mod tests {
             (Some("fp16"), "benchmark")
         );
         let cpu = set(&[FP32]);
-        // A card with fp32 packages only: one candidate, no benchmark pick.
         let r = resolve_mode("paddle-manga", "auto-speed", Some(&cpu), Some("bf16"), "x");
         assert_eq!(
             (r.precision.as_deref(), r.why.as_str()),

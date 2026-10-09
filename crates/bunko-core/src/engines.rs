@@ -15,10 +15,10 @@ pub struct EngineSpec {
     pub patch_budget: bool,
     /// Non-empty when the recognizer may not be put on a GPU.
     pub cpu_only_reason: &'static str,
-    /// Non-empty when the recognizer runs on a GPU only (never on the CPU; a machine
-    /// without a GPU does not offer it). The text is the error shown where it cannot run
-    /// (`bunko_sched::precision::needs_gpu` says the same).
-    pub gpu_only_reason: &'static str,
+    /// Non-empty when the recognizer runs on the CPU but another engine is the better
+    /// CPU choice: shown wherever the CPU is picked for it (setup, settings, the admin
+    /// pools table).
+    pub cpu_note: &'static str,
     /// Precision modes apply (`auto-accuracy`, `fp16`, ...).
     pub precision: bool,
 }
@@ -26,9 +26,6 @@ pub struct EngineSpec {
 impl EngineSpec {
     pub fn cpu_only(&self) -> bool {
         !self.cpu_only_reason.is_empty()
-    }
-    pub fn gpu_only(&self) -> bool {
-        !self.gpu_only_reason.is_empty()
     }
     /// The road through the pipeline: `line` (detector + CTC only) or `reconciled`.
     pub fn road(&self) -> Road {
@@ -75,6 +72,10 @@ impl Road {
     }
 }
 
+/// paddle-manga on the CPU (it runs there, as in 0.5.2): what to know before picking it.
+/// web/app/app.js carries the same text for the setup and settings pages.
+pub const PADDLE_CPU_NOTE: &str = "paddle-manga on the CPU is slow (about 40 s a page on 16 threads) and downloads 3.6 GB of weights; hayai-nova is the CPU engine of choice.";
+
 pub const ENGINES: &[EngineSpec] = &[
     EngineSpec {
         id: "hayai-nova",
@@ -83,7 +84,7 @@ pub const ENGINES: &[EngineSpec] = &[
         detector: None,
         patch_budget: true,
         cpu_only_reason: "",
-        gpu_only_reason: "",
+        cpu_note: "",
         precision: true,
     },
     EngineSpec {
@@ -93,7 +94,7 @@ pub const ENGINES: &[EngineSpec] = &[
         detector: None,
         patch_budget: false,
         cpu_only_reason: "",
-        gpu_only_reason: "paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU",
+        cpu_note: PADDLE_CPU_NOTE,
         precision: true,
     },
     EngineSpec {
@@ -103,7 +104,7 @@ pub const ENGINES: &[EngineSpec] = &[
         detector: Some("ppocr-manga"),
         patch_budget: false,
         cpu_only_reason: "PP-OCRv6's CTC recognizer runs on the CPU",
-        gpu_only_reason: "",
+        cpu_note: "",
         precision: false,
     },
 ];
@@ -218,4 +219,24 @@ pub fn normalize_precision_mode(value: Option<&str>) -> Result<&'static str, Str
                 PRECISION_MODES.join(", ")
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// paddle-manga runs on the CPU (0.5.2 parity) with a note; the setup and settings
+    /// pages carry the same text as the admin panel's catalog.
+    #[test]
+    fn paddle_manga_runs_on_the_cpu_with_a_note() {
+        let paddle = engine("paddle-manga").unwrap();
+        assert!(!paddle.cpu_only() && paddle.precision);
+        assert_eq!(paddle.cpu_note, PADDLE_CPU_NOTE);
+        assert!(engine("hayai-nova").unwrap().cpu_note.is_empty());
+        let app_js = include_str!("../../../web/app/app.js");
+        assert!(
+            app_js.contains(&format!("const PADDLE_CPU_NOTE = '{PADDLE_CPU_NOTE}';")),
+            "web/app/app.js carries another PADDLE_CPU_NOTE"
+        );
+    }
 }

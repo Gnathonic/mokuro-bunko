@@ -199,9 +199,7 @@ ocr:
   #   engine       - hayai-nova:   hayai-ocr v2.5 Nova (Apache-2.0); reads
   #                                each line at patch_budget. The default.
   #                - paddle-manga: PaddleOCR-VL 1.6 + manga LoRA (Apache-2.0);
-  #                                ~2 GB of model files, slowest, most accurate;
-  #                                needs a GPU (NVIDIA CUDA or AMD ROCm): a
-  #                                CPU-only machine never runs it (use hayai-nova)
+  #                                ~2 GB of model files, slowest, most accurate
   #                - ppocr-manga:  PP-OCRv6 manga (Apache-2.0), a small line
   #                                detector + CTC recognizer on the CPU; brings
   #                                its own detector and is the one engine that
@@ -231,8 +229,7 @@ ocr:
   #                  queue_capacity how many may wait in the queue it fills
   #                  stage_device   WHERE that stage's model runs: cpu or
   #                                 gpu:<n>; absent = auto. The ppocr-manga
-  #                                 detector is CPU only; paddle-manga's
-  #                                 engine stage is GPU only.
+  #                                 detector is CPU only.
   #
   # See docs/configuration.md for the full reference and docs/ocr-internals.md
   # for how it works. Renaming a row means its files are looked for under the

@@ -1,7 +1,7 @@
 // Settings: one page, the section chosen by the path (/app/settings/<section>).
 (function () {
   'use strict';
-  const { esc, get, post, info, toast, showError, setBusy, runJob, jobBox, wirePickers, adminLink, fmtBytes } = window.App;
+  const { esc, get, post, info, toast, showError, setBusy, runJob, jobBox, wirePickers, adminLink, fmtBytes, PADDLE_CPU_NOTE } = window.App;
   const $ = (id) => document.getElementById(id);
   const SECTIONS = ['server', 'https', 'remote', 'library', 'processor', 'ocr', 'startup', 'logs', 'doctor', 'update', 'advanced'];
   const loaded = {};
@@ -276,7 +276,16 @@
   }
 
   // ---- ocr --------------------------------------------------------------
+  // Downloads for paddle-manga: what it costs where it would run on the CPU.
+  function renderEngineNote() {
+    const paddle = $('ocr-engine').value === 'paddle-manga';
+    $('ocr-engine-note').hidden = !paddle;
+    $('ocr-engine-note').textContent = paddle ? PADDLE_CPU_NOTE : '';
+  }
+
   async function loadOcr() {
+    $('ocr-engine').addEventListener('change', renderEngineNote);
+    renderEngineNote();
     const i = await info();
     if (i.role === 'processor' || (!i.config_exists && i.processor_config_exists)) $('ocr-role').value = 'processor';
     try {

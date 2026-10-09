@@ -84,14 +84,14 @@ pub struct StagePlan {
 ///
 /// 0.5.2 only knew the GPU figures, so a CPU engine stage was sized as if it took
 /// 0.177 s a page and got three detect workers. On the CPU the engine is 10-50x
-/// slower (measured on a 16-core desktop, fp32: hayai-nova 3.6 s a page; paddle-manga
-/// took 27 s, which is why it runs on a GPU only now), one detect worker keeps it fed,
-/// and each extra one only holds another decoded page and another detector working set
-/// in memory.
+/// slower (measured on a 16-core desktop, fp32: hayai-nova 3.6 s, paddle-manga 27 s a
+/// page), one detect worker keeps it fed, and each extra one only holds another
+/// decoded page and another detector working set in memory.
 fn stage_seconds(engine: &str, key: &str, declared: f64, gpu: bool) -> f64 {
     match (engine, key, gpu) {
         ("paddle-manga", STAGE_ENGINE, true) => 0.915,
         ("hayai-nova", STAGE_ENGINE, true) => 0.177,
+        ("paddle-manga", STAGE_ENGINE, false) => 27.0,
         ("hayai-nova", STAGE_ENGINE, false) => 3.6,
         _ => declared,
     }
@@ -415,6 +415,8 @@ mod tests {
         assert_eq!(widths(&p), vec![(1, 4), (1, 1), (1, 1)]);
         // A CPU engine is slow enough that one detect worker keeps it fed.
         let p = plan("hayai-nova", Road::Reconciled, "cpu", &none, &host(6));
+        assert_eq!(widths(&p), vec![(1, 4), (1, 1), (1, 1)]);
+        let p = plan("paddle-manga", Road::Reconciled, "cpu", &none, &host(6));
         assert_eq!(widths(&p), vec![(1, 4), (1, 1), (1, 1)]);
         // ppocr-manga: detect takes the ceiling (0.5.2's 4), the layout one worker.
         let p = plan("ppocr-manga", Road::Line, "cpu", &none, &host(7));
