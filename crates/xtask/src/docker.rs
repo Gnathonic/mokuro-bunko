@@ -106,7 +106,7 @@ pub fn run(args: &DockerContextArgs) -> Result<()> {
         let Some((target, flavor)) = names::parse_archive_name(&name, &version) else {
             continue;
         };
-        for (arch, flavor_dir) in self::slots(target, flavor) {
+        for (arch, flavor_dir) in self::slots(target, &flavor) {
             let dest = out.join(arch).join(flavor_dir);
             if dest.exists() {
                 std::fs::remove_dir_all(&dest)?;
@@ -115,12 +115,10 @@ pub fn run(args: &DockerContextArgs) -> Result<()> {
             if !dest.join(names::BIN).is_file() {
                 bail!("{name} has no {} at its top level", names::BIN);
             }
-            // Images have no desktop: drop the tray and its desktop entries/icons.
-            let _ = std::fs::remove_file(dest.join(names::TRAY_BIN));
+            // Images have no desktop: drop the menu/autostart entries and icons (the
+            // tray in the full binary never starts there: nothing runs `tray`).
             let _ = std::fs::remove_dir_all(dest.join("share"));
-            files.retain(|f| {
-                f.as_path() != std::path::Path::new(names::TRAY_BIN) && !f.starts_with("share")
-            });
+            files.retain(|f| !f.starts_with("share"));
             eprintln!("    {arch}/{flavor_dir}: {} files from {name}", files.len());
             slots.push((arch.to_string(), dest));
         }
@@ -144,7 +142,7 @@ pub fn run(args: &DockerContextArgs) -> Result<()> {
         && packs.is_empty()
     {
         bail!(
-            "--bake-pack {v}: no mokuro-bunko-{version}-*-torch-{v}.tar.zst in {}",
+            "--bake-pack {v}: no mokuro-bunko-backend-{version}-*-{v}.tar.zst in {}",
             dir.display()
         );
     }

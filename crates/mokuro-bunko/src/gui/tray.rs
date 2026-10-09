@@ -3,11 +3,12 @@
 //! * `tray.json` next to the default `config.yaml` (portable: `data\tray.json`) lists
 //!   the instances the tray starts and supervises:
 //!   `{"managed":[{"role":"server"|"processor","args":[...]}],"notifications":false}`.
-//!   Same format and defaults as `bunko-tray`'s `trayconf.rs` (re-declared here: that
-//!   crate links GTK, which the CLI must not). The tray reads it when it starts.
+//!   Same format and defaults as `bunko-tray`'s `trayconf.rs` (written here so the lite
+//!   build, which has no tray, still reads and edits it). The tray reads it when it starts.
 //! * The tray's own login item, as the tray's "Start at login" writes it
 //!   (`bunko-tray/src/autostart.rs`): XDG autostart `.desktop`, a LaunchAgent, or the
-//!   Startup-folder shortcut `Mokuro Bunko.lnk`.
+//!   Startup-folder shortcut `Mokuro Bunko.lnk`. The tray is `mokuro-bunko tray` (on
+//!   Windows `Mokuro Bunko.exe`); the lite build has none.
 //!
 //! A role runs either from the tray or as a service, never both (two copies would fight
 //! over the port / the processor's storage lock): the pages offer to remove the other.
@@ -36,19 +37,17 @@ pub struct Managed {
     pub args: Vec<String>,
 }
 
-/// The tray program's name.
-pub fn tray_name() -> &'static str {
-    if cfg!(windows) {
-        "mokuro-bunko-tray.exe"
-    } else {
-        "mokuro-bunko-tray"
-    }
-}
-
-/// The Windows portable layout (`PORTABLE.txt` next to the programs): its `data\`.
+/// The Windows portable layout (`PORTABLE.txt` at the top of the folder, above `bin\`):
+/// its `data\`.
 fn portable_data(exe: &Path) -> Option<PathBuf> {
     let dir = exe.parent()?;
-    dir.join("PORTABLE.txt").is_file().then(|| dir.join("data"))
+    let in_bin = dir
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("bin"));
+    let root = if in_bin { dir.parent()? } else { dir };
+    root.join("PORTABLE.txt")
+        .is_file()
+        .then(|| root.join("data"))
 }
 
 /// Where the tray reads `tray.json` (bunko-tray `Layout::tray_config`).
@@ -62,21 +61,18 @@ pub fn config_path(exe: &Path) -> PathBuf {
     }
 }
 
-/// The tray program that ships with this one: next to it, in the macOS bundle next to
-/// it, or on `PATH`.
-pub fn tray_exe(exe: &Path) -> Option<PathBuf> {
-    let dir = exe.parent()?;
-    let mut candidates = vec![
-        dir.join(tray_name()),
-        dir.join("mokuro-bunko.app/Contents/MacOS")
-            .join(tray_name()),
-        dir.join("Mokuro Bunko.app/Contents/MacOS")
-            .join(tray_name()),
-    ];
-    if let Some(path) = std::env::var_os("PATH") {
-        candidates.extend(std::env::split_paths(&path).map(|d| d.join(tray_name())));
+/// How to start the tray of this program (`exe`): `mokuro-bunko tray`, on Windows
+/// `Mokuro Bunko.exe`. None in the lite build, which has no tray.
+pub fn tray_command(exe: &Path) -> Option<(PathBuf, Vec<String>)> {
+    #[cfg(feature = "tray")]
+    {
+        Some(bunko_tray::autostart::launch_command(exe))
     }
-    candidates.into_iter().find(|p| p.is_file())
+    #[cfg(not(feature = "tray"))]
+    {
+        let _ = exe;
+        None
+    }
 }
 
 /// No desktop to show a tray on (Linux without a display, an SSH session).
@@ -170,8 +166,8 @@ pub fn autostart_path() -> Option<PathBuf> {
     }
 }
 
-/// Add (or with `false` remove) the tray's login item pointing at `tray`.
-pub fn set_autostart(tray: &Path, enabled: bool) -> Result<Option<PathBuf>, String> {
+/// Add (or with `false` remove) the login item that starts the tray of `exe`.
+pub fn set_autostart(exe: &Path, enabled: bool) -> Result<Option<PathBuf>, String> {
     let path = autostart_path().ok_or("no APPDATA folder")?;
     if !enabled {
         return match std::fs::remove_file(&path) {
@@ -180,107 +176,17 @@ pub fn set_autostart(tray: &Path, enabled: bool) -> Result<Option<PathBuf>, Stri
             Err(e) => Err(format!("could not remove {}: {e}", path.display())),
         };
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    #[cfg(feature = "tray")]
+    {
+        bunko_tray::autostart::set(&bunko_tray::paths::ProcessEnv, exe, true)
+            .map_err(|e| e.to_string())?;
+        Ok(Some(path))
     }
-    write_entry(&path, tray)?;
-    Ok(Some(path))
-}
-
-#[cfg(windows)]
-fn write_entry(path: &Path, exe: &Path) -> Result<(), String> {
-    let mut link = mslnk::ShellLink::new(exe)
-        .map_err(|e| format!("could not make a shortcut to {}: {e}", exe.display()))?;
-    if let Some(dir) = exe.parent() {
-        link.set_working_dir(Some(dir.to_string_lossy().into_owned()));
+    #[cfg(not(feature = "tray"))]
+    {
+        let _ = exe;
+        Err("this build has no tray (the lite build): use a service instead".into())
     }
-    link.set_name(Some("Mokuro Bunko".into()));
-    link.create_lnk(path)
-        .map_err(|e| format!("could not write {}: {e}", path.display()))
-}
-
-#[cfg(not(windows))]
-fn write_entry(path: &Path, exe: &Path) -> Result<(), String> {
-    let text = if cfg!(target_os = "macos") {
-        launchd_plist(exe)
-    } else {
-        desktop_entry(exe)
-    };
-    std::fs::write(path, text).map_err(|e| format!("could not write {}: {e}", path.display()))
-}
-
-/// The XDG autostart entry (bunko-tray `autostart::desktop_entry(exe, true)`).
-#[cfg_attr(windows, allow(dead_code))]
-pub fn desktop_entry(exe: &Path) -> String {
-    format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Mokuro Bunko\n\
-         GenericName=Manga library tray\n\
-         Comment=Status, pause and settings of the mokuro-bunko library and OCR processor\n\
-         Exec={}\n\
-         Icon=mokuro-bunko\n\
-         Terminal=false\n\
-         Categories=Utility;\n\
-         StartupNotify=false\n\
-         X-GNOME-Autostart-enabled=true\n\
-         X-KDE-autostart-after=panel\n",
-        desktop_exec_quote(&exe.to_string_lossy())
-    )
-}
-
-/// The Exec key's quoting rules (Desktop Entry Specification, "The Exec key").
-#[cfg_attr(windows, allow(dead_code))]
-fn desktop_exec_quote(arg: &str) -> String {
-    let needs = arg
-        .chars()
-        .any(|c| c.is_whitespace() || "\"'\\><~|&;$*?#()`".contains(c));
-    let escaped = arg.replace('%', "%%");
-    if !needs {
-        return escaped;
-    }
-    let mut out = String::from("\"");
-    for c in escaped.chars() {
-        if matches!(c, '"' | '`' | '$' | '\\') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out.push('"');
-    out
-}
-
-/// The tray's LaunchAgent (bunko-tray `autostart::launchd_plist`).
-#[cfg_attr(windows, allow(dead_code))]
-pub fn launchd_plist(exe: &Path) -> String {
-    let xml = |s: &str| {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-    };
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-         <plist version=\"1.0\">\n\
-         <dict>\n\
-         \x20 <key>Label</key>\n\
-         \x20 <string>{LAUNCHD_LABEL}</string>\n\
-         \x20 <key>ProgramArguments</key>\n\
-         \x20 <array>\n\
-         \x20   <string>{}</string>\n\
-         \x20 </array>\n\
-         \x20 <key>RunAtLoad</key>\n\
-         \x20 <true/>\n\
-         \x20 <key>LimitLoadToSessionType</key>\n\
-         \x20 <string>Aqua</string>\n\
-         \x20 <key>ProcessType</key>\n\
-         \x20 <string>Interactive</string>\n\
-         </dict>\n\
-         </plist>\n",
-        xml(&exe.to_string_lossy())
-    )
 }
 
 // --- is a tray running? -----------------------------------------------------------
@@ -333,6 +239,36 @@ pub fn tray_running(exe: &Path) -> bool {
     })
 }
 
+/// Whether a command line (`argv`, program first) runs the tray: `mokuro-bunko tray`, or
+/// the separate `mokuro-bunko-tray` of 0.7.0-beta.2 and earlier.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn is_tray_command(argv: &[String]) -> bool {
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    let name = Path::new(program)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if name == "mokuro-bunko-tray" {
+        return true;
+    }
+    if name != "mokuro-bunko" {
+        return false;
+    }
+    // The subcommand: the first word that is neither an option nor the value of the
+    // global `-c`/`--config`.
+    let mut args = argv[1..].iter();
+    while let Some(a) = args.next() {
+        if a == "-c" || a == "--config" {
+            args.next();
+        } else if !a.starts_with('-') {
+            return a == "tray";
+        }
+    }
+    false
+}
+
 /// The pids of this user's running trays (Windows stops it by image name instead).
 #[cfg(unix)]
 pub fn tray_pids() -> Vec<u32> {
@@ -352,12 +288,15 @@ pub fn tray_pids() -> Vec<u32> {
                 Ok(m) => m,
                 Err(_) => continue,
             }) == uid;
-            let is_tray = std::fs::read_link(e.path().join("exe")).is_ok_and(|x| {
-                x.file_name().is_some_and(|n| {
-                    n == tray_name() || n.to_string_lossy() == format!("{} (deleted)", tray_name())
+            let argv: Vec<String> = std::fs::read(e.path().join("cmdline"))
+                .map(|b| {
+                    b.split(|c| *c == 0)
+                        .filter(|a| !a.is_empty())
+                        .map(|a| String::from_utf8_lossy(a).into_owned())
+                        .collect()
                 })
-            });
-            if mine && is_tray && pid != std::process::id() {
+                .unwrap_or_default();
+            if mine && is_tray_command(&argv) && pid != std::process::id() {
                 out.push(pid);
             }
         }
@@ -367,12 +306,18 @@ pub fn tray_pids() -> Vec<u32> {
     {
         let uid = unsafe { libc::getuid() };
         std::process::Command::new("pgrep")
-            .args(["-U", &uid.to_string(), "-f", "/mokuro-bunko-tray$"])
+            .args([
+                "-U",
+                &uid.to_string(),
+                "-f",
+                "(/mokuro-bunko-tray$)|(/mokuro-bunko tray$)",
+            ])
             .output()
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .lines()
                     .filter_map(|l| l.trim().parse().ok())
+                    .filter(|p| *p != std::process::id())
                     .collect()
             })
             .unwrap_or_default()
@@ -406,10 +351,12 @@ pub fn stop_tray(exe: &Path) -> Result<Option<String>, String> {
     };
     #[cfg(windows)]
     let what = {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/IM", tray_name()])
-            .output();
-        tray_name().to_string()
+        for image in ["Mokuro Bunko.exe", "mokuro-bunko-tray.exe"] {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/IM", image])
+                .output();
+        }
+        "Mokuro Bunko.exe".to_string()
     };
     #[cfg(not(any(unix, windows)))]
     let what = String::new();
@@ -494,17 +441,30 @@ mod tests {
     }
 
     #[test]
-    fn autostart_files() {
-        let e = desktop_entry(Path::new("/home/a b/bin/mokuro-bunko-tray"));
-        assert!(
-            e.contains("Exec=\"/home/a b/bin/mokuro-bunko-tray\"\n"),
-            "{e}"
-        );
-        assert!(e.contains("X-GNOME-Autostart-enabled=true"));
-        let p = launchd_plist(Path::new(
-            "/Applications/R&D.app/Contents/MacOS/mokuro-bunko-tray",
-        ));
-        assert!(p.contains("R&amp;D") && p.contains(LAUNCHD_LABEL));
-        assert_eq!(desktop_exec_quote("/x/100%"), "/x/100%%");
+    fn tray_commands() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_tray_command(&v(&["/opt/mb/mokuro-bunko", "tray"])));
+        assert!(is_tray_command(&v(&[
+            "/opt/mb/mokuro-bunko",
+            "-v",
+            "tray",
+            "--log-stderr"
+        ])));
+        assert!(is_tray_command(&v(&["/opt/mb/mokuro-bunko-tray"])));
+        assert!(!is_tray_command(&v(&["/opt/mb/mokuro-bunko", "serve"])));
+        assert!(!is_tray_command(&v(&[
+            "/opt/mb/mokuro-bunko",
+            "-c",
+            "tray",
+            "serve"
+        ])));
+        assert!(is_tray_command(&v(&[
+            "mokuro-bunko",
+            "--config",
+            "x.yaml",
+            "tray"
+        ])));
+        assert!(!is_tray_command(&v(&["/usr/bin/tray"])));
+        assert!(!is_tray_command(&[]));
     }
 }

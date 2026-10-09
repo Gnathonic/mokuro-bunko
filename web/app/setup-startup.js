@@ -126,7 +126,7 @@
       $('how-' + t.recommended).checked = true;
       if (!t.available) {
         $('how-tray').disabled = true;
-        $('how-tray-text').textContent = 'This package has no tray program (mokuro-bunko-tray) next to mokuro-bunko.';
+        $('how-tray-text').textContent = 'This build has no tray (the lite build, a server only): use a background service.';
       } else if (t.headless) {
         $('how-tray-text').textContent += ' This session has no desktop, so a service suits it better.';
       }

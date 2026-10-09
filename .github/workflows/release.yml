@@ -1,8 +1,10 @@
-# Build a release from a `v*` tag: every platform archive, the macOS disk images, the
-# backend packs, the signed release.json, a DRAFT GitHub release, and versioned Docker
-# images. Nothing here is visible to the updater or to `:latest` users: the owner
-# reviews the draft and then runs the "Publish" workflow (publish.yml), which un-drafts
-# the release and moves the `latest*` image tags. See docs/rust-port/PACKAGING.md.
+# Build a release from a `v*` tag: the four downloads (Windows zip, macOS disk image,
+# Linux x64, Linux arm64 server) and the macOS archive older updaters take, the backend
+# packs, the signed release.json, a DRAFT GitHub release whose notes start with a
+# "Which file do I want?" table, and versioned Docker images. Nothing here is visible
+# to the updater or to `:latest` users: the owner reviews the draft and then runs the
+# "Publish" workflow (publish.yml), which un-drafts the release and moves the `latest*`
+# image tags (stable versions only). See docs/rust-port/PACKAGING.md.
 #
 # The build jobs are release-build.yml and release-docker.yml (reusable workflows);
 # release-check.yml runs the same two on any branch without a tag, signing and
@@ -137,13 +139,41 @@ jobs:
         run: cargo run -q -p xtask --locked -- sign dist/release.json
       - name: verify with the key compiled into bunko-update
         run: cargo run -q -p xtask --locked -- verify dist/release.json --dir dist --require-all
+      # The notes: the "Which file do I want?" table (xtask release-notes: each row links
+      # to its file), "Other files install automatically.", and the changelog link
+      # since the previous v* tag.
+      - name: release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          prev=$(git ls-remote --tags origin 'refs/tags/v*' | sed 's|.*refs/tags/||; s|\^{}$||' | sort -u |
+            python3 -c '
+          import re, sys
+          tag = sys.argv[1]
+          def key(t):
+              m = re.match(r"^v(\d+)\.(\d+)\.(\d+)(?:-(.+))?$", t)
+              if not m:
+                  return None
+              pre = m.group(4)
+              parts = [] if pre is None else [(0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split(".")]
+              return (int(m.group(1)), int(m.group(2)), int(m.group(3)), pre is None, parts)
+          me = key(tag)
+          older = [t for t in sys.stdin.read().split() if key(t) is not None and key(t) < me]
+          print(max(older, key=key) if older else "")
+          ' "$TAG")
+          args=(-f tag_name="$TAG" -f target_commitish="$(git rev-parse HEAD)")
+          if [ -n "$prev" ]; then args+=(-f previous_tag_name="$prev"); fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${args[@]}" --jq .body > changelog.md
+          cargo run -q -p xtask --locked -- release-notes --version "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --docker-repo "$IMAGE" --dir dist --changelog changelog.md > notes.md
+          cat notes.md
       - name: draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
-          # The macOS disk images are assets but not release.json artifacts (the updater
-          # takes the .tar.gz); SHA256SUMS lists them.
+          # Every file is in release.json and SHA256SUMS (no per-file .sha256).
           files=(dist/*.tar.gz dist/*.zip dist/*.dmg dist/*.tar.zst* dist/release.json dist/release.json.sig dist/SHA256SUMS)
           if compgen -G 'dist-android/*.apk' > /dev/null; then
             files+=(dist-android/*.apk dist-android/*.apk.sha256)
@@ -151,11 +181,17 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             # Re-run: replace the assets of the existing (draft) release.
             gh release upload "$TAG" --clobber "${files[@]}"
+            gh release edit "$TAG" --notes-file notes.md
           else
-            flags=(--draft --verify-tag --title "mokuro-bunko $VERSION" --generate-notes)
+            flags=(--draft --verify-tag --title "mokuro-bunko $VERSION" --notes-file notes.md --latest=false)
             if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
             gh release create "$TAG" "${flags[@]}" "${files[@]}"
           fi
+      # Every link in the notes names a file of the draft, and that file can be fetched.
+      - name: the notes' links
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/release-links.sh "$TAG"
 
   # The versioned images (`:<ver>-lite`, `:<ver>`, `:<ver>-cuda`) from this run's
   # Linux binaries; publish.yml moves `latest*` for stable versions only.

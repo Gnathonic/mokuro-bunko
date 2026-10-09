@@ -78,8 +78,8 @@ M2 Pro: a 20-page volume in 36 seconds (about 0.55 pages per second).
 @END@
 @IF_PRERELEASE@
 
-This is a pre-release (@VERSION@): "Check for updates" finds nothing until a
-release is published.
+This is a pre-release (@VERSION@) for testing: "Check for updates" offers the
+later pre-releases, and the next release.
 @END@
 
 Licences: LICENSE and THIRD-PARTY-LICENSES.md in

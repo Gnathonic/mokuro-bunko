@@ -199,36 +199,26 @@ pub fn cli_name() -> &'static str {
     }
 }
 
-/// The `mokuro-bunko` executable: next to the tray (archives, the Windows folder, the
-/// macOS app's `Contents/MacOS`), the CLI next to an unpacked `mokuro-bunko.app`,
-/// then `PATH`, then `~/.local/bin`. The installed app (`Mokuro Bunko.app` from the
-/// disk image) always uses its own copy.
-pub fn cli_exe(exe_dir: &Path, env: &dyn Env) -> Option<PathBuf> {
-    let name = cli_name();
-    let mut candidates = vec![exe_dir.join(name)];
-    // mokuro-bunko.app/Contents/MacOS in an unpacked release archive → the archive folder
-    // holding the .app. The CLI there comes first: `mokuro-bunko update` replaces that
-    // file, and the copy inside the bundle (a hard link when unpacked) keeps the old
-    // version. Only for the archive's bundle name: the app installed from the disk image
-    // ("Mokuro Bunko.app", wherever it was dragged) carries the only CLI it should run.
-    let in_bundle = exe_dir.ends_with("Contents/MacOS")
-        && exe_dir
-            .ancestors()
-            .nth(2)
-            .and_then(|a| a.file_name())
-            .is_some_and(|n| n == "mokuro-bunko.app");
-    if let Some(outer) = exe_dir.ancestors().nth(3) {
-        if in_bundle {
-            candidates.insert(0, outer.join(name));
-        } else {
-            candidates.push(outer.join(name));
-        }
+/// The Windows program that runs the tray (the GUI-subsystem build: no console window),
+/// at the top of the install folder; the command line is `bin\mokuro-bunko.exe`.
+pub const WINDOWS_GUI_EXE: &str = "Mokuro Bunko.exe";
+
+/// The `mokuro-bunko` command line the tray starts instances with. The tray is the
+/// same program: on Linux and macOS that is `exe` itself; on Windows the tray is
+/// `Mokuro Bunko.exe` (no console) and the command line is `bin\mokuro-bunko.exe` next
+/// to it (an install from before 0.7.0-beta.3: `mokuro-bunko.exe` next to it). `PATH` is
+/// not searched: the tray runs the command line of its own install.
+pub fn cli_exe(exe: &Path, _env: &dyn Env) -> Option<PathBuf> {
+    let gui = exe
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case(WINDOWS_GUI_EXE));
+    if !gui {
+        return Some(exe.to_path_buf());
     }
-    if let Some(path) = env.var("PATH") {
-        candidates.extend(std::env::split_paths(&path).map(|d| d.join(name)));
-    }
-    candidates.push(home(env).join(".local").join("bin").join(name));
-    candidates.into_iter().find(|p| p.is_file())
+    let dir = exe.parent()?;
+    [dir.join("bin").join(cli_name()), dir.join(cli_name())]
+        .into_iter()
+        .find(|p| p.is_file())
 }
 
 #[cfg(test)]
@@ -344,34 +334,24 @@ mod tests {
     }
 
     #[test]
-    fn finds_the_cli_next_to_the_tray_or_outside_the_app_bundle() {
+    fn the_cli_is_the_tray_itself_or_bin_next_to_the_windows_gui() {
         let dir = tempfile::tempdir().unwrap();
         let env = FakeEnv::default().with("HOME", dir.path().join("nohome"));
-        let macos = dir
+        // Linux/macOS (and `mokuro-bunko tray` on Windows): the same program.
+        let exe = dir
             .path()
-            .join("mokuro-bunko.app")
-            .join("Contents")
-            .join("MacOS");
-        std::fs::create_dir_all(&macos).unwrap();
-        assert_eq!(cli_exe(&macos, &env), None);
+            .join("Mokuro Bunko.app/Contents/MacOS/mokuro-bunko");
+        assert_eq!(cli_exe(&exe, &env), Some(exe.clone()));
+        // Windows: Mokuro Bunko.exe runs bin\mokuro-bunko.exe.
+        let gui = dir.path().join(WINDOWS_GUI_EXE);
+        assert_eq!(cli_exe(&gui, &env), None);
         std::fs::write(dir.path().join(cli_name()), "").unwrap();
-        assert_eq!(cli_exe(&macos, &env), Some(dir.path().join(cli_name())));
-        // Inside a bundle the outer CLI wins: `update` replaces it, not the bundle copy.
-        std::fs::write(macos.join(cli_name()), "").unwrap();
-        assert_eq!(cli_exe(&macos, &env), Some(dir.path().join(cli_name())));
-        // Outside a bundle the sibling wins.
-        let plain = dir.path().join("a").join("b").join("c");
-        std::fs::create_dir_all(&plain).unwrap();
-        std::fs::write(plain.join(cli_name()), "").unwrap();
-        assert_eq!(cli_exe(&plain, &env), Some(plain.join(cli_name())));
-        // The app from the disk image uses its own CLI, even with one next to it.
-        let app = dir
-            .path()
-            .join("Mokuro Bunko.app")
-            .join("Contents")
-            .join("MacOS");
-        std::fs::create_dir_all(&app).unwrap();
-        std::fs::write(app.join(cli_name()), "").unwrap();
-        assert_eq!(cli_exe(&app, &env), Some(app.join(cli_name())));
+        assert_eq!(cli_exe(&gui, &env), Some(dir.path().join(cli_name())));
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        std::fs::write(dir.path().join("bin").join(cli_name()), "").unwrap();
+        assert_eq!(
+            cli_exe(&gui, &env),
+            Some(dir.path().join("bin").join(cli_name()))
+        );
     }
 }

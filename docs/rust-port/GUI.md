@@ -8,7 +8,7 @@ and *everything that is a flag in the CLI*; tray pause offers both "after this v
 ## 1. Pieces
 
 ```
- mokuro-bunko-tray (desktop binary)          browser (default browser)
+ mokuro-bunko tray (same program)            browser (default browser)
    ├─ menu: status, stats, pause/resume,       ├─ wizard  /app/setup/...
    │   open dashboard/library/settings/logs    ├─ settings /app/settings/...
    ├─ start-at-login, quit                     └─ dashboard /app/dashboard
@@ -36,10 +36,14 @@ and *everything that is a flag in the CLI*; tray pause offers both "after this v
   hands off to a started service or the tab is closed for 10 min. On Windows/macOS,
   double-clicking the binary with no arguments runs `gui` (CLI behaviour from a terminal
   unchanged: a TTY keeps today's help output).
-- **`mokuro-bunko-tray`** (new crate `bunko-tray`, own binary): `tray-icon` + `muda` (+ `tao`
-  event loop), MIT/Apache-2.0. Linux needs GTK 3 and libayatana-appindicator3 at run time
-  (system libraries, dynamically linked; LGPL — acceptable per the licence stance), so the tray
-  is a *separate* executable: the CLI/server binaries and Docker images never depend on GTK.
+- **`mokuro-bunko tray`** (crate `bunko-tray`, in the program since 0.7.0-beta.3; a separate
+  `mokuro-bunko-tray` executable before): on Linux a StatusNotifierItem + dbusmenu on the
+  session D-Bus (ksni on zbus, pure Rust: no GTK or AppIndicator library, so the full
+  binary still runs headless and in Docker); on Windows and macOS `tray-icon` + `muda` on a
+  `tao` event loop. Windows ships the program twice from one build: `bin\mokuro-bunko.exe`
+  (console) and `Mokuro Bunko.exe` (the same bytes with the GUI subsystem: the tray, no
+  console window). On macOS the app's main program is `mokuro-bunko`; opened by the
+  Finder or launchd it runs the tray. The lite build has no tray.
 
 ## 2. Control API (contract — streams G2/G3 code against this)
 
@@ -202,7 +206,7 @@ Supervision: the tray starts `processor serve`/`serve` as a child when the machi
 for tray-managed running and no instance is up; restarts it on crash with backoff; never
 starts a second instance when a service-managed one is running.
 
-**As built (stream G3, `crates/bunko-tray`, binary `mokuro-bunko-tray`):**
+**As built (stream G3, `crates/bunko-tray`; since 0.7.0-beta.3 run as `mokuro-bunko tray`):**
 - Discovery: `.control.json` (read with the same lenient types as `bunko-control`'s wire
   types; `tests/contract.rs` checks them against the real ones) in, in order: `--storage DIR`
   (repeatable), portable `data\`, `$MOKURO_STORAGE`, the storage of `$MOKURO_CONFIG` / the
@@ -217,7 +221,9 @@ starts a second instance when a service-managed one is running.
   `%LOCALAPPDATA%\mokuro-bunko\`; portable `data\tray.json`):
   `{"managed":[{"role":"server"|"processor","args":[...]}],"notifications":false}`. Without
   `args`: `serve`, or `processor serve --config <default processor.yaml>`. `install.ps1`
-  writes `{"managed":[{"role":"server"}]}`. The wizard's "Start with the machine" (G2)
+  writes `{"managed":[{"role":"server"}]}`. The tray starts its instances with the
+  command line of its own install (`mokuro-bunko` itself; on Windows `bin\mokuro-bunko.exe`
+  below `Mokuro Bunko.exe`). The wizard's "Start with the machine" (G2)
   offers both: **"Run from the tray when I log in"** (recommended on a desktop with the tray
   program next to the CLI) writes this role's entry into `tray.json` (the server's without
   `args` for the default config, else `["-c", <config>, "serve"]`; the processor's with
@@ -245,8 +251,14 @@ starts a second instance when a service-managed one is running.
 - One tray per user (`.tray.lock` in the log folder). Logs: `<server storage>/logs/
   mokuro-bunko-tray.<date>.log` (portable `data\logs`; falls back to
   `<config>/mokuro-bunko/logs`, then the temp folder, when that cannot be created).
-  Start at login: `~/.config/autostart/mokuro-bunko-tray.desktop`, LaunchAgent
-  `io.github.gnathonic.mokuro-bunko-tray`, or Startup `Mokuro Bunko.lnk`.
+  Start at login: `~/.config/autostart/mokuro-bunko-tray.desktop` (`Exec=<mokuro-bunko> tray`),
+  LaunchAgent `io.github.gnathonic.mokuro-bunko-tray` (the app's `mokuro-bunko`, `tray`), or
+  Startup `Mokuro Bunko.lnk` (→ `Mokuro Bunko.exe`): the names of the old separate tray,
+  whose entries the update rewrites (PACKAGING.md §1).
+- Linux: the icon is a pixmap per state (idle, working, paused, attention with "!"), and
+  the SNI status is `NeedsAttention` with the attention icon; a left click opens the menu.
+  Started before the panel (at login) it waits for the StatusNotifierWatcher. SIGTERM
+  quits it as the menu's Quit does (its supervised instances stop cleanly).
 - Automatic updates (opt-in, `status.update` / `problems[].kind == "update"`):
   - Status lines: `waiting`/`downloading`/`installing`/`restarting` show "Updating to X…"
   (waiting: "… (after the running volume)") in place of the state; `updated` adds
@@ -274,12 +286,14 @@ starts a second instance when a service-managed one is running.
 
 ## 6. Packaging
 
-- Windows zip/installer: `mokuro-bunko-tray.exe` next to the CLI; Start-menu "mokuro-bunko"
-  shortcut launches the tray; `install.ps1 -Startup` adds the tray to Startup.
-- macOS: `mokuro-bunko.app` (LSUIElement agent) holding both binaries + icon; unsigned
-  (quarantine note as today); launchd agent can start the tray.
-- Linux x86_64 full and lite: `mokuro-bunko-tray` + `.desktop` entry + autostart entry +
-  hicolor icons; `doctor` reports missing GTK/appindicator libraries with distro package names.
+- Windows zip/installer: `Mokuro Bunko.exe` (the tray, GUI subsystem) at the top,
+  `bin\mokuro-bunko.exe` (the command line); the Start-menu "Mokuro Bunko" shortcut and
+  `install.ps1 -Startup` start `Mokuro Bunko.exe`.
+- macOS: `Mokuro Bunko.app` (LSUIElement agent) whose main program is `mokuro-bunko`,
+  sealed ad hoc; not notarized (quarantine note as today); the LaunchAgent starts its tray.
+- Linux x86_64 full: `.desktop` entry + autostart entry (`mokuro-bunko tray`) + hicolor
+  icons; `doctor` checks the session bus and a StatusNotifier host (GNOME: the
+  AppIndicator extension).
 - Docker: no tray (unchanged). Licence notices updated for the new crates.
 
 As built: PACKAGING.md §1 "Desktop tray" (archive layout per target, the musl lite archive

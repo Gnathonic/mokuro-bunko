@@ -64,7 +64,10 @@ fn install_ocr_lists_and_checks_its_sources() {
         .arg(empty.path().join("backends"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("torch-cpu.tar.zst"));
+        .stderr(
+            predicate::str::contains("mokuro-bunko-backend-")
+                .and(predicate::str::contains("-cpu.tar.zst")),
+        );
 }
 
 #[cfg(not(feature = "ocr"))]

@@ -1,49 +1,61 @@
-//! The native side: a tao event loop that owns the tray icon and its muda menu, fed by
-//! the monitor (instance status), the supervisor and the update check.
+//! The tray's behaviour, independent of the toolkit: the monitor (instance status), the
+//! supervisor and the update check feed a [`MenuModel`]; a menu click comes back as an
+//! item id. The toolkit side ([`Ui`]) only shows the model: a StatusNotifierItem over
+//! D-Bus on Linux (`sni.rs`, ksni), tray-icon + muda on a tao event loop on Windows and
+//! macOS (`native.rs`).
 
 use crate::Options;
-use anyhow::{Context, Result};
-use bunko_tray::autostart;
-use bunko_tray::autoupdate::{self, Alarm, Notified};
-use bunko_tray::client::{Client, PauseRequest};
-use bunko_tray::discover;
-use bunko_tray::icons;
-use bunko_tray::launch;
-use bunko_tray::model::{self, IconState, InstanceView, MenuModel, UpdateView};
-use bunko_tray::monitor::{Live, Monitor};
-use bunko_tray::notify;
-use bunko_tray::paths::{self, Env, Layout, ProcessEnv};
-use bunko_tray::status::Status;
-use bunko_tray::supervise::{self, Launch, Supervisor, World};
-use bunko_tray::trayconf::TrayConfig;
-use bunko_tray::updates;
+use crate::autostart;
+use crate::autoupdate::{self, Alarm, Notified};
+use crate::client::{Client, PauseRequest};
+use crate::discover;
+use crate::launch;
+use crate::model::{self, InstanceView, MenuModel, UpdateView};
+use crate::monitor::{Live, Monitor};
+use crate::notify;
+use crate::paths::{self, Env, Layout, ProcessEnv};
+use crate::status::Status;
+use crate::supervise::{self, Launch, Supervisor, World};
+use crate::trayconf::TrayConfig;
+use crate::updates;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tao::event::{Event, StartCause};
-use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+
+#[cfg(any(windows, target_os = "macos"))]
+mod native;
+#[cfg(target_os = "linux")]
+mod sni;
 
 pub struct Setup {
     pub opts: Options,
+    /// This program (`mokuro-bunko`, or `Mokuro Bunko.exe` on Windows).
     pub exe: PathBuf,
     pub layout: Layout,
+    /// The `mokuro-bunko` command line the tray starts instances with.
     pub cli: Option<PathBuf>,
     /// Held for the life of the process (one tray per user).
     pub lock: std::fs::File,
 }
 
+/// What reaches the tray's loop from its threads and from the toolkit.
 #[derive(Debug)]
-enum UserEvent {
-    Menu(MenuEvent),
+pub enum UserEvent {
+    /// A menu item was clicked (its [`id`]).
+    Menu(String),
+    /// Something the menu shows may have changed.
     Changed,
+    /// The result of "Check for updates".
     Update(UpdateView),
 }
 
-mod id {
+/// Sends a [`UserEvent`] to the tray's loop (from any thread).
+pub type Sender = Arc<dyn Fn(UserEvent) + Send + Sync>;
+
+/// The menu item ids.
+pub mod id {
     pub const PAUSE_AFTER: &str = "pause_after";
     pub const PAUSE_NOW: &str = "pause_now";
     pub const PAUSE_HOUR: &str = "pause_hour";
@@ -59,139 +71,12 @@ mod id {
     pub const QUIT: &str = "quit";
 }
 
-/// The menu items whose text or state changes.
-struct Items {
-    menu: Menu,
-    status: Vec<MenuItem>,
-    stats_menu: Submenu,
-    stats: Vec<MenuItem>,
-    pause_after: MenuItem,
-    pause_now: MenuItem,
-    pause_hour: MenuItem,
-    pause_tomorrow: MenuItem,
-    resume: MenuItem,
-    dashboard: MenuItem,
-    library: MenuItem,
-    updates: MenuItem,
-    autostart: CheckMenuItem,
-    quit: MenuItem,
-}
-
-fn build_menu(m: &MenuModel, autostart_on: bool) -> Result<Items> {
-    let menu = Menu::new();
-    let status: Vec<MenuItem> = m
-        .status_lines
-        .iter()
-        .map(|l| MenuItem::new(l, false, None))
-        .collect();
-    for s in &status {
-        menu.append(s)?;
-    }
-    let stats_menu = Submenu::new("Statistics", true);
-    let stats: Vec<MenuItem> = m
-        .stats_lines
-        .iter()
-        .map(|l| MenuItem::new(l, false, None))
-        .collect();
-    for s in &stats {
-        stats_menu.append(s)?;
-    }
-    menu.append(&stats_menu)?;
-    menu.append(&PredefinedMenuItem::separator())?;
-    let item = |id: &str, text: &str, enabled: bool| MenuItem::with_id(id, text, enabled, None);
-    let pause_after = item(
-        id::PAUSE_AFTER,
-        "Pause after this volume",
-        m.can_pause_after,
-    );
-    let pause_now = item(id::PAUSE_NOW, "Pause now", m.can_pause_now);
-    let pause_hour = item(id::PAUSE_HOUR, "Pause for 1 hour", m.can_pause_now);
-    let pause_tomorrow = item(
-        id::PAUSE_TOMORROW,
-        "Pause until tomorrow 08:00",
-        m.can_pause_now,
-    );
-    let resume = item(id::RESUME, "Resume", m.can_resume);
-    menu.append_items(&[
-        &pause_after,
-        &pause_now,
-        &pause_hour,
-        &pause_tomorrow,
-        &resume,
-    ])?;
-    menu.append(&PredefinedMenuItem::separator())?;
-    let dashboard = item(id::DASHBOARD, "Open dashboard", m.can_open_dashboard);
-    let library = item(id::LIBRARY, "Open library", m.library_url.is_some());
-    let settings = item(id::SETTINGS, "Settings…", true);
-    let wizard = item(id::WIZARD, "Setup wizard…", true);
-    let logs = item(id::LOGS, "Show logs", true);
-    let updates = item(id::UPDATES, &m.update_text, true);
-    menu.append_items(&[&dashboard, &library, &settings, &wizard, &logs, &updates])?;
-    menu.append(&PredefinedMenuItem::separator())?;
-    let autostart =
-        CheckMenuItem::with_id(id::AUTOSTART, "Start at login", true, autostart_on, None);
-    let quit = item(id::QUIT, &m.quit_text, true);
-    menu.append_items(&[&autostart, &quit])?;
-    Ok(Items {
-        menu,
-        status,
-        stats_menu,
-        stats,
-        pause_after,
-        pause_now,
-        pause_hour,
-        pause_tomorrow,
-        resume,
-        dashboard,
-        library,
-        updates,
-        autostart,
-        quit,
-    })
-}
-
-impl Items {
-    /// Update in place; false when the number of lines changed (rebuild instead).
-    fn apply(&self, m: &MenuModel) -> bool {
-        if self.status.len() != m.status_lines.len() || self.stats.len() != m.stats_lines.len() {
-            return false;
-        }
-        for (item, text) in self.status.iter().zip(&m.status_lines) {
-            if item.text() != *text {
-                item.set_text(text);
-            }
-        }
-        for (item, text) in self.stats.iter().zip(&m.stats_lines) {
-            if item.text() != *text {
-                item.set_text(text);
-            }
-        }
-        self.pause_after.set_enabled(m.can_pause_after);
-        self.pause_now.set_enabled(m.can_pause_now);
-        self.pause_hour.set_enabled(m.can_pause_now);
-        self.pause_tomorrow.set_enabled(m.can_pause_now);
-        self.resume.set_enabled(m.can_resume);
-        self.dashboard.set_enabled(m.can_open_dashboard);
-        self.library.set_enabled(m.library_url.is_some());
-        if self.updates.text() != m.update_text {
-            self.updates.set_text(&m.update_text);
-        }
-        if self.quit.text() != m.quit_text {
-            self.quit.set_text(&m.quit_text);
-        }
-        let _ = &self.stats_menu;
-        true
-    }
-}
-
-fn icon(state: IconState) -> Option<Icon> {
-    match icons::rgba(state) {
-        Ok((rgba, w, h)) => Icon::from_rgba(rgba, w, h).ok(),
-        Err(e) => {
-            tracing::error!("tray icon {}: {e}", state.name());
-            None
-        }
-    }
+/// The toolkit side: shows a model (creating the icon the first time).
+pub trait Ui {
+    /// Show `m`; `autostart` is the "Start at login" check mark.
+    fn show(&mut self, m: &MenuModel, autostart: bool) -> anyhow::Result<()>;
+    /// Remove the icon (Quit).
+    fn hide(&mut self);
 }
 
 /// The supervisor's view of the world, backed by the monitor.
@@ -209,7 +94,7 @@ impl World for MonitorWorld {
     }
 }
 
-struct App {
+pub struct App {
     exe: PathBuf,
     layout: Layout,
     cli: Option<PathBuf>,
@@ -219,11 +104,9 @@ struct App {
     monitor: Arc<Monitor>,
     supervisor: Option<Supervisor>,
     update: UpdateView,
-    proxy: EventLoopProxy<UserEvent>,
-    tray: Option<TrayIcon>,
-    items: Option<Items>,
-    icon_state: Option<IconState>,
+    send: Sender,
     model: Option<MenuModel>,
+    autostart_shown: Option<bool>,
     first_run_checked: bool,
     /// Each role's last status that came from a live answer, and when (restart grace).
     last_good: HashMap<String, (Status, Instant)>,
@@ -231,124 +114,115 @@ struct App {
     notified: Notified,
 }
 
-pub fn run(setup: Setup) -> Result<()> {
-    let Setup {
-        opts,
-        exe,
-        layout,
-        cli,
-        lock,
-    } = setup;
-    #[allow(unused_mut)]
-    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-    #[cfg(target_os = "macos")]
+/// Run the tray until Quit (the toolkit of this platform).
+pub fn run(setup: Setup) -> anyhow::Result<()> {
+    #[cfg(any(windows, target_os = "macos"))]
+    return native::run(setup);
+    #[cfg(target_os = "linux")]
+    return sni::run(setup);
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
-        use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
-        // A menu-bar agent: no Dock icon even when started outside the .app bundle.
-        event_loop.set_activation_policy(ActivationPolicy::Accessory);
+        let _ = setup;
+        anyhow::bail!("there is no tray on this platform")
     }
-    let proxy = event_loop.create_proxy();
-    {
-        let p = proxy.clone();
-        MenuEvent::set_event_handler(Some(move |e| {
-            let _ = p.send_event(UserEvent::Menu(e));
-        }));
-    }
-    let env = ProcessEnv;
-    let tray_config_path = layout.tray_config(&env);
-    let tray_config = match TrayConfig::load(&tray_config_path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("{e}");
-            None
-        }
-    };
-    let changed: Arc<dyn Fn() + Send + Sync> = {
-        let p = proxy.clone();
-        Arc::new(move || {
-            let _ = p.send_event(UserEvent::Changed);
-        })
-    };
-    let candidates = {
-        let layout = layout.clone();
-        let tc = tray_config.clone();
-        let extra = opts.storages.clone();
-        Box::new(move || discover::candidate_storages(&ProcessEnv, &layout, tc.as_ref(), &extra))
-    };
-    let monitor = Monitor::start(candidates, changed.clone());
-    let child_env = layout.child_env(&env);
-    let supervisor = match (&tray_config, opts.supervise) {
-        (Some(tc), true) if !tc.managed.is_empty() => Some(Supervisor::start(
-            &tc.managed,
-            |m| m.command_args(&ProcessEnv),
-            Launch {
-                cli: cli.clone(),
-                env: child_env.clone(),
-                log_dir: layout.writable_log_dir(&env),
-            },
-            Arc::new(MonitorWorld(monitor.clone())),
-            changed.clone(),
-        )),
-        _ => None,
-    };
-    // Re-render every few seconds even without events ("restarting in N s").
-    {
-        let p = proxy.clone();
-        std::thread::spawn(move || {
-            loop {
-                std::thread::sleep(Duration::from_secs(2));
-                if p.send_event(UserEvent::Changed).is_err() {
-                    break;
-                }
-            }
-        });
-    }
-
-    let mut app = App {
-        exe,
-        layout,
-        cli,
-        child_env,
-        tray_config_path,
-        tray_config,
-        monitor,
-        supervisor,
-        update: UpdateView::default(),
-        proxy,
-        tray: None,
-        items: None,
-        icon_state: None,
-        model: None,
-        first_run_checked: false,
-        last_good: HashMap::new(),
-        notified: Notified::default(),
-    };
-    let _lock = lock;
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-        match event {
-            // The tray must be created once the loop runs (macOS requirement).
-            Event::NewEvents(StartCause::Init) => {
-                if let Err(e) = app.create_tray() {
-                    tracing::error!("could not create the tray icon: {e:#}");
-                    *control_flow = ControlFlow::Exit;
-                }
-            }
-            Event::UserEvent(UserEvent::Changed) => app.refresh(),
-            Event::UserEvent(UserEvent::Update(v)) => {
-                app.update = v;
-                app.refresh();
-            }
-            Event::UserEvent(UserEvent::Menu(e)) if app.on_menu(e.id.as_ref()) => {
-                *control_flow = ControlFlow::Exit;
-            }
-            _ => {}
-        }
-    })
 }
 
 impl App {
-    fn current_model(&mut self) -> MenuModel {
+    /// Start the monitor, the supervisor and the redraw ticker; events go to `send`.
+    pub fn start(setup: Setup, send: Sender) -> (App, std::fs::File) {
+        let Setup {
+            opts,
+            exe,
+            layout,
+            cli,
+            lock,
+        } = setup;
+        let env = ProcessEnv;
+        let tray_config_path = layout.tray_config(&env);
+        let tray_config = match TrayConfig::load(&tray_config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("{e}");
+                None
+            }
+        };
+        let changed: Arc<dyn Fn() + Send + Sync> = {
+            let s = send.clone();
+            Arc::new(move || s(UserEvent::Changed))
+        };
+        let candidates = {
+            let layout = layout.clone();
+            let tc = tray_config.clone();
+            let extra = opts.storages.clone();
+            Box::new(move || {
+                discover::candidate_storages(&ProcessEnv, &layout, tc.as_ref(), &extra)
+            })
+        };
+        let monitor = Monitor::start(candidates, changed.clone());
+        let child_env = layout.child_env(&env);
+        let supervisor = match (&tray_config, opts.supervise) {
+            (Some(tc), true) if !tc.managed.is_empty() => Some(Supervisor::start(
+                &tc.managed,
+                |m| m.command_args(&ProcessEnv),
+                Launch {
+                    cli: cli.clone(),
+                    env: child_env.clone(),
+                    log_dir: layout.writable_log_dir(&env),
+                },
+                Arc::new(MonitorWorld(monitor.clone())),
+                changed.clone(),
+            )),
+            _ => None,
+        };
+        // Re-render every few seconds even without events ("restarting in N s").
+        {
+            let s = send.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_secs(2));
+                    s(UserEvent::Changed);
+                }
+            });
+        }
+        let app = App {
+            exe,
+            layout,
+            cli,
+            child_env,
+            tray_config_path,
+            tray_config,
+            monitor,
+            supervisor,
+            update: UpdateView::default(),
+            send,
+            model: None,
+            autostart_shown: None,
+            first_run_checked: false,
+            last_good: HashMap::new(),
+            notified: Notified::default(),
+        };
+        (app, lock)
+    }
+
+    /// Handle one event; returns true to exit.
+    pub fn on_event(&mut self, ui: &mut dyn Ui, event: UserEvent) -> bool {
+        match event {
+            UserEvent::Changed => self.refresh(ui),
+            UserEvent::Update(v) => {
+                self.update = v;
+                self.refresh(ui);
+            }
+            UserEvent::Menu(id) => {
+                if self.on_menu(ui, &id) {
+                    return true;
+                }
+                self.refresh(ui);
+            }
+        }
+        false
+    }
+
+    pub fn current_model(&mut self) -> MenuModel {
         let lives = self.monitor.instances();
         let now = Instant::now();
         // Remember each role's last answer; a role that stops answering during its own
@@ -438,55 +312,26 @@ impl App {
         }
     }
 
-    fn create_tray(&mut self) -> Result<()> {
+    /// Show the current model (first call: create the icon). An error creating the icon
+    /// is returned: the tray cannot work without it.
+    pub fn refresh_or_fail(&mut self, ui: &mut dyn Ui) -> anyhow::Result<()> {
+        self.maybe_first_run();
+        self.notify_update_problems();
         let m = self.current_model();
-        let items = build_menu(&m, autostart::is_enabled(&ProcessEnv))?;
-        let mut builder = TrayIconBuilder::new()
-            .with_menu(Box::new(items.menu.clone()))
-            .with_tooltip(&m.tooltip)
-            .with_menu_on_left_click(true);
-        if let Some(i) = icon(m.icon) {
-            builder = builder.with_icon(i);
+        let autostart_on = autostart::is_enabled(&ProcessEnv);
+        if self.model.as_ref() == Some(&m) && self.autostart_shown == Some(autostart_on) {
+            return Ok(());
         }
-        let tray = builder.build().context("building the tray icon")?;
-        self.icon_state = Some(m.icon);
-        self.items = Some(items);
-        self.tray = Some(tray);
+        ui.show(&m, autostart_on)?;
         self.model = Some(m);
+        self.autostart_shown = Some(autostart_on);
         Ok(())
     }
 
-    fn refresh(&mut self) {
-        self.maybe_first_run();
-        self.notify_update_problems();
-        if self.tray.is_none() {
-            return;
+    fn refresh(&mut self, ui: &mut dyn Ui) {
+        if let Err(e) = self.refresh_or_fail(ui) {
+            tracing::error!("tray: {e:#}");
         }
-        let m = self.current_model();
-        let Some(tray) = &self.tray else { return };
-        if self.model.as_ref() == Some(&m) {
-            return;
-        }
-        let in_place = self.items.as_ref().is_some_and(|i| i.apply(&m));
-        if !in_place {
-            match build_menu(&m, autostart::is_enabled(&ProcessEnv)) {
-                Ok(items) => {
-                    tray.set_menu(Some(Box::new(items.menu.clone())));
-                    self.items = Some(items);
-                }
-                Err(e) => tracing::error!("menu: {e}"),
-            }
-        }
-        if self.icon_state != Some(m.icon) {
-            if let Some(i) = icon(m.icon) {
-                let _ = tray.set_icon(Some(i));
-            }
-            self.icon_state = Some(m.icon);
-        }
-        if self.model.as_ref().map(|o| &o.tooltip) != Some(&m.tooltip) {
-            let _ = tray.set_tooltip(Some(&m.tooltip));
-        }
-        self.model = Some(m);
     }
 
     /// Nothing configured and nothing running: open the setup wizard once.
@@ -519,7 +364,7 @@ impl App {
     fn spawn_gui(&self, next: &str) {
         let Some(cli) = &self.cli else {
             self.monitor
-                .set_notice("the mokuro-bunko program was not found next to the tray".into());
+                .set_notice("the mokuro-bunko command line was not found".into());
             return;
         };
         let mut cmd = std::process::Command::new(cli);
@@ -587,6 +432,7 @@ impl App {
             .filter(|l| l.status.as_ref().is_some_and(|s| s.can_pause()))
             .collect();
         let monitor = self.monitor.clone();
+        let send = self.send.clone();
         std::thread::spawn(move || {
             for live in targets {
                 let client = Client::new(&live.control);
@@ -611,6 +457,7 @@ impl App {
                     }
                 }
             }
+            send(UserEvent::Changed);
         });
     }
 
@@ -626,31 +473,31 @@ impl App {
         open_path(&dir);
     }
 
-    fn check_updates(&mut self) {
+    fn check_updates(&mut self, ui: &mut dyn Ui) {
         if self.update.available || self.model.as_ref().is_some_and(|m| m.update_available) {
             self.open_page("/app/settings#update");
             return;
         }
         let Some(cli) = self.cli.clone() else {
             self.monitor
-                .set_notice("the mokuro-bunko program was not found next to the tray".into());
+                .set_notice("the mokuro-bunko command line was not found".into());
             return;
         };
         self.update = UpdateView {
             checking: true,
             ..Default::default()
         };
-        self.refresh();
+        self.refresh(ui);
         let env = self.child_env.clone();
-        let p = self.proxy.clone();
+        let send = self.send.clone();
         std::thread::spawn(move || {
             let v = updates::check(&cli, &env);
             tracing::info!("update check: {v:?}");
-            let _ = p.send_event(UserEvent::Update(v));
+            send(UserEvent::Update(v));
         });
     }
 
-    fn toggle_autostart(&self) {
+    fn toggle_autostart(&mut self) {
         let env = ProcessEnv;
         let want = !autostart::is_enabled(&env);
         if let Err(e) = autostart::set(&env, &self.exe, want) {
@@ -659,15 +506,12 @@ impl App {
         } else {
             tracing::info!("start at login: {want}");
         }
-        if let Some(items) = &self.items {
-            items.autostart.set_checked(autostart::is_enabled(&env));
-        }
+        // The next refresh shows the check mark as it now is.
+        self.autostart_shown = None;
     }
 
-    fn quit(&mut self) {
-        if let Some(tray) = &self.tray {
-            let _ = tray.set_visible(false);
-        }
+    fn quit(&mut self, ui: &mut dyn Ui) {
+        ui.hide();
         if let Some(sup) = &self.supervisor {
             let monitor = self.monitor.clone();
             sup.stop_all(
@@ -679,12 +523,11 @@ impl App {
             );
         }
         self.monitor.stop();
-        self.tray = None;
         tracing::info!("quit");
     }
 
     /// Returns true to exit.
-    fn on_menu(&mut self, id: &str) -> bool {
+    fn on_menu(&mut self, ui: &mut dyn Ui, id: &str) -> bool {
         tracing::info!("menu: {id}");
         let now = chrono::Local::now();
         match id {
@@ -720,10 +563,10 @@ impl App {
             id::SETTINGS => self.open_page("/app/settings"),
             id::WIZARD => self.open_page("/app/setup"),
             id::LOGS => self.show_logs(),
-            id::UPDATES => self.check_updates(),
+            id::UPDATES => self.check_updates(ui),
             id::AUTOSTART => self.toggle_autostart(),
             id::QUIT => {
-                self.quit();
+                self.quit(ui);
                 return true;
             }
             other => tracing::debug!("menu event {other}"),

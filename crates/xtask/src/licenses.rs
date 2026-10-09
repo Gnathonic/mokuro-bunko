@@ -6,7 +6,7 @@
 //! the licence files each crate ships. Copyleft licences fail the build: the project's
 //! rule is that nothing GPL/LGPL/AGPL ends up in a release artifact.
 
-use crate::names::{BIN, Build, Ep, Flavor, TRAY_PKG};
+use crate::names::{BIN, Build, Ep, Flavor};
 use crate::util;
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -169,22 +169,9 @@ pub fn collect(
     build: &Build,
     version: &str,
     native_dirs: &[PathBuf],
-    tray_target: Option<&str>,
 ) -> Result<Report> {
     let (no_default, features) = build.cargo_features();
     let mut components = crates_of(root, BIN, &build.target, no_default, &features)?;
-    // The desktop tray ships in the same archive: its crates are listed too (for the
-    // Linux musl lite archive, those of its glibc build).
-    if let Some(t) = tray_target {
-        for c in crates_of(root, TRAY_PKG, t, false, &[])? {
-            if !components
-                .iter()
-                .any(|o| o.name == c.name && o.version == c.version)
-            {
-                components.push(c);
-            }
-        }
-    }
     components.sort_by(|a, b| {
         (a.name.as_str(), a.version.as_str()).cmp(&(b.name.as_str(), b.version.as_str()))
     });
@@ -195,14 +182,7 @@ pub fn collect(
         .iter()
         .find(|c| c.name == "ort-sys")
         .map(|c| c.version.as_str());
-    let markdown = render(
-        build,
-        version,
-        &components,
-        ort_version,
-        native_dirs,
-        tray_target,
-    );
+    let markdown = render(build, version, &components, ort_version, native_dirs);
     Ok(Report {
         components,
         markdown,
@@ -360,7 +340,6 @@ fn render(
     components: &[Component],
     ort_version: Option<&str>,
     native_dirs: &[PathBuf],
-    tray_target: Option<&str>,
 ) -> String {
     let mut md = String::new();
     let _ = writeln!(md, "# Third-party licences\n");
@@ -373,21 +352,21 @@ fn render(
         build.manifest_flavor()
     );
     let full = build.flavor == Flavor::Full && ort_version.is_some();
-    if let Some(t) = tray_target {
-        let _ = writeln!(md, "## Desktop tray (`mokuro-bunko-tray`)\n");
+    let tray = components
+        .iter()
+        .any(|c| c.name == "ksni" || c.name == "tray-icon");
+    if tray {
+        let _ = writeln!(md, "## Desktop tray (`mokuro-bunko tray`)\n");
         let _ = writeln!(
             md,
-            "The archive also holds `mokuro-bunko-tray` ({t}), the desktop tray; its crates \
-             are in the table below. Its icons are original artwork of this project \
-             (`packaging/icons/`, MPL-2.0)."
+            "The desktop tray is part of this program; its crates are in the table below. \
+             Its icons are original artwork of this project (`packaging/icons/`, MPL-2.0)."
         );
-        if t.contains("linux") {
+        if build.target.contains("linux") {
             let _ = writeln!(
                 md,
-                "\nOn Linux it uses the system's **GTK 3** (and its GLib, Pango, Cairo, \
-                 GDK-Pixbuf, ATK) and **libayatana-appindicator3** (or libappindicator3), \
-                 dynamically linked / loaded at run time from the distribution's packages \
-                 (LGPL-2.1+/LGPL-3); none of them is shipped in this archive."
+                "\nOn Linux it is a StatusNotifierItem on the session D-Bus (ksni and zbus, \
+                 pure Rust): it loads no GTK or AppIndicator library."
             );
         }
         let _ = writeln!(md);

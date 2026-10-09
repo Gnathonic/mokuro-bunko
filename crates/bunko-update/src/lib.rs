@@ -13,13 +13,12 @@
 
 pub mod auto;
 pub mod backend;
+pub mod layout;
 
 use base64::Engine as _;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
@@ -76,34 +75,42 @@ impl UpdateError {
     }
 }
 
-/// A verified new executable waiting next to the running one ([`Updater::stage`]).
+/// A verified new release unpacked next to the running executable ([`Updater::stage`]).
 #[derive(Debug)]
 pub struct Staged {
     pub version: String,
     /// The new executable (runnable: prefetch steps run it before it is installed).
     pub binary: PathBuf,
-    /// The verified archive (companions come out of it on commit).
-    pub archive: PathBuf,
-    url: String,
-    exe_dir: PathBuf,
+    unpacked: layout::Unpacked,
+    /// The downloaded archive (removed once unpacked or discarded).
+    archive: PathBuf,
 }
 
 impl Staged {
-    /// Swap the new executable in for the running one (and the installed companions).
+    /// Put the new release in place of the running one: the executable, the other
+    /// copies of it in this install (Windows: the `Mokuro Bunko.exe` / `bin` pair) and
+    /// the macOS app bundle ([`layout::Plan`]).
     pub fn commit(self) -> Result<String, UpdateError> {
-        let r = self_replace::self_replace(&self.binary).map_err(UpdateError::Io);
-        if r.is_ok() {
-            update_companions(&self.archive, &self.url, &self.exe_dir);
-        }
-        let _ = std::fs::remove_file(&self.binary);
+        let r = current_exe()
+            .map_err(UpdateError::Io)
+            .and_then(|exe| layout::Plan::for_exe(&exe).commit(&self.unpacked));
+        self.unpacked.remove();
         let _ = std::fs::remove_file(&self.archive);
         r.map(|()| self.version)
     }
 
     pub fn discard(self) {
-        let _ = std::fs::remove_file(&self.binary);
+        self.unpacked.remove();
         let _ = std::fs::remove_file(&self.archive);
     }
+}
+
+/// A file of a release (a disk image) and its checksum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRef {
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +148,12 @@ pub struct Manifest {
     /// (`install-ocr`; [`backend`]). Absent in manifests before 0.7.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub backends: BTreeMap<String, BTreeMap<String, backend::BackendArtifact>>,
+    /// macOS: target triple → flavor → the disk image (`Mokuro Bunko.app`), which an
+    /// updater from 0.7.0-beta.3 on installs from instead of the `artifacts` archive.
+    /// Added in 0.7.0-beta.3; older updaters ignore it (they read `artifacts`, which
+    /// must then still name an archive for them).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bundles: BTreeMap<String, BTreeMap<String, FileRef>>,
 }
 
 /// Read `loc`: an http(s) URL, a `file://` URL or a plain path (mirrors on disk, tests).
@@ -173,6 +186,22 @@ impl Manifest {
     pub fn semver(&self) -> Result<semver::Version, UpdateError> {
         semver::Version::parse(self.version.trim_start_matches('v'))
             .map_err(|e| UpdateError::Manifest(e.to_string()))
+    }
+
+    /// What this build installs from on `target`: on macOS the disk image when the
+    /// release has one, else the archive. `(url, sha256, size, binary)`.
+    pub fn download(&self, target: &str, flavor: &str) -> Result<Artifact, UpdateError> {
+        if target.ends_with("-apple-darwin")
+            && let Some(d) = self.bundles.get(target).and_then(|f| f.get(flavor))
+        {
+            return Ok(Artifact {
+                url: d.url.clone(),
+                sha256: d.sha256.clone(),
+                size: d.size,
+                binary: "mokuro-bunko".into(),
+            });
+        }
+        self.artifact(target, flavor).cloned()
     }
 
     pub fn artifact(&self, target: &str, flavor: &str) -> Result<&Artifact, UpdateError> {
@@ -412,45 +441,42 @@ impl Updater {
                 bunko_core::VERSION
             )));
         }
-        let artifact = manifest.artifact(TARGET, &self.flavor)?.clone();
+        let artifact = manifest.download(TARGET, &self.flavor)?;
         let dir = exe
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(std::env::temp_dir);
-        if let Err(e) = auto::check_space(&dir, artifact.size.saturating_mul(3)) {
+        if let Err(e) = auto::check_space(&dir, artifact.size.saturating_mul(4)) {
             return Err(UpdateError::NoSpace(e));
         }
         let archive = dir.join(format!(".mokuro-bunko-update-{}.part", manifest.version));
-        let binary = dir.join(format!(
-            ".mokuro-bunko-update-{}{}",
-            manifest.version,
-            std::env::consts::EXE_SUFFIX
-        ));
+        let staging = dir.join(format!(".mokuro-bunko-update-{}.d", manifest.version));
         let result = async {
             self.download_verified(&artifact, &archive).await?;
-            let (a, u, b, out) = (
+            let (a, kind, b, out) = (
                 archive.clone(),
-                artifact.url.clone(),
+                layout::Kind::of(&artifact.url),
                 artifact.binary.clone(),
-                binary.clone(),
+                staging.clone(),
             );
-            tokio::task::spawn_blocking(move || extract_binary(&a, &u, &b, &out))
+            tokio::task::spawn_blocking(move || layout::unpack(&a, kind, &b, &out))
                 .await
                 .map_err(|e| UpdateError::Unpack(e.to_string()))?
         }
         .await;
-        if let Err(e) = result {
-            let _ = std::fs::remove_file(&archive);
-            let _ = std::fs::remove_file(&binary);
-            return Err(e);
+        let _ = std::fs::remove_file(&archive);
+        match result {
+            Ok(unpacked) => Ok(Staged {
+                version: manifest.version.clone(),
+                binary: unpacked.cli.clone(),
+                unpacked,
+                archive,
+            }),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                Err(e)
+            }
         }
-        Ok(Staged {
-            version: manifest.version.clone(),
-            binary,
-            archive,
-            url: artifact.url,
-            exe_dir: dir,
-        })
     }
 
     /// Where `release.json` is. GitHub's `releases/latest/download/` never points at a
@@ -511,7 +537,7 @@ impl Updater {
                 status.docker_image = m.docker.get(&self.flavor).cloned();
                 status.can_apply = status.available
                     && install.can_apply()
-                    && m.artifact(TARGET, &self.flavor).is_ok();
+                    && m.download(TARGET, &self.flavor).is_ok();
             }
             // Nothing published (yet): the check worked, there is just nothing to
             // update to. Not an error, so automatic updates do not count it as one.
@@ -543,16 +569,11 @@ impl Updater {
                 bunko_core::VERSION
             )));
         }
-        let artifact = manifest.artifact(TARGET, &self.flavor)?.clone();
-        // Download next to the executable so the final swap is a same-filesystem rename.
-        let dir = exe
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(std::env::temp_dir);
-        let download = dir.join(format!(".mokuro-bunko-update-{}.part", manifest.version));
-        let result = self.download_and_install(&artifact, &download).await;
-        let _ = tokio::fs::remove_file(&download).await;
-        result.map(|_| manifest.version)
+        drop(exe);
+        let staged = self.stage(&manifest).await?;
+        tokio::task::spawn_blocking(move || staged.commit())
+            .await
+            .map_err(|e| UpdateError::Unpack(e.to_string()))?
     }
 
     /// Download `artifact` to `download` and check its sha256 against the manifest.
@@ -575,8 +596,11 @@ impl Updater {
                 .await?
                 .error_for_status()?;
             let mut file = tokio::fs::File::create(download).await?;
+            let name = artifact.url.rsplit('/').next().unwrap_or(&artifact.url);
+            let mut progress = Progress::new(name, artifact.size);
             while let Some(chunk) = resp.chunk().await? {
                 file.write_all(&chunk).await?;
+                progress.add(chunk.len() as u64);
             }
             file.flush().await?;
         }
@@ -593,50 +617,6 @@ impl Updater {
             });
         }
         Ok(())
-    }
-
-    async fn download_and_install(
-        &self,
-        artifact: &Artifact,
-        download: &Path,
-    ) -> Result<(), UpdateError> {
-        let mut resp = self
-            .client
-            .get(&artifact.url)
-            .send()
-            .await?
-            .error_for_status()?;
-        let mut file = tokio::fs::File::create(download).await?;
-        let mut hasher = Sha256::new();
-        while let Some(chunk) = resp.chunk().await? {
-            hasher.update(&chunk);
-            file.write_all(&chunk).await?;
-        }
-        file.flush().await?;
-        drop(file);
-        let got = hex::encode(hasher.finalize());
-        if !got.eq_ignore_ascii_case(&artifact.sha256) {
-            return Err(UpdateError::Checksum {
-                got,
-                want: artifact.sha256.clone(),
-            });
-        }
-        let download = download.to_path_buf();
-        let binary = artifact.binary.clone();
-        let url = artifact.url.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), UpdateError> {
-            let unpacked = download.with_extension("bin");
-            extract_binary(&download, &url, &binary, &unpacked)?;
-            let r = self_replace::self_replace(&unpacked).map_err(UpdateError::Io);
-            let _ = std::fs::remove_file(&unpacked);
-            r?;
-            if let Some(dir) = download.parent() {
-                update_companions(&download, &url, dir);
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| UpdateError::Unpack(e.to_string()))?
     }
 }
 
@@ -682,6 +662,41 @@ pub fn prerelease_lookup(url: &str, channel: &str) -> Option<(String, String)> {
     Some((repo.to_string(), file.to_string()))
 }
 
+/// Download progress in the log: a line every 10 %, as the bytes arrive.
+struct Progress {
+    name: String,
+    total: u64,
+    done: u64,
+    next: u64,
+}
+
+impl Progress {
+    fn new(name: &str, total: u64) -> Progress {
+        Progress {
+            name: name.to_string(),
+            total,
+            done: 0,
+            next: 10,
+        }
+    }
+
+    fn add(&mut self, n: u64) {
+        self.done += n;
+        if self.total == 0 {
+            return;
+        }
+        let pct = self.done.saturating_mul(100) / self.total;
+        if pct >= self.next {
+            tracing::info!(
+                "update: {} {pct}% of {:.0} MB",
+                self.name,
+                self.total as f64 / 1e6
+            );
+            self.next = (pct / 10 + 1) * 10;
+        }
+    }
+}
+
 /// Pull `binary` out of a `.tar.gz`, `.zip` or bare executable download into `out`.
 pub fn extract_binary(
     archive: &Path,
@@ -689,126 +704,11 @@ pub fn extract_binary(
     binary: &str,
     out: &Path,
 ) -> Result<(), UpdateError> {
-    let lower = url.to_ascii_lowercase();
-    let mut bytes = Vec::new();
-    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        let mut tar =
-            tar::Archive::new(flate2::read::GzDecoder::new(std::fs::File::open(archive)?));
-        let mut found = false;
-        for entry in tar.entries()? {
-            let mut entry = entry?;
-            let path = entry.path()?.to_path_buf();
-            if path.file_name().is_some_and(|n| n == binary) {
-                entry.read_to_end(&mut bytes)?;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            return Err(UpdateError::Unpack(format!(
-                "{binary} is not in the archive"
-            )));
-        }
-    } else if lower.ends_with(".zip") {
-        let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?)
-            .map_err(|e| UpdateError::Unpack(e.to_string()))?;
-        let name = zip
-            .file_names()
-            .find(|n| *n == binary || n.rsplit('/').next() == Some(binary))
-            .map(str::to_string)
-            .ok_or_else(|| UpdateError::Unpack(format!("{binary} is not in the archive")))?;
-        zip.by_name(&name)
-            .map_err(|e| UpdateError::Unpack(e.to_string()))?
-            .read_to_end(&mut bytes)?;
-    } else {
-        std::fs::copy(archive, out)?;
-        set_executable(out)?;
-        return Ok(());
-    }
-    std::fs::write(out, bytes)?;
-    set_executable(out)?;
-    Ok(())
-}
-
-fn set_executable(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
-
-/// Executables installed next to `mokuro-bunko` from the same archive, which an update
-/// replaces too when they are there: the desktop tray (GUI.md §6). In the macOS archive
-/// the tray is inside `mokuro-bunko.app`.
-pub const COMPANIONS: &[&str] = &[if cfg!(windows) {
-    "mokuro-bunko-tray.exe"
-} else {
-    "mokuro-bunko-tray"
-}];
-
-/// Where the installed copies of companion `name` are, under the executable's `dir`.
-fn companion_paths(dir: &Path, name: &str) -> Vec<PathBuf> {
-    [
-        dir.join(name),
-        dir.join("mokuro-bunko.app")
-            .join("Contents")
-            .join("MacOS")
-            .join(name),
-        // The app from the macOS disk image, should a CLI live next to it.
-        dir.join("Mokuro Bunko.app")
-            .join("Contents")
-            .join("MacOS")
-            .join(name),
-    ]
-    .into_iter()
-    .filter(|p| p.is_file())
-    .collect()
-}
-
-/// Replace the installed [`COMPANIONS`] under `dir` with the ones in the downloaded
-/// archive. Best effort, after the main executable was replaced: a failure is logged and
-/// the old companion keeps working. A running tray goes on running its old copy until it
-/// is started again. Returns the paths replaced.
-pub fn update_companions(archive: &Path, url: &str, dir: &Path) -> Vec<PathBuf> {
-    let mut done = Vec::new();
-    for name in COMPANIONS {
-        for target in companion_paths(dir, name) {
-            let new = target.with_file_name(format!(".{name}.new"));
-            let result = extract_binary(archive, url, name, &new)
-                .and_then(|()| replace_file(&new, &target).map_err(UpdateError::Io));
-            match result {
-                Ok(()) => done.push(target),
-                Err(e) => {
-                    let _ = std::fs::remove_file(&new);
-                    tracing::warn!("update: {} not replaced: {e}", target.display());
-                }
-            }
-        }
-    }
-    done
-}
-
-/// Put `new` in place of `target`. Windows cannot overwrite a running executable but can
-/// rename it, so the old one moves aside (`.old`, removed now or by the next update).
-fn replace_file(new: &Path, target: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        let old = target.with_extension("exe.old");
-        let _ = std::fs::remove_file(&old);
-        std::fs::rename(target, &old)?;
-        if let Err(e) = std::fs::rename(new, target) {
-            let _ = std::fs::rename(&old, target);
-            return Err(e);
-        }
-        let _ = std::fs::remove_file(&old);
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    std::fs::rename(new, target)
+    let stage = out.with_extension("unpack");
+    let un = layout::unpack(archive, layout::Kind::of(url), binary, &stage)?;
+    let r = std::fs::rename(&un.cli, out).map_err(UpdateError::Io);
+    un.remove();
+    r
 }
 
 /// This process's executable path. On Linux, once an update has replaced the file,
@@ -834,17 +734,16 @@ pub fn previous_exe_path() -> std::io::Result<PathBuf> {
     )))
 }
 
-/// The installed [`COMPANIONS`] next to the running executable and where their copies go.
+/// The other copies of the program in this install ([`layout::Plan`]) and where their
+/// backups go.
 fn companion_backups() -> Vec<(PathBuf, PathBuf)> {
-    let Some(dir) = current_exe()
-        .ok()
-        .and_then(|e| e.parent().map(Path::to_path_buf))
-    else {
+    let Ok(exe) = current_exe() else {
         return Vec::new();
     };
-    COMPANIONS
-        .iter()
-        .flat_map(|name| companion_paths(&dir, name))
+    layout::Plan::for_exe(&exe)
+        .programs()
+        .into_iter()
+        .skip(1)
         .map(|p| {
             let name = p
                 .file_name()
@@ -857,7 +756,7 @@ fn companion_backups() -> Vec<(PathBuf, PathBuf)> {
 }
 
 /// Copy the running executable aside ([`previous_exe_path`]) before an update replaces
-/// it, and the installed companions (the tray) beside theirs.
+/// it, and the other copies in this install beside theirs.
 pub fn backup_running() -> std::io::Result<PathBuf> {
     let exe = current_exe()?;
     let prev = previous_exe_path()?;
@@ -872,8 +771,8 @@ pub fn backup_running() -> std::io::Result<PathBuf> {
     Ok(prev)
 }
 
-/// Put the backed-up executable (and companions) back in place of the running one (a
-/// rollback).
+/// Put the backed-up executable (and copies) back in place of the running one (a
+/// rollback). A macOS app bundle is sealed again.
 pub fn restore_previous() -> std::io::Result<()> {
     let prev = previous_exe_path()?;
     if !prev.is_file() {
@@ -886,9 +785,14 @@ pub fn restore_previous() -> std::io::Result<()> {
     let _ = std::fs::remove_file(&prev);
     for (installed, backup) in companion_backups() {
         if backup.is_file()
-            && let Err(e) = replace_file(&backup, &installed)
+            && let Err(e) = layout::replace_file(&backup, &installed)
         {
             tracing::warn!("rollback: {} not restored: {e}", installed.display());
+        }
+    }
+    if let Ok(exe) = current_exe() {
+        for b in layout::Plan::for_exe(&exe).bundles {
+            layout::seal_bundle(&b);
         }
     }
     Ok(())
@@ -957,62 +861,6 @@ pub(crate) fn now_iso() -> String {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn update_replaces_installed_companions_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let tray = COMPANIONS[0];
-        // The archive: top/mokuro-bunko + top/<tray> + the macOS bundle's copy.
-        let archive = dir.path().join("a.tar.gz");
-        {
-            let gz = flate2::write::GzEncoder::new(
-                std::fs::File::create(&archive).unwrap(),
-                flate2::Compression::fast(),
-            );
-            let mut tar = tar::Builder::new(gz);
-            for (path, body) in [
-                ("top/mokuro-bunko", &b"cli-new"[..]),
-                (&*format!("top/{tray}"), &b"tray-new"[..]),
-            ] {
-                let mut h = tar::Header::new_gnu();
-                h.set_size(body.len() as u64);
-                h.set_mode(0o755);
-                h.set_cksum();
-                tar.append_data(&mut h, path, body).unwrap();
-            }
-            tar.into_inner().unwrap().finish().unwrap();
-        }
-        let install = dir.path().join("install");
-        std::fs::create_dir_all(&install).unwrap();
-        // No tray installed: nothing to do.
-        assert!(update_companions(&archive, "x.tar.gz", &install).is_empty());
-        std::fs::write(install.join(tray), b"tray-old").unwrap();
-        let bundle = install.join("mokuro-bunko.app/Contents/MacOS");
-        std::fs::create_dir_all(&bundle).unwrap();
-        std::fs::write(bundle.join(tray), b"tray-old").unwrap();
-        let done = update_companions(&archive, "x.tar.gz", &install);
-        assert_eq!(done.len(), 2);
-        assert_eq!(std::fs::read(install.join(tray)).unwrap(), b"tray-new");
-        assert_eq!(std::fs::read(bundle.join(tray)).unwrap(), b"tray-new");
-        assert!(!install.join(format!(".{tray}.new")).exists());
-        // An archive without the tray leaves the installed one alone.
-        let bare = dir.path().join("b.tar.gz");
-        {
-            let gz = flate2::write::GzEncoder::new(
-                std::fs::File::create(&bare).unwrap(),
-                flate2::Compression::fast(),
-            );
-            let mut tar = tar::Builder::new(gz);
-            let mut h = tar::Header::new_gnu();
-            h.set_size(3);
-            h.set_cksum();
-            tar.append_data(&mut h, "top/mokuro-bunko", &b"cli"[..])
-                .unwrap();
-            tar.into_inner().unwrap().finish().unwrap();
-        }
-        assert!(update_companions(&bare, "x.tar.gz", &install).is_empty());
-        assert_eq!(std::fs::read(install.join(tray)).unwrap(), b"tray-new");
-    }
-
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 

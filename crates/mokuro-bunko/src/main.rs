@@ -15,6 +15,8 @@ mod gui;
 mod local_ocr;
 mod logging;
 mod machine;
+#[cfg(feature = "tray")]
+mod migrate;
 #[cfg(feature = "ocr")]
 mod ocr_probe;
 #[cfg(feature = "ocr")]
@@ -56,13 +58,20 @@ pub fn update_flavor() -> &'static str {
 }
 
 fn main() {
-    // A double-click (Windows Explorer, a macOS app bundle) has no arguments and no
-    // terminal of its own: open the desktop app. From a terminal, no arguments still
-    // print the help.
-    let cli = if std::env::args_os().len() == 1 && double_clicked() {
-        Cli::parse_from(["mokuro-bunko", "gui"])
+    // Old macOS versions pass -psn_… to apps the Finder starts.
+    let args: Vec<std::ffi::OsString> = std::env::args_os()
+        .enumerate()
+        .filter(|(i, a)| *i == 0 || !a.to_string_lossy().starts_with("-psn_"))
+        .map(|(_, a)| a)
+        .collect();
+    let cli = if args.len() == 1 {
+        match no_argument_start() {
+            Start::Help => Cli::parse_from(args),
+            Start::Run(cmd) => Cli::parse_from(["mokuro-bunko", cmd]),
+            Start::Done => return,
+        }
     } else {
-        Cli::parse()
+        Cli::parse_from(args)
     };
     if cli.version {
         println!("mokuro-bunko, version {}", bunko_core::VERSION);
@@ -109,6 +118,75 @@ fn run(cli: Cli) -> out::CmdResult {
         Command::Processor(c) => cmd::processor::run(&ctx, c),
         Command::Healthcheck { url } => cmd::healthcheck::run(&ctx, url),
         Command::Gui(args) => cmd::gui::run(&ctx, args),
+        #[cfg(feature = "tray")]
+        Command::Tray(args) => cmd::tray::run(&ctx, args),
+    }
+}
+
+enum Start {
+    /// The help (a terminal, a script).
+    Help,
+    /// This command.
+    Run(&'static str),
+    /// Nothing more to do.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Done,
+}
+
+/// What a start without arguments runs. From a terminal: the help. Started by the
+/// desktop: the Windows GUI build (`Mokuro Bunko.exe`) and the macOS app run the tray,
+/// which opens the setup wizard on a machine with nothing set up; the Windows command
+/// line double-clicked in Explorer starts `Mokuro Bunko.exe` above its `bin` folder and
+/// exits, or else opens the desktop app pages (`gui`).
+fn no_argument_start() -> Start {
+    if windows_gui_subsystem() {
+        return Start::Run(if cfg!(feature = "tray") {
+            "tray"
+        } else {
+            "gui"
+        });
+    }
+    if !double_clicked() {
+        return Start::Help;
+    }
+    #[cfg(windows)]
+    if let Some(gui) = bunko_update::current_exe().ok().and_then(|exe| {
+        let root = exe.parent()?.parent()?;
+        let gui = root.join(bunko_update::layout::WINDOWS_GUI_EXE);
+        gui.is_file().then_some(gui)
+    }) && std::process::Command::new(&gui).spawn().is_ok()
+    {
+        return Start::Done;
+    }
+    if cfg!(all(feature = "tray", target_os = "macos")) {
+        Start::Run("tray")
+    } else {
+        Start::Run("gui")
+    }
+}
+
+/// This is the GUI-subsystem build (`Mokuro Bunko.exe`: Windows gives it no console).
+fn windows_gui_subsystem() -> bool {
+    #[cfg(windows)]
+    {
+        // SAFETY: the module handle of this executable stays valid while it runs; the
+        // reads stay inside its mapped PE headers (DOS header e_lfanew, then the
+        // optional header's Subsystem field at offset 68, the same in PE32 and PE32+).
+        unsafe {
+            let base = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null())
+                as *const u8;
+            if base.is_null() {
+                return false;
+            }
+            let e_lfanew = std::ptr::read_unaligned(base.add(0x3c) as *const u32) as usize;
+            let subsystem =
+                std::ptr::read_unaligned(base.add(e_lfanew + 4 + 20 + 68) as *const u16);
+            subsystem == bunko_update::layout::PE_SUBSYSTEM_GUI
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 

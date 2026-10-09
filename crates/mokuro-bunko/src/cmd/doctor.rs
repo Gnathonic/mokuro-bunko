@@ -739,92 +739,84 @@ fn as_problem(c: Check) -> Option<bunko_control::Problem> {
     })
 }
 
-/// The desktop tray (`mokuro-bunko-tray` next to this program, Linux): the system
-/// libraries it needs at run time, GTK 3 and an AppIndicator library, with the
-/// distribution packages that provide them (GUI.md §6). The CLI itself never needs them.
+/// The desktop tray on Linux (`mokuro-bunko tray`, GUI.md §5): a StatusNotifierItem,
+/// so it needs no GTK or AppIndicator library, only the session D-Bus and a
+/// StatusNotifier host (the panel's tray; on GNOME the AppIndicator extension). Checked
+/// in a desktop session only: a server or processor never needs it.
 fn check_tray_libs() -> Option<Check> {
-    if !cfg!(target_os = "linux") {
-        return None;
+    #[cfg(all(target_os = "linux", feature = "tray"))]
+    {
+        let set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty());
+        if !set("DISPLAY") && !set("WAYLAND_DISPLAY") {
+            return None;
+        }
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        Some(tray_host_check(&bunko_tray::session::host(), &desktop))
     }
-    let exe = std::env::current_exe().ok()?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-    let tray = exe.parent()?.join("mokuro-bunko-tray");
-    if !tray.is_file() {
-        return None;
+    #[cfg(not(all(target_os = "linux", feature = "tray")))]
+    {
+        None
     }
-    Some(tray_libs_check(&|lib| linux_lib_present(lib)))
 }
 
-fn tray_libs_check(present: &dyn Fn(&str) -> bool) -> Check {
-    let gtk = present("libgtk-3.so.0");
-    let indicator = ["libayatana-appindicator3.so.1", "libappindicator3.so.1"]
-        .iter()
-        .any(|l| present(l));
-    if gtk && indicator {
-        return Check::pass("Desktop tray", "GTK 3 and AppIndicator libraries found");
-    }
-    let mut missing = Vec::new();
-    if !gtk {
-        missing.push("GTK 3 (libgtk-3.so.0)");
-    }
-    if !indicator {
-        missing.push("AppIndicator (libayatana-appindicator3.so.1)");
-    }
-    let (mut deb, mut fedora, mut arch, mut suse) = (vec![], vec![], vec![], vec![]);
-    if !gtk {
-        deb.push("libgtk-3-0t64 (Debian 13 / Ubuntu 24.04+; libgtk-3-0 before)");
-        fedora.push("gtk3");
-        arch.push("gtk3");
-        suse.push("libgtk-3-0");
-    }
-    if !indicator {
-        deb.push("libayatana-appindicator3-1");
-        fedora.push("libayatana-appindicator-gtk3");
-        arch.push("libayatana-appindicator");
-        suse.push("libayatana-appindicator3-1");
-    }
-    Check::warn(
-        "Desktop tray",
-        format!(
-            "mokuro-bunko-tray cannot start: missing {}",
-            missing.join(" and ")
-        ),
-        Some(format!(
-            "install them: Debian/Ubuntu: apt install {}; Fedora: dnf install {}; Arch: pacman -S {}; \
-             openSUSE: zypper install {}. GNOME also needs the \"AppIndicator and KStatusNotifierItem \
-             Support\" extension to show tray icons. The server and processor do not need any of this.",
-            deb.join(" "),
-            fedora.join(" "),
-            arch.join(" "),
-            suse.join(" ")
-        )),
+#[cfg_attr(not(all(target_os = "linux", feature = "tray")), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TrayHost {
+    Ready,
+    NoBus(String),
+    NoWatcher,
+    NoHost,
+}
+
+#[cfg(all(target_os = "linux", feature = "tray"))]
+fn tray_host_check(host: &bunko_tray::session::Host, desktop: &str) -> Check {
+    use bunko_tray::session::Host;
+    tray_check(
+        &match host {
+            Host::Ready => TrayHost::Ready,
+            Host::NoBus(e) => TrayHost::NoBus(e.clone()),
+            Host::NoWatcher => TrayHost::NoWatcher,
+            Host::NoHost => TrayHost::NoHost,
+        },
+        desktop,
     )
 }
 
-/// Whether the dynamic loader can find `lib` (`ldconfig -p`, then the usual directories).
-fn linux_lib_present(lib: &str) -> bool {
-    let cache = ["/sbin/ldconfig", "/usr/sbin/ldconfig", "ldconfig"]
-        .iter()
-        .find_map(|c| std::process::Command::new(c).arg("-p").output().ok())
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-    if cache
-        .lines()
-        .any(|line| line.trim_start().starts_with(&format!("{lib} ")))
-    {
-        return true;
+#[cfg_attr(not(all(target_os = "linux", feature = "tray")), allow(dead_code))]
+fn tray_check(host: &TrayHost, desktop: &str) -> Check {
+    let gnome = desktop.to_ascii_lowercase().contains("gnome");
+    let hint = if gnome {
+        "GNOME shows tray icons with the \"AppIndicator and KStatusNotifierItem Support\" extension: \
+         Debian/Ubuntu: apt install gnome-shell-extension-appindicator; Fedora: dnf install \
+         gnome-shell-extension-appindicator; Arch: pacman -S gnome-shell-extension-appindicator; \
+         then enable it (gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com) and log in again. \
+         The server and processor do not need it."
+            .to_string()
+    } else {
+        "Add the panel's system tray (status notifier) widget, or use a desktop with one \
+         (KDE Plasma, Xfce, LXQt, Cinnamon, MATE, Budgie; GNOME with the AppIndicator extension). \
+         The server and processor do not need it."
+            .to_string()
+    };
+    match host {
+        TrayHost::Ready => Check::pass(
+            "Desktop tray",
+            "session D-Bus and a StatusNotifier host found (the tray icon can show)",
+        ),
+        TrayHost::NoBus(e) => Check::warn(
+            "Desktop tray",
+            format!("no session D-Bus ({e}): `mokuro-bunko tray` cannot show its icon"),
+            Some(
+                "Run it inside your desktop session (it needs DBUS_SESSION_BUS_ADDRESS). The server and processor do not need it."
+                    .into(),
+            ),
+        ),
+        TrayHost::NoWatcher | TrayHost::NoHost => Check::warn(
+            "Desktop tray",
+            "no StatusNotifier host in this session: the tray icon cannot show".to_string(),
+            Some(hint),
+        ),
     }
-    [
-        "/lib",
-        "/lib64",
-        "/usr/lib",
-        "/usr/lib64",
-        "/lib/x86_64-linux-gnu",
-        "/usr/lib/x86_64-linux-gnu",
-        "/usr/local/lib",
-    ]
-    .iter()
-    .any(|d| Path::new(d).join(lib).exists())
 }
 
 #[cfg(test)]
@@ -832,19 +824,20 @@ mod tray_lib_tests {
     use super::*;
 
     #[test]
-    fn names_the_missing_packages() {
-        let ok = tray_libs_check(&|_| true);
-        assert!(ok.status == Status::Pass);
-        let c = tray_libs_check(&|l| l == "libgtk-3.so.0");
+    fn names_what_the_tray_needs() {
+        assert!(tray_check(&TrayHost::Ready, "KDE").status == Status::Pass);
+        let c = tray_check(&TrayHost::NoWatcher, "ubuntu:GNOME");
         assert!(c.status == Status::Warn);
-        assert!(c.detail.contains("AppIndicator"));
-        assert!(!c.detail.contains("GTK 3 ("));
         let hint = c.hint.unwrap();
-        assert!(hint.contains("libayatana-appindicator3-1"));
-        assert!(!hint.contains("pacman -S gtk3"));
-        let c = tray_libs_check(&|l| l == "libappindicator3.so.1");
-        assert!(c.detail.contains("GTK 3"));
-        assert!(c.hint.unwrap().contains("pacman -S gtk3"));
+        assert!(
+            hint.contains("gnome-shell-extension-appindicator"),
+            "{hint}"
+        );
+        assert!(!hint.contains("gtk"), "{hint}");
+        let c = tray_check(&TrayHost::NoHost, "XFCE");
+        assert!(c.hint.unwrap().contains("system tray"));
+        let c = tray_check(&TrayHost::NoBus("no address".into()), "KDE");
+        assert!(c.detail.contains("session D-Bus"));
     }
 }
 

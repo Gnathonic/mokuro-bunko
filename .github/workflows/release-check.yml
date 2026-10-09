@@ -1,5 +1,5 @@
 # A release dry run on any branch, without a tag: the jobs of a release build
-# (release-build.yml: tests, every platform archive, the macOS disk images, the
+# (release-build.yml: tests, the four downloads, the macOS update archive, the
 # Windows/macOS/Linux backend packs) and the Docker images (release-docker.yml, built
 # but not pushed), then the unsigned release.json and the asset list the draft release
 # would get. Signs nothing, uses no secret, creates no tag or release and pushes no
@@ -104,26 +104,40 @@ jobs:
       - name: the draft's assets are complete
         run: |
           set -eu
-          p="mokuro-bunko-$VERSION"
-          want_archives=(x86_64-unknown-linux-musl/lite aarch64-unknown-linux-musl/lite
-            x86_64-unknown-linux-gnu/full x86_64-pc-windows-msvc/full x86_64-pc-windows-msvc/lite
-            aarch64-apple-darwin/full aarch64-apple-darwin/lite x86_64-apple-darwin/lite)
+          v="$VERSION"
+          # What release.yml uploads: the four downloads, the macOS archive of the older
+          # updaters, the packs (whole or in parts), release.json (+ .sig) and SHA256SUMS.
+          want_files=("mokuro-bunko-$v-windows.zip" "mokuro-bunko-$v-macos.dmg"
+            "mokuro-bunko-$v-linux-x64.tar.gz" "mokuro-bunko-$v-linux-arm64-server.tar.gz"
+            "mokuro-bunko-update-$v-macos.tar.gz")
+          want_archives=(aarch64-apple-darwin/full aarch64-unknown-linux-musl/lite
+            x86_64-pc-windows-msvc/full x86_64-unknown-linux-gnu/full)
           want_packs=(x86_64-unknown-linux-gnu/cpu x86_64-unknown-linux-gnu/cu130 x86_64-unknown-linux-gnu/rocm7.1
             x86_64-pc-windows-msvc/cpu x86_64-pc-windows-msvc/cu130 aarch64-apple-darwin/cpu)
-          want_dmgs=(aarch64-apple-darwin-full aarch64-apple-darwin-lite x86_64-apple-darwin-lite)
           bad=0
-          got=$(jq -r '.artifacts | to_entries[] | .key as $t | .value | keys[] | "\($t)/\(.)"' dist/release.json | sort)
-          [ "$got" = "$(printf '%s\n' "${want_archives[@]}" | sort)" ] || { echo "release.json artifacts: $got"; bad=1; }
-          got=$(jq -r '.backends | to_entries[] | .key as $t | .value | keys[] | "\($t)/\(.)"' dist/release.json | sort)
-          [ "$got" = "$(printf '%s\n' "${want_packs[@]}" | sort)" ] || { echo "release.json backends: $got"; bad=1; }
-          for d in "${want_dmgs[@]}"; do
-            f="$p-$d.dmg"
+          for f in "${want_files[@]}"; do
             [ -s "dist/$f" ] || { echo "missing $f"; bad=1; continue; }
             grep -q "  $f\$" dist/SHA256SUMS || { echo "$f is not in SHA256SUMS"; bad=1; }
-            if jq -e --arg f "$f" '[.. | strings | select(endswith($f))] | length > 0' dist/release.json >/dev/null; then
-              echo "$f is in release.json"; bad=1
-            fi
           done
+          # Nothing else but packs and the manifest: no .sha256 files, no lite/Intel builds.
+          for path in dist/*; do
+            [ -f "$path" ] || continue
+            f=$(basename "$path")
+            case " release.json SHA256SUMS ${want_files[*]} " in *" $f "*) continue ;; esac
+            if printf '%s' "$f" | grep -qE "^mokuro-bunko-backend-$v-(linux-x64|windows|macos)-[a-z0-9.]+\.tar\.zst(\.[0-9]{3})?\$"; then
+              continue
+            fi
+            echo "unexpected file: $f"; bad=1
+          done
+          got=$(jq -r '.artifacts | to_entries[] | .key as $t | .value | keys[] | "\($t)/\(.)"' dist/release.json | sort)
+          [ "$got" = "$(printf '%s\n' "${want_archives[@]}" | sort)" ] || { echo "release.json artifacts: $got"; bad=1; }
+          # The updaters up to 0.7.0-beta.2 take the macOS archive, newer ones the image.
+          [ "$(jq -r '.artifacts["aarch64-apple-darwin"].full.url' dist/release.json)" = \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/v$v/mokuro-bunko-update-$v-macos.tar.gz" ] || bad=1
+          [ "$(jq -r '.bundles["aarch64-apple-darwin"].full.url' dist/release.json)" = \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/v$v/mokuro-bunko-$v-macos.dmg" ] || bad=1
+          got=$(jq -r '.backends | to_entries[] | .key as $t | .value | keys[] | "\($t)/\(.)"' dist/release.json | sort)
+          [ "$got" = "$(printf '%s\n' "${want_packs[@]}" | sort)" ] || { echo "release.json backends: $got"; bad=1; }
           [ "$(jq -r .version dist/release.json)" = "$VERSION" ] || bad=1
           # What release.yml's "draft GitHub release" step would upload (it also adds
           # release.json.sig, made by its signing step).
@@ -131,10 +145,17 @@ jobs:
           {
             echo "| draft asset | bytes |"
             echo "|---|---|"
-            for f in "${files[@]}"; do echo "| $(basename "$f") | $(stat -c %s "$f") |"; done
+            for f in $(printf '%s\n' "${files[@]}" | LC_ALL=C sort -f); do echo "| $(basename "$f") | $(stat -c %s "$f") |"; done
             echo "| release.json.sig | (release.yml signs) |"
           } | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$bad"
+      - name: release notes (the table release.yml puts on top)
+        run: |
+          set -eu
+          echo "### Release notes (top)" >> "$GITHUB_STEP_SUMMARY"
+          cargo run -q -p xtask --locked -- release-notes --version "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --docker-repo "ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/mokuro-bunko" --dir dist |
+            tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: release-json-unsigned

@@ -30,7 +30,6 @@ pub fn is_executable(rel: &Path) -> bool {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     name == crate::names::BIN
-        || name == crate::names::TRAY_BIN
         || name.ends_with(".exe")
         || name.ends_with(".sh")
         || name.ends_with(".dll")

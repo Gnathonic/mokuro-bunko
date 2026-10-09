@@ -158,8 +158,7 @@ impl Supervisor {
                         )
                     }
                     SlotState::NoExecutable => (
-                        "cannot start: the mokuro-bunko program was not found next to the tray"
-                            .to_string(),
+                        "cannot start: the mokuro-bunko command line was not found".to_string(),
                         true,
                     ),
                     _ => return None,

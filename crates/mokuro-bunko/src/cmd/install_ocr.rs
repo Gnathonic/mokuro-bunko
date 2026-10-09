@@ -293,7 +293,8 @@ mod full {
     }
 
     /// [`bundled_offline_dir`] for an executable in `exe_dir`: a folder counts when it
-    /// holds a backend pack archive (`*-torch-*.tar.zst`, or its first part).
+    /// holds a backend pack archive (`mokuro-bunko-backend-*.tar.zst`, or the name packs
+    /// had up to 0.7.0-beta.2, `*-torch-*.tar.zst`; or its first part).
     pub fn bundled_offline_in(exe_dir: &Path) -> Option<PathBuf> {
         let mut candidates = Vec::new();
         if exe_dir.ends_with("Contents/MacOS")
@@ -309,7 +310,7 @@ mod full {
         std::fs::read_dir(dir).is_ok_and(|entries| {
             entries.filter_map(|e| e.ok()).any(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                name.contains("-torch-")
+                (name.starts_with("mokuro-bunko-backend-") || name.contains("-torch-"))
                     && (name.ends_with(".tar.zst") || name.ends_with(".tar.zst.001"))
                     && e.path().is_file()
             })
@@ -881,25 +882,45 @@ mod full {
         Ok(lines)
     }
 
+    /// The pack platform of `target` in the archive names (`linux-x64`, `windows`,
+    /// `macos`; xtask's `names::pack_platform`).
+    fn pack_platform(target: &str) -> &str {
+        match target {
+            "x86_64-unknown-linux-gnu" => "linux-x64",
+            "x86_64-pc-windows-msvc" => "windows",
+            "aarch64-apple-darwin" => "macos",
+            other => other,
+        }
+    }
+
     /// Pack archive files for `variant` in a local directory: the whole archive or its
-    /// numbered parts, preferring this version's.
-    fn local_parts(dir: &Path, target: &str, variant: &str, version: &str) -> Vec<PathBuf> {
-        let suffix = format!("-{target}-torch-{variant}.tar.zst");
-        let ours = format!("mokuro-bunko-{version}{suffix}");
+    /// numbered parts, preferring this version's. Names:
+    /// `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`, or (packs up to
+    /// 0.7.0-beta.2) `mokuro-bunko-<ver>-<target>-torch-<variant>.tar.zst`.
+    pub fn local_parts(dir: &Path, target: &str, variant: &str, version: &str) -> Vec<PathBuf> {
+        let platform = pack_platform(target);
+        let new_ours = format!("mokuro-bunko-backend-{version}-{platform}-{variant}.tar.zst");
+        let new_suffix = format!("-{platform}-{variant}.tar.zst");
+        let old_suffix = format!("-{target}-torch-{variant}.tar.zst");
+        let old_ours = format!("mokuro-bunko-{version}{old_suffix}");
         let mut whole: Vec<PathBuf> = Vec::new();
         let mut parts: Vec<PathBuf> = Vec::new();
+        let is_part = |n: &str, ours: &str| {
+            n.starts_with(ours)
+                && n.len() == ours.len() + 4
+                && n[ours.len() + 1..].chars().all(|c| c.is_ascii_digit())
+        };
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let n = e.file_name().to_string_lossy().to_string();
-                if n == ours {
+                if n == new_ours || n == old_ours {
                     return vec![e.path()];
                 }
-                if n.ends_with(&suffix) {
-                    whole.push(e.path());
-                } else if n.starts_with(&ours)
-                    && n.len() == ours.len() + 4
-                    && n[ours.len() + 1..].chars().all(|c| c.is_ascii_digit())
+                if (n.starts_with("mokuro-bunko-backend-") && n.ends_with(&new_suffix))
+                    || n.ends_with(&old_suffix)
                 {
+                    whole.push(e.path());
+                } else if is_part(&n, &new_ours) || is_part(&n, &old_ours) {
                     parts.push(e.path());
                 }
             }
@@ -997,7 +1018,8 @@ mod full {
                 if files.is_empty() {
                     return Err(PackFailure::owner(
                         format!(
-                            "no mokuro-bunko-*-{target}-torch-{variant}.tar.zst in {}",
+                            "no mokuro-bunko-backend-{version}-{}-{variant}.tar.zst in {}",
+                            pack_platform(target),
                             dir.display()
                         ),
                         "Put the pack archive of this release in that folder, or install without --from.",
@@ -1349,8 +1371,17 @@ mod tests {
         // A folder without a pack archive does not count.
         touch(&offline.join("hayai-nova_config.json"));
         assert_eq!(bundled_offline_in(&macos), None);
-        touch(&offline.join("mokuro-bunko-0.7.0-aarch64-apple-darwin-torch-cpu.tar.zst"));
+        touch(&offline.join("mokuro-bunko-backend-0.7.0-macos-cpu.tar.zst"));
         assert_eq!(bundled_offline_in(&macos), Some(offline));
+        assert_eq!(
+            local_parts(
+                &app.join("Resources/ocr-offline"),
+                "aarch64-apple-darwin",
+                "cpu",
+                "0.7.0"
+            ),
+            [app.join("Resources/ocr-offline/mokuro-bunko-backend-0.7.0-macos-cpu.tar.zst")]
+        );
 
         // Elsewhere: ocr-offline next to the executable (split archives count too).
         let plain = dir.path().join("mb");
@@ -1360,6 +1391,20 @@ mod tests {
             "ocr-offline/mokuro-bunko-0.7.0-x86_64-unknown-linux-gnu-torch-rocm7.1.tar.zst.001",
         ));
         assert_eq!(bundled_offline_in(&plain), Some(plain.join("ocr-offline")));
+        // The names of 0.7.0-beta.2's packs still count.
+        touch(&plain.join(
+            "ocr-offline/mokuro-bunko-0.7.0-x86_64-unknown-linux-gnu-torch-rocm7.1.tar.zst.002",
+        ));
+        assert_eq!(
+            local_parts(
+                &plain.join("ocr-offline"),
+                "x86_64-unknown-linux-gnu",
+                "rocm7.1",
+                "0.7.0"
+            )
+            .len(),
+            2
+        );
         // `Resources/` is only looked at inside an app bundle.
         let outside = dir.path().join("lib/bin");
         std::fs::create_dir_all(&outside).unwrap();

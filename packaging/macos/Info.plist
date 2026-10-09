@@ -8,8 +8,10 @@
   <string>Mokuro Bunko</string>
   <key>CFBundleName</key>
   <string>Mokuro Bunko</string>
+  <!-- The program itself: started by the Finder or launchd (no arguments), it runs
+       the tray, and the setup wizard on a Mac with nothing set up. -->
   <key>CFBundleExecutable</key>
-  <string>mokuro-bunko-tray</string>
+  <string>mokuro-bunko</string>
   <key>CFBundleIdentifier</key>
   <string>io.github.gnathonic.mokuro-bunko.tray</string>
   <key>CFBundleIconFile</key>
