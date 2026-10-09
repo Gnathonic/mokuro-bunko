@@ -3,16 +3,19 @@
 # weights identical to the release's), verified against eager torch on the runner, and
 # uploaded as workflow artifacts. Manual only; it publishes nothing (no release, no tag).
 #
-#   gh workflow run torch-export-win.yml --ref <branch> [-f compare_embedded=false]
+#   gh workflow run torch-export-win.yml --ref <branch> [-f engine=paddle-manga] [-f compare_embedded=false]
+#
+# paddle-manga on a 4-vCPU runner reads about a line a few seconds: give it fewer pages
+# (-f ocr_pages=4 -f ocr_rounds=2).
 name: torch-export-win
 
 on:
   workflow_dispatch:
     inputs:
       engine:
-        description: Engine (paddle-manga has no CPU packages)
+        description: Engine
         type: choice
-        options: [hayai-nova]
+        options: [hayai-nova, paddle-manga]
         default: hayai-nova
       precision:
         description: Precision (Windows CPU packages are fp32)
@@ -32,6 +35,14 @@ on:
         description: With compare_embedded, also OCR a generated volume with both layouts through the Rust runtime
         type: boolean
         default: true
+      ocr_pages:
+        description: Pages in the generated volume
+        type: string
+        default: "12"
+      ocr_rounds:
+        description: Rounds of the two layouts (alternating)
+        type: string
+        default: "3"
 
 permissions:
   contents: read
@@ -43,7 +54,7 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     defaults:
       run:
         shell: pwsh
@@ -177,7 +188,7 @@ jobs:
         if: inputs.compare_embedded && inputs.ocr
         working-directory: tools/torch_export
         # no real manga in a public repo's logs and artifacts: pages of generated text
-        run: python -m torch_export.ocr_inputs "$env:GITHUB_WORKSPACE\ocr" --pages 12
+        run: python -m torch_export.ocr_inputs "$env:GITHUB_WORKSPACE\ocr" --pages ${{ inputs.ocr_pages }} --engine $env:ENGINE
       - uses: dtolnay/rust-toolchain@stable
         if: inputs.compare_embedded && inputs.ocr
       - name: "OCR: CPU backend pack + ocr_volume"
@@ -220,16 +231,21 @@ jobs:
           $env:MOKURO_TORCH_PACK = "$ws\pack\torch-cpu-2.13.0"
           $env:MOKURO_MODELS_DOWNLOAD = "0"; $env:RUST_LOG = "warn"
           # the embedded packages bind nothing, but the store wants the weights files the
-          # manifest says a package of this target requires beside it
-          Copy-Item "$ws\out\$env:ENGINE\$env:PREC\weights-*.safetensors" "$ws\out-embed\$env:ENGINE\$env:PREC\"
+          # manifest says a package of this target requires beside it (hayai-nova). Not
+          # for paddle-manga: beside weights files it reads its input embeddings from them,
+          # which a package with its weights inside does not bind; it reads the table
+          # ocr_inputs wrote instead
+          if ($env:ENGINE -eq 'hayai-nova') {
+            Copy-Item "$ws\out\$env:ENGINE\$env:PREC\weights-*.safetensors" "$ws\out-embed\$env:ENGINE\$env:PREC\"
+          }
           $failed = $false
-          foreach ($r in 1..3) { foreach ($v in 'embedded', 'weightless') {
+          foreach ($r in 1..${{ inputs.ocr_rounds }}) { foreach ($v in 'embedded', 'weightless') {
             $env:MOKURO_TORCH_MODELS_DIR = if ($v -eq 'weightless') { "$ws\out" } else { "$ws\out-embed" }
             $m = "$o\models-$v"
             if (-not (Test-Path $m)) { Copy-Item -Recurse "$o\models" $m }
             $out = "$o\$v-$r"
             $p = Start-Process -FilePath $X -NoNewWindow -PassThru -RedirectStandardOutput "$out.log" -RedirectStandardError "$out.err" `
-              -ArgumentList @('hayai-nova', "$o\synthetic.cbz", "$out.mokuro", '--backend', 'cpu', '--precision', $env:PREC, '--models', $m, '--uuids', 't,v')
+              -ArgumentList @($env:ENGINE, "$o\synthetic.cbz", "$out.mokuro", '--backend', 'cpu', '--precision', $env:PREC, '--models', $m, '--uuids', 't,v')
             $null = $p.Handle; $peak = 0
             while (-not $p.HasExited) {
               $p.Refresh(); try { $peak = [math]::Max($peak, $p.PeakWorkingSet64) } catch {}; Start-Sleep -Milliseconds 200

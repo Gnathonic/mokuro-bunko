@@ -1,12 +1,15 @@
 """Inputs for an OCR smoke run where no real volume may be used (CI runners, public logs).
 
-    python -m torch_export.ocr_inputs <dir> [--pages N]
+    python -m torch_export.ocr_inputs <dir> [--pages N] [--engine hayai-nova|paddle-manga]
 
-Writes ``<dir>/models/``, a model store for ``ocr_volume --models`` -- hayai-nova's host
-files (``hayai-nova_{pos_table,token_embeddings}.npy``, ``hayai-nova_tokenizer.json``;
-written as tools/onnx_export writes them: byte-identical to the models-v1 release files,
-so the store's sha256 check accepts them) and the PP-OCR files from their pinned Hugging
-Face revision -- and ``<dir>/synthetic.cbz``: pages of generated Japanese text in
+Writes ``<dir>/models/``, a model store for ``ocr_volume --models`` -- the engine's host
+files, written as tools/onnx_export writes them (byte-identical to the models-v1 release
+files, so the store's sha256 check accepts them): hayai-nova's
+``hayai-nova_{pos_table,token_embeddings}.npy`` and ``hayai-nova_tokenizer.json``, or
+paddle-manga's ``paddle-manga_tokenizer.json`` and ``paddle-manga_embed_fp32.npy`` (the
+input embeddings: a weightless package reads them from the shared decoder weights, a
+package with its weights inside from this table) -- and the PP-OCR files from their
+pinned Hugging Face revision; and ``<dir>/synthetic.cbz``: pages of generated Japanese text in
 vertical columns inside white "bubbles" (a system Japanese font; Latin text if none).
 The pages are random but seeded: every run writes the same volume.
 """
@@ -32,19 +35,30 @@ KANA = ("あいうえおかきくけこさしすせそたちつてとなにぬ�
 WORDS = ["科学", "王国", "研究", "実験", "未来", "仲間", "文明", "時間", "世界", "名前", "電気", "魔法"]
 
 
-def models(dst: Path) -> None:
+def models(dst: Path, engine: str = "hayai-nova") -> None:
     sys.path.insert(0, str(HERE.parents[1] / "onnx_export"))
     import numpy as np
     from onnx_export.common import snapshot_file
-    from onnx_export.hayai.export import POS_TABLE, TOKEN_EMBEDDINGS, TOKENIZER, load_model
-    from onnx_export.pins import HAYAI, PPOCR, PPOCR_FILES
+    from onnx_export.pins import HAYAI, PADDLE_BASE, PPOCR, PPOCR_FILES
 
     dst.mkdir(parents=True, exist_ok=True)
-    model, _tok = load_model()
-    vm = model.vision_encoder.vision_model if hasattr(model.vision_encoder, "vision_model") else model.vision_encoder
-    np.save(dst / POS_TABLE, np.ascontiguousarray(vm.embeddings.position_embedding.weight.detach().float().numpy(), dtype="<f4"))
-    np.save(dst / TOKEN_EMBEDDINGS, np.ascontiguousarray(model.decoder.token_embeddings.weight.detach().float().numpy(), dtype="<f4"))
-    shutil.copyfile(snapshot_file(HAYAI, "tokenizer.json"), dst / TOKENIZER)
+    if engine == "hayai-nova":
+        from onnx_export.hayai.export import POS_TABLE, TOKEN_EMBEDDINGS, TOKENIZER, load_model
+
+        model, _tok = load_model()
+        vm = model.vision_encoder.vision_model if hasattr(model.vision_encoder, "vision_model") else model.vision_encoder
+        np.save(dst / POS_TABLE, np.ascontiguousarray(vm.embeddings.position_embedding.weight.detach().float().numpy(), dtype="<f4"))
+        np.save(dst / TOKEN_EMBEDDINGS, np.ascontiguousarray(model.decoder.token_embeddings.weight.detach().float().numpy(), dtype="<f4"))
+        shutil.copyfile(snapshot_file(HAYAI, "tokenizer.json"), dst / TOKENIZER)
+    elif engine == "paddle-manga":
+        from onnx_export.paddle.export import TOKENIZER, embed_name, load_model
+
+        model, _proc = load_model("float32")
+        emb = model.model.language_model.embed_tokens.weight.detach().float().numpy()
+        np.save(dst / embed_name("fp32"), np.ascontiguousarray(emb, dtype="<f4"))
+        shutil.copyfile(snapshot_file(PADDLE_BASE, "tokenizer.json"), dst / TOKENIZER)
+    else:
+        raise SystemExit(f"no host files for {engine!r}")
     (dst / "ppocr-manga").mkdir(exist_ok=True)
     for repo_path in PPOCR_FILES.values():
         shutil.copyfile(snapshot_file(PPOCR, repo_path), dst / "ppocr-manga" / Path(repo_path).name)
@@ -83,9 +97,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("dir", type=Path)
     ap.add_argument("--pages", type=int, default=12)
+    ap.add_argument("--engine", default="hayai-nova", choices=("hayai-nova", "paddle-manga"))
     a = ap.parse_args(argv)
     a.dir.mkdir(parents=True, exist_ok=True)
-    models(a.dir / "models")
+    models(a.dir / "models", a.engine)
     font = volume(a.dir / "synthetic.cbz", a.pages)
     print(f"{a.dir}: models/, synthetic.cbz ({a.pages} pages, font {font})")
     return 0
