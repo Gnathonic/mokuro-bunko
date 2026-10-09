@@ -190,12 +190,13 @@ jobs:
           # MSVC rejects those headers in C++17 (C7555: designated initializers) and libtch in
           # C++20 (`module` as a name). clang-cl (MSVC ABI) accepts both, as in the
           # cross-built packs; this wrapper drops torch-sys's MSBuild-style /p: argument,
-          # which clang-cl would take for a file.
+          # which clang-cl would take for a file, and turns C++ exceptions on (/EHsc).
           $w = "$env:RUNNER_TEMP\clwrap"; New-Item -ItemType Directory -Force $w | Out-Null
           @'
           fn main() {
               let args: Vec<_> = std::env::args_os().skip(1).filter(|a| !a.to_string_lossy().starts_with("/p:")).collect();
-              let st = std::process::Command::new("clang-cl").args(&args).status().expect("clang-cl");
+              // C++ exceptions on, as cl.exe has them (torch-sys passes no /EHsc)
+              let st = std::process::Command::new("clang-cl").arg("/EHsc").args(&args).status().expect("clang-cl");
               std::process::exit(st.code().unwrap_or(1));
           }
           '@ | Set-Content "$w\clwrap.rs"
