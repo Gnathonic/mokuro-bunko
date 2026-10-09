@@ -87,6 +87,10 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
   `ppocr-manga`, all Apache-2.0. A fresh config has one `hayai-nova` primary row.
   At fp32 their text is identical to 0.5.2's; default speed is above a tuned 0.5.2
   on every GPU tested (e.g. RTX 4090 13.9 vs 10.5 pages/s, RX 6900 XT 4.35 vs 2.75).
+- paddle-manga now needs a GPU (NVIDIA CUDA or AMD ROCm); 0.5.2 also ran it on the CPU.
+  CPU-only machines use hayai-nova: they no longer offer paddle-manga, fetch nothing for
+  it, and say "paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the
+  CPU" where its generation is asked for (`doctor`, `models download`, a session).
 - OCR backends and models are downloaded on demand, after hardware detection and
   by the owner's preference, never baked into a release:
   - The full Docker image carries no backend pack and no model. On every start it

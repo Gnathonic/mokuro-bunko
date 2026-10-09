@@ -13,7 +13,7 @@
     if (hw.amd_gfx.length) gpus.push('AMD ' + hw.amd_gfx.join(', '));
     $('hw').innerHTML =
       '<dt>Platform</dt><dd>' + esc(hw.target) + '</dd>' +
-      '<dt>GPU</dt><dd>' + esc(gpus.length ? gpus.join('; ') : 'none found (the CPU pack works everywhere)') + '</dd>' +
+      '<dt>GPU</dt><dd>' + esc(gpus.length ? gpus.join('; ') : 'none found (the CPU pack works everywhere: hayai-nova and ppocr-manga; paddle-manga needs a GPU)') + '</dd>' +
       (hw.hidden.length ? '<dt>Hidden</dt><dd>' + esc(hw.hidden.join(', ')) + '</dd>' : '') +
       '<dt>Recommended</dt><dd><strong>' + esc(hw.auto_variant) + '</strong> — ' + esc(hw.reason) + '</dd>' +
       '<dt>Source</dt><dd>' + (hw.bundled_offline

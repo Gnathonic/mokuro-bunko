@@ -15,6 +15,10 @@ pub struct EngineSpec {
     pub patch_budget: bool,
     /// Non-empty when the recognizer may not be put on a GPU.
     pub cpu_only_reason: &'static str,
+    /// Non-empty when the recognizer runs on a GPU only (never on the CPU; a machine
+    /// without a GPU does not offer it). The text is the error shown where it cannot run
+    /// (`bunko_sched::precision::needs_gpu` says the same).
+    pub gpu_only_reason: &'static str,
     /// Precision modes apply (`auto-accuracy`, `fp16`, ...).
     pub precision: bool,
 }
@@ -22,6 +26,9 @@ pub struct EngineSpec {
 impl EngineSpec {
     pub fn cpu_only(&self) -> bool {
         !self.cpu_only_reason.is_empty()
+    }
+    pub fn gpu_only(&self) -> bool {
+        !self.gpu_only_reason.is_empty()
     }
     /// The road through the pipeline: `line` (detector + CTC only) or `reconciled`.
     pub fn road(&self) -> Road {
@@ -76,6 +83,7 @@ pub const ENGINES: &[EngineSpec] = &[
         detector: None,
         patch_budget: true,
         cpu_only_reason: "",
+        gpu_only_reason: "",
         precision: true,
     },
     EngineSpec {
@@ -85,6 +93,7 @@ pub const ENGINES: &[EngineSpec] = &[
         detector: None,
         patch_budget: false,
         cpu_only_reason: "",
+        gpu_only_reason: "paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU",
         precision: true,
     },
     EngineSpec {
@@ -94,6 +103,7 @@ pub const ENGINES: &[EngineSpec] = &[
         detector: Some("ppocr-manga"),
         patch_budget: false,
         cpu_only_reason: "PP-OCRv6's CTC recognizer runs on the CPU",
+        gpu_only_reason: "",
         precision: false,
     },
 ];

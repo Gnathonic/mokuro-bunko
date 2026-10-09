@@ -176,9 +176,9 @@ mod tests {
                 "auto-speed; benchmark: fp32 3.00 p/s".into()
             )
         );
-        // One usable candidate: no benchmark needed.
+        // One usable candidate (a card with fp32 packages only): no benchmark needed.
         assert_eq!(
-            ok(resolve("paddle-manga", "auto-speed", cpu, None, "")),
+            ok(resolve("paddle-manga", "auto-speed", &["fp32"], None, "")),
             (Precision::Fp32, "auto-speed".into())
         );
         assert_eq!(resolve("ppocr-manga", "fp16", cpu, None, ""), Ok(None));
@@ -308,7 +308,8 @@ mod tests {
         let err = resolve("hayai-nova", "bf16", supported(true), None, "").unwrap_err();
         assert!(err.starts_with(PRECISION_REFUSAL), "{err}");
         assert!(err.contains("hayai-nova is asked for bf16"), "{err}");
-        let err = resolve("paddle-manga", "fp16", supported(false), None, "").unwrap_err();
+        // a card with fp32 packages only
+        let err = resolve("paddle-manga", "fp16", &["fp32"], None, "").unwrap_err();
         assert!(err.contains("(fp16 not supported)"), "{err}");
         assert_eq!(
             ok(resolve("paddle-manga", "FP16", supported(true), None, "")),

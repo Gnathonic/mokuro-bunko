@@ -58,6 +58,18 @@ Your config keeps loading, and the server migrates it when it reads it
 - A config with no `ocr.generations` at all gets the default: one
   `hayai-nova` primary row.
 
+### paddle-manga needs a GPU
+
+0.5.2 offered `paddle-manga` on any machine and ran it on the CPU where there
+was no GPU. In 0.7 it runs on a GPU only (NVIDIA CUDA or AMD ROCm): there are
+no CPU packages for it, a machine without a usable GPU does not offer it, and
+the library gives its rows only to machines with one. A `pools.stage_device`
+that pinned its `engine` stage to `cpu` is dropped (with a config warning),
+so the row runs on the GPU. If none of your machines has a GPU, switch the
+row to `hayai-nova` (or disable it): `doctor` warns
+`paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU`
+(see [Troubleshooting](troubleshooting.md#paddle-manga-needs-a-gpu)).
+
 **Your existing `.mokuro` files are kept and served.** A bare
 `<Volume>.mokuro` written by mokuro counts as complete, so nothing re-runs
 OCR on a volume that already has one. Only volumes **without** a primary

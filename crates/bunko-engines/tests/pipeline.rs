@@ -322,11 +322,55 @@ fn refusals_before_loading() {
     let p = pipeline(tmp.path());
     let err = p.open(&spec("hayai-nova", "bf16")).err().unwrap();
     assert!(err.starts_with("precision not available here"), "{err}");
+    // `Backend::Cpu`: paddle-manga runs on a GPU only.
     let err = p.open(&spec("paddle-manga", "fp16")).err().unwrap();
-    assert!(err.contains("fp16 not supported"), "{err}");
+    assert!(err.starts_with("paddle-manga needs a GPU"), "{err}");
     let err = p.open(&spec("mokuro", "auto")).err().unwrap();
     assert!(err.contains("unknown engine mokuro"), "{err}");
     let mut s = spec("ppocr-manga", "auto");
     s.detector = Some("ctd".into());
     assert!(p.open(&s).err().unwrap().contains("unknown detector ctd"));
+}
+
+/// paddle-manga runs on a GPU only: on a machine whose devices are the CPU alone
+/// (`ocr.backend: cpu` here) a session fails at once with the clear error, before any
+/// model is fetched or loaded (none is on disk here), whatever its precision mode; and
+/// it is neither offered by `describe` nor resolvable for a download.
+#[test]
+fn paddle_manga_on_a_cpu_only_host_fails_clearly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = pipeline(tmp.path());
+    let needs = "paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU";
+    for mode in ["auto-accuracy", "auto-speed", "fp32", "bf16"] {
+        let err = p.open(&spec("paddle-manga", mode)).err().unwrap();
+        assert_eq!(err, needs, "{mode}");
+    }
+    let mut pinned = spec("paddle-manga", "fp32");
+    pinned
+        .pools
+        .stage_device
+        .insert("engine".into(), "cpu".into());
+    assert!(p.open(&pinned).err().unwrap().starts_with(needs));
+    assert_eq!(p.device_for("paddle-manga").unwrap_err(), needs);
+    assert!(p.device_for("hayai-nova").is_ok());
+    assert!(
+        !p.describe()
+            .catalog
+            .engines
+            .contains(&"paddle-manga".to_string())
+    );
+    #[cfg(feature = "torch")]
+    {
+        assert!(p.need_for("paddle-manga", "auto-accuracy").is_err());
+        for (engine, r) in p.prefetch_rows(&[("paddle-manga", "auto-accuracy")]) {
+            assert_eq!(engine, "paddle-manga");
+            assert!(r.is_err());
+        }
+    }
+    assert!(
+        p.recognizer_for("paddle-manga", bunko_vlm::Precision::Fp32, "cpu", 512)
+            .err()
+            .unwrap()
+            .starts_with(needs)
+    );
 }

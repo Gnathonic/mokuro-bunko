@@ -8,7 +8,7 @@
 //! ```
 //! Prints one JSON line of stats; `out.json` holds `texts` and `by_name` (for the
 //! shootout's `py/score.py`). paddle-manga crops are read with a 64-token cap, as the
-//! 0.5.2 reference run did.
+//! 0.5.2 reference run did; paddle-manga runs on a GPU only (`gpu:N`).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

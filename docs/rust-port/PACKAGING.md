@@ -37,9 +37,9 @@ build by *target triple* and *flavor*:
 | `lite` | `--no-default-features` | server only; OCR by remote processors |
 | `full` | `ocr` (default) | + ONNX Runtime on the CPU (PP-OCR detector/reader), the libtorch pack loader, local OCR, `processor` |
 
-GPU support is no longer a build flavor: the same `full` binary runs hayai-nova and
-paddle-manga on whatever pack `install-ocr` installed — `cpu`, `cu130` (NVIDIA) or
-`rocm7.1` (AMD, Linux). The ONNX Runtime GPU execution providers (`--ep cuda`,
+GPU support is no longer a build flavor: the same `full` binary runs hayai-nova on
+whatever pack `install-ocr` installed — `cpu`, `cu130` (NVIDIA) or `rocm7.1` (AMD,
+Linux) — and paddle-manga on the GPU packs' GPUs only (no CPU packages for it). The ONNX Runtime GPU execution providers (`--ep cuda`,
 `directml`, `coreml`, `webgpu` → `full-<ep>`) still compile (CI clippy checks
 `cuda,webgpu`) but are not released.
 

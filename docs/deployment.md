@@ -141,6 +141,10 @@ installs the pack and models on the first one and does nothing later
 Without a pack the server still starts and serves; hayai-nova and
 paddle-manga are not offered on the machine (ppocr-manga still is, and remote
 processors still work), and `mokuro-bunko doctor` says which pack to install.
+paddle-manga needs a GPU pack and its GPU (NVIDIA CUDA or AMD ROCm): with the
+`cpu` pack, or a GPU pack on a machine without its GPU, the machine runs
+hayai-nova and ppocr-manga only (see
+[Troubleshooting](troubleshooting.md#paddle-manga-needs-a-gpu)).
 
 ### OCR models
 
@@ -160,7 +164,8 @@ mokuro-bunko models verify
 ```
 
 Sizes: hayai-nova about 0.5 GB per precision, paddle-manga about 2 GB per
-precision, ppocr-manga about 23 MB. `MOKURO_MODELS_DIR` points at a directory
+precision (GPU packages only: a machine without a GPU fetches nothing for it),
+ppocr-manga about 23 MB. `MOKURO_MODELS_DIR` points at a directory
 of model files for air-gapped hosts, and `MOKURO_MODELS_DOWNLOAD=0` forbids
 downloads (see [configuration](configuration.md#ocr-models)).
 
@@ -847,7 +852,8 @@ Before `serve` (and before `processor serve`) the full image runs
 Later starts find the pack and download nothing. Started with a different GPU
 (or with `MOKURO_OCR_BACKEND` asking for a GPU it now sees) the container
 installs that GPU's pack and removes the one it replaces; started without its
-GPU it keeps the GPU pack, which runs on the CPU too. An image update installs
+GPU it keeps the GPU pack, which runs on the CPU too (hayai-nova and
+ppocr-manga; paddle-manga waits for the GPU). An image update installs
 the new release's pack on its first start. If the download fails, the server
 starts anyway (ppocr-manga and remote processors work; hayai-nova and
 paddle-manga wait for the pack) and the next start tries again.
