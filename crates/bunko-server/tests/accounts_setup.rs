@@ -1,12 +1,29 @@
 //! First-run setup wizard. Ports tests/unit/test_setup_api.py and covers the 0.7 setup
-//! token that lets a Docker host's browser through the localhost gate.
+//! code that lets another computer (a Docker host's or a NAS's browser) through the
+//! localhost gate, and the `MOKURO_ADMIN_*` bootstrap.
 
 mod accounts_support;
 
 use accounts_support::*;
 use bunko_core::Role;
-use bunko_server::accounts::{SETUP_TOKEN_FILE, ensure_setup_token};
+use bunko_server::accounts::{
+    ATTEMPTS_PER_IP, Bootstrap, LEGACY_TOKEN_FILE, REMOTE_NEEDS_CODE, SESSION_COOKIE,
+    bootstrap_admin, normalize_code, remove_legacy_token,
+};
 use serde_json::json;
+
+/// A form POST of the code page.
+fn code_form(peer: &str, code: &str) -> http::Request<axum::body::Body> {
+    let body = format!("code={}", code.replace(' ', "+"));
+    from_peer("POST", "/setup/code", peer)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from(body))
+        .expect("request")
+}
+
+fn remote_refusal() -> serde_json::Value {
+    json!({ "error": REMOTE_NEEDS_CODE })
+}
 
 fn complete_body() -> serde_json::Value {
     json!({"admin": {"username": "admin", "password": "password123"}, "registration": {"mode": "invite"}})
@@ -24,12 +41,12 @@ async fn complete_requires_localhost() {
         from_peer("POST", "/setup/api/complete", "203.0.113.10"),
     )
     .await;
-    assert_eq!(
-        (r.status, r.json()),
-        (
-            403,
-            json!({"error": "Setup is only allowed from localhost"})
-        )
+    assert_eq!((r.status, r.json()), (403, remote_refusal()));
+    assert!(
+        r.json()["error"]
+            .as_str()
+            .unwrap()
+            .contains("see the server log for the setup code")
     );
     assert!(env.db.get_user("admin").unwrap().is_none());
 }
@@ -152,17 +169,24 @@ async fn ipv6_loopback_is_local() {
 #[tokio::test]
 async fn pages_are_gated_while_setup_is_needed() {
     let env = Env::new();
-    for path in ["/setup", "/setup/", "/setup/setup.js", "/setup/api/status"] {
+    env.deps.setup.issue_code();
+    for path in ["/setup/setup.js", "/setup/index.html", "/setup/api/status"] {
         let r = env.send(empty(from_peer("GET", path, "172.17.0.1"))).await;
-        assert_eq!(
-            (r.status, r.json()),
-            (
-                403,
-                json!({"error": "Setup is only allowed from localhost"})
-            ),
-            "{path}"
-        );
+        assert_eq!((r.status, r.json()), (403, remote_refusal()), "{path}");
     }
+    // The wizard's address answers the code page instead (HTML, not JSON)...
+    for path in ["/setup", "/setup/"] {
+        let r = env.send(empty(from_peer("GET", path, "172.17.0.1"))).await;
+        assert_eq!(r.status, 200, "{path}");
+        assert_eq!(r.header("content-type"), Some("text/html; charset=utf-8"));
+        assert!(r.text().contains(r#"name="code""#), "{}", r.text());
+        assert!(!r.text().contains("setup.js"), "not the wizard");
+    }
+    // ...whose stylesheet is not gated.
+    let r = env
+        .send(empty(from_peer("GET", "/setup/setup.css", "172.17.0.1")))
+        .await;
+    assert_eq!(r.status, 200);
     let r = env.send(empty(req("GET", "/setup"))).await;
     assert_eq!(r.status, 200);
     assert_eq!(r.header("cache-control"), Some("no-cache"));
@@ -199,94 +223,344 @@ async fn root_redirects_browsers_to_setup_until_an_admin_exists() {
     assert_eq!(r.status, 200, "the home page now");
 }
 
-// --- the 0.7 setup token -------------------------------------------------------------
+// --- the 0.7 setup code --------------------------------------------------------------
 
-#[tokio::test]
-async fn token_file_opens_the_gate_and_is_removed_on_completion() {
-    let env = Env::new();
-    let layout = env.deps.core.layout.clone();
-    let token = ensure_setup_token(&layout).unwrap().expect("a fresh token");
-    let docker = "172.17.0.1";
+const DOCKER: &str = "172.17.0.1";
 
-    // Wrong or missing token: still refused.
-    let r = env
-        .send(empty(
-            from_peer("GET", "/setup/api/status", docker).header("x-setup-token", "wrong"),
-        ))
-        .await;
-    assert_eq!(r.status, 403);
-
-    // `?token=` on the page sets a cookie scoped to /setup.
-    let r = env
-        .send(empty(from_peer(
-            "GET",
-            &format!("/setup?token={token}"),
-            docker,
-        )))
-        .await;
-    assert_eq!(r.status, 200);
-    let cookie = r.header("set-cookie").expect("cookie").to_string();
-    assert!(
-        cookie.starts_with(&format!("mokuro_setup_token={token};")),
-        "{cookie}"
-    );
-    assert!(
-        cookie.contains("Path=/setup")
-            && cookie.contains("HttpOnly")
-            && cookie.contains("SameSite=Strict")
-    );
-
-    // The page's own fetches carry the cookie, not the query.
-    let jar = format!("mokuro_setup_token={token}");
-    let r = env
-        .send(empty(
-            from_peer("GET", "/setup/api/status", docker).header("cookie", jar.as_str()),
-        ))
-        .await;
-    assert_eq!((r.status, r.json()), (200, json!({"needs_setup": true})));
-    let r = env
-        .send(empty(
-            from_peer("GET", "/setup/setup.js", docker).header("x-setup-token", token.as_str()),
-        ))
-        .await;
-    assert_eq!(r.status, 200);
-
-    let r = complete(
-        &env,
-        from_peer("POST", "/setup/api/complete", docker).header("cookie", jar.as_str()),
-    )
-    .await;
-    assert_eq!(r.status, 201, "{}", r.text());
-    assert!(
-        !layout.base.join(SETUP_TOKEN_FILE).exists(),
-        "one-time: deleted on completion"
-    );
-    let r = complete(
-        &env,
-        from_peer("POST", "/setup/api/complete", docker).header("cookie", jar.as_str()),
-    )
-    .await;
-    assert_eq!(r.status, 403, "the spent token no longer opens the gate");
+/// The session cookie's `name=value` out of a Set-Cookie header.
+fn jar_of(set_cookie: &str) -> String {
+    set_cookie.split(';').next().unwrap().trim().to_string()
 }
 
 #[tokio::test]
-async fn env_token_opens_the_gate() {
-    let mut env = Env::new();
-    env.deps.setup.env_token = Some("from-the-env".into());
+async fn a_remote_request_without_a_code_gets_the_code_page() {
+    let env = Env::new();
+    let code = env.deps.setup.issue_code();
+    let r = env.send(empty(from_peer("GET", "/setup", DOCKER))).await;
+    assert_eq!(r.status, 200);
+    let page = r.text();
+    assert!(
+        page.contains(r#"<form method="post" action="/setup/code""#),
+        "{page}"
+    );
+    assert!(page.contains("server log"), "{page}");
+    assert!(!page.contains(&code) && !page.contains(&normalize_code(&code)));
+    assert_eq!(r.header("cache-control"), Some("no-store"));
+    // The API says how to get one.
+    let r = env
+        .send(empty(from_peer("GET", "/setup/api/status", DOCKER)))
+        .await;
+    assert_eq!((r.status, r.json()), (403, remote_refusal()));
+    // Without an active code (no startup announcement) the page says so.
+    let fresh = Env::new();
+    let r = fresh.send(empty(from_peer("GET", "/setup", DOCKER))).await;
+    assert!(r.text().contains("No setup code is active"), "{}", r.text());
+}
+
+#[tokio::test]
+async fn a_wrong_code_is_refused_then_rate_limited() {
+    let env = Env::new();
+    let code = env.deps.setup.issue_code();
+    let peer = "198.51.100.7";
+    for i in 0..ATTEMPTS_PER_IP {
+        let r = env.send(code_form(peer, "ZZZZZ-ZZZZZ")).await;
+        assert_eq!(r.status, 403, "attempt {i}");
+        assert!(r.text().contains("not the setup code"));
+        assert!(r.header("set-cookie").is_none());
+    }
+    // Over the limit: refused without looking, even the right code.
+    let r = env.send(code_form(peer, &code)).await;
+    assert_eq!(r.status, 429);
+    assert!(r.text().contains("Too many attempts"));
+    assert!(r.header("retry-after").is_some());
+    assert!(r.header("set-cookie").is_none());
+    // The API's header path counts against the same limit.
+    let r = env
+        .send(empty(
+            from_peer("GET", "/setup/api/status", peer).header("x-setup-code", code.as_str()),
+        ))
+        .await;
+    assert_eq!(r.status, 429);
+    assert!(r.json()["error"].as_str().unwrap().starts_with("Too many"));
+    // Another computer still gets its tries.
+    let r = env.send(code_form("198.51.100.8", &code)).await;
+    assert_eq!(r.status, 303);
+    assert!(env.db.get_user("admin").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn the_right_code_opens_the_wizard_once() {
+    let env = Env::new();
+    let code = env.deps.setup.issue_code();
+    // Typed loosely: lower case, spaces instead of the dash.
+    let typed = code.to_lowercase().replace('-', " ");
+    let r = env.send(code_form(DOCKER, &typed)).await;
+    assert_eq!((r.status, r.header("location")), (303, Some("/setup")));
+    let cookie = r
+        .header("set-cookie")
+        .expect("a session cookie")
+        .to_string();
+    assert!(
+        cookie.starts_with(&format!("{SESSION_COOKIE}=")),
+        "{cookie}"
+    );
+    for attr in ["Path=/setup", "HttpOnly", "SameSite=Strict", "Max-Age=3600"] {
+        assert!(cookie.contains(attr), "{cookie}");
+    }
+    assert!(!cookie.contains("Secure"), "plain http");
+    assert!(
+        !cookie.contains(&normalize_code(&code)) && !cookie.contains(&code),
+        "the cookie is a session id, not the code"
+    );
+    let jar = jar_of(&cookie);
+
+    // The wizard and its API calls work with the cookie.
+    let r = env
+        .send(empty(
+            from_peer("GET", "/setup", DOCKER).header("cookie", jar.as_str()),
+        ))
+        .await;
+    assert_eq!(r.status, 200);
+    assert!(r.text().contains("setup.js"), "the wizard page");
+    let r = env
+        .send(empty(
+            from_peer("GET", "/setup/setup.js", DOCKER).header("cookie", jar.as_str()),
+        ))
+        .await;
+    assert_eq!(r.status, 200);
+    let r = env
+        .send(empty(
+            from_peer("GET", "/setup/api/status", DOCKER).header("cookie", jar.as_str()),
+        ))
+        .await;
+    assert_eq!((r.status, r.json()), (200, json!({"needs_setup": true})));
+    // A forged session does not.
+    let r = env
+        .send(empty(from_peer("GET", "/setup/api/status", DOCKER).header(
+            "cookie",
+            format!("{SESSION_COOKIE}=forged").as_str(),
+        )))
+        .await;
+    assert_eq!(r.status, 403);
+
     let r = complete(
         &env,
-        from_peer("POST", "/setup/api/complete?token=from-the-env", "10.0.0.9"),
+        from_peer("POST", "/setup/api/complete", DOCKER).header("cookie", jar.as_str()),
     )
     .await;
-    assert_eq!(r.status, 201);
+    assert_eq!(r.status, 201, "{}", r.text());
+    assert_eq!(env.db.get_user("admin").unwrap().unwrap().role, Role::Admin);
+
+    // Dead now: the code, the session, the header.
+    assert!(!env.deps.setup.has_code());
+    let r = complete(
+        &env,
+        from_peer("POST", "/setup/api/complete", DOCKER).header("cookie", jar.as_str()),
+    )
+    .await;
+    assert_eq!(r.status, 403, "the spent session opens nothing");
+    let r = complete(
+        &env,
+        from_peer("POST", "/setup/api/complete", DOCKER).header("x-setup-code", code.as_str()),
+    )
+    .await;
+    assert_eq!(r.status, 403, "nor the spent code");
+    let r = env.send(code_form(DOCKER, &code)).await;
     assert_eq!(
-        complete(
-            &env,
-            from_peer("POST", "/setup/api/complete?token=nope", "10.0.0.9")
-        )
-        .await
-        .status,
-        403
+        (r.status, r.header("location"), r.header("set-cookie")),
+        (303, Some("/setup"), None),
+        "setup is done: the (inert) page, no session"
+    );
+}
+
+#[tokio::test]
+async fn the_code_header_serves_scripts() {
+    let env = Env::new();
+    let code = env.deps.setup.issue_code();
+    let r = complete(
+        &env,
+        from_peer("POST", "/setup/api/complete", "10.0.0.9")
+            .header("x-setup-code", normalize_code(&code).as_str()),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    assert!(!r.text().contains(&normalize_code(&code)));
+}
+
+#[tokio::test]
+async fn an_admin_made_elsewhere_ends_the_code() {
+    let env = Env::new();
+    let code = env.deps.setup.issue_code();
+    // `admin add-user` (another process) writes the database directly.
+    env.user("root", "password123", Role::Admin);
+    let r = env.send(code_form(DOCKER, &code)).await;
+    assert_eq!((r.status, r.header("set-cookie")), (303, None));
+    assert!(!env.deps.setup.has_code());
+}
+
+#[tokio::test]
+async fn https_sessions_are_secure_cookies() {
+    let env = Env::with_config(|c| c.ssl.enabled = true);
+    let code = env.deps.setup.issue_code();
+    let r = env.send(code_form(DOCKER, &code)).await;
+    assert!(r.header("set-cookie").unwrap().contains("; Secure"));
+}
+
+#[test]
+fn the_betas_token_file_is_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = bunko_core::StorageLayout::new(tmp.path());
+    std::fs::write(tmp.path().join(LEGACY_TOKEN_FILE), "old").unwrap();
+    remove_legacy_token(&layout);
+    assert!(!tmp.path().join(LEGACY_TOKEN_FILE).exists());
+    remove_legacy_token(&layout); // absent: fine
+}
+
+#[test]
+fn the_banner_names_the_address_and_the_code_once() {
+    let b = bunko_server::app::setup_banner("0.0.0.0", 8080, false, "ABCDE-12345", true, false);
+    let text = b.join("\n");
+    assert_eq!(text.matches("ABCDE-12345").count(), 1, "{text}");
+    assert!(text.contains(
+        "First run: create the admin account at http://<this server's address>:8080/setup (setup code: ABCDE-12345)"
+    ));
+    assert!(
+        text.contains("host port mapped to the container's port 8080"),
+        "{text}"
+    );
+    let b = bunko_server::app::setup_banner("192.168.1.5", 8443, true, "X", false, false);
+    assert!(b[1].contains("https://192.168.1.5:8443/setup"), "{b:?}");
+    assert!(!b.join("\n").contains("Docker"));
+    let b = bunko_server::app::setup_banner("127.0.0.1", 8080, false, "X", false, false);
+    assert!(b.join("\n").contains("this computer only"));
+    let b = bunko_server::app::setup_banner("0.0.0.0", 8081, false, "X", true, true);
+    assert!(b[1].contains("<web UI port>"), "behind nginx: {b:?}");
+}
+
+// --- MOKURO_ADMIN_USERNAME / MOKURO_ADMIN_PASSWORD ----------------------------------------
+
+fn vars(pairs: &[(&str, String)]) -> impl Fn(&str) -> Option<String> + use<> {
+    let pairs: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    move |k| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
+}
+
+#[tokio::test]
+async fn env_bootstrap_creates_the_admin_once() {
+    let env = Env::new();
+    let code = env.deps.setup.issue_code();
+    let none = bootstrap_admin(&env.db, &env.deps.setup, vars(&[]));
+    assert_eq!(none, Bootstrap::NotAsked);
+    let made = bootstrap_admin(
+        &env.db,
+        &env.deps.setup,
+        vars(&[
+            ("MOKURO_ADMIN_USERNAME", "boss".into()),
+            ("MOKURO_ADMIN_PASSWORD", "password123".into()),
+        ]),
+    );
+    assert_eq!(made, Bootstrap::Created("boss".into()));
+    let u = env.db.get_user("boss").unwrap().unwrap();
+    assert_eq!(u.role, Role::Admin);
+    assert!(
+        env.db
+            .authenticate_user("boss", "password123")
+            .unwrap()
+            .is_some()
+    );
+    // Setup is over: no code, and the remote page is the inert wizard.
+    assert!(!env.deps.setup.has_code());
+    let r = env.send(code_form(DOCKER, &code)).await;
+    assert_eq!(r.header("set-cookie"), None);
+    // The next start: an admin exists, the variables are ignored.
+    let again = bootstrap_admin(
+        &env.db,
+        &env.deps.setup,
+        vars(&[
+            ("MOKURO_ADMIN_USERNAME", "other".into()),
+            ("MOKURO_ADMIN_PASSWORD", "password456".into()),
+        ]),
+    );
+    assert_eq!(again, Bootstrap::Ignored);
+    assert!(env.db.get_user("other").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn env_bootstrap_refuses_bad_input_and_reads_a_password_file() {
+    let env = Env::new();
+    let setup = &env.deps.setup;
+    let short = bootstrap_admin(
+        &env.db,
+        setup,
+        vars(&[
+            ("MOKURO_ADMIN_USERNAME", "boss".into()),
+            ("MOKURO_ADMIN_PASSWORD", "short".into()),
+        ]),
+    );
+    assert!(
+        matches!(short, Bootstrap::Failed(ref m) if m.contains("password")),
+        "{short:?}"
+    );
+    let bad_name = bootstrap_admin(
+        &env.db,
+        setup,
+        vars(&[
+            ("MOKURO_ADMIN_USERNAME", "../x".into()),
+            ("MOKURO_ADMIN_PASSWORD", "password123".into()),
+        ]),
+    );
+    assert!(matches!(bad_name, Bootstrap::Failed(_)));
+    let no_password = bootstrap_admin(
+        &env.db,
+        setup,
+        vars(&[("MOKURO_ADMIN_USERNAME", "boss".into())]),
+    );
+    assert!(matches!(no_password, Bootstrap::Failed(_)));
+    // A name a reader already has: not promoted.
+    env.user("reader", "password123", Role::Registered);
+    let taken = bootstrap_admin(
+        &env.db,
+        setup,
+        vars(&[
+            ("MOKURO_ADMIN_USERNAME", "reader".into()),
+            ("MOKURO_ADMIN_PASSWORD", "password123".into()),
+        ]),
+    );
+    assert!(matches!(taken, Bootstrap::Failed(_)), "{taken:?}");
+    assert_eq!(
+        env.db.get_user("reader").unwrap().unwrap().role,
+        Role::Registered
+    );
+    assert!(setup.needs_setup(&env.db).unwrap(), "nothing created");
+    let missing = bootstrap_admin(
+        &env.db,
+        setup,
+        vars(&[
+            ("MOKURO_ADMIN_USERNAME", "boss".into()),
+            ("MOKURO_ADMIN_PASSWORD_FILE", "/nonexistent/secret".into()),
+        ]),
+    );
+    assert!(matches!(missing, Bootstrap::Failed(_)));
+
+    // Docker secrets end in a newline.
+    let secret = env.dir.path().join("admin_password");
+    std::fs::write(&secret, "correct horse\n").unwrap();
+    let made = bootstrap_admin(
+        &env.db,
+        setup,
+        vars(&[
+            ("MOKURO_ADMIN_USERNAME", "boss".into()),
+            ("MOKURO_ADMIN_PASSWORD_FILE", secret.display().to_string()),
+        ]),
+    );
+    assert_eq!(made, Bootstrap::Created("boss".into()));
+    assert!(
+        env.db
+            .authenticate_user("boss", "correct horse")
+            .unwrap()
+            .is_some()
     );
 }
 

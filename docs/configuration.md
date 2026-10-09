@@ -1244,7 +1244,9 @@ Other variables:
 | `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` | — | Short aliases for `server.host`, `server.port`, `storage.base_path`. |
 | `MOKURO_LOG` | `info` (`debug` with `-v`) | The log filter (`tracing` syntax), for example `debug` or `info,bunko_server=debug`. |
 | `MOKURO_NGINX_ACCEL` | unset | `1` when an nginx in front serves library downloads via `X-Accel-Redirect`. Set by the Docker images only when their nginx runs; never set it without that nginx. |
-| `MOKURO_SETUP_TOKEN` | generated | The one-time token that lets first-run setup (`/setup?token=…`) be opened from a browser that is not on the server machine, e.g. under Docker bridge networking. Unset, the server creates `<storage>/.setup-token` and logs the setup URL at startup while no admin exists; the file is removed when setup completes. |
+| `MOKURO_ADMIN_USERNAME` | unset | With `MOKURO_ADMIN_PASSWORD` (or `MOKURO_ADMIN_PASSWORD_FILE`): create this admin account at startup when no admin exists (Docker's unattended first run; the wizard's username and password rules apply). Ignored, with a log line, once an admin exists. Not a config key. |
+| `MOKURO_ADMIN_PASSWORD` | unset | The password for `MOKURO_ADMIN_USERNAME` (at least 8 characters). Never logged. |
+| `MOKURO_ADMIN_PASSWORD_FILE` | unset | Read the password from this file instead (a Docker secret; a trailing newline is dropped). |
 | `MOKURO_INSTALL_KIND` | detected | `self`, `docker` or a package manager's name; decides what the updater does (see [Updates](#updates)). |
 | `MOKURO_UPDATE_CHECK_SECONDS` | `43200` | The background release check's period (and, up to 60 s, its first delay), for mirrors that publish often and tests. |
 | `MOKURO_UPDATE_RETRY_SECONDS` | `600` | The first wait after a failed automatic update (doubling to 12 h). |

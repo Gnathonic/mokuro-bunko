@@ -30,6 +30,9 @@
   <Config Name="UMASK" Target="UMASK" Default="002" Mode="" Description="Umask for created files" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="TAKE_OWNERSHIP" Target="TAKE_OWNERSHIP" Default="false" Mode="" Description="Set true to chown /data and /config to PUID:PGID on boot" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
+  <Config Name="Admin username" Target="MOKURO_ADMIN_USERNAME" Default="" Mode="" Description="Optional: create this admin account on the first start (ignored once an admin exists). Leave empty to create it in the browser at /setup with the one-time setup code from the container's log." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Admin password" Target="MOKURO_ADMIN_PASSWORD" Default="" Mode="" Description="Optional: the password for Admin username (at least 8 characters; only used on the first start)." Type="Variable" Display="always" Required="false" Mask="true"/>
+
   <Config Name="MOKURO_CONFIG" Target="MOKURO_CONFIG" Default="/config/config.yaml" Mode="" Description="Config file path" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="MOKURO_HOST" Target="MOKURO_HOST" Default="0.0.0.0" Mode="" Description="Bind host" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="MOKURO_PORT" Target="MOKURO_PORT" Default="8080" Mode="" Description="Bind port" Type="Variable" Display="advanced" Required="false" Mask="false"/>
