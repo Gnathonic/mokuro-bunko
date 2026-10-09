@@ -85,10 +85,7 @@ mokuro-bunko.exe config set ocr.backend cpu
 ```
 
 If the GPU cannot be used (an old driver, say), the server logs why in
-`%LOCALAPPDATA%\mokuro-bunko\logs\server.log` and runs OCR on the CPU:
-hayai-nova and ppocr-manga only, since paddle-manga needs the GPU (`doctor`
-then warns `paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova
-on the CPU` if a paddle-manga generation is enabled).
+`%LOCALAPPDATA%\mokuro-bunko\logs\server.log` and runs OCR on the CPU.
 Without any pack, hayai-nova and paddle-manga do not run at all (only
 ppocr-manga does) until you run `install-ocr`.
 
@@ -97,7 +94,7 @@ ppocr-manga does) until you run `install-ocr`.
 The OCR models are fetched by `install-ocr`, or the first time a volume is
 OCR'd, into `models\` under your data folder, and verified: about 0.5 GB for
 hayai-nova (its compiled package for your GPU or CPU), about 2 GB more for
-paddle-manga if you enable it (GPU only). To fetch them up front later (for example
+paddle-manga if you enable it. To fetch them up front later (for example
 after enabling paddle-manga):
 
 ```powershell

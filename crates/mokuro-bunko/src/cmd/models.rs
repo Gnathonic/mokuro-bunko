@@ -130,53 +130,17 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
             .map(|e| (e.to_string(), "auto-accuracy".to_string()))
             .collect(),
     };
-    let mut recognizer_rows: Vec<(&str, &str)> = rows
+    let recognizer_rows: Vec<(&str, &str)> = rows
         .iter()
         .filter(|(e, _)| e == models::HAYAI || e == models::PADDLE)
         .map(|(e, m)| (e.as_str(), m.as_str()))
         .collect();
-    // Every failure is reported at the end; one file failing does not stop the others.
-    let mut failed: Vec<String> = Vec::new();
-    // The compiled libtorch packages depend on this machine's devices: the backend pack
-    // (install-ocr) says which, limited to the devices `ocr.backend` allows (`cpu`
-    // beside a GPU pack fetches the CPU packages).
-    let pipeline = (!recognizer_rows.is_empty()).then(|| {
-        bunko_engines::EnginePipeline::new(
-            target.engine_config(Backend::parse(&target.backend_preference())),
-        )
-    });
-    // A GPU-only engine (paddle-manga) on a machine without a GPU: nothing to fetch for
-    // it. Asked for by name, that is a failure (non-zero exit, nothing fetched); as one
-    // of the library's generations (a processor with a GPU may run it) or of a
-    // processor's every-engine default (it does not offer it), a note.
-    let mut notes: Vec<String> = Vec::new();
-    if let Some(pipeline) = pipeline.as_ref().filter(|p| p.torch().is_ok()) {
-        recognizer_rows.retain(|(e, _)| match pipeline.device_for(e) {
-            Ok(()) => true,
-            Err(why) if engine.is_some() => {
-                notes.push(format!("  {e:<14} FAILED: {why}"));
-                failed.push(format!("{e} (needs a GPU)"));
-                false
-            }
-            Err(why) => {
-                let after = if target.role == Role::Library {
-                    "not fetched here; a processor with a GPU can run its generation"
-                } else {
-                    "not fetched; this processor does not offer it"
-                };
-                notes.push(format!("  {e:<14} {why}: {after}"));
-                false
-            }
-        });
-    }
-    let refused = !failed.is_empty();
     // Device-independent files: PP-OCR (every engine reads lines with it) and the host
     // files of the recognizer engines those rows use.
     let gpu = bunko_ocr::runtime::ep_compiled().len() > 1;
     let mut ids: Vec<&'static str> = Vec::new();
     for e in models::ENGINES {
-        let wanted =
-            (e == models::PPOCR && !refused) || recognizer_rows.iter().any(|(r, _)| *r == e);
+        let wanted = e == models::PPOCR || recognizer_rows.iter().any(|(r, _)| *r == e);
         if !wanted {
             continue;
         }
@@ -198,9 +162,8 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
         store.options().root.display(),
         mb(total)
     );
-    for note in &notes {
-        println!("{note}");
-    }
+    // Every failure is reported at the end; one file failing does not stop the others.
+    let mut failed: Vec<String> = Vec::new();
     for id in ids {
         match store.ensure(id) {
             Ok(r) => println!(
@@ -222,7 +185,13 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
             }
         }
     }
-    if let Some(pipeline) = pipeline.as_ref().filter(|_| !recognizer_rows.is_empty()) {
+    if !recognizer_rows.is_empty() {
+        // The compiled libtorch packages depend on this machine's devices: the backend
+        // pack (install-ocr) says which, limited to the devices `ocr.backend` allows
+        // (`cpu` beside a GPU pack fetches the CPU packages).
+        let pipeline = bunko_engines::EnginePipeline::new(
+            target.engine_config(Backend::parse(&target.backend_preference())),
+        );
         match pipeline.torch() {
             Err(e) => {
                 println!(

@@ -2376,14 +2376,17 @@ function genDeviceCellHtml(row, index, stage) {
         return '<option value="' + escapeHtml(id) + '"' + (id === chosen ? ' selected' : '') + '>' +
             escapeHtml(label) + '</option>';
     }).join('');
-    // A GPU-only engine (paddle-manga) offers no CPU; the cell says why.
-    const needsGpu = stage.device_needs_gpu
-        ? '<span class="pools__why">' + escapeHtml(stage.device_needs_gpu) + '</span>'
+    // An engine that runs on the CPU but is slow there (paddle-manga): say so when
+    // the CPU is picked, or is the only device this machine offers.
+    const onCpu = chosen === 'cpu' ||
+        (chosen === 'auto' && !allowed.some((id) => String(id).startsWith('gpu')));
+    const cpuNote = stage.device_cpu_note && onCpu
+        ? '<span class="pools__why">' + escapeHtml(stage.device_cpu_note) + '</span>'
         : '';
     return (
         '<td><select class="form-input pools__device-select" data-act="device" data-idx="' + index +
         '" data-stage="' + escapeHtml(stage.key) + '"' +
-        ' aria-label="' + escapeHtml(stage.key) + ' device">' + options + '</select>' + needsGpu + '</td>'
+        ' aria-label="' + escapeHtml(stage.key) + ' device">' + options + '</select>' + cpuNote + '</td>'
     );
 }
 

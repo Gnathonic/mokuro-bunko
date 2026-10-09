@@ -851,19 +851,6 @@ fn parse_pools(
                     ),
                 ));
             }
-            // A GPU-only engine pinned to the CPU (0.5.x ran paddle-manga there): the pin
-            // is dropped, so the row runs on a GPU where there is one.
-            if key == engines::STAGE_ENGINE
-                && device == "cpu"
-                && let Some(e) = spec.engine_spec().filter(|e| e.gpu_only())
-            {
-                out.warnings.push(format!(
-                    "ocr.generations[{index}]: pools.stage_device.engine was 'cpu', but {}; set to auto",
-                    e.gpu_only_reason
-                ));
-                out.migrated = true;
-                continue;
-            }
             pools.stage_device.insert(key.to_string(), device);
         }
     }
@@ -1076,31 +1063,5 @@ mod tests {
         );
         let bad = json!([{"engine": "hayai-nova", "primary": true, "pools": {"stage_device": {"detect": "gpu:0"}}}]);
         assert!(parse_generation_list(&bad).is_err());
-    }
-
-    /// paddle-manga runs on a GPU only: a 0.5.x pin of its engine stage to the CPU is
-    /// dropped with a warning (the row still loads); hayai-nova keeps its CPU pin.
-    #[test]
-    fn a_cpu_pin_of_a_gpu_only_engine_is_dropped() {
-        let v = json!([
-            {"name": "nova", "engine": "hayai-nova", "primary": true,
-             "pools": {"stage_device": {"engine": "cpu"}}},
-            {"name": "vl", "engine": "paddle-manga",
-             "pools": {"stage_device": {"engine": "cpu"}}},
-            {"name": "vl1", "engine": "paddle-manga",
-             "pools": {"stage_device": {"engine": "gpu:1"}}}
-        ]);
-        let p = parse_generation_list(&v).unwrap();
-        let engine_pin = |i: usize| p.rows[i].pools.stage_device.get("engine").cloned();
-        assert_eq!(engine_pin(0).as_deref(), Some("cpu"));
-        assert_eq!(engine_pin(1), None);
-        assert_eq!(engine_pin(2).as_deref(), Some("gpu:1"));
-        assert!(p.migrated);
-        assert!(
-            p.warnings.iter().any(|w| w.contains("ocr.generations[1]")
-                && w.contains("paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm)")),
-            "{:?}",
-            p.warnings
-        );
     }
 }

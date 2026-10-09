@@ -670,7 +670,7 @@ without Python — from a *backend pack* that `mokuro-bunko install-ocr` install
 | `auto` | The installed pack's GPUs, else the CPU. `install-ocr` installs the pack for the GPU it finds (`cu130`, `rocm7.1`, else `cpu`). |
 | `cuda` | NVIDIA GPUs (the `cu130` pack): Turing (GTX 16xx / RTX 20xx) or newer, driver 580 or newer. Nothing else to install: the pack brings the CUDA libraries. |
 | `rocm` | AMD GPUs on Linux (the `rocm7.1` pack): Radeon RX 6000 (gfx1030; RX 6600/6700 too: `HSA_OVERRIDE_GFX_VERSION=10.3.0` is set automatically), RX 7000, RX 9000. Needs `libnuma` from the system (Debian/Ubuntu: `libnuma-dev`). |
-| `cpu` | CPU only (slower): hayai-nova and ppocr-manga, not paddle-manga (it needs a GPU). `install-ocr` installs the `cpu` pack even with a GPU present (an installed GPU pack is kept and runs on the CPU). |
+| `cpu` | CPU only (slower). `install-ocr` installs the `cpu` pack even with a GPU present (an installed GPU pack is kept and runs on the CPU). |
 | `skip` | This server runs no OCR of its own, the same as `local_processing: false`. The Docker image then installs nothing. |
 
 With `cuda` or `rocm` and no such GPU usable here (none, an old driver, a GPU the
@@ -685,11 +685,6 @@ as in 0.5.2 (early 0.7 builds read it as `webgpu`, which left an AMD GPU unused)
 which is installed. Without a pack, hayai-nova and paddle-manga are not offered on the
 machine (ppocr-manga still is, and remote processors still work).
 
-**paddle-manga needs a GPU** (NVIDIA CUDA or AMD ROCm). It never runs on the CPU:
-a machine without a usable GPU (or with `ocr.backend: cpu`) does not offer it, and
-the library gives its generation only to a machine with a GPU. On a CPU-only setup
-use hayai-nova. See [Troubleshooting](troubleshooting.md#paddle-manga-needs-a-gpu).
-
 `skip` is not "no OCR at all": it means none on this machine. The server
 still owns the queue and still serves cover thumbnails; a
 [processor](#remote-ocr-processors) that logs in runs the OCR. Until one
@@ -698,7 +693,7 @@ since …". A server that must never have OCR done simply has no `processor`
 account: that role is only ever given by an admin.
 
 A GPU that cannot be used (only the CPU pack installed, an old driver, a hidden
-device) leaves the CPU, and with it hayai-nova and ppocr-manga only. `mokuro-bunko doctor` shows which pack is in use and
+device) leaves the CPU. `mokuro-bunko doctor` shows which pack is in use and
 which this machine would want, and whether the models and compiled packages
 are on disk; the server log lists the devices the pack found when it loaded.
 
@@ -835,7 +830,7 @@ pack), ppocr-manga on ONNX Runtime on the CPU.
 | Engine | What it is | Runs on | Use it for |
 |--------|-----------|---------|------------|
 | `hayai-nova` | [hayai-ocr v2.5 "Nova"](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova) | card or CPU | The default. Better text than 0.5's mokuro engine, especially display lettering, sound effects and colour pages. Reads at the row's `patch_budget`. Needs a detector. |
-| `paddle-manga` | [PaddleOCR-VL 1.6 + manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora) | card only (NVIDIA CUDA or AMD ROCm) | The most accurate and the slowest; about 2 GB of model files. Needs a detector. A machine without a GPU does not run it: use hayai-nova there. |
+| `paddle-manga` | [PaddleOCR-VL 1.6 + manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora) | card recommended | The most accurate and the slowest; about 2 GB of model files (3.6 GB in fp32, which the CPU runs). Needs a detector. On the CPU about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
 | `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector + CTC recognizer, 23 MB | CPU only | Reads lines rather than bubbles, removes furigana, and is the one engine that reads scanned **novel** pages. Brings its own detector. |
 
 Sidecars from every engine, and every non-primary layer, carry an
@@ -852,8 +847,7 @@ verifies each file's sha256 and only then moves it into place: the PP-OCR ONNX
 files, hayai-nova's and paddle-manga's host tables (tokenizer, embeddings), and
 the **compiled libtorch packages** for this machine's devices
 (`models/torch/<engine>/<precision>/<target>/`, e.g. `linux-cuda-sm_89`,
-`linux-rocm-gfx1201`, `linux-cpu-x86_64-v3`, with the shared weights next to them;
-paddle-manga has GPU packages only).
+`linux-rocm-gfx1201`, `linux-cpu-x86_64-v3`, with the shared weights next to them).
 `mokuro-bunko install-ocr` and `models download [--engine E]` fetch them up front
 (for example before going offline); `models list|verify` inspect them. Sizes:
 hayai-nova about 0.5 GB per precision, ppocr-manga about 23 MB, paddle-manga
@@ -899,14 +893,14 @@ it is written, so editing them never stops a running job.
 |---|---|---|
 | `stage_workers` | `{stage: 1–64}` | How many workers a stage runs. A stage holding a model on a card runs one worker; for the `engine` stage a number above 1 instead runs that many recognizer copies on the card (up to 8), only worth it on a card with spare memory and compute. |
 | `queue_capacity` | `{stage: 1–256}` | How many pages may wait in the queue a stage fills. Capacity is memory (a decoded page can be ~14 MB); the default is small on purpose. |
-| `stage_device` | `{stage: cpu \| "gpu:<n>"}` | Where a stage's model runs. Absent means auto: card 0 when there is one, else the CPU (paddle-manga's `engine`: card 0, never the CPU). Only stages holding a model take one. |
+| `stage_device` | `{stage: cpu \| "gpu:<n>"}` | Where a stage's model runs. Absent means auto: card 0 when there is one, else the CPU. Only stages holding a model take one. |
 
 Which stage names a row has depends on its engine; a name from another road
 is refused when the config loads:
 
 | Row | Stages | Take a device |
 |---|---|---|
-| `hayai-nova` / `paddle-manga` | `detect` → `engine` → `post` | `detect` (CPU only), `engine` (paddle-manga: a GPU only; a `cpu` pin from 0.5.x is dropped with a warning) |
+| `hayai-nova` / `paddle-manga` | `detect` → `engine` → `post` | `detect` (CPU only), `engine` |
 | `ppocr-manga` | `detect` → `layout` | `detect` (CPU only) |
 
 Some placements worth knowing:
@@ -915,8 +909,7 @@ Some placements worth knowing:
   whole card goes to the recognizer and the detector is a CPU pool.
 - **Two rows on two cards** (`gpu:0`, `gpu:1`) with `ocr.concurrency: 2` run
   side by side.
-- **Everything on the CPU** is for a machine with no card (hayai-nova or
-  ppocr-manga rows; paddle-manga needs a card).
+- **Everything on the CPU** is for a machine with no card.
 
 The admin panel's pools table offers only the devices a machine really has,
 and shows what each blank cell derives to. A machine's pools never carry a

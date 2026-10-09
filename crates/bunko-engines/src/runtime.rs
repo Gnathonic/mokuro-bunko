@@ -314,44 +314,6 @@ pub fn place_runnable(
     (p, why)
 }
 
-/// [`place_runnable`] for `engine`, except that a GPU-only engine (paddle-manga,
-/// [`bunko_sched::precision::gpu_only`]) never falls back to the CPU: `Err` with
-/// [`bunko_sched::precision::needs_gpu`] when no GPU here may run it (there is none, or
-/// `ocr.backend: cpu` hides it, or the row pins the engine to the CPU or to a GPU this
-/// machine does not have). A GPU without a compiled package for it stays the placement:
-/// the caller reports the missing package for that GPU.
-pub fn place_engine(
-    engine: &str,
-    asked: Option<&str>,
-    devices: &[Device],
-    formats: impl Fn(&Placement) -> Vec<&'static str>,
-) -> Result<(Placement, Option<String>), String> {
-    if !bunko_sched::precision::gpu_only(engine) {
-        return Ok(place_runnable(asked, devices, formats));
-    }
-    let (p, why) = place(asked, devices);
-    if p.is_gpu() {
-        return Ok((p, None));
-    }
-    let msg = bunko_sched::precision::needs_gpu(engine);
-    Err(match why {
-        Some(why) => format!("{msg} ({why})"),
-        None if devices.iter().any(|d| d.id != "cpu") => {
-            format!("{msg} (the generation pins its engine stage to the CPU)")
-        }
-        None => msg,
-    })
-}
-
-/// Whether `engine` can run on some device of `devices` at all: not a GPU-only engine on
-/// a machine whose devices (under `ocr.backend`) are the CPU alone. `Err` says why not.
-pub fn engine_has_device(engine: &str, devices: &[Device]) -> Result<(), String> {
-    if bunko_sched::precision::gpu_only(engine) && devices.iter().all(|d| d.id == "cpu") {
-        return Err(bunko_sched::precision::needs_gpu(engine));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,40 +363,6 @@ mod tests {
         assert!(Backend::Rocm.allows("rocm") && Backend::Rocm.allows("cpu"));
         assert!(!Backend::Cuda.allows("rocm"));
         assert_eq!(Backend::parse("whatever"), Backend::Auto);
-    }
-
-    #[test]
-    fn paddle_manga_is_never_placed_on_the_cpu() {
-        let none = |_: &Placement| -> Vec<&'static str> { Vec::new() };
-        let fp32 = |_: &Placement| -> Vec<&'static str> { vec!["fp32"] };
-        let needs = "paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU";
-        // A CPU-only host: a clear error, not a CPU placement.
-        let cpu_only = vec![dev("cpu", "cpu")];
-        assert_eq!(
-            place_engine("paddle-manga", None, &cpu_only, fp32).unwrap_err(),
-            needs
-        );
-        assert!(engine_has_device("paddle-manga", &cpu_only).is_err());
-        // hayai-nova on the same host: the CPU, as before.
-        assert_eq!(
-            place_engine("hayai-nova", None, &cpu_only, fp32).unwrap(),
-            (Placement::cpu(), None)
-        );
-        assert!(engine_has_device("hayai-nova", &cpu_only).is_ok());
-        // A GPU host: the GPU, and no CPU fallback when it has no package (hayai-nova
-        // falls back).
-        let gpus = vec![dev("cpu", "cpu"), dev("gpu:0", "rocm")];
-        assert!(engine_has_device("paddle-manga", &gpus).is_ok());
-        let (p, why) = place_engine("paddle-manga", None, &gpus, none).unwrap();
-        assert_eq!((p.device.as_str(), why), ("gpu:0", None));
-        let (p, why) = place_engine("hayai-nova", None, &gpus, none).unwrap();
-        assert_eq!(p, Placement::cpu());
-        assert!(why.unwrap().contains("no compiled package"));
-        // Pinned to the CPU, or to a GPU that is not here.
-        let e = place_engine("paddle-manga", Some("cpu"), &gpus, fp32).unwrap_err();
-        assert!(e.starts_with(needs) && e.contains("pins"), "{e}");
-        let e = place_engine("paddle-manga", Some("gpu:3"), &gpus, fp32).unwrap_err();
-        assert!(e.starts_with(needs) && e.contains("gpu:3"), "{e}");
     }
 
     #[test]

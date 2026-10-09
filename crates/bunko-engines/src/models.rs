@@ -14,10 +14,9 @@
 //! precision x device target (`bunko_ocr::models::ModelStore::ensure_torch_package`)
 //! plus the host files listed by [`torch_host_ids`] (tokenizers, hayai-nova's position
 //! table and token embeddings; paddle-manga's input embeddings come with its packages'
-//! weights, [`paddle_embed_id`] for a package without them). paddle-manga runs on a GPU
-//! only (`bunko_sched::precision::gpu_only`): the release has no CPU packages for it.
-//! The ONNX graphs ([`engine_ids`]) are only used by the deferred ONNX recognizers
-//! (feature `onnx-vlm`).
+//! weights, GPU and CPU alike; [`paddle_embed_id`] for a package without them). The
+//! ONNX graphs ([`engine_ids`]) are only used by the deferred ONNX recognizers (feature
+//! `onnx-vlm`).
 //!
 //! paddle-manga's input embeddings: the ONNX recognizer reads the fp16 table at both
 //! precisions (what bunko-vlm keeps in memory and measured parity on). The libtorch one
@@ -44,7 +43,7 @@ pub fn ppocr_ids() -> Vec<&'static str> {
 }
 
 /// Host files the libtorch recognizer of `engine` always reads besides its compiled
-/// package. paddle-manga's input embeddings come with its (GPU) packages' weights; only
+/// package. paddle-manga's input embeddings come with its packages' weights; only
 /// a package without them (an older or hand-made one) also needs [`paddle_embed_id`].
 pub fn torch_host_ids(engine: &str, _precision: Precision) -> Vec<&'static str> {
     match engine {

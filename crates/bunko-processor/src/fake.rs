@@ -123,16 +123,10 @@ fn paced_sleep(delay: Duration, debt: &mut Duration, cancel: &CancelToken) -> bo
 impl PagePipeline for FakePipeline {
     fn describe(&self) -> MachineInfo {
         let config = &self.inner.config;
-        // As the engines offer them: a GPU-only engine (paddle-manga) only with a GPU.
         let engines = if config.engines.is_empty() {
             vec!["fake".to_string()]
         } else {
-            config
-                .engines
-                .iter()
-                .filter(|e| config.gpu_formats.is_some() || !bunko_sched::precision::gpu_only(e))
-                .cloned()
-                .collect()
+            config.engines.clone()
         };
         MachineInfo {
             host: HostInfo {
@@ -184,10 +178,6 @@ impl PagePipeline for FakePipeline {
             (Some("cpu"), _) | (_, None) => "cpu".to_string(),
             _ => "gpu:0".to_string(),
         };
-        // As the engines place it: a GPU-only engine never runs on the CPU.
-        if device == "cpu" && bunko_sched::precision::gpu_only(&spec.engine) {
-            return Err(bunko_sched::precision::needs_gpu(&spec.engine));
-        }
         // As the engines resolve: the shared bf16 rule over the device's formats.
         let formats = match (&config.gpu_formats, device.as_str()) {
             (Some(f), "gpu:0") => bunko_sched::precision::device_formats(
@@ -429,45 +419,5 @@ impl VolumeRunner for FakeRunner {
                 ..Default::default()
             }],
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn row(engine: &str) -> RowSpec {
-        serde_json::from_value(json!({"id": "g1", "name": "default", "engine": engine})).unwrap()
-    }
-
-    /// The fake offers and places engines as the real ones do: paddle-manga runs on a
-    /// GPU only.
-    #[test]
-    fn paddle_manga_needs_the_fake_gpu() {
-        let engines = vec!["hayai-nova".to_string(), "paddle-manga".to_string()];
-        let cpu = FakePipeline::new(FakeConfig {
-            engines: engines.clone(),
-            ..Default::default()
-        });
-        assert_eq!(cpu.describe().catalog.engines, ["hayai-nova"]);
-        let err = cpu.open(&row("paddle-manga")).err().unwrap();
-        assert!(err.starts_with("paddle-manga needs a GPU"), "{err}");
-        assert!(cpu.open(&row("hayai-nova")).is_ok());
-        let gpu = FakePipeline::new(FakeConfig {
-            engines,
-            gpu_formats: Some(vec!["fp32".into()]),
-            ..Default::default()
-        });
-        assert_eq!(
-            gpu.describe().catalog.engines,
-            ["hayai-nova", "paddle-manga"]
-        );
-        assert!(gpu.open(&row("paddle-manga")).is_ok());
-        let mut pinned = row("paddle-manga");
-        pinned
-            .pools
-            .stage_device
-            .insert("engine".into(), "cpu".into());
-        assert!(gpu.open(&pinned).is_err());
     }
 }

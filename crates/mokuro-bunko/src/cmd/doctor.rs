@@ -370,7 +370,7 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
                 want.reason
             ),
             Some(format!(
-                "Run 'mokuro-bunko install-ocr{flag}' (installs the {} pack). Without it hayai-nova and paddle-manga (which also needs a GPU) cannot run here; ppocr-manga and remote processors still work.",
+                "Run 'mokuro-bunko install-ocr{flag}' (installs the {} pack). Without it hayai-nova and paddle-manga cannot run here; ppocr-manga and remote processors still work.",
                 want.variant
             )),
         );
@@ -469,10 +469,9 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
 /// device (`EnginePipeline::package_status_for`, each row's precision mode), and what
 /// the backend set for its runtime (an RX 6600's `HSA_OVERRIDE_GFX_VERSION`). FAIL
 /// when a row's package (with the weights it binds) or one of its host files is not on
-/// disk (OCR would have to download it first), or nothing here can run it; WARN when a
-/// row's engine needs a GPU this machine has not got (paddle-manga: a processor with a
-/// GPU can still run that generation); None when no enabled row uses a recognizer or no
-/// backend pack is installed (the OCR backend check reports that).
+/// disk (OCR would have to download it first), or nothing here can run it; None when no
+/// enabled row uses a recognizer or no backend pack is installed (the OCR backend check
+/// reports that).
 #[cfg(feature = "ocr")]
 fn check_packages(
     target: &crate::ocr_target::OcrTarget,
@@ -503,14 +502,7 @@ fn check_packages(
         .map(|(k, v)| format!("{k}={v} set (the card runs its family's ROCm target)"))
         .collect();
     let (mut present, mut missing, mut cannot) = (Vec::new(), Vec::new(), Vec::new());
-    let mut needs_gpu: Vec<String> = Vec::new();
     for (engine, mode) in &rows {
-        if let Err(why) = pipeline.device_for(engine) {
-            if !needs_gpu.contains(&why) {
-                needs_gpu.push(why);
-            }
-            continue;
-        }
         match pipeline.package_status_for(engine, mode) {
             Ok(st) if st.ready() => present.push(format!(
                 "{engine} {} on {} ({})",
@@ -544,9 +536,6 @@ fn check_packages(
     if !cannot.is_empty() {
         detail.push(format!("NOT RUNNABLE HERE: {}", cannot.join("; ")));
     }
-    if !needs_gpu.is_empty() {
-        detail.push(format!("NO GPU HERE: {}", needs_gpu.join("; ")));
-    }
     detail.extend(notes);
     let detail = detail.join("; ");
     Some(if !cannot.is_empty() {
@@ -568,17 +557,9 @@ fn check_packages(
                 }
             )),
         )
-    } else if !needs_gpu.is_empty() {
-        Check::warn("Compiled packages", detail, Some(needs_gpu_hint().into()))
     } else {
         Check::pass("Compiled packages", detail)
     })
-}
-
-/// What to do about an enabled paddle-manga generation on a machine without a GPU.
-#[cfg(feature = "ocr")]
-fn needs_gpu_hint() -> &'static str {
-    "This machine cannot run paddle-manga: its generation runs only on a processor with a GPU (NVIDIA CUDA or AMD ROCm). To read on this machine's CPU, use a hayai-nova generation instead (admin panel: Settings → OCR)."
 }
 
 #[cfg(feature = "ocr")]

@@ -22,8 +22,6 @@ It prints PASS / WARN / FAIL lines, with a fix hint under anything wrong:
 - Compiled packages (full build, when a hayai-nova or paddle-manga
   generation is enabled): whether the compiled package each one needs on
   this machine's device is on disk, and whether anything here can run it
-  (paddle-manga needs a GPU: see
-  ["paddle-manga needs a GPU"](#paddle-manga-needs-a-gpu))
 - free disk space (warns under 2 GB)
 - whether the configured port is already in use
 - volumes currently failing OCR
@@ -141,13 +139,12 @@ without installing anything.
   driver an installed `cu130` pack runs on the CPU only, and the server log
   has a `libtorch backend:` warning saying why.
 - **GPUs older than Turing** (GTX 10xx and older): there are no compiled
-  packages for them. hayai-nova runs on the CPU (`models download` says
-  `note: running on the CPU: ...`); paddle-manga cannot run there.
+  packages for them. OCR runs on the CPU; `models download` says
+  `note: running on the CPU: ...`.
 - **AMD**: only Linux, and only RX 6000 (gfx1030, gfx1031, gfx1032, gfx1034), RX 7000
   (gfx1100 to gfx1102) and RX 9000 (gfx1200, gfx1201). Another card gives
   `AMD gfx906 is not one of the supported ROCm GPUs (...)` and the `cpu`
-  pack. On Windows an AMD or Intel GPU runs OCR on the CPU (hayai-nova and
-  ppocr-manga; not paddle-manga, which [needs a GPU](#paddle-manga-needs-a-gpu)).
+  pack. On Windows an AMD or Intel GPU runs OCR on the CPU.
 - **A hidden GPU**: `install-ocr` says `no GPU visible: AMD gfx1201 (hidden by
   HIP_VISIBLE_DEVICES="")`. `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES` or
   `ROCR_VISIBLE_DEVICES` set to an empty value or `-1` hide every GPU of that
@@ -168,6 +165,19 @@ without installing anything.
   shows the pack in use and what this machine would want, and the server log
   lists the devices the pack found when it loaded (`libtorch backend <variant>
   (...) loaded in ...: ...`).
+
+## paddle-manga is slow on the CPU
+
+paddle-manga runs on the CPU, as in 0.5.2, but slowly: about 40 s a page on 16
+threads (a Ryzen 7 5800X), where hayai-nova takes about 4 s. Its CPU package
+downloads 3.6 GB of weights (fp32; the same files its GPU packages use) and
+needs about 6 GB of RAM while it reads. The setup wizard, the settings page
+and the admin panel's pools table say so where the CPU is picked for it.
+
+On a machine without a GPU, use hayai-nova (the default) for the library's
+primary generation. Keep a paddle-manga generation only if you want its
+reading as an extra layer and can wait for it, or connect a
+[processor](deployment.md#remote-ocr-processors) with a GPU to run it.
 
 ## ROCm: missing host libraries, RX 6600/6700
 
@@ -205,39 +215,6 @@ device type (e.g. `linux-cuda-sm_89`, `linux-rocm-gfx1201`,
   `mokuro-bunko install-ocr`; otherwise use another precision for the row, or
   a processor on other hardware.
 
-## paddle-manga needs a GPU
-
-paddle-manga (PaddleOCR-VL with the manga LoRA) runs only on a GPU: NVIDIA
-(CUDA, the `cu130` pack) or AMD (ROCm, the `rocm7.1` pack, Linux). There are
-no CPU packages for it. On a machine without a usable GPU (none, only the
-`cpu` pack installed, `ocr.backend: cpu`, an NVIDIA driver too old for the
-`cu130` pack, a container not given the GPU) it is not offered, and where it
-is asked for anyway you see:
-
-```
-paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU
-```
-
-- `doctor` shows it as a `WARN` on `Compiled packages` (`NO GPU HERE: ...`)
-  for an enabled paddle-manga generation: this machine cannot run it, but a
-  processor with a GPU still can, and this machine reads the other
-  generations.
-- `models download` and `install-ocr` fetch nothing for that generation and
-  say so (not a failure); `models download --engine paddle-manga` fails
-  with the message.
-- The library never gives a paddle-manga row to a machine that reports no
-  GPU (a processor without one does not list the engine), and a benchmark
-  of it on such a machine is refused with the same text. A session that is
-  opened anyway fails with it at once, before anything is downloaded.
-
-To fix it: on a setup with no GPU, switch the generation to `hayai-nova` (or
-disable it) in the admin panel (Settings → OCR); or connect a
-[processor](deployment.md#remote-ocr-processors) with a GPU; or give this machine its GPU (see
-["The wrong pack for this GPU"](#the-wrong-pack-for-this-gpu-or-the-gpu-is-not-used)).
-0.5.2 also ran paddle-manga on the CPU, at tens of seconds a page; a 0.5
-config that pinned its `engine` stage to `cpu` still loads, with the pin
-dropped and a config warning.
-
 ## Models do not download
 
 The first OCR run (or `mokuro-bunko install-ocr`, or
@@ -249,8 +226,8 @@ exits non-zero when anything failed. If it fails:
 
 - check the machine can reach the internet (GitHub release assets and, for
   upstream files, Hugging Face), and that the disk has room (hayai-nova about
-  0.6 GB in fp32 and 0.3 GB in bf16/fp16; paddle-manga, on a GPU only, about
-  3.6 GB in fp32 and 1.8 GB in bf16/fp16);
+  0.6 GB in fp32 and 0.3 GB in bf16/fp16; paddle-manga about 3.6 GB in fp32,
+  on the CPU too, and 1.8 GB in bf16/fp16);
 - **"no compiled <engine> <precision> package for this device (looked for
   ...)"**: the release has no package for this device type; see
   ["Compiled packages" FAIL](#doctor-compiled-packages-fail) above;
@@ -314,8 +291,7 @@ Also check:
   gives the volumes back.
 - The processor can run what the library asks for: a processor is only
   offered rows it can run (a forced `fp16`, say, is not given to a CPU-only
-  machine, nor is a paddle-manga row, which
-  [needs a GPU](#paddle-manga-needs-a-gpu)). Without a backend pack in its own storage it can run no
+  machine). Without a backend pack in its own storage it can run no
   hayai-nova or paddle-manga row at all; `processor setup` shows
   `engines: ...` for the machine, and see
   ["No backend pack installed"](#no-backend-pack-installed).
