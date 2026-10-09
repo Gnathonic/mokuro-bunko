@@ -105,8 +105,9 @@ Why these choices:
   `vcruntime140_1`, `msvcp140`, `msvcp140_1`, `msvcp140_2` and `vcomp140` into each
   Windows pack's `lib/` (`crates/xtask/src/vcredist.rs`; `--no-vc-runtime` to leave them
   out). They come from the building Visual Studio's
-  `VC\Redist\MSVC\<version>\x64\Microsoft.VC143.{CRT,OpenMP}` (`VC_REDIST_DIR` or
-  `VCToolsRedistDir` override; the windows-latest runner has VS 2022). Terms: they are
+  `VC\Redist\MSVC\<version>\x64\Microsoft.VC14*.{CRT,OpenMP}` (`VC_REDIST_DIR` or
+  `VCToolsRedistDir` override; the windows-latest runner has Visual Studio 18, whose
+  14.51 runtime the 0.7.0-beta.1 release check shipped). Terms: they are
   "Distributable Code" of Visual Studio 2022
   (<https://learn.microsoft.com/visualstudio/releases/2022/redistribution#visual-c-runtime-files>)
   and app-local deployment is a documented way to deploy them
@@ -687,6 +688,23 @@ Verified locally 2026-10-02 (stream C, libtorch backend; details in §8):
     sm_80 packages; the volume OCRed on gpu:0 (20 pages in 1.5 s); second start 0
     requests. **Not verified**: the toolkit's own injection (`--gpus all`,
     `--runtime=nvidia`), which no test host here has.
+
+Release check, 2026-10-09 (`release-check.yml` on `0.7` at 0.7.0-beta.1, run
+37894529228, every job green): all 8 archives (Windows full and lite, macOS arm64
+full/lite and x86_64 lite, Linux musl lite x86_64/arm64, manylinux full), the 3 disk
+images (built with dmgbuild, mounted on the runner), the 6 backend packs (Windows
+`cpu`/`cu130` with the clang-cl wrapper, macOS `cpu`, Linux `cpu`/`cu130`/`rocm7.1`),
+both images built (multi-arch lite, amd64 full; the amd64 ones loaded and run
+`--version`, nothing pushed, no registry login) and the unsigned `release.json` with
+the expected 8 artifacts and 6 backends. Downloaded and checked: the Windows `cpu`
+pack's `pack.json` says `bunko_version` 0.7.0-beta.1, `bunko_torch.dll` imports
+`MSVCP140`/`VCRUNTIME140*` (MSVC ABI) and `lib/` holds the six VC++ runtime DLLs
+(14.51) listed in pack.json, with `licenses/microsoft-vc-runtime.txt`; the arm64 full
+and lite disk images on an M-series Mac (`hdiutil imageinfo`: UDZO; attached
+`-nobrowse`): `Mokuro Bunko.app` (CLI + tray, `--version` 0.7.0-beta.1 full / lite,
+`CFBundleVersion` 0.7.0-beta.1, `LSUIElement`), the `Applications` link to
+`/Applications`, `Read me.txt` (the lite one with the lite paragraph), no
+`ocr-offline`; their sha256 equal the `SHA256SUMS` lines.
 
 Only verifiable in CI / on real hardware:
 
