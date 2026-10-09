@@ -136,14 +136,27 @@ def main(argv=None) -> int:
     if a.bench:
         extra["peak_rss_mb"] = peak_rss_mb()
     print(json.dumps({**res, **extra}), flush=True)
+    # free the packages before the weights they bind (the runtime's order: PackageSet
+    # drops its graphs before its Weights)
+    pk.clear()
+    import gc
+
+    gc.collect()
+    print("packages released", file=sys.stderr, flush=True)
     return 0 if all(r["ids_equal"] for r in res.values()) else 1
 
 
 if __name__ == "__main__":
     rc = main()
-    if sys.platform == "win32":
-        # skip interpreter teardown: the AOTI loaders' destructors (removing their temp
-        # dirs while the model DLLs are still mapped) can fail the exit code on Windows
+    if sys.platform == "win32" and os.environ.get("TORCH_EXPORT_VERIFY_TEARDOWN") != "1":
+        # skip process teardown (DLL detach of libtorch and the model DLLs), which ended
+        # the runner's verify with 0xC0000005 after its result was printed
+        import ctypes
+
+        sys.stdout.flush()
         sys.stderr.flush()
-        os._exit(rc)
+        k32 = ctypes.WinDLL("kernel32")
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        k32.TerminateProcess(k32.GetCurrentProcess(), rc)
     sys.exit(rc)

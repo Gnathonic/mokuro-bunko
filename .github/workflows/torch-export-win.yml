@@ -147,6 +147,20 @@ jobs:
           }
           Get-ChildItem -Recurse "$env:GITHUB_WORKSPACE\out-embed\$env:ENGINE\$env:PREC\$env:TARGET" -Filter *.pt2 |
             Select-Object Name, Length | Format-Table | Out-String | Tee-Object -FilePath "$d\embedded-sizes.txt"
+      - name: Process teardown after verify (informational)
+        if: inputs.compare_embedded
+        continue-on-error: true
+        working-directory: tools/torch_export
+        env:
+          TORCH_EXPORT_VERIFY_TEARDOWN: "1"
+        run: |
+          # verify.py ends the process without teardown on Windows; this shows the exit
+          # code a normal interpreter exit gets with each layout
+          foreach ($o in 'out', 'out-embed') {
+            python -m torch_export.verify "$env:GITHUB_WORKSPACE\$o" $env:ENGINE $env:PREC $env:TARGET --device cpu | Out-Null
+            "$o (normal exit): exit code $LASTEXITCODE"
+          }
+          exit 0
       - name: Upload the package
         uses: actions/upload-artifact@v4
         with:
