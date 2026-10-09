@@ -18,7 +18,10 @@
 
 Environment: TORCH_EXPORT_WORK (default ~/.cache/mokuro-bunko-demo/tmp/torch-export:
 tmp/, inductor-cache/, cuda-home/, out/), MOKURO_REF_052 (0.5.2 checkout; pins are
-checked against it), HF_HUB_OFFLINE (default 1: models come from the HF cache).
+checked against it), HF_HUB_OFFLINE (default 1: models come from the HF cache),
+TORCH_EXPORT_CPU_EMBED=1 (CPU targets: the old frozen layout, weights inside the package),
+TORCH_EXPORT_WIN_EMBED=1 (cross-built Windows GPU targets: weights inside),
+TORCH_EXPORT_OBJDUMP (the GNU objdump the checks run; default objdump).
 """
 
 from __future__ import annotations

@@ -13,8 +13,9 @@ export_tool_version, kind, role, precision -- plus, for the libtorch backend:
   target    aoti only: linux-cuda-sm_86, linux-rocm-gfx1030, linux-cpu-x86_64-v3, ...
   torch     the exact torch the package was compiled with (the backend pack must match)
   io        graph I/O contract version (TORCH-BACKEND.md)
-  requires  aoti only: ids of the weights files it binds at load; empty for packages that
-            carry their own weights (CPU targets, cross-built Windows GPU targets)
+  requires  aoti only: ids of the weights files it binds at load (every release package);
+            empty only for packages built with their weights inside
+            (TORCH_EXPORT_CPU_EMBED=1 / TORCH_EXPORT_WIN_EMBED=1)
 
 Build records (``build.json``) are the source of truth; files present on disk but not in a
 build record are refused, as are records whose sha256 no longer matches the file.
@@ -86,7 +87,6 @@ def build_manifest(out: Path, tag: str, base_url: str | None = None, flat_dir: P
                           # the archive has one top folder "<role>/": extract its CONTENTS
                           # (strip that folder) into unpack_to, else <role>/<role>/ results
                           "unpack_to": f"torch/{eng}/{prec}/{target}/{role}/", "torch": rec["torch"], "io": rec["io"],
-                          # packages with weights inside (CPU, cross-built Windows) bind nothing
                           # the weights group this graph binds (vision -> weights-vision,
                           # prefill/step -> weights-decoder); none when the weights are inside
                           "requires": [f"torch/{eng}/{prec}/{w}" for w in weights

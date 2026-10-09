@@ -1,12 +1,15 @@
 """Load built packages on THIS machine's device and compare them with eager torch.
 
-    python -m torch_export.verify <out> <engine> <precision> <target> [--device cuda|cpu]
+    python -m torch_export.verify <out> <engine> <precision> <target> [--device cuda|cpu] [--bench N]
 
 Binds the shared weights exactly as the Rust runtime will (one tensor per weights-file
 key on the device, ``load_constants(user_managed=True)`` per package via the
 ``bunko.weights`` map), runs vision -> prefill -> 8 decode steps on a fixed random batch
 and reports, per graph, the max |difference| against the eager modules the packages were
 exported from (same precast weights, same autocast). Token ids must match exactly.
+``--bench N`` also times N more runs of each package (median/min ms, same inputs) and
+reports the process's peak resident memory -- for comparing two builds of one target on
+one machine (e.g. weightless vs ``TORCH_EXPORT_CPU_EMBED=1``) where no OCR run is possible.
 The crop-level parity gate is the Rust harness (ltbench) on the real crop sets.
 """
 
@@ -28,6 +31,31 @@ def load_weights(pdir: Path, device):
             for k in s.keys():
                 w[k] = s.get_tensor(k).to(device)
     return w
+
+
+def peak_rss_mb() -> float:
+    """Peak resident set (Linux/macOS) or peak working set (Windows) of this process."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class PMC(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                        ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                        ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+
+        c = PMC()
+        c.cb = ctypes.sizeof(c)
+        k32 = ctypes.WinDLL("kernel32")
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        ctypes.WinDLL("psapi").GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(c), c.cb)
+        return round(c.PeakWorkingSetSize / 2**20, 1)
+    import resource
+
+    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(r / 2**20 if sys.platform == "darwin" else r / 2**10, 1)
 
 
 def load_pkg(path: Path, weights: dict, device_index: int):
@@ -52,6 +80,7 @@ def main(argv=None) -> int:
     ap.add_argument("precision")
     ap.add_argument("target")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--bench", type=int, default=0, help="time N more runs of each package")
     a = ap.parse_args(argv)
     from .__main__ import _imports
 
@@ -69,7 +98,8 @@ def main(argv=None) -> int:
     for role in G.ROLES:
         pk[role], meta = load_pkg(tdir / f"{role}.pt2", weights, dev.index if dev.type == "cuda" else -1)
     io = int(meta["bunko.io"])
-    print(f"loaded 3 packages + {len(weights)} weights in {time.time() - t0:.1f}s (io v{io})", file=sys.stderr)
+    load_s = time.time() - t0
+    print(f"loaded 3 packages + {len(weights)} weights in {load_s:.1f}s (io v{io})", file=sys.stderr)
     gs = G.BUILDERS[a.engine](a.precision, dev, io)
     res = {}
     with torch.no_grad():
@@ -85,7 +115,22 @@ def main(argv=None) -> int:
                 else:
                     diffs.append((r.float() - o.float()).abs().max().item())
             res[g.role] = {"outputs": len(got), "max_abs_diff": max(diffs), "ids_equal": all(d != float("inf") for d in diffs)}
-    print(json.dumps(res))
+            if a.bench:
+                ts = []
+                for _ in range(a.bench):
+                    if dev.type == "cuda":
+                        torch.cuda.synchronize()
+                    t1 = time.perf_counter()
+                    pk[g.role](*g.args)
+                    if dev.type == "cuda":
+                        torch.cuda.synchronize()
+                    ts.append((time.perf_counter() - t1) * 1e3)
+                ts.sort()
+                res[g.role].update({"ms_median": round(ts[len(ts) // 2], 2), "ms_min": round(ts[0], 2)})
+    extra = {"load_s": round(load_s, 2), "weights": len(weights)}
+    if a.bench:
+        extra["peak_rss_mb"] = peak_rss_mb()
+    print(json.dumps({**res, **extra}))
     return 0 if all(r["ids_equal"] for r in res.values()) else 1
 
 

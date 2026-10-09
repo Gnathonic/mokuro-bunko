@@ -7,10 +7,14 @@ Layout under ``--out`` (mirrors ``<storage>/models/torch/``):
     <engine>/<precision>/<target>/{vision,prefill,step}.pt2
     <engine>/<precision>/<target>/build.json              what was built, how, sha256s
 
-GPU packages are compiled weightless (``package_constants_in_so=False``); at load the
-runtime binds each package's constants from the weights files (user-managed, no copy):
-package metadata ``bunko.weights`` maps every constant FQN of the package to a key of
-the weights files. CPU packages are frozen and carry their own weights (binary blob).
+Every package is compiled weightless (``package_constants_in_so=False``, no freezing);
+at load the runtime binds each package's constants from the weights files
+(user-managed, no copy): package metadata ``bunko.weights`` maps every constant FQN of
+the package to a key of the weights files. The weights files of an engine x precision
+are the same bytes for every target, GPU or CPU (the build checks it).
+``TORCH_EXPORT_CPU_EMBED=1`` rebuilds a CPU target in the old layout instead: frozen
+(oneDNN/MKL-prepacked weights folded into the graph) with its weights inside, as
+``TORCH_EXPORT_WIN_EMBED=1`` does for cross-built Windows GPU targets.
 
 Weight groups: ``vision`` (the vision graph's weights) and ``decoder`` (prefill+step,
 plus the host loop's tables), each < 1.9 GB (GitHub's asset cap is 2 GiB).
@@ -133,17 +137,22 @@ def write_weights(real_model, maps: dict[str, dict[str, str]], host_weights: dic
 
 def inductor_options(t: Target, role: str, meta: dict[str, str]) -> dict:
     o = {"max_autotune": False, "aot_inductor.metadata": meta}
-    if t.gpu:
+    if t.gpu or not _cpu_embed():
+        # weightless: the constants stay the model's own tensors (no freezing: it folds
+        # derived constants -- oneDNN/MKL-prepacked weights on the CPU -- into the graph,
+        # which no shared weights file could then provide)
         o.update({
             "freezing": False,
-            "shape_padding": False,  # pad_mm benchmarks on the device
             "aot_inductor.package_constants_in_so": False,
             "aot_inductor.package_constants_on_disk_format": None,
         })
+        if t.gpu:
+            o["shape_padding"] = False  # pad_mm benchmarks on the device
     else:
-        o.update({"aot_inductor.package_constants_on_disk_format": "binary_blob"})
-    if t.os == "windows" and (not t.gpu or _win_embed()):
-        # CPU: weights out of the .dll (inductor would emit them as a multi-GB C++ byte array).
+        # TORCH_EXPORT_CPU_EMBED=1: frozen, prepacked weights inside the package, out of
+        # the shared library (inductor would emit them as a multi-GB C++ byte array)
+        o.update({"freezing": True, "aot_inductor.package_constants_on_disk_format": "binary_blob"})
+    if t.os == "windows" and t.gpu and _win_embed():
         # GPU: weightless like Linux unless TORCH_EXPORT_WIN_EMBED=1 (in-package blob)
         o["aot_inductor.package_constants_on_disk_format"] = "binary_blob"
     if t.os == "windows" and sys.platform != "win32":
@@ -236,7 +245,14 @@ def build(engine: str, precision: str, t: Target, out: Path, io: int = IO_VERSIO
         gs = build_fn(precision, torch.device("cpu"), io, **kw)
         with torch.no_grad():
             eps = {g.role: torch.export.export(g.module, g.args, dynamic_shapes=g.dynamic_shapes, strict=False) for g in gs.graphs}
-        maps = {g.role: {} for g in gs.graphs}
+        if _cpu_embed():
+            maps = {g.role: {} for g in gs.graphs}
+        else:
+            # the same weights files as every GPU target of this engine x precision
+            canon = _canonical(gs.model, gs.extra)
+            maps = {g.role: _weight_map(g, canon, eps[g.role]) for g in gs.graphs}
+            record["weights"] = write_weights(gs.model, maps, gs.host_weights, pdir, gs.extra)
+        record["cpu_embed"] = _cpu_embed()
         meta_common = dict(gs.meta)
 
     if t.os == "windows" and sys.platform == "win32":
@@ -354,6 +370,12 @@ def _real_constants_for_blob() -> None:
         raise SystemExit(f"windows blob: constant {name} ({fqn}) has no real weight; known e.g. {list(_REAL)[:3]}")
 
     GraphLowering.get_original_value_of_constant = real_value
+
+
+def _cpu_embed() -> bool:
+    """CPU targets: frozen with the (prepacked) weights inside the package (the
+    pre-2026-10-08 layout) instead of binding the shared weights files."""
+    return os.environ.get("TORCH_EXPORT_CPU_EMBED") == "1"
 
 
 def _win_embed() -> bool:

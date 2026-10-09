@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import tempfile
@@ -20,13 +21,17 @@ from pathlib import Path
 ABI_PREFIXES = ("GLIBC", "GLIBCXX", "CXXABI")
 
 
+# GNU objdump (any build that reads the package's ELF / PE / Mach-O objects)
+OBJDUMP = os.environ.get("TORCH_EXPORT_OBJDUMP", "objdump")
+
+
 def _vkey(v: str) -> tuple[int, ...]:
     return tuple(int(x) for x in v.split("."))
 
 
 def required_versions(so: Path) -> dict[str, str]:
     """Highest GLIBC_/GLIBCXX_/CXXABI_ version a shared object requires (dynamic symbols)."""
-    out = subprocess.run(["objdump", "-T", str(so)], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run([OBJDUMP, "-T", str(so)], capture_output=True, text=True, check=True).stdout
     und: dict[str, str] = {}  # only symbols the object NEEDS (UND), not ones it defines
     for line in out.splitlines():
         if "*UND*" not in line:
@@ -76,7 +81,7 @@ def zmm_count(path: Path) -> dict[str, int]:
     for f in files:
         with tempfile.TemporaryDirectory() as d:
             for p in _native_files(f, d):
-                dis = subprocess.run(["objdump", "-d", "--no-show-raw-insn", str(p)], capture_output=True, text=True).stdout
+                dis = subprocess.run([OBJDUMP, "-d", "--no-show-raw-insn", str(p)], capture_output=True, text=True).stdout
                 out[f"{f}:{p.name}"] = dis.count("%zmm")
     return out
 
