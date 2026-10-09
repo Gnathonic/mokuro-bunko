@@ -25,7 +25,10 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
   signed manifest and sha256.
 - One-click updates: the admin panel's Updates card checks for new releases
   and installs them (ed25519-signed `release.json`, sha256-checked archive). Also
-  `mokuro-bunko update check|apply`, and `update.*` settings.
+  `mokuro-bunko update check|apply`, and `update.*` settings. `update.channel`
+  defaults to `auto`: a pre-release install (a beta or release candidate) follows
+  later pre-releases, a stable install only stable releases; `stable` or
+  `prerelease` pins it.
 - Processor protocol v3: one WebSocket per processor plus streamed result
   uploads, replacing 0.5's long-lived chunked streams.
 - `mokuro-bunko models list|download|verify` and `mokuro-bunko healthcheck`.

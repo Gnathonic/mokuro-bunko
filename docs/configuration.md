@@ -486,7 +486,7 @@ dyndns:
 update:
   check: true
   auto: false
-  channel: stable
+  channel: auto
   manifest_url: "https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json"
   # public_key: ""   # forks and test releases only; config file only
 ```
@@ -494,7 +494,7 @@ update:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `check` | boolean | `true` | Look for new releases in the background (first check a minute after start, then every 12 hours) and show the result in the admin panel's **Updates** card (Status tab). With `false`, nothing is fetched unless you press **Check now**. |
-| `channel` | string | `stable` | `stable` or `prerelease`. Note that GitHub's `releases/latest` never points at a pre-release, so `prerelease` sees nothing newer until a separate manifest URL is published. |
+| `channel` | string | `auto` | Which releases count as updates. `auto` follows the installed build: a pre-release (such as `0.7.0-beta.1`) is on `prerelease`, so it sees the next beta or release candidate as well as the next stable release, and a stable release is on `stable`, so it only sees stable releases. `stable` or `prerelease` pins the channel whatever is installed. On `prerelease` with the GitHub URL, the newest published release that carries a `release.json` is looked up through GitHub's releases API (unauthenticated: 60 requests an hour per address), since `releases/latest` never points at a pre-release. A processor following its library (`processor.auto_update`) installs exactly the library's version and ignores the channel. |
 | `auto` | boolean | `false` | Install a newer release on the channel by itself, at a quiet moment, then restart. See [Automatic updates](#automatic-updates). Also settable in the admin panel's **Updates** card and the app's Settings → Updates. |
 | `manifest_url` | string | the GitHub `releases/latest` `release.json` | Where the release manifest comes from. Change it for a mirror or a fork (a fork also needs its own signing key: compiled in, or `public_key`). |
 | `public_key` | string | empty (the compiled-in key) | The ed25519 public key (base64) release manifests are checked against, for a fork or a test release. Read **only from the config file**: no `MOKURO_UPDATE_*` variable, `config set`, admin API or app page can set it, and every start (server, CLI, processor) logs `UPDATES ARE TRUSTED FROM A NON-DEFAULT SIGNING KEY …`. Anyone who can write the config file can already replace the program, so this adds no new way in; an attacker who only controls the environment of a release build cannot use it. |
