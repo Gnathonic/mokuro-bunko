@@ -42,9 +42,9 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 | `serve --port` | [Server](/app/settings/server) → Port (`server.port`); first set in [setup](/app/setup/server) |
 | `serve --ocr` | [Server](/app/settings/server) → Devices (`ocr.backend`) |
 | `serve --generations` | /_admin → Settings → OCR (the engine generations and their order) |
-| `setup` | [Library server setup](/app/setup/server): folder, admin account, registration, remote access, HTTPS, OCR |
+| `setup` | [Library server setup](/app/setup/server): folder, admin account, registration, remote access, HTTPS, then two toggles: OCR on this machine (its install runs in the flow) and start with the machine |
 | `setup --skip-if-exists` | CLI-only because it exists for container entrypoints and scripts. [Setup](/app/setup/server) says when a configuration already exists, and replaces it only when that box is ticked |
-| `doctor` | [Diagnostics](/app/settings/doctor) runs the same checks with live output; the [OCR install](/app/setup/ocr) runs it at the end |
+| `doctor` | [Diagnostics](/app/settings/doctor) runs the same checks with live output; the OCR install runs it at the end (in the [server](/app/setup/server) and [processor](/app/setup/processor) setups, and on the [OCR install](/app/setup/ocr) page) |
 | `doctor --processor` | [Diagnostics](/app/settings/doctor) → Check: the processor |
 | `healthcheck` | [Diagnostics](/app/settings/doctor) → "Is the server answering?" |
 | `healthcheck --url` | CLI-only because it probes an arbitrary address for container health checks. The app checks this machine's own server |
@@ -144,15 +144,15 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 
 | Command | Where |
 |---|---|
-| `install-ocr` | [OCR install](/app/setup/ocr), with progress; also offered at the end of the [server](/app/setup/server) and [processor](/app/setup/processor) setups |
-| `install-ocr --variant` | [OCR install](/app/setup/ocr) → Pack (automatic, cpu, cu130, rocm7.1) |
-| `install-ocr --from` | [OCR install](/app/setup/ocr) → Advanced → Install from a folder |
-| `install-ocr --dir` | [OCR install](/app/setup/ocr) → Advanced → Install into |
-| `install-ocr --no-models` | [OCR install](/app/setup/ocr) → Advanced → Skip the models |
-| `install-ocr --force` | [OCR install](/app/setup/ocr) → Advanced → Reinstall |
+| `install-ocr` | Runs inside the [processor setup](/app/setup/processor) (always) and the [server setup](/app/setup/server) (when "OCR on this machine" is on), with progress; later from Settings → [OCR & models](/app/settings/ocr) → [OCR install](/app/setup/ocr) |
+| `install-ocr --variant` | The setups' OCR step and [OCR install](/app/setup/ocr) → Pack (automatic, cpu, cu130, rocm7.1) |
+| `install-ocr --from` | The setups' OCR step and [OCR install](/app/setup/ocr) → More options → Install from a folder |
+| `install-ocr --dir` | [OCR install](/app/setup/ocr) → More options → Install into |
+| `install-ocr --no-models` | The setups' OCR step and [OCR install](/app/setup/ocr) → More options → Only the pack |
+| `install-ocr --force` | The setups' OCR step and [OCR install](/app/setup/ocr) → More options → Reinstall |
 | `install-ocr --if-needed` | CLI-only because it is what the Docker image's entrypoint runs on every start (install the pack for the container's GPU and `ocr.backend` only when it is missing); in the desktop app the [OCR install](/app/setup/ocr) page is the deliberate way |
 | `install-ocr --list` | [OCR & models](/app/settings/ocr) shows the hardware and the installed packs; "Packs and hardware" runs it |
-| `install-ocr --processor` | [OCR install](/app/setup/ocr) → For: the processor (preselected from the processor setup) |
+| `install-ocr --processor` | The [processor setup](/app/setup/processor) installs for the processor; [OCR install](/app/setup/ocr) → For: the processor |
 | `install-ocr --probe` | CLI-only because it is internal (hidden): an automatic update loads a new backend pack in a child process to check it works before switching to it |
 | `install-ocr --backend` | CLI-only because it is the hidden 0.5 spelling of `--variant`, kept for old scripts |
 | `install-ocr --engines` | CLI-only because it is a hidden 0.5 flag that 0.7 accepts and ignores (the models follow the configured engines) |
@@ -160,7 +160,7 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 | `models` | [OCR & models](/app/settings/ocr) |
 | `models list` | [OCR & models](/app/settings/ocr) → "List the models" |
 | `models list --processor` | [OCR & models](/app/settings/ocr) → For: the processor |
-| `models download` | [OCR & models](/app/settings/ocr) → Download; [OCR install](/app/setup/ocr) downloads them too |
+| `models download` | [OCR & models](/app/settings/ocr) → Download; the OCR install ([OCR install](/app/setup/ocr), the setups) downloads them too |
 | `models download --engine` | [OCR & models](/app/settings/ocr) → Engine |
 | `models download --processor` | [OCR & models](/app/settings/ocr) → For: the processor |
 | `models verify` | [OCR & models](/app/settings/ocr) → "Verify them" |
@@ -171,27 +171,27 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 | Command | Where |
 |---|---|
 | `processor` | [Processor setup](/app/setup/processor) and [Processor settings](/app/settings/processor) |
-| `processor serve` | [Processor setup](/app/setup/processor) → "Start it"; [Processor](/app/settings/processor) → "Start it". The tray starts and stops it |
+| `processor serve` | [Processor setup](/app/setup/processor) starts it at the end; [Processor](/app/settings/processor) → "Start it". The tray starts and stops it |
 | `processor serve --config` | The app uses this machine's processor.yaml (shown in [Processor](/app/settings/processor)); `MOKURO_PROCESSOR_CONFIG` points it elsewhere |
 | `processor serve --verbose` | CLI-only because it only adds detail to terminal output. The processor's log is in [Logs](/app/settings/logs) |
-| `processor setup` | [Processor setup](/app/setup/processor): library address, account, connection test, this machine |
+| `processor setup` | [Processor setup](/app/setup/processor): library address, account, connection test, this machine, the OCR install, optionally start with the machine |
 | `processor setup --config` | [Processor setup](/app/setup/processor) writes this machine's processor.yaml and shows its path |
 | `processor setup --url` | [Processor setup](/app/setup/processor) → Library address |
 | `processor setup --username` | [Processor setup](/app/setup/processor) → Username |
 | `processor setup --password-stdin` | [Processor setup](/app/setup/processor) → Password |
 | `processor setup --name` | [Processor setup](/app/setup/processor) → Name; [Processor](/app/settings/processor) → Name |
-| `processor setup --backend` | [OCR install](/app/setup/ocr) → Pack: the processor uses the devices of the pack installed for it |
+| `processor setup --backend` | [Processor setup](/app/setup/processor) → OCR install → Pack: the processor uses the devices of the pack installed for it |
 | `processor setup --tls-verify` | [Processor setup](/app/setup/processor) → Certificate check; [Processor](/app/settings/processor) |
 | `processor setup --auto-update` | [Processor setup](/app/setup/processor) → "Update this processor automatically when its library updates" (off by default); [Updates](/app/settings/update) and [Processor](/app/settings/processor) change it later (`processor.auto_update`) |
 | `processor setup --yes` | CLI-only because it answers terminal prompts, and the app has no prompts |
-| `processor setup --no-install` | [Processor setup](/app/setup/processor) never installs; the OCR pack is the separate [OCR install](/app/setup/ocr) step |
-| `processor setup --no-service` | [Processor setup](/app/setup/processor) sets up no service; [Start with the machine](/app/setup/startup) is a separate, optional step |
+| `processor setup --no-install` | CLI-only because the app's [Processor setup](/app/setup/processor) always installs OCR (a processor without it does nothing); [OCR install](/app/setup/ocr) replaces the pack later |
+| `processor setup --no-service` | [Processor setup](/app/setup/processor) → "Start with the machine" is off by default; later in [Start with the machine](/app/setup/startup) |
 | `processor setup --force` | [Processor setup](/app/setup/processor) says when a processor.yaml exists, and replaces it only when that box is ticked |
 | `processor status` | [Processor](/app/settings/processor) shows the last status; the [dashboard](/app/dashboard) of a running processor shows it live |
 | `processor status --config` | [Processor](/app/settings/processor) reads this machine's processor.yaml |
-| `processor service` | [Start with the machine](/app/setup/startup) → For: the processor (shows the service file) |
+| `processor service` | [Processor setup](/app/setup/processor) → Start with the machine; [Start with the machine](/app/setup/startup) → For: the processor (shows the service file) |
 | `processor service --config` | [Start with the machine](/app/setup/startup) uses this machine's processor.yaml |
-| `processor service --install` | [Start with the machine](/app/setup/startup) → How: as a background service → Set it up (the other choice there, "Run from the tray when I log in", writes `tray.json` and the tray's login item instead; it has no CLI twin) |
+| `processor service --install` | [Processor setup](/app/setup/processor) → Start with the machine → As a background service; later [Start with the machine](/app/setup/startup) → How: as a background service → Set it up (the other choice, the tray at login, writes `tray.json` and the tray's login item instead; it has no CLI twin) |
 
 ## The desktop app itself
 
@@ -200,7 +200,7 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 | `gui` | [Home](/app/): this command serves the app and opens it. Double-clicking the Windows command line (`bin\mokuro-bunko.exe`) with no `Mokuro Bunko.exe` above it does too |
 | `gui --no-browser` | CLI-only because it starts the pages without opening a browser, for the tray and remote shells; it prints the sign-in link |
 | `gui --open` | [Home](/app/) is the default; any app page can be the start page (`--open /app/settings/update`) |
-| `tray` | [Start with the machine](/app/setup/startup) → How: "Run from the tray when I log in" starts it and adds its login item. Opening the macOS app or `Mokuro Bunko.exe` on Windows runs it too |
+| `tray` | The setups' "Start with the machine" → From the tray at login, or [Start with the machine](/app/setup/startup) → "Run from the tray when I log in": it starts the tray and adds its login item. Opening the macOS app or `Mokuro Bunko.exe` on Windows runs it too |
 | `tray --storage` | CLI-only because the tray finds the instances of this machine by itself (the default storages, the configs, the services); this adds another folder for a hand-made setup |
 | `tray --no-supervise` | CLI-only because it is for watching instances something else runs; the app's choice between the tray and a service ([Start with the machine](/app/setup/startup)) decides what the tray starts |
 | `tray --log-stderr` | CLI-only because it only moves the tray's log to the terminal; [Logs](/app/settings/logs) shows the tray's log file |

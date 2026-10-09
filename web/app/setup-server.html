@@ -11,7 +11,7 @@
     <header class="mokuro-header" id="app-header" data-current="setup"></header>
     <main class="app-main app-main--narrow">
         <h1 class="page-title">Library server</h1>
-        <p class="page-lede">The same questions as <code>mokuro-bunko setup</code>, then the server starts.</p>
+        <p class="page-lede">The same questions as <code>mokuro-bunko setup</code>.</p>
         <div class="wizard-card">
             <form id="server-form" novalidate>
             <!-- 1. Folder and address -->
@@ -142,27 +142,48 @@
                 <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev>Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" data-next="remote">Next</button></div>
             </section>
 
-            <!-- 5. OCR here -->
+            <!-- 5. This machine: the two toggles that add steps -->
+            <section class="wizard-step" id="s-extras" aria-labelledby="h-extras" hidden>
+                <h2 id="h-extras">This machine</h2>
+                <p class="step-lede">Both can be changed later in Settings.</p>
+                <label class="toggle"><input type="checkbox" role="switch" id="local-ocr"><span class="toggle__text"><strong>OCR on this machine</strong><span id="ocr-note">Checking for a GPU…</span></span></label>
+                <label class="toggle"><input type="checkbox" role="switch" id="want-startup"><span class="toggle__text"><strong>Start with the machine</strong><span>Run the server whenever you log in.</span></span></label>
+                <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev>Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" data-next="extras">Next</button></div>
+            </section>
+
+            <!-- 6. OCR install (when on) -->
             <section class="wizard-step" id="s-ocr" aria-labelledby="h-ocr" hidden>
-                <h2 id="h-ocr">OCR on this machine</h2>
-                <p class="step-lede">The server can read new volumes itself, or leave that to processors on other machines.</p>
-                <label class="check"><input type="checkbox" id="local-ocr" checked> Read volumes on this machine too</label>
-                <p class="form-hint" id="ocr-note"></p>
+                <h2 id="h-ocr">OCR install</h2>
+                <p class="step-lede">The pack and the models install after you save, then a check runs.</p>
+                <div id="ocr-fields"><p class="form-hint">Detecting the hardware…</p></div>
+                <p class="form-error" id="err-ocr" role="alert" hidden></p>
                 <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev>Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" data-next="ocr">Next</button></div>
             </section>
 
-            <!-- 6. Review and save -->
-            <section class="wizard-step" id="s-review" aria-labelledby="h-review" hidden>
-                <h2 id="h-review">Save and start</h2>
-                <p class="step-lede">Check the answers, then save the configuration and start the server.</p>
-                <dl class="summary" id="summary"></dl>
-                <label class="check" id="overwrite-row" hidden><input type="checkbox" id="overwrite"> Replace the existing configuration file</label>
-                <p class="form-error" id="err-review" role="alert" hidden></p>
-                <div id="save-result"></div>
-                <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev id="review-back">Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" id="save-btn">Save and start the server</button></div>
+            <!-- 7. Start with the machine (when on) -->
+            <section class="wizard-step" id="s-startup" aria-labelledby="h-startup" hidden>
+                <h2 id="h-startup">Start with the machine</h2>
+                <p class="step-lede">How the server starts when you log in.</p>
+                <div id="startup-fields"><p class="form-hint">Loading…</p></div>
+                <p class="form-error" id="err-startup" role="alert" hidden></p>
+                <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev>Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" data-next="startup">Next</button></div>
             </section>
 
-            <!-- 7. Done -->
+            <!-- 8. Review, then save and run -->
+            <section class="wizard-step" id="s-review" aria-labelledby="h-review" hidden>
+                <h2 id="h-review">Save and start</h2>
+                <p class="step-lede">Check the answers, then save and start the server.</p>
+                <dl class="summary" id="summary"></dl>
+                <label class="check" id="overwrite-row" hidden><input type="checkbox" id="overwrite"> Replace the existing configuration file</label>
+                <ul class="run-list" id="run-list" hidden></ul>
+                <p class="form-error" id="err-review" role="alert" hidden></p>
+                <div id="save-result"></div>
+                <div id="install-job"></div>
+                <div id="doctor-job"></div>
+                <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev id="review-back">Back</button><span class="spacer"></span><button type="button" class="btn btn--ghost" id="skip-btn" hidden>Skip</button><button type="button" class="btn btn--primary" id="save-btn">Save and start the server</button></div>
+            </section>
+
+            <!-- Done -->
             <section class="wizard-step" id="s-done" aria-labelledby="h-done" hidden>
                 <h2 id="h-done">The library server is running</h2>
                 <div id="done-body"></div>
@@ -174,6 +195,7 @@
         </div>
     </main>
     <script src="/app/app.js"></script>
+    <script src="/app/setup-steps.js"></script>
     <script src="/app/setup-server.js"></script>
 </body>
 </html>

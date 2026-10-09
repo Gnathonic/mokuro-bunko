@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="/app/app.css">
 </head>
 <body>
-    <header class="mokuro-header" id="app-header" data-current="setup"></header>
+    <header class="mokuro-header" id="app-header" data-current="settings"></header>
     <main class="app-main app-main--narrow">
         <h1 class="page-title">Start with the machine</h1>
         <p class="page-lede">Run the library server or the processor whenever you log in, as your user (no administrator rights).</p>
@@ -46,7 +46,7 @@
 
             <p class="form-error" id="err-svc" role="alert" hidden></p>
             <div id="svc-result" aria-live="polite"></div>
-            <div class="wizard-actions"><a class="btn btn--ghost" href="/app/setup">Back</a><span class="spacer"></span><button type="button" class="btn btn--danger" id="remove-btn" hidden>Remove</button><button type="button" class="btn btn--primary" id="install-btn">Set it up</button></div>
+            <div class="wizard-actions"><a class="btn btn--ghost" href="/app/settings/startup">Back</a><span class="spacer"></span><button type="button" class="btn btn--danger" id="remove-btn" hidden>Remove</button><button type="button" class="btn btn--primary" id="install-btn">Set it up</button></div>
             <p class="cli-hint">CLI: <code>mokuro-bunko processor service --install --config …</code> writes the processor's service; the tray's own menu has <em>Start at login</em>.</p>
         </div>
     </main>

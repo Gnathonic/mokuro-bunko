@@ -1,4 +1,4 @@
-// Setup: the role chooser (the OCR steps need the full build).
+// Setup: the role chooser (the processor needs the full build).
 document.addEventListener('DOMContentLoaded', async () => {
   'use strict';
   try {
