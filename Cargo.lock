@@ -596,6 +596,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "webpki-roots",
  "zip 2.4.2",
