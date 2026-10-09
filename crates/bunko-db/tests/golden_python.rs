@@ -202,6 +202,16 @@ fn users_and_passwords(tag: &str) {
 fn tokens(tag: &str) {
     let m = manifest(&format!("{tag}.json"));
     let (_dir, path) = copy_fixture(&format!("{tag}.db"));
+    // The fixture's tokens expire 7-90 days after it was made: move every token that was
+    // live then (expires after it was created) a century on, so the test does not expire
+    // with them. The one made already expired stays expired.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE auth_tokens SET expires_at = expires_at + 3155760000 WHERE expires_at > created_at",
+            [],
+        )
+        .unwrap();
     let db = open(&path);
     for t in m["tokens"].as_array().unwrap() {
         let user = db.resolve_auth_token(s(&t["token"])).unwrap();
