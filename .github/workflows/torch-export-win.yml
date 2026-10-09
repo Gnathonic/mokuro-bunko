@@ -186,13 +186,29 @@ jobs:
         env:
           BUNKO_PACK_CACHE: ${{ github.workspace }}\pack-cache
         run: |
-          # torch-sys and the shim compile libtorch 2.13's headers with /std:c++17, which this
-          # runner's MSVC (VS 18) rejects (C7555 designated initializers need C++20); cc puts
-          # CXXFLAGS after a build script's flags, so the last /std wins
-          $env:CXXFLAGS = "/std:c++20"
-          cargo run -p xtask --locked -- torch-pack --locked --variant cpu --no-archive --out "$env:GITHUB_WORKSPACE\pack"
+          # torch-sys 0.26 compiles libtch against libtorch 2.13's headers with /std:c++17:
+          # MSVC rejects those headers in C++17 (C7555: designated initializers) and libtch in
+          # C++20 (`module` as a name). clang-cl (MSVC ABI) accepts both, as in the
+          # cross-built packs; this wrapper drops torch-sys's MSBuild-style /p: argument,
+          # which clang-cl would take for a file.
+          $w = "$env:RUNNER_TEMP\clwrap"; New-Item -ItemType Directory -Force $w | Out-Null
+          @'
+          fn main() {
+              let args: Vec<_> = std::env::args_os().skip(1).filter(|a| !a.to_string_lossy().starts_with("/p:")).collect();
+              let st = std::process::Command::new("clang-cl").args(&args).status().expect("clang-cl");
+              std::process::exit(st.code().unwrap_or(1));
+          }
+          '@ | Set-Content "$w\clwrap.rs"
+          rustc -O "$w\clwrap.rs" -o "$w\clang-cl-wrap.exe"
+          if ($LASTEXITCODE) { throw "wrapper build failed" }
+          clang-cl --version | Select-Object -First 1
+          cargo build --locked -p xtask
+          if ($LASTEXITCODE) { throw "xtask build failed" }
+          # only the pack's build (torch-sys, the shim) compiles with clang-cl
+          $env:CXX_x86_64_pc_windows_msvc = "$w\clang-cl-wrap.exe"; $env:CC_x86_64_pc_windows_msvc = "$w\clang-cl-wrap.exe"
+          & "$env:GITHUB_WORKSPACE\target\debug\xtask.exe" torch-pack --locked --variant cpu --no-archive --out "$env:GITHUB_WORKSPACE\pack"
           if ($LASTEXITCODE) { throw "torch-pack failed" }
-          Remove-Item Env:CXXFLAGS
+          Remove-Item Env:CXX_x86_64_pc_windows_msvc, Env:CC_x86_64_pc_windows_msvc
           cargo build --release --locked -p bunko-engines --example ocr_volume
           if ($LASTEXITCODE) { throw "ocr_volume build failed" }
       - name: "OCR: both layouts through the Rust runtime (alternating)"
