@@ -698,11 +698,16 @@ async fn remote_round_trip_over_a_websocket() {
     assert_eq!(v["title"], "Series");
     assert_eq!(v["volume"], "Vol 1");
     assert!(v["volume_uuid"].is_string());
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let row =
-        e.db.get_ocr_sidecar("Series/Vol 1.mokuro")
-            .unwrap()
-            .expect("provenance row");
+    // Written after the file is in place: wait for it.
+    let mut row = None;
+    for _ in 0..100 {
+        row = e.db.get_ocr_sidecar("Series/Vol 1.mokuro").unwrap();
+        if row.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let row = row.expect("provenance row");
     assert_eq!(row.machine, "tower");
     assert_eq!(row.account.as_deref(), Some("tower-acct"));
     assert_eq!(row.pages, Some(3));
@@ -1053,11 +1058,17 @@ async fn local_lanes_run_the_in_process_processor() {
     for p in &want {
         assert!(p.is_file(), "{} was not installed", p.display());
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let row = db
-        .get_ocr_sidecar("A/V1.mokuro")
-        .unwrap()
-        .expect("provenance");
+    // The provenance row is written after the file is in place: wait for it (a fixed
+    // 200 ms was too short on a slow Windows CI runner).
+    let mut row = None;
+    for _ in 0..100 {
+        row = db.get_ocr_sidecar("A/V1.mokuro").unwrap();
+        if row.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let row = row.expect("provenance");
     assert_eq!(row.machine, "local");
     assert!(row.account.is_none());
     let (lanes, failures, hold) = ocr
