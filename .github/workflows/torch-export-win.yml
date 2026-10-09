@@ -71,14 +71,14 @@ jobs:
       PREC: ${{ inputs.precision }}
       TARGET: ${{ inputs.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 0.5.2 reference sources (release 0.5.2, 199cff5)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: 199cff5941ce32dc6e4e50e00f5fc6b0f519afc7
           path: ref052
           sparse-checkout: src/mokuro_bunko/ocr
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: MSVC environment (x64)
@@ -141,7 +141,7 @@ jobs:
             Tee-Object -FilePath "$env:GITHUB_WORKSPACE\out\$env:ENGINE\$env:PREC\$env:TARGET\verify.json"
           if ($LASTEXITCODE) { throw "verify failed (exit code $LASTEXITCODE)" }
       - name: Upload the package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: torch-${{ inputs.engine }}-${{ inputs.precision }}-${{ inputs.target }}
           # the package only: its shared weights are the release's files (checked above)
@@ -263,7 +263,7 @@ jobs:
           if ($shas.Count -ne 1) { throw "the two layouts read different text" }
       - name: Upload the comparison logs
         if: always() && inputs.compare_embedded
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: torch-compare-logs-${{ inputs.engine }}-${{ inputs.precision }}-${{ inputs.target }}
           path: |
