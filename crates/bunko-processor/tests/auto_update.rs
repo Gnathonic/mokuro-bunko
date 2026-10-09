@@ -32,6 +32,8 @@ struct Lib {
     /// In order: `register`, `socket`, `<event>[:<claim>]`, `install:<n>`.
     log: Vec<String>,
     mismatches: Vec<Option<VersionMismatch>>,
+    /// Why each `volume_failed` failed (shown when a wait times out).
+    errors: Vec<String>,
     /// Open the session only after the first install attempt failed (so the retry
     /// finds a volume running).
     open_after_failure: bool,
@@ -120,6 +122,9 @@ async fn drive(mut ws: WebSocket, lib: Shared) {
         if let Event::Availability(a) = &event {
             name = format!("availability:{}", a.paused);
         }
+        if let Event::VolumeFailed { error, .. } = &event {
+            lib.0.lock().errors.push(error.clone());
+        }
         if matches!(
             event,
             Event::Page { .. } | Event::Stats { .. } | Event::Ping
@@ -166,12 +171,18 @@ async fn drive(mut ws: WebSocket, lib: Shared) {
 }
 
 async fn library(version: &str, open_after_failure: bool) -> (String, Shared) {
+    // The processor's own log lines, shown with a failing test's output.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_test_writer()
+        .try_init();
     let lib: Shared = Arc::new((
         Mutex::new(Lib {
             version: version.into(),
             archive: common::volume(4, 1000),
             log: Vec::new(),
             mismatches: Vec::new(),
+            errors: Vec::new(),
             open_after_failure,
             opened: false,
         }),
@@ -261,7 +272,8 @@ async fn wait_for(lib: &Shared, secs: u64, done: impl Fn(&Lib) -> bool) {
         .await
         .is_err()
         {
-            panic!("timed out; log so far: {:?}", lib.0.lock().log);
+            let l = lib.0.lock();
+            panic!("timed out; log so far: {:?}; errors: {:?}", l.log, l.errors);
         }
     }
 }

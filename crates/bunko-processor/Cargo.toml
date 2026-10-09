@@ -45,6 +45,8 @@ libc = "0.2"
 
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }
+# auto_update: the processor's log lines in a failing test's output
+tracing-subscriber.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 rcgen.workspace = true
