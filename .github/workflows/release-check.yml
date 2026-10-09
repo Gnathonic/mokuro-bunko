@@ -105,11 +105,10 @@ jobs:
         run: |
           set -eu
           v="$VERSION"
-          # What release.yml uploads: the four downloads, the macOS archive of the older
-          # updaters, the packs (whole or in parts), release.json (+ .sig) and SHA256SUMS.
+          # What release.yml uploads: the four downloads, the packs (whole or in parts),
+          # release.json (+ .sig) and SHA256SUMS.
           want_files=("mokuro-bunko-$v-windows.zip" "mokuro-bunko-$v-macos.dmg"
-            "mokuro-bunko-$v-linux-x64.tar.gz" "mokuro-bunko-$v-linux-arm64-server.tar.gz"
-            "mokuro-bunko-update-$v-macos.tar.gz")
+            "mokuro-bunko-$v-linux-x64.tar.gz" "mokuro-bunko-$v-linux-arm64-server.tar.gz")
           want_archives=(aarch64-apple-darwin/full aarch64-unknown-linux-musl/lite
             x86_64-pc-windows-msvc/full x86_64-unknown-linux-gnu/full)
           want_packs=(x86_64-unknown-linux-gnu/cpu x86_64-unknown-linux-gnu/cu130 x86_64-unknown-linux-gnu/rocm7.1
@@ -131,10 +130,8 @@ jobs:
           done
           got=$(jq -r '.artifacts | to_entries[] | .key as $t | .value | keys[] | "\($t)/\(.)"' dist/release.json | sort)
           [ "$got" = "$(printf '%s\n' "${want_archives[@]}" | sort)" ] || { echo "release.json artifacts: $got"; bad=1; }
-          # The updaters up to 0.7.0-beta.2 take the macOS archive, newer ones the image.
+          # On a Mac the updater installs from the disk image.
           [ "$(jq -r '.artifacts["aarch64-apple-darwin"].full.url' dist/release.json)" = \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/v$v/mokuro-bunko-update-$v-macos.tar.gz" ] || bad=1
-          [ "$(jq -r '.bundles["aarch64-apple-darwin"].full.url' dist/release.json)" = \
             "https://github.com/$GITHUB_REPOSITORY/releases/download/v$v/mokuro-bunko-$v-macos.dmg" ] || bad=1
           got=$(jq -r '.backends | to_entries[] | .key as $t | .value | keys[] | "\($t)/\(.)"' dist/release.json | sort)
           [ "$got" = "$(printf '%s\n' "${want_packs[@]}" | sort)" ] || { echo "release.json backends: $got"; bad=1; }

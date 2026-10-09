@@ -2,44 +2,28 @@
 
 ## [0.7.0-beta.3] - 2026-10-09
 
-A pre-release on the way to 0.7.0. Installs of beta.1 and beta.2 update to it
-(their updater reads this release's files as before); its first start then moves
-them to the new layout.
+A pre-release on the way to 0.7.0 (everything below under 0.7.0 applies).
 
 ### Changed
-- Release downloads: four, named for people: `mokuro-bunko-<ver>-windows.zip`,
-  `-macos.dmg` (Apple silicon), `-linux-x64.tar.gz` and
-  `-linux-arm64-server.tar.gz` (the server; OCR from a processor), plus the Docker
-  images. No lite Windows/macOS download and no Intel macOS build any more; the lite
-  x64 Linux archive is gone too (the lite Docker image stays). The OCR backend packs
-  are `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`; the per-file
-  `.sha256` files are gone (`SHA256SUMS` and the signed `release.json` have every
-  checksum). The macOS archive older updaters install from is
-  `mokuro-bunko-update-<ver>-macos.tar.gz`.
-- Every release's notes start with a "Which file do I want?" table linking each
-  system's file; the README has a Download section.
-- The tray is part of the program: `mokuro-bunko tray`. On Linux it is a
-  StatusNotifierItem over D-Bus and needs no GTK or AppIndicator library (`doctor`
-  checks for a session bus and a tray host; GNOME needs the AppIndicator extension).
-  On Windows the zip has `Mokuro Bunko.exe` (the tray, no console window) and the
-  command line in `bin\mokuro-bunko.exe`; `run.bat`, `doctor.bat`, `install.ps1` and the
-  shortcuts follow. On macOS the app's program is `mokuro-bunko`: opening the app runs
-  the tray (and the setup wizard the first time). The separate `mokuro-bunko-tray` is
-  gone.
-- The first start after an update from beta.2 or earlier moves an install over: login
-  items (autostart entry, menu entry, LaunchAgent, Startup and Start-menu shortcuts)
-  start the new tray, a running old tray is replaced by the new one (an instance it was
-  running is restarted under the new tray), the old tray program and its links are
-  removed, the macOS app gets its new main program, and a Windows install gets the
-  `bin\` layout.
+- Four downloads per release, named for people: `mokuro-bunko-<ver>-windows.zip`,
+  `-macos.dmg` (Apple silicon), `-linux-x64.tar.gz`, `-linux-arm64-server.tar.gz`
+  (the server; OCR from a processor), plus the Docker images. The notes start with a
+  table linking each one. No lite Windows/macOS download, no Intel macOS build, no
+  static x64 Linux tarball (the lite Docker image stays). OCR backend packs are
+  `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`; the per-file `.sha256`
+  files are gone (`SHA256SUMS` and the signed `release.json` cover everything).
+- One program: the tray is `mokuro-bunko tray`, and `mokuro-bunko` with no arguments
+  starts the app (on a desktop the tray, the first time with the setup wizard;
+  headless what is set up, or `setup`). On Linux the tray needs no GTK or AppIndicator
+  library (`doctor` checks for a tray host; GNOME needs the AppIndicator extension).
+  On Windows `mokuro-bunko.exe` is the app (no console window) and
+  `mokuro-bunko-cli.exe` the same program for terminals. On macOS opening the app runs it.
 - The macOS updater installs from the disk image, and the app is sealed (ad hoc) when
   built and again after an update: `codesign --verify` passes before and after.
 
 ### Fixed
-- An automatic update's download progress reaches the log as it happens, not all at
-  once at the end.
-- A server with automatic updates off logs "X is available" once per version, not on
-  every check.
+- An automatic update's download progress reaches the log as it happens.
+- A server with automatic updates off logs "X is available" once per version.
 
 ## [0.7.0-beta.2] - 2026-10-09
 

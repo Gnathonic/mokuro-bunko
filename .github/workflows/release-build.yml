@@ -75,12 +75,10 @@ jobs:
           # recognizers come from the backend packs), with the desktop tray. Linux x86_64
           # full is the `build-linux-full` job (manylinux_2_28). No lite Windows/macOS
           # download, no Intel macOS build (owner, 0.7.0-beta.3).
-          # Windows: mokuro-bunko-<ver>-windows.zip (Mokuro Bunko.exe + bin\mokuro-bunko.exe).
+          # Windows: mokuro-bunko-<ver>-windows.zip (mokuro-bunko.exe, the app, + mokuro-bunko-cli.exe).
           - { name: windows, os: windows-latest, target: x86_64-pc-windows-msvc, flavor: full, artifact: dist }
-          # macOS: the disk image mokuro-bunko-<ver>-macos.dmg (what people download and
-          # what the updater from 0.7.0-beta.3 on installs from), made from the archive
-          # mokuro-bunko-update-<ver>-macos.tar.gz (what the updaters up to 0.7.0-beta.2
-          # take; install.sh too).
+          # macOS: the disk image mokuro-bunko-<ver>-macos.dmg (what people, install.sh and
+          # the updater take), made from the archive xtask dist writes (not uploaded).
           - { name: macos, os: macos-latest, target: aarch64-apple-darwin, flavor: full, artifact: dist }
     runs-on: ${{ matrix.os }}
     defaults:
@@ -115,8 +113,7 @@ jobs:
           ls -l dist
       # The disk image: "Mokuro Bunko.app" (main program mokuro-bunko: opening it runs
       # the tray) + an Applications link, no OCR inside (the wizard downloads the backend
-      # pack and models on demand), sealed ad hoc. In release.json as `bundles`: the
-      # updater from 0.7.0-beta.3 on installs from it.
+      # pack and models on demand), sealed ad hoc. The macOS artifact of release.json.
       - name: disk image (dmgbuild)
         if: runner.os == 'macOS'
         env:
@@ -127,7 +124,7 @@ jobs:
           set -eux
           python3 -m venv "$RUNNER_TEMP/dmgbuild"
           "$RUNNER_TEMP/dmgbuild/bin/pip" install -q --disable-pip-version-check "dmgbuild==$DMGBUILD_VERSION"
-          archive="dist/mokuro-bunko-update-$VERSION-macos.tar.gz"
+          archive="dist/mokuro-bunko-$VERSION-macos.tar.gz"
           dmg="dist/mokuro-bunko-$VERSION-macos.dmg"
           # hdiutil on hosted runners sometimes fails with "Resource busy": retry.
           for attempt in 1 2 3; do
@@ -152,6 +149,8 @@ jobs:
           "$mnt/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko" --version
           "$mnt/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko" tray --help
           hdiutil detach "$mnt"
+          # The archive was only the image's input.
+          rm "$archive"
           ls -l dist
       # Windows: the zip's layout, and the tray program is a GUI-subsystem build (no
       # console window) of the same program.
@@ -163,16 +162,15 @@ jobs:
           $x = Join-Path $env:RUNNER_TEMP "z"; Expand-Archive $zip.FullName -DestinationPath $x -Force
           $top = Get-ChildItem $x -Directory | Select-Object -First 1
           Get-ChildItem -Recurse $top.FullName | Select-Object FullName, Length | Format-Table -AutoSize
-          foreach ($f in "Mokuro Bunko.exe", "bin\mokuro-bunko.exe", "run.bat", "doctor.bat", "_env.cmd", "mokuro-bunko.ico") {
+          foreach ($f in "mokuro-bunko.exe", "mokuro-bunko-cli.exe", "run.bat", "doctor.bat", "_env.cmd", "mokuro-bunko.ico") {
             if (-not (Test-Path (Join-Path $top.FullName $f))) { throw "the zip has no $f" }
           }
           if (Test-Path (Join-Path $top.FullName "mokuro-bunko-tray.exe")) { throw "a separate tray is still in the zip" }
-          if (Test-Path (Join-Path $top.FullName "mokuro-bunko.exe")) { throw "the command line belongs in bin\" }
           function Subsystem($p) { $b = [IO.File]::ReadAllBytes($p); $pe = [BitConverter]::ToInt32($b, 0x3c); [BitConverter]::ToUInt16($b, $pe + 24 + 68) }
-          $gui = Subsystem (Join-Path $top.FullName "Mokuro Bunko.exe"); $cli = Subsystem (Join-Path $top.FullName "bin\mokuro-bunko.exe")
-          Write-Host "subsystems: Mokuro Bunko.exe=$gui bin\mokuro-bunko.exe=$cli"
+          $gui = Subsystem (Join-Path $top.FullName "mokuro-bunko.exe"); $cli = Subsystem (Join-Path $top.FullName "mokuro-bunko-cli.exe")
+          Write-Host "subsystems: mokuro-bunko.exe=$gui mokuro-bunko-cli.exe=$cli"
           if ($gui -ne 2 -or $cli -ne 3) { throw "expected GUI (2) and console (3)" }
-          & (Join-Path $top.FullName "bin\mokuro-bunko.exe") --version
+          & (Join-Path $top.FullName "mokuro-bunko-cli.exe") --version
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - uses: actions/upload-artifact@v4
         with:

@@ -3,6 +3,6 @@ setlocal
 title Mokuro Bunko - diagnostics
 call "%~dp0_env.cmd"
 
-"%~dp0bin\mokuro-bunko.exe" doctor
+"%~dp0mokuro-bunko-cli.exe" doctor
 echo.
 pause

@@ -31,7 +31,7 @@ mod sni;
 
 pub struct Setup {
     pub opts: Options,
-    /// This program (`mokuro-bunko`, or `Mokuro Bunko.exe` on Windows).
+    /// This program (`mokuro-bunko`; on Windows usually the app `mokuro-bunko.exe`).
     pub exe: PathBuf,
     pub layout: Layout,
     /// The `mokuro-bunko` command line the tray starts instances with.

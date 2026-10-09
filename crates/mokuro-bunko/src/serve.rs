@@ -52,10 +52,6 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
     if started.proven {
         crate::autoupdate::prune_models(&config.storage.base_path);
     }
-    #[cfg(feature = "tray")]
-    if crate::migrate::run(crate::migrate::Caller::Server) == crate::migrate::Outcome::HandOver {
-        crate::autoupdate::hand_over(&config.storage.base_path, &started);
-    }
     if config.update.auto {
         info!(
             "Automatic updates are on (update.auto): a newer release on the {} channel installs itself when nothing is running",

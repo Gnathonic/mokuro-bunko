@@ -100,8 +100,8 @@ pub enum Command {
     /// Open the desktop app in the browser: setup wizard, settings and dashboard.
     Gui(GuiArgs),
     /// Show the desktop tray: status, pause/resume, settings; starts and supervises the
-    /// instances tray.json lists. (Opening the app on macOS, or `Mokuro Bunko.exe` on
-    /// Windows, does the same.)
+    /// instances tray.json lists. (`mokuro-bunko` with no arguments does the same on a
+    /// desktop.)
     #[cfg(feature = "tray")]
     Tray(TrayArgs),
 }

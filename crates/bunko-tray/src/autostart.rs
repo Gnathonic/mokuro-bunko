@@ -5,11 +5,7 @@
 //! * macOS: `~/Library/LaunchAgents/io.github.gnathonic.mokuro-bunko-tray.plist`
 //!   (RunAtLoad; loaded at the next login), `<app>/Contents/MacOS/mokuro-bunko tray`.
 //! * Windows: `Mokuro Bunko.lnk` in the Startup folder — the same shortcut
-//!   `install.ps1 -Startup` creates — to `Mokuro Bunko.exe`.
-//!
-//! The file names are the ones of the separate `mokuro-bunko-tray` program of 0.7.0-beta.2
-//! and earlier, so an existing entry is found (and rewritten by the update, see the
-//! mokuro-bunko crate's `migrate`).
+//!   `install.ps1 -Startup` creates — to the app `mokuro-bunko.exe` (no arguments).
 
 use crate::paths::{self, Env};
 use std::path::{Path, PathBuf};
@@ -43,18 +39,21 @@ pub fn is_enabled(env: &dyn Env) -> bool {
 }
 
 /// What a login item runs to start the tray of the program `exe`: `(program, args)`.
-/// Linux and macOS: `<exe> tray`. Windows: `Mokuro Bunko.exe` (no console window), which
-/// is `exe` itself or, for the command line `bin\mokuro-bunko.exe`, the one above it.
+/// Linux and macOS: `<exe> tray`. Windows: the app `mokuro-bunko.exe` with no arguments
+/// (no console window): `exe` itself, or the one next to the console build
+/// `mokuro-bunko-cli.exe`.
 pub fn launch_command(exe: &Path) -> (PathBuf, Vec<String>) {
     if cfg!(windows) {
-        let gui = paths::WINDOWS_GUI_EXE;
-        if exe.file_name().is_some_and(|n| n.eq_ignore_ascii_case(gui)) {
+        let name = exe
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if name == "mokuro-bunko.exe" {
             return (exe.to_path_buf(), Vec::new());
         }
-        if let Some(root) = exe.parent().and_then(Path::parent)
-            && root.join(gui).is_file()
-        {
-            return (root.join(gui), Vec::new());
+        let app = exe.with_file_name("mokuro-bunko.exe");
+        if name == "mokuro-bunko-cli.exe" && app.is_file() {
+            return (app, Vec::new());
         }
     }
     (exe.to_path_buf(), vec!["tray".into()])

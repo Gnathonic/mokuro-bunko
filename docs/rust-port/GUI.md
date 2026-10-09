@@ -40,10 +40,12 @@ and *everything that is a flag in the CLI*; tray pause offers both "after this v
   `mokuro-bunko-tray` executable before): on Linux a StatusNotifierItem + dbusmenu on the
   session D-Bus (ksni on zbus, pure Rust: no GTK or AppIndicator library, so the full
   binary still runs headless and in Docker); on Windows and macOS `tray-icon` + `muda` on a
-  `tao` event loop. Windows ships the program twice from one build: `bin\mokuro-bunko.exe`
-  (console) and `Mokuro Bunko.exe` (the same bytes with the GUI subsystem: the tray, no
-  console window). On macOS the app's main program is `mokuro-bunko`; opened by the
-  Finder or launchd it runs the tray. The lite build has no tray.
+  `tao` event loop. `mokuro-bunko` with no arguments starts the app: in a desktop session
+  the tray (first run: the setup wizard), headless what is configured (`serve`,
+  `processor serve`, both) or `setup` (PACKAGING.md §1). Windows ships the program twice
+  from one build: `mokuro-bunko.exe` (the app, GUI subsystem: no console window) and
+  `mokuro-bunko-cli.exe` (console, for terminals). On macOS the app's main program is
+  `mokuro-bunko`. The lite build has no tray.
 
 ## 2. Control API (contract — streams G2/G3 code against this)
 
@@ -222,9 +224,8 @@ starts a second instance when a service-managed one is running.
   `{"managed":[{"role":"server"|"processor","args":[...]}],"notifications":false}`. Without
   `args`: `serve`, or `processor serve --config <default processor.yaml>`. `install.ps1`
   writes `{"managed":[{"role":"server"}]}`. The tray starts its instances with the
-  command line of its own install (`mokuro-bunko` itself; on Windows `bin\mokuro-bunko.exe`
-  below `Mokuro Bunko.exe`). The wizard's "Start with the machine" (G2)
-  offers both: **"Run from the tray when I log in"** (recommended on a desktop with the tray
+  tray's own program (on Windows the app `mokuro-bunko.exe`, so no console window). The
+  wizard's "Start with the machine" (G2) offers both: **"Run from the tray when I log in"** (recommended on a desktop with the tray
   program next to the CLI) writes this role's entry into `tray.json` (the server's without
   `args` for the default config, else `["-c", <config>, "serve"]`; the processor's with
   `--config <its processor.yaml>`), the tray's login item (as above) and restarts a running
@@ -253,8 +254,7 @@ starts a second instance when a service-managed one is running.
   `<config>/mokuro-bunko/logs`, then the temp folder, when that cannot be created).
   Start at login: `~/.config/autostart/mokuro-bunko-tray.desktop` (`Exec=<mokuro-bunko> tray`),
   LaunchAgent `io.github.gnathonic.mokuro-bunko-tray` (the app's `mokuro-bunko`, `tray`), or
-  Startup `Mokuro Bunko.lnk` (→ `Mokuro Bunko.exe`): the names of the old separate tray,
-  whose entries the update rewrites (PACKAGING.md §1).
+  Startup `Mokuro Bunko.lnk` (→ `mokuro-bunko.exe`).
 - Linux: the icon is a pixmap per state (idle, working, paused, attention with "!"), and
   the SNI status is `NeedsAttention` with the attention icon; a left click opens the menu.
   Started before the panel (at login) it waits for the StatusNotifierWatcher. SIGTERM
@@ -286,9 +286,9 @@ starts a second instance when a service-managed one is running.
 
 ## 6. Packaging
 
-- Windows zip/installer: `Mokuro Bunko.exe` (the tray, GUI subsystem) at the top,
-  `bin\mokuro-bunko.exe` (the command line); the Start-menu "Mokuro Bunko" shortcut and
-  `install.ps1 -Startup` start `Mokuro Bunko.exe`.
+- Windows zip/installer: `mokuro-bunko.exe` (the app, GUI subsystem) and
+  `mokuro-bunko-cli.exe` (console); the Start-menu "Mokuro Bunko" shortcut and
+  `install.ps1 -Startup` start `mokuro-bunko.exe`.
 - macOS: `Mokuro Bunko.app` (LSUIElement agent) whose main program is `mokuro-bunko`,
   sealed ad hoc; not notarized (quarantine note as today); the LaunchAgent starts its tray.
 - Linux x86_64 full: `.desktop` entry + autostart entry (`mokuro-bunko tray`) + hicolor

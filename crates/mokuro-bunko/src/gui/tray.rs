@@ -8,7 +8,7 @@
 //! * The tray's own login item, as the tray's "Start at login" writes it
 //!   (`bunko-tray/src/autostart.rs`): XDG autostart `.desktop`, a LaunchAgent, or the
 //!   Startup-folder shortcut `Mokuro Bunko.lnk`. The tray is `mokuro-bunko tray` (on
-//!   Windows `Mokuro Bunko.exe`); the lite build has none.
+//!   Windows the app `mokuro-bunko.exe`); the lite build has none.
 //!
 //! A role runs either from the tray or as a service, never both (two copies would fight
 //! over the port / the processor's storage lock): the pages offer to remove the other.
@@ -37,17 +37,10 @@ pub struct Managed {
     pub args: Vec<String>,
 }
 
-/// The Windows portable layout (`PORTABLE.txt` at the top of the folder, above `bin\`):
-/// its `data\`.
+/// The Windows portable layout (`PORTABLE.txt` next to the programs): its `data\`.
 fn portable_data(exe: &Path) -> Option<PathBuf> {
     let dir = exe.parent()?;
-    let in_bin = dir
-        .file_name()
-        .is_some_and(|n| n.eq_ignore_ascii_case("bin"));
-    let root = if in_bin { dir.parent()? } else { dir };
-    root.join("PORTABLE.txt")
-        .is_file()
-        .then(|| root.join("data"))
+    dir.join("PORTABLE.txt").is_file().then(|| dir.join("data"))
 }
 
 /// Where the tray reads `tray.json` (bunko-tray `Layout::tray_config`).
@@ -61,8 +54,8 @@ pub fn config_path(exe: &Path) -> PathBuf {
     }
 }
 
-/// How to start the tray of this program (`exe`): `mokuro-bunko tray`, on Windows
-/// `Mokuro Bunko.exe`. None in the lite build, which has no tray.
+/// How to start the tray of this program (`exe`): `mokuro-bunko tray`, on Windows the
+/// app `mokuro-bunko.exe`. None in the lite build, which has no tray.
 pub fn tray_command(exe: &Path) -> Option<(PathBuf, Vec<String>)> {
     #[cfg(feature = "tray")]
     {
@@ -221,111 +214,39 @@ fn lock_dirs(exe: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// A tray holds its lock (it runs for this user).
-pub fn tray_running(exe: &Path) -> bool {
-    lock_dirs(exe).iter().any(|d| {
-        let Ok(f) = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(d.join(".tray.lock"))
-        else {
-            return false;
-        };
-        matches!(
-            fs4::FileExt::try_lock(&f),
-            Err(fs4::TryLockError::WouldBlock)
-        )
-        // A lock we got is released when `f` drops.
-    })
-}
-
-/// Whether a command line (`argv`, program first) runs the tray: `mokuro-bunko tray`, or
-/// the separate `mokuro-bunko-tray` of 0.7.0-beta.2 and earlier.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn is_tray_command(argv: &[String]) -> bool {
-    let Some(program) = argv.first() else {
+/// The tray lock in `dir` is held (by a running tray).
+fn lock_held(dir: &Path) -> bool {
+    let Ok(f) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.join(".tray.lock"))
+    else {
         return false;
     };
-    let name = Path::new(program)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    if name == "mokuro-bunko-tray" {
-        return true;
-    }
-    if name != "mokuro-bunko" {
-        return false;
-    }
-    // The subcommand: the first word that is neither an option nor the value of the
-    // global `-c`/`--config`.
-    let mut args = argv[1..].iter();
-    while let Some(a) = args.next() {
-        if a == "-c" || a == "--config" {
-            args.next();
-        } else if !a.starts_with('-') {
-            return a == "tray";
-        }
-    }
-    false
+    matches!(
+        fs4::FileExt::try_lock(&f),
+        Err(fs4::TryLockError::WouldBlock)
+    )
+    // A lock we got is released when `f` drops.
 }
 
-/// The pids of this user's running trays (Windows stops it by image name instead).
-#[cfg(unix)]
-pub fn tray_pids() -> Vec<u32> {
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: getuid has no failure mode.
-        let uid = unsafe { libc::getuid() };
-        let mut out = Vec::new();
-        let Ok(rd) = std::fs::read_dir("/proc") else {
-            return out;
-        };
-        for e in rd.flatten() {
-            let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
-                continue;
-            };
-            let mine = std::os::unix::fs::MetadataExt::uid(&match e.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            }) == uid;
-            let argv: Vec<String> = std::fs::read(e.path().join("cmdline"))
-                .map(|b| {
-                    b.split(|c| *c == 0)
-                        .filter(|a| !a.is_empty())
-                        .map(|a| String::from_utf8_lossy(a).into_owned())
-                        .collect()
-                })
-                .unwrap_or_default();
-            if mine && is_tray_command(&argv) && pid != std::process::id() {
-                out.push(pid);
-            }
-        }
-        out
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let uid = unsafe { libc::getuid() };
-        std::process::Command::new("pgrep")
-            .args([
-                "-U",
-                &uid.to_string(),
-                "-f",
-                "(/mokuro-bunko-tray$)|(/mokuro-bunko tray$)",
-            ])
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter_map(|l| l.trim().parse().ok())
-                    .filter(|p| *p != std::process::id())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        Vec::new()
-    }
+/// A tray holds its lock (it runs for this user).
+pub fn tray_running(exe: &Path) -> bool {
+    lock_dirs(exe).iter().any(|d| lock_held(d))
+}
+
+/// The pids of this user's running trays: what their `.tray.pid` files say (the tray
+/// writes one next to its lock), for the lock folders whose lock is held.
+pub fn tray_pids(exe: &Path) -> Vec<u32> {
+    let mut out: Vec<u32> = lock_dirs(exe)
+        .iter()
+        .filter(|d| lock_held(d))
+        .filter_map(|d| std::fs::read_to_string(d.join(".tray.pid")).ok())
+        .filter_map(|t| t.trim().parse().ok())
+        .filter(|p| *p != std::process::id())
+        .collect();
+    out.dedup();
+    out
 }
 
 /// Stop this user's tray (it reads tray.json only when it starts; its children stop
@@ -334,32 +255,28 @@ pub fn stop_tray(exe: &Path) -> Result<Option<String>, String> {
     if !tray_running(exe) {
         return Ok(None);
     }
-    #[cfg(unix)]
-    let what = {
-        let pids = tray_pids();
-        for pid in &pids {
-            // SAFETY: a plain signal to a process of this user.
-            unsafe { libc::kill(*pid as libc::pid_t, libc::SIGTERM) };
+    let pids = tray_pids(exe);
+    for pid in &pids {
+        // SIGTERM: the tray quits as its menu's Quit does (Linux), or ends (macOS).
+        #[cfg(unix)]
+        // SAFETY: a plain signal to a process of this user.
+        unsafe {
+            libc::kill(*pid as libc::pid_t, libc::SIGTERM);
         }
-        format!(
-            "pid {}",
-            pids.iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    #[cfg(windows)]
-    let what = {
-        for image in ["Mokuro Bunko.exe", "mokuro-bunko-tray.exe"] {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/T", "/IM", image])
-                .output();
-        }
-        "Mokuro Bunko.exe".to_string()
-    };
-    #[cfg(not(any(unix, windows)))]
-    let what = String::new();
+        // The tray and its children share the program's name: stop it by pid, with its
+        // tree (its children stop with it).
+        #[cfg(windows)]
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
+    let what = format!(
+        "pid {}",
+        pids.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     for _ in 0..40 {
         if !tray_running(exe) {
             return Ok(Some(format!("Stopped the running tray ({what}).")));
@@ -438,33 +355,5 @@ mod tests {
         assert_eq!(e.args, vec!["-c", cfg, "serve"]);
         let d = entry(Role::Server, &bunko_core::storage::default_config_path());
         assert!(d.args.is_empty(), "{d:?}");
-    }
-
-    #[test]
-    fn tray_commands() {
-        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(is_tray_command(&v(&["/opt/mb/mokuro-bunko", "tray"])));
-        assert!(is_tray_command(&v(&[
-            "/opt/mb/mokuro-bunko",
-            "-v",
-            "tray",
-            "--log-stderr"
-        ])));
-        assert!(is_tray_command(&v(&["/opt/mb/mokuro-bunko-tray"])));
-        assert!(!is_tray_command(&v(&["/opt/mb/mokuro-bunko", "serve"])));
-        assert!(!is_tray_command(&v(&[
-            "/opt/mb/mokuro-bunko",
-            "-c",
-            "tray",
-            "serve"
-        ])));
-        assert!(is_tray_command(&v(&[
-            "mokuro-bunko",
-            "--config",
-            "x.yaml",
-            "tray"
-        ])));
-        assert!(!is_tray_command(&v(&["/usr/bin/tray"])));
-        assert!(!is_tray_command(&[]));
     }
 }

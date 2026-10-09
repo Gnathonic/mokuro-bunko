@@ -2,13 +2,14 @@
 # Build the macOS disk image: "Mokuro Bunko.app" next to an Applications alias, on a
 # background that says to drag one onto the other, plus a small "Read me".
 #
-#   packaging/macos/make-dmg.sh dist/mokuro-bunko-update-<ver>-macos.tar.gz \
+#   packaging/macos/make-dmg.sh dist/mokuro-bunko-<ver>-macos.tar.gz \
 #       dist/mokuro-bunko-<ver>-macos.dmg
 #   packaging/macos/make-dmg.sh --bundle-ocr <ocr-offline dir> <full .tar.gz> <out.dmg>
 #
 # The release names the image mokuro-bunko-<ver>-macos.dmg (crates/xtask/src/names.rs,
-# dmg_name); release-build.yml makes it from the arm64 full archive. A build without a
-# release name (mokuro-bunko-<ver>-<target>-<flavor>.tar.gz) works too.
+# dmg_name); release-build.yml makes it from the arm64 full archive, which is not a
+# release file itself. A build without a release name
+# (mokuro-bunko-<ver>-<target>-<flavor>.tar.gz) works too.
 #
 # The app is the release archive's mokuro-bunko.app (`xtask dist`: its main program is
 # mokuro-bunko, which runs the tray when the Finder opens it), renamed, with the
@@ -61,8 +62,8 @@ if [ "${MAKE_DMG_DRY_RUN:-}" != "1" ]; then
 fi
 tar -xzf "$ARCHIVE" -C "$TMP"
 TOP=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-NAME=$(basename "$TOP")   # mokuro-bunko-update-<ver>-macos, or mokuro-bunko-<ver>-<target>-<flavor>
-VERSION=$(echo "$NAME" | sed -E 's/^mokuro-bunko-update-(.*)-macos$/\1/; s/^mokuro-bunko-(.*)-aarch64-apple-darwin-.*$/\1/; s/^mokuro-bunko-(.*)-x86_64-apple-darwin-.*$/\1/')
+NAME=$(basename "$TOP")   # mokuro-bunko-<ver>-macos, or mokuro-bunko-<ver>-<target>-<flavor>
+VERSION=$(echo "$NAME" | sed -E 's/^mokuro-bunko-(.*)-macos$/\1/; s/^mokuro-bunko-(.*)-aarch64-apple-darwin-.*$/\1/; s/^mokuro-bunko-(.*)-x86_64-apple-darwin-.*$/\1/')
 [ -d "$TOP/mokuro-bunko.app" ] || { echo "$ARCHIVE has no mokuro-bunko.app" >&2; exit 1; }
 case "$NAME" in
 *-x86_64-apple-darwin-*) ARCH="Intel" ;;

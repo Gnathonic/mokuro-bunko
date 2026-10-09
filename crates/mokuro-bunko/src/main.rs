@@ -15,8 +15,7 @@ mod gui;
 mod local_ocr;
 mod logging;
 mod machine;
-#[cfg(feature = "tray")]
-mod migrate;
+mod no_args;
 #[cfg(feature = "ocr")]
 mod ocr_probe;
 #[cfg(feature = "ocr")]
@@ -64,11 +63,20 @@ fn main() {
         .filter(|(i, a)| *i == 0 || !a.to_string_lossy().starts_with("-psn_"))
         .map(|(_, a)| a)
         .collect();
+    let mut both: Option<std::process::Child> = None;
     let cli = if args.len() == 1 {
-        match no_argument_start() {
-            Start::Help => Cli::parse_from(args),
-            Start::Run(cmd) => Cli::parse_from(["mokuro-bunko", cmd]),
-            Start::Done => return,
+        match no_args::start() {
+            no_args::Start::Run(argv) => Cli::parse_from(argv),
+            no_args::Start::Both(processor) => {
+                // A library and a processor here, headless: the processor runs as a child
+                // (stopped with this process), the library server in this one.
+                both = no_args::spawn_processor(&processor);
+                Cli::parse_from(["mokuro-bunko", "serve"])
+            }
+            no_args::Start::Message => {
+                println!("{}", no_args::NOTHING_SET_UP);
+                return;
+            }
         }
     } else {
         Cli::parse_from(args)
@@ -78,7 +86,12 @@ fn main() {
         println!("flavor: {FLAVOR}, target: {}", bunko_update::TARGET);
         return;
     }
-    let code = match run(cli) {
+    let result = run(cli);
+    if let Some(mut child) = both {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let code = match result {
         Ok(()) => 0,
         Err(Fail::Exit(code)) => code,
         Err(Fail::Error(msg)) => {
@@ -123,50 +136,8 @@ fn run(cli: Cli) -> out::CmdResult {
     }
 }
 
-enum Start {
-    /// The help (a terminal, a script).
-    Help,
-    /// This command.
-    Run(&'static str),
-    /// Nothing more to do.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    Done,
-}
-
-/// What a start without arguments runs. From a terminal: the help. Started by the
-/// desktop: the Windows GUI build (`Mokuro Bunko.exe`) and the macOS app run the tray,
-/// which opens the setup wizard on a machine with nothing set up; the Windows command
-/// line double-clicked in Explorer starts `Mokuro Bunko.exe` above its `bin` folder and
-/// exits, or else opens the desktop app pages (`gui`).
-fn no_argument_start() -> Start {
-    if windows_gui_subsystem() {
-        return Start::Run(if cfg!(feature = "tray") {
-            "tray"
-        } else {
-            "gui"
-        });
-    }
-    if !double_clicked() {
-        return Start::Help;
-    }
-    #[cfg(windows)]
-    if let Some(gui) = bunko_update::current_exe().ok().and_then(|exe| {
-        let root = exe.parent()?.parent()?;
-        let gui = root.join(bunko_update::layout::WINDOWS_GUI_EXE);
-        gui.is_file().then_some(gui)
-    }) && std::process::Command::new(&gui).spawn().is_ok()
-    {
-        return Start::Done;
-    }
-    if cfg!(all(feature = "tray", target_os = "macos")) {
-        Start::Run("tray")
-    } else {
-        Start::Run("gui")
-    }
-}
-
-/// This is the GUI-subsystem build (`Mokuro Bunko.exe`: Windows gives it no console).
-fn windows_gui_subsystem() -> bool {
+/// This is the GUI-subsystem build (Windows `mokuro-bunko.exe`: no console window).
+pub fn windows_gui_subsystem() -> bool {
     #[cfg(windows)]
     {
         // SAFETY: the module handle of this executable stays valid while it runs; the
@@ -185,32 +156,6 @@ fn windows_gui_subsystem() -> bool {
         }
     }
     #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
-/// Started without a terminal to talk to: on Windows the console is this process's
-/// alone (Explorer or a shortcut made it), on macOS LaunchServices started it (Finder,
-/// the Dock, `open`: a child of launchd, stdin not a terminal). A script, `ssh host
-/// mokuro-bunko` or a test harness without a terminal is neither, and gets the help.
-fn double_clicked() -> bool {
-    #[cfg(windows)]
-    {
-        let mut ids = [0u32; 4];
-        // SAFETY: the buffer and its length match; the call only writes into it.
-        let n = unsafe {
-            windows_sys::Win32::System::Console::GetConsoleProcessList(ids.as_mut_ptr(), 4)
-        };
-        n == 1
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::io::IsTerminal;
-        // SAFETY: getppid has no preconditions.
-        !std::io::stdin().is_terminal() && unsafe { libc::getppid() } == 1
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
     {
         false
     }
