@@ -1,0 +1,111 @@
+# The release's Docker images, shared by release.yml and release-check.yml: the lite
+# image (linux/amd64 + linux/arm64) and the full image (linux/amd64), built from the
+# release binaries of this run (the `dist-linux-*` artifacts of release-build.yml).
+#
+# Pushes only with `push: true`, which release.yml passes together with
+# `packages: write`. release-check.yml passes `push: false` and grants no package
+# permission: the images are built, nothing logs in, nothing leaves the runner.
+name: Release images
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit, branch or tag to build
+        required: true
+        type: string
+      version:
+        description: The workspace version (the images' tag)
+        required: true
+        type: string
+      image:
+        description: Image name, e.g. ghcr.io/<owner>/mokuro-bunko
+        required: true
+        type: string
+      push:
+        description: Log in to ghcr.io and push the versioned tags
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      IMAGE: ${{ inputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-linux-*
+          path: dist
+          merge-multiple: true
+      # The images reuse the release binaries (BIN_FROM=prebuilt): no second compile,
+      # and the arm64 lite image needs no emulated build. No backend pack and no model
+      # goes into any image: the full image downloads the pack its container's GPU
+      # needs from this release on first start (PACKAGING.md §2). Never pass
+      # --bake-pack here.
+      - name: docker context (release binaries + bunko-init per arch)
+        run: cargo run -q -p xtask --locked -- docker-context --version "$VERSION" --dir dist --out dist/docker --zig
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - if: inputs.push
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: lite (static musl on distroless)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.lite
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BIN_FROM=prebuilt
+            VERSION=${{ env.VERSION }}
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-lite
+          push: ${{ inputs.push }}
+      # One full image for CPU, NVIDIA and AMD (the pack is downloaded on first start),
+      # also tagged -cuda so templates written for the 0.5.2 CUDA image keep working.
+      - name: full (local OCR, backend downloaded on first start; optional nginx)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            BIN_FROM=prebuilt
+            BAKE_PACK=0
+            VERSION=${{ env.VERSION }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.IMAGE }}:${{ env.VERSION }}-cuda
+          push: ${{ inputs.push }}
+      # The check only: the amd64 images run from the local daemon (one platform can be
+      # loaded; the arm64 lite image was built above).
+      - name: load and run the amd64 images (not pushed)
+        if: ${{ !inputs.push }}
+        run: |
+          set -eux
+          docker buildx build --load --platform linux/amd64 -f deploy/docker/Dockerfile.lite \
+            --build-arg BIN_FROM=prebuilt --build-arg VERSION="$VERSION" -t "check-lite:$VERSION" .
+          docker buildx build --load --platform linux/amd64 -f deploy/docker/Dockerfile \
+            --build-arg BIN_FROM=prebuilt --build-arg BAKE_PACK=0 --build-arg VERSION="$VERSION" -t "check-full:$VERSION" .
+          docker run --rm "check-lite:$VERSION" --version | tee /dev/stderr | grep -F "$VERSION"
+          docker run --rm --entrypoint /opt/mokuro-bunko/mokuro-bunko "check-full:$VERSION" --version | tee /dev/stderr | grep -F "$VERSION"
+          docker image ls

@@ -21,6 +21,9 @@ Where things live:
 | `deploy/docker-compose*.yml`, `deploy/unraid/*.xml` | compose files and Unraid templates for the published images |
 | `scripts/install.sh`, `scripts/install.ps1` | installers that download a release (`setup-windows.ps1` forwards to `install.ps1`) |
 | `.github/workflows/{ci,release,publish}.yml` | CI, tag → draft release, owner's publish step |
+| `.github/workflows/release-{build,docker}.yml` | the release's build jobs (reusable: `workflow_call`), shared by `release.yml` and `release-check.yml` |
+| `.github/workflows/release-check.yml` | the release dry run on any branch: builds everything, signs and publishes nothing (§5) |
+| `packaging/macos/` | `Info.plist` of the app, `make-dmg.sh` + background + `Read me.txt` of the disk image |
 
 Run xtask with `cargo run -p xtask -- <command>`. A `cargo xtask` alias needs
 `.cargo/config.toml` with `[alias] xtask = "run -p xtask --"` (not added yet:
@@ -43,16 +46,17 @@ Linux) — and paddle-manga on the GPU packs' GPUs only (no CPU packages for it)
 `directml`, `coreml`, `webgpu` → `full-<ep>`) still compile (CI clippy checks
 `cuda,webgpu`) but are not released.
 
-Release matrix (`.github/workflows/release.yml`):
+Release matrix (`.github/workflows/release-build.yml`, run by `release.yml` and
+`release-check.yml`):
 
 | target | lite | full | backend packs | how |
 |---|---|---|---|---|
 | `x86_64-unknown-linux-musl` | ✔ static | | | `cargo zigbuild` |
 | `aarch64-unknown-linux-musl` | ✔ static | | | `cargo zigbuild` |
 | `x86_64-unknown-linux-gnu` | | ✔ | `cpu`, `cu130`, `rocm7.1` | manylinux_2_28 container (`packaging/manylinux/build.sh`): glibc ≥ 2.28 |
-| `x86_64-pc-windows-msvc` | ✔ | ✔ | `cpu`, `cu130` | native, windows-latest |
-| `aarch64-apple-darwin` | ✔ | ✔ | `cpu` | native, macos-latest |
-| `x86_64-apple-darwin` | ✔ | — | | cross from macos-latest |
+| `x86_64-pc-windows-msvc` | ✔ | ✔ | `cpu`, `cu130` | native, windows-latest (the packs' C++ with clang-cl, below) |
+| `aarch64-apple-darwin` | ✔ + `.dmg` | ✔ + `.dmg` | `cpu` | native, macos-latest |
+| `x86_64-apple-darwin` | ✔ + `.dmg` | — | | cross from macos-latest |
 | `aarch64-linux-android` + `x86_64-linux-android` | (APK `mokuro-bunko-<ver>-android.apk`, not in release.json; not released in 0.7) | | | job `android`: cargo-ndk + Gradle (`packaging/android/build.sh`); out of 0.7's scope, opt-in only with `vars.BUILD_ANDROID == 'true'`; see MOBILE.md |
 
 Dropped against the ONNX-only design: `full-cuda` (Linux, Windows), Linux arm64 full
@@ -112,6 +116,17 @@ Why these choices:
   without the Redistributable installed is still to do.
   Linux full builds get an `$ORIGIN` runpath so the provider libraries are found next to
   the real executable even when it is started through a symlink.
+- **Windows packs compile their C++ with clang-cl.** libbunko_torch links libtorch
+  through torch-sys 0.26, whose build script compiles its C++ glue (libtch) with
+  `/std:c++17`. The windows-latest runner's MSVC (Visual Studio 18) rejects libtorch
+  2.13's headers in C++17 (C7555, designated initializers) and libtch in C++20 (`module`
+  used as a name); clang-cl (clang's front end, MSVC's ABI and headers) accepts both.
+  The `packs` job of `release-build.yml` compiles a small wrapper, `clang-cl-wrap.exe`,
+  that drops torch-sys's MSBuild-style `/p:` argument (clang-cl would take it for a
+  file) and adds `/EHsc`, and points `CXX_/CC_x86_64_pc_windows_msvc` at it for
+  `xtask torch-pack` only: xtask, the binary and the tray are built by cl.exe as before.
+  It is the wrapper `torch-export-win.yml` uses. The ABI is MSVC's, so the DLL links
+  the official libtorch build and the app-local VC++ runtime.
 - **No macOS universal binary**: ort ships no `x86_64-apple-darwin` ONNX Runtime, so a
   universal full build is impossible, and the updater picks artifacts by target triple
   anyway. Intel Macs get lite (use a processor elsewhere for OCR).
@@ -176,9 +191,23 @@ server and processor still run on a headless box, NAS or container.
   without `--from` (and so the wizard, which then shows "Source: Bundled with this app")
   installs from that folder by itself (`bundled_offline_dir`:
   `<exe>/../Resources/ocr-offline` inside an app bundle, else `<exe>/ocr-offline`, when it
-  holds a `*-torch-*.tar.zst`). `Read me.txt` carries the paragraph of the build
-  (`@IF_DOWNLOAD@` / `@IF_BUNDLED@` blocks); `MAKE_DMG_DRY_RUN=1` stops after staging
-  (checks the layout on any host). The tray in an app not
+  holds a `*-torch-*.tar.zst`). `Read me.txt` carries the paragraphs of the build
+  (`@IF_DOWNLOAD@` / `@IF_BUNDLED@` / `@IF_FULL@` / `@IF_LITE@` / `@IF_PRERELEASE@`
+  blocks; `@ARCH@` is "Apple silicon" or "Intel"); `MAKE_DMG_DRY_RUN=1` stops after
+  staging (checks the layout on any host).
+  **The release builds one disk image per macOS archive** (`release-build.yml`, the
+  macOS `build` jobs: dmgbuild 1.6.7 in a venv on the runner, then the image is
+  mounted there and checked for the app, its CLI and tray, the Applications link and
+  no `ocr-offline`): aarch64 full, aarch64 lite and x86_64 lite, each named like its
+  archive with `.dmg`, `mokuro-bunko-<ver>-<target>-<flavor>.dmg`
+  (`names::parse_dmg_name`). A lite image's `Read me.txt` says the app is a library
+  server without local OCR. **The disk images are release assets, not `release.json`
+  artifacts**: the updater picks one archive per target and flavor and replaces the
+  binaries from it (in a dmg install, the two inside the app), so the `.tar.gz` already
+  serves dmg installs, and the manifest has no place for a second file per target and
+  flavor; `install.sh` takes the `.tar.gz` too. `SHA256SUMS` lists them (`xtask
+  manifest` adds every `mokuro-bunko-<ver>-<target>-<flavor>.dmg` of an Apple target in
+  its directory); like `SHA256SUMS` itself they are not covered by the signature. The tray in an app not
   named `mokuro-bunko.app` always runs the CLI inside its own bundle; the updater
   replaces both binaries there (the tray is the CLI's sibling). Terminal users run
   `/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko`. Measured on an M2 Pro
@@ -455,14 +484,21 @@ PowerShell has no ed25519); the in-app updater does check the signature.
 
 ## 5. Cutting a release
 
+0. Dry run first: Actions → **Release check** on the branch to be tagged
+   (`gh workflow run release-check.yml --ref <branch>`). It runs the release's build
+   jobs on the branch's head (below) and must be green before tagging.
 1. Bump `version` in the root `Cargo.toml` (`[workspace.package]`), update
    `CHANGELOG.md`, commit, and push a tag: `git tag v0.7.0 && git push origin v0.7.0`.
-   (`-alpha.N`/`-rc.N` versions become GitHub pre-releases.)
+   (A version with a `-`, e.g. `-alpha.N`, `-beta.N`, `-rc.N`, becomes a GitHub
+   pre-release, and Publish leaves the `latest*` image tags alone.)
 2. `release.yml` runs: checks the tag equals the workspace version and that
-   `BUNKO_SIGNING_KEY` exists; tests; builds the matrix; writes, signs and verifies
-   `release.json`; creates a **draft** release with all assets; pushes the versioned
-   images `:<ver>-lite` and `:<ver>` (also tagged `:<ver>-cuda`; no pack, no model inside).
-   A draft is invisible to
+   `BUNKO_SIGNING_KEY` exists; runs `release-build.yml` (tests, the archive matrix,
+   the macOS disk images, the backend packs); writes, signs and verifies
+   `release.json`; creates a **draft** release with all assets (archives, disk
+   images, packs, `release.json` + `.sig`, `SHA256SUMS`); and, through
+   `release-docker.yml`, pushes the versioned images `:<ver>-lite` and `:<ver>` (also
+   tagged `:<ver>-cuda`; no pack, no model inside). The images are pushed once every
+   build job has passed. A draft is invisible to
    `releases/latest/download/`, so no installed server sees it yet.
 3. Review the draft (notes, assets; `cargo run -p xtask -- verify release.json --dir .`
    on downloaded assets if you like).
@@ -472,6 +508,24 @@ PowerShell has no ed25519); the in-app updater does check the signature.
 
 Re-running `release.yml` for the same tag (workflow_dispatch) replaces the draft's
 assets (`--clobber`) and re-pushes the versioned images.
+
+### The release check (`release-check.yml`)
+
+The build half of a release is two reusable workflows (`on: workflow_call`):
+`release-build.yml` (test, every archive, the disk images, the Windows/macOS/Linux
+packs, the opt-in APK, uploaded as `dist-*` / `pack-*` artifacts) and
+`release-docker.yml` (the lite and full images from this run's Linux binaries; pushes
+only with `push: true`). `release.yml` calls them for a tag and then signs, drafts and
+pushes. `release-check.yml` (manual, any branch) calls the same two on the branch's
+head without a tag, then writes the **unsigned** `release.json` and `SHA256SUMS` and
+checks the asset set the draft would get: the 8 archives, the 6 packs in
+`release.json`, the 3 disk images in `SHA256SUMS` and not in `release.json`. It cannot
+publish anything: the workflow has only `contents: read` (no `packages: write`, no
+`contents: write`), passes no secret (nothing is signed; the Android job is off), and
+calls `release-docker.yml` with `push: false` (no registry login; the amd64 images are
+loaded and run `--version` on the runner instead). Its artifacts are kept for 3 days.
+What only a tag exercises: the tag/version check, `BUNKO_SIGNING_KEY`, signing and
+verifying with the compiled-in key, `gh release create`, the GHCR login and push.
 
 Locally, the same pipeline (minus upload):
 

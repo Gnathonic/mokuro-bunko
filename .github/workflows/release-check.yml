@@ -1,0 +1,145 @@
+# A release dry run on any branch, without a tag: the jobs of a release build
+# (release-build.yml: tests, every platform archive, the macOS disk images, the
+# Windows/macOS/Linux backend packs) and the Docker images (release-docker.yml, built
+# but not pushed), then the unsigned release.json and the asset list the draft release
+# would get. Signs nothing, uses no secret, creates no tag or release and pushes no
+# image: the workflow has only `contents: read`. The outputs are workflow artifacts
+# kept for 3 days.
+#
+#   gh workflow run release-check.yml --ref <branch>
+name: Release check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.v.outputs.ref }}
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      epoch: ${{ steps.v.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: the workspace version (what a tag v<version> would build)
+        run: |
+          set -eu
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mokuro-bunko") | .version')
+          case "$version" in *-*) pre=true ;; *) pre=false ;; esac
+          {
+            echo "ref=$(git rev-parse HEAD)"
+            echo "version=$version"
+            echo "prerelease=$pre"
+            echo "epoch=$(git log -1 --format=%ct)"
+          } >> "$GITHUB_OUTPUT"
+          echo "### Release check of $version ($(git rev-parse --short HEAD)), prerelease: $pre" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: prepare
+    uses: ./.github/workflows/release-build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.ref }}
+      version: ${{ needs.prepare.outputs.version }}
+      epoch: ${{ needs.prepare.outputs.epoch }}
+      android: false
+      retention-days: 3
+
+  docker:
+    needs: [prepare, build]
+    uses: ./.github/workflows/release-docker.yml
+    with:
+      ref: ${{ needs.prepare.outputs.ref }}
+      version: ${{ needs.prepare.outputs.version }}
+      # a name that is no registry's: these images go nowhere
+      image: release-check/mokuro-bunko
+      push: false
+
+  # The release job of release.yml up to signing: release.json and SHA256SUMS from all
+  # the archives and packs, and the complete asset set the draft release would get.
+  assemble:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+    steps:
+      - name: free disk space (all archives and packs, ~5 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h .
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pack-*
+          path: dist
+          merge-multiple: true
+      - name: release.json (unsigned)
+        run: |
+          set -eux
+          cargo run -q -p xtask --locked -- manifest --version "$VERSION" --dir dist \
+            --docker-repo "ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/mokuro-bunko"
+          cat dist/release.json dist/SHA256SUMS
+      - name: the draft's assets are complete
+        run: |
+          set -eu
+          p="mokuro-bunko-$VERSION"
+          want_archives=(x86_64-unknown-linux-musl/lite aarch64-unknown-linux-musl/lite
+            x86_64-unknown-linux-gnu/full x86_64-pc-windows-msvc/full x86_64-pc-windows-msvc/lite
+            aarch64-apple-darwin/full aarch64-apple-darwin/lite x86_64-apple-darwin/lite)
+          want_packs=(x86_64-unknown-linux-gnu/cpu x86_64-unknown-linux-gnu/cu130 x86_64-unknown-linux-gnu/rocm7.1
+            x86_64-pc-windows-msvc/cpu x86_64-pc-windows-msvc/cu130 aarch64-apple-darwin/cpu)
+          want_dmgs=(aarch64-apple-darwin-full aarch64-apple-darwin-lite x86_64-apple-darwin-lite)
+          bad=0
+          got=$(jq -r '.artifacts | to_entries[] | .key as $t | .value | keys[] | "\($t)/\(.)"' dist/release.json | sort)
+          [ "$got" = "$(printf '%s\n' "${want_archives[@]}" | sort)" ] || { echo "release.json artifacts: $got"; bad=1; }
+          got=$(jq -r '.backends | to_entries[] | .key as $t | .value | keys[] | "\($t)/\(.)"' dist/release.json | sort)
+          [ "$got" = "$(printf '%s\n' "${want_packs[@]}" | sort)" ] || { echo "release.json backends: $got"; bad=1; }
+          for d in "${want_dmgs[@]}"; do
+            f="$p-$d.dmg"
+            [ -s "dist/$f" ] || { echo "missing $f"; bad=1; continue; }
+            grep -q "  $f\$" dist/SHA256SUMS || { echo "$f is not in SHA256SUMS"; bad=1; }
+            if jq -e --arg f "$f" '[.. | strings | select(endswith($f))] | length > 0' dist/release.json >/dev/null; then
+              echo "$f is in release.json"; bad=1
+            fi
+          done
+          [ "$(jq -r .version dist/release.json)" = "$VERSION" ] || bad=1
+          # What release.yml's "draft GitHub release" step would upload (it also adds
+          # release.json.sig, made by its signing step).
+          files=(dist/*.tar.gz dist/*.zip dist/*.dmg dist/*.tar.zst* dist/release.json dist/SHA256SUMS)
+          {
+            echo "| draft asset | bytes |"
+            echo "|---|---|"
+            for f in "${files[@]}"; do echo "| $(basename "$f") | $(stat -c %s "$f") |"; done
+            echo "| release.json.sig | (release.yml signs) |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$bad"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-json-unsigned
+          path: |
+            dist/release.json
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 3

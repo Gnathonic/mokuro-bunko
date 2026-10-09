@@ -1,8 +1,12 @@
-# Build a release from a `v*` tag: every platform archive, the signed release.json,
-# a DRAFT GitHub release, and versioned Docker images. Nothing here is visible to the
-# updater or to `:latest` users: the owner reviews the draft and then runs the
-# "Publish" workflow (publish.yml), which un-drafts the release and moves the
-# `latest*` image tags. See docs/rust-port/PACKAGING.md.
+# Build a release from a `v*` tag: every platform archive, the macOS disk images, the
+# backend packs, the signed release.json, a DRAFT GitHub release, and versioned Docker
+# images. Nothing here is visible to the updater or to `:latest` users: the owner
+# reviews the draft and then runs the "Publish" workflow (publish.yml), which un-drafts
+# the release and moves the `latest*` image tags. See docs/rust-port/PACKAGING.md.
+#
+# The build jobs are release-build.yml and release-docker.yml (reusable workflows);
+# release-check.yml runs the same two on any branch without a tag, signing and
+# publishing nothing.
 #
 # Needs the repository secret BUNKO_SIGNING_KEY (base64 ed25519 seed of the release
 # key whose public half is compiled into bunko-update).
@@ -71,320 +75,25 @@ jobs:
             exit 1
           fi
 
-  test:
-    needs: prepare
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # bunko-tray links GTK 3 on Linux (the desktop tray; the CLI does not).
-      - run: sudo apt-get update -q && sudo apt-get install -y -q libgtk-3-dev
-      - run: cargo test --workspace --locked
-
+  # Tests, every archive, the macOS disk images, the backend packs and (opt-in) the
+  # APK: release-build.yml, the same jobs release-check.yml runs without a tag.
   build:
     needs: prepare
-    name: build ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Linux lite: fully static musl, cross-built with zig. x86_64 lite is the
-          # `build-linux-x64-lite` job: it takes the tray from the manylinux job.
-          - { name: linux-arm64-lite, os: ubuntu-latest, target: aarch64-unknown-linux-musl, flavor: lite, zig: true }
-          # Full: one binary per platform (ONNX Runtime on the CPU for PP-OCR; the
-          # recognizers come from the backend packs). Linux x86_64 full is built by the
-          # `build-linux-full` job (manylinux_2_28). The ONNX Runtime GPU flavors
-          # (full-cuda, DirectML, CoreML, WebGPU) are not released any more, and there is
-          # no Linux arm64 / Intel macOS full build (no backend pack for them).
-          - { name: windows-x64-full, os: windows-latest, target: x86_64-pc-windows-msvc, flavor: full }
-          - { name: windows-x64-lite, os: windows-latest, target: x86_64-pc-windows-msvc, flavor: lite }
-          - { name: macos-arm64-full, os: macos-latest, target: aarch64-apple-darwin, flavor: full }
-          - { name: macos-arm64-lite, os: macos-latest, target: aarch64-apple-darwin, flavor: lite }
-          - { name: macos-x64-lite, os: macos-latest, target: x86_64-apple-darwin, flavor: lite }
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
-      TARGET: ${{ matrix.target }}
-      FLAVOR: ${{ matrix.flavor }}
-      ZIG: ${{ matrix.zig }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - if: matrix.zig
-        uses: mlugg/setup-zig@v2
-      - if: matrix.zig
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.name }}
-      - name: xtask dist
-        run: |
-          set -eux
-          args=(--locked --target "$TARGET" --flavor "$FLAVOR" --out dist)
-          if [ "$ZIG" = "true" ]; then args+=(--zig); fi
-          cargo run -p xtask --locked -- dist "${args[@]}"
-          ls -l dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-${{ matrix.name }}
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
-          if-no-files-found: error
-
-  # Linux x86_64 full: in a manylinux_2_28 container (AlmaLinux 8, glibc 2.28,
-  # gcc-toolset-14), so the binary runs on glibc >= 2.28 with the distribution's
-  # libstdc++ (Debian 12, Ubuntu 22.04, RHEL 8+), like 0.5.2's wheels. ONNX Runtime
-  # 1.28's static libraries need GCC 13's libstdc++ (GLIBCXX_3.4.31); gcc-toolset links
-  # those parts statically (libstdc++_nonshared.a). packaging/manylinux/build.sh is the
-  # same recipe for local builds.
-  build-linux-full:
-    needs: prepare
-    runs-on: ubuntu-latest
-    container: quay.io/pypa/manylinux_2_28_x86_64
-    env:
-      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
-      CARGO_HOME: /github/home/.cargo
-      RUSTUP_HOME: /github/home/.rustup
-      OUT: dist
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-      - name: build (xtask dist, then show the glibc/GLIBCXX versions the binary needs)
-        run: packaging/manylinux/build.sh full tray
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-linux-x64-full
-          path: dist/*.tar.gz
-          if-no-files-found: error
-      # The desktop tray (glibc 2.28 + GTK 3) for the x86_64 lite archive.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tray-linux-x64
-          path: dist/mokuro-bunko-tray
-          if-no-files-found: error
-
-  # Linux x86_64 lite: the static musl CLI (zig), plus the manylinux job's glibc tray
-  # (a tray needs glibc and GTK 3 anyway; the CLI stays static).
-  build-linux-x64-lite:
-    needs: [prepare, build-linux-full]
-    runs-on: ubuntu-latest
-    env:
-      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-      - uses: mlugg/setup-zig@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: linux-x64-lite
-      - uses: actions/download-artifact@v4
-        with:
-          name: tray-linux-x64
-          path: tray
-      - name: xtask dist
-        run: |
-          set -eux
-          chmod +x tray/mokuro-bunko-tray
-          cargo run -p xtask --locked -- dist --locked --zig --target x86_64-unknown-linux-musl \
-            --flavor lite --tray-bin tray/mokuro-bunko-tray --out dist
-          ls -l dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-linux-x64-lite
-          path: dist/*.tar.gz
-          if-no-files-found: error
-
-  # OCR backend packs (docs/rust-port/TORCH-BACKEND.md, PACKAGING.md §8): libtorch
-  # 2.13.0 of each variant, trimmed, with libbunko_torch built against it, as
-  # mokuro-bunko-<ver>-<target>-torch-<variant>.tar.zst (split in .001/.002 parts
-  # above 1.9 GiB). The NVIDIA libraries are not in the archives: pack.json lists
-  # NVIDIA's PyPI wheels (pinned by sha256) and `install-ocr` fetches them.
-  packs:
-    needs: prepare
-    name: pack ${{ matrix.name }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: windows-x64-cpu, os: windows-latest, target: x86_64-pc-windows-msvc, variant: cpu }
-          - { name: windows-x64-cu130, os: windows-latest, target: x86_64-pc-windows-msvc, variant: cu130 }
-          - { name: macos-arm64-cpu, os: macos-latest, target: aarch64-apple-darwin, variant: cpu }
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
-      BUNKO_PACK_CACHE: ${{ github.workspace }}/pack-cache
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: pack-${{ matrix.name }}
-      - name: xtask torch-pack
-        run: |
-          set -eux
-          cargo run -p xtask --locked -- torch-pack --locked --variant "${{ matrix.variant }}" \
-            --target "${{ matrix.target }}" --out dist
-          rm -rf "$BUNKO_PACK_CACHE"
-          ls -l dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pack-${{ matrix.name }}
-          path: dist/*.tar.zst*
-          if-no-files-found: error
-          compression-level: 0
-
-  # The Linux packs, built in the same manylinux_2_28 image as the Linux full binary
-  # (libbunko_torch must run where the binary runs; the cu130 pack's stubs for cuFile,
-  # NVSHMEM and nvJitLink are compiled there too).
-  packs-linux:
-    needs: prepare
-    name: pack linux-x64-${{ matrix.variant }}
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [cpu, cu130, rocm7.1]
-    runs-on: ubuntu-latest
-    env:
-      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
-    steps:
-      # The ROCm zip is 5.4 GiB and unpacks the kept libraries to ~7 GiB.
-      - name: free disk space
-        if: matrix.variant == 'rocm7.1'
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h .
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-      - name: xtask torch-pack (manylinux_2_28)
-        run: |
-          set -eux
-          docker run --rm -v "$PWD:/src" -w /src -e SOURCE_DATE_EPOCH -e OUT=dist \
-            -e CARGO_HOME=/src/.mb/cargo -e RUSTUP_HOME=/src/.mb/rustup -e CARGO_TARGET_DIR=/src/.mb/target \
-            quay.io/pypa/manylinux_2_28_x86_64 packaging/manylinux/build.sh "${{ matrix.variant }}"
-          sudo rm -rf .mb
-          ls -l dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pack-linux-x64-${{ matrix.variant }}
-          path: dist/*.tar.zst*
-          if-no-files-found: error
-          compression-level: 0
-
-  # Android APK (docs/rust-port/MOBILE.md): the lite server as a JNI library
-  # (crates/bunko-android, cargo ndk for arm64-v8a + x86_64) in the Kotlin app under
-  # packaging/android. A release asset only: it is not in release.json (the app updates
-  # by store/sideload; the updater reports InstallKind::Mobile). On by default; set the
-  # repository variable BUILD_ANDROID to "true" to build it.
-  #
-  # Signing: the secrets ANDROID_KEYSTORE_BASE64 (base64 of a .jks/.keystore),
-  # ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD. Without them the
-  # APK is signed with a throwaway debug key, and users cannot update it in place.
-  android:
-    needs: prepare
-    # Android is out of 0.7's scope (owner, 2026-10-03): opt in with BUILD_ANDROID=true.
-    if: vars.BUILD_ANDROID == 'true'
-    runs-on: ubuntu-latest
-    env:
-      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
-      CARGO_LOCKED: "1"
-      NDK_VERSION: "29.0.14206865"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,x86_64-linux-android
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-ndk
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: android
-      - name: Android SDK packages (platform 36, build-tools, NDK)
-        run: |
-          set -eux
-          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$sdkmanager" --licenses > /dev/null || true
-          "$sdkmanager" --install "platforms;android-36" "build-tools;36.0.0" "ndk;$NDK_VERSION"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
-      - name: release keystore
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: |
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set: the APK is signed with a debug key (see docs/rust-port/MOBILE.md)"
-            exit 0
-          fi
-          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-          {
-            echo "BUNKO_ANDROID_KEYSTORE=$RUNNER_TEMP/release.keystore"
-            echo "BUNKO_ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
-            echo "BUNKO_ANDROID_KEY_ALIAS=$KEY_ALIAS"
-            echo "BUNKO_ANDROID_KEY_PASSWORD=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
-          } >> "$GITHUB_ENV"
-      - name: build.sh (native libraries, licences, assembleRelease)
-        run: packaging/android/build.sh --out dist-android
-      - name: check the APK
-        run: |
-          set -eux
-          apk="dist-android/mokuro-bunko-${{ needs.prepare.outputs.version }}-android.apk"
-          bt=$(find "$ANDROID_HOME"/build-tools -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)
-          "$bt/apksigner" verify --print-certs "$apk"
-          "$bt/zipalign" -c -P 16 4 "$apk"
-          unzip -l "$apk" | grep -E 'lib/(arm64-v8a|x86_64)/libbunko_android.so'
-          unzip -l "$apk" | grep -E 'assets/THIRD-PARTY-LICENSES.md'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: android-apk
-          path: dist-android/*
-          if-no-files-found: error
+    uses: ./.github/workflows/release-build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.prepare.outputs.version }}
+      epoch: ${{ needs.prepare.outputs.epoch }}
+      # Android is out of 0.7's scope (owner, 2026-10-03): opt in with BUILD_ANDROID=true.
+      android: ${{ vars.BUILD_ANDROID == 'true' }}
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
   release:
-    needs: [prepare, test, build, build-linux-full, build-linux-x64-lite, packs, packs-linux, android]
-    # android is skipped unless BUILD_ANDROID=true; everything else must have passed.
-    if: >-
-      ${{ !cancelled() && needs.prepare.result == 'success' && needs.test.result == 'success'
-      && needs.build.result == 'success' && needs.build-linux-full.result == 'success'
-      && needs.build-linux-x64-lite.result == 'success'
-      && needs.packs.result == 'success' && needs.packs-linux.result == 'success'
-      && (needs.android.result == 'success' || needs.android.result == 'skipped') }}
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -410,7 +119,7 @@ jobs:
           path: dist
           merge-multiple: true
       # Kept out of dist/: the APK is a release asset, not a release.json artifact.
-      - if: needs.android.result == 'success'
+      - if: vars.BUILD_ANDROID == 'true'
         uses: actions/download-artifact@v4
         with:
           name: android-apk
@@ -433,7 +142,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eux
-          files=(dist/*.tar.gz dist/*.zip dist/*.tar.zst* dist/release.json dist/release.json.sig dist/SHA256SUMS)
+          # The macOS disk images are assets but not release.json artifacts (the updater
+          # takes the .tar.gz); SHA256SUMS lists them.
+          files=(dist/*.tar.gz dist/*.zip dist/*.dmg dist/*.tar.zst* dist/release.json dist/release.json.sig dist/SHA256SUMS)
           if compgen -G 'dist-android/*.apk' > /dev/null; then
             files+=(dist-android/*.apk dist-android/*.apk.sha256)
           fi
@@ -446,70 +157,16 @@ jobs:
             gh release create "$TAG" "${flags[@]}" "${files[@]}"
           fi
 
+  # The versioned images (`:<ver>-lite`, `:<ver>`, `:<ver>-cuda`) from this run's
+  # Linux binaries; publish.yml moves `latest*` for stable versions only.
   docker:
-    needs: [prepare, test, build-linux-full, build-linux-x64-lite, build]
-    runs-on: ubuntu-latest
+    needs: [prepare, build]
+    uses: ./.github/workflows/release-docker.yml
     permissions:
       contents: read
       packages: write
-    env:
-      VERSION: ${{ needs.prepare.outputs.version }}
-      IMAGE: ${{ needs.prepare.outputs.image }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
-      - uses: mlugg/setup-zig@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: dist-linux-*
-          path: dist
-          merge-multiple: true
-      # The images reuse the release binaries (BIN_FROM=prebuilt): no second compile,
-      # and the arm64 lite image needs no emulated build. No backend pack and no model
-      # goes into any image: the full image downloads the pack its container's GPU
-      # needs from this release on first start (PACKAGING.md §2). Never pass
-      # --bake-pack here.
-      - name: docker context (release binaries + bunko-init per arch)
-        run: cargo run -q -p xtask --locked -- docker-context --version "$VERSION" --dir dist --out dist/docker --zig
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-      - name: lite (static musl on distroless)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile.lite
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            BIN_FROM=prebuilt
-            VERSION=${{ env.VERSION }}
-          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-lite
-          push: true
-      # One full image for CPU, NVIDIA and AMD (the pack is downloaded on first start),
-      # also tagged -cuda so templates written for the 0.5.2 CUDA image keep working.
-      - name: full (local OCR, backend downloaded on first start; optional nginx)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile
-          platforms: linux/amd64
-          build-args: |
-            BIN_FROM=prebuilt
-            BAKE_PACK=0
-            VERSION=${{ env.VERSION }}
-          tags: |
-            ${{ env.IMAGE }}:${{ env.VERSION }}
-            ${{ env.IMAGE }}:${{ env.VERSION }}-cuda
-          push: true
+    with:
+      ref: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.prepare.outputs.version }}
+      image: ${{ needs.prepare.outputs.image }}
+      push: true
