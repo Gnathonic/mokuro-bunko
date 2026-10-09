@@ -369,7 +369,9 @@ fn refuse_result(
 ) -> Response {
     let shown: String = name.chars().take(120).collect();
     tracing::warn!(
-        "Refused a result from processor account {username} for claim {claim} (sidecar name {shown:?}): {why}"
+        "Refused a result from processor account {} for claim {} (sidecar name {shown:?}): {why}",
+        crate::ocr::sched::log_safe(username),
+        crate::ocr::sched::log_safe(claim)
     );
     error(status, why.to_string())
 }
@@ -468,7 +470,10 @@ async fn result_upload(
         Some(UploadCheck::Refused(status, msg, code)) => {
             // Usually a claim cancelled a moment ago: worth a line, not a warning.
             tracing::info!(
-                "Refused a result from processor account {username} for claim {claim}: {msg}"
+                "Refused a result from processor account {} for claim {}: {}",
+                crate::ocr::sched::log_safe(&username),
+                crate::ocr::sched::log_safe(&claim),
+                crate::ocr::sched::log_safe(msg)
             );
             return refused(status, msg, code);
         }
@@ -476,7 +481,9 @@ async fn result_upload(
     };
     if expected != name {
         tracing::warn!(
-            "Refused a result from processor account {username} for claim {claim}: its sidecar arrived as {:?}, not {expected:?}",
+            "Refused a result from processor account {} for claim {}: its sidecar arrived as {:?}, not {expected:?}",
+            crate::ocr::sched::log_safe(&username),
+            crate::ocr::sched::log_safe(&claim),
             name.chars().take(120).collect::<String>()
         );
         ocr.send(Msg::ResultStored {

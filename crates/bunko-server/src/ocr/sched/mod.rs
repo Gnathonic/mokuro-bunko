@@ -451,8 +451,11 @@ impl Scheduler {
         self.page_version
     }
 
+    /// One scheduler line in the server log. Lines quote processors' own words (reasons,
+    /// names), so control characters are escaped: a reason holding a newline must not
+    /// forge a second log line.
     pub fn log(&self, line: impl AsRef<str>) {
-        info!("{}", line.as_ref());
+        info!("{}", log_safe(line.as_ref()));
     }
 
     pub fn run_background(&mut self, job: Box<dyn FnOnce() -> Msg + Send>) {
@@ -832,5 +835,38 @@ pub fn cancel_reason(running: &Generation, rows: &[Generation]) -> Option<String
             Some("its engine, detector or patch budget changed".into())
         }
         _ => None,
+    }
+}
+
+/// `s` with control characters escaped (`\n`, `\u{1b}`, ...) so it stays one log line.
+pub fn log_safe(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    std::borrow::Cow::Owned(
+        s.chars()
+            .flat_map(|c| {
+                if c.is_control() {
+                    c.escape_default().collect::<Vec<_>>()
+                } else {
+                    vec![c]
+                }
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod log_safe_tests {
+    use super::log_safe;
+
+    #[test]
+    fn control_characters_cannot_forge_log_lines() {
+        assert_eq!(log_safe("busy: GPU full"), "busy: GPU full");
+        assert_eq!(
+            log_safe("x\nINFO forged line\r\u{1b}[31m"),
+            "x\\nINFO forged line\\r\\u{1b}[31m"
+        );
+        assert_eq!(log_safe("日本語 ok"), "日本語 ok");
     }
 }
