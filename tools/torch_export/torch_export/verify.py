@@ -50,7 +50,11 @@ def peak_rss_mb() -> float:
         c.cb = ctypes.sizeof(c)
         k32 = ctypes.WinDLL("kernel32")
         k32.GetCurrentProcess.restype = wintypes.HANDLE
-        ctypes.WinDLL("psapi").GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(c), c.cb)
+        info = ctypes.WinDLL("psapi").GetProcessMemoryInfo
+        info.argtypes = [wintypes.HANDLE, ctypes.POINTER(PMC), wintypes.DWORD]
+        info.restype = wintypes.BOOL
+        if not info(k32.GetCurrentProcess(), ctypes.byref(c), c.cb):
+            return -1.0
         return round(c.PeakWorkingSetSize / 2**20, 1)
     import resource
 
