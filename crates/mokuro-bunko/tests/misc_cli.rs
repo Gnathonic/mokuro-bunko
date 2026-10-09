@@ -22,15 +22,77 @@ fn version() {
         )));
 }
 
+/// No arguments starts the app (src/no_args.rs). Headless with nothing set up and no
+/// terminal to run the setup in: a short message, exit 0.
 #[test]
-fn no_command_prints_help() {
+fn no_arguments_headless_and_nothing_set_up_says_what_to_do() {
     Env::new()
         .cmd()
+        .env("MOKURO_DESKTOP", "0")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Usage: mokuro-bunko [OPTIONS] [COMMAND]",
-        ));
+        .stdout(
+            predicate::str::contains("Nothing is set up on this machine yet")
+                .and(predicate::str::contains("mokuro-bunko setup"))
+                .and(predicate::str::contains("mokuro-bunko --help")),
+        );
+}
+
+#[test]
+fn help_prints_the_help() {
+    for arg in ["--help", "help"] {
+        Env::new()
+            .cmd()
+            .arg(arg)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "Usage: mokuro-bunko [OPTIONS] [COMMAND]",
+            ));
+    }
+}
+
+/// No arguments, headless, a library set up: it serves, in the foreground.
+#[test]
+fn no_arguments_headless_runs_the_configured_library() {
+    use std::io::{Read, Write};
+    let env = Env::new();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    env.write_config(&format!(
+        "server:\n  host: 127.0.0.1\n  port: {port}\nocr:\n  local_processing: false\n  autobench: false\n"
+    ));
+    let out_path = env.root().join("noargs.out");
+    let mut child = env
+        .std_cmd()
+        .env("MOKURO_DESKTOP", "0")
+        .stdout(std::fs::File::create(&out_path).unwrap())
+        .stderr(std::fs::File::create(env.root().join("noargs.err")).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut up = false;
+    while std::time::Instant::now() < deadline && !up {
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!(
+                "exited ({status}): {}",
+                std::fs::read_to_string(&out_path).unwrap_or_default()
+            );
+        }
+        if let Ok(mut s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            let _ = s.write_all(b"GET /api/health HTTP/1.0\r\nHost: x\r\n\r\n");
+            let mut answer = String::new();
+            let _ = s.read_to_string(&mut answer);
+            up = answer.starts_with("HTTP/1.");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(up, "the configured library was not served");
 }
 
 #[test]

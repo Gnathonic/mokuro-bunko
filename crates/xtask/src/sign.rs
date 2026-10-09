@@ -134,20 +134,6 @@ pub fn verify(args: &VerifyArgs) -> Result<()> {
         .artifacts
         .iter()
         .flat_map(|(t, f)| f.iter().map(move |(k, a)| (t, k.clone(), a.clone())))
-        .chain(m.bundles.iter().flat_map(|(t, f)| {
-            f.iter().map(move |(k, d)| {
-                (
-                    t,
-                    format!("{k} (dmg)"),
-                    bunko_update::Artifact {
-                        url: d.url.clone(),
-                        sha256: d.sha256.clone(),
-                        size: d.size,
-                        binary: String::new(),
-                    },
-                )
-            })
-        }))
         .collect::<Vec<_>>();
     for (target, flavor, a) in &files {
         {

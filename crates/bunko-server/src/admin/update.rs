@@ -417,9 +417,12 @@ impl UpdateService {
                 r.failures()
             };
             let problems = if failures >= bunko_update::auto::RETRY_TELL_AFTER {
+                // The same text on every later failure: the tray announces a problem once
+                // per distinct text (a count in it made a new notification per check).
                 vec![Problem::update_needs_you(
                     format!(
-                        "Automatic updates: the release server has not answered {failures} times in a row: {e}"
+                        "Automatic updates: checking for a new release failed {} times in a row: {e}",
+                        bunko_update::auto::RETRY_TELL_AFTER
                     ),
                     "Check the network, or update.manifest_url in config.yaml (a mirror).",
                 )]

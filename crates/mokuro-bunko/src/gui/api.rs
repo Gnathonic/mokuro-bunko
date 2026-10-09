@@ -779,7 +779,7 @@ async fn stop_tray_instance(state: &AppState, role: Role) -> Option<String> {
     ))
 }
 
-/// Start the tray (`mokuro-bunko tray`; Windows: `Mokuro Bunko.exe`) in the background;
+/// Start the tray (`mokuro-bunko tray`; Windows: the app `mokuro-bunko.exe`) in the background;
 /// its pid.
 fn start_tray(state: &AppState, tray: &(PathBuf, Vec<String>)) -> Result<u32, String> {
     let log = paths::server_storage(&state.config_path)

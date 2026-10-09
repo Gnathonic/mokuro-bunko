@@ -3,9 +3,9 @@
 //! Release downloads are named for people (0.7.0-beta.3): `mokuro-bunko-<ver>-windows.zip`,
 //! `-macos.dmg`, `-linux-x64.tar.gz`, `-linux-arm64-server.tar.gz` ([`platform_label`]).
 //! The OCR backend packs are `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`
-//! (after every download in GitHub's alphabetical list), and the macOS archive that the
-//! updater of 0.7.0-beta.2 and earlier installs from is `mokuro-bunko-update-<ver>-macos.tar.gz`.
-//! A build without a label (an unreleased flavor, a local build) keeps the old name
+//! (after every download in GitHub's alphabetical list). The macOS archive
+//! (`mokuro-bunko-<ver>-macos.tar.gz`) is what the disk image is made from, not a release
+//! file: on a Mac people and the updater take the disk image. A build without a label (an unreleased flavor, a local build) keeps the old name
 //! `mokuro-bunko-<ver>-<target>-<flavor>`; [`parse_archive_name`] reads both.
 //!
 //! The release manifest keys artifacts by `target triple → flavor`, where the flavor is
@@ -18,8 +18,9 @@
 use std::fmt;
 
 pub const BIN: &str = "mokuro-bunko";
-/// The Windows build of the program for the GUI subsystem (the tray, no console window).
+/// Windows: the app (GUI subsystem, no console window) and the console build.
 pub const WINDOWS_GUI_EXE: &str = bunko_update::layout::WINDOWS_GUI_EXE;
+pub const WINDOWS_CLI_EXE: &str = bunko_update::layout::WINDOWS_CLI_EXE;
 pub const DEFAULT_DOCKER_REPO: &str = "ghcr.io/gnathonic/mokuro-bunko";
 pub const DEFAULT_GITHUB_REPO: &str = "Gnathonic/mokuro-bunko";
 
@@ -174,16 +175,11 @@ const PLATFORMS: &[(&str, &str, &str)] = &[
     ("x86_64-unknown-linux-musl", "lite", "linux-x64-server"),
 ];
 
-/// The prefix of the macOS archive the updater of 0.7.0-beta.2 and earlier takes (they
-/// cannot install from the disk image): after the downloads in the release's file list.
-pub const MACOS_UPDATE_PREFIX: &str = "mokuro-bunko-update";
-
-/// `mokuro-bunko-<ver>-<label>` (the macOS archive: `mokuro-bunko-update-<ver>-macos`),
-/// or `mokuro-bunko-<ver>-<target>-<flavor>` for a build without a label.
+/// `mokuro-bunko-<ver>-<label>`, or `mokuro-bunko-<ver>-<target>-<flavor>` for a build
+/// without a label.
 pub fn archive_stem(version: &str, target: &str, flavor: &str) -> String {
     let v = strip_v(version);
     match platform_label(target, flavor) {
-        Some(l) if target.ends_with("-apple-darwin") => format!("{MACOS_UPDATE_PREFIX}-{v}-{l}"),
         Some(l) => format!("{BIN}-{v}-{l}"),
         None => format!("{BIN}-{v}-{target}-{flavor}"),
     }
@@ -386,7 +382,7 @@ mod tests {
         );
         assert_eq!(
             name("aarch64-apple-darwin", Flavor::Full),
-            "mokuro-bunko-update-0.7.0-beta.3-macos.tar.gz"
+            "mokuro-bunko-0.7.0-beta.3-macos.tar.gz"
         );
         // Unreleased kinds keep the triple.
         assert_eq!(
@@ -454,7 +450,7 @@ mod tests {
             None
         );
         assert_eq!(
-            parse_dmg_name("mokuro-bunko-update-0.7.0-macos.tar.gz", "0.7.0"),
+            parse_dmg_name("mokuro-bunko-0.7.0-macos.tar.gz", "0.7.0"),
             None
         );
     }

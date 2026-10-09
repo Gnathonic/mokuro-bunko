@@ -21,9 +21,9 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Download
 
-**[Latest release](https://github.com/Gnathonic/mokuro-bunko/releases/latest)**: the table at the top of its notes links the file for your system (Windows zip, macOS disk image, Linux x64, Linux arm64 server). Pre-releases (betas) are on the [Releases page](https://github.com/Gnathonic/mokuro-bunko/releases) only: `releases/latest` skips them.
+**[Latest release](https://github.com/Gnathonic/mokuro-bunko/releases/latest)**: the table at the top of its notes links the file for your system. Betas are pre-releases, on the [Releases page](https://github.com/Gnathonic/mokuro-bunko/releases) only (`releases/latest` skips them).
 
-One line instead:
+Or in one line:
 
 ```bash
 # Linux (x64 or arm64; checks the release signature)
@@ -38,7 +38,7 @@ powershell -c "irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main
 docker pull ghcr.io/gnathonic/mokuro-bunko:latest
 ```
 
-These take the latest stable release. For a pre-release, use the script of its tag and name the version, e.g. `curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/v0.7.0-beta.3/scripts/install.sh | sh -s -- --version 0.7.0-beta.3`, `install.ps1 -Version 0.7.0-beta.3`, or `docker pull ghcr.io/gnathonic/mokuro-bunko:0.7.0-beta.3`.
+These take the latest stable release; for a beta, use the script of its tag with `--version` (`-Version`), e.g. `curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/v0.7.0-beta.3/scripts/install.sh | sh -s -- --version 0.7.0-beta.3`, or the image tag `:0.7.0-beta.3`.
 
 ## Editions
 
@@ -53,6 +53,8 @@ The full build runs on any GPU: the OCR recognizers run on **libtorch**, which `
 
 ## Quick start
 
+Run `mokuro-bunko`. On a desktop it starts the app: a tray icon, and the first time the setup wizard in your browser. Headless (a server, SSH) it runs what is set up, or the terminal setup when nothing is. `mokuro-bunko --help` lists the commands. On Windows, use `mokuro-bunko-cli` in a terminal.
+
 The first browser visit to a new server (`http://localhost:8080`) walks you through creating the admin account; `mokuro-bunko setup` does the same in the console. From a browser on another machine (or through Docker's network) the setup page needs the one-time token the server prints in its log at startup (`/setup?token=...`, also in `<storage>/.setup-token`).
 
 ### Linux
@@ -61,7 +63,7 @@ The first browser visit to a new server (`http://localhost:8080`) walks you thro
 
 ### Windows
 
-Unzip the release anywhere and double-click **`Mokuro Bunko.exe`**: a tray icon appears by the clock and the setup wizard opens in your browser the first time. The command line is `bin\mokuro-bunko.exe`; `run.bat` runs the server in a console window instead, `doctor.bat` diagnoses problems. Config, library, logs and OCR models stay in a `data\` folder next to it (portable mode). `install.ps1` installs into `%LOCALAPPDATA%\mokuro-bunko\app` instead, with Start-menu shortcuts (`-Startup` for the tray at logon; parameters at the top of [`scripts/install.ps1`](scripts/install.ps1)), and keeps your data in `%LOCALAPPDATA%\mokuro-bunko`. For an NVIDIA GPU see [docs/setup-windows-nvidia-ocr.md](docs/setup-windows-nvidia-ocr.md).
+Unzip the release anywhere and double-click **`mokuro-bunko.exe`**: a tray icon appears by the clock and the setup wizard opens in your browser the first time. In a terminal use `mokuro-bunko-cli`; `run.bat` runs the server in a console window instead, `doctor.bat` diagnoses problems. Config, library, logs and OCR models stay in a `data\` folder next to it (portable mode). `install.ps1` installs into `%LOCALAPPDATA%\mokuro-bunko\app` instead, with Start-menu shortcuts (`-Startup` for the tray at logon; parameters at the top of [`scripts/install.ps1`](scripts/install.ps1)), and keeps your data in `%LOCALAPPDATA%\mokuro-bunko`. For an NVIDIA GPU see [docs/setup-windows-nvidia-ocr.md](docs/setup-windows-nvidia-ocr.md).
 
 ### macOS
 
@@ -141,7 +143,7 @@ See [Building from source](#building-from-source).
 
 ## Desktop app
 
-`mokuro-bunko gui` opens the setup and settings pages in your browser. The tray icon (`mokuro-bunko tray`; `Mokuro Bunko.exe` on Windows, the app on macOS) opens them too, shows what the server or processor is doing, pauses OCR and can start everything at login. On Linux it shows in any panel with a system tray (GNOME needs the AppIndicator extension); it needs no GTK or AppIndicator library. The pages are served on this machine only (`127.0.0.1`, with a one-time sign-in link), and they cover:
+`mokuro-bunko gui` opens the setup and settings pages in your browser. The tray icon (`mokuro-bunko` on a desktop, or `mokuro-bunko tray`) opens them too, shows what the server or processor is doing, pauses OCR and can start everything at login. On Linux it shows in any panel with a system tray (GNOME needs the AppIndicator extension); it needs no GTK or AppIndicator library. The pages are served on this machine only (`127.0.0.1`, with a one-time sign-in link), and they cover:
 
 - **Setup**: a library server (folder, admin account, registration, remote access, HTTPS), a processor for another library (with a connection test), the OCR backend install with live progress, and starting either one with the machine.
 - **Settings**: server, HTTPS, remote access, processor, OCR and models, start-up, logs, diagnostics (`doctor`), updates, and any `config.yaml` key. Users, invites and the library's own settings stay in the server's admin panel, which the app links to.

@@ -411,20 +411,11 @@ pub fn archive_stem(version: &str, target: &str, variant: &str) -> String {
 }
 
 /// A pack archive (or part) name → `(target, variant, part)`:
-/// `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst[.NNN]`, or the name packs had
-/// up to 0.7.0-beta.2, `mokuro-bunko-<ver>-<target>-torch-<variant>.tar.zst[.NNN]`.
+/// `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst[.NNN]`.
 pub fn parse_pack_name<'a>(file: &'a str, version: &str) -> Option<(&'a str, &'a str, u32)> {
-    let (rest, new) = match file
-        .strip_prefix(PACK_PREFIX)
-        .and_then(|r| r.strip_prefix('-'))
-    {
-        Some(r) => (r, true),
-        None => (
-            file.strip_prefix(crate::names::BIN)?.strip_prefix('-')?,
-            false,
-        ),
-    };
-    let rest = rest
+    let rest = file
+        .strip_prefix(PACK_PREFIX)?
+        .strip_prefix('-')?
         .strip_prefix(crate::names::strip_v(version))?
         .strip_prefix('-')?;
     let (stem, part) = match rest.rsplit_once(".tar.zst") {
@@ -438,25 +429,18 @@ pub fn parse_pack_name<'a>(file: &'a str, version: &str) -> Option<(&'a str, &'a
         }
         None => return None,
     };
-    if new {
-        for platform in ["linux-x64", "windows", "macos"] {
-            if let Some(variant) = stem
-                .strip_prefix(platform)
-                .and_then(|v| v.strip_prefix('-'))
-                .filter(|v| !v.is_empty() && !v.contains('-'))
-            {
-                return Some((crate::names::pack_target(platform)?, variant, part));
-            }
+    for platform in ["linux-x64", "windows", "macos"] {
+        if let Some(variant) = stem
+            .strip_prefix(platform)
+            .and_then(|v| v.strip_prefix('-'))
+            .filter(|v| !v.is_empty() && !v.contains('-'))
+        {
+            return Some((crate::names::pack_target(platform)?, variant, part));
         }
-        let (target, variant) = stem.rsplit_once('-')?;
-        return (target.split('-').count() >= 3 && !variant.is_empty())
-            .then_some((target, variant, part));
     }
-    let (target, variant) = stem.rsplit_once("-torch-")?;
-    if target.split('-').count() < 3 || variant.is_empty() {
-        return None;
-    }
-    Some((target, variant, part))
+    // A target without a platform name keeps its triple.
+    let (target, variant) = stem.rsplit_once('-')?;
+    (target.split('-').count() >= 3 && !variant.is_empty()).then_some((target, variant, part))
 }
 
 /// The archive and any parts of it in `dir`.
@@ -1487,13 +1471,12 @@ mod tests {
                 Some((t, v, 1))
             );
         }
-        // The names of 0.7.0-beta.2 and earlier.
         assert_eq!(
             parse_pack_name(
                 "mokuro-bunko-0.7.0-x86_64-unknown-linux-gnu-torch-cpu.tar.zst",
                 "0.7.0"
             ),
-            Some(("x86_64-unknown-linux-gnu", "cpu", 0))
+            None
         );
         assert_eq!(
             parse_pack_name(&format!("{stem}.tar.zst"), "0.7.0"),

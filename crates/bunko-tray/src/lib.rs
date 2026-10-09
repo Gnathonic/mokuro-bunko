@@ -1,5 +1,5 @@
-//! The desktop tray of mokuro-bunko (GUI.md §5), run by `mokuro-bunko tray` (and on
-//! Windows by `Mokuro Bunko.exe`, on macOS by opening the app).
+//! The desktop tray of mokuro-bunko (GUI.md §5): `mokuro-bunko tray`, and what
+//! `mokuro-bunko` with no arguments runs in a desktop session.
 //!
 //! The logic lives in plain modules (discovery, the control API client, the menu
 //! model, supervision, autostart) so it is testable without a desktop; `app` glues it
@@ -27,6 +27,9 @@ pub mod updates;
 use anyhow::{Context, Result};
 use paths::{Layout, ProcessEnv};
 use std::path::PathBuf;
+
+/// The file next to `.tray.lock` holding the running tray's pid.
+pub const TRAY_PID_FILE: &str = ".tray.pid";
 
 /// `mokuro-bunko tray`'s options.
 #[derive(Debug, Clone)]
@@ -80,9 +83,8 @@ fn init_logging(
 }
 
 /// Run the tray until Quit. `exe` is this program; the instances it starts run the
-/// `mokuro-bunko` command line found by [`paths::cli_exe`]. `first` runs once logging is
-/// up and this tray holds the one-tray-per-user lock (the program's migration step).
-pub fn run(opts: Options, exe: PathBuf, first: impl FnOnce()) -> Result<()> {
+/// `mokuro-bunko` command line found by [`paths::cli_exe`].
+pub fn run(opts: Options, exe: PathBuf) -> Result<()> {
     let exe_dir = exe
         .parent()
         .map(PathBuf::from)
@@ -114,7 +116,9 @@ pub fn run(opts: Options, exe: PathBuf, first: impl FnOnce()) -> Result<()> {
         }
     }
 
-    first();
+    // Who holds the lock: `mokuro-bunko gui` stops this tray to restart it (a pid is
+    // the only way to tell it from the instances on Windows, where they share a name).
+    let _ = std::fs::write(lock_dir.join(TRAY_PID_FILE), std::process::id().to_string());
     let cli = paths::cli_exe(&exe, &ProcessEnv);
     match &cli {
         Some(c) => tracing::info!("mokuro-bunko command line: {}", c.display()),

@@ -13,7 +13,7 @@ rem Pre-set MOKURO_CONFIG / MOKURO_STORAGE before launching to override either.
 
 set "MB_ROOT=%~dp0"
 set "MOKURO_LAUNCHER=run.bat"
-rem The server may replace bin\mokuro-bunko.exe and Mokuro Bunko.exe itself (admin
+rem The server may replace mokuro-bunko.exe and mokuro-bunko-cli.exe itself (admin
 rem panel > update).
 if not defined MOKURO_INSTALL_KIND set "MOKURO_INSTALL_KIND=self"
 

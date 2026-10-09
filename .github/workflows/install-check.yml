@@ -39,12 +39,11 @@ jobs:
           ./scripts/install.ps1 -Version $env:VERSION -Flavor full -InstallDir $dir -Portable -NoShortcut -NonInteractive
           if ($LASTEXITCODE -ne 0) { exit 1 }
           if (-not (Test-Path (Join-Path $dir "PORTABLE.txt"))) { throw "not a portable install" }
-      # The command line: bin\mokuro-bunko.exe from 0.7.0-beta.3 on, mokuro-bunko.exe before.
+      # The console build (mokuro-bunko.exe is the app: no console, no output).
       - name: where the command line is
         shell: pwsh
         run: |
-          $cli = Join-Path $env:INSTALL_DIR "bin\mokuro-bunko.exe"
-          if (-not (Test-Path $cli)) { $cli = Join-Path $env:INSTALL_DIR "mokuro-bunko.exe" }
+          $cli = Join-Path $env:INSTALL_DIR "mokuro-bunko-cli.exe"
           "CLI=$cli" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           Get-ChildItem $env:INSTALL_DIR | Select-Object Name, Length | Format-Table -AutoSize
       - name: --version is the release

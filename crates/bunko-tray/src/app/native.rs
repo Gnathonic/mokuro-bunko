@@ -221,6 +221,8 @@ pub fn run(setup: Setup) -> anyhow::Result<()> {
             let _ = p.lock().unwrap_or_else(|e| e.into_inner()).send_event(e);
         })
     };
+    #[cfg(unix)]
+    quit_on_signals(send.clone());
     let (mut app, lock) = App::start(setup, send);
     let mut ui = Native::default();
     event_loop.run(move |event, _, control_flow| {
@@ -242,4 +244,28 @@ pub fn run(setup: Setup) -> anyhow::Result<()> {
             _ => {}
         }
     })
+}
+
+/// SIGINT (Ctrl+C in the terminal it was started from) and SIGTERM quit as the menu's
+/// Quit does: the instances this tray started stop cleanly instead of running on.
+#[cfg(unix)]
+fn quit_on_signals(send: super::Sender) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static HIT: AtomicBool = AtomicBool::new(false);
+    extern "C" fn on_signal(_: libc::c_int) {
+        // Only an atomic store: async-signal-safe.
+        HIT.store(true, Ordering::SeqCst);
+    }
+    // SAFETY: installing a handler that only stores to an atomic.
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+    }
+    std::thread::spawn(move || {
+        while !HIT.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        tracing::info!("signal: quitting");
+        send(UserEvent::Menu(id::QUIT.to_string()));
+    });
 }

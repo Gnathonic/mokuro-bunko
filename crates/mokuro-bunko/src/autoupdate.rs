@@ -404,30 +404,6 @@ pub struct StartReport {
     pub proven: bool,
 }
 
-/// Exit so that the new tray starts this instance again (`migrate::Outcome::HandOver`).
-/// An update this start just finished is said again by the next one ("Updated to X"):
-/// its marker is written back without a pack, so nothing is checked twice.
-#[cfg_attr(not(feature = "tray"), allow(dead_code))]
-pub fn hand_over(storage: &Path, started: &StartReport) -> ! {
-    if let Some(v) = started.view.as_ref().filter(|v| v.state == "updated")
-        && let (Some(to), Some(from)) = (&v.version, &v.from)
-    {
-        let _ = Marker {
-            kind: "binary".into(),
-            from: from.clone(),
-            to: to.clone(),
-            at: bunko_update::auto::now_rfc3339(),
-            pack: None,
-            prev_pack: None,
-            pack_root: None,
-            reason: None,
-        }
-        .write(storage);
-    }
-    tracing::info!("handing over to the new tray: exiting; it starts this instance again");
-    std::process::exit(0)
-}
-
 /// After a proven update: delete the model files this release's manifest no longer
 /// names from the role's store (`<storage>/models`). Full build only.
 pub fn prune_models(storage: &Path) {

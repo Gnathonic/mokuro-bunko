@@ -1,37 +1,31 @@
 //! Where the files of an installed copy are, and how an update replaces them.
 //!
-//! Since 0.7.0-beta.3 the tray is part of the program (`mokuro-bunko tray`); there is no
-//! separate `mokuro-bunko-tray` any more. What an update replaces besides the running
+//! The tray is part of the program (`mokuro-bunko tray`, and `mokuro-bunko` with no
+//! arguments in a desktop session). What an update replaces besides the running
 //! executable:
 //!
-//! * **Windows**: the pair `bin\mokuro-bunko.exe` (the command line) and
-//!   `Mokuro Bunko.exe` above it (the same program built for the GUI subsystem: it runs
-//!   the tray without a console window). An install laid out before beta.3 has
-//!   `mokuro-bunko.exe` at the top; whichever of the three exist are replaced.
-//! * **macOS**: the app bundle around the program (`Mokuro Bunko.app` from the disk
-//!   image, `mokuro-bunko.app` from an archive): its `Info.plist`, `PkgInfo` and
-//!   `Resources` come from the new release too, a leftover `mokuro-bunko-tray` is
-//!   removed, and the bundle is sealed again (`codesign --force --deep -s -`), so
+//! * **Windows**: the pair in the install folder, `mokuro-bunko.exe` (the app: the
+//!   program built for the GUI subsystem, no console window) and `mokuro-bunko-cli.exe`
+//!   (the console build, for terminals and scripts): same code, the PE header's
+//!   subsystem field is the only difference ([`set_pe_subsystem`]).
+//! * **macOS**: the app bundle around the program (`Mokuro Bunko.app`): its
+//!   `Info.plist`, `PkgInfo` and `Resources` come from the new release (the disk image),
+//!   and the bundle is sealed again (`codesign --force --deep -s -`), so
 //!   `codesign --verify` passes after the update as it did before.
 //! * **Linux**: just the executable.
 //!
-//! A release archive is unpacked into a staging folder next to the executable first
-//! ([`unpack`]); [`Plan::commit`] then puts the files in place.
+//! A release download is unpacked into a staging folder next to the executable first
+//! ([`unpack`]); [`Plan::commit`] then puts the files in place, and [`Plan::seal`]
+//! seals a bundle once the staging folder is gone.
 
 use crate::UpdateError;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// The Windows program that runs the tray (GUI subsystem: no console window).
-pub const WINDOWS_GUI_EXE: &str = "Mokuro Bunko.exe";
-/// The Windows command line, in the `bin` folder of an install.
-pub const WINDOWS_CLI_EXE: &str = "mokuro-bunko.exe";
-/// The separate tray program of 0.7.0-beta.2 and earlier.
-pub const LEGACY_TRAY: &str = if cfg!(windows) {
-    "mokuro-bunko-tray.exe"
-} else {
-    "mokuro-bunko-tray"
-};
+/// The Windows app (GUI subsystem): what shortcuts, Startup and a double-click run.
+pub const WINDOWS_GUI_EXE: &str = "mokuro-bunko.exe";
+/// The Windows console build, for terminals and scripts.
+pub const WINDOWS_CLI_EXE: &str = "mokuro-bunko-cli.exe";
 /// `IMAGE_SUBSYSTEM_WINDOWS_GUI` / `_CUI` in a PE optional header.
 pub const PE_SUBSYSTEM_GUI: u16 = 2;
 pub const PE_SUBSYSTEM_CONSOLE: u16 = 3;
@@ -63,36 +57,27 @@ pub fn pe_subsystem(bytes: &[u8]) -> Option<u16> {
     Some(u16::from_le_bytes([bytes[at], bytes[at + 1]]))
 }
 
-/// Set the subsystem of a Windows executable. `Mokuro Bunko.exe` is `mokuro-bunko.exe`
-/// with the GUI subsystem: Rust links both with the same entry point
-/// (`mainCRTStartup`), so the field is the only difference (`windows_subsystem` only
-/// changes the linker's `/SUBSYSTEM`), and Windows does not check the PE checksum of an
-/// application.
+/// Set the subsystem of a Windows executable. `mokuro-bunko.exe` is `mokuro-bunko-cli.exe`
+/// with the GUI subsystem: Rust links both with the same entry point (`mainCRTStartup`),
+/// so the field is the only difference (`windows_subsystem` only changes the linker's
+/// `/SUBSYSTEM`), and Windows does not check the PE checksum of an application.
 pub fn set_pe_subsystem(bytes: &mut [u8], subsystem: u16) -> Result<(), String> {
     let at = pe_subsystem_offset(bytes).ok_or("not a Windows executable (PE)")?;
     bytes[at..at + 2].copy_from_slice(&subsystem.to_le_bytes());
     Ok(())
 }
 
-/// Write the GUI-subsystem copy of the Windows executable `cli` to `out`.
-pub fn write_gui_copy(cli: &Path, out: &Path) -> std::io::Result<()> {
-    let mut bytes = std::fs::read(cli)?;
-    set_pe_subsystem(&mut bytes, PE_SUBSYSTEM_GUI)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(out, bytes)
+/// Whether the Windows executable at `path` is a GUI-subsystem build.
+pub fn is_gui_exe(path: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|b| pe_subsystem(&b) == Some(PE_SUBSYSTEM_GUI))
 }
 
-/// `exe` is a Windows `bin\` folder's command line: the install root is above it.
-fn windows_root(exe: &Path) -> Option<PathBuf> {
-    let dir = exe.parent()?;
-    let in_bin = dir
-        .file_name()
-        .is_some_and(|n| n.eq_ignore_ascii_case("bin"));
-    Some(if in_bin {
-        dir.parent()?.to_path_buf()
-    } else {
-        dir.to_path_buf()
-    })
+/// Write a copy of the Windows executable `from` with the subsystem `subsystem` to `out`.
+pub fn write_subsystem_copy(from: &Path, subsystem: u16, out: &Path) -> std::io::Result<()> {
+    let mut bytes = std::fs::read(from)?;
+    set_pe_subsystem(&mut bytes, subsystem)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(out, bytes)
 }
 
 /// The app bundle `exe` is the main program of (`X.app/Contents/MacOS/<exe>`).
@@ -113,24 +98,28 @@ pub struct Plan {
     pub exe: PathBuf,
     /// Whether `exe` is the Windows GUI build (it then takes the new GUI build).
     pub exe_is_gui: bool,
-    /// Other copies of the command line in this install (replaced by rename).
+    /// Other copies of the console program in this install (replaced by rename).
     pub cli_copies: Vec<PathBuf>,
-    /// Copies of the Windows GUI build (`Mokuro Bunko.exe`).
+    /// Copies of the Windows GUI build (`mokuro-bunko.exe`).
     pub gui_copies: Vec<PathBuf>,
     /// macOS app bundles of this install (refreshed and sealed again).
     pub bundles: Vec<PathBuf>,
 }
 
 impl Plan {
-    /// The plan for the installed copy whose executable is `exe`, as laid out on disk now.
-    pub fn for_exe(exe: &Path) -> Plan {
-        let mut plan = Plan {
+    fn empty(exe: &Path) -> Plan {
+        Plan {
             exe: exe.to_path_buf(),
             exe_is_gui: false,
             cli_copies: Vec::new(),
             gui_copies: Vec::new(),
             bundles: Vec::new(),
-        };
+        }
+    }
+
+    /// The plan for the installed copy whose executable is `exe`, as laid out on disk now.
+    pub fn for_exe(exe: &Path) -> Plan {
+        let mut plan = Plan::empty(exe);
         if cfg!(windows) {
             plan.add_windows();
         } else if cfg!(target_os = "macos") {
@@ -139,58 +128,30 @@ impl Plan {
         plan
     }
 
-    /// The Windows layout under `root` (every platform, for tests).
+    /// The Windows pair next to `exe` (every platform, for tests).
     pub fn add_windows(&mut self) {
-        let Some(root) = windows_root(&self.exe) else {
+        let Some(dir) = self.exe.parent() else {
             return;
         };
-        self.exe_is_gui = self
-            .exe
-            .file_name()
-            .is_some_and(|n| n.eq_ignore_ascii_case(WINDOWS_GUI_EXE));
-        for cli in [
-            root.join("bin").join(WINDOWS_CLI_EXE),
-            root.join(WINDOWS_CLI_EXE),
-        ] {
-            if cli.is_file() && !same_file(&cli, &self.exe) {
-                self.cli_copies.push(cli);
+        self.exe_is_gui = is_gui_exe(&self.exe);
+        for name in [WINDOWS_GUI_EXE, WINDOWS_CLI_EXE] {
+            let p = dir.join(name);
+            if !p.is_file() || same_file(&p, &self.exe) {
+                continue;
             }
-        }
-        let gui = root.join(WINDOWS_GUI_EXE);
-        if gui.is_file() && !same_file(&gui, &self.exe) {
-            self.gui_copies.push(gui);
+            if is_gui_exe(&p) {
+                self.gui_copies.push(p);
+            } else {
+                self.cli_copies.push(p);
+            }
         }
     }
 
-    /// The macOS layout (every platform, for tests): the bundle around `exe`, the
-    /// archive's `mokuro-bunko.app` (or an app copied) next to it, and the command line
-    /// next to an archive's bundle.
+    /// The macOS layout (every platform, for tests): the bundle around `exe`.
     pub fn add_macos(&mut self) {
-        let mut bundles = Vec::new();
         if let Some(b) = bundle_of(&self.exe) {
-            if b.file_name().is_some_and(|n| n == "mokuro-bunko.app")
-                && let Some(outer) = b.parent().map(|d| d.join("mokuro-bunko"))
-                && outer.is_file()
-            {
-                self.cli_copies.push(outer);
-            }
-            bundles.push(b);
+            self.bundles.push(b);
         }
-        if let Some(dir) = self.exe.parent() {
-            for name in ["mokuro-bunko.app", "Mokuro Bunko.app"] {
-                let b = dir.join(name);
-                if b.join("Contents").is_dir() && !bundles.contains(&b) {
-                    bundles.push(b);
-                }
-            }
-        }
-        for b in &bundles {
-            let cli = b.join("Contents/MacOS/mokuro-bunko");
-            if cli.is_file() && !same_file(&cli, &self.exe) && !self.cli_copies.contains(&cli) {
-                self.cli_copies.push(cli);
-            }
-        }
-        self.bundles = bundles;
     }
 
     /// Every file of this install that holds the program, the running one first.
@@ -202,21 +163,22 @@ impl Plan {
     }
 
     /// Put the unpacked release in place: the running executable first (its failure
-    /// changes nothing), then the other copies and the bundles, best effort.
+    /// changes nothing), then the other copies and the bundles' files, best effort.
+    /// Seal the bundles afterwards ([`Plan::seal`]), once the staging folder is gone.
     pub fn commit(&self, new: &Unpacked) -> Result<(), UpdateError> {
-        let gui_new = match (&new.gui, self.exe_is_gui || !self.gui_copies.is_empty()) {
-            (Some(g), _) => Some(g.clone()),
-            (None, true) => {
+        let want_gui = self.exe_is_gui || !self.gui_copies.is_empty();
+        let gui_new = match &new.gui {
+            Some(g) => Some(g.clone()),
+            None if want_gui => {
                 let g = new.dir.join(WINDOWS_GUI_EXE);
-                write_gui_copy(&new.cli, &g)?;
+                write_subsystem_copy(&new.cli, PE_SUBSYSTEM_GUI, &g)?;
                 Some(g)
             }
-            (None, false) => None,
+            None => None,
         };
-        let main = if self.exe_is_gui {
-            gui_new.clone().unwrap_or_else(|| new.cli.clone())
-        } else {
-            new.cli.clone()
+        let main = match (&gui_new, self.exe_is_gui) {
+            (Some(g), true) => g.clone(),
+            _ => new.cli.clone(),
         };
         self_replace::self_replace(&main).map_err(UpdateError::Io)?;
         for copy in &self.cli_copies {
@@ -237,10 +199,17 @@ impl Plan {
             {
                 tracing::warn!("update: {} not refreshed: {e}", b.display());
             }
-            remove_legacy_tray(&b.join("Contents/MacOS"));
-            seal_bundle(b);
         }
         Ok(())
+    }
+
+    /// Seal the bundles again ([`seal_bundle`]): after an update's files are in place
+    /// and its staging folder is gone, and again when the previous release's backups
+    /// go (`drop_previous`) or come back (`restore_previous`).
+    pub fn seal(&self) {
+        for b in &self.bundles {
+            seal_bundle(b);
+        }
     }
 }
 
@@ -343,23 +312,6 @@ fn walk(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> 
     Ok(())
 }
 
-/// Remove the separate tray program of 0.7.0-beta.2 and earlier (and its update backup)
-/// from `dir`. Returns what was removed.
-pub fn remove_legacy_tray(dir: &Path) -> Vec<PathBuf> {
-    let mut removed = Vec::new();
-    for name in [
-        LEGACY_TRAY.to_string(),
-        format!(".{LEGACY_TRAY}.previous"),
-        format!(".{LEGACY_TRAY}.new"),
-    ] {
-        let p = dir.join(&name);
-        if p.is_file() && std::fs::remove_file(&p).is_ok() {
-            removed.push(p);
-        }
-    }
-    removed
-}
-
 /// Seal a macOS app bundle again (ad hoc: `codesign --force --deep -s -`) after files in
 /// it changed, so `codesign --verify` passes. codesign writes the signed program as a new
 /// file, so a running copy is not disturbed. Best effort; nothing to do elsewhere.
@@ -389,7 +341,7 @@ pub fn seal_bundle(bundle: &Path) {
 pub struct Unpacked {
     /// The staging folder (removed by [`Unpacked::remove`]).
     pub dir: PathBuf,
-    /// The new command line (runnable: the prefetch step runs it).
+    /// The new console program (runnable: the prefetch step runs it).
     pub cli: PathBuf,
     /// The new Windows GUI build, when the archive has one.
     pub gui: Option<PathBuf>,
@@ -428,9 +380,9 @@ impl Kind {
     }
 }
 
-/// Unpack the downloaded `archive` (kind `kind`) into the folder `out`: the command line
-/// named `binary` (found by file name; in a Windows zip `bin\` first), the Windows GUI
-/// build and the macOS app's `Contents`.
+/// Unpack the downloaded `archive` (kind `kind`) into the folder `out`: the program
+/// named `binary` (found by file name; in a Windows zip the console build
+/// `mokuro-bunko-cli.exe` and the app `binary`), and the macOS app's `Contents`.
 pub fn unpack(
     archive: &Path,
     kind: Kind,
@@ -439,7 +391,11 @@ pub fn unpack(
 ) -> Result<Unpacked, UpdateError> {
     let _ = std::fs::remove_dir_all(out);
     std::fs::create_dir_all(out)?;
-    let cli = out.join(binary);
+    let cli = out.join(if kind == Kind::Zip {
+        WINDOWS_CLI_EXE
+    } else {
+        binary
+    });
     let mut un = Unpacked {
         dir: out.to_path_buf(),
         cli: cli.clone(),
@@ -474,8 +430,8 @@ fn unpack_tar(archive: &Path, binary: &str, un: &mut Unpacked) -> Result<(), Upd
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
         let rel = below_top(&path);
-        // The command line: the first regular file of that name (the top-level one; the
-        // copy in an archive's app bundle is a hard link to it).
+        // The program: the first regular file of that name (the top-level one; the copy
+        // in an archive's app bundle is a hard link to it).
         if !found
             && entry.header().entry_type().is_file()
             && path.file_name().is_some_and(|n| n == binary)
@@ -486,8 +442,7 @@ fn unpack_tar(archive: &Path, binary: &str, un: &mut Unpacked) -> Result<(), Upd
             found = true;
             continue;
         }
-        // The app bundle's Contents, without its programs (the command line above is the
-        // one program; a link entry has no data of its own).
+        // The app bundle's Contents, without its program (a link entry has no data).
         if let Ok(r) = rel.strip_prefix("mokuro-bunko.app/Contents")
             && entry.header().entry_type().is_file()
             && !r.starts_with("MacOS")
@@ -522,29 +477,37 @@ fn unpack_zip(archive: &Path, binary: &str, un: &mut Unpacked) -> Result<(), Upd
     let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?)
         .map_err(|e| UpdateError::Unpack(e.to_string()))?;
     let names: Vec<String> = zip.file_names().map(str::to_string).collect();
-    let last = |n: &str| n.rsplit('/').next().unwrap_or(n).to_string();
-    // The command line: `<top>/bin/<binary>` (0.7.0-beta.3+), else `<top>/<binary>`.
-    let mut cli: Vec<&String> = names.iter().filter(|n| last(n) == binary).collect();
-    cli.sort_by_key(|n| !n.contains("/bin/"));
-    let name = cli
-        .first()
-        .ok_or_else(|| UpdateError::Unpack(format!("{binary} is not in the archive")))?;
-    let mut bytes = Vec::new();
-    zip.by_name(name)
-        .map_err(|e| UpdateError::Unpack(e.to_string()))?
-        .read_to_end(&mut bytes)?;
-    std::fs::write(&un.cli, &bytes)?;
-    if let Some(gui) = names
-        .iter()
-        .find(|n| last(n).eq_ignore_ascii_case(WINDOWS_GUI_EXE))
-    {
+    let find = |file: &str| {
+        names
+            .iter()
+            .find(|n| n.rsplit('/').next().unwrap_or(n).eq_ignore_ascii_case(file))
+            .cloned()
+    };
+    let mut read = |name: &str, out: &Path| -> Result<(), UpdateError> {
         let mut bytes = Vec::new();
-        zip.by_name(gui)
+        zip.by_name(name)
             .map_err(|e| UpdateError::Unpack(e.to_string()))?
             .read_to_end(&mut bytes)?;
-        let out = un.dir.join(WINDOWS_GUI_EXE);
-        std::fs::write(&out, bytes)?;
-        un.gui = Some(out);
+        std::fs::write(out, bytes)?;
+        Ok(())
+    };
+    // The console build `mokuro-bunko-cli.exe` (what the prefetch step runs) and the
+    // app `binary`; a zip with one program (a lite build) has just `binary`.
+    match (find(WINDOWS_CLI_EXE), find(binary)) {
+        (Some(cli), gui) => {
+            read(&cli, &un.cli)?;
+            if let Some(gui) = gui.filter(|g| *g != cli) {
+                let out = un.dir.join(WINDOWS_GUI_EXE);
+                read(&gui, &out)?;
+                un.gui = Some(out);
+            }
+        }
+        (None, Some(only)) => read(&only, &un.cli)?,
+        (None, None) => {
+            return Err(UpdateError::Unpack(format!(
+                "{binary} is not in the archive"
+            )));
+        }
     }
     Ok(())
 }
@@ -672,87 +635,35 @@ mod tests {
     #[test]
     fn windows_plan() {
         let d = tempfile::tempdir().unwrap();
-        let root = d.path();
-        std::fs::create_dir_all(root.join("bin")).unwrap();
-        for f in ["bin/mokuro-bunko.exe", "Mokuro Bunko.exe"] {
-            std::fs::write(root.join(f), b"x").unwrap();
-        }
-        let mut p = Plan {
-            exe: root.join("bin/mokuro-bunko.exe"),
-            exe_is_gui: false,
-            cli_copies: vec![],
-            gui_copies: vec![],
-            bundles: vec![],
-        };
+        let dir = d.path();
+        std::fs::write(dir.join(WINDOWS_GUI_EXE), fake_exe(PE_SUBSYSTEM_GUI)).unwrap();
+        std::fs::write(dir.join(WINDOWS_CLI_EXE), fake_exe(PE_SUBSYSTEM_CONSOLE)).unwrap();
+        // A server the tray started: the app runs, the console build is a copy.
+        let mut p = Plan::empty(&dir.join(WINDOWS_GUI_EXE));
         p.add_windows();
-        assert!(!p.exe_is_gui);
-        assert!(p.cli_copies.is_empty());
-        assert_eq!(p.gui_copies, [root.join("Mokuro Bunko.exe")]);
-        // The tray's own update (rare): the GUI build runs, the CLI is a copy.
-        let mut g = Plan {
-            exe: root.join("Mokuro Bunko.exe"),
-            ..p.clone()
-        };
-        g.cli_copies.clear();
-        g.gui_copies.clear();
-        g.add_windows();
-        assert!(g.exe_is_gui);
-        assert_eq!(g.cli_copies, [root.join("bin/mokuro-bunko.exe")]);
-        // A layout from before beta.3 that the update reached first: the top-level
-        // command line runs; the new pair is replaced too once it exists.
-        std::fs::write(root.join("mokuro-bunko.exe"), b"x").unwrap();
-        let mut l = Plan {
-            exe: root.join("mokuro-bunko.exe"),
-            exe_is_gui: false,
-            cli_copies: vec![],
-            gui_copies: vec![],
-            bundles: vec![],
-        };
-        l.add_windows();
-        assert_eq!(l.cli_copies, [root.join("bin/mokuro-bunko.exe")]);
-        assert_eq!(l.gui_copies, [root.join("Mokuro Bunko.exe")]);
+        assert!(p.exe_is_gui);
+        assert_eq!(p.cli_copies, vec![dir.join(WINDOWS_CLI_EXE)]);
+        assert!(p.gui_copies.is_empty());
+        // `mokuro-bunko-cli update apply` in a terminal: the other way round.
+        let mut c = Plan::empty(&dir.join(WINDOWS_CLI_EXE));
+        c.add_windows();
+        assert!(!c.exe_is_gui);
+        assert_eq!(c.gui_copies, vec![dir.join(WINDOWS_GUI_EXE)]);
+        assert!(c.cli_copies.is_empty());
     }
 
     #[test]
     fn macos_plan() {
         let d = tempfile::tempdir().unwrap();
-        // The disk image's app, wherever it was dragged.
         let app = d.path().join("Mokuro Bunko.app");
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         std::fs::write(app.join("Contents/MacOS/mokuro-bunko"), b"x").unwrap();
-        let mut p = Plan {
-            exe: app.join("Contents/MacOS/mokuro-bunko"),
-            exe_is_gui: false,
-            cli_copies: vec![],
-            gui_copies: vec![],
-            bundles: vec![],
-        };
+        let mut p = Plan::empty(&app.join("Contents/MacOS/mokuro-bunko"));
         p.add_macos();
         assert_eq!(p.bundles, vec![app.clone()]);
-        assert!(p.cli_copies.is_empty());
-        // An archive install: the CLI with mokuro-bunko.app next to it.
-        let top = d.path().join("lib");
-        let b = top.join("mokuro-bunko.app");
-        std::fs::create_dir_all(b.join("Contents/MacOS")).unwrap();
-        std::fs::write(top.join("mokuro-bunko"), b"x").unwrap();
-        std::fs::write(b.join("Contents/MacOS/mokuro-bunko"), b"y").unwrap();
-        let mut q = Plan {
-            exe: top.join("mokuro-bunko"),
-            ..p.clone()
-        };
-        q.bundles.clear();
+        let mut q = Plan::empty(&d.path().join("mokuro-bunko"));
         q.add_macos();
-        assert_eq!(q.bundles, vec![b.clone()]);
-        assert_eq!(q.cli_copies, [b.join("Contents/MacOS/mokuro-bunko")]);
-        // Started from inside that bundle: the outer CLI is a copy.
-        let mut r = Plan {
-            exe: b.join("Contents/MacOS/mokuro-bunko"),
-            ..p.clone()
-        };
-        r.bundles.clear();
-        r.add_macos();
-        assert_eq!(r.cli_copies, [top.join("mokuro-bunko")]);
-        assert_eq!(r.bundles, [b]);
+        assert!(q.bundles.is_empty());
     }
 
     fn tar_gz(path: &Path, files: &[(&str, &[u8])], links: &[(&str, &str)]) {
@@ -798,24 +709,21 @@ mod tests {
         assert_eq!(std::fs::read(&un.cli).unwrap(), b"cli-new");
         let contents = un.app_contents.clone().unwrap();
         assert!(!contents.join("MacOS").exists());
-        // An installed bundle of the old layout: the tray as the main program.
         let app = d.path().join("Mokuro Bunko.app");
         std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         std::fs::write(app.join("Contents/Info.plist"), b"plist-old").unwrap();
-        std::fs::write(app.join("Contents/MacOS/mokuro-bunko-tray"), b"tray").unwrap();
         refresh_bundle(&app, &contents).unwrap();
         assert_eq!(
             std::fs::read(app.join("Contents/Info.plist")).unwrap(),
             b"plist-new"
         );
         assert!(app.join("Contents/Resources/x.icns").is_file());
-        assert_eq!(remove_legacy_tray(&app.join("Contents/MacOS")).len(), 1);
         un.remove();
         assert!(!d.path().join("stage").exists());
     }
 
     #[test]
-    fn unpack_windows_zip_takes_bin_and_the_gui_build() {
+    fn unpack_windows_zip_takes_the_pair() {
         use std::io::Write;
         let d = tempfile::tempdir().unwrap();
         let a = d.path().join("a.zip");
@@ -823,8 +731,8 @@ mod tests {
             let mut z = zip::ZipWriter::new(std::fs::File::create(&a).unwrap());
             let o = zip::write::SimpleFileOptions::default();
             for (n, b) in [
-                ("top/Mokuro Bunko.exe", &b"gui"[..]),
-                ("top/bin/mokuro-bunko.exe", b"cli"),
+                ("top/mokuro-bunko.exe", &b"gui"[..]),
+                ("top/mokuro-bunko-cli.exe", b"cli"),
                 ("top/run.bat", b"bat"),
             ] {
                 z.start_file(n, o).unwrap();
@@ -835,7 +743,7 @@ mod tests {
         let un = unpack(&a, Kind::Zip, "mokuro-bunko.exe", &d.path().join("s")).unwrap();
         assert_eq!(std::fs::read(&un.cli).unwrap(), b"cli");
         assert_eq!(std::fs::read(un.gui.unwrap()).unwrap(), b"gui");
-        // A zip of the old layout.
+        // A zip with one program (a lite build).
         let b = d.path().join("b.zip");
         {
             let mut z = zip::ZipWriter::new(std::fs::File::create(&b).unwrap());
@@ -844,39 +752,29 @@ mod tests {
                 zip::write::SimpleFileOptions::default(),
             )
             .unwrap();
-            z.write_all(b"old").unwrap();
+            z.write_all(b"only").unwrap();
             z.finish().unwrap();
         }
         let un = unpack(&b, Kind::Zip, "mokuro-bunko.exe", &d.path().join("t")).unwrap();
-        assert_eq!(std::fs::read(&un.cli).unwrap(), b"old");
+        assert_eq!(std::fs::read(&un.cli).unwrap(), b"only");
         assert!(un.gui.is_none());
         assert!(unpack(&b, Kind::Zip, "nope.exe", &d.path().join("u")).is_err());
         assert!(!d.path().join("u").exists());
     }
 
     #[test]
-    fn commit_replaces_the_copies() {
-        // Every platform: the Windows pair with fake executables (the running one is
-        // replaced by self_replace, which these tests cannot exercise: copies only).
+    fn install_copy_replaces_through_a_rename() {
         let d = tempfile::tempdir().unwrap();
-        let root = d.path();
-        std::fs::create_dir_all(root.join("bin")).unwrap();
-        std::fs::write(root.join("Mokuro Bunko.exe"), b"old-gui").unwrap();
-        let un = Unpacked {
-            dir: root.join("stage"),
-            cli: root.join("stage/mokuro-bunko.exe"),
-            gui: Some(root.join("stage/Mokuro Bunko.exe")),
-            app_contents: None,
-        };
-        std::fs::create_dir_all(&un.dir).unwrap();
-        std::fs::write(&un.cli, b"new-cli").unwrap();
-        std::fs::write(un.gui.as_ref().unwrap(), b"new-gui").unwrap();
-        install_copy(un.gui.as_ref().unwrap(), &root.join("Mokuro Bunko.exe")).unwrap();
+        let dir = d.path();
+        std::fs::write(dir.join(WINDOWS_GUI_EXE), b"old-gui").unwrap();
+        let new = dir.join("stage-gui");
+        std::fs::write(&new, b"new-gui").unwrap();
+        install_copy(&new, &dir.join(WINDOWS_GUI_EXE)).unwrap();
         assert_eq!(
-            std::fs::read(root.join("Mokuro Bunko.exe")).unwrap(),
+            std::fs::read(dir.join(WINDOWS_GUI_EXE)).unwrap(),
             b"new-gui"
         );
-        assert!(!root.join(".Mokuro Bunko.exe.new").exists());
+        assert!(!dir.join(".mokuro-bunko.exe.new").exists());
     }
 
     #[test]

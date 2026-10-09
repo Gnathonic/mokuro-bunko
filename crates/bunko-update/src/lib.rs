@@ -88,14 +88,23 @@ pub struct Staged {
 
 impl Staged {
     /// Put the new release in place of the running one: the executable, the other
-    /// copies of it in this install (Windows: the `Mokuro Bunko.exe` / `bin` pair) and
-    /// the macOS app bundle ([`layout::Plan`]).
+    /// copy of it in this install (Windows: the `mokuro-bunko.exe` /
+    /// `mokuro-bunko-cli.exe` pair) and the macOS app bundle ([`layout::Plan`]), which
+    /// is sealed again once the staging folder is gone.
     pub fn commit(self) -> Result<String, UpdateError> {
-        let r = current_exe()
-            .map_err(UpdateError::Io)
-            .and_then(|exe| layout::Plan::for_exe(&exe).commit(&self.unpacked));
+        let plan = current_exe().map(|exe| layout::Plan::for_exe(&exe));
+        let r = match &plan {
+            Ok(p) => p.commit(&self.unpacked),
+            Err(e) => Err(UpdateError::Io(std::io::Error::new(
+                e.kind(),
+                e.to_string(),
+            ))),
+        };
         self.unpacked.remove();
         let _ = std::fs::remove_file(&self.archive);
+        if let Ok(p) = &plan {
+            p.seal();
+        }
         r.map(|()| self.version)
     }
 
@@ -103,14 +112,6 @@ impl Staged {
         self.unpacked.remove();
         let _ = std::fs::remove_file(&self.archive);
     }
-}
-
-/// A file of a release (a disk image) and its checksum.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileRef {
-    pub url: String,
-    pub sha256: String,
-    pub size: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,12 +149,6 @@ pub struct Manifest {
     /// (`install-ocr`; [`backend`]). Absent in manifests before 0.7.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub backends: BTreeMap<String, BTreeMap<String, backend::BackendArtifact>>,
-    /// macOS: target triple → flavor → the disk image (`Mokuro Bunko.app`), which an
-    /// updater from 0.7.0-beta.3 on installs from instead of the `artifacts` archive.
-    /// Added in 0.7.0-beta.3; older updaters ignore it (they read `artifacts`, which
-    /// must then still name an archive for them).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub bundles: BTreeMap<String, BTreeMap<String, FileRef>>,
 }
 
 /// Read `loc`: an http(s) URL, a `file://` URL or a plain path (mirrors on disk, tests).
@@ -186,22 +181,6 @@ impl Manifest {
     pub fn semver(&self) -> Result<semver::Version, UpdateError> {
         semver::Version::parse(self.version.trim_start_matches('v'))
             .map_err(|e| UpdateError::Manifest(e.to_string()))
-    }
-
-    /// What this build installs from on `target`: on macOS the disk image when the
-    /// release has one, else the archive. `(url, sha256, size, binary)`.
-    pub fn download(&self, target: &str, flavor: &str) -> Result<Artifact, UpdateError> {
-        if target.ends_with("-apple-darwin")
-            && let Some(d) = self.bundles.get(target).and_then(|f| f.get(flavor))
-        {
-            return Ok(Artifact {
-                url: d.url.clone(),
-                sha256: d.sha256.clone(),
-                size: d.size,
-                binary: "mokuro-bunko".into(),
-            });
-        }
-        self.artifact(target, flavor).cloned()
     }
 
     pub fn artifact(&self, target: &str, flavor: &str) -> Result<&Artifact, UpdateError> {
@@ -441,7 +420,7 @@ impl Updater {
                 bunko_core::VERSION
             )));
         }
-        let artifact = manifest.download(TARGET, &self.flavor)?;
+        let artifact = manifest.artifact(TARGET, &self.flavor)?.clone();
         let dir = exe
             .parent()
             .map(Path::to_path_buf)
@@ -537,7 +516,7 @@ impl Updater {
                 status.docker_image = m.docker.get(&self.flavor).cloned();
                 status.can_apply = status.available
                     && install.can_apply()
-                    && m.download(TARGET, &self.flavor).is_ok();
+                    && m.artifact(TARGET, &self.flavor).is_ok();
             }
             // Nothing published (yet): the check worked, there is just nothing to
             // update to. Not an error, so automatic updates do not count it as one.
@@ -791,9 +770,7 @@ pub fn restore_previous() -> std::io::Result<()> {
         }
     }
     if let Ok(exe) = current_exe() {
-        for b in layout::Plan::for_exe(&exe).bundles {
-            layout::seal_bundle(&b);
-        }
+        layout::Plan::for_exe(&exe).seal();
     }
     Ok(())
 }
@@ -805,6 +782,13 @@ pub fn drop_previous() {
     }
     for (_, backup) in companion_backups() {
         let _ = std::fs::remove_file(backup);
+    }
+    // A macOS bundle sealed with the backups in it: seal it without them.
+    if let Ok(exe) = current_exe() {
+        let plan = layout::Plan::for_exe(&exe);
+        if !plan.bundles.is_empty() {
+            plan.seal();
+        }
     }
 }
 

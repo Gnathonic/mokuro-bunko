@@ -8,10 +8,10 @@
     Start-menu shortcuts (and optionally a logon shortcut), runs
     'mokuro-bunko doctor' and starts the server.
 
-    "Mokuro Bunko" in the Start menu starts the tray (Mokuro Bunko.exe): an icon by
+    "Mokuro Bunko" in the Start menu starts the app (mokuro-bunko.exe): an icon by
     the clock with status, pause/resume and the settings, which runs the server for
     you (tray.json). "Mokuro Bunko server (console)" keeps the old console window
-    (run.bat). The command line is bin\mokuro-bunko.exe.
+    (run.bat). In a terminal, use mokuro-bunko-cli.
 
     No admin rights, no Python, nothing in the registry. The library, config
     and logs stay in %LOCALAPPDATA%\mokuro-bunko (where mokuro-bunko 0.5 kept
@@ -26,9 +26,8 @@
     checksum). Running this script again also updates; your data is kept.
 
 .PARAMETER Flavor
-    full (default: local OCR; the setup wizard or `bin\mokuro-bunko.exe install-ocr`
-    installs CUDA support for an NVIDIA GPU with driver 580+ or the CPU backend). lite
-    (server only) exists for releases before 0.7.0-beta.3 only.
+    full (default: local OCR; the setup wizard or `mokuro-bunko-cli install-ocr`
+    installs CUDA support for an NVIDIA GPU with driver 580+ or the CPU backend).
 
 .PARAMETER Version
     Release to install, e.g. 0.7.0 (default: the latest release).
@@ -40,7 +39,7 @@
     Keep PORTABLE.txt: config, library and logs go to <InstallDir>\data.
 
 .PARAMETER Startup
-    Also start Mokuro Bunko when you log in: the tray (Mokuro Bunko.exe), which runs
+    Also start Mokuro Bunko when you log in: the app (mokuro-bunko.exe), which runs
     the server, through a shortcut in the Startup folder (the same shortcut as the
     tray's "Start at login").
 
@@ -58,7 +57,7 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet("full", "lite")]
+    [ValidateSet("full")]
     [string]$Flavor = "full",
     [string]$Version = "",
     [string]$InstallDir = "",
@@ -130,23 +129,17 @@ try {
     $extract = Join-Path $tmp "x"
     Expand-Archive -Path $zipPath -DestinationPath $extract -Force
     $inner = Get-ChildItem -Path $extract -Directory | Select-Object -First 1
-    # The command line: bin\mokuro-bunko.exe (0.7.0-beta.3+), mokuro-bunko.exe before.
-    $cliRel = "bin\mokuro-bunko.exe"
-    if ($inner -and -not (Test-Path (Join-Path $inner.FullName $cliRel))) { $cliRel = "mokuro-bunko.exe" }
-    if (-not $inner -or -not (Test-Path (Join-Path $inner.FullName $cliRel))) {
-        Fail "the zip has no mokuro-bunko.exe."
+    if (-not $inner -or -not (Test-Path (Join-Path $inner.FullName "mokuro-bunko-cli.exe"))) {
+        Fail "the zip has no mokuro-bunko-cli.exe."
     }
 
     # --- 3. Install ---------------------------------------------------------
     Write-Step "Installing into $InstallDir"
-    $exe = Join-Path $InstallDir $cliRel
-    # The tray: Mokuro Bunko.exe (0.7.0-beta.3+); a separate mokuro-bunko-tray.exe before.
-    $trayExe = Join-Path $InstallDir "Mokuro Bunko.exe"
-    if (-not (Test-Path (Join-Path $inner.FullName "Mokuro Bunko.exe"))) { $trayExe = Join-Path $InstallDir "mokuro-bunko-tray.exe" }
-    $ours = @((Join-Path $InstallDir "mokuro-bunko.exe"), (Join-Path $InstallDir "bin\mokuro-bunko.exe"),
-        (Join-Path $InstallDir "Mokuro Bunko.exe"), (Join-Path $InstallDir "mokuro-bunko-tray.exe"))
-    $running = Get-Process -Name "mokuro-bunko", "Mokuro Bunko", "mokuro-bunko-tray" -ErrorAction SilentlyContinue |
-        Where-Object { $p = $_.Path; $p -and ($ours | Where-Object { $_ -ieq $p }) }
+    # The console build runs the commands below; the app is what shortcuts start.
+    $exe = Join-Path $InstallDir "mokuro-bunko-cli.exe"
+    $trayExe = Join-Path $InstallDir "mokuro-bunko.exe"
+    $running = Get-Process -Name "mokuro-bunko", "mokuro-bunko-cli" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and (($_.Path -ieq $exe) -or ($_.Path -ieq $trayExe)) }
     if ($running) {
         if (-not $NonInteractive) {
             $answer = Read-Host "    mokuro-bunko is running from $InstallDir. Stop it to update? [Y/n]"
@@ -159,12 +152,6 @@ try {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     # Copy over the old version; data\ (portable mode) and anything else of yours stays.
     Copy-Item -Path (Join-Path $inner.FullName "*") -Destination $InstallDir -Recurse -Force
-    if ($cliRel -ne "mokuro-bunko.exe") {
-        # The layout before 0.7.0-beta.3: the command line at the top, a separate tray.
-        foreach ($old in "mokuro-bunko.exe", "mokuro-bunko-tray.exe") {
-            Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $InstallDir $old)
-        }
-    }
     if (-not $Portable) {
         Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $InstallDir "PORTABLE.txt")
     }
@@ -175,7 +162,7 @@ try {
     # --- 4. Shortcuts -------------------------------------------------------
     $runBat = Join-Path $InstallDir "run.bat"
     $shell = New-Object -ComObject WScript.Shell
-    $hasTray = Test-Path $trayExe
+    $hasTray = $true
     $iconFile = Join-Path $InstallDir "mokuro-bunko.ico"
     if (-not (Test-Path $iconFile)) { $iconFile = $exe }
     function New-Shortcut([string]$Path, [string]$Target, [string]$Description, [int]$WindowStyle = 1) {
@@ -211,8 +198,6 @@ try {
         Write-Ok "Start-menu shortcuts: $menu"
     }
     $startupLink = Join-Path ([Environment]::GetFolderPath("Startup")) "Mokuro Bunko.lnk"
-    # A logon shortcut from an earlier install is kept, pointing at this version's tray.
-    if (-not $Startup -and $hasTray -and (Test-Path $startupLink)) { $Startup = $true }
     if ($Startup) {
         if ($hasTray) {
             New-Shortcut $startupLink $trayExe "Start Mokuro Bunko (tray) at logon"
@@ -248,7 +233,7 @@ try {
     $dataDir = if ($Portable) { Join-Path $InstallDir "data" } else { Join-Path $env:LOCALAPPDATA "mokuro-bunko" }
     Write-Host ""
     Write-Host "Installed mokuro-bunko $($manifest.version) ($Flavor)." -ForegroundColor Green
-    Write-Host "  Program     : $InstallDir  (command line: $exe)"
+    Write-Host "  Program     : $InstallDir  (in a terminal: mokuro-bunko-cli)"
     if ($hasTray) {
         Write-Host "  Start       : Start menu > Mokuro Bunko (tray icon), or $runBat (console)"
     } else {

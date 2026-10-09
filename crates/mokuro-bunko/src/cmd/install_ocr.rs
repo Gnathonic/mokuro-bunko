@@ -293,8 +293,7 @@ mod full {
     }
 
     /// [`bundled_offline_dir`] for an executable in `exe_dir`: a folder counts when it
-    /// holds a backend pack archive (`mokuro-bunko-backend-*.tar.zst`, or the name packs
-    /// had up to 0.7.0-beta.2, `*-torch-*.tar.zst`; or its first part).
+    /// holds a backend pack archive (`mokuro-bunko-backend-*.tar.zst`, or its first part).
     pub fn bundled_offline_in(exe_dir: &Path) -> Option<PathBuf> {
         let mut candidates = Vec::new();
         if exe_dir.ends_with("Contents/MacOS")
@@ -310,7 +309,7 @@ mod full {
         std::fs::read_dir(dir).is_ok_and(|entries| {
             entries.filter_map(|e| e.ok()).any(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                (name.starts_with("mokuro-bunko-backend-") || name.contains("-torch-"))
+                name.starts_with("mokuro-bunko-backend-")
                     && (name.ends_with(".tar.zst") || name.ends_with(".tar.zst.001"))
                     && e.path().is_file()
             })
@@ -894,15 +893,12 @@ mod full {
     }
 
     /// Pack archive files for `variant` in a local directory: the whole archive or its
-    /// numbered parts, preferring this version's. Names:
-    /// `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`, or (packs up to
-    /// 0.7.0-beta.2) `mokuro-bunko-<ver>-<target>-torch-<variant>.tar.zst`.
+    /// numbered parts, preferring this version's:
+    /// `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`.
     pub fn local_parts(dir: &Path, target: &str, variant: &str, version: &str) -> Vec<PathBuf> {
         let platform = pack_platform(target);
         let new_ours = format!("mokuro-bunko-backend-{version}-{platform}-{variant}.tar.zst");
         let new_suffix = format!("-{platform}-{variant}.tar.zst");
-        let old_suffix = format!("-{target}-torch-{variant}.tar.zst");
-        let old_ours = format!("mokuro-bunko-{version}{old_suffix}");
         let mut whole: Vec<PathBuf> = Vec::new();
         let mut parts: Vec<PathBuf> = Vec::new();
         let is_part = |n: &str, ours: &str| {
@@ -913,14 +909,12 @@ mod full {
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let n = e.file_name().to_string_lossy().to_string();
-                if n == new_ours || n == old_ours {
+                if n == new_ours {
                     return vec![e.path()];
                 }
-                if (n.starts_with("mokuro-bunko-backend-") && n.ends_with(&new_suffix))
-                    || n.ends_with(&old_suffix)
-                {
+                if n.starts_with("mokuro-bunko-backend-") && n.ends_with(&new_suffix) {
                     whole.push(e.path());
-                } else if is_part(&n, &new_ours) || is_part(&n, &old_ours) {
+                } else if is_part(&n, &new_ours) {
                     parts.push(e.path());
                 }
             }
@@ -1387,14 +1381,9 @@ mod tests {
         let plain = dir.path().join("mb");
         std::fs::create_dir_all(&plain).unwrap();
         assert_eq!(bundled_offline_in(&plain), None);
-        touch(&plain.join(
-            "ocr-offline/mokuro-bunko-0.7.0-x86_64-unknown-linux-gnu-torch-rocm7.1.tar.zst.001",
-        ));
+        touch(&plain.join("ocr-offline/mokuro-bunko-backend-0.7.0-linux-x64-rocm7.1.tar.zst.001"));
         assert_eq!(bundled_offline_in(&plain), Some(plain.join("ocr-offline")));
-        // The names of 0.7.0-beta.2's packs still count.
-        touch(&plain.join(
-            "ocr-offline/mokuro-bunko-0.7.0-x86_64-unknown-linux-gnu-torch-rocm7.1.tar.zst.002",
-        ));
+        touch(&plain.join("ocr-offline/mokuro-bunko-backend-0.7.0-linux-x64-rocm7.1.tar.zst.002"));
         assert_eq!(
             local_parts(
                 &plain.join("ocr-offline"),
@@ -1410,7 +1399,7 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         touch(
             &dir.path()
-                .join("lib/Resources/ocr-offline/x-torch-cpu.tar.zst"),
+                .join("lib/Resources/ocr-offline/mokuro-bunko-backend-0.7.0-macos-cpu.tar.zst"),
         );
         assert_eq!(bundled_offline_in(&outside), None);
     }

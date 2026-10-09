@@ -48,7 +48,7 @@ pub struct DistArgs {
     #[arg(long, value_delimiter = ',', default_value = "tensorrt")]
     pub exclude_lib: Vec<String>,
     /// Build without the desktop tray (the `tray` feature) and leave its files out (menu
-    /// and autostart entries, icons, the macOS .app, `Mokuro Bunko.exe`). The Dockerfiles
+    /// and autostart entries, icons, the macOS .app, the Windows app build). The Dockerfiles
     /// pass this: images have no desktop.
     #[arg(long)]
     pub no_tray: bool,
@@ -129,15 +129,16 @@ pub fn run(args: &DistArgs) -> Result<PathBuf> {
     }
     std::fs::create_dir_all(&stage)?;
 
-    // Windows: the command line in `bin\`, the tray program (`Mokuro Bunko.exe`, the same
-    // build with the GUI subsystem) at the top. Elsewhere the one program at the top.
-    let cli_dir = if build.is_windows() {
-        stage.join("bin")
+    let desktop = build.has_tray();
+    // Windows with the tray: the console build is `mokuro-bunko-cli.exe` and the app
+    // `mokuro-bunko.exe` (the same build with the GUI subsystem, stage_desktop). Every
+    // other build: the one program.
+    let cli_dir = stage.clone();
+    let staged_cli = cli_dir.join(if build.is_windows() && desktop {
+        names::WINDOWS_CLI_EXE.to_string()
     } else {
-        stage.clone()
-    };
-    std::fs::create_dir_all(&cli_dir)?;
-    let staged_cli = cli_dir.join(build.exe_name());
+        build.exe_name()
+    });
     std::fs::copy(&exe, &staged_cli).with_context(|| format!("copying {}", exe.display()))?;
     for dir in &native_dirs {
         for lib in shared_libs(dir, &args.exclude_lib, build.ep, build.is_windows())? {
@@ -147,7 +148,6 @@ pub fn run(args: &DistArgs) -> Result<PathBuf> {
             eprintln!("    bundling {}", name.to_string_lossy());
         }
     }
-    let desktop = build.has_tray();
     let mut third_party = report.markdown.clone();
     if build.is_windows() && !args.no_vc_runtime {
         let wanted = crate::vcredist::imported_by(&exe)?;
@@ -155,10 +155,6 @@ pub fn run(args: &DistArgs) -> Result<PathBuf> {
         for dll in crate::vcredist::find(&names)? {
             let name = dll.file_name().context("dll name")?;
             std::fs::copy(&dll, cli_dir.join(name))?;
-            // Mokuro Bunko.exe loads them from its own folder too.
-            if desktop {
-                std::fs::copy(&dll, stage.join(name))?;
-            }
             eprintln!("    bundling {} (VC++ runtime)", name.to_string_lossy());
         }
         if !names.is_empty() {
@@ -335,8 +331,9 @@ fn shared_libs(dir: &Path, exclude: &[String], ep: Ep, windows: bool) -> Result<
 const MAC_APP: &str = "mokuro-bunko.app";
 
 /// Stage the desktop integration of a build with the tray (GUI.md §6):
-/// * Windows: `Mokuro Bunko.exe` (the program with the GUI subsystem: it runs the tray
-///   without a console window) + `mokuro-bunko.ico` (shortcuts use it);
+/// * Windows: `mokuro-bunko.exe`, the app (the program with the GUI subsystem: no console
+///   window, for itself or the instances it starts), next to `mokuro-bunko-cli.exe` (the
+///   console build), + `mokuro-bunko.ico`;
 /// * macOS: `mokuro-bunko.app` (LSUIElement agent) whose main program is the CLI (a hard
 ///   link of the top-level one: stored once in the archive; opening the app runs the
 ///   tray), with its icon; the disk image is made from it (`packaging/macos/make-dmg.sh`);
@@ -346,7 +343,7 @@ const MAC_APP: &str = "mokuro-bunko.app";
 fn stage_desktop(root: &Path, build: &Build, version: &str, stage: &Path) -> Result<()> {
     let icons = root.join("packaging/icons");
     if build.is_windows() {
-        let cli = stage.join("bin").join(build.exe_name());
+        let cli = stage.join(names::WINDOWS_CLI_EXE);
         let mut bytes = std::fs::read(&cli)?;
         bunko_update::layout::set_pe_subsystem(&mut bytes, bunko_update::layout::PE_SUBSYSTEM_GUI)
             .map_err(|e| anyhow::anyhow!("{}: {e}", cli.display()))?;

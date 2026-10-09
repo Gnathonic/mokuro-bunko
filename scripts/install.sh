@@ -30,8 +30,8 @@
 # Desktop: the full build has the tray (`mokuro-bunko tray`). On Linux it gets a menu
 # entry + icons under <prefix>/share; it shows in any panel with a system tray
 # (StatusNotifierItem over D-Bus: no GTK or AppIndicator library needed; GNOME needs the
-# AppIndicator extension, `mokuro-bunko doctor` says so). On macOS use the disk image
-# (mokuro-bunko-<ver>-macos.dmg) for the app; this script installs the command line.
+# AppIndicator extension, `mokuro-bunko doctor` says so). On macOS it installs the app
+# from the disk image into ~/Applications (/Applications as root).
 #
 # Environment: MOKURO_BUNKO_REPO (default Gnathonic/mokuro-bunko),
 #              MOKURO_BUNKO_BASE_URL (where release.json lives; default: the GitHub
@@ -228,7 +228,10 @@ bindir="$PREFIX/bin"
 
 say "mokuro-bunko $release_version ($FLAVOR, $triple)"
 say "  from $url"
-say "  into $libdir (linked from $bindir/mokuro-bunko)"
+case "$url" in
+*.dmg) say "  into Applications (linked from $bindir/mokuro-bunko)" ;;
+*) say "  into $libdir (linked from $bindir/mokuro-bunko)" ;;
+esac
 [ "$DRY_RUN" = 1 ] && exit 0
 
 # --- download, verify, unpack ------------------------------------------------
@@ -238,6 +241,34 @@ fetch "$url" "$archive" || die "download failed: $url"
 got_sha="$(sha256 "$archive")"
 [ "$got_sha" = "$want_sha" ] || die "sha256 mismatch: got $got_sha, the signed manifest says $want_sha"
 say "Checksum OK"
+
+# macOS: the release is the disk image. Copy its app to Applications (~/Applications
+# for a user, /Applications as root) and link the program into the bin dir.
+case "$url" in
+*.dmg)
+	if [ "$(id -u)" = 0 ]; then appdir=/Applications; else appdir="$HOME/Applications"; fi
+	mkdir -p "$appdir" "$bindir" "$tmp/mnt"
+	hdiutil attach -nobrowse -readonly -noautoopen -quiet -mountpoint "$tmp/mnt" "$archive" ||
+		die "could not open the disk image"
+	rm -rf "$appdir/Mokuro Bunko.app.new"
+	ditto "$tmp/mnt/Mokuro Bunko.app" "$appdir/Mokuro Bunko.app.new"
+	hdiutil detach -quiet "$tmp/mnt" || hdiutil detach -quiet -force "$tmp/mnt" || true
+	if ! "$appdir/Mokuro Bunko.app.new/Contents/MacOS/mokuro-bunko" --version; then
+		rm -rf "$appdir/Mokuro Bunko.app.new"
+		die "the app does not run on this Mac; nothing was changed"
+	fi
+	rm -rf "$appdir/Mokuro Bunko.app"
+	mv "$appdir/Mokuro Bunko.app.new" "$appdir/Mokuro Bunko.app"
+	ln -sf "$appdir/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko" "$bindir/mokuro-bunko"
+	say ""
+	say "Installed Mokuro Bunko $release_version in $appdir (open it, or run 'mokuro-bunko')."
+	case ":$PATH:" in
+	*":$bindir:"*) ;;
+	*) warn "$bindir is not on your PATH" ;;
+	esac
+	exit 0
+	;;
+esac
 
 mkdir -p "$tmp/x"
 tar -xzf "$archive" -C "$tmp/x"
@@ -258,22 +289,9 @@ rm -rf "$libdir.old"
 ln -sf "$libdir/mokuro-bunko" "$bindir/mokuro-bunko"
 
 # --- desktop tray (Linux) ------------------------------------------------------
-# The tray is `mokuro-bunko tray` (0.7.0-beta.3+). Releases before had a separate
-# mokuro-bunko-tray program: its link goes, and login items that started it start the
-# new one (the program does the same on its first start).
 tray_cmd="$libdir/mokuro-bunko tray"
-old_tray="$libdir/mokuro-bunko-tray"
-if [ -L "$bindir/mokuro-bunko-tray" ] && [ "$(readlink "$bindir/mokuro-bunko-tray")" = "$old_tray" ]; then
-	rm -f "$bindir/mokuro-bunko-tray"
-fi
 if [ "$os" = Linux ] && [ -d "$libdir/share/applications" ]; then
 	autostart_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
-	for entry in "$PREFIX/share/applications/mokuro-bunko-tray.desktop" "$autostart_dir/mokuro-bunko-tray.desktop"; do
-		if [ -f "$entry" ] && grep -qx "Exec=$old_tray" "$entry"; then
-			sed "s|^Exec=.*|Exec=$tray_cmd|" "$entry" >"$entry.new" && mv "$entry.new" "$entry"
-			say "Updated $entry: it starts '$tray_cmd' now"
-		fi
-	done
 	if [ "$DESKTOP" = 1 ]; then
 		share="$PREFIX/share"
 		mkdir -p "$share/applications"

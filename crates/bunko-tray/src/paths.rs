@@ -199,26 +199,10 @@ pub fn cli_name() -> &'static str {
     }
 }
 
-/// The Windows program that runs the tray (the GUI-subsystem build: no console window),
-/// at the top of the install folder; the command line is `bin\mokuro-bunko.exe`.
-pub const WINDOWS_GUI_EXE: &str = "Mokuro Bunko.exe";
-
-/// The `mokuro-bunko` command line the tray starts instances with. The tray is the
-/// same program: on Linux and macOS that is `exe` itself; on Windows the tray is
-/// `Mokuro Bunko.exe` (no console) and the command line is `bin\mokuro-bunko.exe` next
-/// to it (an install from before 0.7.0-beta.3: `mokuro-bunko.exe` next to it). `PATH` is
-/// not searched: the tray runs the command line of its own install.
+/// The `mokuro-bunko` program the tray starts instances with: the tray's own program
+/// (on Windows the app `mokuro-bunko.exe`, so no console window appears for them either).
 pub fn cli_exe(exe: &Path, _env: &dyn Env) -> Option<PathBuf> {
-    let gui = exe
-        .file_name()
-        .is_some_and(|n| n.eq_ignore_ascii_case(WINDOWS_GUI_EXE));
-    if !gui {
-        return Some(exe.to_path_buf());
-    }
-    let dir = exe.parent()?;
-    [dir.join("bin").join(cli_name()), dir.join(cli_name())]
-        .into_iter()
-        .find(|p| p.is_file())
+    Some(exe.to_path_buf())
 }
 
 #[cfg(test)]
@@ -334,24 +318,9 @@ mod tests {
     }
 
     #[test]
-    fn the_cli_is_the_tray_itself_or_bin_next_to_the_windows_gui() {
-        let dir = tempfile::tempdir().unwrap();
-        let env = FakeEnv::default().with("HOME", dir.path().join("nohome"));
-        // Linux/macOS (and `mokuro-bunko tray` on Windows): the same program.
-        let exe = dir
-            .path()
-            .join("Mokuro Bunko.app/Contents/MacOS/mokuro-bunko");
-        assert_eq!(cli_exe(&exe, &env), Some(exe.clone()));
-        // Windows: Mokuro Bunko.exe runs bin\mokuro-bunko.exe.
-        let gui = dir.path().join(WINDOWS_GUI_EXE);
-        assert_eq!(cli_exe(&gui, &env), None);
-        std::fs::write(dir.path().join(cli_name()), "").unwrap();
-        assert_eq!(cli_exe(&gui, &env), Some(dir.path().join(cli_name())));
-        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
-        std::fs::write(dir.path().join("bin").join(cli_name()), "").unwrap();
-        assert_eq!(
-            cli_exe(&gui, &env),
-            Some(dir.path().join("bin").join(cli_name()))
-        );
+    fn the_instances_run_the_trays_own_program() {
+        let env = FakeEnv::default();
+        let exe = Path::new("/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko");
+        assert_eq!(cli_exe(exe, &env), Some(exe.to_path_buf()));
     }
 }

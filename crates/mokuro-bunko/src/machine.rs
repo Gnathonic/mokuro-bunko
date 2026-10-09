@@ -33,7 +33,6 @@ pub fn find_processor_config() -> Option<PathBuf> {
 /// A library server is configured here: its config file exists, or the deployment
 /// names its storage through the environment (Docker's `MOKURO_STORAGE`). Decides
 /// which role `install-ocr` / `doctor` / `models` serve (full build).
-#[cfg(feature = "ocr")]
 pub fn library_configured(config_path: &std::path::Path) -> bool {
     config_path.is_file()
         || std::env::var_os("MOKURO_STORAGE").is_some_and(|v| !v.is_empty())
