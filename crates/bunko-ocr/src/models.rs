@@ -1483,6 +1483,45 @@ mod tests {
         assert!(torch_release_name().starts_with("torch-models"));
     }
 
+    /// paddle-manga runs on the CPU as in 0.5.2: the release has its fp32 CPU packages
+    /// for Linux, Windows and macOS, and they bind the same fp32 weights files as its
+    /// GPU packages (no CPU-only copy of the weights).
+    #[test]
+    fn paddle_manga_cpu_packages_share_the_gpu_weights() {
+        let files = torch_release_files_from(TORCH_MODELS_JSON).expect("compiled-in release loads");
+        for target in [
+            "linux-cpu-x86_64-v3",
+            "windows-cpu-x86_64-v3",
+            "macos-cpu-arm64",
+        ] {
+            for role in ["vision", "prefill", "step"] {
+                let id = format!("torch/paddle-manga/fp32/{target}/{role}.pt2");
+                let f = files
+                    .iter()
+                    .find(|f| f.id == id)
+                    .unwrap_or_else(|| panic!("{id} is in the release"));
+                let group = if role == "vision" {
+                    "vision"
+                } else {
+                    "decoder"
+                };
+                assert_eq!(
+                    f.requires,
+                    vec![format!(
+                        "torch/paddle-manga/fp32/weights-{group}.safetensors"
+                    )],
+                    "{id}"
+                );
+            }
+        }
+        // the shared fp32 weights are listed once, for every target
+        let weights = files
+            .iter()
+            .filter(|f| f.id.starts_with("torch/paddle-manga/fp32/weights-"))
+            .count();
+        assert_eq!(weights, 2);
+    }
+
     #[test]
     fn every_package_resolves_its_weights() {
         let files = torch_release_files_from(TORCH_MODELS_JSON).expect("compiled-in release loads");

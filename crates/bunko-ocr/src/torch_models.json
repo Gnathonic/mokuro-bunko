@@ -5293,6 +5293,105 @@
   },
   {
    "engine": "paddle-manga",
+   "file": "paddle-manga_fp32_linux-cpu-x86_64-v3_vision.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/paddle-manga_fp32_linux-cpu-x86_64-v3_vision.pt2",
+   "size": 3741613,
+   "sha256": "4b9c6cd8256acbb5d304b3b5cd85496be5a844226445403b3e61f4a9f3ceb5ac",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "vision",
+   "precision": "fp32",
+   "target": "linux-cpu-x86_64-v3",
+   "id": "torch/paddle-manga/fp32/linux-cpu-x86_64-v3/vision.pt2",
+   "path": "torch/paddle-manga/fp32/linux-cpu-x86_64-v3/vision.pt2",
+   "unpack_to": "torch/paddle-manga/fp32/linux-cpu-x86_64-v3/vision/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/paddle-manga/fp32/weights-vision.safetensors"
+   ]
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "paddle-manga_fp32_linux-cpu-x86_64-v3_prefill.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/paddle-manga_fp32_linux-cpu-x86_64-v3_prefill.pt2",
+   "size": 2659563,
+   "sha256": "7722929877dbd17a9f51c7d1b36a91aac13b85f55e0338d4e260e67314641a06",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "prefill",
+   "precision": "fp32",
+   "target": "linux-cpu-x86_64-v3",
+   "id": "torch/paddle-manga/fp32/linux-cpu-x86_64-v3/prefill.pt2",
+   "path": "torch/paddle-manga/fp32/linux-cpu-x86_64-v3/prefill.pt2",
+   "unpack_to": "torch/paddle-manga/fp32/linux-cpu-x86_64-v3/prefill/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/paddle-manga/fp32/weights-decoder.safetensors"
+   ]
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "paddle-manga_fp32_linux-cpu-x86_64-v3_step.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/paddle-manga_fp32_linux-cpu-x86_64-v3_step.pt2",
+   "size": 3202461,
+   "sha256": "5e54c33c672e217a9904541b81e2ad6f473222a4ceb039ad0b779d2b9aaa3566",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "step",
+   "precision": "fp32",
+   "target": "linux-cpu-x86_64-v3",
+   "id": "torch/paddle-manga/fp32/linux-cpu-x86_64-v3/step.pt2",
+   "path": "torch/paddle-manga/fp32/linux-cpu-x86_64-v3/step.pt2",
+   "unpack_to": "torch/paddle-manga/fp32/linux-cpu-x86_64-v3/step/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/paddle-manga/fp32/weights-decoder.safetensors"
+   ]
+  },
+  {
+   "engine": "paddle-manga",
    "file": "paddle-manga_fp32_linux-cuda-sm_75_vision.pt2",
    "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/paddle-manga_fp32_linux-cuda-sm_75_vision.pt2",
    "size": 3872849,
@@ -6078,6 +6177,204 @@
    "path": "torch/paddle-manga/fp32/linux-rocm-gfx1201/step.pt2",
    "unpack_to": "torch/paddle-manga/fp32/linux-rocm-gfx1201/step/",
    "torch": "2.13.0+rocm7.1",
+   "io": 2,
+   "requires": [
+    "torch/paddle-manga/fp32/weights-decoder.safetensors"
+   ]
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "paddle-manga_fp32_macos-cpu-arm64_vision.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/paddle-manga_fp32_macos-cpu-arm64_vision.pt2",
+   "size": 1540719,
+   "sha256": "fafaeb97af026f73ad8d82da60dd811da08ba3788bada7047d6399ed04420383",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "vision",
+   "precision": "fp32",
+   "target": "macos-cpu-arm64",
+   "id": "torch/paddle-manga/fp32/macos-cpu-arm64/vision.pt2",
+   "path": "torch/paddle-manga/fp32/macos-cpu-arm64/vision.pt2",
+   "unpack_to": "torch/paddle-manga/fp32/macos-cpu-arm64/vision/",
+   "torch": "2.13.0",
+   "io": 2,
+   "requires": [
+    "torch/paddle-manga/fp32/weights-vision.safetensors"
+   ]
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "paddle-manga_fp32_macos-cpu-arm64_prefill.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/paddle-manga_fp32_macos-cpu-arm64_prefill.pt2",
+   "size": 907663,
+   "sha256": "eb56d7f98b18329166bd7ae1cba76e2e42617755e622032d8a07658386fbd80f",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "prefill",
+   "precision": "fp32",
+   "target": "macos-cpu-arm64",
+   "id": "torch/paddle-manga/fp32/macos-cpu-arm64/prefill.pt2",
+   "path": "torch/paddle-manga/fp32/macos-cpu-arm64/prefill.pt2",
+   "unpack_to": "torch/paddle-manga/fp32/macos-cpu-arm64/prefill/",
+   "torch": "2.13.0",
+   "io": 2,
+   "requires": [
+    "torch/paddle-manga/fp32/weights-decoder.safetensors"
+   ]
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "paddle-manga_fp32_macos-cpu-arm64_step.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/paddle-manga_fp32_macos-cpu-arm64_step.pt2",
+   "size": 1157094,
+   "sha256": "64e2f283e312c570d56977e2d1fa1624437492e55edaa076daaa6a63a698becc",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "step",
+   "precision": "fp32",
+   "target": "macos-cpu-arm64",
+   "id": "torch/paddle-manga/fp32/macos-cpu-arm64/step.pt2",
+   "path": "torch/paddle-manga/fp32/macos-cpu-arm64/step.pt2",
+   "unpack_to": "torch/paddle-manga/fp32/macos-cpu-arm64/step/",
+   "torch": "2.13.0",
+   "io": 2,
+   "requires": [
+    "torch/paddle-manga/fp32/weights-decoder.safetensors"
+   ]
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "paddle-manga_fp32_windows-cpu-x86_64-v3_vision.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/paddle-manga_fp32_windows-cpu-x86_64-v3_vision.pt2",
+   "size": 2017112,
+   "sha256": "bbbd3abd42967733b2e7500df606bb9a8de4273d0ca6643f3fd3ad759e71f178",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "vision",
+   "precision": "fp32",
+   "target": "windows-cpu-x86_64-v3",
+   "id": "torch/paddle-manga/fp32/windows-cpu-x86_64-v3/vision.pt2",
+   "path": "torch/paddle-manga/fp32/windows-cpu-x86_64-v3/vision.pt2",
+   "unpack_to": "torch/paddle-manga/fp32/windows-cpu-x86_64-v3/vision/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/paddle-manga/fp32/weights-vision.safetensors"
+   ]
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "paddle-manga_fp32_windows-cpu-x86_64-v3_prefill.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/paddle-manga_fp32_windows-cpu-x86_64-v3_prefill.pt2",
+   "size": 1187051,
+   "sha256": "3e0f5d61ed7c48e50945972d4eb90007310771502e40153ecdba9113bfe10cab",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "prefill",
+   "precision": "fp32",
+   "target": "windows-cpu-x86_64-v3",
+   "id": "torch/paddle-manga/fp32/windows-cpu-x86_64-v3/prefill.pt2",
+   "path": "torch/paddle-manga/fp32/windows-cpu-x86_64-v3/prefill.pt2",
+   "unpack_to": "torch/paddle-manga/fp32/windows-cpu-x86_64-v3/prefill/",
+   "torch": "2.13.0+cpu",
+   "io": 2,
+   "requires": [
+    "torch/paddle-manga/fp32/weights-decoder.safetensors"
+   ]
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "paddle-manga_fp32_windows-cpu-x86_64-v3_step.pt2",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/torch-models-v1/paddle-manga_fp32_windows-cpu-x86_64-v3_step.pt2",
+   "size": 1411880,
+   "sha256": "e8fdded183d3e13823c57aacfe9311a5328903bddf53981089e1c007374d095a",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "export_tool_version": "0.1.0",
+   "kind": "aoti",
+   "role": "step",
+   "precision": "fp32",
+   "target": "windows-cpu-x86_64-v3",
+   "id": "torch/paddle-manga/fp32/windows-cpu-x86_64-v3/step.pt2",
+   "path": "torch/paddle-manga/fp32/windows-cpu-x86_64-v3/step.pt2",
+   "unpack_to": "torch/paddle-manga/fp32/windows-cpu-x86_64-v3/step/",
+   "torch": "2.13.0+cpu",
    "io": 2,
    "requires": [
     "torch/paddle-manga/fp32/weights-decoder.safetensors"
