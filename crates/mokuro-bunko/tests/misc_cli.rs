@@ -46,9 +46,11 @@ fn help_prints_the_help() {
             .arg(arg)
             .assert()
             .success()
-            .stdout(predicate::str::contains(
-                "Usage: mokuro-bunko [OPTIONS] [COMMAND]",
-            ));
+            // `mokuro-bunko.exe` on Windows (clap names the program as it was started).
+            .stdout(
+                predicate::str::contains("Usage: mokuro-bunko")
+                    .and(predicate::str::contains(" [OPTIONS] [COMMAND]")),
+            );
     }
 }
 
