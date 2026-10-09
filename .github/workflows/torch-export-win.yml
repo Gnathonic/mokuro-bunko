@@ -28,6 +28,11 @@ on:
         description: Also build the old frozen weights-inside layout (TORCH_EXPORT_CPU_EMBED=1) and time both on this runner
         type: boolean
         default: true
+  # TEMPORARY: GitHub registers a workflow only once it is on the default branch or has
+  # run; this push (skipped job) registers it so it can be dispatched from this branch.
+  push:
+    branches: ["0.7"]
+    paths: [.github/workflows/torch-export-win.yml]
 
 permissions:
   contents: read
@@ -38,6 +43,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 240
     defaults:
