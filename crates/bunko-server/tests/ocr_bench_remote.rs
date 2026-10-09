@@ -153,14 +153,24 @@ async fn a_remote_processor_is_benchmarked_through_the_admin_api() {
     }
     assert!(connected, "the processor registered");
 
-    let posted = http
-        .post(format!("{url}/_admin/api/ocr/generations/g-1/bench"))
-        .header("authorization", admin.clone())
-        .json(&json!({"processor": "tower", "pages": 8}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(posted.status(), 202);
+    // Listed once it registered; benchmarkable once its socket is open too (a moment
+    // later, which a slow CI runner can make longer than the listing poll above).
+    let mut answer = (0, String::new());
+    for _ in 0..100 {
+        let posted = http
+            .post(format!("{url}/_admin/api/ocr/generations/g-1/bench"))
+            .header("authorization", admin.clone())
+            .json(&json!({"processor": "tower", "pages": 8}))
+            .send()
+            .await
+            .unwrap();
+        answer = (posted.status().as_u16(), posted.text().await.unwrap());
+        if !(answer.0 == 400 && answer.1.contains("is connected")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(answer.0, 202, "{}", answer.1);
     let mut result = Value::Null;
     for _ in 0..600 {
         result = get(format!(
