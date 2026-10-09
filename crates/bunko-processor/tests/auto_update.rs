@@ -80,7 +80,10 @@ async fn archive(State(lib): State<Shared>) -> Response {
         .into_response()
 }
 
-async fn result() -> Response {
+/// Reads the whole upload before answering, as the library does: answering first closes
+/// the connection under a body still being sent, which Windows reports to the client as
+/// "connection aborted" (os error 10053) and the processor counts as a failed upload.
+async fn result(_body: Bytes) -> Response {
     StatusCode::OK.into_response()
 }
 
