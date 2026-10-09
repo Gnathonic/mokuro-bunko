@@ -136,13 +136,14 @@ def main(argv=None) -> int:
     if a.bench:
         extra["peak_rss_mb"] = peak_rss_mb()
     print(json.dumps({**res, **extra}), flush=True)
-    # free the packages before the weights they bind (the runtime's order: PackageSet
-    # drops its graphs before its Weights)
-    pk.clear()
-    import gc
+    if sys.platform != "win32" or os.environ.get("TORCH_EXPORT_VERIFY_TEARDOWN") == "1":
+        # free the packages before the weights they bind (the runtime's order: PackageSet
+        # drops its graphs before its Weights)
+        pk.clear()
+        import gc
 
-    gc.collect()
-    print("packages released", file=sys.stderr, flush=True)
+        gc.collect()
+        print("packages released", file=sys.stderr, flush=True)
     return 0 if all(r["ids_equal"] for r in res.values()) else 1
 
 
