@@ -11,7 +11,7 @@
     <header class="mokuro-header" id="app-header" data-current="setup"></header>
     <main class="app-main app-main--narrow">
         <h1 class="page-title">Processor</h1>
-        <p class="page-lede">Connect this machine to a library as an OCR processor (<code>mokuro-bunko processor setup</code>). An admin of that library makes a <em>processor</em> account for it.</p>
+        <p class="page-lede">Connect this machine to a library as its OCR processor (<code>mokuro-bunko processor setup</code>). A library admin makes the <em>processor</em> account.</p>
         <div class="wizard-card">
             <form id="proc-form" novalidate>
             <section class="wizard-step" id="p-library" aria-labelledby="h-plib">
@@ -82,18 +82,38 @@
                     <div class="input-row"><input class="form-input" id="pstorage"><button type="button" class="btn btn--secondary" data-pick="pstorage" data-title="Choose the processor's folder">Browse…</button></div>
                     <div class="alert alert--warning" id="pstorage-note" role="status" hidden></div>
                 </div>
+                <label class="toggle mt-3"><input type="checkbox" role="switch" id="want-startup"><span class="toggle__text"><strong>Start with the machine</strong><span>Run the processor whenever you log in.</span></span></label>
                 <p class="form-error" id="err-machine" role="alert" hidden></p>
                 <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev>Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" id="machine-next">Next</button></div>
             </section>
 
+            <section class="wizard-step" id="p-ocr" aria-labelledby="h-pocr" hidden>
+                <h2 id="h-pocr">OCR install</h2>
+                <p class="step-lede">The pack and the models install after you save, then a check runs.</p>
+                <div id="ocr-fields"><p class="form-hint">Detecting the hardware…</p></div>
+                <p class="form-error" id="err-ocr" role="alert" hidden></p>
+                <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev>Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" id="ocr-next">Next</button></div>
+            </section>
+
+            <section class="wizard-step" id="p-startup" aria-labelledby="h-pstartup" hidden>
+                <h2 id="h-pstartup">Start with the machine</h2>
+                <p class="step-lede">How the processor starts when you log in.</p>
+                <div id="startup-fields"><p class="form-hint">Loading…</p></div>
+                <p class="form-error" id="err-startup" role="alert" hidden></p>
+                <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev>Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" id="startup-next">Next</button></div>
+            </section>
+
             <section class="wizard-step" id="p-save" aria-labelledby="h-psave" hidden>
                 <h2 id="h-psave">Save and start</h2>
-                <p class="step-lede">The account is checked again, then processor.yaml is written (readable by you only).</p>
+                <p class="step-lede">Check the answers, then save processor.yaml (readable by you only) and start the processor.</p>
                 <dl class="summary" id="p-summary"></dl>
                 <label class="check" id="p-overwrite-row" hidden><input type="checkbox" id="p-overwrite"> Replace the existing processor.yaml</label>
+                <ul class="run-list" id="run-list" hidden></ul>
                 <p class="form-error" id="err-save" role="alert" hidden></p>
                 <div id="p-save-result" aria-live="polite"></div>
-                <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev id="p-save-back">Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" id="p-save-btn">Save</button><button type="button" class="btn btn--primary" id="p-start-btn" hidden>Start the processor</button></div>
+                <div id="install-job"></div>
+                <div id="doctor-job"></div>
+                <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev id="p-save-back">Back</button><span class="spacer"></span><button type="button" class="btn btn--ghost" id="skip-btn" hidden>Skip</button><button type="button" class="btn btn--primary" id="p-save-btn">Save and start the processor</button></div>
             </section>
 
             <section class="wizard-step" id="p-done" aria-labelledby="h-pdone" hidden>
@@ -107,6 +127,7 @@
         </div>
     </main>
     <script src="/app/app.js"></script>
+    <script src="/app/setup-steps.js"></script>
     <script src="/app/setup-processor.js"></script>
 </body>
 </html>

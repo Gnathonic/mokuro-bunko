@@ -277,26 +277,45 @@
     });
   }
 
-  // Wizard steps: sections .wizard-step in order; dots in .wizard-dots.
-  function wizard(steps, onShow) {
-    let i = 0;
+  // Wizard steps: sections .wizard-step in order; dots and "Step n of m" in
+  // .wizard-dots. `steps` is a list of ids or a function giving the current list (a
+  // flow whose toggles add or drop steps); `opts.done` is the closing step, which is
+  // not counted.
+  function wizard(steps, onShow, opts) {
+    opts = opts || {};
+    const list = () => (typeof steps === 'function' ? steps() : steps);
+    let cur = list()[0];
     const dots = document.querySelector('.wizard-dots');
-    if (dots) dots.innerHTML = steps.map((_, n) => '<span class="wizard-dot" data-n="' + n + '"></span>').join('');
-    function show(n) {
-      i = Math.max(0, Math.min(steps.length - 1, n));
-      steps.forEach((id, k) => {
-        const el = document.getElementById(id);
-        el.hidden = k !== i;
-      });
-      if (dots) dots.querySelectorAll('.wizard-dot').forEach((d, k) => d.classList.toggle('active', k <= i));
-      const first = document.getElementById(steps[i]).querySelector('h2');
+    function render() {
+      const ids = list();
+      const counted = ids.filter((id) => id !== opts.done);
+      const i = counted.indexOf(cur);
+      const finished = cur === opts.done;
+      if (!dots) return;
+      dots.innerHTML = counted.map((_, k) =>
+        '<span class="wizard-dot' + (finished || k <= i ? ' active' : '') + '"></span>').join('') +
+        '<span class="wizard-count">' + (finished ? 'Done' : 'Step ' + (i + 1) + ' of ' + counted.length) + '</span>';
+    }
+    function showId(id) {
+      const ids = list();
+      if (!ids.includes(id)) return;
+      cur = id;
+      // Every step section of the page, also the ones a toggle took out of the flow.
+      document.querySelectorAll('.wizard-step').forEach((el) => { el.hidden = el.id !== cur; });
+      render();
+      const first = document.getElementById(cur).querySelector('h2');
       if (first) { first.setAttribute('tabindex', '-1'); first.focus({ preventScroll: true }); }
       window.scrollTo(0, 0);
-      if (onShow) onShow(steps[i]);
+      if (onShow) onShow(cur);
     }
-    show(0);
-    return { show: show, next: () => show(i + 1), prev: () => show(i - 1), get index() { return i; },
-      go: (id) => show(steps.indexOf(id)) };
+    const step = (d) => {
+      const ids = list();
+      const k = ids.indexOf(cur) + d;
+      if (k >= 0 && k < ids.length) showId(ids[k]);
+    };
+    showId(cur);
+    return { next: () => step(1), prev: () => step(-1), go: showId, refresh: render,
+      get current() { return cur; } };
   }
 
   function fmtBytes(n) {

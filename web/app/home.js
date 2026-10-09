@@ -15,20 +15,15 @@
       document.getElementById('state-server').textContent = i.config_exists
         ? 'Set up: ' + i.config_path : 'Not set up';
       if (!i.ocr_build) {
-        for (const id of ['choice-processor', 'choice-ocr']) {
-          const el = document.getElementById(id);
-          el.removeAttribute('href');
-          el.setAttribute('aria-disabled', 'true');
-          el.style.opacity = '0.5';
-        }
+        const el = document.getElementById('choice-processor');
+        el.removeAttribute('href');
+        el.setAttribute('aria-disabled', 'true');
+        el.style.opacity = '0.5';
         document.getElementById('state-processor').textContent = 'Needs the full build';
-        document.getElementById('state-ocr').textContent = 'Needs the full build (this is lite)';
       } else {
         document.getElementById('state-processor').textContent = i.processor_config_exists
           ? 'Set up: ' + i.processor_config : 'Not set up';
-        document.getElementById('state-ocr').textContent = 'Installs into ' + i.server_storage + ' or ' + i.processor_storage;
       }
-      document.getElementById('state-startup').textContent = 'As ' + i.service_describe;
 
       const r = await get('/app/api/instances');
       const items = [];

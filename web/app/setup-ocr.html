@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="/app/app.css">
 </head>
 <body>
-    <header class="mokuro-header" id="app-header" data-current="setup"></header>
+    <header class="mokuro-header" id="app-header" data-current="settings"></header>
     <main class="app-main app-main--narrow">
         <h1 class="page-title">OCR on this machine</h1>
         <p class="page-lede">Installs the OCR backend pack that fits this machine's GPU (or the CPU) and downloads the models (<code>mokuro-bunko install-ocr</code>), then checks everything (<code>doctor</code>).</p>
@@ -53,7 +53,7 @@
                     <label class="check"><input type="checkbox" id="force"> Reinstall even if the pack is already there</label>
                     <label class="check"><input type="checkbox" id="no-models"> Only the pack, not the models</label>
                 </details>
-                <div class="wizard-actions"><a class="btn btn--ghost" href="/app/setup">Back</a><span class="spacer"></span><button type="button" class="btn btn--primary" id="install-btn">Install</button></div>
+                <div class="wizard-actions"><a class="btn btn--ghost" href="/app/settings/ocr">Back</a><span class="spacer"></span><button type="button" class="btn btn--primary" id="install-btn">Install</button></div>
                 <p class="form-error" id="err-install" role="alert" hidden></p>
             </section>
 

@@ -11,26 +11,19 @@
     <header class="mokuro-header" id="app-header" data-current="setup"></header>
     <main class="app-main">
         <h1 class="page-title">Set up this machine</h1>
-        <p class="page-lede">Choose a role first. A machine can be both: a library server that also reads its own volumes, or a library elsewhere plus a processor here.</p>
-        <div class="choice-grid">
+        <p class="page-lede">What should it do?</p>
+        <div class="choice-grid choice-grid--two">
             <a class="choice" href="/app/setup/server">
-                <span class="choice__title">1. Library server</span>
-                <span class="choice__text">Library folder, address, the admin account, remote access, OCR on this machine.</span>
+                <span class="choice__title">Library server</span>
+                <span class="choice__text">Keep the manga library here and serve it to readers.</span>
             </a>
             <a class="choice" href="/app/setup/processor" data-ocr>
-                <span class="choice__title">2. Processor</span>
-                <span class="choice__text">Connect this machine to a library as an OCR processor: address, login, connection test, name, sessions.</span>
-            </a>
-            <a class="choice" href="/app/setup/ocr" data-ocr>
-                <span class="choice__title">3. OCR install</span>
-                <span class="choice__text">Detect the GPU, install the matching backend pack and the models, check everything.</span>
-            </a>
-            <a class="choice" href="/app/setup/startup">
-                <span class="choice__title">4. Start with the machine</span>
-                <span class="choice__text">A user service (systemd, launchd or the Startup folder) for the server or the processor.</span>
+                <span class="choice__title">Processor</span>
+                <span class="choice__text">Read the text of volumes for a library on another machine.</span>
             </a>
         </div>
-        <p class="cli-hint mt-4">Every step has a command-line twin: <code>mokuro-bunko setup</code>, <code>processor setup</code>, <code>install-ocr</code>, <code>processor service --install</code>.</p>
+        <p class="form-hint mt-4">Need both? Set up one, then add the other from <a href="/app/settings">Settings</a>.</p>
+        <p class="cli-hint">Command line: <code>mokuro-bunko setup</code>, <code>mokuro-bunko processor setup</code>.</p>
     </main>
     <script src="/app/app.js"></script>
     <script src="/app/setup.js"></script>
