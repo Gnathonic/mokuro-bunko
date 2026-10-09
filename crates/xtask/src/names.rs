@@ -177,14 +177,35 @@ pub fn strip_v(version: &str) -> &str {
 
 /// Split `mokuro-bunko-<version>-<target>-<flavor>.<ext>` back into `(target, flavor)`.
 pub fn parse_archive_name<'a>(file: &'a str, version: &str) -> Option<(&'a str, &'a str)> {
-    let rest = file
+    let stem = file
+        .strip_suffix(".tar.gz")
+        .or_else(|| file.strip_suffix(".zip"))?;
+    let (target, flavor) = parse_stem(stem, version)?;
+    if archive_ext(target) != &file[file.len() - archive_ext(target).len()..] {
+        return None;
+    }
+    Some((target, flavor))
+}
+
+/// Split a macOS disk image name into `(target, flavor)` (Apple targets only). The disk
+/// image made from an archive (`packaging/macos/make-dmg.sh`, release-build.yml) is named
+/// like it with `.dmg`: `mokuro-bunko-<version>-<target>-<flavor>.dmg`. It is a release
+/// asset listed in `SHA256SUMS`, never a `release.json` artifact (the updater takes the
+/// `.tar.gz`).
+pub fn parse_dmg_name<'a>(file: &'a str, version: &str) -> Option<(&'a str, &'a str)> {
+    let (target, flavor) = parse_stem(file.strip_suffix(".dmg")?, version)?;
+    target
+        .ends_with("-apple-darwin")
+        .then_some((target, flavor))
+}
+
+/// `mokuro-bunko-<version>-<target>-<flavor>` → `(target, flavor)`.
+fn parse_stem<'a>(stem: &'a str, version: &str) -> Option<(&'a str, &'a str)> {
+    let stem = stem
         .strip_prefix(BIN)?
         .strip_prefix('-')?
         .strip_prefix(strip_v(version))?
         .strip_prefix('-')?;
-    let stem = rest
-        .strip_suffix(".tar.gz")
-        .or_else(|| rest.strip_suffix(".zip"))?;
     // The flavor is the part after the target triple: `lite`, `full` or `full-<ep>`.
     let (target, flavor) = if let Some(i) = stem.rfind("-full-") {
         (&stem[..i], &stem[i + 1..])
@@ -195,9 +216,7 @@ pub fn parse_archive_name<'a>(file: &'a str, version: &str) -> Option<(&'a str, 
     if !matches!(flavor, "lite" | "full") && !flavor.starts_with("full-") {
         return None;
     }
-    if target.split('-').count() < 3
-        || archive_ext(target) != &file[file.len() - archive_ext(target).len()..]
-    {
+    if target.split('-').count() < 3 {
         return None;
     }
     Some((target, flavor))
@@ -271,6 +290,41 @@ mod tests {
             None
         );
         assert_eq!(parse_archive_name("release.json", "0.7.0"), None);
+    }
+
+    #[test]
+    fn dmg_names() {
+        let b = Build::new("aarch64-apple-darwin", Flavor::Full, None).unwrap();
+        let name = format!("{}.dmg", b.archive_stem("v0.7.0-beta.1"));
+        assert_eq!(
+            name,
+            "mokuro-bunko-0.7.0-beta.1-aarch64-apple-darwin-full.dmg"
+        );
+        assert_eq!(
+            parse_dmg_name(&name, "0.7.0-beta.1"),
+            Some(("aarch64-apple-darwin", "full"))
+        );
+        // Never an updater artifact.
+        assert_eq!(parse_archive_name(&name, "0.7.0-beta.1"), None);
+        let b = Build::new("x86_64-apple-darwin", Flavor::Lite, None).unwrap();
+        assert_eq!(
+            parse_dmg_name(&format!("{}.dmg", b.archive_stem("0.7.0")), "0.7.0"),
+            Some(("x86_64-apple-darwin", "lite"))
+        );
+        assert_eq!(
+            parse_dmg_name(
+                "mokuro-bunko-0.7.0-x86_64-pc-windows-msvc-full.dmg",
+                "0.7.0"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_dmg_name(
+                "mokuro-bunko-0.7.0-aarch64-apple-darwin-full.tar.gz",
+                "0.7.0"
+            ),
+            None
+        );
     }
 
     #[test]

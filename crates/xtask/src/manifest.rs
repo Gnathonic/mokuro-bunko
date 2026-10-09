@@ -254,7 +254,27 @@ pub fn to_bytes(m: &Manifest) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// `SHA256SUMS`: every archive and pack part of the manifest, plus the release assets
+/// that are not in it: the macOS disk images (`<archive stem>.dmg`).
 fn write_sha256sums(dir: &Path, m: &Manifest) -> Result<()> {
+    let mut extra = Vec::new();
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if names::parse_dmg_name(&name, &m.version).is_some() {
+            let (sha256, size) = util::sha256_file(&path)?;
+            eprintln!("    {name}: {size} bytes  {sha256} (SHA256SUMS only)");
+            extra.push(format!("{sha256}  {name}"));
+        }
+    }
     let mut lines: Vec<String> = m
         .artifacts
         .values()
@@ -279,6 +299,7 @@ fn write_sha256sums(dir: &Path, m: &Manifest) -> Result<()> {
                     )
                 }),
         )
+        .chain(extra)
         .collect();
     lines.sort();
     std::fs::write(dir.join("SHA256SUMS"), lines.join("\n") + "\n")?;
@@ -326,8 +347,25 @@ mod tests {
             docker_flavors: vec!["lite".into(), "full".into(), "full-cuda".into()],
             out: None,
         };
+        // A disk image: in SHA256SUMS, not in release.json.
+        std::fs::write(
+            dir.path()
+                .join("mokuro-bunko-0.7.0-aarch64-apple-darwin-full.dmg"),
+            b"dmg",
+        )
+        .unwrap();
         let m = build_manifest(&args, "0.7.0", "https://example.test/dl").unwrap();
         assert_eq!(m.artifacts.len(), 2);
+        assert!(m.artifact("aarch64-apple-darwin", "full").is_err());
+        write_sha256sums(dir.path(), &m).unwrap();
+        let sums = std::fs::read_to_string(dir.path().join("SHA256SUMS")).unwrap();
+        let names: Vec<&str> = sums
+            .lines()
+            .map(|l| l.split_once("  ").unwrap().1)
+            .collect();
+        assert_eq!(names.len(), 3, "{sums}");
+        assert!(names.contains(&"mokuro-bunko-0.7.0-aarch64-apple-darwin-full.dmg"));
+        assert!(names.contains(&"mokuro-bunko-0.7.0-x86_64-unknown-linux-musl-lite.tar.gz"));
         let lite = m.artifact("x86_64-unknown-linux-musl", "lite").unwrap();
         assert_eq!(
             lite.url,

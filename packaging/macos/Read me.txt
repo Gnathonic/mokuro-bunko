@@ -1,4 +1,4 @@
-Mokuro Bunko @VERSION@ for macOS (Apple silicon)
+Mokuro Bunko @VERSION@ for macOS (@ARCH@)
 ================================================
 
 Install
@@ -7,15 +7,25 @@ Drag "Mokuro Bunko" onto the Applications folder in this window, then open it
 from Applications (or Launchpad). A book icon appears in the menu bar; there is
 no Dock icon. The first time, the setup wizard opens in your browser.
 
+@IF_FULL@
 The wizard sets up a library server (folder, port, admin account), or a
 processor that does OCR for a library on another machine, or both. It can also
 start everything when you log in.
+@END@
+@IF_LITE@
+This is the lite build: a library server without local OCR. The wizard sets it
+up (folder, port, admin account) and can start it when you log in. OCR for its
+library comes from a processor on another machine (the full build for Linux,
+Windows or a Mac with Apple silicon).
+@END@
 @IF_DOWNLOAD@
+
 Its OCR step detects this Mac's hardware and downloads the OCR backend and the
 models of the OCR engines you turn on (a few hundred MB), checked against the
 signed release.
 @END@
 @IF_BUNDLED@
+
 Its OCR step installs from the files that come with the app: nothing is
 downloaded, just click Install.
 @END@
@@ -42,25 +52,35 @@ To type just `mokuro-bunko`, link it into a folder on your PATH, for example:
 
 Where things are
 ----------------
+@IF_FULL@
   ~/.local/share/mokuro-bunko/     library, database, logs, OCR backend and models
+@END@
+@IF_LITE@
+  ~/.local/share/mokuro-bunko/     library, database, logs
+@END@
   ~/.config/mokuro-bunko/          config.yaml, processor.yaml, tray.json
   ~/Library/LaunchAgents/io.github.gnathonic.mokuro-bunko*.plist
                                    start-at-login entries
 
 Uninstall: choose Quit in the menu-bar menu, then move the app to the Trash. To
 remove your data too, delete the two folders and the LaunchAgents files above.
-
 @IF_DOWNLOAD@
+
 OCR runs on the CPU backend (libtorch), downloaded by the OCR step, with
 hayai-nova compiled for Apple silicon and the PP-OCR manga detector. Measured on
 an M2 Pro: a 20-page volume in 36 seconds (about 0.55 pages per second).
 @END@
 @IF_BUNDLED@
+
 OCR in this package: the CPU backend (libtorch) and the hayai-nova model
 compiled for Apple silicon, plus the PP-OCR manga detector. Measured on an
 M2 Pro: a 20-page volume in 36 seconds (about 0.55 pages per second).
 @END@
+@IF_PRERELEASE@
 
 This is a pre-release (@VERSION@): "Check for updates" finds nothing until a
-release is published. Licences: LICENSE and THIRD-PARTY-LICENSES.md in
+release is published.
+@END@
+
+Licences: LICENSE and THIRD-PARTY-LICENSES.md in
 Mokuro Bunko.app/Contents/Resources.

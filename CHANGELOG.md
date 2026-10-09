@@ -16,9 +16,11 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
   Linux) or the CPU (all platforms) — and the packages for the GPU, verified
   against the signed release manifest.
 - Release packages: Linux x86_64 full (glibc 2.28+) and static lite (x86_64,
-  arm64), Windows x86_64 zip with a portable mode, macOS on Apple silicon, and
-  Docker images `:latest` (local OCR; the backend for the container's GPU is
-  downloaded on first start) and `:latest-lite` (amd64 + arm64).
+  arm64), Windows x86_64 zip with a portable mode, macOS on Apple silicon (lite
+  also for Intel Macs) as a drag-to-Applications disk image (`.dmg`) or a
+  `.tar.gz`, and Docker images `:latest` (local OCR; the backend for the
+  container's GPU is downloaded on first start) and `:latest-lite` (amd64 +
+  arm64).
 - `scripts/install.sh` and `scripts/install.ps1` install a release, checking its
   signed manifest and sha256.
 - One-click updates: the admin panel's Updates card checks for new releases
