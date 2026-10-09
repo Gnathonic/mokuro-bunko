@@ -124,7 +124,7 @@ jobs:
         run: |
           python -m torch_export.verify "$env:GITHUB_WORKSPACE\out" $env:ENGINE $env:PREC $env:TARGET --device cpu --bench 20 |
             Tee-Object -FilePath "$env:GITHUB_WORKSPACE\out\$env:ENGINE\$env:PREC\$env:TARGET\verify.json"
-          if ($LASTEXITCODE) { throw "verify failed" }
+          if ($LASTEXITCODE) { throw "verify failed (exit code $LASTEXITCODE)" }
       - name: Build the embedded layout for comparison (TORCH_EXPORT_CPU_EMBED=1)
         if: inputs.compare_embedded
         working-directory: tools/torch_export
@@ -140,10 +140,10 @@ jobs:
           foreach ($i in 1..2) {
             python -m torch_export.verify "$env:GITHUB_WORKSPACE\out-embed" $env:ENGINE $env:PREC $env:TARGET --device cpu --bench 20 |
               Tee-Object -FilePath "$d\verify-embedded-$i.json"
-            if ($LASTEXITCODE) { throw "verify (embedded) failed" }
+            if ($LASTEXITCODE) { throw "verify (embedded) failed (exit code $LASTEXITCODE)" }
             python -m torch_export.verify "$env:GITHUB_WORKSPACE\out" $env:ENGINE $env:PREC $env:TARGET --device cpu --bench 20 |
               Tee-Object -FilePath "$d\verify-weightless-$i.json"
-            if ($LASTEXITCODE) { throw "verify (weightless) failed" }
+            if ($LASTEXITCODE) { throw "verify (weightless) failed (exit code $LASTEXITCODE)" }
           }
           Get-ChildItem -Recurse "$env:GITHUB_WORKSPACE\out-embed\$env:ENGINE\$env:PREC\$env:TARGET" -Filter *.pt2 |
             Select-Object Name, Length | Format-Table | Out-String | Tee-Object -FilePath "$d\embedded-sizes.txt"

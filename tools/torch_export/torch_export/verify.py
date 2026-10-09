@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -134,9 +135,15 @@ def main(argv=None) -> int:
     extra = {"load_s": round(load_s, 2), "weights": len(weights)}
     if a.bench:
         extra["peak_rss_mb"] = peak_rss_mb()
-    print(json.dumps({**res, **extra}))
+    print(json.dumps({**res, **extra}), flush=True)
     return 0 if all(r["ids_equal"] for r in res.values()) else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    if sys.platform == "win32":
+        # skip interpreter teardown: the AOTI loaders' destructors (removing their temp
+        # dirs while the model DLLs are still mapped) can fail the exit code on Windows
+        sys.stderr.flush()
+        os._exit(rc)
+    sys.exit(rc)
