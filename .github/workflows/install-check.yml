@@ -1,0 +1,67 @@
+# Install a PUBLISHED release the way a user would, on a clean runner, and check that it
+# runs. Windows: scripts/install.ps1 (portable: everything under the runner's temp
+# folder), then `--version`, `doctor`, `install-ocr --backend cpu` (the backend pack and
+# models come from the GitHub releases) and `models verify`. Uses no secret and writes
+# nothing to the repository.
+#
+#   gh workflow run install-check.yml --ref <branch> -f version=0.7.0-beta.1
+name: Install check
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published release to install, e.g. 0.7.0-beta.1"
+        required: true
+        type: string
+  # Only so the workflow is registered and can be dispatched from a branch before it is
+  # on the default branch: on a push the job is skipped.
+  push:
+    paths: [.github/workflows/install-check.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.ps1 -Version (portable, no shortcuts, not started)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "mokuro-bunko"
+          "INSTALL_DIR=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          ./scripts/install.ps1 -Version $env:VERSION -Flavor full -InstallDir $dir -Portable -NoShortcut -NonInteractive
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (Test-Path (Join-Path $dir "PORTABLE.txt"))) { throw "not a portable install" }
+      - name: --version is the release
+        shell: pwsh
+        run: |
+          $v = & "$env:INSTALL_DIR\mokuro-bunko.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Write-Host $v
+          if ($v -notmatch [regex]::Escape($env:VERSION)) { throw "--version printed '$v', not $env:VERSION" }
+      - name: doctor (before the OCR install; a missing backend may be reported)
+        shell: pwsh
+        run: |
+          & "$env:INSTALL_DIR\mokuro-bunko.exe" doctor
+          Write-Host "doctor exit code: $LASTEXITCODE"
+          exit 0
+      - name: install-ocr --backend cpu (from the GitHub releases)
+        shell: pwsh
+        run: |
+          & "$env:INSTALL_DIR\mokuro-bunko.exe" install-ocr --backend cpu
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: models verify, doctor again
+        shell: pwsh
+        run: |
+          & "$env:INSTALL_DIR\mokuro-bunko.exe" models verify
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$env:INSTALL_DIR\mokuro-bunko.exe" doctor
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem -Recurse "$env:INSTALL_DIR\data" -Depth 2 | Select-Object FullName, Length | Format-Table -AutoSize
