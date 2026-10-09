@@ -49,7 +49,7 @@ jobs:
       - name: validate tag
         run: |
           printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "bad tag: $TAG"; exit 1; }
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ env.TAG }}
       - id: v
@@ -105,24 +105,24 @@ jobs:
       IMAGE: ${{ needs.prepare.outputs.image }}
       SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: pack-*
           path: dist
           merge-multiple: true
       # Kept out of dist/: the APK is a release asset, not a release.json artifact.
       - if: vars.BUILD_ANDROID == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: android-apk
           path: dist-android

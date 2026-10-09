@@ -30,7 +30,7 @@ jobs:
     env:
       VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: install.ps1 -Version (portable, no shortcuts, not started)
         shell: pwsh
         run: |

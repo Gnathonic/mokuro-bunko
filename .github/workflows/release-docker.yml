@@ -39,7 +39,7 @@ jobs:
       VERSION: ${{ inputs.version }}
       IMAGE: ${{ inputs.image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
@@ -50,13 +50,13 @@ jobs:
         with:
           tool: cargo-zigbuild
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: dist-linux-*
           path: dist
           merge-multiple: true
       # The static x86_64 server of the lite image (not a release file).
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: docker-linux-*
           path: dist
@@ -68,16 +68,16 @@ jobs:
       # --bake-pack here.
       - name: docker context (release binaries + bunko-init per arch)
         run: cargo run -q -p xtask --locked -- docker-context --version "$VERSION" --dir dist --out dist/docker --zig
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
       - if: inputs.push
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - name: lite (static musl on distroless)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/Dockerfile.lite
@@ -90,7 +90,7 @@ jobs:
       # One full image for CPU, NVIDIA and AMD (the pack is downloaded on first start),
       # also tagged -cuda so templates written for the 0.5.2 CUDA image keep working.
       - name: full (local OCR, backend downloaded on first start; optional nginx)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/docker/Dockerfile
