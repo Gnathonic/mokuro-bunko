@@ -42,7 +42,7 @@ jobs:
       - name: --version is the release
         shell: pwsh
         run: |
-          $v = & "$env:INSTALL_DIR\mokuro-bunko.exe" --version
+          $v = (& "$env:INSTALL_DIR\mokuro-bunko.exe" --version) -join " "
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Write-Host $v
           if ($v -notmatch [regex]::Escape($env:VERSION)) { throw "--version printed '$v', not $env:VERSION" }
@@ -57,11 +57,14 @@ jobs:
         run: |
           & "$env:INSTALL_DIR\mokuro-bunko.exe" install-ocr --backend cpu
           if ($LASTEXITCODE -ne 0) { exit 1 }
-      - name: models verify, doctor again
+      - name: doctor after the OCR install
+        shell: pwsh
+        run: |
+          & "$env:INSTALL_DIR\mokuro-bunko.exe" doctor
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: models verify
         shell: pwsh
         run: |
           & "$env:INSTALL_DIR\mokuro-bunko.exe" models verify
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          & "$env:INSTALL_DIR\mokuro-bunko.exe" doctor
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-ChildItem -Recurse "$env:INSTALL_DIR\data" -Depth 2 | Select-Object FullName, Length | Format-Table -AutoSize
