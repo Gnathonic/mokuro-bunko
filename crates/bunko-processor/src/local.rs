@@ -6,9 +6,10 @@
 //! * `VolumeOp.archive` is a filesystem path. It is read in place: no download, no
 //!   verification, no spool, no `fetch` events. A path that is not a file is
 //!   returned as `volume_returned{class: "missing"}`.
-//! * The sidecar is written to `<results_dir>/<sid>/<claim>/<sidecar_name>`
-//!   (`sidecar_name` reduced to a basename) — the same `{sid}/{claim}` keying as the
-//!   remote upload path, so the server collects both the same way. `volume_done`
+//! * The sidecar is written to `<results_dir>/<sid>/<claim>/result.mokuro`
+//!   ([`bunko_proto::RESULT_FILE`], never the volume's own name) — the same
+//!   `{sid}/{claim}` keying and file name as the remote upload path, so the server
+//!   collects both the same way. `volume_done`
 //!   carries its `sidecar_sha256`. After a `volume_done` the server owns
 //!   `<results_dir>/<sid>/<claim>/` and removes it once it has collected the file;
 //!   for every other ending the processor removes it itself.
@@ -35,13 +36,12 @@ pub struct LocalConfig {
 }
 
 impl LocalConfig {
-    /// `<results_dir>/<sid>/<claim>/<sidecar_name>`: where a claim's sidecar lands.
-    pub fn sidecar_path(&self, sid: &str, claim: &str, sidecar_name: &str) -> PathBuf {
-        let base = sidecar_name
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(sidecar_name);
-        self.results_dir.join(sid).join(claim).join(base)
+    /// `<results_dir>/<sid>/<claim>/result.mokuro`: where a claim's sidecar lands.
+    pub fn result_path(&self, sid: &str, claim: &str) -> PathBuf {
+        self.results_dir
+            .join(sid)
+            .join(claim)
+            .join(bunko_proto::RESULT_FILE)
     }
 }
 

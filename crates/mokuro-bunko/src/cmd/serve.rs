@@ -6,7 +6,9 @@ use crate::cli::ServeArgs;
 use crate::out::{CmdResult, Fail};
 
 pub fn run(ctx: &Ctx, mut args: ServeArgs) -> CmdResult {
-    let mut config = cfgfile::load_effective(&ctx.config_path)?;
+    // Quiet: `serve` logs the loader's warnings itself (printing them here as well put
+    // every migration note on the console twice).
+    let mut config = cfgfile::load_effective_quiet(&ctx.config_path)?;
     // Fix over 0.5.2 (spec §4.1, Q7): a flag that was passed always wins, even when it
     // equals the built-in default; one that was not passed never touches the config.
     let overrides = [

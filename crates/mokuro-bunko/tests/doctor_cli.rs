@@ -52,6 +52,25 @@ fn healthy_storage_passes_core_checks() {
     assert!(!env.storage().join(".mokuro-doctor-probe").exists());
 }
 
+/// Regression (upgrade test): with `ocr.local_processing` off, the full build's doctor
+/// told the owner to run `install-ocr` and download models: at most an INFO line.
+#[cfg(feature = "ocr")]
+#[test]
+fn local_processing_off_needs_no_ocr_install() {
+    let env = Env::new();
+    env.write_config("server:\n  port: 0\nocr:\n  local_processing: false\n");
+    let out = env.cmd().arg("doctor").output().unwrap();
+    let s = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{s}");
+    assert!(
+        s.contains(" INFO  Local OCR: not used (ocr.local_processing is off)"),
+        "{s}"
+    );
+    for gone in ["OCR backend:", "Models:", "install-ocr", "models download"] {
+        assert!(!s.contains(gone), "{gone}: {s}");
+    }
+}
+
 #[test]
 fn missing_config_uses_defaults() {
     let env = Env::new();

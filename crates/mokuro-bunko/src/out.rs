@@ -67,6 +67,7 @@ pub enum Color {
     Red,
     Green,
     Yellow,
+    Cyan,
 }
 
 /// click.style: ANSI colour (+ bold) only when stdout is a terminal and `NO_COLOR` is unset.
@@ -78,6 +79,7 @@ pub fn style(text: &str, color: Color, bold: bool) -> String {
         Color::Red => 31,
         Color::Green => 32,
         Color::Yellow => 33,
+        Color::Cyan => 36,
     };
     if bold {
         format!("\x1b[{code};1m{text}\x1b[0m")

@@ -178,7 +178,10 @@ fn walk(dir: &Path, keep: &mut dyn FnMut(&Path)) {
 pub fn thumbnail_candidates(library: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     walk(library, &mut |p| {
-        if p.extension().is_some_and(|e| e == "cbz") && needs_thumbnail(p) {
+        if p.extension()
+            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
+            && needs_thumbnail(p)
+        {
             out.push(p.to_path_buf());
         }
     });
@@ -465,6 +468,24 @@ mod tests {
         cbz(&series.join("Vol 4.cbz"), &[("p.png", &png(300, 200))]);
         assert_eq!(thumbs.scan_once(&lib, &CancellationToken::new()), 1);
         assert!(!series.join("Vol 4.webp.tmp").exists());
+    }
+
+    /// Regression (upgrade test): neither 0.5.3 nor 0.7 made a cover for `Vol.CBZ`: the
+    /// walk asked for exactly `.cbz` though every other archive check ignores case.
+    #[test]
+    fn upper_case_archives_get_covers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        let series = lib.join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        cbz(&series.join("Vol 1.CBZ"), &[("p.png", &png(20, 30))]);
+        cbz(&series.join("Vol 2.Cbz"), &[("p.png", &png(20, 30))]);
+        assert_eq!(thumbnail_candidates(&lib).len(), 2);
+        let thumbs = Thumbnails::default();
+        assert_eq!(thumbs.scan_once(&lib, &CancellationToken::new()), 2);
+        assert!(series.join("Vol 1.webp").is_file());
+        assert!(series.join("Vol 2.webp").is_file());
+        assert!(thumbnail_candidates(&lib).is_empty());
     }
 
     #[test]

@@ -309,6 +309,8 @@ pub struct Scheduler {
     /// Ended sessions per processor, for late events: sid → when.
     pub ended_sessions: HashMap<String, f64>,
     pub hold_logged: bool,
+    /// This server's own OCR has come up at least once (`LocalUp`).
+    pub local_was_up: bool,
     /// An automatic update is waiting for a quiet moment: no machine gets a new claim
     /// (`held` is true everywhere); what is in flight finishes.
     pub update_drain: bool,
@@ -378,6 +380,7 @@ impl Scheduler {
             results: HashMap::new(),
             ended_sessions: HashMap::new(),
             hold_logged: false,
+            local_was_up: false,
             update_drain: false,
             last_poll_tick: f64::NEG_INFINITY,
             scan_reset_at: f64::NEG_INFINITY,
@@ -613,9 +616,11 @@ impl Scheduler {
             return;
         }
         if self.processing_hold().is_some() {
-            if !self.hold_logged {
+            if !self.hold_logged
+                && let Some(line) = self.hold_notice()
+            {
                 self.hold_logged = true;
-                self.log("OCR is waiting for hardware: local processing is off and no processor is connected");
+                self.log(line);
             }
             return;
         }

@@ -350,13 +350,24 @@ fn canonical(value: &JsonValue) -> String {
     pyjson::dumps(value, DumpOptions::DEFAULT).unwrap()
 }
 
+/// 0.5.3's index with 0.7's one deliberate difference: `Dr Stone 03.CBZ` is an archive
+/// (`has_cbz`; 0.5.3 asked for exactly `.cbz`), so it is also waiting for a cover.
+fn expected_index_07() -> String {
+    let python = canonical(&load_json("expected/index.json"));
+    let (from, to) = (
+        r#"{"name": "Dr Stone 03", "has_cbz": false,"#,
+        r#"{"name": "Dr Stone 03", "has_cbz": true,"#,
+    );
+    assert_eq!(python.matches(from).count(), 1, "{python}");
+    let (thumbs_from, thumbs_to) = (r#""pending_thumbnails": 10"#, r#""pending_thumbnails": 11"#);
+    assert_eq!(python.matches(thumbs_from).count(), 1, "{python}");
+    python.replace(from, to).replace(thumbs_from, thumbs_to)
+}
+
 #[test]
 fn library_index_matches_python() {
     let (_temp, root) = fixture_library();
-    assert_eq!(
-        canonical(&snapshot_json(&root)),
-        canonical(&load_json("expected/index.json"))
-    );
+    assert_eq!(canonical(&snapshot_json(&root)), expected_index_07());
 }
 
 #[test]

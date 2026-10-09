@@ -173,7 +173,7 @@ Python `GET /api/stats` (always 200): `{total_users (non-deleted users), total_v
 library volumes), total_pages_read:0, total_characters_read:0, total_reading_time_seconds:0,
 total_reading_time_formatted:"0s", last_updated: <epoch int>}`; DB/index errors degrade to 0.
 Also exists (not used by JS): `GET /api/health` -> `{status:"ok"|"degraded", uptime_seconds,
-db_status, library_status, total_users, total_volumes, ocr:{backend, worker_alive, pending, failed}|null}`.
+db_status, library_status, total_users, total_volumes, ocr:{backend, worker_alive, pending, failed}|null}` (0.7 adds `ocr.queued_jobs`).
 
 ### 5.2 Login - `GET /login`
 Assets: shared.css, `/login/styles.css`, nav.js, `/login/login.js`. (Defines global `logout()`.)

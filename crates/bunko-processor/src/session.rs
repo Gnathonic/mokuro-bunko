@@ -1143,7 +1143,9 @@ impl Session {
             seq,
             archive: delivered.archive,
             meta,
-            out: claim_dir.join(&sidecar_name),
+            // Not the volume's name: a Windows processor cannot create `Who? 1.mokuro`
+            // or `CON.mokuro`. The name goes with the upload, never onto this disk.
+            out: claim_dir.join(bunko_proto::RESULT_FILE),
         };
         if jobs.send(job).is_ok() {
             intake.next_seq += 1;

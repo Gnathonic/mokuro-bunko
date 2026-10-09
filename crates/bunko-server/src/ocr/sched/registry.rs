@@ -593,6 +593,7 @@ impl Scheduler {
             update: None,
         };
         self.machines.shift_insert(0, LOCAL.into(), machine);
+        self.local_was_up = true;
         self.rebuild_lanes();
         self.bump();
         self.maybe_start_scan();

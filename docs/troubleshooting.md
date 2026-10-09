@@ -378,10 +378,12 @@ other process.
 `GET /api/health` includes an `ocr` section:
 
 ```json
-"ocr": {"backend": "cuda", "worker_alive": true, "pending": 0, "failed": 0}
+"ocr": {"backend": "cuda", "worker_alive": true, "pending": 0, "failed": 0, "queued_jobs": 0}
 ```
 
-`worker_alive: false` means the background OCR loop stopped heartbeating:
+`pending` is the number of volumes without a primary sidecar (`<Volume>.mokuro`), as
+in 0.5; `queued_jobs` counts the OCR jobs waiting, one per volume and generation
+(a volume owed two layers counts twice). `worker_alive: false` means the background OCR loop stopped heartbeating:
 restart the server and check `server.log`. With `ocr.backend: skip` (or a
 lite build) the section reads `{"backend": "skip", "worker_alive": null,
 "pending": null, "failed": 0}`: this server runs no OCR, so there is no loop

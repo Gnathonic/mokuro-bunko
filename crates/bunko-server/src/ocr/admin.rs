@@ -24,7 +24,30 @@ use crate::admin::ocr::{
 const WAIT: Duration = Duration::from_secs(10);
 pub const GEN_STATS_TTL_SECONDS: u64 = 60;
 
-static STATS: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
+/// The last stats worked out, by what they were worked out for ([`stats_key`]): a
+/// changed list of rows (or another library) is never answered with stale counts.
+static STATS: Mutex<Option<HashMap<String, (Instant, Value)>>> = Mutex::new(None);
+
+/// What the stats depend on besides the disk: the library and each row's id, name,
+/// primary, enabled and files (0.5.3 keyed its cache on the rows the same way).
+fn stats_key(ocr: &OcrControl, rows: &[Generation]) -> String {
+    let mut key = ocr.core().layout.library().display().to_string();
+    for r in rows {
+        key.push_str(&format!(
+            "\0{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
+            r.id,
+            r.name,
+            r.primary,
+            r.enabled,
+            r.files_suffix()
+        ));
+    }
+    key
+}
+
+fn cached_stats(key: &str) -> Option<(Instant, Value)> {
+    STATS.lock().as_ref().and_then(|m| m.get(key).cloned())
+}
 
 /// Every device any connected or remembered machine could place a model on.
 fn merged_devices(s: &Scheduler) -> Value {
@@ -57,10 +80,26 @@ fn ask<T: Send + 'static>(
     ocr.ask_blocking(WAIT, f)
 }
 
+/// The volumes the stats count, as 0.5.3 did (`_generation_volume_counts` over the
+/// library index): archives inside a series folder that is not hidden. A loose archive
+/// at the library root, or one under a `.folder`, is in no series the catalog shows (OCR
+/// still reads it), so it is not one of the library's volumes here.
+pub fn stats_volumes(library: &std::path::Path) -> Vec<std::path::PathBuf> {
+    super::owed::list_archives(library)
+        .into_iter()
+        .filter(|cbz| {
+            super::types::rel_of(library, cbz).is_some_and(|rel| {
+                let parts: Vec<&str> = rel.split('/').collect();
+                parts.len() > 1 && !parts[..parts.len() - 1].iter().any(|p| p.starts_with('.'))
+            })
+        })
+        .collect()
+}
+
 /// `generations/stats`: done / total / skipped per row and who wrote them.
 fn compute_stats(ocr: &OcrControl, rows: &[Generation]) -> Value {
     let library = ocr.core().layout.library();
-    let archives = super::owed::list_archives(&library);
+    let archives = stats_volumes(&library);
     let mut out = Map::new();
     let skipped: HashMap<String, Vec<String>> = ask(ocr, |s| {
         s.owed
@@ -85,7 +124,9 @@ fn compute_stats(ocr: &OcrControl, rows: &[Generation]) -> Value {
         let mut skip = 0u64;
         for cbz in &archives {
             let rel = super::types::rel_of(&library, cbz).unwrap_or_default();
-            if super::owed::row_done(cbz, row) {
+            // The row's own files: a row retired from primary left bare ones.
+            let (plain, gz) = super::owed::sidecar_paths(cbz, &row.files_suffix());
+            if plain.exists() || gz.exists() {
                 done += 1;
                 present.insert(rel.clone());
             } else if !row.primary && skipped.get(&rel).is_some_and(|g| g.contains(&row.id)) {
@@ -110,13 +151,17 @@ fn compute_stats(ocr: &OcrControl, rows: &[Generation]) -> Value {
 }
 
 fn stats(ocr: &OcrControl, config: &Config) -> Value {
-    if let Some((at, v)) = STATS.lock().clone()
+    let key = stats_key(ocr, &config.ocr.generations);
+    if let Some((at, v)) = cached_stats(&key)
         && at.elapsed().as_secs() < GEN_STATS_TTL_SECONDS
     {
         return v;
     }
     let v = compute_stats(ocr, &config.ocr.generations);
-    *STATS.lock() = Some((Instant::now(), v.clone()));
+    let mut cache = STATS.lock();
+    let map = cache.get_or_insert_with(HashMap::new);
+    map.retain(|_, (at, _)| at.elapsed().as_secs() < GEN_STATS_TTL_SECONDS);
+    map.insert(key, (Instant::now(), v.clone()));
     v
 }
 
@@ -224,7 +269,7 @@ impl OcrAdmin for OcrControl {
         let names = profiles.names();
         let saved = bunko_sched::bench_file::BenchFile::new(&storage).load();
         let history = bunko_sched::congestion::CongestionHistory::new(&storage);
-        let stats = STATS.lock().clone().map(|(_, v)| v);
+        let stats = cached_stats(&stats_key(self, &rows)).map(|(_, v)| v);
         let mut entries = Vec::new();
         for row in &rows {
             let mut e = generation_entry(row, &devices);

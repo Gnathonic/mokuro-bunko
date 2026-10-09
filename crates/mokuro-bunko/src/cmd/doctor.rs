@@ -21,6 +21,8 @@ const LOW_DISK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Status {
     Pass,
+    /// Worth knowing, nothing to fix: not counted as a warning.
+    Info,
     Warn,
     Fail,
 }
@@ -39,6 +41,16 @@ impl Check {
     fn pass(label: &'static str, detail: impl Into<String>) -> Check {
         Check {
             status: Status::Pass,
+            label,
+            detail: detail.into(),
+            hint: None,
+            needs_you: false,
+        }
+    }
+    #[cfg_attr(not(feature = "ocr"), allow(dead_code))]
+    fn info(label: &'static str, detail: impl Into<String>) -> Check {
+        Check {
+            status: Status::Info,
             label,
             detail: detail.into(),
             hint: None,
@@ -121,11 +133,7 @@ pub fn run(ctx: &Ctx, processor: bool) -> CmdResult {
                 library: Some(config.clone()),
                 reason: String::new(),
             };
-            results.push(check_backend(&target));
-            results.push(check_models(&config.storage.layout().models(), ""));
-            if let Some(c) = check_packages(&target, config) {
-                results.push(c);
-            }
+            results.extend(library_ocr_checks(&target, config));
             if let Some(p) = crate::machine::find_processor_config() {
                 results.push(Check::pass(
                     "Processor",
@@ -185,7 +193,11 @@ fn processor_checks(ctx: &Ctx, flag: bool) -> Vec<Check> {
         ),
     });
     results.push(check_backend(&target));
-    results.push(check_models(&target.models_dir(), " --processor"));
+    results.push(check_models(
+        &target.models_dir(),
+        &super::models::planned_ids(&super::models::wanted_rows(&target, None), false),
+        " --processor",
+    ));
     if let Some(c) = check_packages(&target, &bunko_core::Config::default()) {
         results.push(c);
     }
@@ -200,6 +212,7 @@ fn report(results: &[Check]) -> CmdResult {
     for r in results {
         let (word, color) = match r.status {
             Status::Pass => ("PASS", Color::Green),
+            Status::Info => ("INFO", Color::Cyan),
             Status::Warn => ("WARN", Color::Yellow),
             Status::Fail => ("FAIL", Color::Red),
         };
@@ -209,7 +222,7 @@ fn report(results: &[Check]) -> CmdResult {
             r.label,
             r.detail
         );
-        if let (Some(hint), false) = (&r.hint, r.status == Status::Pass) {
+        if let (Some(hint), false) = (&r.hint, matches!(r.status, Status::Pass | Status::Info)) {
             println!("        -> {hint}");
         }
     }
@@ -330,6 +343,36 @@ fn check_onnx_runtime() -> Check {
             Some("Local OCR is unavailable; remote processors still work. Reinstall this build or use the lite build.".into()),
         ),
     }
+}
+
+/// The library's own OCR: the backend pack, the models and compiled packages its enabled
+/// generations need. With `ocr.local_processing` off (or `ocr.backend: skip`) this
+/// server runs no OCR, so none of that is needed: one INFO line, no warnings.
+#[cfg(feature = "ocr")]
+fn library_ocr_checks(target: &crate::ocr_target::OcrTarget, config: &Config) -> Vec<Check> {
+    if !config.processes_locally(true) {
+        let why = if config.ocr.backend == "skip" {
+            "ocr.backend is skip"
+        } else {
+            "ocr.local_processing is off"
+        };
+        return vec![Check::info(
+            "Local OCR",
+            format!(
+                "not used ({why}): this server reads no volume itself, connected processors do; the OCR backend pack and models are only needed to turn it on"
+            ),
+        )];
+    }
+    let mut out = vec![
+        check_backend(target),
+        check_models(
+            &config.storage.layout().models(),
+            &super::models::planned_ids(&super::models::wanted_rows(target, None), false),
+            "",
+        ),
+    ];
+    out.extend(check_packages(target, config));
+    out
 }
 
 /// The OCR backend pack for this machine (install-ocr): present, complete, host
@@ -562,14 +605,15 @@ fn check_packages(
     })
 }
 
+/// The model files `ids` (what `models download` fetches for this machine: PP-OCR and
+/// the fp32 sets of the engines the enabled generations use, every engine on a
+/// processor) in the store (and `MOKURO_MODELS_DIR`); missing files are fetched when a
+/// session first needs them.
 #[cfg(feature = "ocr")]
-fn check_models(models_dir: &Path, flag: &str) -> Check {
-    // What the engines would use: the store (and `MOKURO_MODELS_DIR`), PP-OCR plus every
-    // engine's fp32 set; missing files are fetched when a session first needs them.
+fn check_models(models_dir: &Path, ids: &[&str], flag: &str) -> Check {
     let config =
         bunko_engines::EngineConfig::new(models_dir.to_path_buf(), bunko_engines::Backend::Auto);
     let store = config.store();
-    let ids = bunko_engines::models::download_plan(None, false);
     let missing: Vec<&str> = ids
         .iter()
         .copied()
@@ -680,7 +724,7 @@ pub fn backend_problem(target: &crate::ocr_target::OcrTarget) -> Option<bunko_co
 
 fn as_problem(c: Check) -> Option<bunko_control::Problem> {
     let severity = match c.status {
-        Status::Pass => return None,
+        Status::Pass | Status::Info => return None,
         _ if c.needs_you => bunko_control::Severity::Fail,
         Status::Warn => bunko_control::Severity::Warn,
         Status::Fail => bunko_control::Severity::Fail,
@@ -801,5 +845,107 @@ mod tray_lib_tests {
         let c = tray_libs_check(&|l| l == "libappindicator3.so.1");
         assert!(c.detail.contains("GTK 3"));
         assert!(c.hint.unwrap().contains("pacman -S gtk3"));
+    }
+}
+
+#[cfg(all(test, feature = "ocr"))]
+mod library_ocr_tests {
+    use super::*;
+    use crate::ocr_target::{OcrTarget, Role};
+    use bunko_engines::models;
+
+    fn target(storage: &Path, config: &Config) -> OcrTarget {
+        OcrTarget {
+            role: Role::Library,
+            storage: storage.to_path_buf(),
+            processor_config: None,
+            library: Some(config.clone()),
+            reason: String::new(),
+        }
+    }
+
+    /// Regression (upgrade test): with `ocr.local_processing` off, the full build's doctor
+    /// still said to run `install-ocr` and download models. Nothing here needs them.
+    #[test]
+    fn local_ocr_off_is_one_info_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.storage.base_path = dir.path().to_path_buf();
+        config.ocr.local_processing = false;
+        let checks = library_ocr_checks(&target(dir.path(), &config), &config);
+        assert_eq!(checks.len(), 1);
+        assert!(checks[0].status == Status::Info);
+        assert_eq!(checks[0].label, "Local OCR");
+        assert!(checks[0].detail.contains("ocr.local_processing is off"));
+        assert!(checks[0].hint.is_none());
+        assert!(
+            as_problem(library_ocr_checks(&target(dir.path(), &config), &config).remove(0))
+                .is_none()
+        );
+        config.ocr.local_processing = true;
+        config.ocr.backend = "skip".into();
+        let checks = library_ocr_checks(&target(dir.path(), &config), &config);
+        assert_eq!(checks.len(), 1);
+        assert!(checks[0].detail.contains("ocr.backend is skip"));
+        // On: the backend pack and the models are checked (and missing here).
+        config.ocr.backend = "auto".into();
+        let checks = library_ocr_checks(&target(dir.path(), &config), &config);
+        let labels: Vec<&str> = checks.iter().map(|c| c.label).collect();
+        assert_eq!(&labels[..2], ["OCR backend", "Models"]);
+        assert!(checks.iter().all(|c| c.status != Status::Info));
+    }
+
+    /// Regression (upgrade test): after a clean install, doctor warned that paddle-manga's
+    /// files were not downloaded although no enabled generation uses paddle-manga.
+    #[test]
+    fn models_are_checked_for_the_enabled_generations_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.storage.base_path = dir.path().to_path_buf();
+        let paddle_only: Vec<&str> = models::download_plan(Some(models::PADDLE), false)
+            .into_iter()
+            .filter(|id| !models::download_plan(Some(models::HAYAI), false).contains(id))
+            .collect();
+        assert!(!paddle_only.is_empty());
+        let t = target(dir.path(), &config);
+        let ids =
+            super::super::models::planned_ids(&super::super::models::wanted_rows(&t, None), false);
+        assert!(ids.iter().all(|id| !paddle_only.contains(id)), "{ids:?}");
+        let mut want = models::download_plan(Some(models::PPOCR), false);
+        for id in models::download_plan(Some(models::HAYAI), false) {
+            if !want.contains(&id) {
+                want.push(id);
+            }
+        }
+        want.sort();
+        let mut got = ids.clone();
+        got.sort();
+        assert_eq!(got, want);
+        // The models row counts exactly those files (unless MOKURO_MODELS_DIR has them).
+        let c = check_models(dir.path(), &ids, "");
+        assert!(
+            c.status == Status::Pass || c.detail.contains(&format!(" of {} files", ids.len())),
+            "{}",
+            c.detail
+        );
+        // Enabled, paddle-manga's files are wanted too.
+        let rows = bunko_core::generations::parse_generation_list(&serde_json::json!([
+            {"name": "hayai", "engine": "hayai-nova", "primary": true},
+            {"name": "paddle", "engine": "paddle-manga", "primary": false}
+        ]))
+        .unwrap()
+        .rows;
+        config.ocr.generations = rows;
+        let ids = super::super::models::planned_ids(
+            &super::super::models::wanted_rows(&target(dir.path(), &config), None),
+            false,
+        );
+        assert!(paddle_only.iter().all(|id| ids.contains(id)));
+        // A processor runs whatever its library asks for: every engine.
+        let mut p = target(dir.path(), &Config::default());
+        p.role = Role::Processor;
+        let ids =
+            super::super::models::planned_ids(&super::super::models::wanted_rows(&p, None), false);
+        assert!(paddle_only.iter().all(|id| ids.contains(id)));
     }
 }

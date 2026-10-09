@@ -28,6 +28,45 @@ fn nothing_runs_without_a_processor() {
     assert_eq!(h.s.queue_hold(), Some("no-processor"));
 }
 
+/// Regression (upgrade test): with `local_processing` on, the server logged "OCR is
+/// waiting for hardware: local processing is off and no processor is connected" at
+/// startup, about 30 ms before its own OCR came up. That wait is no wait.
+#[test]
+fn no_hold_line_while_this_servers_ocr_starts() {
+    let mut h = harness(vec![primary()]);
+    h.s.settings.local_processing = true;
+    h.add("A/V1.cbz", 3);
+    h.at(0.0);
+    assert!(h.s.processing_hold().is_some(), "held until it is up");
+    assert_eq!(h.s.hold_notice(), None);
+    assert!(!h.s.hold_logged, "nothing was logged");
+    let _ops = local_up(&mut h, &["fp32"]);
+    assert!(h.s.processing_hold().is_none());
+    // It went away: now the wait is real, and says what it is.
+    h.s.handle(Msg::Drop {
+        pid: "local".into(),
+        reason: "the local processor stopped".into(),
+    });
+    h.at(31.0);
+    assert!(h.s.processing_hold().is_some());
+    assert_eq!(
+        h.s.hold_notice(),
+        Some(
+            "OCR is waiting for hardware: this server's OCR stopped and no processor is connected"
+        )
+    );
+    assert!(h.s.hold_logged);
+    // Off: the wait is the owner's choice, said once.
+    let mut off = harness(vec![primary()]);
+    off.add("A/V1.cbz", 3);
+    off.at(0.0);
+    assert_eq!(
+        off.s.hold_notice(),
+        Some("OCR is waiting for hardware: local processing is off and no processor is connected")
+    );
+    assert!(off.s.hold_logged);
+}
+
 #[test]
 fn claim_order_round_robin_and_lookahead() {
     let mut h = harness(vec![primary()]);

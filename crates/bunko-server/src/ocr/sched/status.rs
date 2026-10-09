@@ -53,6 +53,24 @@ impl Scheduler {
         Some(Value::Object(hold))
     }
 
+    /// The line the log gets once when OCR starts waiting for hardware, or None while
+    /// this server's own OCR is still starting: with `local_processing` on, the scheduler
+    /// runs (and walks the library) a moment before the local processor is up, and that
+    /// is no wait worth a line (a local processor that cannot start says why itself).
+    pub fn hold_notice(&self) -> Option<&'static str> {
+        if !self.settings.local_processing {
+            Some(
+                "OCR is waiting for hardware: local processing is off and no processor is connected",
+            )
+        } else if self.local_was_up {
+            Some(
+                "OCR is waiting for hardware: this server's OCR stopped and no processor is connected",
+            )
+        } else {
+            None
+        }
+    }
+
     /// `_every_machine_held()`: held = a hold, or (remote) an open breaker.
     pub fn every_machine_held(&self) -> bool {
         let mut seen = false;
