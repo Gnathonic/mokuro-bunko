@@ -66,7 +66,8 @@ def build_manifest(out: Path, tag: str, base_url: str | None = None, flat_dir: P
                           "sha256": digest, "licence": lic, "sources": srcs, "export_tool_version": rec["tool"],
                           "kind": "aoti-weights", "role": "weights-" + wname.split("-", 1)[1].split(".")[0],
                           "precision": prec, "id": f"torch/{eng}/{prec}/{wname}", "path": f"torch/{eng}/{prec}/{wname}",
-                          "torch": rec["torch"], "io": rec["io"]})
+                          # shared by every target (cpu, cu130, rocm7.1 builds): no variant
+                          "torch": rec["torch"].split("+")[0], "io": rec["io"]})
         for role, g in rec["graphs"].items():
             p = tdir / g["file"]
             seen.add(p)

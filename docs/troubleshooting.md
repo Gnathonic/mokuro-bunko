@@ -194,7 +194,11 @@ device type (e.g. `linux-cuda-sm_89`, `linux-rocm-gfx1201`,
 
 - **`NOT DOWNLOADED: hayai-nova bf16 on gpu:0 (...)`**: the package an enabled
   generation needs is not on disk yet. OCR would download it on first use;
-  `mokuro-bunko models download` fetches it now.
+  `mokuro-bunko models download` fetches it now. A package counts as on disk
+  only with the weights it binds: `weights-vision.safetensors` and
+  `weights-decoder.safetensors` in its engine/precision folder, shared by every
+  package (GPU and CPU) of that engine and precision. If only those are named,
+  they were deleted or never fetched; `models download` gets them.
 - **`NOT RUNNABLE HERE: ...`**: no device here can run that row, e.g. a forced
   precision the hardware lacks, or an x86_64 CPU without AVX2 and FMA (the CPU
   packages are built for x86-64-v3). If no pack is installed, run
@@ -245,7 +249,8 @@ exits non-zero when anything failed. If it fails:
 
 - check the machine can reach the internet (GitHub release assets and, for
   upstream files, Hugging Face), and that the disk has room (hayai-nova about
-  0.5 GB per precision, paddle-manga about 2 GB per precision);
+  0.6 GB in fp32 and 0.3 GB in bf16/fp16; paddle-manga, on a GPU only, about
+  3.6 GB in fp32 and 1.8 GB in bf16/fp16);
 - **"no compiled <engine> <precision> package for this device (looked for
   ...)"**: the release has no package for this device type; see
   ["Compiled packages" FAIL](#doctor-compiled-packages-fail) above;

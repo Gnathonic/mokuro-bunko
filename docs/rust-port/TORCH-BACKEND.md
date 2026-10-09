@@ -70,16 +70,18 @@ for that device (CPU ppocr-manga still works) and says why — as 0.5.2 did with
 AOTInductor `.pt2` per engine × precision × **target**, weights shared:
 
     <storage>/models/torch/<engine>/<precision>/
-        weights-vision.safetensors      every GPU target's vision graph binds these
+        weights-vision.safetensors      every target's vision graph binds these (GPU and CPU)
         weights-decoder.safetensors     prefill + step (+ paddle's input embeddings)
-        <target>/{vision,prefill,step}.pt2   code only for GPU targets (3-10 MB each)
+        <target>/{vision,prefill,step}.pt2   code only (1-10 MB each)
 
 `target` = `<os>-<backend>-<arch>`: `linux-cuda-sm_75` (Turing: fp32/fp16), `linux-cuda-sm_80`
 (Ampere and newer), `linux-rocm-gfx1030` (RDNA2, incl. gfx1031/1032 via
 `HSA_OVERRIDE_GFX_VERSION=10.3.0`), `linux-rocm-gfx1201` (RDNA4; gfx110x/gfx1200 build the same
 way, untested: no card), `linux-cpu-x86_64-v3` (fp32), `linux-cpu-x86_64-v4bf16` (bf16,
-AVX512_BF16 hosts), `windows-cuda-sm_75|sm_80`, `macos-cpu-arm64`. Also built: `sm_86`,
-`sm_89`, `sm_120` (identical speed to `sm_80` on sm_86/89, see A1; not needed).
+AVX512_BF16 hosts), `windows-cuda-sm_75|sm_80`, `windows-cpu-x86_64-v3`, `macos-cpu-arm64`.
+Also built: `sm_86`, `sm_89`, `sm_120` (identical speed to `sm_80` on sm_86/89, see A1; not
+needed). CPU targets are hayai-nova only: paddle-manga is a GPU-only engine (2026-10-08, owner
+decision; a CPU read took ~1 s a crop, ~27 s a page, from a 4.65 GB package per platform).
 
 **Tool.** `python -m torch_export build -e hayai-nova -p bf16 -t linux-cuda-sm_80`; `matrix`
 (every combination, skips finished ones); `manifest` (`torch-models.json`); `check-isa`;
@@ -141,10 +143,20 @@ vs 5.97 GB with per-package weights (−0.82 GB here, −1.24 GB once the runtim
 table is counted, which the embedded layout uploaded separately). Packages: 4–5 MB per graph
 instead of 1.4–1.8 GB. (`TORCH_EXPORT_WIN_EMBED=1` rebuilds the old weights-inside layout.)
 The wrapper is renamed `*.wrapper.pyd` (the Windows loader's extension). Windows CPU packages
-are built natively on Windows with a portable MSVC (`winpatch.py` applies the shootout's inductor
-fixes in memory; built on pimax, Zen 2 AVX2-only, so the code is AVX2: 0 zmm; hayai and paddle
-fp32 match eager on pimax) and carry their weights (MSVC STL on both sides). macOS arm64 packages
-are built natively on the Mac (hayai + paddle fp32); the build rewrites the wrapper's install
+are built natively with MSVC (`winpatch.py` applies the shootout's inductor fixes in memory;
+`cpp.simdlen=256`, i.e. `/arch:AVX2`, whatever the build host has: 0 zmm), since 2026-10-08 on a
+GitHub `windows-latest` runner (`.github/workflows/torch-export-win.yml`, manual dispatch only:
+build, AVX-512 check, weights = the release's, `verify.py` against eager, optionally the
+embedded layout built and timed beside it and a generated volume read with both through the
+Rust runtime; the package is a workflow artifact, nothing is published; the runner's MSVC
+(VS 18) cannot compile torch-sys 0.26's libtch against libtorch 2.13 in either C++17 or C++20,
+so the workflow builds the backend pack's C++ with clang-cl, as the cross-built packs are).
+They are weightless
+like every other package and bind through the same C-ABI Pairs entry point. Cross-building them
+on Linux was not adopted: unlike a GPU wrapper (C shim calls only), the CPU kernels would be
+compiled by clang/MinGW with a different OpenMP runtime (libomp instead of MSVC's vcomp140,
+whose thread count the runtime sets) and checked on no Windows machine. macOS arm64 packages
+are built natively on the Mac (hayai fp32); the build rewrites the wrapper's install
 name (`@rpath/<file>`) and its libomp import (`/opt/llvm-openmp/lib/libomp.dylib` →
 `@rpath/libomp.dylib`, satisfied by libtorch's libomp), drops absolute LC_RPATHs and re-signs ad
 hoc. Every Linux/macOS package is checked for absolute build-host paths in ELF
@@ -193,6 +205,11 @@ glibc-2.28 container, without touching any GPU, and run unchanged on the fleet (
 | paddle fp32 `linux-cpu-x86_64-v3` | desktop Zen 4 | 100/100 | 1.05 (16 threads) |
 | hayai, paddle fp32 `macos-cpu-arm64` (built on the Mac) | M2 Pro | ids equal to eager, max |Δ| 2e-5 / 7e-5 | (verify.py; no crop harness on the Mac) |
 | hayai, paddle fp32 `windows-cpu-x86_64-v3` (native MSVC on pimax) | pimax 3800X | ids equal to eager, max |Δ| 9e-6 / 2e-5 | (verify.py) |
+| **weightless CPU (2026-10-08)**, vs the embedded packages, alternating runs, Dr Stone 01 20 pages | | | |
+| hayai fp32 `linux-cpu-x86_64-v3` (container) | Ryzen 7 5800X, idle | ids = eager (= embedded's max |Δ|); `.mokuro` byte-identical to embedded (8/8 runs) | 0.256 vs 0.257 p/s; peak RSS 1643 vs 1864 MiB (one buffer per weights file; 1714 with one allocation per tensor) |
+| hayai bf16 `linux-cpu-x86_64-v4bf16` (container) | Ryzen 9 7950X, host load 18–30 | ids = eager; `.mokuro` byte-identical (14/14) | 0.709 vs 0.723 p/s (noise: same-process graph times equal); peak RSS 1220 vs 1337 MiB |
+| hayai fp32 `macos-cpu-arm64` (on the Mac) | M2 Pro | ids = eager; `.mokuro` byte-identical (36/36, = the Linux runs') | 37.9 vs 38.8 s per 20 pages (n=9 rounds, within noise); max RSS 2030 vs 2238 MiB |
+| hayai fp32 `windows-cpu-x86_64-v3` (GitHub runner, MSVC) | `windows-latest`, 4 vCPU | ids = eager, max |Δ| 3e-6 / 9e-6 / 7e-6 (= embedded's); a generated 12-page volume (`torch_export.ocr_inputs`; no real manga on a public runner) through the Rust runtime: `.mokuro` identical to the embedded build's (6/6 runs, every exit 0) | 186.1 vs 185.4 s per 12 pages; peak working set 1536 vs 1739 MiB; graph times equal |
 
 How: `fakegpu.py` answers inductor's device queries with the target's properties, gives
 Triton a driver that only reports the target (`GPUTarget("cuda", 80, 32)` /
@@ -252,8 +269,21 @@ self-contained packages). Sizes per engine × precision (download / per extra ta
 | paddle bf16 / fp16 | 2330 + 423 MB per target | 1811 MB | 10 MB |
 
 GPU memory/RSS: hayai bf16 RSS 993 MB vs 1722 (4090); paddle bf16 1.3 GB vs 3.1 GB.
-Exception: CPU packages (frozen: oneDNN-prepacked weights inside, hayai fp32 787 MB).
 Windows GPU packages share the weights too, bound through the C-ABI Pairs entry point (above).
+
+**CPU packages (2026-10-08): weightless too.** They used to be built with `freezing=True` and
+the weights inside (hayai fp32 787 MB per CPU target, paddle fp32 4.65 GB): freezing was
+expected to fold oneDNN/MKL-prepacked weights into the graph -- derived constants no shared
+file could provide -- so the CPU path of `build.py` never mapped the constants to the weights
+files. On these exported graphs it folds nothing: the old and new packages' generated C++ is
+identical on every CPU target (the same 201/122/122 constants under their original FQNs, no
+prepacked or folded constant, no oneDNN call; the Linear weights are pre-cast and q|k|v /
+gate|up pre-fused at export). Freezing only cost the shared weights. CPU targets now build like
+the GPU ones (`freezing=False`, `package_constants_in_so=False`, `bunko.weights` mapped; the
+build checks the weights files are the GPU targets' bytes: they are, fp32 and bf16), and
+`TORCH_EXPORT_CPU_EMBED=1` rebuilds the old layout. CPU tensors bind through the Pairs entry
+point like GPU ones. The runtime reads each weights file into one buffer on the CPU (the
+weights are views of it), the layout AOTInductor gives an embedded package's constants.
 
 #### Argmax in the step graph (I/O v2)
 
@@ -267,10 +297,10 @@ shootout's frozen package (175–184) while weightless. RTX 4090: no measurable 
 
 | engine × precision | shared weights | `linux-cuda-sm_80` | `linux-cuda-sm_75` | `linux-rocm-gfx1030` | `linux-rocm-gfx1201` | `windows-cuda-sm_80` / `sm_75` | CPU |
 |---|---:|---:|---:|---:|---:|---:|---|
-| hayai fp32 | 565 | 9 | 9 | 9 | 8 | ~11 each | `linux`/`windows-cpu-x86_64-v3` 789; `macos-cpu-arm64` 783 |
-| hayai bf16 | 283 | 9 | — | 9 | 9 | ~11 / — | `linux-cpu-x86_64-v4bf16` 399 |
+| hayai fp32 | 565 | 9 | 9 | 9 | 8 | ~11 each | `linux-cpu-x86_64-v3` 8, `windows-cpu-x86_64-v3` 4, `macos-cpu-arm64` 3 (were 789 / 784 / 783 with the weights inside) |
+| hayai bf16 | 283 | 9 | — | 9 | 9 | ~11 / — | `linux-cpu-x86_64-v4bf16` 9 (was 399) |
 | hayai fp16 | 283 | 9 | 9 | 9 | 9 | ~11 each | — |
-| paddle fp32 | 3622 | 10 | 10 | 10 | 10 | ~13 each | `linux`/`windows-cpu-x86_64-v3`, `macos-cpu-arm64` 4645–4651 |
+| paddle fp32 | 3622 | 10 | 10 | 10 | 10 | ~13 each | — (GPU-only since 2026-10-08; were 4645–4651 per CPU target) |
 | paddle bf16 | 1811 | 10 | — | 10 | 10 | ~13 / — | — |
 | paddle fp16 | 1811 | 10 | 10 | 10 | 10 | ~13 each | — |
 
@@ -278,6 +308,21 @@ Adding a GPU family costs ~10 MB per engine × precision. RDNA3 (`gfx1100/1101/1
 `gfx1200` are one `matrix` line each (compiled the same way as gfx1201; no card to test).
 `sm_86`/`sm_89`/`sm_120` packages are unnecessary (sm_80 SASS/PTX covers them at equal speed).
 Largest single file: paddle fp32 `weights-decoder` 1,866,630,056 B (< 1.9 GB cap).
+
+#### The release set (2026-10-08)
+
+The 2026-10-03 set below minus paddle-manga's CPU packages (GPU-only engine) and with
+weightless hayai-nova CPU packages: `linux-cpu-x86_64-v3` and `linux-cpu-x86_64-v4bf16` from
+the container, `windows-cpu-x86_64-v3` from the `torch-export-win` workflow (native MSVC on a
+GitHub runner; rebuilds differ only in the wrapper DLL's PE timestamp, 4 bytes), `macos-cpu-arm64` on the Mac; GPU
+packages and every weights file unchanged. 180 packages + 12 weights files = 192 assets,
+8.94 GB (was 25.6 GB), largest asset 1,866,630,056 B (paddle fp32 `weights-decoder`, < 1.9
+GB). What a machine downloads for its default row (packages + the weights they bind; plus
+35 MB of hayai-nova host files and 23 MB of PP-OCR files): CPU hayai-nova fp32 568–573 MB
+(was 783–789), bf16 on AVX512_BF16 hosts 291 MB (was 399); GPU hayai-nova bf16/fp16 292–294
+MB, fp32 574 MB (unchanged); GPU paddle-manga bf16/fp16 1822 MB, fp32 3633 MB (unchanged);
+paddle-manga on the CPU: nothing (was 4651 MB). Weights entries in `torch-models.json` carry
+the variant-free torch version (`2.13.0`): every target shares them.
 
 #### The release set (2026-10-03)
 
@@ -320,8 +365,9 @@ random inputs: in bf16 the step's argmax can tie-flip between eager and compiled
 #### Graph I/O contract for the runtime (stream A) — changes vs the shootout
 
 * v2 (above) is the default; v1 still builds (`--io 1`).
-* Weights: GPU packages (Linux and Windows) bind `bunko.weights` from `../weights-*.safetensors`;
-  CPU packages have `bunko.weights = {}` (weights inside). On Windows (`bunko.bind = "pairs"`)
+* Weights: every package (GPU and CPU, Linux, Windows, macOS) binds `bunko.weights` from
+  `../weights-*.safetensors`; only `TORCH_EXPORT_CPU_EMBED=1` / `TORCH_EXPORT_WIN_EMBED=1`
+  builds have `bunko.weights = {}` (weights inside). On Windows (`bunko.bind = "pairs"`)
   bind through the wrapper's `AOTInductorModelContainerUpdateUserManagedConstantBufferPairs`,
   never `load_constants` (see "Windows" above).
 * Windows wrappers are `*.wrapper.pyd`; strip the archive's top `<role>/` folder when extracting
@@ -417,11 +463,11 @@ A handle is shared by any number of threads (device work is serialised inside).
 * Graph I/O: package metadata `bunko.io` — **v1** (no metadata; the shootout's packages:
   prefill/step return `(logits, *present)`) and **v2** (B: `(next_ids, live, *present)`, step
   takes `live`). Both verified.
-* Weights: GPU packages (Linux and Windows) are weightless; each package's `bunko.weights`
+* Weights: every package (GPU and CPU, since 2026-10-08) is weightless; each package's `bunko.weights`
   (FQN → key) is bound (user-managed, no copy) to tensors loaded once from
   `<engine>/<precision>/weights-*.safetensors` (the parent of the target directory),
   streamed one tensor at a time. paddle-manga's input embeddings come from the decoder blob
-  (`bunko.alias.host.embed_tokens`); packages without a blob (CPU, the shootout's) read
+  (`bunko.alias.host.embed_tokens`); packages without a blob (the shootout's, hand-made) read
   `paddle-manga/embed-fp32` (bf16/fp32, cast on load; bit-identical to the model's table) or
   `embed-fp16`. hayai-nova reads `hayai-nova/{pos-table,token-embeddings,tokenizer}` from the
   existing manifest. `bunko.special` / `bunko.prompt` are checked against the code's
@@ -435,7 +481,7 @@ A handle is shared by any number of threads (device work is serialised inside).
   **(2026-10-03)** The release's `torch-models.json` is compiled into bunko-ocr
   (`crates/bunko-ocr/src/torch_models.json`, refreshed with each `torch-models-*` release; it
   must also list the windows-* / macos-* targets). `ModelStore::ensure_torch_package` fetches
-  a package's graphs and only the weights files its graphs `require` (CPU packages: none),
+  a package's graphs and only the weights files its graphs `require` (every release package),
   verifies each `.pt2`, unpacks it to its `unpack_to` directory (`<target>/<role>/`, stamped
   `.unpacked` = its sha256) and deletes the zip: one copy on disk, loaded in place.
   `MOKURO_TORCH_MODELS_MIRROR` (a base URL, or a directory of the flat asset names) is tried
@@ -447,8 +493,14 @@ A handle is shared by any number of threads (device work is serialised inside).
   bf16 is emulated (6900 XT hayai-nova: fp32 2.72, bf16 2.19 p/s, and less accurate), so
   auto-accuracy runs fp32 there and auto-speed fp16; a forced `bf16` still runs. A GPU with no package in any format (e.g. its arch not compiled)
   places the session on the CPU with a logged reason (`runtime::place_runnable`); a GPU pack
-  on a host without a GPU still offers the engines on the CPU packages (0.5.2's CUDA image
-  fell back to CPU torch). Unit-tested with fake `bt_devices` reports.
+  on a host without a GPU still offers hayai-nova on its CPU packages (0.5.2's CUDA image
+  fell back to CPU torch). **(2026-10-08)** paddle-manga is GPU-only
+  (`bunko_sched::precision::gpu_only`, `runtime::place_engine`): never placed on or
+  offered for the CPU, no CPU fallback when its GPU has no package; without a GPU a session,
+  `models download --engine paddle-manga` and the library's claim fail with "paddle-manga
+  needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the CPU" (`doctor`: WARN, since a
+  processor with a GPU can still run that generation). Unit-tested with fake `bt_devices`
+  reports.
 
 ### Main side (bunko-engines)
 
@@ -489,8 +541,8 @@ loaded OpenMP runtime (libgomp, libomp, libiomp5, and MSVC's vcomp140 that Windo
 packages import). An `atexit` hook (re-registered after each package load, so it runs
 before their destructors) stops reads and waits for running ones: no more "aoti_torch_cpu_…
 API call failed" when the server stops mid-volume. Per-crop host preprocessing runs in
-parallel (hayai-nova: all crops of a batch; paddle-manga on the CPU: ahead of the vision
-runs; outputs identical): 4090 hayai bf16 crops 277 → 337/s. Load errors name the missing
+parallel (hayai-nova: all crops of a batch; paddle-manga on the CPU, before it became
+GPU-only: ahead of the vision runs; outputs identical): 4090 hayai bf16 crops 277 → 337/s. Load errors name the missing
 library / newer system (`abi::explain_load_error`, with libloading's source chain).
 
 **Catalog and benchmarks (2026-10-03).** `describe()` lists per device only the formats a
@@ -522,9 +574,9 @@ store ids (as `torch_export manifest` writes them) or flat release file names; a
 naming neither fails the release load instead of being dropped (it was: every GPU
 package lost its `weights-*` and `models download` / first use never fetched them). A
 package counts as on disk only with the weights its graphs bind beside it
-(`ModelStore::locate_torch_package`); `doctor` FAILs on a missing weights file and on
-paddle-manga's missing `embed-*` table on the CPU (`EnginePipeline::package_status_for`
-checks the recognizer's host files too). (2) SIGTERM mid-volume / mid-benchmark: the
+(`ModelStore::locate_torch_package`); `doctor` FAILs on a missing weights file
+(`EnginePipeline::package_status_for` checks the recognizer's host files too; the CPU
+check for paddle-manga's `embed-*` table went with paddle's CPU packages, 2026-10-08). (2) SIGTERM mid-volume / mid-benchmark: the
 server's OCR stop now awaits the local processor (`LocalChannels::finished`), whose
 sessions drop their runner -- joining the stage threads and freeing the recognizers --
 before they report their end; `bt_free` after the exit hook has run leaks the handle

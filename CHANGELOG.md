@@ -91,6 +91,11 @@ features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
   CPU-only machines use hayai-nova: they no longer offer paddle-manga, fetch nothing for
   it, and say "paddle-manga needs a GPU (NVIDIA CUDA or AMD ROCm); use hayai-nova on the
   CPU" where its generation is asked for (`doctor`, `models download`, a session).
+- The CPU's compiled model packages no longer carry their own copy of the weights:
+  like the GPU packages they use the engine's shared weights files. hayai-nova on the
+  CPU downloads 0.57 GB in fp32 (was 0.79 GB) and 0.29 GB in bf16 (was 0.40 GB), uses
+  about 200 MB less memory, and reads the same text at the same speed. The
+  compiled-models release shrinks from 25.6 GB to 8.9 GB.
 - OCR backends and models are downloaded on demand, after hardware detection and
   by the owner's preference, never baked into a release:
   - The full Docker image carries no backend pack and no model. On every start it
