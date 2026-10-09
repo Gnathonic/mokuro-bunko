@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.7.0-beta.4] - 2026-10-09
+
+A pre-release with no changes of its own: it checks that installs of 0.7.0-beta.3
+update themselves to the next release (GitHub Actions on their Node 24 versions).
+
 ## [0.7.0-beta.3] - 2026-10-09
 
 A pre-release on the way to 0.7.0 (everything below under 0.7.0 applies).
