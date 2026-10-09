@@ -10,12 +10,12 @@ A target names what a package runs on: ``<os>-<backend>-<arch>``.
   windows-cuda-sm_XX          as linux-cuda, but the wrapper is a PE .dll (built on Windows).
   macos-cpu-arm64             Apple silicon CPU (built on a Mac).
 
-GPU packages never contain weights: every target of one engine x precision shares the
-same ``weights.safetensors`` (see build.py). Their host code (the AOTI wrapper) is
+Packages never contain weights: every target of one engine x precision, GPU or CPU,
+shares the same ``weights-{vision,decoder}.safetensors`` (see build.py). Their host code (the AOTI wrapper) is
 compiled for x86-64-v3 so one package runs on any AVX2 host (a package built with the
 default ``-march=native`` on a Zen 5 SIGILLs on a Zen 3: the shootout's lily failure).
-CPU packages are frozen (oneDNN weight prepacking is a large CPU win) and so carry
-their own weights.
+CPU packages are not frozen either (freezing folds prepacked copies of the weights into
+the package; ``TORCH_EXPORT_CPU_EMBED=1`` still builds that layout).
 """
 
 from __future__ import annotations
@@ -72,13 +72,15 @@ for _gfx in ("gfx1030", "gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201"):
     TARGETS[t.name] = t
 # CPU kernels read the OpenMP thread count at run time (else the compile host's core
 # count is baked into every `#pragma omp parallel num_threads(N)`)
-CPU = {"freezing": True, "cpp.dynamic_threads": True}
+CPU = {"cpp.dynamic_threads": True}
 TARGETS["linux-cpu-x86_64-v3"] = Target("linux-cpu-x86_64-v3", "linux", "cpu", "x86-64-v3", ("fp32",), "cpu",
                                         {**X86_V3, **CPU})
 TARGETS["linux-cpu-x86_64-v4bf16"] = Target(
     "linux-cpu-x86_64-v4bf16", "linux", "cpu", "x86-64-v4", ("bf16",), "cpu",
     {"cpp.march": "x86-64-v4", "cpp.simdlen": 512, **CPU})
-TARGETS["windows-cpu-x86_64-v3"] = Target("windows-cpu-x86_64-v3", "windows", "cpu", "x86-64-v3", ("fp32",), "cpu", dict(CPU))
+# MSVC: simdlen 256 = /arch:AVX2 whatever the build host has (cpp.march is a GCC/clang flag)
+TARGETS["windows-cpu-x86_64-v3"] = Target("windows-cpu-x86_64-v3", "windows", "cpu", "x86-64-v3", ("fp32",), "cpu",
+                                          {"cpp.simdlen": 256, **CPU})
 TARGETS["macos-cpu-arm64"] = Target("macos-cpu-arm64", "macos", "cpu", "arm64", ("fp32",), "cpu", dict(CPU))
 
 

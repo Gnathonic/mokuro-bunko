@@ -68,7 +68,7 @@ def run_build(argv: list[str], variant: str, out: Path, work: Path, backend: str
         "HF_HUB_OFFLINE": "1", "HF_MODULES_CACHE": "/work/hf-modules", "UV_CACHE_DIR": "/uvcache",
         "TORCH_EXPORT_IN_CONTAINER": "1", "PYTHONDONTWRITEBYTECODE": "1",
     }
-    for k in ("TORCH_EXPORT_INDUCTOR_OPTS", "TORCH_EXPORT_FUSE", "TORCH_EXPORT_SKIP_CHECKS", "TORCH_EXPORT_ROCM_ARCHS", "TORCH_EXPORT_NO_FLASH"):
+    for k in ("TORCH_EXPORT_INDUCTOR_OPTS", "TORCH_EXPORT_FUSE", "TORCH_EXPORT_CPU_EMBED", "TORCH_EXPORT_SKIP_CHECKS", "TORCH_EXPORT_ROCM_ARCHS", "TORCH_EXPORT_NO_FLASH"):
         if k in os.environ:
             env[k] = os.environ[k]
     if backend == "rocm":

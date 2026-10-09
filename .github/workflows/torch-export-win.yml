@@ -1,0 +1,157 @@
+# Windows CPU AOTInductor packages (tools/torch_export, docs/rust-port/TORCH-BACKEND.md):
+# compiled natively with MSVC on a GitHub Windows runner, checked (no AVX-512 code,
+# weights identical to the release's), verified against eager torch on the runner, and
+# uploaded as workflow artifacts. Manual only; it publishes nothing (no release, no tag).
+#
+#   gh workflow run torch-export-win.yml --ref <branch> [-f compare_embedded=false]
+name: torch-export-win
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: Engine (paddle-manga has no CPU packages)
+        type: choice
+        options: [hayai-nova]
+        default: hayai-nova
+      precision:
+        description: Precision (Windows CPU packages are fp32)
+        type: choice
+        options: [fp32]
+        default: fp32
+      target:
+        description: Compile target
+        type: choice
+        options: [windows-cpu-x86_64-v3]
+        default: windows-cpu-x86_64-v3
+      compare_embedded:
+        description: Also build the old frozen weights-inside layout (TORCH_EXPORT_CPU_EMBED=1) and time both on this runner
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: torch-export-win-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      # the pinned model revisions are downloaded on the runner (tools/onnx_export/pins.py)
+      HF_HUB_OFFLINE: "0"
+      HF_HOME: ${{ github.workspace }}\hf
+      TORCH_EXPORT_WORK: ${{ github.workspace }}\work
+      # 0.5.2 sources: the export checks its model pins against them
+      MOKURO_REF_052: ${{ github.workspace }}\ref052
+      ENGINE: ${{ inputs.engine }}
+      PREC: ${{ inputs.precision }}
+      TARGET: ${{ inputs.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 0.5.2 reference sources (release 0.5.2, 199cff5)
+        uses: actions/checkout@v4
+        with:
+          ref: 199cff5941ce32dc6e4e50e00f5fc6b0f519afc7
+          path: ref052
+          sparse-checkout: src/mokuro_bunko/ocr
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: MSVC environment (x64)
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio with the x64 C++ tools" }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { "$($Matches[1])=$($Matches[2])" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV }
+          }
+      - name: GNU objdump (AVX-512 check)
+        run: |
+          $od = (Get-Command objdump -ErrorAction SilentlyContinue).Source
+          foreach ($d in 'C:\mingw64\bin', 'C:\msys64\mingw64\bin', 'C:\Strawberry\c\bin') {
+            if (-not $od -and (Test-Path "$d\objdump.exe")) { $od = "$d\objdump.exe" }
+          }
+          if (-not $od) {
+            C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-binutils
+            $od = 'C:\msys64\mingw64\bin\objdump.exe'
+          }
+          & $od --version | Select-Object -First 1
+          "TORCH_EXPORT_OBJDUMP=$od" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Export environment (torch 2.13.0+cpu)
+        run: |
+          python -m pip install --disable-pip-version-check -q -r tools/torch_export/requirements-cpu.txt
+          python -c "import torch; print(torch.__version__, torch.backends.cpu.get_cpu_capability())"
+          cl 2>&1 | Select-Object -First 1
+          Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors | Format-List
+      - name: Build (weightless)
+        working-directory: tools/torch_export
+        run: python -m torch_export build -e $env:ENGINE -p $env:PREC -t $env:TARGET --out "$env:GITHUB_WORKSPACE\out"
+      - name: Check the package (AVX-512, shared weights = the release's)
+        working-directory: tools/torch_export
+        run: |
+          python -m torch_export check-isa "$env:GITHUB_WORKSPACE\out\$env:ENGINE\$env:PREC\$env:TARGET"
+          if ($LASTEXITCODE) { throw "AVX-512 instructions in an x86-64-v3 package" }
+          @'
+          import hashlib, json, os, pathlib, sys
+          e, p, t = os.environ["ENGINE"], os.environ["PREC"], os.environ["TARGET"]
+          out = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "out" / e / p
+          man = json.loads(pathlib.Path(os.environ["GITHUB_WORKSPACE"], "crates/bunko-ocr/src/torch_models.json").read_text())
+          want = {f["id"]: f["sha256"] for f in man["files"]}
+          rec = json.loads((out / t / "build.json").read_text())
+          bad = 0
+          for name, info in sorted(rec["weights"].items()):
+              key = f"torch/{e}/{p}/{name}"
+              got = hashlib.sha256((out / name).read_bytes()).hexdigest()
+              ok = got == info["sha256"] == want.get(key)
+              print(f"{name}: {got} {'= the release' if ok else 'DIFFERS from ' + str(want.get(key))}")
+              bad += not ok
+          for role, g in rec["graphs"].items():
+              print(f"{role}: {g['size']:,} bytes, {g['constants']} constants bound, compiled in {g['compile_s']} s")
+              bad += g["constants"] == 0
+          sys.exit(bad)
+          '@ | python -
+      - name: Verify against eager torch (ids equal) + time the graphs
+        working-directory: tools/torch_export
+        run: |
+          python -m torch_export.verify "$env:GITHUB_WORKSPACE\out" $env:ENGINE $env:PREC $env:TARGET --device cpu --bench 20 |
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE\out\$env:ENGINE\$env:PREC\$env:TARGET\verify.json"
+          if ($LASTEXITCODE) { throw "verify failed" }
+      - name: Build the embedded layout for comparison (TORCH_EXPORT_CPU_EMBED=1)
+        if: inputs.compare_embedded
+        working-directory: tools/torch_export
+        env:
+          TORCH_EXPORT_CPU_EMBED: "1"
+        run: python -m torch_export build -e $env:ENGINE -p $env:PREC -t $env:TARGET --out "$env:GITHUB_WORKSPACE\out-embed"
+      - name: Verify + time the embedded layout
+        if: inputs.compare_embedded
+        working-directory: tools/torch_export
+        run: |
+          $d = "$env:GITHUB_WORKSPACE\out\$env:ENGINE\$env:PREC\$env:TARGET"
+          # alternate the two layouts (weightless first ran above)
+          foreach ($i in 1..2) {
+            python -m torch_export.verify "$env:GITHUB_WORKSPACE\out-embed" $env:ENGINE $env:PREC $env:TARGET --device cpu --bench 20 |
+              Tee-Object -FilePath "$d\verify-embedded-$i.json"
+            if ($LASTEXITCODE) { throw "verify (embedded) failed" }
+            python -m torch_export.verify "$env:GITHUB_WORKSPACE\out" $env:ENGINE $env:PREC $env:TARGET --device cpu --bench 20 |
+              Tee-Object -FilePath "$d\verify-weightless-$i.json"
+            if ($LASTEXITCODE) { throw "verify (weightless) failed" }
+          }
+          Get-ChildItem -Recurse "$env:GITHUB_WORKSPACE\out-embed\$env:ENGINE\$env:PREC\$env:TARGET" -Filter *.pt2 |
+            Select-Object Name, Length | Format-Table | Out-String | Tee-Object -FilePath "$d\embedded-sizes.txt"
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: torch-${{ inputs.engine }}-${{ inputs.precision }}-${{ inputs.target }}
+          # the package only: its shared weights are the release's files (checked above)
+          path: out/${{ inputs.engine }}/${{ inputs.precision }}/${{ inputs.target }}/
+          if-no-files-found: error
+          retention-days: 30
