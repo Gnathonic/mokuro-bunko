@@ -28,6 +28,10 @@ on:
         description: Also build the old frozen weights-inside layout (TORCH_EXPORT_CPU_EMBED=1) and time both on this runner
         type: boolean
         default: true
+      ocr:
+        description: With compare_embedded, also OCR a generated volume with both layouts through the Rust runtime
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -161,6 +165,67 @@ jobs:
             "$o (normal exit): exit code $LASTEXITCODE"
           }
           exit 0
+      - name: "OCR: inputs (generated volume, model store)"
+        if: inputs.compare_embedded && inputs.ocr
+        working-directory: tools/torch_export
+        # no real manga in a public repo's logs and artifacts: pages of generated text
+        run: python -m torch_export.ocr_inputs "$env:GITHUB_WORKSPACE\ocr" --pages 12
+      - uses: dtolnay/rust-toolchain@stable
+        if: inputs.compare_embedded && inputs.ocr
+      - name: "OCR: CPU backend pack + ocr_volume"
+        if: inputs.compare_embedded && inputs.ocr
+        shell: bash
+        env:
+          BUNKO_PACK_CACHE: ${{ github.workspace }}/pack-cache
+        run: |
+          set -eux
+          cargo run -p xtask --locked -- torch-pack --locked --variant cpu --no-archive --out "$GITHUB_WORKSPACE/pack"
+          cargo build --release --locked -p bunko-engines --example ocr_volume
+      - name: "OCR: both layouts through the Rust runtime (alternating)"
+        if: inputs.compare_embedded && inputs.ocr
+        run: |
+          $ws = $env:GITHUB_WORKSPACE; $o = "$ws\ocr"
+          $X = "$ws\target\release\examples\ocr_volume.exe"
+          $env:MOKURO_TORCH_PACK = "$ws\pack\torch-cpu-2.13.0"
+          $env:MOKURO_MODELS_DOWNLOAD = "0"; $env:RUST_LOG = "warn"
+          # the embedded packages bind nothing, but the store wants the weights files the
+          # manifest says a package of this target requires beside it
+          Copy-Item "$ws\out\$env:ENGINE\$env:PREC\weights-*.safetensors" "$ws\out-embed\$env:ENGINE\$env:PREC\"
+          $failed = $false
+          foreach ($r in 1..3) { foreach ($v in 'embedded', 'weightless') {
+            $env:MOKURO_TORCH_MODELS_DIR = if ($v -eq 'weightless') { "$ws\out" } else { "$ws\out-embed" }
+            $m = "$o\models-$v"
+            if (-not (Test-Path $m)) { Copy-Item -Recurse "$o\models" $m }
+            $out = "$o\$v-$r"
+            $p = Start-Process -FilePath $X -NoNewWindow -PassThru -RedirectStandardOutput "$out.log" -RedirectStandardError "$out.err" `
+              -ArgumentList @('hayai-nova', "$o\synthetic.cbz", "$out.mokuro", '--backend', 'cpu', '--precision', $env:PREC, '--models', $m, '--uuids', 't,v')
+            $null = $p.Handle; $peak = 0
+            while (-not $p.HasExited) {
+              $p.Refresh(); try { $peak = [math]::Max($peak, $p.PeakWorkingSet64) } catch {}; Start-Sleep -Milliseconds 200
+            }
+            $p.WaitForExit()
+            $line = (Select-String -Path "$out.log" -Pattern '^pages=' | Select-Object -First 1).Line
+            $sha = if (Test-Path "$out.mokuro") { (Get-FileHash "$out.mokuro").Hash.Substring(0, 16) } else { 'none' }
+            "$v $r exit=$($p.ExitCode) peak_working_set_mib=$([math]::Round($peak / 1MB)) mokuro=$sha | $line" |
+              Tee-Object -Append -FilePath "$o\ocr.txt"
+            if ($p.ExitCode -ne 0) { $failed = $true; Get-Content "$out.err" | Select-Object -Last 40 }
+          }}
+          $shas = @(Get-ChildItem "$o\*.mokuro" | ForEach-Object { (Get-FileHash $_).Hash } | Sort-Object -Unique)
+          "distinct .mokuro files: $($shas.Count)" | Tee-Object -Append -FilePath "$o\ocr.txt"
+          if ($failed) { throw "ocr_volume failed" }
+          if ($shas.Count -ne 1) { throw "the two layouts read different text" }
+      - name: Upload the OCR logs
+        if: always() && inputs.compare_embedded && inputs.ocr
+        uses: actions/upload-artifact@v4
+        with:
+          name: torch-ocr-logs-${{ inputs.engine }}-${{ inputs.precision }}-${{ inputs.target }}
+          path: |
+            ocr/*.txt
+            ocr/*.log
+            ocr/*.err
+            ocr/*.mokuro
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Upload the package
         uses: actions/upload-artifact@v4
         with:
