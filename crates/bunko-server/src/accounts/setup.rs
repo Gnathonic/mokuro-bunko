@@ -7,18 +7,22 @@
 //!
 //! 0.5.2 allowed only loopback requests: the TCP peer must be loopback, and the client
 //! address resolved through trusted proxies must be loopback too (so a local reverse
-//! proxy forwarding a public client is refused). That made the wizard unreachable from
-//! the host's browser under Docker bridge networking, where the peer is the bridge
-//! gateway.
+//! proxy forwarding a public client is refused). That rule stays, and it made the
+//! wizard unreachable for a server in Docker or on a NAS, opened from another computer.
 //!
-//! New in 0.7: a **one-time setup token** also passes the gate. The token is
-//! `MOKURO_SETUP_TOKEN` (read when [`AccountsDeps`](super::AccountsDeps) is built) or
-//! the contents of `<storage>/.setup-token`, which the server creates and logs at
-//! startup while no admin exists ([`ensure_setup_token`]). A request presents it as
-//! `?token=<t>`, an `X-Setup-Token: <t>` header, or the `mokuro_setup_token` cookie.
-//! Opening `/setup?token=<t>` sets that cookie (`Path=/setup; HttpOnly;
-//! SameSite=Strict`, one hour), so the unchanged wizard page's own `fetch()` calls to
-//! `/setup/api/*` carry it. The token file is deleted when setup completes.
+//! New in 0.7: a **one-time setup code**. While no admin exists the server makes a new
+//! code at every start ([`SetupFlag::issue_code`]) and prints it in its log
+//! ([`crate::app::announce_setup`]); it lives in memory only. `GET /setup` from another
+//! computer answers a page asking for it; `POST /setup/code` checks it (constant time,
+//! [`ATTEMPTS_PER_IP`] tries a minute per client address and [`ATTEMPTS_GLOBAL`] in all)
+//! and answers a random setup-session cookie ([`SESSION_COOKIE`], `Path=/setup`,
+//! `HttpOnly; SameSite=Strict`, one hour), which the unchanged wizard page and its
+//! `/setup/api/*` calls carry. A script may send the code as `X-Setup-Code` instead
+//! (same limits). The code and every session die as soon as an admin exists (the wizard,
+//! `admin add-user`, `MOKURO_ADMIN_USERNAME`). The code is never written to a response.
+//!
+//! [`bootstrap_admin_from_env`]: `MOKURO_ADMIN_USERNAME` + `MOKURO_ADMIN_PASSWORD` (or
+//! `MOKURO_ADMIN_PASSWORD_FILE`) create the admin at startup when none exists (Docker).
 
 use super::AccountsDeps;
 use super::util::{
@@ -35,140 +39,239 @@ use bunko_core::{Role, StorageLayout};
 use bunko_db::pyfmt::strip;
 use bunko_db::{Database, DbError, UserStatus, validate_password, validate_username};
 use http::request::Parts;
-use http::{HeaderMap, HeaderValue, header};
+use http::{HeaderMap, HeaderValue, StatusCode, header};
+use parking_lot::Mutex;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing::{info, warn};
+use std::time::{Duration, Instant};
+use tracing::{error, info, warn};
 
-pub const SETUP_TOKEN_ENV: &str = "MOKURO_SETUP_TOKEN";
-pub const SETUP_TOKEN_FILE: &str = ".setup-token";
-pub const SETUP_TOKEN_HEADER: &str = "x-setup-token";
-pub const SETUP_TOKEN_COOKIE: &str = "mokuro_setup_token";
+/// The header a script may send the setup code in.
+pub const SETUP_CODE_HEADER: &str = "x-setup-code";
+/// The cookie a right code earns (a random session id, never the code).
+pub const SESSION_COOKIE: &str = "mokuro_setup_session";
+/// 0.7 betas kept a token here; removed at startup.
+pub const LEGACY_TOKEN_FILE: &str = ".setup-token";
 
-const LOCAL_ONLY: &str = "Setup is only allowed from localhost";
-const VALID_MODES: [&str; 4] = ["disabled", "self", "invite", "approval"];
+/// Code attempts per client address per [`ATTEMPT_WINDOW`].
+pub const ATTEMPTS_PER_IP: usize = 5;
+/// Code attempts from everyone together per [`ATTEMPT_WINDOW`].
+pub const ATTEMPTS_GLOBAL: usize = 30;
+pub const ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
+/// How long a setup session lasts.
+pub const SESSION_TTL: Duration = Duration::from_secs(3600);
+/// Sessions kept at once (the oldest goes first).
+const MAX_SESSIONS: usize = 16;
+/// Client addresses tracked by the limiter; beyond it every new address is refused
+/// until the window passes.
+const MAX_TRACKED: usize = 4096;
+
+/// Crockford's base32: no I, L, O or U (50 bits in 10 characters).
+const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const CODE_LEN: usize = 10;
+
+pub const REMOTE_NEEDS_CODE: &str = "Setup from another computer needs the one-time setup code: open /setup in a browser and enter the code printed in the server log at startup (see the server log for the setup code)";
+const NO_CODE_YET: &str =
+    "No setup code is active: restart the server and see its log for the setup code";
 
 /// First-run state, shared by every clone of the deps.
 #[derive(Clone, Default)]
-pub struct SetupFlag {
-    complete: Arc<AtomicBool>,
-    /// `MOKURO_SETUP_TOKEN`, captured once.
-    pub env_token: Option<String>,
+pub struct SetupFlag(Arc<Inner>);
+
+#[derive(Default)]
+struct Inner {
+    complete: AtomicBool,
+    /// The current code, normalized (10 characters of [`ALPHABET`]).
+    code: Mutex<Option<String>>,
+    /// Session id → when it expires.
+    sessions: Mutex<HashMap<String, Instant>>,
+    limiter: Mutex<Limiter>,
+}
+
+#[derive(Default)]
+struct Limiter {
+    per_ip: HashMap<String, VecDeque<Instant>>,
+    all: VecDeque<Instant>,
+}
+
+impl Limiter {
+    /// Record an attempt from `ip`; Err(seconds to wait) when over a limit (the
+    /// attempt is then not counted).
+    fn attempt(&mut self, ip: &str, now: Instant) -> Result<(), u64> {
+        let cut = |q: &mut VecDeque<Instant>| {
+            while q
+                .front()
+                .is_some_and(|t| now.duration_since(*t) >= ATTEMPT_WINDOW)
+            {
+                q.pop_front();
+            }
+        };
+        cut(&mut self.all);
+        self.per_ip.retain(|_, q| {
+            cut(q);
+            !q.is_empty()
+        });
+        let wait = |q: &VecDeque<Instant>| {
+            q.front()
+                .map(|t| (ATTEMPT_WINDOW - now.duration_since(*t)).as_secs().max(1))
+                .unwrap_or(1)
+        };
+        if self.all.len() >= ATTEMPTS_GLOBAL {
+            return Err(wait(&self.all));
+        }
+        if let Some(q) = self.per_ip.get(ip)
+            && q.len() >= ATTEMPTS_PER_IP
+        {
+            return Err(wait(q));
+        }
+        if !self.per_ip.contains_key(ip) && self.per_ip.len() >= MAX_TRACKED {
+            return Err(wait(&self.all));
+        }
+        self.all.push_back(now);
+        self.per_ip
+            .entry(ip.to_string())
+            .or_default()
+            .push_back(now);
+        Ok(())
+    }
+}
+
+/// What a request presenting credentials gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    Allowed,
+    Denied,
+    /// Too many attempts: retry after this many seconds.
+    Limited(u64),
 }
 
 impl SetupFlag {
-    pub fn from_env() -> Self {
-        let env_token = std::env::var(SETUP_TOKEN_ENV)
-            .ok()
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty());
-        SetupFlag {
-            complete: Arc::default(),
-            env_token,
-        }
-    }
-
     /// No admin account exists (blocking: reads the users table until one is seen).
+    /// Seeing one ends the code and the sessions.
     pub fn needs_setup(&self, db: &Database) -> bunko_db::Result<bool> {
-        if self.complete.load(Ordering::Acquire) {
+        if self.0.complete.load(Ordering::Acquire) {
             return Ok(false);
         }
         let has_admin = db.list_users(None)?.iter().any(|u| u.role == Role::Admin);
         if has_admin {
-            self.complete.store(true, Ordering::Release);
+            self.mark_complete();
         }
         Ok(!has_admin)
     }
 
+    /// Make a new setup code (replacing any earlier one) and return it for display
+    /// (`XXXXX-XXXXX`). Called once at startup while no admin exists.
+    pub fn issue_code(&self) -> String {
+        use rand::RngCore as _;
+        let mut bytes = [0u8; CODE_LEN];
+        rand::rng().fill_bytes(&mut bytes);
+        let code: String = bytes
+            .iter()
+            .map(|b| ALPHABET[(*b & 31) as usize] as char)
+            .collect();
+        *self.0.code.lock() = Some(code.clone());
+        format_code(&code)
+    }
+
+    /// A code is active (setup is still open to other computers).
+    pub fn has_code(&self) -> bool {
+        self.0.code.lock().is_some()
+    }
+
     fn mark_complete(&self) {
-        self.complete.store(true, Ordering::Release);
+        self.0.complete.store(true, Ordering::Release);
+        *self.0.code.lock() = None;
+        self.0.sessions.lock().clear();
     }
-}
 
-fn token_path(layout: &StorageLayout) -> PathBuf {
-    layout.base.join(SETUP_TOKEN_FILE)
-}
-
-/// For startup while no admin exists: the token to log. `None` when
-/// `MOKURO_SETUP_TOKEN` is set (the operator already knows it). Otherwise the existing
-/// `<storage>/.setup-token`, or a new random one written there (mode 0600 on Unix).
-pub fn ensure_setup_token(layout: &StorageLayout) -> std::io::Result<Option<String>> {
-    if std::env::var(SETUP_TOKEN_ENV).is_ok_and(|t| !t.trim().is_empty()) {
-        return Ok(None);
-    }
-    let path = token_path(layout);
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        let t = existing.trim();
-        if !t.is_empty() {
-            return Ok(Some(t.to_string()));
+    /// Check a presented code against the current one, counting the attempt.
+    fn check_code(&self, ip: &str, presented: &str) -> Gate {
+        if let Err(wait) = self.0.limiter.lock().attempt(ip, Instant::now()) {
+            return Gate::Limited(wait);
+        }
+        let given = normalize_code(presented);
+        let ok = match self.0.code.lock().as_deref() {
+            Some(code) => constant_time_eq(code.as_bytes(), given.as_bytes()),
+            None => false,
+        };
+        if ok {
+            Gate::Allowed
+        } else {
+            warn!("setup: a wrong setup code was entered from {ip}");
+            Gate::Denied
         }
     }
-    let token = random_token();
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+
+    /// Start a session (after a right code): its id, for the cookie.
+    fn new_session(&self) -> String {
+        use base64::Engine as _;
+        use rand::RngCore as _;
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let now = Instant::now();
+        let mut s = self.0.sessions.lock();
+        s.retain(|_, until| *until > now);
+        while s.len() >= MAX_SESSIONS {
+            let oldest = s
+                .iter()
+                .min_by_key(|(_, until)| **until)
+                .map(|(k, _)| k.clone());
+            match oldest {
+                Some(k) => s.remove(&k),
+                None => break,
+            };
+        }
+        s.insert(id.clone(), now + SESSION_TTL);
+        id
     }
-    use std::io::Write as _;
-    opts.open(&path)?.write_all(token.as_bytes())?;
-    Ok(Some(token))
+
+    fn session_valid(&self, id: &str) -> bool {
+        let now = Instant::now();
+        let s = self.0.sessions.lock();
+        s.iter()
+            .any(|(k, until)| *until > now && constant_time_eq(k.as_bytes(), id.as_bytes()))
+    }
 }
 
-/// Delete `<storage>/.setup-token` (done when setup completes).
-pub fn remove_setup_token(layout: &StorageLayout) {
-    let path = token_path(layout);
+/// `ABCDE12345` → `ABCDE-12345`.
+fn format_code(code: &str) -> String {
+    let (a, b) = code.split_at(code.len() / 2);
+    format!("{a}-{b}")
+}
+
+/// What a person typed → the code's characters: upper case, no spaces or dashes, and
+/// the letters Crockford's alphabet leaves out read as the digits they look like.
+pub fn normalize_code(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .map(|c| match c.to_ascii_uppercase() {
+            'O' => '0',
+            'I' | 'L' => '1',
+            c => c,
+        })
+        .collect()
+}
+
+/// Delete the 0.7 betas' `<storage>/.setup-token` (it no longer opens anything).
+pub fn remove_legacy_token(layout: &StorageLayout) {
+    let path = layout.base.join(LEGACY_TOKEN_FILE);
     match std::fs::remove_file(&path) {
-        Ok(()) => info!("setup complete; removed {}", path.display()),
+        Ok(()) => info!("removed {} (setup now uses a setup code)", path.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => warn!("could not remove {}: {e}", path.display()),
     }
 }
 
-/// 32 random bytes as URL-safe base64 (43 characters).
-fn random_token() -> String {
-    use base64::Engine as _;
-    use rand::RngCore as _;
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// Compare without an early exit, so timing does not leak the token.
+/// Compare without an early exit, so timing does not leak the code.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// The setup tokens currently accepted.
-fn accepted_tokens(deps: &AccountsDeps) -> Vec<String> {
-    let mut out = Vec::new();
-    if let Some(t) = &deps.setup.env_token {
-        out.push(t.clone());
-    }
-    if let Ok(t) = std::fs::read_to_string(token_path(&deps.core.layout)) {
-        let t = t.trim();
-        if !t.is_empty() {
-            out.push(t.to_string());
-        }
-    }
-    out
-}
-
-fn query_token(query: Option<&str>) -> Option<String> {
-    query?.split('&').find_map(|pair| {
-        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        (k == "token").then(|| {
-            percent_encoding::percent_decode_str(&v.replace('+', " "))
-                .decode_utf8_lossy()
-                .into_owned()
-        })
-    })
-}
-
-fn cookie_token(headers: &HeaderMap) -> Option<String> {
+fn session_cookie(headers: &HeaderMap) -> Option<String> {
     headers
         .get_all(header::COOKIE)
         .iter()
@@ -176,32 +279,8 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
         .flat_map(|v| v.split(';'))
         .find_map(|c| {
             let (k, v) = c.trim().split_once('=')?;
-            (k == SETUP_TOKEN_COOKIE).then(|| v.trim().to_string())
+            (k == SESSION_COOKIE).then(|| v.trim().to_string())
         })
-}
-
-/// Every token the request presents (query, header, cookie).
-fn presented_tokens(parts: &Parts) -> Vec<String> {
-    let header = parts
-        .headers
-        .get(SETUP_TOKEN_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.trim().to_string());
-    [
-        query_token(parts.uri.query()),
-        header,
-        cookie_token(&parts.headers),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|t| !t.is_empty())
-    .collect()
-}
-
-fn token_matches(accepted: &[String], presented: &str) -> bool {
-    accepted
-        .iter()
-        .any(|t| constant_time_eq(t.as_bytes(), presented.as_bytes()))
 }
 
 /// 0.5.2 `_is_local_request`: loopback peer, and a loopback client address if proxy
@@ -213,17 +292,24 @@ fn is_local(client: &Client) -> bool {
     client.ip == client.peer.to_string() || is_loopback(&client.ip)
 }
 
-/// May this request run setup: local, or carrying a valid setup token.
-fn allowed(deps: &AccountsDeps, client: &Client, parts: &Parts) -> bool {
+/// May this request run setup: local, a live setup session, or the code in
+/// `X-Setup-Code` (which counts as an attempt).
+fn gate_of(deps: &AccountsDeps, client: &Client, parts: &Parts) -> Gate {
     if is_local(client) {
-        return true;
+        return Gate::Allowed;
     }
-    let presented = presented_tokens(parts);
-    if presented.is_empty() {
-        return false;
+    if session_cookie(&parts.headers).is_some_and(|s| deps.setup.session_valid(&s)) {
+        return Gate::Allowed;
     }
-    let accepted = accepted_tokens(deps);
-    presented.iter().any(|p| token_matches(&accepted, p))
+    match parts
+        .headers
+        .get(SETUP_CODE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.trim().is_empty())
+    {
+        Some(code) => deps.setup.check_code(&client.ip, code),
+        None => Gate::Denied,
+    }
 }
 
 /// Blocking `needs_setup`; a DB failure answers 500.
@@ -235,12 +321,31 @@ async fn needs_setup(deps: &AccountsDeps) -> Result<bool, Response> {
     }
 }
 
-/// The 403 gate the setup pages and status apply while setup is needed.
+fn refusal(gate: Gate) -> Response {
+    match gate {
+        Gate::Limited(wait) => {
+            let mut r = json_error(
+                429,
+                &format!("Too many setup code attempts. Retry in {wait}s"),
+            );
+            if let Ok(v) = HeaderValue::from_str(&wait.to_string()) {
+                r.headers_mut().insert(header::RETRY_AFTER, v);
+            }
+            r
+        }
+        _ => json_error(403, REMOTE_NEEDS_CODE),
+    }
+}
+
+/// The JSON gate the setup API and files apply while setup is needed.
 async fn gate(deps: &AccountsDeps, client: &Client, parts: &Parts) -> Option<Response> {
     match needs_setup(deps).await {
         Err(resp) => Some(resp),
-        Ok(true) if !allowed(deps, client, parts) => Some(json_error(403, LOCAL_ONLY)),
-        Ok(_) => None,
+        Ok(true) => match gate_of(deps, client, parts) {
+            Gate::Allowed => None,
+            g => Some(refusal(g)),
+        },
+        Ok(false) => None,
     }
 }
 
@@ -248,6 +353,7 @@ pub fn routes() -> Router<AccountsDeps> {
     Router::new()
         .route("/setup/api/status", get(status))
         .route("/setup/api/complete", post(complete))
+        .route("/setup/code", post(code))
         .route("/setup", get(index))
         .route("/setup/", get(index))
         .route("/setup/{*file}", get(file))
@@ -264,22 +370,22 @@ async fn status(State(d): State<AccountsDeps>, client: Client, parts: Parts) -> 
 }
 
 async fn index(State(d): State<AccountsDeps>, client: Client, parts: Parts) -> Response {
-    if let Some(resp) = gate(&d, &client, &parts).await {
-        return resp;
+    match needs_setup(&d).await {
+        Err(resp) => return resp,
+        Ok(true) => match gate_of(&d, &client, &parts) {
+            Gate::Allowed => {}
+            Gate::Denied => return code_page(StatusCode::OK, None, d.setup.has_code()),
+            Gate::Limited(wait) => {
+                return code_page(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Some(format!("Too many attempts. Try again in {wait} seconds.")),
+                    true,
+                );
+            }
+        },
+        Ok(false) => {}
     }
-    let mut resp = serve_page_json_errors("setup", "index.html", "Not found", Some("no-cache"));
-    // A valid `?token=` is remembered for the page's own API calls.
-    if let Some(t) =
-        query_token(parts.uri.query()).filter(|t| token_matches(&accepted_tokens(&d), t))
-    {
-        let cookie = format!(
-            "{SETUP_TOKEN_COOKIE}={t}; Path=/setup; Max-Age=3600; HttpOnly; SameSite=Strict"
-        );
-        if let Ok(v) = HeaderValue::from_str(&cookie) {
-            resp.headers_mut().insert(header::SET_COOKIE, v);
-        }
-    }
-    resp
+    serve_page_json_errors("setup", "index.html", "Not found", Some("no-cache"))
 }
 
 async fn file(
@@ -292,10 +398,148 @@ async fn file(
     if file.starts_with("api/") {
         return json_error(404, "Not found");
     }
-    if let Some(resp) = gate(&d, &client, &parts).await {
+    // The code page's own stylesheet.
+    if file != "setup.css"
+        && let Some(resp) = gate(&d, &client, &parts).await
+    {
         return resp;
     }
     serve_page_json_errors("setup", &file, "Not found", Some("no-cache"))
+}
+
+/// `POST /setup/code` (a form: `code=XXXXX-XXXXX`): a right code earns a setup session
+/// and goes on to the wizard.
+async fn code(State(d): State<AccountsDeps>, client: Client, body: Body) -> Response {
+    let to_setup = || {
+        let mut r = Response::new(Body::empty());
+        *r.status_mut() = StatusCode::SEE_OTHER;
+        r.headers_mut()
+            .insert(header::LOCATION, HeaderValue::from_static("/setup"));
+        r
+    };
+    match needs_setup(&d).await {
+        Err(resp) => return resp,
+        Ok(false) => return to_setup(),
+        Ok(true) => {}
+    }
+    if is_local(&client) {
+        return to_setup();
+    }
+    let bytes = match axum::body::to_bytes(body, 4096).await {
+        Ok(b) => b,
+        Err(_) => return code_page(StatusCode::PAYLOAD_TOO_LARGE, None, d.setup.has_code()),
+    };
+    let presented = form_value(&bytes, "code").unwrap_or_default();
+    if presented.trim().is_empty() {
+        return code_page(
+            StatusCode::BAD_REQUEST,
+            Some("Enter the setup code.".into()),
+            d.setup.has_code(),
+        );
+    }
+    match d.setup.check_code(&client.ip, &presented) {
+        Gate::Allowed => {
+            info!("setup: the setup code was entered from {}", client.ip);
+            let id = d.setup.new_session();
+            let secure = if d.core.config.read().ssl.enabled {
+                "; Secure"
+            } else {
+                ""
+            };
+            let cookie = format!(
+                "{SESSION_COOKIE}={id}; Path=/setup; Max-Age={}; HttpOnly; SameSite=Strict{secure}",
+                SESSION_TTL.as_secs()
+            );
+            let mut r = to_setup();
+            if let Ok(v) = HeaderValue::from_str(&cookie) {
+                r.headers_mut().insert(header::SET_COOKIE, v);
+            }
+            r
+        }
+        Gate::Denied => code_page(
+            StatusCode::FORBIDDEN,
+            Some("That is not the setup code. Check the server log and try again.".into()),
+            d.setup.has_code(),
+        ),
+        Gate::Limited(wait) => {
+            let mut r = code_page(
+                StatusCode::TOO_MANY_REQUESTS,
+                Some(format!("Too many attempts. Try again in {wait} seconds.")),
+                true,
+            );
+            if let Ok(v) = HeaderValue::from_str(&wait.to_string()) {
+                r.headers_mut().insert(header::RETRY_AFTER, v);
+            }
+            r
+        }
+    }
+}
+
+/// `name`'s value in an `application/x-www-form-urlencoded` body.
+fn form_value(body: &[u8], name: &str) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    text.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        (k == name).then(|| {
+            percent_encoding::percent_decode_str(&v.replace('+', " "))
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+    })
+}
+
+/// The page asking another computer for the setup code. `message` is ours (never what
+/// the client sent).
+fn code_page(status: StatusCode, message: Option<String>, has_code: bool) -> Response {
+    let note = match (message, has_code) {
+        (Some(m), _) => format!(r#"<div class="form-error" role="alert">{m}</div>"#),
+        (None, false) => format!(r#"<div class="form-error" role="alert">{NO_CODE_YET}.</div>"#),
+        (None, true) => String::new(),
+    };
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Setup code - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/setup/setup.css">
+</head>
+<body>
+    <div class="setup-container">
+        <div class="setup-card card">
+            <h1 class="setup-title">Set up Mokuro Bunko</h1>
+            <p class="setup-description">To create the admin account from another computer, enter the one-time setup code.
+            It is in the server log, printed at startup in a line beginning <code>First run:</code>
+            (for Docker: <code>docker logs &lt;container&gt;</code>; on Unraid: the container's log).</p>
+            <form method="post" action="/setup/code" autocomplete="off">
+                <div class="form-group">
+                    <label for="setup-code" class="form-label">Setup code</label>
+                    <input type="text" id="setup-code" name="code" class="form-input" required autofocus
+                           maxlength="32" spellcheck="false" autocapitalize="characters" placeholder="XXXXX-XXXXX">
+                    <p class="form-hint">On the server itself, open this page at localhost: no code is needed there.</p>
+                </div>
+                {note}
+                <div class="setup-actions">
+                    <button type="submit" class="btn btn--primary btn--lg">Continue</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+"#
+    );
+    let mut r = Response::new(Body::from(html));
+    *r.status_mut() = status;
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    r
 }
 
 /// `POST /setup/api/complete` `{admin: {username, password}, registration: {mode}}`.
@@ -305,17 +549,24 @@ async fn complete(
     parts: Parts,
     body: Body,
 ) -> Response {
-    if !allowed(&d, &client, &parts) {
-        return json_error(403, LOCAL_ONLY);
-    }
     // One completion at a time: two concurrent requests must not both see "no admin
     // yet" and create two admins.
     static COMPLETING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _one_at_a_time = COMPLETING.lock().await;
     match needs_setup(&d).await {
         Ok(true) => {}
-        Ok(false) => return json_error(400, "Setup already completed"),
+        Ok(false) => {
+            // 0.5.2: a non-local caller is refused before "already completed".
+            if !is_local(&client) {
+                return json_error(403, REMOTE_NEEDS_CODE);
+            }
+            return json_error(400, "Setup already completed");
+        }
         Err(resp) => return resp,
+    }
+    match gate_of(&d, &client, &parts) {
+        Gate::Allowed => {}
+        g => return refusal(g),
     }
     if let Some((status, msg)) = crate::http::csrf::require_json(&parts.headers) {
         return json_error(status, msg);
@@ -360,6 +611,8 @@ async fn complete(
         Ok(Err(e)) => return db_failed("setup admin", &e),
         Err(resp) => return resp,
     }
+    // The admin exists: the code and the sessions end now.
+    d.setup.mark_complete();
     let mode = data
         .get("registration")
         .and_then(|r| r.get("mode"))
@@ -368,22 +621,105 @@ async fn complete(
         d.core.config.write().registration.mode = mode.to_string();
     }
     let core = d.core.clone();
-    let saved = blocking(move || {
-        let saved = core.save_config();
-        remove_setup_token(&core.layout);
-        saved
-    })
-    .await;
+    let saved = blocking(move || core.save_config()).await;
     // The admin exists either way; 0.5.2 answered 500 here, leaving the wizard stuck on
     // "Setup already completed" for a retry.
     if let Ok(Err(e)) = saved {
         warn!("setup: could not save the config: {e}");
     }
-    d.setup.mark_complete();
     json_response(
         201,
         json!({ "success": true, "message": "Setup completed successfully" }),
     )
+}
+
+const VALID_MODES: [&str; 4] = ["disabled", "self", "invite", "approval"];
+
+// --- the Docker bootstrap ------------------------------------------------------------
+
+pub const ADMIN_USERNAME_ENV: &str = "MOKURO_ADMIN_USERNAME";
+pub const ADMIN_PASSWORD_ENV: &str = "MOKURO_ADMIN_PASSWORD";
+pub const ADMIN_PASSWORD_FILE_ENV: &str = "MOKURO_ADMIN_PASSWORD_FILE";
+
+/// What [`bootstrap_admin`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bootstrap {
+    /// No `MOKURO_ADMIN_USERNAME`.
+    NotAsked,
+    Created(String),
+    /// An admin exists: the variables were ignored.
+    Ignored,
+    /// Bad input or a failed create: nothing was created (the reason, logged).
+    Failed(String),
+}
+
+/// [`bootstrap_admin`] over the process environment (the server's startup).
+pub fn bootstrap_admin_from_env(db: &Database, flag: &SetupFlag) -> Bootstrap {
+    bootstrap_admin(db, flag, |k| std::env::var(k).ok())
+}
+
+/// `MOKURO_ADMIN_USERNAME` + `MOKURO_ADMIN_PASSWORD` (or `MOKURO_ADMIN_PASSWORD_FILE`,
+/// its trailing newline dropped) create the admin account when none exists, with the
+/// wizard's checks. An existing admin wins: the variables are ignored (one log line).
+/// The password is never logged.
+pub fn bootstrap_admin(
+    db: &Database,
+    flag: &SetupFlag,
+    env: impl Fn(&str) -> Option<String>,
+) -> Bootstrap {
+    let set = |k: &str| env(k).filter(|v| !v.trim().is_empty());
+    let Some(username) = set(ADMIN_USERNAME_ENV) else {
+        if set(ADMIN_PASSWORD_ENV).is_some() || set(ADMIN_PASSWORD_FILE_ENV).is_some() {
+            warn!("{ADMIN_PASSWORD_ENV} is set without {ADMIN_USERNAME_ENV}: ignored");
+        }
+        return Bootstrap::NotAsked;
+    };
+    let username = username.trim().to_string();
+    let fail = |why: String| {
+        error!("{ADMIN_USERNAME_ENV}: the admin account was not created: {why}");
+        Bootstrap::Failed(why)
+    };
+    match flag.needs_setup(db) {
+        Ok(false) => {
+            info!(
+                "{ADMIN_USERNAME_ENV} is set but an admin account exists: ignored (change accounts in the admin panel)"
+            );
+            return Bootstrap::Ignored;
+        }
+        Ok(true) => {}
+        Err(e) => return fail(format!("the database could not be read: {e}")),
+    }
+    let password = match (set(ADMIN_PASSWORD_ENV), set(ADMIN_PASSWORD_FILE_ENV)) {
+        (Some(p), _) => p,
+        (None, Some(path)) => match std::fs::read_to_string(path.trim()) {
+            Ok(p) => p.trim_end_matches(['\r', '\n']).to_string(),
+            Err(e) => {
+                return fail(format!(
+                    "{ADMIN_PASSWORD_FILE_ENV}: could not read {}: {e}",
+                    path.trim()
+                ));
+            }
+        },
+        (None, None) => {
+            return fail(format!(
+                "{ADMIN_PASSWORD_ENV} (or {ADMIN_PASSWORD_FILE_ENV}) is not set"
+            ));
+        }
+    };
+    if let Some(msg) = validate_username(&username) {
+        return fail(format!("username: {msg}"));
+    }
+    if let Some(msg) = validate_password(&password) {
+        return fail(format!("password: {msg}"));
+    }
+    match db.create_user(&username, &password, Role::Admin, UserStatus::Active, "") {
+        Ok(_) => {
+            flag.mark_complete();
+            info!("Created the admin account '{username}' from {ADMIN_USERNAME_ENV}");
+            Bootstrap::Created(username)
+        }
+        Err(e) => fail(e.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -391,50 +727,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_and_cookie_parsing() {
-        assert_eq!(query_token(Some("a=1&token=ab%2Bc")), Some("ab+c".into()));
-        assert_eq!(query_token(Some("tokens=x")), None);
-        assert_eq!(query_token(None), None);
+    fn cookie_parsing() {
         let mut h = HeaderMap::new();
         h.insert(
             header::COOKIE,
-            "x=1; mokuro_setup_token=abc ; y=2".parse().unwrap(),
+            "x=1; mokuro_setup_session=abc ; y=2".parse().unwrap(),
         );
-        assert_eq!(cookie_token(&h), Some("abc".into()));
+        assert_eq!(session_cookie(&h), Some("abc".into()));
+        assert_eq!(
+            form_value(b"a=1&code=ab+c%2D1", "code"),
+            Some("ab c-1".into())
+        );
+        assert_eq!(form_value(b"codes=1", "code"), None);
     }
 
     #[test]
-    fn token_compare() {
+    fn codes_are_ten_unambiguous_characters() {
+        let flag = SetupFlag::default();
+        let shown = flag.issue_code();
+        assert_eq!(shown.len(), 11);
+        assert_eq!(&shown[5..6], "-");
+        let raw = normalize_code(&shown);
+        assert_eq!(raw.len(), CODE_LEN);
+        assert!(raw.bytes().all(|b| ALPHABET.contains(&b)));
+        assert!(!raw.contains(['I', 'L', 'O', 'U']));
+        // 32 symbols x 10 = 50 bits; a new code each time.
+        assert_ne!(normalize_code(&flag.issue_code()), raw);
+        assert_eq!(normalize_code(" abc-de oIl "), "ABCDE011");
+    }
+
+    #[test]
+    fn code_compare_and_limits() {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
-        assert_eq!(random_token().len(), 43);
+        let flag = SetupFlag::default();
+        let code = flag.issue_code();
+        assert_eq!(flag.check_code("1.2.3.4", "nope"), Gate::Denied);
+        assert_eq!(
+            flag.check_code("1.2.3.4", &code.to_lowercase()),
+            Gate::Allowed
+        );
+        for _ in 0..3 {
+            assert_eq!(flag.check_code("1.2.3.4", "nope"), Gate::Denied);
+        }
+        // The sixth attempt is refused, even with the right code.
+        assert!(matches!(
+            flag.check_code("1.2.3.4", &code),
+            Gate::Limited(_)
+        ));
+        // Others still get their tries, up to the global cap.
+        assert_eq!(flag.check_code("5.6.7.8", &code), Gate::Allowed);
+        let mut l = Limiter::default();
+        let now = Instant::now();
+        for i in 0..ATTEMPTS_GLOBAL {
+            assert!(l.attempt(&format!("10.0.{}.{}", i / 4, i % 4), now).is_ok());
+        }
+        assert!(l.attempt("10.9.9.9", now).is_err());
+        // The window passes.
+        assert!(l.attempt("10.9.9.9", now + ATTEMPT_WINDOW).is_ok());
     }
 
     #[test]
-    fn token_file_lifecycle() {
-        // MOKURO_SETUP_TOKEN is not set in the test environment.
-        if std::env::var(SETUP_TOKEN_ENV).is_ok() {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let layout = StorageLayout::new(tmp.path());
-        let t = ensure_setup_token(&layout).unwrap().unwrap();
-        assert_eq!(
-            ensure_setup_token(&layout).unwrap().unwrap(),
-            t,
-            "reused, not regenerated"
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(tmp.path().join(SETUP_TOKEN_FILE))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
-        remove_setup_token(&layout);
-        assert!(!tmp.path().join(SETUP_TOKEN_FILE).exists());
+    fn completion_ends_the_code_and_the_sessions() {
+        let flag = SetupFlag::default();
+        let code = flag.issue_code();
+        let s = flag.new_session();
+        assert!(flag.session_valid(&s));
+        assert!(!flag.session_valid("other"));
+        flag.mark_complete();
+        assert!(!flag.has_code());
+        assert!(!flag.session_valid(&s));
+        assert_eq!(flag.check_code("9.9.9.9", &code), Gate::Denied);
     }
 }

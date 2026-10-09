@@ -100,6 +100,9 @@ pub struct Services {
     /// Requests that write (uploads, moves, deletes, processor results) being served
     /// now: an automatic update restarts only when there are none.
     pub writes: WritesInFlight,
+    /// First-run state: the setup code and its sessions (shared with the accounts
+    /// routes; [`announce_setup`] issues the code).
+    pub setup: crate::accounts::SetupFlag,
 }
 
 /// Counts the writing requests in flight ([`Services::writes`]).
@@ -262,6 +265,7 @@ impl Services {
             stop: CancellationToken::new(),
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writes: WritesInFlight::default(),
+            setup: crate::accounts::SetupFlag::default(),
         })
     }
 }
@@ -571,6 +575,7 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
     };
     let mut accounts =
         crate::accounts::AccountsDeps::new(services.core.clone(), services.db.clone());
+    accounts.setup = services.setup.clone();
     accounts.library = Some(services.library.counts());
     accounts.health = Some(Arc::new(ocr.clone()));
     accounts.hooks.on_processor_login_refused = Some(refused);
@@ -661,34 +666,95 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
     )
 }
 
-/// When nobody can sign in yet, write (or reuse) a one-time setup token and log the URL,
-/// so the wizard is reachable from another machine (Docker bridge networking).
+/// When nobody can sign in yet: a new one-time setup code ([`crate::accounts::SetupFlag`]),
+/// printed once in a banner with the address to open, so the wizard is reachable from
+/// another computer (Docker, a NAS). Also removes the 0.7 betas' `.setup-token` file.
+/// Call after [`crate::accounts::bootstrap_admin_from_env`].
 pub fn announce_setup(services: &Services) {
-    let flag = crate::accounts::SetupFlag::default();
-    if !flag.needs_setup(&services.db).unwrap_or(false) {
+    crate::accounts::remove_legacy_token(&services.core.layout);
+    if !services.setup.needs_setup(&services.db).unwrap_or(false) {
         return;
     }
     let (host, port, ssl) = {
         let c = services.core.config.read();
         (c.server.host.clone(), c.server.port, c.ssl.enabled)
     };
-    let scheme = if ssl { "https" } else { "http" };
-    let host = if host == "0.0.0.0" || host == "::" {
-        "localhost".to_string()
-    } else {
-        host
-    };
-    match crate::accounts::ensure_setup_token(&services.core.layout) {
-        Ok(Some(token)) => {
-            info!("First run: finish setup at {scheme}://{host}:{port}/setup?token={token}")
-        }
-        Ok(None) => info!(
-            "First run: finish setup at {scheme}://{host}:{port}/setup (token from MOKURO_SETUP_TOKEN)"
-        ),
-        Err(e) => info!(
-            "First run: finish setup at {scheme}://{host}:{port}/setup from this machine ({e})"
-        ),
+    let code = services.setup.issue_code();
+    for line in setup_banner(&host, port, ssl, &code, in_container(), behind_nginx()) {
+        info!("{line}");
     }
+}
+
+/// The first-run banner's lines (the code appears in exactly one of them).
+pub fn setup_banner(
+    host: &str,
+    port: u16,
+    ssl: bool,
+    code: &str,
+    container: bool,
+    nginx: bool,
+) -> Vec<String> {
+    let scheme = if ssl { "https" } else { "http" };
+    let any = matches!(host, "0.0.0.0" | "::" | "[::]" | "");
+    let local_only = matches!(host, "127.0.0.1" | "::1" | "localhost");
+    // Behind the image's bundled nginx the server listens on an internal port.
+    let shown_host = if any || nginx {
+        "<this server's address>".to_string()
+    } else if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let shown_port = if nginx {
+        "<web UI port>".to_string()
+    } else {
+        port.to_string()
+    };
+    let rule = "=".repeat(78);
+    let mut lines = vec![
+        rule.clone(),
+        format!(
+            "First run: create the admin account at {scheme}://{shown_host}:{shown_port}/setup (setup code: {code})"
+        ),
+    ];
+    if container {
+        lines.push(if nginx {
+            "  In Docker: the host's address and the host port mapped to the container's web UI port."
+                .to_string()
+        } else {
+            format!(
+                "  In Docker: the host's address and the host port mapped to the container's port {port}."
+            )
+        });
+    }
+    if local_only {
+        lines.push(
+            "  The server listens on this computer only: open it here (no code needed).".into(),
+        );
+    } else {
+        lines.push(format!(
+            "  On the server itself, {scheme}://localhost:{shown_port}/setup needs no code."
+        ));
+    }
+    lines.push(
+        "  The code works until an admin exists; every start makes a new one. Or set MOKURO_ADMIN_USERNAME and MOKURO_ADMIN_PASSWORD."
+            .into(),
+    );
+    lines.push(rule);
+    lines
+}
+
+/// Running in a container (Docker's `/.dockerenv`, Podman's `/run/.containerenv`, or
+/// the images' `MOKURO_INSTALL_KIND=docker`).
+fn in_container() -> bool {
+    std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
+        || std::env::var("MOKURO_INSTALL_KIND").is_ok_and(|k| k == "docker")
+}
+
+/// The image's entrypoint put nginx in front (`MOKURO_NGINX_ACCEL`).
+fn behind_nginx() -> bool {
+    std::env::var("BUNKO_NGINX_RUNNING").is_ok_and(|v| v == "1")
 }
 
 pub fn not_found_json() -> Response {

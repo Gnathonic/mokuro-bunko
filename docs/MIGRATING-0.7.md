@@ -213,6 +213,22 @@ up). Upload ownership is keyed by path, so a merged volume needs its
 `volume_uploads`, `ocr_sidecars` and `volume_identities` rows renamed too, or
 re-uploaded by its uploader.
 
+### First-run setup from another computer
+
+This only matters for a new library (an upgraded one already has its admin). 0.5
+let the setup page create the admin only from the server machine itself
+(`Setup is only allowed from localhost`); in Docker or on a NAS that meant
+`docker exec … mokuro-bunko admin add-user` or `mokuro-bunko setup`. 0.7 keeps
+localhost working without anything more and adds two ways in:
+
+- The **setup code**: while no admin exists, the server prints a new one-time code
+  at each start (`First run: create the admin account at http://…/setup (setup code:
+  XXXXX-XXXXX)`). Opened from another computer, `/setup` asks for it, then shows the
+  same wizard. The code works until an admin exists, a few tries a minute.
+- **`MOKURO_ADMIN_USERNAME` + `MOKURO_ADMIN_PASSWORD`** (or
+  `MOKURO_ADMIN_PASSWORD_FILE`): the admin is created on the first start; ignored
+  once one exists. The Unraid templates have both as optional fields.
+
 ### Behaviour fixes you may notice
 
 0.5.2 quirks that were fixed rather than ported (full list in the

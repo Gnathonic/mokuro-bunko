@@ -54,8 +54,7 @@ impl Env {
             Some(dir.path().join("config.yaml")),
             backend,
         );
-        let mut deps = AccountsDeps::new(core, db.clone());
-        deps.setup.env_token = None;
+        let deps = AccountsDeps::new(core, db.clone());
         Env { dir, db, deps }
     }
 

@@ -55,7 +55,7 @@ The full build runs on any GPU: the OCR recognizers run on **libtorch**, which `
 
 Run `mokuro-bunko`. On a desktop it starts the app: a tray icon, and the first time the setup wizard in your browser. Headless (a server, SSH) it runs what is set up, or the terminal setup when nothing is. `mokuro-bunko --help` lists the commands. On Windows, use `mokuro-bunko-cli` in a terminal.
 
-The first browser visit to a new server (`http://localhost:8080`) walks you through creating the admin account; `mokuro-bunko setup` does the same in the console. From a browser on another machine (or through Docker's network) the setup page needs the one-time token the server prints in its log at startup (`/setup?token=...`, also in `<storage>/.setup-token`).
+The first browser visit to a new server (`http://localhost:8080`) walks you through creating the admin account; `mokuro-bunko setup` does the same in the console. From a browser on another machine (Docker, a NAS) the setup page asks for the one-time **setup code** the server prints in its log at startup (`First run: create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`). Or let Docker create the admin on first start with `MOKURO_ADMIN_USERNAME` and `MOKURO_ADMIN_PASSWORD` (or `MOKURO_ADMIN_PASSWORD_FILE`).
 
 ### Linux
 
@@ -86,7 +86,7 @@ Each tag also has a versioned form (`0.7.0`, `0.7.0-cuda`, `0.7.0-lite`); pin on
 ```bash
 docker run -d --name mokuro-bunko -p 8080:8080 -v mokuro-data:/data \
   -e PUID=1000 -e PGID=1000 ghcr.io/gnathonic/mokuro-bunko:latest
-docker logs mokuro-bunko      # the OCR backend download, then the one-time setup link: http://<host>:8080/setup?token=...
+docker logs mokuro-bunko      # the OCR backend download, then: First run: … /setup (setup code: XXXXX-XXXXX)
 ```
 
 The first start downloads the OCR backend before the server listens: ~100 MB for the CPU, ~2 GB for NVIDIA (~350 MB from the release, the rest NVIDIA's CUDA libraries from PyPI), ~3 GB for AMD; then the models of the enabled engines. Later starts reuse them and download nothing. Starting the container with a different GPU (or setting `MOKURO_OCR_BACKEND` to a GPU it now sees) installs that GPU's backend on the next start.

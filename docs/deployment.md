@@ -182,11 +182,25 @@ An update replaces the executable only; the installed backend pack stays. If
 ## First start
 
 The first browser visit to a new server opens a setup page that creates the
-admin account. From the machine itself that just works. From another machine,
-and under Docker bridge networking, the page needs a one-time token: while no
-admin exists the server writes `<storage>/.setup-token` and logs the URL
-(`http://host:8080/setup?token=...`) at startup. `MOKURO_SETUP_TOKEN` sets a
-token of your own. `mokuro-bunko setup` does the same in the console.
+admin account. From the machine itself that just works. From another machine
+(a server in Docker, on a NAS, or reached over SSH) the page first asks for a
+one-time **setup code**: while no admin exists the server makes a new code at
+every start and prints it in its log:
+
+```
+First run: create the admin account at http://<this server's address>:8080/setup (setup code: 7KQ2M-X9D4R)
+```
+
+The code is kept in memory only, works until an admin exists, and allows five
+tries a minute per address (30 in all). `mokuro-bunko setup` does the same in
+the console, and `mokuro-bunko admin add-user NAME --role admin` adds an admin
+directly.
+
+Docker (or any unattended start) can skip the page: `MOKURO_ADMIN_USERNAME` and
+`MOKURO_ADMIN_PASSWORD` (or `MOKURO_ADMIN_PASSWORD_FILE`, e.g. a Docker secret)
+create the admin on the first start. Once an admin exists they are ignored (one
+log line), so changing them later changes nothing: change passwords in the admin
+panel.
 
 ## Deployment Scenarios
 
@@ -873,8 +887,10 @@ Without a GPU OCR runs on the CPU; the first start downloads the CPU backend
 and the models into `/data`. For GPU OCR pass the GPU in (below), or run the
 lite image (or `latest` with `MOKURO_OCR_LOCAL_PROCESSING=false`) and a
 [remote processor](#remote-ocr-processors) on the GPU machine. The first
-visit to the setup page from the host needs the setup token (see
-[First start](#first-start)): `docker logs mokuro-bunko` shows the URL.
+visit to the setup page from another computer asks for the setup code (see
+[First start](#first-start)): `docker logs mokuro-bunko` shows it. Or pass
+`-e MOKURO_ADMIN_USERNAME=... -e MOKURO_ADMIN_PASSWORD=...` to create the
+admin on the first start.
 
 ### Docker Compose
 

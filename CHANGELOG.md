@@ -1,5 +1,25 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- First-run setup from another computer (Docker, a NAS): while no admin exists the
+  server prints a one-time **setup code** in its log at every start (`First run:
+  create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`). `/setup`
+  opened from another address asks for it (an HTML page, five tries a minute per
+  address, 30 in all), then shows the wizard; scripts may send it as `X-Setup-Code`.
+  Localhost still needs no code. The code lives in memory only and dies once an admin
+  exists. 0.5 allowed setup from localhost only.
+- `MOKURO_ADMIN_USERNAME` + `MOKURO_ADMIN_PASSWORD` (or `MOKURO_ADMIN_PASSWORD_FILE`)
+  create the admin on the first start when none exists, and are ignored (logged) once
+  one does. Optional fields in the Unraid templates; commented in the compose files.
+
+### Changed
+- The setup token of the earlier 0.7 betas (`<storage>/.setup-token`,
+  `/setup?token=`, `MOKURO_SETUP_TOKEN`) is gone: its file is deleted at startup and
+  the setup code replaces it. A remote setup API call without a code is answered with
+  how to get one ("…see the server log for the setup code").
+
 ## [0.7.0-beta.4] - 2026-10-09
 
 A pre-release with no changes of its own: it checks that installs of 0.7.0-beta.3
