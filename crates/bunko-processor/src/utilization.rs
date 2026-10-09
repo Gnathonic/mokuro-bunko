@@ -380,9 +380,17 @@ mod tests {
             dir.path(),
             &stat,
         );
-        std::thread::sleep(Duration::from_millis(30));
+        // Waits on what the sampler has done, not on fixed sleeps: a slow CI runner may
+        // start its thread after the stat file changed (then no tick sees CPU busy).
+        let wait = |done: &dyn Fn(&[Sample]) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done(&s.samples()) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait(&|v| !v.is_empty());
         std::fs::write(&stat, "cpu  150 0 150 900 0 0 0 0 0 0\n").unwrap();
-        std::thread::sleep(Duration::from_millis(80));
+        wait(&|v| v.iter().any(|x| x.cpu_pct.is_some()));
         s.stop();
         let (gpu, cpu) = s.means(Some(0.0), Some(10.0));
         assert_eq!(gpu, Some(90.0), "gpu:1 is card10");
