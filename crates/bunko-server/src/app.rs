@@ -412,13 +412,6 @@ type RefusalHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 /// Where refused processor logins are reported (the registry's admin-panel list).
 static PROCESSOR_REFUSALS: std::sync::OnceLock<RefusalHook> = std::sync::OnceLock::new();
 
-/// A placeholder WebDAV handler until bunko-dav is wired.
-pub fn dav_unavailable() -> DavFallback {
-    Arc::new(|_req, _ctx| {
-        Box::pin(async { (StatusCode::NOT_IMPLEMENTED, "WebDAV not wired").into_response() })
-    })
-}
-
 /// Assemble the router: module routers (each with its own state) in 0.5.2 precedence,
 /// then the authenticated WebDAV fallback, wrapped by CORS and security headers.
 pub fn build_router(core: Core, modules: Vec<Router>, dav: DavFallback) -> Router {

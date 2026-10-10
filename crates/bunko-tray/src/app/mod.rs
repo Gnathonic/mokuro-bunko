@@ -1,8 +1,8 @@
-//! The tray's behaviour, independent of the toolkit: the monitor (instance status), the
-//! supervisor and the update check feed a [`MenuModel`]; a menu click comes back as an
-//! item id. The toolkit side ([`Ui`]) only shows the model: a StatusNotifierItem over
-//! D-Bus on Linux (`sni.rs`, ksni), tray-icon + muda on a tao event loop on Windows and
-//! macOS (`native.rs`).
+//! The tray's behaviour, independent of the toolkit: the monitor (instance status) and
+//! the supervisor feed a [`MenuModel`]; a menu click comes back as an item id. The
+//! toolkit side ([`Ui`]) only shows the model: a StatusNotifierItem over D-Bus on Linux
+//! (`sni.rs`, ksni), tray-icon + muda on a tao event loop on Windows and macOS
+//! (`native.rs`).
 
 use crate::Options;
 use crate::autostart;
@@ -10,7 +10,7 @@ use crate::autoupdate::{self, Alarm, Notified};
 use crate::client::{Client, PauseRequest};
 use crate::discover;
 use crate::launch;
-use crate::model::{self, InstanceView, MenuModel, UpdateView};
+use crate::model::{self, InstanceView, MenuModel};
 use crate::monitor::{Live, Monitor};
 use crate::notify;
 use crate::paths::{self, Env, Layout, ProcessEnv};
@@ -119,7 +119,6 @@ pub struct App {
     supervise: bool,
     monitor: Arc<Monitor>,
     supervisor: Option<Supervisor>,
-    update: UpdateView,
     send: Sender,
     model: Option<MenuModel>,
     autostart_shown: Option<bool>,
@@ -214,7 +213,6 @@ impl App {
             tray_config,
             monitor,
             supervisor,
-            update: UpdateView::default(),
             send,
             model: None,
             autostart_shown: None,
@@ -308,7 +306,6 @@ impl App {
         model::build(&model::Inputs {
             instances: &instances,
             supervised: &supervised,
-            update: &self.update,
             updating: &updating,
             notice: notice.as_deref(),
             now: chrono::Local::now(),

@@ -6,12 +6,9 @@ mod cfgfile;
 mod cli;
 mod cmd;
 mod control;
+mod gui;
 #[cfg(feature = "ocr")]
 mod hwdetect;
-// `init_server` is for `serve.rs` (orchestrator) and `processor serve`. logging.rs is
-// not this CLI's file; its one collapsible `if` is left to its owner.
-mod gui;
-#[allow(dead_code)]
 mod local_ocr;
 mod logging;
 mod machine;

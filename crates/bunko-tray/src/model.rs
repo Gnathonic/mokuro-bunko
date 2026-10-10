@@ -44,16 +44,6 @@ pub struct SupervisedView {
     pub failing: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct UpdateView {
-    pub checking: bool,
-    pub latest: Option<String>,
-    pub available: bool,
-    pub error: Option<String>,
-    /// Not a failure (e.g. no release published yet).
-    pub note: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct MenuModel {
     pub status_lines: Vec<String>,
@@ -70,10 +60,6 @@ pub struct MenuModel {
     /// Nothing runs and the tray runs nothing: "Set up…" (the chooser).
     pub show_setup: bool,
     pub library_url: Option<String>,
-    pub update_text: String,
-    /// The update item leads to the Updates settings (a newer release is known) rather
-    /// than running a check.
-    pub update_available: bool,
     pub quit_text: String,
 }
 
@@ -202,7 +188,6 @@ fn state_text(s: &Status, now: DateTime<Local>) -> String {
 pub struct Inputs<'a> {
     pub instances: &'a [InstanceView],
     pub supervised: &'a [SupervisedView],
-    pub update: &'a UpdateView,
     /// Roles inside the restart grace (an automatic update is restarting them), with
     /// the version being installed: shown as "Updating to X…", never as a crash.
     pub updating: &'a [(String, Option<String>)],
@@ -422,38 +407,6 @@ pub fn build(inp: &Inputs) -> MenuModel {
         IconState::Idle
     };
 
-    // An instance whose own check found a newer release it will not install by itself
-    // (`update.auto` off): say so here too, until a manual check here says otherwise.
-    let reported = inp.instances.iter().find_map(|i| {
-        let u = i.status.as_ref()?.update.as_ref()?;
-        (u.state == "available").then(|| u.version.clone().unwrap_or_default())
-    });
-    let unchecked =
-        inp.update.latest.is_none() && inp.update.error.is_none() && inp.update.note.is_none();
-    let update_available = inp.update.available || (unchecked && reported.is_some());
-    let update_text = if inp.update.checking {
-        "Checking for updates…".to_string()
-    } else if update_available {
-        let v = inp
-            .update
-            .latest
-            .clone()
-            .or(reported)
-            .filter(|v| !v.is_empty());
-        format!(
-            "Update available: {} …",
-            v.as_deref().unwrap_or("new version")
-        )
-    } else if let Some(latest) = &inp.update.latest {
-        format!("Up to date ({latest}) — check again")
-    } else if inp.update.note.is_some() {
-        "No release published yet — check again".to_string()
-    } else if inp.update.error.is_some() {
-        "Update check failed — try again".to_string()
-    } else {
-        "Check for updates".to_string()
-    };
-
     let external: Vec<&str> = inp
         .instances
         .iter()
@@ -483,8 +436,6 @@ pub fn build(inp: &Inputs) -> MenuModel {
         admin_url,
         show_setup: inp.instances.iter().all(|i| i.role == "gui") && inp.supervised.is_empty(),
         library_url,
-        update_text,
-        update_available,
         quit_text,
     }
 }
@@ -586,7 +537,6 @@ mod tests {
         build(&Inputs {
             instances,
             supervised: &[],
-            update: &UpdateView::default(),
             updating: &[],
             notice: None,
             now: now(),
@@ -674,26 +624,10 @@ mod tests {
     }
 
     #[test]
-    fn an_update_the_library_only_reports_shows_in_the_update_item() {
+    fn an_update_the_library_only_reports_is_not_a_problem() {
         let m = model(&[inst(with_update("available", ""), true)]);
-        assert_eq!(m.update_text, "Update available: 0.7.1 …");
-        assert!(m.update_available);
+        assert_eq!(m.status_lines, ["Library: Idle"]);
         assert_eq!(m.icon, IconState::Idle);
-        // A manual check here wins.
-        let m = build(&Inputs {
-            instances: &[inst(with_update("available", ""), true)],
-            supervised: &[],
-            update: &UpdateView {
-                latest: Some("0.7.1".into()),
-                ..Default::default()
-            },
-            updating: &[],
-            notice: None,
-            now: now(),
-        });
-        assert!(!m.update_available);
-        let m = model(&[inst(with_update("updated", ""), true)]);
-        assert_eq!(m.update_text, "Check for updates");
     }
 
     #[test]
@@ -728,7 +662,6 @@ mod tests {
         let m = build(&Inputs {
             instances: &[gone, inst(gap(), true)],
             supervised: &[],
-            update: &UpdateView::default(),
             updating: &[("server".to_string(), Some("0.7.1".to_string()))],
             notice: None,
             now: now(),
@@ -784,7 +717,6 @@ mod tests {
             build(&Inputs {
                 instances,
                 supervised,
-                update: &UpdateView::default(),
                 updating: &updating,
                 notice: None,
                 now: now(),
@@ -908,11 +840,6 @@ mod tests {
                 text: "stopped (exit code 1), restarting in 8 s".into(),
                 failing: true,
             }],
-            update: &UpdateView {
-                available: true,
-                latest: Some("0.7.1".into()),
-                ..Default::default()
-            },
             updating: &[],
             notice: Some("pause failed"),
             now: now(),
@@ -925,7 +852,6 @@ mod tests {
             ]
         );
         assert_eq!(m.icon, IconState::Attention);
-        assert_eq!(m.update_text, "Update available: 0.7.1 …");
     }
 
     #[test]
