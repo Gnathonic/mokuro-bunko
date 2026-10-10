@@ -200,12 +200,16 @@
     $('go-dashboard').addEventListener('click', goDashboard);
     w.go('s-done');
     if (ocrOn()) S.watchInstall($('done-ocr'), 'server');
+    // The server reports on itself from now on: its dashboard (signed in), where the
+    // OCR install goes on; this setup app closes.
+    $('dash-note').textContent = 'Opening it…';
+    goDashboard();
   }
 
   // The started server serves its own pages (its control listener): move there and
   // let this setup app close.
   async function goDashboard(ev) {
-    ev.preventDefault();
+    if (ev) ev.preventDefault();
     const note = $('dash-note');
     note.textContent = 'Looking for it…';
     const me = await S.waitFor(async () => {

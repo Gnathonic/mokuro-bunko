@@ -203,23 +203,30 @@
       '<li><a href="#" id="p-dash">Go to its dashboard</a> <span class="form-hint" id="p-dash-note"></span></li>',
       '<li class="form-hint">OCR and start-up can change later: <a href="/app/settings/ocr">OCR &amp; models</a>, <a href="/app/settings/startup">Start-up</a>.</li>',
     ].join('');
-    $('p-dash').addEventListener('click', async (ev) => {
-      ev.preventDefault();
-      const note = $('p-dash-note');
-      note.textContent = 'Looking for it…';
-      const me = await S.waitFor(async () => {
-        const x = await get('/app/api/instances');
-        return x.instances.find((i) => i.role === 'processor' && i.alive && i.dashboard);
-      }, 10);
-      if (me) {
-        await post('/app/api/handoff', { url: me.dashboard }).catch(() => {});
-        window.location.href = me.dashboard;
-        return;
-      }
-      note.textContent = 'Its dashboard is not reachable yet.';
-    });
+    $('p-dash').addEventListener('click', goDashboard);
     w.go('p-done');
     S.watchInstall($('p-done-ocr'), 'processor');
+    // The processor reports on itself from now on: its dashboard (signed in), where
+    // the OCR install goes on; this setup app closes.
+    $('p-dash-note').textContent = 'Opening it…';
+    goDashboard();
+  }
+
+  // The started processor serves its own pages: move there and let this app close.
+  async function goDashboard(ev) {
+    if (ev) ev.preventDefault();
+    const note = $('p-dash-note');
+    note.textContent = 'Looking for it…';
+    const me = await S.waitFor(async () => {
+      const x = await get('/app/api/instances');
+      return x.instances.find((i) => i.role === 'processor' && i.alive && i.dashboard);
+    }, 10);
+    if (me) {
+      await post('/app/api/handoff', { url: me.dashboard }).catch(() => {});
+      window.location.href = me.dashboard;
+      return;
+    }
+    note.textContent = 'Its dashboard is not reachable yet.';
   }
 
   document.addEventListener('DOMContentLoaded', async () => {

@@ -158,7 +158,11 @@ fn state_text(s: &Status, now: DateTime<Local>) -> String {
             }
             None => "Working".into(),
         },
-        "idle" => format!("Idle{}", queue.unwrap_or_default()),
+        "idle" => match s.library.as_ref().and_then(|l| l.activity.as_deref()) {
+            // The first run of an engine measures its speed before the first volume.
+            Some(a) if a.starts_with("Measuring") => shorten(a, 70),
+            _ => format!("Idle{}", queue.unwrap_or_default()),
+        },
         "paused" | "pausing" => {
             let base = if s.state == "pausing" {
                 "Pausing after this volume"

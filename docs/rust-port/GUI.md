@@ -197,8 +197,11 @@ runs, and on a failure (or `missing`: automatic installs off) the message with a
 Install button (`POST /control/ocr-install`); the tray adds "Installing OCR backend: NN%"
 under the state, and a failure is a `fail` problem (`kind: "ocr-install"`), so the icon
 asks for attention. The setup wizards save the OCR step's choices
-(`<backends>/.install-request.json`) and start the server or processor; their last page
-comes as soon as it serves and follows the install there. When a tray runs, what the
+(`<backends>/.install-request.json`) and start the server or processor; as soon as it
+serves, the browser moves to that instance's dashboard, signed in through a single-use
+code from its control API (`/app/api/instances/<role>/dashboard`), and the `gui` process
+exits: from then on the instance's dashboard (serving, the install's progress, "OCR
+ready", the first-run benchmark as `library.activity`) and the tray report on it. When a tray runs, what the
 wizard starts is handed to it (tray.json; a running tray picks up added roles, and adopts
 an instance started for it with `MOKURO_CONTROL_MANAGED=1`), so the tray's Quit stops it.
 

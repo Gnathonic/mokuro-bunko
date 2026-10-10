@@ -568,6 +568,12 @@ impl Installer {
             }
         }
         self.0.running.store(false, Ordering::SeqCst);
+        // The pack in use, as the status shows it.
+        if let Some(c) = self.0.control.lock().as_ref()
+            && let Ok(t) = self.target()
+        {
+            c.set_backend_pack(crate::control::pack_name(&t.backends_dirs()));
+        }
         // Done or not: the local OCR (re)starts with what is installed now.
         self.0.finished.send_modify(|n| *n += 1);
     }

@@ -81,6 +81,10 @@ pub struct LibraryView {
     /// Why it is not connected (login refused, unreachable, ...).
     #[serde(default)]
     pub error: Option<String>,
+    /// What holds the queue now, in a sentence (0.7: the first-run speed measurement of
+    /// an engine on a machine, before its first volume). None: nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
 }
 
 /// One volume this machine is reading now.

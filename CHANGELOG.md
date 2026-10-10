@@ -18,8 +18,11 @@
   directory; an interrupted one resumes its downloads at the next start. `install-ocr`
   stays a foreground command for scripts.
 - The setup wizard's "Save and start" saves the configuration and the OCR choices and
-  starts the server or processor; the last page comes as soon as it serves, and the OCR
-  install continues in the background (the browser can be closed). Turning local
+  starts the server or processor, then moves the browser to that instance's own
+  dashboard, signed in (the setup app exits): it shows the server serving, the OCR
+  backend install with its progress, then "OCR ready", and an engine's first-run speed
+  measurement; the browser can be closed at any point. The dashboard and the tray are
+  the one place that reports on it afterwards. Turning local
   processing on in the admin panel's OCR settings starts the install (or the local OCR)
   at once.
 - First-run setup from another computer (Docker, a NAS): while no admin exists the

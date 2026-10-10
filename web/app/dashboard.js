@@ -47,7 +47,8 @@
   function installText(i) {
     if (i.state === 'failed') return 'The OCR backend install failed' + (i.message ? ': ' + i.message : '') + '.';
     if (i.state === 'missing') return (i.message || 'No OCR backend is installed') + '.';
-    if (i.state === 'done') return 'OCR backend installed' + (i.pack ? ' (' + i.pack + ')' : '') + '; local OCR uses it now.';
+    if (i.state === 'done') return 'OCR ready: the ' + (i.pack || i.variant || '') + ' backend is installed' +
+      (last && last.role === 'processor' ? '; this processor takes work now.' : '; this server reads volumes with it now.');
     const stage = {
       checking: 'Checking what this machine needs', waiting: 'Waiting for another OCR install on this machine',
       downloading: 'Downloading the ' + (i.variant ? i.variant + ' ' : '') + 'backend pack',
@@ -103,6 +104,9 @@
         (p.since ? ' — since ' + new Date(p.since).toLocaleTimeString() : '') + '.';
     }
 
+    const act = (s.library || {}).activity;
+    $('dash-activity').hidden = !act;
+    $('dash-activity').textContent = act || '';
     const line = updateLine(s.update);
     $('dash-update').hidden = !line;
     if (line) {
@@ -152,6 +156,9 @@
     const libUrl = (s.urls && s.urls.library) || lib.url;
     link.hidden = !libUrl;
     if (libUrl) link.href = libUrl;
+    const admin = $('admin-link');
+    admin.hidden = !(libUrl && s.role === 'server');
+    if (!admin.hidden) admin.href = libUrl.replace(/\/$/, '') + '/_admin';
   }
 
   async function poll() {
