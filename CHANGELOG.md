@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **This server → Engines and models tells the truth about the models folder.** Each
+  engine's row counts what it needs on this machine: the models-v1 files and the
+  compiled package (graphs and shared weights) for the device and precision it runs at
+  ("bf16 · linux-cuda-sm_80 on gpu:0"), present out of needed, and bytes on disk. An
+  engine not in use says what enabling it would download (from the manifest). The
+  total line is the folder's size (as `du --apparent-size`), every file counted once:
+  what the engines in use need, files of engines not in use, files nothing needs, and
+  the rest (checksum stamps). The OCR backend's own size (and the part NVIDIA's CUDA
+  wheels added) is on the OCR backend card. `models list` prints the same plan, and
+  `models download` / `doctor` share its planning code, so they cannot disagree.
+
 ## [0.7.0-beta.4] - 2026-10-09
 
 ### Added

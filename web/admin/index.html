@@ -589,11 +589,13 @@
                     <h3 class="settings-section__title">Engines and models</h3>
                     <div class="table-container">
                         <table class="table machine-table">
-                            <thead><tr><th scope="col">Engine</th><th scope="col">Used</th><th scope="col">Files</th><th scope="col">Size</th></tr></thead>
+                            <thead><tr><th scope="col">Engine</th><th scope="col">Used</th><th scope="col">Files</th><th scope="col">On disk</th><th scope="col">Runs as</th></tr></thead>
                             <tbody id="machine-models-body"></tbody>
+                            <tfoot id="machine-models-foot"></tfoot>
                         </table>
                     </div>
                     <p class="form-hint" id="machine-models-dir"></p>
+                    <p class="form-hint" id="machine-models-backend"></p>
                     <div class="connectivity-section__actions">
                         <button class="btn btn--primary btn--sm" onclick="machineJob('models-download')">Download missing</button>
                         <button class="btn btn--secondary btn--sm" onclick="machineJob('models-verify')">Verify</button>

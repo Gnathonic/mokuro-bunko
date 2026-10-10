@@ -370,6 +370,9 @@ mod full {
                     "version": man.bunko_version,
                     "dir": p,
                     "size": super::dir_size(&p),
+                    // The part NVIDIA's CUDA wheels added (fetched from PyPI at install).
+                    "external_size": man.external.iter().flat_map(|e| &e.files).map(|f| f.size).sum::<u64>(),
+                    "external": man.external.iter().map(|e| e.name.clone()).collect::<Vec<_>>(),
                     "complete": install_ocr::pack_complete(&p, &man),
                     "current": man.bunko_version == bunko_core::VERSION,
                     "removable": dir == own,
@@ -385,22 +388,15 @@ mod full {
             }
             install_ocr::Need::Satisfied(why) => json!({"state": "ok", "text": why}),
         };
-        // The models the enabled generations need, file by file.
+        // What the enabled generations need here, engine by engine: the same plan as
+        // `models list` / `models download`. The compiled packages need the libtorch
+        // backend: planned when this process has it open, or opens it the way its own
+        // OCR would (local OCR on, no install running); never loaded just for a page
+        // otherwise.
         let store = t.engine_config(bunko_engines::Backend::Auto).store();
-        let rows = crate::cmd::models::wanted_rows(&t, None);
-        let mut engines = Vec::new();
-        for engine in bunko_engines::models::ENGINES {
-            let enabled = rows.iter().any(|(e, _)| e == engine)
-                || (*engine == *bunko_engines::models::PPOCR && !rows.is_empty());
-            let files: Vec<Value> = bunko_engines::models::list_ids(engine)
-                .iter()
-                .filter_map(|id| store.manifest().get(id))
-                .map(|f| {
-                    json!({"id": f.id, "size": f.size, "present": store.locate(&f.id).is_some()})
-                })
-                .collect();
-            engines.push(json!({"engine": engine, "enabled": enabled, "files": files}));
-        }
+        let open =
+            t.local_ocr_off().is_none() && !m.installer.as_ref().is_some_and(|i| i.running());
+        let plan = crate::cmd::models::plan(&t, &crate::cmd::models::wanted_rows(&t, None), open);
         vec![
             ("hardware".into(), hardware_json(&hw)),
             (
@@ -429,8 +425,9 @@ mod full {
             ),
             (
                 "models".into(),
-                json!({"dir": t.models_dir(), "engines": engines,
-                       "downloads": store.can_download()}),
+                json!({"dir": plan.dir, "engines": plan.engines, "total": plan.total,
+                       "total_text": plan.total_text(),
+                       "shared": plan.shared, "downloads": store.can_download()}),
             ),
         ]
     }
