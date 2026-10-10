@@ -7,7 +7,7 @@ mod accounts_support;
 use accounts_support::*;
 use bunko_core::Role;
 use bunko_server::accounts::{
-    ATTEMPTS_PER_IP, Bootstrap, LEGACY_TOKEN_FILE, REMOTE_NEEDS_CODE, SESSION_COOKIE,
+    ATTEMPTS_PER_IP, Bootstrap, LEGACY_TOKEN_FILE, REMOTE_NEEDS_CODE, ROTATE_AFTER, SESSION_COOKIE,
     bootstrap_admin, normalize_code, remove_legacy_token,
 };
 use serde_json::json;
@@ -286,6 +286,55 @@ async fn a_wrong_code_is_refused_then_rate_limited() {
     let r = env.send(code_form("198.51.100.8", &code)).await;
     assert_eq!(r.status, 303);
     assert!(env.db.get_user("admin").unwrap().is_none());
+}
+
+/// A flood of wrong codes from many addresses (and forged X-Forwarded-For headers from
+/// an untrusted peer) never locks setup: localhost still works, the code is replaced
+/// rather than locked, and a forged header buys no fresh tries.
+#[tokio::test]
+async fn an_attack_never_locks_the_owner_out() {
+    let env = Env::new();
+    env.deps.setup.issue_code();
+    let attacker = "198.51.100.66";
+    // Forged forwarding headers from a peer that is no trusted proxy: one bucket.
+    for i in 0..10 {
+        let r = env
+            .send(
+                from_peer("POST", "/setup/code", attacker)
+                    .header("x-forwarded-for", format!("10.9.{i}.1"))
+                    .header("x-real-ip", format!("10.8.{i}.1"))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(axum::body::Body::from("code=ZZZZZ-ZZZZZ"))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(
+            r.status,
+            if i < ATTEMPTS_PER_IP as usize {
+                403
+            } else {
+                429
+            },
+            "{i}"
+        );
+    }
+    // Many addresses: past the rotation count, the code is replaced, never locked.
+    for i in 0..(ROTATE_AFTER * 2) {
+        let r = env
+            .send(code_form(
+                &format!("203.0.{}.{}", i / 250, i % 250 + 1),
+                "ZZZZZ-ZZZZZ",
+            ))
+            .await;
+        assert_eq!(r.status, 403, "attempt {i} is refused, not limited");
+    }
+    // Localhost always works.
+    let r = env
+        .send(empty(from_peer("GET", "/setup/api/status", "127.0.0.1")))
+        .await;
+    assert_eq!((r.status, r.json()), (200, json!({"needs_setup": true})));
+    let r = complete(&env, from_peer("POST", "/setup/api/complete", "127.0.0.1")).await;
+    assert_eq!(r.status, 201, "{}", r.text());
 }
 
 #[tokio::test]

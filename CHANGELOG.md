@@ -6,8 +6,10 @@
 - First-run setup from another computer (Docker, a NAS): while no admin exists the
   server prints a one-time **setup code** in its log at every start (`First run:
   create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`). `/setup`
-  opened from another address asks for it (an HTML page, five tries a minute per
-  address, 30 in all), then shows the wizard; scripts may send it as `X-Setup-Code`.
+  opened from another address asks for it (an HTML page; five tries per address,
+  one more every 12 s; after 30 wrong codes within a minute from everyone the code is
+  replaced and the new one logged, so a flood never locks the owner out), then shows
+  the wizard; scripts may send it as `X-Setup-Code`.
   Localhost still needs no code. The code lives in memory only and dies once an admin
   exists. 0.5 allowed setup from localhost only.
 - `MOKURO_ADMIN_USERNAME` + `MOKURO_ADMIN_PASSWORD` (or `MOKURO_ADMIN_PASSWORD_FILE`)
