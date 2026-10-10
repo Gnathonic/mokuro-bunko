@@ -1193,7 +1193,7 @@ function initGenerations() {
     document.getElementById('upgrade-save-btn').addEventListener('click', saveUpgrade);
     document.getElementById('upgrade-edited').addEventListener('click', (e) => {
         const b = e.target.closest('[data-upgrade]');
-        if (b) upgradeVolume(b.dataset.volume, b.dataset.upgrade);
+        if (b) upgradeVolume(b.dataset.volume);
     });
 }
 
@@ -1228,7 +1228,7 @@ function renderUpgrade() {
         (families.unknown ? '<span class="form-hint">unknown ' + families.unknown.toLocaleString() +
             ' (never upgraded)</span>' : '');
     document.getElementById('upgrade-counts').textContent = c.enabled
-        ? 'Ready to swap ' + c.ready + ' · needs OCR ' + c.needs_ocr +
+        ? 'Ready to replace ' + c.ready + ' · needs OCR ' + c.needs_ocr +
           ' · skipped (missing pages) ' + c.skipped_missing_pages + ' · skipped (edited) ' + c.skipped_edited
         : 'Counts appear once upgrading is enabled and saved.';
     const list = document.getElementById('upgrade-edited');
@@ -1236,8 +1236,7 @@ function renderUpgrade() {
     list.hidden = !edited.length;
     list.innerHTML = edited.map((v) => '<li><span class="upgrade-edited__name">' + escapeHtml(v) + '</span>' +
         '<button type="button" class="btn btn--secondary btn--sm" data-upgrade="force" data-volume="' + escapeHtml(v) +
-        '">Upgrade anyway</button><button type="button" class="btn btn--secondary btn--sm" data-upgrade="revert" data-volume="' +
-        escapeHtml(v) + '">Revert</button></li>').join('');
+        '">Upgrade anyway</button></li>').join('');
 }
 
 async function saveUpgrade() {
@@ -1254,11 +1253,12 @@ async function saveUpgrade() {
     }
 }
 
-async function upgradeVolume(volume, action) {
+async function upgradeVolume(volume) {
     const path = '/ocr/upgrade/' + volume.split('/').map(encodeURIComponent).join('/');
     try {
-        const r = action === 'revert' ? await apiPost(path + '/revert', {}) : await apiPost(path, { force: true });
-        showToast(action === 'revert' ? 'Reverted ' + volume : 'Upgrade ' + (r.mode || 'done') + ': ' + volume, 'success');
+        const r = await apiPost(path, { force: true });
+        const done = { direct: 'Replaced ', generated: 'Queued for OCR, then replaced: ', current: 'Already current: ' };
+        showToast((done[r.mode] || 'Upgrade: ') + volume, 'success');
     } catch (err) {
         showToast(err.message, 'error');
     }

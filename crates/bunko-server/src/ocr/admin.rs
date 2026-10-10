@@ -568,8 +568,8 @@ impl OcrAdmin for OcrControl {
         let _ = ask(self, |s| s.bump_page_pub());
     }
 
-    /// `/api/ocr/upgrade` (GET census), `/api/ocr/upgrade/<volume>` (POST, `force`),
-    /// `/api/ocr/upgrade/<volume>/revert` (POST).
+    /// `/api/ocr/upgrade` (GET census), `/api/ocr/upgrade/<volume>` (POST, `force`).
+    /// `/api/ocr/upgrade/<volume>/revert` is gone (410): an upgrade replaces the old file.
     fn other(
         &self,
         _config: &Config,
@@ -606,13 +606,13 @@ impl OcrAdmin for OcrControl {
         if *method != Method::POST {
             return Some(Err(OcrError::not_found()));
         }
-        let revert = path.last() == Some(&"revert");
-        let parts = if revert {
-            &path[2..path.len() - 1]
-        } else {
-            &path[2..]
-        };
-        let rel: String = parts
+        if path.last() == Some(&"revert") {
+            return Some(Err(OcrError::new(
+                410,
+                "an upgrade replaces the old OCR file, so there is nothing to revert to",
+            )));
+        }
+        let rel: String = path[2..]
             .iter()
             .map(|p| {
                 percent_encoding::percent_decode_str(p)
@@ -638,19 +638,6 @@ impl OcrAdmin for OcrControl {
         let cbz = self.core().layout.library().join(&rel);
         if !cbz.is_file() {
             return Some(Err(OcrError::new(404, "no such volume")));
-        }
-        if revert {
-            let actor = body
-                .get("actor")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            return Some(match up.revert(&cbz, actor.as_deref()) {
-                Ok(bare) => Ok((
-                    200,
-                    json!({"success": true, "sidecar": super::types::rel_of(&self.core().layout.library(), &bare)}),
-                )),
-                Err(e) => Err(OcrError::new(409, e)),
-            });
         }
         if bunko_sched::py::truthy(body.get("force")) {
             up.force(&rel);

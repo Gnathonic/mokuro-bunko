@@ -44,6 +44,23 @@
   `latest*` exists before 0.7.0) and the templates' `<TemplateURL>` points at the `0.7`
   branch (`main` still has the 0.5 templates); both go back to `latest` / `main` with
   0.7.0.
+- **Generation upgrade (`ocr.upgrade`) replaces the old primary file; it no longer
+  keeps it as a layer.** beta.3 kept the replaced `<Volume>.mokuro` beside the new one
+  as `<Volume>.<old-name>.mokuro` (usually `<Volume>.mokuro.mokuro`); now the new file
+  replaces it outright, atomically, and the old bytes are gone. Every gate stays: a
+  volume a person edited is skipped (an admin can force one), a short archive is never
+  regenerated. A direct replace removes the layer it copied when that layer is
+  byte-identical and no enabled generation writes it. The audit event
+  `ocr_sidecar_upgraded` says `replaced: true` (no `kept_as`). The admin panel's
+  per-volume Revert and `POST /_admin/api/ocr/upgrade/<volume>/revert` are gone (410):
+  with no kept layer there is nothing to revert to. Extra OCR beside the primary is
+  what non-primary generations are for.
+- The layers beta.3's upgrade kept (stamped `ocr_engine.upgraded_from_primary: true`)
+  are removed, with their saved originals under `<storage>/.upgrade-originals/`, at
+  startup (the ones its audit names) and at the next census, once the volume's bare
+  file is the upgraded output. One log line per file. A layer without that stamp (a
+  person's, another generation's, what a forced upgrade kept of an edit) is never
+  touched.
 - The setup token of the earlier 0.7 betas (`<storage>/.setup-token`,
   `/setup?token=`, `MOKURO_SETUP_TOKEN`) is gone: its file is deleted at startup and
   the setup code replaces it. A remote setup API call without a code is answered with
