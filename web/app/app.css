@@ -527,6 +527,7 @@ h2:focus { outline: none; }
 
 .state-pill[data-state="working"]::before { background: var(--success); }
 .state-pill[data-state="idle"]::before { background: var(--info); }
+.state-pill[data-state="installing"]::before { background: var(--accent-primary); }
 .state-pill[data-state="paused"]::before,
 .state-pill[data-state="pausing"]::before { background: var(--warning); }
 .state-pill[data-state="error"]::before,

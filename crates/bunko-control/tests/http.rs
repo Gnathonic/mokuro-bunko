@@ -371,6 +371,7 @@ async fn install_state_and_retry() {
         .await
         .unwrap();
     assert_eq!(s.install, Some(running));
+    assert_eq!(s.state, State::Installing);
     assert!(s.problems.is_empty());
 
     let failed = bunko_control::OcrInstall {
@@ -403,6 +404,10 @@ async fn install_state_and_retry() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["installing"], true);
     assert_eq!(body["status"]["install"]["state"], "failed");
+    assert_eq!(
+        body["status"]["state"], "idle",
+        "a failed install is not installing"
+    );
     assert_eq!(body["status"]["problems"][0]["kind"], "ocr-install");
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     // Without the token: refused like every other route.
