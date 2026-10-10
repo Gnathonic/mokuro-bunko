@@ -278,8 +278,9 @@ fn cargo_build(root: &Path, build: &Build, args: &DistArgs) -> Result<(PathBuf, 
     let exe = exe.context("cargo reported no mokuro-bunko executable")?;
     if build.flavor == Flavor::Full && native.is_empty() {
         eprintln!(
-            "warning: a full build that does not link ONNX Runtime (ort-sys reported no library \
-             directory); mokuro-bunko's `ocr` feature is not wired to bunko-ocr yet?"
+            "warning: ort-sys reported no ONNX Runtime library directory for this full build; \
+             the third-party notices will lack the licence and notice files shipped with \
+             ONNX Runtime"
         );
     }
     Ok((exe, native))
