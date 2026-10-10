@@ -288,9 +288,37 @@ fn device_short(device: &str) -> String {
     }
 }
 
-/// `stages[]` of a row as the registry alone describes it: keys, names, which stages take
-/// a device and which are locked to the CPU. With no host facts (`NoOcr`), `auto`
-/// resolves to the CPU and the derived widths/capacities are unknown (null).
+/// What `auto` places a model stage on, given a device list: the `auto` entry's own
+/// `resolves` when the caller worked it out (this server's first card while its OCR
+/// runs), else the list's first card (a processor's own list), else the CPU. The engines
+/// place an automatic stage on the first GPU (`runtime::place_runnable`).
+pub fn auto_device(devices: &Value) -> String {
+    let list = devices.as_array().map(Vec::as_slice).unwrap_or_default();
+    let id_of = |d: &Value| d.get("id").and_then(Value::as_str).map(str::to_string);
+    if let Some(r) = list
+        .iter()
+        .find(|d| d.get("id").and_then(Value::as_str) == Some("auto"))
+        .and_then(|d| d.get("resolves"))
+        .and_then(Value::as_str)
+    {
+        return r.to_string();
+    }
+    list.iter()
+        // A card that reports no formats runs no model (as the claim reads it).
+        .filter(|d| {
+            d.get("formats")
+                .and_then(Value::as_array)
+                .is_none_or(|f| !f.is_empty())
+        })
+        .filter_map(id_of)
+        .find(|id| id.starts_with("gpu:"))
+        .unwrap_or_else(|| "cpu".into())
+}
+
+/// `stages[]` of a row as the registry and the device list describe it: keys, names,
+/// which stages take a device and which are locked to the CPU, and where `auto` puts
+/// each ([`auto_device`]). With no host facts (`NoOcr`) the list holds no card, so
+/// `auto` reads as the CPU; the derived widths/capacities are unknown (null).
 pub fn stage_rows(row: &Generation, devices: &Value) -> Vec<Value> {
     let Some(road) = row.road() else {
         return vec![];
@@ -303,6 +331,7 @@ pub fn stage_rows(row: &Generation, devices: &Value) -> Vec<Value> {
                 .collect()
         })
         .unwrap_or_default();
+    let auto = auto_device(devices);
     let label_of = |id: &str| -> String {
         devices
             .as_array()
@@ -326,15 +355,22 @@ pub fn stage_rows(row: &Generation, devices: &Value) -> Vec<Value> {
             } else {
                 ids.clone()
             };
-            let device = match row.pools.stage_device.get(*key) {
-                Some(d) if takes_device && locked.is_none() && d != "auto" => d.clone(),
-                _ => "cpu".to_string(),
+            let device = match row.pools.stage_device.get(*key).map(String::as_str) {
+                _ if !takes_device || locked.is_some() => "cpu".to_string(),
+                Some(d) if !d.is_empty() && d != "auto" => d.to_string(),
+                _ => auto.clone(),
             };
             let options: Vec<Value> = allowed
                 .iter()
                 .map(|id| {
                     let label = if id == "auto" {
-                        "Auto → CPU".to_string()
+                        // What it resolves to here: a locked stage stays on the CPU.
+                        let to = if locked.is_some() {
+                            "cpu"
+                        } else {
+                            auto.as_str()
+                        };
+                        format!("Auto → {}", device_short(to))
                     } else {
                         label_of(id)
                     };
@@ -880,6 +916,54 @@ mod tests {
         let nova = stage_rows(&parsed.rows[0], &devices);
         assert_eq!(nova[1]["device_cpu_note"], Value::Null);
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    /// `auto` reads as where it lands: the `auto` entry's `resolves`, else the list's
+    /// first card that runs a model, else the CPU; a stage locked to the CPU says so.
+    #[test]
+    fn auto_reads_as_the_device_it_resolves_to() {
+        let row = generations::default_generation("g-1");
+        let device = |devices: Value| -> (Value, Value, Value) {
+            let st = stage_rows(&row, &devices);
+            (
+                st[1]["device"].clone(),
+                st[1]["device_options"][0]["label"].clone(),
+                st[0]["device_options"][0]["label"].clone(),
+            )
+        };
+        assert_eq!(
+            device(default_devices()),
+            (json!("cpu"), json!("Auto → CPU"), json!("Auto → CPU"))
+        );
+        // A processor's own list (`derive`): its first card with formats.
+        assert_eq!(
+            device(json!([
+                {"id": "auto", "label": "Auto"}, {"id": "cpu", "label": "CPU"},
+                {"id": "gpu:0", "label": "old card", "formats": []},
+                {"id": "gpu:1", "label": "RX 9070 XT", "formats": ["fp32", "bf16"]},
+            ])),
+            (json!("gpu:1"), json!("Auto → GPU 1"), json!("Auto → CPU"))
+        );
+        // This server's list says what auto is here, though another machine has a card.
+        assert_eq!(
+            device(json!([
+                {"id": "auto", "label": "Auto — CPU", "resolves": "cpu"},
+                {"id": "cpu", "label": "CPU"}, {"id": "gpu:0", "label": "a processor's card"},
+            ])),
+            (json!("cpu"), json!("Auto → CPU"), json!("Auto → CPU"))
+        );
+        // A pin stands.
+        let mut pinned = row.clone();
+        pinned
+            .pools
+            .stage_device
+            .insert("engine".into(), "cpu".into());
+        let st = stage_rows(
+            &pinned,
+            &json!([{"id": "auto", "resolves": "gpu:0"}, {"id": "gpu:0"}]),
+        );
+        assert_eq!(st[1]["device"], json!("cpu"));
+        assert_eq!(st[1]["workers_means"], json!("pool"));
     }
 
     #[test]

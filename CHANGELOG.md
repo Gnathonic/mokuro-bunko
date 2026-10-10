@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.0-beta.4] - 2026-10-09
 
 ### Added
 - **The OCR backend installs in the background; getting up and serving never waits
@@ -68,11 +68,20 @@
   backup, a re-upload) leaves the file, its mtime and its provenance alone and is
   audited as an `edit` with `"unchanged": true`, which is not an edit either. Volumes
   flagged before are judged again at the next start.
-
-## [0.7.0-beta.4] - 2026-10-09
-
-A pre-release with no changes of its own: it checks that installs of 0.7.0-beta.3
-update themselves to the next release (GitHub Actions on their Node 24 versions).
+- The admin panel's pools table said a stage left on Auto runs on the CPU ("Auto →
+  CPU") whatever the machine had, so after a GPU backend was installed it kept saying
+  the engine would use the CPU while volumes were read on the card. Auto now reads as
+  the device it resolves to (this server's first card while its OCR runs, a processor's
+  own first card in its table), as soon as the backend is loaded; the copies box of an
+  engine on a card says "auto" rather than 1 (a fast card on a large host runs two).
+- A benchmark run by hand on this server was saved for the admin panel only, so the
+  scheduler benchmarked the same row again before its first volume. It is now this
+  server's benchmark of the row (its rate; the pools stay as set), and one benchmark
+  per engine and machine is enough.
+- After a failed OCR backend install the server started its OCR anyway and logged
+  "Starting this server's OCR: its OCR backend is installed". With no backend in place
+  it now waits (the failure shows with a Retry, and the automatic retries go on) and
+  starts once an install succeeds; a failed install never restarts OCR that runs.
 
 ## [0.7.0-beta.3] - 2026-10-09
 
