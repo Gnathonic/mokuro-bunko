@@ -12,6 +12,8 @@
 //! ```
 //!
 //! Env: `BUNKO_REF_PYTHON` (default `~/.cache/mokuro-bunko-demo/ref052-ocr/bin/python`),
+//! `MOKURO_REF_052` (the 0.5.2 checkout the oracle imports `line_layout` from, default
+//! the sibling worktree `../ref-0.5.2`: `git worktree add --detach ../ref-0.5.2 199cff5`),
 //! `BUNKO_PPOCR_MODELS` (default: the pinned Hugging Face cache snapshot),
 //! `BUNKO_GOLDEN_THREADS` (ORT intra-op threads, default 4 like the fixtures),
 //! `BUNKO_GOLDEN_PREP` (crop/tensor threads, default 1 — Python's is 1),
