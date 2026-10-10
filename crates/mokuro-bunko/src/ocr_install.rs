@@ -1112,7 +1112,7 @@ exit 1"#,
             ),
         );
         let inst = Installer::with_exe(library(dir.path()), exe)
-            .with_retry_after(vec![Duration::from_millis(200)]);
+            .with_retry_after(vec![Duration::from_secs(3)]);
         let control = Control::new(bunko_control::ControlConfig::new(
             bunko_control::Role::Server,
             "box",
@@ -1124,6 +1124,7 @@ exit 1"#,
         inst.spawn();
         let v = wait_state(&mut rx, "failed").await;
         assert!(v.message.unwrap().starts_with("network down"));
+        // Read before the automatic retry (3 s) starts another run.
         let status = control.status();
         assert_eq!(status.install.unwrap().state, "failed");
         assert_eq!(
