@@ -2286,7 +2286,12 @@ details[open] > .bench-res__summary::before {
 .machine-kv { margin: 0.5rem 0 1rem; }
 .machine-row { display: flex; gap: 0.5rem; align-items: center; max-width: 28rem; }
 .machine-row .form-select { flex: 1; min-width: 0; }
-.machine-table td, .machine-table th { white-space: nowrap; }
+.machine-table td, .machine-table th { white-space: nowrap; vertical-align: top; }
+.machine-table td:last-child { white-space: normal; min-width: 16rem; }
+.machine-table tfoot td { font-weight: 600; border-top: 1px solid var(--border-default); }
+.machine-table tfoot td:last-child { font-weight: normal; color: var(--text-secondary); }
+.machine-models-details { margin: 0; padding-left: 1rem; color: var(--text-secondary); }
+.machine-models-details li + li { margin-top: 0.15rem; }
 .machine-pre {
     max-height: 24rem;
     overflow: auto;

@@ -175,6 +175,25 @@ impl PackageStatus {
     }
 }
 
+/// The files a row of an engine needs on this machine ([`EnginePipeline::package_plan`]):
+/// what `models list`, `models download`, `doctor` and the admin panel all count.
+#[derive(Debug, Clone)]
+pub struct PackagePlan {
+    pub need: EngineNeed,
+    /// The package target counted: the one on disk, else the first of `need.targets`
+    /// the release has (what a download fetches). None when neither exists.
+    pub target: Option<String>,
+    /// Manifest ids of that package: its graphs and the shared weights they bind.
+    /// Empty for a package on disk that the release does not list (the override
+    /// directory, a hand-made one): see `package`.
+    pub package_ids: Vec<String>,
+    /// The package directory, when the package is on disk with the weights it binds.
+    pub package: Option<PathBuf>,
+    /// Manifest ids of the recognizer's host files read with that package (tokenizer,
+    /// tables, paddle-manga's embedding table for a package without it).
+    pub host_ids: Vec<&'static str>,
+}
+
 /// What [`EnginePipeline::prefetch`] put in place for an engine.
 #[derive(Debug, Clone)]
 pub struct Prefetched {
@@ -479,33 +498,71 @@ impl EnginePipeline {
     /// [`models::torch_host_files`] would load with it.
     #[cfg(feature = "torch")]
     pub fn package_status_for(&self, engine: &str, mode: &str) -> Result<PackageStatus, String> {
-        let need = self.need_for(engine, mode)?;
-        let package = self
-            .store
-            .torch_package_present(need.engine, need.precision.as_str(), &need.targets)
-            .map(|p| p.dir);
-        let mut host: Vec<&str> = models::torch_host_ids(need.engine, need.precision);
-        if need.engine == models::PADDLE {
-            // As `torch_host_files`: the embedding table is loaded only for a package
-            // whose shared decoder weights do not carry it (the release's GPU packages
-            // all do; an older or hand-made package may not).
-            let blob = package.as_ref().is_some_and(|d| {
-                d.parent()
-                    .is_some_and(|p| p.join("weights-decoder.safetensors").is_file())
-            });
-            if package.is_some() && !blob {
-                host.push(models::paddle_embed_id(need.precision));
-            }
-        }
-        let missing_host_files = host
-            .into_iter()
+        let plan = self.package_plan(engine, mode)?;
+        let missing_host_files = plan
+            .host_ids
+            .iter()
             .filter(|id| self.store.locate(id).is_none())
-            .map(str::to_string)
+            .map(|id| id.to_string())
             .collect();
         Ok(PackageStatus {
-            need,
-            package,
+            need: plan.need,
+            package: plan.package,
             missing_host_files,
+        })
+    }
+
+    /// Every file a row of `engine` with precision `mode` needs on this machine, on
+    /// disk or not: the device and precision it runs at ([`need_for`](Self::need_for)),
+    /// the package for that device (graphs and shared weights) and the host files.
+    #[cfg(feature = "torch")]
+    pub fn package_plan(&self, engine: &str, mode: &str) -> Result<PackagePlan, String> {
+        let need = self.need_for(engine, mode)?;
+        let precision = need.precision.as_str();
+        let present = self
+            .store
+            .torch_package_present(need.engine, precision, &need.targets);
+        let target = present.as_ref().map(|p| p.target.clone()).or_else(|| {
+            need.targets
+                .iter()
+                .find(|t| {
+                    self.store
+                        .torch_package_ids(need.engine, precision, t)
+                        .is_some()
+                })
+                .cloned()
+        });
+        let package_ids = target
+            .as_deref()
+            .and_then(|t| self.store.torch_package_ids(need.engine, precision, t))
+            .unwrap_or_default();
+        let package = present.map(|p| p.dir);
+        let mut host_ids: Vec<&'static str> = models::torch_host_ids(need.engine, need.precision);
+        if need.engine == models::PADDLE {
+            // As `torch_host_files`: the embedding table is loaded only for a package
+            // whose shared decoder weights do not carry it (the release's packages all
+            // do; an older or hand-made package may not).
+            let blob = match &package {
+                Some(d) => d
+                    .parent()
+                    .is_some_and(|p| p.join("weights-decoder.safetensors").is_file()),
+                None => {
+                    target.is_none()
+                        || package_ids
+                            .iter()
+                            .any(|id| id.ends_with("/weights-decoder.safetensors"))
+                }
+            };
+            if !blob {
+                host_ids.push(models::paddle_embed_id(need.precision));
+            }
+        }
+        Ok(PackagePlan {
+            need,
+            target,
+            package_ids,
+            package,
+            host_ids,
         })
     }
 

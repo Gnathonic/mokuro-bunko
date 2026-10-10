@@ -1120,6 +1120,24 @@ pub fn torch_graph_path(dir: &Path, graph: &str) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// The bytes of every regular file under `dir` (symlinks not followed), as `du
+/// --apparent-size` counts them.
+pub fn tree_size(dir: &Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => stack.push(e.path()),
+                Ok(t) if t.is_file() => total += e.metadata().map(|m| m.len()).unwrap_or(0),
+                _ => {}
+            }
+        }
+    }
+    total
+}
+
 fn has_graphs(dir: &Path) -> bool {
     TORCH_GRAPHS
         .iter()
@@ -1215,6 +1233,39 @@ impl ModelStore {
             .collect()
     }
 
+    /// The manifest ids of one release package: its three graphs and the shared weights
+    /// they bind (each once), what [`ensure_torch_package`](Self::ensure_torch_package)
+    /// fetches for `target`. None when the release has no such package.
+    pub fn torch_package_ids(
+        &self,
+        engine: &str,
+        precision: &str,
+        target: &str,
+    ) -> Option<Vec<String>> {
+        let graphs = self.torch_manifest_graphs(engine, precision, target)?;
+        let mut ids: Vec<String> = Vec::new();
+        for g in &graphs {
+            for id in std::iter::once(&g.id).chain(g.requires.iter()) {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        Some(ids)
+    }
+
+    /// The bytes `id`'s local copy takes: the file's length, or for an unpacked package
+    /// entry the sum of the files under its directory. None when it is not here.
+    pub fn local_size(&self, id: &str) -> Option<(PathBuf, u64)> {
+        let path = self.locate(id)?;
+        let size = if path.is_dir() {
+            tree_size(&path)
+        } else {
+            fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+        };
+        Some((path, size))
+    }
+
     /// Whether a package for one of `targets` is on disk, or listed in the manifest
     /// and downloads are allowed.
     pub fn torch_package_obtainable(
@@ -1276,7 +1327,17 @@ impl ModelStore {
                 }
             }
         }
-        for t in targets {
+        // A release package already on disk for any of the targets (what
+        // `torch_package_present` reports) before downloading the first one.
+        let here = |t: &String| {
+            self.torch_package_ids(engine, precision, t)
+                .is_some_and(|ids| ids.iter().all(|id| self.locate(id).is_some()))
+        };
+        let order = targets
+            .iter()
+            .filter(|t| here(t))
+            .chain(targets.iter().filter(|t| !here(t)));
+        for t in order {
             let Some(graphs) = self.torch_manifest_graphs(engine, precision, t) else {
                 continue;
             };

@@ -4956,10 +4956,16 @@ function renderMachine(m) {
     const b = m.backend || {};
     const parts = [];
     // "rocm7.1 for 0.7.0-beta.4": a pack belongs to one release.
-    if (b.loaded) parts.push('In use: ' + b.loaded.variant + ' for ' + b.loaded.version);
+    const packSize = (p) => formatBytes(p.size) + ' on disk' + (p.external_size
+        ? ', of which ' + formatBytes(p.external_size) + " came from NVIDIA's CUDA wheels" : '');
+    const loadedPack = b.loaded && (m.packs || []).find((p) => p.in_use);
+    if (b.loaded) {
+        parts.push('In use: ' + b.loaded.variant + ' for ' + b.loaded.version +
+            (loadedPack ? ' (' + packSize(loadedPack) + ')' : ''));
+    }
     (m.packs || []).forEach((p) => {
         if (b.loaded && p.in_use) return;
-        parts.push(p.variant + ' for ' + p.version + ' (' + formatBytes(p.size) +
+        parts.push(p.variant + ' for ' + p.version + ' (' + packSize(p) +
             (p.complete ? '' : ', incomplete') + ')');
     });
     if (b.need && b.need.state === 'install') parts.push('Missing: the ' + b.need.variant + ' pack');
@@ -4992,16 +4998,29 @@ function renderMachine(m) {
     document.getElementById('machine-remove-btn').hidden = running || !(m.packs || []).some((p) => p.removable);
     if (running) startMachineInstallPolling();
 
-    // Engines and models.
-    const rows = ((m.models && m.models.engines) || []).map((e) => {
-        const present = e.files.filter((f) => f.present).length;
-        const size = e.files.reduce((n, f) => n + (f.size || 0), 0);
-        return '<tr><td class="mono">' + escapeHtml(e.engine) + '</td><td>' + (e.enabled ? 'yes' : '-') +
-            '</td><td>' + present + ' of ' + e.files.length + '</td><td>' + formatBytes(size) + '</td></tr>';
+    // Engines and models: what each engine needs on this machine (the models-v1 files
+    // and the compiled packages for the device and precision it runs at), as `models
+    // list` counts it. The total is the folder's size, every file counted once.
+    const mm = m.models || {};
+    const rows = (mm.engines || []).map((e) => {
+        const details = (e.details || []).map((d) => '<li>' + escapeHtml(d) + '</li>').join('');
+        return '<tr><td class="mono">' + escapeHtml(e.engine) + '</td><td>' + (e.used ? 'yes' : '-') +
+            '</td><td>' + e.present + ' of ' + e.needed + '</td><td>' + formatBytes(e.disk || 0) +
+            '</td><td><ul class="machine-models-details">' + details + '</ul></td></tr>';
     });
     document.getElementById('machine-models-body').innerHTML = rows.join('');
-    document.getElementById('machine-models-dir').textContent = m.models ? 'In ' + m.models.dir +
-        (m.models.downloads ? '' : ' (downloads are off here)') : '';
+    const t = mm.total;
+    document.getElementById('machine-models-foot').innerHTML = t
+        ? '<tr><td>Total</td><td></td><td></td><td>' + formatBytes(t.disk || 0) +
+            '</td><td>' + escapeHtml(mm.total_text || '') + '</td></tr>'
+        : '';
+    document.getElementById('machine-models-dir').textContent = mm.downloads === false
+        ? 'Downloads are off here (MOKURO_MODELS_DOWNLOAD).' : '';
+    const inUse = (m.packs || []).find((p) => p.in_use) || (m.packs || [])[0];
+    document.getElementById('machine-models-backend').textContent = inUse
+        ? 'Not counted here: the OCR backend (libtorch and its GPU libraries, ' + formatBytes(inUse.size) +
+            ') is on the OCR backend card.'
+        : 'Not counted here: the OCR backend (libtorch and its GPU libraries), on the OCR backend card.';
 }
 
 function renderMachineInstall(i) {
