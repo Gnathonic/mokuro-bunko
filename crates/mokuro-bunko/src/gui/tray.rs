@@ -1,25 +1,14 @@
-//! "Run from the tray when I log in": tray-managed running (GUI.md §5 "As built (G3)").
-//!
-//! * `tray.json` next to the default `config.yaml` (portable: `data\tray.json`) lists
-//!   the instances the tray starts and supervises:
-//!   `{"managed":[{"role":"server"|"processor","args":[...]}],"notifications":false}`.
-//!   Same format and defaults as `bunko-tray`'s `trayconf.rs` (written here so the lite
-//!   build, which has no tray, still reads and edits it). The tray reads it when it starts.
-//! * The tray's own login item, as the tray's "Start at login" writes it
-//!   (`bunko-tray/src/autostart.rs`): XDG autostart `.desktop`, a LaunchAgent, or the
-//!   Startup-folder shortcut `Mokuro Bunko.lnk`. The tray is `mokuro-bunko tray` (on
-//!   Windows the app `mokuro-bunko.exe`); the lite build has none.
-//!
-//! A role runs either from the tray or as a service, never both (two copies would fight
-//! over the port / the processor's storage lock): the pages offer to remove the other.
+//! Tray-managed running (GUI.md §5 "As built (G3)"): `tray.json` next to the default
+//! `config.yaml` (portable: `data\tray.json`) lists the instances the tray starts and
+//! supervises: `{"managed":[{"role":"server"|"processor","args":[...]}],"notifications":false}`.
+//! Same format and defaults as `bunko-tray`'s `trayconf.rs` (written here so the lite
+//! build, which has no tray, still reads and edits it). A running tray picks up a role
+//! added to it. The chooser's two roles go here; "Start at login" is the tray's own
+//! menu checkbox.
 
 use super::Role;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-
-pub const DESKTOP_NAME: &str = "mokuro-bunko-tray.desktop";
-pub const LAUNCHD_LABEL: &str = "io.github.gnathonic.mokuro-bunko-tray";
-pub const WINDOWS_LINK: &str = "Mokuro Bunko.lnk";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
@@ -132,54 +121,9 @@ pub fn set_role(conf: &mut TrayConfig, role: &str, entry: Option<Managed>) {
     }
 }
 
-pub fn manages(conf: &TrayConfig, role: &str) -> bool {
+#[cfg(test)]
+fn manages(conf: &TrayConfig, role: &str) -> bool {
     conf.managed.iter().any(|m| m.role == role)
-}
-
-// --- the tray's login item --------------------------------------------------------
-
-/// The file whose presence means the tray starts at login.
-pub fn autostart_path() -> Option<PathBuf> {
-    let home = bunko_core::storage::home_dir();
-    if cfg!(windows) {
-        std::env::var_os("APPDATA")
-            .filter(|v| !v.is_empty())
-            .map(|_| super::service::startup_dir().join(WINDOWS_LINK))
-    } else if cfg!(target_os = "macos") {
-        Some(
-            home.join("Library/LaunchAgents")
-                .join(format!("{LAUNCHD_LABEL}.plist")),
-        )
-    } else {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config"));
-        Some(base.join("autostart").join(DESKTOP_NAME))
-    }
-}
-
-/// Add (or with `false` remove) the login item that starts the tray of `exe`.
-pub fn set_autostart(exe: &Path, enabled: bool) -> Result<Option<PathBuf>, String> {
-    let path = autostart_path().ok_or("no APPDATA folder")?;
-    if !enabled {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(Some(path)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("could not remove {}: {e}", path.display())),
-        };
-    }
-    #[cfg(feature = "tray")]
-    {
-        bunko_tray::autostart::set(&bunko_tray::paths::ProcessEnv, exe, true)
-            .map_err(|e| e.to_string())?;
-        Ok(Some(path))
-    }
-    #[cfg(not(feature = "tray"))]
-    {
-        let _ = exe;
-        Err("this build has no tray (the lite build): use a service instead".into())
-    }
 }
 
 // --- is a tray running? -----------------------------------------------------------
@@ -233,59 +177,6 @@ fn lock_held(dir: &Path) -> bool {
 /// A tray holds its lock (it runs for this user).
 pub fn tray_running(exe: &Path) -> bool {
     lock_dirs(exe).iter().any(|d| lock_held(d))
-}
-
-/// The pids of this user's running trays: what their `.tray.pid` files say (the tray
-/// writes one next to its lock), for the lock folders whose lock is held.
-pub fn tray_pids(exe: &Path) -> Vec<u32> {
-    let mut out: Vec<u32> = lock_dirs(exe)
-        .iter()
-        .filter(|d| lock_held(d))
-        .filter_map(|d| std::fs::read_to_string(d.join(".tray.pid")).ok())
-        .filter_map(|t| t.trim().parse().ok())
-        .filter(|p| *p != std::process::id())
-        .collect();
-    out.dedup();
-    out
-}
-
-/// Stop this user's tray (it reads tray.json only when it starts; its children stop
-/// with it). Waits until its lock is free. Returns what was done.
-pub fn stop_tray(exe: &Path) -> Result<Option<String>, String> {
-    if !tray_running(exe) {
-        return Ok(None);
-    }
-    let pids = tray_pids(exe);
-    for pid in &pids {
-        // SIGTERM: the tray quits as its menu's Quit does (Linux), or ends (macOS).
-        #[cfg(unix)]
-        // SAFETY: a plain signal to a process of this user.
-        unsafe {
-            libc::kill(*pid as libc::pid_t, libc::SIGTERM);
-        }
-        // The tray and its children share the program's name: stop it by pid, with its
-        // tree (its children stop with it).
-        #[cfg(windows)]
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .output();
-    }
-    let what = format!(
-        "pid {}",
-        pids.iter()
-            .map(u32::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    for _ in 0..40 {
-        if !tray_running(exe) {
-            return Ok(Some(format!("Stopped the running tray ({what}).")));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    Err(format!(
-        "the running tray ({what}) did not stop; choose Quit in its menu, then try again"
-    ))
 }
 
 #[cfg(test)]

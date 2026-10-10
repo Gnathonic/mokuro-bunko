@@ -29,6 +29,12 @@ async function logout() {
 
 updateNav();
 
+// `?next=/_admin#server`: a path on this server only (never another origin).
+function safeNext() {
+    const next = new URLSearchParams(window.location.search).get('next') || '';
+    return /^\/(?![\/\\])[^\s]*$/.test(next) ? next : '/';
+}
+
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
     
@@ -43,8 +49,8 @@ form.addEventListener('submit', async (e) => {
         // The password is checked once and traded for a token; it is not kept.
         await window.mokuroAuth.signIn(username, password);
 
-        // Redirect to home
-        window.location.href = '/';
+        // Back where the sign-in was asked for (a path on this server), else home.
+        window.location.href = safeNext();
         
     } catch (err) {
         errorMsg.textContent = err.message;

@@ -21,15 +21,18 @@ struct Items {
     pause_hour: MenuItem,
     pause_tomorrow: MenuItem,
     resume: MenuItem,
-    dashboard: MenuItem,
+    admin: MenuItem,
     library: MenuItem,
-    updates: MenuItem,
+    /// The optional items, as built ("Open processor", "Set up…"): a change rebuilds.
+    processor_up: bool,
+    show_setup: bool,
     autostart: CheckMenuItem,
     quit: MenuItem,
 }
 
 fn build_menu(m: &MenuModel, autostart_on: bool) -> anyhow::Result<Items> {
     let menu = Menu::new();
+    menu.append(&MenuItem::new(super::version_line(), false, None))?;
     let status: Vec<MenuItem> = m
         .status_lines
         .iter()
@@ -71,13 +74,16 @@ fn build_menu(m: &MenuModel, autostart_on: bool) -> anyhow::Result<Items> {
         &resume,
     ])?;
     menu.append(&PredefinedMenuItem::separator())?;
-    let dashboard = item(id::DASHBOARD, "Open dashboard", m.can_open_dashboard);
+    let admin = item(id::ADMIN, "Open admin panel", m.admin_url.is_some());
+    menu.append(&admin)?;
+    if m.processor_up {
+        menu.append(&item(id::PROCESSOR, "Open processor", true))?;
+    }
     let library = item(id::LIBRARY, "Open library", m.library_url.is_some());
-    let settings = item(id::SETTINGS, "Settings…", true);
-    let wizard = item(id::WIZARD, "Setup wizard…", true);
-    let logs = item(id::LOGS, "Show logs", true);
-    let updates = item(id::UPDATES, &m.update_text, true);
-    menu.append_items(&[&dashboard, &library, &settings, &wizard, &logs, &updates])?;
+    menu.append(&library)?;
+    if m.show_setup {
+        menu.append(&item(id::SETUP, "Set up…", true))?;
+    }
     menu.append(&PredefinedMenuItem::separator())?;
     let autostart =
         CheckMenuItem::with_id(id::AUTOSTART, "Start at login", true, autostart_on, None);
@@ -92,9 +98,10 @@ fn build_menu(m: &MenuModel, autostart_on: bool) -> anyhow::Result<Items> {
         pause_hour,
         pause_tomorrow,
         resume,
-        dashboard,
+        admin,
         library,
-        updates,
+        processor_up: m.processor_up,
+        show_setup: m.show_setup,
         autostart,
         quit,
     })
@@ -103,7 +110,11 @@ fn build_menu(m: &MenuModel, autostart_on: bool) -> anyhow::Result<Items> {
 impl Items {
     /// Update in place; false when the number of lines changed (rebuild instead).
     fn apply(&self, m: &MenuModel, autostart_on: bool) -> bool {
-        if self.status.len() != m.status_lines.len() || self.stats.len() != m.stats_lines.len() {
+        if self.status.len() != m.status_lines.len()
+            || self.stats.len() != m.stats_lines.len()
+            || self.processor_up != m.processor_up
+            || self.show_setup != m.show_setup
+        {
             return false;
         }
         for (item, text) in self.status.iter().zip(&m.status_lines) {
@@ -121,11 +132,8 @@ impl Items {
         self.pause_hour.set_enabled(m.can_pause_now);
         self.pause_tomorrow.set_enabled(m.can_pause_now);
         self.resume.set_enabled(m.can_resume);
-        self.dashboard.set_enabled(m.can_open_dashboard);
+        self.admin.set_enabled(m.admin_url.is_some());
         self.library.set_enabled(m.library_url.is_some());
-        if self.updates.text() != m.update_text {
-            self.updates.set_text(&m.update_text);
-        }
         if self.quit.text() != m.quit_text {
             self.quit.set_text(&m.quit_text);
         }

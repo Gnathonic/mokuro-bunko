@@ -60,15 +60,14 @@
 
   const LOGO = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>';
 
-  // The header: brand + Home / Setup / Settings / Dashboard (+ the library, when known).
+  // The header: brand + Home / Processor / Status (+ the library, when known).
   async function header(current) {
     const el = document.getElementById('app-header');
     if (!el) return;
     const links = [
       ['home', 'Home', '/app/'],
-      ['setup', 'Setup', '/app/setup'],
-      ['settings', 'Settings', '/app/settings'],
-      ['dashboard', 'Dashboard', '/app/dashboard'],
+      ['settings', 'Processor', '/app/settings'],
+      ['dashboard', 'Status', '/app/dashboard'],
     ];
     const nav = links.map(([k, label, href]) =>
       '<a href="' + href + '" class="btn ' + (k === current ? 'btn--secondary' : 'btn--ghost') + ' btn--sm"' +
@@ -80,10 +79,10 @@
     try {
       const i = await info();
       const role = { gui: 'setup', server: 'library server', processor: 'processor' }[i.role] || i.role;
-      document.getElementById('app-role').textContent = role;
+      document.getElementById('app-role').textContent = role + ' · ' + i.version;
       if (i.library_url && i.config_exists) {
         document.getElementById('app-library-link').innerHTML =
-          '<a href="' + esc(i.library_url) + '" target="_blank" rel="noopener" class="btn btn--ghost btn--sm">Library &#8599;</a>';
+          '<a href="' + esc(i.library_url) + '/_admin" target="_blank" rel="noopener" class="btn btn--ghost btn--sm">Admin panel &#8599;</a>';
       }
     } catch (_) { /* the page shows its own error */ }
   }

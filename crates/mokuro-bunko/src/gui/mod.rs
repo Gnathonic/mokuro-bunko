@@ -1,5 +1,7 @@
-//! The desktop app pages (`/app/...`) and their backend (`/app/api/...`): the setup
-//! wizard, the machine-local settings and the dashboard (docs/rust-port/GUI.md §1, §4).
+//! The desktop app's local pages (`/app/...`) and their backend (`/app/api/...`): the
+//! first-launch chooser (library server or processor), the processor's pairing,
+//! settings and status pages (docs/rust-port/GUI.md §1, §4). A library server's setup
+//! and settings are its own web pages (`/setup`, the admin panel), on any machine.
 //!
 //! The router ([`app`]) is mounted on the local control listener of every long-running
 //! instance (`gui`, `serve`, `processor serve`; bunko-control's `ControlListener::serve`
@@ -23,7 +25,6 @@
 pub mod api;
 pub mod jobs;
 pub mod paths;
-pub mod service;
 pub mod setup;
 pub mod spawn;
 pub mod tray;
@@ -189,7 +190,7 @@ async fn login(
 }
 
 /// The embedded file for an `/app/...` path: `/app/` is `index.html`, a page path
-/// `/app/setup/server` is `setup-server.html`, anything with an extension is an asset.
+/// `/app/setup/processor` is `setup-processor.html`, anything with an extension is an asset.
 pub fn page_file(path: &str) -> Option<String> {
     let rest = path.trim_start_matches('/');
     if rest.is_empty() {
@@ -239,15 +240,14 @@ mod tests {
     fn page_paths() {
         assert_eq!(page_file("").as_deref(), Some("index.html"));
         assert_eq!(
-            page_file("setup/server").as_deref(),
-            Some("setup-server.html")
+            page_file("setup/processor").as_deref(),
+            Some("setup-processor.html")
         );
         assert_eq!(page_file("dashboard/").as_deref(), Some("dashboard.html"));
         assert_eq!(
             page_file("settings/update").as_deref(),
             Some("settings.html")
         );
-        assert_eq!(page_file("setup").as_deref(), Some("setup.html"));
         assert_eq!(page_file("app.css").as_deref(), Some("app.css"));
         assert_eq!(page_file("../admin/admin.js"), None);
         assert_eq!(page_file("x/y.js"), None);
@@ -379,37 +379,29 @@ mod tests {
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(r.headers()["cache-control"], "no-store");
         assert_eq!(r.headers()["x-frame-options"], "DENY");
-        let r = send("GET", "/app/settings/https", &[host, cookie], "").await;
+        let r = send("GET", "/app/settings/logs", &[host, cookie], "").await;
         assert_eq!(r.status(), StatusCode::OK);
 
         // A cookie-authenticated POST needs this listener's own Origin.
-        let body = r#"{"set":{"server.port":"8123"}}"#;
-        let r = send(
-            "POST",
-            "/app/api/server/config",
-            &[host, cookie, json],
-            body,
-        )
-        .await;
+        let body = r#"{"url":"/app/"}"#;
+        let r = send("POST", "/app/api/handoff", &[host, cookie, json], body).await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = send(
             "POST",
-            "/app/api/server/config",
+            "/app/api/handoff",
             &[host, cookie, json, ("origin", "http://127.0.0.1:9999")],
             body,
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
-        assert!(!dir.path().join("config.yaml").exists());
         let r = send(
             "POST",
-            "/app/api/server/config",
+            "/app/api/handoff",
             &[host, cookie, json, ("origin", "http://127.0.0.1:4567")],
             body,
         )
         .await;
         assert_eq!(r.status(), StatusCode::OK);
-        assert!(dir.path().join("config.yaml").is_file());
         // JSON only: a form post (what a cross-site form could send) is refused.
         let r = send(
             "POST",

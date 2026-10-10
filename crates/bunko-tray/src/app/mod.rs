@@ -17,7 +17,6 @@ use crate::paths::{self, Env, Layout, ProcessEnv};
 use crate::status::Status;
 use crate::supervise::{self, Launch, Supervisor, World};
 use crate::trayconf::TrayConfig;
-use crate::updates;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -47,8 +46,6 @@ pub enum UserEvent {
     Menu(String),
     /// Something the menu shows may have changed.
     Changed,
-    /// The result of "Check for updates".
-    Update(UpdateView),
 }
 
 /// Sends a [`UserEvent`] to the tray's loop (from any thread).
@@ -61,14 +58,17 @@ pub mod id {
     pub const PAUSE_HOUR: &str = "pause_hour";
     pub const PAUSE_TOMORROW: &str = "pause_tomorrow";
     pub const RESUME: &str = "resume";
-    pub const DASHBOARD: &str = "dashboard";
+    pub const ADMIN: &str = "admin";
+    pub const PROCESSOR: &str = "processor";
     pub const LIBRARY: &str = "library";
-    pub const SETTINGS: &str = "settings";
-    pub const WIZARD: &str = "wizard";
-    pub const LOGS: &str = "logs";
-    pub const UPDATES: &str = "updates";
+    pub const SETUP: &str = "setup";
     pub const AUTOSTART: &str = "autostart";
     pub const QUIT: &str = "quit";
+}
+
+/// The menu's first (greyed) line: "Mokuro Bunko 0.7.0-beta.4".
+pub fn version_line() -> String {
+    format!("Mokuro Bunko {}", env!("CARGO_PKG_VERSION"))
 }
 
 /// The toolkit side: shows a model (creating the icon the first time).
@@ -229,10 +229,6 @@ impl App {
     pub fn on_event(&mut self, ui: &mut dyn Ui, event: UserEvent) -> bool {
         match event {
             UserEvent::Changed => self.refresh(ui),
-            UserEvent::Update(v) => {
-                self.update = v;
-                self.refresh(ui);
-            }
             UserEvent::Menu(id) => {
                 if self.on_menu(ui, &id) {
                     return true;
@@ -498,6 +494,26 @@ impl App {
         }
     }
 
+    /// The processor's own status page (on its control host, signed in).
+    fn open_processor(&self) {
+        let live = self
+            .monitor
+            .instances()
+            .into_iter()
+            .find(|l| l.control.role == "processor" && l.status.is_some());
+        let Some(live) = live else { return };
+        let monitor = self.monitor.clone();
+        std::thread::spawn(move || {
+            match Client::new(&live.control).sign_in_url("/app/dashboard") {
+                Ok(url) => open_url(&url, &monitor),
+                Err(e) => {
+                    tracing::error!("sign-in code from the processor: {e}");
+                    monitor.set_notice(format!("could not open the page: {e}"));
+                }
+            }
+        });
+    }
+
     fn pause_all(&self, req: Option<PauseRequest>) {
         let targets: Vec<Live> = self
             .monitor
@@ -532,42 +548,6 @@ impl App {
                 }
             }
             send(UserEvent::Changed);
-        });
-    }
-
-    fn show_logs(&self) {
-        let dir = self
-            .monitor
-            .instances()
-            .iter()
-            .find_map(|l| l.status.as_ref().and_then(|s| s.urls.logs_dir.clone()))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.layout.writable_log_dir(&ProcessEnv));
-        let _ = std::fs::create_dir_all(&dir);
-        open_path(&dir);
-    }
-
-    fn check_updates(&mut self, ui: &mut dyn Ui) {
-        if self.update.available || self.model.as_ref().is_some_and(|m| m.update_available) {
-            self.open_page("/app/settings#update");
-            return;
-        }
-        let Some(cli) = self.cli.clone() else {
-            self.monitor
-                .set_notice("the mokuro-bunko command line was not found".into());
-            return;
-        };
-        self.update = UpdateView {
-            checking: true,
-            ..Default::default()
-        };
-        self.refresh(ui);
-        let env = self.child_env.clone();
-        let send = self.send.clone();
-        std::thread::spawn(move || {
-            let v = updates::check(&cli, &env);
-            tracing::info!("update check: {v:?}");
-            send(UserEvent::Update(v));
         });
     }
 
@@ -622,22 +602,18 @@ impl App {
                 until: Some(model::tomorrow_at_8(now)),
             })),
             id::RESUME => self.pause_all(None),
-            id::DASHBOARD => {
-                let next = self
-                    .page_host()
-                    .and_then(|l| l.status.and_then(|s| s.urls.dashboard))
-                    .unwrap_or_else(|| "/app/dashboard".into());
-                self.open_page(&next);
+            id::ADMIN => {
+                if let Some(url) = self.model.as_ref().and_then(|m| m.admin_url.clone()) {
+                    open_url(&url, &self.monitor);
+                }
             }
+            id::PROCESSOR => self.open_processor(),
             id::LIBRARY => {
                 if let Some(url) = self.model.as_ref().and_then(|m| m.library_url.clone()) {
                     open_url(&url, &self.monitor);
                 }
             }
-            id::SETTINGS => self.open_page("/app/settings"),
-            id::WIZARD => self.open_page("/app/setup"),
-            id::LOGS => self.show_logs(),
-            id::UPDATES => self.check_updates(ui),
+            id::SETUP => self.open_page("/app/"),
             id::AUTOSTART => self.toggle_autostart(),
             id::QUIT => {
                 self.quit(ui);
@@ -697,11 +673,5 @@ fn open_url(url: &str, monitor: &Arc<Monitor>) {
     if let Err(e) = open::that_detached(url) {
         tracing::error!("could not open the browser: {e}");
         monitor.set_notice(format!("Couldn't open the browser: {e}"));
-    }
-}
-
-fn open_path(path: &Path) {
-    if let Err(e) = open::that_detached(path) {
-        tracing::error!("could not open {}: {e}", path.display());
     }
 }

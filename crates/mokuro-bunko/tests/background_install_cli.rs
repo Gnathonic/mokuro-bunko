@@ -112,6 +112,63 @@ impl Drop for Killed {
     }
 }
 
+fn add_admin(env: &common::Env) {
+    let out = env
+        .std_cmd()
+        .args([
+            "admin",
+            "add-user",
+            "admin",
+            "--role",
+            "admin",
+            "--password",
+            "admin-pass-123",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", common::stderr(&out));
+}
+
+/// Before the first-run setup nothing installs by itself: the setup's "OCR on this
+/// machine" decides.
+#[test]
+fn nothing_installs_before_the_first_run_setup() {
+    let env = common::Env::new();
+    let port = free_port();
+    env.write_config(&format!(
+        "server:\n  host: 127.0.0.1\n  port: {port}\nupdate:\n  check: false\nocr:\n  local_processing: true\n  generations:\n    - {{name: hayai, engine: hayai-nova, primary: true, enabled: true}}\n"
+    ));
+    let release = slow_release();
+    let log = env.root().join("serve.log");
+    let out = std::fs::File::create(&log).unwrap();
+    let child = env
+        .std_cmd()
+        .arg("serve")
+        .env("MOKURO_OCR_AUTO_INSTALL", "true")
+        .env(
+            "MOKURO_BACKEND_MANIFEST",
+            format!("http://127.0.0.1:{}/release.json", release.port),
+        )
+        .env("MOKURO_MODELS_DOWNLOAD", "0")
+        .stdout(out.try_clone().unwrap())
+        .stderr(out)
+        .spawn()
+        .unwrap();
+    let _server = Killed(child);
+    let show = || std::fs::read_to_string(&log).unwrap_or_default();
+    wait(60, "/api/health", || {
+        http(port, "GET", "/api/health", None).filter(|(s, _)| *s == 200)
+    });
+    wait(30, "the setup note", || {
+        show()
+            .contains("the first-run setup decides whether to install it")
+            .then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(release.hits.load(Ordering::SeqCst), 0, "{}", show());
+    release.release.store(true, Ordering::SeqCst);
+}
+
 #[test]
 fn serves_at_once_while_the_backend_installs_and_a_failure_is_a_problem() {
     let env = common::Env::new();
@@ -119,6 +176,8 @@ fn serves_at_once_while_the_backend_installs_and_a_failure_is_a_problem() {
     env.write_config(&format!(
         "server:\n  host: 127.0.0.1\n  port: {port}\nupdate:\n  check: false\nocr:\n  local_processing: true\n  autobench: false\n  generations:\n    - {{name: hayai, engine: hayai-nova, primary: true, enabled: true}}\n"
     ));
+    // Set up already (an admin exists): automatic installs start with the server.
+    add_admin(&env);
     let release = slow_release();
     let log = env.root().join("serve.log");
     let out = std::fs::File::create(&log).unwrap();

@@ -2280,3 +2280,34 @@ details[open] > .bench-res__summary::before {
     color: var(--text-secondary);
     overflow-wrap: anywhere;
 }
+
+/* This server (0.7) */
+.machine-card { padding: 1.25rem; }
+.machine-kv { margin: 0.5rem 0 1rem; }
+.machine-row { display: flex; gap: 0.5rem; align-items: center; max-width: 28rem; }
+.machine-row .form-select { flex: 1; min-width: 0; }
+.machine-table td, .machine-table th { white-space: nowrap; }
+.machine-pre {
+    max-height: 24rem;
+    overflow: auto;
+    margin: 0.5rem 0 0;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-md);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.75rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+#machine-install { margin: 0.5rem 0; }
+#machine-install .progress-bar { max-width: 28rem; }
+#server-tab [hidden] { display: none !important; }
+
+/* The running version, quiet, at the foot of every tab */
+.admin-version {
+    padding: 1.5rem 0 1rem;
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}

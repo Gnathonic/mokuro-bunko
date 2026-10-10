@@ -14,6 +14,7 @@ pub mod davhooks;
 pub mod glue;
 pub mod http;
 pub mod library;
+pub mod machine;
 pub mod ocr;
 pub mod ops;
 pub mod serve;

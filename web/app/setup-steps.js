@@ -1,8 +1,7 @@
-// The steps both setup flows share: OCR install and start with the machine (their
-// choices are made in a step; they apply from the review step, after the configuration
-// is saved), and the review step's list of what runs. The OCR backend itself installs
-// in the background once the server or processor runs: the last page comes as soon as
-// it serves and follows the install.
+// The processor pairing's shared steps: the OCR choices (applied after the
+// configuration is saved) and the last step's list of what runs. The OCR backend
+// installs in the background once the processor runs: the last page comes as soon as
+// it is up and follows the install.
 (function () {
   'use strict';
   const { esc, get, post, runJob, jobBox, wirePickers, PADDLE_CPU_NOTE } = window.App;
@@ -85,57 +84,6 @@
     };
   }
 
-  // The start-up step: from the tray at login, or as a per-user service.
-  async function startupStep(el, role) {
-    const [tray, svc] = await Promise.all([get('/app/api/tray'), get('/app/api/service?role=' + role)]);
-    const who = roleName(role);
-    el.innerHTML =
-      '<div class="radio-cards">' +
-      '<label class="radio-card"><input type="radio" name="su-how" value="tray" id="su-tray"><div class="radio-card__content">' +
-      '<strong>From the tray at login</strong><span id="su-tray-text">The tray starts the ' + who + ', restarts it if it stops, and can pause it.</span></div></label>' +
-      '<label class="radio-card"><input type="radio" name="su-how" value="service" id="su-service"><div class="radio-card__content">' +
-      '<strong>As a background service</strong><span>' + esc(svc.describe.charAt(0).toUpperCase() + svc.describe.slice(1)) + ', no tray.</span></div></label>' +
-      '</div>' +
-      '<label class="check mt-3"><input type="checkbox" id="su-now" checked> <span id="su-now-text"></span></label>' +
-      '<p class="form-hint" id="su-note"></p>';
-    const how = () => (el.querySelector('input[name="su-how"]:checked') || {}).value;
-    if (!tray.available) {
-      $('su-tray').disabled = true;
-      $('su-tray-text').textContent = 'This build has no tray.';
-    }
-    $(tray.available && tray.recommended === 'tray' ? 'su-tray' : 'su-service').checked = true;
-    let touched = false;
-    $('su-now').addEventListener('change', () => { touched = true; });
-    function render() {
-      const t = how() === 'tray';
-      const notes = [];
-      $('su-now-text').textContent = t ? 'Start the tray now (it starts the ' + who + ')' : 'Start the service now';
-      $('su-now').disabled = !t && !svc.can_start;
-      if (!touched) $('su-now').checked = t ? !tray.headless : svc.can_start;
-      if (!t && !svc.can_start) notes.push('No service manager runs here now: the file is only written.');
-      if (!$('su-now').checked || $('su-now').disabled) notes.push('The setup starts the ' + who + ' itself this time.');
-      if (t && svc.written) notes.push('Its service (' + svc.name + ') is removed, so only one copy runs.');
-      if (!t && svc.tray_manages) notes.push('The tray stops running it, so only one copy runs.');
-      $('su-note').textContent = notes.join(' ');
-    }
-    el.querySelectorAll('input[name="su-how"]').forEach((r) => r.addEventListener('change', render));
-    $('su-now').addEventListener('change', render);
-    render();
-    const startsIt = () => $('su-now').checked && !$('su-now').disabled;
-    return {
-      startsIt,
-      describe() {
-        return (how() === 'tray' ? 'from the tray at login' : 'as ' + svc.describe) + (startsIt() ? ', started now' : '');
-      },
-      async apply() {
-        const r = how() === 'tray'
-          ? await post('/app/api/tray', { role, action: 'enable', autostart: true, start_now: startsIt(), remove_service: svc.written })
-          : await post('/app/api/service', { role, action: 'install', start: startsIt(), remove_tray: svc.tray_manages });
-        return r.messages || [];
-      },
-    };
-  }
-
   // The review step's list of what runs: [key, label] pairs into `ul`.
   function runList(ul, stages) {
     ul.innerHTML = stages.map(([k, label]) =>
@@ -170,7 +118,7 @@
     const bytes = i.done_bytes != null && i.total_bytes
       ? ' (' + (i.done_bytes / 1e9).toFixed(2) + ' of ' + (i.total_bytes / 1e9).toFixed(2) + ' GB)' : '';
     return { text: 'Installing the OCR backend in the background: ' + what + (i.percent != null ? ' ' + i.percent + '%' : '…') + bytes +
-      '. The ' + 'server already serves; you can close this page.', percent: i.percent };
+      '. It runs in the background; you can close this page.', percent: i.percent };
   }
 
   // Follow the started instance's OCR install on the last page (until it ends or
@@ -205,5 +153,5 @@
     return null;
   }
 
-  window.SetupSteps = { gpus, usableGpu, ocrStep, startupStep, runList, queueOcr, installLine, watchInstall, waitFor };
+  window.SetupSteps = { gpus, usableGpu, ocrStep, runList, queueOcr, installLine, watchInstall, waitFor };
 })();

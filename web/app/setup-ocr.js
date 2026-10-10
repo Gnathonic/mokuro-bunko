@@ -3,7 +3,7 @@
   'use strict';
   const { esc, get, info, showError, setBusy, wirePickers, runJob, jobBox, PADDLE_CPU_NOTE } = window.App;
   const $ = (id) => document.getElementById(id);
-  const role = () => (document.querySelector('input[name="for"]:checked') || {}).value;
+  const role = () => 'processor';
   let hw = null;
 
   function renderHardware() {
@@ -28,10 +28,10 @@
     const opt = $('variant').querySelector('option[value="auto"]');
     opt.textContent = 'Automatic (' + hw.auto_variant + ')';
     renderCpuNote();
-    const packs = hw.packs || [];
+    const packs = (hw.packs || []).filter((p) => p.role !== 'server');
     $('packs').innerHTML = packs.length
       ? '<p class="form-label">Installed</p><ul class="notes">' + packs.map((p) =>
-        '<li>' + esc(p.name) + ' for the ' + esc(p.role) + ' — ' + esc(p.dir) + (p.complete ? '' : ' <span class="badge badge--error">incomplete</span>') + '</li>').join('') + '</ul>'
+        '<li>' + esc(p.name) + ' — ' + esc(p.dir) + (p.complete ? '' : ' <span class="badge badge--error">incomplete</span>') + '</li>').join('') + '</ul>'
       : '<p class="form-hint">No pack installed yet.</p>';
   }
 
@@ -66,7 +66,6 @@
         await runJob({ kind: 'doctor', processor: role() === 'processor' }, d);
         try { hw = await get('/app/api/ocr/hardware'); renderHardware(); } catch (_) {}
         const links = [
-          '<li><a href="/app/setup/startup?role=' + esc(role()) + '">Start the ' + (role() === 'processor' ? 'processor' : 'library server') + ' with the machine</a></li>',
           '<li><a href="/app/settings/ocr">OCR settings and models</a></li>',
           '<li class="form-hint">The first volume of each engine measures its speed on this machine (the benchmark the scheduler uses).</li>',
         ];
@@ -92,12 +91,6 @@
         $('hw').innerHTML = '<dt>Build</dt><dd>lite</dd>';
         return;
       }
-      $('for-server-path').textContent = 'Into ' + i.server_storage;
-      $('for-proc-path').textContent = 'Into ' + i.processor_storage + (i.processor_config_exists ? '' : ' (not set up yet)');
-      const want = new URLSearchParams(location.search).get('role') ||
-        (i.processor_config_exists && !i.config_exists ? 'processor' : 'server');
-      const radio = document.querySelector('input[name="for"][value="' + want + '"]');
-      if (radio) radio.checked = true;
       hw = await get('/app/api/ocr/hardware');
       renderHardware();
       // A running install (page reloaded): show it again.

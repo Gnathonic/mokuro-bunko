@@ -25,15 +25,20 @@ pub type Installer = crate::ocr_install::Installer;
 /// Full build: `bunko_processor::LocalProcessor` over `bunko_engines::EnginePipeline`.
 /// Under the control API (`control`), the local OCR obeys its pause and reports into
 /// its status (GUI.md §2, §3).
+///
+/// `live`: the config file and the `serve --ocr` override to read `ocr.backend` from at
+/// each start, so a backend chosen since (the setup, the admin panel) is the one used.
 #[cfg(feature = "ocr")]
 pub fn factory(
     config: &bunko_core::Config,
     control: Option<bunko_control::Control>,
     installer: Option<Installer>,
+    live: Option<(std::path::PathBuf, Option<String>)>,
 ) -> Option<Arc<dyn LocalProcessorFactory>> {
     Some(Arc::new(full::Factory {
         control,
         installer,
+        live,
         engines: bunko_engines::EngineConfig {
             models_dir: config.storage.layout().models(),
             backend: bunko_engines::Backend::parse(config.ocr.effective_backend()),
@@ -55,6 +60,7 @@ mod full {
 
     pub struct Factory {
         pub engines: EngineConfig,
+        pub live: Option<(std::path::PathBuf, Option<String>)>,
         pub control: Option<bunko_control::Control>,
         pub installer: Option<super::Installer>,
     }
@@ -67,7 +73,19 @@ mod full {
         }
 
         fn start(&self, results_dir: &Path) -> Result<LocalChannels, String> {
-            let pipeline = Arc::new(EnginePipeline::new(self.engines.clone()));
+            let mut engines = self.engines.clone();
+            if let Some((path, cli)) = &self.live {
+                let backend = match cli {
+                    Some(b) => Some(b.clone()),
+                    None => crate::cfgfile::load_effective_quiet(path)
+                        .ok()
+                        .map(|c| c.ocr.effective_backend().to_string()),
+                };
+                if let Some(b) = backend {
+                    engines.backend = bunko_engines::Backend::parse(&b);
+                }
+            }
+            let pipeline = Arc::new(EnginePipeline::new(engines));
             let machine = pipeline.describe();
             tracing::info!(
                 "Local OCR: {} on {} ({}); engines: {}",

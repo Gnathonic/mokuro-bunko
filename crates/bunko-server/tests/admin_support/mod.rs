@@ -36,6 +36,7 @@ pub struct Options {
     pub ocr: Option<Arc<dyn OcrAdmin>>,
     pub updates: Option<Arc<dyn UpdateSource>>,
     pub configure: Option<Configure>,
+    pub machine: Option<Arc<dyn bunko_server::machine::Machine>>,
 }
 
 pub struct Reply {
@@ -103,6 +104,7 @@ impl Harness {
             restart: Some(Arc::new(move || {
                 r2.fetch_add(1, Ordering::SeqCst);
             })),
+            machine: opts.machine,
         });
         Harness {
             dir,

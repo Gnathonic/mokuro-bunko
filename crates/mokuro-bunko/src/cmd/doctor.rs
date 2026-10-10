@@ -672,7 +672,14 @@ fn check_disk(storage: &Path) -> Check {
     }
 }
 
+/// Set by the running server on the `doctor` it starts (its port is not "in use").
+pub const SERVING_ENV: &str = "MOKURO_DOCTOR_FROM_SERVER";
+
 fn check_port(host: &str, port: u16) -> Check {
+    // Run by the server itself (the admin panel's Diagnostics): the port is its own.
+    if std::env::var_os(SERVING_ENV).is_some() {
+        return Check::pass("Port", format!("{port}: this server serves on it"));
+    }
     let probe_host = match host {
         "0.0.0.0" | "" => "127.0.0.1",
         "::" => "::1",

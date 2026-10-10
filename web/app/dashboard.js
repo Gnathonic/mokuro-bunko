@@ -73,7 +73,7 @@
     $('install-fill').style.width = (i.percent || 0) + '%';
     if (i.percent != null) $('install-bar').setAttribute('aria-valuenow', i.percent);
     $('install-hint').textContent = running
-      ? 'It runs in the background: the server already serves, and you can close this page.' +
+      ? 'It runs in the background; you can close this page.' +
         (i.message && i.stage === 'models' ? ' (' + i.message + ')' : '')
       : (stuck ? (i.action || 'See the log for the details.') : '');
     $('install-actions').hidden = !stuck;

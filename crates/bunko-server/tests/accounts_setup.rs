@@ -55,13 +55,10 @@ async fn complete_requires_localhost() {
 async fn complete_from_localhost_creates_the_admin_and_saves_the_mode() {
     let env = Env::new();
     let r = complete(&env, req("POST", "/setup/api/complete")).await;
-    assert_eq!(
-        (r.status, r.json()),
-        (
-            201,
-            json!({"success": true, "message": "Setup completed successfully"})
-        )
-    );
+    assert_eq!(r.status, 201);
+    assert_eq!(r.json()["success"], true);
+    assert_eq!(r.json()["message"], "Setup completed successfully");
+    assert_eq!(r.json()["restarting"], false);
     let admin = env.db.get_user("admin").unwrap().unwrap();
     assert_eq!(admin.role, Role::Admin);
     assert_eq!(env.deps.core.config.read().registration.mode, "invite");
@@ -521,4 +518,146 @@ async fn complete_needs_a_json_body() {
         )
     );
     assert!(env.db.get_user("admin").unwrap().is_none());
+}
+
+/// The machine the setup's OCR step talks to.
+#[derive(Default)]
+struct FakeMachine {
+    changed: parking_lot::Mutex<Vec<(String, bool, bool, bool)>>,
+}
+
+impl bunko_server::machine::Machine for FakeMachine {
+    fn overview(&self) -> serde_json::Value {
+        json!({})
+    }
+    fn setup_options(&self) -> serde_json::Value {
+        json!({"default_on": true, "choices": [{"id": "auto"}, {"id": "rocm"}]})
+    }
+    fn backend_locked(&self) -> Option<String> {
+        None
+    }
+    fn ocr_changed(
+        &self,
+        config: &bunko_core::Config,
+        backend_changed: bool,
+        from_setup: bool,
+    ) -> serde_json::Value {
+        self.changed.lock().push((
+            config.ocr.backend.clone(),
+            config.ocr.local_processing,
+            backend_changed,
+            from_setup,
+        ));
+        json!({"installing": true, "restarting": false, "message": "Installing in the background."})
+    }
+    fn install(&self, _: bool) -> Result<serde_json::Value, String> {
+        Ok(json!({}))
+    }
+    fn remove(&self) -> Result<serde_json::Value, String> {
+        Ok(json!({}))
+    }
+    fn start_job(&self, _: &str, _: Option<&str>) -> Result<serde_json::Value, String> {
+        Err("no".into())
+    }
+    fn job(&self, _: u64, _: u64) -> Option<serde_json::Value> {
+        None
+    }
+    fn logs(&self, _: usize) -> serde_json::Value {
+        json!({})
+    }
+}
+
+/// The later steps: remote access (Dynamic DNS, CORS) and OCR on this machine are
+/// checked before the admin is made, then saved, and the OCR choice reaches the machine.
+#[tokio::test]
+async fn remote_access_and_ocr_are_saved_and_the_ocr_choice_applied() {
+    let mut env = Env::new();
+    let machine = std::sync::Arc::new(FakeMachine::default());
+    env.deps.machine = Some(machine.clone());
+    let r = env.send(empty(req("GET", "/setup/api/options"))).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json()["ocr"]["default_on"], true);
+    // A remote caller without the code sees nothing.
+    let r = env
+        .send(empty(from_peer(
+            "GET",
+            "/setup/api/options",
+            "203.0.113.10",
+        )))
+        .await;
+    assert_eq!(r.status, 403);
+
+    let send =
+        |body: serde_json::Value| env.send(json_body(req("POST", "/setup/api/complete"), body));
+    // A mistake in a later step: nothing is written, not even the admin.
+    let r = send(json!({
+        "admin": {"username": "admin", "password": "password123"},
+        "remote": {"access": "dyndns", "dyndns": {"provider": "duckdns", "domain": "x.duckdns.org"}},
+    }))
+    .await;
+    assert_eq!(r.status, 400);
+    assert!(r.json()["error"].as_str().unwrap().contains("token"));
+    assert!(env.db.get_user("admin").unwrap().is_none());
+    let r = send(json!({
+        "admin": {"username": "admin", "password": "password123"},
+        "remote": {"ssl": {"mode": "files", "cert_file": "/no/such.pem", "key_file": "/no/key.pem"}},
+    }))
+    .await;
+    assert_eq!(r.status, 400);
+    assert!(env.db.get_user("admin").unwrap().is_none());
+
+    let r = send(json!({
+        "admin": {"username": "admin", "password": "password123"},
+        "registration": {"mode": "approval"},
+        "remote": {
+            "access": "dyndns",
+            "dyndns": {"provider": "duckdns", "domain": "x.duckdns.org", "token": "tok"},
+            "ssl": {"mode": "off"},
+            "cors_origins": ["https://reader.example"],
+        },
+        "ocr": {"on": true, "backend": "rocm"},
+    }))
+    .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    assert_eq!(r.json()["ocr"]["installing"], true);
+    assert_eq!(r.json()["restarting"], false);
+    let c = env.deps.core.config.read().clone();
+    assert_eq!(c.registration.mode, "approval");
+    assert!(c.dyndns.enabled);
+    assert_eq!(c.dyndns.domain, "x.duckdns.org");
+    assert!(
+        c.cors
+            .allowed_origins
+            .iter()
+            .any(|o| o == "https://reader.example")
+    );
+    assert!(c.ocr.local_processing);
+    assert_eq!(c.ocr.backend, "rocm");
+    assert_eq!(
+        machine.changed.lock().as_slice(),
+        &[("rocm".to_string(), true, true, true)]
+    );
+    let saved = bunko_core::config::load_config(Some(&env.dir.path().join("config.yaml"))).unwrap();
+    assert_eq!(saved.ocr.backend, "rocm");
+    assert!(saved.dyndns.enabled);
+}
+
+/// OCR off: saved as such, and the machine is told (it stops nothing it never started).
+#[tokio::test]
+async fn ocr_off_is_saved() {
+    let mut env = Env::new();
+    let machine = std::sync::Arc::new(FakeMachine::default());
+    env.deps.machine = Some(machine.clone());
+    let r = env
+        .send(json_body(
+            req("POST", "/setup/api/complete"),
+            json!({"admin": {"username": "admin", "password": "password123"}, "ocr": {"on": false}}),
+        ))
+        .await;
+    assert_eq!(r.status, 201);
+    assert!(!env.deps.core.config.read().ocr.local_processing);
+    assert_eq!(
+        machine.changed.lock().as_slice(),
+        &[("auto".to_string(), false, false, true)]
+    );
 }

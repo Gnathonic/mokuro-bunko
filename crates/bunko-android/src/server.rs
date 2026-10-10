@@ -88,6 +88,7 @@ fn start_locked(opts: &StartOptions) -> Result<Running, String> {
         verbose: false,
         flavor: crate::FLAVOR,
         local: None,
+        machine: None,
     };
     let services = {
         let _guard = runtime.enter();

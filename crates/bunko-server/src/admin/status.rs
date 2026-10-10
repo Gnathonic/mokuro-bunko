@@ -60,6 +60,8 @@ pub(super) async fn status(s: &AdminState) -> Response {
             "user_count": user_count,
             "volume_count": volume_count,
             "stats": {},
+            // 0.7: the running version (the panel's footer).
+            "version": bunko_core::VERSION,
         }))
     })
     .await;
