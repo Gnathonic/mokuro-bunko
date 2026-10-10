@@ -104,11 +104,14 @@ sidecar's family is in `ocr.upgrade.replace`, the volume is either swapped
 directly (another layer already holds the target recipe made from the
 current archive) or gets an upgrade job queued behind every ordinary job. A
 volume with missing pages, or whose sidecar a person edited, is skipped. The
-swap runs under the per-path write lock shared with WebDAV: the old primary
-is first copied to a layer named after its generation, then the new bytes
+swap runs under the per-path write lock shared with WebDAV: the new bytes
 replace the bare file atomically, so there is never a moment without a
-primary. The row in `ocr_sidecars` moves with the file and an
-`ocr_sidecar_upgraded` audit event is written; `volume_uuid` is preserved.
+primary, and no copy of the old file is kept. The old file's `ocr_sidecars`
+row is dropped, the new file gets its own, and an `ocr_sidecar_upgraded`
+audit event is written; `volume_uuid` is preserved. Layers 0.7.0-beta.3 kept
+of replaced files (stamped `ocr_engine.upgraded_from_primary`) are removed at
+startup (from the audit's `kept_as`) and at the census, once the volume's
+bare file has the primary's recipe.
 
 ## Queue order
 

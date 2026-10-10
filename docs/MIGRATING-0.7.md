@@ -81,10 +81,10 @@ ocr:
 key). For every volume whose primary
 sidecar was written by an older recipe the server either reuses an existing
 layer made by the new engine, or queues an upgrade job behind all ordinary
-jobs. The old file is kept beside the new one as a layer named after the old
-generation, so nothing is lost and a volume can be reverted. Volumes whose
-archive is missing pages, or whose sidecar a person has edited, are skipped
-and listed. Reading progress is untouched because the `volume_uuid` is
+jobs. The new file replaces the old one outright: the old OCR is not kept
+(add a non-primary generation if you want another recipe's OCR beside the
+primary). Volumes whose archive is missing pages, or whose sidecar a person
+has edited, are skipped and listed; an admin can force one edited volume. Reading progress is untouched because the `volume_uuid` is
 preserved. It is off by default because it rewrites what readers see and
 costs OCR time.
 

@@ -815,15 +815,18 @@ current primary generation:
   archive, its bytes become the new primary at once. Otherwise the volume
   gets an upgrade job, queued behind every ordinary job (a volume with no OCR
   always beats one with old OCR) and runnable on any machine.
-- The old primary is kept as a layer named after its generation (`mokuro`
-  for mokuro-legacy files; `-prev`, `-prev2`, … if that name is taken). A
+- The new file **replaces** the old primary outright, in one atomic rename;
+  no copy of the old file is kept and there is no undo. (To keep another
+  recipe's OCR beside the primary, add a non-primary generation instead.) A
   crash mid-way never leaves a volume without its primary. The `volume_uuid`
-  is preserved, so reading progress is untouched, and the swap is audited as
-  `ocr_sidecar_upgraded`.
+  is preserved, so reading progress is untouched, and the replace is audited
+  as `ocr_sidecar_upgraded`.
+- The layers 0.7.0-beta.3 kept of replaced files (`<Volume>.mokuro.mokuro`,
+  stamped `upgraded_from_primary`) are removed at startup, or at the next
+  census, once the volume is upgraded; each removal is logged.
 
-The admin API serves a census and per-volume actions
-(`GET /_admin/api/ocr/upgrade`, `POST …/upgrade/<volume>` with `force`,
-`POST …/upgrade/<volume>/revert` to swap the kept layer back).
+The admin API serves a census and a per-volume action
+(`GET /_admin/api/ocr/upgrade`, `POST …/upgrade/<volume>` with `force`).
 
 #### OCR engines
 
