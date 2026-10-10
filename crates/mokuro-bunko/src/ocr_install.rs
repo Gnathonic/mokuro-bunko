@@ -644,6 +644,19 @@ impl BackgroundInstall for Installer {
     fn finished(&self) -> watch::Receiver<u64> {
         self.0.finished.subscribe()
     }
+
+    /// A pack of this release that serves the machine is in place, or none is needed
+    /// (what `install-ocr --if-needed` checks). One that failed to replace another
+    /// leaves the old in place: still ready.
+    fn backend_ready(&self) -> bool {
+        let Ok(target) = self.target() else {
+            return true;
+        };
+        !matches!(
+            install_ocr::need(&target, &crate::hwdetect::detect()),
+            Need::Install { .. }
+        )
+    }
 }
 
 /// The child's arguments, environment, and the backends directory.

@@ -1060,7 +1060,10 @@ impl Scheduler {
     }
 
     /// Persist a finished result: `.ocr-bench.json` (this server, not precision-only)
-    /// and the machine's profile (a processor's benchmark, and this server's autobench).
+    /// and the machine's profile, every benchmark of a saved row on any machine. One run
+    /// by hand on this server counts too: it measured this machine, so the scheduler's
+    /// "benchmark before it runs there" must not measure it all over again. Only an
+    /// autobench writes pools ([`Self::persist_profile`]).
     fn bench_store(&mut self, run: &BenchRun) {
         let local = run.machine == LOCAL;
         if local && !run.precision_only {
@@ -1073,9 +1076,7 @@ impl Scheduler {
                 tracing::warn!("Could not persist the OCR benchmark result: {e}");
             }
         }
-        if !local || run.autobench {
-            self.persist_profile(run);
-        }
+        self.persist_profile(run);
     }
 
     /// `_persist_remote`: the bench summary into that machine's profile, and — for an

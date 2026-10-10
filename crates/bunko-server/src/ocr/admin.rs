@@ -49,7 +49,13 @@ fn cached_stats(key: &str) -> Option<(Instant, Value)> {
     STATS.lock().as_ref().and_then(|m| m.get(key).cloned())
 }
 
-/// Every device any connected or remembered machine could place a model on.
+/// Every device any connected or remembered machine could place a model on. Read live
+/// from the machines' catalogs: this server's own is replaced each time its OCR (re)starts
+/// (`LocalUp`), so a backend installed in the background shows here at once.
+///
+/// `auto` carries what it `resolves` to for the row's own (this server's) table: the
+/// first card of this server's catalog while its OCR runs, else the first card any
+/// machine reports.
 fn merged_devices(s: &Scheduler) -> Value {
     let mut out: Vec<Value> = Vec::new();
     let mut gpus: BTreeMap<String, String> = BTreeMap::new();
@@ -60,17 +66,28 @@ fn merged_devices(s: &Scheduler) -> Value {
             }
         }
     }
-    let first_gpu = gpus.keys().next().cloned();
-    out.push(json!({"id": "auto", "label": match &first_gpu { Some(g) => format!("Auto \u{2014} GPU {}", g.trim_start_matches("gpu:")), None => "Auto \u{2014} CPU".into() }}));
+    let resolves = match s.machines.values().find(|m| m.local) {
+        Some(local) => local
+            .catalog
+            .devices
+            .iter()
+            .find(|d| d.id.starts_with("gpu:") && !d.formats.is_empty())
+            .map_or_else(|| "cpu".to_string(), |d| d.id.clone()),
+        None => gpus.keys().next().cloned().unwrap_or_else(|| "cpu".into()),
+    };
+    if gpus.is_empty() {
+        return default_devices();
+    }
+    let auto_label = match resolves.strip_prefix("gpu:") {
+        Some(i) => format!("Auto \u{2014} GPU {i}"),
+        None => "Auto \u{2014} CPU".into(),
+    };
+    out.push(json!({"id": "auto", "label": auto_label, "resolves": resolves}));
     out.push(json!({"id": "cpu", "label": "CPU"}));
     for (id, label) in gpus {
         out.push(json!({"id": id, "label": label}));
     }
-    if out.len() == 2 {
-        default_devices()
-    } else {
-        Value::Array(out)
-    }
+    Value::Array(out)
 }
 
 fn ask<T: Send + 'static>(

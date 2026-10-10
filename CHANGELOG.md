@@ -61,6 +61,20 @@
   still keeps running, and Quit says so.
 - A failed libtorch backend load was remembered for the life of the process; a backend
   installed later is now picked up without a restart.
+- The admin panel's pools table said a stage left on Auto runs on the CPU ("Auto →
+  CPU") whatever the machine had, so after a GPU backend was installed it kept saying
+  the engine would use the CPU while volumes were read on the card. Auto now reads as
+  the device it resolves to (this server's first card while its OCR runs, a processor's
+  own first card in its table), as soon as the backend is loaded; the copies box of an
+  engine on a card says "auto" rather than 1 (a fast card on a large host runs two).
+- A benchmark run by hand on this server was saved for the admin panel only, so the
+  scheduler benchmarked the same row again before its first volume. It is now this
+  server's benchmark of the row (its rate; the pools stay as set), and one benchmark
+  per engine and machine is enough.
+- After a failed OCR backend install the server started its OCR anyway and logged
+  "Starting this server's OCR: its OCR backend is installed". With no backend in place
+  it now waits (the failure shows with a Retry, and the automatic retries go on) and
+  starts once an install succeeds; a failed install never restarts OCR that runs.
 
 ## [0.7.0-beta.4] - 2026-10-09
 
