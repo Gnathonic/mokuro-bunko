@@ -25,6 +25,7 @@ mod ocr_target;
 mod out;
 mod prompt;
 mod serve;
+mod server_machine;
 
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Command};

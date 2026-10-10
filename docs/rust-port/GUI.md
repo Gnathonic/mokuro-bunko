@@ -5,6 +5,43 @@ covers library first run, processor pairing, OCR install with progress, start-wi
 and *everything that is a flag in the CLI*; tray pause offers both "after this volume" and
 "now" (plus timed pauses); tray on Windows, macOS and Linux.
 
+## 0. Since 0.7.0-beta.4: one web interface per server
+
+Everything about a library server is done in its own web pages, the same on the
+desktop, from another computer and in Docker. The loopback `/app` pages keep only what
+is truly local. Sections 1–5 below describe the design as first built; where they
+differ, this section wins.
+
+- **Server setup** is the server's `/setup` (localhost: no code; elsewhere the one-time
+  setup code from the log): admin account, who may join, remote access (tunnel,
+  Dynamic DNS, HTTPS, CORS), OCR on this machine (toggle, on when a usable GPU is
+  found; backend Auto, CPU or the GPU found). `POST /setup/api/complete` takes
+  `{admin, registration, remote, ocr}`; every answer is checked before the admin is
+  made. Values the environment sets are shown read-only (`GET /setup/api/options`
+  `pinned`). Finishing signs the admin in and opens `/_admin#server`. HTTPS turned on
+  restarts the server. Until an admin exists, a new server does not start the OCR
+  install by itself; the setup's choice does (when `MOKURO_OCR_AUTO_INSTALL` allows).
+- **Admin panel → This server** (`/_admin/api/machine/*`, admin only, CSRF-checked;
+  `bunko_server::machine::Machine`, implemented by the binary's `server_machine.rs`):
+  OCR on/off (`ocr.local_processing`), the backend preference (`ocr.backend`; locked
+  when `MOKURO_OCR_BACKEND` or `serve --ocr` sets it), install / reinstall / remove
+  with live progress (the background installer), engines and models (download,
+  verify, list), `doctor`, the server log. A backend switch installs what is missing;
+  when another backend is already loaded in the process the server restarts to use
+  it. Installs come only from the signed release or the `ocr-offline` folder next to
+  the program; no page names a folder. One install at a time; 3 s between starts of
+  an action (429).
+- **Desktop app** (`/app`, loopback + token as before): the chooser (Library server:
+  folder, then the tray runs `serve` on a free port from 8080 and the browser goes to
+  its `/setup`; Processor: the pairing page), the processor's pairing, settings
+  (connection, OCR & models, logs, diagnostics, updates) and status pages. Removed:
+  the server setup and settings pages, the start-up step and page, service install
+  from a page.
+- **Tray**: a greyed "Mokuro Bunko <version>" line, status, Statistics, pause items,
+  Open admin panel (`<library>/_admin`; the login page brings the admin back to it),
+  Open processor (its status page, signed in), Open library, "Set up…" (only while
+  nothing runs), Start at login, Quit.
+
 ## 1. Pieces
 
 ```

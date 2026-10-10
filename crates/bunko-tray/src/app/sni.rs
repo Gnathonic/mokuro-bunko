@@ -134,7 +134,8 @@ impl ksni::Tray for Sni {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let m = &self.model;
-        let mut items: Vec<MenuItem<Self>> = m.status_lines.iter().map(|l| line(l)).collect();
+        let mut items: Vec<MenuItem<Self>> = vec![line(&super::version_line())];
+        items.extend(m.status_lines.iter().map(|l| line(l)));
         items.push(
             SubMenu {
                 label: "Statistics".into(),
@@ -158,12 +159,14 @@ impl ksni::Tray for Sni {
         ));
         items.push(self.item(id::RESUME, "Resume", m.can_resume));
         items.push(MenuItem::Separator);
-        items.push(self.item(id::DASHBOARD, "Open dashboard", m.can_open_dashboard));
+        items.push(self.item(id::ADMIN, "Open admin panel", m.admin_url.is_some()));
+        if m.processor_up {
+            items.push(self.item(id::PROCESSOR, "Open processor", true));
+        }
         items.push(self.item(id::LIBRARY, "Open library", m.library_url.is_some()));
-        items.push(self.item(id::SETTINGS, "Settings…", true));
-        items.push(self.item(id::WIZARD, "Setup wizard…", true));
-        items.push(self.item(id::LOGS, "Show logs", true));
-        items.push(self.item(id::UPDATES, &m.update_text, true));
+        if m.show_setup {
+            items.push(self.item(id::SETUP, "Set up…", true));
+        }
         items.push(MenuItem::Separator);
         items.push(
             CheckmarkItem {

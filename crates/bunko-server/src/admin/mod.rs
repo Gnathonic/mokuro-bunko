@@ -15,6 +15,7 @@
 
 mod accounts;
 mod audit;
+mod machine;
 pub mod ocr;
 mod settings;
 mod status;
@@ -35,6 +36,7 @@ use http::{HeaderValue, Method, StatusCode, header};
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
+pub use machine::CHOOSABLE_BACKENDS;
 pub use ocr::{NoOcr, OcrAdmin};
 pub use update::{AutoDeps, Quiet, UpdateService, UpdateSource};
 
@@ -63,6 +65,8 @@ pub struct AdminDeps {
     pub drop_processors: Option<DropProcessors>,
     /// `None`: an applied update says `restarting: false` and waits for a manual restart.
     pub restart: Option<Restart>,
+    /// The machine this server runs on (the "This server" tab); `None`: 404.
+    pub machine: Option<Arc<dyn crate::machine::Machine>>,
 }
 
 #[derive(Clone)]
@@ -72,6 +76,9 @@ pub(crate) struct AdminInner {
     pub deps: AdminDeps,
     /// 0.5.2 `_config_lock`: one read-modify-save of the config at a time.
     pub config_lock: parking_lot::Mutex<()>,
+    /// When each long-running "This server" action last started (a short cooldown).
+    pub machine_actions:
+        parking_lot::Mutex<std::collections::HashMap<&'static str, std::time::Instant>>,
 }
 
 impl std::ops::Deref for AdminState {
@@ -113,6 +120,7 @@ pub fn router(deps: AdminDeps) -> Router {
     let state = AdminState(Arc::new(AdminInner {
         deps,
         config_lock: parking_lot::Mutex::new(()),
+        machine_actions: parking_lot::Mutex::new(std::collections::HashMap::new()),
     }));
     Router::new()
         .route("/_admin", any(entry))
@@ -350,6 +358,14 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
         ["dyndns", "start"] if post => status::dyndns_start(s),
         ["dyndns", "stop"] if post => status::dyndns_stop(s),
         ["dyndns", "test"] if post => status::dyndns_test(s).await,
+
+        ["machine"] if get => machine::overview(s).await,
+        ["machine", "ocr"] if put => machine::ocr(s, &req).await,
+        ["machine", "install"] if post => machine::install(s, &req).await,
+        ["machine", "remove"] if post => machine::remove(s).await,
+        ["machine", "jobs"] if post => machine::start_job(s, &req).await,
+        ["machine", "jobs", id] if get => machine::job(s, &req, id).await,
+        ["machine", "logs"] if get => machine::logs(s, &req).await,
 
         ["update"] if get => update::http::get(s, &req).await,
         ["update", "apply"] if post => update::http::apply(s, &req).await,

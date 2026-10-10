@@ -63,7 +63,12 @@ pub struct MenuModel {
     pub can_pause_after: bool,
     pub can_pause_now: bool,
     pub can_resume: bool,
-    pub can_open_dashboard: bool,
+    /// A processor here answers: "Open processor" (its local status page).
+    pub processor_up: bool,
+    /// The library server here: its admin panel (`<url>/_admin`).
+    pub admin_url: Option<String>,
+    /// Nothing runs and the tray runs nothing: "Set up…" (the chooser).
+    pub show_setup: bool,
     pub library_url: Option<String>,
     pub update_text: String,
     /// The update item leads to the Updates settings (a newer release is known) rather
@@ -278,7 +283,8 @@ pub fn build(inp: &Inputs) -> MenuModel {
     let mut pausable_running = false; // can still be paused (not paused/pausing)
     let mut pausable_not_fully_paused = false; // pausing counts: "now" still helps
     let mut library_url = None;
-    let mut dashboard = false;
+    let mut admin_url = None;
+    let mut processor_up = false;
     let multi = inp.instances.len() + inp.supervised.len() > 1;
 
     let grace = |role: &str| inp.updating.iter().find(|(r, _)| r == role);
@@ -303,7 +309,14 @@ pub fn build(inp: &Inputs) -> MenuModel {
         }
         match &inst.status {
             Some(s) => {
-                dashboard = true;
+                if inst.role == "processor" {
+                    processor_up = true;
+                }
+                if inst.role == "server" && admin_url.is_none() {
+                    admin_url = s
+                        .library_url()
+                        .map(|u| format!("{}/_admin", u.trim_end_matches('/')));
+                }
                 let text = updating_line(s).unwrap_or_else(|| {
                     if s.state == "disconnected" && inst.role == "processor" && library_restarting {
                         "Reconnecting (the library is restarting for its update)".into()
@@ -466,7 +479,9 @@ pub fn build(inp: &Inputs) -> MenuModel {
         can_pause_after: pausable_running,
         can_pause_now: pausable_not_fully_paused,
         can_resume: paused_any,
-        can_open_dashboard: dashboard,
+        processor_up,
+        admin_url,
+        show_setup: inp.instances.iter().all(|i| i.role == "gui") && inp.supervised.is_empty(),
         library_url,
         update_text,
         update_available,
@@ -885,7 +900,7 @@ mod tests {
     fn nothing_running_and_supervision() {
         let m = model(&[]);
         assert_eq!(m.status_lines, ["Not running"]);
-        assert!(!m.can_pause_now && !m.can_resume && !m.can_open_dashboard);
+        assert!(!m.can_pause_now && !m.can_resume && !m.processor_up);
         let m = build(&Inputs {
             instances: &[],
             supervised: &[SupervisedView {

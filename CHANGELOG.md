@@ -17,14 +17,24 @@
   is then a problem with an Install button). One install at a time per backends
   directory; an interrupted one resumes its downloads at the next start. `install-ocr`
   stays a foreground command for scripts.
-- The setup wizard's "Save and start" saves the configuration and the OCR choices and
-  starts the server or processor, then moves the browser to that instance's own
-  dashboard, signed in (the setup app exits): it shows the server serving, the OCR
-  backend install with its progress, then "OCR ready", and an engine's first-run speed
-  measurement; the browser can be closed at any point. The dashboard and the tray are
-  the one place that reports on it afterwards. Turning local
-  processing on in the admin panel's OCR settings starts the install (or the local OCR)
-  at once.
+- **One web interface for a library server, the same locally, remotely and in Docker.**
+  The server's own first-run page (`/setup`) is the setup wizard: the admin account,
+  who may join, remote access (Cloudflare tunnel, Dynamic DNS, HTTPS, other web apps)
+  and **OCR on this machine** (on by default when a usable GPU is found; Auto, CPU or
+  the GPU found). Finishing signs the admin in and opens the admin panel, where the
+  OCR backend's background install shows its progress. Answers the environment fixes
+  (`MOKURO_REGISTRATION_MODE`, `MOKURO_SSL_ENABLED`, `MOKURO_OCR_BACKEND`) are shown, not
+  asked. Before setup, a new server does not start installing OCR by itself.
+- The admin panel's new **This server** tab: OCR on this machine, the hardware, the
+  backend in use ("rocm7.1 for 0.7.0-beta.4"), the backend preference (`ocr.backend`:
+  Auto, CPU or the GPU found; a switch installs what is missing, and restarts the
+  server when another backend is already loaded), Install / Reinstall / Remove with
+  live progress, the engines' models (download, verify, details), diagnostics
+  (`doctor`) and the server log. Admin only, behind the panel's CSRF checks; installs
+  come only from the signed release or the `ocr-offline` folder next to the program (no
+  folder from a page); one install at a time and a short cooldown between actions.
+- The running version is shown at the foot of the admin panel, on the local processor
+  pages and as the tray menu's first (greyed) line.
 - First-run setup from another computer (Docker, a NAS): while no admin exists the
   server prints a one-time **setup code** in its log at every start (`First run:
   create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`). `/setup`
@@ -36,6 +46,16 @@
   exists. 0.5 allowed setup from localhost only.
 
 ### Changed
+- The desktop app is only what is local. With nothing set up, `mokuro-bunko` opens a
+  chooser: **Library server** (pick the folder; the tray starts the server on a free
+  port and the browser moves to its `/setup`) or **Processor** (the local pairing page:
+  library address, login, connection test, name, sessions, automatic updates; then
+  its own status and settings pages). The tray menu: status, pause, Statistics, Open
+  admin panel, Open processor, Open library, Start at login, Quit. Removed: the
+  desktop server setup and server settings pages, the "Start with the machine" step,
+  the Start-up settings page and installing services from a page (the tray's "Start at
+  login" checkbox replaces them; `processor service --install` stays a command). The
+  login page now returns to the page that sent you there.
 - The full Docker image's entrypoint no longer runs `install-ocr --if-needed` before
   the server: the server answers within seconds of the first start (health check start
   period 30 s instead of 20 min).

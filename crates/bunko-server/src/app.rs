@@ -30,6 +30,9 @@ pub struct ServeOptions {
     pub flavor: &'static str,
     /// Local OCR (full build): starts an in-process processor over the real engines.
     pub local: Option<Arc<dyn crate::ocr::LocalProcessorFactory>>,
+    /// The machine this server runs on (the admin panel's "This server", the setup's
+    /// OCR step); the binary supplies it.
+    pub machine: Option<Arc<dyn crate::machine::Machine>>,
 }
 
 /// 0.5.2 `_validate_startup_environment`: directories exist and are writable; TLS
@@ -562,7 +565,7 @@ pub async fn serve_router_with(
 
 /// Build every module router and the WebDAV fallback for these services. Modules are
 /// added here as they land; the order is 0.5.2's precedence (spec http-webdav §2.1).
-pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
+pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
     let ocr = services.ocr.clone();
     let refused: RefusalHook = {
         let ocr = ocr.clone();
@@ -608,6 +611,15 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
             stop.cancel();
         }) as Arc<dyn Fn() + Send + Sync>
     };
+    if let Some(m) = &opts.machine {
+        m.attach(crate::machine::MachineHooks {
+            restart: restart.clone(),
+            ocr: ocr.clone(),
+        });
+    }
+    accounts.machine = opts.machine.clone();
+    accounts.dyndns = Some(services.dyndns.clone());
+    accounts.restart = Some(restart.clone());
     let admin = crate::admin::AdminDeps {
         core: services.core.clone(),
         db: services.db.clone(),
@@ -617,6 +629,7 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
         updates: Some(services.updates.clone()),
         drop_processors: Some(drop),
         restart: Some(restart),
+        machine: opts.machine.clone(),
     };
     let mut modules: Vec<Router> = vec![
         crate::accounts::router(accounts.clone()),

@@ -1,9 +1,9 @@
 //! `/app/api/...`: the pages' backend. Every route sits behind `super::guard`.
 
 use super::jobs;
-use super::setup::{self, ProcessorForm, ServerSetup};
+use super::setup::{self, ProcessorForm};
 use super::spawn;
-use super::{AppState, Role, paths, service, tray};
+use super::{AppState, Role, paths, tray};
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path as UrlPath, Query, State};
@@ -30,14 +30,9 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/app/api/instances/{slot}/status", get(instance_status))
         .route("/app/api/ocr/request", post(ocr_request))
         .route("/app/api/fs", get(fs_list))
-        .route(
-            "/app/api/server/config",
-            get(server_config).post(server_config_set),
-        )
-        .route("/app/api/server/setup", post(server_setup))
         .route("/app/api/server/start", post(server_start))
+        .route("/app/api/server/new", post(server_new))
         .route("/app/api/server/health", get(server_health))
-        .route("/app/api/ssl", get(ssl_status))
         .route("/app/api/processor/test", post(processor_test))
         .route("/app/api/processor/setup", post(processor_setup))
         .route(
@@ -47,8 +42,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/app/api/processor/start", post(processor_start))
         .route("/app/api/processor/status", get(processor_status))
         .route("/app/api/ocr/hardware", get(ocr_hardware))
-        .route("/app/api/service", get(service_get).post(service_post))
-        .route("/app/api/tray", get(tray_get).post(tray_post))
         .route("/app/api/logs", get(logs_list))
         .route("/app/api/logs/tail", get(logs_tail))
         .route("/app/api/update", get(update_check))
@@ -95,7 +88,6 @@ async fn info(State(state): S) -> Response {
         let config_exists = st.config_path.is_file();
         let processor_exists = st.processor_config.is_file();
         let lib = library_url(&st);
-        let kind = service::platform_kind();
         json!({
             "version": bunko_core::VERSION,
             "flavor": crate::FLAVOR,
@@ -115,9 +107,6 @@ async fn info(State(state): S) -> Response {
             "processor_storage_check": paths::storage_check(&paths::processor_storage(&st.processor_config)),
             "library_url": lib.as_ref().map(|l| l.0.clone()),
             "admin_path": lib.as_ref().map(|l| l.1.admin.path.clone()),
-            "service_kind": kind.as_str(),
-            "service_describe": kind.describe(),
-            "service_can_start": service::can_start(kind),
         })
     })
     .await
@@ -159,7 +148,9 @@ async fn instances(State(state): S) -> Response {
     })
     .await
     .unwrap_or_default();
-    let library = match library_url(&state) {
+    // Only a library this machine is set up as (something else may answer on the
+    // default port).
+    let library = match library_url(&state).filter(|_| state.config_path.is_file()) {
         Some((url, _)) => json!({"url": url, "up": spawn::healthy(&url).await}),
         None => Value::Null,
     };
@@ -300,30 +291,42 @@ async fn ocr_request(State(state): S, Json(b): Json<OcrRequestBody>) -> Response
     }
 }
 
-/// When a tray runs for this user, the setup hands it the instance it starts: `role`
-/// goes into tray.json (the tray notices within seconds, starts it and supervises it;
-/// its Quit stops it). Returns what was done, None without a tray.
+/// The tray runs `role` from now on: its entry goes into tray.json (so the next start
+/// of the app runs it too), and a running tray picks it up within seconds; with no
+/// tray running on a desktop, the tray is started (it starts the role). None: no tray
+/// (the lite build, or headless): the caller starts the role itself.
 async fn hand_to_tray(state: &AppState, role: Role) -> Option<String> {
     let exe = state.exe.clone();
     let cfg = service_config(state, role);
+    let log = paths::server_storage(&state.config_path)
+        .join("logs")
+        .join("tray-start-console.log");
     blocking(move || -> Option<String> {
-        if tray::tray_command(&exe).is_none() || !tray::tray_running(&exe) {
-            return None;
-        }
+        let cmd = tray::tray_command(&exe)?;
         let path = tray::config_path(&exe);
         let mut conf = tray::load(&path).ok()?;
         let entry = tray::entry(role, &cfg);
-        if conf.managed.contains(&entry) {
-            // Listed already: the tray starts it unless something else runs it.
-            return Some(format!("the tray runs the {} ({})", role.as_str(), path.display()));
+        if !conf.managed.contains(&entry) {
+            tray::set_role(&mut conf, role.as_str(), Some(entry));
+            tray::save(&path, &conf).ok()?;
         }
-        tray::set_role(&mut conf, role.as_str(), Some(entry));
-        tray::save(&path, &conf).ok()?;
-        Some(format!(
-            "Handed the {} to the running tray ({}): it starts it, restarts it if it stops, and Quit stops it.",
-            role.as_str(),
-            path.display()
-        ))
+        if tray::tray_running(&exe) {
+            return Some(format!("the tray runs the {}", role.as_str()));
+        }
+        if tray::headless() {
+            return None;
+        }
+        let _ = std::fs::create_dir_all(log.parent()?);
+        match spawn::spawn_detached(&cmd.0, &cmd.1, &log) {
+            Ok(pid) => Some(format!(
+                "started the tray (pid {pid}); it runs the {}",
+                role.as_str()
+            )),
+            Err(e) => {
+                tracing::warn!("could not start the tray: {e}");
+                None
+            }
+        }
     })
     .await
     .flatten()
@@ -378,133 +381,128 @@ async fn fs_list(Query(q): Query<FsQuery>) -> Response {
     }
 }
 
-/// config.yaml: the file's own values (what is saved), the effective values (with
-/// `MOKURO_*` applied) and the keys `config set` accepts.
-async fn server_config(State(state): S) -> Response {
-    let path = state.config_path.clone();
-    let v = blocking(move || {
-        let file = crate::cfgfile::load_for_write(&path);
-        let effective = bunko_core::config::load_config(Some(&path));
-        let env: Vec<String> = std::env::vars()
-            .map(|(k, _)| k)
-            .filter(|k| k.starts_with("MOKURO_"))
-            .collect();
-        match (file, effective) {
-            (Ok(f), Ok(e)) => Ok(json!({
-                "path": path,
-                "exists": path.is_file(),
-                "file": f.to_value(),
-                "effective": e.to_value(),
-                "yaml": e.to_yaml(),
-                "warnings": e.warnings,
-                "keys": bunko_core::Config::KEYS,
-                "env": env,
-                "ocr_build": cfg!(feature = "ocr"),
-            })),
-            (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
-        }
-    })
-    .await;
-    match v {
-        Some(Ok(v)) => ok(v),
-        Some(Err(e)) => bad(e),
-        None => fail(StatusCode::INTERNAL_SERVER_ERROR, "read failed"),
-    }
-}
-
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct ConfigSet {
-    /// Dotted key → value text, as `config set` takes them.
-    set: serde_json::Map<String, Value>,
-    cors_add: Option<String>,
-    cors_remove: Option<String>,
-    /// `config init`: write a default file (`force` over an existing one).
-    init: bool,
-    force: bool,
+struct ServerNew {
+    /// The library folder (empty: the default).
+    storage: String,
 }
 
-async fn server_config_set(State(state): S, Json(body): Json<ConfigSet>) -> Response {
+/// The chooser's "Library server": write a config.yaml when there is none (the
+/// folder, a free port), start the server (the tray runs it), and say where the
+/// browser goes: its first-run `/setup`, or its admin panel once set up.
+async fn server_new(State(state): S, Json(b): Json<ServerNew>) -> Response {
     let path = state.config_path.clone();
-    let res = blocking(move || -> Result<Value, String> {
-        if body.init {
-            if path.exists() && !body.force {
-                return Err(format!("{} already exists", path.display()));
-            }
-            crate::cfgfile::save(&bunko_core::Config::default(), &path)
-                .map_err(|e| e.to_string())?;
-            return Ok(json!({"saved": path, "changed": ["(defaults)"]}));
+    let written = blocking(move || write_first_config(&path, b.storage.trim())).await;
+    match written {
+        Some(Ok(())) => {}
+        Some(Err(e)) => return bad(e),
+        None => {
+            return fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not write the config",
+            );
         }
-        let mut c = crate::cfgfile::load_for_write(&path).map_err(|e| e.to_string())?;
-        let mut changed = Vec::new();
-        for (k, v) in &body.set {
-            if !bunko_core::Config::KEYS.contains(&k.as_str()) {
-                return Err(format!("{k}: no such setting"));
-            }
-            let text = match v {
-                Value::String(s) => s.clone(),
-                Value::Bool(b) => b.to_string(),
-                Value::Number(n) => n.to_string(),
-                Value::Array(_) | Value::Object(_) => v.to_string(),
-                Value::Null => String::new(),
-            };
-            c.set_by_dotted_key(k, &text)
-                .map_err(|e| format!("{k}: {e}"))?;
-            changed.push(k.clone());
-        }
-        if let Some(o) = body
-            .cors_add
-            .as_deref()
-            .map(str::trim)
-            .filter(|o| !o.is_empty())
-        {
-            if !c.cors.allowed_origins.iter().any(|x| x == o) {
-                c.cors.allowed_origins.push(o.to_string());
-            }
-            changed.push("cors.allowed_origins".into());
-        }
-        if let Some(o) = body.cors_remove.as_deref().map(str::trim) {
-            c.cors.allowed_origins.retain(|x| x != o);
-            changed.push("cors.allowed_origins".into());
-        }
-        crate::cfgfile::save(&c, &path).map_err(|e| e.to_string())?;
-        Ok(json!({"saved": path, "changed": changed, "restart_needed": true}))
-    })
-    .await;
-    match res {
-        Some(Ok(v)) => ok(v),
-        Some(Err(e)) => bad(e),
-        None => fail(StatusCode::INTERNAL_SERVER_ERROR, "save failed"),
     }
+    let resp = start_server(&state).await;
+    if !resp.0 {
+        return ok(resp.1);
+    }
+    let mut v = resp.1;
+    let url = v["url"].as_str().unwrap_or_default().to_string();
+    let next = match setup_needed(&url).await {
+        Some(false) => "/_admin",
+        _ => "/setup",
+    };
+    v["open"] = json!(format!("{}{next}", url.trim_end_matches('/')));
+    if state.role == Role::Gui {
+        let st = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let _ = st.handoff.send(true);
+        });
+    }
+    ok(v)
 }
 
-async fn server_setup(State(state): S, Json(form): Json<ServerSetup>) -> Response {
-    let path = state.config_path.clone();
-    match blocking(move || setup::write_server(&form, &path)).await {
-        Some(Ok(v)) => ok(v),
-        Some(Err(e)) => bad(e),
-        None => fail(StatusCode::INTERNAL_SERVER_ERROR, "setup failed"),
+/// A config.yaml for a new library server, unless one exists: `storage` (empty: the
+/// default folder), port 8080 or the next free one.
+fn write_first_config(path: &Path, storage: &str) -> Result<(), String> {
+    if path.is_file() {
+        return Ok(());
     }
+    let mut config = bunko_core::Config::default();
+    if !storage.is_empty() {
+        let p = bunko_core::storage::expand_user(Path::new(storage));
+        if !p.is_absolute() {
+            return Err("library folder: give its full path".into());
+        }
+        config.storage.base_path = p;
+    }
+    paths::ensure_writable(&config.storage.base_path)
+        .map_err(|e| format!("{}: {e}", config.storage.base_path.display()))?;
+    config.server.port = (8080..8100)
+        .find(|p| std::net::TcpListener::bind(("0.0.0.0", *p)).is_ok())
+        .ok_or("no free port between 8080 and 8099")?;
+    crate::cfgfile::save(&config, path).map_err(|e| e.to_string())?;
+    tracing::info!(
+        "wrote {} (library folder {}, port {})",
+        path.display(),
+        config.storage.base_path.display(),
+        config.server.port
+    );
+    Ok(())
+}
+
+/// Does the server at `url` still need its first-run setup? (None: no answer.)
+async fn setup_needed(url: &str) -> Option<bool> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .no_proxy()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .ok()?;
+    let v: Value = client
+        .get(format!("{}/setup/api/status", url.trim_end_matches('/')))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    v.get("needs_setup").and_then(Value::as_bool)
 }
 
 /// Start `serve` in the background and wait for it to answer.
 async fn server_start(State(state): S) -> Response {
-    let Some((url, config)) = library_url(&state) else {
-        return bad(format!(
-            "{} does not load: run the setup first",
-            state.config_path.display()
-        ));
+    let (_, v) = start_server(&state).await;
+    ok(v)
+}
+
+/// (up, the answer).
+async fn start_server(state: &Arc<AppState>) -> (bool, Value) {
+    let Some((url, config)) = library_url(state) else {
+        return (
+            false,
+            json!({"up": false, "error": format!("{} does not load", state.config_path.display())}),
+        );
     };
     if spawn::healthy(&url).await {
-        return ok(json!({"url": url, "already_running": true, "up": true}));
+        return (
+            true,
+            json!({"url": url, "already_running": true, "up": true}),
+        );
     }
     let log = spawn::stdout_log(&config.storage.base_path, "serve-console.log");
     // A running tray takes it over (tray.json); it starts it within seconds.
-    let tray = hand_to_tray(&state, Role::Server).await;
+    let tray = hand_to_tray(state, Role::Server).await;
     if let Some(note) = &tray
-        && spawn::wait_healthy(&url, Duration::from_secs(25)).await
+        && spawn::wait_healthy(&url, Duration::from_secs(40)).await
     {
-        return ok(json!({"url": url, "up": true, "by_tray": true, "note": note}));
+        return (
+            true,
+            json!({"url": url, "up": true, "by_tray": true, "note": note}),
+        );
     }
     let args = vec![
         "-c".to_string(),
@@ -519,7 +517,12 @@ async fn server_start(State(state): S) -> Response {
     };
     let pid = match spawn::spawn_detached_env(&state.exe, &args, &log, envs) {
         Ok(p) => p,
-        Err(e) => return bad(format!("could not start the server: {e}")),
+        Err(e) => {
+            return (
+                false,
+                json!({"up": false, "error": format!("could not start the server: {e}")}),
+            );
+        }
     };
     let up = spawn::wait_healthy(&url, Duration::from_secs(45)).await;
     let tail = if up {
@@ -527,7 +530,10 @@ async fn server_start(State(state): S) -> Response {
     } else {
         spawn::tail_file(&log, 30).unwrap_or_default()
     };
-    ok(json!({"url": url, "pid": pid, "up": up, "log": log, "output": tail}))
+    (
+        up,
+        json!({"url": url, "pid": pid, "up": up, "log": log, "output": tail}),
+    )
 }
 
 async fn server_health(State(state): S) -> Response {
@@ -535,34 +541,6 @@ async fn server_health(State(state): S) -> Response {
         Some((url, _)) => ok(json!({"url": url, "up": spawn::healthy(&url).await})),
         None => ok(json!({"url": null, "up": false})),
     }
-}
-
-/// HTTPS: what the config says and the certificate's details.
-async fn ssl_status(State(state): S) -> Response {
-    let path = state.config_path.clone();
-    let v = blocking(move || {
-        let c = bunko_core::config::load_config(Some(&path)).unwrap_or_default();
-        let (cert, key) = if c.ssl.auto_cert || c.ssl.cert_file.is_empty() {
-            let (c2, k2) = bunko_server::tls::default_cert_paths();
-            (c2, k2)
-        } else {
-            (
-                PathBuf::from(&c.ssl.cert_file),
-                PathBuf::from(&c.ssl.key_file),
-            )
-        };
-        let details = if cert.is_file() {
-            crate::cmd::ssl::describe_cert(&cert).unwrap_or_else(|e| vec![e])
-        } else {
-            vec![]
-        };
-        json!({"enabled": c.ssl.enabled, "auto_cert": c.ssl.auto_cert,
-               "cert_file": cert, "key_file": key, "cert_exists": cert.is_file(),
-               "details": details})
-    })
-    .await
-    .unwrap_or(Value::Null);
-    ok(v)
 }
 
 async fn processor_test(Json(form): Json<ProcessorForm>) -> Response {
@@ -790,11 +768,7 @@ async fn ocr_hardware(State(state): S) -> Response {
     }
 }
 
-#[derive(Deserialize)]
-struct RoleQuery {
-    role: Option<String>,
-}
-
+#[cfg_attr(not(feature = "ocr"), allow(dead_code))]
 fn role_of(s: Option<&str>) -> Result<Role, Box<Response>> {
     match s.unwrap_or("server") {
         "server" => Ok(Role::Server),
@@ -810,329 +784,11 @@ fn service_config(state: &AppState, role: Role) -> PathBuf {
     }
 }
 
-async fn service_get(State(state): S, Query(q): Query<RoleQuery>) -> Response {
-    let role = match role_of(q.role.as_deref()) {
-        Ok(r) => r,
-        Err(e) => return *e,
-    };
-    let st = state.clone();
-    let v = blocking(move || {
-        let cfg = service_config(&st, role);
-        match service::render(role, &cfg, &st.exe) {
-            Ok(r) => {
-                let (written, enabled) = service::state(&r);
-                let tray_manages = tray::load(&tray::config_path(&st.exe))
-                    .is_ok_and(|c| tray::manages(&c, role.as_str()));
-                Ok(json!({"role": role.as_str(), "kind": r.kind.as_str(),
-                    "describe": r.kind.describe(), "path": r.path, "name": r.name,
-                    "text": r.text, "written": written, "enabled": enabled,
-                    "can_start": service::can_start(r.kind),
-                    "tray_manages": tray_manages,
-                    "config": cfg, "config_exists": cfg.is_file()}))
-            }
-            Err(e) => Err(e),
-        }
-    })
-    .await;
-    match v {
-        Some(Ok(v)) => ok(v),
-        Some(Err(e)) => bad(e),
-        None => fail(StatusCode::INTERNAL_SERVER_ERROR, "failed"),
-    }
-}
-
-#[derive(Deserialize)]
-struct ServiceBody {
-    role: Option<String>,
-    /// `install` or `remove`.
-    action: String,
-    /// With `install`: also enable and start it now.
-    #[serde(default)]
-    start: bool,
-    /// With `install`: take the role out of tray.json first (and stop the copy the
-    /// tray runs), so two copies never run.
-    #[serde(default)]
-    remove_tray: bool,
-}
-
-async fn service_post(State(state): S, Json(b): Json<ServiceBody>) -> Response {
-    let role = match role_of(b.role.as_deref()) {
-        Ok(r) => r,
-        Err(e) => return *e,
-    };
-    let mut before = Vec::new();
-    if b.action == "install" && b.remove_tray {
-        match untray(&state, role).await {
-            Ok(m) => before = m,
-            Err(e) => return bad(e),
-        }
-    }
-    let st = state.clone();
-    let v = blocking(move || -> Result<Value, String> {
-        let cfg = service_config(&st, role);
-        if b.action == "install" && !cfg.is_file() {
-            return Err(format!(
-                "{} does not exist yet: finish the {} setup first",
-                cfg.display(),
-                if role == Role::Processor {
-                    "processor"
-                } else {
-                    "library server"
-                }
-            ));
-        }
-        let r = service::render(role, &cfg, &st.exe)?;
-        let mut messages = before;
-        messages.extend(match b.action.as_str() {
-            "install" => service::install(&r, b.start)?,
-            "remove" => service::remove(&r)?,
-            other => return Err(format!("action: {other}?")),
-        });
-        let (written, enabled) = service::state(&r);
-        Ok(
-            json!({"messages": messages, "path": r.path, "written": written,
-                  "enabled": enabled}),
-        )
-    })
-    .await;
-    match v {
-        Some(Ok(v)) => ok(v),
-        Some(Err(e)) => bad(e),
-        None => fail(StatusCode::INTERNAL_SERVER_ERROR, "failed"),
-    }
-}
-
 /// The storage a role's running instance keeps its `.control.json` in.
 fn role_storage(state: &AppState, role: Role) -> PathBuf {
     match role {
         Role::Processor => paths::processor_storage(&state.processor_config),
         _ => paths::server_storage(&state.config_path),
-    }
-}
-
-/// Stop the copy of `role` the tray started (`POST /control/stop` answers only for
-/// tray-managed instances), and wait for it to exit. A message when one was stopped.
-async fn stop_tray_instance(state: &AppState, role: Role) -> Option<String> {
-    let f = bunko_control::read_control_file(&role_storage(state, role))?;
-    if !f.managed || !spawn::pid_alive(f.pid) {
-        return None;
-    }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .no_proxy()
-        .build()
-        .ok()?;
-    let sent = client
-        .post(format!("http://127.0.0.1:{}/control/stop", f.port))
-        .bearer_auth(&f.token)
-        .send()
-        .await
-        .is_ok_and(|r| r.status().is_success());
-    if !sent {
-        return Some(format!(
-            "Could not ask the tray's {} (pid {}) to stop; quit it from the tray menu.",
-            role.as_str(),
-            f.pid
-        ));
-    }
-    for _ in 0..60 {
-        if !spawn::pid_alive(f.pid) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    Some(format!(
-        "Stopped the {} the tray was running (pid {}).",
-        role.as_str(),
-        f.pid
-    ))
-}
-
-/// Start the tray (`mokuro-bunko tray`; Windows: the app `mokuro-bunko.exe`) in the background;
-/// its pid.
-fn start_tray(state: &AppState, tray: &(PathBuf, Vec<String>)) -> Result<u32, String> {
-    let log = paths::server_storage(&state.config_path)
-        .join("logs")
-        .join("tray-start-console.log");
-    spawn::spawn_detached(&tray.0, &tray.1, &log)
-        .map_err(|e| format!("could not start {}: {e}", tray.0.display()))
-}
-
-/// Take `role` out of tray.json and stop the copy the tray runs. A running tray reads
-/// tray.json only when it starts (and would start the copy again), so it is stopped
-/// first and started again afterwards.
-async fn untray(state: &Arc<AppState>, role: Role) -> Result<Vec<String>, String> {
-    let path = tray::config_path(&state.exe);
-    let mut conf = tray::load(&path)?;
-    let mut messages = Vec::new();
-    if !tray::manages(&conf, role.as_str()) {
-        return Ok(messages);
-    }
-    tray::set_role(&mut conf, role.as_str(), None);
-    tray::save(&path, &conf)?;
-    messages.push(format!(
-        "The tray no longer runs the {} ({}).",
-        role.as_str(),
-        path.display()
-    ));
-    let st = state.clone();
-    let stopped = blocking(move || tray::stop_tray(&st.exe))
-        .await
-        .unwrap_or_else(|| Err("could not stop the tray".into()))?;
-    if let Some(m) = &stopped {
-        messages.push(m.clone());
-    }
-    if let Some(m) = stop_tray_instance(state, role).await {
-        messages.push(m);
-    }
-    if stopped.is_some()
-        && let Some(cmd) = tray::tray_command(&state.exe)
-    {
-        let pid = start_tray(state, &cmd)?;
-        messages.push(format!(
-            "Started the tray again (pid {pid}) with the new tray.json."
-        ));
-    }
-    Ok(messages)
-}
-
-async fn tray_get(State(state): S) -> Response {
-    let st = state.clone();
-    let v = blocking(move || {
-        let exe = tray::tray_command(&st.exe).map(|(p, _)| p);
-        let path = tray::config_path(&st.exe);
-        let conf = tray::load(&path);
-        let headless = tray::headless();
-        let autostart = tray::autostart_path();
-        json!({
-            "tray_exe": exe,
-            "available": exe.is_some(),
-            "headless": headless,
-            "recommended": if exe.is_some() && !headless { "tray" } else { "service" },
-            "config_path": path,
-            "managed": conf.as_ref().map(|c| c.managed.clone()).unwrap_or_default(),
-            "config_error": conf.err(),
-            "autostart_path": autostart,
-            "autostart": autostart.as_ref().is_some_and(|p| p.exists()),
-            "running": tray::tray_running(&st.exe),
-        })
-    })
-    .await
-    .unwrap_or(Value::Null);
-    ok(v)
-}
-
-#[derive(Deserialize)]
-struct TrayBody {
-    role: Option<String>,
-    /// `enable` (the tray runs this role) or `disable`.
-    action: String,
-    /// Add (true) / leave alone (absent) / remove (false) the tray's login item.
-    #[serde(default)]
-    autostart: Option<bool>,
-    /// Start the tray now when it is not running.
-    #[serde(default)]
-    start_now: bool,
-    /// Remove this role's service first, so two copies never run.
-    #[serde(default)]
-    remove_service: bool,
-}
-
-async fn tray_post(State(state): S, Json(b): Json<TrayBody>) -> Response {
-    let role = match role_of(b.role.as_deref()) {
-        Ok(r) => r,
-        Err(e) => return *e,
-    };
-    let cfg = service_config(&state, role);
-    if b.action == "disable" {
-        let mut messages = match untray(&state, role).await {
-            Ok(m) => m,
-            Err(e) => return bad(e),
-        };
-        if b.autostart == Some(false) {
-            match tray::set_autostart(Path::new(""), false) {
-                Ok(Some(p)) => messages.push(format!("Removed {}", p.display())),
-                Ok(None) => {}
-                Err(e) => return bad(e),
-            }
-        }
-        return ok(json!({"messages": messages}));
-    }
-    if b.action != "enable" {
-        return bad(format!("action: {}?", b.action));
-    }
-    if !cfg.is_file() {
-        return bad(format!(
-            "{} does not exist yet: finish the {} setup first",
-            cfg.display(),
-            if role == Role::Processor {
-                "processor"
-            } else {
-                "library server"
-            }
-        ));
-    }
-    let Some(tray_cmd) = tray::tray_command(&state.exe) else {
-        return bad(format!(
-            "{} has no tray (the lite build): use a service instead",
-            state.exe.display()
-        ));
-    };
-    let tray_exe = tray_cmd.0.clone();
-    let st = state.clone();
-    let v = blocking(move || -> Result<Value, String> {
-        let mut messages = Vec::new();
-        if b.remove_service {
-            let r = service::render(role, &cfg, &st.exe)?;
-            if service::state(&r).0 {
-                messages.extend(service::remove(&r)?);
-            }
-        }
-        let path = tray::config_path(&st.exe);
-        let mut conf = tray::load(&path)?;
-        tray::set_role(&mut conf, role.as_str(), Some(tray::entry(role, &cfg)));
-        tray::save(&path, &conf)?;
-        messages.push(format!(
-            "Wrote {}: the tray runs the {} and restarts it if it stops.",
-            path.display(),
-            role.as_str()
-        ));
-        if let Some(on) = b.autostart
-            && let Some(p) = tray::set_autostart(&st.exe, on)?
-        {
-            messages.push(format!(
-                "{} {}",
-                if on {
-                    "The tray starts when you log in:"
-                } else {
-                    "Removed"
-                },
-                p.display()
-            ));
-        }
-        let mut started = None;
-        if b.start_now {
-            // A running tray reads tray.json only when it starts: restart it.
-            if let Some(m) = tray::stop_tray(&st.exe)? {
-                messages.push(m);
-            }
-            let pid = start_tray(&st, &tray_cmd)?;
-            started = Some(pid);
-            messages.push(format!("Started the tray (pid {pid})."));
-        } else if tray::tray_running(&st.exe) {
-            messages.push(
-                "The running tray reads tray.json when it starts: choose Quit in its menu and start it again."
-                    .into(),
-            );
-        }
-        Ok(json!({"messages": messages, "config_path": path, "tray_exe": tray_exe,
-                  "started": started, "autostart_path": tray::autostart_path()}))
-    })
-    .await;
-    match v {
-        Some(Ok(v)) => ok(v),
-        Some(Err(e)) => bad(e),
-        None => fail(StatusCode::INTERNAL_SERVER_ERROR, "failed"),
     }
 }
 
@@ -1564,6 +1220,28 @@ mod tests {
             a,
             vec!["processor", "status", "--config", "/c/processor.yaml"]
         );
+    }
+
+    #[test]
+    fn a_first_config_takes_the_folder_and_a_free_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        assert!(write_first_config(&path, "lib").is_err());
+        let lib = dir.path().join("lib");
+        // Port 8080 taken: the next free one.
+        let held = std::net::TcpListener::bind(("0.0.0.0", 8080)).ok();
+        write_first_config(&path, &lib.display().to_string()).unwrap();
+        let c = bunko_core::config::load_config(Some(&path)).unwrap();
+        assert_eq!(c.storage.base_path, lib);
+        assert!(lib.is_dir());
+        if held.is_some() {
+            assert_ne!(c.server.port, 8080);
+        }
+        assert!((8080..8100).contains(&c.server.port));
+        // An existing file is left alone.
+        write_first_config(&path, "/elsewhere").unwrap();
+        let again = bunko_core::config::load_config(Some(&path)).unwrap();
+        assert_eq!(again.storage.base_path, lib);
     }
 
     #[test]

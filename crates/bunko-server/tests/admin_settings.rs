@@ -332,7 +332,8 @@ async fn status_and_absent_services() {
             "disk_free",
             "user_count",
             "volume_count",
-            "stats"
+            "stats",
+            "version"
         ]
     );
     assert_eq!(s["user_count"], 1);

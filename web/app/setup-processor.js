@@ -1,7 +1,7 @@
-// Processor wizard: library + account (tested), this machine's settings, the OCR
-// choices (always: a processor without OCR does nothing) and optionally start with the
-// machine. The review step saves processor.yaml and the OCR choices, sets up the
-// start-up, starts `processor serve` and waits for it to connect; the OCR backend
+// Processor pairing: library + account (tested), this machine's settings and the OCR
+// choices (always: a processor without OCR does nothing). The last step saves
+// processor.yaml and the OCR choices, hands the processor to the tray (it starts it
+// now and at each start of the app) and waits for it to connect; the OCR backend
 // installs in the background meanwhile (the processor takes no work until it is done).
 (function () {
   'use strict';
@@ -11,14 +11,11 @@
   const val = (name) => (document.querySelector('input[name="' + name + '"]:checked') || {}).value;
   let w;
   let tested = null;
-  const state = { ocr: null, startup: null };
+  const state = { ocr: null };
   const finished = {};
-  let failedStage = null;
   let mark = () => {};
-  const startupOn = () => $('want-startup').checked;
-
   function steps() {
-    return ['p-library', 'p-machine', 'p-ocr'].concat(startupOn() ? ['p-startup'] : [], ['p-save', 'p-done']);
+    return ['p-library', 'p-machine', 'p-ocr', 'p-save', 'p-done'];
   }
 
   function tlsValue() {
@@ -84,24 +81,19 @@
       ['Archive RAM', f.archive_memory_mb + ' MB'],
       ['Automatic updates', f.auto_update ? 'on' : 'off'],
       ['OCR', state.ocr ? state.ocr.describe() : '-'],
-      ['Start with the machine', startupOn() && state.startup ? state.startup.describe() : 'no'],
     ];
     $('p-summary').innerHTML = rows.map(([k, v]) => '<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>').join('');
   }
 
   function stages() {
-    const s = [['save', 'Save processor.yaml'], ['ocr', 'OCR choices (the backend installs in the background once the processor runs)']];
-    if (startupOn()) s.push(['startup', 'Start with the machine']);
-    s.push(['start', 'Start the processor']);
-    return s;
+    return [['save', 'Save processor.yaml'], ['ocr', 'OCR choices (the backend installs in the background once the processor runs)'],
+      ['start', 'Start the processor']];
   }
 
   async function run() {
     const btn = $('p-save-btn');
     const err = $('err-save');
     showError(err, null);
-    $('skip-btn').hidden = true;
-    failedStage = null;
     if (!finished.save) {
       $('run-list').hidden = false;
       mark = S.runList($('run-list'), stages());
@@ -119,25 +111,13 @@
         mark(k, 'failed', e.message && e.message.length < 60 ? e.message : '');
       }
       if (!ok) {
-        failedStage = k;
         setBusy(btn, false);
         btn.textContent = 'Try again';
         if (k === 'save') $('p-save-back').disabled = false;
-        if (k === 'startup') {
-          $('skip-btn').hidden = false;
-          $('skip-btn').textContent = 'Skip this';
-        }
         return;
       }
       finished[k] = true;
     }
-  }
-
-  function skip() {
-    if (failedStage !== 'startup') return;
-    finished.startup = true;
-    mark('startup', 'skipped', 'skipped: Settings can do it later');
-    run();
   }
 
   async function stage(k) {
@@ -158,23 +138,8 @@
       mark('ocr', 'ok', 'kept for the processor: ' + state.ocr.describe());
       return true;
     }
-    if (k === 'startup') {
-      const m = await state.startup.apply();
-      mark('startup', 'ok', m.length ? m[m.length - 1] : '');
-      return true;
-    }
     if (k === 'start') {
-      let r;
-      if (startupOn() && state.startup.startsIt()) {
-        // The tray or the service starts it: wait for it to connect.
-        const st = await S.waitFor(async () => {
-          const x = await get('/app/api/processor/status');
-          return x.status && x.status.state === 'connected' ? x : null;
-        }, 60);
-        r = st ? { state: 'connected', status: st.status, running: true } : await post('/app/api/processor/start');
-      } else {
-        r = await post('/app/api/processor/start');
-      }
+      const r = await post('/app/api/processor/start');
       if (r.state !== 'connected') {
         mark('start', 'failed', r.state);
         $('p-save-result').innerHTML += '<div class="result result--bad"><strong>The processor says: ' + esc(r.state) +
@@ -201,7 +166,7 @@
       '<p class="form-hint mt-2">The library\'s admin panel lists it under Settings → OCR → Processors.</p>';
     $('p-done-links').innerHTML = [
       '<li><a href="#" id="p-dash">Go to its dashboard</a> <span class="form-hint" id="p-dash-note"></span></li>',
-      '<li class="form-hint">OCR and start-up can change later: <a href="/app/settings/ocr">OCR &amp; models</a>, <a href="/app/settings/startup">Start-up</a>.</li>',
+      '<li class="form-hint">Change it later in <a href="/app/settings">Processor</a>; "Start at login" is in the tray menu.</li>',
     ].join('');
     $('p-dash').addEventListener('click', goDashboard);
     w.go('p-done');
@@ -232,23 +197,11 @@
   document.addEventListener('DOMContentLoaded', async () => {
     wirePickers();
     w = wizard(steps, (id) => { if (id === 'p-save') summary(); }, { done: 'p-done' });
-    $('want-startup').addEventListener('change', async () => {
-      w.refresh();
-      if (startupOn() && !state.startup) {
-        try { state.startup = await S.startupStep($('startup-fields'), 'processor'); } catch (e) { showError($('err-startup'), e); }
-      }
-    });
     $('ocr-next').addEventListener('click', () => {
       const msg = state.ocr ? null : 'The hardware is not detected yet.';
       showError($('err-ocr'), msg ? new Error(msg) : null);
       if (!msg) w.next();
     });
-    $('startup-next').addEventListener('click', () => {
-      const msg = state.startup ? null : 'The start-up choices are not loaded yet.';
-      showError($('err-startup'), msg ? new Error(msg) : null);
-      if (!msg) w.next();
-    });
-    $('skip-btn').addEventListener('click', skip);
     document.querySelectorAll('[data-prev]').forEach((b) => b.addEventListener('click', () => w.prev()));
     document.querySelectorAll('input[name="tls"]').forEach((r) => r.addEventListener('change', () => {
       $('tls-cert-group').hidden = val('tls') !== 'cert';
@@ -297,7 +250,7 @@
           $('tls-cert-group').hidden = false;
         }
         $('p-exists').hidden = false;
-        $('p-exists').textContent = 'This machine already has ' + c.config + '. Saving replaces it; to change single settings use Settings → Processor.';
+        $('p-exists').textContent = 'This machine already has ' + c.config + '. Saving replaces it; to change single settings use Processor.';
         $('p-overwrite-row').hidden = false;
       } else {
         $('name').value = c.defaults.name;

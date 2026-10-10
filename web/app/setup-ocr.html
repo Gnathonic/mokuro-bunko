@@ -10,18 +10,10 @@
 <body>
     <header class="mokuro-header" id="app-header" data-current="settings"></header>
     <main class="app-main app-main--narrow">
-        <h1 class="page-title">OCR on this machine</h1>
-        <p class="page-lede">Installs the OCR backend pack that fits this machine's GPU (or the CPU) and downloads the models (<code>mokuro-bunko install-ocr</code>), then checks everything (<code>doctor</code>).</p>
+        <h1 class="page-title">Processor OCR</h1>
+        <p class="page-lede">The backend pack for this machine's GPU (or the CPU) and the models (<code>mokuro-bunko install-ocr --processor</code>), then the checks. A library server installs its own in its admin panel.</p>
         <div class="wizard-card">
-            <section aria-labelledby="h-for">
-                <h2 id="h-for" class="section-title">For</h2>
-                <div class="radio-cards" id="for-cards">
-                    <label class="radio-card"><input type="radio" name="for" value="server" checked><div class="radio-card__content"><strong>The library server on this machine</strong><span id="for-server-path"></span></div></label>
-                    <label class="radio-card"><input type="radio" name="for" value="processor"><div class="radio-card__content"><strong>The processor on this machine</strong><span id="for-proc-path"></span></div></label>
-                </div>
-            </section>
-
-            <section aria-labelledby="h-hw" class="mt-4">
+            <section aria-labelledby="h-hw">
                 <h2 id="h-hw" class="section-title">This machine</h2>
                 <dl class="kv" id="hw"><dt>Hardware</dt><dd>Detecting…</dd></dl>
                 <p class="form-hint mt-2" id="hw-hint" hidden></p>
@@ -47,7 +39,7 @@
                         <div class="input-row"><input class="form-input" id="from" placeholder="a folder holding mokuro-bunko-*-torch-*.tar.zst"><button type="button" class="btn btn--secondary" data-pick="from" data-title="Folder with the pack archive">Browse…</button></div>
                     </div>
                     <div class="form-group">
-                        <label class="form-label" for="dir">Install packs into (default: the role's storage/backends)</label>
+                        <label class="form-label" for="dir">Install packs into (default: the processor's storage/backends)</label>
                         <div class="input-row"><input class="form-input" id="dir"><button type="button" class="btn btn--secondary" data-pick="dir" data-title="Where to install packs">Browse…</button></div>
                     </div>
                     <label class="check"><input type="checkbox" id="force"> Reinstall even if the pack is already there</label>

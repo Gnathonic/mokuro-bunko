@@ -46,7 +46,7 @@ function trimToInvitesOnly() {
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     if (!window.mokuroAuth.token()) {
-        window.location.href = '/login';
+        window.location.href = '/login?next=' + encodeURIComponent('/_admin' + window.location.hash);
         return;
     }
     const isInviter = getSessionRole() === 'inviter';
@@ -58,6 +58,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initForms();
     if (!isInviter) {
         loadUsers();
+        loadVersion();
     }
     loadInvites();
     // A refresh on the Audit tab comes back to it, filters and all; the desktop
@@ -106,6 +107,12 @@ function initTabs() {
             if (tabId === 'connectivity') {
                 loadTunnelStatus();
                 loadDynDNSStatus();
+            }
+            if (tabId === 'server') {
+                loadMachine();
+                loadMachineLog();
+            } else {
+                stopMachinePolling();
             }
         });
     });
@@ -4873,4 +4880,284 @@ function getBadgeClass(status) {
         'used': 'badge--info',
     };
     return classMap[status] || 'badge--muted';
+}
+
+
+// --- This server (0.7): the machine the server runs on -------------------------
+// OCR on this machine, the backend it runs on and its install, the engines'
+// models, the doctor and the server log (`/_admin/api/machine/*`).
+
+let machineData = null;
+let machinePollTimer = null;
+let machineJobTimer = null;
+let machineRestarting = false;
+
+function stopMachinePolling() {
+    if (machinePollTimer) { clearInterval(machinePollTimer); machinePollTimer = null; }
+    if (machineJobTimer) { clearInterval(machineJobTimer); machineJobTimer = null; }
+}
+
+function machineGpus(hw) {
+    const g = [];
+    if (hw.nvidia_gpus && hw.nvidia_gpus.length) g.push('NVIDIA ' + hw.nvidia_gpus.join(', '));
+    else if (hw.nvidia_driver) g.push('NVIDIA (driver ' + hw.nvidia_driver + ')');
+    if (hw.amd_gfx && hw.amd_gfx.length) g.push('AMD ' + hw.amd_gfx.join(', '));
+    return g.join('; ');
+}
+
+function showMachineNotes() {
+    let notes = [];
+    try {
+        notes = JSON.parse(sessionStorage.getItem('mokuro_setup_notes') || '[]');
+        sessionStorage.removeItem('mokuro_setup_notes');
+    } catch (_) { notes = []; }
+    const box = document.getElementById('machine-notes');
+    if (!notes.length) return;
+    box.replaceChildren(...notes.map((n) => {
+        const d = document.createElement('div');
+        d.textContent = n;
+        return d;
+    }));
+    box.hidden = false;
+}
+
+async function loadMachine() {
+    const err = document.getElementById('machine-error');
+    showMachineNotes();
+    try {
+        machineData = await apiGet('/machine');
+        err.hidden = true;
+        renderMachine(machineData);
+    } catch (e) {
+        err.textContent = e.status === 404 ? 'Not available on this server.' : (e.message || String(e));
+        err.hidden = false;
+    }
+}
+
+function renderMachine(m) {
+    const ocr = document.getElementById('machine-ocr');
+    const models = document.getElementById('machine-models');
+    if (!m.ocr_build) {
+        ocr.querySelectorAll('.check, .machine-backend, .connectivity-section__actions, #machine-install').forEach((el) => { el.hidden = true; });
+        document.getElementById('machine-hw').textContent = '-';
+        document.getElementById('machine-pack').textContent = 'This build runs no OCR of its own: processors read the volumes.';
+        models.hidden = true;
+        return;
+    }
+    models.hidden = false;
+    const local = document.getElementById('machine-local');
+    local.checked = !!m.config.local_processing;
+    const hw = m.hardware || {};
+    const g = machineGpus(hw);
+    document.getElementById('machine-hw').textContent = (g || 'No GPU found') +
+        (hw.container ? ' (in a container: only the GPUs passed in count)' : '');
+
+    // Backend: what is in use, what is installed, what is missing.
+    const b = m.backend || {};
+    const parts = [];
+    // "rocm7.1 for 0.7.0-beta.4": a pack belongs to one release.
+    if (b.loaded) parts.push('In use: ' + b.loaded.variant + ' for ' + b.loaded.version);
+    (m.packs || []).forEach((p) => {
+        if (b.loaded && p.in_use) return;
+        parts.push(p.variant + ' for ' + p.version + ' (' + formatBytes(p.size) +
+            (p.complete ? '' : ', incomplete') + ')');
+    });
+    if (b.need && b.need.state === 'install') parts.push('Missing: the ' + b.need.variant + ' pack');
+    if (b.need && b.need.state === 'off') parts.push('OCR here is off');
+    if (!parts.length) parts.push(b.need ? b.need.text : '-');
+    document.getElementById('machine-pack').textContent = parts.join(' · ');
+
+    const sel = document.getElementById('machine-backend');
+    sel.replaceChildren(...(b.choices || []).map((c) => {
+        const o = document.createElement('option');
+        o.value = c.id;
+        o.textContent = c.id === 'auto' ? 'Auto (' + (hw.auto_variant === 'cpu' ? 'CPU' : 'GPU') + ')' :
+            c.label + (c.detected === false ? ' (not found)' : '');
+        return o;
+    }));
+    sel.value = m.config.backend || 'auto';
+    const locked = !!b.locked;
+    sel.disabled = locked || !local.checked;
+    document.getElementById('machine-backend-save').disabled = locked || !local.checked;
+    const note = document.getElementById('machine-backend-note');
+    note.textContent = locked ? b.locked + '.' : (b.hint || '');
+    note.hidden = !note.textContent;
+
+    renderMachineInstall(m.install);
+    const running = m.install && m.install.state === 'running';
+    document.getElementById('machine-install-btn').hidden = !(b.need && b.need.state === 'install') || running;
+    document.getElementById('machine-install-btn').textContent =
+        m.install && m.install.state === 'failed' ? 'Retry' : 'Install';
+    document.getElementById('machine-reinstall-btn').hidden = running || !(m.packs || []).some((p) => p.removable);
+    document.getElementById('machine-remove-btn').hidden = running || !(m.packs || []).some((p) => p.removable);
+    if (running) startMachineInstallPolling();
+
+    // Engines and models.
+    const rows = ((m.models && m.models.engines) || []).map((e) => {
+        const present = e.files.filter((f) => f.present).length;
+        const size = e.files.reduce((n, f) => n + (f.size || 0), 0);
+        return '<tr><td class="mono">' + escapeHtml(e.engine) + '</td><td>' + (e.enabled ? 'yes' : '-') +
+            '</td><td>' + present + ' of ' + e.files.length + '</td><td>' + formatBytes(size) + '</td></tr>';
+    });
+    document.getElementById('machine-models-body').innerHTML = rows.join('');
+    document.getElementById('machine-models-dir').textContent = m.models ? 'In ' + m.models.dir +
+        (m.models.downloads ? '' : ' (downloads are off here)') : '';
+}
+
+function renderMachineInstall(i) {
+    const box = document.getElementById('machine-install');
+    if (!i) { box.hidden = true; return; }
+    box.hidden = false;
+    let text = installSummary(i);
+    if (i.state === 'done' && i.pack) text += ' (' + i.pack + ')';
+    if ((i.state === 'failed' || i.state === 'missing') && i.action) text += '. ' + i.action;
+    if (machineRestarting) text = 'Restarting the server to use it…';
+    document.getElementById('machine-install-text').textContent = text.charAt(0).toUpperCase() + text.slice(1);
+    const bar = document.getElementById('machine-install-bar');
+    bar.hidden = i.state !== 'running';
+    document.getElementById('machine-install-fill').style.width = (i.percent || 0) + '%';
+}
+
+function startMachineInstallPolling() {
+    if (machinePollTimer) return;
+    machinePollTimer = setInterval(async () => {
+        try {
+            const r = await apiGet('/ocr/install');
+            renderMachineInstall(r.install);
+            if (!r.install || r.install.state !== 'running') {
+                clearInterval(machinePollTimer);
+                machinePollTimer = null;
+                if (machineRestarting) waitForRestart(); else loadMachine();
+            }
+        } catch (_) {
+            // A restart: wait for the server to answer again.
+            if (machineRestarting) {
+                clearInterval(machinePollTimer);
+                machinePollTimer = null;
+                waitForRestart();
+            }
+        }
+    }, 1500);
+}
+
+async function waitForRestart() {
+    const text = document.getElementById('machine-install-text');
+    document.getElementById('machine-install').hidden = false;
+    text.textContent = 'Restarting the server…';
+    await new Promise((r) => setTimeout(r, 3000));
+    for (let n = 0; n < 60; n++) {
+        try {
+            await apiGet('/machine');
+            machineRestarting = false;
+            showToast('The server restarted', 'success');
+            loadMachine();
+            return;
+        } catch (_) {
+            await new Promise((r) => setTimeout(r, 2000));
+        }
+    }
+    text.textContent = 'The server has not come back yet. Refresh the page later.';
+}
+
+async function saveMachineOcr(backendToo) {
+    const body = { local_processing: document.getElementById('machine-local').checked };
+    if (backendToo) body.backend = document.getElementById('machine-backend').value;
+    try {
+        const r = await apiPut('/machine/ocr', body);
+        const res = r.result || {};
+        machineRestarting = !!res.restarting || /restarts/.test(res.message || '');
+        showToast(res.message || res.reason || 'Saved', 'success');
+        if (res.restarting) { waitForRestart(); return; }
+        loadMachine();
+    } catch (e) {
+        showToast(e.message || String(e), 'error');
+        loadMachine();
+    }
+}
+
+async function machineInstall(reinstall) {
+    if (reinstall && !confirm('Download and install the OCR backend again?')) return;
+    try {
+        const r = await apiPost('/machine/install', { reinstall });
+        if (r.message) showToast(r.message, 'info');
+        loadMachine();
+    } catch (e) {
+        showToast(e.message || String(e), 'error');
+    }
+}
+
+async function machineRemove() {
+    if (!confirm('Remove the installed OCR backend? OCR here stops until it is installed again.')) return;
+    try {
+        const r = await apiPost('/machine/remove', {});
+        showToast('Removed ' + (r.removed || []).join(', ') + (r.freed ? ' (' + formatBytes(r.freed) + ')' : '') +
+            (r.message ? '. ' + r.message : ''), 'success');
+        loadMachine();
+    } catch (e) {
+        showToast(e.message || String(e), 'error');
+    }
+}
+
+async function machineJob(kind) {
+    const box = document.getElementById('machine-job');
+    const out = document.getElementById('machine-job-output');
+    let job;
+    try {
+        job = await apiPost('/machine/jobs', { kind });
+    } catch (e) {
+        showToast(e.message || String(e), 'error');
+        return;
+    }
+    box.hidden = false;
+    document.getElementById('machine-job-title').textContent = job.title;
+    out.textContent = (job.output || []).join('\n');
+    let next = job.next || 0;
+    const state = document.getElementById('machine-job-state');
+    const show = (j) => {
+        state.textContent = j.state === 'running' ? 'Running…' + (j.progress != null ? ' ' + Math.round(j.progress) + '%' : '')
+            : j.state === 'ok' ? 'Done.' : 'Failed' + (j.exit_code != null ? ' (exit ' + j.exit_code + ')' : '') + '.';
+    };
+    show(job);
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if (machineJobTimer) clearInterval(machineJobTimer);
+    if (job.state !== 'running') return;
+    machineJobTimer = setInterval(async () => {
+        try {
+            const j = await apiGet('/machine/jobs/' + job.id + '?from=' + next);
+            if (j.output && j.output.length) {
+                out.textContent += (out.textContent ? '\n' : '') + j.output.join('\n');
+                out.scrollTop = out.scrollHeight;
+            }
+            next = j.next;
+            show(j);
+            if (j.state !== 'running') {
+                clearInterval(machineJobTimer);
+                machineJobTimer = null;
+                if (kind.startsWith('models')) loadMachine();
+            }
+        } catch (_) { /* next tick */ }
+    }, 1000);
+}
+
+async function loadMachineLog() {
+    try {
+        const r = await apiGet('/machine/logs?lines=300');
+        document.getElementById('machine-log-path').textContent = r.path || '';
+        const pre = document.getElementById('machine-log');
+        pre.textContent = r.text || r.error || '';
+        pre.scrollTop = pre.scrollHeight;
+    } catch (e) {
+        document.getElementById('machine-log').textContent = e.message || String(e);
+    }
+}
+
+// The running version, at the foot of the panel.
+async function loadVersion() {
+    try {
+        const st = await apiGet('/status');
+        if (!st.version) return;
+        const el = document.getElementById('admin-version');
+        el.textContent = 'Mokuro Bunko ' + st.version;
+        el.hidden = false;
+    } catch (_) { /* no footer */ }
 }

@@ -413,6 +413,7 @@ async fn gate(deps: &AccountsDeps, client: &Client, parts: &Parts) -> Option<Res
 pub fn routes() -> Router<AccountsDeps> {
     Router::new()
         .route("/setup/api/status", get(status))
+        .route("/setup/api/options", get(options))
         .route("/setup/api/complete", post(complete))
         .route("/setup/code", post(code))
         .route("/setup", get(index))
@@ -428,6 +429,41 @@ async fn status(State(d): State<AccountsDeps>, client: Client, parts: Parts) -> 
         Ok(needed) => json_response(200, json!({ "needs_setup": needed })),
         Err(resp) => resp,
     }
+}
+
+/// `GET /setup/api/options`: what the wizard's later steps offer here: the OCR step
+/// (the machine's hardware, `null` without one), and the answers the environment
+/// already gives (`MOKURO_*` variables win over the file at every start).
+async fn options(State(d): State<AccountsDeps>, client: Client, parts: Parts) -> Response {
+    if let Some(resp) = gate(&d, &client, &parts).await {
+        return resp;
+    }
+    let machine = d.machine.clone();
+    let ocr = match machine {
+        Some(m) => blocking(move || m.setup_options())
+            .await
+            .unwrap_or(Value::Null),
+        None => Value::Null,
+    };
+    let (registration, ssl) = {
+        let c = d.core.config.read();
+        (c.registration.mode.clone(), c.ssl.enabled)
+    };
+    json_response(
+        200,
+        json!({
+            "ocr": ocr,
+            "pinned": {
+                "registration": env_pin("MOKURO_REGISTRATION_MODE").map(|_| registration),
+                "ssl": env_pin("MOKURO_SSL_ENABLED").map(|_| ssl),
+            },
+        }),
+    )
+}
+
+/// The value of a `MOKURO_*` variable that sets a key at every start (None: unset).
+fn env_pin(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
 async fn index(State(d): State<AccountsDeps>, client: Client, parts: Parts) -> Response {
@@ -647,6 +683,12 @@ async fn complete(
         Some(Value::Object(m)) => m,
         Some(_) => return json_error(400, "Invalid JSON"),
     };
+    // The other answers are checked before anything is written: a mistake in them
+    // must not leave an admin behind with the rest of the setup undone.
+    let plan = match SetupPlan::parse(&data, d.machine.is_some()) {
+        Ok(p) => p,
+        Err(msg) => return json_error(400, &msg),
+    };
     let username = strip(admin.get("username").and_then(Value::as_str).unwrap_or("")).to_string();
     let password = admin
         .get("password")
@@ -678,9 +720,13 @@ async fn complete(
         .get("registration")
         .and_then(|r| r.get("mode"))
         .and_then(Value::as_str);
-    if let Some(mode) = mode.filter(|m| VALID_MODES.contains(m)) {
-        d.core.config.write().registration.mode = mode.to_string();
-    }
+    let applied = {
+        let mut c = d.core.config.write();
+        if let Some(mode) = mode.filter(|m| VALID_MODES.contains(m)) {
+            c.registration.mode = mode.to_string();
+        }
+        plan.apply(&mut c)
+    };
     let core = d.core.clone();
     let saved = blocking(move || core.save_config()).await;
     // The admin exists either way; 0.5.2 answered 500 here, leaving the wizard stuck on
@@ -688,13 +734,218 @@ async fn complete(
     if let Ok(Err(e)) = saved {
         warn!("setup: could not save the config: {e}");
     }
+    let snapshot = d.core.config.read().clone();
+    if applied.dyndns
+        && let Some(service) = &d.dyndns
+    {
+        service.configure(snapshot.dyndns.clone());
+        service.start();
+    }
+    // OCR on this machine: the install of its backend starts (when automatic installs
+    // are on) and its progress shows in the admin panel.
+    let mut ocr = Value::Null;
+    if let (Some(m), true) = (d.machine.clone(), plan.ocr.is_some()) {
+        let backend_changed = applied.backend_changed;
+        ocr = blocking(move || m.ocr_changed(&snapshot, backend_changed, true))
+            .await
+            .unwrap_or(Value::Null);
+    }
+    // HTTPS starts with the next start: restart now (after this answer goes out).
+    let restarting = applied.ssl && d.restart.is_some();
+    if restarting && let Some(restart) = d.restart.clone() {
+        info!("setup: HTTPS turned on; restarting the server");
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            restart();
+        });
+    }
     json_response(
         201,
-        json!({ "success": true, "message": "Setup completed successfully" }),
+        json!({
+            "success": true,
+            "message": "Setup completed successfully",
+            "notes": applied.notes,
+            "ocr": ocr,
+            "restarting": restarting,
+            "https": applied.ssl,
+        }),
     )
 }
 
 const VALID_MODES: [&str; 4] = ["disabled", "self", "invite", "approval"];
+
+/// The setup's answers beyond the admin account and the registration mode, checked
+/// before anything is written.
+#[derive(Debug, Default)]
+struct SetupPlan {
+    dyndns: Option<bunko_core::config::DynDnsConfig>,
+    /// `Some(ssl)`: HTTPS on, with this certificate.
+    ssl: Option<bunko_core::config::SslConfig>,
+    cors: Vec<String>,
+    /// OCR on this machine, and the backend it prefers (None: leave it).
+    ocr: Option<(bool, Option<String>)>,
+    access: String,
+}
+
+/// What [`SetupPlan::apply`] changed.
+#[derive(Debug, Default)]
+struct Applied {
+    dyndns: bool,
+    ssl: bool,
+    backend_changed: bool,
+    notes: Vec<String>,
+}
+
+impl SetupPlan {
+    fn parse(
+        data: &serde_json::Map<String, Value>,
+        has_machine: bool,
+    ) -> Result<SetupPlan, String> {
+        use bunko_core::config::{DYNDNS_PROVIDERS, DynDnsConfig, SslConfig};
+        let mut plan = SetupPlan::default();
+        let empty = serde_json::Map::new();
+        let remote = match data.get("remote") {
+            None | Some(Value::Null) => &empty,
+            Some(Value::Object(m)) => m,
+            Some(_) => return Err("remote: an object".into()),
+        };
+        let text = |m: &serde_json::Map<String, Value>, k: &str| {
+            m.get(k)
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        };
+        plan.access = text(remote, "access");
+        if !["", "lan", "cloudflare", "dyndns", "reverse-proxy"].contains(&plan.access.as_str()) {
+            return Err(format!("remote access: {}?", plan.access));
+        }
+        if plan.access == "dyndns" {
+            let d = match remote.get("dyndns") {
+                Some(Value::Object(m)) => m,
+                _ => &empty,
+            };
+            let provider = match text(d, "provider") {
+                p if p.is_empty() => "duckdns".to_string(),
+                p => p,
+            };
+            if !DYNDNS_PROVIDERS.contains(&provider.as_str()) {
+                return Err(format!("Dynamic DNS provider: {provider}?"));
+            }
+            let (domain, token, url) = (text(d, "domain"), text(d, "token"), text(d, "update_url"));
+            if domain.is_empty() || token.is_empty() {
+                return Err("Dynamic DNS needs the domain and the token".into());
+            }
+            if provider == "generic" && url.is_empty() {
+                return Err("Dynamic DNS: the generic provider needs an update URL".into());
+            }
+            plan.dyndns = Some(DynDnsConfig {
+                enabled: true,
+                update_url: if provider == "generic" {
+                    url
+                } else {
+                    String::new()
+                },
+                provider,
+                token,
+                domain,
+                ..DynDnsConfig::default()
+            });
+        }
+        let ssl = match remote.get("ssl") {
+            Some(Value::Object(m)) => m,
+            _ => &empty,
+        };
+        plan.ssl = match text(ssl, "mode").as_str() {
+            "" | "off" => None,
+            _ if env_pin("MOKURO_SSL_ENABLED").is_some() => {
+                return Err("HTTPS is set by MOKURO_SSL_ENABLED here".into());
+            }
+            "self-signed" => Some(SslConfig {
+                enabled: true,
+                auto_cert: true,
+                ..SslConfig::default()
+            }),
+            "files" => {
+                let (cert, key) = (text(ssl, "cert_file"), text(ssl, "key_file"));
+                for (label, p) in [("certificate", &cert), ("private key", &key)] {
+                    if p.is_empty() || !std::path::Path::new(p).is_file() {
+                        return Err(format!(
+                            "HTTPS: the {label} file {p} does not exist on the server"
+                        ));
+                    }
+                }
+                Some(SslConfig {
+                    enabled: true,
+                    auto_cert: false,
+                    cert_file: cert,
+                    key_file: key,
+                })
+            }
+            other => return Err(format!("HTTPS: {other}?")),
+        };
+        if let Some(Value::Array(list)) = remote.get("cors_origins") {
+            for o in list.iter().filter_map(Value::as_str).map(str::trim) {
+                if o.is_empty() {
+                    continue;
+                }
+                if !(o.starts_with("http://") || o.starts_with("https://")) || o.ends_with('/') {
+                    return Err(format!("{o}: an origin is http(s)://host[:port], no path"));
+                }
+                plan.cors.push(o.to_string());
+            }
+        }
+        if has_machine && let Some(Value::Object(o)) = data.get("ocr") {
+            let on = o.get("on").and_then(Value::as_bool).unwrap_or(false);
+            let backend = match o.get("backend").and_then(Value::as_str) {
+                None | Some("") => None,
+                Some(b) if crate::admin::CHOOSABLE_BACKENDS.contains(&b) => Some(b.to_string()),
+                Some(b) => return Err(format!("OCR backend: {b}?")),
+            };
+            plan.ocr = Some((on, backend));
+        }
+        Ok(plan)
+    }
+
+    fn apply(&self, c: &mut bunko_core::Config) -> Applied {
+        let mut a = Applied::default();
+        if let Some(d) = &self.dyndns {
+            c.dyndns = d.clone();
+            a.dyndns = true;
+        }
+        if let Some(ssl) = &self.ssl {
+            c.ssl = ssl.clone();
+            a.ssl = true;
+        }
+        for o in &self.cors {
+            if !c.cors.allowed_origins.iter().any(|x| x == o) {
+                c.cors.allowed_origins.push(o.clone());
+            }
+        }
+        if let Some((on, backend)) = &self.ocr {
+            if env_pin("MOKURO_OCR_LOCAL_PROCESSING").is_none() {
+                c.ocr.local_processing = *on;
+            }
+            if let Some(b) = backend
+                && env_pin("MOKURO_OCR_BACKEND").is_none()
+                && *b != c.ocr.backend
+            {
+                c.ocr.backend = b.clone();
+                a.backend_changed = true;
+            }
+        }
+        match self.access.as_str() {
+            "cloudflare" => a
+                .notes
+                .push("Start the Cloudflare tunnel in Connectivity.".into()),
+            "reverse-proxy" => a.notes.push(format!(
+                "Point your reverse proxy at port {}.",
+                c.server.port
+            )),
+            _ => {}
+        }
+        a
+    }
+}
 
 #[cfg(test)]
 mod tests {

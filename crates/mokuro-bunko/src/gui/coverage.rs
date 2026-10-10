@@ -1,7 +1,8 @@
-//! The desktop app's CLI coverage: every command, flag and argument of the clap tree
-//! has a row in `docs/rust-port/GUI-COVERAGE.md` — a page of the app (`/app/...`), the
-//! library's admin panel (`/_admin`), or `CLI-only because …`. The test below walks
-//! the tree and fails on a missing row, a row without a target, a link to an app page
+//! The CLI's GUI coverage: every command, flag and argument of the clap tree has a row
+//! in `docs/rust-port/GUI-COVERAGE.md` — the server's own pages (its `/setup`, the
+//! admin panel `/_admin#tab`), a local processor page (`/app/...`), a tray item
+//! (`Tray → "…"`), or `CLI-only because …`. The test below walks the tree and fails
+//! on a missing row, a row without a home, a link to a page, admin tab or tray item
 //! that does not exist, and (full build, which has every command) a stale row.
 
 #[cfg(test)]
@@ -89,6 +90,32 @@ mod tests {
         v
     }
 
+    /// The admin panel tabs a target links (`](/_admin#server)`).
+    fn admin_tabs(target: &str) -> Vec<String> {
+        let mut v = Vec::new();
+        let mut s = target;
+        while let Some(i) = s.find("](/_admin#") {
+            let rest = &s[i + 10..];
+            let end = rest.find(')').unwrap_or(rest.len());
+            v.push(rest[..end].to_string());
+            s = &rest[end..];
+        }
+        v
+    }
+
+    /// The tray items a target names (`Tray → "Start at login"`).
+    fn tray_items(target: &str) -> Vec<String> {
+        let mut v = Vec::new();
+        let mut s = target;
+        while let Some(i) = s.find("Tray → \"") {
+            let rest = &s[i + "Tray → \"".len()..];
+            let end = rest.find('"').unwrap_or(rest.len());
+            v.push(rest[..end].to_string());
+            s = &rest[end..];
+        }
+        v
+    }
+
     #[test]
     fn every_command_and_flag_has_a_gui_entry() {
         let doc_path = repo_root().join("docs/rust-port/GUI-COVERAGE.md");
@@ -107,16 +134,29 @@ mod tests {
         );
         let settings = std::fs::read_to_string(repo_root().join("web/app/settings.html"))
             .expect("web/app/settings.html");
+        let admin = std::fs::read_to_string(repo_root().join("web/admin/index.html"))
+            .expect("web/admin/index.html");
+        // The tray's menu labels (the Linux menu; the Windows/macOS one has the same).
+        let tray = [
+            "crates/bunko-tray/src/app/sni.rs",
+            "crates/bunko-tray/src/model.rs",
+        ]
+        .map(|f| std::fs::read_to_string(repo_root().join(f)).expect(f))
+        .join("\n");
+        assert!(repo_root().join("web/setup/index.html").is_file());
 
         let mut problems = Vec::new();
         for k in &keys {
             match table.get(k) {
                 None => problems.push(format!("missing row: | `{k}` | … |")),
                 Some(t) => {
-                    let linked = t.contains("](/app/") || t.contains("/_admin");
+                    let linked = t.contains("](/app/")
+                        || t.contains("](/_admin#")
+                        || t.contains("](/setup)")
+                        || t.contains("Tray → \"");
                     if !linked && !t.contains("CLI-only because") {
                         problems.push(format!(
-                            "`{k}`: link an /app/ or /_admin page, or say \"CLI-only because …\""
+                            "`{k}`: link an /app/, /_admin# or /setup page, name a tray item, or say \"CLI-only because …\""
                         ));
                     }
                 }
@@ -138,6 +178,16 @@ mod tests {
                     if !settings.contains(&format!("data-section=\"{section}\"")) {
                         problems.push(format!("`{k}`: settings has no section {section}"));
                     }
+                }
+            }
+            for tab in admin_tabs(t) {
+                if !admin.contains(&format!("data-tab=\"{tab}\"")) {
+                    problems.push(format!("`{k}`: the admin panel has no tab #{tab}"));
+                }
+            }
+            for item in tray_items(t) {
+                if !tray.contains(&format!("\"{item}\"")) {
+                    problems.push(format!("`{k}`: the tray has no item \"{item}\""));
                 }
             }
             // The full build has every command: a row it does not know is stale.
@@ -164,6 +214,14 @@ mod tests {
         assert_eq!(t.len(), 2);
         assert_eq!(app_links(&t["ssl enable"]), vec!["settings/https"]);
         assert!(app_links(&t["--version"]).is_empty());
+        assert_eq!(
+            admin_tabs("[This server](/_admin#server) → OCR; [Users](/_admin#users)"),
+            vec!["server", "users"]
+        );
+        assert_eq!(
+            tray_items("`Tray → \"Start at login\"` and `Tray → \"Quit\"`"),
+            vec!["Start at login", "Quit"]
+        );
         let keys = cli_keys();
         for k in [
             "--config",

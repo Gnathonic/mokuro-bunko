@@ -100,9 +100,15 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
                 if let Some(c) = &control {
                     i.attach_control(c);
                 }
-                i.start_if_needed();
                 i
             };
+            let machine = std::sync::Arc::new(crate::server_machine::ServerMachine::new(
+                config_path.clone(),
+                config.storage.base_path.clone(),
+                args.ocr.clone(),
+                #[cfg(feature = "ocr")]
+                Some(ocr_installer.clone()),
+            ));
             let opts = ServeOptions {
                 verbose: args.verbose,
                 flavor,
@@ -111,9 +117,11 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
                     &config,
                     control.clone(),
                     Some(ocr_installer.clone()),
+                    Some((config_path.clone(), args.ocr.clone())),
                 ),
                 #[cfg(not(feature = "ocr"))]
                 local: crate::local_ocr::factory(&config, control.clone()),
+                machine: Some(machine),
             };
             #[cfg_attr(not(feature = "ocr"), allow(unused_mut))]
             let mut control_setup = control
@@ -126,6 +134,16 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
             let services = Services::new(config, Some(config_path.clone()), &opts)?;
             // The setup code while there still is no admin.
             app::announce_setup(&services);
+            // The OCR backend installs by itself once set up: before that, the setup's
+            // "OCR on this machine" decides (its finish starts the install).
+            #[cfg(feature = "ocr")]
+            match services.setup.needs_setup(&services.db) {
+                Ok(false) => {
+                    ocr_installer.start_if_needed();
+                }
+                Ok(true) => info!("OCR backend: the first-run setup decides whether to install it"),
+                Err(e) => warn!("OCR backend: could not tell whether setup is done: {e}"),
+            }
             services.updates.set_view(started.view, started.problems);
             if let Some(c) = &control {
                 let c = c.clone();

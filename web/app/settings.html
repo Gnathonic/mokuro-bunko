@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Settings - Mokuro Bunko</title>
+    <title>Processor - Mokuro Bunko</title>
     <link rel="stylesheet" href="/_static/shared.css">
     <link rel="stylesheet" href="/app/app.css">
 </head>
@@ -11,146 +11,22 @@
     <header class="mokuro-header" id="app-header" data-current="settings"></header>
     <div class="settings-layout">
         <nav class="settings-rail" aria-label="Settings sections">
-            <span class="rail-group">Library server</span>
-            <a href="/app/settings/server" data-section="server">Server</a>
-            <a href="/app/settings/https" data-section="https">HTTPS</a>
-            <a href="/app/settings/remote" data-section="remote">Remote access</a>
-            <a href="/app/settings/library" data-section="library">Users &amp; library</a>
-            <span class="rail-group">This machine</span>
-            <a href="/app/settings/processor" data-section="processor" data-ocr>Processor</a>
-            <a href="/app/settings/ocr" data-section="ocr" data-ocr>OCR &amp; models</a>
-            <a href="/app/settings/startup" data-section="startup">Start-up</a>
+            <span class="rail-group">Processor</span>
+            <a href="/app/settings/processor" data-section="processor">Connection</a>
+            <a href="/app/settings/ocr" data-section="ocr">OCR &amp; models</a>
             <a href="/app/settings/logs" data-section="logs">Logs</a>
             <a href="/app/settings/doctor" data-section="doctor">Diagnostics</a>
             <a href="/app/settings/update" data-section="update">Updates</a>
-            <a href="/app/settings/advanced" data-section="advanced">Advanced</a>
         </nav>
         <main>
             <div class="alert alert--error" id="page-error" hidden></div>
-
-            <!-- Server -->
-            <section class="settings-section-x" id="sec-server" data-section="server" aria-labelledby="h-server" hidden>
-                <div class="panel">
-                    <h2 id="h-server">Library server</h2>
-                    <p class="panel__lede">This machine's <code id="cfg-path"></code>. Changes apply when the server restarts.</p>
-                    <div class="alert alert--info" id="no-config" hidden>No library server is set up here yet. <a href="/app/setup/server">Set one up</a>.</div>
-                    <div class="alert alert--warning" id="env-note" hidden></div>
-                    <div class="form-group">
-                        <label class="form-label" for="k-storage">Library folder <span class="cli-hint">storage.base_path</span></label>
-                        <div class="input-row"><input class="form-input" id="k-storage" data-key="storage.base_path"><button type="button" class="btn btn--secondary" data-pick="k-storage" data-title="Library folder">Browse…</button></div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label class="form-label" for="k-host">Listen on <span class="cli-hint">server.host · serve --host</span></label>
-                            <input class="form-input" id="k-host" data-key="server.host">
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label" for="k-port">Port <span class="cli-hint">server.port · serve --port</span></label>
-                            <input class="form-input" id="k-port" type="number" min="1" max="65535" data-key="server.port">
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label class="form-label" for="k-threads">Worker threads (0 = automatic) <span class="cli-hint">server.threads</span></label>
-                            <input class="form-input" id="k-threads" type="number" min="0" data-key="server.threads" data-default="0">
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label" for="k-cache">Cache (MB) <span class="cli-hint">server.cache_mb</span></label>
-                            <input class="form-input" id="k-cache" type="number" min="1" data-key="server.cache_mb" data-default="32">
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="k-proxies">Trusted proxies (comma-separated IPs or networks) <span class="cli-hint">server.trusted_proxies</span></label>
-                        <input class="form-input" id="k-proxies" data-key="server.trusted_proxies" data-list>
-                    </div>
-                    <h3 class="section-title mt-4">OCR on this machine</h3>
-                    <label class="check"><input type="checkbox" id="k-local" data-key="ocr.local_processing"> Read volumes on this machine (otherwise only processors do) <span class="cli-hint">ocr.local_processing</span></label>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label class="form-label" for="k-backend">Devices <span class="cli-hint">ocr.backend · serve --ocr</span></label>
-                            <select class="form-select" id="k-backend" data-key="ocr.backend">
-                                <option value="auto">auto</option><option value="cuda">cuda</option><option value="rocm">rocm</option><option value="cpu">cpu</option><option value="skip">skip</option>
-                                <option value="webgpu">webgpu</option><option value="directml">directml</option><option value="coreml">coreml</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label" for="k-conc">Volumes at once <span class="cli-hint">ocr.concurrency</span></label>
-                            <input class="form-input" id="k-conc" type="number" min="1" max="8" data-key="ocr.concurrency">
-                        </div>
-                    </div>
-                    <p class="form-hint">OCR engines and their order (generations; <code>serve --generations</code>) are in the admin panel: <a data-admin="settings" target="_blank" rel="noopener">Settings → OCR</a>.</p>
-                    <p class="form-error" id="err-server" role="alert" hidden></p>
-                    <div class="panel__footer"><span class="form-hint" id="server-up"></span><span class="spacer"></span><button type="button" class="btn btn--secondary" id="server-start">Start the server</button><button type="button" class="btn btn--primary" id="server-save">Save</button></div>
-                </div>
-            </section>
-
-            <!-- HTTPS -->
-            <section id="sec-https" data-section="https" aria-labelledby="h-https" hidden>
-                <div class="panel">
-                    <h2 id="h-https">HTTPS</h2>
-                    <p class="panel__lede">The library server's own certificate (<code>mokuro-bunko ssl …</code>). A tunnel or reverse proxy adds https without it.</p>
-                    <dl class="kv" id="ssl-kv"></dl>
-                    <h3 class="section-title mt-4">Turn on</h3>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label class="form-label" for="ssl-cert">Certificate file</label>
-                            <div class="input-row"><input class="form-input" id="ssl-cert"><button type="button" class="btn btn--secondary" data-pick="ssl-cert" data-files="pem,crt,cer" data-title="Certificate">Browse…</button></div>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label" for="ssl-key">Private key file</label>
-                            <div class="input-row"><input class="form-input" id="ssl-key"><button type="button" class="btn btn--secondary" data-pick="ssl-key" data-files="pem,key" data-title="Private key">Browse…</button></div>
-                        </div>
-                    </div>
-                    <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="ssl-enable-auto">Use a self-signed certificate</button><button type="button" class="btn btn--primary" data-job="ssl-enable-files">Use these files</button><button type="button" class="btn btn--danger" data-job="ssl-disable">Turn HTTPS off</button></div>
-                    <h3 class="section-title mt-4">Make a self-signed certificate</h3>
-                    <div class="form-row">
-                        <div class="form-group"><label class="form-label" for="gen-host">Host name</label><input class="form-input" id="gen-host" value="localhost"></div>
-                        <div class="form-group"><label class="form-label" for="gen-days">Valid for (days)</label><input class="form-input" id="gen-days" type="number" min="1" value="365"></div>
-                    </div>
-                    <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="ssl-status">Show details</button><button type="button" class="btn btn--primary" data-job="ssl-generate">Make it</button></div>
-                    <div id="job-https"></div>
-                </div>
-            </section>
-
-            <!-- Remote -->
-            <section id="sec-remote" data-section="remote" aria-labelledby="h-remote" hidden>
-                <div class="panel">
-                    <h2 id="h-remote">Remote access</h2>
-                    <p class="panel__lede">The Cloudflare tunnel and Dynamic DNS are run by the library server: start, stop and configure them in its admin panel.</p>
-                    <ul class="link-list"><li><a data-admin="connectivity" target="_blank" rel="noopener">Admin panel → Connectivity</a></li></ul>
-                    <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="tunnel-status">Is cloudflared installed?</button><button type="button" class="btn btn--secondary" data-job="dyndns-status">Dynamic DNS status</button><button type="button" class="btn btn--secondary" data-job="dyndns-update">Update the DNS record now</button><button type="button" class="btn btn--secondary" data-job="dyndns-enable">Turn DynDNS on</button><button type="button" class="btn btn--secondary" data-job="dyndns-disable">Turn DynDNS off</button></div>
-                    <div id="job-remote"></div>
-                </div>
-                <div class="panel">
-                    <h2>Other web apps (CORS)</h2>
-                    <p class="panel__lede">Origins allowed to use the library from a browser, besides Mokuro Reader.</p>
-                    <ul class="notes" id="cors-list"></ul>
-                    <div class="input-row mt-2"><input class="form-input" id="cors-new" placeholder="https://my-reader.example.com" aria-label="New origin"><button type="button" class="btn btn--secondary" id="cors-add">Add</button></div>
-                </div>
-            </section>
-
-            <!-- Library admin -->
-            <section id="sec-library" data-section="library" aria-labelledby="h-library" hidden>
-                <div class="panel">
-                    <h2 id="h-library">Users &amp; library</h2>
-                    <p class="panel__lede">The running library server manages these in its admin panel (<code>mokuro-bunko admin …</code> on the command line).</p>
-                    <ul class="link-list" id="admin-links">
-                        <li><a data-admin="users" target="_blank" rel="noopener">Users</a> — add, approve, disable, delete, restore, change role, set password</li>
-                        <li><a data-admin="invites" target="_blank" rel="noopener">Invites</a> — make, list and delete invite codes</li>
-                        <li><a data-admin="settings" target="_blank" rel="noopener">Settings</a> — registration, CORS, catalog, queue, OCR generations, processors</li>
-                        <li><a data-admin="status" target="_blank" rel="noopener">Status</a> — uptime, storage, updates</li>
-                        <li><a data-admin="audit" target="_blank" rel="noopener">Audit log</a></li>
-                    </ul>
-                    <p class="form-hint" id="admin-down" hidden>Start the server to open its admin panel.</p>
-                </div>
-            </section>
 
             <!-- Processor -->
             <section id="sec-processor" data-section="processor" aria-labelledby="h-proc" hidden>
                 <div class="panel">
                     <h2 id="h-proc">Processor</h2>
                     <p class="panel__lede"><code id="pcfg-path"></code> — changes apply when the processor restarts.</p>
-                    <div class="alert alert--info" id="no-pcfg" hidden>No processor is set up here. <a href="/app/setup/processor">Set one up</a>.</div>
+                    <div class="alert alert--info" id="no-pcfg" hidden>No processor is set up here. <a href="/app/setup/processor">Pair one</a>.</div>
                     <div id="pform">
                         <p class="form-hint" id="pstatus"></p>
                         <div class="form-group"><label class="form-label" for="p-url">Library address</label><input class="form-input" id="p-url"></div>
@@ -173,7 +49,7 @@
                         <label class="check"><input type="checkbox" id="p-auto"> Install updates automatically when the library updates <span class="cli-hint">processor.auto_update</span></label>
                         <p class="form-error" id="err-proc" role="alert" hidden></p>
                         <div id="ptest"></div>
-                        <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="processor-status">Last status</button><button type="button" class="btn btn--secondary" data-job="processor-service">Show its service file</button><button type="button" class="btn btn--secondary" id="p-start">Start it</button><span class="spacer"></span><button type="button" class="btn btn--secondary" id="p-test">Test the connection</button><button type="button" class="btn btn--primary" id="p-save">Save</button></div>
+                        <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="processor-status">Last status</button><button type="button" class="btn btn--secondary" id="p-start">Start it</button><span class="spacer"></span><button type="button" class="btn btn--secondary" id="p-test">Test the connection</button><button type="button" class="btn btn--primary" id="p-save">Save</button></div>
                         <div id="job-processor"></div>
                     </div>
                 </div>
@@ -183,26 +59,15 @@
             <section id="sec-ocr" data-section="ocr" aria-labelledby="h-ocr" hidden>
                 <div class="panel">
                     <h2 id="h-ocr">OCR backend &amp; models</h2>
-                    <p class="panel__lede">Install or replace the backend pack with the <a href="/app/setup/ocr">OCR install</a> step.</p>
+                    <p class="panel__lede">The processor's backend pack and models. Install or replace the pack with the <a href="/app/setup/ocr">OCR install</a> step.</p>
                     <dl class="kv" id="ocr-kv"></dl>
                     <div class="form-row mt-3">
-                        <div class="form-group"><label class="form-label" for="ocr-role">For</label>
-                            <select class="form-select" id="ocr-role"><option value="server">the library server</option><option value="processor">the processor</option></select></div>
                         <div class="form-group"><label class="form-label" for="ocr-engine">Engine (downloads)</label>
                             <select class="form-select" id="ocr-engine"><option value="">the configured ones</option><option>hayai-nova</option><option>paddle-manga</option><option>ppocr-manga</option></select>
                             <p class="form-hint" id="ocr-engine-note" hidden></p></div>
                     </div>
                     <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="install-ocr-list">Packs and hardware</button><button type="button" class="btn btn--secondary" data-job="models-list">List the models</button><button type="button" class="btn btn--secondary" data-job="models-verify">Verify them</button><button type="button" class="btn btn--primary" data-job="models-download">Download</button></div>
                     <div id="job-ocr"></div>
-                </div>
-            </section>
-
-            <!-- Start-up -->
-            <section id="sec-startup" data-section="startup" aria-labelledby="h-startup" hidden>
-                <div class="panel">
-                    <h2 id="h-startup">Start-up</h2>
-                    <p class="panel__lede">What starts the server or the processor at login: the tray (<code>tray.json</code>) or a per-user service. Change them in <a href="/app/setup/startup">Start with the machine</a>.</p>
-                    <dl class="kv" id="startup-kv"></dl>
                 </div>
             </section>
 
@@ -224,10 +89,8 @@
             <section id="sec-doctor" data-section="doctor" aria-labelledby="h-doctor" hidden>
                 <div class="panel">
                     <h2 id="h-doctor">Diagnostics</h2>
-                    <p class="panel__lede">The same checks as <code>mokuro-bunko doctor</code>: configuration, storage, the OCR backend and models, disk, port.</p>
-                    <div class="form-group"><label class="form-label" for="doc-role">Check</label>
-                        <select class="form-select" id="doc-role"><option value="server">the library server</option><option value="processor">the processor</option></select></div>
-                    <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="healthcheck">Is the server answering?</button><button type="button" class="btn btn--primary" data-job="doctor">Run the checks</button></div>
+                    <p class="panel__lede">The processor's checks (<code>mokuro-bunko doctor --processor</code>): its configuration, the OCR backend and models, disk.</p>
+                    <div class="panel__footer"><button type="button" class="btn btn--primary" data-job="doctor">Run the checks</button></div>
                     <div id="job-doctor"></div>
                 </div>
             </section>
@@ -236,10 +99,9 @@
             <section id="sec-update" data-section="update" aria-labelledby="h-update" hidden>
                 <div class="panel">
                     <h2 id="h-update">Updates</h2>
-                    <p class="panel__lede">Signed releases from GitHub (<code>mokuro-bunko update</code>). Installing replaces this program; restart what runs afterwards.</p>
+                    <p class="panel__lede">Signed releases (<code>mokuro-bunko update</code>). A library server on this machine updates from its admin panel.</p>
                     <dl class="kv" id="update-kv"><dt>Status</dt><dd>Checking…</dd></dl>
                     <div class="form-group" id="update-auto-box">
-                        <label class="check" id="update-auto-server-row" hidden><input type="checkbox" id="update-auto-server"> Install updates automatically <span class="cli-hint">update.auto</span></label>
                         <label class="check" id="update-auto-proc-row" hidden><input type="checkbox" id="update-auto-proc"> Install updates automatically (processor) <span class="cli-hint">processor.auto_update</span></label>
                         <p class="form-hint">Off by default. When on, an update is held until nothing is running (the running volume or upload finishes first), installed, and the program restarts. Never a downgrade.</p>
                         <p class="form-error" id="err-update-auto" role="alert" hidden></p>
@@ -249,26 +111,6 @@
                 </div>
             </section>
 
-            <!-- Advanced -->
-            <section id="sec-advanced" data-section="advanced" aria-labelledby="h-adv" hidden>
-                <div class="panel">
-                    <h2 id="h-adv">Any setting</h2>
-                    <p class="panel__lede">Set any key of config.yaml, as <code>mokuro-bunko config set &lt;key&gt; &lt;value&gt;</code> does.</p>
-                    <div class="form-row">
-                        <div class="form-group"><label class="form-label" for="adv-key">Key</label><select class="form-select" id="adv-key"></select></div>
-                        <div class="form-group"><label class="form-label" for="adv-value">Value</label><input class="form-input" id="adv-value"></div>
-                    </div>
-                    <p class="form-error" id="err-adv" role="alert" hidden></p>
-                    <div class="panel__footer"><button type="button" class="btn btn--primary" id="adv-set">Set</button></div>
-                </div>
-                <div class="panel">
-                    <h2>config.yaml</h2>
-                    <p class="panel__lede">What the server runs with (the file plus <code>MOKURO_*</code> variables), as <code>config show</code> prints it.</p>
-                    <pre class="unit-text" id="yaml"></pre>
-                    <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="config-path">Where the files are</button><button type="button" class="btn btn--danger" id="cfg-init">Reset to defaults</button></div>
-                    <div id="job-advanced"></div>
-                </div>
-            </section>
         </main>
     </div>
     <script src="/app/app.js"></script>

@@ -145,13 +145,11 @@ See [Building from source](#building-from-source).
 
 ## Desktop app
 
-`mokuro-bunko gui` opens the setup and settings pages in your browser. The tray icon (`mokuro-bunko` on a desktop, or `mokuro-bunko tray`) opens them too, shows what the server or processor is doing, pauses OCR and can start everything at login. On Linux it shows in any panel with a system tray (GNOME needs the AppIndicator extension); it needs no GTK or AppIndicator library. The pages are served on this machine only (`127.0.0.1`, with a one-time sign-in link), and they cover:
+A library server is set up and run from its own web pages, the same on a desktop, from another computer and in Docker: the first-run page `/setup` (admin account, who may join, remote access, OCR on this machine) and the admin panel, whose **This server** tab covers the OCR backend, models, diagnostics and the log.
 
-- **Setup**: a library server (folder, admin account, registration, remote access, HTTPS), a processor for another library (with a connection test), the OCR backend install with live progress, and starting either one with the machine.
-- **Settings**: server, HTTPS, remote access, processor, OCR and models, start-up, logs, diagnostics (`doctor`), updates, and any `config.yaml` key. Users, invites and the library's own settings stay in the server's admin panel, which the app links to.
-- **Dashboard**: what this machine is reading now, today's totals, problems, and pause / resume (after this volume, now, for an hour, until morning).
+On a desktop, `mokuro-bunko` starts the tray (or `mokuro-bunko tray`). With nothing set up it opens a chooser in your browser: **Library server** (the tray starts the server and opens its `/setup`) or **Processor** (pair this machine with a library elsewhere; its status and settings pages stay on this machine, `127.0.0.1` with a one-time sign-in link). The tray shows what runs, pauses OCR (after this volume, now, for an hour, until morning), opens the admin panel, the processor and the library, and has **Start at login**. On Linux it shows in any panel with a system tray (GNOME needs the AppIndicator extension); it needs no GTK or AppIndicator library.
 
-A running `serve` or `processor serve` serves the same pages on its loopback control port, which is what the tray icon opens. Windows 11 puts a new tray icon in the hidden-icons overflow (the **^** by the clock) at first: drag it onto the taskbar, or turn **Mokuro Bunko** on under Settings → Personalization → Taskbar → Other system tray icons. Everything the app does is also a CLI command; [docs/rust-port/GUI-COVERAGE.md](docs/rust-port/GUI-COVERAGE.md) maps each command and flag to its page.
+Windows 11 puts a new tray icon in the hidden-icons overflow (the **^** by the clock) at first: drag it onto the taskbar, or turn **Mokuro Bunko** on under Settings → Personalization → Taskbar → Other system tray icons. Everything the app does is also a CLI command; [docs/rust-port/GUI-COVERAGE.md](docs/rust-port/GUI-COVERAGE.md) maps each command and flag to its page, tray item or admin panel tab.
 
 ## Configuration
 

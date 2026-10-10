@@ -68,6 +68,12 @@ pub struct AccountsDeps {
     /// First-run state shared by the router and [`root_middleware`]: clone the deps
     /// (not rebuild them) so both see the same flag.
     pub setup: SetupFlag,
+    /// The machine (the setup's OCR step); `None`: the setup has no OCR step.
+    pub machine: Option<Arc<dyn crate::machine::Machine>>,
+    /// Started when the setup turns Dynamic DNS on.
+    pub dyndns: Option<crate::ops::dyndns::DynDnsService>,
+    /// Restart the server (the setup turned HTTPS on).
+    pub restart: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl AccountsDeps {
@@ -81,6 +87,9 @@ impl AccountsDeps {
             library: None,
             health: None,
             setup: SetupFlag::default(),
+            machine: None,
+            dyndns: None,
+            restart: None,
         }
     }
 }

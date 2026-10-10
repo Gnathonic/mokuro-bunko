@@ -10,114 +10,158 @@
 <body>
     <div class="setup-container">
         <div class="setup-card card">
-            <!-- Step 1: Welcome -->
+            <!-- Welcome -->
             <div class="setup-step active" id="step-welcome">
                 <div class="setup-logo">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="48" height="48">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="48" height="48" aria-hidden="true">
                         <circle cx="12" cy="12" r="10"/>
                         <path d="M8 12h8"/>
                         <path d="M12 8v8"/>
                     </svg>
                 </div>
                 <h1 class="setup-title">Welcome to Mokuro Bunko</h1>
-                <p class="setup-description">A self-hosted manga library with OCR support and WebDAV access for Mokuro Reader.</p>
-                <p class="setup-description">Let's set up your server in a few quick steps.</p>
+                <p class="setup-description">Set up this library server in a few steps.</p>
                 <div class="setup-actions">
-                    <button class="btn btn--primary btn--lg" onclick="nextStep()">Get Started</button>
+                    <button type="button" class="btn btn--primary btn--lg" id="start-btn">Get started</button>
                 </div>
             </div>
 
-            <!-- Step 2: Create Admin -->
+            <!-- Admin account -->
             <div class="setup-step" id="step-admin">
-                <h2 class="setup-step-title">Create Admin Account</h2>
-                <p class="setup-description">This account will have full access to manage your server.</p>
+                <h2 class="setup-step-title">Admin account</h2>
+                <p class="setup-lede">Manages users, settings and this server.</p>
                 <div class="form-group">
                     <label for="admin-username" class="form-label">Username</label>
-                    <input type="text" id="admin-username" class="form-input" value="admin"
-                           pattern="[a-zA-Z0-9_-]{3,32}" required
-                           placeholder="admin">
-                    <p class="form-hint">3-32 characters, letters, numbers, underscores, hyphens</p>
+                    <input type="text" id="admin-username" class="form-input" value="admin" autocomplete="username"
+                           pattern="[a-zA-Z0-9_-]{3,32}" required>
+                    <p class="form-hint">3–32 letters, digits, _ or -</p>
                 </div>
                 <div class="form-group">
                     <label for="admin-password" class="form-label">Password</label>
-                    <input type="password" id="admin-password" class="form-input" required minlength="4"
-                           placeholder="Enter a secure password">
+                    <input type="password" id="admin-password" class="form-input" required minlength="8" autocomplete="new-password">
                 </div>
                 <div class="form-group">
-                    <label for="admin-password-confirm" class="form-label">Confirm Password</label>
-                    <input type="password" id="admin-password-confirm" class="form-input" required minlength="4"
-                           placeholder="Confirm your password">
+                    <label for="admin-password-confirm" class="form-label">Password again</label>
+                    <input type="password" id="admin-password-confirm" class="form-input" required minlength="8" autocomplete="new-password">
                 </div>
-                <div id="admin-error" class="form-error" style="display:none"></div>
+                <div id="admin-error" class="form-error" role="alert" hidden></div>
                 <div class="setup-actions">
-                    <button class="btn btn--secondary" onclick="prevStep()">Back</button>
-                    <button class="btn btn--primary" onclick="validateAdmin()">Next</button>
+                    <button type="button" class="btn btn--secondary" data-prev>Back</button>
+                    <button type="button" class="btn btn--primary" id="admin-next">Next</button>
                 </div>
             </div>
 
-            <!-- Step 3: Registration Mode -->
+            <!-- Who may join -->
             <div class="setup-step" id="step-registration">
-                <h2 class="setup-step-title">Registration Mode</h2>
-                <p class="setup-description">How should new users join your server?</p>
-                <div class="radio-cards">
-                    <label class="radio-card">
-                        <input type="radio" name="reg-mode" value="disabled">
-                        <div class="radio-card__content">
-                            <strong>Disabled</strong>
-                            <p>Only admins can create accounts.</p>
-                        </div>
-                    </label>
-                    <label class="radio-card">
-                        <input type="radio" name="reg-mode" value="self" checked>
-                        <div class="radio-card__content">
-                            <strong>Self Registration</strong>
-                            <p>Anyone can create an account.</p>
-                        </div>
-                    </label>
-                    <label class="radio-card">
-                        <input type="radio" name="reg-mode" value="invite">
-                        <div class="radio-card__content">
-                            <strong>Invite Only</strong>
-                            <p>Users need an invite code from an admin.</p>
-                        </div>
-                    </label>
-                    <label class="radio-card">
-                        <input type="radio" name="reg-mode" value="approval">
-                        <div class="radio-card__content">
-                            <strong>Requires Approval</strong>
-                            <p>Users can sign up but need admin approval.</p>
-                        </div>
-                    </label>
+                <h2 class="setup-step-title">Who may join</h2>
+                <p class="setup-lede">The admin panel can change it later.</p>
+                <p class="form-hint" id="reg-pinned" hidden></p>
+                <div class="radio-cards" id="reg-cards">
+                    <label class="radio-card"><input type="radio" name="reg-mode" value="self" checked><div class="radio-card__content"><strong>Anyone</strong><span>Anyone who reaches the server can register.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="reg-mode" value="invite"><div class="radio-card__content"><strong>By invite</strong><span>New users need an invite code.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="reg-mode" value="approval"><div class="radio-card__content"><strong>With approval</strong><span>Anyone can sign up; an admin approves them.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="reg-mode" value="disabled"><div class="radio-card__content"><strong>Nobody</strong><span>Only admins create accounts.</span></div></label>
                 </div>
                 <div class="setup-actions">
-                    <button class="btn btn--secondary" onclick="prevStep()">Back</button>
-                    <button class="btn btn--primary" onclick="completeSetup()">Complete Setup</button>
+                    <button type="button" class="btn btn--secondary" data-prev>Back</button>
+                    <button type="button" class="btn btn--primary" data-next>Next</button>
                 </div>
             </div>
 
-            <!-- Step 4: Done -->
+            <!-- Remote access -->
+            <div class="setup-step" id="step-remote">
+                <h2 class="setup-step-title">Remote access</h2>
+                <p class="setup-lede">Reading away from home. Change it later in Connectivity.</p>
+                <div class="radio-cards">
+                    <label class="radio-card"><input type="radio" name="access" value="lan" checked><div class="radio-card__content"><strong>Home network only</strong><span>Nothing to set up.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="access" value="cloudflare"><div class="radio-card__content"><strong>Cloudflare tunnel</strong><span>A public https address, no open ports. Needs cloudflared.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="access" value="dyndns"><div class="radio-card__content"><strong>Dynamic DNS</strong><span>Your own name pointing at your home address.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="access" value="reverse-proxy"><div class="radio-card__content"><strong>My reverse proxy</strong><span>Caddy, nginx… forwards to this server.</span></div></label>
+                </div>
+                <div id="dyndns-fields" class="mt-3" hidden>
+                    <div class="form-group">
+                        <label class="form-label" for="dd-provider">Provider</label>
+                        <select class="form-select" id="dd-provider"><option value="duckdns">DuckDNS</option><option value="generic">Other (update URL)</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="dd-domain">Domain</label>
+                        <input class="form-input" id="dd-domain" placeholder="mylibrary.duckdns.org" autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="dd-token">Token</label>
+                        <input class="form-input" id="dd-token" type="password" autocomplete="off">
+                    </div>
+                    <div class="form-group" id="dd-url-group" hidden>
+                        <label class="form-label" for="dd-url">Update URL</label>
+                        <input class="form-input" id="dd-url" placeholder="https://provider.example/update?ip={ip}" autocomplete="off">
+                    </div>
+                </div>
+                <div id="ssl-group" class="mt-3">
+                    <label class="form-label" for="ssl-mode">HTTPS</label>
+                    <select class="form-select" id="ssl-mode">
+                        <option value="off">Off (a tunnel or proxy adds it)</option>
+                        <option value="self-signed">Self-signed certificate</option>
+                        <option value="files">My certificate files</option>
+                    </select>
+                    <div id="ssl-files" class="mt-2" hidden>
+                        <div class="form-group">
+                            <label class="form-label" for="cert-file">Certificate file (on the server)</label>
+                            <input class="form-input" id="cert-file" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" for="key-file">Private key file (on the server)</label>
+                            <input class="form-input" id="key-file" autocomplete="off">
+                        </div>
+                    </div>
+                    <p class="form-hint" id="ssl-note" hidden>The server restarts with HTTPS when setup ends.</p>
+                </div>
+                <p class="form-hint" id="ssl-pinned" hidden></p>
+                <details class="mt-3">
+                    <summary class="form-label">Other web apps (CORS)</summary>
+                    <textarea class="form-input mt-2" id="cors" rows="2" placeholder="https://my-reader.example.com"></textarea>
+                    <p class="form-hint">One origin per line. Mokuro Reader is always allowed.</p>
+                </details>
+                <div id="remote-error" class="form-error" role="alert" hidden></div>
+                <div class="setup-actions">
+                    <button type="button" class="btn btn--secondary" data-prev>Back</button>
+                    <button type="button" class="btn btn--primary" id="remote-next">Next</button>
+                </div>
+            </div>
+
+            <!-- OCR on this machine -->
+            <div class="setup-step" id="step-ocr">
+                <h2 class="setup-step-title">OCR on this machine</h2>
+                <p class="setup-lede">Reads the text of each volume. Processors on other machines can do it instead.</p>
+                <label class="toggle"><input type="checkbox" role="switch" id="ocr-on"><span class="toggle__text"><strong>OCR on this machine</strong><span id="ocr-hw">Checking the hardware…</span></span></label>
+                <div class="form-group mt-3" id="ocr-backend-group">
+                    <label class="form-label" for="ocr-backend">Run it on</label>
+                    <select class="form-select" id="ocr-backend"></select>
+                    <p class="form-hint" id="ocr-backend-note" hidden></p>
+                </div>
+                <p class="form-hint" id="ocr-note"></p>
+                <div class="setup-actions">
+                    <button type="button" class="btn btn--secondary" data-prev>Back</button>
+                    <button type="button" class="btn btn--primary" id="finish-btn">Finish</button>
+                </div>
+            </div>
+
+            <!-- Done -->
             <div class="setup-step" id="step-done">
                 <div class="setup-logo setup-logo--success">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="48" height="48">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="48" height="48" aria-hidden="true">
                         <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
                         <polyline points="22 4 12 14.01 9 11.01"/>
                     </svg>
                 </div>
-                <h2 class="setup-step-title">Setup Complete!</h2>
-                <p class="setup-description">Your Mokuro Bunko server is ready to use.</p>
+                <h2 class="setup-step-title setup-center">Done</h2>
+                <p class="setup-description" id="done-text">Opening the admin panel…</p>
+                <ul class="setup-notes" id="done-notes"></ul>
                 <div class="setup-links">
-                    <a href="/_admin" class="btn btn--primary btn--lg">Open Admin Panel</a>
-                    <a href="/" class="btn btn--secondary btn--lg">Go to Home</a>
+                    <a href="/_admin#server" class="btn btn--primary btn--lg" id="done-admin">Open the admin panel</a>
                 </div>
             </div>
 
-            <!-- Progress dots -->
-            <div class="setup-progress" id="setup-progress">
-                <span class="setup-dot active" data-step="0"></span>
-                <span class="setup-dot" data-step="1"></span>
-                <span class="setup-dot" data-step="2"></span>
-                <span class="setup-dot" data-step="3"></span>
-            </div>
+            <div class="setup-progress" id="setup-progress" aria-hidden="true"></div>
         </div>
     </div>
 

@@ -10,30 +10,42 @@
 <body>
     <header class="mokuro-header" id="app-header" data-current="home"></header>
     <main class="app-main">
-        <h1 class="page-title">This machine</h1>
-        <p class="page-lede" id="home-lede">Loading…</p>
+        <h1 class="page-title">Mokuro Bunko</h1>
+        <p class="page-lede" id="home-lede">What should this machine do?</p>
         <div class="alert alert--error" id="home-error" hidden></div>
 
-        <section aria-labelledby="running-title" class="panel" id="running-panel">
+        <section aria-labelledby="running-title" class="panel" id="running-panel" hidden>
             <h2 id="running-title">Running here</h2>
-            <p class="panel__lede" id="running-none">Nothing is running on this machine yet.</p>
             <ul class="link-list" id="running-list"></ul>
         </section>
 
-        <h2 class="section-title">Set up</h2>
         <div class="choice-grid choice-grid--two" id="home-choices">
-            <a class="choice" href="/app/setup/server" id="choice-server">
+            <a class="choice" href="#server" id="choice-server">
                 <span class="choice__title">Library server</span>
                 <span class="choice__text">Keep the manga library here and serve it to readers.</span>
                 <span class="choice__state" id="state-server"></span>
             </a>
             <a class="choice" href="/app/setup/processor" id="choice-processor">
                 <span class="choice__title">Processor</span>
-                <span class="choice__text">Read the text of volumes for a library on another machine.</span>
+                <span class="choice__text">Read OCR for a library on another machine.</span>
                 <span class="choice__state" id="state-processor"></span>
             </a>
         </div>
-        <p class="form-hint mt-2">Change OCR or start-up later in Settings: <a href="/app/settings/ocr">OCR &amp; models</a>, <a href="/app/settings/startup">Start-up</a>.</p>
+
+        <section class="panel mt-4" id="server-start" aria-labelledby="server-start-title" hidden>
+            <h2 id="server-start-title">Library server</h2>
+            <div class="form-group">
+                <label class="form-label" for="storage">Library folder</label>
+                <div class="input-row">
+                    <input class="form-input" id="storage" autocomplete="off">
+                    <button type="button" class="btn btn--secondary" data-pick="storage" data-title="Choose the library folder">Browse…</button>
+                </div>
+                <p class="form-hint">Manga go in its <code>library</code> folder.</p>
+                <div class="alert alert--warning" id="storage-note" role="status" hidden></div>
+            </div>
+            <div class="panel__footer"><span class="spacer"></span><button type="button" class="btn btn--primary" id="server-go">Start</button></div>
+            <p class="form-hint" id="server-status" role="status"></p>
+        </section>
     </main>
     <script src="/app/app.js"></script>
     <script src="/app/home.js"></script>

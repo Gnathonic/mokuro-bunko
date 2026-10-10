@@ -1,17 +1,25 @@
-# GUI coverage: every CLI command in the desktop app
+# GUI coverage: every CLI command has a home
 
-Every command, flag and argument of `mokuro-bunko` has a row here. The row says where
-the same thing is done in the desktop app or in the library's admin panel (`/_admin`),
-or why it stays a command line feature ("CLI-only because …"). The desktop app is the
-set of `/app/...` pages. `mokuro-bunko gui`, `serve` and `processor serve` serve them
-on their loopback control port.
+Every command, flag and argument of `mokuro-bunko` has a row here saying where the same
+thing is done without a terminal:
+
+- **the library server's own pages**, the same locally, remotely and in Docker: the
+  first-run [setup](/setup) and the admin panel (`/_admin`, admins only), whose
+  [This server](/_admin#server) tab covers the machine the server runs on (OCR backend,
+  engines and models, diagnostics, the log);
+- **the local processor pages** (`/app/...`, desktop only, on the loopback control
+  port): the first-launch chooser, the processor's pairing, settings and status;
+- **the tray** (`Tray → "…"`, desktop only);
+- or **"CLI-only because …"**.
 
 The table is checked by a test, `gui::coverage` in `crates/mokuro-bunko`. It walks the
 clap tree and fails when:
 
 - a command, flag or argument has no row;
-- a row names neither a page nor a "CLI-only because" reason;
-- a row links an `/app/` page or a settings section that does not exist;
+- a row names no home (an `/app/`, `/_admin` or `/setup` link, a tray item, or "CLI-only
+  because");
+- a row links an `/app/` page or a settings section that does not exist, an admin panel
+  tab (`/_admin#tab`) the panel does not have, or a tray item the menu does not have;
 - a row names something the CLI no longer has (checked in the full build).
 
 Hidden flags and subcommands (internal ones such as `update prefetch` and
@@ -22,61 +30,58 @@ When you add a flag, add its row. Rows use the CLI's spelling, such as
 `install-ocr --from` or `admin add-user <USERNAME>`. Global flags have no command in
 front (`--config`).
 
-The admin panel lives on the library server, so the server must be running to use it.
-The app's [Users & library](/app/settings/library) section links each of its tabs.
-
 ## Global flags
 
 | Command | Where |
 |---|---|
-| `--config` | The app works on the config file it was started with (`mokuro-bunko -c PATH gui`), and every job it runs gets the same `-c`. [Advanced](/app/settings/advanced) → "Where the files are" shows the path |
-| `--verbose` | CLI-only because it only adds detail to terminal output. The app's jobs show their full output, and [Logs](/app/settings/logs) shows the log files |
-| `--version` | [Updates](/app/settings/update) shows this version and the latest one |
+| `--config` | CLI-only because the server's pages work on the config it runs with (its path is in [This server](/_admin#server) → Log); `-c` picks another file for a command |
+| `--verbose` | CLI-only because it only adds detail to terminal output. [This server](/_admin#server) → Log shows the server log |
+| `--version` | [Status](/_admin#status) → Updates shows this version and the latest one |
 
 ## Library server
 
 | Command | Where |
 |---|---|
-| `serve` | [Library server setup](/app/setup/server) starts it at the end; [Server](/app/settings/server) → "Start the server". The tray starts and stops it |
-| `serve --host` | [Server](/app/settings/server) → Listen on (`server.host`) |
-| `serve --port` | [Server](/app/settings/server) → Port (`server.port`); first set in [setup](/app/setup/server) |
-| `serve --ocr` | [Server](/app/settings/server) → Devices (`ocr.backend`) |
-| `serve --generations` | /_admin → Settings → OCR (the engine generations and their order) |
-| `setup` | [Library server setup](/app/setup/server): folder, admin account, registration, remote access, HTTPS, then two toggles: OCR on this machine (its install runs in the flow) and start with the machine |
-| `setup --skip-if-exists` | CLI-only because it exists for container entrypoints and scripts. [Setup](/app/setup/server) says when a configuration already exists, and replaces it only when that box is ticked |
-| `doctor` | [Diagnostics](/app/settings/doctor) runs the same checks with live output; the OCR install runs it at the end (in the [server](/app/setup/server) and [processor](/app/setup/processor) setups, and on the [OCR install](/app/setup/ocr) page) |
-| `doctor --processor` | [Diagnostics](/app/settings/doctor) → Check: the processor |
-| `healthcheck` | [Diagnostics](/app/settings/doctor) → "Is the server answering?" |
-| `healthcheck --url` | CLI-only because it probes an arbitrary address for container health checks. The app checks this machine's own server |
+| `serve` | The chooser's [Library server](/app/) starts it (the tray runs it from then on); `Tray → "Quit"` stops it. Docker and services run it themselves |
+| `serve --host` | CLI-only because where the server listens is fixed before it serves (`server.host`, `MOKURO_HOST`); the chooser keeps the default (the home network) |
+| `serve --port` | CLI-only because where the server listens is fixed before it serves (`server.port`, `MOKURO_PORT`); the chooser picks a free port from 8080 |
+| `serve --ocr` | [This server](/_admin#server) → OCR → Run it on (`ocr.backend`: auto, CPU, or the GPU found) |
+| `serve --generations` | [Settings](/_admin#settings) → OCR → Generations |
+| `setup` | The server's own [setup](/setup): admin account, who may join, remote access (tunnel, Dynamic DNS, HTTPS), OCR on this machine. From another computer it asks for the one-time code in the server log |
+| `setup --skip-if-exists` | CLI-only because it exists for container entrypoints and scripts; [setup](/setup) only runs while no admin exists |
+| `doctor` | [This server](/_admin#server) → Diagnostics → Run checks |
+| `doctor --processor` | [Diagnostics](/app/settings/doctor) on the processor's own page |
+| `healthcheck` | CLI-only because it is the container health probe; the admin panel answering is the same answer |
+| `healthcheck --url` | CLI-only because it probes an arbitrary address for container health checks |
 
 ## Users and invites
 
 | Command | Where |
 |---|---|
-| `admin` | /_admin → Users and Invites (linked from [Users & library](/app/settings/library)) |
-| `admin add-user` | /_admin → Users → Add user; the first admin is made by [setup](/app/setup/server) |
-| `admin add-user <USERNAME>` | /_admin → Users → Add user → Username |
-| `admin add-user --role` | /_admin → Users → Add user → Role |
-| `admin add-user --password` | /_admin → Users → Add user → Password |
-| `admin delete-user` | /_admin → Users → Delete |
-| `admin delete-user <USERNAME>` | /_admin → Users → the user's row |
-| `admin delete-user --yes` | /_admin → Users → Delete asks in a dialog instead |
-| `admin list-users` | /_admin → Users |
-| `admin list-users --status` | /_admin → Users shows each account's status (active, pending, disabled, deleted) |
-| `admin change-role` | /_admin → Users → Change role |
-| `admin change-role <USERNAME>` | /_admin → Users → the user's row |
-| `admin change-role <ROLE>` | /_admin → Users → Change role → Role |
-| `admin generate-invite` | /_admin → Invites → Generate |
-| `admin generate-invite --role` | /_admin → Invites → Generate → Role |
-| `admin generate-invite --expires` | /_admin → Invites → Generate → Expires in |
-| `admin list-invites` | /_admin → Invites |
-| `admin list-invites --all` | /_admin → Invites lists used and expired codes with their status |
-| `admin delete-invite` | /_admin → Invites → Delete |
-| `admin delete-invite <CODE>` | /_admin → Invites → the code's row |
-| `admin approve-user` | /_admin → Users → Approve (pending accounts) |
-| `admin approve-user <USERNAME>` | /_admin → Users → the user's row |
-| `admin disable-user` | /_admin → Users → Disable |
-| `admin disable-user <USERNAME>` | /_admin → Users → the user's row |
+| `admin` | [Users](/_admin#users) and [Invites](/_admin#invites) |
+| `admin add-user` | [Users](/_admin#users) → Add user; the first admin is made by [setup](/setup) |
+| `admin add-user <USERNAME>` | [Users](/_admin#users) → Add user → Username |
+| `admin add-user --role` | [Users](/_admin#users) → Add user → Role |
+| `admin add-user --password` | [Users](/_admin#users) → Add user → Password |
+| `admin delete-user` | [Users](/_admin#users) → Delete |
+| `admin delete-user <USERNAME>` | [Users](/_admin#users) → the user's row |
+| `admin delete-user --yes` | [Users](/_admin#users) → Delete asks in a dialog instead |
+| `admin list-users` | [Users](/_admin#users) |
+| `admin list-users --status` | [Users](/_admin#users) shows each account's status (active, pending, disabled, deleted) |
+| `admin change-role` | [Users](/_admin#users) → Change role |
+| `admin change-role <USERNAME>` | [Users](/_admin#users) → the user's row |
+| `admin change-role <ROLE>` | [Users](/_admin#users) → Change role → Role |
+| `admin generate-invite` | [Invites](/_admin#invites) → Generate |
+| `admin generate-invite --role` | [Invites](/_admin#invites) → Generate → Role |
+| `admin generate-invite --expires` | [Invites](/_admin#invites) → Generate → Expires in |
+| `admin list-invites` | [Invites](/_admin#invites) |
+| `admin list-invites --all` | [Invites](/_admin#invites) lists used and expired codes with their status |
+| `admin delete-invite` | [Invites](/_admin#invites) → Delete |
+| `admin delete-invite <CODE>` | [Invites](/_admin#invites) → the code's row |
+| `admin approve-user` | [Users](/_admin#users) → Approve (pending accounts) |
+| `admin approve-user <USERNAME>` | [Users](/_admin#users) → the user's row |
+| `admin disable-user` | [Users](/_admin#users) → Disable |
+| `admin disable-user <USERNAME>` | [Users](/_admin#users) → the user's row |
 | `admin restore-user` | CLI-only because the admin panel cannot bring deleted accounts back yet. This command is the recovery path for an account deleted by mistake |
 | `admin restore-user <USERNAME>` | CLI-only because `admin restore-user` is |
 | `admin restore-user --role` | CLI-only because `admin restore-user` is |
@@ -89,118 +94,118 @@ The app's [Users & library](/app/settings/library) section links each of its tab
 
 | Command | Where |
 |---|---|
-| `config` | [Settings](/app/settings/server); every key is in [Advanced](/app/settings/advanced) |
-| `config show` | [Advanced](/app/settings/advanced) → config.yaml (the file with `MOKURO_*` applied) |
-| `config set` | [Advanced](/app/settings/advanced) → Any setting; the common keys have their own fields in [Server](/app/settings/server) |
-| `config set <KEY>` | [Advanced](/app/settings/advanced) → Key (the same list `config set` accepts) |
-| `config set <VALUE>` | [Advanced](/app/settings/advanced) → Value |
-| `config path` | [Advanced](/app/settings/advanced) → "Where the files are" |
-| `config init` | [Library server setup](/app/setup/server) writes a new file; [Advanced](/app/settings/advanced) → "Reset to defaults" |
-| `config init --force` | [Advanced](/app/settings/advanced) → "Reset to defaults" (asks first) |
-| `config cors-add` | [Remote access](/app/settings/remote) → Other web apps → Add; also /_admin → Settings |
-| `config cors-add <ORIGIN>` | [Remote access](/app/settings/remote) → Other web apps → the origin |
-| `config cors-remove` | [Remote access](/app/settings/remote) → Other web apps → Remove |
-| `config cors-remove <ORIGIN>` | [Remote access](/app/settings/remote) → Other web apps → that origin's Remove |
+| `config` | [Settings](/_admin#settings) and [This server](/_admin#server) change the keys a page needs |
+| `config show` | CLI-only because it prints the whole file with `MOKURO_*` applied, for the terminal; the pages show each setting where it is changed |
+| `config set` | CLI-only because it reaches every key, including the ones fixed before the server starts; [Settings](/_admin#settings) changes the common ones live |
+| `config set <KEY>` | CLI-only because `config set` is |
+| `config set <VALUE>` | CLI-only because `config set` is |
+| `config path` | [This server](/_admin#server) → Log names the storage folder; CLI-only for the config file's path, which a page cannot open |
+| `config init` | The chooser's [Library server](/app/) writes a new file on a desktop; [setup](/setup) fills it in |
+| `config init --force` | CLI-only because resetting the file under a running server would undo its own settings; stop it first |
+| `config cors-add` | [Settings](/_admin#settings) → CORS; also [setup](/setup) → Remote access → Other web apps |
+| `config cors-add <ORIGIN>` | [Settings](/_admin#settings) → CORS → the origin |
+| `config cors-remove` | [Settings](/_admin#settings) → CORS → Remove |
+| `config cors-remove <ORIGIN>` | [Settings](/_admin#settings) → CORS → that origin's Remove |
 
 ## HTTPS, tunnel and Dynamic DNS
 
 | Command | Where |
 |---|---|
-| `ssl` | [HTTPS](/app/settings/https) |
-| `ssl enable` | [HTTPS](/app/settings/https) → Turn on; also a choice in [setup](/app/setup/server) |
-| `ssl enable --auto-cert` | [HTTPS](/app/settings/https) → "Use a self-signed certificate" |
-| `ssl enable --cert` | [HTTPS](/app/settings/https) → Certificate file |
-| `ssl enable --key` | [HTTPS](/app/settings/https) → Private key file |
-| `ssl disable` | [HTTPS](/app/settings/https) → "Turn HTTPS off" |
-| `ssl status` | [HTTPS](/app/settings/https) shows it; "Show details" runs the command |
-| `ssl generate` | [HTTPS](/app/settings/https) → Make a self-signed certificate |
-| `ssl generate --hostname` | [HTTPS](/app/settings/https) → Host name |
-| `ssl generate --days` | [HTTPS](/app/settings/https) → Valid for (days) |
-| `tunnel` | /_admin → Connectivity (linked from [Remote access](/app/settings/remote)) |
-| `tunnel status` | [Remote access](/app/settings/remote) → "Is cloudflared installed?"; /_admin → Connectivity |
-| `tunnel cloudflare` | /_admin → Connectivity → Cloudflare tunnel (the running server owns the tunnel) |
-| `tunnel cloudflare --port` | /_admin → Connectivity: the server tunnels its own port |
-| `dyndns` | [Remote access](/app/settings/remote); /_admin → Connectivity → Dynamic DNS |
-| `dyndns setup` | [Setup](/app/setup/server) → Remote access → Dynamic DNS (provider, domain, token); later in /_admin → Connectivity |
-| `dyndns status` | [Remote access](/app/settings/remote) → "Dynamic DNS status" |
-| `dyndns update` | [Remote access](/app/settings/remote) → "Update the DNS record now" |
-| `dyndns enable` | [Remote access](/app/settings/remote) → "Turn DynDNS on" |
-| `dyndns disable` | [Remote access](/app/settings/remote) → "Turn DynDNS off" |
+| `ssl` | [setup](/setup) → Remote access → HTTPS; later CLI-only because the certificate files live on the server and a change needs a restart |
+| `ssl enable` | [setup](/setup) → Remote access → HTTPS (the server restarts with it) |
+| `ssl enable --auto-cert` | [setup](/setup) → HTTPS → Self-signed certificate |
+| `ssl enable --cert` | [setup](/setup) → HTTPS → My certificate files → Certificate file |
+| `ssl enable --key` | [setup](/setup) → HTTPS → My certificate files → Private key file |
+| `ssl disable` | CLI-only because HTTPS is fixed while the server runs; run it, then restart |
+| `ssl status` | CLI-only because it reads the certificate files on the server for the terminal |
+| `ssl generate` | CLI-only because it writes files on the server; [setup](/setup)'s self-signed choice makes one by itself |
+| `ssl generate --hostname` | CLI-only because `ssl generate` is |
+| `ssl generate --days` | CLI-only because `ssl generate` is |
+| `tunnel` | [Connectivity](/_admin#connectivity) → Cloudflare Tunnel |
+| `tunnel status` | [Connectivity](/_admin#connectivity) → Cloudflare Tunnel (says when cloudflared is missing) |
+| `tunnel cloudflare` | [Connectivity](/_admin#connectivity) → Start Tunnel (the running server owns the tunnel) |
+| `tunnel cloudflare --port` | [Connectivity](/_admin#connectivity): the server tunnels its own port |
+| `dyndns` | [Connectivity](/_admin#connectivity) → Dynamic DNS |
+| `dyndns setup` | [setup](/setup) → Remote access → Dynamic DNS (provider, domain, token); later [Connectivity](/_admin#connectivity) → Dynamic DNS → Save Settings |
+| `dyndns status` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Last Update |
+| `dyndns update` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Test Update |
+| `dyndns enable` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Start |
+| `dyndns disable` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Stop |
 
 ## Updates
 
 | Command | Where |
 |---|---|
-| `update` | [Updates](/app/settings/update); the tray's "Check for updates" opens it |
-| `update check` | [Updates](/app/settings/update) checks when it opens; "Check again" |
-| `update apply` | [Updates](/app/settings/update) → "Install the update" (live output) |
-| `update apply --yes` | [Updates](/app/settings/update): the button is the confirmation |
-| `update prefetch` | CLI-only because it is internal (hidden): an automatic update runs it from the downloaded release before installing it. The app shows the result as the [dashboard](/app/dashboard)'s update line, and turns automatic updates on in [Updates](/app/settings/update) → "Install updates automatically" |
+| `update` | [Status](/_admin#status) → Updates for the server; [Updates](/app/settings/update) on a processor's page |
+| `update check` | [Status](/_admin#status) → Updates → Check now; [Updates](/app/settings/update) → Check again |
+| `update apply` | [Status](/_admin#status) → Updates → Update and restart; [Updates](/app/settings/update) → Install the update |
+| `update apply --yes` | [Status](/_admin#status) → Updates: the button is the confirmation |
+| `update apply --restart` | [Status](/_admin#status) → Updates → Update and restart |
+| `update prefetch` | CLI-only because it is internal (hidden): an automatic update runs it from the downloaded release before installing it. [Status](/_admin#status) → Updates → "Install updates automatically" turns them on |
 | `update prefetch --processor-config` | CLI-only because `update prefetch` is |
 | `update prefetch --manifest-url` | CLI-only because `update prefetch` is |
-| `update apply --restart` | CLI-only because it replaces the calling process with the new `serve`. From the app, restart the server from the tray after updating |
 
 ## OCR backend and models
 
 | Command | Where |
 |---|---|
-| `install-ocr` | Runs inside the [processor setup](/app/setup/processor) (always) and the [server setup](/app/setup/server) (when "OCR on this machine" is on), with progress; later from Settings → [OCR & models](/app/settings/ocr) → [OCR install](/app/setup/ocr) |
-| `install-ocr --variant` | The setups' OCR step and [OCR install](/app/setup/ocr) → Pack (automatic, cpu, cu130, rocm7.1) |
-| `install-ocr --from` | The setups' OCR step and [OCR install](/app/setup/ocr) → More options → Install from a folder |
-| `install-ocr --dir` | [OCR install](/app/setup/ocr) → More options → Install into |
-| `install-ocr --no-models` | The setups' OCR step and [OCR install](/app/setup/ocr) → More options → Only the pack |
-| `install-ocr --force` | The setups' OCR step and [OCR install](/app/setup/ocr) → More options → Reinstall |
-| `install-ocr --if-needed` | CLI-only because `serve` and `processor serve` run it themselves, in the background, when local OCR needs a backend that is missing (its progress and a Retry are on the dashboard); in the desktop app the [OCR install](/app/setup/ocr) page is the deliberate way |
-| `install-ocr --list` | [OCR & models](/app/settings/ocr) shows the hardware and the installed packs; "Packs and hardware" runs it |
-| `install-ocr --processor` | The [processor setup](/app/setup/processor) installs for the processor; [OCR install](/app/setup/ocr) → For: the processor |
+| `install-ocr` | [This server](/_admin#server) → OCR → Install (progress there; it runs in the background); a processor's [OCR install](/app/setup/ocr) |
+| `install-ocr --variant` | [This server](/_admin#server) → OCR → Run it on (auto, CPU, the GPU found); [OCR install](/app/setup/ocr) → Pack |
+| `install-ocr --if-needed` | CLI-only because `serve` and `processor serve` run it themselves in the background ([This server](/_admin#server) shows its progress and a Retry) |
+| `install-ocr --from` | [OCR install](/app/setup/ocr) → More options → Install from a folder (a processor's local page only). A server installs from its signed release, or from the `ocr-offline` folder shipped next to the program |
+| `install-ocr --dir` | [OCR install](/app/setup/ocr) → More options → Install packs into |
+| `install-ocr --no-models` | [OCR install](/app/setup/ocr) → More options → Only the pack |
+| `install-ocr --force` | [This server](/_admin#server) → OCR → Reinstall; [OCR install](/app/setup/ocr) → More options → Reinstall |
+| `install-ocr --list` | [This server](/_admin#server) → OCR shows the hardware and the installed packs; [OCR & models](/app/settings/ocr) → Packs and hardware |
+| `install-ocr --processor` | A processor's [OCR install](/app/setup/ocr) (its pages always mean the processor) |
 | `install-ocr --probe` | CLI-only because it is internal (hidden): an automatic update loads a new backend pack in a child process to check it works before switching to it |
 | `install-ocr --backend` | CLI-only because it is the hidden 0.5 spelling of `--variant`, kept for old scripts |
 | `install-ocr --engines` | CLI-only because it is a hidden 0.5 flag that 0.7 accepts and ignores (the models follow the configured engines) |
 | `install-ocr --detector` | CLI-only because it is a hidden 0.5 flag that 0.7 accepts and ignores |
-| `models` | [OCR & models](/app/settings/ocr) |
-| `models list` | [OCR & models](/app/settings/ocr) → "List the models" |
-| `models list --processor` | [OCR & models](/app/settings/ocr) → For: the processor |
-| `models download` | [OCR & models](/app/settings/ocr) → Download; the OCR install ([OCR install](/app/setup/ocr), the setups) downloads them too |
-| `models download --engine` | [OCR & models](/app/settings/ocr) → Engine |
-| `models download --processor` | [OCR & models](/app/settings/ocr) → For: the processor |
-| `models verify` | [OCR & models](/app/settings/ocr) → "Verify them" |
-| `models verify --processor` | [OCR & models](/app/settings/ocr) → For: the processor |
+| `models` | [This server](/_admin#server) → Engines and models; [OCR & models](/app/settings/ocr) for a processor |
+| `models list` | [This server](/_admin#server) → Engines and models (and Details); [OCR & models](/app/settings/ocr) → List the models |
+| `models list --processor` | [OCR & models](/app/settings/ocr) → List the models |
+| `models download` | [This server](/_admin#server) → Engines and models → Download missing; [OCR & models](/app/settings/ocr) → Download |
+| `models download --engine` | [OCR & models](/app/settings/ocr) → Engine; a server fetches what its enabled generations use |
+| `models download --processor` | [OCR & models](/app/settings/ocr) → Download |
+| `models verify` | [This server](/_admin#server) → Engines and models → Verify; [OCR & models](/app/settings/ocr) → Verify them |
+| `models verify --processor` | [OCR & models](/app/settings/ocr) → Verify them |
 
 ## Processor
 
 | Command | Where |
 |---|---|
-| `processor` | [Processor setup](/app/setup/processor) and [Processor settings](/app/settings/processor) |
-| `processor serve` | [Processor setup](/app/setup/processor) starts it at the end; [Processor](/app/settings/processor) → "Start it". The tray starts and stops it |
-| `processor serve --config` | The app uses this machine's processor.yaml (shown in [Processor](/app/settings/processor)); `MOKURO_PROCESSOR_CONFIG` points it elsewhere |
+| `processor` | [Pair a processor](/app/setup/processor) and its [settings](/app/settings/processor) |
+| `processor serve` | [Pair a processor](/app/setup/processor) starts it at the end (the tray runs it from then on); [Connection](/app/settings/processor) → Start it; `Tray → "Quit"` stops it |
+| `processor serve --config` | The pages use this machine's processor.yaml (shown in [Connection](/app/settings/processor)); `MOKURO_PROCESSOR_CONFIG` points it elsewhere |
 | `processor serve --verbose` | CLI-only because it only adds detail to terminal output. The processor's log is in [Logs](/app/settings/logs) |
-| `processor setup` | [Processor setup](/app/setup/processor): library address, account, connection test, this machine, the OCR install, optionally start with the machine |
-| `processor setup --config` | [Processor setup](/app/setup/processor) writes this machine's processor.yaml and shows its path |
-| `processor setup --url` | [Processor setup](/app/setup/processor) → Library address |
-| `processor setup --username` | [Processor setup](/app/setup/processor) → Username |
-| `processor setup --password-stdin` | [Processor setup](/app/setup/processor) → Password |
-| `processor setup --name` | [Processor setup](/app/setup/processor) → Name; [Processor](/app/settings/processor) → Name |
-| `processor setup --backend` | [Processor setup](/app/setup/processor) → OCR install → Pack: the processor uses the devices of the pack installed for it |
-| `processor setup --tls-verify` | [Processor setup](/app/setup/processor) → Certificate check; [Processor](/app/settings/processor) |
-| `processor setup --auto-update` | [Processor setup](/app/setup/processor) → "Update this processor automatically when its library updates" (off by default); [Updates](/app/settings/update) and [Processor](/app/settings/processor) change it later (`processor.auto_update`) |
-| `processor setup --yes` | CLI-only because it answers terminal prompts, and the app has no prompts |
-| `processor setup --no-install` | CLI-only because the app's [Processor setup](/app/setup/processor) always installs OCR (a processor without it does nothing); [OCR install](/app/setup/ocr) replaces the pack later |
-| `processor setup --no-service` | [Processor setup](/app/setup/processor) → "Start with the machine" is off by default; later in [Start with the machine](/app/setup/startup) |
-| `processor setup --force` | [Processor setup](/app/setup/processor) says when a processor.yaml exists, and replaces it only when that box is ticked |
-| `processor status` | [Processor](/app/settings/processor) shows the last status; the [dashboard](/app/dashboard) of a running processor shows it live |
-| `processor status --config` | [Processor](/app/settings/processor) reads this machine's processor.yaml |
-| `processor service` | [Processor setup](/app/setup/processor) → Start with the machine; [Start with the machine](/app/setup/startup) → For: the processor (shows the service file) |
-| `processor service --config` | [Start with the machine](/app/setup/startup) uses this machine's processor.yaml |
-| `processor service --install` | [Processor setup](/app/setup/processor) → Start with the machine → As a background service; later [Start with the machine](/app/setup/startup) → How: as a background service → Set it up (the other choice, the tray at login, writes `tray.json` and the tray's login item instead; it has no CLI twin) |
+| `processor setup` | [Pair a processor](/app/setup/processor): library address, account, connection test, this machine, the OCR choices |
+| `processor setup --config` | [Pair a processor](/app/setup/processor) writes this machine's processor.yaml and shows its path |
+| `processor setup --url` | [Pair a processor](/app/setup/processor) → Library address |
+| `processor setup --username` | [Pair a processor](/app/setup/processor) → Processor username |
+| `processor setup --password-stdin` | [Pair a processor](/app/setup/processor) → Password |
+| `processor setup --name` | [Pair a processor](/app/setup/processor) → Name; [Connection](/app/settings/processor) → Name |
+| `processor setup --backend` | [Pair a processor](/app/setup/processor) → OCR install → Backend pack |
+| `processor setup --tls-verify` | [Pair a processor](/app/setup/processor) → Check the library's certificate; [Connection](/app/settings/processor) |
+| `processor setup --auto-update` | [Pair a processor](/app/setup/processor) → "Update this processor automatically when its library updates" (off by default); [Updates](/app/settings/update) changes it later |
+| `processor setup --yes` | CLI-only because it answers terminal prompts, and the pages have no prompts |
+| `processor setup --no-install` | CLI-only because the [pairing](/app/setup/processor) always installs OCR (a processor without it does nothing) |
+| `processor setup --no-service` | CLI-only because the pages never write a service: the tray runs the processor, and `Tray → "Start at login"` starts it at login |
+| `processor setup --force` | [Pair a processor](/app/setup/processor) says when a processor.yaml exists, and replaces it only when that box is ticked |
+| `processor status` | [Connection](/app/settings/processor) → Last status; its [status page](/app/dashboard) shows it live |
+| `processor status --config` | [Connection](/app/settings/processor) reads this machine's processor.yaml |
+| `processor service` | CLI-only because a background service is for headless machines, set up from their terminal; on a desktop the tray runs the processor and `Tray → "Start at login"` starts it |
+| `processor service --config` | CLI-only because `processor service` is |
+| `processor service --install` | CLI-only because `processor service` is |
 
 ## The desktop app itself
 
 | Command | Where |
 |---|---|
-| `gui` | [Home](/app/): this command serves the app and opens it. Double-clicking the Windows command line (`bin\mokuro-bunko.exe`) with no `Mokuro Bunko.exe` above it does too |
-| `gui --no-browser` | CLI-only because it starts the pages without opening a browser, for the tray and remote shells; it prints the sign-in link |
-| `gui --open` | [Home](/app/) is the default; any app page can be the start page (`--open /app/settings/update`) |
-| `tray` | The setups' "Start with the machine" → From the tray at login, or [Start with the machine](/app/setup/startup) → "Run from the tray when I log in": it starts the tray and adds its login item. Opening the macOS app or `Mokuro Bunko.exe` on Windows runs it too |
+| `gui` | [Home](/app/): the first-launch chooser (library server or processor). The tray opens it when nothing is set up (`Tray → "Set up…"`) |
+| `gui --no-browser` | CLI-only because it starts the pages without opening a browser, for remote shells; it prints the sign-in link |
+| `gui --open` | [Home](/app/) is the default; any local page can be the start page (`--open /app/settings/update`) |
+| `tray` | `Tray → "Start at login"` starts it at login; `mokuro-bunko` with no arguments on a desktop runs it (the Windows app, the macOS app) |
 | `tray --storage` | CLI-only because the tray finds the instances of this machine by itself (the default storages, the configs, the services); this adds another folder for a hand-made setup |
-| `tray --no-supervise` | CLI-only because it is for watching instances something else runs; the app's choice between the tray and a service ([Start with the machine](/app/setup/startup)) decides what the tray starts |
-| `tray --log-stderr` | CLI-only because it only moves the tray's log to the terminal; [Logs](/app/settings/logs) shows the tray's log file |
+| `tray --no-supervise` | CLI-only because it is for watching instances something else runs (a service); the chooser and the pairing hand what they start to the tray |
+| `tray --log-stderr` | CLI-only because it only moves the tray's log to the terminal |
