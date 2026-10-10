@@ -1183,6 +1183,71 @@ fn hand_set_pools_on_this_server_are_never_width_tuned() {
     assert_eq!(opened(&sent).len(), 1, "the table is used as written");
 }
 
+/// Regression (a fresh desktop install): the owner benchmarked the row on this server by
+/// hand, and the scheduler then benchmarked it again ("before it runs there") because a
+/// benchmark by hand reached `.ocr-bench.json` but not this server's profile, the one
+/// thing the autobench looks at. One benchmark per engine and machine: the volume runs
+/// straight after it, untuned (a run by hand never changes the pools).
+#[test]
+fn a_benchmark_by_hand_on_this_server_is_not_run_again_before_its_first_volume() {
+    let row = primary();
+    let mut h = harness(vec![row.clone()]);
+    h.s.settings.autobench = true;
+    h.s.settings.local_processing = true;
+    h.add("A/V1.cbz", 6);
+    let mut ops = local_up(&mut h, &["fp32", "fp16", "bf16"]);
+    let req = bunko_server::ocr::sched::BenchRequest {
+        key: "g-1".into(),
+        processor: "local".into(),
+        ..Default::default()
+    };
+    let v = h.s.bench_enqueue(req).expect("bench queued");
+    assert_eq!(v["autobench"], false);
+    h.at(0.0);
+    let sent = drain_rx(&mut ops);
+    let op = bench_op(&sent).expect("the benchmark asked for");
+    assert!(opened(&sent).is_empty(), "the benchmark holds the queue");
+    let local = h.s.machines.values().find(|m| m.local).unwrap().pid.clone();
+    h.s.handle(Msg::Event {
+        pid: local,
+        event: Event::BenchDone {
+            bid: op.bid.clone(),
+            detail: detail(serde_json::json!({
+                "baseline": {"pages_per_second": 8.0},
+                "best": {"trial": 2, "stage_workers": {"detect": 5}, "queue_capacity": {}, "stage_device": {}, "pages_per_second": 8.9},
+                "precision": "bf16", "precision_mode": "auto-accuracy",
+            })),
+        },
+    });
+    assert_eq!(h.s.bench_get("g-1", "local")["state"], "done");
+    let prof = bunko_server::ocr::profiles::Profiles::new(&h.storage());
+    let mine = prof
+        .row(
+            bunko_server::ocr::profiles::LOCAL_PROFILE,
+            "g-1",
+            Some(&row.output_affecting()),
+        )
+        .expect("the run by hand is this server's benchmark of the row");
+    assert_eq!(mine.bench.as_ref().unwrap()["pages_per_second"], 8.9);
+    assert!(mine.pools.is_empty(), "a run by hand never sets pools");
+    for t in [1.0, 2.0, 30.0] {
+        h.at(t);
+        let sent = drain_rx(&mut ops);
+        assert!(
+            bench_op(&sent).is_none(),
+            "measured again at {t}s: {sent:?}"
+        );
+        if !opened(&sent).is_empty() {
+            break;
+        }
+    }
+    assert!(
+        !h.s.claims.is_empty(),
+        "the volume runs after the benchmark"
+    );
+    assert!(h.s.bench_get("g-1", "local")["autobench"] != true);
+}
+
 /// One autobench round on a device whose auto modes run fp32 (bf16 emulated or a CPU),
 /// then the row runs there; the fp32 benchmark stays current through later scans.
 fn fp32_device_autobenches_once(device: serde_json::Value) {
