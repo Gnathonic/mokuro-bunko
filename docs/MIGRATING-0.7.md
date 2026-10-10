@@ -136,7 +136,7 @@ downloads are no longer used and can be deleted.
 |---|---|
 | `MOKURO_THREADS` (request threads, default 50) | Not read. The server is async; `server.threads` (default `min(cores, 4)`) sets the worker threads. |
 | `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`, `MOKURO_BUNKO_MOKURO_SPEC` | Accepted by the Docker entrypoint and ignored. |
-| `OCR_AUTO_INSTALL` | Full Docker image: the OCR backend is installed on start by default (`install-ocr --if-needed`). `true` keeps that on; `false` (the 0.5.2 Unraid template's default) is noted and ignored, because in 0.5.2 it never stopped the server from installing OCR on start. |
+| `OCR_AUTO_INSTALL` | The OCR backend is installed by the server itself, in the background, when local OCR needs it (`MOKURO_OCR_AUTO_INSTALL`, default on). `true` keeps that on; `false` (the 0.5.2 Unraid template's default) is noted and ignored, because in 0.5.2 it never stopped the server from installing OCR on start. |
 | (new) `MOKURO_OCR_AUTO_INSTALL` | Full Docker image, default `true`. `false` turns the install on start off: local OCR then has no backend until `mokuro-bunko install-ocr` is run. |
 | `MOKURO_PPOCR_MODELS`, `MOKURO_PPOCR_DOWNLOAD` | Still honoured as aliases of `MOKURO_MODELS_DIR` (a directory of model files to use) and `MOKURO_MODELS_DOWNLOAD` (`0` forbids downloads). |
 | `MOKURO_DEBUG`, `MOKURO_EFT_TRACE` | Not read. Use `MOKURO_LOG` (a log filter such as `debug`, or `info,bunko_server=debug`) or `-v`. |
@@ -183,9 +183,12 @@ in `/config`). Differences:
 - The container health check is `mokuro-bunko healthcheck`; there is no curl
   or Python in the images. The image licence label now says MPL-2.0.
 
-Unraid: switch the template's repository to `ghcr.io/gnathonic/mokuro-bunko:latest`
-(`latest-cuda` is the same image; templates in `deploy/unraid/`). No volume or variable
-needs to change; the first start downloads the OCR backend (~2 GB for NVIDIA). For an AMD
+Unraid: switch the template's repository to `ghcr.io/gnathonic/mokuro-bunko:beta` while
+0.7 is in beta, `:latest` from 0.7.0 on (`latest-cuda` is the same image; templates in
+`deploy/unraid/`). No volume or variable needs to change. The server comes up at once and
+downloads the OCR backend (~2 GB for NVIDIA) in the background, where 0.5 made the web UI
+wait for its OCR environment; local OCR starts by itself when it is done, and a failed
+download is shown in the admin panel with a Retry button instead of stopping anything. For an AMD
 GPU replace `--runtime=nvidia` in Extra Parameters with
 `--device=/dev/kfd --device=/dev/dri`. The README's [Docker section](../README.md#docker)
 has the full list of volumes, variables and GPU prerequisites.

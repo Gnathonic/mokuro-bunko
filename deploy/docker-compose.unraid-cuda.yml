@@ -1,12 +1,12 @@
 # Unraid / NVIDIA: mokuro-bunko with OCR on an NVIDIA GPU (successor of the 0.5
-# unraid-cuda image; :latest-cuda is the same image as :latest). The first start
-# downloads the cu130 OCR backend pack (libtorch + the CUDA 13 libraries, about 2 GB)
+# unraid-cuda image; :latest-cuda is the same image as :latest). Once it serves, it
+# downloads in the background the cu130 OCR backend pack (libtorch + the CUDA 13 libraries, about 2 GB)
 # into /data/backends and the enabled engines' models into /data/models; later starts
 # reuse them. The host needs an NVIDIA driver >= 580 and the NVIDIA container toolkit
 # (Unraid: the Nvidia-Driver plugin). Turing (RTX 20xx / GTX 16xx) or newer.
 services:
   mokuro-bunko:
-    image: ghcr.io/gnathonic/mokuro-bunko:latest
+    image: ghcr.io/gnathonic/mokuro-bunko:beta  # :latest from 0.7.0 on
     # build:
     #   context: ..
     #   dockerfile: deploy/docker/Dockerfile

@@ -1,7 +1,7 @@
 # A remote OCR processor on a GPU machine, working for a mokuro-bunko library
 # elsewhere (protocol: docs/rust-port/PROTOCOL.md). processor.yaml (library URL,
-# processor account) goes in ./processor/. Before `processor serve` the first start
-# downloads the OCR backend pack for the GPU the container is given into the volume
+# processor account) goes in ./processor/. `processor serve` connects at once (taking
+# no work until it is ready) and downloads in the background the OCR backend pack for the GPU the container is given into the volume
 # (NVIDIA: `gpus: all`, driver >= 580 and the NVIDIA container toolkit, about 2 GB;
 # AMD: the `devices` lines below, about 3 GB; neither: the CPU), with the models;
 # later starts reuse them. MOKURO_OCR_BACKEND=cpu|cuda|rocm overrides the choice.
@@ -9,7 +9,7 @@
 #   docker compose -f deploy/docker-compose.processor.yml up -d
 services:
   processor:
-    image: ghcr.io/gnathonic/mokuro-bunko:latest
+    image: ghcr.io/gnathonic/mokuro-bunko:beta  # :latest from 0.7.0 on
     container_name: mokuro-bunko-processor
     restart: unless-stopped
     command: ["processor", "serve", "--config", "/config/processor.yaml"]

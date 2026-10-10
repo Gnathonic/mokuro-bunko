@@ -3,6 +3,7 @@
 #   * re-verifies release.json's signature against the key compiled into bunko-update,
 #   * un-drafts the GitHub release (so .../releases/latest/download/release.json, which
 #     every installed server polls, now points at it),
+#   * moves the `beta` and `beta-lite` image tags to this version (any version), and
 #   * for a stable version, moves the `latest`, `latest-lite` and `latest-cuda` image tags
 #     (`latest-cuda` is the full image under the name the 0.5.2 CUDA image used).
 name: Publish
@@ -71,6 +72,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      # `beta` / `beta-lite` follow every published version, pre-release or stable (the
+      # newest of either: what the 0.7 Unraid template and compose files default to while
+      # 0.7 is in beta); `latest*` follow stable versions only.
+      - name: move the beta* image tags (every version)
+        run: |
+          set -eux
+          version="${TAG#v}"
+          image="ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/mokuro-bunko"
+          docker buildx imagetools create -t "$image:beta" "$image:$version"
+          docker buildx imagetools create -t "$image:beta-lite" "$image:$version-lite"
       - name: move the latest* image tags (stable versions only)
         run: |
           set -eux

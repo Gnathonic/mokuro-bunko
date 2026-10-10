@@ -659,8 +659,11 @@ The recognizers (hayai-nova, paddle-manga) run on **libtorch** — the torch 0.5
 without Python — from a *backend pack* that `mokuro-bunko install-ocr` installs into
 `<storage>/backends/`: `cu130` (NVIDIA, Linux and Windows), `rocm7.1` (AMD, Linux) or
 `cpu`. ppocr-manga and the PP-OCR text detector run on ONNX Runtime on the CPU, as in
-0.5.2. The full Docker image carries no pack: it installs one on first start
-(`install-ocr --if-needed`, see [Deployment](deployment.md#ocr-backend-on-first-start)).
+0.5.2. `serve` and `processor serve` install the pack themselves when local OCR needs
+it and it is missing, **in the background**: they serve at once, show the progress (log,
+admin panel, dashboard, tray, `/control/status`) and start local OCR when it is done
+(see [Deployment](deployment.md#ocr-backend-install-ocr)); the full Docker image, which
+carries no pack, relies on this.
 
 `ocr.backend` (and `serve --ocr`) picks the devices, and with them the pack
 `install-ocr` (without `--variant`) and the Docker image install on this machine:
@@ -1253,7 +1256,7 @@ Other variables:
 | `MOKURO_MODELS_DIR`, `MOKURO_MODELS_DOWNLOAD` | — | A directory of model files to use; `0` forbids model downloads (see [OCR models](#ocr-models)). The 0.5 names `MOKURO_PPOCR_MODELS` and `MOKURO_PPOCR_DOWNLOAD` still work. |
 | `MOKURO_PROCESSOR_CONFIG` | — | `processor.yaml` path for the `processor` commands (the same as `--config`). |
 | `MOKURO_PROCESSOR_PASSWORD` | — | The processor's password; overrides `library.password` and `password_file`. |
-| `MOKURO_OCR_AUTO_INSTALL` | `true` (full Docker image) | `false`: the image does not install the OCR backend on start (`install-ocr --if-needed`); local OCR has no backend until `mokuro-bunko install-ocr` is run. 0.5.2's `OCR_AUTO_INSTALL=true` also keeps it on; `OCR_AUTO_INSTALL=false` is ignored. |
+| `MOKURO_OCR_AUTO_INSTALL` | `true` | `false`: `serve` / `processor serve` never install a missing OCR backend by themselves (anywhere, not only in Docker); the missing backend is a problem with an Install button (dashboard, admin panel), or run `mokuro-bunko install-ocr`. 0.5.2's `OCR_AUTO_INSTALL=true` also keeps it on; `OCR_AUTO_INSTALL=false` is ignored. |
 
 The 0.5 variables `MOKURO_THREADS`, `MOKURO_DEBUG`, `MOKURO_EFT_TRACE`,
 `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`,

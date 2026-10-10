@@ -3,6 +3,25 @@
 ## [Unreleased]
 
 ### Added
+- **The OCR backend installs in the background; getting up and serving never waits
+  for it.** `serve` and `processor serve` start at once and, when local OCR is on and an
+  enabled generation needs the libtorch backend that is missing (any OS, not only
+  Docker), run the same detection and install as `install-ocr --if-needed` in the
+  background. The progress (stage, percent, bytes, pack) is in the log, the admin panel
+  (Settings → OCR → Processors), the dashboard, the tray and `/control/status`
+  (`install`). The server's local OCR starts by itself when it is done; a processor
+  registers at once as not available (reason `installing`; the library's list shows
+  "installing OCR backend: NN%") and takes work once its backend is ready. A failed
+  install is a problem ("needs you", tray "!") with a Retry button, retried after 5, 15
+  and 60 minutes. `MOKURO_OCR_AUTO_INSTALL=false` still means never (the missing backend
+  is then a problem with an Install button). One install at a time per backends
+  directory; an interrupted one resumes its downloads at the next start. `install-ocr`
+  stays a foreground command for scripts.
+- The setup wizard's "Save and start" saves the configuration and the OCR choices and
+  starts the server or processor; the last page comes as soon as it serves, and the OCR
+  install continues in the background (the browser can be closed). Turning local
+  processing on in the admin panel's OCR settings starts the install (or the local OCR)
+  at once.
 - First-run setup from another computer (Docker, a NAS): while no admin exists the
   server prints a one-time **setup code** in its log at every start (`First run:
   create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`). `/setup`
@@ -17,10 +36,31 @@
   one does. Optional fields in the Unraid templates; commented in the compose files.
 
 ### Changed
+- The full Docker image's entrypoint no longer runs `install-ocr --if-needed` before
+  the server: the server answers within seconds of the first start (health check start
+  period 30 s instead of 20 min).
+- Docker images: Publish also moves `beta` / `beta-lite` (every release, beta or
+  stable). The Unraid templates and compose files of the 0.7 branch default to them (no
+  `latest*` exists before 0.7.0) and the templates' `<TemplateURL>` points at the `0.7`
+  branch (`main` still has the 0.5 templates); both go back to `latest` / `main` with
+  0.7.0.
 - The setup token of the earlier 0.7 betas (`<storage>/.setup-token`,
   `/setup?token=`, `MOKURO_SETUP_TOKEN`) is gone: its file is deleted at startup and
   the setup code replaces it. A remote setup API call without a code is answered with
   how to get one ("…see the server log for the setup code").
+
+### Fixed
+- A library server set up without its OCR backend (beta.3's wizard had OCR install as
+  a separate card) ran with ppocr-manga only and said so in one INFO line: a missing
+  backend for an enabled generation is now installed in the background, or shown as a
+  problem everywhere.
+- The tray's Quit did not stop a server the setup wizard had just started (it was the
+  wizard's child, and the tray treated it as someone else's): what the wizard starts is
+  handed to a running tray (tray.json, picked up live; an instance started for the tray
+  is adopted), so Quit stops it; an instance the tray does not manage (a system service)
+  still keeps running, and Quit says so.
+- A failed libtorch backend load was remembered for the life of the process; a backend
+  installed later is now picked up without a restart.
 
 ## [0.7.0-beta.4] - 2026-10-09
 
