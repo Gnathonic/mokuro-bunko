@@ -56,6 +56,136 @@ mod full {
     /// version's GitHub release (mirrors, tests). Its `.sig` must sit next to it.
     const MANIFEST_ENV: &str = "MOKURO_BACKEND_MANIFEST";
 
+    /// `MOKURO_INSTALL_EVENTS=1` (set by the background installer of `serve` and
+    /// `processor serve`, [`crate::ocr_install`]): progress as machine-readable lines,
+    /// [`EVENT_PREFIX`] + one JSON object, besides the usual text.
+    pub const EVENTS_ENV: &str = "MOKURO_INSTALL_EVENTS";
+    pub const EVENT_PREFIX: &str = "@@ocr-install ";
+    /// The lock two installs into one backends directory take (a background install of
+    /// the server, of a processor on the same storage, a `install-ocr` by hand).
+    pub const LOCK_FILE: &str = ".install.lock";
+
+    fn events_on() -> bool {
+        std::env::var(EVENTS_ENV).is_ok_and(|v| v == "1")
+    }
+
+    /// One progress event for the background installer (nothing unless it asked).
+    pub fn event(v: serde_json::Value) {
+        if events_on() {
+            use std::io::Write as _;
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{EVENT_PREFIX}{v}");
+            let _ = out.flush();
+        }
+    }
+
+    /// What `--if-needed` would do here.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Need {
+        /// Local OCR is off: nothing to install.
+        Off(String),
+        /// A fitting pack is installed, or nothing enabled needs one.
+        Satisfied(String),
+        /// The pack of this variant is missing.
+        Install { variant: String, reason: String },
+    }
+
+    /// The library's enabled generations need the libtorch backend (hayai-nova,
+    /// paddle-manga); ppocr-manga alone runs on ONNX Runtime and needs no pack. A
+    /// processor runs whatever its library asks for: always.
+    pub fn needs_backend(ocr: &crate::ocr_target::OcrTarget) -> bool {
+        match (&ocr.role, &ocr.library) {
+            (crate::ocr_target::Role::Library, Some(c)) => c
+                .ocr
+                .generations
+                .iter()
+                .filter(|g| g.runnable())
+                .any(|g| g.engine != bunko_engines::models::PPOCR),
+            _ => true,
+        }
+    }
+
+    /// The variant `--if-needed` wants: the owner's `ocr.backend` on this hardware,
+    /// unless a variant was picked by hand at the last install (the setup wizard, `--variant`)
+    /// and neither the hardware nor `ocr.backend` (still `auto`) changed since.
+    pub fn wanted_choice(
+        ocr: &crate::ocr_target::OcrTarget,
+        hw: &hwdetect::Hardware,
+        root: &Path,
+    ) -> hwdetect::Choice {
+        let target = bunko_update::TARGET;
+        let pref = ocr.backend_preference();
+        let wanted = hwdetect::preferred(&pref, hw, target);
+        if pref.trim().eq_ignore_ascii_case("auto")
+            && let Some(rec) = HardwareRecord::read(root)
+            && let Some(chosen) = rec.chosen.as_deref()
+            && rec.auto_variant == hwdetect::choose(hw, target).variant
+            && let Some(v) = ["cpu", "cu130", "rocm7.1"]
+                .into_iter()
+                .find(|v| *v == chosen)
+        {
+            return hwdetect::Choice {
+                variant: v,
+                reason: format!("{v} picked at the last install"),
+                hint: None,
+            };
+        }
+        wanted
+    }
+
+    /// What `--if-needed` would do for this role (the auto-install setting aside).
+    pub fn need(ocr: &crate::ocr_target::OcrTarget, hw: &hwdetect::Hardware) -> Need {
+        if let Some(why) = ocr.local_ocr_off() {
+            return Need::Off(why);
+        }
+        if !needs_backend(ocr) {
+            return Need::Satisfied(
+                "no enabled OCR generation needs the OCR backend (ppocr-manga runs without it)"
+                    .into(),
+            );
+        }
+        let root = ocr.backends_dir();
+        let choice = wanted_choice(ocr, hw, &root);
+        match already_fits(&ocr.backends_dirs(), choice.variant) {
+            Some(m) => Need::Satisfied(m),
+            None => Need::Install {
+                variant: choice.variant.to_string(),
+                reason: choice.reason,
+            },
+        }
+    }
+
+    /// Hold `<root>/.install.lock` for the install (blocking while another holds it).
+    fn lock_installs(root: &Path) -> Result<std::fs::File, Fail> {
+        std::fs::create_dir_all(root).map_err(|e| Fail::msg(format!("{}: {e}", root.display())))?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(root.join(LOCK_FILE))
+            .map_err(|e| Fail::msg(format!("{}: {e}", root.join(LOCK_FILE).display())))?;
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => return Ok(file),
+            Err(fs4::TryLockError::WouldBlock) => {}
+            Err(fs4::TryLockError::Error(e)) => {
+                return Err(Fail::msg(format!(
+                    "{}: {e}",
+                    root.join(LOCK_FILE).display()
+                )));
+            }
+        }
+        println!(
+            "Another OCR install into {} is running; waiting for it to finish...",
+            root.display()
+        );
+        event(
+            serde_json::json!({"stage": "waiting", "message": "another OCR install on this machine is running"}),
+        );
+        fs4::FileExt::lock(&file)
+            .map_err(|e| Fail::msg(format!("{}: {e}", root.join(LOCK_FILE).display())))?;
+        Ok(file)
+    }
+
     pub fn run(ctx: &Ctx, args: InstallOcrArgs) -> CmdResult {
         crate::logging::init_console(ctx.verbose);
         if args.engines.is_some() || args.detector.is_some() {
@@ -91,9 +221,9 @@ mod full {
         let target = bunko_update::TARGET;
         let hw = hwdetect::detect();
         let auto = hwdetect::choose(&hw, target);
-        // No --variant: what the owner's `ocr.backend` asks for on this hardware.
-        let pref = ocr.backend_preference();
-        let wanted = hwdetect::preferred(&pref, &hw, target);
+        // No --variant: what the owner's `ocr.backend` asks for on this hardware (or
+        // the variant picked by hand at the last install, the hardware unchanged).
+        let wanted = wanted_choice(&ocr, &hw, &root);
         let requested = match (&args.variant, args.backend.as_deref()) {
             (Some(v), _) => Some(v.clone()),
             (None, Some(b)) => Some(legacy_backend(b)?.to_string()),
@@ -126,6 +256,23 @@ mod full {
             println!("  {h}");
         }
 
+        if args.if_needed && requested.is_none() && !args.force && !needs_backend(&ocr) {
+            println!(
+                "No enabled OCR generation needs the OCR backend (ppocr-manga runs without it): nothing to install."
+            );
+            return Ok(());
+        }
+        if args.if_needed
+            && !args.force
+            && let Some(kept) = already_fits(&search, &variant)
+        {
+            println!("{kept}");
+            return Ok(());
+        }
+        event(serde_json::json!({"stage": "checking", "variant": variant}));
+        // One install per backends directory at a time; whoever waited finds what the
+        // other one installed.
+        let _lock = lock_installs(&root)?;
         if args.if_needed
             && !args.force
             && let Some(kept) = already_fits(&search, &variant)
@@ -162,7 +309,13 @@ mod full {
             let source = ReleaseSource::for_target(&ocr, bunko_core::VERSION);
             let dir = rt
                 .block_on(install(&root, &variant, target, from.as_deref(), &source))
-                .map_err(|f| Fail::msg(f.to_string()))?;
+                .map_err(|f| {
+                    event(serde_json::json!({
+                        "stage": "failed", "message": f.message,
+                        "needs_owner": f.needs_owner, "action": f.action,
+                    }));
+                    Fail::msg(f.to_string())
+                })?;
             println!("Installed {}", dir.display());
             if args.if_needed {
                 // The packs this one replaces (another GPU, a GPU that is gone, another
@@ -189,11 +342,20 @@ mod full {
         // What this machine's GPU called for when the pack went in: a later change of
         // GPU is then told apart from a deliberate choice (doctor, GUI.md "Automatic
         // updates").
+        // A variant picked by hand (not what `ocr.backend` would pick here) is kept
+        // by later `--if-needed` runs while the hardware stays the same.
+        let chosen = requested
+            .as_deref()
+            .filter(|r| *r != "auto" && *r != wanted.variant)
+            .map(str::to_string);
         HardwareRecord {
             auto_variant: auto.variant.to_string(),
             reason: auto.reason.clone(),
+            chosen,
         }
         .write(&root);
+        event(serde_json::json!({"stage": "installed", "variant": variant,
+            "pack": pack_dir.file_name().map(|n| n.to_string_lossy().into_owned())}));
         if let Some((_, m)) = find_installed(&search, &variant) {
             let missing = missing_system_libs(&m.requires.system_libs);
             if !missing.is_empty() {
@@ -210,6 +372,7 @@ mod full {
             return Ok(());
         }
         println!("Fetching the OCR models for this machine (mokuro-bunko models download)...");
+        event(serde_json::json!({"stage": "models"}));
         // Prefetch for this pack: left alone, the loader would pick by its own order
         // (a GPU pack before cpu, only in the configured backends dir), so
         // `--variant cpu` beside an installed cu130 pack, or `--dir`, would fetch
@@ -523,6 +686,10 @@ mod full {
         pub auto_variant: String,
         #[serde(default)]
         pub reason: String,
+        /// The variant picked by hand at that install, when it was not the one
+        /// `ocr.backend` picks here (`--variant`, the setup wizard).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub chosen: Option<String>,
     }
 
     impl HardwareRecord {
@@ -929,18 +1096,37 @@ mod full {
 
     /// A line every 25% (`MOKURO_PROGRESS_STEP` sets the step: the desktop app asks for
     /// 2 to drive its progress bar).
-    fn progress(label: String) -> impl FnMut(u64, u64) {
+    /// [`progress`], also as events of `stage` ([`event`]): the bytes of the whole
+    /// stage, `before` of its `total` done before this file.
+    fn progress_in(label: String, stage: Option<(&'static str, u64, u64)>) -> impl FnMut(u64, u64) {
         let step = std::env::var("MOKURO_PROGRESS_STEP")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|s| (1..=100).contains(s))
             .unwrap_or(25);
         let mut last = 0u64;
+        let mut last_event: Option<(u64, std::time::Instant)> = None;
+        let events = events_on();
         move |done, total| {
             let pct = (done * 100).checked_div(total).unwrap_or(100);
             if pct >= last + step || (done == total && last < 100) {
                 last = pct;
                 println!("  {label}: {pct}% of {}", mb(total));
+            }
+            if let Some((stage, before, all)) = stage.filter(|_| events) {
+                let all = all.max(before + total);
+                let at = before + done;
+                let pct_all = (at * 100).checked_div(all).unwrap_or(100);
+                let due = match last_event {
+                    None => true,
+                    Some((p, t)) => pct_all != p && (t.elapsed().as_millis() >= 500 || at == all),
+                };
+                if due {
+                    last_event = Some((pct_all, std::time::Instant::now()));
+                    event(serde_json::json!({
+                        "stage": stage, "label": label, "done": at, "total": all,
+                    }));
+                }
             }
         }
     }
@@ -1063,17 +1249,27 @@ mod full {
                     mb(a.external_size),
                     mb(a.installed_size)
                 );
+                event(serde_json::json!({
+                    "stage": "downloading", "variant": variant, "pack": a.name,
+                    "done": 0, "total": a.size,
+                }));
                 let mut files = Vec::new();
+                let mut before = 0u64;
                 for (i, p) in a.parts.iter().enumerate() {
                     let name = p.url.rsplit('/').next().unwrap_or("pack").to_string();
                     let dest = downloads.join(&name);
+                    let at = before;
+                    before += p.size;
                     pack::download(
                         &client,
                         &p.url,
                         &dest,
                         &p.sha256,
                         p.size,
-                        progress(format!("{name} [{}/{}]", i + 1, a.parts.len())),
+                        progress_in(
+                            format!("{name} [{}/{}]", i + 1, a.parts.len()),
+                            Some(("downloading", at, a.size)),
+                        ),
                     )
                     .await
                     .map_err(|e| match e {
@@ -1099,7 +1295,7 @@ mod full {
                 &parts,
                 whole.as_ref().map(|(s, n)| (s.as_str(), *n)),
                 &staging2,
-                progress("unpacking".into()),
+                progress_in("unpacking".into(), Some(("unpacking", 0, 0))),
             )
         })
         .await
@@ -1171,7 +1367,11 @@ mod full {
                 manifest.name
             );
         }
+        let fetch_total: u64 = fetch.iter().map(|e| e.size).sum();
+        let mut fetched = 0u64;
         for ext in &fetch {
+            let at = fetched;
+            fetched += ext.size;
             let file = ext.url.rsplit('/').next().unwrap_or(&ext.name).to_string();
             let local = local_wheel(ext);
             let dest = downloads.join(&file);
@@ -1185,7 +1385,10 @@ mod full {
                 &dest,
                 &ext.sha256,
                 ext.size,
-                progress(format!("{} {} ({})", ext.name, ext.version, ext.license)),
+                progress_in(
+                    format!("{} {} ({})", ext.name, ext.version, ext.license),
+                    Some(("libraries", at, fetch_total)),
+                ),
             )
             .await
             .map_err(PackFailure::retry)?;

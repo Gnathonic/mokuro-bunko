@@ -241,6 +241,19 @@ async fn stop(State(st): State<AppState>) -> Response {
     }
 }
 
+/// `POST /control/ocr-install`: start (or retry) the background OCR backend install.
+/// 202 `{installing: true|false, status}`; 409 when this instance has none.
+async fn ocr_install(State(st): State<AppState>) -> Response {
+    match st.control.start_install() {
+        Ok(running) => (
+            StatusCode::ACCEPTED,
+            axum::Json(serde_json::json!({"installing": running, "status": st.control.status()})),
+        )
+            .into_response(),
+        Err(e) => control_error(e),
+    }
+}
+
 /// `status` events: one at once, then one per change (at most every
 /// [`EVENTS_MIN_GAP`]), re-read every [`EVENTS_REFRESH`]; an unchanged status is not
 /// sent twice. Ends when the listener stops.
@@ -393,6 +406,7 @@ fn router(state: AppState, app: Option<Router>) -> Router {
         .route("/control/resume", post(resume))
         .route("/control/events", get(events))
         .route("/control/stop", post(stop))
+        .route("/control/ocr-install", post(ocr_install))
         .route("/control/login-code", post(login_code))
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state.clone());

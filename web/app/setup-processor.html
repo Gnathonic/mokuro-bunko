@@ -89,7 +89,7 @@
 
             <section class="wizard-step" id="p-ocr" aria-labelledby="h-pocr" hidden>
                 <h2 id="h-pocr">OCR install</h2>
-                <p class="step-lede">The pack and the models install after you save, then a check runs.</p>
+                <p class="step-lede">The pack and the models install in the background once the processor runs: it connects at once (taking no work until the backend is ready), and its dashboard shows the download.</p>
                 <div id="ocr-fields"><p class="form-hint">Detecting the hardware…</p></div>
                 <p class="form-error" id="err-ocr" role="alert" hidden></p>
                 <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev>Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" id="ocr-next">Next</button></div>
@@ -111,8 +111,6 @@
                 <ul class="run-list" id="run-list" hidden></ul>
                 <p class="form-error" id="err-save" role="alert" hidden></p>
                 <div id="p-save-result" aria-live="polite"></div>
-                <div id="install-job"></div>
-                <div id="doctor-job"></div>
                 <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev id="p-save-back">Back</button><span class="spacer"></span><button type="button" class="btn btn--ghost" id="skip-btn" hidden>Skip</button><button type="button" class="btn btn--primary" id="p-save-btn">Save and start the processor</button></div>
             </section>
 

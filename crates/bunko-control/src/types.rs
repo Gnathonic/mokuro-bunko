@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use bunko_proto::OcrInstall;
+
 /// Which kind of instance answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -148,6 +150,9 @@ pub struct Problem {
 
 impl Problem {
     pub const KIND_UPDATE: &'static str = "update";
+    /// The background OCR backend install failed (retry from the dashboard or the
+    /// admin panel).
+    pub const KIND_OCR_INSTALL: &'static str = "ocr-install";
 
     /// A `fail` problem of kind `update`: something only the owner can fix.
     pub fn update_needs_you(text: impl Into<String>, hint: impl Into<String>) -> Problem {
@@ -245,6 +250,9 @@ pub struct Status {
     /// The automatic update (0.7): null when this instance has nothing to say.
     #[serde(default)]
     pub update: Option<UpdateView>,
+    /// The background OCR backend install (0.7): null when none ran since the start.
+    #[serde(default)]
+    pub install: Option<OcrInstall>,
 }
 
 /// `<storage>/.control.json`: how a tray or browser finds a running instance.

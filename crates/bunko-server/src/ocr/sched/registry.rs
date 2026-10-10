@@ -210,7 +210,8 @@ impl Machine {
             "public_name": self.public_name,
             "transfer": self.transfer.to_value(),
             // 0.7: the processor's own pause, `{paused, until, reason}` or null.
-            "pause": self.pause.as_ref().map(|a| json!({"paused": true, "until": a.until, "reason": a.reason})),
+            // 0.7: `install` = how far its OCR backend install is (reason `installing`).
+            "pause": self.pause.as_ref().map(super::availability::pause_json),
             // 0.7: `{library_version, processor_version, relation}` or null.
             "version_mismatch": self.version_mismatch,
             // 0.7: `{state, version?, message?, action?}` (its automatic update) or null.
@@ -475,13 +476,15 @@ impl Scheduler {
         self.profiles
             .set_identity(&name, &host_value, &catalog_value);
         self.machines.insert(pid.clone(), machine);
-        let paused = self.machines.get(&pid).is_some_and(|m| m.pause.is_some());
+        let pause = self.machines.get(&pid).and_then(|m| m.pause.clone());
         self.log(format!(
             "Processor {name} registered ({pid}){}{}",
-            if paused {
-                "; it is paused by its owner"
-            } else {
-                ""
+            match &pause {
+                Some(a) if a.is_installing() => {
+                    "; it is still installing its OCR backend (no work until that is done)"
+                }
+                Some(_) => "; it is paused by its owner",
+                None => "",
             },
             match &version_mismatch {
                 Some(v) if v.library_newer() => format!(

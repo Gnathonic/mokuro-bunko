@@ -183,11 +183,15 @@ impl OcrAdmin for OcrControl {
             "cli_hint": if self.has_local() { "" } else { crate::admin::ocr::NO_OCR_HINT },
             "driver_hint": "",
             "active_engines": engines,
+            "install": self.install_view(),
         })
     }
 
     fn processors(&self, config: &Config) -> Value {
         let local = config.processes_locally(self.has_local());
+        // 0.7: this server's background OCR backend install (null: none ran).
+        let install = serde_json::to_value(self.install_view()).unwrap_or(Value::Null);
+        let install2 = install.clone();
         ask(self, move |s| {
             let mut processors = s.processors();
             for p in &mut processors {
@@ -219,9 +223,10 @@ impl OcrAdmin for OcrControl {
                 "last_disconnect": s.last_disconnect(),
                 "local_processing": local,
                 "processing_hold": s.processing_hold(),
+                "local_install": install,
             })
         })
-        .unwrap_or_else(|| json!({"processors": [], "speed": [], "failed_logins": [], "last_disconnect": null, "local_processing": local, "processing_hold": null}))
+        .unwrap_or_else(|| json!({"processors": [], "speed": [], "failed_logins": [], "last_disconnect": null, "local_processing": local, "processing_hold": null, "local_install": install2}))
     }
 
     fn generations_payload(&self, config: &Config) -> Value {
@@ -556,6 +561,21 @@ impl OcrAdmin for OcrControl {
         _query: &str,
         body: &Value,
     ) -> Option<Result<(u16, Value), OcrError>> {
+        // 0.7: `GET /api/ocr/install` (where this server's background OCR backend
+        // install stands) and `POST /api/ocr/install` (start it, or retry a failed one).
+        if path == ["ocr", "install"] {
+            return Some(match *method {
+                Method::GET => Ok((200, json!({"install": self.install_view()}))),
+                Method::POST => match self.start_install() {
+                    Ok(running) => Ok((
+                        202,
+                        json!({"success": true, "installing": running, "install": self.install_view()}),
+                    )),
+                    Err(e) => Err(OcrError::new(409, e)),
+                },
+                _ => Err(OcrError::not_found()),
+            });
+        }
         if path.len() < 2 || path[0] != "ocr" || path[1] != "upgrade" {
             return None;
         }

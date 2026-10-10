@@ -45,6 +45,37 @@ pub struct Status {
     pub can_pause: Option<bool>,
     /// The automatic update (added in 0.7; absent from older instances).
     pub update: Option<UpdateInfo>,
+    /// The background OCR backend install (added in 0.7).
+    pub install: Option<InstallInfo>,
+}
+
+/// `status.install`: the background OCR backend install. Every field optional.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct InstallInfo {
+    /// running | done | failed | missing
+    pub state: String,
+    pub stage: String,
+    pub percent: Option<u32>,
+}
+
+impl InstallInfo {
+    /// `Installing OCR backend: 42%` while one runs (None otherwise: a failure is a
+    /// problem, shown as one).
+    pub fn line(&self) -> Option<String> {
+        if self.state != "running" {
+            return None;
+        }
+        let what = if self.stage == "models" {
+            "Installing OCR models"
+        } else {
+            "Installing OCR backend"
+        };
+        Some(match self.percent {
+            Some(p) => format!("{what}: {}%", p.min(100)),
+            None => format!("{what}…"),
+        })
+    }
 }
 
 /// `status.update`: where the instance's automatic update stands. Every field is

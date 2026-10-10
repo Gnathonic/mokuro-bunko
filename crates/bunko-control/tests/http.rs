@@ -339,6 +339,78 @@ async fn stop_only_for_managed_instances() {
     server.shutdown().await;
 }
 
+/// `status.install` and its failure as a problem; `POST /control/ocr-install` runs the
+/// instance's trigger (409 without one).
+#[tokio::test]
+async fn install_state_and_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let (control, server, _stop) = start(dir.path(), Role::Server, false).await;
+    let url = format!("{}/control/ocr-install", server.url());
+    let resp = client()
+        .post(&url)
+        .bearer_auth(server.token())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409, "no trigger: nothing to install here");
+
+    let running = bunko_control::OcrInstall {
+        state: "running".into(),
+        stage: "downloading".into(),
+        percent: Some(42),
+        ..Default::default()
+    };
+    control.set_install(Some(running.clone()), Vec::new());
+    let s: Status = client()
+        .get(format!("{}/control/status", server.url()))
+        .bearer_auth(server.token())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(s.install, Some(running));
+    assert!(s.problems.is_empty());
+
+    let failed = bunko_control::OcrInstall {
+        state: "failed".into(),
+        message: Some("network down".into()),
+        ..Default::default()
+    };
+    control.set_install(
+        Some(failed),
+        vec![bunko_control::Problem {
+            severity: bunko_control::Severity::Fail,
+            text: "OCR backend install failed: network down".into(),
+            hint: None,
+            kind: Some(bunko_control::Problem::KIND_OCR_INSTALL.into()),
+        }],
+    );
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c2 = calls.clone();
+    control.set_install_trigger(std::sync::Arc::new(move || {
+        c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(true)
+    }));
+    let resp = client()
+        .post(&url)
+        .bearer_auth(server.token())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["installing"], true);
+    assert_eq!(body["status"]["install"]["state"], "failed");
+    assert_eq!(body["status"]["problems"][0]["kind"], "ocr-install");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // Without the token: refused like every other route.
+    let resp = client().post(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 401);
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_lite_server_has_nothing_to_pause() {
     let dir = tempfile::tempdir().unwrap();

@@ -567,6 +567,7 @@ function renderProcessors(data) {
         hint.textContent = remote + ' processor' + (remote === 1 ? '' : 's') + ' connected' +
             (data.local_processing ? ', beside this server\'s own hardware.' : '.');
     }
+    renderLocalInstall(data.local_install);
     const held = data.processing_hold;
     if (held) {
         hold.hidden = false;
@@ -608,8 +609,58 @@ function processorTransfer(transfer) {
 // A processor that paused itself (from its tray or desktop app): "paused
 // until 18:00", or "paused" with no end. The owner lifts it; an admin
 // cannot. `pause` is absent on servers before 0.7.
+// "installing OCR backend: 42%" / "... (downloading)" for an OcrInstall.
+function installSummary(i) {
+    if (!i) return '';
+    if (i.state === 'failed') return 'OCR backend install failed' + (i.message ? ': ' + i.message : '');
+    if (i.state === 'missing') return i.message || 'OCR backend not installed';
+    if (i.state === 'done') return 'OCR backend installed';
+    const what = i.stage === 'models' ? 'installing OCR models'
+        : i.stage === 'waiting' ? 'waiting for another OCR install' : 'installing OCR backend';
+    const bytes = (i.done_bytes != null && i.total_bytes)
+        ? ' (' + (i.done_bytes / 1e9).toFixed(1) + ' of ' + (i.total_bytes / 1e9).toFixed(1) + ' GB)' : '';
+    if (i.percent != null) return what + ': ' + i.percent + '%' + bytes;
+    return what + (i.stage ? ' (' + i.stage + ')' : '');
+}
+
+// This server's background OCR backend install (0.7): progress, or a failure /
+// a missing backend with a button to (re)try.
+function renderLocalInstall(install) {
+    const box = document.getElementById('processors-install');
+    if (!box) return;
+    if (!install || install.state === 'done') {
+        box.hidden = true;
+        box.innerHTML = '';
+        return;
+    }
+    const stuck = install.state === 'failed' || install.state === 'missing';
+    box.hidden = false;
+    box.classList.toggle('gen-banner--info', !stuck);
+    box.innerHTML = '<strong>This server:</strong> ' + escapeHtml(installSummary(install)) +
+        (install.action && stuck ? '<div class="form-hint">' + escapeHtml(install.action) + '</div>' : '') +
+        (stuck ? ' <button type="button" class="btn btn--small" id="processors-install-retry">' +
+            (install.state === 'missing' ? 'Install' : 'Retry') + '</button>' : '');
+    const btn = document.getElementById('processors-install-retry');
+    if (btn) {
+        btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            try {
+                await apiPost('/ocr/install', {});
+            } catch (e) {
+                showToast(e.message || String(e), 'error');
+            }
+            loadProcessors();
+        });
+    }
+}
+
 function processorPause(pause) {
     if (!pause || !pause.paused) return '';
+    if (pause.reason === 'installing') {
+        return '<div class="processor-transfer processor-transfer--paused" title="' +
+            escapeHtml('it is installing its OCR backend and takes no work until that is done') + '">' +
+            escapeHtml(installSummary(pause.install || { state: 'running' })) + '</div>';
+    }
     const until = typeof pause.until === 'string' ? Date.parse(pause.until) : NaN;
     const when = isFinite(until)
         ? ' until ' + processorClock(until / 1000, until - Date.now() > 20 * 3600 * 1000)
@@ -737,7 +788,7 @@ function processorRowHtml(p, machine) {
         '<span class="processors-machine__name">' + escapeHtml(name) + '</span>' +
         (online ? '' : ' <span class="processors-machine__offline">offline</span>') +
         (installing ? ' <span class="processors-machine__installing">installing</span>' : '') +
-        (p && p.pause && p.pause.paused ? ' <span class="processors-machine__paused">paused</span>' : '') +
+        (p && p.pause && p.pause.paused && p.pause.reason !== 'installing' ? ' <span class="processors-machine__paused">paused</span>' : '') +
         (p && !local
             ? '<div class="processors-machine__since" title="' +
               escapeHtml('connected ' + processorClock(p.connected_since, true)) + '">connected</div>'

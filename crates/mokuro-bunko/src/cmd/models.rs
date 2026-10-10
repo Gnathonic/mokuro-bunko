@@ -175,8 +175,19 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
     );
     // Every failure is reported at the end; one file failing does not stop the others.
     let mut failed: Vec<String> = Vec::new();
+    // For the background installer: the files and packages done, of how many.
+    let items = ids.len() + recognizer_rows.len();
+    let mut done_items = 0usize;
+    let mut step = |label: &str| {
+        done_items += 1;
+        super::install_ocr::event(serde_json::json!({
+            "stage": "models", "label": label, "done": done_items, "total": items, "unit": "files",
+        }));
+    };
     for id in ids {
-        match store.ensure(id) {
+        let result = store.ensure(id);
+        step(id);
+        match result {
             Ok(r) => println!(
                 "  {id:<34} {}{}",
                 if r.verified {
@@ -212,6 +223,7 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
             }
             Ok(_) => {
                 for (e, r) in pipeline.prefetch_rows(&recognizer_rows) {
+                    step(e);
                     match r {
                         Ok(p) => {
                             println!(

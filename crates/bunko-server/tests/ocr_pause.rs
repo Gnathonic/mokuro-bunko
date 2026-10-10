@@ -16,6 +16,7 @@ fn paused(until: Option<&str>) -> Event {
         paused: true,
         until: until.map(str::to_string),
         reason: Some("user".into()),
+        install: None,
     })
 }
 

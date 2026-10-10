@@ -1,7 +1,8 @@
 // The steps both setup flows share: OCR install and start with the machine (their
-// choices are made in a step; they run from the review step, after the configuration
-// is saved, because install-ocr and the service work on the saved file), and the
-// review step's list of what runs.
+// choices are made in a step; they apply from the review step, after the configuration
+// is saved), and the review step's list of what runs. The OCR backend itself installs
+// in the background once the server or processor runs: the last page comes as soon as
+// it serves and follows the install.
 (function () {
   'use strict';
   const { esc, get, post, runJob, jobBox, wirePickers, PADDLE_CPU_NOTE } = window.App;
@@ -147,19 +148,48 @@
     };
   }
 
-  // install-ocr, then doctor, each in its own job box. { ok, doctor_ok }.
-  async function runOcr(request, installEl, doctorEl, mark) {
-    mark('ocr', 'running');
-    const r = await runJob(request, jobBox(installEl));
-    if (r.state !== 'ok') {
-      mark('ocr', 'failed', r.state === 'cancelled' ? 'cancelled' : 'see the output below');
-      return { ok: false };
+  // The OCR step's choices go to the instance that is about to start: it installs the
+  // backend in the background once it serves (nothing waits for the download).
+  async function queueOcr(request, role) {
+    const r = Object.assign({}, request, { role: role });
+    delete r.kind;
+    delete r.processor;
+    return post('/app/api/ocr/request', r);
+  }
+
+  // One line for `status.install` (the background OCR backend install).
+  function installLine(i) {
+    if (!i) return null;
+    if (i.state === 'done') return { ok: true, text: 'OCR backend installed' + (i.pack ? ' (' + i.pack + ')' : '') + '; local OCR uses it now.' };
+    if (i.state === 'failed') return { bad: true, text: 'The OCR backend install failed' + (i.message ? ': ' + i.message : '') + '. Retry from the dashboard.' };
+    if (i.state === 'missing') return { bad: true, text: (i.message || 'No OCR backend installed') + '. Install it from the dashboard.' };
+    const what = { checking: 'checking what this machine needs', waiting: 'waiting for another install',
+      downloading: 'downloading the ' + (i.variant ? i.variant + ' ' : '') + 'backend pack',
+      unpacking: 'unpacking the backend pack', libraries: 'fetching NVIDIA\'s CUDA libraries',
+      installed: 'backend pack installed', models: 'fetching the OCR models' }[i.stage] || i.stage;
+    const bytes = i.done_bytes != null && i.total_bytes
+      ? ' (' + (i.done_bytes / 1e9).toFixed(2) + ' of ' + (i.total_bytes / 1e9).toFixed(2) + ' GB)' : '';
+    return { text: 'Installing the OCR backend in the background: ' + what + (i.percent != null ? ' ' + i.percent + '%' : '…') + bytes +
+      '. The ' + 'server already serves; you can close this page.', percent: i.percent };
+  }
+
+  // Follow the started instance's OCR install on the last page (until it ends or
+  // the setup app closes).
+  function watchInstall(el, slot) {
+    let timer = null;
+    async function tick() {
+      let s = null;
+      try { s = await get('/app/api/instances/' + slot + '/status'); } catch (_) { /* not up yet */ }
+      const line = s && installLine(s.install);
+      el.hidden = !line;
+      if (line) {
+        el.className = 'result ' + (line.bad ? 'result--bad' : line.ok ? 'result--ok' : 'result--wait') + ' mt-2';
+        el.textContent = line.text.replace('The server', slot === 'processor' ? 'The processor' : 'The server');
+      }
+      if (s && s.install && s.install.state !== 'running') { clearInterval(timer); timer = null; }
     }
-    mark('ocr', 'ok');
-    mark('doctor', 'running');
-    const d = await runJob({ kind: 'doctor', processor: request.processor }, jobBox(doctorEl));
-    mark('doctor', 'ok', d.state === 'ok' ? '' : 'it found problems (see below)');
-    return { ok: true, doctor_ok: d.state === 'ok' };
+    tick();
+    timer = setInterval(tick, 2000);
   }
 
   // Wait for `check()` to give a truthy value (every half second, up to `secs`).
@@ -175,5 +205,5 @@
     return null;
   }
 
-  window.SetupSteps = { gpus, usableGpu, ocrStep, startupStep, runList, runOcr, waitFor };
+  window.SetupSteps = { gpus, usableGpu, ocrStep, startupStep, runList, queueOcr, installLine, watchInstall, waitFor };
 })();

@@ -48,6 +48,7 @@ impl PauseState {
             paused: true,
             until: self.until.map(rfc3339),
             reason: Some(self.reason.clone()),
+            install: None,
         }
     }
 

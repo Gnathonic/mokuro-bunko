@@ -8,6 +8,16 @@ use std::time::Duration;
 
 /// Start `exe args...` in the background; returns its pid.
 pub fn spawn_detached(exe: &Path, args: &[String], log: &Path) -> std::io::Result<u32> {
+    spawn_detached_env(exe, args, log, &[])
+}
+
+/// [`spawn_detached`] with extra environment variables.
+pub fn spawn_detached_env(
+    exe: &Path,
+    args: &[String],
+    log: &Path,
+    envs: &[(&str, &str)],
+) -> std::io::Result<u32> {
     if let Some(dir) = log.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -18,6 +28,7 @@ pub fn spawn_detached(exe: &Path, args: &[String], log: &Path) -> std::io::Resul
     let err = out.try_clone()?;
     let mut cmd = Command::new(exe);
     cmd.args(args)
+        .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));

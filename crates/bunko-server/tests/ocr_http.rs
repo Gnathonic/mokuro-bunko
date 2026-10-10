@@ -1085,6 +1085,144 @@ async fn local_lanes_run_the_in_process_processor() {
     ocr.stop().await;
 }
 
+/// The background OCR backend install of the binary, faked: a view and a counter.
+struct FakeInstall {
+    view: parking_lot::Mutex<Option<bunko_proto::OcrInstall>>,
+    finished: tokio::sync::watch::Sender<u64>,
+}
+
+impl bunko_server::ocr::BackgroundInstall for FakeInstall {
+    fn view(&self) -> Option<bunko_proto::OcrInstall> {
+        self.view.lock().clone()
+    }
+    fn start(&self) -> Result<bool, String> {
+        Ok(self.running())
+    }
+    fn finished(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.finished.subscribe()
+    }
+}
+
+struct InstallingLocal {
+    inner: FakeLocal,
+    install: Arc<FakeInstall>,
+    starts: std::sync::atomic::AtomicUsize,
+}
+
+impl bunko_server::ocr::LocalProcessorFactory for InstallingLocal {
+    fn start(
+        &self,
+        results_dir: &std::path::Path,
+    ) -> Result<bunko_server::ocr::LocalChannels, String> {
+        self.starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.start(results_dir)
+    }
+    fn installer(&self) -> Option<Arc<dyn bunko_server::ocr::BackgroundInstall>> {
+        Some(self.install.clone())
+    }
+}
+
+/// This server's OCR waits while its backend installs in the background, starts by
+/// itself when the install ends, and restarts (with the new backend) after a later one.
+#[tokio::test]
+async fn local_ocr_waits_for_the_background_install_then_starts_by_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.storage.base_path = dir.path().join("storage");
+    config.ocr.autobench = false;
+    config.ocr.local_processing = true;
+    let layout = config.storage.layout();
+    layout.ensure_directories().unwrap();
+    let db = Arc::new(
+        Database::open_with(
+            layout.database(),
+            &DbOptions {
+                bcrypt_cost: 4,
+                ..DbOptions::default()
+            },
+        )
+        .unwrap(),
+    );
+    let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
+    let core = Core::new(Arc::new(RwLock::new(config)), None, backend);
+    let fake = bunko_processor::FakePipeline::new(bunko_processor::FakeConfig {
+        engines: vec!["hayai-nova".into()],
+        page_delay: Duration::from_millis(5),
+        ..Default::default()
+    });
+    let lib = layout.library();
+    ocr_common::write_cbz(&lib.join("A/V1.cbz"), 2);
+    let install = Arc::new(FakeInstall {
+        view: parking_lot::Mutex::new(Some(bunko_proto::OcrInstall {
+            state: "running".into(),
+            stage: "downloading".into(),
+            percent: Some(10),
+            ..Default::default()
+        })),
+        finished: tokio::sync::watch::channel(0).0,
+    });
+    let factory = Arc::new(InstallingLocal {
+        inner: FakeLocal(fake),
+        install: install.clone(),
+        starts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let ocr = OcrControl::new(OcrDeps {
+        core,
+        db: Some(db.clone()),
+        facts: Arc::new(FileFacts),
+        locks: Arc::new(DavLocks(bunko_dav::PathWriteLocks::new())),
+        local: Some(factory.clone()),
+        clock: None,
+    });
+    let stop = CancellationToken::new();
+    ocr.start(stop.clone());
+    let local_up = |ocr: OcrControl| async move {
+        ocr.ask(|s| s.machines.contains_key("local")).await.unwrap()
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !local_up(ocr.clone()).await,
+        "no local OCR while installing"
+    );
+    assert_eq!(factory.starts.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(!lib.join("A/V1.mokuro").exists());
+    assert_eq!(ocr.install_view().unwrap().percent, Some(10));
+
+    // The install ends: the local OCR starts by itself and reads the volume.
+    *install.view.lock() = Some(bunko_proto::OcrInstall {
+        state: "done".into(),
+        ..Default::default()
+    });
+    install.finished.send_modify(|n| *n += 1);
+    for _ in 0..100 {
+        if lib.join("A/V1.mokuro").is_file() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(lib.join("A/V1.mokuro").is_file(), "read after the install");
+    assert!(local_up(ocr.clone()).await);
+    assert_eq!(factory.starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // A later install (a retry, another pack): a restart, and it stays up.
+    install.finished.send_modify(|n| *n += 1);
+    for _ in 0..50 {
+        if factory.starts.load(std::sync::atomic::Ordering::SeqCst) == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(factory.starts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        local_up(ocr.clone()).await,
+        "the restarted processor is not dropped by its predecessor's end"
+    );
+    stop.cancel();
+    ocr.stop().await;
+}
+
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else {

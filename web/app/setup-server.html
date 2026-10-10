@@ -154,7 +154,7 @@
             <!-- 6. OCR install (when on) -->
             <section class="wizard-step" id="s-ocr" aria-labelledby="h-ocr" hidden>
                 <h2 id="h-ocr">OCR install</h2>
-                <p class="step-lede">The pack and the models install after you save, then a check runs.</p>
+                <p class="step-lede">The pack and the models install in the background once the server runs: it serves at once, and its dashboard shows the download.</p>
                 <div id="ocr-fields"><p class="form-hint">Detecting the hardware…</p></div>
                 <p class="form-error" id="err-ocr" role="alert" hidden></p>
                 <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev>Back</button><span class="spacer"></span><button type="button" class="btn btn--primary" data-next="ocr">Next</button></div>
@@ -178,8 +178,6 @@
                 <ul class="run-list" id="run-list" hidden></ul>
                 <p class="form-error" id="err-review" role="alert" hidden></p>
                 <div id="save-result"></div>
-                <div id="install-job"></div>
-                <div id="doctor-job"></div>
                 <div class="wizard-actions"><button type="button" class="btn btn--secondary" data-prev id="review-back">Back</button><span class="spacer"></span><button type="button" class="btn btn--ghost" id="skip-btn" hidden>Skip</button><button type="button" class="btn btn--primary" id="save-btn">Save and start the server</button></div>
             </section>
 

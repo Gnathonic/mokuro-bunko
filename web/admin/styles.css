@@ -1902,6 +1902,12 @@ details[open] > .bench-res__summary::before {
     max-width: 70ch;
 }
 
+/* Progress, not a problem (this server's OCR backend installing). */
+.gen-banner--info {
+    background: var(--bg-tertiary, rgba(127, 127, 127, 0.12));
+    color: var(--text-secondary, inherit);
+}
+
 .gen-empty {
     font-size: 0.8125rem;
     color: var(--text-muted);

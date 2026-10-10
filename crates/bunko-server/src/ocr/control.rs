@@ -62,6 +62,33 @@ const LOCAL_STOP_WAIT: Duration = Duration::from_secs(15);
 pub trait LocalProcessorFactory: Send + Sync {
     /// Start it; sidecars land in `<results_dir>/<sid>/<claim>/<name>`.
     fn start(&self, results_dir: &Path) -> Result<LocalChannels, String>;
+
+    /// The background install of this server's OCR backend (the pack for its GPU and
+    /// the models), when the binary runs one. While it runs the local processor waits;
+    /// each install that finishes (re)starts it.
+    fn installer(&self) -> Option<Arc<dyn BackgroundInstall>> {
+        None
+    }
+}
+
+/// The OCR backend install a server runs in the background while it serves.
+pub trait BackgroundInstall: Send + Sync {
+    /// Where it stands (None: none ran since the start).
+    fn view(&self) -> Option<bunko_proto::OcrInstall>;
+
+    /// An install is running now.
+    fn running(&self) -> bool {
+        self.view().is_some_and(|v| v.running())
+    }
+
+    /// Start one (or retry a failed one) unless one runs: `Ok(true)` when one runs now,
+    /// `Ok(false)` when there is nothing to install (or automatic installs are off),
+    /// `Err` why it cannot start.
+    fn start(&self) -> Result<bool, String>;
+
+    /// Bumped each time an install ends (done or failed): the local processor (re)starts
+    /// with what is installed then.
+    fn finished(&self) -> tokio::sync::watch::Receiver<u64>;
 }
 
 /// What the OCR module is handed.
@@ -86,6 +113,13 @@ struct Inner {
     local: Option<Arc<dyn LocalProcessorFactory>>,
     /// The running local processor's end ([`LocalChannels::finished`]).
     local_finished: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Which start of the local processor is current: a stopped one's late "it ended"
+    /// must not drop its successor.
+    local_gen: std::sync::atomic::AtomicU64,
+    /// One (re)start of the local processor at a time.
+    local_restart: tokio::sync::Mutex<()>,
+    /// The runtime `start` ran in (restarts from synchronous code use it).
+    runtime: Mutex<Option<tokio::runtime::Handle>>,
     upgrade: Arc<upgrade::Upgrade>,
     queue_file: queue_file::QueueFile,
     status: queue_api::StatusCache,
@@ -185,6 +219,9 @@ impl OcrControl {
             thread: Mutex::new(None),
             local: deps.local,
             local_finished: Mutex::new(None),
+            local_gen: std::sync::atomic::AtomicU64::new(0),
+            local_restart: tokio::sync::Mutex::new(()),
+            runtime: Mutex::new(None),
             upgrade: up,
             queue_file: queue_file::QueueFile::default(),
             status: queue_api::StatusCache::default(),
@@ -235,14 +272,115 @@ impl OcrControl {
                 return;
             }
         }
+        *self.0.runtime.lock() = tokio::runtime::Handle::try_current().ok();
+        let installer = self.installer();
         if local_processing && let Some(factory) = self.0.local.clone() {
-            self.start_local(factory.as_ref());
+            if installer.as_ref().is_some_and(|i| i.running()) {
+                tracing::info!(
+                    "This server's OCR starts once its OCR backend is installed (installing in the background)"
+                );
+            } else {
+                self.start_local(factory.as_ref());
+            }
+        }
+        // Each finished install (re)starts this server's OCR with the new backend.
+        if let Some(installer) = installer {
+            let mut done = installer.finished();
+            done.borrow_and_update();
+            let me = self.clone();
+            let stop2 = stop.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = stop2.cancelled() => return,
+                        changed = done.changed() => if changed.is_err() { return },
+                    }
+                    done.borrow_and_update();
+                    me.restart_local("its OCR backend is installed").await;
+                }
+            });
         }
         let me = self.clone();
         tokio::spawn(async move {
             stop.cancelled().await;
             me.send(Msg::Stop);
         });
+    }
+
+    /// The background OCR backend install, when this build runs one.
+    pub fn installer(&self) -> Option<Arc<dyn BackgroundInstall>> {
+        self.0.local.as_ref().and_then(|f| f.installer())
+    }
+
+    /// The background install's state for the admin panel (null: none ran).
+    pub fn install_view(&self) -> Option<bunko_proto::OcrInstall> {
+        self.installer().and_then(|i| i.view())
+    }
+
+    /// Start (or retry) the background OCR backend install.
+    pub fn start_install(&self) -> Result<bool, String> {
+        match self.installer() {
+            Some(i) => i.start(),
+            None => Err("this build installs no OCR backend (lite build)".into()),
+        }
+    }
+
+    /// Stop this server's local processor (if it runs) and start it again when local
+    /// processing is on: after an OCR backend install, or local processing turned on.
+    /// What it was running goes back to the queue unrecorded.
+    pub async fn restart_local(&self, why: &str) {
+        let Some(factory) = self.0.local.clone() else {
+            return;
+        };
+        let _one = self.0.local_restart.lock().await;
+        let state = self
+            .ask(|s| {
+                (
+                    s.settings().local_processing,
+                    s.machines.contains_key(types::LOCAL),
+                )
+            })
+            .await;
+        let Some((wanted, running)) = state else {
+            return; // stopped
+        };
+        if running {
+            tracing::info!("Restarting this server's OCR: {why}");
+            // A new generation first: the old processor's "ended" must not drop the new.
+            self.0
+                .local_gen
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.send(Msg::Drop {
+                pid: types::LOCAL.into(),
+                reason: format!("restarting: {why}"),
+            });
+            let old = self.0.local_finished.lock().take();
+            if let Some(f) = old
+                && tokio::time::timeout(LOCAL_STOP_WAIT, f).await.is_err()
+            {
+                tracing::warn!(
+                    "this server's OCR was still stopping after {}s; starting the new one anyway",
+                    LOCAL_STOP_WAIT.as_secs()
+                );
+            }
+        }
+        if wanted {
+            if !running {
+                tracing::info!("Starting this server's OCR: {why}");
+            }
+            self.start_local(factory.as_ref());
+        }
+    }
+
+    /// [`Self::restart_local`] from synchronous code (the settings apply path).
+    fn restart_local_soon(&self, why: &str) {
+        let handle = self.0.runtime.lock().clone();
+        let Some(handle) = handle else {
+            return;
+        };
+        let me = self.clone();
+        let why = why.to_string();
+        handle.spawn(async move { me.restart_local(&why).await });
     }
 
     fn start_local(&self, factory: &dyn LocalProcessorFactory) {
@@ -276,8 +414,16 @@ impl OcrControl {
         });
         let tx = self.0.tx.clone();
         let mut events = channels.events;
+        let me = self.clone();
+        let generation = self.0.local_gen.load(std::sync::atomic::Ordering::SeqCst);
+        let current =
+            move || me.0.local_gen.load(std::sync::atomic::Ordering::SeqCst) == generation;
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
+                // A restarted processor's last events are not its successor's.
+                if !current() {
+                    return;
+                }
                 if tx
                     .send(Msg::Event {
                         pid: types::LOCAL.into(),
@@ -288,10 +434,12 @@ impl OcrControl {
                     return;
                 }
             }
-            let _ = tx.send(Msg::Drop {
-                pid: types::LOCAL.into(),
-                reason: "the local processor stopped".into(),
-            });
+            if current() {
+                let _ = tx.send(Msg::Drop {
+                    pid: types::LOCAL.into(),
+                    reason: "the local processor stopped".into(),
+                });
+            }
         });
     }
 
@@ -416,16 +564,34 @@ impl OcrControl {
             })
             .unwrap_or(false)
         };
-        let mut restart_required = false;
+        let restart_required = false;
+        let mut installing = false;
         let mut reason = String::new();
         if config.ocr.local_processing && !self.has_local() && config.ocr.backend != "skip" {
             reason = "this build runs no OCR of its own; only a connected processor reads volumes"
                 .into();
-        } else if wanted_local && !local_running {
-            restart_required = true;
-            reason = "local processing starts with the next server start".into();
+        } else if wanted_local && !local_running && self.0.pending.lock().is_none() {
+            // Turned on: install the OCR backend first if it is missing (in the
+            // background; its end starts this server's OCR), else start it now.
+            match self.installer().map(|i| i.start()) {
+                Some(Ok(true)) => {
+                    installing = true;
+                    reason = "installing the OCR backend in the background; this server's OCR starts when it is done".into();
+                }
+                Some(Err(e)) => {
+                    tracing::warn!("could not start the OCR backend install: {e}");
+                    self.restart_local_soon("local processing was turned on");
+                    reason = format!(
+                        "this server's OCR starts now; the OCR backend install did not start ({e})"
+                    );
+                }
+                Some(Ok(false)) | None => {
+                    self.restart_local_soon("local processing was turned on");
+                    reason = "this server's OCR starts now".into();
+                }
+            }
         }
-        json!({"applied": true, "installing": false, "restart_required": restart_required, "reason": reason})
+        json!({"applied": true, "installing": installing, "restart_required": restart_required, "reason": reason})
     }
 
     /// Cut off every processor of an account now (disabled, deleted, re-roled).

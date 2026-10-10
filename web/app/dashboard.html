@@ -26,6 +26,13 @@
         </div>
         <p class="text-muted" id="dash-pause" hidden></p>
         <p class="alert alert--info" id="dash-update" role="status" hidden></p>
+        <div class="panel" id="install-panel" hidden>
+            <h2>OCR backend</h2>
+            <p id="install-text" role="status"></p>
+            <div class="progress" id="install-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="OCR backend install"><div class="progress__fill" id="install-fill"></div></div>
+            <p class="form-hint" id="install-hint"></p>
+            <div class="panel__footer" id="install-actions" hidden><button type="button" class="btn btn--primary btn--sm" id="install-retry">Retry</button></div>
+        </div>
         <div class="alert alert--info" id="dash-setup" hidden>Nothing is running on this machine yet. <a href="/app/setup">Set it up</a>, or start the library server or the processor from the tray.</div>
 
         <div class="tiles" id="tiles"></div>

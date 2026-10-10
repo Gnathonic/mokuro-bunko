@@ -1,7 +1,8 @@
 // Processor wizard: library + account (tested), this machine's settings, the OCR
-// install (always: a processor without OCR does nothing) and optionally start with the
-// machine. The review step saves processor.yaml, installs OCR, sets up the start-up,
-// starts `processor serve` and waits for it to connect.
+// choices (always: a processor without OCR does nothing) and optionally start with the
+// machine. The review step saves processor.yaml and the OCR choices, sets up the
+// start-up, starts `processor serve` and waits for it to connect; the OCR backend
+// installs in the background meanwhile (the processor takes no work until it is done).
 (function () {
   'use strict';
   const { esc, get, post, info, showError, setBusy, wirePickers, wizard } = window.App;
@@ -13,7 +14,6 @@
   const state = { ocr: null, startup: null };
   const finished = {};
   let failedStage = null;
-  let doctorOk = true;
   let mark = () => {};
   const startupOn = () => $('want-startup').checked;
 
@@ -90,7 +90,7 @@
   }
 
   function stages() {
-    const s = [['save', 'Save processor.yaml'], ['ocr', 'Install OCR'], ['doctor', 'Check (doctor)']];
+    const s = [['save', 'Save processor.yaml'], ['ocr', 'OCR choices (the backend installs in the background once the processor runs)']];
     if (startupOn()) s.push(['startup', 'Start with the machine']);
     s.push(['start', 'Start the processor']);
     return s;
@@ -154,11 +154,10 @@
       }
     }
     if (k === 'ocr') {
-      const r = await S.runOcr(state.ocr.request(), $('install-job'), $('doctor-job'), mark);
-      if (r.ok) { finished.doctor = true; doctorOk = r.doctor_ok; }
-      return r.ok;
+      await S.queueOcr(state.ocr.request(), 'processor');
+      mark('ocr', 'ok', 'kept for the processor: ' + state.ocr.describe());
+      return true;
     }
-    if (k === 'doctor') return true; // runs with the install
     if (k === 'startup') {
       const m = await state.startup.apply();
       mark('startup', 'ok', m.length ? m[m.length - 1] : '');
@@ -196,8 +195,9 @@
     const s = r.status || {};
     $('p-done-body').innerHTML = '<div class="result ' + (r.state === 'connected' ? 'result--ok' : 'result--wait') + '">' +
       (r.state === 'connected' ? 'Connected to ' : 'Started; state ' + esc(r.state) + ' for ') +
-      esc(s.library || form().url) + (s.name ? ' as ' + esc(s.name) : '') + (r.pid ? ' (pid ' + esc(r.pid) + ')' : '') + '.</div>' +
-      (doctorOk ? '' : '<p class="form-hint mt-2">The check found problems: see <a href="/app/settings/doctor">Diagnostics</a>.</p>') +
+      esc(s.library || form().url) + (s.name ? ' as ' + esc(s.name) : '') + (r.pid ? ' (pid ' + esc(r.pid) + ')' : '') +
+      (r.by_tray ? '; the tray runs it (its Quit stops it)' : '') + '.</div>' +
+      '<div id="p-done-ocr" role="status" hidden></div>' +
       '<p class="form-hint mt-2">The library\'s admin panel lists it under Settings → OCR → Processors.</p>';
     $('p-done-links').innerHTML = [
       '<li><a href="#" id="p-dash">Go to its dashboard</a> <span class="form-hint" id="p-dash-note"></span></li>',
@@ -219,6 +219,7 @@
       note.textContent = 'Its dashboard is not reachable yet.';
     });
     w.go('p-done');
+    S.watchInstall($('p-done-ocr'), 'processor');
   }
 
   document.addEventListener('DOMContentLoaded', async () => {

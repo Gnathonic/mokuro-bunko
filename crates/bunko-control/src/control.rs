@@ -11,9 +11,13 @@ use tokio_util::sync::CancellationToken;
 use crate::activity::{Activity, Changes};
 use crate::pause::{PauseCtl, PauseError};
 use crate::types::{
-    BackendView, LibraryView, PauseBody, PauseMode, Problem, Role, State, Stats, Status,
-    UpdateView, Urls,
+    BackendView, LibraryView, OcrInstall, PauseBody, PauseMode, Problem, Role, State, Stats,
+    Status, UpdateView, Urls,
 };
+
+/// Starts (or retries) the instance's background OCR backend install: `Ok(true)` when
+/// one runs now, `Ok(false)` when nothing needs installing, `Err` why it cannot.
+pub type InstallTrigger = Arc<dyn Fn() -> Result<bool, String> + Send + Sync>;
 
 /// GPU busy (%) and CPU cores busy right now, from whatever the platform offers.
 pub trait LoadProbe: Send + Sync {
@@ -118,6 +122,9 @@ struct Inner {
     /// The automatic update's state and the problems it raised (kept apart from the
     /// doctor's, which `set_problems` replaces wholesale).
     update: Mutex<(Option<UpdateView>, Vec<Problem>)>,
+    /// The background OCR install's state and the problem its failure raised.
+    install: Mutex<(Option<OcrInstall>, Vec<Problem>)>,
+    install_trigger: Mutex<Option<InstallTrigger>>,
     urls: Mutex<Urls>,
     load: Mutex<Option<Arc<dyn LoadProbe>>>,
     stop: Mutex<Option<CancellationToken>>,
@@ -178,6 +185,8 @@ impl Control {
             backend: Mutex::new(BackendView::default()),
             problems: Mutex::new(Vec::new()),
             update: Mutex::new((None, Vec::new())),
+            install: Mutex::new((None, Vec::new())),
+            install_trigger: Mutex::new(None),
             load: Mutex::new(None),
             stop: Mutex::new(None),
         }))
@@ -301,6 +310,37 @@ impl Control {
         }
     }
 
+    /// The background OCR install (`status.install`) and the problems it raises (a
+    /// failure: listed after the doctor's, so the tray shows "!").
+    pub fn set_install(&self, view: Option<OcrInstall>, problems: Vec<Problem>) {
+        let mut i = self.0.install.lock();
+        if i.0 != view || i.1 != problems {
+            *i = (view, problems);
+            drop(i);
+            self.0.changes.bump();
+        }
+    }
+
+    pub fn install_view(&self) -> Option<OcrInstall> {
+        self.0.install.lock().0.clone()
+    }
+
+    /// What `POST /control/ocr-install` runs.
+    pub fn set_install_trigger(&self, trigger: InstallTrigger) {
+        *self.0.install_trigger.lock() = Some(trigger);
+    }
+
+    /// `POST /control/ocr-install`: start (or retry) the background OCR install.
+    pub fn start_install(&self) -> Result<bool, ControlError> {
+        let trigger = self.0.install_trigger.lock().clone();
+        match trigger {
+            Some(t) => t().map_err(ControlError::NotHere),
+            None => Err(ControlError::NotHere(
+                "this instance installs no OCR backend (lite build, or no local OCR)".into(),
+            )),
+        }
+    }
+
     pub fn set_urls(&self, urls: Urls) {
         *self.0.urls.lock() = urls;
         self.0.changes.bump();
@@ -380,12 +420,14 @@ impl Control {
             problems: {
                 let mut p = self.0.problems.lock().clone();
                 p.extend(self.0.update.lock().1.iter().cloned());
+                p.extend(self.0.install.lock().1.iter().cloned());
                 p
             },
             urls: self.0.urls.lock().clone(),
             managed: c.managed,
             can_pause: self.0.pause.is_some(),
             update: self.0.update.lock().0.clone(),
+            install: self.0.install.lock().0.clone(),
         }
     }
 

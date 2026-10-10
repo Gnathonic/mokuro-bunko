@@ -308,6 +308,9 @@ pub fn build(inp: &Inputs) -> MenuModel {
                     }
                 });
                 status_lines.push(format!("{label}: {text}"));
+                if let Some(l) = s.install.as_ref().and_then(|i| i.line()) {
+                    status_lines.push(if multi { format!("{label}: {l}") } else { l });
+                }
                 if let Some(l) = update_result_line(s, inp.now) {
                     status_lines.push(if l.starts_with('⚠') || !multi {
                         l
@@ -575,6 +578,38 @@ mod tests {
         status(&format!(
             r#"{{"role":"server","state":"idle","update":{{"state":"{state}","version":"0.7.1","from":"0.7.0","since":"{since}"}}}}"#
         ))
+    }
+
+    /// The background OCR install: its progress under the state; its failure (a fail
+    /// problem) asks for attention.
+    #[test]
+    fn ocr_install_progress_and_failure() {
+        let m = model(&[inst(
+            status(
+                r#"{"role":"server","state":"idle","install":{"state":"running","stage":"downloading","percent":42}}"#,
+            ),
+            true,
+        )]);
+        assert_eq!(
+            m.status_lines[1], "Installing OCR backend: 42%",
+            "{:?}",
+            m.status_lines
+        );
+        assert_eq!(m.icon, IconState::Idle);
+        let m = model(&[inst(
+            status(
+                r#"{"role":"server","state":"idle","install":{"state":"failed"},"problems":[{"severity":"fail","text":"OCR backend install failed: network down","kind":"ocr-install"}]}"#,
+            ),
+            true,
+        )]);
+        assert_eq!(m.icon, IconState::Attention);
+        assert!(
+            m.status_lines
+                .iter()
+                .any(|l| l.contains("OCR backend install failed")),
+            "{:?}",
+            m.status_lines
+        );
     }
 
     #[test]

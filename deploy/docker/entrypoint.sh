@@ -5,15 +5,12 @@
 #    nginx takes the public ${MOKURO_PORT} and serves library files with sendfile();
 #    mokuro-bunko moves to 127.0.0.1:${MOKURO_BACKEND_PORT} and answers library GETs
 #    with "X-Accel-Redirect: /internal-library/<path>". Same topology as 0.5.
-# 2. OCR backend, on demand: before `serve` (and `processor serve`) it runs
-#    `mokuro-bunko install-ocr --if-needed` as PUID:PGID. The image carries no pack and
-#    no model; that command detects the GPUs this container was given, applies
-#    ocr.backend (MOKURO_OCR_BACKEND) and installs the matching pack into
-#    ${MOKURO_STORAGE}/backends and the enabled engines' models into
-#    ${MOKURO_STORAGE}/models (persisted). It does nothing when local OCR is off
-#    (ocr.backend: skip, ocr.local_processing: false), when MOKURO_OCR_AUTO_INSTALL is
-#    false, or when a fitting pack of this release is already there. A failure is
-#    logged and the server starts anyway (without the recognizer engines).
+# 2. The OCR backend is NOT installed here: `serve` and `processor serve` start serving
+#    at once and install it themselves in the background when local OCR needs it
+#    (the GPU this container was given, ocr.backend / MOKURO_OCR_BACKEND; the pack into
+#    ${MOKURO_STORAGE}/backends, the models into ${MOKURO_STORAGE}/models, persisted),
+#    with the progress in the log, the admin panel and /control/status. A failed
+#    install is a problem with a retry, not a crash. MOKURO_OCR_AUTO_INSTALL=false: never.
 # 3. exec bunko-init, which applies PUID/PGID/UMASK/TAKE_OWNERSHIP (keeping the GPU
 #    device groups) and execs the server (see packaging/docker-init).
 set -eu
@@ -73,38 +70,5 @@ if [ -n "${MOKURO_TORCH_PACK:-}" ] && [ ! -f "${MOKURO_TORCH_PACK}/pack.json" ];
 	echo "[entrypoint] MOKURO_TORCH_PACK=${MOKURO_TORCH_PACK} holds no pack.json; ignored" >&2
 	unset MOKURO_TORCH_PACK
 fi
-
-ocr_install() {
-	echo "[entrypoint] OCR backend: mokuro-bunko install-ocr --if-needed $*"
-	/opt/mokuro-bunko/bunko-init install-ocr --if-needed "$@" ||
-		echo "[entrypoint] install-ocr failed; the server starts without the recognizer engines (see above; retried on the next start)" >&2
-}
-
-case "${1:-serve}" in
-serve)
-	ocr_install
-	;;
-processor)
-	if [ "${2:-}" = "serve" ]; then
-		# The processor's config: --config PATH / --config=PATH, else MOKURO_PROCESSOR_CONFIG.
-		pconf="${MOKURO_PROCESSOR_CONFIG:-}"
-		prev=""
-		for a in "$@"; do
-			case "$a" in
-			--config=*) pconf="${a#--config=}" ;;
-			esac
-			if [ "$prev" = "--config" ]; then
-				pconf="$a"
-			fi
-			prev="$a"
-		done
-		(
-			MOKURO_PROCESSOR_CONFIG="$pconf"
-			export MOKURO_PROCESSOR_CONFIG
-			ocr_install --processor
-		)
-	fi
-	;;
-esac
 
 exec /opt/mokuro-bunko/bunko-init "$@"
