@@ -90,7 +90,7 @@ shared with WebDAV (bunko-dav exposes it). The steps, in order:
 ### Generation upgrade (0.6 design, carried into 0.7)
 
 `ocr.upgrade.enabled` and `replace` (bunko-core config) control it. Implement the census,
-direct replace, generate-then-swap and revert as specified in
+direct replace and generate-then-swap (the new file replaces the old one; no revert) as specified in
 `../mokuro-webdav-library-worktrees/feat-0.6/docs/superpowers/specs/2026-09-29-generation-upgrade-design.md`
 (copied to `docs/rust-port/spec/generation-upgrade.md`). The main use is moving
 `mokuro-legacy` bare files to the new primary.

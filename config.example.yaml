@@ -167,9 +167,10 @@ ocr:
   # the derived settings and benchmark by hand". At startup.
   autobench: true
 
-  # Replace OLD primary OCR with the current primary generation's. Off by
-  # default: an upgrade rewrites what readers see (the old file is kept as a
-  # layer). See docs/MIGRATING-0.7.md.
+  # Replace OLD primary OCR with the current primary generation's: the new
+  # file replaces the old primary file (no copy is kept); files a person
+  # edited are skipped. Off by default: an upgrade rewrites what readers see.
+  # See docs/MIGRATING-0.7.md.
   upgrade:
     enabled: false
     # Which existing <Volume>.mokuro files may be replaced: an engine id, or

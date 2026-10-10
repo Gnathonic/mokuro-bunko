@@ -281,6 +281,9 @@ impl OcrControl {
             }
         }
         *self.0.runtime.lock() = tokio::runtime::Handle::try_current().ok();
+        // Layers an earlier 0.7 beta's upgrade kept of the replaced file: gone.
+        let up = self.0.upgrade.clone();
+        tokio::task::spawn_blocking(move || up.sweep_kept_from_audit());
         let installer = self.installer();
         if local_processing && let Some(factory) = self.0.local.clone() {
             if installer.as_ref().is_some_and(|i| i.running()) {

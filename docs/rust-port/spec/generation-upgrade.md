@@ -21,8 +21,11 @@ way to re-OCR a volume is to delete its sidecar by hand.
      in.
    - **Generate then swap:** otherwise the file is generated, then swapped in.
 
-   Either way, the upgrade runs only when the archive holds every page the old
-   file names.
+   Either way, the new file **replaces** the old one outright: the low-accuracy
+   file is not kept as a layer (extra layers are what non-primary generations
+   are for). The upgrade runs only when the archive holds every page the old
+   file names, and never touches a file a person edited unless an admin
+   forces that volume.
 
 ## 1. Deprecation (soft; removal in 0.7)
 
@@ -106,7 +109,8 @@ A volume is an **upgrade candidate** when all of the following hold:
      corrections). An `edit` whose details carry `"unchanged": true` does not
      count: the PUT re-sent the file's exact bytes (a backup, a re-upload), so
      the server left the file, its mtime and its provenance row alone;
-   - an audit-log `ocr_sidecar_reverted` of that path by a user account;
+   - an audit-log `ocr_sidecar_reverted` of that path by a user account (the
+     revert 0.7.0-beta.3 offered);
    - its `ocr_sidecars` row predating the file's current mtime by more than 2 s.
 
    An `upload` (the file did not exist before the PUT, as when a volume is
@@ -164,41 +168,48 @@ For each candidate, in this order:
 With the volume's per-path write lock held, and with the new content already
 validated and normalized in the workspace:
 
-1. **Keep the old file as a layer.** Copy the old bare file to
-   `<Volume>.<old-name>.mokuro` through a temp file and `os.replace`.
-   - `<old-name>` is the `generation_name` on its `ocr_sidecars` row, or
-     `mokuro` for `mokuro-legacy`. It must pass the layer-name grammar and
-     avoid the reserved names.
-   - If that path already holds a *different* file, `-prev`, `-prev2`, and so
-     on are appended.
-   - If the old file has no `ocr_engine` block, it is stamped with one:
-     `{"id": <engine>, "generation": <old-name>, "generator": "mokuro-bunko X", "upgraded_from_primary": true}`.
-     The reader treats an unstamped layer as a person's edit.
-   - An edited file that reaches here through a forced upgrade stays
-     unstamped, so the reader shows it as the edit it is.
-2. **Install the new file.** `os.replace(new, bare)`, which is atomic.
-   - If the new bytes came from a direct replace and that layer's row is
-     **disabled or gone**, the layer file is then removed, so it is not kept
-     twice.
-   - If the row is **enabled**, the layer file stays. Deleting it would make
+1. **Install the new file.** `os.replace(new, bare)`, which is atomic. The old
+   bare file is gone; no copy of it is kept.
+   - If the new bytes came from a direct replace, the layer they came from is
+     the primary's output twice over. It is removed when it is byte-identical
+     to the new bare file and no **enabled** row writes it.
+   - If an enabled row writes it, the layer stays: deleting it would only make
      that row pending again. The admin panel flags a primary whose recipe
      equals an enabled layer's recipe as redundant.
 
-**Crash safety.**
-- A crash between steps 1 and 2 leaves the old bare file and a copy of it.
-  There is never a moment with no bare file, so the primary never looks
-  pending.
-- The next scan still sees an old recipe and redoes the swap. Step 1 is
-  idempotent because the content is the same.
+**Crash safety.** The replace is one atomic rename, so there is never a moment
+with no bare file and the primary never looks pending. A crash before the
+rename leaves the old file; the next scan still sees an old recipe and redoes
+the upgrade.
 
 **Bookkeeping.**
-- `ocr_sidecars`: the old row moves to the layer path, and the new bare file
-  gets a row.
-- The audit log records `ocr_sidecar_upgraded` with `{from_recipe, to_recipe, kept_as, mode: direct|generated}`.
+- `ocr_sidecars`: the old bare file's row is dropped with it, and the new bare
+  file gets a row (a direct replace copies the layer's).
+- The audit log records `ocr_sidecar_upgraded` with `{from_recipe, to_recipe, replaced: true, mode: direct|generated}`.
 - The metadata recompile runs from the existing filesystem callback.
 - `volume_uuid` is preserved, because `_normalize_mokuro_metadata` stamps the
   volume's own uuid, so reading progress is untouched.
 - The manifest's `modified` changes, which is what tells readers to refetch.
+
+**Undo.** There is none: the old bytes are gone after a replace. The safety is
+in the gates (§3): a file a person edited is skipped, and a short archive is
+never regenerated. An admin who wants a volume's old OCR back restores the old
+file from their own copy (a WebDAV PUT, which then counts as an edit).
+
+**Clean-up of the earlier 0.7 betas' kept layers.** 0.7.0-beta.3 kept the old
+file as `<Volume>.<old-name>.mokuro` (usually `<Volume>.mokuro.mokuro`),
+stamped `ocr_engine.upgraded_from_primary: true`, plus an unstamped original
+under `<storage>/.upgrade-originals/`. Such a layer is removed, with its
+provenance row and its saved original, once the volume's bare file is the
+upgraded output (its recipe equals the primary's):
+- **at startup,** for every layer an `ocr_sidecar_upgraded` audit event names
+  in `kept_as`;
+- **at the census,** for a volume's layers named `mokuro`, `mokuro-old*` or
+  `*-prev*`.
+
+Only a file that carries the stamp is removed: never a layer a person made,
+another generation's layer, or what a forced upgrade kept of an edited file
+(left unstamped). One log line per file removed.
 
 ## 6. Admin surface
 
@@ -209,7 +220,7 @@ section showing:
   (e.g. *mokuro-legacy 1,234 · hayai-nova 40 · unknown 3*);
 - checkboxes that write `ocr.upgrade.replace`, and the enable toggle;
 - counts for:
-  - **ready to swap** — direct replace available;
+  - **ready to replace** — direct replace available;
   - **needs OCR**;
   - **skipped (missing pages)**;
   - **skipped (edited)** — with the volume list.
@@ -217,13 +228,10 @@ section showing:
 The census is computed on the watcher's scan and cached against each bare
 file's stat, so it does not re-read unchanged files.
 
-**Single-volume actions:**
-- `POST /api/ocr/upgrade/<volume>` with `force` overrides the edited check
-  only. The missing-pages check is never overridden.
-- `POST /api/ocr/upgrade/<volume>/revert` swaps the kept layer back. This is
-  the same swap run the other way.
-
-Both are audited.
+**Single-volume action:** `POST /api/ocr/upgrade/<volume>` with `force`
+overrides the edited check only. The missing-pages check is never overridden.
+It is audited. (0.7.0-beta.3's `POST …/<volume>/revert` answers 410: with no
+kept layer there is nothing to swap back.)
 
 **Queue page.** Upgrade jobs show as their own kind, and a volume's ETA
 counts them.
@@ -243,18 +251,17 @@ counts them.
 - **Unit:**
   - recipe classification for each of the four sources in §2;
   - the four candidate conditions, each alone;
-  - `-prev` naming and reserved-name avoidance;
-  - stamping and not-stamping;
-  - the redundant-layer rule.
-- **Swap:** injected crash points after step 1, and after step 2 before the
-  bookkeeping. Each rerun must converge.
+  - the redundant-layer rule;
+  - an upgrade leaves no layer of the old file;
+  - the clean-up removes a stamped kept layer and never an unstamped one.
+- **Swap:** an injected crash after the rename, before the bookkeeping. The
+  rerun must converge.
 - **Watcher:**
   - upgrade jobs order after ordinary ones;
   - a remote processor's result is swapped, not `_1`-suffixed;
   - `publish_guard` still drops a result whose archive changed.
 - **End to end:** the ~/Downloads samples with their shipped `.mokuro` files.
-  Enable the upgrade, check both the direct and the generated paths, then
-  check that revert restores byte-identical files.
+  Enable the upgrade and check both the direct and the generated paths.
 - **Deprecation:**
   - the catalog omits mokuro and ctd;
   - the badge shows;
@@ -265,7 +272,7 @@ counts them.
 ## Out of scope
 
 - Upgrading non-primary layers. Disabling the old row already retires a layer.
-- Deleting kept layers. Keeping them is what makes an upgrade reversible.
-  Space is left to the admin.
+- Keeping the old file. An upgrade replaces it; a library that wants another
+  recipe's OCR beside the primary adds a non-primary generation.
 - Deciding which recipe reads better. The admin decides, through the primary
   row and `replace`.

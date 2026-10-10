@@ -19,6 +19,9 @@ use http::{Request, StatusCode};
 use tower::ServiceExt;
 
 const LEGACY: &str = r#"{"version": "0.2.1", "title": "A", "volume": "V1", "pages": [{"img_path": "001.jpg", "blocks": []}, {"img_path": "002.jpg", "blocks": []}, {"img_path": "003.jpg", "blocks": []}]}"#;
+const HAYAI: &str = r#"{"version":"0.2.5","title":"A","volume":"V1","volume_uuid":"vu","ocr_engine":{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512},"pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
+/// The old file as 0.7.0-beta.3's upgrade kept it beside the new one.
+const KEPT: &str = r#"{"version":"0.2.1","title":"A","volume":"V1","pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}],"ocr_engine":{"id":"mokuro","generation":"mokuro","generator":"mokuro-bunko 0.7.0-beta.3","upgraded_from_primary":true}}"#;
 /// The same, with a reader's text correction.
 const CORRECTED: &str = r#"{"version": "0.2.1", "title": "A", "volume": "V1", "pages": [{"img_path": "001.jpg", "blocks": [{"lines": ["fixed"]}]}, {"img_path": "002.jpg", "blocks": []}, {"img_path": "003.jpg", "blocks": []}]}"#;
 
@@ -260,4 +263,114 @@ async fn a_file_newer_than_its_provenance_row_is_edited() {
         .set_modified(later)
         .unwrap();
     assert_eq!(env.judge("A/V1.cbz"), Verdict::SkippedEdited);
+}
+
+/// The `.mokuro` files of a series folder, sorted.
+fn sidecars(dir: &std::path::Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".mokuro"))
+        .collect();
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn an_edited_volume_is_not_replaced_until_forced_and_then_keeps_no_layer() {
+    let env = Env::new();
+    env.add_volume("A").await;
+    assert_eq!(
+        env.put("/mokuro-reader/A/V1.mokuro", CORRECTED.as_bytes())
+            .await,
+        204
+    );
+    std::fs::write(env.lib("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    assert_eq!(env.judge("A/V1.cbz"), Verdict::SkippedEdited);
+    assert_eq!(
+        std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
+        CORRECTED,
+        "an edited file is left alone"
+    );
+    env.up().force("A/V1.cbz");
+    let Verdict::Ready(layer) = env.up().judge(&env.lib("A/V1.cbz"), "A/V1.cbz").1 else {
+        panic!("forced: the matching layer is ready to swap in");
+    };
+    env.up()
+        .direct_replace(&env.lib("A/V1.cbz"), &layer)
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
+        HAYAI
+    );
+    assert_eq!(sidecars(&env.lib("A")), ["V1.mokuro"]);
+    let rows = env.services.db.list_audit_events(100, None).unwrap();
+    let up = rows
+        .iter()
+        .find(|e| e.action == "ocr_sidecar_upgraded")
+        .expect("audited");
+    let details: serde_json::Value = serde_json::from_str(up.details.as_deref().unwrap()).unwrap();
+    assert_eq!(details["replaced"], true);
+    assert_eq!(details["mode"], "direct");
+    assert!(details.get("kept_as").is_none(), "{details}");
+    assert_eq!(env.judge("A/V1.cbz"), Verdict::Current);
+}
+
+fn beta3_upgrade_audit(env: &Env, bare: &str, kept: &str) {
+    env.services
+        .db
+        .log_audit_event(
+            &NewAuditEvent::new("ocr_sidecar_upgraded")
+                .target_type("sidecar")
+                .target_path(&format!("/mokuro-reader/{bare}"))
+                .details(
+                    AuditDetails::new()
+                        .with("kept_as", kept)
+                        .with("mode", "generated"),
+                ),
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn layers_beta3_kept_are_removed_at_startup_and_nothing_else() {
+    use sha2::Digest;
+    let env = Env::new();
+    for folder in ["A", "B", "C"] {
+        env.mkcol(folder);
+        std::fs::write(env.lib(&format!("{folder}/V1.cbz")), cbz(3)).unwrap();
+    }
+    // A: upgraded; beta.3 kept the old file as a stamped layer, and its unstamped
+    // original under `.upgrade-originals`.
+    std::fs::write(env.lib("A/V1.mokuro"), HAYAI).unwrap();
+    std::fs::write(env.lib("A/V1.mokuro.mokuro"), KEPT).unwrap();
+    let digest = hex::encode(sha2::Sha256::digest(b"A/V1.mokuro.mokuro"));
+    let backup = env
+        .storage
+        .join(".upgrade-originals")
+        .join(format!("{}.mokuro", &digest[..32]));
+    std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+    std::fs::write(&backup, LEGACY).unwrap();
+    beta3_upgrade_audit(&env, "A/V1.mokuro", "A/V1.mokuro.mokuro");
+    // B: a forced upgrade kept a person's edit unstamped; a person's own layer beside.
+    std::fs::write(env.lib("B/V1.mokuro"), HAYAI).unwrap();
+    std::fs::write(env.lib("B/V1.mokuro.mokuro"), CORRECTED).unwrap();
+    std::fs::write(env.lib("B/V1.mine.mokuro"), CORRECTED).unwrap();
+    beta3_upgrade_audit(&env, "B/V1.mokuro", "B/V1.mokuro.mokuro");
+    // C: the bare file is not the upgraded output (the stamped copy a crash left).
+    std::fs::write(env.lib("C/V1.mokuro"), LEGACY).unwrap();
+    std::fs::write(env.lib("C/V1.mokuro.mokuro"), KEPT).unwrap();
+    beta3_upgrade_audit(&env, "C/V1.mokuro", "C/V1.mokuro.mokuro");
+
+    assert_eq!(env.up().sweep_kept_from_audit(), 1);
+    assert_eq!(sidecars(&env.lib("A")), ["V1.mokuro"]);
+    assert!(!backup.exists());
+    assert!(!env.storage.join(".upgrade-originals").exists());
+    assert_eq!(
+        sidecars(&env.lib("B")),
+        ["V1.mine.mokuro", "V1.mokuro", "V1.mokuro.mokuro"]
+    );
+    assert_eq!(sidecars(&env.lib("C")), ["V1.mokuro", "V1.mokuro.mokuro"]);
+    assert_eq!(env.up().sweep_kept_from_audit(), 0, "idempotent");
 }
