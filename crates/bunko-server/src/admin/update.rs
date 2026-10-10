@@ -17,7 +17,9 @@
 //! ([`UpdateService::try_auto`]): new OCR claims stop everywhere, the claims in flight
 //! and the uploads finish, the [`ReleaseInstaller`] fetches and switches the release
 //! (binary + backend pack + models), and the restart hook restarts the server. Docker
-//! and package-managed installs only report (a `fail` problem: the owner must act).
+//! and package-managed installs cannot update themselves ([`manual_update`]): there
+//! `update.auto` is ignored, the response says `auto_supported: false` and a newer
+//! release is only reported (state `available`, no problem: nothing failed).
 
 use bunko_control::{Problem, UpdateView};
 use bunko_core::Config;
@@ -157,8 +159,24 @@ impl UpdateService {
         *self.inner.reporter.lock() = Some(reporter);
     }
 
+    /// `update.auto` as saved.
     pub fn auto_enabled(&self) -> bool {
         self.inner.config.read().update.auto
+    }
+
+    /// How this server is installed: from the last check, else detected.
+    fn install_kind(&self) -> InstallKind {
+        self.inner
+            .cached
+            .lock()
+            .as_ref()
+            .map(|(_, s)| s.install.clone())
+            .unwrap_or_else(InstallKind::detect)
+    }
+
+    /// `update.auto` as it acts: on, and an install that can update itself.
+    pub fn auto_effective(&self) -> bool {
+        self.auto_enabled() && manual_update(&self.install_kind(), None).is_none()
     }
 
     /// The automatic update's state and problems.
@@ -198,7 +216,7 @@ impl UpdateService {
                 .then(|| old.as_ref().and_then(|o| o.from.clone()))
                 .flatten(),
             message,
-            auto: self.auto_enabled(),
+            auto: self.auto_effective(),
             since: if same_state {
                 old.and_then(|o| o.since)
             } else {
@@ -391,7 +409,9 @@ impl UpdateService {
     /// stopped meanwhile), then the server restarts. Docker and managed installs, a
     /// blocked (rolled back) version and a failing install only report.
     pub async fn try_auto(&self, status: &UpdateStatus, stop: &CancellationToken) {
-        if !self.auto_enabled() {
+        // Docker and managed installs update from outside: `update.auto` is ignored
+        // there (no error), and a newer release is only reported.
+        if !self.auto_enabled() || manual_update(&status.install, None).is_some() {
             // Off: nothing is installed. "Updated"/"rolled back" from the start stays.
             let keep = self
                 .inner
@@ -651,6 +671,22 @@ fn unchecked_status() -> UpdateStatus {
     }
 }
 
+/// How an install that cannot update itself is updated (one line for the panel), or
+/// None for a self-managed install. `image`: the release's Docker image, when known.
+pub fn manual_update(install: &InstallKind, image: Option<&str>) -> Option<String> {
+    match install {
+        InstallKind::SelfManaged { .. } => None,
+        InstallKind::Docker => Some(format!(
+            "Runs in Docker: update by pulling the new image (e.g. Unraid's Check for Updates, or a container auto-updater){}",
+            image.map(|i| format!(". Image: {i}")).unwrap_or_default()
+        )),
+        InstallKind::Managed { by } => Some(format!(
+            "Installed by {by}: update it with {by} (it replaces this program)"
+        )),
+        InstallKind::Mobile => Some("Updates come through the app store".into()),
+    }
+}
+
 /// Why an available update cannot be applied from the panel.
 pub fn cannot_apply_reason(status: &UpdateStatus) -> String {
     match &status.install {
@@ -692,7 +728,14 @@ pub(super) mod http {
             m.insert("applying".into(), json!(updates.is_applying()));
             // 0.7: automatic updates (`update.auto`) and where one stands.
             let (view, problems) = updates.auto_view();
-            m.insert("auto".into(), json!(updates.auto_enabled()));
+            // Docker and managed installs: no automatic updates, one line saying how.
+            let manual = super::manual_update(&status.install, status.docker_image.as_deref());
+            m.insert("auto_supported".into(), json!(manual.is_none()));
+            m.insert("manual_update".into(), json!(manual));
+            m.insert(
+                "auto".into(),
+                json!(updates.auto_enabled() && manual.is_none()),
+            );
             m.insert("auto_state".into(), json!(view));
             m.insert("problems".into(), json!(problems));
             if status.available && !status.can_apply {
@@ -744,7 +787,7 @@ pub(super) mod http {
             Ok(Ok(())) => {}
             Ok(Err(r)) | Err(r) => return r,
         }
-        let (auto, check) = (updates.auto_enabled(), updates.checks_enabled());
+        let (auto, check) = (updates.auto_effective(), updates.checks_enabled());
         tracing::info!(
             "Updates: automatic install {}, background checks {} (admin panel)",
             if auto { "on" } else { "off" },
@@ -1006,14 +1049,36 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn docker_and_blocked_versions_only_report() {
-        let (svc, log, _d) = service(true, InstallKind::Docker, false, 0);
-        let status = svc.check_now().await;
-        svc.try_auto(&status, &CancellationToken::new()).await;
-        assert!(log.get().is_empty());
-        let (view, problems) = svc.auto_view();
-        assert_eq!(view.unwrap().state, "blocked");
-        assert_eq!(problems[0].severity, bunko_control::Severity::Fail);
-        assert_eq!(problems[0].kind.as_deref(), Some("update"));
+        // Docker and managed installs: a saved `update.auto: true` is ignored, a newer
+        // release is reported as available, with no problem (nothing failed, no tray
+        // flag).
+        for install in [
+            InstallKind::Docker,
+            InstallKind::Managed { by: "apt".into() },
+        ] {
+            let (svc, log, _d) = service(true, install.clone(), false, 0);
+            let status = svc.check_now().await;
+            svc.try_auto(&status, &CancellationToken::new()).await;
+            assert!(log.get().is_empty(), "{install:?}");
+            let (view, problems) = svc.auto_view();
+            let view = view.unwrap();
+            assert_eq!(view.state, "available", "{install:?}");
+            assert_eq!(view.version.as_deref(), Some("99.0.0"));
+            assert!(!view.auto, "auto is not in effect here");
+            assert!(problems.is_empty(), "{problems:?}");
+            assert!(svc.auto_enabled() && !svc.auto_effective());
+        }
+        assert!(
+            manual_update(&InstallKind::Docker, Some("ghcr.io/x/bunko:9.9.9"))
+                .unwrap()
+                .ends_with("Image: ghcr.io/x/bunko:9.9.9")
+        );
+        assert!(
+            manual_update(&InstallKind::Managed { by: "apt".into() }, None)
+                .unwrap()
+                .contains("apt")
+        );
+        assert!(manual_update(&self_managed(), None).is_none());
 
         let (svc, log, dir) = service(true, self_managed(), false, 0);
         Blocked {
