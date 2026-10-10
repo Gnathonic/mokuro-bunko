@@ -20,10 +20,7 @@
 //! `HttpOnly; SameSite=Strict`, one hour), which the unchanged wizard page and its
 //! `/setup/api/*` calls carry. A script may send the code as `X-Setup-Code` instead
 //! (same limits). The code and every session die as soon as an admin exists (the wizard,
-//! `admin add-user`, `MOKURO_ADMIN_USERNAME`). The code is never written to a response.
-//!
-//! [`bootstrap_admin_from_env`]: `MOKURO_ADMIN_USERNAME` + `MOKURO_ADMIN_PASSWORD` (or
-//! `MOKURO_ADMIN_PASSWORD_FILE`) create the admin at startup when none exists (Docker).
+//! `admin add-user`). The code is never written to a response.
 
 use super::AccountsDeps;
 use super::util::{
@@ -47,7 +44,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// The header a script may send the setup code in.
 pub const SETUP_CODE_HEADER: &str = "x-setup-code";
@@ -698,93 +695,6 @@ async fn complete(
 }
 
 const VALID_MODES: [&str; 4] = ["disabled", "self", "invite", "approval"];
-
-// --- the Docker bootstrap ------------------------------------------------------------
-
-pub const ADMIN_USERNAME_ENV: &str = "MOKURO_ADMIN_USERNAME";
-pub const ADMIN_PASSWORD_ENV: &str = "MOKURO_ADMIN_PASSWORD";
-pub const ADMIN_PASSWORD_FILE_ENV: &str = "MOKURO_ADMIN_PASSWORD_FILE";
-
-/// What [`bootstrap_admin`] did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Bootstrap {
-    /// No `MOKURO_ADMIN_USERNAME`.
-    NotAsked,
-    Created(String),
-    /// An admin exists: the variables were ignored.
-    Ignored,
-    /// Bad input or a failed create: nothing was created (the reason, logged).
-    Failed(String),
-}
-
-/// [`bootstrap_admin`] over the process environment (the server's startup).
-pub fn bootstrap_admin_from_env(db: &Database, flag: &SetupFlag) -> Bootstrap {
-    bootstrap_admin(db, flag, |k| std::env::var(k).ok())
-}
-
-/// `MOKURO_ADMIN_USERNAME` + `MOKURO_ADMIN_PASSWORD` (or `MOKURO_ADMIN_PASSWORD_FILE`,
-/// its trailing newline dropped) create the admin account when none exists, with the
-/// wizard's checks. An existing admin wins: the variables are ignored (one log line).
-/// The password is never logged.
-pub fn bootstrap_admin(
-    db: &Database,
-    flag: &SetupFlag,
-    env: impl Fn(&str) -> Option<String>,
-) -> Bootstrap {
-    let set = |k: &str| env(k).filter(|v| !v.trim().is_empty());
-    let Some(username) = set(ADMIN_USERNAME_ENV) else {
-        if set(ADMIN_PASSWORD_ENV).is_some() || set(ADMIN_PASSWORD_FILE_ENV).is_some() {
-            warn!("{ADMIN_PASSWORD_ENV} is set without {ADMIN_USERNAME_ENV}: ignored");
-        }
-        return Bootstrap::NotAsked;
-    };
-    let username = username.trim().to_string();
-    let fail = |why: String| {
-        error!("{ADMIN_USERNAME_ENV}: the admin account was not created: {why}");
-        Bootstrap::Failed(why)
-    };
-    match flag.needs_setup(db) {
-        Ok(false) => {
-            info!(
-                "{ADMIN_USERNAME_ENV} is set but an admin account exists: ignored (change accounts in the admin panel)"
-            );
-            return Bootstrap::Ignored;
-        }
-        Ok(true) => {}
-        Err(e) => return fail(format!("the database could not be read: {e}")),
-    }
-    let password = match (set(ADMIN_PASSWORD_ENV), set(ADMIN_PASSWORD_FILE_ENV)) {
-        (Some(p), _) => p,
-        (None, Some(path)) => match std::fs::read_to_string(path.trim()) {
-            Ok(p) => p.trim_end_matches(['\r', '\n']).to_string(),
-            Err(e) => {
-                return fail(format!(
-                    "{ADMIN_PASSWORD_FILE_ENV}: could not read {}: {e}",
-                    path.trim()
-                ));
-            }
-        },
-        (None, None) => {
-            return fail(format!(
-                "{ADMIN_PASSWORD_ENV} (or {ADMIN_PASSWORD_FILE_ENV}) is not set"
-            ));
-        }
-    };
-    if let Some(msg) = validate_username(&username) {
-        return fail(format!("username: {msg}"));
-    }
-    if let Some(msg) = validate_password(&password) {
-        return fail(format!("password: {msg}"));
-    }
-    match db.create_user(&username, &password, Role::Admin, UserStatus::Active, "") {
-        Ok(_) => {
-            flag.mark_complete();
-            info!("Created the admin account '{username}' from {ADMIN_USERNAME_ENV}");
-            Bootstrap::Created(username)
-        }
-        Err(e) => fail(e.to_string()),
-    }
-}
 
 #[cfg(test)]
 mod tests {

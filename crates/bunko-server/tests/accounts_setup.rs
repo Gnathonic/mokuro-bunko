@@ -1,14 +1,14 @@
 //! First-run setup wizard. Ports tests/unit/test_setup_api.py and covers the 0.7 setup
 //! code that lets another computer (a Docker host's or a NAS's browser) through the
-//! localhost gate, and the `MOKURO_ADMIN_*` bootstrap.
+//! localhost gate.
 
 mod accounts_support;
 
 use accounts_support::*;
 use bunko_core::Role;
 use bunko_server::accounts::{
-    ATTEMPTS_PER_IP, Bootstrap, LEGACY_TOKEN_FILE, REMOTE_NEEDS_CODE, ROTATE_AFTER, SESSION_COOKIE,
-    bootstrap_admin, normalize_code, remove_legacy_token,
+    ATTEMPTS_PER_IP, LEGACY_TOKEN_FILE, REMOTE_NEEDS_CODE, ROTATE_AFTER, SESSION_COOKIE,
+    normalize_code, remove_legacy_token,
 };
 use serde_json::json;
 
@@ -484,133 +484,6 @@ fn the_banner_names_the_address_and_the_code_once() {
     assert!(b.join("\n").contains("this computer only"));
     let b = bunko_server::app::setup_banner("0.0.0.0", 8081, false, "X", true, true);
     assert!(b[1].contains("<web UI port>"), "behind nginx: {b:?}");
-}
-
-// --- MOKURO_ADMIN_USERNAME / MOKURO_ADMIN_PASSWORD ----------------------------------------
-
-fn vars(pairs: &[(&str, String)]) -> impl Fn(&str) -> Option<String> + use<> {
-    let pairs: Vec<(String, String)> = pairs
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.clone()))
-        .collect();
-    move |k| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
-}
-
-#[tokio::test]
-async fn env_bootstrap_creates_the_admin_once() {
-    let env = Env::new();
-    let code = env.deps.setup.issue_code();
-    let none = bootstrap_admin(&env.db, &env.deps.setup, vars(&[]));
-    assert_eq!(none, Bootstrap::NotAsked);
-    let made = bootstrap_admin(
-        &env.db,
-        &env.deps.setup,
-        vars(&[
-            ("MOKURO_ADMIN_USERNAME", "boss".into()),
-            ("MOKURO_ADMIN_PASSWORD", "password123".into()),
-        ]),
-    );
-    assert_eq!(made, Bootstrap::Created("boss".into()));
-    let u = env.db.get_user("boss").unwrap().unwrap();
-    assert_eq!(u.role, Role::Admin);
-    assert!(
-        env.db
-            .authenticate_user("boss", "password123")
-            .unwrap()
-            .is_some()
-    );
-    // Setup is over: no code, and the remote page is the inert wizard.
-    assert!(!env.deps.setup.has_code());
-    let r = env.send(code_form(DOCKER, &code)).await;
-    assert_eq!(r.header("set-cookie"), None);
-    // The next start: an admin exists, the variables are ignored.
-    let again = bootstrap_admin(
-        &env.db,
-        &env.deps.setup,
-        vars(&[
-            ("MOKURO_ADMIN_USERNAME", "other".into()),
-            ("MOKURO_ADMIN_PASSWORD", "password456".into()),
-        ]),
-    );
-    assert_eq!(again, Bootstrap::Ignored);
-    assert!(env.db.get_user("other").unwrap().is_none());
-}
-
-#[tokio::test]
-async fn env_bootstrap_refuses_bad_input_and_reads_a_password_file() {
-    let env = Env::new();
-    let setup = &env.deps.setup;
-    let short = bootstrap_admin(
-        &env.db,
-        setup,
-        vars(&[
-            ("MOKURO_ADMIN_USERNAME", "boss".into()),
-            ("MOKURO_ADMIN_PASSWORD", "short".into()),
-        ]),
-    );
-    assert!(
-        matches!(short, Bootstrap::Failed(ref m) if m.contains("password")),
-        "{short:?}"
-    );
-    let bad_name = bootstrap_admin(
-        &env.db,
-        setup,
-        vars(&[
-            ("MOKURO_ADMIN_USERNAME", "../x".into()),
-            ("MOKURO_ADMIN_PASSWORD", "password123".into()),
-        ]),
-    );
-    assert!(matches!(bad_name, Bootstrap::Failed(_)));
-    let no_password = bootstrap_admin(
-        &env.db,
-        setup,
-        vars(&[("MOKURO_ADMIN_USERNAME", "boss".into())]),
-    );
-    assert!(matches!(no_password, Bootstrap::Failed(_)));
-    // A name a reader already has: not promoted.
-    env.user("reader", "password123", Role::Registered);
-    let taken = bootstrap_admin(
-        &env.db,
-        setup,
-        vars(&[
-            ("MOKURO_ADMIN_USERNAME", "reader".into()),
-            ("MOKURO_ADMIN_PASSWORD", "password123".into()),
-        ]),
-    );
-    assert!(matches!(taken, Bootstrap::Failed(_)), "{taken:?}");
-    assert_eq!(
-        env.db.get_user("reader").unwrap().unwrap().role,
-        Role::Registered
-    );
-    assert!(setup.needs_setup(&env.db).unwrap(), "nothing created");
-    let missing = bootstrap_admin(
-        &env.db,
-        setup,
-        vars(&[
-            ("MOKURO_ADMIN_USERNAME", "boss".into()),
-            ("MOKURO_ADMIN_PASSWORD_FILE", "/nonexistent/secret".into()),
-        ]),
-    );
-    assert!(matches!(missing, Bootstrap::Failed(_)));
-
-    // Docker secrets end in a newline.
-    let secret = env.dir.path().join("admin_password");
-    std::fs::write(&secret, "correct horse\n").unwrap();
-    let made = bootstrap_admin(
-        &env.db,
-        setup,
-        vars(&[
-            ("MOKURO_ADMIN_USERNAME", "boss".into()),
-            ("MOKURO_ADMIN_PASSWORD_FILE", secret.display().to_string()),
-        ]),
-    );
-    assert_eq!(made, Bootstrap::Created("boss".into()));
-    assert!(
-        env.db
-            .authenticate_user("boss", "correct horse")
-            .unwrap()
-            .is_some()
-    );
 }
 
 #[tokio::test]

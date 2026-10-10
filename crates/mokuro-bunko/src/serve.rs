@@ -124,9 +124,7 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
                 s.installer = Some(ocr_installer.clone());
             }
             let services = Services::new(config, Some(config_path.clone()), &opts)?;
-            // Docker's first-run admin (MOKURO_ADMIN_USERNAME / _PASSWORD), then the
-            // setup code while there still is no admin.
-            bunko_server::accounts::bootstrap_admin_from_env(&services.db, &services.setup);
+            // The setup code while there still is no admin.
             app::announce_setup(&services);
             services.updates.set_view(started.view, started.problems);
             if let Some(c) = &control {

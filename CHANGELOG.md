@@ -31,9 +31,6 @@
   the wizard; scripts may send it as `X-Setup-Code`.
   Localhost still needs no code. The code lives in memory only and dies once an admin
   exists. 0.5 allowed setup from localhost only.
-- `MOKURO_ADMIN_USERNAME` + `MOKURO_ADMIN_PASSWORD` (or `MOKURO_ADMIN_PASSWORD_FILE`)
-  create the admin on the first start when none exists, and are ignored (logged) once
-  one does. Optional fields in the Unraid templates; commented in the compose files.
 
 ### Changed
 - The full Docker image's entrypoint no longer runs `install-ocr --if-needed` before

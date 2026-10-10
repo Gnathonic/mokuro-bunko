@@ -55,7 +55,7 @@ The full build runs on any GPU: the OCR recognizers run on **libtorch**, which `
 
 Run `mokuro-bunko`. On a desktop it starts the app: a tray icon, and the first time the setup wizard in your browser. Headless (a server, SSH) it runs what is set up, or the terminal setup when nothing is. `mokuro-bunko --help` lists the commands. On Windows, use `mokuro-bunko-cli` in a terminal.
 
-The first browser visit to a new server (`http://localhost:8080`) walks you through creating the admin account; `mokuro-bunko setup` does the same in the console. From a browser on another machine (Docker, a NAS) the setup page asks for the one-time **setup code** the server prints in its log at startup (`First run: create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`). Or let Docker create the admin on first start with `MOKURO_ADMIN_USERNAME` and `MOKURO_ADMIN_PASSWORD` (or `MOKURO_ADMIN_PASSWORD_FILE`).
+The first browser visit to a new server (`http://localhost:8080`) walks you through creating the admin account; `mokuro-bunko setup` does the same in the console. From a browser on another machine (Docker, a NAS) the setup page asks for the one-time **setup code** the server prints in its log at startup (`First run: create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`).
 
 ### Linux
 
@@ -89,7 +89,7 @@ docker run -d --name mokuro-bunko -p 8080:8080 -v mokuro-data:/data \
 docker logs mokuro-bunko      # First run: … /setup (setup code: XXXXX-XXXXX), then the OCR download
 ```
 
-The server answers within seconds. **First admin**: open `http://<host>:8080/setup` and enter the one-time setup code from the log (from the machine itself no code is needed), or set `MOKURO_ADMIN_USERNAME` and `MOKURO_ADMIN_PASSWORD` for the first start.
+The server answers within seconds. **First admin**: open `http://<host>:8080/setup` and enter the one-time setup code from the log (from the machine itself no code is needed).
 
 **OCR backend**: downloaded in the background while the server already serves: ~100 MB for the CPU, ~2 GB for NVIDIA (~350 MB from the release, the rest NVIDIA's CUDA libraries from PyPI), ~3 GB for AMD, then the models of the enabled engines. The log and the admin panel (Settings → OCR → Processors) show the progress; local OCR starts by itself when it is done; a failed download is shown there with a Retry button (and retried by itself). Later starts reuse it. Starting the container with a different GPU (or setting `MOKURO_OCR_BACKEND` to a GPU it now sees) installs that GPU's backend the same way.
 
@@ -111,7 +111,7 @@ The server keeps the groups that own those devices when it switches to `PUID:PGI
 
 **Compose**: [`deploy/docker-compose.yml`](deploy/docker-compose.yml) (CPU, with commented NVIDIA and AMD lines), [`deploy/docker-compose.unraid-cuda.yml`](deploy/docker-compose.unraid-cuda.yml) (NVIDIA, `gpus: all`), [`deploy/docker-compose.lite.yml`](deploy/docker-compose.lite.yml), [`deploy/docker-compose.processor.yml`](deploy/docker-compose.processor.yml) (a GPU processor for a library elsewhere): `docker compose -f deploy/docker-compose.yml up -d`.
 
-**Unraid**: add the template [`deploy/unraid/mokuro-bunko.xml`](deploy/unraid/mokuro-bunko.xml) (`--runtime=nvidia` for an NVIDIA GPU with the Nvidia-Driver plugin, driver ≥ 580; for AMD replace it with `--device=/dev/kfd --device=/dev/dri`; PUID 99 / PGID 100, `/data` and `/config` under `/mnt/user/appdata/mokuro-bunko/`) or [`mokuro-bunko-lite.xml`](deploy/unraid/mokuro-bunko-lite.xml). This branch's templates update themselves from it and default to the `beta` image; the optional *Admin username* / *Admin password* fields create the first admin.
+**Unraid**: add the template [`deploy/unraid/mokuro-bunko.xml`](deploy/unraid/mokuro-bunko.xml) (`--runtime=nvidia` for an NVIDIA GPU with the Nvidia-Driver plugin, driver ≥ 580; for AMD replace it with `--device=/dev/kfd --device=/dev/dri`; PUID 99 / PGID 100, `/data` and `/config` under `/mnt/user/appdata/mokuro-bunko/`) or [`mokuro-bunko-lite.xml`](deploy/unraid/mokuro-bunko-lite.xml). This branch's templates update themselves from it and default to the `beta` image; the first admin is created at `/setup` with the setup code from the container's log.
 
 **Volumes and variables**:
 
@@ -123,7 +123,6 @@ The server keeps the groups that own those devices when it switches to `PUID:PGI
 | `MOKURO_NGINX_ACCEL=1` | Put the bundled nginx in front for library downloads (as in 0.5). |
 | `MOKURO_OCR_BACKEND` | `auto` (default: the GPU the container sees), `cuda`, `rocm`, `cpu` (stay on the CPU even with a GPU), or `skip` (no OCR here; remote processors only, nothing downloaded). Decides which backend is downloaded. |
 | `MOKURO_OCR_AUTO_INSTALL` | `true` (default): download the OCR backend in the background when it is missing. `false`: never by itself; the admin panel shows it missing, with an Install button (or `docker exec mokuro-bunko mokuro-bunko install-ocr`). |
-| `MOKURO_ADMIN_USERNAME`, `MOKURO_ADMIN_PASSWORD` (`_FILE`) | Optional: create the first admin on the first start; ignored once one exists. |
 | `MOKURO_*` | Any config key (`MOKURO_<SECTION>_<KEY>`), see [docs/configuration.md](docs/configuration.md). |
 
 The compiled models are unpacked once into the data volume (`/data/models`) and loaded from there. `docker exec mokuro-bunko mokuro-bunko doctor` checks the setup, including the OCR backend.

@@ -211,16 +211,11 @@ every start and prints it in its log:
 First run: create the admin account at http://<this server's address>:8080/setup (setup code: 7KQ2M-X9D4R)
 ```
 
-The code is kept in memory only, works until an admin exists, and allows five
-tries a minute per address (30 in all). `mokuro-bunko setup` does the same in
-the console, and `mokuro-bunko admin add-user NAME --role admin` adds an admin
-directly.
-
-Docker (or any unattended start) can skip the page: `MOKURO_ADMIN_USERNAME` and
-`MOKURO_ADMIN_PASSWORD` (or `MOKURO_ADMIN_PASSWORD_FILE`, e.g. a Docker secret)
-create the admin on the first start. Once an admin exists they are ignored (one
-log line), so changing them later changes nothing: change passwords in the admin
-panel.
+The code is kept in memory only and works until an admin exists. Each address
+gets five tries, one more every 12 seconds; after 30 wrong codes within a minute
+from everyone the server replaces the code and logs the new one (a flood of
+guesses never locks setup). `mokuro-bunko setup` does the same in the console,
+and `mokuro-bunko admin add-user NAME --role admin` adds an admin directly.
 
 ## Deployment Scenarios
 
@@ -912,9 +907,7 @@ and the models into `/data`. For GPU OCR pass the GPU in (below), or run the
 lite image (or `latest` with `MOKURO_OCR_LOCAL_PROCESSING=false`) and a
 [remote processor](#remote-ocr-processors) on the GPU machine. The first
 visit to the setup page from another computer asks for the setup code (see
-[First start](#first-start)): `docker logs mokuro-bunko` shows it. Or pass
-`-e MOKURO_ADMIN_USERNAME=... -e MOKURO_ADMIN_PASSWORD=...` to create the
-admin on the first start.
+[First start](#first-start)): `docker logs mokuro-bunko` shows it.
 
 ### Docker Compose
 
@@ -1002,8 +995,7 @@ The web UI comes up within seconds; the OCR backend for the GPU the container
 sees downloads into `/data/backends` in the background (about 2 GB for
 NVIDIA), with the progress in the log and the admin panel. For the first admin,
 open `http://<unraid>:<port>/setup` and enter the setup code from the
-container's log, or fill in the template's *Admin username* / *Admin password*
-before the first start.
+container's log.
 
 Optional:
 - `MOKURO_OCR_GENERATIONS`: the OCR generations as JSON, e.g.

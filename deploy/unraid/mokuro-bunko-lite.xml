@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/Gnathonic/mokuro-bunko/issues</Support>
   <Project>https://github.com/Gnathonic/mokuro-bunko</Project>
-  <Overview>Mokuro Bunko (lite): self-hosted manga library server for Mokuro Reader (WebDAV, catalog, accounts) in a ~10 MB image. No local OCR: OCR is done by mokuro-bunko processors on other machines. The image has no shell or nginx. First admin: the log prints a one-time setup code for http://[IP]:[PORT]/setup, or fill in Admin username and Admin password. Tags: beta-lite (the default while 0.7 is in beta) follows the newest release; latest-lite follows stable releases from 0.7.0 on.</Overview>
+  <Overview>Mokuro Bunko (lite): self-hosted manga library server for Mokuro Reader (WebDAV, catalog, accounts) in a ~10 MB image. No local OCR: OCR is done by mokuro-bunko processors on other machines. The image has no shell or nginx. First admin: open http://[IP]:[PORT]/setup and enter the one-time setup code the container log prints. Tags: beta-lite (the default while 0.7 is in beta) follows the newest release; latest-lite follows stable releases from 0.7.0 on.</Overview>
   <Category>MediaServer:Books Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/0.7/deploy/unraid/mokuro-bunko-lite.xml</TemplateURL>
@@ -29,9 +29,6 @@
   <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID to run as (Unraid users=100)" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="UMASK" Target="UMASK" Default="002" Mode="" Description="Umask for created files" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="TAKE_OWNERSHIP" Target="TAKE_OWNERSHIP" Default="false" Mode="" Description="Set true to chown /data and /config to PUID:PGID on boot" Type="Variable" Display="advanced" Required="false" Mask="false"/>
-
-  <Config Name="Admin username" Target="MOKURO_ADMIN_USERNAME" Default="" Mode="" Description="Optional: create this admin account on the first start (ignored once an admin exists). Leave empty to create it in the browser at /setup with the one-time setup code from the container's log." Type="Variable" Display="always" Required="false" Mask="false"/>
-  <Config Name="Admin password" Target="MOKURO_ADMIN_PASSWORD" Default="" Mode="" Description="Optional: the password for Admin username (at least 8 characters; only used on the first start)." Type="Variable" Display="always" Required="false" Mask="true"/>
 
   <Config Name="MOKURO_CONFIG" Target="MOKURO_CONFIG" Default="/config/config.yaml" Mode="" Description="Config file path" Type="Variable" Display="always" Required="true" Mask="false"/>
   <Config Name="MOKURO_HOST" Target="MOKURO_HOST" Default="0.0.0.0" Mode="" Description="Bind host" Type="Variable" Display="advanced" Required="false" Mask="false"/>

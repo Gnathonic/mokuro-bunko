@@ -669,7 +669,6 @@ pub fn assemble(services: &Services, _opts: &ServeOptions) -> Router {
 /// When nobody can sign in yet: a new one-time setup code ([`crate::accounts::SetupFlag`]),
 /// printed once in a banner with the address to open, so the wizard is reachable from
 /// another computer (Docker, a NAS). Also removes the 0.7 betas' `.setup-token` file.
-/// Call after [`crate::accounts::bootstrap_admin_from_env`].
 pub fn announce_setup(services: &Services) {
     crate::accounts::remove_legacy_token(&services.core.layout);
     if !services.setup.needs_setup(&services.db).unwrap_or(false) {
@@ -736,10 +735,7 @@ pub fn setup_banner(
             "  On the server itself, {scheme}://localhost:{shown_port}/setup needs no code."
         ));
     }
-    lines.push(
-        "  The code works until an admin exists; every start makes a new one. Or set MOKURO_ADMIN_USERNAME and MOKURO_ADMIN_PASSWORD."
-            .into(),
-    );
+    lines.push("  The code works until an admin exists; every start makes a new one.".into());
     lines.push(rule);
     lines
 }

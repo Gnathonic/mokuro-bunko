@@ -691,6 +691,8 @@ struct Tracker {
     needs_owner: bool,
     action: Option<String>,
     last_error: Option<String>,
+    /// The models stage's files and packages: (done, of how many).
+    files: Option<(u64, u64)>,
 }
 
 impl Tracker {
@@ -707,6 +709,7 @@ impl Tracker {
             needs_owner: false,
             action: None,
             last_error: None,
+            files: None,
         }
     }
 
@@ -727,7 +730,13 @@ impl Tracker {
         if self.view.stage == "models"
             && let Some((name, done, total, pct)) = parse_model_download(text)
         {
-            self.view.message = Some(format!("downloading {name}"));
+            // The file's own progress; which file of how many says the message.
+            self.view.message = Some(match self.files {
+                Some((done, total)) => {
+                    format!("file {} of {total}: {name}", (done + 1).min(total))
+                }
+                None => format!("downloading {name}"),
+            });
             self.view.done_bytes = Some(done);
             self.view.total_bytes = Some(total);
             self.view.percent = Some(pct);
@@ -766,6 +775,7 @@ impl Tracker {
             self.view.percent =
                 Some(((done * 100).checked_div(total).unwrap_or(100)).min(100) as u32);
             if s("unit").as_deref() == Some("files") {
+                self.files = Some((done, total));
                 self.view.done_bytes = None;
                 self.view.total_bytes = None;
             } else {
@@ -774,7 +784,10 @@ impl Tracker {
             }
         }
         if let Some(l) = s("label") {
-            self.view.message = Some(l);
+            self.view.message = Some(match (s("unit").as_deref(), self.files) {
+                (Some("files"), Some((done, total))) => format!("{done} of {total} done: {l}"),
+                _ => l,
+            });
         }
         if new_stage {
             info!("OCR install: {}", stage_text(&self.view));
@@ -925,6 +938,7 @@ mod tests {
             .unwrap();
         assert_eq!(v.percent, Some(50));
         assert_eq!(v.total_bytes, Some(900_000_000));
+        assert_eq!(v.message.as_deref(), Some("file 2 of 4: hayai.pt2"));
         // Plain lines are only logged; a failure event is kept for the end.
         assert!(t.line("Installed /x/backends/torch-cpu", false).is_none());
         assert!(
