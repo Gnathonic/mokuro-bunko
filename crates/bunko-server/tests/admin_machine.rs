@@ -69,6 +69,40 @@ async fn admins_only_and_absent_without_a_machine() {
     assert_eq!(r.status, 403);
     let r = h.call("GET", "/_admin/api/machine", None, None).await;
     assert!(r.status == 401 || r.status == 403, "{}", r.status);
+    // Every route, for everyone but an admin: refused, nothing about the machine.
+    let inviter = h.login("inv", Role::Inviter);
+    let routes = [
+        ("GET", "/_admin/api/machine", None),
+        (
+            "PUT",
+            "/_admin/api/machine/ocr",
+            Some(json!({"backend": "cpu"})),
+        ),
+        ("POST", "/_admin/api/machine/install", Some(json!({}))),
+        ("POST", "/_admin/api/machine/remove", Some(json!({}))),
+        (
+            "POST",
+            "/_admin/api/machine/jobs",
+            Some(json!({"kind": "doctor"})),
+        ),
+        ("GET", "/_admin/api/machine/jobs/1", None),
+        ("GET", "/_admin/api/machine/logs", None),
+    ];
+    for (method, path, body) in &routes {
+        for token in [None, Some(user.as_str()), Some(inviter.as_str())] {
+            let r = h.call(method, path, token, body.clone()).await;
+            assert!(
+                r.status == 401 || r.status == 403,
+                "{method} {path} as {token:?}: {}",
+                r.status
+            );
+            let text = String::from_utf8_lossy(&r.bytes);
+            assert!(
+                !text.contains("gfx1201") && !text.contains("server.log"),
+                "{text}"
+            );
+        }
+    }
     let admin = h.admin();
     let r = h
         .call("GET", "/_admin/api/machine", Some(&admin), None)

@@ -661,3 +661,72 @@ async fn ocr_off_is_saved() {
         &[("auto".to_string(), false, false, true)]
     );
 }
+
+/// The setup gate on every setup route: from another computer without the code each
+/// is refused (the GETs too), with the code each works, and once an admin exists none
+/// describes the machine or writes anything.
+#[tokio::test]
+async fn every_setup_route_is_gated() {
+    let mut env = Env::new();
+    env.deps.machine = Some(std::sync::Arc::new(FakeMachine::default()));
+    let code = normalize_code(&env.deps.setup.issue_code());
+    let far = "203.0.113.10";
+    // No code: refused, reads and writes alike; nothing machine-revealing in the answer.
+    for (method, path) in [
+        ("GET", "/setup/api/status"),
+        ("GET", "/setup/api/options"),
+        ("GET", "/setup/setup.js"),
+    ] {
+        let r = env.send(empty(from_peer(method, path, far))).await;
+        assert_eq!(r.status, 403, "{method} {path}");
+        assert!(!r.text().contains("choices"), "{path}: {}", r.text());
+    }
+    let r = complete(&env, from_peer("POST", "/setup/api/complete", far)).await;
+    assert_eq!(r.status, 403);
+    let r = env.send(empty(from_peer("GET", "/setup", far))).await;
+    assert!(r.text().contains("setup code"), "the code page");
+    assert!(!r.text().contains(&code), "the code is never echoed");
+
+    // The code: each route works.
+    let with_code = |method: &str, path: &str| {
+        from_peer(method, path, far).header("x-setup-code", code.as_str())
+    };
+    let r = env
+        .send(empty(with_code("GET", "/setup/api/options")))
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json()["local"], false);
+    assert_eq!(r.json()["ocr"]["default_on"], true);
+    let r = env.send(empty(with_code("GET", "/setup/api/status"))).await;
+    assert_eq!(r.json()["needs_setup"], true);
+    // From elsewhere a page may not name files on the server.
+    let r = env
+        .send(json_body(
+            with_code("POST", "/setup/api/complete"),
+            json!({"admin": {"username": "admin", "password": "password123"},
+                   "remote": {"ssl": {"mode": "files", "cert_file": "/etc/hostname", "key_file": "/etc/hostname"}}}),
+        ))
+        .await;
+    assert_eq!(r.status, 400);
+    assert!(r.json()["error"].as_str().unwrap().contains("localhost"));
+    assert!(env.db.get_user("admin").unwrap().is_none());
+    let r = complete(&env, with_code("POST", "/setup/api/complete")).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    assert!(!r.text().contains(&code));
+
+    // Done: nothing answers as setup any more, from anywhere.
+    for peer in [far, "127.0.0.1"] {
+        let r = env
+            .send(empty(from_peer("GET", "/setup/api/options", peer)))
+            .await;
+        assert_eq!(r.status, 410, "{peer}");
+        assert!(!r.text().contains("choices"));
+        let r = complete(&env, from_peer("POST", "/setup/api/complete", peer)).await;
+        assert!(r.status == 400 || r.status == 403, "{peer}: {}", r.status);
+    }
+    let r = env
+        .send(empty(with_code("GET", "/setup/api/options")))
+        .await;
+    assert_eq!(r.status, 410);
+    assert_eq!(env.deps.core.config.read().registration.mode, "invite");
+}

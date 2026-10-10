@@ -24,7 +24,10 @@
   the GPU found). Finishing signs the admin in and opens the admin panel, where the
   OCR backend's background install shows its progress. Answers the environment fixes
   (`MOKURO_REGISTRATION_MODE`, `MOKURO_SSL_ENABLED`, `MOKURO_OCR_BACKEND`) are shown, not
-  asked. Before setup, a new server does not start installing OCR by itself.
+  asked. Before setup, a new server does not start installing OCR by itself. Every
+  setup route, its reads included, answers only while no admin exists and only to
+  localhost or a holder of the setup code; HTTPS certificate files can be named only
+  from the server itself.
 - The admin panel's new **This server** tab: OCR on this machine, the hardware, the
   backend in use ("rocm7.1 for 0.7.0-beta.4"), the backend preference (`ocr.backend`:
   Auto, CPU or the GPU found; a switch installs what is missing, and restarts the
