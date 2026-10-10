@@ -637,3 +637,34 @@ shootout's own `ocr_volume` (same packages, same load): 4.96 vs 4.94, then 1.88 
 3.11 vs 2.81 p/s under shifting load — no systematic difference. Desktop CPU timings (0.33 p/s
 fp32, 0.25 bf16 on 20 pages) were taken under the same load and are not comparable to the
 shootout's 0.64 / 0.95; re-measure on a quiet host.
+
+### Hardware and data tests (`#[ignore]`d)
+
+Tests that need model files, sample archives, a backend pack, the 0.5.2 reference or the
+network are `#[ignore]`d, so a plain `cargo test` never runs them. On a machine with the data
+(release builds; each file's doc comment lists its variables):
+
+| test | needs | run (`cargo test ... -- --ignored`) |
+|---|---|---|
+| `bunko-engines` `tests/pipeline.rs` | ppocr-manga model files (`MOKURO_MODELS_DIR`, e.g. a `models-v1` folder), a sample archive (`BUNKO_SAMPLE_CBZ`, default Dr Stone 01 in `~/Downloads`) | `-p bunko-engines --release --test pipeline` |
+| `bunko-engines` `tests/torch_loader.rs` | a pack (`cargo run -p xtask -- torch-pack --variant cpu\|rocm7.1\|cu130 --no-archive --out <dir>`) in `MOKURO_TORCH_PACK=<dir>/torch-<variant>-2.13.0`, `rustc`; without the variable it prints "skipping" and passes | `-p bunko-engines --release --test torch_loader` |
+| `bunko-ocr` `tests/ppocr_golden.rs` | the 0.5.2 OCR venv (`BUNKO_REF_PYTHON`), the 0.5.2 checkout for the layout oracle (`MOKURO_REF_052`, default the sibling worktree `../ref-0.5.2`), the pinned PP-OCR snapshot in the Hugging Face cache, the sample archives in `~/Downloads` (a page whose archive is missing is skipped) | `-p bunko-ocr --release --test ppocr_golden` |
+| `bunko-ocr` `models::tests::downloads_and_resumes_from_hugging_face` | network | `-p bunko-ocr --lib downloads_and_resumes` |
+
+All of bunko-engines' can run in one go with a pack set; `refusals_before_loading` then checks
+only the engine and detector refusals (its precision refusals assume no pack). The libtorch
+recognizers have no test of their own: run a volume through the processor seam with the
+`ocr_volume` example (`MOKURO_TORCH_PACK`, `MOKURO_MODELS_DIR` for the PP-OCR and host files,
+`MOKURO_TORCH_MODELS_MIRROR` = a directory of the release's flat asset names, `--models <store>`;
+`--uuids T,V` makes two runs' sidecars comparable byte for byte).
+
+Last run 2026-10-10 on the desktop (7950X + RX 9070 XT, packs built from the tree at
+0.7.0-beta.4, the 201-asset compiled-package set; the host was busy with other work, so no
+speeds are given): pipeline 2/2, torch_loader with the rocm7.1 and the cpu pack, network and
+ppocr_golden pass (28 of 30 pages, two archives absent; final lines 633/634 exact, no text
+difference, one geometry difference at IoU 0.96). paddle-manga bf16 on the 9070 XT is
+deterministic: 8 runs of the 20-page Dr Stone 01 (5 with the default pools, 3 with
+`detect=4,engine=2`) wrote byte-identical sidecars (20 pages, 320 lines). Against other builds
+the same 20 pages agree on 18 (the shootout's on-card ROCm bf16 build), 19 (0.5.2 bf16, RTX
+4060) and 17 (0.5.2 fp32), differing on sound-effect lines. hayai-nova on the CPU with the cpu
+pack (auto-accuracy = fp32): 20/20 pages, 322/322 lines identical to 0.5.2's CPU fp32.
