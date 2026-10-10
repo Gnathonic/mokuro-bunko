@@ -13,6 +13,13 @@
   the rest (checksum stamps). The OCR backend's own size (and the part NVIDIA's CUDA
   wheels added) is on the OCR backend card. `models list` prints the same plan, and
   `models download` / `doctor` share its planning code, so they cannot disagree.
+- **"Install updates automatically" is honest in Docker and package-managed
+  installs.** They cannot update themselves, so the admin panel shows one line instead
+  of the checkbox ("Runs in Docker: update by pulling the new image", with the image
+  when known; a managed install names its manager), `GET /_admin/api/update` says
+  `auto_supported: false` (and `manual_update`), a saved `update.auto: true` is ignored
+  without an error, and a newer release is reported as available, not as a failure
+  (no problem, no tray warning).
 
 ## [0.7.0-beta.4] - 2026-10-09
 

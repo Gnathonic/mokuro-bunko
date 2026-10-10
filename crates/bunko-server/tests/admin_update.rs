@@ -188,6 +188,33 @@ async fn apply_refusals_and_failures() {
             .unwrap()
             .contains("pull ghcr.io/example/bunko:9.9.9")
     );
+    // No automatic updates in Docker: the page says how instead (with the image), and
+    // a saved `update.auto: true` is accepted and ignored.
+    assert_eq!(s["auto_supported"], false);
+    let manual = s["manual_update"].as_str().unwrap();
+    assert!(
+        manual.starts_with("Runs in Docker: update by pulling the new image")
+            && manual.ends_with("Image: ghcr.io/example/bunko:9.9.9"),
+        "{manual}"
+    );
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/update/settings",
+            Some(&admin),
+            Some(json!({"auto": true})),
+        )
+        .await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json()["auto"], false);
+    let s = h
+        .call("GET", "/_admin/api/update", Some(&admin), None)
+        .await
+        .json();
+    assert_eq!(
+        (s["auto"].clone(), s["problems"].clone()),
+        (json!(false), json!([]))
+    );
     let r = h
         .call("POST", "/_admin/api/update/apply", Some(&admin), None)
         .await;

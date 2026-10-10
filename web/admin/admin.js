@@ -4335,7 +4335,10 @@ async function loadUpdate(refresh) {
     }
     document.getElementById('update-summary').textContent = summary;
     const hint = document.getElementById('update-hint');
-    hint.textContent = data.available && !data.can_apply ? (data.cannot_apply_reason || '') : '';
+    // Docker and managed installs update from outside: one line says how (below),
+    // instead of the automatic-update checkbox.
+    const manual = data.auto_supported === false ? (data.manual_update || '') : '';
+    hint.textContent = data.available && !data.can_apply && !manual ? (data.cannot_apply_reason || '') : '';
     hint.hidden = !hint.textContent;
     const apply = document.getElementById('update-apply-btn');
     // .btn sets display, which beats the hidden attribute.
@@ -4347,6 +4350,11 @@ async function loadUpdate(refresh) {
     const auto = document.getElementById('update-auto');
     auto.checked = !!data.auto;
     auto.disabled = false;
+    // .check sets display, which beats the hidden attribute.
+    document.getElementById('update-auto-label').style.display = manual ? 'none' : '';
+    const manualLine = document.getElementById('update-manual');
+    manualLine.textContent = manual;
+    manualLine.hidden = !manual;
     const line = updateAutoLine(data.auto_state);
     const state = document.getElementById('update-auto-state');
     state.textContent = line;
