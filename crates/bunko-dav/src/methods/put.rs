@@ -194,6 +194,11 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
     let expected = expected_size(req);
     let digest = upload::parse_content_digest(req.header("content-digest"));
     let mut staging = Staging::create(&dest, expected, digest).await?;
+    if existed_before && is_ocr_sidecar(&dest) {
+        // A client re-sending an OCR file unchanged (a backup, a re-upload) edits nothing:
+        // the file, its provenance and its history stay as they were.
+        staging.keep_if_identical();
+    }
     let mut body = body;
     loop {
         // A client that stops sending for two minutes is gone: drop the upload rather
@@ -230,9 +235,11 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
 
     // Committed: the rest reports it and never fails the request.
     let (inner2, req2, dest2) = (inner.clone(), req.clone(), dest.clone());
-    let follow_up = super::blocking(move || after_commit(&inner2, &req2, &dest2, existed_before))
-        .await
-        .unwrap_or(None);
+    let unchanged = stored.unchanged;
+    let follow_up =
+        super::blocking(move || after_commit(&inner2, &req2, &dest2, existed_before, unchanged))
+            .await
+            .unwrap_or(None);
 
     let etag = tokio::fs::metadata(&dest)
         .await
@@ -264,14 +271,32 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
     Ok(resp)
 }
 
+/// A `.mokuro` / `.mokuro.gz` OCR file.
+fn is_ocr_sidecar(path: &Path) -> bool {
+    let name = paths::file_name(path).to_lowercase();
+    name.ends_with(".mokuro") || name.ends_with(".mokuro.gz")
+}
+
 /// 0.5.2 `_on_write_committed` + `UploadMiddleware._archive_arrived`. Blocking.
 fn after_commit(
     inner: &Inner,
     req: &Req,
     dest: &Path,
     existed_before: bool,
+    unchanged: bool,
 ) -> Option<crate::PutFollowUp> {
     let rel = inner.roots.library_rel(dest);
+    if unchanged {
+        // Nothing on disk changed: only the request is on record (as an `edit` the
+        // generation upgrade does not count as one, `generation-upgrade.md` §3).
+        audit(
+            req,
+            "edit",
+            file_audit_target(inner, &req.path, dest),
+            Some(serde_json::json!({ "existed_before": true, "unchanged": true })),
+        );
+        return None;
+    }
     if let (Some(rel), Some(actor)) = (rel.as_deref(), req.username()) {
         req.ctx
             .hooks
