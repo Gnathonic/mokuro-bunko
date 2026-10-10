@@ -1,7 +1,8 @@
 services:
   mokuro-bunko:
-    # The first start downloads the NVIDIA OCR backend (about 2 GB) into /data/backends.
-    image: ghcr.io/gnathonic/mokuro-bunko:latest
+    # Once it serves, the NVIDIA OCR backend (about 2 GB) downloads into /data/backends
+    # in the background.
+    image: ghcr.io/gnathonic/mokuro-bunko:beta  # :latest from 0.7.0 on
     container_name: mokuro-bunko
     ports:
       - "8081:8080"    # 8081 to avoid conflict with VM on 8080

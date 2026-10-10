@@ -72,7 +72,15 @@ Proxies: Caddy forwards WebSockets as-is. The bundled nginx template sets
    released claims at once and records nothing for them; a session that ends while its
    machine is paused is not blamed (no strike, no start-failure backoff). While paused a
    processor answers `volume` with `released`, `open_session` with `exit`, and a bench
-   with `fatal` + `exit`. Older libraries ignore both events (unknown events are logged
+   with `fatal` + `exit`. **Installing** (0.7, additive): a processor whose OCR backend
+   is still downloading in the background registers at once with
+   `availability{paused:true, reason:"installing", install:{state, stage, percent,
+   done_bytes, total_bytes, variant, pack, …}}` (`bunko_proto::OcrInstall`), repeats it
+   as the install moves (at most once a second, any new stage at once), treats offered
+   work as while paused, and when the install is done registers again (a fresh
+   catalog); a failed install says `availability{paused:false}` (or the owner's pause).
+   The library shows "installing OCR backend: NN%" in the processor list
+   (`pause.install`) and logs only the transitions. Older libraries ignore both events (unknown events are logged
    and dropped), so the claims time out as before.
 
 10. **Version mismatch** (0.7, additive). The library compares the

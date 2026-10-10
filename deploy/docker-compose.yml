@@ -1,13 +1,14 @@
-# mokuro-bunko with local OCR. The image carries no OCR backend: the first start
-# detects the GPU the container is given and downloads the matching backend pack into
-# the data volume (CPU about 100 MB, NVIDIA about 2 GB, AMD about 3 GB), then the
-# enabled engines' models; later starts reuse them. Uncomment the NVIDIA or AMD lines
+# mokuro-bunko with local OCR. The image carries no OCR backend: the server answers at
+# once and, in the background, detects the GPU the container is given and downloads the
+# matching backend pack into the data volume (CPU about 100 MB, NVIDIA about 2 GB, AMD
+# about 3 GB), then the enabled engines' models (progress in the log and the admin
+# panel; local OCR starts by itself when done); later starts reuse them. Uncomment the NVIDIA or AMD lines
 # below for GPU OCR; for a small server without OCR use docker-compose.lite.yml.
 #
 #   docker compose -f deploy/docker-compose.yml up -d
 services:
   mokuro-bunko:
-    image: ghcr.io/gnathonic/mokuro-bunko:latest
+    image: ghcr.io/gnathonic/mokuro-bunko:beta  # :latest from 0.7.0 on
     # Or build it yourself:
     # build:
     #   context: ..
@@ -45,8 +46,8 @@ services:
     # devices:
     #   - /dev/kfd
     #   - /dev/dri
-    # The image has a HEALTHCHECK (`mokuro-bunko healthcheck`); its start period
-    # covers the first start's OCR backend download.
+    # The image has a HEALTHCHECK (`mokuro-bunko healthcheck`); the OCR backend
+    # download does not hold it up.
 
 volumes:
   mokuro-data:

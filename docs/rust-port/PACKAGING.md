@@ -15,7 +15,7 @@ Where things live:
 | `packaging/windows/` | `run.bat`, `doctor.bat`, `_env.cmd`, `README.txt`, `PORTABLE.txt` for the Windows zip |
 | `packaging/android/` | the Android app (Kotlin, Gradle) and `build.sh`; the server library is `crates/bunko-android` (MOBILE.md) |
 | `packaging/docker-init/` | `bunko-init`, the containers' PUID/PGID/UMASK entrypoint (static, libc only; own Cargo workspace) |
-| `deploy/docker/` | `Dockerfile.lite`, `Dockerfile` (full: no pack inside, it downloads the one for its GPU on first start; `BAKE_PACK=1` opt-in), `entrypoint.sh` (config path, nginx, `install-ocr --if-needed`), per-Dockerfile `.dockerignore` |
+| `deploy/docker/` | `Dockerfile.lite`, `Dockerfile` (full: no pack inside; the server downloads the one for its GPU in the background once it serves; `BAKE_PACK=1` opt-in), `entrypoint.sh` (config path, nginx), per-Dockerfile `.dockerignore` |
 | `deploy/nginx-internal.conf.template` | the in-container nginx for the X-Accel offload (now with the processor WebSocket) |
 | `deploy/*.service` | systemd units: server and processor, system and user variants |
 | `deploy/docker-compose*.yml`, `deploy/unraid/*.xml` | compose files and Unraid templates for the published images |
@@ -271,8 +271,9 @@ through the container toolkit. The image adds the few Debian libraries the `rocm
 pack expects from a host (`libnuma1` plus the unversioned `libnuma.so` link,
 `libelf1t64`, `libdw1t64`, `libatomic1`; ~1.5 MB).
 
-**First start** (`entrypoint.sh`, before `serve` and before `processor serve`): it runs
-`mokuro-bunko install-ocr --if-needed` as PUID:PGID, which
+**First start**: `serve` and `processor serve` (as PUID:PGID) start serving at once and run
+`mokuro-bunko install-ocr --if-needed` as a background child process
+(`crates/mokuro-bunko/src/ocr_install.rs`; the entrypoint no longer runs it first), which
 
 1. does nothing when local OCR is off (`ocr.backend: skip`, `ocr.local_processing:
    false`; a processor always runs OCR) or `MOKURO_OCR_AUTO_INSTALL=false`;
@@ -294,9 +295,12 @@ pack expects from a host (`libnuma1` plus the unversioned `libnuma.so` link,
 
 Later starts find the fitting pack and download nothing. A container started with a new
 GPU, or a preference for a GPU it now sees, gets that GPU's pack; a GPU that is gone
-keeps the GPU pack (it runs on the CPU too). A failed install is logged and retried on
-the next start; the server starts anyway, with ppocr-manga and remote processors (the
-recognizer engines need the pack). The image update to a new release installs that
+keeps the GPU pack (it runs on the CPU too). The progress is in the log, the admin panel
+and `/control/status`; local OCR starts by itself when it is done (a processor registers
+at once as not available, reason `installing`, and registers again then). A failed
+install is a problem with a Retry button, retried after 5/15/60 min and on the next
+start; the server keeps serving with ppocr-manga and remote processors (the recognizer
+engines need the pack). The health check's start period is 30 s. The image update to a new release installs that
 release's pack on its first start (a pack belongs to one release, §8).
 
 Run examples:
@@ -494,8 +498,14 @@ PowerShell has no ed25519); the in-app updater does check the signature.
    on downloaded assets if you like).
 4. Run **Publish** (Actions → Publish → tag `v0.7.0`): re-verifies the manifest and
    the notes' links, un-drafts the release (a pre-release stays a pre-release; a
-   stable one is marked latest), checks the links again as published, and for stable versions moves
-   `latest`, `latest-lite`, `latest-cuda` (= `latest`). Installed servers see it on their next check.
+   stable one is marked latest), checks the links again as published, moves `beta` and
+   `beta-lite` to it (every version), and for stable versions moves `latest`,
+   `latest-lite`, `latest-cuda` (= `latest`). Installed servers see it on their next check.
+5. **At 0.7.0 (the first stable 0.7)**: the Unraid templates and compose files of the `0.7`
+   branch default to `:beta` / `:beta-lite` and the templates' `<TemplateURL>` points at
+   the `0.7` branch, because `latest*` do not exist before then and `main` still has the
+   0.5 templates. When 0.7.0 is merged into `main`, switch them to `:latest` /
+   `:latest-lite` and `<TemplateURL>` to `main`.
 
 Re-running `release.yml` for the same tag (workflow_dispatch) replaces the draft's
 assets (`--clobber`) and re-pushes the versioned images.

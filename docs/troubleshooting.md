@@ -114,13 +114,20 @@ without installing anything.
   configuration, or with `install-ocr --processor`. The processor also finds
   a pack in the default library storage, for example one installed before
   `processor setup` (see [deployment](deployment.md#3-the-processor-machine)).
-- **Docker**: the full image installs the pack into `/data/backends` on
-  start (`install-ocr --if-needed`; its output is at the top of
-  `docker logs`). Nothing is installed when `MOKURO_OCR_AUTO_INSTALL=false`
-  or local OCR is off (`MOKURO_OCR_BACKEND=skip`,
-  `MOKURO_OCR_LOCAL_PROCESSING=false`); a failed download is retried on the
-  next start, or run `docker exec <container> mokuro-bunko install-ocr`
-  and restart the container.
+- **Installing in the background** (Docker, or any `serve` / `processor
+  serve` whose enabled generations need a backend that is missing): the
+  server serves meanwhile; the progress is in the log (`OCR install: ...`
+  lines), the admin panel (Settings → OCR → Processors), the dashboard and
+  the tray. Nothing is installed when `MOKURO_OCR_AUTO_INSTALL=false` (the
+  admin panel then offers Install) or local OCR is off
+  (`MOKURO_OCR_BACKEND=skip`, `MOKURO_OCR_LOCAL_PROCESSING=false`). A failed
+  download is a problem with a Retry button, tried again after 5, 15 and 60
+  minutes and at the next start; `docker exec <container> mokuro-bunko
+  install-ocr` installs it by hand (local OCR then starts with the next
+  Retry or restart).
+- **A processor that stays "installing OCR backend: NN%"** in the library's
+  processor list is downloading its own backend; it takes work as soon as
+  that is done.
 - **"OCR backend: ... files are missing or damaged"** (a FAIL), or a pack
   that fails to load: `mokuro-bunko install-ocr --force` downloads and checks
   it again.

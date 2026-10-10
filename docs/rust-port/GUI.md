@@ -190,6 +190,18 @@ downloading, installing, restarting), "Updated to X (from Y)", or "Update to X f
 … — will retry"; a `blocked` update (needs the owner) is a problem in the Problems
 panel instead.
 
+**OCR backend install** (`status.install`, 0.7): `serve` and `processor serve` install a
+missing OCR backend in the background (`crates/mokuro-bunko/src/ocr_install.rs`). The
+dashboard's "OCR backend" panel shows the stage, a progress bar and the bytes while it
+runs, and on a failure (or `missing`: automatic installs off) the message with a Retry /
+Install button (`POST /control/ocr-install`); the tray adds "Installing OCR backend: NN%"
+under the state, and a failure is a `fail` problem (`kind: "ocr-install"`), so the icon
+asks for attention. The setup wizards save the OCR step's choices
+(`<backends>/.install-request.json`) and start the server or processor; their last page
+comes as soon as it serves and follows the install there. When a tray runs, what the
+wizard starts is handed to it (tray.json; a running tray picks up added roles, and adopts
+an instance started for it with `MOKURO_CONTROL_MANAGED=1`), so the tray's Quit stops it.
+
 ## 5. Tray
 
 Menu (state-dependent):

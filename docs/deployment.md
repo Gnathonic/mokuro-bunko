@@ -133,14 +133,34 @@ and its `.sig`, and the NVIDIA wheels) on a host without internet,
 `--no-models` skips the models, `--force` reinstalls. Without `--variant` it
 follows `ocr.backend`: `auto` takes the GPU it finds, `cpu` stays on the CPU
 even with a GPU, `cuda`/`rocm` take that GPU (or `cpu`, with a hint, when it is
-not there); `--variant auto` looks at the hardware only. The full Docker image
-carries no pack: it runs `install-ocr --if-needed` on every start, which
-installs the pack and models on the first one and does nothing later
-([Docker](#docker)). `MOKURO_BACKENDS_DIR` moves the packs elsewhere.
+not there); `--variant auto` looks at the hardware only. `install-ocr` is a
+foreground command for scripts; `MOKURO_BACKENDS_DIR` moves the packs elsewhere.
 
-Without a pack the server still starts and serves; hayai-nova and
-paddle-manga are not offered on the machine (ppocr-manga still is, and remote
-processors still work), and `mokuro-bunko doctor` says which pack to install.
+**`serve` and `processor serve` install it themselves, in the background**, on
+any system (the full Docker image carries no pack and relies on this): when
+local OCR is on, an enabled generation needs the backend (hayai-nova,
+paddle-manga; a processor: always) and no fitting pack of this release is
+installed, they start serving at once and run the same detection and install
+(`install-ocr --if-needed`, as a child process) meanwhile:
+
+- the progress (stage, percent, bytes, the pack) is in the log, the admin
+  panel (Settings → OCR → Processors), the dashboard and the tray, and in
+  `/control/status` (`install`);
+- when it is done the server's local OCR starts by itself (no restart); a
+  processor registers at once but as not available (reason `installing`; the
+  library's processor list shows "installing OCR backend: NN%") and takes work
+  once its backend is ready;
+- a failed install is a problem ("needs you") with a Retry button in the
+  dashboard and the admin panel; one that may pass by itself (the network) is
+  retried after 5, 15 and 60 minutes, and every start tries again;
+- one install at a time per backends directory (`.install.lock`); an install
+  cut short resumes at the next start (downloads continue from their `.part`
+  files and are checked by sha256);
+- `MOKURO_OCR_AUTO_INSTALL=false`: never by itself; the missing backend is a
+  problem with an Install button instead.
+
+Until it is installed hayai-nova and paddle-manga are not offered on the
+machine (ppocr-manga still is, and remote processors still work).
 
 ### OCR models
 
@@ -813,11 +833,13 @@ Images are published at `ghcr.io/gnathonic/mokuro-bunko`:
 | Tag | Dockerfile | What | Size |
 |---|---|---|---|
 | `latest-lite`, `<ver>-lite` | `deploy/docker/Dockerfile.lite` | Server only, distroless, no OCR, no nginx. amd64, arm64. | 29 MB; idles at ~16 MiB RSS |
-| `latest`, `<ver>` | `deploy/docker/Dockerfile` | Server + local OCR + nginx and tini. amd64. No OCR backend inside: the first start downloads the one for the GPU the container is given (CPU, NVIDIA or AMD). | see [PACKAGING.md §2](rust-port/PACKAGING.md#2-docker-images-ghcriognathonicmokuro-bunko) |
+| `latest`, `<ver>` | `deploy/docker/Dockerfile` | Server + local OCR + nginx and tini. amd64. No OCR backend inside: once it serves, the server downloads the one for the GPU the container is given (CPU, NVIDIA or AMD) in the background. | see [PACKAGING.md §2](rust-port/PACKAGING.md#2-docker-images-ghcriognathonicmokuro-bunko) |
 | `latest-cuda`, `<ver>-cuda` | — | The same image as `latest`, under the name of the 0.5.2 CUDA image, so templates written for it keep working. | same image |
 
 There are no arm64 OCR images (arm64 hosts run the lite image and OCR on a
-processor elsewhere).
+processor elsewhere). `latest*` follow stable releases (from 0.7.0 on); `beta`
+and `beta-lite` follow every release, beta or stable (what this branch's
+compose files and Unraid templates default to while 0.7 is in beta).
 
 Everything lives under `/data` (library, database, `config.yaml`, the OCR
 backend in `/data/backends`, the models in `/data/models`), so mount a volume
@@ -839,8 +861,9 @@ release is installed into `/data/backends`. Published images never carry one.
 
 ### OCR backend on first start
 
-Before `serve` (and before `processor serve`) the full image runs
-`mokuro-bunko install-ocr --if-needed`:
+The server (and `processor serve`) answers within seconds of the start; the OCR
+backend installs in the background meanwhile, as on any system (see [OCR
+backend](#ocr-backend-install-ocr)), with what the container was given:
 
 1. Nothing happens when local OCR is off (`ocr.backend: skip` or
    `ocr.local_processing: false`, also through `MOKURO_OCR_BACKEND` /
@@ -856,17 +879,18 @@ Before `serve` (and before `processor serve`) the full image runs
 4. It downloads the matching backend pack of this release into
    `/data/backends` (~100 MB for the CPU; ~350 MB plus ~1.6 GB of NVIDIA's CUDA
    libraries from PyPI; ~3 GB for AMD) and the models of the enabled OCR
-   engines into `/data/models`, then starts the server.
+   engines into `/data/models`; local OCR then starts by itself.
 
 Later starts find the pack and download nothing. Started with a different GPU
 (or with `MOKURO_OCR_BACKEND` asking for a GPU it now sees) the container
 installs that GPU's pack and removes the one it replaces; started without its
 GPU it keeps the GPU pack, which runs on the CPU too. An image update installs
 the new release's pack on its first start. If the download fails, the server
-starts anyway (ppocr-manga and remote processors work; hayai-nova and
-paddle-manga wait for the pack) and the next start tries again.
-`MOKURO_OCR_AUTO_INSTALL=false` leaves the install to you:
-`docker exec mokuro-bunko mokuro-bunko install-ocr`, then restart. 0.5.2's
+keeps serving (ppocr-manga and remote processors work; hayai-nova and
+paddle-manga wait for the pack), the admin panel shows the failure with a
+Retry button, and it is tried again later and at the next start.
+`MOKURO_OCR_AUTO_INSTALL=false` leaves the install to you: the Install button,
+or `docker exec mokuro-bunko mokuro-bunko install-ocr`. 0.5.2's
 `OCR_AUTO_INSTALL=true` still works; its `OCR_AUTO_INSTALL=false` is ignored,
 as it never stopped 0.5.2 from installing OCR on start.
 
@@ -954,9 +978,11 @@ add them with `--group-add`.
 ### Unraid
 
 The Unraid templates are [`deploy/unraid/mokuro-bunko.xml`](../deploy/unraid/mokuro-bunko.xml)
-(full image, `ghcr.io/gnathonic/mokuro-bunko:latest`; `latest-cuda` is the same
-image) and [`deploy/unraid/mokuro-bunko-lite.xml`](../deploy/unraid/mokuro-bunko-lite.xml)
-(lite image).
+(full image, `ghcr.io/gnathonic/mokuro-bunko:beta` while 0.7 is in beta, `latest`
+from 0.7.0 on; `latest-cuda` is the same image) and
+[`deploy/unraid/mokuro-bunko-lite.xml`](../deploy/unraid/mokuro-bunko-lite.xml)
+(lite image, `beta-lite` / `latest-lite`). The templates of this branch update
+from it (`TemplateURL` on the `0.7` branch).
 
 1. For an NVIDIA GPU, install the Unraid NVIDIA driver plugin (a driver of 580
    or newer for the CUDA 13 pack) and keep `--runtime=nvidia` in
@@ -972,9 +998,12 @@ image) and [`deploy/unraid/mokuro-bunko-lite.xml`](../deploy/unraid/mokuro-bunko
    - `NVIDIA_VISIBLE_DEVICES=all`
    - `NVIDIA_DRIVER_CAPABILITIES=compute,utility`
 
-The first start downloads the OCR backend for the GPU the container sees into
-`/data/backends` before the web UI comes up (about 2 GB for NVIDIA); the log
-shows the progress.
+The web UI comes up within seconds; the OCR backend for the GPU the container
+sees downloads into `/data/backends` in the background (about 2 GB for
+NVIDIA), with the progress in the log and the admin panel. For the first admin,
+open `http://<unraid>:<port>/setup` and enter the setup code from the
+container's log, or fill in the template's *Admin username* / *Admin password*
+before the first start.
 
 Optional:
 - `MOKURO_OCR_GENERATIONS`: the OCR generations as JSON, e.g.
@@ -983,7 +1012,8 @@ Optional:
   is the easier way to edit them.
 - `MOKURO_OCR_LOCAL_PROCESSING=false`: no OCR in the container; a remote
   processor runs the queue (nothing is downloaded).
-- `MOKURO_OCR_AUTO_INSTALL=false`: no automatic OCR backend install.
+- `MOKURO_OCR_AUTO_INSTALL=false`: no automatic OCR backend install (the
+  admin panel offers an Install button).
 - `MOKURO_NGINX_ACCEL=1`: put nginx in front for downloads; the server then
   listens on `MOKURO_BACKEND_PORT` (default 8081) inside the container.
 - `TAKE_OWNERSHIP=true`: chown `/data` and `/config` at boot.
