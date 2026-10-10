@@ -13,9 +13,10 @@
 //! New in 0.7: a **one-time setup code**. While no admin exists the server makes a new
 //! code at every start ([`SetupFlag::issue_code`]) and prints it in its log
 //! ([`crate::app::announce_setup`]); it lives in memory only. `GET /setup` from another
-//! computer answers a page asking for it; `POST /setup/code` checks it (constant time,
-//! [`ATTEMPTS_PER_IP`] tries a minute per client address and [`ATTEMPTS_GLOBAL`] in all)
-//! and answers a random setup-session cookie ([`SESSION_COOKIE`], `Path=/setup`,
+//! computer answers a page asking for it; `POST /setup/code` checks it (constant time;
+//! [`ATTEMPTS_PER_IP`] tries per client address, one more every [`REFILL`]; after
+//! [`ROTATE_AFTER`] wrong codes from everyone within a minute the code is replaced and
+//! the new one logged, so nobody can lock the owner out) and answers a random setup-session cookie ([`SESSION_COOKIE`], `Path=/setup`,
 //! `HttpOnly; SameSite=Strict`, one hour), which the unchanged wizard page and its
 //! `/setup/api/*` calls carry. A script may send the code as `X-Setup-Code` instead
 //! (same limits). The code and every session die as soon as an admin exists (the wizard,
@@ -55,18 +56,23 @@ pub const SESSION_COOKIE: &str = "mokuro_setup_session";
 /// 0.7 betas kept a token here; removed at startup.
 pub const LEGACY_TOKEN_FILE: &str = ".setup-token";
 
-/// Code attempts per client address per [`ATTEMPT_WINDOW`].
-pub const ATTEMPTS_PER_IP: usize = 5;
-/// Code attempts from everyone together per [`ATTEMPT_WINDOW`].
-pub const ATTEMPTS_GLOBAL: usize = 30;
-pub const ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
+/// Code attempts a client address may make at once; one more every [`REFILL`]
+/// (5 a minute). Self-healing: an address that waits gets its tries back.
+pub const ATTEMPTS_PER_IP: u32 = 5;
+pub const REFILL: Duration = Duration::from_secs(12);
+/// Wrong codes from everyone together within [`ROTATE_WINDOW`] that make the server
+/// replace the code (a new one in the log): a guessing run spread over many addresses
+/// starts over, and nobody is locked out.
+pub const ROTATE_AFTER: usize = 30;
+pub const ROTATE_WINDOW: Duration = Duration::from_secs(60);
 /// How long a setup session lasts.
 pub const SESSION_TTL: Duration = Duration::from_secs(3600);
 /// Sessions kept at once (the oldest goes first).
 const MAX_SESSIONS: usize = 16;
-/// Client addresses tracked by the limiter; beyond it every new address is refused
-/// until the window passes.
-const MAX_TRACKED: usize = 4096;
+/// Client addresses the limiter remembers; past it, those whose tries are all back
+/// are forgotten, then the least recently seen (memory stays bounded whatever the
+/// number of addresses).
+const MAX_TRACKED: usize = 1024;
 
 /// Crockford's base32: no I, L, O or U (50 bits in 10 characters).
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -90,51 +96,94 @@ struct Inner {
     limiter: Mutex<Limiter>,
 }
 
+/// One client address's tries: a token bucket.
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    tokens: f64,
+    /// When `tokens` was last brought up to date.
+    at: Instant,
+}
+
+impl Bucket {
+    fn refill(&mut self, now: Instant) {
+        let gained = now.saturating_duration_since(self.at).as_secs_f64() / REFILL.as_secs_f64();
+        self.tokens = (self.tokens + gained).min(f64::from(ATTEMPTS_PER_IP));
+        self.at = now;
+    }
+
+    fn full(&self, now: Instant) -> bool {
+        let mut b = *self;
+        b.refill(now);
+        b.tokens >= f64::from(ATTEMPTS_PER_IP)
+    }
+}
+
 #[derive(Default)]
 struct Limiter {
-    per_ip: HashMap<String, VecDeque<Instant>>,
-    all: VecDeque<Instant>,
+    per_ip: HashMap<String, Bucket>,
+    /// The wrong codes of the last [`ROTATE_WINDOW`], from everyone.
+    wrong: VecDeque<Instant>,
 }
 
 impl Limiter {
-    /// Record an attempt from `ip`; Err(seconds to wait) when over a limit (the
-    /// attempt is then not counted).
-    fn attempt(&mut self, ip: &str, now: Instant) -> Result<(), u64> {
-        let cut = |q: &mut VecDeque<Instant>| {
-            while q
-                .front()
-                .is_some_and(|t| now.duration_since(*t) >= ATTEMPT_WINDOW)
+    /// Take one try for `key`; Err(seconds until the next one) when it has none.
+    fn attempt(&mut self, key: &str, now: Instant) -> Result<(), u64> {
+        if !self.per_ip.contains_key(key) && self.per_ip.len() >= MAX_TRACKED {
+            self.per_ip.retain(|_, b| !b.full(now));
+            if self.per_ip.len() >= MAX_TRACKED
+                && let Some(oldest) = self
+                    .per_ip
+                    .iter()
+                    .min_by_key(|(_, b)| b.at)
+                    .map(|(k, _)| k.clone())
             {
-                q.pop_front();
+                self.per_ip.remove(&oldest);
             }
-        };
-        cut(&mut self.all);
-        self.per_ip.retain(|_, q| {
-            cut(q);
-            !q.is_empty()
+        }
+        let b = self.per_ip.entry(key.to_string()).or_insert(Bucket {
+            tokens: f64::from(ATTEMPTS_PER_IP),
+            at: now,
         });
-        let wait = |q: &VecDeque<Instant>| {
-            q.front()
-                .map(|t| (ATTEMPT_WINDOW - now.duration_since(*t)).as_secs().max(1))
-                .unwrap_or(1)
-        };
-        if self.all.len() >= ATTEMPTS_GLOBAL {
-            return Err(wait(&self.all));
+        b.refill(now);
+        if b.tokens >= 1.0 {
+            b.tokens -= 1.0;
+            Ok(())
+        } else {
+            let wait = (1.0 - b.tokens) * REFILL.as_secs_f64();
+            Err(wait.ceil().max(1.0) as u64)
         }
-        if let Some(q) = self.per_ip.get(ip)
-            && q.len() >= ATTEMPTS_PER_IP
+    }
+
+    /// A wrong code: true when there were [`ROTATE_AFTER`] within [`ROTATE_WINDOW`]
+    /// (the count starts over).
+    fn wrong(&mut self, now: Instant) -> bool {
+        while self
+            .wrong
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) >= ROTATE_WINDOW)
         {
-            return Err(wait(q));
+            self.wrong.pop_front();
         }
-        if !self.per_ip.contains_key(ip) && self.per_ip.len() >= MAX_TRACKED {
-            return Err(wait(&self.all));
+        self.wrong.push_back(now);
+        if self.wrong.len() >= ROTATE_AFTER {
+            self.wrong.clear();
+            return true;
         }
-        self.all.push_back(now);
-        self.per_ip
-            .entry(ip.to_string())
-            .or_default()
-            .push_back(now);
-        Ok(())
+        false
+    }
+}
+
+/// The limiter's key for a client: its address as resolved (the socket peer, or what a
+/// trusted proxy says), never a raw header a stranger chose; an IPv6 address by its /64
+/// (one host's share of addresses).
+fn limit_key(client: &Client) -> String {
+    let ip = client.ip.parse::<std::net::IpAddr>().unwrap_or(client.peer);
+    match ip {
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        v4 => v4.to_string(),
     }
 }
 
@@ -187,8 +236,12 @@ impl SetupFlag {
     }
 
     /// Check a presented code against the current one, counting the attempt.
-    fn check_code(&self, ip: &str, presented: &str) -> Gate {
-        if let Err(wait) = self.0.limiter.lock().attempt(ip, Instant::now()) {
+    fn check_code(&self, key: &str, presented: &str) -> Gate {
+        self.check_code_at(key, presented, Instant::now())
+    }
+
+    fn check_code_at(&self, key: &str, presented: &str, now: Instant) -> Gate {
+        if let Err(wait) = self.0.limiter.lock().attempt(key, now) {
             return Gate::Limited(wait);
         }
         let given = normalize_code(presented);
@@ -197,11 +250,17 @@ impl SetupFlag {
             None => false,
         };
         if ok {
-            Gate::Allowed
-        } else {
-            warn!("setup: a wrong setup code was entered from {ip}");
-            Gate::Denied
+            return Gate::Allowed;
         }
+        warn!("setup: a wrong setup code was entered from {key}");
+        if self.0.limiter.lock().wrong(now) && self.has_code() {
+            let code = self.issue_code();
+            warn!(
+                "setup: {ROTATE_AFTER} wrong setup codes within {} s: the setup code changed. New setup code: {code}",
+                ROTATE_WINDOW.as_secs()
+            );
+        }
+        Gate::Denied
     }
 
     /// Start a session (after a right code): its id, for the cookie.
@@ -266,9 +325,14 @@ pub fn remove_legacy_token(layout: &StorageLayout) {
     }
 }
 
-/// Compare without an early exit, so timing does not leak the code.
+/// Compare without an early exit, so timing does not leak the code (a length
+/// difference is folded in too, not returned early).
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    let mut diff = u8::from(a.len() != b.len());
+    for i in 0..a.len().max(b.len()) {
+        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
 }
 
 fn session_cookie(headers: &HeaderMap) -> Option<String> {
@@ -307,7 +371,7 @@ fn gate_of(deps: &AccountsDeps, client: &Client, parts: &Parts) -> Gate {
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.trim().is_empty())
     {
-        Some(code) => deps.setup.check_code(&client.ip, code),
+        Some(code) => deps.setup.check_code(&limit_key(client), code),
         None => Gate::Denied,
     }
 }
@@ -437,7 +501,7 @@ async fn code(State(d): State<AccountsDeps>, client: Client, body: Body) -> Resp
             d.setup.has_code(),
         );
     }
-    match d.setup.check_code(&client.ip, &presented) {
+    match d.setup.check_code(&limit_key(&client), &presented) {
         Gate::Allowed => {
             info!("setup: the setup code was entered from {}", client.ip);
             let id = d.setup.new_session();
@@ -776,16 +840,79 @@ mod tests {
             flag.check_code("1.2.3.4", &code),
             Gate::Limited(_)
         ));
-        // Others still get their tries, up to the global cap.
+        // Others still get their tries.
         assert_eq!(flag.check_code("5.6.7.8", &code), Gate::Allowed);
+    }
+
+    /// An attacker's burst costs the attacker's tries only for a while: the right code
+    /// works again once its tries came back.
+    #[test]
+    fn a_burst_does_not_stop_a_later_right_code() {
+        let flag = SetupFlag::default();
+        let code = flag.issue_code();
+        let t0 = Instant::now();
+        for i in 0..20 {
+            let g = flag.check_code_at("6.6.6.6", "WRONGWRONG", t0 + Duration::from_millis(i));
+            assert!(matches!(g, Gate::Denied | Gate::Limited(_)), "{g:?}");
+        }
+        assert!(matches!(
+            flag.check_code_at("6.6.6.6", &code, t0 + Duration::from_secs(1)),
+            Gate::Limited(_)
+        ));
+        // The same address, after a refill period: allowed again.
+        assert_eq!(
+            flag.check_code_at("6.6.6.6", &code, t0 + REFILL + Duration::from_secs(1)),
+            Gate::Allowed
+        );
+    }
+
+    /// Wrong codes spread over many addresses never lock setup: they replace the code
+    /// (the old one stops working, the new one works).
+    #[test]
+    fn many_wrong_codes_rotate_the_code_instead_of_locking() {
+        let flag = SetupFlag::default();
+        let old = flag.issue_code();
+        let t0 = Instant::now();
+        for i in 0..ROTATE_AFTER {
+            let ip = format!("10.1.{}.{}", i / 200, i % 200);
+            assert_eq!(flag.check_code_at(&ip, "WRONGWRONG", t0), Gate::Denied);
+        }
+        let new = format_code(flag.0.code.lock().as_deref().unwrap());
+        assert_ne!(normalize_code(&new), normalize_code(&old), "rotated");
+        assert_eq!(flag.check_code_at("192.0.2.9", &old, t0), Gate::Denied);
+        assert_eq!(flag.check_code_at("192.0.2.10", &new, t0), Gate::Allowed);
+    }
+
+    /// The limiter forgets addresses: bounded however many there are.
+    #[test]
+    fn the_limiter_stays_bounded() {
         let mut l = Limiter::default();
         let now = Instant::now();
-        for i in 0..ATTEMPTS_GLOBAL {
-            assert!(l.attempt(&format!("10.0.{}.{}", i / 4, i % 4), now).is_ok());
+        for i in 0..10_000u32 {
+            let ip = std::net::Ipv4Addr::from(0x0a00_0000 + i).to_string();
+            let _ = l.attempt(&ip, now);
+            assert!(l.per_ip.len() <= MAX_TRACKED);
         }
-        assert!(l.attempt("10.9.9.9", now).is_err());
-        // The window passes.
-        assert!(l.attempt("10.9.9.9", now + ATTEMPT_WINDOW).is_ok());
+        assert!(l.per_ip.len() <= MAX_TRACKED);
+        // A new address still gets its tries.
+        assert!(l.attempt("192.0.2.1", now).is_ok());
+    }
+
+    #[test]
+    fn limiter_keys() {
+        let c = |ip: &str| Client {
+            peer: "203.0.113.5".parse().unwrap(),
+            ip: ip.into(),
+            peer_known: true,
+        };
+        assert_eq!(limit_key(&c("203.0.113.5")), "203.0.113.5");
+        // Not an address (a trusted proxy's odd header): the peer.
+        assert_eq!(limit_key(&c("not-an-ip")), "203.0.113.5");
+        // IPv6 by its /64.
+        assert_eq!(
+            limit_key(&c("2001:db8:1:2:aaaa::1")),
+            limit_key(&c("2001:db8:1:2:bbbb::9"))
+        );
     }
 
     #[test]

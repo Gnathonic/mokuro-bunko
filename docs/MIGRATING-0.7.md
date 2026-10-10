@@ -224,7 +224,7 @@ localhost working without anything more and adds two ways in:
 - The **setup code**: while no admin exists, the server prints a new one-time code
   at each start (`First run: create the admin account at http://…/setup (setup code:
   XXXXX-XXXXX)`). Opened from another computer, `/setup` asks for it, then shows the
-  same wizard. The code works until an admin exists, a few tries a minute.
+  same wizard. The code works until an admin exists, a few tries a minute per address (a flood of wrong codes replaces it with a new one in the log rather than locking setup).
 - **`MOKURO_ADMIN_USERNAME` + `MOKURO_ADMIN_PASSWORD`** (or
   `MOKURO_ADMIN_PASSWORD_FILE`): the admin is created on the first start; ignored
   once one exists. The Unraid templates have both as optional fields.
