@@ -141,9 +141,119 @@ pub struct Availability {
     /// When the pause lifts by itself (RFC 3339), if it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<String>,
-    /// `user` or `schedule`.
+    /// `user`, `schedule`, or `installing` (its OCR backend is still installing: it
+    /// takes no work until that is done; [`Availability::INSTALLING`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// How far the processor's OCR backend install is (0.7 addition, optional): set
+    /// while one runs, whatever the reason of the pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<OcrInstall>,
+}
+
+impl Availability {
+    /// `reason` of a processor that is installing its OCR backend.
+    pub const INSTALLING: &'static str = "installing";
+
+    /// Not available while its OCR backend installs.
+    pub fn installing(install: OcrInstall) -> Availability {
+        Availability {
+            paused: true,
+            until: None,
+            reason: Some(Self::INSTALLING.into()),
+            install: Some(install),
+        }
+    }
+
+    /// Paused only because its OCR backend is installing.
+    pub fn is_installing(&self) -> bool {
+        self.paused && self.reason.as_deref() == Some(Self::INSTALLING)
+    }
+}
+
+/// Where a machine's background OCR backend install stands (0.7): the pack for its
+/// GPU (or the CPU) and the models, downloaded while it already serves. Shown by the
+/// control API (`status.install`), the admin panel and, for a processor, the library's
+/// processor list (`availability.install`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OcrInstall {
+    /// `running`, `done`, `failed`, or `missing` (needed, but automatic installs are
+    /// off: it waits for its owner).
+    pub state: String,
+    /// What it is doing: `checking`, `waiting` (another install on this machine holds
+    /// the lock), `downloading` (the backend pack), `unpacking`, `libraries` (NVIDIA's
+    /// CUDA libraries), `models`, `done`, `failed`.
+    #[serde(default)]
+    pub stage: String,
+    /// Of the stage (0-100), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    /// The pack variant (`cpu`, `cu130`, `rocm7.1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    /// The pack (`mokuro-bunko-backend-0.7.0-linux-x64-cu130.tar.zst`, or its name once
+    /// installed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack: Option<String>,
+    /// The latest line (what is downloading, or what went wrong).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// A failure retrying alone will not fix (driver too old, no space, ...).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_owner: bool,
+    /// What the owner should do, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// When this install began, or ended (RFC 3339, UTC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+impl OcrInstall {
+    pub const RUNNING: &'static str = "running";
+    pub const DONE: &'static str = "done";
+    pub const FAILED: &'static str = "failed";
+    pub const MISSING: &'static str = "missing";
+
+    pub fn running(&self) -> bool {
+        self.state == Self::RUNNING
+    }
+
+    pub fn failed(&self) -> bool {
+        self.state == Self::FAILED
+    }
+
+    /// `installing OCR backend: 42%` / `... (downloading)` / `OCR backend install failed: ...`:
+    /// one line for a list.
+    pub fn summary(&self) -> String {
+        match self.state.as_str() {
+            Self::FAILED => format!(
+                "OCR backend install failed{}",
+                self.message
+                    .as_deref()
+                    .map(|m| format!(": {m}"))
+                    .unwrap_or_default()
+            ),
+            Self::DONE => "OCR backend installed".into(),
+            Self::MISSING => "OCR backend not installed".into(),
+            _ => {
+                let what = match self.stage.as_str() {
+                    "models" => "installing OCR models",
+                    "waiting" => "waiting for another OCR install",
+                    _ => "installing OCR backend",
+                };
+                match self.percent {
+                    Some(p) => format!("{what}: {}%", p.min(100)),
+                    None if self.stage.is_empty() => what.to_string(),
+                    None => format!("{what} ({})", self.stage),
+                }
+            }
+        }
+    }
 }
 
 fn one() -> u32 {
@@ -547,6 +657,48 @@ mod tests {
     }
 
     #[test]
+    fn installing_availability() {
+        let mut i = OcrInstall {
+            state: OcrInstall::RUNNING.into(),
+            stage: "downloading".into(),
+            percent: Some(42),
+            done_bytes: Some(416),
+            total_bytes: Some(1000),
+            variant: Some("cu130".into()),
+            ..OcrInstall::default()
+        };
+        let a = Availability::installing(i.clone());
+        assert!(a.paused && a.is_installing());
+        let text = serde_json::to_string(&Event::Availability(a.clone())).unwrap();
+        assert!(text.contains(r#""reason":"installing""#), "{text}");
+        assert!(
+            text.contains(r#""install":{"state":"running","stage":"downloading""#),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Event>(&text).unwrap(),
+            Event::Availability(a)
+        );
+        assert_eq!(i.summary(), "installing OCR backend: 42%");
+        i.stage = "models".into();
+        i.percent = None;
+        assert_eq!(i.summary(), "installing OCR models (models)");
+        i.state = OcrInstall::FAILED.into();
+        i.message = Some("no space".into());
+        assert_eq!(i.summary(), "OCR backend install failed: no space");
+        // A user's pause is not an install.
+        let user = Availability {
+            paused: true,
+            reason: Some("user".into()),
+            ..Availability::default()
+        };
+        assert!(!user.is_installing());
+        // An availability without `install` (0.7 betas) still reads.
+        let old: Availability = serde_json::from_str(r#"{"paused":true,"reason":"user"}"#).unwrap();
+        assert_eq!(old.install, None);
+    }
+
+    #[test]
     fn event_shapes() {
         let e: Event = serde_json::from_str(
             r#"{"event":"fetch","sid":"s","id":"v1","state":"ready","bytes":10,"crc32":"abcd1234"}"#,
@@ -566,6 +718,7 @@ mod tests {
             paused: true,
             until: Some("2026-10-04T18:00:00Z".into()),
             reason: Some("user".into()),
+            install: None,
         });
         let text = serde_json::to_string(&a).unwrap();
         assert_eq!(

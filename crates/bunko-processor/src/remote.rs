@@ -74,6 +74,11 @@ pub struct ServeOptions {
     pub installer: Option<Arc<dyn ReleaseInstaller>>,
     /// The first retry wait after a failed automatic update (tests shorten it).
     pub retry_first: Duration,
+    /// The background OCR backend install (the binary runs it): while it runs the
+    /// processor registers as not available (reason `installing`, with its progress)
+    /// and takes no work; once it is done the processor registers again with what it
+    /// can run now. None: no install (tests, the lite build).
+    pub install: Option<crate::session::InstallWatch>,
 }
 
 /// How `serve` ended without an error.
@@ -102,6 +107,7 @@ impl ServeOptions {
             control: None,
             installer: None,
             retry_first: bunko_update::auto::retry_first(),
+            install: None,
         }
     }
 }
@@ -364,7 +370,7 @@ async fn serve_loop(
                 tracing::warn!("{e}; retrying in {}s", backoff.as_secs());
                 Next::Backoff
             }
-            Ok((client, reply, ws, engines)) => {
+            Ok((client, reply, ws, engines, said_installing)) => {
                 backoff = start;
                 write_status(
                     storage,
@@ -389,11 +395,12 @@ async fn serve_loop(
                     spool.clone(),
                     &mut track,
                     update,
+                    said_installing,
                 )
                 .await;
                 write_status(storage, State::Disconnected, url, None, None);
                 let why = match &ended {
-                    Ended::Shutdown | Ended::Updated(_) => None,
+                    Ended::Shutdown | Ended::Updated(_) | Ended::Installed => None,
                     Ended::Lost(r) | Ended::Closed(r) => Some(r.as_str()),
                 };
                 link_state(options, bunko_control::LinkPhase::Disconnected, why);
@@ -402,6 +409,12 @@ async fn serve_loop(
                     Ended::Updated(v) => {
                         tracing::info!("Automatic update: installed mokuro-bunko {v}; restarting");
                         return Ok(ServeExit::Updated(v));
+                    }
+                    Ended::Installed => {
+                        tracing::info!(
+                            "OCR backend installed: registering again with what this processor can run now"
+                        );
+                        Next::AtOnce
                     }
                     Ended::Lost(reason) | Ended::Closed(reason) => {
                         tracing::warn!(
@@ -428,9 +441,11 @@ async fn serve_loop(
 }
 
 /// Probe, register, open the socket.
-async fn connect(
-    options: &ServeOptions,
-) -> Result<(LibraryClient, RegisterReply, WebSocket, usize), ClientError> {
+/// The registration said "installing" (`bool`): the connection must say otherwise once
+/// the install is over.
+type Connected = (LibraryClient, RegisterReply, WebSocket, usize, bool);
+
+async fn connect(options: &ServeOptions) -> Result<Connected, ClientError> {
     let config = &options.config;
     let client = LibraryClient::new(&config.library, &config.processor.name)?;
     // Re-probed at every registration: models that finished downloading show up.
@@ -445,13 +460,17 @@ async fn connect(
     if let Some(c) = &options.control {
         c.set_devices(&info.catalog.devices);
     }
-    // A paused processor says so in its registration: it is offered nothing at all.
-    let availability = options
+    // A paused processor (or one still installing its OCR backend) says so in its
+    // registration: it is offered nothing at all.
+    let pause = options
         .control
         .as_ref()
         .and_then(|c| c.pause_ctl())
         .and_then(|p| p.current())
         .map(|s| s.availability());
+    let install = options.install.as_ref().and_then(|rx| rx.borrow().clone());
+    let said_installing = install.as_ref().is_some_and(|i| i.running());
+    let availability = crate::session::availability_for(pause, install.as_ref());
     let request = RegisterRequest {
         protocol: PROTOCOL_VERSION,
         name: Some(config.processor.name.clone()),
@@ -466,13 +485,15 @@ async fn connect(
         r = client.register(&request) => r?,
     };
     let ws = client.connect_socket(&reply.socket).await?;
-    Ok((client, reply, ws, engines))
+    Ok((client, reply, ws, engines, said_installing))
 }
 
 enum Ended {
     Shutdown,
     Lost(String),
     Closed(String),
+    /// The OCR backend install finished: register again (a fresh catalog).
+    Installed,
     /// The automatic update installed this version.
     Updated(String),
 }
@@ -497,6 +518,7 @@ async fn run_connection(
     spool: Arc<ArchiveSpool>,
     track: &mut UpdateTrack,
     update: Option<String>,
+    said_installing: bool,
 ) -> Ended {
     let leaving = Arc::new(AtomicBool::new(false));
     let lost = CancellationToken::new();
@@ -525,6 +547,7 @@ async fn run_connection(
         leaving.clone(),
         options.bench.clone(),
         options.control.clone(),
+        options.install.clone(),
     );
     let mut last_heard = Instant::now();
     let mut last_sent = Instant::now();
@@ -558,7 +581,28 @@ async fn run_connection(
             _ => None,
         }
     });
+    // The registration said "installing": the install's end re-registers (done) or
+    // says the processor is available after all (failed). It may have ended already.
+    let mut install = options.install.clone();
+    let mut install_running = said_installing;
+    let mut installed_already = false;
+    if said_installing {
+        let now = install
+            .as_mut()
+            .and_then(|rx| rx.borrow_and_update().clone());
+        match now.as_ref().map(|i| i.state.as_str()) {
+            Some(bunko_proto::OcrInstall::RUNNING) => {}
+            Some(bunko_proto::OcrInstall::DONE) => installed_already = true,
+            _ => {
+                install_running = false;
+                hub.announce(true);
+            }
+        }
+    }
     let ended = loop {
+        if std::mem::take(&mut installed_already) {
+            break Ended::Installed;
+        }
         // Start draining when an update is due.
         if let (Phase::Idle, Some(v)) = (&phase, &target)
             && track.retry.may_try(v, Instant::now())
@@ -657,6 +701,28 @@ async fn run_connection(
                         say(r);
                     }
                 }
+            }
+            changed = async {
+                match install.as_mut() {
+                    Some(rx) => rx.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() {
+                    install = None;
+                    continue;
+                }
+                let now = install.as_mut().and_then(|rx| rx.borrow_and_update().clone());
+                let running = now.as_ref().is_some_and(|i| i.running());
+                let done = now.as_ref().is_some_and(|i| i.state == bunko_proto::OcrInstall::DONE);
+                if install_running && done {
+                    break Ended::Installed;
+                }
+                if install_running && !running {
+                    // Failed: available again with what it has (the hub says so).
+                    hub.announce(true);
+                }
+                install_running = running;
             }
             _ = options.shutdown.cancelled() => break Ended::Shutdown,
             _ = lost.cancelled() => break Ended::Lost("the library refused this account for a download".into()),

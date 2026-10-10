@@ -1,6 +1,8 @@
 // Library server wizard: the `setup` questions and two toggles (OCR on this machine,
 // start with the machine) that add their steps. The review step saves (config.yaml +
-// admin account + certificate), installs OCR, sets up the start-up and starts `serve`.
+// admin account + certificate, the OCR choices), sets up the start-up and starts
+// `serve`; the last page comes as soon as it serves, while the OCR backend installs in
+// the background.
 (function () {
   'use strict';
   const { esc, get, post, info, showError, setBusy, wirePickers, wizard } = window.App;
@@ -12,7 +14,6 @@
   // Stages of the run that finished (a retry goes on from the first other one).
   const finished = {};
   let failedStage = null;
-  let doctorOk = true;
 
   const ocrOn = () => $('local-ocr').checked;
   const startupOn = () => $('want-startup').checked;
@@ -79,10 +80,11 @@
     $('summary').innerHTML = rows.map(([k, v]) => '<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>').join('');
   }
 
-  // What the review step runs, in order.
+  // What the review step runs, in order. The OCR backend downloads after the start,
+  // in the background (the server does it), so it is not a stage here.
   function stages() {
     const s = [['save', 'Save the configuration']];
-    if (ocrOn()) s.push(['ocr', 'Install OCR'], ['doctor', 'Check (doctor)']);
+    if (ocrOn()) s.push(['ocr', 'OCR choices (the backend installs in the background once the server runs)']);
     if (startupOn()) s.push(['startup', 'Start with the machine']);
     s.push(['start', 'Start the server']);
     return s;
@@ -121,7 +123,7 @@
         // OCR and the start-up can be done later from Settings.
         if (k === 'ocr' || k === 'startup') {
           $('skip-btn').hidden = false;
-          $('skip-btn').textContent = k === 'ocr' ? 'Skip OCR for now' : 'Skip this';
+          $('skip-btn').textContent = k === 'ocr' ? 'Skip the OCR choices' : 'Skip this';
         }
         return;
       }
@@ -133,7 +135,6 @@
     if (!failedStage) return;
     finished[failedStage] = true;
     mark(failedStage, 'skipped', 'skipped: Settings can do it later');
-    if (failedStage === 'ocr') { finished.doctor = true; mark('doctor', 'skipped'); }
     run();
   }
 
@@ -150,11 +151,10 @@
       }
     }
     if (k === 'ocr') {
-      const r = await S.runOcr(state.ocr.request(), $('install-job'), $('doctor-job'), mark);
-      if (r.ok) { finished.doctor = true; doctorOk = r.doctor_ok; }
-      return r.ok;
+      await S.queueOcr(state.ocr.request(), 'server');
+      mark('ocr', 'ok', 'kept for the server: ' + state.ocr.describe());
+      return true;
     }
-    if (k === 'doctor') return true; // runs with the install
     if (k === 'startup') {
       const m = await state.startup.apply();
       mark('startup', 'ok', m.length ? m[m.length - 1] : '');
@@ -187,8 +187,9 @@
     const admin = i.library_url + (i.admin_path || '/_admin');
     $('done-body').innerHTML =
       '<div class="result result--ok">' + (s.already_running ? 'A server was already running at ' : 'Answering at ') +
-      '<a href="' + esc(s.url) + '" target="_blank" rel="noopener">' + esc(s.url) + '</a>.</div>' +
-      (doctorOk ? '' : '<p class="form-hint mt-2">The check found problems: see <a href="/app/settings/doctor">Diagnostics</a>.</p>');
+      '<a href="' + esc(s.url) + '" target="_blank" rel="noopener">' + esc(s.url) + '</a>' +
+      (s.by_tray ? ' (the tray runs it: its Quit stops it)' : '') + '.</div>' +
+      '<div id="done-ocr" role="status" hidden></div>';
     const links = [
       '<li><a href="' + esc(s.url) + '" target="_blank" rel="noopener">Open the library</a></li>',
       '<li><a href="' + esc(admin) + '" target="_blank" rel="noopener">Open the admin panel</a> (users, invites, settings, tunnel)</li>',
@@ -198,6 +199,7 @@
     $('done-links').innerHTML = links.join('');
     $('go-dashboard').addEventListener('click', goDashboard);
     w.go('s-done');
+    if (ocrOn()) S.watchInstall($('done-ocr'), 'server');
   }
 
   // The started server serves its own pages (its control listener): move there and

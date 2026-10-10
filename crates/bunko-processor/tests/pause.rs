@@ -166,6 +166,7 @@ async fn pause_now_releases_everything_and_says_only_exit() {
         paused: true,
         until: Some("2099-01-01T00:00:00Z".into()),
         reason: Some("user".into()),
+        install: None,
     })));
     let status = ctl.status();
     assert_eq!(status.state, State::Paused);
@@ -217,7 +218,8 @@ async fn a_pause_survives_a_restart_and_is_announced_first() {
         Event::Availability(Availability {
             paused: true,
             until: None,
-            reason: Some("user".into())
+            reason: Some("user".into()),
+            install: None,
         })
     );
     link.ops.send(open("s1")).await.unwrap();

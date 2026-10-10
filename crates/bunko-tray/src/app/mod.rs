@@ -79,6 +79,10 @@ pub trait Ui {
     fn hide(&mut self);
 }
 
+fn mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 /// The supervisor's view of the world, backed by the monitor.
 struct MonitorWorld(Arc<Monitor>);
 
@@ -92,6 +96,14 @@ impl World for MonitorWorld {
     fn service_active(&self, role: &str) -> Option<String> {
         supervise::service_active(role)
     }
+    fn managed_instance(&self, role: &str) -> Option<u32> {
+        let pid = self.0.live_pid(role)?;
+        self.0
+            .instances()
+            .iter()
+            .any(|l| l.control.pid == pid && l.status.as_ref().is_some_and(|s| s.managed))
+            .then_some(pid)
+    }
 }
 
 pub struct App {
@@ -101,6 +113,10 @@ pub struct App {
     child_env: Vec<(String, OsString)>,
     tray_config_path: PathBuf,
     tray_config: Option<TrayConfig>,
+    /// tray.json's modification time when last read (a change adds its new roles).
+    tray_config_mtime: Option<std::time::SystemTime>,
+    /// This tray starts and supervises what tray.json lists (`--no-supervise`: not).
+    supervise: bool,
     monitor: Arc<Monitor>,
     supervisor: Option<Supervisor>,
     update: UpdateView,
@@ -152,9 +168,11 @@ impl App {
         };
         let candidates = {
             let layout = layout.clone();
-            let tc = tray_config.clone();
+            let path = tray_config_path.clone();
             let extra = opts.storages.clone();
+            // tray.json as it is now: a role added while the tray runs is looked for too.
             Box::new(move || {
+                let tc = TrayConfig::load(&path).ok().flatten();
                 discover::candidate_storages(&ProcessEnv, &layout, tc.as_ref(), &extra)
             })
         };
@@ -184,11 +202,14 @@ impl App {
                 }
             });
         }
+        let tray_config_mtime = mtime(&tray_config_path);
         let app = App {
             exe,
             layout,
             cli,
             child_env,
+            supervise: opts.supervise,
+            tray_config_mtime,
             tray_config_path,
             tray_config,
             monitor,
@@ -328,7 +349,60 @@ impl App {
         Ok(())
     }
 
+    /// tray.json changed while the tray runs (the setup wizard handed it a server or a
+    /// processor): supervise the roles it gained. A role it lost keeps running until
+    /// Quit (the pages stop it themselves when they take it away).
+    fn reload_tray_config(&mut self) {
+        let now = mtime(&self.tray_config_path);
+        if now == self.tray_config_mtime || !self.supervise {
+            return;
+        }
+        self.tray_config_mtime = now;
+        let conf = match TrayConfig::load(&self.tray_config_path) {
+            Ok(Some(c)) => c,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::error!("{e}");
+                return;
+            }
+        };
+        let added = match self.supervisor.as_mut() {
+            Some(sup) => sup.add(&conf.managed),
+            None if !conf.managed.is_empty() => {
+                let send = self.send.clone();
+                let sup = Supervisor::start(
+                    &conf.managed,
+                    |m| m.command_args(&ProcessEnv),
+                    Launch {
+                        cli: self.cli.clone(),
+                        env: self.child_env.clone(),
+                        log_dir: self.layout.writable_log_dir(&ProcessEnv),
+                    },
+                    Arc::new(MonitorWorld(self.monitor.clone())),
+                    Arc::new(move || send(UserEvent::Changed)),
+                );
+                let n = sup.slots.len();
+                self.supervisor = Some(sup);
+                n
+            }
+            None => 0,
+        };
+        if added > 0 {
+            tracing::info!(
+                "{} changed: now also running {}",
+                self.tray_config_path.display(),
+                conf.managed
+                    .iter()
+                    .map(|m| m.role.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        self.tray_config = Some(conf);
+    }
+
     fn refresh(&mut self, ui: &mut dyn Ui) {
+        self.reload_tray_config();
         if let Err(e) = self.refresh_or_fail(ui) {
             tracing::error!("tray: {e:#}");
         }

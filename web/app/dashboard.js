@@ -43,8 +43,45 @@
     }
   }
 
+  // `status.install`: the background OCR backend install (0.7).
+  function installText(i) {
+    if (i.state === 'failed') return 'The OCR backend install failed' + (i.message ? ': ' + i.message : '') + '.';
+    if (i.state === 'missing') return (i.message || 'No OCR backend is installed') + '.';
+    if (i.state === 'done') return 'OCR backend installed' + (i.pack ? ' (' + i.pack + ')' : '') + '; local OCR uses it now.';
+    const stage = {
+      checking: 'Checking what this machine needs', waiting: 'Waiting for another OCR install on this machine',
+      downloading: 'Downloading the ' + (i.variant ? i.variant + ' ' : '') + 'backend pack',
+      unpacking: 'Unpacking and checking the backend pack', libraries: 'Fetching NVIDIA\'s CUDA libraries',
+      installed: 'Backend pack installed', models: 'Fetching the OCR models',
+    }[i.stage] || ('Installing (' + i.stage + ')');
+    const bytes = i.done_bytes != null && i.total_bytes
+      ? ' — ' + (i.done_bytes / 1e9).toFixed(2) + ' of ' + (i.total_bytes / 1e9).toFixed(2) + ' GB' : '';
+    return stage + (i.percent != null ? ': ' + i.percent + '%' : '…') + bytes;
+  }
+
+  function renderInstall(i) {
+    const panel = $('install-panel');
+    panel.hidden = !i;
+    if (!i) return;
+    const running = i.state === 'running';
+    const stuck = i.state === 'failed' || i.state === 'missing';
+    $('install-text').textContent = installText(i);
+    $('install-text').className = stuck ? 'problem problem--fail' : '';
+    $('install-bar').hidden = !running;
+    $('install-bar').classList.toggle('progress--indeterminate', running && i.percent == null);
+    $('install-fill').style.width = (i.percent || 0) + '%';
+    if (i.percent != null) $('install-bar').setAttribute('aria-valuenow', i.percent);
+    $('install-hint').textContent = running
+      ? 'It runs in the background: the server already serves, and you can close this page.' +
+        (i.message && i.stage === 'models' ? ' (' + i.message + ')' : '')
+      : (stuck ? (i.action || 'See the log for the details.') : '');
+    $('install-actions').hidden = !stuck;
+    $('install-retry').textContent = i.state === 'missing' ? 'Install' : 'Retry';
+  }
+
   function render(s) {
     last = s;
+    renderInstall(s.install);
     showError($('dash-error'), null);
     $('dash-name').textContent = (s.role === 'server' ? 'Library server' : s.role === 'processor' ? 'Processor' : 'This machine') +
       (s.name ? ' · ' + s.name : '');
@@ -96,7 +133,8 @@
         '</div></div>';
     }).join('') : '<p class="text-muted">' + (paused ? 'Nothing — paused.' : 'Nothing.') + '</p>';
 
-    const probs = s.problems || [];
+    // The install's own failure is in its panel above.
+    const probs = (s.problems || []).filter((pr) => pr.kind !== 'ocr-install' || !s.install);
     $('problems-panel').hidden = !probs.length;
     $('problems').innerHTML = probs.map((pr) =>
       '<div class="problem problem--' + esc(pr.severity) + '">' + esc(pr.text) +
@@ -176,6 +214,14 @@
   document.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('[data-pause]').forEach((b) => { b.onclick = () => pause(b.dataset.pause); });
     $('resume').onclick = resume;
+    $('install-retry').onclick = async () => {
+      $('install-retry').disabled = true;
+      try {
+        const r = await post('/control/ocr-install');
+        if (r && r.status) render(r.status); else poll();
+        toast(r && r.installing ? 'Installing the OCR backend in the background.' : 'Nothing to install.');
+      } catch (e) { toast(e.message, 'error'); } finally { $('install-retry').disabled = false; }
+    };
     poll();
     connect();
   });

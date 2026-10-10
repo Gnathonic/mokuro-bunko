@@ -98,6 +98,12 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
     let mut options = ServeOptions::new(cfg, engines);
     options.verbose = verbose;
     options.installer = Some(installer);
+    // The OCR backend installs in the background when it is missing: the processor
+    // registers at once, as not available until it is done (crate::ocr_install).
+    let ocr_installer = crate::ocr_install::Installer::new(crate::ocr_install::Who::Processor {
+        config: processor_config_path(config),
+    });
+    options.install = Some(ocr_installer.subscribe());
     let shutdown = options.shutdown.clone();
     let config_path = ctx.config_path.clone();
     let processor_config = std::path::absolute(config).unwrap_or_else(|_| config.to_path_buf());
@@ -113,6 +119,9 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
             tracing::info!("Stopping the processor");
             signal.cancel();
         });
+        // Only the instance that will hold the storage installs (a second one fails
+        // below).
+        let installs = storage_free(&storage);
         // The local control API (GUI.md §2): pause/resume, status, the app pages. Only
         // the instance holding the storage lock serves it (a second one fails below).
         let control_server = if bunko_control::enabled_from_env() && storage_free(&storage) {
@@ -135,13 +144,27 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
                 library: None,
                 reason: String::new(),
             };
-            crate::control::watch_problems(control.clone(), shutdown.clone(), move || {
-                let mut problems: Vec<_> = super::doctor::backend_problem(&target)
-                    .into_iter()
-                    .collect();
-                problems.extend(super::doctor::control_problems(&target.storage, false));
-                problems
-            });
+            ocr_installer.attach_control(&control);
+            let watched = ocr_installer.clone();
+            crate::control::watch_problems(
+                control.clone(),
+                shutdown.clone(),
+                Some(bunko_server::ocr::BackgroundInstall::finished(
+                    &ocr_installer,
+                )),
+                move || {
+                    let mut problems: Vec<_> =
+                        if crate::ocr_install::speaks_for_backend(Some(&watched)) {
+                            Vec::new()
+                        } else {
+                            super::doctor::backend_problem(&target)
+                                .into_iter()
+                                .collect()
+                        };
+                    problems.extend(super::doctor::control_problems(&target.storage, false));
+                    problems
+                },
+            );
             control.set_update(started.view);
             control.set_update_problems(started.problems);
             options.control = Some(control.clone());
@@ -149,6 +172,9 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
         } else {
             None
         };
+        if installs {
+            ocr_installer.start_if_needed();
+        }
         let result = bunko_processor::serve(options).await;
         if let Some(server) = control_server {
             server.shutdown().await;
@@ -175,6 +201,11 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
         }
         Err(e) => Err(Fail::msg(e)),
     }
+}
+
+/// processor.yaml as an absolute path (the install child runs elsewhere).
+fn processor_config_path(config: &Path) -> PathBuf {
+    std::path::absolute(config).unwrap_or_else(|_| config.to_path_buf())
 }
 
 /// Nobody else serves this storage (`bunko_processor::lock`): probed and released, the

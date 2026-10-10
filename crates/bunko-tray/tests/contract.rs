@@ -80,6 +80,12 @@ fn full_status() -> bc::Status {
             auto: true,
             since: Some("2026-10-05T10:00:00Z".into()),
         }),
+        install: Some(bc::OcrInstall {
+            state: "running".into(),
+            stage: "downloading".into(),
+            percent: Some(42),
+            ..Default::default()
+        }),
     }
 }
 
@@ -88,6 +94,10 @@ fn status_round_trips_into_the_tray_types() {
     let wire = serde_json::to_string(&full_status()).unwrap();
     let s: Status = serde_json::from_str(&wire).unwrap();
     assert_eq!(s.role, "processor");
+    assert_eq!(
+        s.install.as_ref().and_then(|i| i.line()).as_deref(),
+        Some("Installing OCR backend: 42%")
+    );
     assert_eq!(s.state, "paused");
     assert_eq!(s.pause.mode.as_deref(), Some("now"));
     assert_eq!(s.pause.until.as_deref(), Some("2026-10-05T15:00:00Z"));

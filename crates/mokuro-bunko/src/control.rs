@@ -60,14 +60,16 @@ pub async fn start(
 }
 
 /// Keep `problems` current: `check` now and every [`PROBLEMS_EVERY`] on a blocking
-/// thread, until `stop`.
+/// thread, until `stop`; also at once whenever `again` changes (an OCR install ended).
 pub fn watch_problems(
     control: Control,
     stop: CancellationToken,
+    again: Option<tokio::sync::watch::Receiver<u64>>,
     check: impl Fn() -> Vec<Problem> + Send + Sync + 'static,
 ) {
     let check = std::sync::Arc::new(check);
     tokio::spawn(async move {
+        let mut again = again;
         loop {
             let run = check.clone();
             if let Ok(problems) = tokio::task::spawn_blocking(move || run()).await {
@@ -76,6 +78,16 @@ pub fn watch_problems(
             tokio::select! {
                 _ = stop.cancelled() => break,
                 _ = tokio::time::sleep(PROBLEMS_EVERY) => {}
+                changed = async {
+                    match again.as_mut() {
+                        Some(rx) => rx.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if changed.is_err() {
+                        again = None;
+                    }
+                }
             }
         }
     });

@@ -42,7 +42,8 @@ pub use types::*;
 pub use activity::{Activity, Changes};
 #[cfg(feature = "runtime")]
 pub use control::{
-    Control, ControlConfig, ControlError, LinkPhase, LoadProbe, enabled_from_env, managed_from_env,
+    Control, ControlConfig, ControlError, InstallTrigger, LinkPhase, LoadProbe, enabled_from_env,
+    managed_from_env,
 };
 #[cfg(feature = "runtime")]
 pub use http::{ControlListener, ControlServer};

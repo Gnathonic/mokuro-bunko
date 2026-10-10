@@ -19,7 +19,7 @@ pub mod recognizer;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use bunko_torch::abi::{DeviceEntry, DevicesReport, LoadOptions, PACK_JSON};
 use bunko_vlm::{Precision, RecognizerInfo};
@@ -121,7 +121,10 @@ pub fn discover_all(dirs: &[PathBuf]) -> Vec<PathBuf> {
     seen
 }
 
-static BACKEND: OnceLock<Result<Arc<TorchBackend>, String>> = OnceLock::new();
+/// The process's backend, once decided. A loaded library is never unloaded, so a
+/// success stays for the life of the process; a failure stays too (every caller sees the
+/// same answer) until [`forget_failure`] lets the next caller try again.
+static BACKEND: Mutex<Option<Result<Arc<TorchBackend>, String>>> = Mutex::new(None);
 
 /// The process's backend: the first pack of [`discover`] (or `MOKURO_TORCH_PACK`)
 /// that opens. Decided once; later calls return the same result whatever they pass.
@@ -131,14 +134,32 @@ pub fn backend(backends_dir: &Path, cpu_only: bool) -> Result<Arc<TorchBackend>,
 
 /// [`backend`] searching several directories in order ([`discover_all`]).
 pub fn backend_in(backends_dirs: &[PathBuf], cpu_only: bool) -> Result<Arc<TorchBackend>, String> {
-    BACKEND
-        .get_or_init(|| open_backend(backends_dirs, cpu_only))
+    let mut slot = BACKEND.lock().unwrap_or_else(|e| e.into_inner());
+    slot.get_or_insert_with(|| open_backend(backends_dirs, cpu_only))
         .clone()
 }
 
 /// The backend if [`backend`] was already called (no loading).
 pub fn backend_if_open() -> Option<Arc<TorchBackend>> {
-    BACKEND.get().and_then(|r| r.as_ref().ok().cloned())
+    BACKEND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|r| r.as_ref().ok().cloned())
+}
+
+/// Let the next [`backend`] call look for a pack again after a failure (a backend pack
+/// was installed while this process runs: its OCR picks it up without a restart).
+/// Returns false when a backend is loaded already: that one stays.
+pub fn forget_failure() -> bool {
+    let mut slot = BACKEND.lock().unwrap_or_else(|e| e.into_inner());
+    match slot.as_ref() {
+        Some(Ok(_)) => false,
+        _ => {
+            *slot = None;
+            true
+        }
+    }
 }
 
 fn open_backend(backends_dirs: &[PathBuf], cpu_only: bool) -> Result<Arc<TorchBackend>, String> {
@@ -435,6 +456,33 @@ pub fn recognizer_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pack installed while the process runs: after [`forget_failure`] the next call
+    /// looks again (a different answer: this "pack" is found, then fails to open).
+    #[test]
+    fn a_failure_is_forgotten_on_request() {
+        if std::env::var_os(PACK_ENV).is_some() || backend_if_open().is_some() {
+            return; // a real backend in this process: nothing to forget
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = vec![dir.path().to_path_buf()];
+        let first = backend_in(&dirs, true).err().unwrap_or_default();
+        if !first.contains("no libtorch backend pack") {
+            return; // another test decided this process's backend first
+        }
+        assert_eq!(backend_in(&dirs, true).err(), Some(first.clone()), "kept");
+        std::fs::create_dir_all(dir.path().join("torch-cpu-2.13.0")).unwrap();
+        std::fs::write(dir.path().join("torch-cpu-2.13.0").join(PACK_JSON), "{}").unwrap();
+        assert_eq!(
+            backend_in(&dirs, true).err(),
+            Some(first.clone()),
+            "still kept"
+        );
+        assert!(forget_failure());
+        let second = backend_in(&dirs, true).err().unwrap_or_default();
+        assert_ne!(second, first, "looked again");
+        assert!(forget_failure());
+    }
 
     fn entry(id: &str, kind: &str, arch: &str, isa: &[&str], formats: &[&str]) -> DeviceEntry {
         DeviceEntry {

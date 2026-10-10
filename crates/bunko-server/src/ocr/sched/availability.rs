@@ -31,8 +31,26 @@ impl Scheduler {
             return;
         };
         let was = m.pause.is_some();
+        let before_installing = m.pause.as_ref().is_some_and(|a| a.is_installing());
         let label = m.label();
         let now_paused = availability.paused;
+        // Only the install's progress moved: nothing to rebuild, nothing to log.
+        let same = |a: &Availability, b: &Availability| {
+            a.paused == b.paused
+                && a.reason == b.reason
+                && a.until.as_ref().filter(|u| !u.is_empty())
+                    == b.until.as_ref().filter(|u| !u.is_empty())
+        };
+        if now_paused
+            && let Some(before) = m.pause.as_mut()
+            && same(before, &availability)
+        {
+            if before.install != availability.install {
+                before.install = availability.install;
+                self.bump();
+            }
+            return;
+        }
         m.pause = now_paused.then(|| {
             let mut a = availability.clone();
             a.until = a.until.filter(|u| !u.is_empty());
@@ -45,13 +63,24 @@ impl Scheduler {
                 .and_then(|a| a.until.clone())
                 .map(|u| format!(" until {u}"))
                 .unwrap_or_default();
-            if !was {
+            let installing = m.pause.as_ref().is_some_and(|a| a.is_installing());
+            if installing {
+                if !was {
+                    self.log(format!(
+                        "{label} is installing its OCR backend; it takes no work until that is done"
+                    ));
+                }
+            } else if !was || before_installing {
                 self.log(format!(
                     "{label} paused itself{until}; it takes no new work (what it runs finishes)"
                 ));
             }
         } else if was {
-            self.log(format!("{label} resumed"));
+            self.log(if before_installing {
+                format!("{label} is available (its OCR backend install ended)")
+            } else {
+                format!("{label} resumed")
+            });
         }
         self.rebuild_lanes();
         for lane in &mut self.lanes {
@@ -100,10 +129,20 @@ impl Scheduler {
     /// `pause` for the admin's processor list: `{until, reason}` or null.
     pub fn pause_value(&self, pid: &str) -> Value {
         match self.machines.get(pid).and_then(|m| m.pause.as_ref()) {
-            Some(a) => json!({"paused": true, "until": a.until, "reason": a.reason}),
+            Some(a) => pause_json(a),
             None => Value::Null,
         }
     }
+}
+
+/// A pause for the admin's processor list: `{paused, until, reason}`, plus `install`
+/// (how far its OCR backend install is) while it installs.
+pub fn pause_json(a: &Availability) -> Value {
+    let mut v = json!({"paused": true, "until": a.until, "reason": a.reason});
+    if let Some(i) = &a.install {
+        v["install"] = serde_json::to_value(i).unwrap_or(Value::Null);
+    }
+    v
 }
 
 /// The `availability` a registration body carries (lenient: anything malformed reads

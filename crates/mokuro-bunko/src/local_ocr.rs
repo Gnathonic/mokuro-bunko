@@ -18,6 +18,10 @@ pub fn factory(
     None
 }
 
+/// The installer the full build's factory carries (none in the lite build).
+#[cfg(feature = "ocr")]
+pub type Installer = crate::ocr_install::Installer;
+
 /// Full build: `bunko_processor::LocalProcessor` over `bunko_engines::EnginePipeline`.
 /// Under the control API (`control`), the local OCR obeys its pause and reports into
 /// its status (GUI.md §2, §3).
@@ -25,9 +29,11 @@ pub fn factory(
 pub fn factory(
     config: &bunko_core::Config,
     control: Option<bunko_control::Control>,
+    installer: Option<Installer>,
 ) -> Option<Arc<dyn LocalProcessorFactory>> {
     Some(Arc::new(full::Factory {
         control,
+        installer,
         engines: bunko_engines::EngineConfig {
             models_dir: config.storage.layout().models(),
             backend: bunko_engines::Backend::parse(config.ocr.effective_backend()),
@@ -50,9 +56,16 @@ mod full {
     pub struct Factory {
         pub engines: EngineConfig,
         pub control: Option<bunko_control::Control>,
+        pub installer: Option<super::Installer>,
     }
 
     impl LocalProcessorFactory for Factory {
+        fn installer(&self) -> Option<Arc<dyn bunko_server::ocr::BackgroundInstall>> {
+            self.installer
+                .clone()
+                .map(|i| Arc::new(i) as Arc<dyn bunko_server::ocr::BackgroundInstall>)
+        }
+
         fn start(&self, results_dir: &Path) -> Result<LocalChannels, String> {
             let pipeline = Arc::new(EnginePipeline::new(self.engines.clone()));
             let machine = pipeline.describe();

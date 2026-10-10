@@ -27,6 +27,8 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/app/api/instances/{slot}/dashboard",
             get(instance_dashboard),
         )
+        .route("/app/api/instances/{slot}/status", get(instance_status))
+        .route("/app/api/ocr/request", post(ocr_request))
         .route("/app/api/fs", get(fs_list))
         .route(
             "/app/api/server/config",
@@ -192,6 +194,139 @@ async fn instance_dashboard(State(state): S, UrlPath(slot): UrlPath<String>) -> 
             "that instance did not answer; open its dashboard from the tray",
         ),
     }
+}
+
+/// `GET /app/api/instances/{server|processor}/status`: the running instance's
+/// `/control/status` (the setup's last page shows its OCR backend install).
+async fn instance_status(State(state): S, UrlPath(slot): UrlPath<String>) -> Response {
+    let role = match slot.as_str() {
+        "server" => Role::Server,
+        "processor" => Role::Processor,
+        _ => return fail(StatusCode::NOT_FOUND, "no such instance"),
+    };
+    let storage = role_storage(&state, role);
+    let Some(f) = blocking(move || bunko_control::read_control_file(&storage))
+        .await
+        .flatten()
+    else {
+        return fail(StatusCode::NOT_FOUND, "that instance is not running");
+    };
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .no_proxy()
+        .build()
+    else {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, "no HTTP client");
+    };
+    match client
+        .get(format!("http://127.0.0.1:{}/control/status", f.port))
+        .bearer_auth(&f.token)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.json::<Value>().await {
+            Ok(v) => ok(v),
+            Err(e) => fail(StatusCode::BAD_GATEWAY, e),
+        },
+        _ => fail(StatusCode::BAD_GATEWAY, "that instance did not answer"),
+    }
+}
+
+/// The OCR step's choices (`POST /app/api/ocr/request`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct OcrRequestBody {
+    role: Option<String>,
+    variant: Option<String>,
+    from: Option<String>,
+    no_models: bool,
+    force: bool,
+}
+
+/// `POST /app/api/ocr/request`: keep the setup's OCR choices for the background
+/// install the started server or processor runs (`<backends>/.install-request.json`;
+/// it removes the file once an install with them succeeded).
+async fn ocr_request(State(state): S, Json(b): Json<OcrRequestBody>) -> Response {
+    #[cfg(feature = "ocr")]
+    {
+        let role = match role_of(b.role.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return *e,
+        };
+        let storage = role_storage(&state, role);
+        let backends =
+            bunko_engines::EngineConfig::new(storage.join("models"), bunko_engines::Backend::Auto)
+                .backends_dir();
+        let req = crate::ocr_install::InstallRequest {
+            variant: b.variant.filter(|v| !v.is_empty() && v != "auto"),
+            from: b
+                .from
+                .filter(|f| !f.trim().is_empty())
+                .map(|f| PathBuf::from(f.trim())),
+            no_models: b.no_models,
+            force: b.force,
+        };
+        if let Some(v) = &req.variant
+            && !["cpu", "cu130", "rocm7.1"].contains(&v.as_str())
+        {
+            return bad(format!("variant: {v}?"));
+        }
+        let plain = req == crate::ocr_install::InstallRequest::default();
+        let path = crate::ocr_install::InstallRequest::path(&backends);
+        let written = blocking(move || {
+            if plain {
+                // Nothing beyond what the configuration decides.
+                match std::fs::remove_file(&path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+                    _ => Ok(None),
+                }
+            } else {
+                req.write(&backends)
+                    .map(|()| Some(path))
+                    .map_err(|e| e.to_string())
+            }
+        })
+        .await;
+        match written {
+            Some(Ok(p)) => ok(json!({"saved": p})),
+            Some(Err(e)) => bad(e),
+            None => fail(StatusCode::INTERNAL_SERVER_ERROR, "could not save"),
+        }
+    }
+    #[cfg(not(feature = "ocr"))]
+    {
+        let _ = (state, b);
+        lite()
+    }
+}
+
+/// When a tray runs for this user, the setup hands it the instance it starts: `role`
+/// goes into tray.json (the tray notices within seconds, starts it and supervises it;
+/// its Quit stops it). Returns what was done, None without a tray.
+async fn hand_to_tray(state: &AppState, role: Role) -> Option<String> {
+    let exe = state.exe.clone();
+    let cfg = service_config(state, role);
+    blocking(move || -> Option<String> {
+        if tray::tray_command(&exe).is_none() || !tray::tray_running(&exe) {
+            return None;
+        }
+        let path = tray::config_path(&exe);
+        let mut conf = tray::load(&path).ok()?;
+        let entry = tray::entry(role, &cfg);
+        if conf.managed.contains(&entry) {
+            // Listed already: the tray starts it unless something else runs it.
+            return Some(format!("the tray runs the {} ({})", role.as_str(), path.display()));
+        }
+        tray::set_role(&mut conf, role.as_str(), Some(entry));
+        tray::save(&path, &conf).ok()?;
+        Some(format!(
+            "Handed the {} to the running tray ({}): it starts it, restarts it if it stops, and Quit stops it.",
+            role.as_str(),
+            path.display()
+        ))
+    })
+    .await
+    .flatten()
 }
 
 /// A sign-in code from the control listener on `port` (`POST /control/login-code`).
@@ -364,12 +499,25 @@ async fn server_start(State(state): S) -> Response {
         return ok(json!({"url": url, "already_running": true, "up": true}));
     }
     let log = spawn::stdout_log(&config.storage.base_path, "serve-console.log");
+    // A running tray takes it over (tray.json); it starts it within seconds.
+    let tray = hand_to_tray(&state, Role::Server).await;
+    if let Some(note) = &tray
+        && spawn::wait_healthy(&url, Duration::from_secs(25)).await
+    {
+        return ok(json!({"url": url, "up": true, "by_tray": true, "note": note}));
+    }
     let args = vec![
         "-c".to_string(),
         state.config_path.display().to_string(),
         "serve".to_string(),
     ];
-    let pid = match spawn::spawn_detached(&state.exe, &args, &log) {
+    // Started for the tray when there is one (it adopts it: Quit stops it).
+    let envs: &[(&str, &str)] = if tray.is_some() {
+        &[(bunko_control::MANAGED_ENV, "1")]
+    } else {
+        &[]
+    };
+    let pid = match spawn::spawn_detached_env(&state.exe, &args, &log, envs) {
         Ok(p) => p,
         Err(e) => return bad(format!("could not start the server: {e}")),
     };
@@ -494,13 +642,34 @@ async fn processor_start(State(state): S) -> Response {
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         let log = spawn::stdout_log(&storage, "processor-console.log");
+        // A running tray takes it over (tray.json); it starts it within seconds.
+        let tray = hand_to_tray(&state, Role::Processor).await;
+        if let Some(note) = &tray {
+            let end = tokio::time::Instant::now() + Duration::from_secs(25);
+            while tokio::time::Instant::now() < end {
+                if let Some(f) = bunko_control::read_control_file(&storage)
+                    && spawn::pid_alive(f.pid)
+                {
+                    let status = bunko_processor::status::read_status(&storage);
+                    return ok(json!({"pid": f.pid, "by_tray": true, "note": note,
+                        "state": status.get("state").and_then(Value::as_str).unwrap_or("starting"),
+                        "status": status, "running": true, "log": log, "output": ""}));
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
         let args = vec![
             "processor".to_string(),
             "serve".to_string(),
             "--config".to_string(),
             cfg.display().to_string(),
         ];
-        let pid = match spawn::spawn_detached(&state.exe, &args, &log) {
+        let envs: &[(&str, &str)] = if tray.is_some() {
+            &[(bunko_control::MANAGED_ENV, "1")]
+        } else {
+            &[]
+        };
+        let pid = match spawn::spawn_detached_env(&state.exe, &args, &log, envs) {
             Ok(p) => p,
             Err(e) => return bad(format!("could not start the processor: {e}")),
         };

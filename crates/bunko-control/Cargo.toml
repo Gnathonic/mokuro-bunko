@@ -16,7 +16,6 @@ runtime = [
     "dep:tokio",
     "dep:tokio-util",
     "dep:futures-util",
-    "dep:bunko-proto",
     "dep:parking_lot",
     "dep:rand",
     "dep:hex",
@@ -34,7 +33,8 @@ axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
-bunko-proto = { workspace = true, optional = true }
+# The wire types (`OcrInstall` is part of the status; serde only).
+bunko-proto.workspace = true
 parking_lot = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }

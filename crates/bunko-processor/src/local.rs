@@ -119,6 +119,7 @@ impl LocalProcessor {
             leaving,
             bench,
             control,
+            None,
         );
         let stop = shutdown.clone();
         let task = tokio::spawn(async move {

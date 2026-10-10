@@ -89,14 +89,40 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
                     ocr_here,
                 ))
             });
+            // The OCR backend installs in the background when it is missing: serving
+            // never waits for it (crate::ocr_install).
+            #[cfg(feature = "ocr")]
+            let ocr_installer = {
+                let i = crate::ocr_install::Installer::new(crate::ocr_install::Who::Library {
+                    config_path: config_path.clone(),
+                    backend: args.ocr.clone(),
+                });
+                if let Some(c) = &control {
+                    i.attach_control(c);
+                }
+                i.start_if_needed();
+                i
+            };
             let opts = ServeOptions {
                 verbose: args.verbose,
                 flavor,
+                #[cfg(feature = "ocr")]
+                local: crate::local_ocr::factory(
+                    &config,
+                    control.clone(),
+                    Some(ocr_installer.clone()),
+                ),
+                #[cfg(not(feature = "ocr"))]
                 local: crate::local_ocr::factory(&config, control.clone()),
             };
-            let control_setup = control
+            #[cfg_attr(not(feature = "ocr"), allow(unused_mut))]
+            let mut control_setup = control
                 .as_ref()
                 .map(|_| ControlSetup::of(&config, ocr_here));
+            #[cfg(feature = "ocr")]
+            if let Some(s) = control_setup.as_mut() {
+                s.installer = Some(ocr_installer.clone());
+            }
             let services = Services::new(config, Some(config_path.clone()), &opts)?;
             app::announce_setup(&services);
             services.updates.set_view(started.view, started.problems);
@@ -141,6 +167,8 @@ struct ControlSetup {
     library_url: String,
     #[cfg(feature = "ocr")]
     target: Option<crate::ocr_target::OcrTarget>,
+    #[cfg(feature = "ocr")]
+    installer: Option<crate::ocr_install::Installer>,
 }
 
 impl ControlSetup {
@@ -160,6 +188,8 @@ impl ControlSetup {
                 library: Some(config.clone()),
                 reason: String::new(),
             }),
+            #[cfg(feature = "ocr")]
+            installer: None,
         }
     }
 
@@ -189,11 +219,21 @@ impl ControlSetup {
         let storage = self.storage;
         #[cfg(feature = "ocr")]
         let target = self.target;
-        crate::control::watch_problems(control.clone(), stop, move || {
+        #[cfg(feature = "ocr")]
+        let installer = self.installer;
+        #[cfg(feature = "ocr")]
+        let again = installer
+            .as_ref()
+            .map(bunko_server::ocr::BackgroundInstall::finished);
+        #[cfg(not(feature = "ocr"))]
+        let again = None;
+        crate::control::watch_problems(control.clone(), stop, again, move || {
             #[allow(unused_mut)]
             let mut problems = Vec::new();
             #[cfg(feature = "ocr")]
-            if let Some(t) = &target {
+            if let Some(t) = &target
+                && !crate::ocr_install::speaks_for_backend(installer.as_ref())
+            {
                 problems.extend(crate::cmd::doctor::backend_problem(t));
             }
             problems.extend(crate::cmd::doctor::control_problems(&storage, true));

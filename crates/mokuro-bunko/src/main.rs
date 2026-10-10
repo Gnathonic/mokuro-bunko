@@ -17,6 +17,8 @@ mod logging;
 mod machine;
 mod no_args;
 #[cfg(feature = "ocr")]
+mod ocr_install;
+#[cfg(feature = "ocr")]
 mod ocr_probe;
 #[cfg(feature = "ocr")]
 mod ocr_target;

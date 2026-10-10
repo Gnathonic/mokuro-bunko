@@ -109,9 +109,9 @@ ENV PATH="/opt/mokuro-bunko:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/s
 VOLUME ["/data"]
 EXPOSE 8080
 
-# The first start downloads the OCR backend before the server listens (up to ~3.5 GB
-# for AMD): failures in the start period do not count.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20m --retries=3 \
+# The server answers within seconds of the start; the OCR backend downloads in the
+# background meanwhile (it does not hold up the health check).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD ["mokuro-bunko", "healthcheck"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]

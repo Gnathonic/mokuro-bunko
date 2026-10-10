@@ -34,8 +34,8 @@ use std::time::{Duration, Instant};
 
 use bunko_control::{Activity, Control, PauseMode, PauseState};
 use bunko_proto::{
-    Availability, BenchOp, Event, MAX_OUTSTANDING_VOLUMES, Op, RowSpec, VolumeOp, return_class,
-    valid_id,
+    Availability, BenchOp, Event, MAX_OUTSTANDING_VOLUMES, OcrInstall, Op, RowSpec, VolumeOp,
+    return_class, valid_id,
 };
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -57,6 +57,30 @@ const STATS_INTERVAL: Duration = Duration::from_secs(2);
 const QUIET_WAIT: Duration = Duration::from_secs(60);
 /// A volume_done whose sidecar did not reach the library becomes this failure.
 pub const SIDECAR_NOT_SENT: &str = "the finished sidecar could not be sent from the processor";
+/// What an install in progress says in a `fatal` to a benchmark it refuses.
+const INSTALLING: &str = "this processor is still installing its OCR backend";
+
+/// The background OCR install a hub watches (None: none, or not this kind of hub).
+pub type InstallWatch = tokio::sync::watch::Receiver<Option<OcrInstall>>;
+
+/// The `availability` to tell the library: the owner's pause (or the update's drain)
+/// when there is one, else "installing" while the OCR backend installs, else none. An
+/// install in progress rides along with a pause, so the library shows both.
+pub fn availability_for(
+    pause: Option<Availability>,
+    install: Option<&OcrInstall>,
+) -> Option<Availability> {
+    let install = install.filter(|i| i.running()).cloned();
+    match (pause, install) {
+        (Some(mut a), i) => {
+            a.install = i;
+            Some(a)
+        }
+        (None, Some(i)) => Some(Availability::installing(i)),
+        (None, None) => None,
+    }
+}
+
 /// What a pause says in a `fatal` to a benchmark it refuses.
 const PAUSED: &str = "this processor is paused by its owner";
 
@@ -333,6 +357,12 @@ pub(crate) struct Hub {
     /// Draining for an automatic update: paused after the running volumes whatever the
     /// owner's pause says (only a `now` pause goes further).
     draining: std::sync::atomic::AtomicBool,
+    /// The background OCR install: while it runs, no work is taken.
+    install: Option<InstallWatch>,
+    /// The pause's own `availability` as last applied (None: not paused).
+    pause_said: Mutex<Option<Availability>>,
+    /// The last `availability` told, and when.
+    announced: Mutex<(Option<Availability>, Option<Instant>)>,
 }
 
 impl Hub {
@@ -346,6 +376,7 @@ impl Hub {
         leaving: Arc<AtomicBool>,
         bench_config: BenchConfig,
         control: Option<Control>,
+        install: Option<InstallWatch>,
     ) -> Arc<Hub> {
         let hub = Arc::new(Hub {
             pipeline,
@@ -359,9 +390,88 @@ impl Hub {
             paused: Mutex::new(None),
             watcher: CancellationToken::new(),
             draining: std::sync::atomic::AtomicBool::new(false),
+            install,
+            pause_said: Mutex::new(None),
+            announced: Mutex::new((None, None)),
         });
         hub.watch_pause();
+        hub.watch_install();
         hub
+    }
+
+    /// The OCR backend install, while it runs.
+    fn installing(&self) -> Option<OcrInstall> {
+        self.install
+            .as_ref()
+            .and_then(|rx| rx.borrow().clone())
+            .filter(|i| i.running())
+    }
+
+    /// Tell the library the availability now in force, unless it was just said (an
+    /// install's progress at most every second; any other change at once).
+    pub(crate) fn announce(&self, force: bool) {
+        let install = self.installing();
+        let pause = self.pause_said.lock().clone();
+        let now = availability_for(pause, install.as_ref());
+        let mut last = self.announced.lock();
+        let key = |a: &Option<Availability>| {
+            a.as_ref().map(|a| {
+                (
+                    a.paused,
+                    a.reason.clone(),
+                    a.until.clone(),
+                    a.install
+                        .as_ref()
+                        .map(|i| (i.state.clone(), i.stage.clone())),
+                )
+            })
+        };
+        if last.0 == now {
+            return;
+        }
+        let same_kind = key(&last.0) == key(&now);
+        if same_kind && !force && last.1.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        if last.0.is_none() && now.is_none() {
+            return;
+        }
+        *last = (now.clone(), Some(Instant::now()));
+        drop(last);
+        self.say(Event::Availability(now.unwrap_or_default()));
+    }
+
+    /// Follow the background OCR install: "installing" (with its progress) while it
+    /// runs. Its end is not said here: a finished install re-registers (the caller
+    /// ends the connection), a failed one says the processor is available again.
+    fn watch_install(self: &Arc<Self>) {
+        let Some(mut rx) = self.install.clone() else {
+            return;
+        };
+        let installing = rx.borrow_and_update().as_ref().is_some_and(|i| i.running());
+        if installing {
+            self.announce(true);
+        }
+        let weak = Arc::downgrade(self);
+        let stop = self.watcher.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    changed = rx.changed() => if changed.is_err() { return },
+                }
+                let state = rx.borrow_and_update().clone();
+                let Some(hub) = weak.upgrade() else { return };
+                if hub.leaving.load(Ordering::SeqCst) {
+                    return;
+                }
+                match state.as_ref().map(|i| i.state.as_str()) {
+                    Some(OcrInstall::DONE) => continue,
+                    Some(OcrInstall::FAILED) | None => hub.announce(true),
+                    _ => hub.announce(false),
+                }
+            }
+        });
     }
 
     /// Apply the control's pause now and on every change, until the hub leaves.
@@ -409,14 +519,15 @@ impl Hub {
         let mut paused = self.paused.lock();
         let before = *paused;
         *paused = state.map(|s| s.mode);
+        *self.pause_said.lock() = state.map(|s| s.availability());
         let Some(state) = state else {
             if before.is_some() {
                 tracing::info!("Resumed: taking work again");
-                self.say(Event::Availability(Availability::default()));
+                self.announce(true);
             }
             return;
         };
-        self.say(Event::Availability(state.availability()));
+        self.announce(true);
         if before == Some(PauseMode::Now) {
             return;
         }
@@ -548,17 +659,19 @@ impl Hub {
         // the op, so a pause applied meanwhile never misses a claim being offered.
         let paused = self.paused.lock();
         {
-            if paused.is_some() {
+            let installing = paused.is_none() && self.installing().is_some();
+            if paused.is_some() || installing {
+                let why = if installing { "installing" } else { "paused" };
                 match &op {
                     Op::Volume(v) => {
-                        tracing::info!("volume {}: paused, giving it back", v.claim);
+                        tracing::info!("volume {}: {why}, giving it back", v.claim);
                         self.say(Event::Released {
                             claims: vec![v.claim.clone()],
                         });
                         return;
                     }
                     Op::OpenSession { sid, .. } => {
-                        tracing::info!("session {sid}: paused, not opening it");
+                        tracing::info!("session {sid}: {why}, not opening it");
                         self.say(Event::Exit {
                             sid: sid.clone(),
                             returncode: None,
@@ -566,10 +679,10 @@ impl Hub {
                         return;
                     }
                     Op::Bench(b) => {
-                        tracing::info!("benchmark {}: paused, not running it", b.bid);
+                        tracing::info!("benchmark {}: {why}, not running it", b.bid);
                         self.say(Event::Fatal {
                             sid: b.bid.clone(),
-                            error: PAUSED.to_string(),
+                            error: if installing { INSTALLING } else { PAUSED }.to_string(),
                         });
                         self.say(Event::Exit {
                             sid: b.bid.clone(),

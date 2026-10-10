@@ -24,6 +24,12 @@ pub enum SlotState {
     Waiting,
     /// Another instance of this role is up (or its service is active): not ours to run.
     External(String),
+    /// An instance of this role that was started for a tray (the setup wizard handed it
+    /// over: `MOKURO_CONTROL_MANAGED`) is up: this tray looks after it as its own, and
+    /// Quit stops it. When it ends, the tray starts its own.
+    Adopted {
+        pid: u32,
+    },
     Running {
         pid: u32,
     },
@@ -53,6 +59,13 @@ pub trait World: Send + Sync {
     fn discovered(&self) -> bool;
     /// A system service that runs (or is starting) `role`, by name.
     fn service_active(&self, role: &str) -> Option<String>;
+    /// The pid of a live instance of `role` that was started for a tray (its status
+    /// says `managed`: a tray, or the setup wizard handing it to one, started it), which
+    /// this tray may adopt.
+    fn managed_instance(&self, role: &str) -> Option<u32> {
+        let _ = role;
+        None
+    }
 }
 
 pub struct Slot {
@@ -74,6 +87,14 @@ impl Slot {
     pub fn child_pid(&self) -> Option<u32> {
         lock(&self.child).as_ref().map(Child::id)
     }
+
+    /// The instance this slot adopted (not its child).
+    pub fn adopted_pid(&self) -> Option<u32> {
+        match self.state() {
+            SlotState::Adopted { pid } => Some(pid),
+            _ => None,
+        }
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -81,10 +102,17 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+type ArgsFor = Box<dyn Fn(&Managed) -> Vec<String> + Send + Sync>;
+
 pub struct Supervisor {
     pub slots: Vec<Arc<Slot>>,
     quitting: Arc<AtomicBool>,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// What [`Supervisor::add`] needs to start more slots.
+    args_for: ArgsFor,
+    launch: Arc<Launch>,
+    world: Arc<dyn World>,
+    on_change: Arc<dyn Fn() + Send + Sync>,
 }
 
 pub struct Launch {
@@ -96,42 +124,59 @@ pub struct Launch {
 impl Supervisor {
     pub fn start(
         managed: &[Managed],
-        args_for: impl Fn(&Managed) -> Vec<String>,
+        args_for: impl Fn(&Managed) -> Vec<String> + Send + Sync + 'static,
         launch: Launch,
         world: Arc<dyn World>,
         on_change: Arc<dyn Fn() + Send + Sync>,
     ) -> Supervisor {
-        let quitting = Arc::new(AtomicBool::new(false));
-        let launch = Arc::new(launch);
-        let mut slots = Vec::new();
-        let mut threads = Vec::new();
+        let mut sup = Supervisor {
+            slots: Vec::new(),
+            quitting: Arc::new(AtomicBool::new(false)),
+            threads: Mutex::new(Vec::new()),
+            args_for: Box::new(args_for),
+            launch: Arc::new(launch),
+            world,
+            on_change,
+        };
+        sup.add(managed);
+        sup
+    }
+
+    /// Supervise the roles of `managed` that have no slot yet (tray.json gained them
+    /// while the tray runs: the setup wizard handed a server or processor over).
+    /// Returns how many were added.
+    pub fn add(&mut self, managed: &[Managed]) -> usize {
+        let mut added = 0;
         for m in managed {
+            if self.slots.iter().any(|s| s.managed.role == m.role) {
+                continue;
+            }
             let slot = Arc::new(Slot {
                 managed: m.clone(),
-                args: args_for(m),
+                args: (self.args_for)(m),
                 state: Mutex::new(SlotState::Waiting),
                 child: Mutex::new(None),
             });
-            slots.push(slot.clone());
+            self.slots.push(slot.clone());
             let (q, w, l, c) = (
-                quitting.clone(),
-                world.clone(),
-                launch.clone(),
-                on_change.clone(),
+                self.quitting.clone(),
+                self.world.clone(),
+                self.launch.clone(),
+                self.on_change.clone(),
             );
-            threads.push(std::thread::spawn(move || {
+            lock(&self.threads).push(std::thread::spawn(move || {
                 run_slot(&slot, &q, &*w, &l, &*c)
             }));
+            added += 1;
         }
-        Supervisor {
-            slots,
-            quitting,
-            threads: Mutex::new(threads),
-        }
+        added
     }
 
+    /// `pid` is this tray's: its child, or an instance it adopted (Quit stops both).
     pub fn is_child(&self, pid: u32) -> bool {
-        self.slots.iter().any(|s| s.child_pid() == Some(pid))
+        self.slots
+            .iter()
+            .any(|s| s.child_pid() == Some(pid) || s.adopted_pid() == Some(pid))
     }
 
     /// Menu lines for slots whose instance is not (yet) visible.
@@ -178,6 +223,11 @@ impl Supervisor {
     pub fn stop_all(&self, stop: impl Fn(u32) -> bool, grace: Duration) {
         self.quitting.store(true, Ordering::SeqCst);
         for slot in &self.slots {
+            if let Some(pid) = slot.adopted_pid() {
+                stop_adopted(&slot.managed.role, pid, &stop, grace);
+                slot.set(SlotState::Stopped);
+                continue;
+            }
             let mut guard = lock(&slot.child);
             let Some(child) = guard.as_mut() else {
                 continue;
@@ -213,6 +263,30 @@ impl Supervisor {
         for t in lock(&self.threads).drain(..) {
             let _ = t.join();
         }
+    }
+}
+
+/// Stop an adopted instance (not a child: no handle to wait on): its control API's
+/// stop, else SIGTERM; wait for its pid to go.
+fn stop_adopted(role: &str, pid: u32, stop: &impl Fn(u32) -> bool, grace: Duration) {
+    let gone = || crate::discover::pid_alive(pid) == Some(false);
+    if !stop(pid) {
+        #[cfg(unix)]
+        if let Ok(p) = libc::pid_t::try_from(pid) {
+            // SAFETY: plain kill(2) on an instance of this user.
+            unsafe {
+                libc::kill(p, libc::SIGTERM);
+            }
+        }
+    }
+    let deadline = Instant::now() + grace;
+    while !gone() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if gone() {
+        tracing::info!("{role} (pid {pid}, adopted) stopped");
+    } else {
+        tracing::warn!("{role} (pid {pid}, adopted) did not stop in time");
     }
 }
 
@@ -260,6 +334,18 @@ fn run_slot(
                 changed();
             }
             nap(quitting, Duration::from_secs(5));
+            continue;
+        }
+        // Started for a tray (the setup wizard handed it over): ours to look after.
+        if let Some(pid) = world.managed_instance(role) {
+            if slot.state() != (SlotState::Adopted { pid }) {
+                tracing::info!(
+                    "{role}: adopting pid {pid} (it was started for the tray); Quit stops it"
+                );
+                slot.set(SlotState::Adopted { pid });
+                changed();
+            }
+            nap(quitting, Duration::from_secs(2));
             continue;
         }
         if let Some(pid) = world.live_instance(role) {
@@ -482,6 +568,83 @@ mod tests {
     struct FakeWorld {
         live: Mutex<Option<u32>>,
         service: Option<String>,
+    }
+
+    /// A world whose live instance was started for a tray (`managed`).
+    struct ManagedWorld(Mutex<Option<u32>>);
+
+    impl World for ManagedWorld {
+        fn live_instance(&self, _: &str) -> Option<u32> {
+            *lock(&self.0)
+        }
+        fn discovered(&self) -> bool {
+            true
+        }
+        fn service_active(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn managed_instance(&self, _: &str) -> Option<u32> {
+            *lock(&self.0)
+        }
+    }
+
+    /// The setup wizard's server, started for the tray: the tray adopts it (it is the
+    /// tray's, Quit stops it through its control API) and starts its own once it is
+    /// gone. A role added to tray.json while the tray runs gets a slot.
+    #[cfg(unix)]
+    #[test]
+    fn adopts_an_instance_started_for_it_and_stops_it_on_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut other = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = other.id();
+        let world = Arc::new(ManagedWorld(Mutex::new(Some(pid))));
+        let marker = dir.path().join("started");
+        let mut sup = Supervisor::start(
+            &[],
+            |_| vec![],
+            Launch {
+                cli: Some(fake_cli(
+                    dir.path(),
+                    &format!(
+                        "touch '{}'
+exec sleep 30",
+                        marker.display()
+                    ),
+                )),
+                env: vec![],
+                log_dir: dir.path().join("logs"),
+            },
+            world.clone(),
+            Arc::new(|| {}),
+        );
+        assert!(sup.slots.is_empty());
+        assert_eq!(sup.add(&[managed("server")]), 1);
+        assert_eq!(sup.add(&[managed("server")]), 0, "one slot per role");
+        let slot = sup.slots[0].clone();
+        assert!(wait_for(|| slot.state() == SlotState::Adopted { pid }));
+        assert!(sup.is_child(pid), "Quit counts it as the tray's");
+        assert!(sup.views(&["server"]).is_empty());
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let a2 = asked.clone();
+        let t = std::thread::spawn(move || {
+            // The control API's stop is asked first; this one ends it as the API would.
+            let _ = other.kill();
+            let _ = other.wait();
+        });
+        sup.stop_all(
+            move |p| {
+                lock(&a2).push(p);
+                true
+            },
+            Duration::from_secs(10),
+        );
+        t.join().unwrap();
+        assert_eq!(*lock(&asked), vec![pid]);
+        assert_eq!(slot.state(), SlotState::Stopped);
+        assert!(!marker.exists(), "nothing of its own started meanwhile");
     }
 
     impl World for FakeWorld {
