@@ -89,6 +89,7 @@
     const pill = $('dash-state');
     pill.dataset.state = s.state;
     pill.textContent = STATES[s.state] || s.state;
+    if (s.state === 'idle' && (s.library || {}).activity) pill.textContent = 'Measuring speed (first run)';
     $('dash-setup').hidden = s.state !== 'setup';
 
     const paused = s.state === 'paused' || s.state === 'pausing';

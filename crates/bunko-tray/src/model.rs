@@ -586,6 +586,22 @@ mod tests {
 
     /// The background OCR install: its progress under the state; its failure (a fail
     /// problem) asks for attention.
+    /// An engine's first-run speed measurement replaces "Idle".
+    #[test]
+    fn first_run_benchmark_is_not_idle() {
+        let m = model(&[inst(
+            status(
+                r#"{"role":"server","state":"idle","library":{"connected":true,"queue_pending":1,"activity":"Measuring hayai-nova's speed on this machine before its first volume"}}"#,
+            ),
+            true,
+        )]);
+        assert!(
+            m.status_lines[0].starts_with("Library: Measuring hayai-nova's speed"),
+            "{:?}",
+            m.status_lines
+        );
+    }
+
     #[test]
     fn ocr_install_progress_and_failure() {
         let m = model(&[inst(
