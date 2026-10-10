@@ -186,6 +186,9 @@ pub struct Stored {
     pub verdict: &'static str,
     pub size: u64,
     pub digest_verified: Option<&'static str>,
+    /// The body equalled the destination's bytes, so nothing was replaced (only with
+    /// [`Staging::keep_if_identical`]).
+    pub unchanged: bool,
 }
 
 /// One body being staged at `<dest dir>/.<name>.upload-<random>.tmp`. Dropping it before
@@ -200,6 +203,7 @@ pub struct Staging {
     expected_size: Option<u64>,
     written: u64,
     finished: bool,
+    keep_identical: bool,
 }
 
 impl Drop for Staging {
@@ -251,6 +255,7 @@ impl Staging {
                         expected_size,
                         written: 0,
                         finished: false,
+                        keep_identical: false,
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -263,6 +268,12 @@ impl Staging {
             "The server failed writing the upload: no staging name.",
             true,
         ))
+    }
+
+    /// At commit, leave an existing destination alone when the body equals its bytes
+    /// (a re-sent, unchanged file keeps its mtime and its history).
+    pub fn keep_if_identical(&mut self) {
+        self.keep_identical = true;
     }
 
     pub fn written(&self) -> u64 {
@@ -353,6 +364,21 @@ impl Staging {
                 })?;
             judge_archive(result, size, digest_verified, &self.dest, damage)?;
         }
+        if self.keep_identical {
+            let (temp, dest) = (self.temp.clone(), self.dest.clone());
+            let same = tokio::task::spawn_blocking(move || same_bytes(&temp, &dest))
+                .await
+                .unwrap_or(false);
+            if same {
+                // Dropping `self` removes the staged copy.
+                return Ok(Stored {
+                    verdict: if is_cbz { "verified" } else { "stored" },
+                    size,
+                    digest_verified,
+                    unchanged: true,
+                });
+            }
+        }
         tokio::fs::rename(&self.temp, &self.dest)
             .await
             .map_err(|e| Rejection::from_io(&e, "moving the upload into place"))?;
@@ -362,8 +388,47 @@ impl Staging {
             verdict: if is_cbz { "verified" } else { "stored" },
             size,
             digest_verified,
+            unchanged: false,
         })
     }
+}
+
+/// Do two files hold the same bytes? (Any read error: no.) Blocking.
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    let (Ok(fa), Ok(fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    match (fa.metadata(), fb.metadata()) {
+        (Ok(ma), Ok(mb)) if ma.is_file() && mb.is_file() && ma.len() == mb.len() => {}
+        _ => return false,
+    }
+    let (mut ra, mut rb) = (fa, fb);
+    let (mut ba, mut bb) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+    loop {
+        let (Ok(n), Ok(m)) = (read_full(&mut ra, &mut ba), read_full(&mut rb, &mut bb)) else {
+            return false;
+        };
+        if n != m || ba[..n] != bb[..n] {
+            return false;
+        }
+        if n == 0 {
+            return true;
+        }
+    }
+}
+
+/// Fill `buf` as far as the reader allows; the count read (short only at the end).
+fn read_full(r: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
+    let mut got = 0;
+    while got < buf.len() {
+        match r.read(&mut buf[got..]) {
+            Ok(0) => break,
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(got)
 }
 
 /// What the zip's own CRCs say about a staged archive.

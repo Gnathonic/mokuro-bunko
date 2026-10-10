@@ -172,6 +172,14 @@ pub struct Upgrade {
     forced: Mutex<HashSet<String>>,
 }
 
+/// An audit row's details say the write left the bytes as they were.
+fn audit_unchanged(details: Option<&str>) -> bool {
+    details
+        .and_then(|d| serde_json::from_str::<Value>(d).ok())
+        .and_then(|v| v.get("unchanged").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
 fn sqlite_utc_to_epoch(text: &str) -> Option<f64> {
     // `YYYY-MM-DD HH:MM:SS` (UTC).
     let t = text.replace(' ', "T");
@@ -211,8 +219,10 @@ impl Upgrade {
         format!("{}.mokuro", &rel[..rel.len() - 4])
     }
 
-    /// Evidence a person edited the bare file: an audit-logged WebDAV write by an account
-    /// to that path, or a provenance row older than the file by more than 2 s.
+    /// Evidence a person changed the file: a user's WebDAV overwrite of it that changed
+    /// its bytes (`edit`), a revert, or a provenance row older than the file by more than
+    /// 2 s. Adding the file (`upload`: it did not exist before) is not an edit, nor is
+    /// re-sending its exact bytes (`edit` with `unchanged`).
     fn edited(&self, bare: &Path, bare_rel: &str, row: Option<&bunko_db::OcrSidecar>) -> bool {
         if let (Some(r), Ok(meta)) = (row, std::fs::metadata(bare))
             && let Some(written) = sqlite_utc_to_epoch(&r.written_at)
@@ -224,21 +234,28 @@ impl Upgrade {
         }
         let Some(db) = &self.db else { return false };
         let target = format!("{}{bare_rel}", bunko_proto::ARCHIVES_ROOT);
-        let q = bunko_db::AuditQuery {
-            actions: vec![
-                "upload".into(),
-                "edit".into(),
-                "ocr_sidecar_reverted".into(),
-            ],
+        let mut q = bunko_db::AuditQuery {
+            actions: vec!["edit".into(), "ocr_sidecar_reverted".into()],
             search: Some(bare_rel.to_string()),
-            limit: 50,
+            limit: 200,
             ..Default::default()
         };
-        match db.query_audit_events(&q) {
-            Ok(page) => page.events.iter().any(|e| {
-                e.target_path.as_deref() == Some(target.as_str()) && e.actor_username.is_some()
-            }),
-            Err(_) => false,
+        // Unchanged re-sends can be many: read every page, not just the newest.
+        loop {
+            let Ok(page) = db.query_audit_events(&q) else {
+                return false;
+            };
+            if page.events.iter().any(|e| {
+                e.target_path.as_deref() == Some(target.as_str())
+                    && e.actor_username.is_some()
+                    && !(e.action == "edit" && audit_unchanged(e.details.as_deref()))
+            }) {
+                return true;
+            }
+            match page.next_cursor {
+                Some(c) => q.cursor = Some(c),
+                None => return false,
+            }
         }
     }
 

@@ -99,10 +99,19 @@ A volume is an **upgrade candidate** when all of the following hold:
    Regenerating from a short archive would lose OCR for those pages, so such
    volumes are **skipped (missing pages)** until a whole archive replaces
    them. This matches the gate 0.5 already applies to extra layers.
-4. **Not edited.** Nothing shows a person edited the bare file. The evidence
-   is either of:
-   - an audit-log WebDAV write to that sidecar path, by a user account;
+4. **Not edited.** Nothing shows a person changed the bare file. The evidence
+   is any of:
+   - an audit-log `edit` of that sidecar path by a user account: a WebDAV PUT
+     over the existing file (what Mokuro Reader does when saving text
+     corrections). An `edit` whose details carry `"unchanged": true` does not
+     count: the PUT re-sent the file's exact bytes (a backup, a re-upload), so
+     the server left the file, its mtime and its provenance row alone;
+   - an audit-log `ocr_sidecar_reverted` of that path by a user account;
    - its `ocr_sidecars` row predating the file's current mtime by more than 2 s.
+
+   An `upload` (the file did not exist before the PUT, as when a volume is
+   added together with its existing OCR file) is not an edit, with or without
+   `existed_before` in its details.
 
    Edited files are **skipped (edited)**, and listed for the admin, who can
    force one volume (§6).

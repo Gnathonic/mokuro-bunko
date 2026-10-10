@@ -61,6 +61,13 @@
   still keeps running, and Quit says so.
 - A failed libtorch backend load was remembered for the life of the process; a backend
   installed later is now picked up without a restart.
+- Generation upgrade marked every volume uploaded together with its existing `.mokuro`
+  "skipped (edited)": adding a volume's OCR file counted as a hand edit. Only changing
+  an existing one does now (a WebDAV overwrite with different bytes, a revert, or a file
+  newer than its provenance row). A PUT that re-sends a `.mokuro` byte for byte (a
+  backup, a re-upload) leaves the file, its mtime and its provenance alone and is
+  audited as an `edit` with `"unchanged": true`, which is not an edit either. Volumes
+  flagged before are judged again at the next start.
 
 ## [0.7.0-beta.4] - 2026-10-09
 

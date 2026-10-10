@@ -1281,3 +1281,77 @@ async fn listings_hide_staging_files_and_symlinks_stay_contained() {
         assert!(outside.join("secret.txt").exists());
     }
 }
+
+/// Adding an OCR file is an `upload`; overwriting it an `edit`; re-sending its exact bytes
+/// replaces nothing and is an `edit` marked `unchanged` (generation-upgrade.md §3).
+#[tokio::test]
+async fn put_ocr_sidecar_create_overwrite_and_unchanged_resend() {
+    let env = Env::new();
+    let path = "/mokuro-reader/series/Vol%209.mokuro";
+    let file = env.lib("series/Vol 9.mokuro");
+    let first = br#"{"version":"0.2.1","pages":[]}"#;
+    let r = env.req(Some("admin"), "PUT", path, &[], first).await;
+    assert_eq!(r.code(), 201);
+    let details = |n: usize| env.hooks.audits()[n].details.clone();
+    assert_eq!(env.hooks.audits()[0].action, "upload");
+    assert_eq!(
+        details(0),
+        Some(serde_json::json!({ "existed_before": false }))
+    );
+
+    // The same bytes again: the file is left alone (mtime, provenance) and no temp remains.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let forgets = |env: &Env| {
+        env.hooks
+            .calls()
+            .iter()
+            .filter(|c| c.as_str() == "forget_ocr_sidecar series/Vol 9.mokuro")
+            .count()
+    };
+    let forgot = forgets(&env);
+    let r = env.req(Some("admin"), "PUT", path, &[], first).await;
+    assert_eq!(r.code(), 204);
+    assert!(r.header("etag").is_some());
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        before
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), first);
+    assert_eq!(forgets(&env), forgot, "its provenance row is kept");
+    assert_eq!(env.hooks.audits()[1].action, "edit");
+    assert_eq!(
+        details(1),
+        Some(serde_json::json!({ "existed_before": true, "unchanged": true }))
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(env.lib("series"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".upload-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // Different bytes of the same length: a real edit.
+    let second = br#"{"version":"0.2.1","pages":[1]}"#;
+    let r = env
+        .req(Some("admin"), "PUT", path, &[], &second[..first.len()])
+        .await;
+    assert_eq!(r.code(), 204);
+    assert_eq!(std::fs::read(&file).unwrap(), &second[..first.len()]);
+    assert_ne!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        before
+    );
+    assert_eq!(forgets(&env), forgot + 1);
+    assert_eq!(env.hooks.audits()[2].action, "edit");
+    assert_eq!(
+        details(2),
+        Some(serde_json::json!({ "existed_before": true }))
+    );
+}

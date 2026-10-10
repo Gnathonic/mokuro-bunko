@@ -845,6 +845,15 @@ On a successful commit `_on_write_committed(existed_before)` (`resources.py:643-
    `/mokuro-reader/<rel>`) or, for per-user files, `progress` with the request path, `details {"existed_before": bool}`,
    actor = username. **This includes every progress-file save** (one audit row per PUT of
    `volume-data.json`!). Audit rows are pruned after 30 days (`database.py:1440+`).
+
+**0.7 (no 0.5.2 equivalent): an unchanged OCR file is not replaced.** A PUT over an existing
+`*.mokuro`/`*.mokuro.gz` whose staged bytes equal the file's (same length, then a byte
+compare at commit, after the size/digest checks) does not rename over it: the staged copy is
+dropped, so the file keeps its mtime and ETag, and steps 1-3 are skipped (no
+`record_volume_upload`, no `forget_ocr_sidecar`, no change effects). The answer is the same
+`204` (with `ETag`, `X-Mokuro-Upload: stored`). It is audited as `edit` with `details
+{"existed_before": true, "unchanged": true}`, which the generation upgrade does not count as
+a hand edit (generation-upgrade.md §3).
 If step 2-4 raise (e.g. DB locked) after the file was already replaced, the client gets `500` although the file
 was stored (QUIRK).
 
