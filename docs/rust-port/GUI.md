@@ -93,7 +93,7 @@ All JSON. `GET /control/status`:
 
 ```json
 { "role": "processor|server|gui", "version": "0.7.0", "name": "beast",
-  "state": "working|idle|paused|pausing|connecting|disconnected|error|setup",
+  "state": "working|idle|installing|paused|pausing|connecting|disconnected|error|setup",
   "pause": {"mode": "after_volume|now|null", "until": "ISO-8601|null", "reason": "user|schedule|null",
             "since": "ISO-8601|null"},
   "library": {"url": "...", "connected": true, "queue_pending": 12, "error": "...|null"},
@@ -234,16 +234,21 @@ panel instead.
 missing OCR backend in the background (`crates/mokuro-bunko/src/ocr_install.rs`). The
 dashboard's "OCR backend" panel shows the stage, a progress bar and the bytes while it
 runs, and on a failure (or `missing`: automatic installs off) the message with a Retry /
-Install button (`POST /control/ocr-install`); the tray adds "Installing OCR backend: NN%"
-under the state, and a failure is a `fail` problem (`kind: "ocr-install"`), so the icon
-asks for attention. The setup wizards save the OCR step's choices
-(`<backends>/.install-request.json`) and start the server or processor; as soon as it
-serves, the browser moves to that instance's dashboard, signed in through a single-use
-code from its control API (`/app/api/instances/<role>/dashboard`), and the `gui` process
-exits: from then on the instance's dashboard (serving, the install's progress, "OCR
-ready", the first-run benchmark as `library.activity`) and the tray report on it. When a tray runs, what the
-wizard starts is handed to it (tray.json; a running tray picks up added roles, and adopts
-an instance started for it with `MOKURO_CONTROL_MANAGED=1`), so the tray's Quit stops it.
+Install button (`POST /control/ocr-install`). While it runs, an instance that would
+otherwise be `idle` has `state: "installing"` (a connection problem, a pause or a
+running volume still win): the dashboard's state reads "Installing OCR backend" and the
+tray's status line "Installing OCR backend: NN%" (under another state it is a line of
+its own), and the doctor's "no backend pack" problem is left to the install. A failure
+is a `fail` problem (`kind: "ocr-install"`), so the icon asks for attention. The setup
+wizards save the OCR step's choices (`<backends>/.install-request.json`) and start the
+server or processor; as soon as it serves, the browser moves to that instance's
+dashboard, signed in through a single-use code from its control API
+(`/app/api/instances/<role>/dashboard`), and the `gui` process exits: from then on the
+instance's dashboard (serving, the install's progress, "OCR ready", the first-run
+benchmark as `library.activity`) and the tray report on it. When a tray runs, what the
+wizard starts is handed to it (tray.json; a running tray picks up added roles, and
+adopts an instance started for it with `MOKURO_CONTROL_MANAGED=1`), so the tray's Quit
+stops it.
 
 ## 5. Tray
 

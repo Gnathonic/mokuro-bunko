@@ -379,6 +379,14 @@ impl Control {
         let current = activity.map(|a| a.current()).unwrap_or_default();
         let held = activity.map(|a| a.held()).unwrap_or(0);
         let sessions = activity.map(|a| a.sessions()).unwrap_or(0);
+        // The background OCR install runs: `installing` where the state would be idle.
+        let installing = self
+            .0
+            .install
+            .lock()
+            .0
+            .as_ref()
+            .is_some_and(OcrInstall::running);
         let state = if c.role == Role::Gui {
             State::Setup
         } else if phase == LinkPhase::Refused {
@@ -395,6 +403,8 @@ impl Control {
             State::Disconnected
         } else if held > 0 || sessions > 0 {
             State::Working
+        } else if installing {
+            State::Installing
         } else {
             State::Idle
         };
@@ -531,6 +541,42 @@ mod tests {
             device_line(&device("gpu:1", "RTX 4090", "cuda", "sm_89")),
             "gpu:1 RTX 4090 · cuda, sm_89"
         );
+    }
+
+    /// A running background OCR install reads as `installing` where the state would
+    /// otherwise be `idle`, for a server and a processor alike; a processor still
+    /// connecting, or a pause, says more.
+    #[tokio::test]
+    async fn a_running_install_reads_as_installing_instead_of_idle() {
+        let running = OcrInstall {
+            state: OcrInstall::RUNNING.into(),
+            stage: "downloading".into(),
+            percent: Some(42),
+            ..OcrInstall::default()
+        };
+        for role in [Role::Server, Role::Processor] {
+            let dir = tempfile::tempdir().unwrap();
+            let c = Control::new(ControlConfig::new(role, "box", "0", dir.path()));
+            c.set_install(Some(running.clone()), Vec::new());
+            if role == Role::Processor {
+                assert_eq!(c.status().state, State::Connecting);
+                c.set_link(LinkPhase::Connected, Some("http://lib"), None);
+            }
+            assert_eq!(c.status().state, State::Installing, "{role:?}");
+            c.pause_mode(PauseMode::Now, None).unwrap();
+            assert_eq!(c.status().state, State::Paused, "{role:?}");
+            c.resume().unwrap();
+            for ended in [OcrInstall::DONE, OcrInstall::FAILED, OcrInstall::MISSING] {
+                let view = OcrInstall {
+                    state: ended.into(),
+                    ..OcrInstall::default()
+                };
+                c.set_install(Some(view), Vec::new());
+                assert_eq!(c.status().state, State::Idle, "{role:?} {ended}");
+            }
+            c.set_install(None, Vec::new());
+            assert_eq!(c.status().state, State::Idle, "{role:?}");
+        }
     }
 
     #[tokio::test]

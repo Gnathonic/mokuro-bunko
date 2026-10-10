@@ -5,7 +5,8 @@
   const { esc, get, post, toast, showError } = window.App;
   const $ = (id) => document.getElementById(id);
   const STATES = {
-    working: 'Working', idle: 'Idle — waiting for volumes', paused: 'Paused', pausing: 'Pausing after this volume',
+    working: 'Working', idle: 'Idle — waiting for volumes', installing: 'Installing OCR backend',
+    paused: 'Paused', pausing: 'Pausing after this volume',
     connecting: 'Connecting', disconnected: 'Disconnected', error: 'Error', setup: 'Not set up',
   };
   let last = null;
@@ -90,6 +91,8 @@
     pill.dataset.state = s.state;
     pill.textContent = STATES[s.state] || s.state;
     if (s.state === 'idle' && (s.library || {}).activity) pill.textContent = 'Measuring speed (first run)';
+    // `installing`: the background OCR install (its progress in the OCR backend panel), as the tray says it.
+    if (s.state === 'installing' && (s.install || {}).stage === 'models') pill.textContent = 'Installing OCR models';
     $('dash-setup').hidden = s.state !== 'setup';
 
     const paused = s.state === 'paused' || s.state === 'pausing';
