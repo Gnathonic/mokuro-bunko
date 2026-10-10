@@ -103,12 +103,37 @@ pub fn watch_queue(
 ) {
     tokio::spawn(async move {
         loop {
-            let pending = ocr.ask(|s| s.pending_jobs().len() as u64).await;
+            let asked = ocr
+                .ask(|s| {
+                    let bench = s.paused_for_benchmark().map(|b| {
+                        let generation =
+                            b["generation"].as_str().unwrap_or("an engine").to_string();
+                        let machine = b["processor"].as_str().unwrap_or("").to_string();
+                        (generation, machine)
+                    });
+                    (s.pending_jobs().len() as u64, bench)
+                })
+                .await;
+            let (pending, bench) = match asked {
+                Some((p, b)) => (Some(p), b),
+                None => (None, None),
+            };
+            let activity = bench.map(|(generation, machine)| {
+                format!(
+                    "Measuring {generation}'s speed on {} before its first volume (once per engine and machine; a few minutes)",
+                    if machine.is_empty() || machine == "local" {
+                        "this machine".to_string()
+                    } else {
+                        machine
+                    }
+                )
+            });
             control.set_library(bunko_control::LibraryView {
                 url: Some(url.clone()),
                 connected: true,
                 queue_pending: pending,
                 error: None,
+                activity,
             });
             tokio::select! {
                 _ = stop.cancelled() => break,

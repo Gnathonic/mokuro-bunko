@@ -110,6 +110,8 @@ pub struct Library {
     pub queue_pending: Option<f64>,
     /// Why it is not connected.
     pub error: Option<String>,
+    /// What holds the queue now (0.7: an engine's first-run speed measurement).
+    pub activity: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
