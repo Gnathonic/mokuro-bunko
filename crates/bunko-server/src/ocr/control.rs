@@ -87,8 +87,16 @@ pub trait BackgroundInstall: Send + Sync {
     fn start(&self) -> Result<bool, String>;
 
     /// Bumped each time an install ends (done or failed): the local processor (re)starts
-    /// with what is installed then.
+    /// with what is installed then, when that is a backend ([`Self::backend_ready`]).
     fn finished(&self) -> tokio::sync::watch::Receiver<u64>;
+
+    /// This machine has what its enabled OCR generations need from the backend (a pack
+    /// is in place, or none is needed). False after an install that failed with no
+    /// pack in place: this server's OCR then waits for the retry instead of starting
+    /// without the backend.
+    fn backend_ready(&self) -> bool {
+        true
+    }
 }
 
 /// What the OCR module is handed.
@@ -296,7 +304,7 @@ impl OcrControl {
                         changed = done.changed() => if changed.is_err() { return },
                     }
                     done.borrow_and_update();
-                    me.restart_local("its OCR backend is installed").await;
+                    me.after_install(installer.as_ref()).await;
                 }
             });
         }
@@ -368,6 +376,53 @@ impl OcrControl {
             if !running {
                 tracing::info!("Starting this server's OCR: {why}");
             }
+            self.start_local(factory.as_ref());
+        }
+    }
+
+    /// An install ended. Done: this server's OCR (re)starts with the new backend. Failed:
+    /// nothing changed, so OCR that runs keeps running; OCR that waited for the backend
+    /// starts only if a backend is in place after all, else it keeps waiting (the
+    /// failure shows with a retry in the dashboard and the admin panel, and a retry that
+    /// succeeds ends up here as done).
+    pub(crate) async fn after_install(&self, installer: &dyn BackgroundInstall) {
+        let failed = installer.view().is_some_and(|v| v.failed());
+        if !failed {
+            self.restart_local("its OCR backend is installed").await;
+            return;
+        }
+        if !installer.backend_ready() {
+            let running = self
+                .ask(|s| s.machines.contains_key(types::LOCAL))
+                .await
+                .unwrap_or(false);
+            if !running && self.0.local.is_some() {
+                tracing::info!(
+                    "This server's OCR waits for its OCR backend: the install failed (it is retried, or retry it from the dashboard or the admin panel)"
+                );
+            }
+            return;
+        }
+        self.start_local_if_stopped("an OCR backend is installed (the new install failed)")
+            .await;
+    }
+
+    /// Start this server's OCR unless it runs (local processing on).
+    async fn start_local_if_stopped(&self, why: &str) {
+        let Some(factory) = self.0.local.clone() else {
+            return;
+        };
+        let _one = self.0.local_restart.lock().await;
+        let state = self
+            .ask(|s| {
+                (
+                    s.settings().local_processing,
+                    s.machines.contains_key(types::LOCAL),
+                )
+            })
+            .await;
+        if let Some((true, false)) = state {
+            tracing::info!("Starting this server's OCR: {why}");
             self.start_local(factory.as_ref());
         }
     }

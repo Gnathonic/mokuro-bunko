@@ -1089,6 +1089,29 @@ async fn local_lanes_run_the_in_process_processor() {
 struct FakeInstall {
     view: parking_lot::Mutex<Option<bunko_proto::OcrInstall>>,
     finished: tokio::sync::watch::Sender<u64>,
+    /// A backend is in place ([`bunko_server::ocr::BackgroundInstall::backend_ready`]).
+    ready: std::sync::atomic::AtomicBool,
+}
+
+impl FakeInstall {
+    fn new(view: Option<bunko_proto::OcrInstall>) -> Arc<FakeInstall> {
+        Arc::new(FakeInstall {
+            view: parking_lot::Mutex::new(view),
+            finished: tokio::sync::watch::channel(0).0,
+            ready: std::sync::atomic::AtomicBool::new(true),
+        })
+    }
+
+    /// The install ends in `state`, leaving a backend in place or not.
+    fn end(&self, state: &str, ready: bool) {
+        *self.view.lock() = Some(bunko_proto::OcrInstall {
+            state: state.into(),
+            stage: state.into(),
+            ..Default::default()
+        });
+        self.ready.store(ready, std::sync::atomic::Ordering::SeqCst);
+        self.finished.send_modify(|n| *n += 1);
+    }
 }
 
 impl bunko_server::ocr::BackgroundInstall for FakeInstall {
@@ -1101,10 +1124,15 @@ impl bunko_server::ocr::BackgroundInstall for FakeInstall {
     fn finished(&self) -> tokio::sync::watch::Receiver<u64> {
         self.finished.subscribe()
     }
+    fn backend_ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
+/// What a start of this server's OCR opens: the pipeline in place then (a test swaps
+/// it when an install brings a GPU backend).
 struct InstallingLocal {
-    inner: FakeLocal,
+    inner: parking_lot::Mutex<FakeLocal>,
     install: Arc<FakeInstall>,
     starts: std::sync::atomic::AtomicUsize,
 }
@@ -1116,7 +1144,7 @@ impl bunko_server::ocr::LocalProcessorFactory for InstallingLocal {
     ) -> Result<bunko_server::ocr::LocalChannels, String> {
         self.starts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.start(results_dir)
+        self.inner.lock().start(results_dir)
     }
     fn installer(&self) -> Option<Arc<dyn bunko_server::ocr::BackgroundInstall>> {
         Some(self.install.clone())
@@ -1153,17 +1181,14 @@ async fn local_ocr_waits_for_the_background_install_then_starts_by_itself() {
     });
     let lib = layout.library();
     ocr_common::write_cbz(&lib.join("A/V1.cbz"), 2);
-    let install = Arc::new(FakeInstall {
-        view: parking_lot::Mutex::new(Some(bunko_proto::OcrInstall {
-            state: "running".into(),
-            stage: "downloading".into(),
-            percent: Some(10),
-            ..Default::default()
-        })),
-        finished: tokio::sync::watch::channel(0).0,
-    });
+    let install = FakeInstall::new(Some(bunko_proto::OcrInstall {
+        state: "running".into(),
+        stage: "downloading".into(),
+        percent: Some(10),
+        ..Default::default()
+    }));
     let factory = Arc::new(InstallingLocal {
-        inner: FakeLocal(fake),
+        inner: parking_lot::Mutex::new(FakeLocal(fake)),
         install: install.clone(),
         starts: std::sync::atomic::AtomicUsize::new(0),
     });
@@ -1221,6 +1246,224 @@ async fn local_ocr_waits_for_the_background_install_then_starts_by_itself() {
     );
     stop.cancel();
     ocr.stop().await;
+}
+
+/// This server's OCR with a background install, as `serve` runs it (autobench off).
+struct InstallEnv {
+    _dir: tempfile::TempDir,
+    core: Core,
+    lib: std::path::PathBuf,
+    ocr: OcrControl,
+    install: Arc<FakeInstall>,
+    factory: Arc<InstallingLocal>,
+    stop: CancellationToken,
+}
+
+fn fake_pipeline(gpu: bool) -> bunko_processor::FakePipeline {
+    bunko_processor::FakePipeline::new(bunko_processor::FakeConfig {
+        engines: vec!["hayai-nova".into()],
+        page_delay: Duration::from_millis(5),
+        gpu_formats: gpu.then(|| vec!["fp32".into(), "fp16".into(), "bf16".into()]),
+        ..Default::default()
+    })
+}
+
+fn install_env(view: Option<bunko_proto::OcrInstall>, gpu: bool) -> InstallEnv {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.storage.base_path = dir.path().join("storage");
+    config.ocr.autobench = false;
+    config.ocr.local_processing = true;
+    let layout = config.storage.layout();
+    layout.ensure_directories().unwrap();
+    let db = Arc::new(
+        Database::open_with(
+            layout.database(),
+            &DbOptions {
+                bcrypt_cost: 4,
+                ..DbOptions::default()
+            },
+        )
+        .unwrap(),
+    );
+    let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
+    let core = Core::new(Arc::new(RwLock::new(config)), None, backend);
+    let install = FakeInstall::new(view);
+    let factory = Arc::new(InstallingLocal {
+        inner: parking_lot::Mutex::new(FakeLocal(fake_pipeline(gpu))),
+        install: install.clone(),
+        starts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let ocr = OcrControl::new(OcrDeps {
+        core: core.clone(),
+        db: Some(db),
+        facts: Arc::new(FileFacts),
+        locks: Arc::new(DavLocks(bunko_dav::PathWriteLocks::new())),
+        local: Some(factory.clone()),
+        clock: None,
+    });
+    let stop = CancellationToken::new();
+    ocr.start(stop.clone());
+    InstallEnv {
+        _dir: dir,
+        core,
+        lib: layout.library(),
+        ocr,
+        install,
+        factory,
+        stop,
+    }
+}
+
+impl InstallEnv {
+    fn starts(&self) -> usize {
+        self.factory
+            .starts
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn local_up(&self) -> bool {
+        self.ocr
+            .ask(|s| s.machines.contains_key("local"))
+            .await
+            .unwrap()
+    }
+
+    async fn wait_starts(&self, n: usize) {
+        for _ in 0..100 {
+            if self.starts() >= n && self.local_up().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("this server's OCR did not start {n} time(s)");
+    }
+
+    /// The admin panel's generations list, as the page reads it.
+    async fn generations(&self) -> Value {
+        use bunko_server::admin::OcrAdmin;
+        let ocr = self.ocr.clone();
+        let config = self.core.config.read().clone();
+        tokio::task::spawn_blocking(move || ocr.generations_payload(&config))
+            .await
+            .unwrap()
+    }
+}
+
+fn installing() -> Option<bunko_proto::OcrInstall> {
+    Some(bunko_proto::OcrInstall {
+        state: "running".into(),
+        stage: "downloading".into(),
+        percent: Some(10),
+        ..Default::default()
+    })
+}
+
+/// Regression (a fresh desktop install whose first try failed): the install's end was
+/// taken for an installed backend, and the log said "Starting this server's OCR: its
+/// OCR backend is installed" right under "OCR install failed". A failed install with no
+/// backend in place leaves this server's OCR waiting (the failure shows with a retry);
+/// the retry that succeeds starts it; a failure with a backend in place starts that
+/// one; a failed install never restarts OCR that runs.
+#[tokio::test]
+async fn a_failed_install_leaves_this_servers_ocr_waiting_for_the_backend() {
+    let e = install_env(installing(), true);
+    ocr_common::write_cbz(&e.lib.join("A/V1.cbz"), 2);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!e.local_up().await, "no local OCR while installing");
+
+    e.install.end("failed", false);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!e.local_up().await, "a failed install starts nothing");
+    assert_eq!(e.starts(), 0);
+    assert!(!e.lib.join("A/V1.mokuro").exists());
+    assert!(e.ocr.install_view().unwrap().failed(), "the failure shows");
+
+    // The retry succeeds: this server's OCR starts by itself and reads the volume.
+    e.install.end("done", true);
+    e.wait_starts(1).await;
+    for _ in 0..100 {
+        if e.lib.join("A/V1.mokuro").is_file() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(e.lib.join("A/V1.mokuro").is_file(), "read after the retry");
+
+    // A later install that fails (another pack) leaves the running OCR alone.
+    e.install.end("failed", true);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(e.starts(), 1, "nothing changed: no restart");
+    assert!(e.local_up().await);
+    e.stop.cancel();
+    e.ocr.stop().await;
+
+    // A failed install with a backend still in place (the setup asked for another
+    // variant): this server's OCR starts with the one there.
+    let e = install_env(installing(), false);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    e.install.end("failed", true);
+    e.wait_starts(1).await;
+    e.stop.cancel();
+    e.ocr.stop().await;
+}
+
+/// Regression (a fresh desktop install): the GPU backend arrived in the background and
+/// the volumes were read on gpu:0, yet the admin panel's pools table said the engine
+/// runs on the CPU ("Auto → CPU"), whatever the machines reported. The table reads the
+/// devices live: what `auto` resolves to follows this server's catalog as each start of
+/// its OCR registers it, with no restart of the server.
+#[tokio::test]
+async fn the_pools_table_follows_the_backend_installed_in_the_background() {
+    let e = install_env(installing(), false);
+    let stage = |v: &Value, key: &str| -> Value {
+        v["generations"][0]["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["key"] == key)
+            .cloned()
+            .unwrap()
+    };
+    let labels = |s: &Value| -> Vec<String> {
+        s["device_options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["label"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // Installing: nothing reported a card yet.
+    let before = e.generations().await;
+    let engine = stage(&before, "engine");
+    assert_eq!(engine["device"], "cpu");
+    assert_eq!(labels(&engine)[0], "Auto → CPU");
+    assert_eq!(before["catalog"]["devices"][0]["label"], "Auto — CPU");
+
+    // The install brings a GPU backend: the next start of this server's OCR reports it.
+    *e.factory.inner.lock() = FakeLocal(fake_pipeline(true));
+    e.install.end("done", true);
+    e.wait_starts(1).await;
+    let after = e.generations().await;
+    let engine = stage(&after, "engine");
+    assert_eq!(engine["device"], "gpu:0", "{engine:#}");
+    assert_eq!(labels(&engine)[0], "Auto → GPU 0");
+    assert_eq!(engine["workers_means"], "copies");
+    assert!(
+        engine["devices_allowed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d == "gpu:0")
+    );
+    assert_eq!(after["catalog"]["devices"][0]["label"], "Auto — GPU 0");
+    assert_eq!(after["catalog"]["devices"][0]["resolves"], "gpu:0");
+    // The detector stays on the CPU: it is locked there, auto or not.
+    let detect = stage(&after, "detect");
+    assert_eq!(detect["device"], "cpu");
+    assert_eq!(labels(&detect)[0], "Auto → CPU");
+    e.stop.cancel();
+    e.ocr.stop().await;
 }
 
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

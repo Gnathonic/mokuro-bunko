@@ -2289,7 +2289,10 @@ function genLocalNoteHtml(row) {
         bits.push('Not configured by hand: this server runs what its benchmark found (' +
             genPoolsSummary(row.localPools) + ').');
     } else if (row.localBench) {
-        bits.push('Not configured by hand: this server\'s benchmark found the derived sizes best.');
+        // A benchmark with no pools stored: an automatic one that found the
+        // derived sizes best, or one run by hand (it never sets pools; its
+        // result above offers Apply). Either way it is not measured again.
+        bits.push('Not configured by hand: this server runs the derived sizes (already measured, so it is not benchmarked again).');
     } else {
         bits.push('Not configured by hand: this server benchmarks it before it runs it.');
     }
@@ -2457,7 +2460,8 @@ function genPoolRowHtml(row, index, stage) {
     const engineWorkers = stage.workers_means === 'engine';
     // A recognizer's engine stage on a card: the number is how many copies
     // of the model the session runs there, each in a process of its own.
-    // Blank is one copy, the way the stage has always run.
+    // Blank is the machine's own choice (two on a fast card of a big host,
+    // else one), so the box says "auto" rather than a number it may not run.
     const copies = stage.workers_means === 'copies';
     // A monolithic row's one stage has no queue between stages either.
     const forkStage = stage.derived_workers == null && stage.derived_capacity == null;
@@ -2468,9 +2472,10 @@ function genPoolRowHtml(row, index, stage) {
         ? '<td class="num pools__fixed">1 <span class="pools__why">one model on one device</span></td>'
         : copies
         ? '<td class="num"><input type="number" class="form-input pools__input" data-act="workers" data-idx="' + index +
-          '" data-stage="' + escapeHtml(stage.key) + '" min="1" max="' + GEN_MAX_ENGINE_COPIES + '" placeholder="1"' +
+          '" data-stage="' + escapeHtml(stage.key) + '" min="1" max="' + GEN_MAX_ENGINE_COPIES + '" placeholder="' +
+          escapeHtml(stage.derived_workers == null ? 'auto' : String(stage.derived_workers)) + '"' +
           ' value="' + escapeHtml(typeof workers === 'number' ? String(workers) : '') + '"' +
-          ' aria-label="' + escapeHtml(stage.key) + ' copies of the model on the card, blank for one">' +
+          ' aria-label="' + escapeHtml(stage.key) + ' copies of the model on the card, blank for automatic">' +
           ' <span class="pools__why">copies of the model on the card</span></td>'
         : '<td class="num"><input type="number" class="form-input pools__input" data-act="workers" data-idx="' + index +
           '" data-stage="' + escapeHtml(stage.key) + '" min="1"' +
