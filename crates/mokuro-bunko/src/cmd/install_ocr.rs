@@ -1109,7 +1109,8 @@ mod full {
         let events = events_on();
         move |done, total| {
             let pct = (done * 100).checked_div(total).unwrap_or(100);
-            if pct >= last + step || (done == total && last < 100) {
+            // With events the background installer logs the progress itself.
+            if !events && (pct >= last + step || (done == total && last < 100)) {
                 last = pct;
                 println!("  {label}: {pct}% of {}", mb(total));
             }

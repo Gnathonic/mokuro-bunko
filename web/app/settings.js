@@ -75,11 +75,9 @@
 
   // MOKURO_* variables that override config.yaml keys (MOKURO_<SECTION>_<KEY> and the
   // short aliases), not the other MOKURO_* knobs.
-  // (MOKURO_ADMIN_USERNAME / _PASSWORD[_FILE] create the first admin; not config keys.)
   function overriding(env, file) {
     const sections = Object.keys(file || {}).map((k) => k.toUpperCase());
-    const notKeys = ['MOKURO_ADMIN_USERNAME', 'MOKURO_ADMIN_PASSWORD', 'MOKURO_ADMIN_PASSWORD_FILE'];
-    return env.filter((k) => !notKeys.includes(k)).filter((k) => ['MOKURO_HOST', 'MOKURO_PORT', 'MOKURO_STORAGE'].includes(k) ||
+    return env.filter((k) => ['MOKURO_HOST', 'MOKURO_PORT', 'MOKURO_STORAGE'].includes(k) ||
       sections.some((sec) => k.startsWith('MOKURO_' + sec + '_')));
   }
 

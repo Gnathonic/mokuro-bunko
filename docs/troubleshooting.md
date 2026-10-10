@@ -413,7 +413,7 @@ The setup page opens without a code only from the server machine itself
 bridge networking, it asks for the one-time setup code the server printed in
 its log at startup (a line beginning `First run:`; `docker logs <container>`,
 or the container's log on Unraid). Every start makes a new code, so take the
-one from the latest start. After five wrong codes in a minute the page says to
-wait. Alternatives: `MOKURO_ADMIN_USERNAME` + `MOKURO_ADMIN_PASSWORD` on the
-first start, or `mokuro-bunko admin add-user NAME --role admin` on the server
+one from the latest start (after many wrong codes from the network the server
+also logs a replacement code: take the newest). After five wrong codes the page
+says to wait a little. Or run `mokuro-bunko admin add-user NAME --role admin` on the server
 (in Docker: `docker exec -it <container> mokuro-bunko admin add-user NAME --role admin`).

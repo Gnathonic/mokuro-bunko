@@ -16,10 +16,6 @@ services:
       - PGID=1000
       - MOKURO_STORAGE=/data
       - MOKURO_CONFIG=/data/config.yaml
-      # First run: create the admin account (ignored once one exists). Without
-      # these, the log shows a one-time setup code for http://HOST:8080/setup.
-      # - MOKURO_ADMIN_USERNAME=admin
-      # - MOKURO_ADMIN_PASSWORD=change-me-please
       - MOKURO_REGISTRATION_MODE=self
 
 volumes:
