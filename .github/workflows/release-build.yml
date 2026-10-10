@@ -212,7 +212,10 @@ jobs:
   # 2.13.0 of each variant, trimmed, with libbunko_torch built against it, as
   # mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst (split in .001/.002 parts
   # above 1.9 GiB). The NVIDIA libraries are not in the archives: pack.json lists
-  # NVIDIA's PyPI wheels (pinned by sha256) and `install-ocr` fetches them.
+  # NVIDIA's PyPI wheels (pinned by sha256) and `install-ocr` fetches them. The closure
+  # check also reads a compiled model package of the pack's platform and variant
+  # (--sample-from-manifest: the smallest in bunko-ocr's torch-models.json), whose
+  # libraries import more than the pack's own do (vcomp140.dll, cudart64_13.dll, ...).
   packs:
     name: pack ${{ matrix.name }}
     strategy:
@@ -276,7 +279,7 @@ jobs:
           fi
           xtask=target/debug/xtask
           if [ -f "$xtask.exe" ]; then xtask="$xtask.exe"; fi
-          "$xtask" torch-pack --locked --variant "$VARIANT" --target "$TARGET" --out dist
+          "$xtask" torch-pack --locked --variant "$VARIANT" --target "$TARGET" --sample-from-manifest --out dist
           rm -rf "$BUNKO_PACK_CACHE"
           ls -l dist
       - uses: actions/upload-artifact@v6
