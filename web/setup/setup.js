@@ -226,6 +226,11 @@
             const r = await fetch('/setup/api/options');
             if (r.ok) options = await r.json();
         } catch (_) { /* the defaults */ }
+        if (!options.local) {
+            // Files on the server can be named on the server itself only.
+            const files = document.querySelector('#ssl-mode option[value="files"]');
+            if (files) files.remove();
+        }
         setupOcr(options.ocr);
         setupPinned(options.pinned || {});
         show(0);

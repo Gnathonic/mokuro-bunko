@@ -18,7 +18,10 @@ differ, this section wins.
   found; backend Auto, CPU or the GPU found). `POST /setup/api/complete` takes
   `{admin, registration, remote, ocr}`; every answer is checked before the admin is
   made. Values the environment sets are shown read-only (`GET /setup/api/options`
-  `pinned`). Finishing signs the admin in and opens `/_admin#server`. HTTPS turned on
+  `pinned`). Every `/setup` route, the reads included, answers only while no admin
+  exists and only past the setup gate (localhost, the code, or a session from it);
+  `options` answers 410 once an admin exists. Certificate files may be named only
+  from the server itself. Finishing signs the admin in and opens `/_admin#server`. HTTPS turned on
   restarts the server. Until an admin exists, a new server does not start the OCR
   install by itself; the setup's choice does (when `MOKURO_OCR_AUTO_INSTALL` allows).
 - **Admin panel → This server** (`/_admin/api/machine/*`, admin only, CSRF-checked;

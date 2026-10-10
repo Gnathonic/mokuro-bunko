@@ -114,8 +114,8 @@ front (`--config`).
 | `ssl` | [setup](/setup) → Remote access → HTTPS; later CLI-only because the certificate files live on the server and a change needs a restart |
 | `ssl enable` | [setup](/setup) → Remote access → HTTPS (the server restarts with it) |
 | `ssl enable --auto-cert` | [setup](/setup) → HTTPS → Self-signed certificate |
-| `ssl enable --cert` | [setup](/setup) → HTTPS → My certificate files → Certificate file |
-| `ssl enable --key` | [setup](/setup) → HTTPS → My certificate files → Private key file |
+| `ssl enable --cert` | [setup](/setup) opened on the server itself → HTTPS → My certificate files → Certificate file |
+| `ssl enable --key` | [setup](/setup) opened on the server itself → HTTPS → My certificate files → Private key file |
 | `ssl disable` | CLI-only because HTTPS is fixed while the server runs; run it, then restart |
 | `ssl status` | CLI-only because it reads the certificate files on the server for the terminal |
 | `ssl generate` | CLI-only because it writes files on the server; [setup](/setup)'s self-signed choice makes one by itself |

@@ -434,9 +434,19 @@ async fn status(State(d): State<AccountsDeps>, client: Client, parts: Parts) -> 
 /// `GET /setup/api/options`: what the wizard's later steps offer here: the OCR step
 /// (the machine's hardware, `null` without one), and the answers the environment
 /// already gives (`MOKURO_*` variables win over the file at every start).
+///
+/// Only while setup is needed, and only to a caller the setup gate lets in (localhost,
+/// a setup session, or the code): it describes the machine. Once an admin exists it
+/// answers 410; the same facts are in the admin panel, behind admin auth.
 async fn options(State(d): State<AccountsDeps>, client: Client, parts: Parts) -> Response {
-    if let Some(resp) = gate(&d, &client, &parts).await {
-        return resp;
+    match needs_setup(&d).await {
+        Err(resp) => return resp,
+        Ok(false) => return json_error(410, "Setup already completed"),
+        Ok(true) => {}
+    }
+    match gate_of(&d, &client, &parts) {
+        Gate::Allowed => {}
+        g => return refusal(g),
     }
     let machine = d.machine.clone();
     let ocr = match machine {
@@ -453,6 +463,8 @@ async fn options(State(d): State<AccountsDeps>, client: Client, parts: Parts) ->
         200,
         json!({
             "ocr": ocr,
+            // Certificate files can be named from this machine only.
+            "local": is_local(&client),
             "pinned": {
                 "registration": env_pin("MOKURO_REGISTRATION_MODE").map(|_| registration),
                 "ssl": env_pin("MOKURO_SSL_ENABLED").map(|_| ssl),
@@ -685,7 +697,7 @@ async fn complete(
     };
     // The other answers are checked before anything is written: a mistake in them
     // must not leave an admin behind with the rest of the setup undone.
-    let plan = match SetupPlan::parse(&data, d.machine.is_some()) {
+    let plan = match SetupPlan::parse(&data, d.machine.is_some(), is_local(&client)) {
         Ok(p) => p,
         Err(msg) => return json_error(400, &msg),
     };
@@ -797,9 +809,13 @@ struct Applied {
 }
 
 impl SetupPlan {
+    /// `local`: the request comes from this machine. Only then may it name files on
+    /// the server (HTTPS certificate files); from elsewhere the self-signed choice
+    /// (made inside the server's own storage) is the one offered.
     fn parse(
         data: &serde_json::Map<String, Value>,
         has_machine: bool,
+        local: bool,
     ) -> Result<SetupPlan, String> {
         use bunko_core::config::{DYNDNS_PROVIDERS, DynDnsConfig, SslConfig};
         let mut plan = SetupPlan::default();
@@ -865,6 +881,13 @@ impl SetupPlan {
                 auto_cert: true,
                 ..SslConfig::default()
             }),
+            "files" if !local => {
+                return Err(
+                    "HTTPS: certificate files can be named only on the server itself (localhost); \
+                     choose the self-signed certificate, or set the files later with `mokuro-bunko ssl enable`"
+                        .into(),
+                );
+            }
             "files" => {
                 let (cert, key) = (text(ssl, "cert_file"), text(ssl, "key_file"));
                 for (label, p) in [("certificate", &cert), ("private key", &key)] {
