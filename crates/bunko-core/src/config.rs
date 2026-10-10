@@ -242,7 +242,8 @@ impl Default for DatabaseConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpgradeConfig {
-    /// Replace older primary OCR with the current primary recipe (0.6 design, §3).
+    /// Replace older primary OCR with the current primary recipe (0.6 design, §3): the
+    /// new file replaces the old primary file; edited files are skipped.
     pub enabled: bool,
     /// Recipe families to replace: engine ids or `mokuro-legacy`.
     pub replace: Vec<String>,
