@@ -558,6 +558,34 @@ such file or directory" and names every card "AMD Radeon Graphics"), and 0.5.2's
 `HSA_OVERRIDE_GFX_VERSION` (RX 6600 gfx1032 → 10.3.0, verified on host-e). Neither
 overrides a user value.
 
+**ROCm needs a writable temporary folder (2026-10-10).** Before its first stream (the
+first host→GPU copy, `hipStreamCreate`) HIP builds its blit (copy) kernels with comgr,
+which makes a `comgr-XXXXXX` work folder in LLVM's `system_temp_directory` (the first
+of `TMPDIR`, `TMP`, `TEMP`, `TEMPDIR` that is set, else `/tmp`) and writes the kernel
+source, a precompiled header and the bitcode there -- at every process start, whatever
+`~/.cache/comgr` holds. When that folder is missing or read-only the compile fails
+(`AMD_LOG_LEVEL=2`: "Failed to compile source", "Couldn't create blit kernels!", "Could
+not create BlitManager!") and HIP's error path dereferences the half-built queue:
+SIGSEGV in `amd::HostQueue::terminate` ← `hip::Stream::terminate` ←
+`hip::Device::NullStream` ← `hipMemcpyWithStream` (here under `at::native::copy_` of the
+first `bt_load`). A ROCm bug (it should return an error), reproduced outside
+mokuro-bunko with the pack's HIP 7.1 and the host's 7.2.4 (`hipInit`, `hipSetDevice`
+fine, then `hipStreamCreate` or `hipMemcpy` crash), so nothing in-process can catch it.
+Found when 32 first-run benchmarks on the desktop 9070 XT crashed: the test script ran
+`HOME=<fresh> TMPDIR=~/...`, and bash expands that `~` with the new `HOME`, so `TMPDIR`
+named a folder that did not exist (it looked like "fresh HOME crashes, real HOME
+works"; HOME itself does not matter: a fresh HOME with a valid `TMPDIR` passes).
+`abi::prepare_rocm_env` (loader and `bt_init`) now probes that folder (makes a folder
+and a file in it) and, when it fails, sets `TMPDIR` to the first usable of `/tmp`,
+`/var/tmp`, `<backends>/.tmp` (warning in the log, the devices report and `doctor`);
+with none usable the GPU half is not loaded (`RocmEnv::gpu_off`: "no GPU: no folder the
+ROCm runtime can compile its copy kernels in ...", OCR on the CPU). Verified on the
+desktop: the old binary crashed with `TMPDIR` missing; the fix 5/5 benchmarks clean
+with a fresh HOME and a missing `TMPDIR`, then Dr Stone 01 OCR'd (196/196 pages, 3203
+lines, bf16 on gpu:0); with `/tmp`, `/var/tmp` and the backends folder read-only (a
+user+mount namespace) the server stays up on the CPU, through the new loader and
+through the pack's `bt_init` under the old loader.
+
 **Runtime details (2026-10-03).** `MOKURO_TORCH_THREADS` is applied on every read to every
 loaded OpenMP runtime (libgomp, libomp, libiomp5, and MSVC's vcomp140 that Windows CPU
 packages import). An `atexit` hook (re-registered after each package load, so it runs

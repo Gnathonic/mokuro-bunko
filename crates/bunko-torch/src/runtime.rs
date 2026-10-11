@@ -25,14 +25,17 @@ pub fn init(cfg: &InitConfig) -> Result<(), TorchError> {
     register_exit_hook();
     // The ROCm runtime reads these when it starts (a no-op when the loader already did,
     // or for a non-ROCm pack on a host without AMD GPUs).
+    let mut gpu_off = None;
     if let Some(pack) = dir.and_then(Path::parent)
         && !cfg.cpu_only
         && dir.is_some_and(|d| d.join("libtorch_hip.so").exists())
     {
-        crate::abi::prepare_rocm_env(pack, &cfg.gpu_archs);
+        // No folder for the runtime's kernel compiles: its first GPU copy would crash
+        // the process, so the GPU half stays unloaded and the devices report says why.
+        gpu_off = crate::abi::prepare_rocm_env(pack, &cfg.gpu_archs).gpu_off;
     }
-    let r = crate::gpu::init(dir, cfg.cpu_only);
-    let _ = INIT_WARNING.set(r.err());
+    let r = crate::gpu::init(dir, cfg.cpu_only || gpu_off.is_some());
+    let _ = INIT_WARNING.set(gpu_off.or(r.err()));
     Ok(())
 }
 
