@@ -283,20 +283,31 @@ Total 6,360,175,075 bytes in 23 files (+ `models.json`); largest 1,755,789,760.
 - No bf16 graphs (spec Q4). No int8 paddle graph (the spike's 97/100; Q8) — add it to
   `paddle/export.py` with ORT `quantize_dynamic` if Q8 is decided "yes".
 
-## 7. Publishing (requires the owner's approval — nothing has been uploaded)
+## 7. Publishing
+
+**Published:** `models-v1` is a GitHub pre-release since 2026-10-09, with the 23 files of
+§1. `models.json` itself and a signature were not uploaded: the file table (every size and
+sha256) is compiled into the program instead (`crates/bunko-ocr/src/models_release.rs`,
+from this release's `models.json`), and the program comes from a signed release
+(PACKAGING.md §3), so every download is checked against the binary's own table. The
+compiled libtorch packages the recognizers run in 0.7 are a second release,
+`torch-models-v1` (`tools/torch_export`; its `torch-models.json` is compiled in the same
+way, TORCH-BACKEND.md).
+
+The steps, for the next export:
 
 1. Re-run `python -m onnx_export all` (or check the existing outputs: `manifest` recomputes
    every sha256) and read the parity block in `models.json`.
-2. Sign the manifest (ARCHITECTURE §7 says "signed"; the key and scheme are the owner's
-   decision — e.g. minisign/ed25519 with the public key compiled into `bunko-update`):
-   `minisign -S -m models.json` → `models.json.minisig`.
+2. Put the manifest's table into bunko-ocr (`models_release.rs`) in the program release
+   that first uses the files; no separate signature is needed (the release manifest
+   signs the program that carries it).
 3. Create the release and upload every top-level file (not `_stage/`, not `_parity/`):
    ```sh
    cd ~/.cache/mokuro-bunko-demo/models-v1
    gh release create models-v1 --repo Gnathonic/mokuro-bunko --title "OCR models v1" \
       --notes-file /path/to/release-notes.md --prerelease   # notes kept outside this dir
    gh release upload models-v1 --repo Gnathonic/mokuro-bunko \
-      $(ls | grep -v '^_')   # the 23 files + models.json (+ .minisig)
+      $(ls | grep -v '^_' | grep -vx models.json)   # the 23 files
    ```
    The release notes carry the licence/attribution text from §2.
 4. Verify: download a few assets back and compare sha256 with `models.json`
