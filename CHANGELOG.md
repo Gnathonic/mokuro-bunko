@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.0-beta.6] - 2026-10-11
+
+A pre-release on the way to 0.7.0 (everything below under 0.7.0 applies).
 
 ### Changed
 - **A processor downloads only the models its library uses.** The library names the

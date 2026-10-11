@@ -36,7 +36,7 @@ everything beside the program:
 ```
 
 These take the latest stable release; for a beta, use the script of its tag
-with `-Version`, e.g. `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/v0.7.0-beta.5/scripts/install.ps1))) -Version 0.7.0-beta.5`.
+with `-Version`, e.g. `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/v0.7.0-beta.6/scripts/install.ps1))) -Version 0.7.0-beta.6`.
 
 Prefer a zip? Download `mokuro-bunko-<version>-windows.zip` from the
 [releases page](https://github.com/Gnathonic/mokuro-bunko/releases), extract
