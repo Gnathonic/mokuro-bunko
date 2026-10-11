@@ -231,12 +231,10 @@ impl Installer {
         }
         match self.decide() {
             Ok(Decision::Install {
-                variant,
-                reason,
-                request,
+                reason, request, ..
             }) if auto => {
                 info!(
-                    "OCR backend: the {variant} pack is not installed ({reason}); installing it in the background{}",
+                    "OCR backend: {reason}; installing it in the background{}",
                     if request {
                         " with the setup's choices"
                     } else {
@@ -315,15 +313,18 @@ impl Installer {
         let hw = crate::hwdetect::detect();
         match install_ocr::need(&target, &hw) {
             Need::Off(why) => Ok(Decision::Nothing(format!("local OCR is off: {why}"))),
-            Need::Install { variant, reason } => Ok(Decision::Install {
-                variant: request
+            Need::Install { variant, reason } => {
+                let variant = request
                     .as_ref()
                     .and_then(|r| r.variant.clone())
                     .filter(|v| v != "auto")
-                    .unwrap_or(variant),
-                reason,
-                request: request.is_some(),
-            }),
+                    .unwrap_or(variant);
+                Ok(Decision::Install {
+                    reason: format!("the {variant} pack is not installed ({reason})"),
+                    variant,
+                    request: request.is_some(),
+                })
+            }
             // The wizard asked for something the pack in place may not be (another
             // variant, a reinstall): the child decides.
             Need::Satisfied(_) if request.is_some() => Ok(Decision::Install {
@@ -331,9 +332,20 @@ impl Installer {
                     .as_ref()
                     .and_then(|r| r.variant.clone())
                     .unwrap_or_else(|| "auto".into()),
-                reason: "the setup's OCR choices".into(),
+                reason: "the setup picked the OCR backend".into(),
                 request: true,
             }),
+            // The pack is in place but the last install's models did not all download:
+            // the child fetches the rest.
+            Need::Satisfied(_) if install_ocr::models_incomplete(&backends) => {
+                Ok(Decision::Install {
+                    variant: install_ocr::wanted_choice(&target, &hw, &backends)
+                        .variant
+                        .to_string(),
+                    reason: "the last install did not download all the OCR models".into(),
+                    request: false,
+                })
+            }
             Need::Satisfied(why) => Ok(Decision::Nothing(why)),
         }
     }

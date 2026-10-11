@@ -773,60 +773,115 @@ fn fetch_to(url: &str, part: &Path, expected: u64) -> Result<()> {
 
 #[cfg(feature = "download")]
 fn download(url: &str, part: &Path, expected: u64) -> Result<()> {
-    let have = fs::metadata(part).map(|m| m.len()).unwrap_or(0);
-    let have = if have >= expected { 0 } else { have };
+    download_in_slices(url, part, expected, std::time::Duration::from_secs(120))
+}
+
+/// Requests in a row that may end without adding a byte before the download fails.
+#[cfg(feature = "download")]
+const STALLED_REQUESTS: u32 = 4;
+
+/// Downloads `url` into `part` as a series of requests, each allowed `slice` of body
+/// time (ureq has no idle timeout, only a total one). A request that times out or drops
+/// part-way is followed by a `Range` request for the rest, so a slow link still finishes
+/// a multi-gigabyte file; the download fails only after [`STALLED_REQUESTS`] requests
+/// in a row add nothing (a dead link, or a server that ignores `Range`).
+#[cfg(feature = "download")]
+fn download_in_slices(
+    url: &str,
+    part: &Path,
+    expected: u64,
+    slice: std::time::Duration,
+) -> Result<()> {
+    use std::time::{Duration, Instant};
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_connect(Some(std::time::Duration::from_secs(30)))
-        .timeout_recv_body(Some(std::time::Duration::from_secs(120)))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .timeout_recv_body(Some(slice))
         .build()
         .into();
-    let mut req = agent.get(url);
-    if have > 0 {
-        req = req.header("Range", format!("bytes={have}-"));
-    }
     let err = |msg: String| Error::Download {
         url: url.to_string(),
         msg,
     };
-    let resp = req.call().map_err(|e| err(e.to_string()))?;
-    let resumed = resp.status().as_u16() == 206;
-    let mut out = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(resumed)
-        .truncate(!resumed)
-        .open(part)
-        .map_err(|e| Error::io(part, e))?;
-    let mut body = resp.into_body();
-    let mut reader = body.as_reader();
-    let mut buf = vec![0u8; 1 << 16];
-    let started = std::time::Instant::now();
-    let mut last_report = started;
-    let mut got: u64 = if resumed { have } else { 0 };
     let name = url.rsplit('/').next().unwrap_or(url);
+    let started = Instant::now();
+    let mut last_report = started;
+    let mut fetched: u64 = 0;
+    // The most bytes on disk so far: a request that does not pass it made no progress.
+    let mut best = fs::metadata(part)
+        .map(|m| m.len())
+        .unwrap_or(0)
+        .min(expected);
+    let mut stalled = 0;
     loop {
-        let n = reader.read(&mut buf).map_err(|e| err(e.to_string()))?;
-        if n == 0 {
-            break;
+        let have = fs::metadata(part).map(|m| m.len()).unwrap_or(0);
+        let have = if have >= expected { 0 } else { have };
+        let mut req = agent.get(url);
+        if have > 0 {
+            req = req.header("Range", format!("bytes={have}-"));
         }
-        out.write_all(&buf[..n]).map_err(|e| Error::io(part, e))?;
-        got += n as u64;
-        // Progress for the log: a multi-gigabyte model takes minutes.
-        if last_report.elapsed() >= std::time::Duration::from_secs(5) {
-            last_report = std::time::Instant::now();
-            let secs = started.elapsed().as_secs_f64().max(0.001);
-            let fetched = got - if resumed { have } else { 0 };
-            info!(
-                "downloading {name}: {} / {} MB ({:.0}%), {:.1} MB/s",
-                got / 1_000_000,
-                expected / 1_000_000,
-                100.0 * got as f64 / expected.max(1) as f64,
-                fetched as f64 / 1e6 / secs
-            );
+        let ended: std::result::Result<u64, String> = (|| {
+            let resp = req.call().map_err(|e| e.to_string())?;
+            let resumed = resp.status().as_u16() == 206;
+            let mut out = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(resumed)
+                .truncate(!resumed)
+                .open(part)
+                .map_err(|e| format!("{}: {e}", part.display()))?;
+            let mut got: u64 = if resumed { have } else { 0 };
+            let mut body = resp.into_body();
+            let mut reader = body.as_reader();
+            let mut buf = vec![0u8; 1 << 16];
+            let read = loop {
+                let n = match reader.read(&mut buf) {
+                    Ok(0) => break Ok(()),
+                    Ok(n) => n,
+                    Err(e) => break Err(e.to_string()),
+                };
+                out.write_all(&buf[..n])
+                    .map_err(|e| format!("{}: {e}", part.display()))?;
+                got += n as u64;
+                fetched += n as u64;
+                // Progress for the log: a multi-gigabyte model takes minutes.
+                if last_report.elapsed() >= Duration::from_secs(5) {
+                    last_report = Instant::now();
+                    let secs = started.elapsed().as_secs_f64().max(0.001);
+                    info!(
+                        "downloading {name}: {} / {} MB ({:.0}%), {:.1} MB/s",
+                        got / 1_000_000,
+                        expected / 1_000_000,
+                        100.0 * got as f64 / expected.max(1) as f64,
+                        fetched as f64 / 1e6 / secs
+                    );
+                }
+            };
+            out.sync_all()
+                .map_err(|e| format!("{}: {e}", part.display()))?;
+            match read {
+                Ok(()) if got >= expected => Ok(got),
+                Ok(()) => Err(format!("connection closed at {got} of {expected} bytes")),
+                Err(e) => Err(format!("{e} at {got} of {expected} bytes")),
+            }
+        })();
+        let on_disk = fs::metadata(part).map(|m| m.len()).unwrap_or(0);
+        let why = match ended {
+            Ok(_) => return Ok(()),
+            Err(why) => why,
+        };
+        if on_disk > best {
+            best = on_disk;
+            stalled = 0;
+        } else {
+            stalled += 1;
+            if stalled >= STALLED_REQUESTS {
+                return Err(err(why));
+            }
         }
+        warn!("downloading {name}: {why}; continuing from byte {on_disk}");
+        std::thread::sleep(Duration::from_secs(u64::from(stalled.min(5))));
     }
-    out.sync_all().map_err(|e| Error::io(part, e))?;
-    Ok(())
 }
 
 #[cfg(not(feature = "download"))]
@@ -1900,6 +1955,101 @@ mod tests {
         assert!(r.verified);
         assert_eq!(fs::read(&r.path).unwrap(), full);
         assert!(!part.exists());
+    }
+
+    /// A one-file HTTP server for the download tests. `per_request` caps the body bytes
+    /// one response sends (then the connection drops); `chunk_delay` paces the chunks;
+    /// `ranges` says whether `Range` is honoured. Returns the URL.
+    #[cfg(feature = "download")]
+    fn serve_file(
+        data: Vec<u8>,
+        per_request: usize,
+        chunk_delay: std::time::Duration,
+        ranges: bool,
+    ) -> String {
+        use std::io::{BufRead, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut from = 0usize;
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                        from = v.trim().trim_end_matches('-').parse().unwrap_or(0);
+                    }
+                }
+                let from = if ranges { from } else { 0 };
+                let head = if from > 0 {
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{}/{}\r\nConnection: close\r\n\r\n",
+                        data.len() - from,
+                        data.len() - 1,
+                        data.len()
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        data.len()
+                    )
+                };
+                let _ = stream.write_all(head.as_bytes());
+                let end = data.len().min(from.saturating_add(per_request));
+                for c in data[from..end].chunks(1024) {
+                    if stream.write_all(c).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(chunk_delay);
+                }
+            }
+        });
+        format!("http://{addr}/model.bin")
+    }
+
+    #[cfg(feature = "download")]
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 31 % 251) as u8).collect()
+    }
+
+    /// A link too slow to finish inside one request's body time, and one that drops
+    /// the connection part-way: both finish by resuming within the same download.
+    #[cfg(feature = "download")]
+    #[test]
+    fn a_slow_or_dropping_download_resumes_until_done() {
+        use std::time::Duration;
+        let data = pattern(64 * 1024);
+        let tmp = tempfile::tempdir().unwrap();
+
+        let slow = serve_file(data.clone(), usize::MAX, Duration::from_millis(40), true);
+        let part = tmp.path().join("slow.part");
+        download_in_slices(&slow, &part, data.len() as u64, Duration::from_millis(500)).unwrap();
+        assert_eq!(fs::read(&part).unwrap(), data);
+
+        let dropping = serve_file(data.clone(), 10 * 1024, Duration::ZERO, true);
+        let part = tmp.path().join("dropping.part");
+        download_in_slices(&dropping, &part, data.len() as u64, Duration::from_secs(30)).unwrap();
+        assert_eq!(fs::read(&part).unwrap(), data);
+    }
+
+    /// A server that ignores `Range` and keeps dropping makes no progress past the
+    /// first request: the download gives up instead of looping forever.
+    #[cfg(feature = "download")]
+    #[test]
+    fn a_download_that_stops_making_progress_fails() {
+        use std::time::Duration;
+        let data = pattern(64 * 1024);
+        let tmp = tempfile::tempdir().unwrap();
+        let url = serve_file(data.clone(), 10 * 1024, Duration::ZERO, false);
+        let part = tmp.path().join("norange.part");
+        let e = download_in_slices(&url, &part, data.len() as u64, Duration::from_secs(30))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("of 65536 bytes"), "{e}");
     }
 
     #[test]
