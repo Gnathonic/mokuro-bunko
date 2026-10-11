@@ -320,10 +320,18 @@ fn ppocr_volume_with_bad_pages() {
 fn refusals_before_loading() {
     let tmp = tempfile::tempdir().unwrap();
     let p = pipeline(tmp.path());
-    let err = p.open(&spec("hayai-nova", "bf16")).err().unwrap();
-    assert!(err.starts_with("precision not available here"), "{err}");
-    let err = p.open(&spec("paddle-manga", "fp16")).err().unwrap();
-    assert!(err.contains("fp16 not supported"), "{err}");
+    // The precision refusals hold only without a backend pack: with one (say
+    // `MOKURO_TORCH_PACK`, set for `torch_loader` in the same run) both rows open.
+    if std::env::var_os("MOKURO_TORCH_PACK").is_none()
+        && std::env::var_os(bunko_engines::BACKENDS_DIR_ENV).is_none()
+    {
+        let err = p.open(&spec("hayai-nova", "bf16")).err().unwrap();
+        assert!(err.starts_with("precision not available here"), "{err}");
+        let err = p.open(&spec("paddle-manga", "fp16")).err().unwrap();
+        assert!(err.contains("fp16 not supported"), "{err}");
+    } else {
+        eprintln!("a backend pack is configured: precision refusals not checked");
+    }
     let err = p.open(&spec("mokuro", "auto")).err().unwrap();
     assert!(err.contains("unknown engine mokuro"), "{err}");
     let mut s = spec("ppocr-manga", "auto");

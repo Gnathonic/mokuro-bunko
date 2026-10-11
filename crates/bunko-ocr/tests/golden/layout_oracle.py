@@ -7,10 +7,21 @@ stdout, one JSON object per line: {"pieces": [[i, ...], ...]} or
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "src" / "mokuro_bunko" / "ocr"))
+# The 0.5.2 sources are no longer in this tree: MOKURO_REF_052 names a checkout of commit
+# 199cff5 (release 0.5.2), default the sibling worktree `../ref-0.5.2`
+# (`git worktree add --detach ../ref-0.5.2 199cff5`), as for tools/onnx_export.
+REF_052 = Path(os.environ.get("MOKURO_REF_052", Path(__file__).resolve().parents[5] / "ref-0.5.2"))
+OCR_SRC = REF_052 / "src" / "mokuro_bunko" / "ocr"
+if not (OCR_SRC / "line_layout.py").is_file():
+    raise SystemExit(
+        f"0.5.2 reference sources not found at {REF_052}: set MOKURO_REF_052 to a checkout of "
+        "commit 199cff5 (git worktree add --detach ../ref-0.5.2 199cff5)"
+    )
+sys.path.insert(0, str(OCR_SRC))
 import line_layout  # noqa: E402
 
 for line in sys.stdin:
