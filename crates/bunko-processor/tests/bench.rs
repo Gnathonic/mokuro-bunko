@@ -127,14 +127,47 @@ async fn the_width_search_widens_what_the_verdict_names_while_it_pays() {
         useful_width: 2,
         ..Default::default()
     };
-    // The row's own width is NOT what is measured: the search starts from the
-    // derivation (1 for the fake).
-    let (seen, fake) = run(
-        config,
-        spec("fake", "auto-accuracy", &[("engine", 3)]),
-        false,
-    )
-    .await;
+    // The fake's rate at an engine width (`FakeRunner::page_delay`): the 4 ms page
+    // divided by the width up to the useful 2, a quarter slower per worker past it.
+    let rate_at = |width: u64| {
+        let over = width.saturating_sub(2) as f64;
+        width.clamp(1, 2) as f64 / 0.004 / ((4.0 + over) / 4.0)
+    };
+    // The search decides on measured rates. A host that freezes this process for
+    // ~0.1 s at the end of a trial's 0.3 s window (a paused CI VM; the fake makes up
+    // lost time with the pages after it, but nothing comes after a window's last page)
+    // measures that width slower than it is, and the search then rightly decides
+    // otherwise. A run is judged only when every trial measured its width's rate within
+    // 10%, near enough that no decision can turn (width 3's 400 p/s stays short of
+    // 1.03 x width 2's 500), and is repeated otherwise.
+    let mut disturbed = Vec::new();
+    let (seen, fake) = loop {
+        // The row's own width is NOT what is measured: the search starts from the
+        // derivation (1 for the fake).
+        let (seen, fake) = run(
+            config.clone(),
+            spec("fake", "auto-accuracy", &[("engine", 3)]),
+            false,
+        )
+        .await;
+        let off: Vec<(u64, f64)> = seen
+            .trials
+            .iter()
+            .filter_map(|t| {
+                let width = t["stage_workers"]["engine"].as_u64()?;
+                let rate = t["pages_per_second"].as_f64()?;
+                ((rate / rate_at(width) - 1.0).abs() > 0.10).then_some((width, rate))
+            })
+            .collect();
+        if off.is_empty() {
+            break (seen, fake);
+        }
+        disturbed.push(off);
+        assert!(
+            disturbed.len() < 5,
+            "no run measured the fake's rates within 10% (width, pages/s): {disturbed:?}"
+        );
+    };
     assert_eq!(seen.fatal, None);
     assert_eq!(seen.exit, Some(Some(0)));
     let ready = seen.ready.expect("bench_ready");
