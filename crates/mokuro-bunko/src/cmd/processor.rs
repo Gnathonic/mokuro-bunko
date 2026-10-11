@@ -122,12 +122,6 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
         // Only the instance that will hold the storage installs and serves the control
         // API (a second one fails below).
         let owns_storage = storage_free(&storage);
-        // The install starts before the problems watcher's first check (as in `serve`):
-        // while it runs, it speaks for the missing backend, and the doctor's "run
-        // install-ocr" problem would otherwise stay until the next check (two minutes).
-        if owns_storage {
-            ocr_installer.start_if_needed();
-        }
         // The local control API (GUI.md §2): pause/resume, status, the app pages.
         let control_server = if bunko_control::enabled_from_env() && owns_storage {
             let control = bunko_control::Control::new(crate::control::config(
@@ -149,7 +143,13 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
                 library: None,
                 reason: String::new(),
             };
+            // As in `serve`: attach, then start the install, then the problems watcher.
+            // Attaching first means no install update can be overwritten by the attach's
+            // copy of the view; starting before the watcher's first check means the
+            // install speaks for the missing backend, so the doctor's "run install-ocr"
+            // problem never shows while it runs.
             ocr_installer.attach_control(&control);
+            ocr_installer.start_if_needed();
             let watched = ocr_installer.clone();
             crate::control::watch_problems(
                 control.clone(),
@@ -175,6 +175,9 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
             options.control = Some(control.clone());
             crate::control::start(&control, config_path, Some(processor_config)).await
         } else {
+            if owns_storage {
+                ocr_installer.start_if_needed();
+            }
             None
         };
         let result = bunko_processor::serve(options).await;

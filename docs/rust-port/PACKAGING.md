@@ -577,9 +577,9 @@ cargo run -p xtask -- docker-context --dir dist          # then docker build --b
   such as `models-v1` carry none and are skipped). The API is unauthenticated (60
   requests an hour per address); the 12-hour check is far below that.
 - `MOKURO_NGINX_ACCEL` must stay tolerated by the server; inside images it is only set
-  when nginx really runs. In nginx mode (and on any wildcard host) the first-run banner
-  names `<this server's address>` and `<web UI port>` instead of the internal backend
-  address, next to the setup code (`bunko_server::app::setup_banner`).
+  when nginx really runs. On a wildcard host the first-run banner names
+  `<this server's address>` instead of the bind address, and in nginx mode also
+  `<web UI port>` instead of the internal backend port, next to the setup code (`bunko_server::app::setup_banner`).
 
 ## 7. Verification status
 

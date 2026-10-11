@@ -38,7 +38,7 @@ plus `models`, `healthcheck`, `gui` and `tray`). Cargo features choose what is l
 | Build | Features | Contains | Released for |
 |---|---|---|---|
 | **lite** | `--no-default-features` | server, WebDAV, catalog, admin panel, first-run setup, the scheduler for remote processors, the updater, the local control API and app pages | Linux arm64 (static, musl), the lite Docker image (amd64 + arm64) |
-| **full** | `ocr`, `tray` (the defaults) | lite + ONNX Runtime on the CPU (PP-OCR), the libtorch pack loader, the engines, local OCR, `processor`, the desktop tray | Linux x86_64 (glibc 2.28+), Windows x86_64, macOS on Apple silicon, the full Docker image (amd64) |
+| **full** | `ocr`, `tray` (the defaults) | lite + ONNX Runtime on the CPU (PP-OCR), the libtorch pack loader, the engines, local OCR, `processor`, the desktop tray | Linux x86_64 (glibc 2.28+), Windows x86_64, macOS on Apple silicon, the full Docker image (amd64; built with `--no-tray`, so `ocr` only) |
 
 GPU support is not a build: the full binary runs whatever backend pack is installed (§8).
 In the lite build the server reads no OCR itself (`Config::processes_locally`); OCR comes
