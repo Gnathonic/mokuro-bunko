@@ -48,7 +48,9 @@ for what in "$@"; do
 		cargo run --release ${LOCKED:+"$LOCKED"} -p xtask -- dist ${LOCKED:+"$LOCKED"} --target "$TARGET" --flavor full --out "$OUT"
 		;;
 	*)
-		cargo run --release ${LOCKED:+"$LOCKED"} -p xtask -- torch-pack ${LOCKED:+"$LOCKED"} --variant "$what" --target "$TARGET" --out "$OUT"
+		# --sample-from-manifest: the closure check also reads a compiled model package
+		# of this variant (what it imports is invisible in the pack's own libraries).
+		cargo run --release ${LOCKED:+"$LOCKED"} -p xtask -- torch-pack ${LOCKED:+"$LOCKED"} --variant "$what" --target "$TARGET" --sample-from-manifest --out "$OUT"
 		;;
 	esac
 done

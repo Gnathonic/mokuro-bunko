@@ -22,7 +22,6 @@ pub mod session;
 pub mod status;
 pub mod supervise;
 pub mod trayconf;
-pub mod updates;
 
 use anyhow::{Context, Result};
 use paths::{Layout, ProcessEnv};
