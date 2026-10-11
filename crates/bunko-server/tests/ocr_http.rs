@@ -507,7 +507,7 @@ async fn remote_round_trip_over_a_websocket() {
     let reg = http
         .post(format!("{base}/_processor/register"))
         .header("authorization", &auth)
-        .json(&json!({"protocol": 3, "name": "tower", "host": {"gpu": "RTX 4090", "version": "0.7.0"}, "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "devices": [{"id": "gpu:0", "label": "GPU 0"}]}, "max_sessions": 1}))
+        .json(&json!({"protocol": 3, "name": "tower", "host": {"gpu": "RTX 4090", "version": "0.6.0"}, "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"], "devices": [{"id": "gpu:0", "label": "GPU 0"}]}, "max_sessions": 1}))
         .send()
         .await
         .unwrap();
@@ -522,14 +522,9 @@ async fn remote_round_trip_over_a_websocket() {
     assert_eq!(reg["archives"], "/mokuro-reader/");
     // 0.7: the library compares the registered version with its own and says so.
     let ours = bunko_core::VERSION;
-    let relation = if bunko_update::auto::is_newer(ours, "0.7.0") {
-        "library_newer"
-    } else {
-        "library_older"
-    };
     assert_eq!(
         reg["version_mismatch"],
-        json!({"library_version": ours, "processor_version": "0.7.0", "relation": relation})
+        json!({"library_version": ours, "processor_version": "0.6.0", "relation": "library_newer"})
     );
     // 0.7: the engines of the enabled generations, for the processor's model downloads.
     let mut want: Vec<Value> = Vec::new();
@@ -596,7 +591,7 @@ async fn remote_round_trip_over_a_websocket() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert_eq!(listed["update"]["state"], "waiting", "{listed}");
-    assert_eq!(listed["version_mismatch"]["relation"], relation);
+    assert_eq!(listed["version_mismatch"]["relation"], "library_newer");
     ws_send(
         &mut tx,
         &Event::Ready {

@@ -21,7 +21,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Download
 
-**[Latest release](https://github.com/Gnathonic/mokuro-bunko/releases/latest)**: the table at the top of its notes links the file for your system. Betas are pre-releases, on the [Releases page](https://github.com/Gnathonic/mokuro-bunko/releases) only (`releases/latest` skips them).
+**[Latest release](https://github.com/Gnathonic/mokuro-bunko/releases/latest)**: the table at the top of its notes links the file for your system. Older versions and any pre-releases are on the [Releases page](https://github.com/Gnathonic/mokuro-bunko/releases).
 
 Or in one line:
 
@@ -34,11 +34,11 @@ curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts
 powershell -c "irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1 | iex"
 ```
 ```bash
-# Docker (`:beta-lite` for the server only; `:latest` from 0.7.0 on)
-docker pull ghcr.io/gnathonic/mokuro-bunko:beta
+# Docker (`:latest-lite` for the server only)
+docker pull ghcr.io/gnathonic/mokuro-bunko:latest
 ```
 
-These take the latest stable release; for a beta, use the script of its tag with `--version` (`-Version`), e.g. `curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/v0.7.0-beta.3/scripts/install.sh | sh -s -- --version 0.7.0-beta.3`, or the image tag `:0.7.0-beta.3`.
+These take the latest release; for a specific version, use the script of its tag with `--version` (`-Version`), e.g. `curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/v0.7.0/scripts/install.sh | sh -s -- --version 0.7.0`, or the image tag `:0.7.0`.
 
 ## Editions
 
@@ -77,15 +77,15 @@ Images are published at `ghcr.io/gnathonic/mokuro-bunko`:
 |---|---|---|
 | `latest` | Server + local OCR + optional nginx for fast downloads. linux/amd64. No OCR backend inside: once it serves, it detects the GPU the container was given (none, NVIDIA or AMD), follows `ocr.backend` and downloads the matching backend pack and the models of the enabled OCR engines into `/data`, in the background. | `deploy/Dockerfile` and `deploy/Dockerfile.unraid` (`unraid-cuda`) |
 | `latest-cuda` | The same image as `latest` under the name the 0.5.2 CUDA image used, so existing templates keep working. | `unraid-cuda` |
-| `latest-lite` | Server only, distroless, 29 MB, amd64 + arm64 (the only image for arm64 hosts). OCR by remote processors. | new |
+| `latest-lite` | Server only, distroless, a 12 MB download (43 MB on disk), amd64 + arm64 (the only image for arm64 hosts). OCR by remote processors. | new |
 
-Each tag also has a versioned form (`0.7.0`, `0.7.0-cuda`, `0.7.0-lite`); pin one for production. The `latest*` tags appear with the first stable 0.7 release; until then use `beta` / `beta-lite` (the newest release, beta or stable; what the compose files and the Unraid templates of this branch default to) or a version.
+Each tag also has a versioned form (`0.7.0`, `0.7.0-cuda`, `0.7.0-lite`); pin one for production. The `latest*` tags follow stable releases; `beta` / `beta-lite` follow every release, pre-releases included.
 
 **Run it** (everything in one volume; OCR on the CPU):
 
 ```bash
 docker run -d --name mokuro-bunko -p 8080:8080 -v mokuro-data:/data \
-  -e PUID=1000 -e PGID=1000 ghcr.io/gnathonic/mokuro-bunko:beta
+  -e PUID=1000 -e PGID=1000 ghcr.io/gnathonic/mokuro-bunko:latest
 docker logs mokuro-bunko      # First run: … /setup (setup code: XXXXX-XXXXX), then the OCR download
 ```
 
@@ -93,25 +93,25 @@ The server answers within seconds. **First admin**: open `http://<host>:8080/set
 
 **OCR backend**: downloaded in the background while the server already serves: ~100 MB for the CPU, ~2 GB for NVIDIA (~350 MB from the release, the rest NVIDIA's CUDA libraries from PyPI), ~3 GB for AMD, then the models of the enabled engines. The log and the admin panel (This server, and Settings → OCR → Processors) show the progress; local OCR starts by itself when it is done; a failed download is shown there with a Retry button (and retried by itself). Later starts reuse it. Starting the container with a different GPU (or setting `MOKURO_OCR_BACKEND` to a GPU it now sees) installs that GPU's backend the same way.
 
-**NVIDIA GPU**: the host needs an NVIDIA driver **580 or newer** (CUDA 13), the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) and a Turing (GTX 16xx / RTX 20xx) or newer GPU. Check with `docker run --rm --gpus all ghcr.io/gnathonic/mokuro-bunko:beta install-ocr --list` (it prints the driver and GPU it sees, and the pack it would install).
+**NVIDIA GPU**: the host needs an NVIDIA driver **580 or newer** (CUDA 13), the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) and a Turing (GTX 16xx / RTX 20xx) or newer GPU. Check with `docker run --rm --gpus all ghcr.io/gnathonic/mokuro-bunko:latest install-ocr --list` (it prints the driver and GPU it sees, and the pack it would install).
 
 ```bash
 docker run -d --name mokuro-bunko --gpus all -p 8080:8080 \
-  -v /srv/mokuro/data:/data ghcr.io/gnathonic/mokuro-bunko:beta
+  -v /srv/mokuro/data:/data ghcr.io/gnathonic/mokuro-bunko:latest
 ```
 
 **AMD GPU** (Linux; Radeon RX 6000, 7000, 9000): pass the ROCm devices in. No ROCm on the host besides the kernel driver, and no special image.
 
 ```bash
 docker run -d --name mokuro-bunko --device /dev/kfd --device /dev/dri -p 8080:8080 \
-  -v /srv/mokuro/data:/data ghcr.io/gnathonic/mokuro-bunko:beta
+  -v /srv/mokuro/data:/data ghcr.io/gnathonic/mokuro-bunko:latest
 ```
 
 The server keeps the groups that own those devices when it switches to `PUID:PGID`; with `docker run --user`, add them yourself (`--group-add`).
 
 **Compose**: [`deploy/docker-compose.yml`](deploy/docker-compose.yml) (CPU, with commented NVIDIA and AMD lines), [`deploy/docker-compose.unraid-cuda.yml`](deploy/docker-compose.unraid-cuda.yml) (NVIDIA, `gpus: all`), [`deploy/docker-compose.lite.yml`](deploy/docker-compose.lite.yml), [`deploy/docker-compose.processor.yml`](deploy/docker-compose.processor.yml) (a GPU processor for a library elsewhere): `docker compose -f deploy/docker-compose.yml up -d`.
 
-**Unraid**: add the template [`deploy/unraid/mokuro-bunko.xml`](deploy/unraid/mokuro-bunko.xml) (`--runtime=nvidia` for an NVIDIA GPU with the Nvidia-Driver plugin, driver ≥ 580; for AMD replace it with `--device=/dev/kfd --device=/dev/dri`; PUID 99 / PGID 100, `/data` and `/config` under `/mnt/user/appdata/mokuro-bunko/`) or [`mokuro-bunko-lite.xml`](deploy/unraid/mokuro-bunko-lite.xml). This branch's templates update themselves from it and default to the `beta` image; the first admin is created at `/setup` with the setup code from the container's log.
+**Unraid**: add the template [`deploy/unraid/mokuro-bunko.xml`](deploy/unraid/mokuro-bunko.xml) (`--runtime=nvidia` for an NVIDIA GPU with the Nvidia-Driver plugin, driver ≥ 580; for AMD replace it with `--device=/dev/kfd --device=/dev/dri`; PUID 99 / PGID 100, `/data` and `/config` under `/mnt/user/appdata/mokuro-bunko/`) or [`mokuro-bunko-lite.xml`](deploy/unraid/mokuro-bunko-lite.xml). The templates update themselves from `main` and default to the `latest` / `latest-lite` image; the first admin is created at `/setup` with the setup code from the container's log.
 
 **Volumes and variables**:
 

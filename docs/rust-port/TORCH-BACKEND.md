@@ -21,7 +21,8 @@ hayai-nova, 1.2–1.5x on paddle-manga, exact crop parity with 0.5.2 at every pr
 | macOS arm64 | CPU (its MPS option never reached the engines) | libtorch cpu |
 | Docker | `Dockerfile` (CPU), `Dockerfile.unraid` (CUDA) | one full image; the cpu / cu130 / rocm7.1 pack is downloaded on first start for the GPU the container is given (`-cuda` is a tag of it) |
 
-Not in scope: Android/iOS, Windows AMD, pre-Turing NVIDIA, Intel GPUs, Intel Macs, Metal (MPS).
+Not in scope: Android/iOS, Windows AMD, Linux arm64 (its static server takes OCR from a
+processor), pre-Turing NVIDIA, Intel GPUs, Intel Macs, Metal (MPS).
 The lite build is unchanged (no OCR, no ONNX Runtime, no libtorch).
 
 ## Architecture

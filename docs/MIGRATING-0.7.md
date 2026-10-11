@@ -150,8 +150,8 @@ downloads are no longer used and can be deleted.
 New: `server.threads`, `server.cache_mb`, `update.check`, `update.channel`,
 `update.manifest_url` (each also settable as `MOKURO_<SECTION>_<KEY>`;
 `update.channel` defaults to `auto`, which follows the installed build: a
-pre-release install sees later pre-releases, a stable install only stable
-releases) and
+pre-release install sees every later release, pre-release or stable (so a
+0.7.0 beta is offered 0.7.0), a stable install only stable releases) and
 `ocr.upgrade.*` (`config.yaml` only). `ocr.sessions` is accepted and ignored;
 `ocr.backend` keeps 0.5.2's values (`auto`, `cuda`, `rocm`, `cpu`, `skip`).
 The 0.5 refusals of `ocr.engines`, `ocr.detector`, `ocr.patch_budget` and
@@ -165,7 +165,7 @@ Images are published as `ghcr.io/gnathonic/mokuro-bunko`:
 |---|---|---|
 | `latest`, `<ver>` | Server + local OCR + nginx for downloads; amd64. The OCR backend for the GPU the container is given (none, NVIDIA, AMD) is downloaded on first start | the generic `deploy/Dockerfile` image and the `unraid-cuda` image (`Dockerfile.unraid`) |
 | `latest-cuda`, `<ver>-cuda` | The same image under the CUDA image's name, so existing templates keep working | the `unraid-cuda` image |
-| `latest-lite`, `<ver>-lite` | Server only, no OCR, no nginx (29 MB, ~16 MiB RSS idle); amd64 + arm64 | new |
+| `latest-lite`, `<ver>-lite` | Server only, no OCR, no nginx (12 MB download, 43 MB on disk, ~16 MiB RSS idle); amd64 + arm64 | new |
 
 `PUID`, `PGID`, `UMASK`, `TAKE_OWNERSHIP`, `MOKURO_CONFIG` and the other
 `MOKURO_*` variables work as before. Defaults: PUID/PGID 1000:1000 (the Unraid
@@ -188,9 +188,8 @@ in `/config`). Differences:
 - The container health check is `mokuro-bunko healthcheck`; there is no curl
   or Python in the images. The image licence label now says MPL-2.0.
 
-Unraid: switch the template's repository to `ghcr.io/gnathonic/mokuro-bunko:beta` while
-0.7 is in beta, `:latest` from 0.7.0 on (`latest-cuda` is the same image; templates in
-`deploy/unraid/`). No volume or variable needs to change. The server comes up at once and
+Unraid: switch the template's repository to `ghcr.io/gnathonic/mokuro-bunko:latest`
+(`latest-cuda` is the same image; templates in `deploy/unraid/`). No volume or variable needs to change. The server comes up at once and
 downloads the OCR backend (~2 GB for NVIDIA) in the background, where 0.5 made the web UI
 wait for its OCR environment; local OCR starts by itself when it is done, and a failed
 download is shown in the admin panel with a Retry button instead of stopping anything. For an AMD

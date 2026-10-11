@@ -262,7 +262,7 @@ detection and by the owner's preference; bake in only what cannot be fetched).
 
 | tag | Dockerfile | base | pack | platforms | size (uncompressed) |
 |---|---|---|---|---|---|
-| `<ver>-lite`, `latest-lite` | `deploy/docker/Dockerfile.lite` | `gcr.io/distroless/static-debian13` | — | amd64, arm64 | 29 MB |
+| `<ver>-lite`, `latest-lite` | `deploy/docker/Dockerfile.lite` | `gcr.io/distroless/static-debian13` | — | amd64, arm64 | 12 MB download, 43 MB on disk |
 | `<ver>`, `latest` | `deploy/docker/Dockerfile` | `debian:trixie-slim` + nginx, tini | downloaded on first start (`cpu`, `cu130` or `rocm7.1`) | amd64 | 216 MB (58 MB compressed) |
 | `<ver>-cuda`, `latest-cuda` | — (a second tag of the same image) | | | amd64 | the same image |
 
@@ -507,11 +507,11 @@ PowerShell has no ed25519); the in-app updater does check the signature.
    stable one is marked latest), checks the links again as published, moves `beta` and
    `beta-lite` to it (every version), and for stable versions moves `latest`,
    `latest-lite`, `latest-cuda` (= `latest`). Installed servers see it on their next check.
-5. **At 0.7.0 (the first stable 0.7)**: the Unraid templates and compose files of the `0.7`
-   branch default to `:beta` / `:beta-lite` and the templates' `<TemplateURL>` points at
-   the `0.7` branch, because `latest*` do not exist before then and `main` still has the
-   0.5 templates. When 0.7.0 is merged into `main`, switch them to `:latest` /
-   `:latest-lite` and `<TemplateURL>` to `main`.
+5. The Unraid templates and compose files default to `:latest` / `:latest-lite` and the
+   templates' `<TemplateURL>` points at `main`. (Through the 0.7 betas they used `:beta` /
+   `:beta-lite` and the `0.7` branch, because `latest*` did not exist before 0.7.0 and
+   `main` still had the 0.5 templates; 0.7.0 was merged into `main` and switched them.)
+   `:beta` / `:beta-lite` keep following every version, for anyone who wants pre-releases.
 
 Re-running `release.yml` for the same tag (workflow_dispatch) replaces the draft's
 assets (`--clobber`) and re-pushes the versioned images.

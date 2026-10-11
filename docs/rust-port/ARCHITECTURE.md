@@ -1,7 +1,8 @@
 # mokuro-bunko 0.7 — Rust architecture
 
-**Status:** living document; describes the code of the 0.7 branch · **Baseline:** Python
-0.5.2 (`release/0.5.2`, 199cff5), held to 0.5.3 for library paths (CONVENTIONS.md)
+**Status:** living document; describes the code of 0.7 (released as 0.7.0, 2026-10-11) ·
+**Baseline:** Python 0.5.2 (`release/0.5.2`, 199cff5), held to 0.5.3 for library paths
+(CONVENTIONS.md)
 **Specs of the 0.5.2 behaviour being ported:** `docs/rust-port/spec/*.md`
 
 ## Goals (owner, 2026-10-01)

@@ -1,7 +1,7 @@
 # mokuro-bunko 0.7 — mobile (Android app; why there is no iOS app)
 
-**Status:** living document. Android: working APK, verified on an emulator (§6). iOS: not
-shipped (§7).
+**Status:** living document. Android: working APK, verified on an emulator (§6), but out
+of 0.7's scope (owner, 2026-10-03): 0.7.0 ships no APK (§4, CI). iOS: not shipped (§7).
 
 ## 1. What the Android app is
 
@@ -21,7 +21,7 @@ on a NAS. Volumes wait in the queue until a processor connects.
 |---|---|
 | `crates/bunko-android/` | the server as `libbunko_android.so` (cdylib; rlib for host tests): JNI entry points, lifecycle, config, logging |
 | `packaging/android/` | the Kotlin app (Gradle 9.6.1 wrapper, AGP 9.4.1, no AndroidX), `build.sh`, `android_licenses.py` |
-| `.github/workflows/release.yml` job `android` | builds and checks the APK; the `release` job attaches it |
+| `.github/workflows/release-build.yml` job `android` | builds and checks the APK; the `release` job attaches it |
 
 ## 2. Native library (`crates/bunko-android`)
 
@@ -152,14 +152,15 @@ library).
 For Google Play, upload an AAB instead (`./gradlew bundleRelease`) with Play App Signing;
 not wired yet.
 
-### CI (`release.yml`, job `android`)
+### CI (`release-build.yml`, job `android`)
 
-On by default (repository variable `BUILD_ANDROID=false` skips it). Ubuntu runner:
+Off for 0.7 (Android is out of its scope): the repository variable `BUILD_ANDROID=true`
+turns it on. Ubuntu runner:
 Rust with both Android targets, cargo-ndk, Temurin 21, `sdkmanager` installs
 `platforms;android-36`, `build-tools;36.0.0`, `ndk;29.0.14206865`; optional keystore
 from secrets; `build.sh --out dist-android`; then `apksigner verify`, `zipalign -c -P 16`
 and a check that both `.so` files and the licence file are in the APK. The `release` job
-waits for it (success or skipped) and uploads `mokuro-bunko-<ver>-android.apk` and its
+waits for it and, when it ran, uploads `mokuro-bunko-<ver>-android.apk` and its
 `.sha256` as release assets — kept out of `dist/`, so they are not in `release.json`
 or `SHA256SUMS`.
 

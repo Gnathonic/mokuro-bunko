@@ -73,8 +73,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       # `beta` / `beta-lite` follow every published version, pre-release or stable (the
-      # newest of either: what the 0.7 Unraid template and compose files default to while
-      # 0.7 is in beta); `latest*` follow stable versions only.
+      # newest of either); `latest*` follow stable versions only (what the Unraid templates
+      # and compose files default to).
       - name: move the beta* image tags (every version)
         run: |
           set -eux
