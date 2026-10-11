@@ -20,6 +20,11 @@
   `auto_supported: false` (and `manual_update`), a saved `update.auto: true` is ignored
   without an error, and a newer release is reported as available, not as a failure
   (no problem, no tray warning).
+- **Big WebDAV listings arrive whole.** At some listing sizes a `PROPFIND` of a large
+  folder or of the whole library lost up to 4 KiB at its end: the plain answer came out
+  shorter than its Content-Length and the gzip one did not decode. Rare (a few listings
+  in a thousand), but the same listing compresses the same way every time, so a client
+  kept getting the broken one until the folder changed.
 
 ## [0.7.0-beta.4] - 2026-10-09
 
