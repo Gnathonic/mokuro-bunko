@@ -95,27 +95,90 @@ const GENERATION_SLOTS: usize = 4;
 
 const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
 
+/// A raw deflate stream compressed as it is fed and ended with a sync flush: byte-aligned
+/// and without a final block, so another deflate stream may follow it.
+///
+/// Not `flate2::write::DeflateEncoder::flush`: that asks for the sync flush once, into
+/// whatever is left of its 32 KiB buffer, then drains with `FlushCompress::None`. When the
+/// flush must first write out a whole block (the encoder's block filled up while it
+/// compressed the last few KiB it holds back) and that block does not fit, miniz stops
+/// mid-flush and the `None` calls never finish it: the held-back input (up to 4 KiB of the
+/// listing) was lost and the stream ended mid-block, so an identity answer came out short
+/// of its Content-Length and a gzip one was corrupt.
+struct SyncDeflate {
+    raw: flate2::Compress,
+    out: Vec<u8>,
+}
+
+impl SyncDeflate {
+    /// Output room offered per call.
+    const ROOM: usize = 32 * 1024;
+
+    fn new(level: Compression) -> Self {
+        Self {
+            raw: flate2::Compress::new(level, false),
+            out: Vec::with_capacity(64 * 1024),
+        }
+    }
+
+    fn write(&mut self, mut input: &[u8]) -> std::io::Result<()> {
+        while !input.is_empty() {
+            self.out.reserve(Self::ROOM);
+            let (before_in, before_out) = (self.raw.total_in(), self.out.len());
+            self.raw
+                .compress_vec(input, &mut self.out, flate2::FlushCompress::None)
+                .map_err(std::io::Error::other)?;
+            let taken = (self.raw.total_in() - before_in) as usize;
+            if taken == 0 && self.out.len() == before_out {
+                return Err(std::io::Error::other("deflate made no progress"));
+            }
+            input = &input[taken..];
+        }
+        Ok(())
+    }
+
+    /// Sync-flush and hand back the stream. A sync call that leaves output room unused may
+    /// only have drained what the previous call could not fit (miniz returns right after
+    /// draining), so the flush is complete once two calls in a row leave room: the second
+    /// had nothing to drain, so it compressed everything held back and wrote the sync
+    /// marker (an extra, empty one when the first call had already finished).
+    fn finish_sync(mut self) -> std::io::Result<Vec<u8>> {
+        let mut roomy = 0;
+        while roomy < 2 {
+            self.out.reserve(Self::ROOM);
+            self.raw
+                .compress_vec(&[], &mut self.out, flate2::FlushCompress::Sync)
+                .map_err(std::io::Error::other)?;
+            roomy = if self.out.len() < self.out.capacity() {
+                roomy + 1
+            } else {
+                0
+            };
+        }
+        Ok(self.out)
+    }
+}
+
 /// `MULTISTATUS_OPEN` plus whatever `body` writes, deflated as it is produced into a
 /// gzip prefix without its final block. Blocking.
 fn compress(level: Compression, body: impl FnOnce(&mut dyn FnMut(&str))) -> Option<Entry> {
     let mut crc = crc32fast::Hasher::new();
     let mut raw_len = 0u64;
-    let mut enc = DeflateEncoder::new(Vec::with_capacity(64 * 1024), level);
+    let mut enc = SyncDeflate::new(level);
     let mut failed = false;
     let mut feed = |chunk: &str| {
         crc.update(chunk.as_bytes());
         raw_len += chunk.len() as u64;
-        if enc.write_all(chunk.as_bytes()).is_err() {
+        if !failed && enc.write(chunk.as_bytes()).is_err() {
             failed = true;
         }
     };
     feed(MULTISTATUS_OPEN);
     body(&mut feed);
-    // Sync flush: byte-aligned, no final block, so another deflate stream may follow.
-    if failed || enc.flush().is_err() {
+    if failed {
         return None;
     }
-    let deflated = std::mem::take(enc.get_mut());
+    let deflated = enc.finish_sync().ok()?;
     let mut gz = Vec::with_capacity(GZIP_HEADER.len() + deflated.len());
     gz.extend_from_slice(&GZIP_HEADER);
     gz.extend_from_slice(&deflated);
@@ -460,7 +523,9 @@ fn inflate_stream(deflated: Bytes, tail: Bytes) -> Body {
     let s = stream::unfold(st, |mut st| async move {
         if !st.done {
             let mut out = Vec::with_capacity(64 * 1024);
-            while out.len() < out.capacity() && st.pos < st.input.len() {
+            // Not done when the input runs out: a decompressor may still hold output then
+            // (miniz does not with these chunk sizes; other flate2 backends may).
+            while out.len() < out.capacity() {
                 let (before_in, before_out) = (st.dec.total_in(), out.len());
                 let res = st.dec.decompress_vec(
                     &st.input[st.pos..],
@@ -479,16 +544,13 @@ fn inflate_stream(deflated: Bytes, tail: Bytes) -> Body {
                             },
                         ));
                     }
-                    // No progress either way: the input is exhausted for this stream.
+                    // No progress either way: everything is out.
                     Ok(_) if st.dec.total_in() == before_in && out.len() == before_out => {
-                        st.pos = st.input.len();
+                        st.done = true;
                         break;
                     }
                     Ok(_) => {}
                 }
-            }
-            if st.pos >= st.input.len() {
-                st.done = true;
             }
             if !out.is_empty() {
                 return Some((Ok(Bytes::from(out)), st));
@@ -498,4 +560,85 @@ fn inflate_stream(deflated: Bytes, tail: Bytes) -> Body {
         Some((Ok(tail), st))
     });
     Body::from_stream(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+
+    use http_body_util::BodyExt;
+
+    use super::*;
+
+    /// Deterministic text deflate barely shrinks (all literals), so the encoder ends a
+    /// block every ~60 KB of it at both levels.
+    fn noise(len: usize) -> String {
+        const ALNUM: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let mut seed = 1u64;
+        (0..len)
+            .map(|_| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ALNUM[((seed >> 33) % ALNUM.len() as u64) as usize] as char
+            })
+            .collect()
+    }
+
+    async fn body_of(resp: Response<Body>) -> (Option<u64>, Vec<u8>) {
+        let len = resp
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok()?.parse().ok());
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (len, body.to_vec())
+    }
+
+    /// Regression (an identity `Depth: 1` answer came out 1113 bytes short of its
+    /// Content-Length): ending a listing's deflate stream could need to write out a whole
+    /// block first, and when that block did not fit the encoder's buffer the rest of the
+    /// flush was dropped with up to 4 KiB of the listing. Sizes 97 bytes apart (less than
+    /// either level's lookahead) from 50 to 100 KB cross a block boundary at both levels in
+    /// use, so some of them end a block inside the final flush.
+    #[tokio::test]
+    async fn listings_round_trip_at_every_size() {
+        let text = noise(100_000);
+        let mut wrong = Vec::new();
+        for level in [Compression::fast(), Compression::new(6)] {
+            for n in (50_000..text.len()).step_by(97) {
+                let entry = compress(level, |feed| feed(&text[..n])).unwrap();
+                let mut want = String::from(MULTISTATUS_OPEN);
+                want.push_str(&text[..n]);
+                want.push_str(MULTISTATUS_CLOSE);
+                let case = format!("level {}, {n} bytes", level.level());
+
+                let hit = Hit {
+                    entry: entry.clone(),
+                };
+                let (len, ident) = body_of(respond(hit, "", false)).await;
+                assert_eq!(len, Some(want.len() as u64), "{case}");
+                if ident != want.as_bytes() {
+                    wrong.push(format!(
+                        "identity, {case}: {} of {}",
+                        ident.len(),
+                        want.len()
+                    ));
+                }
+
+                let (len, gz) = body_of(respond(Hit { entry }, "", true)).await;
+                assert_eq!(len, Some(gz.len() as u64), "{case}");
+                let mut unzipped = Vec::new();
+                let read = flate2::read::GzDecoder::new(&gz[..]).read_to_end(&mut unzipped);
+                if read.is_err() || unzipped != want.as_bytes() {
+                    wrong.push(format!("gzip, {case}: {read:?}"));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} wrong answers, e.g. {:#?}",
+            wrong.len(),
+            &wrong[..wrong.len().min(6)]
+        );
+    }
 }
