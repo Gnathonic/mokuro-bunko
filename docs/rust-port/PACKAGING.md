@@ -835,8 +835,12 @@ archive that `pack.json` does not list, non-regular entries and unsafe paths.
 3. Checks the pack's host libraries (`ldconfig -p` + library dirs) and prints the
    package names for what is missing (Debian/Ubuntu and Arch).
 4. `models download` (skip with `--no-models`): the files of the enabled generations
-   only (a library; a processor, which runs whatever its library asks, every engine's
-   default row), and the compiled packages for the devices `ocr.backend` allows.
+   only (a library; a processor, those of the engines its library named at the last
+   registration, `<storage>/library-engines.json`, only PP-OCR's before the first),
+   and the compiled packages for the devices `ocr.backend` allows. An install whose
+   models fail leaves `backends/.models-incomplete`; `--if-needed` fetches models while
+   it is there or while a file the wanted engines need is missing (a processor whose
+   library enabled another engine: its registration starts that fetch).
 
 `--if-needed` (what `serve` and `processor serve` run in the background, §2): nothing when
 `MOKURO_OCR_AUTO_INSTALL=false`, when local OCR is off (`ocr.backend: skip`,
@@ -1068,8 +1072,6 @@ Still open:
 
 - The ROCm pack is 3 GiB to download (licence texts: done, above); the full Docker image
   downloads it in the background once it serves, with an AMD GPU passed in.
-- A Docker processor's models: `models download` for a processor fetches every engine's
-  default row (it runs whatever its library asks for), not only what its library enables.
 - Windows and macOS packs are built with their cdylib by CI's `packs` job (the release
   check above); a run on a Windows machine without the VC++ runtime installed is still
   to do (CHANGELOG, Known issues).

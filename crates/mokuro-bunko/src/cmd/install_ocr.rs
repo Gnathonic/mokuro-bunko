@@ -74,6 +74,13 @@ mod full {
         root.join(MODELS_INCOMPLETE).exists()
     }
 
+    /// Models to fetch although the pack is in place: the last install's failed, or a
+    /// model file the wanted engines need is missing (a processor's library asked for
+    /// another engine).
+    pub fn models_wanted(ocr: &crate::ocr_target::OcrTarget, root: &Path) -> bool {
+        models_incomplete(root) || super::super::models::wanted_missing(ocr)
+    }
+
     fn events_on() -> bool {
         std::env::var(EVENTS_ENV).is_ok_and(|v| v == "1")
     }
@@ -273,7 +280,7 @@ mod full {
         }
         if args.if_needed
             && !args.force
-            && !models_incomplete(&root)
+            && !models_wanted(&ocr, &root)
             && let Some(kept) = already_fits(&search, &variant)
         {
             println!("{kept}");
@@ -285,7 +292,7 @@ mod full {
         let _lock = lock_installs(&root)?;
         if args.if_needed
             && !args.force
-            && !models_incomplete(&root)
+            && !models_wanted(&ocr, &root)
             && let Some(kept) = already_fits(&search, &variant)
         {
             println!("{kept}");

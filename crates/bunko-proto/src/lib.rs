@@ -276,6 +276,19 @@ pub struct RegisterReply {
     /// (`auto_update`). Older processors ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_mismatch: Option<VersionMismatch>,
+    /// The engines the library's enabled generations run, each with its precision mode
+    /// (0.7 v3 addition, optional): the models a processor downloads ahead of work.
+    /// None: a library that does not say (the processor fetches every engine's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engines: Option<Vec<EngineWant>>,
+}
+
+/// One engine a library runs (`RegisterReply.engines`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineWant {
+    pub engine: String,
+    /// The generation's precision mode (`auto-accuracy`, `fp32`, ...).
+    pub precision: String,
 }
 
 /// `RegisterReply.version_mismatch`: the library's verdict on the processor's version.
@@ -793,6 +806,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.version_mismatch, None);
+        assert_eq!(old.engines, None);
         let reply = RegisterReply {
             version_mismatch: Some(newer.clone()),
             ..old

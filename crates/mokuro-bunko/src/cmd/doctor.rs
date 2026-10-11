@@ -609,8 +609,8 @@ fn check_packages(
 }
 
 /// The model files `ids` (what `models download` fetches for this machine: PP-OCR and
-/// the fp32 sets of the engines the enabled generations use, every engine on a
-/// processor) in the store (and `MOKURO_MODELS_DIR`); missing files are fetched when a
+/// the fp32 sets of the engines the enabled generations use; on a processor, of the
+/// engines its library named at registration) in the store (and `MOKURO_MODELS_DIR`); missing files are fetched when a
 /// session first needs them.
 #[cfg(feature = "ocr")]
 fn check_models(models_dir: &Path, ids: &[&str], flag: &str) -> Check {
@@ -944,11 +944,33 @@ mod library_ocr_tests {
             false,
         );
         assert!(paddle_only.iter().all(|id| ids.contains(id)));
-        // A processor runs whatever its library asks for: every engine.
+        // A processor fetches what its library named at registration: before that, only
+        // PP-OCR; then those engines.
         let mut p = target(dir.path(), &Config::default());
         p.role = Role::Processor;
+        p.storage = dir.path().join("processor");
+        let ids =
+            super::super::models::planned_ids(&super::super::models::wanted_rows(&p, None), false);
+        let mut ppocr = models::download_plan(Some(models::PPOCR), false);
+        ppocr.sort();
+        let mut got = ids.clone();
+        got.sort();
+        assert_eq!(got, ppocr);
+        bunko_processor::wants::write(
+            &p.storage,
+            &[bunko_proto::EngineWant {
+                engine: models::PADDLE.into(),
+                precision: "auto-accuracy".into(),
+            }],
+        )
+        .unwrap();
         let ids =
             super::super::models::planned_ids(&super::super::models::wanted_rows(&p, None), false);
         assert!(paddle_only.iter().all(|id| ids.contains(id)));
+        let hayai_only: Vec<&str> = models::download_plan(Some(models::HAYAI), false)
+            .into_iter()
+            .filter(|id| !models::download_plan(Some(models::PADDLE), false).contains(id))
+            .collect();
+        assert!(hayai_only.iter().all(|id| !ids.contains(id)), "{ids:?}");
     }
 }

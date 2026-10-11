@@ -35,6 +35,7 @@ pub mod status;
 pub mod tls;
 pub mod utilization;
 pub mod verify;
+pub mod wants;
 
 pub use bench::BenchConfig;
 pub use config::{ProcessorConfig, TlsVerify, load_processor_config};
