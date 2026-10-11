@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -83,7 +83,13 @@ async fn archive(State(lib): State<Shared>) -> Response {
 /// Reads the whole upload before answering, as the library does: answering first closes
 /// the connection under a body still being sent, which Windows reports to the client as
 /// "connection aborted" (os error 10053) and the processor counts as a failed upload.
-async fn result(_body: Bytes) -> Response {
+/// Logs `result:<claim>` before the answer goes out.
+async fn result(
+    State(lib): State<Shared>,
+    Path((_pid, _sid, claim)): Path<(String, String, String)>,
+    _body: Bytes,
+) -> Response {
+    push(&lib, format!("result:{claim}"));
     StatusCode::OK.into_response()
 }
 
@@ -303,11 +309,20 @@ async fn newer_library_drains_then_updates_after_a_failed_try() {
         .expect("serve ended")
         .unwrap();
     assert_eq!(ended, Ok(ServeExit::Updated("99.0.0".into())));
+    // The processor's last words may still be on their way through the socket.
+    wait_for(&lib, 10, |l| {
+        l.log.iter().any(|e| e == "update_status:restarting")
+    })
+    .await;
     let log = lib.0.lock().log.clone();
     let mismatch = lib.0.lock().mismatches[0].clone().unwrap();
     // The mismatch round trip: the library compared the registered version.
     assert_eq!(mismatch.processor_version, OURS);
     assert!(mismatch.library_newer());
+    // The log has two writers: `install:*` is logged as the processor calls the
+    // installer, its events only once the library's socket task has read them. Only
+    // orders something enforces are compared: events among themselves (one socket), and
+    // an install against what the processor waited for before it (an upload's answer).
     // First try at once (nothing running), it fails: the processor keeps working.
     let first = pos(&log, "install:1:99.0.0");
     let failed = pos(&log, "update_status:failed");
@@ -318,18 +333,25 @@ async fn newer_library_drains_then_updates_after_a_failed_try() {
         .iter()
         .rposition(|e| e == "update_status:waiting")
         .unwrap();
+    let installing = log
+        .iter()
+        .rposition(|e| e == "update_status:installing")
+        .unwrap();
     let done = pos(&log, "volume_done:v1");
-    let second = pos(&log, "install:2:99.0.0");
     assert!(
         started < waiting,
         "drain begins while the volume runs: {log:?}"
     );
     assert!(
-        done < second,
+        pos(&log, "result:v1") < pos(&log, "install:2:99.0.0"),
+        "the volume is uploaded before the install: {log:?}"
+    );
+    assert!(
+        done < installing,
         "the volume finishes before the install: {log:?}"
     );
     assert!(
-        log[started..second]
+        log[started..installing]
             .iter()
             .any(|e| e == "availability:true"),
         "the drain is announced as a pause: {log:?}"
