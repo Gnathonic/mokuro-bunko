@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>mokuro-bunko-lite</Name>
-  <Repository>ghcr.io/gnathonic/mokuro-bunko:beta-lite</Repository>
+  <Repository>ghcr.io/gnathonic/mokuro-bunko:latest-lite</Repository>
   <Registry>https://github.com/Gnathonic/mokuro-bunko/pkgs/container/mokuro-bunko</Registry>
   <Network>bridge</Network>
   <MyIP/>
@@ -9,10 +9,10 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/Gnathonic/mokuro-bunko/issues</Support>
   <Project>https://github.com/Gnathonic/mokuro-bunko</Project>
-  <Overview>Mokuro Bunko (lite): self-hosted manga library server for Mokuro Reader (WebDAV, catalog, accounts) in a ~10 MB image. No local OCR: OCR is done by mokuro-bunko processors on other machines. The image has no shell or nginx. First admin: open http://[IP]:[PORT]/setup and enter the one-time setup code the container log prints. Tags: beta-lite (the default while 0.7 is in beta) follows the newest release; latest-lite follows stable releases from 0.7.0 on.</Overview>
+  <Overview>Mokuro Bunko (lite): self-hosted manga library server for Mokuro Reader (WebDAV, catalog, accounts) in a 12 MB image download (43 MB on disk). No local OCR: OCR is done by mokuro-bunko processors on other machines. The image has no shell or nginx. First admin: open http://[IP]:[PORT]/setup and enter the one-time setup code the container log prints. Tags: latest-lite follows stable releases; beta-lite follows every release, pre-releases included; pin a version with e.g. 0.7.0-lite.</Overview>
   <Category>MediaServer:Books Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/0.7/deploy/unraid/mokuro-bunko-lite.xml</TemplateURL>
+  <TemplateURL>https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/deploy/unraid/mokuro-bunko-lite.xml</TemplateURL>
   <Icon/>
   <ExtraParams/>
   <PostArgs/>

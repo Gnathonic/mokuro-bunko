@@ -6,7 +6,7 @@
 # (Unraid: the Nvidia-Driver plugin). Turing (RTX 20xx / GTX 16xx) or newer.
 services:
   mokuro-bunko:
-    image: ghcr.io/gnathonic/mokuro-bunko:beta  # :latest from 0.7.0 on
+    image: ghcr.io/gnathonic/mokuro-bunko:latest
     # build:
     #   context: ..
     #   dockerfile: deploy/docker/Dockerfile

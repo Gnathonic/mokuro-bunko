@@ -843,14 +843,14 @@ Images are published at `ghcr.io/gnathonic/mokuro-bunko`:
 
 | Tag | Dockerfile | What | Size |
 |---|---|---|---|
-| `latest-lite`, `<ver>-lite` | `deploy/docker/Dockerfile.lite` | Server only, distroless, no OCR, no nginx. amd64, arm64. | 29 MB; idles at ~16 MiB RSS |
+| `latest-lite`, `<ver>-lite` | `deploy/docker/Dockerfile.lite` | Server only, distroless, no OCR, no nginx. amd64, arm64. | 12 MB download, 43 MB on disk; idles at ~16 MiB RSS |
 | `latest`, `<ver>` | `deploy/docker/Dockerfile` | Server + local OCR + nginx and tini. amd64. No OCR backend inside: once it serves, the server downloads the one for the GPU the container is given (CPU, NVIDIA or AMD) in the background. | see [PACKAGING.md §2](rust-port/PACKAGING.md#2-docker-images-ghcriognathonicmokuro-bunko) |
 | `latest-cuda`, `<ver>-cuda` | — | The same image as `latest`, under the name of the 0.5.2 CUDA image, so templates written for it keep working. | same image |
 
 There are no arm64 OCR images (arm64 hosts run the lite image and OCR on a
-processor elsewhere). `latest*` follow stable releases (from 0.7.0 on); `beta`
-and `beta-lite` follow every release, beta or stable (what this branch's
-compose files and Unraid templates default to while 0.7 is in beta).
+processor elsewhere). `latest*` follow stable releases; `beta` and
+`beta-lite` follow every release, pre-releases included. Pin a version
+(`0.7.0`, `0.7.0-lite`) to update only when you choose to.
 
 Everything lives under `/data` (library, database, `config.yaml`, the OCR
 backend in `/data/backends`, the models in `/data/models`), so mount a volume
@@ -988,11 +988,11 @@ add them with `--group-add`.
 ### Unraid
 
 The Unraid templates are [`deploy/unraid/mokuro-bunko.xml`](../deploy/unraid/mokuro-bunko.xml)
-(full image, `ghcr.io/gnathonic/mokuro-bunko:beta` while 0.7 is in beta, `latest`
-from 0.7.0 on; `latest-cuda` is the same image) and
+(full image, `ghcr.io/gnathonic/mokuro-bunko:latest`; `latest-cuda` is the same
+image) and
 [`deploy/unraid/mokuro-bunko-lite.xml`](../deploy/unraid/mokuro-bunko-lite.xml)
-(lite image, `beta-lite` / `latest-lite`). The templates of this branch update
-from it (`TemplateURL` on the `0.7` branch).
+(lite image, `latest-lite`). The templates update themselves from the `main`
+branch (`TemplateURL`).
 
 1. For an NVIDIA GPU, install the Unraid NVIDIA driver plugin (a driver of 580
    or newer for the CUDA 13 pack) and keep `--runtime=nvidia` in

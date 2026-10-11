@@ -1,6 +1,6 @@
 # Desktop GUI: one web interface, local pages and the tray (0.7)
 
-**Status:** built; describes the code of the 0.7 branch (first designed 2026-10-04,
+**Status:** built; describes the code of 0.7 (released as 0.7.0; first designed 2026-10-04,
 reshaped in 0.7.0-beta.4). **Owner decisions:** browser UI + native tray; a library server is
 set up and run from **its own web pages**, the same on the desktop, from another computer
 and in Docker; the desktop app keeps only what is local (the first-launch chooser and a
