@@ -20,6 +20,14 @@
   `auto_supported: false` (and `manual_update`), a saved `update.auto: true` is ignored
   without an error, and a newer release is reported as available, not as a failure
   (no problem, no tray warning).
+- **AMD GPUs: no crash when the temporary folder is unusable.** When `TMPDIR` (or
+  `TMP`/`TEMP`, or `/tmp` with none set) names a folder that is missing or read-only,
+  the ROCm runtime cannot build its copy kernels and crashed the process (SIGSEGV) at
+  its first GPU copy -- the first-run benchmark took the server down at every start.
+  The backend now checks that folder before the ROCm runtime starts and, when it is
+  unusable, points `TMPDIR` at `/tmp`, `/var/tmp` or a `.tmp` folder beside the backend
+  pack, with a warning in the log and `doctor`. With no usable folder at all the GPU
+  stays off (OCR on the CPU) and the log says why.
 
 ## [0.7.0-beta.4] - 2026-10-09
 
