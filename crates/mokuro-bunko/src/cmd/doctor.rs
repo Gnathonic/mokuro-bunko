@@ -510,7 +510,8 @@ fn check_backend(target: &crate::ocr_target::OcrTarget) -> Check {
 
 /// The compiled libtorch packages the enabled generations need on this machine's
 /// device (`EnginePipeline::package_status_for`, each row's precision mode), and what
-/// the backend set for its runtime (an RX 6600's `HSA_OVERRIDE_GFX_VERSION`). FAIL
+/// the backend set for its runtime (an RX 6600's `HSA_OVERRIDE_GFX_VERSION`, a usable
+/// `TMPDIR`) or turned off (the GPU, with no usable temporary folder at all). FAIL
 /// when a row's package (with the weights it binds) or one of its host files is not on
 /// disk (OCR would have to download it first), or nothing here can run it; None when no
 /// enabled row uses a recognizer or no backend pack is installed (the OCR backend check
@@ -543,6 +544,8 @@ fn check_packages(
         .iter()
         .filter(|(k, _)| k == "HSA_OVERRIDE_GFX_VERSION")
         .map(|(k, v)| format!("{k}={v} set (the card runs its family's ROCm target)"))
+        // An unusable temporary folder the ROCm runtime needed moved, or the GPU off.
+        .chain(tb.pack.warnings.iter().cloned())
         .collect();
     let (mut present, mut missing, mut cannot) = (Vec::new(), Vec::new(), Vec::new());
     for (engine, mode) in &rows {

@@ -188,7 +188,8 @@ fn open_backend(backends_dirs: &[PathBuf], cpu_only: bool) -> Result<Arc<TorchBa
                     for w in &report.warnings {
                         warn!("libtorch backend: {w}");
                     }
-                    for (k, v) in &pack.env {
+                    // (A moved TMPDIR is in the warnings above, with why.)
+                    for (k, v) in pack.env.iter().filter(|(k, _)| k != abi::TMPDIR_VAR) {
                         info!("libtorch backend: set {k}={v}");
                     }
                     info!(
