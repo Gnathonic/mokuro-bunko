@@ -74,8 +74,11 @@ pub struct Pack {
     pub dir: PathBuf,
     pub manifest: PackManifest,
     /// Environment the loader set for the pack's runtime (ROCm: `amdgpu.ids` paths,
-    /// `HSA_OVERRIDE_GFX_VERSION`), for the log and `doctor`.
+    /// `HSA_OVERRIDE_GFX_VERSION`, a usable `TMPDIR`), for the log and `doctor`.
     pub env: Vec<(String, String)>,
+    /// What the loader worked around or turned off while preparing that environment
+    /// (ROCm: an unusable temporary folder); [`Pack::devices`] reports them.
+    pub warnings: Vec<String>,
     api: Api,
     // Never dlclose'd: see the module docs.
     _lib: ManuallyDrop<libloading::Library>,
@@ -223,11 +226,17 @@ impl Pack {
         }
         let lib_dir = dir.join(&manifest.lib_dir);
         // Before anything of the ROCm runtime is loaded (a ROCm libtorch_cpu links it).
-        let env = if manifest.variant.starts_with("rocm") && !cpu_only {
+        let rocm = if manifest.variant.starts_with("rocm") && !cpu_only {
             abi::prepare_rocm_env(dir, &manifest.requires.gpu_archs)
         } else {
-            Vec::new()
+            abi::RocmEnv::default()
         };
+        let mut warnings = rocm.warnings;
+        // The ROCm runtime would crash the process at its first GPU copy: CPU only.
+        let cpu_only = cpu_only || rocm.gpu_off.is_some();
+        if let Some(why) = rocm.gpu_off {
+            warnings.push(format!("no GPU: {why}"));
+        }
         let lib = open_library(&path, &lib_dir).map_err(|msg| PackLoadError::Library {
             path: path.clone(),
             msg: abi::explain_load_error(&msg).unwrap_or(msg),
@@ -272,7 +281,8 @@ impl Pack {
         let pack = Pack {
             dir: dir.to_path_buf(),
             manifest,
-            env,
+            env: rocm.set,
+            warnings,
             api,
             _lib: ManuallyDrop::new(lib),
         };
@@ -299,7 +309,7 @@ impl Pack {
         abi::foreign_libraries(Some(&self.dir.join(&self.manifest.lib_dir)))
     }
 
-    /// `bt_devices`.
+    /// `bt_devices`, with the loader's own [`Pack::warnings`] first.
     pub fn devices(&self) -> Result<DevicesReport, String> {
         let (mut out, mut err) = (std::ptr::null_mut(), std::ptr::null_mut());
         // SAFETY: out pointers.
@@ -309,7 +319,10 @@ impl Pack {
         if status != BT_OK {
             return Err(err.unwrap_or_else(|| format!("bt_devices: status {status}")));
         }
-        serde_json::from_str(&out.unwrap_or_default()).map_err(|e| format!("bt_devices: {e}"))
+        let mut report: DevicesReport = serde_json::from_str(&out.unwrap_or_default())
+            .map_err(|e| format!("bt_devices: {e}"))?;
+        report.warnings.splice(0..0, self.warnings.iter().cloned());
+        Ok(report)
     }
 
     /// `bt_load`: a handle owned by the returned [`Loaded`].

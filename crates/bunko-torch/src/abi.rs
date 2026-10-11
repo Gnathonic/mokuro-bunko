@@ -22,7 +22,8 @@
 //! work inside); `bt_free` must not race a `bt_read` on the same handle. A panic never
 //! crosses the boundary (it becomes [`BT_ERR_PANIC`]).
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -565,8 +566,21 @@ pub fn rocm_override_for(targets: &[String], built: &[String]) -> Option<String>
     None
 }
 
+/// What [`prepare_rocm_env`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RocmEnv {
+    /// The variables set, as (name, value): for the log and `doctor`.
+    pub set: Vec<(String, String)>,
+    /// What went wrong and how it was worked around, for the log and the devices report.
+    pub warnings: Vec<String>,
+    /// Set when the process must not touch the GPU (the reason): the ROCm runtime would
+    /// crash it at the first copy to the card. The CPU still works.
+    pub gpu_off: Option<String>,
+}
+
 /// Prepares the environment of a pack's ROCm runtime; returns what was set (for the
-/// log and `doctor`). Never overrides a value the user set.
+/// log and `doctor`). Never overrides a value the user set, except a temporary folder
+/// the runtime cannot use.
 ///
 /// * `AMDGPU_ASIC_ID_TABLE_PATHS`: the pack's `share/libdrm`, then `/usr/share/libdrm`.
 ///   The libdrm_amdgpu that libtorch's ROCm build bundles otherwise looks for
@@ -575,11 +589,13 @@ pub fn rocm_override_for(targets: &[String], built: &[String]) -> Option<String>
 ///   names every card "AMD Radeon Graphics".
 /// * `HSA_OVERRIDE_GFX_VERSION`: [`rocm_override_for`] the cards in the kfd topology
 ///   and the pack's built targets (`gpu_archs`, or [`ROCM_DEFAULT_ARCHS`]).
+/// * `TMPDIR`: see [`ensure_rocm_temp_dir`]; when no usable folder exists at all,
+///   [`RocmEnv::gpu_off`] says why.
 ///
 /// Must run before the ROCm runtime starts. It changes the process environment, so
 /// it is called while the process loads its OCR backend, before any OCR thread runs.
-pub fn prepare_rocm_env(pack_dir: &Path, gpu_archs: &[String]) -> Vec<(String, String)> {
-    let mut set = Vec::new();
+pub fn prepare_rocm_env(pack_dir: &Path, gpu_archs: &[String]) -> RocmEnv {
+    let mut env = RocmEnv::default();
     let mut dirs: Vec<String> = Vec::new();
     for d in [
         pack_dir.join("share/libdrm"),
@@ -602,7 +618,7 @@ pub fn prepare_rocm_env(pack_dir: &Path, gpu_archs: &[String]) -> Vec<(String, S
         // SAFETY: called while the backend loads, before the OCR threads that could read
         // the environment concurrently exist (see the function docs).
         unsafe { std::env::set_var(ASIC_ID_PATHS_VAR, &value) };
-        set.push((ASIC_ID_PATHS_VAR.to_string(), value));
+        env.set.push((ASIC_ID_PATHS_VAR.to_string(), value));
     }
     if std::env::var_os(HSA_OVERRIDE_VAR).is_none_or(|v| v.is_empty()) {
         let built: Vec<String> = if gpu_archs.is_empty() {
@@ -613,10 +629,158 @@ pub fn prepare_rocm_env(pack_dir: &Path, gpu_archs: &[String]) -> Vec<(String, S
         if let Some(v) = rocm_override_for(&kfd_gfx_targets(Path::new("/sys")), &built) {
             // SAFETY: as above.
             unsafe { std::env::set_var(HSA_OVERRIDE_VAR, &v) };
-            set.push((HSA_OVERRIDE_VAR.to_string(), v));
+            env.set.push((HSA_OVERRIDE_VAR.to_string(), v));
         }
     }
-    set
+    match ensure_rocm_temp_dir(pack_dir) {
+        TempDirFix::Usable => {}
+        TempDirFix::Moved { from, to } => {
+            let to = to.to_string_lossy().into_owned();
+            env.warnings.push(format!(
+                "{from} cannot be written to; the ROCm runtime compiles its copy kernels in \
+                 a folder there and crashes at the first GPU copy without one: set \
+                 {TMPDIR_VAR}={to}"
+            ));
+            env.set.push((TMPDIR_VAR.to_string(), to));
+        }
+        TempDirFix::NoneUsable { from, tried } => {
+            env.gpu_off = Some(format!(
+                "no folder the ROCm runtime can compile its copy kernels in ({from}; also \
+                 tried {}): it would crash at the first GPU copy, so OCR runs on the CPU. Set \
+                 {TMPDIR_VAR} to a writable folder and restart",
+                tried
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    env
+}
+
+// ---------------------------------------------------------------------------
+// The ROCm runtime's temporary folder
+//
+// Before its first copy to a card (its first stream) the HIP runtime builds its blit
+// (copy) kernels with comgr, which makes a `comgr-XXXXXX` work folder in LLVM's
+// `system_temp_directory` and writes the kernel source, a precompiled header and the
+// bitcode there -- every process start, whatever comgr's cache holds. When the folder
+// cannot be made (TMPDIR names a missing or read-only folder) the compile fails
+// ("Couldn't create blit kernels!") and HIP's error path crashes the process (SIGSEGV
+// in `amd::HostQueue::terminate` under `hip::Device::NullStream` or `hipStreamCreate`)
+// instead of returning an error: ROCm 7.1 (the pack's) and 7.2 alike. Nothing
+// in-process can catch that, so the folder is checked before the runtime starts.
+
+/// The temporary-folder variable this module sets (it is the one LLVM reads first).
+pub const TMPDIR_VAR: &str = "TMPDIR";
+/// The variables LLVM's `system_temp_directory` reads, in its order; the first one set
+/// wins even when it names nothing usable. Unset: `/tmp`.
+const LLVM_TEMP_VARS: [&str; 4] = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"];
+
+/// Where the ROCm runtime would make its work folders, and what chose it
+/// (`TMPDIR=/x`, or `/tmp (no TMPDIR set)`).
+pub fn rocm_temp_dir() -> (PathBuf, String) {
+    temp_dir_from(|v| std::env::var_os(v))
+}
+
+fn temp_dir_from(get: impl Fn(&str) -> Option<OsString>) -> (PathBuf, String) {
+    for var in LLVM_TEMP_VARS {
+        if let Some(v) = get(var) {
+            let dir = PathBuf::from(&v);
+            let from = format!("{var}={}", dir.display());
+            return (dir, from);
+        }
+    }
+    (PathBuf::from("/tmp"), "/tmp (no TMPDIR set)".into())
+}
+
+/// Whether a folder can be made in `dir` and a file written in that, as comgr does
+/// there before its first compile (the probe is removed again).
+pub fn temp_dir_usable(dir: &Path) -> bool {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let probe = dir.join(format!(
+        ".mokuro-bunko-probe-{}-{}-{nanos}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    if std::fs::create_dir(&probe).is_err() {
+        return false;
+    }
+    let file = probe.join("probe");
+    let ok = std::fs::write(&file, b"comgr").is_ok();
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir(&probe);
+    ok
+}
+
+/// The folders tried, in order, when the runtime's own is unusable: `/tmp`, `/var/tmp`,
+/// then `.tmp` beside the pack (in the backends folder the installer wrote the pack
+/// to; made when needed).
+fn temp_dir_fallbacks(pack_dir: &Path) -> Vec<PathBuf> {
+    let mut v = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
+    if let Some(parent) = pack_dir.parent() {
+        v.push(parent.join(".tmp"));
+    }
+    v
+}
+
+/// What [`ensure_rocm_temp_dir`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TempDirFix {
+    /// The runtime's temporary folder works: nothing changed.
+    Usable,
+    /// It did not (`from` says which and why it was chosen): `TMPDIR` now names `to`.
+    Moved { from: String, to: PathBuf },
+    /// Neither it nor any fallback works: the GPU must stay off.
+    NoneUsable { from: String, tried: Vec<PathBuf> },
+}
+
+/// Makes sure the ROCm runtime gets a temporary folder it can make folders in (see the
+/// section notes above): when its own is unusable, sets `TMPDIR` to the first usable of
+/// [`temp_dir_fallbacks`]. Same contract as [`prepare_rocm_env`] (before the runtime
+/// starts, before the OCR threads exist).
+pub fn ensure_rocm_temp_dir(pack_dir: &Path) -> TempDirFix {
+    let (dir, from) = rocm_temp_dir();
+    // The fallback beside the pack is ours to make; nothing else is created.
+    let ours = pack_dir.parent().map(|p| p.join(".tmp"));
+    let fix = choose_temp_dir(&dir, from, &temp_dir_fallbacks(pack_dir), |d| {
+        if Some(d) == ours.as_deref() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        temp_dir_usable(d)
+    });
+    if let TempDirFix::Moved { to, .. } = &fix {
+        // SAFETY: as in `prepare_rocm_env`.
+        unsafe { std::env::set_var(TMPDIR_VAR, to) };
+    }
+    fix
+}
+
+fn choose_temp_dir(
+    dir: &Path,
+    from: String,
+    fallbacks: &[PathBuf],
+    usable: impl Fn(&Path) -> bool,
+) -> TempDirFix {
+    if usable(dir) {
+        return TempDirFix::Usable;
+    }
+    let tried: Vec<PathBuf> = fallbacks
+        .iter()
+        .filter(|f| f.as_path() != dir)
+        .cloned()
+        .collect();
+    match tried.iter().find(|f| usable(f)) {
+        Some(to) => TempDirFix::Moved {
+            from,
+            to: to.clone(),
+        },
+        None => TempDirFix::NoneUsable { from, tried },
+    }
 }
 
 #[cfg(test)]
@@ -791,6 +955,104 @@ mod tests {
         }
         assert_eq!(kfd_gfx_targets(&tmp), vec!["gfx1032"]);
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn rocm_temp_dir_follows_llvm() {
+        let from = |vars: &[(&str, &str)]| {
+            let vars: Vec<(String, OsString)> = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), OsString::from(v)))
+                .collect();
+            temp_dir_from(|k| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()))
+        };
+        assert_eq!(
+            from(&[]),
+            (PathBuf::from("/tmp"), "/tmp (no TMPDIR set)".to_string())
+        );
+        // TMPDIR first; a set variable wins even when it names nothing usable.
+        assert_eq!(
+            from(&[("TMP", "/b"), ("TMPDIR", "/a")]),
+            (PathBuf::from("/a"), "TMPDIR=/a".to_string())
+        );
+        assert_eq!(
+            from(&[("TEMP", "/c"), ("TMP", "/b")]),
+            (PathBuf::from("/b"), "TMP=/b".to_string())
+        );
+        assert_eq!(from(&[("TEMPDIR", "/d")]).0, PathBuf::from("/d"));
+    }
+
+    #[test]
+    fn temp_dir_probe_and_choice() {
+        let root = std::env::temp_dir().join(format!("bt-tmpdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(temp_dir_usable(&root));
+        // the probe leaves nothing behind
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        assert!(!temp_dir_usable(&root.join("missing")));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let ro = root.join("ro");
+            std::fs::create_dir(&ro).unwrap();
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+            // root ignores the mode: only check where it applies
+            if std::fs::write(ro.join("x"), b"").is_err() {
+                assert!(!temp_dir_usable(&ro));
+            }
+            std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let fallbacks = temp_dir_fallbacks(Path::new("/s/backends/torch-rocm7.1-2.13.0"));
+        assert_eq!(
+            fallbacks,
+            vec![
+                PathBuf::from("/tmp"),
+                PathBuf::from("/var/tmp"),
+                PathBuf::from("/s/backends/.tmp")
+            ]
+        );
+        let ok =
+            |good: &'static [&'static str]| move |p: &Path| good.iter().any(|g| p == Path::new(g));
+        let from = || "TMPDIR=/gone".to_string();
+        assert_eq!(
+            choose_temp_dir(Path::new("/x"), from(), &fallbacks, ok(&["/x", "/tmp"])),
+            TempDirFix::Usable
+        );
+        assert_eq!(
+            choose_temp_dir(Path::new("/gone"), from(), &fallbacks, ok(&["/tmp"])),
+            TempDirFix::Moved {
+                from: from(),
+                to: PathBuf::from("/tmp")
+            }
+        );
+        assert_eq!(
+            choose_temp_dir(
+                Path::new("/gone"),
+                from(),
+                &fallbacks,
+                ok(&["/s/backends/.tmp"])
+            ),
+            TempDirFix::Moved {
+                from: from(),
+                to: PathBuf::from("/s/backends/.tmp")
+            }
+        );
+        // An unusable /tmp is not tried twice.
+        assert_eq!(
+            choose_temp_dir(
+                Path::new("/tmp"),
+                "/tmp (no TMPDIR set)".into(),
+                &fallbacks,
+                ok(&[])
+            ),
+            TempDirFix::NoneUsable {
+                from: "/tmp (no TMPDIR set)".into(),
+                tried: vec![PathBuf::from("/var/tmp"), PathBuf::from("/s/backends/.tmp")]
+            }
+        );
     }
 
     #[test]
