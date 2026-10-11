@@ -32,7 +32,12 @@ pub fn init(cfg: &InitConfig) -> Result<(), TorchError> {
     {
         // No folder for the runtime's kernel compiles: its first GPU copy would crash
         // the process, so the GPU half stays unloaded and the devices report says why.
-        gpu_off = crate::abi::prepare_rocm_env(pack, &cfg.gpu_archs).gpu_off;
+        let env = crate::abi::prepare_rocm_env(pack, &cfg.gpu_archs);
+        gpu_off = env.gpu_off;
+        // What this check worked around (e.g. a moved temporary folder) is reported in
+        // every devices report, so it reaches the log and `doctor` even when an older
+        // loader did not run the check itself.
+        let _ = ENV_WARNINGS.set(env.warnings);
     }
     let r = crate::gpu::init(dir, cfg.cpu_only || gpu_off.is_some());
     let _ = INIT_WARNING.set(gpu_off.or(r.err()));
@@ -40,6 +45,7 @@ pub fn init(cfg: &InitConfig) -> Result<(), TorchError> {
 }
 
 static INIT_WARNING: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static ENV_WARNINGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 // ---------------------------------------------------------------- process exit
 //
@@ -139,6 +145,9 @@ pub fn devices() -> DevicesReport {
         warnings.push(format!("no GPU: {why}"));
     }
     warnings.extend(crate::gpu::notes().iter().cloned());
+    if let Some(env) = ENV_WARNINGS.get() {
+        warnings.extend(env.iter().cloned());
+    }
     DevicesReport {
         abi: BT_ABI_VERSION,
         torch: torch_version().into(),

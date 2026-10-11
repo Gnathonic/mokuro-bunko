@@ -918,8 +918,9 @@ docker run -d \
   ghcr.io/gnathonic/mokuro-bunko:latest
 ```
 
-Without a GPU OCR runs on the CPU; the first start downloads the CPU backend
-and the models into `/data`. For GPU OCR pass the GPU in (below), or run the
+Without a GPU OCR runs on the CPU: once setup is done, the server downloads the
+CPU backend and the models into `/data` in the background (a new server waits
+for its `/setup` first). For GPU OCR pass the GPU in (below), or run the
 lite image (or `latest` with `MOKURO_OCR_LOCAL_PROCESSING=false`) and a
 [remote processor](#remote-ocr-processors) on the GPU machine. The first
 visit to the setup page from another computer asks for the setup code (see
