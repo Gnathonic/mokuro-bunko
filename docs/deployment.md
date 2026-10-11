@@ -19,19 +19,22 @@ Pick a build:
 | **full** | Lite plus the OCR engines, local OCR and `processor`. | A machine that does OCR: the library host itself, or a processor. |
 
 There is one full build per platform, whatever the GPU: the GPU support comes
-from the OCR backend pack that `mokuro-bunko install-ocr` installs afterwards
-(see [OCR backend](#ocr-backend-install-ocr)).
+from the OCR backend pack the server installs by itself once it serves, or
+`mokuro-bunko install-ocr` (see [OCR backend](#ocr-backend-install-ocr)).
 
-Platform support of the release archives:
+Each release has four downloads (the table at the top of its notes links them):
 
-- **Linux x86_64**: lite (a static binary for any distribution) and full
-  (glibc 2.28 or newer: Debian 11+, Ubuntu 20.04+, RHEL 8+).
-- **Linux aarch64 (arm64)**: lite only. OCR for an arm64 library comes from a
+- **Linux x86_64**: full, `mokuro-bunko-<version>-linux-x64.tar.gz` (glibc 2.28
+  or newer: Debian 11+, Ubuntu 20.04+, RHEL 8+). The lite server for x86_64 is
+  the `latest-lite` Docker image.
+- **Linux aarch64 (arm64)**: lite only,
+  `mokuro-bunko-<version>-linux-arm64-server.tar.gz` (a static binary for any
+  distribution). OCR for an arm64 library comes from a
   [remote processor](#remote-ocr-processors) on an x86_64, Windows or macOS
   machine.
-- **Windows x86_64**: lite and full.
-- **macOS Apple silicon**: lite and full (OCR on the CPU).
-- **macOS Intel**: lite only.
+- **Windows x86_64**: full, `mokuro-bunko-<version>-windows.zip`.
+- **macOS Apple silicon**: full (OCR on the CPU), `mokuro-bunko-<version>-macos.dmg`.
+- **macOS Intel**: no build; use the Docker image.
 
 **GPU prerequisites.** Only the GPU driver comes from the host; the backend
 pack brings libtorch and, for NVIDIA, the CUDA libraries:
@@ -50,11 +53,13 @@ models are downloaded by mokuro-bunko itself (see below).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.sh | sh -s -- --flavor lite --systemd
+curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.sh | sh -s -- --systemd
 ```
 
-The script picks the archive for your OS, CPU and flavor (`--flavor
-lite|full`, default: full where it exists, else lite), checks the
+The script picks the build for your OS and CPU (full on x86_64 Linux and on
+macOS, where it installs the app from the disk image; lite on arm64 Linux;
+`--flavor lite|full` asks for one, and fails when the release has none for this
+machine), checks the
 signature of the release manifest (needs OpenSSL 3; `--require-signature`
 fails without it) and the archive's sha256, and installs into
 `~/.local/lib/mokuro-bunko` with a link in `~/.local/bin` (as root:
@@ -63,14 +68,14 @@ it). A full binary built for a newer glibc than yours is caught before
 anything is replaced. `--systemd` installs and starts a service (see
 [Systemd](#systemd-service)), `--processor` installs the OCR processor unit
 (needs a full flavor), `--version X.Y.Z` pins a release, `--dry-run` shows
-what would happen. Run it again to update. On a full build, run
-`mokuro-bunko install-ocr` once afterwards (see
-[OCR backend](#ocr-backend-install-ocr)).
+what would happen. Run it again to update. A full build installs its OCR
+backend by itself once it serves (see [OCR backend](#ocr-backend-install-ocr));
+`mokuro-bunko install-ocr` does it up front.
 
-Without the script: unpack `mokuro-bunko-<version>-<target>-<flavor>.tar.gz`
-and run `./mokuro-bunko serve`. On macOS a tarball downloaded in a browser is
-quarantined: `xattr -d com.apple.quarantine mokuro-bunko` (the script is not
-affected).
+Without the script: on Linux unpack the archive and run `./mokuro-bunko serve`;
+on macOS open the disk image and drag **Mokuro Bunko** to Applications. The app
+is not notarized: the first time, right-click it and choose Open (the script
+is not affected).
 
 ### Windows: `install.ps1` or the portable zip
 
@@ -80,17 +85,21 @@ powershell -c "irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main
 
 Installs into `%LOCALAPPDATA%\mokuro-bunko\app` (no admin rights, nothing in
 the registry), adds Start-menu shortcuts, runs `mokuro-bunko doctor` and
-starts the server. Your data stays in `%LOCALAPPDATA%\mokuro-bunko`. Options
-are `-Flavor full|lite`, `-Version`, `-InstallDir`, `-Portable`,
-`-Startup` (start at logon), `-NoShortcut`, `-NoStart`; see the top of
-[`scripts/install.ps1`](../scripts/install.ps1). It verifies the archive's
-sha256 (PowerShell cannot verify the ed25519 signature; the in-app updater
-does). Windows SmartScreen may warn: the executable is not Authenticode
-signed. Then run `mokuro-bunko.exe install-ocr` once from the install folder
-(the `cu130` pack on an NVIDIA GPU, else the CPU pack).
+starts the app (the tray, which runs the server). Your data stays in
+`%LOCALAPPDATA%\mokuro-bunko`. Options are `-Version`, `-InstallDir`, `-Portable`,
+`-Startup` (start the app at logon), `-NoShortcut`, `-NoStart` (`-Flavor` takes
+only `full`); see the top of [`scripts/install.ps1`](../scripts/install.ps1). It
+verifies the archive's sha256 (PowerShell cannot verify the ed25519 signature;
+the in-app updater does). Windows SmartScreen may warn: the executable is not
+Authenticode signed. The server installs its OCR backend by itself after the
+first-run setup (the `cu130` pack on an NVIDIA GPU, else the CPU pack);
+`mokuro-bunko-cli.exe install-ocr` from the install folder does it by hand. In a
+terminal use `mokuro-bunko-cli.exe`: `mokuro-bunko.exe` is the app, with no
+console window.
 
-The **portable zip** (`mokuro-bunko-<version>-x86_64-pc-windows-msvc-<flavor>.zip`)
-needs no installer: extract it anywhere and run `run.bat`. While `PORTABLE.txt`
+The **portable zip** (`mokuro-bunko-<version>-windows.zip`) needs no installer:
+extract it anywhere and double-click `mokuro-bunko.exe` (the tray), or run
+`run.bat` for the server in a console window. While `PORTABLE.txt`
 is present, config, library, logs and models live in `data\` next to it and
 nothing is written to AppData. `doctor.bat` diagnoses problems. For NVIDIA
 GPUs see [setup-windows-nvidia-ocr.md](setup-windows-nvidia-ocr.md).
@@ -195,14 +204,20 @@ Docker only get a notice ("re-run `install.sh`", "pull the new image"). Your
 data is never touched by an update. Set `update.check: false` to stop the
 background check. See [configuration](configuration.md#updates).
 
-An update replaces the executable only; the installed backend pack stays. If
-`doctor` or the server log then says the pack implements another backend ABI
-("install the pack of this release"), run `mokuro-bunko install-ocr --force`.
+An update installs the release as one unit: the program, its OCR backend pack
+for the variant installed here and its models (a pack belongs to exactly one
+release). A pack of another release does not load ("the backend pack is from
+mokuro-bunko A, this is B"); the server then installs its own in the background,
+or run `mokuro-bunko install-ocr`.
 
 ## First start
 
-The first browser visit to a new server opens a setup page that creates the
-admin account. From the machine itself that just works. From another machine
+The first browser visit to a new server opens its setup page (`/setup`): the
+admin account, who may join, remote access (a Cloudflare tunnel, Dynamic DNS,
+HTTPS, other web apps) and OCR on this machine. Finishing signs you in and opens
+the admin panel's **This server** tab, where the OCR backend's background install
+shows its progress; a new server installs nothing before that. From the machine
+itself that just works. From another machine
 (a server in Docker, on a NAS, or reached over SSH) the page first asks for a
 one-time **setup code**: while no admin exists the server makes a new code at
 every start and prints it in its log:
@@ -485,10 +500,10 @@ the server is async, so several processors do not need any tuning.
 
 A processor is the **same `mokuro-bunko` executable**, full build, of the
 same release as the library. There is no Python, git or checkout to install.
-Install it as in [Installing](#installing) (`install.sh --flavor full`,
-`install.ps1`, a Docker image), install the OCR backend pack, then one
-command, `processor setup`, does the rest. From the host the processor needs
-the GPU driver only (see the [GPU prerequisites](#installing)).
+Install it as in [Installing](#installing) (`install.sh`, `install.ps1`, the
+disk image, a Docker image), then one command, `processor setup`, does the
+rest; the processor installs its OCR backend pack by itself. From the host the
+processor needs the GPU driver only (see the [GPU prerequisites](#installing)).
 
 A processor keeps its pack and models in its own storage, `processor.storage`
 (`~/.local/share/mokuro-bunko-processor` on Linux and macOS,
@@ -508,8 +523,10 @@ So either order works:
 mokuro-bunko install-ocr        # or, after processor setup: install-ocr --processor
 ```
 
-(The full Docker image installs it on start and needs no step.) The desktop
-app's processor setup offers the same install, with progress. Then:
+This step is optional: `processor serve` runs the same install by itself, in
+the background, when its backend is missing (it registers with the library at
+once, as not available, and takes work once the backend is ready). The desktop
+app's pairing page offers the same choices. Then:
 
 ```bash
 mokuro-bunko processor setup
@@ -551,9 +568,9 @@ did.
 
 #### Linux
 
-Install the full build (`install.sh --flavor full`; x86_64 only, arm64 Linux
-has no full build and cannot be a processor), install the pack into the
-processor's storage as above and run `mokuro-bunko processor setup`. NVIDIA
+Install the full build (`install.sh`; x86_64 only, arm64 Linux has no full
+build and cannot be a processor) and run `mokuro-bunko processor setup`; the
+pack goes into the processor's storage as above. NVIDIA
 gets the `cu130` pack (driver 580 or newer, nothing else). A supported AMD
 GPU gets the `rocm7.1` pack; it needs `libnuma` from the system
 (`install-ocr` prints the package names of any host library it misses) and
@@ -562,31 +579,30 @@ Anything else runs on the CPU.
 
 #### Windows
 
-Install with `install.ps1` (the `full` flavor), install the pack into the
-processor's storage as above (the `cu130` pack on an NVIDIA GPU; AMD and Intel
-GPUs run OCR on the CPU) and run
-`mokuro-bunko.exe processor setup` from a terminal in the install folder (or
-the Start-menu shortcut's folder). The questions are the same.
+Install with `install.ps1` or the zip and run `mokuro-bunko-cli.exe processor
+setup` from a terminal in the install folder (or the Start-menu shortcut's
+folder), or choose **Processor** in the app's chooser. The questions are the
+same. The pack goes into the processor's storage as above (the `cu130` pack on
+an NVIDIA GPU; AMD and Intel GPUs run OCR on the CPU).
 `processor.yaml` is restricted to your account, and the last question is
 "Start the processor now, and at every logon (a Startup entry)?". The
 processor keeps its storage in `%LOCALAPPDATA%\mokuro-bunko-processor`.
 
 #### macOS
 
-Use the `aarch64-apple-darwin` full build (Apple silicon; OCR on the CPU with
-the `cpu` pack), install the pack as above and run
-`mokuro-bunko processor setup`. `processor service` installs a launchd agent.
-Intel Macs have no full build.
+Use the disk image (Apple silicon; OCR on the CPU with the `cpu` pack) and run
+`mokuro-bunko processor setup` (or choose **Processor** in the app's chooser).
+`processor service` installs a launchd agent. Intel Macs have no build.
 
 #### Docker
 
 [`deploy/docker-compose.processor.yml`](../deploy/docker-compose.processor.yml)
 runs the full image as a processor: put `processor.yaml` in `./processor/`
 and start it with `docker compose -f deploy/docker-compose.processor.yml up -d`.
-Before `processor serve` the entrypoint installs the backend pack for the GPU
-the container is given (`gpus: all` for NVIDIA, with the container toolkit and
-a driver 580 or newer; `devices: [/dev/kfd, /dev/dri]` for AMD; neither: the
-CPU) into the volume, with the models; later starts reuse them.
+`processor serve` installs the backend pack for the GPU the container is given
+(`gpus: all` for NVIDIA, with the container toolkit and a driver 580 or newer;
+`devices: [/dev/kfd, /dev/dri]` for AMD; neither: the CPU) into the volume, with
+the models, in the background once it runs; later starts reuse them.
 `MOKURO_OCR_BACKEND` (`cpu`, `cuda`, `rocm`) overrides the choice. The password
 can come from the environment instead of the file: `MOKURO_PROCESSOR_PASSWORD`.
 

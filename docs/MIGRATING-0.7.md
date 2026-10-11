@@ -14,9 +14,10 @@ exist, and how OCR processors talk to the library.
 - Plan to update **processors at the same time**. A 0.5.2 processor cannot
   talk to a 0.7 library (see [Processors](#processors)).
 - Decide on a build. **Lite** is the server only (OCR by remote processors)
-  and fits a 1 GB VPS. **Full** adds local OCR and the `processor` command; run
-  `mokuro-bunko install-ocr` once after installing it (as with 0.5.2). The Linux full
-  build is x86_64 only and runs on glibc 2.28+ (Debian 11+, Ubuntu 20.04+, RHEL 8+).
+  and fits a 1 GB VPS. **Full** adds local OCR and the `processor` command; it
+  installs its OCR backend by itself in the background once it serves (or run
+  `mokuro-bunko install-ocr`, as with 0.5.2). The Linux full build is x86_64 only
+  and runs on glibc 2.28+ (Debian 11+, Ubuntu 20.04+, RHEL 8+).
   **arm64 Linux gets the lite build only** for now (0.5.2's pip install ran OCR there):
   OCR for an arm64 library comes from a processor on an x86_64 (or Windows/macOS)
   machine.
@@ -94,9 +95,11 @@ Remote processors speak **protocol v3**: one WebSocket per processor
 (`/_processor/<id>/socket`) plus plain `PUT`s for results. 0.5.2 processors
 (protocol v2) and 0.7 libraries refuse each other at registration. Update
 the library and every processor to 0.7 together, and install the **full**
-build on processor machines (then `mokuro-bunko install-ocr` into the processor's
-storage, see [deployment](deployment.md#3-the-processor-machine)); they no longer
-need Python, uv, git or a checkout. Your `processor.yaml` keeps working (its `ocr:` section is ignored).
+build on processor machines (a processor installs its OCR backend into its own
+storage by itself, or run `mokuro-bunko install-ocr`, see
+[deployment](deployment.md#3-the-processor-machine)); they no longer need Python,
+uv, git or a checkout. Your `processor.yaml` keeps working (its `ocr:` section is
+ignored).
 Processor accounts, names and per-machine profiles are unchanged.
 
 **Reverse proxies must pass the WebSocket upgrade for `/_processor/`.**
@@ -122,8 +125,10 @@ from NVIDIA's own packages on PyPI, as they did with pip. On the CPU, OCR runs i
 as in 0.5.2 (bf16 is an opt-in). `MOKURO_BACKENDS_DIR` moves the packs elsewhere. `--backend cuda|rocm|cpu|auto`
 still works (it maps to `--variant cu130|rocm7.1|cpu|auto`); `--engines` and
 `--detector` are ignored. Unlike 0.5.2 it fails visibly (non-zero exit) when it cannot
-install. The full Docker image does the same on its first start (0.5.2's server
-installed its OCR environment on start too); the image itself carries no pack.
+install. `serve` and `processor serve` run the same install by themselves, in the
+background while they already serve, when local OCR needs a backend that is
+missing, on any system and in Docker (0.5.2's server installed its OCR environment
+on start too); the Docker image itself carries no pack.
 
 The models are downloaded on first use into `<storage>/models/` (or up front by
 `install-ocr` / `mokuro-bunko models download`) and verified by sha256. The old
@@ -137,7 +142,7 @@ downloads are no longer used and can be deleted.
 | `MOKURO_THREADS` (request threads, default 50) | Not read. The server is async; `server.threads` (default `min(cores, 4)`) sets the worker threads. |
 | `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`, `MOKURO_BUNKO_MOKURO_SPEC` | Accepted by the Docker entrypoint and ignored. |
 | `OCR_AUTO_INSTALL` | The OCR backend is installed by the server itself, in the background, when local OCR needs it (`MOKURO_OCR_AUTO_INSTALL`, default on). `true` keeps that on; `false` (the 0.5.2 Unraid template's default) is noted and ignored, because in 0.5.2 it never stopped the server from installing OCR on start. |
-| (new) `MOKURO_OCR_AUTO_INSTALL` | Full Docker image, default `true`. `false` turns the install on start off: local OCR then has no backend until `mokuro-bunko install-ocr` is run. |
+| (new) `MOKURO_OCR_AUTO_INSTALL` | Any full build, Docker included; default `true`. `false`: `serve` and `processor serve` never install a missing backend by themselves; it shows as a problem with an Install button (admin panel, dashboard), or run `mokuro-bunko install-ocr`. |
 | `MOKURO_PPOCR_MODELS`, `MOKURO_PPOCR_DOWNLOAD` | Still honoured as aliases of `MOKURO_MODELS_DIR` (a directory of model files to use) and `MOKURO_MODELS_DOWNLOAD` (`0` forbids downloads). |
 | `MOKURO_DEBUG`, `MOKURO_EFT_TRACE` | Not read. Use `MOKURO_LOG` (a log filter such as `debug`, or `info,bunko_server=debug`) or `-v`. |
 | `MOKURO_PPOCR_THREADS` / `_SIDE` / `_TILE` / `_PRECISION`, `MOKURO_OCR_STAGE_*` | Not read. Pools and devices are per-row settings (`pools`). |
@@ -255,5 +260,6 @@ go back:
 4. A migrated config has a `hayai-nova` primary row and a disabled `mokuro`
    row. 0.5.2 loads that; re-enable the `mokuro` row and make it primary
    again if you want mokuro back as the primary engine.
-5. Start 0.5.2, with 0.5.2 processors. Sidecars 0.7 wrote (and any layers the
-   upgrade kept) are normal `.mokuro` files that 0.5.2 serves.
+5. Start 0.5.2, with 0.5.2 processors. Sidecars 0.7 wrote, the generation upgrade's
+   replacements included, are normal `.mokuro` files that 0.5.2 serves (the upgrade
+   keeps no old file to go back to: restore those from your backup).
