@@ -8,7 +8,7 @@ use bunko_library::compiler::{SeriesFolder, compile_series_volumes, entry_json};
 use library_support::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn startup_pass_writes_series_and_catalog_files() {
@@ -288,28 +288,62 @@ async fn store_rows_match_what_the_compiler_serialises() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_steady_stream_of_changes_still_fires_at_the_cap() {
-    // debounce 100 ms, cap 600 ms: changes every 50 ms would postpone the pass forever
-    // without the cap.
-    let env = Env::new(|_| {});
-    let dir = env.series_dir("Busy");
-    write_cbz(&dir.join("b1.cbz"), 1);
-    let series_file = dir.join("series.json");
-    let start = std::time::Instant::now();
-    while !series_file.is_file() && start.elapsed() < Duration::from_secs(3) {
-        env.runtime.on_library_write(&dir.join("b1.cbz"));
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    // debounce 100 ms, cap 600 ms: a change every 20 ms would postpone the pass forever
+    // without the cap. The stream is this task's own, and a busy runner can stall it
+    // for a whole debounce (a 50 ms sleep took over 100 ms on macOS): the pass then
+    // fires early, rightly, because the quiet period really elapsed, and the run says
+    // nothing about the cap. Such a run is repeated, never judged.
+    let policy = fast_policy();
+    let mut stalled = Vec::new();
+    for _ in 0..10 {
+        let env = Env::new(|_| {});
+        let dir = env.series_dir("Busy");
+        let archive = dir.join("b1.cbz");
+        write_cbz(&archive, 1);
+        let series_file = dir.join("series.json");
+        // A change is scheduled somewhere inside its call, so the quiet period between
+        // two changes is at most from one call's start to the next call's end (or to
+        // the check that found the file).
+        let start = Instant::now();
+        let mut last_call: Option<Instant> = None;
+        let mut longest_quiet = Duration::ZERO;
+        let fired_by = loop {
+            let found = series_file.is_file();
+            if let Some(last) = last_call {
+                longest_quiet = longest_quiet.max(last.elapsed());
+            }
+            if found {
+                break start.elapsed();
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the capped debounce never fired"
+            );
+            let called = Instant::now();
+            env.runtime.on_library_write(&archive);
+            if let Some(last) = last_call {
+                longest_quiet = longest_quiet.max(last.elapsed());
+            }
+            last_call = Some(called);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        env.runtime.stop().await;
+        if longest_quiet >= policy.debounce {
+            stalled.push((longest_quiet, fired_by));
+            continue;
+        }
+        // Steady: only the cap, armed by the first change, could have fired it.
+        assert!(
+            fired_by >= policy.max_debounce,
+            "fired before the cap: {fired_by:?} (longest quiet {longest_quiet:?})"
+        );
+        assert!(
+            fired_by < Duration::from_millis(1500),
+            "fired long after the cap: {fired_by:?}"
+        );
+        return;
     }
-    assert!(series_file.is_file(), "the capped debounce never fired");
-    let waited = start.elapsed();
-    assert!(
-        waited >= Duration::from_millis(550),
-        "fired before the cap: {waited:?}"
-    );
-    assert!(
-        waited < Duration::from_millis(1500),
-        "fired long after the cap: {waited:?}"
-    );
-    env.runtime.stop().await;
+    panic!("the runner stalled every stream for a debounce (longest quiet, fired by): {stalled:?}");
 }
 
 /// 0.5.3 `test_case_variant_folders_each_keep_their_own_row`: `Kingdom/` and `kingdom/`
