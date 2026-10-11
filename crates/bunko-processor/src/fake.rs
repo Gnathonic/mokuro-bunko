@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bunko_proto::{Catalog, Device, HostInfo, RowSpec};
@@ -51,6 +51,9 @@ pub struct FakeConfig {
     pub missing_formats: Vec<String>,
     /// The GPU's architecture (default `sm_89`, where bf16 is native).
     pub gpu_arch: Option<String>,
+    /// While set, a volume waits before its last page (until cleared or cancelled): a
+    /// test can act on a volume that is certainly still running, however slow the host.
+    pub hold: Option<Arc<AtomicBool>>,
 }
 
 /// The fake engine. Cheap to clone (clones share their counters).
@@ -364,6 +367,16 @@ impl VolumeRunner for FakeRunner {
         for (i, name) in names.iter().enumerate() {
             if !pacer.next(self.page_delay(), cancel) {
                 return Err(RunError::Cancelled);
+            }
+            if i + 1 == names.len()
+                && let Some(hold) = &config.hold
+            {
+                while hold.load(Ordering::SeqCst) {
+                    if cancel.is_cancelled() {
+                        return Err(RunError::Cancelled);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
             }
             if config.fatal_volumes.contains(&meta.claim)
                 || config.fatal_volumes.contains(&meta.stem)

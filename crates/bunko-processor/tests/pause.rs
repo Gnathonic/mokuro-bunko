@@ -5,6 +5,7 @@ mod common;
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bunko_control::{Control, ControlConfig, PauseMode, Role, State};
@@ -85,9 +86,12 @@ async fn wait_for(link: &mut LocalLink, what: &str, secs: u64) -> Vec<Event> {
     }
 }
 
-fn slow() -> FakeConfig {
+/// Pages at 150 ms, and a volume that stays running (before its last page) while
+/// `hold` is set: the pause certainly arrives mid-volume, however slow the host.
+fn slow(hold: &Arc<AtomicBool>) -> FakeConfig {
     FakeConfig {
         page_delay: Duration::from_millis(150),
+        hold: Some(hold.clone()),
         ..Default::default()
     }
 }
@@ -98,7 +102,8 @@ async fn pause_after_volume_releases_the_unstarted_and_finishes_the_running() {
     let ctl = control(dir.path());
     let a = write_volume(dir.path(), "Vol 1.cbz", 6);
     let b = write_volume(dir.path(), "Vol 2.cbz", 6);
-    let mut link = start(slow(), &dir.path().join("results"), &ctl);
+    let hold = Arc::new(AtomicBool::new(true));
+    let mut link = start(slow(&hold), &dir.path().join("results"), &ctl);
     link.ops.send(open("s1")).await.unwrap();
     link.ops.send(volume_op("s1", "v1", &a)).await.unwrap();
     link.ops.send(volume_op("s1", "v2", &b)).await.unwrap();
@@ -122,6 +127,7 @@ async fn pause_after_volume_releases_the_unstarted_and_finishes_the_running() {
         }
     );
     assert_eq!(ctl.status().state, State::Pausing);
+    hold.store(false, Ordering::SeqCst);
     // The running volume finishes and is reported; the released one never runs.
     let rest = wait_for(&mut link, "volume_done:v1", 10).await;
     assert!(
@@ -147,7 +153,9 @@ async fn pause_now_releases_everything_and_says_only_exit() {
     let ctl = control(dir.path());
     let a = write_volume(dir.path(), "Vol 1.cbz", 20);
     let b = write_volume(dir.path(), "Vol 2.cbz", 20);
-    let mut link = start(slow(), &dir.path().join("results"), &ctl);
+    // Never released: "pause now" cancels the running volume.
+    let hold = Arc::new(AtomicBool::new(true));
+    let mut link = start(slow(&hold), &dir.path().join("results"), &ctl);
     link.ops.send(open("s1")).await.unwrap();
     link.ops.send(volume_op("s1", "v1", &a)).await.unwrap();
     link.ops.send(volume_op("s1", "v2", &b)).await.unwrap();
