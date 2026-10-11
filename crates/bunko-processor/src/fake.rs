@@ -92,32 +92,49 @@ impl FakePipeline {
     }
 }
 
-fn sleep_cancellable(duration: Duration, cancel: &CancelToken) -> bool {
-    let until = Instant::now() + duration;
-    while Instant::now() < until {
+/// Sleep until `until` (at once if it is past); false when cancelled.
+fn sleep_until(until: Instant, cancel: &CancelToken) -> bool {
+    loop {
         if cancel.is_cancelled() {
             return false;
         }
-        std::thread::sleep((until - Instant::now()).min(Duration::from_millis(5)));
+        let now = Instant::now();
+        if now >= until {
+            return true;
+        }
+        std::thread::sleep((until - now).min(Duration::from_millis(5)));
     }
-    !cancel.is_cancelled()
 }
 
-/// Sleep `delay` less what earlier sleeps overslept (`debt`), and add to `debt` what
-/// this one oversleeps: pages come out at the configured rate however late the OS timer
-/// wakes (a macOS runner turns a 4 ms sleep into ~25 ms), a few at once after a late
-/// wake, as from a device that kept working meanwhile.
-fn paced_sleep(delay: Duration, debt: &mut Duration, cancel: &CancelToken) -> bool {
-    let credit = (*debt).min(delay);
-    *debt -= credit;
-    let target = delay - credit;
-    if target.is_zero() {
-        return !cancel.is_cancelled();
+/// A volume's pages on a schedule: each is due one page time after the one before it,
+/// the first one page time after the volume began, less what the runner still owed
+/// then. Pages come out at the configured rate whatever made one late (a timer that
+/// woke late, as on a macOS runner that turns a 4 ms sleep into ~25 ms; a thread or a
+/// whole VM paused between two sleeps; the archive read before the first page, the
+/// sidecar written after the last), a few at once after it, as from a device that kept
+/// working meanwhile.
+struct Pacer {
+    due: Instant,
+}
+
+impl Pacer {
+    fn start(owed: Duration) -> Pacer {
+        let now = Instant::now();
+        Pacer {
+            due: now.checked_sub(owed).unwrap_or(now),
+        }
     }
-    let start = Instant::now();
-    let finished = sleep_cancellable(target, cancel);
-    *debt += start.elapsed().saturating_sub(target);
-    finished
+
+    /// Wait for the next page; false when cancelled.
+    fn next(&mut self, delay: Duration, cancel: &CancelToken) -> bool {
+        self.due += delay;
+        sleep_until(self.due, cancel)
+    }
+
+    /// How far behind its schedule the volume ends: the next volume owes it.
+    fn behind(&self) -> Duration {
+        Instant::now().saturating_duration_since(self.due)
+    }
 }
 
 impl PagePipeline for FakePipeline {
@@ -225,7 +242,7 @@ impl PagePipeline for FakePipeline {
             engine: spec.engine.clone(),
             started: Instant::now(),
             items: AtomicU64::new(0),
-            overslept: Mutex::new(Duration::ZERO),
+            behind: Mutex::new(Duration::ZERO),
             device,
             precision,
             width,
@@ -238,8 +255,8 @@ struct FakeRunner {
     engine: String,
     started: Instant,
     items: AtomicU64,
-    /// What the page sleeps overslept, owed to the next pages ([`paced_sleep`]).
-    overslept: Mutex<Duration>,
+    /// How far behind schedule the last volume ended, owed by the next ([`Pacer`]).
+    behind: Mutex<Duration>,
     device: String,
     precision: String,
     width: u32,
@@ -331,6 +348,7 @@ impl VolumeRunner for FakeRunner {
     ) -> Result<VolumeOutcome, RunError> {
         let config = &self.pipeline.config;
         self.pipeline.ran.lock().push(meta.claim.clone());
+        let mut pacer = Pacer::start(std::mem::take(&mut *self.behind.lock()));
         let names = pages(archive).map_err(RunError::Volume)?;
         progress(PageProgress::Started {
             pages: names.len() as u32,
@@ -343,9 +361,8 @@ impl VolumeRunner for FakeRunner {
         }
         let total = names.len() as u32;
         let mut out_pages = Vec::new();
-        let mut debt = std::mem::take(&mut *self.overslept.lock());
         for (i, name) in names.iter().enumerate() {
-            if !paced_sleep(self.page_delay(), &mut debt, cancel) {
+            if !pacer.next(self.page_delay(), cancel) {
                 return Err(RunError::Cancelled);
             }
             if config.fatal_volumes.contains(&meta.claim)
@@ -362,8 +379,8 @@ impl VolumeRunner for FakeRunner {
                 total,
             });
         }
-        *self.overslept.lock() += debt;
         if config.fail_volumes.contains(&meta.claim) || config.fail_volumes.contains(&meta.stem) {
+            *self.behind.lock() += pacer.behind();
             return Err(RunError::Volume("every page failed".to_string()));
         }
         let sidecar = json!({
@@ -388,6 +405,7 @@ impl VolumeRunner for FakeRunner {
         .map_err(|e| RunError::Volume(format!("could not write {}: {e}", tmp.display())))?;
         std::fs::rename(&tmp, out)
             .map_err(|e| RunError::Volume(format!("could not write {}: {e}", out.display())))?;
+        *self.behind.lock() += pacer.behind();
         Ok(VolumeOutcome {
             pages: total,
             failed_pages: 0,
