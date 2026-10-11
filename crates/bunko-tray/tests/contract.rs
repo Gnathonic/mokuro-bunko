@@ -110,7 +110,6 @@ fn installing_reads_as_the_install_progress() {
             tray_started: true,
         }],
         supervised: &[],
-        update: &UpdateView::default(),
         updating: &[],
         notice: None,
         now: chrono::Local::now(),
