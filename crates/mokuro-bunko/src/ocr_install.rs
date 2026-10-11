@@ -176,11 +176,14 @@ impl Installer {
     /// Mirror the state into the control API (`status.install`, problems) and let
     /// `POST /control/ocr-install` start a retry.
     pub fn attach_control(&self, control: &Control) {
-        *self.0.control.lock() = Some(control.clone());
         let me = self.clone();
         control.set_install_trigger(Arc::new(move || me.start_manual()));
+        // Under the publish lock: the view copied here cannot be older than one a
+        // running install publishes meanwhile.
+        let mut slot = self.0.control.lock();
+        *slot = Some(control.clone());
         let now = self.0.view.borrow().clone();
-        self.publish(now);
+        control.set_install(now.clone(), problems_of(now.as_ref()));
     }
 
     /// The OCR target as the config files say now (a setting saved since the start
@@ -593,10 +596,15 @@ impl Installer {
     }
 
     fn publish(&self, view: Option<OcrInstall>) {
-        self.0.view.send_replace(view.clone());
-        if let Some(c) = self.0.control.lock().as_ref() {
+        // One publish at a time, and the control before the watch: whoever wakes on
+        // the watch (the problems watcher, a test) reads a control status that already
+        // has this view, and two publishes from different threads cannot leave the
+        // control with the older one.
+        let control = self.0.control.lock();
+        if let Some(c) = control.as_ref() {
             c.set_install(view.clone(), problems_of(view.as_ref()));
         }
+        self.0.view.send_replace(view);
     }
 }
 
