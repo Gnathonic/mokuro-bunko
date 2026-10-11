@@ -108,6 +108,17 @@ Proxies: Caddy forwards WebSockets as-is. The bundled nginx template sets
    Older libraries send no field (nothing happens: a processor compares only to
    report) and log and drop the event.
 
+11. **The library's engines** (0.7, additive). The `RegisterReply` carries `engines`:
+   the engines of the library's enabled generations, once each with its precision
+   mode (`[{"engine":"hayai-nova","precision":"auto-accuracy"}]`). The processor keeps
+   the list in `<storage>/library-engines.json` and downloads ahead of work only those
+   engines' models (`install-ocr`, `models download`); when the list names an engine
+   whose files are missing it fetches them in the background, then registers again.
+   The catalog still lists every engine the processor could run, since a session's
+   models are fetched when it opens. Older libraries send no field (the processor
+   fetches PP-OCR's models only, and the rest when a session needs them); older
+   processors ignore it.
+
 ## Local processing
 
 The full build runs the same `bunko-processor` code in-process. Ops and events travel over

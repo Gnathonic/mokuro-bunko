@@ -599,11 +599,22 @@ impl ModelsPlan {
 }
 
 /// What to fetch for, as `(engine, precision mode)` rows: `--engine` (its default row),
-/// else the library's enabled generations (each at its precision mode), else (a
-/// processor, which runs whatever its library asks for) every engine's default row.
+/// else the library's enabled generations (each at its precision mode); a processor
+/// takes what its library named at the last registration ([`bunko_processor::wants`]),
+/// or only PP-OCR before it has said.
 pub fn wanted_rows(target: &OcrTarget, engine: Option<&str>) -> Vec<(String, String)> {
     match (engine, target.library.as_ref()) {
         (Some(e), _) => vec![(e.to_string(), "auto-accuracy".to_string())],
+        (None, _) if target.role == Role::Processor => {
+            match bunko_processor::wants::read(&target.storage) {
+                Some(wants) => wants
+                    .into_iter()
+                    .filter(|w| models::ENGINES.contains(&w.engine.as_str()))
+                    .map(|w| (w.engine, w.precision))
+                    .collect(),
+                None => vec![(models::PPOCR.to_string(), "auto-accuracy".to_string())],
+            }
+        }
         (None, Some(cfg)) if target.role == Role::Library => cfg
             .ocr
             .generations
@@ -636,6 +647,18 @@ pub fn planned_ids(rows: &[(String, String)], gpu: bool) -> Vec<&'static str> {
         }
     }
     ids
+}
+
+/// Whether a model file the wanted rows need (PP-OCR and the recognizers' host files;
+/// the compiled packages are the install's to judge) is missing from the store. Cheap:
+/// no download, no hashing, no backend. False where downloads are off
+/// (`MOKURO_MODELS_DOWNLOAD=0`): nothing could fetch them.
+pub fn wanted_missing(target: &OcrTarget) -> bool {
+    let store = target.engine_config(Backend::Auto).store();
+    store.can_download()
+        && planned_ids(&wanted_rows(target, None), false)
+            .iter()
+            .any(|id| store.locate(id).is_none())
 }
 
 /// Also used by `install-ocr`.

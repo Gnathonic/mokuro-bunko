@@ -225,11 +225,23 @@ impl Installer {
     /// is needed but automatic installs are off, say so (a problem with an Install
     /// button). Returns whether an install runs now. Call inside the tokio runtime.
     pub fn start_if_needed(&self) -> bool {
+        if self.0.running.load(Ordering::SeqCst) {
+            return true;
+        }
         let (auto, note) = install_ocr::auto_install_setting(|n| std::env::var(n).ok());
         if let Some(n) = note {
             info!("{n}");
         }
         match self.decide() {
+            Ok(Decision::Install {
+                models_only: true, ..
+            }) if auto => {
+                info!(
+                    "OCR models are missing for the engines in use; fetching them in the background"
+                );
+                self.spawn();
+                true
+            }
             Ok(Decision::Install {
                 reason, request, ..
             }) if auto => {
@@ -243,6 +255,14 @@ impl Installer {
                 );
                 self.spawn();
                 true
+            }
+            Ok(Decision::Install {
+                models_only: true, ..
+            }) => {
+                info!(
+                    "OCR models are missing; automatic installs are off (MOKURO_OCR_AUTO_INSTALL=false): they download when an engine first needs them"
+                );
+                false
             }
             Ok(Decision::Install { variant, .. }) => {
                 let text = format!(
@@ -323,6 +343,7 @@ impl Installer {
                     reason: format!("the {variant} pack is not installed ({reason})"),
                     variant,
                     request: request.is_some(),
+                    models_only: false,
                 })
             }
             // The wizard asked for something the pack in place may not be (another
@@ -334,16 +355,18 @@ impl Installer {
                     .unwrap_or_else(|| "auto".into()),
                 reason: "the setup picked the OCR backend".into(),
                 request: true,
+                models_only: false,
             }),
-            // The pack is in place but the last install's models did not all download:
-            // the child fetches the rest.
-            Need::Satisfied(_) if install_ocr::models_incomplete(&backends) => {
+            // The pack is in place but models are missing (the last install's failed,
+            // or the library asked for another engine): the child fetches them.
+            Need::Satisfied(_) if install_ocr::models_wanted(&target, &backends) => {
                 Ok(Decision::Install {
                     variant: install_ocr::wanted_choice(&target, &hw, &backends)
                         .variant
                         .to_string(),
-                    reason: "the last install did not download all the OCR models".into(),
+                    reason: "OCR models are missing for the engines in use".into(),
                     request: false,
+                    models_only: true,
                 })
             }
             Need::Satisfied(why) => Ok(Decision::Nothing(why)),
@@ -687,6 +710,8 @@ enum Decision {
         variant: String,
         reason: String,
         request: bool,
+        /// The pack is in place: only models are fetched.
+        models_only: bool,
     },
     Nothing(String),
 }

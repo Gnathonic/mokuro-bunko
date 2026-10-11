@@ -56,6 +56,7 @@ async fn register(State(lib): State<Shared>, body: Bytes) -> Response {
         "protocol": 3, "processor_id": "p1", "socket": "/_processor/p1/socket",
         "results": "/_processor/p1/results/{sid}/{claim}", "archives": "/mokuro-reader/",
         "version": env!("CARGO_PKG_VERSION"),
+        "engines": [{"engine": "hayai-nova", "precision": "auto-accuracy"}],
     }))
     .into_response()
 }
@@ -332,6 +333,33 @@ async fn an_install_that_finishes_later_registers_again() {
     // Once: the new connection does not take the old "done" for another install.
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(registrations(&lib), 2);
+    stop.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+}
+
+/// The library names its engines at registration: kept in the storage, and the binary's
+/// hook (which fetches missing models) runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_library_engines_are_kept_and_announced() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, lib) = library().await;
+    let mut o = options(&url, dir.path());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    o.on_engines = Some(Arc::new(move || {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let stop = o.shutdown.clone();
+    let task = tokio::spawn(serve(o));
+    wait_for(&lib, 10, |l| has(l, "register:-")).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "hook not called");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let wants = bunko_processor::wants::read(dir.path()).unwrap();
+    assert_eq!(wants.len(), 1);
+    assert_eq!(wants[0].engine, "hayai-nova");
     stop.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
 }

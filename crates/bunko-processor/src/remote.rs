@@ -79,6 +79,9 @@ pub struct ServeOptions {
     /// and takes no work; once it is done the processor registers again with what it
     /// can run now. None: no install (tests, the lite build).
     pub install: Option<crate::session::InstallWatch>,
+    /// Called after each registration whose reply names the library's engines (kept in
+    /// [`crate::wants`]): the binary fetches the models it lacks for them. None: nothing.
+    pub on_engines: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// How `serve` ended without an error.
@@ -108,6 +111,7 @@ impl ServeOptions {
             installer: None,
             retry_first: bunko_update::auto::retry_first(),
             install: None,
+            on_engines: None,
         }
     }
 }
@@ -242,6 +246,34 @@ fn on_registered(
     track: &mut UpdateTrack,
     reply: &RegisterReply,
 ) -> Option<String> {
+    if let Some(wants) = &reply.engines {
+        let storage = &options.config.processor.storage;
+        match crate::wants::write(storage, wants) {
+            Ok(changed) => {
+                if changed {
+                    tracing::info!(
+                        "The library runs {}: models are fetched for these",
+                        if wants.is_empty() {
+                            "no engine".to_string()
+                        } else {
+                            wants
+                                .iter()
+                                .map(|w| w.engine.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }
+                    );
+                }
+                if let Some(hook) = &options.on_engines {
+                    hook();
+                }
+            }
+            Err(e) => tracing::warn!(
+                "Could not keep the library's engines in {}: {e}",
+                crate::wants::path(storage).display()
+            ),
+        }
+    }
     let (mismatch, from_library) = mismatch_of(reply);
     let auto = options.config.processor.auto_update && from_library && options.installer.is_some();
     let ours = env!("CARGO_PKG_VERSION");

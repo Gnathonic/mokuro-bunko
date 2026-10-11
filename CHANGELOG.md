@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+- **A processor downloads only the models its library uses.** The library names the
+  engines of its enabled generations when a processor registers (`RegisterReply.engines`);
+  the processor keeps the list (`library-engines.json` in its storage) and its install,
+  `models download` and automatic updates fetch those engines' models, not every
+  engine's (paddle-manga alone is 3.4 GB). When the library enables another engine, the
+  processor fetches its models in the background at its next registration. Before the
+  first registration, or with an older library, it fetches PP-OCR's only; any engine's
+  models are still fetched when a session first needs them.
+
 ### Fixed
 - **Big model files download on slow links.** A download had 120 seconds for the
   whole file, so the 1.8 GB paddle-manga weights failed below about 10 MB/s and the

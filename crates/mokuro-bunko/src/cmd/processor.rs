@@ -122,6 +122,17 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
         // Only the instance that will hold the storage installs and serves the control
         // API (a second one fails below).
         let owns_storage = storage_free(&storage);
+        // The library names its engines at each registration: fetch the models of any
+        // that are missing (in the background, like the install).
+        if owns_storage {
+            let installer = ocr_installer.clone();
+            options.on_engines = Some(Arc::new(move || {
+                let installer = installer.clone();
+                tokio::task::spawn_blocking(move || {
+                    installer.start_if_needed();
+                });
+            }));
+        }
         // The local control API (GUI.md §2): pause/resume, status, the app pages.
         let control_server = if bunko_control::enabled_from_env() && owns_storage {
             let control = bunko_control::Control::new(crate::control::config(

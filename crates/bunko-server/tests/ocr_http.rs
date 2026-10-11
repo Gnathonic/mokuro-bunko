@@ -531,6 +531,21 @@ async fn remote_round_trip_over_a_websocket() {
         reg["version_mismatch"],
         json!({"library_version": ours, "processor_version": "0.7.0", "relation": relation})
     );
+    // 0.7: the engines of the enabled generations, for the processor's model downloads.
+    let mut want: Vec<Value> = Vec::new();
+    for g in bunko_core::Config::default()
+        .ocr
+        .generations
+        .iter()
+        .filter(|g| g.runnable())
+    {
+        let w = json!({"engine": g.engine, "precision": g.precision});
+        if !want.contains(&w) {
+            want.push(w);
+        }
+    }
+    assert!(!want.is_empty());
+    assert_eq!(reg["engines"], Value::Array(want));
 
     let mut req = format!("ws://{addr}/_processor/{pid}/socket")
         .into_client_request()

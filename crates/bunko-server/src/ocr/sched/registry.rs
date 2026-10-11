@@ -506,7 +506,24 @@ impl Scheduler {
             archives: bunko_proto::ARCHIVES_ROOT.to_string(),
             version: self.deps.version.clone(),
             version_mismatch,
+            engines: Some(self.wanted_engines()),
         })
+    }
+
+    /// The engines (with their precision modes) of the enabled generations, once each:
+    /// what a registering processor downloads models for.
+    fn wanted_engines(&self) -> Vec<bunko_proto::EngineWant> {
+        let mut out: Vec<bunko_proto::EngineWant> = Vec::new();
+        for g in self.settings.rows.iter().filter(|g| g.runnable()) {
+            let want = bunko_proto::EngineWant {
+                engine: g.engine.clone(),
+                precision: g.precision.clone(),
+            };
+            if !out.contains(&want) {
+                out.push(want);
+            }
+        }
+        out
     }
 
     /// `GET /_processor/{pid}/socket`: the link of a registration.
