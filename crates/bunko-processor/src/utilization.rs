@@ -389,7 +389,18 @@ mod tests {
             }
         };
         wait(&|v| !v.is_empty());
-        std::fs::write(&stat, "cpu  150 0 150 900 0 0 0 0 0 0\n").unwrap();
+        // Swapped in whole, the way /proc/stat reads. `fs::write` truncates before it
+        // writes: a tick that reads the empty file in between drops its baseline, the
+        // file never changes again, and no later tick has a difference to report.
+        let next = dir.path().join("stat.next");
+        std::fs::write(&next, "cpu  150 0 150 900 0 0 0 0 0 0\n").unwrap();
+        let mut tries = 0;
+        while let Err(e) = std::fs::rename(&next, &stat) {
+            // Windows' older rename refuses a target another handle has open.
+            tries += 1;
+            assert!(tries < 100, "could not replace the stat file: {e}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
         wait(&|v| v.iter().any(|x| x.cpu_pct.is_some()));
         s.stop();
         let (gpu, cpu) = s.means(Some(0.0), Some(10.0));
