@@ -523,7 +523,9 @@ fn inflate_stream(deflated: Bytes, tail: Bytes) -> Body {
     let s = stream::unfold(st, |mut st| async move {
         if !st.done {
             let mut out = Vec::with_capacity(64 * 1024);
-            while out.len() < out.capacity() && st.pos < st.input.len() {
+            // Not done when the input runs out: a decompressor may still hold output then
+            // (miniz does not with these chunk sizes; other flate2 backends may).
+            while out.len() < out.capacity() {
                 let (before_in, before_out) = (st.dec.total_in(), out.len());
                 let res = st.dec.decompress_vec(
                     &st.input[st.pos..],
@@ -542,16 +544,13 @@ fn inflate_stream(deflated: Bytes, tail: Bytes) -> Body {
                             },
                         ));
                     }
-                    // No progress either way: the input is exhausted for this stream.
+                    // No progress either way: everything is out.
                     Ok(_) if st.dec.total_in() == before_in && out.len() == before_out => {
-                        st.pos = st.input.len();
+                        st.done = true;
                         break;
                     }
                     Ok(_) => {}
                 }
-            }
-            if st.pos >= st.input.len() {
-                st.done = true;
             }
             if !out.is_empty() {
                 return Some((Ok(Bytes::from(out)), st));
