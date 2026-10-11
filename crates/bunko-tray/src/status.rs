@@ -29,7 +29,8 @@ pub struct Status {
     pub role: String,
     pub version: String,
     pub name: String,
-    /// working | idle | paused | pausing | connecting | disconnected | error | setup
+    /// working | idle | installing | paused | pausing | connecting | disconnected |
+    /// error | setup
     pub state: String,
     pub pause: Pause,
     pub library: Option<Library>,

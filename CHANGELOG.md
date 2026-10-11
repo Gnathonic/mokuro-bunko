@@ -25,6 +25,13 @@
   shorter than its Content-Length and the gzip one did not decode. Rare (a few listings
   in a thousand), but the same listing compresses the same way every time, so a client
   kept getting the broken one until the folder changed.
+- **A processor installing its OCR backend says so, like a server.** Its dashboard
+  showed "Idle — waiting for volumes" and the problem "Run 'mokuro-bunko install-ocr
+  --processor'" for up to two minutes while the background install was already
+  running (its problems check ran before the install started). Now no such problem
+  shows while the install runs, and a server or processor with nothing to read until
+  its backend is in place reads **Installing OCR backend** (`/control/status` `state:
+  "installing"`; the dashboard's state, the tray's status line with the percent).
 
 ## [0.7.0-beta.4] - 2026-10-09
 

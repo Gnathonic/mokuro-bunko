@@ -217,6 +217,8 @@ fn serves_at_once_while_the_backend_installs_and_a_failure_is_a_problem() {
     };
     let s = status(&control);
     assert_eq!(s["install"]["state"], "running", "{s}\n{}", show());
+    assert_eq!(s["state"], "installing", "{s}");
+    assert_eq!(doctor_backend_problem(&s), None, "{s}");
     assert!(
         http(port, "GET", "/api/health", None).is_some_and(|(c, _)| c == 200),
         "still serving while it installs"
@@ -259,4 +261,137 @@ fn serves_at_once_while_the_backend_installs_and_a_failure_is_a_problem() {
     });
     // The server never stopped answering.
     assert!(http(port, "GET", "/api/health", None).is_some_and(|(c, _)| c == 200));
+}
+
+/// The doctor's "no backend pack" problem (`Run 'mokuro-bunko install-ocr --processor'`),
+/// which the background install speaks for while it runs or after it failed.
+fn doctor_backend_problem(status: &serde_json::Value) -> Option<String> {
+    status["problems"]
+        .as_array()?
+        .iter()
+        .find(|p| {
+            p["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("OCR backend: "))
+        })
+        .map(|p| p.to_string())
+}
+
+/// `processor serve` installs a missing OCR backend in the background like `serve`:
+/// from its first status on, the dashboard and the tray read "installing" and the
+/// doctor's install-ocr problem stays out of the way (the problems watcher used to make
+/// its first check before the install started, and kept the problem for two minutes).
+#[test]
+fn a_processor_reads_as_installing_without_the_install_ocr_problem() {
+    let env = common::Env::new();
+    let port = free_port();
+    env.write_config(&format!(
+        "server:\n  host: 127.0.0.1\n  port: {port}\nupdate:\n  check: false\nocr:\n  local_processing: false\n"
+    ));
+    add_admin(&env);
+    let out = env
+        .std_cmd()
+        .args([
+            "admin",
+            "add-user",
+            "gpu",
+            "--role",
+            "processor",
+            "--password",
+            "proc-pass-123",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", common::stderr(&out));
+    let library_log = env.root().join("serve.log");
+    let out = std::fs::File::create(&library_log).unwrap();
+    let library = env
+        .std_cmd()
+        .arg("serve")
+        .env("MOKURO_CONTROL", "off")
+        .stdout(out.try_clone().unwrap())
+        .stderr(out)
+        .spawn()
+        .unwrap();
+    let _library = Killed(library);
+    wait(60, "the library's /api/health", || {
+        http(port, "GET", "/api/health", None).filter(|(s, _)| *s == 200)
+    });
+
+    let storage = env.root().join("processor");
+    let config = env.root().join("processor.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "library:\n  url: http://127.0.0.1:{port}\n  username: gpu\n  password: proc-pass-123\nprocessor:\n  name: test-gpu\n  storage: {}\n",
+            storage.display()
+        ),
+    )
+    .unwrap();
+    let release = slow_release();
+    let log = env.root().join("processor.log");
+    let out = std::fs::File::create(&log).unwrap();
+    let child = env
+        .std_cmd()
+        .args(["processor", "serve", "--config"])
+        .arg(&config)
+        .env("MOKURO_OCR_AUTO_INSTALL", "true")
+        .env(
+            "MOKURO_BACKEND_MANIFEST",
+            format!("http://127.0.0.1:{}/release.json", release.port),
+        )
+        .env("MOKURO_MODELS_DOWNLOAD", "0")
+        .stdout(out.try_clone().unwrap())
+        .stderr(out)
+        .spawn()
+        .unwrap();
+    let _processor = Killed(child);
+    let show = || std::fs::read_to_string(&log).unwrap_or_default();
+
+    let control = wait(60, "the processor's .control.json", || {
+        bunko_control::read_control_file(&storage)
+    });
+    let status = || -> serde_json::Value {
+        let (code, body) = http(control.port, "GET", "/control/status", Some(&control.token))
+            .unwrap_or((0, String::new()));
+        assert_eq!(code, 200, "{body}\n{}", show());
+        serde_json::from_str(&body).unwrap()
+    };
+    // Every status while it installs: no install-ocr problem; once registered with the
+    // library, the state is "installing", not "idle".
+    let s = wait(60, "the processor to read as installing", || {
+        let s = status();
+        if let Some(p) = doctor_backend_problem(&s) {
+            panic!(
+                "the install-ocr problem while installing: {p}\n{s}\n{}",
+                show()
+            );
+        }
+        (s["state"] == "installing").then_some(s)
+    });
+    assert_eq!(s["install"]["state"], "running", "{s}");
+    assert_eq!(s["library"]["connected"], true, "{s}");
+    wait(30, "the install to reach the release", || {
+        (release.hits.load(Ordering::SeqCst) > 0).then_some(())
+    });
+    let s = status();
+    assert_eq!(s["state"], "installing", "{s}");
+    assert_eq!(doctor_backend_problem(&s), None, "{s}");
+
+    // The download fails: the install's own problem (with a retry), still not the
+    // doctor's, and the processor is no longer installing.
+    release.release.store(true, Ordering::SeqCst);
+    let s = wait(60, "the failed install", || {
+        let s = status();
+        (s["install"]["state"] == "failed").then_some(s)
+    });
+    let problems = s["problems"].as_array().cloned().unwrap_or_default();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p["kind"] == "ocr-install" && p["severity"] == "fail"),
+        "{s}"
+    );
+    assert_eq!(doctor_backend_problem(&s), None, "{s}");
+    assert_ne!(s["state"], "installing", "{s}");
 }
