@@ -46,14 +46,14 @@ Every release has two builds of the same `mokuro-bunko` executable:
 
 | Edition | Contains | Use it for |
 |---|---|---|
-| **full** | The server, WebDAV, catalog, admin panel, local OCR, the `processor` command and the desktop tray. | Windows, macOS (Apple silicon), Linux x64, the Docker `:latest` image. |
+| **full** | The server, WebDAV, catalog, admin panel, local OCR, the `processor` command and the desktop tray (which never starts in Docker). | Windows, macOS (Apple silicon), Linux x64, the Docker `:latest` image. |
 | **lite** (server) | The server without OCR engines: OCR comes from **remote processors**. A static binary; idles around 16 MiB of RAM in Docker. | Linux arm64 (Raspberry Pi, NAS), the Docker `:latest-lite` image, a 1 GB VPS. |
 
-The full build runs on any GPU: the OCR recognizers run on **libtorch**, which `mokuro-bunko install-ocr` (or the setup wizard) downloads as a *backend pack* for the hardware it finds — CUDA for NVIDIA GPUs (Linux, Windows; driver 580 or newer), ROCm for AMD Radeon RX 6000/7000/9000 (Linux), or the CPU (all platforms).
+The full build runs on any GPU: the OCR recognizers run on **libtorch**, which the server downloads by itself in the background (or `mokuro-bunko install-ocr` does) as a *backend pack* for the hardware it finds — CUDA for NVIDIA GPUs (Linux, Windows; driver 580 or newer), ROCm for AMD Radeon RX 6000/7000/9000 (Linux), or the CPU (all platforms).
 
 ## Quick start
 
-Run `mokuro-bunko`. On a desktop it starts the app: a tray icon, and the first time the setup wizard in your browser. Headless (a server, SSH) it runs what is set up, or the terminal setup when nothing is. `mokuro-bunko --help` lists the commands. On Windows, use `mokuro-bunko-cli` in a terminal.
+Run `mokuro-bunko`. On a desktop it starts the app: a tray icon, and the first time a chooser in your browser (a library server here, or a processor for a library elsewhere). Headless (a server, SSH) it runs what is set up, or the terminal setup when nothing is. `mokuro-bunko --help` lists the commands. On Windows, use `mokuro-bunko-cli` in a terminal.
 
 The first browser visit to a new server (`http://localhost:8080`) walks you through creating the admin account; `mokuro-bunko setup` does the same in the console. From a browser on another machine (Docker, a NAS) the setup page asks for the one-time **setup code** the server prints in its log at startup (`First run: create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`).
 
@@ -63,11 +63,11 @@ The first browser visit to a new server (`http://localhost:8080`) walks you thro
 
 ### Windows
 
-Unzip the release anywhere and double-click **`mokuro-bunko.exe`**: a tray icon appears by the clock and the setup wizard opens in your browser the first time. In a terminal use `mokuro-bunko-cli`; `run.bat` runs the server in a console window instead, `doctor.bat` diagnoses problems. Config, library, logs and OCR models stay in a `data\` folder next to it (portable mode). `install.ps1` installs into `%LOCALAPPDATA%\mokuro-bunko\app` instead, with Start-menu shortcuts (`-Startup` for the tray at logon; parameters at the top of [`scripts/install.ps1`](scripts/install.ps1)), and keeps your data in `%LOCALAPPDATA%\mokuro-bunko`. For an NVIDIA GPU see [docs/setup-windows-nvidia-ocr.md](docs/setup-windows-nvidia-ocr.md).
+Unzip the release anywhere and double-click **`mokuro-bunko.exe`**: a tray icon appears by the clock and the first time a chooser opens in your browser. In a terminal use `mokuro-bunko-cli`; `run.bat` runs the server in a console window instead, `doctor.bat` diagnoses problems. Config, library, logs and OCR models stay in a `data\` folder next to it (portable mode). `install.ps1` installs into `%LOCALAPPDATA%\mokuro-bunko\app` instead, with Start-menu shortcuts (`-Startup` for the tray at logon; parameters at the top of [`scripts/install.ps1`](scripts/install.ps1)), and keeps your data in `%LOCALAPPDATA%\mokuro-bunko`. For an NVIDIA GPU see [docs/setup-windows-nvidia-ocr.md](docs/setup-windows-nvidia-ocr.md).
 
 ### macOS
 
-Open the disk image and drag **Mokuro Bunko** to Applications (Apple silicon). Opening it puts an icon in the menu bar and starts the setup wizard the first time. The app is not notarized: if macOS says it cannot be opened, right-click it and choose Open once. The command line is `/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko`. Intel Macs have no build: use the Docker image.
+Open the disk image and drag **Mokuro Bunko** to Applications (Apple silicon). Opening it puts an icon in the menu bar and the first time opens a chooser in your browser. The app is not notarized: if macOS says it cannot be opened, right-click it and choose Open once. The command line is `/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko`. Intel Macs have no build: use the Docker image.
 
 ### Docker
 
@@ -91,7 +91,7 @@ docker logs mokuro-bunko      # First run: … /setup (setup code: XXXXX-XXXXX),
 
 The server answers within seconds. **First admin**: open `http://<host>:8080/setup` and enter the one-time setup code from the log (from the machine itself no code is needed).
 
-**OCR backend**: downloaded in the background while the server already serves: ~100 MB for the CPU, ~2 GB for NVIDIA (~350 MB from the release, the rest NVIDIA's CUDA libraries from PyPI), ~3 GB for AMD, then the models of the enabled engines. The log and the admin panel (Settings → OCR → Processors) show the progress; local OCR starts by itself when it is done; a failed download is shown there with a Retry button (and retried by itself). Later starts reuse it. Starting the container with a different GPU (or setting `MOKURO_OCR_BACKEND` to a GPU it now sees) installs that GPU's backend the same way.
+**OCR backend**: downloaded in the background while the server already serves: ~100 MB for the CPU, ~2 GB for NVIDIA (~350 MB from the release, the rest NVIDIA's CUDA libraries from PyPI), ~3 GB for AMD, then the models of the enabled engines. The log and the admin panel (This server, and Settings → OCR → Processors) show the progress; local OCR starts by itself when it is done; a failed download is shown there with a Retry button (and retried by itself). Later starts reuse it. Starting the container with a different GPU (or setting `MOKURO_OCR_BACKEND` to a GPU it now sees) installs that GPU's backend the same way.
 
 **NVIDIA GPU**: the host needs an NVIDIA driver **580 or newer** (CUDA 13), the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) and a Turing (GTX 16xx / RTX 20xx) or newer GPU. Check with `docker run --rm --gpus all ghcr.io/gnathonic/mokuro-bunko:beta install-ocr --list` (it prints the driver and GPU it sees, and the pack it would install).
 
@@ -184,7 +184,7 @@ The recognizers (hayai-nova, paddle-manga) run on [libtorch](https://pytorch.org
 
 The 0.5 `mokuro` engine and the GPL `ctd`, `animetext` and `rtdetr` detectors are gone; see the [migration guide](docs/MIGRATING-0.7.md) for what happens to old configs and existing `.mokuro` files.
 
-**Install the OCR backend once** on a full build: `mokuro-bunko install-ocr`. It looks at the hardware and installs the matching *backend pack* into `<storage>/backends/`:
+**The OCR backend** is installed once on a full build: the server (and a processor) does it by itself, in the background while it already serves, when local OCR needs it (a new server after its first-run setup), or run `mokuro-bunko install-ocr`. It looks at the hardware and installs the matching *backend pack* into `<storage>/backends/`:
 
 | Pack | For | Download | On disk |
 |---|---|---|---|
@@ -192,7 +192,7 @@ The 0.5 `mokuro` engine and the GPL `ctd`, `animetext` and `rtdetr` detectors ar
 | `rocm7.1` | AMD Radeon RX 6000 (gfx1030; RX 6600/6700 too: `HSA_OVERRIDE_GFX_VERSION=10.3.0` is set automatically), RX 7000, RX 9000 (Linux) | ~3 GB | 6.8 GB |
 | `cpu` | everything else (Linux x86_64, Windows, macOS on Apple silicon) | ~75 MB | 0.4 GB |
 
-On the CPU, OCR runs in fp32 like 0.5.2 (bf16 is an opt-in on CPUs with AVX512-BF16). Every file is checked against the signed release manifest. `install-ocr` picks the pack `ocr.backend` asks for on this hardware (`auto`: the GPU it finds; `cpu`: the CPU even with a GPU; `cuda`/`rocm`: that GPU, or the CPU with a hint when there is none). `install-ocr --list` shows what it detected, `--variant` picks a pack by hand, `--from <dir>` installs from downloaded files (air-gapped hosts). The Docker image downloads its pack on first start in the same way. ROCm needs a few system libraries (`libnuma`, including the unversioned `libnuma.so`; Debian/Ubuntu: `libnuma-dev`, Arch: `numactl`) — `install-ocr` and `doctor` name what is missing.
+On the CPU, OCR runs in fp32 like 0.5.2 (bf16 is an opt-in on CPUs with AVX512-BF16). Every file is checked against the signed release manifest. `install-ocr` picks the pack `ocr.backend` asks for on this hardware (`auto`: the GPU it finds; `cpu`: the CPU even with a GPU; `cuda`/`rocm`: that GPU, or the CPU with a hint when there is none). `install-ocr --list` shows what it detected, `--variant` picks a pack by hand, `--from <dir>` installs from downloaded files (air-gapped hosts). The Docker image carries no pack and installs it the same way. ROCm needs a few system libraries (`libnuma`, including the unversioned `libnuma.so`; Debian/Ubuntu: `libnuma-dev`, Arch: `numactl`) — `install-ocr` and `doctor` name what is missing.
 
 **Models** (the compiled hayai-nova / paddle-manga packages for your GPU, and the PP-OCR files) are downloaded on first use into `<storage>/models/` and verified by sha256, so the first OCR run needs internet access and some disk (about 0.5 GB for hayai-nova, a few GB for paddle-manga). `install-ocr` fetches them up front; `mokuro-bunko models list|download|verify` manages them; `MOKURO_MODELS_DIR` points at a directory of files for air-gapped hosts.
 
@@ -255,7 +255,8 @@ mokuro-bunko models         # list, download [--engine E], verify   (full build)
 mokuro-bunko processor      # serve, setup, status, service         (full build)
 mokuro-bunko healthcheck    # probe /api/health, for container HEALTHCHECKs
 mokuro-bunko install-ocr    # install the OCR backend pack for this GPU/CPU + the models (full build)
-mokuro-bunko gui            # the desktop app: setup, settings and dashboard in the browser
+mokuro-bunko gui            # the desktop app's local pages: the chooser, a processor's pairing, settings and status
+mokuro-bunko tray           # the tray icon (what `mokuro-bunko` with no arguments runs on a desktop; full build)
 ```
 
 Global options: `-c, --config <PATH>` (or `MOKURO_CONFIG`), `-v, --verbose`, `--version` (prints the version, build flavor and target). `mokuro-bunko <command> --help` has the details.
@@ -273,7 +274,7 @@ cargo run -p xtask -- torch-pack --variant cpu --out dist       # an OCR backend
 mokuro-bunko install-ocr --from dist                            # install it
 ```
 
-Cargo features of `mokuro-bunko`: `ocr` (on by default: ONNX Runtime on the CPU, the libtorch pack loader, local OCR and the `processor` command). The ONNX Runtime binaries are fetched at build time; libtorch only by `xtask torch-pack` (the binary never links it). The ONNX Runtime GPU execution providers `cuda`, `webgpu`, `directml`, `coreml` still build but are not released. Release archives, signing and Docker images are built with `cargo run -p xtask -- <command>` (see [docs/rust-port/PACKAGING.md](docs/rust-port/PACKAGING.md)); the design is in [docs/rust-port/ARCHITECTURE.md](docs/rust-port/ARCHITECTURE.md).
+Cargo features of `mokuro-bunko`: `ocr` (on by default: ONNX Runtime on the CPU, the libtorch pack loader, local OCR and the `processor` command) and `tray` (on by default: the desktop tray). The ONNX Runtime binaries are fetched at build time; libtorch only by `xtask torch-pack` (the binary never links it). The ONNX Runtime GPU execution providers `cuda`, `webgpu`, `directml`, `coreml` still build but are not released. Release archives, signing and Docker images are built with `cargo run -p xtask -- <command>` (see [docs/rust-port/PACKAGING.md](docs/rust-port/PACKAGING.md)); the design is in [docs/rust-port/ARCHITECTURE.md](docs/rust-port/ARCHITECTURE.md).
 
 ```bash
 cargo test --workspace      # run tests

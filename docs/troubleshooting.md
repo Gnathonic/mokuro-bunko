@@ -117,10 +117,11 @@ without installing anything.
 - **Installing in the background** (Docker, or any `serve` / `processor
   serve` whose enabled generations need a backend that is missing): the
   server serves meanwhile; the progress is in the log (`OCR install: ...`
-  lines), the admin panel (Settings → OCR → Processors), the dashboard and
-  the tray. Nothing is installed when `MOKURO_OCR_AUTO_INSTALL=false` (the
-  admin panel then offers Install) or local OCR is off
-  (`MOKURO_OCR_BACKEND=skip`, `MOKURO_OCR_LOCAL_PROCESSING=false`). A failed
+  lines), the admin panel (This server, and Settings → OCR → Processors), the
+  dashboard and the tray. Nothing is installed when `MOKURO_OCR_AUTO_INSTALL=false`
+  (the admin panel then offers Install), when local OCR is off
+  (`MOKURO_OCR_BACKEND=skip`, `MOKURO_OCR_LOCAL_PROCESSING=false`), or on a new
+  server before its first-run setup (its OCR step decides). A failed
   download is a problem with a Retry button, tried again after 5, 15 and 60
   minutes and at the next start; `docker exec <container> mokuro-bunko
   install-ocr` installs it by hand (local OCR then starts with the next
@@ -178,8 +179,8 @@ without installing anything.
 paddle-manga runs on the CPU, as in 0.5.2, but slowly: about 40 s a page on 16
 threads (a Ryzen 7 5800X), where hayai-nova takes about 4 s. Its CPU package
 downloads 3.6 GB of weights (fp32; the same files its GPU packages use) and
-needs about 6 GB of RAM while it reads. The setup wizard, the settings page
-and the admin panel's pools table say so where the CPU is picked for it.
+needs about 6 GB of RAM while it reads. The processor's OCR pages and the
+admin panel's pools table say so where the CPU is picked for it.
 
 On a machine without a GPU, use hayai-nova (the default) for the library's
 primary generation. Keep a paddle-manga generation only if you want its
@@ -245,7 +246,10 @@ exits non-zero when anything failed. If it fails:
   `MOKURO_MODELS_MIRROR` does the same for the `models-v1` files. Simplest: put
   the backend pack archive and all those files in one folder and run
   `mokuro-bunko install-ocr --from <folder>`, which uses the folder for both
-  (the wizard's "Install from a folder" does the same);
+  (the processor's OCR install page, "Install from a folder", does the same;
+  without `--from`, `install-ocr` and the background install use an
+  `ocr-offline` folder next to the program, in the macOS app
+  `Contents/Resources/ocr-offline`, when it holds a pack archive);
 - `mokuro-bunko models verify` re-checks every file; delete a damaged one
   (`MISMATCH`) and download again;
 - `MOKURO_MODELS_DOWNLOAD=0` forbids downloading (unset it); `doctor` then
@@ -357,8 +361,9 @@ card and the queue page's detailed level show each machine's speeds; see
   signed with another key. Nothing is installed; try again, and check the URL.
 - **Checks do nothing.** `update.check` may be `false`; **Check now** still
   works. The server needs outbound HTTPS to GitHub.
-- On Windows `run.bat` restarts the server after an update; if you started
-  `mokuro-bunko.exe` by hand, start it again if it does not come back.
+- On Windows the tray and `run.bat` restart the server after an update; if you
+  started `mokuro-bunko-cli.exe serve` by hand, start it again if it does not
+  come back.
 - **Automatic update "waiting" for a long time.** It installs only when no OCR
   volume is in flight anywhere (on this server and on remote processors) and no
   upload is running; new OCR work is held meanwhile. The Updates card and the
@@ -402,8 +407,9 @@ answers (what the Docker health check runs).
 `install.ps1` prints each step and its failure; re-running it is safe and
 updates in place (your data is kept). If SmartScreen blocks the executable,
 choose "More info" then "Run anyway": the binaries are not Authenticode
-signed. `doctor.bat` (portable zip) or `mokuro-bunko.exe doctor` checks the
-installation. For NVIDIA GPUs see
+signed. `doctor.bat` or `mokuro-bunko-cli.exe doctor` checks the
+installation (in a terminal use `mokuro-bunko-cli.exe`: `mokuro-bunko.exe` is
+the app, with no console window). For NVIDIA GPUs see
 [setup-windows-nvidia-ocr.md](setup-windows-nvidia-ocr.md).
 
 ## The first-run setup page will not open from another machine
