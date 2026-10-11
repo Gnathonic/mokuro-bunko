@@ -1,6 +1,7 @@
 # libtorch recognizer backend (0.7 parity plan)
 
-**Status:** design, 2026-10-02. **Decision (owner):** 0.7 aims at *parity with 0.5.2, in Rust*.
+**Status:** built; the release backend of 0.7 since 0.7.0-beta.1 (design of 2026-10-02,
+kept current where it changed). **Decision (owner):** 0.7 aims at *parity with 0.5.2, in Rust*.
 The recognizers (hayai-nova, paddle-manga) run on **libtorch** — the same torch 0.5.2 ran — on
 NVIDIA CUDA, AMD ROCm (Linux) and the CPU. ONNX Runtime stays only where 0.5.2 used it: the
 PP-OCR detector + CTC reader of ppocr-manga, on the CPU (0.5.2 `ppocr.py`, CPUExecutionProvider).
@@ -465,9 +466,9 @@ A handle is shared by any number of threads (device work is serialised inside).
   vram_mb, pci, formats}], warnings}`. GPU facts come from the CUDA driver API / HIP runtime
   (+ KFD sysfs for the gfx target; `HSA_OVERRIDE_GFX_VERSION` honoured). Formats: GPUs
   fp32/fp16/bf16 (what 0.5.2's torch probe said); the CPU fp32, plus bf16 on x86-64-v4 +
-  AVX512_BF16 hosts (the bf16 CPU packages need it). 0.5.2 ran the CPU in fp32 only: on a
-  Zen 4/5 host hayai-nova's auto-accuracy now picks bf16 on the CPU (0.5.2's policy puts bf16
-  first for hayai). **Owner decision** if that should stay fp32.
+  AVX512_BF16 hosts (the bf16 CPU packages need it). Decided: the CPU stays on fp32 as in
+  0.5.2 — the auto modes never pick bf16 there (`bf16_native` below), and a row that
+  forces `bf16` still gets it on such a host.
 * `bt_load(engine, model_dir, precision, device, opts)`: `opts` = `LoadOptions {tokenizer,
   pos_table?, embeddings?, patch_budget?, threads, vision?, prefill?, step?, cache_dir?,
   weights?}`. Graphs default to `<model_dir>/{vision,prefill,step}.pt2`; a `.pt2` may be the
@@ -502,11 +503,12 @@ A handle is shared by any number of threads (device work is serialised inside).
   `<os>-cpu-arm64` (`bunko_ocr::models::torch_targets`). Manifest ids = store paths:
   `torch/<engine>/<precision>/<target>/<file>` and `torch/<engine>/<precision>/weights-<g>.safetensors`.
   **(2026-10-03)** The release's `torch-models.json` is compiled into bunko-ocr
-  (`crates/bunko-ocr/src/torch_models.json`, refreshed with each `torch-models-*` release; it
-  must also list the windows-* / macos-* targets). `ModelStore::ensure_torch_package` fetches
-  a package's graphs and only the weights files its graphs `require` (every release package),
-  verifies each `.pt2`, unpacks it to its `unpack_to` directory (`<target>/<role>/`, stamped
-  `.unpacked` = its sha256) and deletes the zip: one copy on disk, loaded in place.
+  (`crates/bunko-ocr/src/torch_models.json`, refreshed with each `torch-models-*` release;
+  today `torch-models-v1`, with the linux-*, windows-* and macos-* targets).
+  `ModelStore::ensure_torch_package` fetches a package's graphs and only the weights
+  files its graphs `require` (every release package), verifies each `.pt2`, unpacks it
+  to its `unpack_to` directory (`<target>/<role>/`, stamped `.unpacked` = its sha256)
+  and deletes the zip: one copy on disk, loaded in place.
   `MOKURO_TORCH_MODELS_MIRROR` (a base URL, or a directory of the flat asset names) is tried
   before GitHub (air-gapped hosts, local release copies, tests).
 * A compiled package's supported precisions = device formats ∩ packages obtainable here; a

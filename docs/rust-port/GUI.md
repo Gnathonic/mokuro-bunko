@@ -1,66 +1,61 @@
-# Desktop GUI: setup wizard, settings, dashboards and tray (0.7)
+# Desktop GUI: one web interface, local pages and the tray (0.7)
 
-**Status:** design, 2026-10-04. **Owner decisions:** browser UI + native tray; the wizard
-covers library first run, processor pairing, OCR install with progress, start-with-machine,
-and *everything that is a flag in the CLI*; tray pause offers both "after this volume" and
-"now" (plus timed pauses); tray on Windows, macOS and Linux.
-
-## 0. Since 0.7.0-beta.4: one web interface per server
-
-Everything about a library server is done in its own web pages, the same on the
-desktop, from another computer and in Docker. The loopback `/app` pages keep only what
-is truly local. Sections 1–5 below describe the design as first built; where they
-differ, this section wins.
-
-- **Server setup** is the server's `/setup` (localhost: no code; elsewhere the one-time
-  setup code from the log): admin account, who may join, remote access (tunnel,
-  Dynamic DNS, HTTPS, CORS), OCR on this machine (toggle, on when a usable GPU is
-  found; backend Auto, CPU or the GPU found). `POST /setup/api/complete` takes
-  `{admin, registration, remote, ocr}`; every answer is checked before the admin is
-  made. Values the environment sets are shown read-only (`GET /setup/api/options`
-  `pinned`). Every `/setup` route, the reads included, answers only while no admin
-  exists and only past the setup gate (localhost, the code, or a session from it);
-  `options` answers 410 once an admin exists. Certificate files may be named only
-  from the server itself. Finishing signs the admin in and opens `/_admin#server`. HTTPS turned on
-  restarts the server. Until an admin exists, a new server does not start the OCR
-  install by itself; the setup's choice does (when `MOKURO_OCR_AUTO_INSTALL` allows).
-- **Admin panel → This server** (`/_admin/api/machine/*`, admin only, CSRF-checked;
-  `bunko_server::machine::Machine`, implemented by the binary's `server_machine.rs`):
-  OCR on/off (`ocr.local_processing`), the backend preference (`ocr.backend`; locked
-  when `MOKURO_OCR_BACKEND` or `serve --ocr` sets it), install / reinstall / remove
-  with live progress (the background installer), engines and models (download,
-  verify, list), `doctor`, the server log. A backend switch installs what is missing;
-  when another backend is already loaded in the process the server restarts to use
-  it. Installs come only from the signed release or the `ocr-offline` folder next to
-  the program; no page names a folder. One install at a time; 3 s between starts of
-  an action (429).
-- **Desktop app** (`/app`, loopback + token as before): the chooser (Library server:
-  folder, then the tray runs `serve` on a free port from 8080 and the browser goes to
-  its `/setup`; Processor: the pairing page), the processor's pairing, settings
-  (connection, OCR & models, logs, diagnostics, updates) and status pages. Removed:
-  the server setup and settings pages, the start-up step and page, service install
-  from a page.
-- **Tray**: a greyed "Mokuro Bunko <version>" line, status, Statistics, pause items,
-  Open admin panel (`<library>/_admin`; the login page brings the admin back to it),
-  Open processor (its status page, signed in), Open library, "Set up…" (only while
-  nothing runs), Start at login, Quit.
+**Status:** built; describes the code of the 0.7 branch (first designed 2026-10-04,
+reshaped in 0.7.0-beta.4). **Owner decisions:** browser UI + native tray; a library server is
+set up and run from **its own web pages**, the same on the desktop, from another computer
+and in Docker; the desktop app keeps only what is local (the first-launch chooser and a
+processor's pages); *everything that is a flag in the CLI* has a home in a page, the tray
+or a "CLI-only because …" row (GUI-COVERAGE.md); tray pause offers both "after this
+volume" and "now" (plus timed pauses); tray on Windows, macOS and Linux.
 
 ## 1. Pieces
 
 ```
  mokuro-bunko tray (same program)            browser (default browser)
-   ├─ menu: status, stats, pause/resume,       ├─ wizard  /app/setup/...
-   │   open dashboard/library/settings/logs    ├─ settings /app/settings/...
-   ├─ start-at-login, quit                     └─ dashboard /app/dashboard
-   └─ talks to ──► local control API  ◄──────────── same origin (served by it)
-                    (127.0.0.1, token)
+   ├─ menu: version, status, stats,            ├─ the library server's own pages, any machine:
+   │   pause/resume, Open admin panel,         │     /setup (first run), /_admin (This server, …)
+   │   Open processor, Open library,           └─ local pages, this machine only (127.0.0.1):
+   │   Set up…, Start at login, Quit                 /app/ chooser, /app/setup/processor,
+   └─ talks to ──► local control API  ◄───────────── /app/settings, /app/dashboard
+                    (127.0.0.1, token)               (served by the control listener)
                          │
           mokuro-bunko serve  |  mokuro-bunko processor serve  |  mokuro-bunko gui
 ```
 
-- **Local control API** (new, in the existing binary): every long-running instance — `serve`
-  (library server, incl. its local OCR), `processor serve`, and the new `gui` command — listens
-  on `127.0.0.1:<ephemeral>` and writes `<storage>/.control.json`
+- **The library server's own pages** (`bunko-server`), the same locally, remotely and in
+  Docker:
+  - `/setup`, the first-run wizard: admin account, who may join, remote access (tunnel,
+    Dynamic DNS, HTTPS, other web apps' CORS origins), OCR on this machine (a toggle, on
+    when a usable GPU is found; backend Auto, CPU or the GPU found). `POST
+    /setup/api/complete` takes `{admin, registration, remote, ocr}`; every answer is
+    checked before the admin is made. Values the environment sets are shown read-only
+    (`GET /setup/api/options` `pinned`, and the OCR step's `backend_locked`). Every
+    `/setup` route, the reads included, answers only while no admin exists and only past
+    the setup gate: localhost, the **setup code**, or a setup session the code earned.
+    While no admin exists the server logs a new one-time code at every start (`First
+    run: create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`); from
+    another address `/setup` asks for it (5 tries per address, one more every 12 s;
+    30 wrong codes from everyone within a minute replace the code, logged anew, so a
+    flood never locks the owner out), or a script sends `X-Setup-Code`. The code lives
+    in memory and dies once an admin exists. Certificate files may be named only from
+    the server itself (elsewhere: the self-signed certificate). `options` answers 410
+    once an admin exists. Finishing signs the admin in and opens `/_admin#server`;
+    HTTPS turned on restarts the server. Until an admin exists a new server does not
+    start the OCR install by itself; the setup's choice does (when
+    `MOKURO_OCR_AUTO_INSTALL` allows).
+  - **Admin panel → This server** (`/_admin/api/machine/*`, admin only, CSRF-checked;
+    `bunko_server::machine::Machine`, implemented by the binary's `server_machine.rs`):
+    OCR on/off (`ocr.local_processing`), the hardware, the backend in use, the
+    preference (`ocr.backend`; locked when `MOKURO_OCR_BACKEND` or `serve --ocr` sets
+    it), install / reinstall / remove with live progress (the background installer),
+    engines and models (download, verify, details), `doctor`, the server log. A backend
+    switch installs what is missing; when another backend is already loaded in the
+    process the server restarts to use it. Installs come only from the signed release
+    or the `ocr-offline` folder next to the program; no page names a folder. One
+    install at a time; 3 s between starts of an action (429).
+- **Local control API** (in the existing binary): every long-running instance — `serve`
+  (library server, incl. its local OCR), `processor serve`, and `gui` — listens on
+  `127.0.0.1:<ephemeral>` and writes `<storage>/.control.json`
   `{role, pid, port, token, version, started_at}` (mode 0600; removed on clean exit). Requests
   carry `Authorization: Bearer <token>`. The token never goes into a URL (a URL ends up in
   the browser launcher's command line, which other local users can read, in the history and
@@ -71,19 +66,30 @@ differ, this section wins.
   (server and processor) plus `MOKURO_STORAGE` / `processor.yaml`, and trusts a
   `.control.json` only when (on Unix) it is a regular file owned by the user with no
   group/other permission bits.
-- **`mokuro-bunko gui`**: starts the control API + app pages with no server/processor running
-  (first run, or reconfiguring a stopped machine), opens the browser, exits when the wizard
-  hands off to a started service or the tab is closed for 10 min. On Windows/macOS,
-  double-clicking the binary with no arguments runs `gui` (CLI behaviour from a terminal
-  unchanged: a TTY keeps today's help output).
+- **The local pages** (`/app/...`, `crates/mokuro-bunko/src/gui/`), mounted on every
+  control listener: the first-launch **chooser** (`/app/`: **Library server** — pick the
+  folder; a config is written with port 8080 or the next free one, the tray runs `serve`
+  and the browser goes to its `/setup`, or to its admin panel when it is set up already;
+  **Processor** — the pairing page), the processor's **pairing** (`/app/setup/processor`:
+  the library and a tested login, this machine's name, sessions, working folder and
+  automatic updates, the OCR choices; saving hands the processor to the tray and waits
+  for it to connect), its **status** (`/app/dashboard`) and **settings** (`/app/settings`:
+  processor, OCR backend & models with the install page `/app/setup/ocr`, logs,
+  diagnostics, updates). A library server has no local settings pages: its setup and
+  settings are its own pages above.
+- **`mokuro-bunko gui`**: the control API + local pages with nothing running yet (first
+  run, or setting up a stopped machine), opens the browser at its one-time sign-in link,
+  and exits a few seconds after the chooser or the pairing page hands the browser on to
+  a started instance (`/app/api/handoff`), or when no page has talked to it for 10 min.
+  The tray runs it for "Set up…" and on a first run when nothing answers.
 - **`mokuro-bunko tray`** (crate `bunko-tray`, in the program since 0.7.0-beta.3; a separate
   `mokuro-bunko-tray` executable before): on Linux a StatusNotifierItem + dbusmenu on the
   session D-Bus (ksni on zbus, pure Rust: no GTK or AppIndicator library, so the full
   binary still runs headless and in Docker); on Windows and macOS `tray-icon` + `muda` on a
   `tao` event loop. `mokuro-bunko` with no arguments starts the app: in a desktop session
-  the tray (first run: the setup wizard), headless what is configured (`serve`,
-  `processor serve`, both) or `setup` (PACKAGING.md §1). Windows ships the program twice
-  from one build: `mokuro-bunko.exe` (the app, GUI subsystem: no console window) and
+  the tray (nothing set up: the chooser in the browser), headless what is configured
+  (`serve`, `processor serve`, both) or `setup` (PACKAGING.md §1). Windows ships the program
+  twice from one build: `mokuro-bunko.exe` (the app, GUI subsystem: no console window) and
   `mokuro-bunko-cli.exe` (console, for terminals). On macOS the app's main program is
   `mokuro-bunko`. The lite build has no tray.
 
@@ -106,16 +112,27 @@ All JSON. `GET /control/status`:
   "backend": {"pack": "torch-cu130-2.13.0", "devices": ["gpu:0 RTX 4090 sm_89"]},
   "problems": [{"severity": "warn|fail", "text": "...", "hint": "..."}],
   "urls": {"dashboard": "/app/dashboard", "library": "https://...", "logs_dir": "/path"},
-  "managed": false, "can_pause": true }
+  "managed": false, "can_pause": true,
+  "update": {"state": "idle|available|waiting|downloading|installing|restarting|updated|failed|blocked",
+             "version": "...", "from": "...", "message": "...", "auto": false, "since": "ISO-8601"},
+  "install": {"state": "running|done|failed|missing", "stage": "checking|waiting|downloading|unpacking|libraries|models|done|failed",
+              "percent": 42, "done_bytes": 0, "total_bytes": 0, "variant": "cu130", "pack": "...",
+              "message": "...", "needs_owner": false, "action": "..."} }
 ```
+
+(`update` and `install` are null when the instance has nothing to say: §4.)
 
 - `POST /control/pause {"mode": "after_volume"|"now", "until": ISO-8601|null}` → 200 status.
 - `POST /control/resume` → 200 status.
 - `GET /control/events` (Server-Sent Events): a `status` event on every change, at most 2/s;
   the tray and dashboard use it (polling `status` every 2 s is the fallback).
 - `POST /control/stop` (managed instances only: the tray's Quit).
-- `/app/...` serves the wizard/settings/dashboard pages; `/app/api/...` their backend
-  (settings read/write, install progress via SSE, doctor, logs tail, service install).
+- `POST /control/ocr-install`: start (or retry) the background OCR backend install
+  (202 `{installing, status}`; 409 when the instance has none).
+- `/app/...` serves the local pages (§1); `/app/api/...` their backend: the chooser's
+  server start, the processor's pairing, test and settings, hardware, logs, and long
+  work (install-ocr, models, doctor, update apply, …) run as this executable in a child
+  process and streamed over SSE (`gui/jobs.rs`).
 
 **As built (stream G1; additions to the contract above, all backward compatible):**
 
@@ -195,73 +212,86 @@ All JSON. `GET /control/status`:
   no start-failure backoff).
 - Library server with local OCR: the same pause applies to its in-process processor.
 
-## 4. Wizard and settings coverage
+## 4. Setup and settings: where each thing lives
 
-Flows (choose a role first; a machine can be both):
-1. **Library server**: library folder, port/host, admin account (today's `/setup`), remote
-   access (tunnel / dynamic DNS / HTTPS: `ssl`, `tunnel`, `dyndns` commands), OCR on this
-   machine (§4.3), start with the machine.
-2. **Processor**: library URL, login (user/password or token), connection test, name,
-   max sessions, storage, TLS verify, and the opt-in "Update this processor automatically
-   when its library updates" (unchecked; `processor.auto_update`, CLI `--auto-update`) —
-   today's `processor setup` — then §4.3 and start-up.
-3. **OCR install with progress**: detected hardware (`install-ocr --list`), pack choice
-   (`--variant`), download/verify/unpack progress, models download, `doctor`, first benchmark.
-4. **Start with the machine**: `processor service --install` / systemd user unit / launchd
-   agent / Windows Startup entry, plus a tray autostart entry and a Start-menu/desktop shortcut.
+Flows (the chooser picks a role first; a machine can be both):
 
-**Settings** must cover every CLI command and flag. The mapping lives in
-`docs/rust-port/GUI-COVERAGE.md` (command/flag → page), and a test walks the clap command tree
-and fails if a flag has no entry (or an explicit "CLI-only, because …" exemption, e.g.
-`-v`). Pages the library server already has (admin panel: users, invites, settings, tunnel,
-dyndns, generations, processors, updates) are linked, not duplicated; machine-local things
-(OCR pack, models, processor.yaml, service, logs, doctor, update apply, SSL files) get new
-`/app/settings` pages. Styling reuses `web/_static/shared.css`; no front-end framework or
-build step (plain JS like the existing pages).
+1. **Library server**: the chooser asks for the library folder and starts the server
+   (port 8080 or the next free one; the tray runs it from then on), and the browser
+   moves to the server's own `/setup` (§1): admin account, who may join, remote access
+   (tunnel / Dynamic DNS / HTTPS / CORS: the `ssl`, `tunnel`, `dyndns`, `config
+   cors-add` commands), OCR on this machine. From then on everything is in the admin
+   panel: Settings, Status (→ Updates), Connectivity, This server. Docker, a NAS or a
+   headless box start at `/setup` the same way, with the setup code.
+2. **Processor**: the pairing page: library URL, login (user/password), connection test,
+   name and public name, volumes at once, archive RAM, working folder, the library's
+   certificate (TLS verify), the opt-in "Update this processor automatically when its
+   library updates" (unchecked; `processor.auto_update`, CLI `--auto-update`) — today's
+   `processor setup` — and the OCR choices (pack, a folder to install from, no models).
+   Saving writes processor.yaml, hands the processor to the tray and waits for it to
+   connect; its OCR backend installs in the background meanwhile.
+3. **Starting with the machine**: the tray's **Start at login** checkbox (the tray then
+   starts what `tray.json` lists). No page installs a service: `processor service
+   --install`, `install.sh --systemd` / `--autostart` and `install.ps1 -Startup` stay
+   commands.
 
-**Automatic updates** are opt-in and off by default. Settings → Updates has "Install
-updates automatically" for each config the machine has: the library server's
-`update.auto` (written through the settings write path) and the processor's
-`processor.auto_update` (in processor.yaml; also a checkbox in Settings → Processor, so
-saving that form keeps it). `update.public_key` is never settable from a page. The
-admin panel's Updates card has the same switch (`POST /_admin/api/update/settings`).
-The dashboard shows `status.update` as one line: "Updating to X…" (waiting,
-downloading, installing, restarting), "Updated to X (from Y)", or "Update to X failed:
-… — will retry"; a `blocked` update (needs the owner) is a problem in the Problems
-panel instead.
+**Settings** cover every CLI command and flag. The mapping lives in
+`docs/rust-port/GUI-COVERAGE.md` (command/flag → the server's pages, a local page, a tray
+item, or an explicit "CLI-only because …"), and a test (`gui::coverage`) walks the clap
+command tree and fails if a flag has no row, or a row links a page, admin tab or tray item
+that does not exist. What concerns the library server is on its own pages (setup, the
+admin panel's tabs including This server); what is local to a processor is on
+`/app/settings` (processor.yaml, OCR pack and models, logs, doctor, updates). Styling
+reuses `web/_static/shared.css`; no front-end framework or build step (plain JS like the
+existing pages).
+
+**Automatic updates** are opt-in and off by default. The library server's `update.auto`
+is the admin panel's Updates card switch (`POST /_admin/api/update/settings`); an install
+that cannot update itself (Docker, a package manager) shows one line saying how to update
+instead. The processor's `processor.auto_update` (in processor.yaml) is a checkbox on the
+pairing page, in Settings → Processor and in Settings → Updates. `update.public_key` is
+never settable from a page. The dashboard shows `status.update` as one line: "Updating to
+X…" (waiting, downloading, installing, restarting), "Updated to X (from Y)", or "Update
+to X failed: … — will retry"; a `blocked` update (needs the owner) is a problem in the
+Problems panel instead.
 
 **OCR backend install** (`status.install`, 0.7): `serve` and `processor serve` install a
 missing OCR backend in the background (`crates/mokuro-bunko/src/ocr_install.rs`). The
 dashboard's "OCR backend" panel shows the stage, a progress bar and the bytes while it
 runs, and on a failure (or `missing`: automatic installs off) the message with a Retry /
-Install button (`POST /control/ocr-install`); the tray adds "Installing OCR backend: NN%"
+Install button (`POST /control/ocr-install`); the admin panel shows the same in This
+server and in Settings → OCR → Processors; the tray adds "Installing OCR backend: NN%"
 under the state, and a failure is a `fail` problem (`kind: "ocr-install"`), so the icon
-asks for attention. The setup wizards save the OCR step's choices
-(`<backends>/.install-request.json`) and start the server or processor; as soon as it
-serves, the browser moves to that instance's dashboard, signed in through a single-use
-code from its control API (`/app/api/instances/<role>/dashboard`), and the `gui` process
-exits: from then on the instance's dashboard (serving, the install's progress, "OCR
-ready", the first-run benchmark as `library.activity`) and the tray report on it. When a tray runs, what the
-wizard starts is handed to it (tray.json; a running tray picks up added roles, and adopts
-an instance started for it with `MOKURO_CONTROL_MANAGED=1`), so the tray's Quit stops it.
+asks for attention. The server's setup applies its OCR step's choice itself; the
+processor's pairing page saves its OCR choices (`<backends>/.install-request.json`, used
+by the next background install) and starts the processor; as soon as it serves, the
+browser moves to its dashboard, signed in through a single-use code from its control API,
+and the `gui` process exits: from then on the processor's dashboard (serving, the
+install's progress, "OCR ready", the first-run benchmark as `library.activity`) and the
+tray report on it. When a tray runs, what the chooser or the pairing page starts is
+handed to it (tray.json; a running tray picks up added roles, and adopts an instance
+started for it with `MOKURO_CONTROL_MANAGED=1`), so the tray's Quit stops it.
 
 ## 5. Tray
 
-Menu (state-dependent):
+Menu (state-dependent), as built in `bunko-tray`'s `model.rs` and `app/{sni,native}.rs`:
+- A greyed "Mokuro Bunko <version>" line.
 - Status line(s): role + state (e.g. "Working: Dr Stone 01 · 37/196 · 4.2 p/s",
-  "Paused until 18:00", "Idle — 0 in queue", "Can't reach library").
-- **Statistics ▸** today (volumes, pages), total, current rate, GPU busy, backend/device.
-- **Pause after this volume**, **Pause now**, **Pause for 1 hour**, **Pause until tomorrow**,
-  **Resume** (only the applicable ones enabled).
-- **Open dashboard**, **Open library** (server URL), **Settings…**, **Setup wizard…**,
-  **Show logs**, **Check for updates** (uses the existing updater).
+  "Paused until 18:00", "Idle — 0 in queue", "Can't reach library"), plus "Installing
+  OCR backend: NN%" while the background install runs.
+- **Statistics ▸** today (volumes, pages), total, current rate, GPU busy, CPU, backend.
+- **Pause after this volume**, **Pause now**, **Pause for 1 hour**, **Pause until tomorrow
+  08:00**, **Resume** (only the applicable ones enabled).
+- **Open admin panel** (`<library>/_admin`; the login page brings the admin back to it),
+  **Open processor** (shown while a processor answers: its status page, signed in),
+  **Open library** (the server's URL), **Set up…** (only while nothing runs and the tray
+  runs nothing: the chooser).
 - **Start at login** (checkbox), **Quit** (stops instances the tray started; a
-  system-service instance keeps running and the tray says so).
-Icon states: idle, working, paused, attention (problem). Optional notifications: library
-unreachable, OCR backend failure, update available (off by default).
-Supervision: the tray starts `processor serve`/`serve` as a child when the machine is set up
-for tray-managed running and no instance is up; restarts it on crash with backoff; never
-starts a second instance when a service-managed one is running.
+  system-service instance keeps running and the item says so).
+Icon states: idle, working, paused, attention (problem).
+Supervision: the tray starts `processor serve`/`serve` as a child when `tray.json` lists
+the role and no instance is up; restarts it on crash with backoff; never starts a second
+instance when a service-managed one is running.
 
 **As built (stream G3, `crates/bunko-tray`; since 0.7.0-beta.3 run as `mokuro-bunko tray`):**
 - Discovery: `.control.json` (read with the same lenient types as `bunko-control`'s wire
@@ -280,14 +310,12 @@ starts a second instance when a service-managed one is running.
   `args`: `serve`, or `processor serve --config <default processor.yaml>`. `install.ps1`
   writes `{"managed":[{"role":"server"}]}`. The tray starts its instances with the
   tray's own program (on Windows the app `mokuro-bunko.exe`, so no console window). The
-  wizard's "Start with the machine" (G2) offers both: **"Run from the tray when I log in"** (recommended on a desktop with the tray
-  program next to the CLI) writes this role's entry into `tray.json` (the server's without
-  `args` for the default config, else `["-c", <config>, "serve"]`; the processor's with
-  `--config <its processor.yaml>`), the tray's login item (as above) and restarts a running
-  tray so it re-reads the file; **"As a background service"** (recommended headless) writes
-  the service file. Picking one offers to remove the other for that role (service stopped
-  and deleted; or the role taken out of `tray.json`, the tray restarted and its copy stopped). With no `tray.json`,
-  no instance and no config at all, the tray opens the setup wizard once (`gui --open /app/`).
+  chooser's Library server and the processor's pairing page write their role's entry
+  (the server's without `args` for the default config, else `["-c", <config>, "serve"]`;
+  the processor's with `--config <its processor.yaml>`) and start the tray when none
+  runs; a running tray picks up an added role. The tray's **Start at login** checkbox
+  writes its login item (below). With no `tray.json`, no instance and no config at all,
+  the tray opens the chooser once (`gui --open /app/`).
 - Supervision: children get `MOKURO_CONTROL_MANAGED=1` (so `POST /control/stop` is allowed) and
   `MOKURO_LAUNCHER=tray` (after an update, on Windows the child exits 75 → restarted at
   once, never counted as a crash; on Linux/macOS it execs the new program in place, same
@@ -299,11 +327,10 @@ starts a second instance when a service-managed one is running.
   that dies does not leave an unowned processor running.
 - Menu as above; a `fail` problem puts the first one on its own line ("✖ …") and turns the
   icon to attention. Pause items follow `can_pause`; the timed pauses send `mode: "now"` with
-  `until`. Pages open through the server's control host, else the processor's, else
-  `mokuro-bunko gui --open <page>`: dashboard `/app/dashboard`, Settings… `/app/settings`
-  (update available: `/app/settings#update`), Setup wizard… `/app/setup`, via
-  `POST /control/login-code` then `/app/login?c=<code>&next=…`. Check for updates runs
-  `mokuro-bunko update check`.
+  `until`. Open admin panel and Open library open the server's own URLs (the admin signs
+  in there). Open processor opens the processor's `/app/dashboard` and Set up… the chooser
+  `/app/`, each through an instance's control host (`POST /control/login-code`, then
+  `/app/login?c=<code>&next=…`), else `mokuro-bunko gui --open <page>`.
 - One tray per user (`.tray.lock` in the log folder). Logs: `<server storage>/logs/
   mokuro-bunko-tray.<date>.log` (portable `data\logs`; falls back to
   `<config>/mokuro-bunko/logs`, then the temp folder, when that cannot be created).
@@ -337,7 +364,8 @@ starts a second instance when a service-managed one is running.
   machine**. Spawned off the UI thread; `launch::notify` (rate-limited, macOS only) is
   unchanged.
 - Other notifications (library unreachable, OCR failure, update available; the
-  `notifications` switch): not built.
+  `notifications` switch): not built. The menu has no update check of its own: the
+  admin panel's Updates card and the processor's Settings → Updates have it.
 
 ## 6. Packaging
 
@@ -351,12 +379,16 @@ starts a second instance when a service-managed one is running.
   AppIndicator extension).
 - Docker: no tray (unchanged). Licence notices updated for the new crates.
 
-As built: PACKAGING.md §1 "Desktop tray" (archive layout per target, the musl lite archive
-taking the manylinux-built tray, the `.app` with the CLI hard-linked inside, xtask
-`--no-tray`/`--tray-bin`, licences, install scripts, and `mokuro-bunko update` replacing an
-installed tray too).
+As built: PACKAGING.md §1 "Desktop tray" (the tray is the `tray` feature of the program
+since 0.7.0-beta.3: the archive layout per target, the Windows app + cli pair, the `.app`
+bundle, xtask `--no-tray` for the lite and Docker builds, licences, install scripts, and
+what `mokuro-bunko update` replaces besides the program).
 
-## 7. Streams and gates
+## 7. Streams and gates (how it was first built, 2026-10-04)
+
+The first build had a `/app` setup wizard for the library server too, a start-up step and
+a service install page; 0.7.0-beta.4 moved the server's setup and settings to its own
+pages (§1) and dropped the rest.
 
 | stream | owns | gate |
 |---|---|---|

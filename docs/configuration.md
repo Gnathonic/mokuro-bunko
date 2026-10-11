@@ -495,7 +495,7 @@ update:
 |--------|------|---------|-------------|
 | `check` | boolean | `true` | Look for new releases in the background (first check a minute after start, then every 12 hours) and show the result in the admin panel's **Updates** card (Status tab). With `false`, nothing is fetched unless you press **Check now**. |
 | `channel` | string | `auto` | Which releases count as updates. `auto` follows the installed build: a pre-release (such as `0.7.0-beta.1`) is on `prerelease`, so it sees the next beta or release candidate as well as the next stable release, and a stable release is on `stable`, so it only sees stable releases. `stable` or `prerelease` pins the channel whatever is installed. On `prerelease` with the GitHub URL, the newest published release that carries a `release.json` is looked up through GitHub's releases API (unauthenticated: 60 requests an hour per address), since `releases/latest` never points at a pre-release. A processor following its library (`processor.auto_update`) installs exactly the library's version and ignores the channel. |
-| `auto` | boolean | `false` | Install a newer release on the channel by itself, at a quiet moment, then restart. See [Automatic updates](#automatic-updates). Also settable in the admin panel's **Updates** card and the app's Settings → Updates. |
+| `auto` | boolean | `false` | Install a newer release on the channel by itself, at a quiet moment, then restart. See [Automatic updates](#automatic-updates). Also settable in the admin panel's **Updates** card. An install that cannot update itself (Docker, a package manager) ignores it, and the card says how to update it instead. |
 | `manifest_url` | string | the GitHub `releases/latest` `release.json` | Where the release manifest comes from. Change it for a mirror or a fork (a fork also needs its own signing key: compiled in, or `public_key`). |
 | `public_key` | string | empty (the compiled-in key) | The ed25519 public key (base64) release manifests are checked against, for a fork or a test release. Read **only from the config file**: no `MOKURO_UPDATE_*` variable, `config set`, admin API or app page can set it, and every start (server, CLI, processor) logs `UPDATES ARE TRUSTED FROM A NON-DEFAULT SIGNING KEY …`. Anyone who can write the config file can already replace the program, so this adds no new way in; an attacker who only controls the environment of a release build cannot use it. |
 
@@ -518,20 +518,22 @@ its models together.
 
 #### Automatic updates
 
-Opt-in: `update.auto: true` on the library server, `processor.auto_update: true`
-in a processor's `processor.yaml` (`processor setup --auto-update`, the setup
-wizard, or Settings → Updates in the app).
+Opt-in: `update.auto: true` on the library server (also the admin panel's
+Updates card), `processor.auto_update: true` in a processor's `processor.yaml`
+(`processor setup --auto-update`, the processor's pairing page, or its Settings
+→ Updates page).
 
 **A release is one unit.** An OCR backend pack belongs to exactly one
 mokuro-bunko release: release X's program opens only release X's pack (its
 `pack.json` says `bunko_version`; a pack built outside a release, without one,
 is accepted as a development pack). Another release's pack is refused with
 `the backend pack is from mokuro-bunko A, this is B: each release runs only its
-own pack; run 'mokuro-bunko install-ocr'`, and `doctor`, `/control/status` and
+own pack; run 'mokuro-bunko install-ocr' (with automatic updates on, an update
+installs it)`, and `doctor`, `/control/status` and
 the tray name the pack in use as `<variant> for <release>`. The models a release
 uses are named by manifests compiled into its program, so new model files only
 ever arrive with a new release. An update therefore installs, together: the
-program (and the tray next to it), the release's pack for the variant installed
+program (the tray is part of it), the release's pack for the variant installed
 here, and the release's model files.
 
 **Server.** With `auto` on, every check (12 h; `MOKURO_UPDATE_CHECK_SECONDS`
@@ -548,10 +550,11 @@ shortens it) that finds a newer release on the channel starts an update:
    (signature, sha256, every file; the host requirements such as the NVIDIA
    driver version; the free disk space), loads it (a GPU pack must find its GPU),
    and fetches its model files with it. Nothing installed has changed yet.
-3. The switch: the running program is copied aside (`.mokuro-bunko-previous`,
-   the tray too), the installed pack moves to `backends/.prev-<name>`, the staged
-   pack takes its place, the program is replaced, and `<storage>/.update.json`
-   records it. The server restarts.
+3. The switch: the running program is copied aside (`.mokuro-bunko-previous`;
+   on Windows the other program of the pair beside its own), the installed pack
+   moves to `backends/.prev-<name>`, the staged pack takes its place, the
+   program is replaced, and `<storage>/.update.json` records it. The server
+   restarts.
 4. The new release checks its pack in a child process (`install-ocr --probe`,
    the pack it will really open, with its real environment). If it loads, the
    kept copies and the model files the release no longer names are deleted, and
