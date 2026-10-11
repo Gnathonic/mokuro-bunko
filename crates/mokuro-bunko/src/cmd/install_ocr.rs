@@ -64,6 +64,15 @@ mod full {
     /// The lock two installs into one backends directory take (a background install of
     /// the server, of a processor on the same storage, a `install-ocr` by hand).
     pub const LOCK_FILE: &str = ".install.lock";
+    /// Left in the backends directory by an install whose models did not all download
+    /// (removed when they do): `--if-needed` then fetches them even though the pack is
+    /// in place, so the background installer's retry finishes the job.
+    pub const MODELS_INCOMPLETE: &str = ".models-incomplete";
+
+    /// Whether the last install into `root` left models undownloaded.
+    pub fn models_incomplete(root: &Path) -> bool {
+        root.join(MODELS_INCOMPLETE).exists()
+    }
 
     fn events_on() -> bool {
         std::env::var(EVENTS_ENV).is_ok_and(|v| v == "1")
@@ -264,6 +273,7 @@ mod full {
         }
         if args.if_needed
             && !args.force
+            && !models_incomplete(&root)
             && let Some(kept) = already_fits(&search, &variant)
         {
             println!("{kept}");
@@ -275,6 +285,7 @@ mod full {
         let _lock = lock_installs(&root)?;
         if args.if_needed
             && !args.force
+            && !models_incomplete(&root)
             && let Some(kept) = already_fits(&search, &variant)
         {
             println!("{kept}");
@@ -395,7 +406,17 @@ mod full {
                 }
             }
         }
-        super::super::models::download(&ocr, None)
+        let fetched = super::super::models::download(&ocr, None);
+        let marker = root.join(MODELS_INCOMPLETE);
+        match &fetched {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&marker);
+            }
+            Err(_) => {
+                let _ = std::fs::write(&marker, bunko_core::VERSION);
+            }
+        }
+        fetched
     }
 
     /// The pack's host libraries that the dynamic loader cannot find (`ldconfig -p`,

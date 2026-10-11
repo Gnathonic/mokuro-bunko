@@ -262,6 +262,80 @@ async fn a_failed_install_makes_it_available_with_what_it_has() {
     let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
 }
 
+fn failed() -> Option<OcrInstall> {
+    Some(OcrInstall {
+        state: OcrInstall::FAILED.into(),
+        stage: "failed".into(),
+        message: Some("the download failed".into()),
+        ..OcrInstall::default()
+    })
+}
+
+fn registrations(lib: &Shared) -> usize {
+    lib.0
+        .lock()
+        .log
+        .iter()
+        .filter(|e| e.starts_with("register"))
+        .count()
+}
+
+/// The install failed part-way, then a retry found nothing left to do (the failure
+/// clears): the processor registers again, so models that arrived since show up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failure_that_clears_registers_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, lib) = library().await;
+    let (tx, rx) = watch::channel(running("downloading", None));
+    let mut o = options(&url, dir.path());
+    o.install = Some(rx);
+    let stop = o.shutdown.clone();
+    let task = tokio::spawn(serve(o));
+    wait_for(&lib, 10, |l| {
+        has(l, "register:installing") && has(l, "exit:s1")
+    })
+    .await;
+    tx.send_replace(failed());
+    wait_for(&lib, 10, |l| has(l, "availability:false:-:-:-")).await;
+    assert_eq!(registrations(&lib), 1);
+    tx.send_replace(None);
+    wait_for(&lib, 10, |l| has(l, "register:-")).await;
+    assert_eq!(registrations(&lib), 2);
+    stop.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+}
+
+/// A retry after a failure (or an install started from the dashboard after the
+/// registration) that finishes: the processor registers again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_install_that_finishes_later_registers_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, lib) = library().await;
+    let (tx, rx) = watch::channel(failed());
+    let mut o = options(&url, dir.path());
+    o.install = Some(rx);
+    let stop = o.shutdown.clone();
+    let task = tokio::spawn(serve(o));
+    wait_for(&lib, 10, |l| has(l, "register:-")).await;
+    tx.send_replace(running("models", Some(10)));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(registrations(&lib), 1);
+    tx.send_replace(Some(OcrInstall {
+        state: OcrInstall::DONE.into(),
+        stage: "done".into(),
+        ..OcrInstall::default()
+    }));
+    wait_for(&lib, 10, |l| {
+        l.iter().filter(|e| e.starts_with("register")).count() == 2
+    })
+    .await;
+    // Once: the new connection does not take the old "done" for another install.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(registrations(&lib), 2);
+    stop.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+}
+
 /// No install: nothing changes (no availability at registration).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn without_an_install_it_registers_available() {

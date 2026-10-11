@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Big model files download on slow links.** A download had 120 seconds for the
+  whole file, so the 1.8 GB paddle-manga weights failed below about 10 MB/s and the
+  install (or automatic update) failed with them. Each request now gets 120 seconds and
+  the next one asks for the rest (`Range`), so the file finishes at any speed; a
+  download fails only when four requests in a row add nothing.
+- **An OCR install whose models failed finishes on its retry.** The pack was in place,
+  so the automatic retry found nothing to do and the missing models stayed missing.
+  The install now leaves `backends/.models-incomplete` when its models do not all
+  download, and `install-ocr --if-needed` (the background installer's retry) fetches
+  them while it is there.
+- **A processor tells the library what it can run after its install changes.** It
+  registered again only when an install it had registered beside finished. An install
+  started later (from the dashboard, or a retry) or a failure that cleared now
+  registers it again too, so engines whose models arrived are offered work.
+
 ## [0.7.0-beta.5] - 2026-10-10
 
 A pre-release on the way to 0.7.0 (everything below under 0.7.0 applies).
