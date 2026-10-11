@@ -152,8 +152,18 @@ fn state_text(s: &Status, now: DateTime<Local>) -> String {
         "idle" => match s.library.as_ref().and_then(|l| l.activity.as_deref()) {
             // The first run of an engine measures its speed before the first volume.
             Some(a) if a.starts_with("Measuring") => shorten(a, 70),
-            _ => format!("Idle{}", queue.unwrap_or_default()),
+            // An instance from before the `installing` state reads the same.
+            _ => match s.install.as_ref().and_then(|i| i.line()) {
+                Some(installing) => installing,
+                None => format!("Idle{}", queue.unwrap_or_default()),
+            },
         },
+        // Nothing to read until the OCR backend installed in the background is in place.
+        "installing" => s
+            .install
+            .as_ref()
+            .and_then(|i| i.line())
+            .unwrap_or_else(|| "Installing OCR backend…".into()),
         "paused" | "pausing" => {
             let base = if s.state == "pausing" {
                 "Pausing after this volume"
@@ -310,7 +320,13 @@ pub fn build(inp: &Inputs) -> MenuModel {
                     }
                 });
                 status_lines.push(format!("{label}: {text}"));
-                if let Some(l) = s.install.as_ref().and_then(|i| i.line()) {
+                // The install's progress under the state, unless the state says it.
+                if let Some(l) = s
+                    .install
+                    .as_ref()
+                    .and_then(|i| i.line())
+                    .filter(|l| *l != text)
+                {
                     status_lines.push(if multi { format!("{label}: {l}") } else { l });
                 }
                 if let Some(l) = update_result_line(s, inp.now) {
@@ -549,8 +565,6 @@ mod tests {
         ))
     }
 
-    /// The background OCR install: its progress under the state; its failure (a fail
-    /// problem) asks for attention.
     /// An engine's first-run speed measurement replaces "Idle".
     #[test]
     fn first_run_benchmark_is_not_idle() {
@@ -567,20 +581,45 @@ mod tests {
         );
     }
 
+    /// The background OCR install: the state reads as its progress (a server and a
+    /// processor alike), under another state it is a line of its own; its failure (a
+    /// fail problem) asks for attention.
     #[test]
     fn ocr_install_progress_and_failure() {
+        for role in ["server", "processor"] {
+            let m = model(&[inst(
+                status(&format!(
+                    r#"{{"role":"{role}","state":"installing","library":{{"connected":true}},"install":{{"state":"running","stage":"downloading","percent":42}}}}"#
+                )),
+                true,
+            )]);
+            let label = role_label(role);
+            assert_eq!(
+                m.status_lines,
+                [format!("{label}: Installing OCR backend: 42%")],
+                "{role}"
+            );
+            assert_eq!(m.icon, IconState::Idle);
+        }
+        // Its models stage; an instance from before the `installing` state (idle).
         let m = model(&[inst(
             status(
-                r#"{"role":"server","state":"idle","install":{"state":"running","stage":"downloading","percent":42}}"#,
+                r#"{"role":"processor","state":"idle","install":{"state":"running","stage":"models","percent":77}}"#,
+            ),
+            true,
+        )]);
+        assert_eq!(m.status_lines, ["Processor: Installing OCR models: 77%"]);
+        // Paused (or working) while it installs: both are said.
+        let m = model(&[inst(
+            status(
+                r#"{"role":"processor","state":"paused","install":{"state":"running","stage":"downloading","percent":42}}"#,
             ),
             true,
         )]);
         assert_eq!(
-            m.status_lines[1], "Installing OCR backend: 42%",
-            "{:?}",
-            m.status_lines
+            m.status_lines,
+            ["Processor: Paused", "Installing OCR backend: 42%"]
         );
-        assert_eq!(m.icon, IconState::Idle);
         let m = model(&[inst(
             status(
                 r#"{"role":"server","state":"idle","install":{"state":"failed"},"problems":[{"severity":"fail","text":"OCR backend install failed: network down","kind":"ocr-install"}]}"#,

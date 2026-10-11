@@ -119,12 +119,17 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
             tracing::info!("Stopping the processor");
             signal.cancel();
         });
-        // Only the instance that will hold the storage installs (a second one fails
-        // below).
-        let installs = storage_free(&storage);
-        // The local control API (GUI.md §2): pause/resume, status, the app pages. Only
-        // the instance holding the storage lock serves it (a second one fails below).
-        let control_server = if bunko_control::enabled_from_env() && storage_free(&storage) {
+        // Only the instance that will hold the storage installs and serves the control
+        // API (a second one fails below).
+        let owns_storage = storage_free(&storage);
+        // The install starts before the problems watcher's first check (as in `serve`):
+        // while it runs, it speaks for the missing backend, and the doctor's "run
+        // install-ocr" problem would otherwise stay until the next check (two minutes).
+        if owns_storage {
+            ocr_installer.start_if_needed();
+        }
+        // The local control API (GUI.md §2): pause/resume, status, the app pages.
+        let control_server = if bunko_control::enabled_from_env() && owns_storage {
             let control = bunko_control::Control::new(crate::control::config(
                 bunko_control::Role::Processor,
                 name,
@@ -172,9 +177,6 @@ fn serve(ctx: &Ctx, config: &Path, verbose: bool) -> CmdResult {
         } else {
             None
         };
-        if installs {
-            ocr_installer.start_if_needed();
-        }
         let result = bunko_processor::serve(options).await;
         if let Some(server) = control_server {
             server.shutdown().await;

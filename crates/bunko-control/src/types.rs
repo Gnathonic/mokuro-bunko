@@ -220,6 +220,10 @@ pub struct Urls {
 pub enum State {
     Working,
     Idle,
+    /// The OCR backend is installing in the background (`install.state` running; 0.7)
+    /// and no volume is being read: shown instead of `idle`. A connection problem, a
+    /// pause or a running volume says more and wins.
+    Installing,
     Paused,
     /// Paused after the running volume(s): they are still finishing.
     Pausing,
@@ -355,6 +359,10 @@ mod tests {
         let v = serde_json::to_value(PauseView::default()).unwrap();
         assert_eq!(v["mode"], serde_json::Value::Null);
         assert_eq!(serde_json::to_value(State::Pausing).unwrap(), "pausing");
+        assert_eq!(
+            serde_json::to_value(State::Installing).unwrap(),
+            "installing"
+        );
         assert_eq!(serde_json::to_value(Role::Processor).unwrap(), "processor");
     }
 

@@ -90,6 +90,35 @@ fn full_status() -> bc::Status {
     }
 }
 
+/// `installing` (a running background OCR install where the state would be idle) reads
+/// as the install's progress, once.
+#[test]
+fn installing_reads_as_the_install_progress() {
+    let mut wire = full_status();
+    wire.state = bc::State::Installing;
+    wire.pause = bc::PauseView::default();
+    wire.current.clear();
+    wire.problems.clear();
+    wire.update = None;
+    let s: Status = serde_json::from_str(&serde_json::to_string(&wire).unwrap()).unwrap();
+    assert_eq!(s.state, "installing");
+    let m = model::build(&model::Inputs {
+        instances: &[InstanceView {
+            role: s.role.clone(),
+            status: Some(s),
+            error: None,
+            tray_started: true,
+        }],
+        supervised: &[],
+        update: &UpdateView::default(),
+        updating: &[],
+        notice: None,
+        now: chrono::Local::now(),
+    });
+    assert_eq!(m.status_lines, ["Processor: Installing OCR backend: 42%"]);
+    assert_eq!(m.icon, IconState::Idle);
+}
+
 #[test]
 fn status_round_trips_into_the_tray_types() {
     let wire = serde_json::to_string(&full_status()).unwrap();
