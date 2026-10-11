@@ -2,7 +2,7 @@
 //! serialized, parse into the tray's lenient types with nothing lost that the menu uses.
 
 use bunko_control as bc;
-use bunko_tray::model::{self, IconState, InstanceView, UpdateView};
+use bunko_tray::model::{self, IconState, InstanceView};
 use bunko_tray::status::{ControlFile, Status};
 
 fn full_status() -> bc::Status {
@@ -130,7 +130,6 @@ fn status_round_trips_into_the_tray_types() {
             tray_started: true,
         }],
         supervised: &[],
-        update: &UpdateView::default(),
         updating: &[],
         notice: None,
         now: chrono::Local::now(),

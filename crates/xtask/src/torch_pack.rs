@@ -88,7 +88,17 @@ pub struct TorchPackArgs {
     /// Windows) is invisible in the pack's own libraries. Repeatable.
     #[arg(long, value_name = "PATH")]
     pub sample_package: Vec<PathBuf>,
+    /// Also check one compiled model package of the torch-models manifest this build
+    /// fetches from (`crates/bunko-ocr/src/torch_models.json`): the smallest one built
+    /// for this pack's platform, variant and torch release, downloaded (sha256-pinned,
+    /// cached) from its release. The release builds pass it.
+    #[arg(long)]
+    pub sample_from_manifest: bool,
 }
+
+/// The torch-models manifest bunko-ocr compiles in (workspace-relative): the compiled
+/// model packages this build installs.
+const TORCH_MODELS_JSON: &str = "crates/bunko-ocr/src/torch_models.json";
 
 /// A staged file: pack-relative path → source file on disk.
 type Staged = BTreeMap<String, PathBuf>;
@@ -207,11 +217,17 @@ pub fn run(args: &TorchPackArgs) -> Result<PathBuf> {
     // 3. Closure.
     let mut available: Vec<PathBuf> = staged.values().cloned().collect();
     let samples = work.join("sample-packages");
-    for (i, p) in args.sample_package.iter().enumerate() {
-        available.extend(package_libraries(
-            &abs(&root, p),
-            &samples.join(i.to_string()),
-        )?);
+    let mut sample_packages: Vec<PathBuf> =
+        args.sample_package.iter().map(|p| abs(&root, p)).collect();
+    if args.sample_from_manifest {
+        let json = std::fs::read_to_string(root.join(TORCH_MODELS_JSON))
+            .with_context(|| format!("reading {TORCH_MODELS_JSON}"))?;
+        let s = manifest_sample(&json, spec.variant, &target)?;
+        eprintln!("    sample package {} ({})", s.file, s.target);
+        sample_packages.push(fetch_url(&s.url, &s.sha256, s.size, &cache)?);
+    }
+    for (i, p) in sample_packages.iter().enumerate() {
+        available.extend(package_libraries(p, &samples.join(i.to_string()))?);
     }
     if !args.bundle_external {
         available.extend(
@@ -1083,6 +1099,54 @@ fn abi_version(root: &Path) -> Result<u32> {
         .context("BT_ABI_VERSION is not a number")
 }
 
+/// One file of the torch-models manifest: the fields [`manifest_sample`] reads.
+#[derive(Debug, serde::Deserialize)]
+struct ModelFile {
+    file: String,
+    url: String,
+    size: u64,
+    sha256: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    torch: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ModelsManifest {
+    files: Vec<ModelFile>,
+}
+
+/// The smallest compiled package (`kind` `aoti`) of a torch-models manifest that a
+/// `variant` pack for `target` runs: a package target of the pack's OS (`arm64` in it
+/// only for an arm64 pack), compiled against this torch release of the same variant
+/// (`2.13.0+cu130`; the macOS packages say `2.13.0`, the CPU build).
+fn manifest_sample(json: &str, variant: &str, target: &str) -> Result<ModelFile> {
+    let manifest: ModelsManifest =
+        serde_json::from_str(json).with_context(|| format!("parsing {TORCH_MODELS_JSON}"))?;
+    let (os, arch) = os_arch(target);
+    let os_prefix = format!("{os}-");
+    manifest
+        .files
+        .into_iter()
+        .filter(|f| {
+            let (version, local) = f.torch.split_once('+').unwrap_or((f.torch.as_str(), "cpu"));
+            f.kind == "aoti"
+                && f.target.starts_with(&os_prefix)
+                && f.target.contains("arm64") == (arch == "aarch64")
+                && version == torch_specs::TORCH_VERSION
+                && local == variant
+        })
+        .min_by(|a, b| a.size.cmp(&b.size).then_with(|| a.file.cmp(&b.file)))
+        .with_context(|| {
+            format!(
+                "{TORCH_MODELS_JSON} lists no compiled package for a {variant} pack on {target}"
+            )
+        })
+}
+
 /// The shared libraries of a compiled model package (a `.pt2` zip, an unpacked `.pt2`
 /// directory or a directory of them), unpacked from zips into `scratch`.
 fn package_libraries(path: &Path, scratch: &Path) -> Result<Vec<PathBuf>> {
@@ -1419,6 +1483,57 @@ mod tests {
         }
         out.extend(cmds);
         out
+    }
+
+    #[test]
+    fn every_pack_has_a_sample_package_in_the_manifest() {
+        let json = std::fs::read_to_string(util::workspace_root().join(TORCH_MODELS_JSON)).unwrap();
+        for spec in torch_specs::SPECS {
+            for target in spec.targets {
+                let s = manifest_sample(&json, spec.variant, target).unwrap();
+                let (os, _) = os_arch(target);
+                let backend = match spec.variant {
+                    "cpu" => "cpu",
+                    v if v.starts_with("cu") => "cuda",
+                    _ => "rocm",
+                };
+                assert!(
+                    s.target.starts_with(&format!("{os}-{backend}-")),
+                    "{} {target}: {}",
+                    spec.variant,
+                    s.target
+                );
+                assert!(s.file.ends_with(".pt2") && s.url.ends_with(&s.file));
+            }
+        }
+    }
+
+    #[test]
+    fn the_sample_package_is_the_smallest_of_the_pack_s_own() {
+        let json = r#"{"files":[
+            {"file":"w.safetensors","url":"u/w","size":1,"sha256":"0","kind":"aoti-weights","target":"linux-cpu-x86_64-v3","torch":"2.13.0+cpu"},
+            {"file":"old.pt2","url":"u/old","size":2,"sha256":"0","kind":"aoti","target":"linux-cpu-x86_64-v3","torch":"2.12.0+cpu"},
+            {"file":"gpu.pt2","url":"u/gpu","size":3,"sha256":"0","kind":"aoti","target":"linux-cuda-sm_80","torch":"2.13.0+cu130"},
+            {"file":"win.pt2","url":"u/win","size":4,"sha256":"0","kind":"aoti","target":"windows-cpu-x86_64-v3","torch":"2.13.0+cpu"},
+            {"file":"big.pt2","url":"u/big","size":9,"sha256":"0","kind":"aoti","target":"linux-cpu-x86_64-v3","torch":"2.13.0+cpu"},
+            {"file":"small.pt2","url":"u/small","size":5,"sha256":"0","kind":"aoti","target":"linux-cpu-x86_64-v4bf16","torch":"2.13.0+cpu"},
+            {"file":"mac.pt2","url":"u/mac","size":6,"sha256":"0","kind":"aoti","target":"macos-cpu-arm64","torch":"2.13.0"}
+        ]}"#;
+        let pick =
+            |variant: &str, target: &str| manifest_sample(json, variant, target).map(|s| s.file);
+        assert_eq!(
+            pick("cpu", "x86_64-unknown-linux-gnu").unwrap(),
+            "small.pt2"
+        );
+        assert_eq!(
+            pick("cu130", "x86_64-unknown-linux-gnu").unwrap(),
+            "gpu.pt2"
+        );
+        assert_eq!(pick("cpu", "x86_64-pc-windows-msvc").unwrap(), "win.pt2");
+        assert_eq!(pick("cpu", "aarch64-apple-darwin").unwrap(), "mac.pt2");
+        // Nothing for this platform and variant: an error, not a silent skip.
+        assert!(pick("rocm7.1", "x86_64-unknown-linux-gnu").is_err());
+        assert!(pick("cpu", "aarch64-unknown-linux-gnu").is_err());
     }
 
     #[test]

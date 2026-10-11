@@ -43,4 +43,5 @@ uv.lock
 start-mokuro-bunko.cmd
 
 # Rust
-/target/
+# Cargo build output in any crate or packaging directory.
+target/
