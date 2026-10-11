@@ -1,6 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.0-beta.5] - 2026-10-10
+
+A pre-release on the way to 0.7.0 (everything below under 0.7.0 applies).
 
 ### Fixed
 - **This server → Engines and models tells the truth about the models folder.** Each
