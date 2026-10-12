@@ -10,10 +10,9 @@
 # Note: Caddy will automatically obtain and renew SSL certificates.
 
 YOUR_DOMAIN {
-    # Remote OCR processors (docs/deployment.md, "Remote OCR processors
-    # behind a proxy"). The events channel is ONE chunked request body that
-    # lives as long as a session, so it gets NO body cap (a cap is cumulative
-    # over the one body), and the assignment stream is flushed op by op.
+    # Remote OCR processors (protocol v3): one WebSocket per processor, which
+    # Caddy forwards as-is, plus streamed result uploads that must not be
+    # capped by the request_body limit below.
     @processor path /_processor/*
     handle @processor {
         reverse_proxy localhost:8080 {

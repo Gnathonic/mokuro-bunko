@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Processor - Mokuro Bunko</title>
+    <link rel="stylesheet" href="/_static/shared.css">
+    <link rel="stylesheet" href="/app/app.css">
+</head>
+<body>
+    <header class="mokuro-header" id="app-header" data-current="settings"></header>
+    <div class="settings-layout">
+        <nav class="settings-rail" aria-label="Settings sections">
+            <span class="rail-group">Processor</span>
+            <a href="/app/settings/processor" data-section="processor">Connection</a>
+            <a href="/app/settings/ocr" data-section="ocr">OCR &amp; models</a>
+            <a href="/app/settings/logs" data-section="logs">Logs</a>
+            <a href="/app/settings/doctor" data-section="doctor">Diagnostics</a>
+            <a href="/app/settings/update" data-section="update">Updates</a>
+        </nav>
+        <main>
+            <div class="alert alert--error" id="page-error" hidden></div>
+
+            <!-- Processor -->
+            <section id="sec-processor" data-section="processor" aria-labelledby="h-proc" hidden>
+                <div class="panel">
+                    <h2 id="h-proc">Processor</h2>
+                    <p class="panel__lede"><code id="pcfg-path"></code> — changes apply when the processor restarts.</p>
+                    <div class="alert alert--info" id="no-pcfg" hidden>No processor is set up here. <a href="/app/setup/processor">Pair one</a>.</div>
+                    <div id="pform">
+                        <p class="form-hint" id="pstatus"></p>
+                        <div class="form-group"><label class="form-label" for="p-url">Library address</label><input class="form-input" id="p-url"></div>
+                        <div class="form-row">
+                            <div class="form-group"><label class="form-label" for="p-user">Username</label><input class="form-input" id="p-user" autocomplete="username"></div>
+                            <div class="form-group"><label class="form-label" for="p-pass">New password (empty: keep)</label><input class="form-input" id="p-pass" type="password" autocomplete="new-password"></div>
+                        </div>
+                        <div class="form-group"><label class="form-label" for="p-tls">Certificate check (true, false or a certificate file) <span class="cli-hint">--tls-verify</span></label>
+                            <div class="input-row"><input class="form-input" id="p-tls"><button type="button" class="btn btn--secondary" data-pick="p-tls" data-files="pem,crt,cer" data-title="Library certificate">Browse…</button></div></div>
+                        <div class="form-row">
+                            <div class="form-group"><label class="form-label" for="p-name">Name <span class="cli-hint">--name</span></label><input class="form-input" id="p-name"></div>
+                            <div class="form-group"><label class="form-label" for="p-public">Public name</label><input class="form-input" id="p-public" maxlength="64"></div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group"><label class="form-label" for="p-sessions">Volumes at once</label><input class="form-input" id="p-sessions" type="number" min="1"></div>
+                            <div class="form-group"><label class="form-label" for="p-mem">Archive RAM (MB)</label><input class="form-input" id="p-mem" type="number" min="0"></div>
+                        </div>
+                        <div class="form-group"><label class="form-label" for="p-storage">Working folder</label>
+                            <div class="input-row"><input class="form-input" id="p-storage"><button type="button" class="btn btn--secondary" data-pick="p-storage" data-title="Working folder">Browse…</button></div></div>
+                        <label class="check"><input type="checkbox" id="p-auto"> Install updates automatically when the library updates <span class="cli-hint">processor.auto_update</span></label>
+                        <p class="form-error" id="err-proc" role="alert" hidden></p>
+                        <div id="ptest"></div>
+                        <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="processor-status">Last status</button><button type="button" class="btn btn--secondary" id="p-start">Start it</button><span class="spacer"></span><button type="button" class="btn btn--secondary" id="p-test">Test the connection</button><button type="button" class="btn btn--primary" id="p-save">Save</button></div>
+                        <div id="job-processor"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- OCR -->
+            <section id="sec-ocr" data-section="ocr" aria-labelledby="h-ocr" hidden>
+                <div class="panel">
+                    <h2 id="h-ocr">OCR backend &amp; models</h2>
+                    <p class="panel__lede">The processor's backend pack and models. Install or replace the pack with the <a href="/app/setup/ocr">OCR install</a> step.</p>
+                    <dl class="kv" id="ocr-kv"></dl>
+                    <div class="form-row mt-3">
+                        <div class="form-group"><label class="form-label" for="ocr-engine">Engine (downloads)</label>
+                            <select class="form-select" id="ocr-engine"><option value="">the configured ones</option><option>hayai-nova</option><option>paddle-manga</option><option>ppocr-manga</option></select>
+                            <p class="form-hint" id="ocr-engine-note" hidden></p></div>
+                    </div>
+                    <div class="panel__footer"><button type="button" class="btn btn--secondary" data-job="install-ocr-list">Packs and hardware</button><button type="button" class="btn btn--secondary" data-job="models-list">List the models</button><button type="button" class="btn btn--secondary" data-job="models-verify">Verify them</button><button type="button" class="btn btn--primary" data-job="models-download">Download</button></div>
+                    <div id="job-ocr"></div>
+                </div>
+            </section>
+
+            <!-- Logs -->
+            <section id="sec-logs" data-section="logs" aria-labelledby="h-logs" hidden>
+                <div class="panel">
+                    <h2 id="h-logs">Logs</h2>
+                    <p class="panel__lede" id="logs-dirs"></p>
+                    <div class="input-row">
+                        <select class="form-select" id="log-file" aria-label="Log file"></select>
+                        <button type="button" class="btn btn--secondary" id="log-refresh">Refresh</button>
+                    </div>
+                    <label class="check mt-2"><input type="checkbox" id="log-follow"> Follow (refresh every 3 s)</label>
+                    <pre class="log-view" id="log-text" tabindex="0">Choose a log.</pre>
+                </div>
+            </section>
+
+            <!-- Doctor -->
+            <section id="sec-doctor" data-section="doctor" aria-labelledby="h-doctor" hidden>
+                <div class="panel">
+                    <h2 id="h-doctor">Diagnostics</h2>
+                    <p class="panel__lede">The processor's checks (<code>mokuro-bunko doctor --processor</code>): its configuration, the OCR backend and models, disk.</p>
+                    <div class="panel__footer"><button type="button" class="btn btn--primary" data-job="doctor">Run the checks</button></div>
+                    <div id="job-doctor"></div>
+                </div>
+            </section>
+
+            <!-- Update -->
+            <section id="sec-update" data-section="update" aria-labelledby="h-update" hidden>
+                <div class="panel">
+                    <h2 id="h-update">Updates</h2>
+                    <p class="panel__lede">Signed releases (<code>mokuro-bunko update</code>). A library server on this machine updates from its admin panel.</p>
+                    <dl class="kv" id="update-kv"><dt>Status</dt><dd>Checking…</dd></dl>
+                    <div class="form-group" id="update-auto-box">
+                        <label class="check" id="update-auto-proc-row" hidden><input type="checkbox" id="update-auto-proc"> Install updates automatically (processor) <span class="cli-hint">processor.auto_update</span></label>
+                        <p class="form-hint">Off by default. When on, an update is held until nothing is running (the running volume or upload finishes first), installed, and the program restarts. Never a downgrade.</p>
+                        <p class="form-error" id="err-update-auto" role="alert" hidden></p>
+                    </div>
+                    <div class="panel__footer"><button type="button" class="btn btn--secondary" id="update-check">Check again</button><button type="button" class="btn btn--primary" data-job="update-apply" id="update-apply" disabled>Install the update</button></div>
+                    <div id="job-update"></div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+    <script src="/app/app.js"></script>
+    <script src="/app/settings.js"></script>
+</body>
+</html>

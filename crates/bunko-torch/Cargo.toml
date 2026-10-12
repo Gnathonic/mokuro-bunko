@@ -1,0 +1,41 @@
+[package]
+name = "bunko-torch"
+description = "hayai-nova and paddle-manga on libtorch (AOTInductor packages), as a cdylib with a small C ABI that mokuro-bunko loads at run time"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Built per backend pack (cpu / cu130 / rocm7.1) with the `libtorch` feature, against
+# exactly the libtorch of that pack:
+#
+#   LIBTORCH_USE_PYTORCH=1 (in a venv with torch==2.13.0+<variant>) or LIBTORCH=<dir> \
+#   cargo build --release -p bunko-torch --features libtorch
+#
+# Without `libtorch` (the normal workspace build) only the ABI types in `abi` are built,
+# and the cdylib is an empty stub: the workspace never needs libtorch to build.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+libtorch = ["dep:tch", "dep:torch-sys", "dep:libloading", "dep:cc", "dep:zip"]
+
+[dependencies]
+bunko-vlm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tch = { version = "=0.26.0", optional = true }
+torch-sys = { version = "=0.26.0", optional = true }
+libloading = { version = "0.9", optional = true }
+zip = { workspace = true, optional = true }
+
+[build-dependencies]
+cc = { version = "1", optional = true }
+
+[dev-dependencies]
+anyhow.workspace = true
+image.workspace = true
+

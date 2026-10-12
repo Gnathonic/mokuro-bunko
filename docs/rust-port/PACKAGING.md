@@ -1,0 +1,1112 @@
+# mokuro-bunko 0.7 — packaging, releases and updates
+
+**Status:** living document. Replaces the 0.5.2 packaging listed in
+`spec/config-cli-ops.md` §11 (shiv zipapp, Python wheel, uv portable zip,
+`setup-windows.ps1` source install, python:3.12 Docker images).
+
+Where things live:
+
+| Path | What |
+|---|---|
+| `crates/xtask/` | release tooling: `dist`, `torch-pack`, `manifest`, `release-notes`, `sign`, `verify`, `keygen`, `licenses`, `docker-context` |
+| `crates/xtask/src/torch_specs.rs` | what goes into each OCR backend pack: pinned libtorch zips, kept files, NVIDIA wheels (§8) |
+| `packaging/torch/probe_pack.py` | drives an installed pack through its C ABI (load + read crops), for trimming and smoke tests |
+| `packaging/dist/README.md` | README shipped in unix archives |
+| `packaging/windows/` | `run.bat`, `doctor.bat`, `_env.cmd`, `README.txt`, `PORTABLE.txt` for the Windows zip |
+| `packaging/android/` | the Android app (Kotlin, Gradle) and `build.sh`; the server library is `crates/bunko-android` (MOBILE.md) |
+| `packaging/docker-init/` | `bunko-init`, the containers' PUID/PGID/UMASK entrypoint (static, libc only; own Cargo workspace) |
+| `deploy/docker/` | `Dockerfile.lite`, `Dockerfile` (full: no pack inside; the server downloads the one for its GPU in the background once it serves; `BAKE_PACK=1` opt-in), `entrypoint.sh` (full image only: nginx for `MOKURO_NGINX_ACCEL`, drops a `MOKURO_TORCH_PACK` without `pack.json`, then execs `bunko-init`), per-Dockerfile `.dockerignore` |
+| `deploy/nginx-internal.conf.template` | the in-container nginx for the X-Accel offload (now with the processor WebSocket) |
+| `deploy/*.service` | systemd units: server and processor, system and user variants |
+| `deploy/docker-compose*.yml`, `deploy/unraid/*.xml` | compose files and Unraid templates for the published images |
+| `scripts/install.sh`, `scripts/install.ps1` | installers that download a release (`setup-windows.ps1` forwards to `install.ps1`) |
+| `.github/workflows/{ci,release,publish}.yml` | CI, tag → draft release, owner's publish step |
+| `.github/workflows/release-{build,docker}.yml` | the release's build jobs (reusable: `workflow_call`), shared by `release.yml` and `release-check.yml` |
+| `.github/workflows/release-check.yml` | the release dry run on any branch: builds everything, signs and publishes nothing (§5) |
+| `packaging/macos/` | `Info.plist` of the app, `make-dmg.sh` + background + `Read me.txt` of the disk image |
+
+Run xtask with `cargo run -p xtask -- <command>`, or `cargo xtask <command>` (the alias
+in `.cargo/config.toml`).
+
+## 1. Artifacts
+
+One binary, `mokuro-bunko`, in two builds (ARCHITECTURE.md §1), plus the **OCR
+backend packs** the full build downloads (§8, TORCH-BACKEND.md). The manifest names a
+build by *target triple* and *flavor*:
+
+| flavor | cargo features | contents |
+|---|---|---|
+| `lite` | `--no-default-features` | server only; OCR by remote processors |
+| `full` | `ocr` (default) | + ONNX Runtime on the CPU (PP-OCR detector/reader), the libtorch pack loader, local OCR, `processor` |
+
+GPU support is no longer a build flavor: the same `full` binary runs hayai-nova and
+paddle-manga on whatever pack `install-ocr` installed — `cpu`, `cu130` (NVIDIA) or
+`rocm7.1` (AMD, Linux); paddle-manga on the CPU works but is slow. The ONNX Runtime GPU execution providers (`--ep cuda`,
+`directml`, `coreml`, `webgpu` → `full-<ep>`) still compile (CI clippy checks
+`cuda,webgpu`) but are not released.
+
+Release matrix (`.github/workflows/release-build.yml`, run by `release.yml` and
+`release-check.yml`):
+
+Four downloads per release, plus Docker (owner, 0.7.0-beta.3), named for people
+(`names::platform_label`):
+
+| release file | target / flavor | backend packs | how |
+|---|---|---|---|
+| `mokuro-bunko-<ver>-windows.zip` | `x86_64-pc-windows-msvc` full | `cpu`, `cu130` | native, windows-latest (the packs' C++ with clang-cl, below) |
+| `mokuro-bunko-<ver>-macos.dmg` | `aarch64-apple-darwin` full | `cpu` | native, macos-latest (made from the archive `xtask dist` writes, which is not a release file) |
+| `mokuro-bunko-<ver>-linux-x64.tar.gz` | `x86_64-unknown-linux-gnu` full | `cpu`, `cu130`, `rocm7.1` | manylinux_2_28 container (`packaging/manylinux/build.sh`): glibc ≥ 2.28 |
+| `mokuro-bunko-<ver>-linux-arm64-server.tar.gz` | `aarch64-unknown-linux-musl` lite (static) | — | `cargo zigbuild` |
+| (not a release file) `mokuro-bunko-<ver>-linux-x64-server.tar.gz` | `x86_64-unknown-linux-musl` lite (static) | — | `cargo zigbuild`; only for the lite Docker image (workflow artifact `docker-linux-x64-server`) |
+
+No lite Windows or macOS download and no Intel macOS build (owner, 0.7.0-beta.3).
+The backend packs are `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`
+(`.001`/`.002` parts above 1.9 GiB), after every download in GitHub's alphabetical
+file list; there are no per-file `.sha256` files (`SHA256SUMS` and the signed
+`release.json` have every checksum). A local build without a release name (another
+target, an unreleased flavor) keeps `mokuro-bunko-<ver>-<target>-<flavor>`.
+
+Every release's notes start with a two-column "Which file do I want?" table (system →
+its file, each linking `releases/download/<tag>/<file>`; Docker → the `docker pull`
+command), then "Other files install automatically." and the changelog link:
+`xtask release-notes --dir dist` writes it from the same names, and refuses a link to a
+file the release does not have; `scripts/release-links.sh <tag>` checks every link of
+the draft (and with `--public`, of the published release) answers 200/302.
+
+Android (`aarch64-linux-android` + `x86_64-linux-android`, an APK
+`mokuro-bunko-<ver>-android.apk`, not in release.json) is not released in 0.7: the job
+`android` (cargo-ndk + Gradle, `packaging/android/build.sh`) runs only with
+`vars.BUILD_ANDROID == 'true'`; see MOBILE.md.
+
+Dropped against the ONNX-only design: `full-cuda` (Linux, Windows), Linux arm64 full
+and the DirectML/CoreML defaults — there is no libtorch pack for Linux arm64 or Intel
+macOS (TORCH-BACKEND.md scope), so those hosts use lite plus a processor elsewhere.
+
+Why these choices:
+
+- **Lite on Linux is musl + static**: one binary for every distro, NAS and Pi, and it runs
+  on `distroless/static`. mimalloc is the allocator (musl's malloc is too slow).
+- **Full on Linux is glibc, built in manylinux_2_28** (AlmaLinux 8: glibc 2.28,
+  gcc-toolset-14), like a manylinux wheel, by `packaging/manylinux/build.sh` (the release
+  workflow's `build-linux-full` / `packs-linux` jobs and local builds use the same
+  script). Two things make ONNX Runtime 1.28's prebuilt static libraries work there:
+  - they reference GCC 13's libstdc++ (`GLIBCXX_3.4.31`, e.g. `_M_replace_cold`):
+    gcc-toolset's libstdc++ links those parts statically (`libstdc++_nonshared.a`) and
+    takes only old symbol versions from the system's libstdc++.so.6;
+  - they reference four glibc ≥ 2.32/2.38 symbols (`__isoc23_strtol`, `__isoc23_strtoll`,
+    `__isoc23_strtoull`, `__libc_single_threaded`): `packaging/manylinux/glibc_compat.c`
+    defines them (the C23 strto* forward to strto*; `__libc_single_threaded = 0`, i.e.
+    "maybe several threads", always correct) and is linked into the binary.
+  Result (measured 2026-10-03, `objdump -T`): the binary needs at most `GLIBC_2.28`,
+  `GLIBCXX_3.4.21`, `CXXABI_1.3.11`; `libbunko_torch.so` at most `GLIBC_2.28` /
+  `GLIBCXX_3.4.21`; libtorch itself is manylinux_2_28. So the full build runs on Debian
+  11+, Ubuntu 20.04+, RHEL 8+ (tested: Debian 12, Ubuntu 22.04 — §7). A full build made
+  on a newer distro does not run on older ones (an Arch-built binary needs
+  `GLIBC_2.43`); `install.sh` catches this before replacing anything.
+- **arm64 Linux has the lite build only** (owner decision 2026-10-03: no arm64 Linux
+  machine to test OCR on; there are no arm64 packs). OCR for an arm64 library comes from
+  a remote processor on x86_64, Windows or macOS.
+- **ONNX Runtime is linked statically** from ort's prebuilt binaries
+  (`download-binaries`; ort-sys rc.13 = ONNX Runtime 1.28). Only execution providers that
+  ONNX Runtime loads as plugins are shared libraries: the CUDA provider
+  (`libonnxruntime_providers_cuda.so` / `.dll` + `…_providers_shared`), and DirectML's
+  `DirectML.dll`. A release `full` build uses none of them, so **nothing is bundled**;
+  only the unreleased `--ep` builds get their provider libraries next to the executable
+  (`xtask dist` picks them by name from the directory ort-sys linked from; TensorRT is
+  left out). Until 2026-10-03 every library in those directories was copied: the
+  Windows zip carried an unused 18 MB `DirectML.dll`, and on macOS ~25 Xcode sanitizer
+  dylibs from a toolchain link path.
+- **Windows: the Visual C++ runtime ships app-local.** A Rust MSVC binary imports
+  `vcruntime140*.dll`; libtorch's DLLs import `msvcp140*.dll`/`vcruntime140*.dll`, and
+  its CPU kernels and the compiled CPU packages `vcomp140.dll` (OpenMP). Windows does not
+  guarantee them (the "VC++ 2015–2022 Redistributable"). `xtask dist` copies the ones
+  the executable imports next to it, and `xtask torch-pack` puts `vcruntime140`,
+  `vcruntime140_1`, `msvcp140`, `msvcp140_1`, `msvcp140_2` and `vcomp140` into each
+  Windows pack's `lib/` (`crates/xtask/src/vcredist.rs`; `--no-vc-runtime` to leave them
+  out). They come from the building Visual Studio's
+  `VC\Redist\MSVC\<version>\x64\Microsoft.VC14*.{CRT,OpenMP}` (`VC_REDIST_DIR` or
+  `VCToolsRedistDir` override, else the newest installed). The windows-latest runner has
+  Visual Studio 18 (2026), so release DLLs are its 14.5x files (`Microsoft.VC145.*`; the
+  0.7.0-beta.1 release check shipped 14.51). Terms: they are "Distributable Code" under
+  the building Visual Studio's licence terms, for releases Visual Studio 2026's (the
+  NOTICE in `vcredist.rs` still cites Visual Studio 2022's list), and app-local
+  deployment is a documented way to deploy them
+  (<https://learn.microsoft.com/cpp/windows/deployment-in-visual-cpp>); the note is in
+  `THIRD-PARTY-LICENSES.md` / the pack's `licenses/microsoft-vc-runtime.txt`. Verified
+  here only as far as staging and the licence note (no Windows host); a Windows run
+  without the Redistributable installed is still to do.
+  Linux full builds get an `$ORIGIN` runpath so the provider libraries are found next to
+  the real executable even when it is started through a symlink.
+- **Windows packs compile their C++ with clang-cl.** libbunko_torch links libtorch
+  through torch-sys 0.26, whose build script compiles its C++ glue (libtch) with
+  `/std:c++17`. The windows-latest runner's MSVC (Visual Studio 18) rejects libtorch
+  2.13's headers in C++17 (C7555, designated initializers) and libtch in C++20 (`module`
+  used as a name); clang-cl (clang's front end, MSVC's ABI and headers) accepts both.
+  The `packs` job of `release-build.yml` compiles a small wrapper, `clang-cl-wrap.exe`,
+  that drops torch-sys's MSBuild-style `/p:` argument (clang-cl would take it for a
+  file) and adds `/EHsc`, and points `CXX_/CC_x86_64_pc_windows_msvc` at it for
+  `xtask torch-pack` only: xtask, the binary and the tray are built by cl.exe as before.
+  It is the wrapper `torch-export-win.yml` uses. The ABI is MSVC's, so the DLL links
+  the official libtorch build and the app-local VC++ runtime.
+- **No macOS universal binary**: ort ships no `x86_64-apple-darwin` ONNX Runtime, so a
+  universal full build is impossible, and the updater picks artifacts by target triple
+  anyway. Intel Macs get no build, lite included: run the Docker image, or run it on
+  another machine.
+- **GPUs come from packs, not from the binary**: the binary never links libtorch, so it
+  starts (and serves) with no pack, as 0.5.2's server did before `install-ocr`. CUDA
+  packs need an NVIDIA driver ≥ 580 (CUDA 13.0) and nothing else from the host.
+
+Each archive has a top directory of its own name holding:
+
+- unix: `mokuro-bunko`, provider libraries if any, `README.md`, `LICENSE`,
+  `THIRD-PARTY-LICENSES.md`; with the desktop tray (the full build, below): Linux
+  `share/` (menu entry, autostart entry, hicolor icons), macOS `mokuro-bunko.app`;
+- Windows (this *is* the portable build that replaces 0.5.2's uv zip): `mokuro-bunko.exe`
+  (the app, below), `mokuro-bunko-cli.exe` (the console build), the VC++ DLLs, `run.bat`,
+  `doctor.bat` (they call `mokuro-bunko-cli.exe`), `_env.cmd`, `PORTABLE.txt`,
+  `README.txt`, `LICENSE.txt`, `THIRD-PARTY-LICENSES.md`, `mokuro-bunko.ico` (batch files
+  get CRLF line endings).
+  With `PORTABLE.txt` present, `run.bat` keeps config/library/logs/models in `data\`
+  next to it (0.5.2's portable guarantee: nothing in AppData or the registry).
+  `install.ps1` deletes `PORTABLE.txt`, so an installed copy uses
+  `%LOCALAPPDATA%\mokuro-bunko`, where 0.5.2 kept its library.
+
+The release also carries `SHA256SUMS`, `release.json` and `release.json.sig`.
+
+### Desktop tray (`mokuro-bunko tray`, GUI.md §5–§6)
+
+The tray is part of the program: `mokuro-bunko tray` (crate `bunko-tray`, feature `tray`
+of the mokuro-bunko crate, on in the full build; the static lite build has none), and
+`mokuro-bunko` with **no arguments** starts the app (`crates/mokuro-bunko/src/no_args.rs`):
+in a desktop session (Windows; macOS outside SSH; Linux with `DISPLAY`/`WAYLAND_DISPLAY`
+and a session bus) the tray in the foreground (from a terminal it says so in one line;
+on Linux and macOS Ctrl+C quits it and the instances it started, as Quit does; on
+Windows it ends only the tray, and the next tray adopts the instances); headless, what
+is configured (`serve`, `processor serve`, or both), or `setup` with a terminal, or a
+short message.
+`MOKURO_DESKTOP=0|1` overrides the detection. On Linux the tray is a StatusNotifierItem
+with a dbusmenu menu on the session D-Bus (ksni 0.3 on zbus 5, pure Rust: **no GTK or
+AppIndicator library**, so the full binary still starts on a headless box or in
+Docker); on Windows and macOS tray-icon + muda on a tao event loop.
+
+- **Windows**: one program built once, shipped twice: `mokuro-bunko.exe`, the app (the
+  PE header's subsystem set to GUI, `bunko_update::layout::set_pe_subsystem`: Rust links
+  both with `mainCRTStartup`, so that field is the only difference; no console window,
+  ever: shortcuts, Startup and a double-click run it, and the instances the tray starts
+  run as it too), and `mokuro-bunko-cli.exe`, the console build for terminals and
+  scripts (output, exit codes, the shell waits for it), with the same no-argument rules.
+- **macOS**: `Mokuro Bunko.app/Contents/{Info.plist, PkgInfo, MacOS/mokuro-bunko,
+  Resources/mokuro-bunko.icns}`; `CFBundleExecutable` is `mokuro-bunko`, so opening the
+  app is a no-argument start: the tray, and on a Mac with nothing set up the chooser in
+  the browser (GUI.md §1).
+  `LSUIElement` (menu-bar only), bundle id `io.github.gnathonic.mokuro-bunko.tray`.
+- **macOS disk image** (`packaging/macos/make-dmg.sh [--bundle-ocr <dir>] <full .tar.gz>
+  <out.dmg>`, run on a Mac with `pip install dmgbuild`): `Mokuro Bunko.app` and an
+  Applications alias on a "drag to install" background, plus `Read me.txt`. The app is
+  the archive's bundle renamed, its program a real file, **sealed ad hoc**
+  (`codesign --force --deep -s -`): `codesign --verify --deep --strict` passes on the
+  app as it comes out of the image. No OCR backend inside (`--bundle-ocr <dir>` adds
+  `Contents/Resources/ocr-offline` for offline installs). The release's macOS file is
+  this image, `mokuro-bunko-<ver>-macos.dmg`, and it is the macOS artifact of
+  `release.json` (the updater and `install.sh` install from it); the archive it is made
+  from is not uploaded.
+- **Linux**: `share/applications/mokuro-bunko-tray.desktop` and
+  `share/autostart/mokuro-bunko-tray.desktop` (`Exec=mokuro-bunko tray`; `install.sh`
+  writes the installed path), `share/icons/hicolor/<n>x<n>/apps/mokuro-bunko.png`
+  16–512 + scalable SVG. `mokuro-bunko doctor` (in a desktop session) checks the session
+  bus and a StatusNotifier host (`org.kde.StatusNotifierWatcher` with a registered
+  host); on GNOME it names the "AppIndicator and KStatusNotifierItem Support" extension
+  package.
+- **Login items**: `~/.config/autostart/mokuro-bunko-tray.desktop` (`Exec=<mokuro-bunko> tray`),
+  LaunchAgent `io.github.gnathonic.mokuro-bunko-tray` (`ProgramArguments`: the app's
+  `mokuro-bunko`, `tray`), Startup `Mokuro Bunko.lnk` (→ `mokuro-bunko.exe`).
+- **Icons**: original artwork, generated by `packaging/icons/generate.py` (outputs
+  committed); the tray embeds its PNGs (idle / working / paused / attention, the
+  attention one with a "!"; on Linux the SNI status is `NeedsAttention` then).
+- **xtask**: `dist` stages the desktop files of a build with the tray
+  (`Build::has_tray`: full, not `--no-tray`); `--no-tray` (the Dockerfiles) builds
+  without the `tray` feature and stages none; `xtask docker` drops `share/`.
+- **Licences**: the tray's crates are in the program's crate graph and so in
+  `THIRD-PARTY-LICENSES.md` with a "Desktop tray" note (ksni is Unlicense, zbus MIT).
+- **Install scripts**: `install.sh` (Linux) installs the menu entry with an absolute
+  `Exec=<libdir>/mokuro-bunko tray`, the icons and, with `--autostart`, the autostart
+  entry; on macOS it copies the app from the disk image to `~/Applications`
+  (`/Applications` as root) and links its program. `install.ps1` runs
+  `mokuro-bunko-cli.exe` for `--version`/`doctor`, points the Start-menu shortcut
+  "Mokuro Bunko" and `-Startup` at `mokuro-bunko.exe`, and writes `tray.json`
+  (`{"managed":[{"role":"server"}]}`).
+
+**Updates.** What an update replaces is `bunko_update::layout::Plan`: the running program;
+on Windows also the other of the pair (from the zip); on macOS the app bundle around it
+(`Info.plist`, `PkgInfo`, `Resources` from the disk image, mounted `-nobrowse`), sealed
+again with `codesign` once the staging folder is gone, and again when the previous
+release's backup leaves the bundle (`drop_previous`) or returns (`restore_previous`).
+codesign writes the signed program as a new file, so a running copy is not disturbed.
+
+### Licences
+
+`xtask dist` (and `xtask licenses`) walk the `cargo metadata` graph of `mokuro-bunko` for
+the exact target and features (normal dependencies only), classify each SPDX expression
+(OR = any alternative, AND = all), and write `THIRD-PARTY-LICENSES.md`: a table, the
+native components, and every licence/notice file the crates ship, deduplicated by text.
+**A copyleft licence (GPL/LGPL/AGPL/SSPL/EUPL/…) with no permissive alternative fails the
+build**; unknown licence ids and crates without a licence file are warnings (today:
+`asn1-rs-impl` and `yasna` ship no licence file; both MIT/Apache-2.0). CI runs
+`xtask licenses` for lite and every full variant. Non-OSS redistributables flagged in the
+file: Microsoft's Visual C++ runtime (Windows, app-local, above). CUDA/cuDNN are never in the archives;
+the backend packs' licences are in §8.
+
+## 2. Docker images (`ghcr.io/gnathonic/mokuro-bunko`)
+
+Two images: the **full** image, successor of both 0.5.2 images (`deploy/Dockerfile` and
+the CUDA `Dockerfile.unraid`), and the new **lite** image. **No image carries an OCR
+backend pack or a model**: the full image downloads the pack its container's GPU needs,
+and the enabled engines' models, on first start (owner's rule: download after hardware
+detection and by the owner's preference; bake in only what cannot be fetched).
+
+| tag | Dockerfile | base | pack | platforms | size (uncompressed) |
+|---|---|---|---|---|---|
+| `<ver>-lite`, `latest-lite` | `deploy/docker/Dockerfile.lite` | `gcr.io/distroless/static-debian13` | — | amd64, arm64 | 12 MB download, 43 MB on disk |
+| `<ver>`, `latest` | `deploy/docker/Dockerfile` | `debian:trixie-slim` + nginx, tini | downloaded on first start (`cpu`, `cu130` or `rocm7.1`) | amd64 | 216 MB (58 MB compressed) |
+| `<ver>-cuda`, `latest-cuda` | — (a second tag of the same image) | | | amd64 | the same image |
+
+`-cuda` is an **alias**: the release workflow pushes the full image under `:<ver>` and
+`:<ver>-cuda`, and Publish points `latest-cuda` at `:<ver>`. 0.5.2's CUDA Unraid
+template and compose file name a locally built `mokuro-bunko:unraid-cuda`, so they do not
+pick up 0.7 by themselves: set the image (Unraid: Repository) to
+`ghcr.io/gnathonic/mokuro-bunko:latest`; volumes, `/config` and variables keep working.
+Nothing about NVIDIA or AMD
+needs another base: the packs are self-contained (libtorch, cuBLAS/cuDNN from NVIDIA's
+wheels, the ROCm 7.1 libraries); only the NVIDIA driver library comes from the host
+through the container toolkit. The image adds the few Debian libraries the `rocm7.1`
+pack expects from a host (`libnuma1` plus the unversioned `libnuma.so` link,
+`libelf1t64`, `libdw1t64`, `libatomic1`; ~1.5 MB).
+
+**First start**: `serve` and `processor serve` (as PUID:PGID) start serving at once and run
+`mokuro-bunko install-ocr --if-needed` as a background child process
+(`crates/mokuro-bunko/src/ocr_install.rs`; the entrypoint no longer runs it first), which
+
+1. does nothing when local OCR is off (`ocr.backend: skip`, `ocr.local_processing:
+   false`; a processor always runs OCR) or `MOKURO_OCR_AUTO_INSTALL=false`, and a new
+   library server waits for its first-run setup (`/setup`'s OCR step starts it);
+2. detects the GPUs **this container was given** (`hwdetect`): NVIDIA counts only with
+   the toolkit's device nodes (`/dev/nvidiactl`, `/dev/nvidia<N>`) and driver library
+   (`libcuda.so.1`) — the host's `/proc/driver/nvidia` shows through without `--gpus` —
+   and AMD only with `/dev/kfd`, a `/dev/dri/renderD*` node and the permission to open
+   them; a GPU left out is named with the flag that would pass it in (`install-ocr
+   --list`, `doctor`);
+3. applies the owner's preference `ocr.backend` (`MOKURO_OCR_BACKEND`; a processor reads
+   `MOKURO_OCR_BACKEND` alone): `auto` follows the hardware, `cpu` stays on the CPU with a
+   GPU present, `cuda`/`rocm` pick that vendor's pack and fall back to `cpu` with a hint
+   when that GPU is not usable here (as 0.5.2 fell back to CPU torch);
+4. installs the pack of **this release** into `/data/backends` (the cpu archive ~100 MB;
+   cu130 ~350 MB + ~1.6 GB of NVIDIA's wheels from PyPI; rocm7.1 ~3.3 GB) and the models
+   of the enabled generations into `/data/models` (`models download`: a library that
+   enables only hayai-nova never fetches paddle-manga), and removes the packs it
+   replaces (another GPU's, another release's).
+
+Later starts find the fitting pack and download nothing. A container started with a new
+GPU, or a preference for a GPU it now sees, gets that GPU's pack; a GPU that is gone
+keeps the GPU pack (it runs on the CPU too). The progress is in the log, the admin panel
+and `/control/status`; local OCR starts by itself when it is done (a processor registers
+at once as not available, reason `installing`, and registers again then). A failed
+install is a problem with a Retry button. One that may clear by itself (network, a
+download) is retried after 5, 15 and 60 minutes; one that needs the owner (no disk space,
+driver too old) waits for a fix or Retry. Every start tries again while the pack is
+missing. Until the pack is in place the server keeps serving and remote processors take
+the OCR work; this server's own OCR, ppocr-manga included, waits for it. A library that
+enables only ppocr-manga needs no pack and never waits. The health check's start period is 30 s. The image update to a new release installs that
+release's pack on its first start (a pack belongs to one release, §8).
+
+Run examples:
+
+    docker run -p 8080:8080 -v ./data:/data ghcr.io/gnathonic/mokuro-bunko          # CPU
+    docker run --gpus all -p 8080:8080 -v ./data:/data ghcr.io/gnathonic/mokuro-bunko   # NVIDIA
+    docker run --device /dev/kfd --device /dev/dri -p 8080:8080 -v ./data:/data \
+        ghcr.io/gnathonic/mokuro-bunko                                              # AMD
+
+- **NVIDIA**: driver ≥ 580 (CUDA 13.0), the NVIDIA Container Toolkit (`--gpus all`;
+  Unraid: Nvidia-Driver plugin + `--runtime=nvidia`, with `NVIDIA_VISIBLE_DEVICES`), a
+  Turing (sm_75) or newer GPU. The image sets `NVIDIA_VISIBLE_DEVICES=all` and
+  `NVIDIA_DRIVER_CAPABILITIES=compute,utility` for `--runtime=nvidia`; without the
+  toolkit they do nothing.
+- **AMD** (Linux, gfx1030/1100–1102/1200–1201; gfx1031/1032/1034 through the gfx1030
+  kernels): `--device /dev/kfd --device /dev/dri`. `bunko-init` keeps the groups owning
+  those device nodes (and any `--group-add`) when it drops to PUID:PGID, so hosts where
+  they are `render`/`video` 0660 need nothing more.
+- **amd64 only** for the full image: there are no Linux arm64 packs (TORCH-BACKEND.md
+  scope); arm64 hosts run the lite image and OCR on a processor elsewhere.
+- **`BAKE_PACK=1`** (build arg, opt-in for air-gapped self-builds; the release never
+  bakes): the source stage runs `xtask torch-pack --variant $PACK_VARIANT --no-archive`
+  (`PACK_VARIANT` = `cpu` by default, `cu130` with `--bundle-external`, `rocm7.1`) into
+  `/opt/mokuro-bunko/backends`; for `BIN_FROM=prebuilt`, `xtask docker-context
+  --bake-pack <variant>` installs that pack's archive (from `--dir`) there. A baked pack
+  is searched **after** `/data/backends` (`ocr_target::shipped_backends`), so it serves
+  until the automatic install puts a better one in the volume; it counts as installed
+  for `--if-needed`. The images no longer set `MOKURO_TORCH_PACK` (a pinned directory
+  without a `pack.json` is dropped with a warning).
+
+Each Dockerfile has two binary sources, picked by `--build-arg BIN_FROM=`:
+`source` (default; builds with `xtask dist` inside, so `docker build` works from a
+checkout) or `prebuilt` (the release workflow: `xtask docker-context` unpacks the signed
+release archives into `dist/docker/<amd64|arm64>/<lite|full>/` plus `bunko-init`, and
+nothing else).
+
+Container contract (kept from 0.5.2, `spec/config-cli-ops.md` §11.2):
+
+- Starts as root, then `bunko-init` drops to `PUID:PGID` (default 1000:1000, the uid of
+  0.5's `mokuro` user; Unraid templates pass 99:100), keeping the GPU device-node groups
+  and `--group-add` groups (never group 0), sets `UMASK` (002), chowns the storage and
+  config directories (recursively with `TAKE_OWNERSHIP=true`) and execs `mokuro-bunko`
+  (default command `serve`). `docker run --user …` works too (PUID/PGID then ignored;
+  give that user the device groups yourself).
+- `MOKURO_CONFIG` defaults to `/data/config.yaml` (image `ENV`, so `docker exec …
+  mokuro-bunko <command>` reads the same file as the server); the Unraid template and
+  the Unraid compose files set `/config/config.yaml`, as for the 0.5.2 CUDA image.
+- `MOKURO_*` variables as before. `MOKURO_INSTALL_KIND=docker` is set, so the updater
+  only reports the image to pull. The images no longer set `MOKURO_UPDATE_FLAVOR`: the
+  binary is `full`, so the updater names `:<ver>`; release.json keeps its `full-cuda`
+  docker entry, which points at the `-cuda` alias.
+- `MOKURO_OCR_AUTO_INSTALL` (full image, default `true`): `false` skips the automatic
+  install: the dashboard and admin panel show the backend as missing with an Install
+  button, which installs it and starts local OCR without a restart (`docker exec ...
+  mokuro-bunko install-ocr` and a restart also work). Missing models still download when
+  an engine first needs them. 0.5.2's `OCR_AUTO_INSTALL=true` still turns it on;
+  `OCR_AUTO_INSTALL=false` (the 0.5.2 Unraid template's default) is noted and ignored, as
+  it never stopped 0.5.2's server from installing OCR on start.
+- `MOKURO_NGINX_ACCEL=1|true` (full image): `entrypoint.sh` renders
+  `nginx-internal.conf.template`, starts nginx on `MOKURO_PORT` (master root, workers
+  PUID:PGID) and moves the server to `127.0.0.1:MOKURO_BACKEND_PORT` (8081). Default is
+  off (0.5's generic image defaulted it on; the async server no longer needs it). The
+  lite image has no nginx: `bunko-init` drops the variable with a warning, so a carried
+  over `MOKURO_NGINX_ACCEL=1` never produces empty X-Accel responses.
+- Retired variables `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`,
+  `MOKURO_BUNKO_MOKURO_SPEC` are accepted and ignored.
+- The compiled model packages are unpacked once into `/data/models` (the data volume)
+  and loaded in place, not from `/tmp` (bunko-ocr's `models.rs`; a `.pt2` zip handed to
+  `bunko-torch` directly is unpacked by its `unpack.rs` into `/data/models/torch/.unpacked`).
+- `HEALTHCHECK` runs `mokuro-bunko healthcheck` (GET `/api/health`; no curl in the
+  images). The start period is 30 s in the full image and 10 s in the lite one: the
+  server listens within seconds of every start, the first one included (the OCR backend
+  downloads in the background, above), and failures in the start period do not count.
+- Labels: `org.opencontainers.image.licenses=MPL-2.0` (0.5 said MIT; spec Q9).
+
+nginx template changes: the `/_processor/` location now passes the WebSocket upgrade
+(`Upgrade` + `Connection $connection_upgrade`, mapped so ordinary requests keep upstream
+keep-alive) with 3600 s timeouts, for protocol v3's processor socket, and keeps
+unbuffered, uncapped `PUT` uploads.
+
+**Unraid**: switch the template's repository to `ghcr.io/gnathonic/mokuro-bunko:latest`
+(or keep `latest-cuda`: the same image). Every existing variable keeps working;
+`MOKURO_NGINX_ACCEL=1` keeps nginx. The first start downloads the backend for the GPU the
+container sees (~2 GB for NVIDIA). An NVIDIA host needs driver ≥ 580 for the CUDA 13 pack
+(the 0.5.2 image's torch cu130 needed the same); for AMD replace `--runtime=nvidia` in
+Extra Parameters with `--device=/dev/kfd --device=/dev/dri`. With OCR on another
+machine, `:<ver>-lite` (template `mokuro-bunko-lite.xml`) is enough, but it has no nginx.
+
+## 3. release.json and signing
+
+```json
+{
+  "version": "0.7.0",
+  "published_at": "2026-10-01T18:54:27Z",
+  "notes_url": "https://github.com/Gnathonic/mokuro-bunko/releases/tag/v0.7.0",
+  "artifacts": {
+    "aarch64-unknown-linux-musl": {
+      "lite": { "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/v0.7.0/mokuro-bunko-0.7.0-linux-arm64-server.tar.gz",
+                "sha256": "…", "size": 5814114, "binary": "mokuro-bunko" }
+    },
+    "aarch64-apple-darwin": {
+      "full": { "url": "…/mokuro-bunko-0.7.0-macos.dmg", "sha256": "…", "size": …, "binary": "mokuro-bunko" }
+    }
+  },
+  "docker": { "full": "ghcr.io/gnathonic/mokuro-bunko:0.7.0",
+              "full-cuda": "ghcr.io/gnathonic/mokuro-bunko:0.7.0-cuda",
+              "lite": "ghcr.io/gnathonic/mokuro-bunko:0.7.0-lite" }
+}
+```
+
+- Written by `xtask manifest` from the archives, the disk image and the packs in a
+  directory (names parsed back into target and flavor; a disk image is its target's
+  artifact), serialized with bunko-update's own `Manifest` type, pretty-printed
+  one key per line (what `install.sh` parses without jq).
+- `release.json.sig` = base64 ed25519 signature over the exact bytes of
+  `release.json` (`xtask sign`). `bunko-update` verifies it with the public key compiled
+  into the binary (`RELEASE_PUBLIC_KEY`, `bvEsRQhV…HEk=`; forks override with
+  `BUNKO_RELEASE_PUBLIC_KEY` at build time) before trusting any sha256 in it.
+- `xtask sign` refuses a key whose public half is not the compiled-in key (such a
+  release could never verify) and re-verifies its own output the way the updater does.
+  `xtask verify [--dir dist --require-all]` checks signature, sha256 and size.
+
+### Signing key handling
+
+- The key is a base64 32-byte ed25519 seed. The owner's copy is
+  `~/.config/mokuro-bunko-release/signing.key` (mode 600; `signing.pub` next to it). It
+  is never in the repository and xtask never prints it.
+- **The owner must add it as a GitHub Actions secret** before the first release:
+  `gh secret set BUNKO_SIGNING_KEY < ~/.config/mokuro-bunko-release/signing.key`
+  (or Settings → Secrets and variables → Actions → New repository secret). The release
+  workflow fails early when it is missing. Consider putting it in a protected
+  `release` environment with required reviewers.
+- Rotation: generate a new key (`cargo run -p xtask -- keygen --out new.key`, prints the
+  public key), put the public key in `crates/bunko-update/src/lib.rs`, release once
+  signed with the **old** key (so installed servers accept the binary carrying the new
+  key; `xtask sign` and `verify` default to the compiled-in key, so that release's
+  `release.yml` and `publish.yml` pass them `--public-key <old public key>`), then switch
+  the secret and drop that flag. A leaked key means a release with a new key and a
+  manual reinstall for anyone who might have received a forged update.
+
+## 4. How updates work, per install kind
+
+The server polls `https://github.com/Gnathonic/mokuro-bunko/releases/latest/download/release.json`
+(+ `.sig`), verifies it, and compares versions (`update.channel`; the default `auto`
+is `prerelease` for a pre-release build and `stable` otherwise; on `prerelease` the
+manifest comes from the newest published release carrying `release.json`, found through
+the releases API, because `releases/latest` skips pre-releases). What happens next
+depends on `bunko_update::InstallKind::detect()`:
+
+| install | detected as | admin panel | how it is applied |
+|---|---|---|---|
+| tarball / `install.sh` as a user (`~/.local/lib/mokuro-bunko`) | self-managed | **Update** button | download archive → sha256 from the signed manifest → swap the executable (`self-replace`) → `exec` itself (same PID: systemd user units keep tracking it) |
+| `install.sh` as root + system unit | `MOKURO_INSTALL_KIND=install.sh` → managed | notice | binary is root-owned and `/usr` read-only to the service: re-run `install.sh` |
+| Windows zip / portable / `install.ps1` | self-managed (`_env.cmd` sets `MOKURO_INSTALL_KIND=self`) | **Update** button | as above; `run.bat` restarts the server when it exits with code 75 (see §6) |
+| Docker | `/.dockerenv` or `MOKURO_INSTALL_KIND=docker` (set in all images) | notice with the image ref from `docker[flavor]` | `docker pull` / Unraid "update" |
+| distro package, Homebrew, Nix (`/usr/bin`, `Cellar`, `/nix/store`) | managed | notice | the package manager |
+| Android / iOS | mobile | notice | the app store |
+
+A self-managed install updates the release as one unit (the program and its other
+copies in the install, `layout::Plan` above, the release's backend pack for the installed variant, the models its compiled-in
+manifests name): the new binary is staged next to the running one and runs its own
+hidden `update prefetch` (stages + load-checks its pack in `backends/.staging-<variant>`,
+fetches its models) before anything is switched; then the binary and the pack switch
+together, the old ones kept (`.mokuro-bunko-previous`, `backends/.prev-<name>`) until the
+new release's pack has loaded after the restart (`install-ocr --probe` in a child), and
+rolled back together when it does not. Opt-in automatic updates (`update.auto`,
+`processor.auto_update`) do the same unattended at a quiet moment
+(docs/configuration.md "Automatic updates"); a version's manifest is derived from
+`update.manifest_url` (`…/releases/download/v<ver>/release.json`), so a mirror must keep
+every version it serves under `v<ver>/`. A test or fork release signed with another key
+is trusted only through `update.public_key` in the config FILE (never the environment,
+never the admin API), logged loudly at every start.
+
+`install.sh` verifies the same signature with OpenSSL 3 when available (warns or, with
+`--require-signature`, fails without it) and always checks the sha256.
+`install.ps1` checks the sha256 over HTTPS but cannot check ed25519 (Windows
+PowerShell has no ed25519); the in-app updater does check the signature.
+
+## 5. Cutting a release
+
+0. Dry run first: Actions → **Release check** on the branch to be tagged
+   (`gh workflow run release-check.yml --ref <branch>`). It runs the release's build
+   jobs on the branch's head (below) and must be green before tagging.
+1. Bump `version` in the root `Cargo.toml` (`[workspace.package]`), update
+   `CHANGELOG.md`, commit, and push a tag: `git tag v0.7.0 && git push origin v0.7.0`.
+   (A version with a `-`, e.g. `-alpha.N`, `-beta.N`, `-rc.N`, becomes a GitHub
+   pre-release, and Publish leaves the `latest*` image tags alone.)
+2. `release.yml` runs: checks the tag equals the workspace version and that
+   `BUNKO_SIGNING_KEY` exists; runs `release-build.yml` (tests, the archive matrix,
+   the macOS disk image, the backend packs); writes, signs and verifies
+   `release.json`; creates a **draft** release with all assets (archives, disk
+   image, packs, `release.json` + `.sig`, `SHA256SUMS`) and its notes (the
+   "Which file do I want?" table, `xtask release-notes`, and the changelog link since
+   the previous `v*` tag), checks the notes' links name files of the draft
+   (`scripts/release-links.sh`); and, through
+   `release-docker.yml`, pushes the versioned images `:<ver>-lite` and `:<ver>` (also
+   tagged `:<ver>-cuda`; no pack, no model inside). The images are pushed once every
+   build job has passed. A draft is invisible to
+   `releases/latest/download/`, so no installed server sees it yet.
+3. Review the draft (notes, assets; `cargo run -p xtask -- verify release.json --dir .`
+   on downloaded assets if you like).
+4. Run **Publish** (Actions → Publish → tag `v0.7.0`): re-verifies the manifest and
+   the notes' links, un-drafts the release (a pre-release stays a pre-release; a
+   stable one is marked latest), checks the links again as published, moves `beta` and
+   `beta-lite` to it (every version), and for stable versions moves `latest`,
+   `latest-lite`, `latest-cuda` (= `latest`). Installed servers see it on their next check.
+5. The Unraid templates and compose files default to `:latest` / `:latest-lite` and the
+   templates' `<TemplateURL>` points at `main`. (Through the 0.7 betas they used `:beta` /
+   `:beta-lite` and the `0.7` branch, because `latest*` did not exist before 0.7.0 and
+   `main` still had the 0.5 templates; 0.7.0 was merged into `main` and switched them.)
+   `:beta` / `:beta-lite` keep following every version, for anyone who wants pre-releases.
+
+Re-running `release.yml` for the same tag (workflow_dispatch) replaces the draft's
+assets (`--clobber`) and re-pushes the versioned images.
+
+### The release check (`release-check.yml`)
+
+The build half of a release is two reusable workflows (`on: workflow_call`):
+`release-build.yml` (test, every archive, the disk images, the Windows/macOS/Linux
+packs, the opt-in APK, uploaded as `dist-*` / `pack-*` artifacts) and
+`release-docker.yml` (the lite and full images from this run's Linux binaries; pushes
+only with `push: true`). `release.yml` calls them for a tag and then signs, drafts and
+pushes. `release-check.yml` (manual, any branch) calls the same two on the branch's
+head without a tag, then writes the **unsigned** `release.json` and `SHA256SUMS` and
+checks the asset set the draft would get: the four downloads in `SHA256SUMS`, their four
+artifacts in `release.json` (the macOS one is the disk image), the 6 packs, and nothing
+else (no per-file `.sha256`, no lite Windows/macOS or Intel build). It cannot
+publish anything: the workflow has only `contents: read` (no `packages: write`, no
+`contents: write`), passes no secret (nothing is signed; the Android job is off), and
+calls `release-docker.yml` with `push: false` (no registry login; the amd64 images are
+loaded and run `--version` on the runner instead). Its artifacts are kept for 3 days.
+What only a tag exercises: the tag/version check, `BUNKO_SIGNING_KEY`, signing and
+verifying with the compiled-in key, `gh release create`, the GHCR login and push.
+
+Locally, the same pipeline (minus upload):
+
+```sh
+export CARGO_TARGET_DIR=target/release-local
+cargo run -p xtask -- dist --zig --target x86_64-unknown-linux-musl --flavor lite
+cargo run -p xtask -- dist --target x86_64-unknown-linux-gnu --flavor full
+cargo run -p xtask -- torch-pack --variant cpu --out dist          # + cu130, rocm7.1 (Linux)
+cargo run -p xtask -- manifest --version 0.7.0 --dir dist
+cargo run -p xtask -- sign dist/release.json --key ~/.config/mokuro-bunko-release/signing.key
+cargo run -p xtask -- verify dist/release.json --dir dist --require-all
+cargo run -p xtask -- docker-context --dir dist          # then docker build --build-arg BIN_FROM=prebuilt …
+                                                         # (--bake-pack cpu|cu130|rocm7.1: air-gapped self-builds only)
+```
+
+## 6. Requirements on the binary and server (for the crates' owners)
+
+- `mokuro-bunko healthcheck` (exists): exit 0 iff the local server answers; used by every
+  image's `HEALTHCHECK`, run as root via `docker exec`, so it must not write the log file.
+- `--version` must print the version (xtask's smoke test checks it) and should keep naming
+  the flavor (`lite`/`full`): the smoke test fails a lite build that calls itself full.
+- **The updater flavor**: released binaries are `lite` or `full` (GPU support comes from
+  packs). `MOKURO_UPDATE_FLAVOR` overrides it (`crate::update_flavor()`); no image sets
+  it any more (the 0.7 CUDA image set `full-cuda`; `-cuda` is now a tag of the full image).
+- `mokuro-bunko`'s `ocr`/`cuda`/`directml`/`coreml`/`webgpu` features forward to
+  `bunko-ocr` (and so to ort): `ocr` brings bunko-ocr, the others reach it and bunko-vlm
+  through bunko-engines. `xtask dist` still warns about a full build that links no ONNX
+  Runtime.
+- Archives with provider libraries (`full-cuda`, not released): `bunko-update` only
+  replaces the program (and its other copies, `layout::Plan`). When the ONNX Runtime
+  version changes, the bundled
+  `libonnxruntime_providers_*.so`/`.dll` must be replaced too, or the CUDA EP fails to
+  load. Either extract every file of the archive next to the executable, or refuse the
+  in-place update for archives that hold more than the binary.
+- Windows restart: `restart()` spawns a new process and exits, which detaches it from
+  `run.bat`'s console handling. When `MOKURO_LAUNCHER=run.bat` (set by `_env.cmd`), exit
+  with code **75** instead; `run.bat` loops on 75.
+- Pre-release channel: `releases/latest/download/` never points at a GitHub pre-release,
+  so on `prerelease` (the `auto` default of a pre-release build) the updater asks the
+  releases API for the newest published release with a `release.json` (model releases
+  such as `models-v1` carry none and are skipped). The API is unauthenticated (60
+  requests an hour per address); the 12-hour check is far below that.
+- `MOKURO_NGINX_ACCEL` must stay tolerated by the server; inside images it is only set
+  when nginx really runs. On a wildcard host the first-run banner names
+  `<this server's address>` instead of the bind address, and in nginx mode also
+  `<web UI port>` instead of the internal backend port, next to the setup code (`bunko_server::app::setup_banner`).
+
+## 7. Verification status
+
+Verified locally (2026-10-01, x86_64 Arch host, `CARGO_TARGET_DIR=target/agent-packaging`):
+
+- `xtask` unit tests (15): names/flavors/features, archive round trips through
+  `bunko_update::extract_binary`, manifest from a directory, sign/verify/keygen with
+  tamper, wrong-key and checksum-mismatch cases, SPDX classification.
+- `xtask dist` for `x86_64-unknown-linux-gnu` lite and full, `x86_64-unknown-linux-musl`
+  lite (zig; statically linked, smoke-tested) and `aarch64-unknown-linux-musl` lite
+  (zig; static, not runnable here); a Windows zip layout from a stand-in exe.
+- `manifest` → `sign` with the real key (file and `BUNKO_SIGNING_KEY`) → `verify` with
+  the compiled-in key; a wrong key is refused by `sign`.
+- `install.sh` against a local release: bash, dash (Debian 12) and busybox (Alpine);
+  signature OK / tampered / wrong key, musl → lite, glibc-too-old refusal.
+- `install.ps1` / `setup-windows.ps1` parse, and run under pwsh on Linux up to
+  launching the exe (download, sha256, unzip, PORTABLE.txt removal, missing-flavor error).
+- Docker: the lite image built from source (`xtask dist` inside `rust:1-alpine`) runs
+  the real server as PUID:PGID with umask 002, reports `healthy` through
+  `mokuro-bunko healthcheck`, idles at 15.7 MiB and stops cleanly on SIGTERM (exit 0).
+  The full image (prebuilt) in nginx mode: nginx on :8080 (master root, workers PUID),
+  server on 127.0.0.1:8081, a 3 MB library volume downloaded byte-identical through the
+  X-Accel internal location (nginx ETag), a WebSocket upgrade to `/_processor/…/socket`
+  reaches the server (401 without a token), clean stop through tini. The CUDA image
+  builds (stand-in binary; apt, tini, nginx, env, PUID 99:100). `--user`,
+  `TAKE_OWNERSHIP`, retired variables and the lite image's `MOKURO_NGINX_ACCEL` handling
+  checked. The nginx template passes `nginx -t`.
+- systemd units pass `systemd-analyze verify`; workflows pass actionlint; shell scripts
+  pass shellcheck; compose files pass `docker compose config`.
+
+Verified locally 2026-10-02 (stream C, libtorch backend; details in §8):
+
+- `xtask torch-pack` built the Linux `cpu`, `cu130` and `rocm7.1` packs with
+  libbunko_torch (closure check passed); Windows `cpu`/`cu130` and macOS `cpu` staged
+  with `--no-cdylib` and closure-checked (PE / Mach-O). `xtask` tests cover pack names,
+  keep rules, ROCm arch trimming, split + reassembly, pack.json round trip;
+  `bunko-update` tests cover unpacking split archives, whole-archive / per-file
+  checksums, unlisted and unsafe entries, links, wheel member extraction.
+- `install-ocr --from` installed the cpu pack (desktop), the cu130 pack on host-a with
+  the NVIDIA wheels **downloaded from PyPI** (1.67 GB, 27 s) and the 2-part rocm7.1 pack
+  (desktop); the packs then ran hayai-nova / paddle-manga through their C ABI on the
+  CPU, an RTX 4090 and an RX 9070 XT (§8 table), the ROCm one also in a clean Debian
+  container without ROCm.
+- **Linux full binary on old distros** (2026-10-03): `packaging/manylinux/build.sh full
+  cpu cu130 rocm7.1` in `quay.io/pypa/manylinux_2_28_x86_64` (from stream A's final
+  source). In clean `debian:12` (glibc 2.36) and `ubuntu:22.04` (glibc 2.35) containers
+  the archive's binary runs (`--version`), `install-ocr --variant cpu --from` installs the
+  manylinux cpu pack, `doctor` passes (`OCR backend: torch-cpu-2.13.0`), the pack's C ABI
+  reads 40/40 crops identical to 0.5.2, and the server OCRs the 10-page volume with
+  hayai-nova (fp32, the CPU default) and a ppocr-manga layer: 10 pages each, 0 failed;
+  hayai **10/10 pages, 54/54 blocks identical to 0.5.2 torch fp32** on both distros.
+  (Compiled packages for the test: hayai `linux-cpu-x86_64-v3` fp32 and
+  `linux-cpu-x86_64-v4bf16` bf16, built in Debian 12 with the exec-stack bit cleared —
+  stream B's pipeline must do the same.)
+- **CPU image, with the cpu pack baked in** (the design before 2026-10-07; built from
+  source, `debian:trixie-slim`, ~600 MB / 177 MB compressed): the server
+  starts healthy as PUID:PGID, loads the baked pack (`libtorch backend cpu
+  (/opt/mokuro-bunko/backends/torch-cpu-2.13.0) loaded in 0.3s`), `doctor` passes
+  (`OCR backend: torch-cpu-2.13.0`), `install-ocr --list` reports the baked pack, an
+  admin account is created with `admin add-user`, and a 10-page cut of Dr. Stone 01
+  dropped into the library is OCRed by hayai-nova bf16 on the CPU in 9.2 s — **10/10
+  pages, 54/54 blocks identical to 0.5.2 torch fp32** (host-a reference). The compiled
+  package had to be built in Debian 12 and have its exec-stack flag cleared (§8 open
+  items): packages built on Arch need GLIBC_2.43.
+- **CUDA image, with the cu130 pack baked in** (the design before 2026-10-07; since
+  then `-cuda` is a tag of the full image): built from source (rebuilt 2026-10-03 with the stubbed pack: ~2.85 GB
+  uncompressed, 1.79 GB compressed; the old `nvidia/cuda:13.0.3-cudnn-runtime` base alone
+  was ~5 GB); `install-ocr --list` reports the baked `torch-cu130-2.13.0` pack (2.5 GB,
+  NVIDIA licence texts under `licenses/`, the three stubs ~16 KB each),
+  `MOKURO_UPDATE_FLAVOR=full-cuda`. On this desktop (no NVIDIA GPU) the pack loads ("cuda
+  libtorch is loaded but sees no GPU") and the server OCRs the 10-page volume on the CPU
+  with hayai-nova fp32 (54/54 blocks = 0.5.2 fp32) and a ppocr-manga layer. (The first
+  run offered only ppocr-manga: the CPU package was under the old target name.)
+  **Not run on an NVIDIA GPU**: host-a has no Docker / NVIDIA Container Toolkit (podman
+  without CDI), so per the owner's instructions it stayed build-only; the identical
+  cu130 pack was verified natively on host-a's RTX 4090 (§8). Both containers stop
+  cleanly on `docker stop` (exit 0).
+- `xtask docker-context` with a stand-in full archive and the real cpu + cu130 pack
+  archives (the baked design): `amd64/full` and `amd64/cuda` got the binary,
+  `full/backends/torch-cpu-…` (418 MB) and `cuda/backends/torch-cu130-…` completed with
+  the NVIDIA wheels (2.7 GB). Since 2026-10-07 it lays out `amd64/full` only and installs
+  a pack only with `--bake-pack`.
+- **Full image with the backend downloaded on first start** (2026-10-07, built from
+  source with `BAKE_PACK=0`; a local signed release served over HTTP: cpu, cu130 and
+  rocm7.1 packs of this version, `MOKURO_BACKEND_MANIFEST`, the models through
+  `MOKURO_MODELS_MIRROR` / `MOKURO_TORCH_MODELS_MIRROR`; a 20-page volume in
+  `/data/library`):
+  - **Size**: 216 MB (58 MB compressed), against 775 MB / 177 MB for the full image
+    with the cpu pack built in and 4.6 GB / 1.8 GB for the CUDA image as built here
+    on 2026-10-03.
+  - **No GPU** (Ryzen 9 7950X host, RX 9070 XT not passed in): the first start picked
+    `cpu` ("no GPU visible: AMD GPU (the host has the ROCm driver, but this container
+    has no /dev/kfd ...)"), fetched release.json + .sig, the cpu pack and only
+    hayai-nova's and PP-OCR's files (12 requests; nothing of paddle-manga), then OCRed
+    the volume on the CPU (20/20 pages, fp32). The second start: "Already installed
+    ... nothing to download", 0 requests.
+  - **AMD** (`--device /dev/kfd --device /dev/dri`): `rocm7.1 (AMD gfx1201)`, the 3.5 GB
+    pack, hayai-nova bf16 packages for gfx1201; the volume OCRed on gpu:0 (20 pages in
+    3.6 s). `bunko-init` kept the device groups (render, video). Second start: 0
+    requests. The same volume started without the devices kept the rocm7.1 pack ("runs
+    on the CPU too"), 0 requests.
+  - **`ocr.backend: cpu` with the GPU passed in**: `cpu (ocr.backend: cpu)`, the cpu pack
+    and CPU packages, OCR on the CPU. Changing it to `auto` installed rocm7.1 on the
+    next start and removed the cpu pack; back to `cpu` kept the rocm7.1 pack with no
+    download, and `doctor` (through `docker exec`) passes.
+  - **Off switches**: `MOKURO_OCR_BACKEND=skip`, `MOKURO_OCR_LOCAL_PROCESSING=false`,
+    `MOKURO_OCR_AUTO_INSTALL=false`: nothing installed, 0 requests.
+    `OCR_AUTO_INSTALL=false` printed its note and installed as usual.
+  - **NVIDIA** (an RTX 4090 host, driver 595.58.03, rootless podman without the NVIDIA
+    Container Toolkit): without the GPU the container reported "NVIDIA driver 595.58.03
+    on the host, but this container has no access to the GPU" and chose `cpu` (the
+    host's `/proc/driver/nvidia` is visible in the container; before this check the
+    choice would have been cu130). With `/dev/nvidia*` and the driver's `libcuda`,
+    `libnvidia-ptxjitcompiler`, `libnvidia-ml`, `libnvidia-nvvm` and `nvidia-smi`
+    mounted where the toolkit puts them: `cu130 (NVIDIA GeForce RTX 4090 (driver
+    595.58.03))`, the pack plus 1.7 GB of NVIDIA's wheels from PyPI, hayai-nova bf16
+    sm_80 packages; the volume OCRed on gpu:0 (20 pages in 1.5 s); second start 0
+    requests. **Not verified**: the toolkit's own injection (`--gpus all`,
+    `--runtime=nvidia`), which no test host here has.
+
+Release check, 2026-10-09 (`release-check.yml` on `0.7` at 0.7.0-beta.1, run
+37894529228, every job green; before 0.7.0-beta.3 cut the release to four
+downloads): all 8 archives (Windows full and lite, macOS arm64
+full/lite and x86_64 lite, Linux musl lite x86_64/arm64, manylinux full), the 3 disk
+images (built with dmgbuild, mounted on the runner), the 6 backend packs (Windows
+`cpu`/`cu130` with the clang-cl wrapper, macOS `cpu`, Linux `cpu`/`cu130`/`rocm7.1`),
+both images built (multi-arch lite, amd64 full; the amd64 ones loaded and run
+`--version`, nothing pushed, no registry login) and the unsigned `release.json` with
+the expected 8 artifacts and 6 backends. Downloaded and checked: the Windows `cpu`
+pack's `pack.json` says `bunko_version` 0.7.0-beta.1, `bunko_torch.dll` imports
+`MSVCP140`/`VCRUNTIME140*` (MSVC ABI) and `lib/` holds the six VC++ runtime DLLs
+(14.51) listed in pack.json, with `licenses/microsoft-vc-runtime.txt`; the arm64 full
+and lite disk images on an M-series Mac (`hdiutil imageinfo`: UDZO; attached
+`-nobrowse`): `Mokuro Bunko.app` (CLI + tray, `--version` 0.7.0-beta.1 full / lite,
+`CFBundleVersion` 0.7.0-beta.1, `LSUIElement`), the `Applications` link to
+`/Applications`, `Read me.txt` (the lite one with the lite paragraph), no
+`ocr-offline`; their sha256 equal the `SHA256SUMS` lines.
+
+Only verifiable in CI / on real hardware:
+
+- macOS and Windows (MSVC) builds and their packs (CI only; the release check above).
+  Not built at all: Linux arm64 full (dropped, §1) and the ONNX Runtime `--ep` builds
+  with their provider libraries (not released).
+- Multi-arch image builds and pushes, GitHub release creation, Publish's tag moves.
+- CUDA EP on a GPU (driver ≥ 580), DirectML/CoreML at runtime, the Windows shortcuts,
+  `run.bat` restart loop, and the Android CI job (the APK itself is verified on an emulator, MOBILE.md §6).
+- Code signing is not done: Windows Authenticode (SmartScreen will warn) and macOS
+  notarization (when macOS refuses a downloaded `Mokuro Bunko.app`, right-click it and
+  choose Open, or run `xattr -dr com.apple.quarantine "/Applications/Mokuro Bunko.app"`,
+  as `packaging/macos/Read me.txt` says; `curl | sh` installs are not affected).
+
+## 8. OCR backend packs (libtorch)
+
+TORCH-BACKEND.md decides *why*; this is *how they are built, shipped and installed*.
+
+### Layout and pack.json
+
+    <storage>/backends/torch-<variant>-2.13.0/     (Docker: /data/backends/…; a BAKE_PACK=1 image: /opt/mokuro-bunko/backends/…)
+        pack.json             manifest (below)
+        libbunko_torch.so     our cdylib (bunko_torch.dll / libbunko_torch.dylib), RUNPATH $ORIGIN/lib
+        lib/                  the trimmed libtorch runtime (+ CUDA libraries, + ROCm libraries)
+        licenses/             PyTorch LICENSE + bundled third-party licences, NVIDIA licence texts, README.md
+
+`pack.json` (`bunko_update::backend::PackManifest`) is a superset of what the loader
+reads (`bunko_torch::abi::PackManifest`: `format`, `variant`, `torch`, `abi`, `os`,
+`arch`, `library`, `lib_dir`, `files`, `requires.gpu_archs`, and `bunko_version`, which
+must name this release). It adds `name`, `torch_build` (PyTorch
+commit), `target`, `requires.nvidia_driver`/`system_libs`,
+`external` (upstream wheels the installer takes files from, each pinned by url +
+sha256 + size, every extracted file pinned by sha256 + size) and `links`: every ELF
+library whose SONAME differs from its file name is also reachable under the SONAME
+(the ROCm zip names `libamd_comgr.so` what `libtorch_cpu.so` and others NEED as
+`libamd_comgr.so.3`; without it ld.so searches the host, picks `/opt/rocm` where there is
+one and fails where there is not — seen on host-e). The links are symlink entries in the
+archive (so a plain `tar -x` works), listed in pack.json (the installer checks each
+against it and creates them, as copies on Windows) and created by `--no-archive` too. The
+closure check resolves NEEDED names by **file or link name inside the pack** only, never
+by a SONAME carried under another file name, and it runs in the manylinux container,
+which has no `/opt/rocm`.
+
+Which pack a process uses: `MOKURO_TORCH_PACK=<dir>` when set (by hand; the images no
+longer set it), else the loader scans `<storage>/backends/` (bunko-engines
+`torch::discover`; names starting with `.` — `.staging-*`, `.prev-*` — are never opened),
+then a processor's fallback directories, then `<exe dir>/backends` (packs shipped next
+to the executable: a `BAKE_PACK=1` image).
+
+**A pack is locked to its release.** `bunko_version` (written by `xtask torch-pack` from
+the workspace version) must equal the loading binary's version: the loader refuses any
+other release's pack (`the backend pack is from mokuro-bunko A, this is B: each release
+runs only its own pack; run 'mokuro-bunko install-ocr'`) before it checks the ABI, and
+`install-ocr` installs only the pack listed in its own release's `release.json` (an
+installed pack of another release does not count as installed). A pack without
+`bunko_version` (built outside a release) is a development pack and any build opens it.
+`doctor`, `/control/status` (`backend.pack`) and the tray name the pack as
+`<variant> for <release> (<dir name>)`. The `release.json` entry also carries the pack's
+`requires` (e.g. `nvidia_driver`), so an installer can refuse before downloading.
+
+### Archives, release.json, trust chain
+
+`xtask torch-pack` writes `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`
+(zstd 19, 128 MiB window + long-distance matching, multithreaded; `pack.json` is the
+first tar entry so tools read it without unpacking) and splits it into `.001`, `.002`,
+… parts above `--max-part` (1.9 GiB: GitHub release assets must stay under 2 GiB).
+`xtask manifest` puts every pack it finds in `dist/` into `release.json`:
+
+```json
+"backends": {
+  "x86_64-unknown-linux-gnu": {
+    "cu130": { "name": "torch-cu130-2.13.0", "torch": "2.13.0", "abi": 1,
+               "sha256": "<whole archive>", "size": 364499730,
+               "parts": [ { "url": ".../mokuro-bunko-backend-0.7.0-linux-x64-cu130.tar.zst",
+                            "sha256": "…", "size": 364499730 } ],
+               "external_size": …, "installed_size": … } } }
+```
+
+(A split pack lists its `.001`, `.002`, … files as parts. `backends` is skipped when
+empty and ignored by older parsers.) `xtask verify`
+checks every part and the whole. Trust chain: signature of `release.json` → whole
+archive sha256 (and each part's) → `pack.json` inside it → each file's sha256,
+including every file taken out of an NVIDIA wheel. The installer refuses unsafe paths,
+files `pack.json` does not list, entries other than files, directories and symlinks, and
+symlinks that are not in `pack.json`'s `links` or name anything but a file next to them.
+
+### `install-ocr`
+
+    mokuro-bunko install-ocr [--variant auto|cpu|cu130|rocm7.1] [--from DIR] [--dir DIR]
+                             [--no-models] [--force] [--list] [--if-needed] [--processor]
+
+`--processor` installs into the processor's storage (its `processor.yaml`, found through
+`MOKURO_PROCESSOR_CONFIG`) instead of the library server's; it is implied on a machine
+with a `processor.yaml` and no library configuration.
+
+1. Which variant. Without `--variant`, the owner's preference on this hardware
+   (`hwdetect::preferred`): the library's `ocr.backend` (with `MOKURO_OCR_BACKEND`), a
+   processor's `MOKURO_OCR_BACKEND`. `auto` (and the ONNX-era names) follows the
+   hardware as below; `cpu` installs `cpu` whatever the GPU; `cuda`/`rocm` install
+   `cu130`/`rocm7.1` when that vendor's GPU is usable here (also when the other vendor's
+   is present too), else `cpu` with a hint (a GPU pack would only run on the CPU, after a
+   far larger download). `--variant auto` is the hardware alone (the processor
+   pages' "Automatic" pack); `--variant <v>` forces a pack. With `ocr.backend: auto`, a
+   variant picked by hand at the last install (`--variant`, the setup wizard) is kept
+   while the hardware's automatic choice stays the same; `--variant auto` drops it. The
+   hardware: `auto` picks `cu130` for an NVIDIA driver ≥ 580.65 (any 580 on Windows; `/proc/driver/nvidia/version`,
+   `nvidia-smi`; Windows: `nvcuda.dll`), `rocm7.1` for a supported AMD GPU on Linux (KFD
+   topology `gfx_target_version`: gfx1030, gfx1100–1102, gfx1200–1201; gfx1031/1032/1034
+   too, as the backend sets `HSA_OVERRIDE_GFX_VERSION=10.3.0` itself when it is unset),
+   else `cpu`. An NVIDIA driver that is too old gives `cpu` with a hint to update it, even
+   next to a supported AMD GPU (NVIDIA is decided first). GPUs hidden from the
+   process count as absent: `CUDA_VISIBLE_DEVICES` (NVIDIA), `ROCR_VISIBLE_DEVICES` and
+   `HIP_VISIBLE_DEVICES` (or, unset, `CUDA_VISIBLE_DEVICES`) for AMD, set empty or to
+   `-1`. In a container (`/.dockerenv`, `/run/.containerenv` or
+   `MOKURO_INSTALL_KIND=docker`) a GPU also needs to be passed in: NVIDIA with
+   `/dev/nvidiactl` + `/dev/nvidia<N>` and `libcuda.so.1` (the container toolkit adds
+   them; the host's `/proc/driver/nvidia` is visible without them), AMD with `/dev/kfd`,
+   a `/dev/dri/renderD*` node and read-write access to both; otherwise it is listed as
+   hidden with the `docker run` flag that passes it in. 0.5.2's
+   `--backend cuda|rocm|cpu|auto` still works (as `--variant`).
+2. Fetches **this version's** signed `release.json`
+   (`releases/download/v<ver>/release.json`; `MOKURO_BACKEND_MANIFEST` overrides), checks
+   the signature with the compiled-in key and that it is the same version, downloads
+   the parts into `<storage>/backends/.download/` (resuming), unpacks into
+   `.staging-<variant>`, verifies, fetches the `external` wheels from PyPI (resuming,
+   sha256-checked) and unpacks just the listed files, creates the links, swaps the
+   staging dir into place, removes older packs of the variant and the downloads.
+3. Checks the pack's host libraries (`ldconfig -p` + library dirs) and prints the
+   package names for what is missing (Debian/Ubuntu and Arch).
+4. `models download` (skip with `--no-models`): the files of the enabled generations
+   only (a library; a processor, those of the engines its library named at the last
+   registration, `<storage>/library-engines.json`, only PP-OCR's before the first),
+   and the compiled packages for the devices `ocr.backend` allows. An install whose
+   models fail leaves `backends/.models-incomplete`; `--if-needed` fetches models while
+   it is there or while a file the wanted engines need is missing (a processor whose
+   library enabled another engine: its registration starts that fetch), but only when an
+   enabled generation needs the pack (always on a processor) and downloads are allowed
+   (not `MOKURO_MODELS_DOWNLOAD=0`).
+
+`--if-needed` (what `serve` and `processor serve` run in the background, §2): nothing when
+`MOKURO_OCR_AUTO_INSTALL=false`, when local OCR is off (`ocr.backend: skip`,
+`ocr.local_processing: false`), when no enabled generation needs the pack (ppocr-manga
+alone) or when a pack of this release that serves the chosen
+variant is installed (for `cpu`, an installed GPU pack counts: it runs on the CPU too, so
+a container started once without its GPU downloads nothing); otherwise the full install
+above, after which the packs it replaces in the install directory (another variant,
+another release) are removed. 0.5.2's `OCR_AUTO_INSTALL=true` keeps it on; its
+`OCR_AUTO_INSTALL=false` is noted and ignored.
+
+`--from DIR` installs from local files (air-gapped hosts, tests): the archive or its
+parts, the wheels if present (else PyPI), and `release.json` + `.sig` if present (then
+checked exactly like a download; without them only `pack.json`'s checksums are
+checked, with a warning). Re-running leaves a complete pack alone (sizes) and still runs
+the models step; `--force` downloads, unpacks and verifies the pack again (NVIDIA files
+an installed pack has with matching hashes are reused). `doctor` reports the pack (`OCR backend` line). `install-ocr`
+and `models download` then fetch the compiled packages this machine's devices need
+(`EnginePipeline::prefetch`). Packs go to `MOKURO_BACKENDS_DIR` when set (the loader
+reads the same variable), `MOKURO_TORCH_PACK` pins one pack, `MOKURO_TORCH_MODELS_DIR`
+(dev) overrides `<storage>/models/torch`, `MOKURO_TORCH_THREADS` sets the CPU
+recognizer threads. On the CPU the default precision is fp32 (0.5.2 parity; bf16 is an
+opt-in, packages `linux-cpu-x86_64-v4bf16`). An update installs the new release's pack
+together with the program (§4: a pack belongs to one release), so there is no separate
+step after an update; `install-ocr --force` re-verifies and reinstalls by hand.
+
+### `xtask torch-pack`
+
+    cargo run -p xtask -- torch-pack --variant cpu|cu130|rocm7.1 [--target T] [--out dist]
+        [--cache DIR] [--source <zip|dir|wheel>] [--cdylib FILE | --no-cdylib]
+        [--bundle-external] [--keep-all] [--gpu-archs gfx1201,...] [--no-archive]
+        [--level 19] [--max-part BYTES] [--locked] [--no-vc-runtime]
+        [--sample-package PATH]... [--sample-from-manifest]
+
+**The closure check only sees the pack's own libraries.** The compiled model packages
+(AOTInductor `.so` / Windows `.pyd`) import more: `libtorch.so`, `libgomp.so.1`,
+`libtorch_cuda.so`, `libcuda.so.1`; on Windows `cudart64_13.dll` (which the Windows
+verifier had to add to the cu130 pack) and `vcomp140.dll`. Rule: whatever a package
+imports must be in the pack, the spec's system list or the platform base set; check it
+by passing a real package: `xtask torch-pack ... --sample-package <.pt2 | unpacked .pt2
+dir | package dir>` (repeatable) adds its libraries' imports to the check (verified:
+a sm_89 CUDA package against the cpu pack fails on `libcuda.so.1` / `libtorch_cuda.so`;
+the fp32 CPU package against the cpu pack passes). `--sample-from-manifest` does the
+same with the smallest package for the pack's platform, variant and torch in
+`crates/bunko-ocr/src/torch_models.json` (downloaded, sha256-pinned, cached); the release
+builds pass it.
+
+Steps: download the pinned libtorch zip (cache: `--cache`, `$BUNKO_PACK_CACHE`, else
+`<target>/torch-pack-cache`; `curl -C -` resumes) → unpack `include/` and the kept
+`lib/` files (ROCm kernel data trimmed to `--gpu-archs`) → fetch the NVIDIA wheels →
+`cargo build -p bunko-torch --features libtorch --lib --release --target T` with
+`LIBTORCH` = the unpack (own target dir per variant) → **closure check** (goblin
+parses every ELF/PE/Mach-O: each `NEEDED`/import must be in the pack, a wheel, the
+spec's `system_libs` or the platform's base set; otherwise the build fails) → SONAME
+links → licences (PyTorch's from the cpu torch wheel's dist-info, pinned; the zips
+carry none; the wheels' licence files) → `pack.json` → archive. `--no-archive` writes
+the installed form to `<out>/<pack name>/` (what the Dockerfiles' source stage uses);
+`--bundle-external` puts the NVIDIA files into the pack itself (a self-built `BAKE_PACK=1
+PACK_VARIANT=cu130` image; no release artifact).
+
+What each pack keeps (`crates/xtask/src/torch_specs.rs`) and how it was found:
+
+| variant | from libtorch `lib/` | from NVIDIA wheels | dropped (why) |
+|---|---|---|---|
+| `cpu` (Linux) | libc10, libtorch, libtorch_cpu, libgomp | — | test libs, libshm, global_deps, headers (LD_DEBUG: only these 4 load) |
+| `cu130` (Linux) | + libc10_cuda, libtorch_cuda, libtorch_nvshmem, libcaffe2_nvrtc; **generated stubs** for libcufile.so.0, libnvshmem_host.so.3, libnvJitLink.so.13 | cudart, cublas, cublasLt, nvrtc (+builtins), cupti, cufft, curand, cusparse, **cudnn (dispatcher only)**, cusparseLt, nccl | libtorch_cuda_linalg + cuSOLVER (only torch.linalg loads it), the 7 cuDNN sub-libraries (490 MB: LD_DEBUG on an RTX 4090, hayai-nova and paddle-manga bf16, loads none), nvperf/checkpoint, alt nvrtc, cufftw, nvblas |
+| `rocm7.1` (Linux) | libtorch_hip + every ROCm library it needs (HIP, HSA, comgr, rocBLAS, hipBLASLt, MIOpen, RCCL, rocSOLVER, rocSPARSE, rocRAND, rocFFT, roctracer/rocprofiler, aotriton, MAGMA, libdrm); kernel data for gfx1030/1100/1101/1102/1200/1201; `share/libdrm/amdgpu.ids` (below) | — | kernel data for gfx908/90a/942/950/1150/1151 (−3.7 GiB), libnuma/libelf/libdw (LGPL/GPL: taken from the host), libtinfo (unused) |
+| `cpu` (Windows) | c10, torch, torch_cpu, libiomp5md, uv | — | torch_python, global_deps, .lib |
+| `cu130` (Windows) | + c10_cuda, torch_cuda, caffe2_nvrtc | cudart **13.0.96** (the compiled model DLLs import `cudart64_13.dll`; torch_cuda.dll links it statically), cublas(Lt), nvrtc (+builtins), cupti **13.0.48** (torch_cpu.dll imports `cupti64_2025.3.0.dll`), cufft, cusolver, cusparse, nvJitLink, cudnn (dispatcher) | the CUDA DLLs the zip bundles (taken from NVIDIA's wheels instead) |
+| `cpu` (macOS arm64) | libc10, libtorch, libtorch_cpu, libomp | — | |
+
+The Linux libtorch **cu130 zip does not bundle the CUDA libraries** (unlike Windows):
+its RUNPATH points at pip's `nvidia/*/lib`, i.e. it expects torch's PyPI dependencies,
+`cuda-toolkit==13.0.3` extras, `nvidia-cudnn-cu13==9.20.0.48`, `-cusparselt-cu13==0.8.1`,
+`-nccl-cu13==2.29.7`, `-nvshmem-cu13==3.4.5` (nvjitlink pinned to 13.0.88). Its
+libtorch_cpu itself needs `libcupti.so.13` and `libcudart.so.13`, so the CPU half of a
+CUDA pack cannot load without them either.
+
+Host libraries the packs expect: glibc ≥ 2.28, libstdc++, libgcc_s (every desktop);
+cu130 + libcuda.so.1 (the driver) and zlib; rocm7.1 + libnuma (**including the
+unversioned `libnuma.so`**: libtorch_rocshmem dlopen()s that name while loading and
+exits the process when it is missing — Arch: numactl; Debian/Ubuntu: libnuma-dev),
+libelf, libdw, libzstd, liblzma, libbz2, libatomic, zlib.
+
+### Sizes (measured 2026-10-02)
+
+| pack | archive (zstd 19) | unpacked archive | + from PyPI (download) | installed |
+|---|---|---|---|---|
+| `cpu` Linux | 75.4 MiB | 416.8 MiB | — | 416.8 MiB |
+| `cu130` Linux | 347.7 MiB | 873.8 MiB | 1.65 GiB (1.57 GiB) | 2.50 GiB |
+| `rocm7.1` Linux | 3.01 GiB (2 parts) | 6.81 GiB | — | 6.81 GiB |
+| `cpu` Windows¹ | — | 294.1 MiB | — | 294.1 MiB |
+| `cu130` Windows¹ | — | 685.3 MiB | 1.20 GiB (1.33 GiB) | 1.87 GiB |
+| `cpu` macOS arm64¹ | — | 324.5 MiB | — | 324.5 MiB |
+
+¹ staged without the cdylib (cannot be built on this Linux host); closure-checked only.
+
+For comparison, 0.5.2 installed torch + its CUDA/ROCm wheels into a venv (~5 GB CUDA,
+~13 GB ROCm). Further cuts, not done: fetch only the needed members of each wheel with
+HTTP range requests (cuDNN's 366 MB wheel for a 0.1 MB file; ~-0.4 GiB download for
+cu130); stubs for more of what libtorch_cuda links but OCR never calls (cuFFT, cuRAND,
+NCCL, cuSPARSELt: ~0.9 GiB) — possible with the same generator, not done: those
+libraries are redistributable, and fewer stubs means fewer surprises.
+
+#### Stubs for cuFile, NVSHMEM, nvJitLink (Linux cu130)
+
+What links them (readelf, the cu130 zip + wheels): `libtorch_cuda.so` NEEDS
+`libcufile.so.0` but imports **no** symbol from it; `libtorch_nvshmem.so` (NEEDED by
+libtorch_cuda) imports 19 `nvshmem*@NVSHMEM` functions from `libnvshmem_host.so.3`;
+`libcusparse.so.12` imports 8 `__nvJitLink*_13_0@libnvJitLink.so.13` functions. All
+three load at start-up only because of those NEEDED entries (LD_DEBUG on host-a showed
+them loaded before any OCR). `xtask torch-pack` therefore builds stand-ins
+(`Spec::stubs`, `make_stubs`): for each SONAME it collects the functions the pack's
+libraries import from it, with their GNU symbol versions (from the importers'
+`.gnu.version_r`), and compiles a ~16 KB library with that SONAME and version script
+in which every function prints "mokuro-bunko: <fn> (<lib>) was called, but this OCR
+backend pack carries a stub for it" and aborts. **Measured (host-a RTX 4090, 2026-10-03,
+manylinux binary, the real server)**: with the stubs loaded (LD_DEBUG lists them),
+hayai-nova bf16 and paddle-manga bf16 each OCRed the 10-page volume (0 failed pages; hayai
+1.3 s, paddle 2.8 s) and the abort message never appeared; text 10/10 pages vs 0.5.2
+(hayai vs fp32, paddle vs 0.5.2 bf16). Earlier crop runs with the untrimmed pack gave the
+same results. The stubs save 0.1 GiB of download and, more to the point, remove the
+three NVIDIA libraries the CUDA EULA does not list as redistributable.
+
+### Runtime evidence (pack + its C ABI through `packaging/torch/probe_pack.py`)
+
+| pack | where | engine, precision | crops | result |
+|---|---|---|---|---|
+| `cpu` | desktop Ryzen 9 7950X, 16 threads | hayai-nova bf16 (x86-64-v3 packages) | 40 | 40/40 = 0.5.2 torch fp32 reference, 19 crops/s |
+| `cu130` (installed by `install-ocr --from`, wheels from PyPI) | host-a RTX 4090, driver 595.58 | hayai-nova bf16 (sm_89) | 220 | 219/220 vs fp32 ref, 252 crops/s |
+| `cu130` | host-a RTX 4090 | paddle-manga bf16 | 100 | 86/100 vs fp32 ref (bf16), 80 crops/s |
+| `cu130` with stubs, manylinux binary, **real server** | host-a RTX 4090, B's sm_89 packages (weightless + shared weights) | hayai-nova bf16 + paddle-manga bf16 layer | 10 pages each | 0 failed; 10/10 pages vs 0.5.2; stubs loaded, never called |
+| `rocm7.1` | desktop RX 9070 XT (gfx1201) | hayai-nova bf16 | 220 | 219/220, 89 crops/s; strace: only gfx1201 kernel files read |
+| `rocm7.1` | same GPU, **clean debian:trixie-slim container, no ROCm installed** (`/dev/kfd`, `/dev/dri`) | hayai-nova bf16 | 220 | 219/220, 86 crops/s (after `libnuma.so` was provided) |
+
+These runs used `LD_PRELOAD=<pack>/lib/libtorch.so` to work around a loader bug in
+bunko-torch at the time: AOTInductor's model `.so` needs `libtorch.so`, which the cdylib
+did not load (`--as-needed`), so ld.so searched the host — it failed on host-a
+("libtorch.so: cannot open shared object file") and picked Arch's ROCm
+`/usr/lib/libtorch.so` on the desktop. Fixed since: `bt_init` loads the pack's CPU
+half, GPU half and `libtorch` from its `lib/` with `RTLD_GLOBAL` before any package
+(`bunko_torch::abi::core_libraries`, `umbrella_library`), the loader in bunko-engines
+preloads the CPU half before it opens the cdylib, and a recognizer is refused when a
+libtorch from outside the pack is mapped (TORCH-BACKEND.md, `bt_init`).
+
+### Licences of what the packs contain (from the files in the distributions)
+
+- **libtorch** (all packs): BSD-3-Clause (`LICENSE` of the torch 2.13.0 wheel's
+  dist-info) plus ~100 bundled third-party licence files (`licenses/third_party/…`:
+  oneDNN/ideep, sleef, fmt, protobuf, cutlass, composable_kernel, flash-attention,
+  aiter, kineto, …). The libtorch zips themselves contain **no** licence file; xtask
+  copies them from the pinned CPU wheel into `licenses/pytorch/`.
+- **NVIDIA CUDA libraries** (cu130). The `License.txt` in the cudart, cublas, nvrtc,
+  cupti, cufft, cufile, curand, cusolver, cusparse, nvjitlink and nvshmem wheels is the
+  same file (the CUDA Toolkit EULA, md5 298d545d…). §1.1.1(3) grants distribution of the
+  portions "identified in this Agreement as distributable, as incorporated in object
+  code format into a software application" meeting §1.1.2: the application has
+  "material additional functionality", the distributable portions are "only accessed by
+  your application", your terms are consistent with the EULA. §2.3: Linux files may be
+  redistributed "provided that the object code files are not modified". **Attachment A**
+  (§2.6) lists libcudart, libcufft(w), libcublas/libcublasLt, libnvblas, libcusparse,
+  libcusolver, libcurand, NPP, nvJPEG, libnvrtc + libnvrtc-builtins, libnvvm,
+  libdevice, libcupti, libnvToolsExt — and **does not list libnvJitLink, libcufile or
+  libnvshmem_host**, although those three wheels ship this very EULA. The driver
+  library (libcuda) is distributable only inside containers derived from NVIDIA's
+  images on Docker Hub/NGC — we never ship it.
+  - **cuDNN** (`nvidia_cudnn_cu13…/License.txt`, its own SLA): same §1.1/1.2 terms;
+    its supplement §2: "the runtime files .so and .h, cudnn64_7.dll, and cudnn.lib"
+    are distributable (the Windows DLL named is the cuDNN 7 one; `cudnn64_9.dll` is not
+    named).
+  - **cuSPARSELt** (`nvidia/cusparselt/LICENSE.txt`): same SLA terms; "the runtimes files
+    ending with .so and .h as part of your application".
+  - **NCCL**: BSD-3-Clause (`License.txt`). **NVTX** (not shipped): Apache-2.0.
+  - **What we do with this**: release archives contain **no NVIDIA file**; `pack.json`
+    lists NVIDIA's own wheels on PyPI and `install-ocr` downloads them from there on the
+    user's machine (as 0.5.2's `pip install torch` did), so we redistribute nothing of
+    NVIDIA's. **Since 2026-10-07 the release Docker images carry no NVIDIA file either**:
+    the full image downloads the cu130 pack and NVIDIA's wheels on the user's machine on
+    first start. Only an image someone builds with `BAKE_PACK=1 PACK_VARIANT=cu130`, for
+    their own use, holds NVIDIA libraries. What such an image (and the 0.7 CUDA image
+    before 2026-10-07) bakes in is only libraries the shipped licence texts allow — Attachment A
+    (cudart, cuBLAS/cuBLASLt, cuFFT, cuRAND, cuSPARSE, NVRTC + builtins, CUPTI), cuDNN's
+    and cuSPARSELt's `.so` runtime files, NCCL (BSD) — each with its licence text under
+    `licenses/`. nvJitLink, cuFile and NVSHMEM, which the text does not list, are
+    replaced by our stubs (above), so no NVIDIA file without a stated redistribution
+    right is in such an image. The §1.1.2 conditions (material additional functionality,
+    accessed only by our application, consistent terms) would apply to anyone
+    distributing one. On Windows the libtorch zip itself bundles the CUDA DLLs; the Windows cu130
+    pack nevertheless takes them from NVIDIA's wheels, like Linux.
+- **AMD ROCm** (rocm7.1 pack): the libtorch rocm7.1 zip contains **no licence file for
+  any bundled ROCm library** (no `LICENSE`/`NOTICE`/`COPYING` outside `include/`). The
+  bundled ROCm is **7.1.1** (`librocm-core.so`: `7.1.1.0-38`; RCCL 2.27.7; MIOpen 3.5.1;
+  comgr from llvm-project `roc-7.1.1`). The texts are now in the repository,
+  `packaging/torch/licenses/rocm/`, taken from the upstream sources at tag `rocm-7.1.1`
+  (ROCm/rocm-libraries, ROCm/rocm-systems, ROCm/llvm-project, ROCm/rccl), aotriton
+  `0.12b`, MAGMA `v2.9.0` and libdrm `libdrm-2.4.124`, and `xtask torch-pack` copies them
+  into the pack as `licenses/rocm/` (`SOURCES.md` there maps every pack library to its
+  text, URL and sha256). What they are: MIT — HIP, CLR, aqlprofile, rocm-core,
+  rocm-smi-lib, rocprofiler-register, rocprofiler-sdk, roctracer, rocBLAS, Tensile,
+  hipBLAS, hipBLASLt, hipSPARSELt, hipSOLVER, rocSPARSE, hipSPARSE, rocRAND, hipRAND,
+  rocFFT, hipFFT, MIOpen, Composable Kernel, rocRoller, aotriton, libdrm; NCSA
+  (University of Illinois) — ROCR-Runtime (HSA), comgr (+ its NOTICES); BSD-style —
+  rocSOLVER (BSD-2 + LAPACK notice), RCCL (BSD-3, NCCL-derived, + NOTICES), MAGMA
+  (BSD-3). All permissive; no copyleft binary is shipped (libnuma, libelf, libdw stay
+  host packages).
+- **libdrm's GPU name table** (rocm7.1 pack): the bundled `libdrm_amdgpu.so.1` has
+  `/opt/amdgpu/share/libdrm/amdgpu.ids` compiled in; without that file it walks the
+  executable's directory looking for it (a stray "(null): No such file or directory",
+  +3 s per load, generic GPU names — seen on the fleet). The pack ships the table as
+  `share/libdrm/amdgpu.ids` (libdrm `data/amdgpu.ids`, tag `libdrm-2.4.131`; MIT, the
+  licence header is in `licenses/rocm/libdrm/`; repo copy in
+  `packaging/torch/share/rocm7.1/`, `Spec::share_dir`) and bunko-torch's `bt_init` sets
+  `AMDGPU_ASIC_ID_TABLE_PATHS=<pack>/share/libdrm` — a ':'-separated list of
+  directories; libdrm ≥ 2.4.130, which the bundled library is, appends `amdgpu.ids`.
+
+### Open items
+
+Done since the first runs (kept here because the sections above refer to them):
+
+- bunko-torch preloads the pack's libtorch (`bt_init` and the loader; above).
+- **Compiled model packages are portable** (stream B): AOTInductor compiles and links
+  the model `.so` with the build machine's toolchain; built on Arch one needed
+  `GLIBC_2.43`, built on Debian 12 one was marked executable-stack (`GNU_STACK RWE`),
+  which glibc ≥ 2.41 refuses. `tools/torch_export` now builds Linux packages in a
+  manylinux_2_28 container (`tools/torch_export/docker/Dockerfile`), clears the
+  executable-stack bit and fails a package that needs a newer glibc / libstdc++ than
+  libtorch's baseline (`torch_export/checks.py`).
+- AOTInductor's extraction dirs in `/tmp` after failed loads: packages are unpacked
+  once into `<storage>/models/` and loaded in place (`bunko-torch`'s `unpack.rs`; a
+  failed load removes the unpacks it used).
+- After an update the release's pack is installed with the program (§4), not by hand.
+
+Still open:
+
+- The ROCm pack is 3 GiB to download (licence texts: done, above); the full Docker image
+  downloads it in the background once it serves, with an AMD GPU passed in.
+- Windows and macOS packs are built with their cdylib by CI's `packs` job (the release
+  check above); a run on a Windows machine without the VC++ runtime installed is still
+  to do (CHANGELOG, Known issues).
+- Range-fetching wheel members (smaller cu130 download).

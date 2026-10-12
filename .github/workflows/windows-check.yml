@@ -1,0 +1,174 @@
+# Windows, end to end, on a clean runner (dispatch only; no secret, nothing published):
+#   1. this branch's release zip (xtask dist), and a second one one version later;
+#   2. both as local releases signed with a throwaway key, served on 127.0.0.1;
+#   3. install.ps1 from the first: `mokuro-bunko.exe` (the app, GUI subsystem) runs the
+#      tray with no console window and the tray runs the server as itself, also without
+#      one; `mokuro-bunko-cli.exe` is the console build;
+#   4. automatic update to the second: the pair is replaced, the tray keeps running the
+#      server, now the new version.
+#
+#   gh workflow run windows-check.yml --ref <branch>
+name: Windows check
+
+on:
+  workflow_dispatch:
+  # Only so the workflow is registered and can be dispatched from a branch before it is
+  # on the default branch: on a push the job is skipped.
+  push:
+    paths: [.github/workflows/windows-check.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-check
+      - name: two release zips (this version, and the next)
+        shell: bash
+        run: |
+          set -eux
+          v=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mokuro-bunko") | .version')
+          next="$v.1"
+          cargo run -p xtask --locked -- dist --locked --flavor full --out "srv/v$v"
+          sed -i "s/^version = \"$v\"/version = \"$next\"/" Cargo.toml
+          cargo run -p xtask -- dist --flavor full --out "srv/v$next"
+          git checkout Cargo.toml Cargo.lock
+          {
+            echo "VERSION=$v"
+            echo "NEXT=$next"
+          } >> "$GITHUB_ENV"
+          ls -l srv/*
+      - name: local releases signed with a throwaway key
+        shell: bash
+        run: |
+          set -eux
+          pk=$(cargo run -q -p xtask --locked -- keygen --out "$RUNNER_TEMP/k.key")
+          echo "PK=$pk" >> "$GITHUB_ENV"
+          for ver in "$VERSION" "$NEXT"; do
+            cargo run -q -p xtask --locked -- manifest --version "$ver" --dir "srv/v$ver" \
+              --base-url "http://127.0.0.1:18765/v$ver" --docker-repo ""
+            cargo run -q -p xtask --locked -- sign "srv/v$ver/release.json" --key "$RUNNER_TEMP/k.key" --public-key "$pk"
+          done
+          cat "srv/v$VERSION/release.json"
+      - name: serve them on 127.0.0.1:18765
+        run: |
+          Start-Process python -ArgumentList "-m", "http.server", "18765", "--bind", "127.0.0.1" -WorkingDirectory srv -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+          (Invoke-WebRequest "http://127.0.0.1:18765/v$env:VERSION/release.json" -UseBasicParsing).StatusCode
+      - name: install.ps1 (portable, from the local release)
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "mb"
+          ./scripts/install.ps1 -BaseUrl "http://127.0.0.1:18765/v$env:VERSION" -InstallDir $dir -Portable -NoShortcut -NonInteractive
+          if ($LASTEXITCODE) { exit 1 }
+          Get-ChildItem $dir | Select-Object Name, Length | Format-Table -AutoSize
+          foreach ($f in "mokuro-bunko.exe", "mokuro-bunko-cli.exe", "data\tray.json", "run.bat") {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "missing $f" }
+          }
+          $v = (& "$dir\mokuro-bunko-cli.exe" --version) -join " "
+          Write-Host $v
+          if ($v -notmatch [regex]::Escape($env:VERSION)) { throw "--version: $v" }
+          # No arguments, headless and nothing set up: a message, not a hang.
+          $env:MOKURO_DESKTOP = "0"
+          $msg = (& "$dir\mokuro-bunko-cli.exe") -join " "
+          Remove-Item Env:MOKURO_DESKTOP
+          Write-Host $msg
+          if ($LASTEXITCODE -ne 0 -or $msg -notmatch "mokuro-bunko setup") { throw "no-argument start: $msg" }
+          @"
+          server:
+            host: 127.0.0.1
+            port: 18480
+          ocr:
+            local_processing: false
+          update:
+            check: true
+            auto: true
+            manifest_url: http://127.0.0.1:18765/release.json
+            public_key: "$env:PK"
+          "@ | Set-Content -Encoding ASCII "$dir\data\config.yaml"
+      - name: mokuro-bunko.exe runs the tray and the server, with no console window
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "mb"
+          $env:MOKURO_UPDATE_CHECK_SECONDS = "20"
+          $env:MOKURO_UPDATE_RETRY_SECONDS = "30"
+          $tray = Start-Process -FilePath "$dir\mokuro-bunko.exe" -WorkingDirectory $dir -PassThru
+          "TRAY_PID=$($tray.Id)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          $deadline = (Get-Date).AddMinutes(3)
+          $server = $null
+          while ((Get-Date) -lt $deadline -and -not $server) {
+            Start-Sleep -Seconds 3
+            if ($tray.HasExited) { throw "mokuro-bunko.exe exited ($($tray.ExitCode))" }
+            $server = Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $tray.Id -and $_.Name -eq "mokuro-bunko.exe" }
+          }
+          $all = Get-CimInstance Win32_Process
+          $all | Where-Object { $_.Name -match "mokuro|conhost" } | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-Table -AutoSize -Wrap
+          if (-not $server) { throw "the tray did not start the server" }
+          Write-Host "server: $($server.CommandLine)"
+          foreach ($p in @($tray.Id, $server.ProcessId)) {
+            $c = $all | Where-Object { $_.ParentProcessId -eq $p -and $_.Name -eq "conhost.exe" }
+            if ($c) { throw "process $p has a console (conhost.exe $($c.ProcessId))" }
+          }
+          # For contrast: the console build, started the same way, gets one.
+          $cli = Start-Process -FilePath "$dir\mokuro-bunko-cli.exe" -ArgumentList "gui", "--no-browser" -PassThru
+          Start-Sleep -Seconds 5
+          $cliConhost = Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $cli.Id -and $_.Name -eq "conhost.exe" }
+          Write-Host "conhost: mokuro-bunko-cli.exe $(@($cliConhost).Count), the tray 0, its server 0"
+          Stop-Process -Id $cli.Id -Force -ErrorAction SilentlyContinue
+          $ok = $false
+          for ($i = 0; $i -lt 40 -and -not $ok; $i++) {
+            try { $ok = (Invoke-WebRequest http://127.0.0.1:18480/api/health -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200 } catch { Start-Sleep -Seconds 3 }
+          }
+          if (-not $ok) { throw "the server does not answer" }
+          Write-Host "the server answers"
+      - name: publish the next version; the server updates itself and both programs
+        timeout-minutes: 30
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "mb"
+          Copy-Item "srv\v$env:NEXT\release.json", "srv\v$env:NEXT\release.json.sig" srv\
+          $deadline = (Get-Date).AddMinutes(25)
+          $done = $false
+          while ((Get-Date) -lt $deadline -and -not $done) {
+            Start-Sleep -Seconds 10
+            $c = Get-Content "$dir\data\.control.json" -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json -ErrorAction SilentlyContinue
+            Write-Host "$(Get-Date -Format HH:mm:ss) control: version=$($c.version) pid=$($c.pid)"
+            $done = $c.version -eq $env:NEXT
+          }
+          foreach ($l in Get-ChildItem "$dir\data\logs\*.log") { Write-Host "== $($l.Name)"; Get-Content $l | Select-Object -Last 30 }
+          if (-not $done) { throw "the server did not update to $env:NEXT" }
+      - name: both programs are the new version, the right builds, the tray still runs
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "mb"
+          Start-Sleep -Seconds 10
+          Get-ChildItem $dir | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
+          $bad = @()
+          $v = (& "$dir\mokuro-bunko-cli.exe" --version) -join " "
+          Write-Host "cli: $v"
+          if ($v -notmatch [regex]::Escape($env:NEXT)) { $bad += "mokuro-bunko-cli.exe is not $env:NEXT" }
+          $p = Start-Process -FilePath "$dir\mokuro-bunko.exe" -ArgumentList "--version" -RedirectStandardOutput "$env:RUNNER_TEMP\gui-version.txt" -Wait -PassThru -NoNewWindow
+          $g = Get-Content "$env:RUNNER_TEMP\gui-version.txt" -Raw
+          Write-Host "app: $g"
+          if ($g -notmatch [regex]::Escape($env:NEXT)) { $bad += "mokuro-bunko.exe is not $env:NEXT" }
+          function Subsystem($p) { $b = [IO.File]::ReadAllBytes($p); $pe = [BitConverter]::ToInt32($b, 0x3c); [BitConverter]::ToUInt16($b, $pe + 24 + 68) }
+          if ((Subsystem "$dir\mokuro-bunko.exe") -ne 2) { $bad += "mokuro-bunko.exe is not a GUI program" }
+          if ((Subsystem "$dir\mokuro-bunko-cli.exe") -ne 3) { $bad += "mokuro-bunko-cli.exe is not a console program" }
+          if (-not (Get-Process -Id $env:TRAY_PID -ErrorAction SilentlyContinue)) { $bad += "the tray stopped" }
+          $server = Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq [int]$env:TRAY_PID -and $_.Name -eq "mokuro-bunko.exe" }
+          if (-not $server) { $bad += "the tray runs no server" }
+          if ($bad) { $bad | ForEach-Object { Write-Host "FAIL: $_" }; exit 1 }
+          Write-Host "updated: the pair is $env:NEXT and the tray runs the new server"
+      - name: stop everything
+        if: always()
+        run: |
+          Get-Process -Name "mokuro-bunko", "mokuro-bunko-cli" -ErrorAction SilentlyContinue | Stop-Process -Force

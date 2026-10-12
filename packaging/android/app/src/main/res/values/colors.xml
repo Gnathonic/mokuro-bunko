@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#FF3A4A7A</color>
+    <color name="brand_light">#FFE8ECF7</color>
+    <color name="accent">#FFD9534F</color>
+    <color name="icon_bg">#FF2E3B63</color>
+    <color name="surface">#FFFFFFFF</color>
+    <color name="on_surface">#FF1C1C1F</color>
+    <color name="muted">#FF5F6170</color>
+    <color name="bar">#FF2E3B63</color>
+    <color name="on_bar">#FFFFFFFF</color>
+</resources>

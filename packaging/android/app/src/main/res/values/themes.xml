@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Platform Material theme (no AndroidX). No action bar: each screen has its own top
+         bar and pads itself for the system bars (edge-to-edge is enforced from SDK 35). -->
+    <style name="Theme.Bunko" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">@color/brand</item>
+        <item name="android:colorPrimaryDark">@color/bar</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:windowBackground">@color/surface</item>
+        <item name="android:textColorPrimary">@color/on_surface</item>
+        <item name="android:statusBarColor">@color/bar</item>
+        <item name="android:navigationBarColor">@color/surface</item>
+    </style>
+</resources>

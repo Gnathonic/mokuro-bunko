@@ -1,0 +1,21 @@
+[package]
+name = "bunko-layout"
+description = "mokuro-bunko: OCR line layout, VLM/CTC reconcile and .mokuro sidecar assembly (pure, Python-exact)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
+# NFKC for line_reconcile's folding. Python 3.12 ships Unicode 15.0; this crate
+# tracks a newer Unicode (see the crate docs, "Known deviations").
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# The golden fixtures are gzipped JSON (tests/golden/cases/*.json.gz).
+flate2 = "1"

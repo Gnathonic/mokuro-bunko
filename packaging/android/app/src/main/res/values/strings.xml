@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Mokuro Bunko</string>
+    <string name="settings">Server settings</string>
+    <string name="settings_short">Settings</string>
+    <string name="licences">Open-source licences</string>
+    <string name="channel_name">Library server</string>
+    <string name="channel_description">Shown while the library server is running.</string>
+    <string name="notif_starting">Starting the library server…</string>
+    <string name="notif_running_local">Serving on this device only (%1$s)</string>
+    <string name="notif_running_lan">Serving your library at %1$s</string>
+    <string name="notif_failed">The server could not start: %1$s</string>
+    <string name="stop">Stop</string>
+    <string name="start">Start</string>
+    <string name="restart">Apply and restart</string>
+    <string name="reload">Reload</string>
+    <string name="status_stopped">Server stopped</string>
+    <string name="status_starting">Starting…</string>
+    <string name="status_running">Running at %1$s</string>
+    <string name="status_failed">Failed: %1$s</string>
+    <string name="not_running_hint">The library server is not running. Open the settings to start it.</string>
+    <string name="port">Port</string>
+    <string name="lan_access">Allow other devices on this network</string>
+    <string name="lan_access_hint">Off: only apps on this phone can connect (127.0.0.1). On: devices on the same Wi-Fi or hotspot can connect too.</string>
+    <string name="storage_location">Library storage</string>
+    <string name="storage_hint">Copy .cbz files or manga folders into the library folder above, e.g. over USB (it shows as Android/data/app.mokuro.bunko/files/… on the phone\'s storage). Uploading through Mokuro Reader or the web UI works too. Uninstalling the app deletes this folder unless you choose to keep the app\'s data.</string>
+    <string name="connect_title">Connect Mokuro Reader</string>
+    <string name="connect_local">On this phone, add a WebDAV server in Mokuro Reader with the URL:</string>
+    <string name="connect_lan">From other devices on this network:</string>
+    <string name="connect_lan_off">Turn on \"Allow other devices\" to read from other devices.</string>
+    <string name="connect_https_note">Browsers block an https:// page (reader.mokuro.app) from reaching a plain http:// address other than 127.0.0.1. For other devices, use a Mokuro Reader app, enable HTTPS in the admin panel, or use the tunnel.</string>
+    <string name="copy">Copy</string>
+    <string name="copied">Copied</string>
+    <string name="battery_title">Keep running in the background</string>
+    <string name="battery_hint">Android may stop background apps to save battery. Exempt Mokuro Bunko from battery optimisation so the server keeps running with the screen off.</string>
+    <string name="battery_exempt">Battery optimisation: not optimised (good)</string>
+    <string name="battery_optimised">Battery optimisation: optimised — the server may be stopped in the background</string>
+    <string name="battery_open">Open battery settings</string>
+    <string name="log_title">Server log</string>
+    <string name="invalid_port">Enter a port between 1024 and 65535</string>
+    <string name="notifications_denied">Notifications are off: Android hides the server\'s status, but it still runs.</string>
+    <string name="android_licences_intro">The app also contains the Kotlin standard library (Apache-2.0). The native server and its Rust dependencies are listed below.</string>
+</resources>

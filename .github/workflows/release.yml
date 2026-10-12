@@ -1,150 +1,208 @@
+# Build a release from a `v*` tag: the four downloads (Windows zip, macOS disk image,
+# Linux x64, Linux arm64 server) and the macOS archive older updaters take, the backend
+# packs, the signed release.json, a DRAFT GitHub release whose notes start with a
+# "Which file do I want?" table, and versioned Docker images. Nothing here is visible
+# to the updater or to `:latest` users: the owner reviews the draft and then runs the
+# "Publish" workflow (publish.yml), which un-drafts the release and moves the `latest*`
+# image tags (stable versions only). See docs/rust-port/PACKAGING.md.
+#
+# The build jobs are release-build.yml and release-docker.yml (reusable workflows);
+# release-check.yml runs the same two on any branch without a tag, signing and
+# publishing nothing.
+#
+# Needs the repository secret BUNKO_SIGNING_KEY (base64 ed25519 seed of the release
+# key whose public half is compiled into bunko-update).
 name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.7.0"
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
-  test:
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      image: ${{ steps.v.outputs.image }}
+      epoch: ${{ steps.v.outputs.epoch }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
+      - name: validate tag
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          playwright install chromium
-
-      - name: Run all tests
-        run: pytest -v
-
-  build-binaries:
-    needs: test
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-x64
-          - os: macos-latest
-            platform: macos-arm64
-          - os: windows-latest
-            platform: windows-x64
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+          printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "bad tag: $TAG"; exit 1; }
+      - uses: actions/checkout@v5
         with:
-          python-version: "3.12"
-
-      - name: Install dependencies
+          ref: ${{ env.TAG }}
+      - id: v
+        name: tag matches the workspace version
         run: |
-          python -m pip install --upgrade pip
-          pip install shiv build
-
-      - name: Build wheel
-        run: python -m build --wheel
-
-      - name: Build binary (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p dist
-          pip wheel --no-deps --wheel-dir=build .
-          WHEEL=$(ls build/*.whl | head -1)
-          python -m shiv \
-            --compressed \
-            --python "/usr/bin/env python3" \
-            --output-file dist/mokuro-bunko-${{ matrix.platform }} \
-            --entry-point mokuro_bunko.__main__:main \
-            "$WHEEL" \
-            wsgidav cheroot pyyaml bcrypt watchdog cryptography click Pillow
-          chmod +x dist/mokuro-bunko-${{ matrix.platform }}
-
-      - name: Build binary (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          mkdir -p dist
-          pip wheel --no-deps --wheel-dir=build .
-          $wheel = Get-ChildItem build\*.whl | Select-Object -First 1
-          python -m shiv `
-            --compressed `
-            --python "python3" `
-            --output-file dist\mokuro-bunko-${{ matrix.platform }}.pyz `
-            --entry-point mokuro_bunko.__main__:main `
-            $wheel.FullName `
-            wsgidav cheroot pyyaml bcrypt watchdog cryptography click Pillow
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-${{ matrix.platform }}
-          path: dist/mokuro-bunko-*
-
-  build-docker:
-    needs: test
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: deploy/Dockerfile
-          push: false
-          tags: mokuro-bunko:${{ github.ref_name }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Save Docker image
-        run: |
-          docker save mokuro-bunko:${{ github.ref_name }} | gzip > docker-image.tar.gz
-
-      - name: Upload Docker image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-image
-          path: docker-image.tar.gz
-
-  create-release:
-    needs: [build-binaries, build-docker]
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: List artifacts
-        run: find artifacts -type f
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          draft: true
-          generate_release_notes: true
-          files: |
-            artifacts/binary-*/mokuro-bunko-*
+          set -eu
+          version="${TAG#v}"
+          ws=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="mokuro-bunko") | .version')
+          [ "$ws" = "$version" ] || { echo "tag $TAG != workspace version $ws"; exit 1; }
+          case "$version" in *-*) pre=true ;; *) pre=false ;; esac
+          image="ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/mokuro-bunko"
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "prerelease=$pre"
+            echo "image=$image"
+            echo "epoch=$(git log -1 --format=%ct)"
+          } >> "$GITHUB_OUTPUT"
+      - name: signing key is configured
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUNKO_SIGNING_KEY: ${{ secrets.BUNKO_SIGNING_KEY }}
+        run: |
+          if [ -z "$BUNKO_SIGNING_KEY" ]; then
+            echo "::error::Add the BUNKO_SIGNING_KEY repository secret (see docs/rust-port/PACKAGING.md)"
+            exit 1
+          fi
+
+  # Tests, every archive, the macOS disk images, the backend packs and (opt-in) the
+  # APK: release-build.yml, the same jobs release-check.yml runs without a tag.
+  build:
+    needs: prepare
+    uses: ./.github/workflows/release-build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.prepare.outputs.version }}
+      epoch: ${{ needs.prepare.outputs.epoch }}
+      # Android is out of 0.7's scope (owner, 2026-10-03): opt in with BUILD_ANDROID=true.
+      android: ${{ vars.BUILD_ANDROID == 'true' }}
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+      SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: pack-*
+          path: dist
+          merge-multiple: true
+      # Kept out of dist/: the APK is a release asset, not a release.json artifact.
+      - if: vars.BUILD_ANDROID == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: android-apk
+          path: dist-android
+      - name: release.json
+        run: |
+          set -eux
+          published_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cargo run -q -p xtask --locked -- manifest --version "$VERSION" --dir dist \
+            --published-at "$published_at" --docker-repo "$IMAGE"
+          cat dist/release.json
+      - name: sign
+        env:
+          BUNKO_SIGNING_KEY: ${{ secrets.BUNKO_SIGNING_KEY }}
+        run: cargo run -q -p xtask --locked -- sign dist/release.json
+      - name: verify with the key compiled into bunko-update
+        run: cargo run -q -p xtask --locked -- verify dist/release.json --dir dist --require-all
+      # The notes: the "Which file do I want?" table (xtask release-notes: each row links
+      # to its file), "Other files install automatically.", and the changelog link
+      # since the previous v* tag.
+      - name: release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          prev=$(git ls-remote --tags origin 'refs/tags/v*' | sed 's|.*refs/tags/||; s|\^{}$||' | sort -u |
+            python3 -c '
+          import re, sys
+          tag = sys.argv[1]
+          def key(t):
+              m = re.match(r"^v(\d+)\.(\d+)\.(\d+)(?:-(.+))?$", t)
+              if not m:
+                  return None
+              pre = m.group(4)
+              parts = [] if pre is None else [(0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split(".")]
+              return (int(m.group(1)), int(m.group(2)), int(m.group(3)), pre is None, parts)
+          me = key(tag)
+          older = [t for t in sys.stdin.read().split() if key(t) is not None and key(t) < me]
+          print(max(older, key=key) if older else "")
+          ' "$TAG")
+          args=(-f tag_name="$TAG" -f target_commitish="$(git rev-parse HEAD)")
+          if [ -n "$prev" ]; then args+=(-f previous_tag_name="$prev"); fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${args[@]}" --jq .body > changelog.md
+          cargo run -q -p xtask --locked -- release-notes --version "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --docker-repo "$IMAGE" --dir dist --changelog changelog.md > notes.md
+          cat notes.md
+      - name: draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          # Every file is in release.json and SHA256SUMS (no per-file .sha256).
+          files=(dist/*.tar.gz dist/*.zip dist/*.dmg dist/*.tar.zst* dist/release.json dist/release.json.sig dist/SHA256SUMS)
+          if compgen -G 'dist-android/*.apk' > /dev/null; then
+            files+=(dist-android/*.apk dist-android/*.apk.sha256)
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Re-run: replace the assets of the existing (draft) release.
+            gh release upload "$TAG" --clobber "${files[@]}"
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            flags=(--draft --verify-tag --title "mokuro-bunko $VERSION" --notes-file notes.md --latest=false)
+            if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+            gh release create "$TAG" "${flags[@]}" "${files[@]}"
+          fi
+      # Every link in the notes names a file of the draft, and that file can be fetched.
+      - name: the notes' links
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/release-links.sh "$TAG"
+
+  # The versioned images (`:<ver>-lite`, `:<ver>`, `:<ver>-cuda`) from this run's
+  # Linux binaries; publish.yml moves `latest*` for stable versions only.
+  docker:
+    needs: [prepare, build]
+    uses: ./.github/workflows/release-docker.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      ref: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.prepare.outputs.version }}
+      image: ${{ needs.prepare.outputs.image }}
+      push: true

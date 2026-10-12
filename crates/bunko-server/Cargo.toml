@@ -1,0 +1,79 @@
+[package]
+name = "bunko-server"
+description = "The mokuro-bunko library server: WebDAV, web UIs, APIs and the OCR scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+bunko-core.workspace = true
+bunko-proto.workspace = true
+bunko-db.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
+futures-util.workspace = true
+axum = { workspace = true, features = ["ws"] }
+tower.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "http1"] }
+bytes.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+rust-embed.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true
+time.workspace = true
+ipnet = "2"
+hostname = "0.4"
+x509-parser = "0.16"
+base64.workspace = true
+percent-encoding.workspace = true
+reqwest.workspace = true
+which = "7"
+# accounts: one-time setup token generation
+rand.workspace = true
+# admin module: update checks/apply, disk usage for /_admin/api/status
+bunko-update.workspace = true
+# The control API's wire types (status.update, problems) the automatic update reports in.
+bunko-control = { path = "../bunko-control", default-features = false }
+fs4 = { version = "1", default-features = false }
+# ocr module: scheduler math (bunko-sched), collection (bunko-library, bunko-layout),
+# the DAV write locks (bunko-dav), result hashing, the gzip queue file, bench samples
+# (the processor WebSocket uses axum's `ws` feature, enabled on `axum` above)
+bunko-sched.workspace = true
+bunko-library.workspace = true
+bunko-layout.workspace = true
+bunko-dav.workspace = true
+sha2.workspace = true
+hex.workspace = true
+indexmap = "2"
+flate2 = "1"
+zip.workspace = true
+# library module (catalog + metadata runtime): the filesystem watcher
+notify.workspace = true
+# thumbs module: cover thumbnails (Pillow-exact contain + Lanczos, lossy WebP; no ONNX
+# Runtime)
+bunko-thumb = { path = "../bunko-thumb" }
+
+[dev-dependencies]
+# admin::update tests: the automatic update's quiet-moment polling in paused time.
+tokio = { workspace = true, features = ["test-util"] }
+# ocr tests: a processor speaking the v3 WebSocket; the in-process processor over a
+# fake engine (dev only: the server itself never links the processor runtime)
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+bunko-processor.workspace = true
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }
+image.workspace = true
+# differential_053: the shared DAV differential harness (bunko-dav/tests/common/diff.rs).
+quick-xml.workspace = true
