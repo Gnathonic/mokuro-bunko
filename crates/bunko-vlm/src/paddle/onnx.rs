@@ -601,7 +601,9 @@ impl PaddleManga {
         let alloc = g.allocator()?;
         let dm = self.d_model;
         let half = |v: &[f32]| -> Vec<f32> {
-            v.chunks_exact(T_HD)
+            v.as_chunks::<T_HD>()
+                .0
+                .iter()
                 .flat_map(|r| r[..T_HD / 2].iter().copied())
                 .collect()
         };

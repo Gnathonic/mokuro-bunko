@@ -339,10 +339,13 @@ impl VerdictStore {
                 if m.process == me {
                     return true;
                 }
-                let dead = match pid_alive(m.pid) {
-                    Some(alive) => !alive || m.pid == std::process::id(),
-                    None => t.saturating_sub(m.at) > STALE_MARKER_SECS,
-                };
+                // Another process's marker under this process's pid: that process is gone
+                // (on every OS, not only where the pid can be looked up).
+                let dead = m.pid == std::process::id()
+                    || match pid_alive(m.pid) {
+                        Some(alive) => !alive,
+                        None => t.saturating_sub(m.at) > STALE_MARKER_SECS,
+                    };
                 if dead {
                     let v = Verdict {
                         pass: false,
