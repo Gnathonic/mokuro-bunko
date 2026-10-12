@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.7.3] - 2026-10-12
+
+Background work can no longer make the web server stop answering.
+
+### Fixed
+- **A burst of background work hung every request.** Turning on the generation
+  upgrade on a large library swapped in a matching layer for every volume that had
+  one, from inside the census walk; each swap queued a recompile of its series, each
+  recompile walked the whole library, and they all waited in the same blocking-thread
+  queue every request uses to check its login, in arrival order. On a large library
+  the backlog could grow faster than it drained, and the server answered nothing, a
+  static 404 included, until it was restarted.
+  Requests and background work are now kept apart:
+  - **Requests check their login without a blocking thread when they can**:
+    anonymous requests and recently verified Basic logins are decided at once; only
+    a password or token check (bcrypt, the database) waits for one. The public OCR
+    status (`/catalog/api/ocr-status`) reads what the scheduler publishes about once
+    a second instead of asking it.
+  - **One metadata thread compiles series**, batching every series that changed since
+    its last pass into one library walk and one `catalog.json` write, at most one
+    batch every 2 s (a fifth of the debounce). A burst of changes costs a few walks
+    instead of one per series.
+  - **Background work has a runtime of its own** (two threads and a bounded blocking
+    pool): metadata timers, PROPFIND cache refreshes, thumbnails, the community
+    fetcher, OCR control and update checks. PROPFIND refreshes also have their own
+    generation slots, so they never hold the ones a reader's listing needs.
+  - **The generation upgrade's walk only reads.** Volumes with a matching layer are
+    recorded during the walk and swapped in afterwards by one job, one volume at a
+    time (about 20 a second); the admin panel's upgrade census shows its progress
+    (`direct`).
+  - **The library index is walked by one reader at a time.** While a walk runs, other
+    readers (`/api/health`, `/api/stats`) get the previous result at once instead of
+    each walking the library or waiting for a walk a busy background job began. A
+    change made during a walk no longer gets lost (the walk's result was marked
+    current).
+
+  Measured on 3,000 series × 3 volumes with every volume upgradable, under 30
+  polling readers: 0.7.1 left static 404s, `/api/health` and PROPFIND unanswered for
+  15 s at a time over the first two and a half minutes (71 threads); 0.7.3 answered
+  all of them throughout, the slowest in 0.2 s (18 threads), while it upgraded the
+  library.
+
 ## [0.7.2] - 2026-10-12
 
 A hotfix for 0.7.1.

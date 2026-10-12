@@ -35,6 +35,20 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
         .thread_name("bunko")
         .enable_all()
         .build()?;
+    // Background work (metadata passes, cache refreshes, thumbnails, OCR control, update
+    // checks) runs on a runtime of its own, so no burst of it can make a request wait
+    // (bunko_server::rt).
+    let background = Background(Some(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(32)
+            .thread_name("bunko-bg")
+            .enable_all()
+            .build()?,
+    ));
+    if let Some(rt) = &background.0 {
+        bunko_server::rt::set_background(rt.handle().clone());
+    }
     let flavor = crate::update_flavor();
     // An automatic update the previous run made: check the new release's OCR backend
     // (a rollback restarts into the previous release and does not return).
@@ -178,6 +192,18 @@ pub fn run(args: ServeArgs, config: Config, config_path: PathBuf) -> anyhow::Res
             }
             Ok(())
         })
+}
+
+/// The background runtime, shut down when `run` returns: a background job stuck in a
+/// blocking call must not hold up the exit (dropping a runtime waits for them all).
+struct Background(Option<tokio::runtime::Runtime>);
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_timeout(std::time::Duration::from_secs(5));
+        }
+    }
 }
 
 /// What the server's control API needs from the config before `Services` takes it.

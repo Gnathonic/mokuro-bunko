@@ -48,16 +48,15 @@ impl OutlookSource for OcrGlue {
 impl OcrStatusSource for OcrGlue {
     /// The 0.5.2 `.ocr-progress.json` document: the first running card at the top level
     /// plus `jobs` with every card.
+    /// Read from the board the scheduler publishes: never waits on the scheduler.
     fn progress(&self) -> Option<Map<String, Value>> {
-        let ocr = self.0.clone();
-        let jobs =
-            blocking(move || ocr.ask_blocking(Duration::from_millis(500), |s| s.running_jobs()))?;
+        let jobs = self.0.running_jobs();
         let first = jobs.first()?.clone();
         let mut doc = first;
         doc.insert("active".into(), Value::Bool(true));
         doc.insert(
             "jobs".into(),
-            Value::Array(jobs.into_iter().map(Value::Object).collect()),
+            Value::Array(jobs.iter().cloned().map(Value::Object).collect()),
         );
         Some(doc)
     }

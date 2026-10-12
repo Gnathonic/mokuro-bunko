@@ -12,6 +12,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use bunko_core::config::UpgradeConfig;
 use bunko_core::generations::Generation;
@@ -172,6 +174,18 @@ pub struct Upgrade {
     pub generator: String,
     census: Mutex<HashMap<String, CensusEntry>>,
     forced: Mutex<HashSet<String>>,
+    direct: Mutex<DirectProgress>,
+    halted: AtomicBool,
+}
+
+/// The direct replaces in progress: volumes the census found a matching layer for are
+/// swapped in by one paced job ([`Upgrade::run_direct`]), never by the walk itself.
+#[derive(Debug, Clone, Default)]
+pub struct DirectProgress {
+    pub running: bool,
+    pub total: u64,
+    pub done: u64,
+    pub failed: u64,
 }
 
 /// An audit row's details say the write left the bytes as they were.
@@ -207,6 +221,8 @@ impl Upgrade {
             generator,
             census: Mutex::new(HashMap::new()),
             forced: Mutex::new(HashSet::new()),
+            direct: Mutex::new(DirectProgress::default()),
+            halted: AtomicBool::new(false),
         }
     }
 
@@ -422,9 +438,16 @@ impl Upgrade {
         }
         edited.sort();
         let config = self.config.lock().clone();
+        let direct = self.direct.lock().clone();
         json!({
             "enabled": config.enabled,
             "replace": config.replace,
+            "direct": {
+                "running": direct.running,
+                "total": direct.total,
+                "done": direct.done,
+                "failed": direct.failed,
+            },
             "families": families,
             "ready": ready,
             "needs_ocr": needs,
@@ -432,6 +455,70 @@ impl Upgrade {
             "skipped_edited": edited.len(),
             "edited_volumes": edited,
         })
+    }
+
+    /// The volumes the census found a matching layer for (sorted by path).
+    pub fn ready_volumes(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .census
+            .lock()
+            .iter()
+            .filter(|(_, e)| matches!(e.verdict, Verdict::Ready(_)))
+            .map(|(rel, _)| rel.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Stop a running [`run_direct`](Self::run_direct) after its current volume (server
+    /// shutdown).
+    pub fn halt(&self) {
+        self.halted.store(true, Ordering::SeqCst);
+    }
+
+    pub fn direct_progress(&self) -> DirectProgress {
+        self.direct.lock().clone()
+    }
+
+    /// Swap the matching layer in for each of `volumes`, one at a time with `pace`
+    /// between them, re-judging each first (a volume may have changed, or the policy
+    /// moved, since the census). Every swap is an ordinary library write the metadata
+    /// worker coalesces. Returns `(replaced, failed)`.
+    pub fn run_direct(&self, volumes: Vec<String>, pace: Duration) -> (u64, u64) {
+        *self.direct.lock() = DirectProgress {
+            running: true,
+            total: volumes.len() as u64,
+            done: 0,
+            failed: 0,
+        };
+        let (mut done, mut failed) = (0u64, 0u64);
+        for (i, rel) in volumes.iter().enumerate() {
+            if self.halted.load(Ordering::SeqCst) || !self.config.lock().enabled {
+                break;
+            }
+            if i > 0 && !pace.is_zero() {
+                std::thread::sleep(pace);
+            }
+            let cbz = self.library.join(rel);
+            if let Verdict::Ready(layer) = self.judge(&cbz, rel).1 {
+                match self.direct_replace(&cbz, &layer) {
+                    Ok(_) => {
+                        done += 1;
+                        // The census sees the new bare file now, not at the next walk.
+                        self.judge(&cbz, rel);
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        tracing::warn!("could not upgrade {rel} directly: {e}");
+                    }
+                }
+            }
+            let mut progress = self.direct.lock();
+            progress.done = done;
+            progress.failed = failed;
+        }
+        self.direct.lock().running = false;
+        (done, failed)
     }
 
     pub fn force(&self, rel: &str) {
@@ -715,17 +802,11 @@ impl Upgrade {
 }
 
 impl UpgradeProbe for Upgrade {
+    /// Read-only: a volume with a matching layer (`Ready`) is only recorded in the
+    /// census, and the scheduler's paced job swaps it in after the walk. A walk that
+    /// wrote files set off a burst of library changes as it went.
     fn wants_upgrade(&self, cbz: &Path, rel: &str) -> bool {
-        match self.judge(cbz, rel).1 {
-            Verdict::NeedsOcr => true,
-            Verdict::Ready(layer) => {
-                if let Err(e) = self.direct_replace(cbz, &layer) {
-                    tracing::warn!("could not upgrade {rel} directly: {e}");
-                }
-                false
-            }
-            _ => false,
-        }
+        matches!(self.judge(cbz, rel).1, Verdict::NeedsOcr)
     }
 }
 

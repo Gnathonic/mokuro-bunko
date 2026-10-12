@@ -4,8 +4,13 @@
 //!
 //! Timers are tokio tasks armed by a [`Debouncer`] each (one for the full pass, one
 //! per series key). A fired timer clears its slot under the timer lock BEFORE the pass
-//! runs, so a later schedule arms a fresh timer instead of cancelling a running pass;
-//! the pass itself runs on the blocking pool and the service's own locks serialise it.
+//! runs, so a later schedule arms a fresh timer instead of cancelling a running pass.
+//!
+//! Passes never run on the tokio blocking pool: a fired timer hands its work to ONE
+//! metadata thread ([`MetadataWorker`]), which coalesces everything queued since its
+//! last pass (a full pass, or one batch of changed series compiled over a single library
+//! scan). A burst of changes therefore costs a few passes instead of one per series,
+//! and however much changes, the request path's blocking pool is never involved.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +26,7 @@ use bunko_library::{
     DebouncePolicy, Debouncer, LibraryIndexCache, MetadataHooks, MetadataService, PathWriteLocks,
     UpdateError,
 };
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 use tokio::runtime::Handle;
 use tokio::task::AbortHandle;
 
@@ -121,6 +126,99 @@ pub struct LibraryRuntime {
     community_settings: CommunitySettings,
     community: Mutex<Option<Arc<CommunityFetcher>>>,
     started: AtomicBool,
+    worker: Arc<MetadataWorker>,
+}
+
+/// What the metadata thread has been asked to do since its last pass.
+#[derive(Default)]
+struct WorkQueue {
+    stopped: bool,
+    /// A pass (or a batch) is running now.
+    running: bool,
+    full: bool,
+    /// Series to recompile, by key: the latest raw title for each.
+    series: HashMap<String, String>,
+    /// When the last series batch started (batches are spaced by [`batch_gap`]).
+    last_batch: Option<Instant>,
+    /// The least time between two series batches.
+    batch_gap: Duration,
+}
+
+/// The least time between two series batches: a fifth of the debounce (2 s by default).
+/// Each batch walks the library once, so a steady trickle of changes (the generation
+/// upgrade's paced swaps) costs a walk every two seconds at most, however fast it comes.
+fn batch_gap(policy: &DebouncePolicy) -> Duration {
+    policy.debounce / 5
+}
+
+impl WorkQueue {
+    fn is_idle(&self) -> bool {
+        !self.running && !self.full && self.series.is_empty()
+    }
+}
+
+/// The one thread that runs metadata passes (see the module docs), started on first use.
+#[derive(Default)]
+struct MetadataWorker {
+    queue: Mutex<WorkQueue>,
+    wake: Condvar,
+    /// Signalled whenever the queue goes idle.
+    idle: Condvar,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Passes and batches run so far.
+    passes: std::sync::atomic::AtomicU64,
+}
+
+enum Work {
+    Full,
+    Series(Vec<String>),
+}
+
+impl MetadataWorker {
+    /// The next piece of work, waiting for it; `None` once stopped. A queued full pass
+    /// covers every queued series.
+    fn next_work(&self) -> Option<Work> {
+        let mut queue = self.queue.lock();
+        queue.running = false;
+        if queue.is_idle() {
+            self.idle.notify_all();
+        }
+        loop {
+            if queue.stopped {
+                return None;
+            }
+            if queue.full {
+                queue.full = false;
+                queue.series.clear();
+                queue.running = true;
+                return Some(Work::Full);
+            }
+            if !queue.series.is_empty() {
+                if let Some(next) = queue.last_batch.map(|at| at + queue.batch_gap)
+                    && Instant::now() < next
+                {
+                    self.wake.wait_until(&mut queue, next);
+                    continue;
+                }
+                queue.last_batch = Some(Instant::now());
+                let mut titles: Vec<String> = queue.series.drain().map(|(_, t)| t).collect();
+                titles.sort();
+                queue.running = true;
+                return Some(Work::Series(titles));
+            }
+            self.wake.wait(&mut queue);
+        }
+    }
+
+    fn stop(&self) {
+        {
+            let mut queue = self.queue.lock();
+            queue.stopped = true;
+            queue.full = false;
+            queue.series.clear();
+        }
+        self.wake.notify_all();
+    }
 }
 
 /// The service's hooks, pointing back at the runtime.
@@ -196,6 +294,13 @@ impl LibraryRuntime {
                 community_settings: deps.community,
                 community: Mutex::new(None),
                 started: AtomicBool::new(false),
+                worker: Arc::new(MetadataWorker {
+                    queue: Mutex::new(WorkQueue {
+                        batch_gap: batch_gap(&deps.policy),
+                        ..WorkQueue::default()
+                    }),
+                    ..MetadataWorker::default()
+                }),
             }
         })
     }
@@ -345,6 +450,11 @@ impl LibraryRuntime {
         }
         let service = self.service.clone();
         let _ = tokio::task::spawn_blocking(move || service.stop()).await;
+        self.worker.stop();
+        let thread = self.worker.thread.lock().take();
+        if let Some(thread) = thread {
+            let _ = tokio::task::spawn_blocking(move || thread.join()).await;
+        }
         self.hooks_live.store(false, Ordering::SeqCst);
     }
 
@@ -422,13 +532,7 @@ impl LibraryRuntime {
             timers.full.debouncer.fired();
             timers.full.task = None;
         }
-        tracing::info!("[METADATA] full pass fired");
-        let service = self.service.clone();
-        match tokio::task::spawn_blocking(move || service.recompile_all()).await {
-            Ok(Ok(changed)) => tracing::info!("[METADATA] full pass done (changed={changed})"),
-            Ok(Err(error)) => tracing::warn!(%error, "[METADATA] regeneration failed"),
-            Err(error) => tracing::warn!(%error, "[METADATA] regeneration failed"),
-        }
+        self.enqueue(|queue| queue.full = true);
     }
 
     async fn fire_series(&self, key: String, generation: u64) {
@@ -447,24 +551,95 @@ impl LibraryRuntime {
                 None => return,
             }
         };
-        tracing::info!("[METADATA] series regen fired: {title}");
-        let service = self.service.clone();
-        let name = title.clone();
-        match tokio::task::spawn_blocking(move || service.recompile_series(&name)).await {
-            Ok(Ok(changed)) => {
-                tracing::info!("[METADATA] series regen done: {title} (changed={changed})")
+        self.enqueue(move |queue| {
+            queue.series.insert(key, title);
+        });
+    }
+
+    /// Queue work for the metadata thread (starting it on first use) and wake it.
+    fn enqueue(&self, add: impl FnOnce(&mut WorkQueue)) {
+        {
+            let mut queue = self.worker.queue.lock();
+            if queue.stopped {
+                return;
             }
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "[METADATA] series regeneration failed: {title}")
-            }
-            Err(error) => tracing::warn!(%error, "[METADATA] series regeneration failed: {title}"),
+            add(&mut queue);
         }
+        self.ensure_worker();
+        self.worker.wake.notify_one();
+    }
+
+    fn ensure_worker(&self) {
+        let mut thread = self.worker.thread.lock();
+        if thread.is_some() {
+            return;
+        }
+        let (me, worker) = (self.me.clone(), self.worker.clone());
+        match std::thread::Builder::new()
+            .name("metadata".into())
+            .spawn(move || metadata_loop(me, worker))
+        {
+            Ok(handle) => *thread = Some(handle),
+            Err(error) => tracing::error!(%error, "[METADATA] could not start the metadata thread"),
+        }
+    }
+
+    fn run_work(&self, work: Work) {
+        self.worker.passes.fetch_add(1, Ordering::SeqCst);
+        match work {
+            Work::Full => {
+                tracing::info!("[METADATA] full pass fired");
+                match self.service.recompile_all() {
+                    Ok(changed) => tracing::info!("[METADATA] full pass done (changed={changed})"),
+                    Err(error) => tracing::warn!(%error, "[METADATA] regeneration failed"),
+                }
+            }
+            Work::Series(titles) => {
+                let named = series_list(&titles);
+                tracing::info!("[METADATA] series regen fired: {named}");
+                match self.service.recompile_series_batch(&titles) {
+                    Ok(changed) => {
+                        tracing::info!("[METADATA] series regen done: {named} (changed={changed})")
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "[METADATA] series regeneration failed: {named}")
+                    }
+                }
+            }
+        }
+    }
+
+    /// How many passes (full passes and series batches) the metadata thread has run.
+    pub fn passes_run(&self) -> u64 {
+        self.worker.passes.load(Ordering::SeqCst)
+    }
+
+    /// Wait (blocking) until the metadata thread has nothing queued or running. For
+    /// tests and shutdown paths.
+    pub fn wait_idle(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut queue = self.worker.queue.lock();
+        while !queue.is_idle() && !queue.stopped {
+            if self
+                .worker
+                .idle
+                .wait_until(&mut queue, deadline)
+                .timed_out()
+            {
+                return queue.is_idle();
+            }
+        }
+        true
     }
 
     /// Whether a timer (full or any series) is armed. For tests and diagnostics.
     pub fn has_pending_pass(&self) -> bool {
-        let timers = self.timers.lock();
-        timers.full.task.is_some() || timers.series.values().any(|(slot, _)| slot.task.is_some())
+        let armed = {
+            let timers = self.timers.lock();
+            timers.full.task.is_some()
+                || timers.series.values().any(|(slot, _)| slot.task.is_some())
+        };
+        armed || !self.worker.queue.lock().is_idle()
     }
 
     // ------------------------------------------------------------------
@@ -598,10 +773,21 @@ impl LibraryRuntime {
         }
     }
 
-    /// Run a full pass now (bypassing the timers), on the blocking pool.
+    /// Run a full pass now (bypassing the timers and the metadata thread's queue) on a
+    /// thread of its own, never the blocking pool requests use.
     pub async fn recompile_all_now(&self) -> usize {
         let service = self.service.clone();
-        match tokio::task::spawn_blocking(move || service.recompile_all()).await {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("metadata-now".into())
+            .spawn(move || {
+                let _ = tx.send(service.recompile_all());
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "[METADATA] could not start a pass");
+            return 0;
+        }
+        match rx.await {
             Ok(Ok(changed)) => changed,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "[METADATA] regeneration failed");
@@ -631,6 +817,37 @@ impl LibraryRuntime {
             .ok()
             .flatten()
     }
+}
+
+/// The metadata thread: run whatever is queued until the runtime stops or goes away.
+/// It waits holding only the queue, so a dropped runtime is not kept alive by it.
+fn metadata_loop(me: Weak<LibraryRuntime>, worker: Arc<MetadataWorker>) {
+    while let Some(work) = worker.next_work() {
+        let Some(rt) = me.upgrade() else { return };
+        rt.run_work(work);
+    }
+}
+
+impl Drop for LibraryRuntime {
+    fn drop(&mut self) {
+        // Without a `stop`, the metadata thread still has to end.
+        self.worker.stop();
+    }
+}
+
+/// `A, B, C (+12 more)` for the log.
+fn series_list(titles: &[String]) -> String {
+    const SHOWN: usize = 5;
+    let mut text = titles
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if titles.len() > SHOWN {
+        text.push_str(&format!(" (+{} more)", titles.len() - SHOWN));
+    }
+    text
 }
 
 /// `total_volumes` and `pending_ocr` from the library index.

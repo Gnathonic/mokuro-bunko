@@ -22,6 +22,7 @@ mod status;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bunko_core::StorageLayout;
 use bunko_core::config::UpgradeConfig;
@@ -106,6 +107,9 @@ pub struct SchedDeps {
 /// A reply a query sends back.
 pub type Reply<T> = oneshot::Sender<T>;
 
+/// Between two direct replaces of the generation upgrade.
+const DIRECT_PACE: Duration = Duration::from_millis(50);
+
 /// A closure run on the scheduler with full access (status reads, admin calls).
 pub type Query = Box<dyn FnOnce(&mut Scheduler) + Send>;
 
@@ -117,6 +121,11 @@ pub enum Msg {
     Walked {
         epoch: u64,
         index: OwedIndex,
+    },
+    /// The paced direct-replace job finished ([`crate::ocr::upgrade::Upgrade::run_direct`]).
+    DirectUpgraded {
+        done: u64,
+        failed: u64,
     },
     /// A frame from a processor (remote socket or local channel).
     Event {
@@ -197,6 +206,7 @@ impl std::fmt::Debug for Msg {
         let name = match self {
             Msg::Tick => "Tick",
             Msg::Walked { .. } => "Walked",
+            Msg::DirectUpgraded { .. } => "DirectUpgraded",
             Msg::Event { .. } => "Event",
             Msg::Seen { .. } => "Seen",
             Msg::Register { .. } => "Register",
@@ -270,6 +280,8 @@ pub struct Scheduler {
     pub owed: OwedIndex,
     pub walk_epoch: u64,
     pub walking: bool,
+    /// The paced direct-replace job is running.
+    pub direct_running: bool,
     pub last_walk_at: Option<f64>,
     pub machines: IndexMap<String, Machine>,
     pub lanes: Vec<Lane>,
@@ -345,6 +357,7 @@ impl Scheduler {
             owed: OwedIndex::default(),
             walk_epoch: 0,
             walking: false,
+            direct_running: false,
             last_walk_at: None,
             machines: IndexMap::new(),
             lanes: Vec::new(),
@@ -500,6 +513,7 @@ impl Scheduler {
         match msg {
             Msg::Tick => self.tick(),
             Msg::Walked { epoch, index } => self.walked(epoch, index),
+            Msg::DirectUpgraded { done, failed } => self.direct_upgraded(done, failed),
             Msg::Event { pid, event } => self.on_event(&pid, event),
             Msg::Seen { pid } => self.seen(&pid),
             Msg::Register { input, reply } => {
@@ -611,6 +625,49 @@ impl Scheduler {
         self.bump();
         self.bump_page();
         self.maybe_start_scan();
+        self.maybe_start_direct();
+    }
+
+    /// Swap in the layers the walk's census found ready, on a helper thread and paced, so
+    /// the library changes they cause arrive as a steady trickle rather than a burst.
+    fn maybe_start_direct(&mut self) {
+        if self.direct_running || self.stopping {
+            return;
+        }
+        let Some(up) = self.upgrade_probe() else {
+            return;
+        };
+        let volumes = up.ready_volumes();
+        if volumes.is_empty() {
+            return;
+        }
+        self.direct_running = true;
+        self.log(format!(
+            "Upgrading {} volume(s) from layers already on disk (no OCR needed), one at a time",
+            volumes.len()
+        ));
+        let pace = match self.deps.exec {
+            Exec::Inline => Duration::ZERO,
+            Exec::Threads(_) => DIRECT_PACE,
+        };
+        self.run_background(Box::new(move || {
+            let (done, failed) = up.run_direct(volumes, pace);
+            Msg::DirectUpgraded { done, failed }
+        }));
+    }
+
+    fn direct_upgraded(&mut self, done: u64, failed: u64) {
+        self.direct_running = false;
+        let tail = if failed > 0 {
+            format!(", {failed} failed (retried after the next walk)")
+        } else {
+            String::new()
+        };
+        self.log(format!(
+            "Upgraded {done} volume(s) from layers already on disk{tail}"
+        ));
+        self.bump();
+        self.bump_page();
     }
 
     /// The OCR loop's "scan": unless every machine is held or nothing can run.

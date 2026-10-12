@@ -203,6 +203,12 @@ struct CacheState {
     snapshot: Option<Arc<LibrarySnapshot>>,
     snapshot_time: Instant,
     stale: bool,
+    /// Bumped by every [`LibraryIndexCache::invalidate`]: a change that lands while a
+    /// scan runs leaves the result stale.
+    changes: u64,
+    /// The last scan's result, kept even when `snapshot` was dropped: what a reader gets
+    /// while another reader's scan is in progress.
+    last: Option<Arc<LibrarySnapshot>>,
     scan_duration: Duration,
     scans: u64,
 }
@@ -213,6 +219,10 @@ pub struct LibraryIndexCache {
     ttl: Duration,
     max_bytes: usize,
     state: Mutex<CacheState>,
+    /// One scan at a time: while one runs, other readers of a stale index get the last
+    /// snapshot at once (they wait only when there has never been one) instead of each
+    /// walking the whole library, or waiting for a scan a busy background caller began.
+    scanning: Mutex<()>,
 }
 
 impl LibraryIndexCache {
@@ -228,9 +238,12 @@ impl LibraryIndexCache {
                 snapshot: None,
                 snapshot_time: Instant::now(),
                 stale: false,
+                changes: 0,
+                last: None,
                 scan_duration: Duration::ZERO,
                 scans: 0,
             }),
+            scanning: Mutex::new(()),
         }
     }
 
@@ -243,6 +256,7 @@ impl LibraryIndexCache {
     pub fn invalidate(&self) {
         let mut state = self.state.lock();
         state.stale = true;
+        state.changes += 1;
         if state.scan_duration < SLOW_SCAN {
             state.snapshot = None;
         }
@@ -255,20 +269,25 @@ impl LibraryIndexCache {
 
     /// `get_snapshot` and the scan count that produced it, read together.
     pub fn get_snapshot_counted(&self) -> (Arc<LibrarySnapshot>, u64) {
-        {
-            let state = self.state.lock();
-            if let Some(snapshot) = &state.snapshot {
-                let age = state.snapshot_time.elapsed();
-                if !state.stale && age < self.ttl {
-                    return (Arc::clone(snapshot), state.scans);
-                }
-                if state.stale
-                    && age.as_secs_f64() < RESCAN_FACTOR * state.scan_duration.as_secs_f64()
-                {
-                    return (Arc::clone(snapshot), state.scans);
-                }
-            }
+        if let Some(hit) = self.servable() {
+            return hit;
         }
+        let _scan = match self.scanning.try_lock() {
+            Some(guard) => guard,
+            None => {
+                let state = self.state.lock();
+                if let Some(last) = &state.last {
+                    return (Arc::clone(last), state.scans);
+                }
+                drop(state);
+                self.scanning.lock()
+            }
+        };
+        // A scan that finished while this one waited serves it too.
+        if let Some(hit) = self.servable() {
+            return hit;
+        }
+        let changes = self.state.lock().changes;
         let started = Instant::now();
         let snapshot = Arc::new(scan_library(&self.library_path));
         let duration = started.elapsed();
@@ -282,11 +301,25 @@ impl LibraryIndexCache {
         }
         let mut state = self.state.lock();
         state.scan_duration = duration;
-        state.snapshot = Some(Arc::clone(&snapshot));
         state.snapshot_time = Instant::now();
-        state.stale = false;
+        state.stale = state.changes != changes;
+        // Changed while scanning: as `invalidate` would, a cheap scan is redone on the
+        // next read (this one still answers the readers that waited for it).
+        state.snapshot = (!state.stale || duration >= SLOW_SCAN).then(|| Arc::clone(&snapshot));
+        state.last = Some(Arc::clone(&snapshot));
         state.scans += 1;
         (snapshot, state.scans)
+    }
+
+    /// The cached snapshot when it may be served as it is.
+    fn servable(&self) -> Option<(Arc<LibrarySnapshot>, u64)> {
+        let state = self.state.lock();
+        let snapshot = state.snapshot.as_ref()?;
+        let age = state.snapshot_time.elapsed();
+        let fresh = !state.stale && age < self.ttl;
+        let slow_and_recent =
+            state.stale && age.as_secs_f64() < RESCAN_FACTOR * state.scan_duration.as_secs_f64();
+        (fresh || slow_and_recent).then(|| (Arc::clone(snapshot), state.scans))
     }
 
     /// The last snapshot, however old, without ever scanning.
