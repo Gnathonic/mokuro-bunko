@@ -84,14 +84,21 @@ pub struct PropfindCache {
     state: Mutex<State>,
     flights: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     runtime: Option<Handle>,
-    /// Listings generated at once (cache fills, refreshes and live Depth: 1 walks). Each
-    /// holds a directory's member list plus its compressed output; without a bound, N
-    /// parallel requests for N different folders would hold N of those.
+    /// Listings generated at once for requests (cache fills and live Depth: 1 walks).
+    /// Each holds a directory's member list plus its compressed output; without a bound,
+    /// N parallel requests for N different folders would hold N of those.
     slots: Arc<tokio::sync::Semaphore>,
+    /// The same bound for background refreshes, kept apart so a burst of them (every
+    /// library change refreshes every cached listing) never makes a request wait.
+    refresh_slots: Arc<tokio::sync::Semaphore>,
 }
 
-/// How many listings are generated at the same time (see [`PropfindCache`]`::slots`).
+/// How many listings are generated at the same time for requests (see
+/// [`PropfindCache`]`::slots`).
 const GENERATION_SLOTS: usize = 4;
+
+/// How many background refreshes run at the same time.
+const REFRESH_SLOTS: usize = 2;
 
 const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
 
@@ -205,6 +212,7 @@ impl PropfindCache {
             flights: Mutex::new(HashMap::new()),
             runtime: Handle::try_current().ok(),
             slots: Arc::new(tokio::sync::Semaphore::new(GENERATION_SLOTS)),
+            refresh_slots: Arc::new(tokio::sync::Semaphore::new(REFRESH_SLOTS)),
         })
     }
 
@@ -330,7 +338,7 @@ impl PropfindCache {
         };
         let this = Arc::clone(self);
         rt.spawn(async move {
-            let slot = this.slots.clone().acquire_owned().await.ok();
+            let slot = this.refresh_slots.clone().acquire_owned().await.ok();
             let epoch = this.state.lock().epoch;
             let roots = this.roots.clone();
             let k = key.clone();

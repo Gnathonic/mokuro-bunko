@@ -129,6 +129,8 @@ struct Inner {
     /// The runtime `start` ran in (restarts from synchronous code use it).
     runtime: Mutex<Option<tokio::runtime::Handle>>,
     upgrade: Arc<upgrade::Upgrade>,
+    /// What the scheduler thread last published of its running jobs.
+    running_jobs: actor::RunningJobs,
     queue_file: queue_file::QueueFile,
     status: queue_api::StatusCache,
     storage: PathBuf,
@@ -231,6 +233,7 @@ impl OcrControl {
             local_restart: tokio::sync::Mutex::new(()),
             runtime: Mutex::new(None),
             upgrade: up,
+            running_jobs: actor::RunningJobs::default(),
             queue_file: queue_file::QueueFile::default(),
             status: queue_api::StatusCache::default(),
             storage: layout.base.clone(),
@@ -266,6 +269,12 @@ impl OcrControl {
         &self.0.upgrade
     }
 
+    /// The running jobs as the scheduler last published them (within about a second);
+    /// never waits on the scheduler.
+    pub fn running_jobs(&self) -> Arc<Vec<serde_json::Map<String, serde_json::Value>>> {
+        self.0.running_jobs.read().clone()
+    }
+
     /// Start the scheduler thread, the in-process processor (full build, local
     /// processing on) and the stop watcher. Must be called inside a tokio runtime.
     pub fn start(&self, stop: CancellationToken) {
@@ -273,7 +282,7 @@ impl OcrControl {
             return;
         };
         let local_processing = sched.settings().local_processing;
-        match actor::spawn(sched, rx) {
+        match actor::spawn(sched, rx, self.0.running_jobs.clone()) {
             Ok(handle) => *self.0.thread.lock() = Some(handle),
             Err(e) => {
                 tracing::error!("could not start the OCR scheduler: {e}");
@@ -505,6 +514,8 @@ impl OcrControl {
     /// for the local processor it let go of: its sessions wind down and free their
     /// models before this returns (bounded), not under the process exit.
     pub async fn stop(&self) {
+        // A paced direct-upgrade job ends after its current volume.
+        self.0.upgrade.halt();
         self.send(Msg::Stop);
         let handle = self.0.thread.lock().take();
         if let Some(h) = handle {

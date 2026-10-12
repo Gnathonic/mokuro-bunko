@@ -106,6 +106,37 @@ pub fn parse_basic(header: &str) -> Result<Option<(String, String)>, MalformedBa
     Ok(Some((u.to_string(), p.to_string())))
 }
 
+/// [`authenticate`] when it needs neither the database nor bcrypt: no `Authorization`
+/// header, a header that is not Basic or Bearer, a malformed Basic header, or Basic
+/// credentials verified recently ([`AuthBackend::cached_login`]). `None` means the full
+/// check has to run on a blocking thread (a bearer token, an unverified password).
+pub fn authenticate_without_io(headers: &HeaderMap, backend: &dyn AuthBackend) -> Option<Identity> {
+    let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return Some(Identity::default());
+    };
+    if value.starts_with("Bearer ") {
+        return None;
+    }
+    match parse_basic(value) {
+        Ok(None) => Some(Identity::default()),
+        Err(MalformedBasic) => Some(Identity {
+            error: Some("Invalid authorization header".into()),
+            ..Default::default()
+        }),
+        Ok(Some((username, password))) => {
+            backend
+                .cached_login(&username, &password)
+                .map(|user| Identity {
+                    user: Some(user),
+                    ..Default::default()
+                })
+        }
+    }
+}
+
 /// 0.5.2 `AuthMiddleware.authenticate`.
 pub fn authenticate(
     headers: &HeaderMap,
@@ -469,6 +500,72 @@ mod tests {
         browse: true,
         download: true,
     };
+
+    /// A backend whose `cached_login` knows `ed:pw`.
+    struct Cached;
+    impl AuthBackend for Cached {
+        fn resolve_token(&self, _: &str) -> Option<AuthUser> {
+            unreachable!("a token needs the database")
+        }
+        fn check_password(&self, _: &str, _: &str) -> Option<AuthUser> {
+            unreachable!("a password check needs bcrypt")
+        }
+        fn cached_login(&self, u: &str, p: &str) -> Option<AuthUser> {
+            (u == "ed" && p == "pw").then(|| AuthUser {
+                id: 2,
+                username: u.into(),
+                role: Role::Editor,
+            })
+        }
+        fn can_user_delete_library_path(&self, _: &str, _: &str) -> bool {
+            false
+        }
+        fn can_user_edit_series(&self, _: &str, _: &str) -> bool {
+            false
+        }
+        fn physical_exists(&self, _: &str, _: Option<&str>) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn requests_that_need_no_io_are_decided_without_it() {
+        let mut h = HeaderMap::new();
+        let anonymous = authenticate_without_io(&h, &Cached).unwrap();
+        assert!(!anonymous.authenticated() && anonymous.error.is_none());
+        let basic = base64::engine::general_purpose::STANDARD.encode("ed:pw");
+        h.insert(
+            header::AUTHORIZATION,
+            format!("Basic {basic}").parse().unwrap(),
+        );
+        assert_eq!(
+            authenticate_without_io(&h, &Cached).unwrap().role(),
+            Role::Editor
+        );
+        h.insert(header::AUTHORIZATION, "Basic !!!".parse().unwrap());
+        assert_eq!(
+            authenticate_without_io(&h, &Cached)
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("Invalid authorization header")
+        );
+        h.insert(header::AUTHORIZATION, "Digest x".parse().unwrap());
+        assert!(
+            !authenticate_without_io(&h, &Cached)
+                .unwrap()
+                .authenticated()
+        );
+        // These go to a blocking thread (Cached would panic if they were checked here).
+        let other = base64::engine::general_purpose::STANDARD.encode("ed:other");
+        h.insert(
+            header::AUTHORIZATION,
+            format!("Basic {other}").parse().unwrap(),
+        );
+        assert!(authenticate_without_io(&h, &Cached).is_none());
+        h.insert(header::AUTHORIZATION, "Bearer t".parse().unwrap());
+        assert!(authenticate_without_io(&h, &Cached).is_none());
+    }
 
     #[test]
     fn authenticate_paths() {

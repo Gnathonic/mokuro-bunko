@@ -497,6 +497,57 @@ impl MetadataService {
         Ok(changed > 0)
     }
 
+    /// Recompile SEVERAL series (matched by `normalize_volume_title_key`) with one scan
+    /// of the library and one catalog publish: what the server's metadata worker runs for
+    /// every series that changed since its last batch. A burst of N changed series costs
+    /// one library walk instead of N. The pass lock is taken per folder and released
+    /// fairly, as in [`recompile_all`](Self::recompile_all), so a waiting PUT gets in.
+    /// Returns the number of files written.
+    pub fn recompile_series_batch(&self, series_titles: &[String]) -> Result<usize, PassError> {
+        if self.is_stopped() || series_titles.is_empty() {
+            return Ok(0);
+        }
+        let keys: HashSet<String> = series_titles
+            .iter()
+            .map(|title| normalize_volume_title_key(title))
+            .collect();
+        let mut changed = 0;
+        {
+            let Some(folders) = self.scan_folders() else {
+                tracing::warn!(library = %self.library_path.display(), "[METADATA] library root unreadable, skipping pass");
+                self.retry_later();
+                return Ok(0);
+            };
+            let mut catalog_entries = Vec::with_capacity(folders.len());
+            for folder in &folders {
+                if self.is_stopped() {
+                    return Ok(changed);
+                }
+                let guard = self.pass_lock.lock();
+                let result = (|| -> Result<(), StoreError> {
+                    let series_key = normalize_volume_title_key(&folder.title);
+                    let (facts, index) = self.row_for(&series_key)?;
+                    catalog_entries.push((folder.title.clone(), facts.clone()));
+                    if keys.contains(&series_key) {
+                        let volumes =
+                            compile_series_volumes(folder, Some(self.store.as_ref()), true)?;
+                        self.materialize_catalog_row(folder, &volumes)?;
+                        changed += self.publish_series_logged(folder, &facts, &index, &volumes);
+                    }
+                    Ok(())
+                })();
+                MutexGuard::unlock_fair(guard);
+                result?;
+            }
+            if !self.is_stopped() {
+                let _guard = self.pass_lock.lock();
+                changed += self.publish_catalog_logged(&catalog_entries);
+            }
+        }
+        self.published(changed);
+        Ok(changed)
+    }
+
     fn recompile_series_locked(
         &self,
         series_title: &str,

@@ -198,6 +198,9 @@ impl Services {
         config_path: Option<PathBuf>,
         opts: &ServeOptions,
     ) -> anyhow::Result<Self> {
+        // Everything built here that keeps a runtime handle (the library's timers, the
+        // PROPFIND cache's refreshes, the OCR control) belongs to the background runtime.
+        let _background = crate::rt::enter();
         let flavor = opts.flavor;
         let db_options = DbOptions::from(&config.database);
         let layout = config.storage.layout();
@@ -509,41 +512,47 @@ pub async fn serve_router_with(
             stop.cancel();
         }
     });
-    if services.core.config.read().dyndns.enabled {
-        services.dyndns.start();
-    }
-    if let Some(installer) = installer {
-        let (flag, stop2) = (services.restart_requested.clone(), stop.clone());
-        services.updates.set_auto(crate::admin::AutoDeps {
-            installer,
-            quiet: Arc::new(ServerQuiet {
-                ocr: services.ocr.clone(),
-                writes: services.writes.clone(),
-            }),
-            restart: Arc::new(move || {
-                flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                stop2.cancel();
-            }),
-            storage: services.core.layout.base.clone(),
-        });
-    }
-    services.updates.start(stop.clone());
-    services.library.start();
-    let library_dir = services.core.layout.library();
-    {
-        // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
-        // request path.
-        let (lib, db) = (library_dir.clone(), services.db.clone());
-        tokio::task::spawn_blocking(move || {
-            crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db))
-        });
-    }
-    let thumbs = services.thumbs.spawn(
-        services.core.config.clone(),
-        library_dir,
-        stop.child_token(),
-    );
-    services.ocr.start(stop.child_token());
+    // The background services start on the background runtime (crate::rt): nothing
+    // they spawn competes with requests for the serving runtime's threads.
+    let thumbs = {
+        let _background = crate::rt::enter();
+        if services.core.config.read().dyndns.enabled {
+            services.dyndns.start();
+        }
+        if let Some(installer) = installer {
+            let (flag, stop2) = (services.restart_requested.clone(), stop.clone());
+            services.updates.set_auto(crate::admin::AutoDeps {
+                installer,
+                quiet: Arc::new(ServerQuiet {
+                    ocr: services.ocr.clone(),
+                    writes: services.writes.clone(),
+                }),
+                restart: Arc::new(move || {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    stop2.cancel();
+                }),
+                storage: services.core.layout.base.clone(),
+            });
+        }
+        services.updates.start(stop.clone());
+        services.library.start();
+        let library_dir = services.core.layout.library();
+        {
+            // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
+            // request path.
+            let (lib, db) = (library_dir.clone(), services.db.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db))
+            });
+        }
+        let thumbs = services.thumbs.spawn(
+            services.core.config.clone(),
+            library_dir,
+            stop.child_token(),
+        );
+        services.ocr.start(stop.child_token());
+        thumbs
+    };
     crate::serve::serve(listener, app, tls, stop, Duration::from_secs(5)).await?;
     // Ordered shutdown (0.5.2 shutdown_app order, plus the new services).
     let _ = thumbs.await;

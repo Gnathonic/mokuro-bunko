@@ -207,6 +207,50 @@ async fn dav_writes_schedule_the_series_without_the_watcher() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_of_series_changes_is_compiled_in_a_few_batches() {
+    // 0.7.0 ran one pass per changed series on the blocking pool, each scanning the
+    // whole library: a burst of N changes queued N library-wide passes ahead of every
+    // request. They now coalesce into batches on the metadata thread.
+    let env = Env::new(|_| {});
+    const SERIES: usize = 40;
+    let dirs: Vec<_> = (0..SERIES)
+        .map(|i| {
+            let dir = env.series_dir(&format!("Series {i:02}"));
+            write_cbz(&dir.join("Vol 01.cbz"), 1);
+            dir
+        })
+        .collect();
+    assert!(env.runtime.recompile_all_now().await > 0);
+    let before = env.runtime.passes_run();
+    for dir in &dirs {
+        write_cbz(&dir.join("Vol 02.cbz"), 1);
+        bunko_dav::DavHooks::library_changed(env.runtime.as_ref(), &[dir.join("Vol 02.cbz")]);
+    }
+    let all = wait_for(Duration::from_secs(10), || {
+        dirs.iter().all(|dir| {
+            read_json(&dir.join("series.json"))["volumes"]
+                .as_array()
+                .is_some_and(|a| a.len() == 2)
+        })
+    })
+    .await;
+    assert!(all, "every changed series is recompiled");
+    let runtime = env.runtime.clone();
+    assert!(
+        tokio::task::spawn_blocking(move || runtime.wait_idle(Duration::from_secs(10)))
+            .await
+            .unwrap()
+    );
+    let batches = env.runtime.passes_run() - before;
+    assert!(
+        (1..=8).contains(&batches),
+        "{SERIES} changed series took {batches} passes"
+    );
+    assert!(!env.runtime.has_pending_pass());
+    env.runtime.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_rows_match_what_the_compiler_serialises() {
     let env = Env::new(|_| {});
     let dir = env.series_dir("Mix");

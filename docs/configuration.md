@@ -38,7 +38,7 @@ server:
 | `host` | string | `"0.0.0.0"` | Network interface to bind to. Use `127.0.0.1` for local-only access. |
 | `port` | integer | `8080` | TCP port for the server. |
 | `trusted_proxies` | list | `[]` | Networks or addresses of reverse proxies whose `X-Real-IP` / `X-Forwarded-For` are believed. Only a loopback peer (such as the Docker image's own nginx) is trusted without an entry. Add one for a proxy on another host or container, or on the host in front of a published Docker port (the server then sees the Docker gateway address); otherwise every client is counted as the proxy and login rate limits are shared. With `MOKURO_NGINX_ACCEL=1` the bundled nginx already takes the client from `X-Forwarded-For` of private-range proxies. Set as `MOKURO_SERVER_TRUSTED_PROXIES=172.16.0.0/12,10.0.0.5`. |
-| `threads` | integer | `0` | Worker threads of the async runtime, 0-256. `0` means the smaller of the CPU count and 4. Each connected processor costs a socket, not a thread, so this rarely needs raising. Replaces 0.5's `MOKURO_THREADS`. At startup. |
+| `threads` | integer | `0` | Worker threads of the runtime that serves requests, 0-256. `0` means the smaller of the CPU count and 4. Background work (metadata compiles, cache refreshes, thumbnails, OCR control) runs on a separate runtime of two threads and never takes these. Each connected processor costs a socket, not a thread, so this rarely needs raising. Replaces 0.5's `MOKURO_THREADS`. At startup. |
 | `cache_mb` | integer | `32` | Byte budget, in MiB (1-65536), of the in-memory caches: half for WebDAV `Depth: infinity` listings, a quarter for the library index (a soft cap). Raise it for a very large library on a machine with spare RAM, lower it on a tiny host. At startup. |
 
 ### Storage

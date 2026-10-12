@@ -99,6 +99,19 @@ impl RequestCtx {
             .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
     }
 
+    /// [`resolve`](Self::resolve) when the identity needs no I/O
+    /// ([`auth::authenticate_without_io`]); `None` otherwise.
+    pub fn resolve_without_io(core: &Core, parts: &Parts) -> Option<Self> {
+        let identity = auth::authenticate_without_io(&parts.headers, core.backend.as_ref())?;
+        let peer = Self::peer_of(parts);
+        let client_ip = core.proxies.read().client_ip_text(peer, &parts.headers);
+        Some(RequestCtx {
+            peer,
+            client_ip,
+            identity,
+        })
+    }
+
     pub fn resolve(core: &Core, parts: &Parts) -> Self {
         let peer = Self::peer_of(parts);
         let client_ip = core.proxies.read().client_ip_text(peer, &parts.headers);
@@ -128,16 +141,21 @@ where
         if let Some(ctx) = parts.extensions.get::<RequestCtx>() {
             return Ok(ctx.clone());
         }
-        // Password checks are blocking (bcrypt): keep them off the async workers.
-        let ctx = {
-            let p = parts.clone();
-            tokio::task::spawn_blocking(move || RequestCtx::resolve(&core, &p))
-                .await
-                .unwrap_or_else(|_| RequestCtx {
-                    peer: IpAddr::V4(Ipv4Addr::LOCALHOST),
-                    client_ip: String::new(),
-                    identity: Identity::default(),
-                })
+        // Anonymous requests and recently verified logins are decided here, with no I/O;
+        // only a password check (bcrypt) or a token lookup (the database) goes to a
+        // blocking thread, off the async workers.
+        let ctx = match RequestCtx::resolve_without_io(&core, parts) {
+            Some(ctx) => ctx,
+            None => {
+                let p = parts.clone();
+                tokio::task::spawn_blocking(move || RequestCtx::resolve(&core, &p))
+                    .await
+                    .unwrap_or_else(|_| RequestCtx {
+                        peer: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        client_ip: String::new(),
+                        identity: Identity::default(),
+                    })
+            }
         };
         parts.extensions.insert(ctx.clone());
         Ok(ctx)
