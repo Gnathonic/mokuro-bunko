@@ -152,6 +152,10 @@ impl SessionFactory for OrtSessionFactory {
         }
         b = register_provider(b, opts).map_err(ort_err(&what))?;
         let session = b.commit_from_file(model).map_err(ort_err(&what))?;
+        #[cfg(all(feature = "webgpu", target_os = "linux"))]
+        if opts.provider == Provider::WebGpu {
+            webgpu_exit::register();
+        }
         SharedSession::new(session, opts)
     }
 }
@@ -175,12 +179,7 @@ fn register_provider(
                 .error_on_failure(),
         ),
         #[cfg(feature = "webgpu")]
-        Provider::WebGpu => Some(
-            ort::ep::WebGPU::default()
-                .with_device_id(id)
-                .build()
-                .error_on_failure(),
-        ),
+        Provider::WebGpu => Some(webgpu_ep(id).build().error_on_failure()),
         #[cfg(feature = "directml")]
         Provider::DirectMl => Some(
             ort::ep::DirectML::default()
@@ -203,9 +202,83 @@ fn register_provider(
     }
 }
 
+/// Every session of the WebGPU EP shares one WebGPU context per device (its device,
+/// queue, command encoder and buffer cache), which is not thread-safe: two `Run`s on
+/// different sessions at once crash the process (SIGSEGV with two engine threads), and so
+/// does creating or dropping device tensors on one thread while another runs ("corrupted
+/// double-linked list"), both measured on RADV. All of it is serialised process-wide.
+static WEBGPU_RUN: Mutex<()> = Mutex::new(());
+
+std::thread_local! {
+    static HOLDS_WEBGPU: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Holds the process-wide WebGPU lock (see [`WEBGPU_RUN`]) while alive; runs on this
+/// thread then skip their own locking. Take it before creating any device tensor and
+/// drop it after the last one is gone.
+pub struct WebGpuGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl WebGpuGuard {
+    pub fn lock() -> Self {
+        let g = WEBGPU_RUN.lock().unwrap_or_else(|p| p.into_inner());
+        HOLDS_WEBGPU.with(|h| h.set(true));
+        Self(g)
+    }
+}
+
+impl Drop for WebGpuGuard {
+    fn drop(&mut self) {
+        HOLDS_WEBGPU.with(|h| h.set(false));
+    }
+}
+
+/// The WebGPU EP for context `id` (ONNX Runtime's defaults otherwise: buffer caches,
+/// validation and memory patterns made no measurable difference, see
+/// docs/rust-port/VULKAN.md).
+#[cfg(feature = "webgpu")]
+fn webgpu_ep(id: i32) -> ort::ep::WebGPU {
+    ort::ep::WebGPU::default().with_device_id(id)
+}
+
+/// Releases ONNX Runtime's WebGPU contexts (and Dawn's Vulkan instance) from an `atexit`
+/// handler, i.e. before the dynamic loader finalizes libraries. Otherwise `ort` releases
+/// the ONNX Runtime environment from `.fini_array`, after the Vulkan loader has already
+/// unloaded the driver it opened at run time, and destroying the instance jumps into the
+/// unmapped driver: SIGSEGV at every exit on NVIDIA (RTX 4090, driver 595; RADV is
+/// spared by luck). The handler is registered right after the first WebGPU session is
+/// created, i.e. after the driver was loaded and registered its own exit handler, so
+/// (last in, first out) it runs before the driver tears itself down. ONNX Runtime's own
+/// cleanup later finds nothing left to release.
+#[cfg(all(feature = "webgpu", target_os = "linux"))]
+mod webgpu_exit {
+    unsafe extern "C" {
+        /// `onnxruntime::webgpu::CleanupWebGpuContexts()` (ORT's static library; what
+        /// `OrtEnv`'s destructor calls). Idempotent.
+        #[link_name = "_ZN11onnxruntime6webgpu21CleanupWebGpuContextsEv"]
+        fn ort_cleanup_webgpu_contexts();
+        fn atexit(cb: extern "C" fn()) -> i32;
+    }
+
+    extern "C" fn on_exit() {
+        let _g = super::WEBGPU_RUN.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: a plain C++ function without arguments; it locks its own state.
+        unsafe { ort_cleanup_webgpu_contexts() };
+    }
+
+    pub(super) fn register() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: registers a static function with the C runtime.
+            unsafe { atexit(on_exit) };
+        });
+    }
+}
+
 /// One loaded graph that any number of threads may run.
 pub struct SharedSession {
-    session: Session,
+    /// Dropped by hand (see the `Drop` impl): a WebGPU session's buffers go back to the
+    /// shared context under its lock.
+    session: std::mem::ManuallyDrop<Session>,
     inputs: Vec<CString>,
     outputs: Vec<CString>,
     serial: Option<Mutex<()>>,
@@ -221,6 +294,15 @@ impl fmt::Debug for SharedSession {
             .field("serial", &self.serial.is_some())
             .field("device", &self.device)
             .finish()
+    }
+}
+
+impl Drop for SharedSession {
+    fn drop(&mut self) {
+        let _guard = (self.provider == Provider::WebGpu && !HOLDS_WEBGPU.with(|h| h.get()))
+            .then(|| WEBGPU_RUN.lock().unwrap_or_else(|p| p.into_inner()));
+        // SAFETY: dropped exactly once, here; the field is never used afterwards.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.session) };
     }
 }
 
@@ -242,7 +324,7 @@ impl SharedSession {
             .collect::<Result<_, _>>()?;
         let concurrent = opts.sharing == Sharing::Auto && opts.provider.concurrent_run();
         Ok(Self {
-            session,
+            session: std::mem::ManuallyDrop::new(session),
             inputs,
             outputs,
             serial: (!concurrent).then(|| Mutex::new(())),
@@ -292,6 +374,8 @@ impl SharedSession {
     pub fn device_allocator(&self) -> Result<Option<Allocator>, VlmError> {
         let (dev, id) = match (self.provider, self.device) {
             (Provider::Cuda, Device::Gpu(n)) => (AllocationDevice::CUDA, i32::from(n)),
+            // The WebGPU EP's buffers (one adapter per session: device id 0 of its context).
+            (Provider::WebGpu, Device::Gpu(_)) => (AllocationDevice::WEBGPU_BUFFER, 0),
             _ => return Ok(None),
         };
         let info = MemoryInfo::new(dev, id, AllocatorType::Device, MemoryType::Default)
@@ -326,10 +410,14 @@ impl SharedSession {
             .iter_mut()
             .map(|v| v.as_mut().map_or(ptr::null_mut(), |v| v.ptr_mut()))
             .collect();
-        let _guard = self
-            .serial
-            .as_ref()
-            .map(|m| m.lock().unwrap_or_else(|p| p.into_inner()));
+        let _guard = if self.provider == Provider::WebGpu {
+            (!HOLDS_WEBGPU.with(|h| h.get()))
+                .then(|| WEBGPU_RUN.lock().unwrap_or_else(|p| p.into_inner()))
+        } else {
+            self.serial
+                .as_ref()
+                .map(|m| m.lock().unwrap_or_else(|p| p.into_inner()))
+        };
         // SAFETY: names and values outlive the call; `out_vals` has one slot per output,
         // pre-filled with owned values or null. Concurrency: see the module docs.
         let status = unsafe {

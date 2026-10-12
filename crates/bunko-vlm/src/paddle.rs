@@ -9,6 +9,8 @@ use crate::VlmError;
 use crate::pyfmt::round_half_even;
 
 #[cfg(feature = "onnx-vlm")]
+mod gpu;
+#[cfg(feature = "onnx-vlm")]
 mod onnx;
 #[cfg(feature = "onnx-vlm")]
 pub use onnx::PaddleManga;
@@ -45,6 +47,8 @@ pub const PREFIX: [i64; 5] = [100_273, 2969, 93963, 93919, 101_305];
 pub const SUFFIX: [i64; 8] = [101_306, 93972, 2497, 93963, 23, 92267, 93963, 23];
 /// Decoder KV heads.
 pub const KV_HEADS: usize = 2;
+/// Decoder layers (ERNIE-4.5 0.3B).
+pub const N_LAYERS: usize = 18;
 
 /// Files of one paddle-manga export.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -55,6 +59,28 @@ pub struct PaddleAssets {
     pub embed: PathBuf,
     /// The base repo's `tokenizer.json`.
     pub tokenizer: PathBuf,
+    /// The WebGPU backend's graphs (`tools/webgpu_export`): a directory holding the
+    /// layered vision tower and the shared decoder ([`webgpu_files`]), used instead of
+    /// `vision`/`decoder` on a GPU when present (fp32).
+    pub gpu_dir: Option<PathBuf>,
+}
+
+/// The files of the WebGPU backend's paddle-manga graphs (one directory).
+pub fn webgpu_files() -> Vec<String> {
+    let mut v: Vec<String> = [
+        "weights", "embed", "layer", "qkv", "attn", "post", "tail", "decoder",
+    ]
+    .iter()
+    .map(|p| format!("paddle-manga_webgpu_{p}_fp32.onnx"))
+    .collect();
+    v.push("paddle-manga_webgpu_weights_fp32.onnx.data".into());
+    v.push("paddle-manga_webgpu_vision.json".into());
+    v
+}
+
+/// Whether `dir` holds every file of [`webgpu_files`].
+pub fn webgpu_complete(dir: &Path) -> bool {
+    webgpu_files().iter().all(|f| dir.join(f).is_file())
 }
 
 impl PaddleAssets {
@@ -66,6 +92,7 @@ impl PaddleAssets {
             decoder: dir.join("decoder.onnx"),
             embed: dir.join("embed.npy"),
             tokenizer: tokenizer.to_path_buf(),
+            gpu_dir: None,
         }
     }
 }

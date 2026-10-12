@@ -19,6 +19,7 @@ mod torch_pack;
 mod torch_specs;
 mod util;
 mod vcredist;
+mod vulkan_pack;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -53,6 +54,8 @@ enum Cmd {
     /// Build an OCR backend pack (libtorch runtime + libbunko_torch + pack.json) as a
     /// `.tar.zst` for `install-ocr` and the Docker images.
     TorchPack(torch_pack::TorchPackArgs),
+    /// Build the Vulkan backend pack (ncnn + ONNX Runtime WebGPU, docs/rust-port/VULKAN.md).
+    VulkanPack(vulkan_pack::VulkanPackArgs),
 }
 
 #[derive(clap::Args)]
@@ -82,6 +85,7 @@ fn main() -> Result<()> {
         Cmd::Licenses(a) => licenses_cmd(&a),
         Cmd::DockerContext(a) => docker::run(&a),
         Cmd::TorchPack(a) => torch_pack::run(&a).map(drop),
+        Cmd::VulkanPack(a) => vulkan_pack::run(&a).map(drop),
     }
 }
 

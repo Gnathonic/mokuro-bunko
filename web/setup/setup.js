@@ -35,6 +35,7 @@
         if (hw.nvidia_gpus && hw.nvidia_gpus.length) g.push('NVIDIA ' + hw.nvidia_gpus.join(', '));
         else if (hw.nvidia_driver) g.push('NVIDIA (driver ' + hw.nvidia_driver + ')');
         if (hw.amd_gfx && hw.amd_gfx.length) g.push('AMD ' + hw.amd_gfx.join(', '));
+        if (hw.vulkan_gpus && hw.vulkan_gpus.length) g.push(hw.vulkan_gpus.join(', '));
         return g.join('; ');
     }
 
@@ -51,7 +52,7 @@
         sel.replaceChildren(...o.choices.map((c) => {
             const opt = document.createElement('option');
             opt.value = c.id;
-            opt.textContent = c.id === 'auto' ? 'Auto (' + (o.hardware.auto_variant === 'cpu' ? 'CPU' : 'GPU') + ')' : c.label;
+            opt.textContent = c.id === 'auto' ? 'Auto (' + (o.hardware.auto_variant === 'cpu' && !o.hardware.vulkan_pack ? 'CPU' : 'GPU') + ')' : c.label;
             return opt;
         }));
         sel.value = o.backend_locked ? o.backend : 'auto';

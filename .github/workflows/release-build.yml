@@ -326,6 +326,58 @@ jobs:
           compression-level: 0
           retention-days: ${{ inputs.retention-days }}
 
+  # The Vulkan backend pack (docs/rust-port/VULKAN.md): ncnn + ONNX Runtime WebGPU for
+  # the GPUs no libtorch pack covers and as benchmark candidates on every GPU. Linux in
+  # the manylinux_2_28 container (same glibc floor as the binary); Windows natively
+  # (MSVC; ncnn built with Ninja). Artifacts pack-<platform>-vulkan join the release
+  # like the libtorch packs.
+  packs-vulkan:
+    name: pack ${{ matrix.platform }}-vulkan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x64, os: ubuntu-latest }
+          - { platform: windows, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+      - name: xtask vulkan-pack (manylinux_2_28)
+        if: matrix.platform == 'linux-x64'
+        run: |
+          set -eux
+          docker run --rm -v "$PWD:/src" -w /src -e SOURCE_DATE_EPOCH -e OUT=dist \
+            -e CARGO_HOME=/src/.mb/cargo -e RUSTUP_HOME=/src/.mb/rustup -e CARGO_TARGET_DIR=/src/.mb/target \
+            quay.io/pypa/manylinux_2_28_x86_64 packaging/manylinux/build.sh vulkan
+          sudo rm -rf .mb
+          ls -l dist
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.platform == 'windows'
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.platform == 'windows'
+      - name: xtask vulkan-pack (Windows)
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: |
+          set -eux
+          # Git for Windows' /usr/bin/link.exe comes before MSVC's on the bash PATH.
+          linker=$(where.exe link.exe | tr -d '\r' | grep -i '\\MSVC\\' | head -1)
+          [ -n "$linker" ]
+          export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER="$linker"
+          packaging/vulkan/build-ncnn.sh "$RUNNER_TEMP/ncnn"
+          cargo run --release --locked -p xtask -- vulkan-pack --locked \
+            --target x86_64-pc-windows-msvc --ncnn-dir "$RUNNER_TEMP/ncnn/install" --out dist
+          ls -l dist
+      - uses: actions/upload-artifact@v6
+        with:
+          name: pack-${{ matrix.platform }}-vulkan
+          path: dist/*.tar.zst*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: ${{ inputs.retention-days }}
+
   # Android APK (docs/rust-port/MOBILE.md): the lite server as a JNI library
   # (crates/bunko-android, cargo ndk for arm64-v8a + x86_64) in the Kotlin app under
   # packaging/android. A release asset only: it is not in release.json (the app updates

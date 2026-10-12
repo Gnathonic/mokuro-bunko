@@ -170,6 +170,7 @@ impl PagePipeline for FakePipeline {
                         formats: vec!["fp32".into()],
                         provider: Some("cpu".into()),
                         arch: Some(std::env::consts::ARCH.into()),
+                        format_engines: Default::default(),
                     }];
                     if let Some(formats) = &config.gpu_formats {
                         devices.push(Device {
@@ -178,6 +179,7 @@ impl PagePipeline for FakePipeline {
                             formats: formats.clone(),
                             provider: Some("cuda".into()),
                             arch: Some(config.gpu_arch.clone().unwrap_or_else(|| "sm_89".into())),
+                            format_engines: Default::default(),
                         });
                     }
                     devices

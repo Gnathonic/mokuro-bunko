@@ -47,6 +47,13 @@ for what in "$@"; do
 	full)
 		cargo run --release ${LOCKED:+"$LOCKED"} -p xtask -- dist ${LOCKED:+"$LOCKED"} --target "$TARGET" --flavor full --out "$OUT"
 		;;
+	vulkan)
+		# The Vulkan backend pack (docs/rust-port/VULKAN.md): a static ncnn, then the pack.
+		dnf -y -q install cmake ninja-build git || yum -y -q install cmake ninja-build git
+		packaging/vulkan/build-ncnn.sh "${CARGO_TARGET_DIR:-target}/ncnn"
+		cargo run --release ${LOCKED:+"$LOCKED"} -p xtask -- vulkan-pack ${LOCKED:+"$LOCKED"} --target "$TARGET" \
+			--ncnn-dir "${CARGO_TARGET_DIR:-target}/ncnn/install" --out "$OUT"
+		;;
 	*)
 		# --sample-from-manifest: the closure check also reads a compiled model package
 		# of this variant (what it imports is invisible in the pack's own libraries).

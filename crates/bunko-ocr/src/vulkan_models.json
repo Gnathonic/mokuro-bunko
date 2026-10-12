@@ -1,0 +1,730 @@
+{
+ "release": "vulkan-models-v1",
+ "files": [
+  {
+   "engine": "hayai-nova",
+   "file": "vulkan_hayai-nova_ncnn_vision.param",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_hayai-nova_ncnn_vision.param",
+   "size": 23793,
+   "sha256": "24dc2d446ccf1727ebd384c951efb30a7bfd20536069dc9c6bc96676755516fe",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/hayai-nova/ncnn/vision.param",
+   "path": "vulkan/hayai-nova/ncnn/vision.param",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "vulkan_hayai-nova_ncnn_vision.bin",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_hayai-nova_ncnn_vision.bin",
+   "size": 349953024,
+   "sha256": "83bcc502dec8ddda3f729b0fc851707b7a7c3da78feb989d82721a101bac13e7",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/hayai-nova/ncnn/vision.bin",
+   "path": "vulkan/hayai-nova/ncnn/vision.bin",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "vulkan_hayai-nova_ncnn_prefill.param",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_hayai-nova_ncnn_prefill.param",
+   "size": 42238,
+   "sha256": "d74917067a2e04fb7f0ffa76f45f3e8ba35bcac2427cd44677d599cf2146da87",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/hayai-nova/ncnn/prefill.param",
+   "path": "vulkan/hayai-nova/ncnn/prefill.param",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "vulkan_hayai-nova_ncnn_step.param",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_hayai-nova_ncnn_step.param",
+   "size": 28203,
+   "sha256": "5e457a758582e3477cab4e7e34e0f90820d4ab5a8cbda4ae076fed3abec0cef3",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/hayai-nova/ncnn/step.param",
+   "path": "vulkan/hayai-nova/ncnn/step.param",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "vulkan_hayai-nova_ncnn_decoder.bin",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_hayai-nova_ncnn_decoder.bin",
+   "size": 215285760,
+   "sha256": "aee2ae4790b975203923171d1ad364d7c22b95ce763c3a30ca398a1533069c4b",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/hayai-nova/ncnn/decoder.bin",
+   "path": "vulkan/hayai-nova/ncnn/decoder.bin",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "vulkan_hayai-nova_ncnn_ncnn.json",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_hayai-nova_ncnn_ncnn.json",
+   "size": 59,
+   "sha256": "ea5af1925f4241c97e11f6b80756c009447a74697a1b64e3228bb81025dc9f1f",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/hayai-nova/ncnn/ncnn.json",
+   "path": "vulkan/hayai-nova/ncnn/ncnn.json",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "vulkan_hayai-nova_ncnn_token_embeddings.f32",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_hayai-nova_ncnn_token_embeddings.f32",
+   "size": 32776192,
+   "sha256": "dc3034a828b53ee2b0595b2e09546f30723a5cb97634c8486d301cba18445193",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/hayai-nova/ncnn/token_embeddings.f32",
+   "path": "vulkan/hayai-nova/ncnn/token_embeddings.f32",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "vulkan_hayai-nova_webgpu_hayai-nova_webgpu_vision_fp32.onnx",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_hayai-nova_webgpu_hayai-nova_webgpu_vision_fp32.onnx",
+   "size": 349977873,
+   "sha256": "88467b2002c091f7972a00d03ff3ba2ea9197947e32f83402177d9695088d226",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/hayai-nova/webgpu/hayai-nova_webgpu_vision_fp32.onnx",
+   "path": "vulkan/hayai-nova/webgpu/hayai-nova_webgpu_vision_fp32.onnx",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "vulkan_hayai-nova_webgpu_hayai-nova_webgpu_decoder_fp32.onnx",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_hayai-nova_webgpu_hayai-nova_webgpu_decoder_fp32.onnx",
+   "size": 215439186,
+   "sha256": "e6b3e53c9b8ff1c202b7394417040d6854aee40537cd7bf0a344a6704e016573",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/hayai-nova/webgpu/hayai-nova_webgpu_decoder_fp32.onnx",
+   "path": "vulkan/hayai-nova/webgpu/hayai-nova_webgpu_decoder_fp32.onnx",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "hayai-nova",
+   "file": "vulkan_selftest_hayai-nova.json",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_selftest_hayai-nova.json",
+   "size": 598043,
+   "sha256": "3e9be2723292869793df950cfccffb885d1b47b98e56ad2b93e7e18fa375afa6",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
+     "revision": "e46d79138499600564f810d44ab6bdea7230dee1",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "google/siglip2-base-patch16-naflex",
+     "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "selftest",
+   "precision": "fp32",
+   "id": "vulkan/selftest/hayai-nova",
+   "path": "vulkan/selftest/hayai-nova.json",
+   "kind": "vulkan-selftest"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_ncnn_vision.param",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_ncnn_vision.param",
+   "size": 58500,
+   "sha256": "28192e2da658da990ac884799b8d1cf77f2bf844ad6e097ea51a127a31364f62",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/ncnn/vision.param",
+   "path": "vulkan/paddle-manga/ncnn/vision.param",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_ncnn_vision.bin",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_ncnn_vision.bin",
+   "size": 1752430528,
+   "sha256": "6d44016bfea019261bb1c670723cabb6a0c77d2a77087408d8654b83bf61357b",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/ncnn/vision.bin",
+   "path": "vulkan/paddle-manga/ncnn/vision.bin",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_ncnn_prefill.param",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_ncnn_prefill.param",
+   "size": 60052,
+   "sha256": "d309122ada5f9159eedcf1974b7430edcba228cbff5598728cd86de969392ea3",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/ncnn/prefill.param",
+   "path": "vulkan/paddle-manga/ncnn/prefill.param",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_ncnn_step.param",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_ncnn_step.param",
+   "size": 61983,
+   "sha256": "3ad5c353c74af74f4b483ab55a335a2cc7de9736a709e88e2150d1a9b0b4fa4e",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/ncnn/step.param",
+   "path": "vulkan/paddle-manga/ncnn/step.param",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_ncnn_decoder.bin",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_ncnn_decoder.bin",
+   "size": 1442992128,
+   "sha256": "97f21f7a9fed675197867704e35e895bdd5c931fd72b5f5300f65fccbbf7a06b",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/ncnn/decoder.bin",
+   "path": "vulkan/paddle-manga/ncnn/decoder.bin",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_ncnn_ncnn.json",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_ncnn_ncnn.json",
+   "size": 256,
+   "sha256": "41d221cb4c82c91245c21884c7cf1e39e37e095ab0385b904b55a0fa4b06ac04",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/ncnn/ncnn.json",
+   "path": "vulkan/paddle-manga/ncnn/ncnn.json",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_ncnn_embeddings.f32",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_ncnn_embeddings.f32",
+   "size": 423624704,
+   "sha256": "1b8f72ac61ebc10efe920f3d61814886c096dbb9c068c050b13032c40a81eeed",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/ncnn/embeddings.f32",
+   "path": "vulkan/paddle-manga/ncnn/embeddings.f32",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_ncnn_pos_table.f32",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_ncnn_pos_table.f32",
+   "size": 3359232,
+   "sha256": "a4d9bbbc5f351536da70f615b9c2b5fde7d3bda88384bdf3bb77719fa726c140",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "ncnn-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/ncnn/pos_table.f32",
+   "path": "vulkan/paddle-manga/ncnn/pos_table.f32",
+   "kind": "vulkan-ncnn"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_webgpu_paddle-manga_webgpu_weights_fp32.onnx",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_webgpu_paddle-manga_webgpu_weights_fp32.onnx",
+   "size": 73786,
+   "sha256": "33971de7407d10826f563cf709e5771cbba11671884f90b13ccb4c2ebf235b62",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_weights_fp32.onnx",
+   "path": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_weights_fp32.onnx",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_webgpu_paddle-manga_webgpu_embed_fp32.onnx",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_webgpu_paddle-manga_webgpu_embed_fp32.onnx",
+   "size": 681,
+   "sha256": "6f179ea61ae47df978e9b0ae71cf6d694751aec4b39a6795328d022092870b66",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_embed_fp32.onnx",
+   "path": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_embed_fp32.onnx",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_webgpu_paddle-manga_webgpu_layer_fp32.onnx",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_webgpu_paddle-manga_webgpu_layer_fp32.onnx",
+   "size": 2922,
+   "sha256": "2d1877047fd313db80c5432fd4f7ef55278ce7a02d7ee7fb9d0773b48817b945",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_layer_fp32.onnx",
+   "path": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_layer_fp32.onnx",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_webgpu_paddle-manga_webgpu_qkv_fp32.onnx",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_webgpu_paddle-manga_webgpu_qkv_fp32.onnx",
+   "size": 2257,
+   "sha256": "199944d8756062cf2dcfeeb78db43f730dcff324c8bab5dfc3391cd11e107e7d",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_qkv_fp32.onnx",
+   "path": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_qkv_fp32.onnx",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_webgpu_paddle-manga_webgpu_attn_fp32.onnx",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_webgpu_paddle-manga_webgpu_attn_fp32.onnx",
+   "size": 593,
+   "sha256": "2093631c51eca22be7f0fcdcee8375254f099de596287ad6638733ffffeb3c24",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_attn_fp32.onnx",
+   "path": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_attn_fp32.onnx",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_webgpu_paddle-manga_webgpu_post_fp32.onnx",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_webgpu_paddle-manga_webgpu_post_fp32.onnx",
+   "size": 968,
+   "sha256": "67b1e2559313a1d15faa168e178e0ca388a110c2f220fa1283c1e5a5f80a2177",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_post_fp32.onnx",
+   "path": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_post_fp32.onnx",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_webgpu_paddle-manga_webgpu_tail_fp32.onnx",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_webgpu_paddle-manga_webgpu_tail_fp32.onnx",
+   "size": 863,
+   "sha256": "1b5f01cf27cdcb7e2fcc20998c70f019cf6d6b3038fb1c97d2930663f88b575e",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_tail_fp32.onnx",
+   "path": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_tail_fp32.onnx",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_webgpu_paddle-manga_webgpu_decoder_fp32.onnx",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_webgpu_paddle-manga_webgpu_decoder_fp32.onnx",
+   "size": 1443138212,
+   "sha256": "6198947cc9ca19f29f37537438192ed6f21517cd1a234184c5962643f6322301",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_decoder_fp32.onnx",
+   "path": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_decoder_fp32.onnx",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_webgpu_paddle-manga_webgpu_weights_fp32.onnx.data",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_webgpu_paddle-manga_webgpu_weights_fp32.onnx.data",
+   "size": 1755789760,
+   "sha256": "ea22f9660f1325063db94857e98452ffb41b602d2a90620c596314521de3ed1f",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_weights_fp32.onnx.data",
+   "path": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_weights_fp32.onnx.data",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_paddle-manga_webgpu_paddle-manga_webgpu_vision.json",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_paddle-manga_webgpu_paddle-manga_webgpu_vision.json",
+   "size": 48,
+   "sha256": "d08df46573e1cca9d95cc9e5e066d26360f538e5105a429abf5a50322c7a62de",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "webgpu-graph",
+   "precision": "fp32",
+   "id": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_vision.json",
+   "path": "vulkan/paddle-manga/webgpu/paddle-manga_webgpu_vision.json",
+   "kind": "vulkan-webgpu"
+  },
+  {
+   "engine": "paddle-manga",
+   "file": "vulkan_selftest_paddle-manga.json",
+   "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/vulkan-models-v1/vulkan_selftest_paddle-manga.json",
+   "size": 598047,
+   "sha256": "5da779c919ef3744e8a9bf1582f3a38ceb02a62b896d84852620e3be15ae5573",
+   "licence": "Apache-2.0",
+   "sources": [
+    {
+     "repo": "PaddlePaddle/PaddleOCR-VL-1.6",
+     "revision": "c5630abae1d940eafe0697512a0325494b02ab42",
+     "licence": "Apache-2.0"
+    },
+    {
+     "repo": "sorryhyun/paddleocr-vl-1.6-manga-lora",
+     "revision": "26292839d1469c14212a12a1e01b5b1fe01bff15",
+     "licence": "Apache-2.0"
+    }
+   ],
+   "role": "selftest",
+   "precision": "fp32",
+   "id": "vulkan/selftest/paddle-manga",
+   "path": "vulkan/selftest/paddle-manga.json",
+   "kind": "vulkan-selftest"
+  }
+ ]
+}

@@ -122,6 +122,17 @@ pub struct DeviceEntry {
     /// (0.5.2's torch probe said yes on every CUDA/ROCm card); the CPU `bf16` only on
     /// x86-64-v4 hosts with AVX512_BF16 (what the bf16 CPU packages are compiled for).
     pub formats: Vec<String>,
+    /// The driver (Vulkan pack: `radv Mesa 25.2.4`), when the library knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// A stable identity of the GPU across runs (Vulkan pack: the device UUID), for
+    /// caching what was learned about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    /// Vulkan pack: the sub-backends that can run on this device (`ncnn`, `webgpu`),
+    /// in the library's own order. Empty for a libtorch pack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backends: Vec<String>,
 }
 
 /// `bt_load` options.
@@ -129,6 +140,10 @@ pub struct DeviceEntry {
 pub struct LoadOptions {
     /// The model's `tokenizer.json`.
     pub tokenizer: String,
+    /// Vulkan pack: which sub-backend loads the engine (`ncnn`, `webgpu`); a libtorch
+    /// pack ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
     /// hayai-nova: f32 SigLIP2 position table (`hayai-nova/pos-table`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pos_table: Option<String>,
@@ -1082,6 +1097,7 @@ mod tests {
                 vram_mb: None,
                 pci: None,
                 formats: vec!["fp32".into()],
+                ..Default::default()
             }],
             warnings: vec![],
         };

@@ -306,6 +306,8 @@ mod full {
             "nvidia_driver": hw.nvidia_driver,
             "nvidia_gpus": hw.nvidia_gpus,
             "amd_gfx": hw.amd_gfx,
+            "vulkan_gpus": hw.vulkan_gpus.iter().map(hwdetect::Adapter::label).collect::<Vec<_>>(),
+            "vulkan_pack": hwdetect::vulkan_wanted("auto", hw, bunko_update::TARGET),
             "hidden": hw.hidden,
             "auto_variant": choice.variant,
             "reason": choice.reason,
@@ -323,11 +325,15 @@ mod full {
         ];
         let nvidia = hw.nvidia_driver.is_some() || !hw.nvidia_gpus.is_empty();
         let amd = !hw.amd_gfx.is_empty();
+        let vulkan_only = !hw.vulkan_gpus.is_empty();
         if nvidia || current == "cuda" {
             out.push(json!({"id": "cuda", "label": "NVIDIA (CUDA)", "detected": nvidia}));
         }
         if amd || current == "rocm" {
             out.push(json!({"id": "rocm", "label": "AMD (ROCm)", "detected": amd}));
+        }
+        if nvidia || amd || vulkan_only || current == "vulkan" {
+            out.push(json!({"id": "vulkan", "label": "Vulkan (ncnn / WebGPU)", "detected": nvidia || amd || vulkan_only}));
         }
         out
     }
@@ -418,6 +424,22 @@ mod full {
                 }),
             ),
             ("packs".into(), Value::Array(packs)),
+            (
+                // The Vulkan runtimes per GPU (candidates / skipped and why); opened only
+                // when this process's own OCR would open its packs anyway.
+                "vulkan".into(),
+                if open {
+                    serde_json::to_value(
+                        bunko_engines::EnginePipeline::new(
+                            t.engine_config(bunko_engines::Backend::parse(&pref)),
+                        )
+                        .vulkan_report(),
+                    )
+                    .unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                },
+            ),
             (
                 "install".into(),
                 serde_json::to_value(m.installer.as_ref().and_then(|i| i.view()))
@@ -609,7 +631,11 @@ mod full {
                 amd_gfx: vec!["gfx1201".into()],
                 ..Default::default()
             };
-            assert_eq!(ids(choices(&amd, "auto")), ["auto", "cpu", "rocm"]);
+            assert_eq!(
+                ids(choices(&amd, "auto")),
+                ["auto", "cpu", "rocm", "vulkan"]
+            );
+            assert_eq!(ids(choices(&none, "vulkan")), ["auto", "cpu", "vulkan"]);
         }
     }
 }

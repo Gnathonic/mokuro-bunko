@@ -186,6 +186,7 @@ pub fn probe(count: usize) -> (Vec<DeviceEntry>, Vec<String>) {
             vram_mb: None,
             pci: None,
             formats: vec!["fp32".into(), "fp16".into(), "bf16".into()],
+            ..Default::default()
         })
         .collect();
     let r = match backend() {
@@ -366,6 +367,7 @@ pub fn cpu_entry() -> DeviceEntry {
         vram_mb: None,
         pci: None,
         formats,
+        ..Default::default()
     }
 }
 

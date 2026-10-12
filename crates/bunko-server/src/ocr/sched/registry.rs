@@ -299,6 +299,10 @@ pub fn lenient_catalog(value: &Value) -> Catalog {
                             .and_then(Value::as_str)
                             .map(str::to_string),
                         arch: d.get("arch").and_then(Value::as_str).map(str::to_string),
+                        format_engines: d
+                            .get("format_engines")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default(),
                     })
                 })
                 .collect()

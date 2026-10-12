@@ -60,12 +60,15 @@ pub fn supported(gpu: bool) -> &'static [&'static str] {
 /// THE bf16 rule, shared with the library (which judges what each machine runs with
 /// it): [`bf16_native`] says where bf16 is native, [`auto_formats`] keeps bf16 for the
 /// auto modes only there. One copy, in `bunko-sched`.
-pub use bunko_sched::precision::{auto_formats, bf16_native};
+pub use bunko_sched::precision::{auto_formats, base_format, bf16_native, format_backend};
 
 /// A resolved precision and why (`[runner] <engine> precision: <fmt> (<why>)`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     pub precision: Precision,
+    /// The backend a backend-qualified format names (`fp32@ncnn` → `ncnn`); None: the
+    /// device's default backend.
+    pub backend: Option<String>,
     pub why: String,
 }
 
@@ -98,41 +101,66 @@ pub fn resolve(
         )
     };
     let finish = |fmt: &str, reason: &str| {
-        let precision = as_precision(fmt).ok_or_else(|| refuse(format!("{fmt} not supported")))?;
+        let precision =
+            as_precision(base_format(fmt)).ok_or_else(|| refuse(format!("{fmt} not supported")))?;
         let why = if reason == mode {
             mode.clone()
         } else {
             format!("{mode}; {reason}")
         };
-        Ok(Some(Resolved { precision, why }))
+        Ok(Some(Resolved {
+            precision,
+            backend: format_backend(fmt).map(str::to_string),
+            why,
+        }))
+    };
+    // Each precision, then the device's other backends of it (`fp32@ncnn`), by name:
+    // bunko-sched's `with_variants`, which the library and the benchmark use.
+    let expand = |bases: &[&str]| -> Vec<String> {
+        let set: std::collections::BTreeSet<String> =
+            supported.iter().map(|s| s.to_string()).collect();
+        let bases: Vec<String> = bases.iter().map(|b| b.to_string()).collect();
+        bunko_sched::precision::with_variants(&bases, &set)
+    };
+    let pick_in = |usable: &[String]| {
+        pick.filter(|p| usable.len() > 1 && usable.iter().any(|u| u == p))
+            .map(str::to_string)
+    };
+    let why_pick = if pick_why.is_empty() {
+        "benchmark"
+    } else {
+        pick_why
     };
     if FORCED.contains(&mode.as_str()) {
         if supported.contains(&mode.as_str()) && as_precision(&mode).is_some() {
+            let usable = expand(&[mode.as_str()]);
+            if let Some(p) = pick_in(&usable) {
+                return finish(&p, why_pick);
+            }
             return finish(&mode, &mode);
         }
         return Err(refuse(format!("{mode} not supported")));
     }
-    let usable: Vec<&str> = candidates(engine, &mode)
+    let mut bases: Vec<&str> = candidates(engine, &mode)
         .iter()
         .copied()
         .filter(|c| *c == "fp32" || supported.contains(c))
         .filter(|c| as_precision(c).is_some())
         .collect();
-    let Some(first) = usable.first().copied() else {
+    if mode == MODE_ACCURACY {
+        bases.truncate(1);
+    }
+    let usable = expand(&bases);
+    let Some(first) = usable.first().cloned() else {
         return Err(refuse("no candidate format runs here".into()));
     };
-    if mode == MODE_ACCURACY || usable.len() == 1 {
-        return finish(first, &mode);
+    if !bunko_sched::precision::needs_bench(&mode, &usable) {
+        return finish(&first, &mode);
     }
-    if let Some(p) = pick.filter(|p| usable.contains(p)) {
-        let why = if pick_why.is_empty() {
-            "benchmark"
-        } else {
-            pick_why
-        };
-        return finish(p, why);
+    if let Some(p) = pick_in(&usable) {
+        return finish(&p, why_pick);
     }
-    finish(first, "not benchmarked yet: first supported candidate")
+    finish(&first, "not benchmarked yet: first supported candidate")
 }
 
 #[cfg(test)]
@@ -314,5 +342,31 @@ mod tests {
             ok(resolve("paddle-manga", "FP16", supported(true), None, "")),
             (Precision::Fp16, "fp16".into())
         );
+    }
+
+    #[test]
+    fn backend_qualified_formats_resolve_to_a_backend() {
+        let r =
+            |mode, sup: &[&str], pick| resolve("hayai-nova", mode, sup, pick, "").unwrap().unwrap();
+        // A Vulkan-only GPU: plain fp32 is its first runtime; a pick moves to another.
+        let polaris = ["fp32", "fp32@webgpu"];
+        let x = r("auto-accuracy", &polaris, None);
+        assert_eq!((x.precision, x.backend), (Precision::Fp32, None));
+        assert!(x.why.contains("not benchmarked yet"), "{}", x.why);
+        let x = r("auto-accuracy", &polaris, Some("fp32@webgpu"));
+        assert_eq!(x.backend.as_deref(), Some("webgpu"));
+        // Beside libtorch: bf16 native wins the accuracy mode, no Vulkan candidate.
+        let rdna4 = ["fp32", "fp16", "bf16", "fp32@ncnn", "fp32@webgpu"];
+        let x = r("auto-accuracy", &rdna4, Some("fp32@ncnn"));
+        assert_eq!((x.precision, x.backend), (Precision::Bf16, None));
+        // A forced fp32 takes the benchmarked runtime.
+        let x = r("fp32", &rdna4, Some("fp32@ncnn"));
+        assert_eq!(
+            (x.precision, x.backend.as_deref()),
+            (Precision::Fp32, Some("ncnn"))
+        );
+        // A pick that is no candidate any more is ignored.
+        let x = r("fp32", &["fp32"], Some("fp32@ncnn"));
+        assert_eq!(x.backend, None);
     }
 }

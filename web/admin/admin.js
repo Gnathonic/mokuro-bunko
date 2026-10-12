@@ -4910,6 +4910,7 @@ function machineGpus(hw) {
     if (hw.nvidia_gpus && hw.nvidia_gpus.length) g.push('NVIDIA ' + hw.nvidia_gpus.join(', '));
     else if (hw.nvidia_driver) g.push('NVIDIA (driver ' + hw.nvidia_driver + ')');
     if (hw.amd_gfx && hw.amd_gfx.length) g.push('AMD ' + hw.amd_gfx.join(', '));
+    if (hw.vulkan_gpus && hw.vulkan_gpus.length) g.push(hw.vulkan_gpus.join(', '));
     return g.join('; ');
 }
 
@@ -4980,12 +4981,13 @@ function renderMachine(m) {
     if (b.need && b.need.state === 'off') parts.push('OCR here is off');
     if (!parts.length) parts.push(b.need ? b.need.text : '-');
     document.getElementById('machine-pack').textContent = parts.join(' · ');
+    renderMachineVulkan(m.vulkan);
 
     const sel = document.getElementById('machine-backend');
     sel.replaceChildren(...(b.choices || []).map((c) => {
         const o = document.createElement('option');
         o.value = c.id;
-        o.textContent = c.id === 'auto' ? 'Auto (' + (hw.auto_variant === 'cpu' ? 'CPU' : 'GPU') + ')' :
+        o.textContent = c.id === 'auto' ? 'Auto (' + (hw.auto_variant === 'cpu' && !hw.vulkan_pack ? 'CPU' : 'GPU') + ')' :
             c.label + (c.detected === false ? ' (not found)' : '');
         return o;
     }));
@@ -5029,6 +5031,44 @@ function renderMachine(m) {
         ? 'Not counted here: the OCR backend (libtorch and its GPU libraries, ' + formatBytes(inUse.size) +
             ') is on the OCR backend card.'
         : 'Not counted here: the OCR backend (libtorch and its GPU libraries), on the OCR backend card.';
+}
+
+// The Vulkan runtimes per GPU: benchmark candidates, or skipped and why
+// (docs/rust-port/VULKAN.md). The benchmark's numbers and winner are on the
+// generations' precision view (`fp32@ncnn` trials).
+function renderMachineVulkan(v) {
+    const row = document.getElementById('machine-vulkan-row');
+    const box = document.getElementById('machine-vulkan');
+    if (!v || v.mode === 'off' || (v.error && !(v.devices || []).length)) {
+        row.hidden = !(v && v.error && v.mode !== 'off');
+        box.textContent = v && v.error ? 'No Vulkan pack: ' + v.error : '';
+        return;
+    }
+    row.hidden = false;
+    const head = document.createElement('div');
+    head.textContent = v.mode === 'pinned'
+        ? 'ocr.backend is vulkan: ' + (v.order || []).join(', ') + ' in that order, no benchmark.'
+        : 'Benchmark candidates beside libtorch (order ' + (v.order || []).join(', ') + ').';
+    const items = (v.devices || []).map((d) => {
+        const div = document.createElement('div');
+        const title = document.createElement('strong');
+        title.textContent = d.id + ' ' + d.name + (d.driver ? ' (' + d.driver + ')' : '');
+        const ul = document.createElement('ul');
+        ul.className = 'machine-models-details';
+        (d.runtimes || []).forEach((r) => {
+            const li = document.createElement('li');
+            li.textContent = r.engine + ' · ' + r.runtime + ': ' + r.status + ' (' + r.reason + ')';
+            ul.appendChild(li);
+        });
+        div.append(title, ul);
+        return div;
+    });
+    (v.crashes || []).forEach((c) => {
+        const d = document.createElement('div');
+        d.textContent = c.runtime + ' on ' + c.device + ' demoted: ' + c.reason;
+        items.push(d);
+    });
+    box.replaceChildren(head, ...items);
 }
 
 function renderMachineInstall(i) {

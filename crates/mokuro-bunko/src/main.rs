@@ -99,6 +99,10 @@ fn main() {
             1
         }
     };
+    // `process::exit` skips this executable's C exit handlers on Windows (ExitProcess):
+    // tear the Vulkan pack's runtimes down here, while the driver is still loaded.
+    #[cfg(feature = "ocr")]
+    bunko_engines::vulkan::shutdown();
     std::process::exit(code);
 }
 

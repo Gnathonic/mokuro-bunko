@@ -121,6 +121,58 @@ mod full {
         }
     }
 
+    /// The Vulkan backend pack's variant (docs/rust-port/VULKAN.md).
+    pub const VULKAN: &str = "vulkan";
+
+    /// Install the Vulkan pack beside the libtorch one when it is missing; a failure is
+    /// a warning (the release may have no Vulkan pack for this platform).
+    fn install_vulkan_extra(
+        ocr: &crate::ocr_target::OcrTarget,
+        args: &InstallOcrArgs,
+        root: &Path,
+        search: &[PathBuf],
+        why: &str,
+    ) {
+        if !args.force
+            && let Some(kept) = already_fits(search, VULKAN)
+        {
+            println!("Vulkan backend: {kept}");
+            return;
+        }
+        println!("Vulkan backend pack: fetching it first (about 20 MB; {why})");
+        event(serde_json::json!({"stage": "checking", "variant": VULKAN}));
+        let Ok(_lock) = lock_installs(root) else {
+            println!(
+                "Warning: the Vulkan backend pack was not installed (backends directory locked)"
+            );
+            return;
+        };
+        let from = args.from.clone().or_else(bundled_offline_dir);
+        let source = ReleaseSource::for_target(ocr, bunko_core::VERSION);
+        let r = crate::out::runtime()
+            .map_err(|e| e.to_string())
+            .and_then(|rt| {
+                rt.block_on(install(
+                    root,
+                    VULKAN,
+                    bunko_update::TARGET,
+                    from.as_deref(),
+                    &source,
+                ))
+                .map_err(|f| f.to_string())
+            });
+        match r {
+            Ok(dir) => {
+                println!("Installed {}", dir.display());
+                event(serde_json::json!({"stage": "installed", "variant": VULKAN,
+                    "pack": dir.file_name().map(|n| n.to_string_lossy().into_owned())}));
+            }
+            Err(e) => println!(
+                "Warning: the Vulkan backend pack was not installed ({e}); the GPU reads with libtorch, or the CPU"
+            ),
+        }
+    }
+
     /// The variant `--if-needed` wants: the owner's `ocr.backend` on this hardware,
     /// unless a variant was picked by hand at the last install (the setup wizard, `--variant`)
     /// and neither the hardware nor `ocr.backend` (still `auto`) changed since.
@@ -163,7 +215,17 @@ mod full {
         let root = ocr.backends_dir();
         let choice = wanted_choice(ocr, hw, &root);
         match already_fits(&ocr.backends_dirs(), choice.variant) {
-            Some(m) => Need::Satisfied(m),
+            Some(m) => {
+                match hwdetect::vulkan_wanted(&ocr.backend_preference(), hw, bunko_update::TARGET) {
+                    Some(why) if already_fits(&ocr.backends_dirs(), VULKAN).is_none() => {
+                        Need::Install {
+                            variant: VULKAN.to_string(),
+                            reason: why,
+                        }
+                    }
+                    _ => Need::Satisfied(m),
+                }
+            }
             None => Need::Install {
                 variant: choice.variant.to_string(),
                 reason: choice.reason,
@@ -255,7 +317,7 @@ mod full {
             None => requested.clone().unwrap_or_default(),
         };
         if args.list {
-            print_status(&hw, &wanted, &root, &search);
+            print_status(&hw, &wanted, &ocr.backend_preference(), &root, &search);
             return Ok(());
         }
         if args.probe {
@@ -277,6 +339,15 @@ mod full {
                 "No enabled OCR generation needs the OCR backend (ppocr-manga runs without it): nothing to install."
             );
             return Ok(());
+        }
+        // The Vulkan pack beside the libtorch one (smallest first: ~20 MB): its runtimes
+        // are more candidates for this machine's GPUs. Never fatal: the libtorch pack
+        // serves without it.
+        if matches!(requested.as_deref(), None | Some("auto"))
+            && variant != VULKAN
+            && let Some(why) = hwdetect::vulkan_wanted(&ocr.backend_preference(), &hw, target)
+        {
+            install_vulkan_extra(&ocr, &args, &root, &search, &why);
         }
         if args.if_needed
             && !args.force
@@ -339,7 +410,8 @@ mod full {
                 // The packs this one replaces (another GPU, a GPU that is gone, another
                 // release): never opened again, often gigabytes.
                 for (other, m) in pack::installed(&root) {
-                    if other != dir {
+                    // The Vulkan pack sits beside a libtorch pack: neither replaces the other.
+                    if other != dir && (m.variant == VULKAN) == (variant == VULKAN) {
                         println!(
                             "Removing {} ({} for mokuro-bunko {}): replaced by {}",
                             other.display(),
@@ -398,7 +470,12 @@ mod full {
         // SAFETY: set before this process opens the backend or starts any thread that
         // reads the environment (the install runtime above has shut down); only this
         // process sees it.
-        unsafe { std::env::set_var(bunko_engines::torch::PACK_ENV, &pack_dir) };
+        if variant == VULKAN {
+            // The Vulkan pack's runtimes (and the libtorch pack found beside it).
+            unsafe { std::env::set_var(bunko_engines::vulkan::PACK_ENV, &pack_dir) };
+        } else {
+            unsafe { std::env::set_var(bunko_engines::torch::PACK_ENV, &pack_dir) };
+        }
         // `--from <dir>` (or the bundled folder): it may hold the model files under their
         // release names (an offline package); try it before the network.
         if let Some(from) = from.as_deref() {
@@ -406,6 +483,7 @@ mod full {
             for var in [
                 bunko_ocr::models::TORCH_MIRROR_ENV,
                 bunko_ocr::models::MODELS_MIRROR_ENV,
+                bunko_ocr::models::VULKAN_MIRROR_ENV,
             ] {
                 if std::env::var_os(var).is_none_or(|v| v.is_empty()) {
                     // SAFETY: as above.
@@ -651,6 +729,7 @@ mod full {
     fn print_status(
         hw: &hwdetect::Hardware,
         wanted: &hwdetect::Choice,
+        pref: &str,
         root: &Path,
         search: &[PathBuf],
     ) {
@@ -675,6 +754,28 @@ mod full {
                 hw.amd_gfx.join(", ")
             }
         );
+        // Every adapter DXGI lists, for reports from machines we never had (the AMD and
+        // Intel ones become `Vulkan only` below; software adapters never count).
+        #[cfg(windows)]
+        for a in hwdetect::dxgi_adapters() {
+            println!(
+                "Display adapter: {} [vendor {:04x}{}, LUID {}]",
+                a.label(),
+                a.vendor_id,
+                if a.software { ", software" } else { "" },
+                a.luid
+            );
+        }
+        if !hw.vulkan_gpus.is_empty() {
+            println!(
+                "Vulkan only: {}",
+                hw.vulkan_gpus
+                    .iter()
+                    .map(hwdetect::Adapter::label)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         for h in &hw.hidden {
             println!("Hidden: {h}");
         }
@@ -682,7 +783,12 @@ mod full {
         if let Some(h) = &wanted.hint {
             println!("  {h}");
         }
-        println!("Variants: cpu, cu130 (NVIDIA, Linux/Windows), rocm7.1 (AMD, Linux)");
+        if let Some(why) = hwdetect::vulkan_wanted(pref, hw, bunko_update::TARGET) {
+            println!("Also installs: {VULKAN} ({why})");
+        }
+        println!(
+            "Variants: cpu, cu130 (NVIDIA, Linux/Windows), rocm7.1 (AMD, Linux), vulkan (any Vulkan GPU, Linux/Windows)"
+        );
         let mut any = false;
         let mut seen: Vec<PathBuf> = Vec::new();
         for r in search.iter().cloned().chain(bundled_dir()) {

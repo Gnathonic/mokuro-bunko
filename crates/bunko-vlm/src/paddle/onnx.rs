@@ -13,11 +13,12 @@ use super::{
 };
 use crate::crop::{LINE_MARGIN_EM, Quad, SECOND_MARGIN_EM, paddle_quad_crop};
 use crate::detok::Detokenizer;
+use crate::gpudec::{Call, SharedDecoder};
 use crate::image::{Bgr, Rgb};
 use crate::npy::Npy;
 use crate::pyfmt::py_strip;
 use crate::resample::{Filter, resize};
-use crate::runtime::{SessionFactory, SessionOptions, SharedSession};
+use crate::runtime::{Provider, SessionFactory, SessionOptions, SharedSession, WebGpuGuard};
 use crate::tensor::{FloatKind, argmax_rows, floats, halfs, i64s, to_f32};
 use crate::{CropSet, Precision, Recognizer, RecognizerInfo, VlmError, read_flat};
 
@@ -40,15 +41,18 @@ struct Prepped {
 
 /// The paddle-manga recognizer. One instance (two sessions) serves every thread.
 pub struct PaddleManga {
-    vision: SharedSession,
-    decoder: SharedSession,
+    /// The exported graphs; None when the WebGPU graphs replace them.
+    vision: Option<SharedSession>,
+    decoder: Option<SharedSession>,
+    gpu: Option<super::gpu::PaddleGpu>,
+    provider: Provider,
     vis_in: Vec<&'static str>,
     pix_kind: FloatKind,
     vis_aux_kind: FloatKind,
     dec_kind: FloatKind,
     dec_in: Vec<DecIn>,
     n_kv: usize,
-    embed: Vec<f16>,
+    embed: Vec<f32>,
     d_model: usize,
     vocab: usize,
     detok: Detokenizer,
@@ -70,12 +74,33 @@ impl PaddleManga {
         assets: &PaddleAssets,
         opts: &SessionOptions,
     ) -> Result<Self, VlmError> {
-        let vision = factory.open(&assets.vision, opts)?;
-        let decoder = factory.open(&assets.decoder, opts)?;
+        let gpu_dir = match opts.device {
+            crate::Device::Gpu(_) => assets.gpu_dir.as_ref(),
+            crate::Device::Cpu => None,
+        };
+        let gpu = gpu_dir
+            .map(|d| super::gpu::PaddleGpu::load(factory, d, opts))
+            .transpose()?;
+        let vision = match gpu {
+            Some(_) => None,
+            None => Some(factory.open(&assets.vision, opts)?),
+        };
         let mut vis_in = Vec::new();
         let mut pix_kind = FloatKind::F32;
         let mut vis_aux_kind = FloatKind::F32;
-        for (i, n) in vision.input_names().enumerate() {
+        let vin: Vec<(usize, String)> = vision
+            .iter()
+            .flat_map(|v| {
+                v.input_names()
+                    .map(str::to_owned)
+                    .enumerate()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (i, n) in vin.iter().map(|(i, n)| (*i, n.as_str())) {
+            let vision = vision
+                .as_ref()
+                .ok_or_else(|| VlmError::Runtime("no vision".into()))?;
             let name = match n {
                 "pixel_values" => {
                     pix_kind = FloatKind::of(vision.input_type(i), "paddle pixel_values")?;
@@ -97,45 +122,53 @@ impl PaddleManga {
             };
             vis_in.push(name);
         }
-        let outs: Vec<String> = decoder.output_names().map(str::to_owned).collect();
-        if outs.first().map(String::as_str) != Some("logits") {
-            return Err(VlmError::Asset(
-                "paddle decoder: first output is not logits".into(),
-            ));
-        }
-        let mut dec_in = Vec::new();
-        for n in decoder.input_names() {
-            dec_in.push(match n {
-                "inputs_embeds" => DecIn::Embeds,
-                "cos" => DecIn::Cos,
-                "sin" => DecIn::Sin,
-                "bias" => DecIn::Bias,
-                p if p.starts_with("past_") => {
-                    let want = p.replacen("past_", "present_", 1);
-                    let j = outs.iter().position(|o| *o == want).ok_or_else(|| {
-                        VlmError::Asset(format!("paddle decoder: no output {want}"))
-                    })?;
-                    DecIn::Past(j)
+        let (decoder, dec_in, n_kv, dec_kind) = match &gpu {
+            Some(g) => (None, Vec::new(), 0, g.decoder.kind()),
+            None => {
+                let decoder = factory.open(&assets.decoder, opts)?;
+                let outs: Vec<String> = decoder.output_names().map(str::to_owned).collect();
+                if outs.first().map(String::as_str) != Some("logits") {
+                    return Err(VlmError::Asset(
+                        "paddle decoder: first output is not logits".into(),
+                    ));
                 }
-                other => {
-                    return Err(VlmError::Asset(format!(
-                        "paddle decoder: unknown input {other}"
-                    )));
+                let mut dec_in = Vec::new();
+                for n in decoder.input_names() {
+                    dec_in.push(match n {
+                        "inputs_embeds" => DecIn::Embeds,
+                        "cos" => DecIn::Cos,
+                        "sin" => DecIn::Sin,
+                        "bias" => DecIn::Bias,
+                        p if p.starts_with("past_") => {
+                            let want = p.replacen("past_", "present_", 1);
+                            let j = outs.iter().position(|o| *o == want).ok_or_else(|| {
+                                VlmError::Asset(format!("paddle decoder: no output {want}"))
+                            })?;
+                            DecIn::Past(j)
+                        }
+                        other => {
+                            return Err(VlmError::Asset(format!(
+                                "paddle decoder: unknown input {other}"
+                            )));
+                        }
+                    });
                 }
-            });
-        }
-        let n_kv = dec_in
-            .iter()
-            .filter(|d| matches!(d, DecIn::Past(_)))
-            .count();
-        let dec_kind = FloatKind::of(decoder.input_type(0), "paddle decoder input")?;
-
+                let n_kv = dec_in
+                    .iter()
+                    .filter(|d| matches!(d, DecIn::Past(_)))
+                    .count();
+                let dec_kind = FloatKind::of(decoder.input_type(0), "paddle decoder input")?;
+                (Some(decoder), dec_in, n_kv, dec_kind)
+            }
+        };
         let emb = Npy::load(&assets.embed)?;
         let (vocab, d_model) = match emb.shape[..] {
             [a, b] => (a, b),
             _ => return Err(VlmError::Asset("embed.npy is not 2-D".into())),
         };
-        let embed = emb.into_f16()?;
+        // the f16 table, or the f32 one (the libtorch packs' host file) kept as is: f16
+        // would round its smallest values
+        let embed = emb.into_f32_widened()?;
         let detok = Detokenizer::from_file(&assets.tokenizer)?;
         let text_inv: [f32; T_HD / 2] =
             std::array::from_fn(|i| 1.0 / 500_000f32.powf((2 * i) as f32 / T_HD as f32));
@@ -159,6 +192,8 @@ impl PaddleManga {
         Ok(Self {
             vision,
             decoder,
+            gpu,
+            provider: opts.provider,
             vis_in,
             pix_kind,
             vis_aux_kind,
@@ -258,6 +293,15 @@ impl PaddleManga {
                 );
             }
         }
+        if let Some(g) = &self.gpu {
+            return g
+                .vision
+                .forward(n, p.pixels, pos_idx, pos_w, cos, sin, merge);
+        }
+        let vision = self
+            .vision
+            .as_ref()
+            .ok_or_else(|| VlmError::Runtime("paddle vision not loaded".into()))?;
         let mut pixels = Some(p.pixels);
         let mut pos_idx = Some(pos_idx);
         let mut pos_w = Some(pos_w);
@@ -281,7 +325,7 @@ impl PaddleManga {
             });
         }
         let refs: Vec<&DynValue> = feeds.iter().collect();
-        let out = to_f32(&self.vision.run(&refs, Vec::new())?[0])?;
+        let out = to_f32(&vision.run(&refs, Vec::new())?[0])?;
         if out.len() != (n / 4) * self.d_model {
             return Err(VlmError::Runtime(format!(
                 "vision returned {} values for {} patches",
@@ -293,11 +337,7 @@ impl PaddleManga {
     }
 
     fn embed_row(&self, id: usize, out: &mut Vec<f32>) {
-        out.extend(
-            self.embed[id * self.d_model..(id + 1) * self.d_model]
-                .iter()
-                .map(|h| h.to_f32()),
-        );
+        out.extend_from_slice(&self.embed[id * self.d_model..(id + 1) * self.d_model]);
     }
 
     /// cos/sin rows (128 each) for M-RoPE position (t, h, w) (spec §6.7).
@@ -325,10 +365,17 @@ impl PaddleManga {
             FloatKind::F32 => f32::MIN,
             FloatKind::F16 => -65504.0,
         };
+        // host preprocessing first: another engine thread may run on the GPU meanwhile
+        let prepped = crops
+            .iter()
+            .map(|c| Self::prep(c))
+            .collect::<Result<Vec<_>, _>>()?;
+        // WebGPU: one context per process, not thread-safe (`runtime::WebGpuGuard`); held
+        // until this batch's last device tensor is gone (declared before them).
+        let _webgpu = (self.provider == Provider::WebGpu).then(WebGpuGuard::lock);
         // per-row prompt embeddings and positions
         let mut rows: Vec<(Vec<f32>, Vec<[i64; 3]>)> = Vec::with_capacity(b);
-        for crop in crops {
-            let p = Self::prep(crop)?;
+        for p in prepped {
             let (hb, wb) = (p.gh / 2, p.gw / 2);
             let img = self.vision_embeds(p)?;
             let n_img = hb * wb;
@@ -378,6 +425,13 @@ impl PaddleManga {
                 + 1;
         }
         drop(rows);
+        if let Some(g) = &self.gpu {
+            return self.decode_gpu(&g.decoder, b, s, x, cos, sin, valid, &base, caps, neg);
+        }
+        let decoder = self
+            .decoder
+            .as_ref()
+            .ok_or_else(|| VlmError::Runtime("paddle decoder not loaded".into()))?;
         let mut bias = vec![0f32; b * s * s];
         for i in 0..b {
             for q in 0..s {
@@ -391,7 +445,12 @@ impl PaddleManga {
         }
 
         let dk = self.dec_kind;
-        let alloc = self.decoder.device_allocator()?;
+        // Device-resident KV for CUDA only (WebGPU: see hayai's `gpu.rs`).
+        let alloc = if decoder.provider() == Provider::WebGpu {
+            None
+        } else {
+            decoder.device_allocator()?
+        };
         let mut past: Vec<DynValue> = Vec::with_capacity(self.n_kv);
         for _ in 0..self.n_kv {
             past.push(floats(dk, &[b, KV_HEADS, 0, T_HD], Vec::new())?);
@@ -421,7 +480,7 @@ impl PaddleManga {
                     )?));
                 }
             }
-            let mut out = self.decoder.run(&feeds, pre)?;
+            let mut out = decoder.run(&feeds, pre)?;
             drop(feeds);
             let logits = to_f32(&out[0])?;
             if logits.len() != b * self.vocab {
@@ -522,6 +581,160 @@ impl PaddleManga {
             .collect())
     }
 
+    /// The batch on the WebGPU decoder graph (`crate::gpudec`): same masks, positions and
+    /// greedy loop as the exported decoder's, the KV cache on the device throughout.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_gpu(
+        &self,
+        g: &SharedDecoder,
+        b: usize,
+        s: usize,
+        x: Vec<f32>,
+        cos: Vec<f32>,
+        sin: Vec<f32>,
+        valid: Vec<bool>,
+        base: &[i64],
+        caps: &[u32],
+        neg: f32,
+    ) -> Result<Vec<String>, VlmError> {
+        // The allocator outlives every device tensor of this batch (declared first).
+        let alloc = g.allocator()?;
+        let dm = self.d_model;
+        let half = |v: &[f32]| -> Vec<f32> {
+            v.chunks_exact(T_HD)
+                .flat_map(|r| r[..T_HD / 2].iter().copied())
+                .collect()
+        };
+        // prefill: gen_bias (b, 1, s, 1 + s) = the dummy key, then the exported mask
+        let w = 1 + s;
+        let mut gen_bias = vec![neg; b * s * w];
+        for i in 0..b {
+            for q in 0..s {
+                let row = &mut gen_bias[(i * s + q) * w..(i * s + q + 1) * w];
+                for k in 0..s {
+                    if (k <= q && valid[i * s + k]) || k == q {
+                        row[1 + k] = 0.0;
+                    }
+                }
+            }
+        }
+        let dummy_ctx = g.dummy("ctx", b)?;
+        let dummy_gen = g.dummy("gen", b)?;
+        // the prompt in chunks (bounded attention scores per run): every query keeps
+        // exactly its keys and mask row
+        let step = super::gpu::prefill_chunk(b, s + 1);
+        let (cos, sin) = (half(&cos), half(&sin));
+        let mut first = Vec::new();
+        let mut acc: Option<crate::gpudec::Kv> = None;
+        for a in (0..s).step_by(step) {
+            let e = (a + step).min(s);
+            let c = e - a;
+            let rows = |v: &[f32], width: usize| -> Vec<f32> {
+                (0..b)
+                    .flat_map(|i| v[(i * s + a) * width..(i * s + e) * width].iter().copied())
+                    .collect()
+            };
+            // gen keys so far: [dummy, tokens 0..e)
+            let mut gb = Vec::with_capacity(b * c * (1 + e));
+            for i in 0..b {
+                for q in a..e {
+                    gb.extend_from_slice(&gen_bias[(i * s + q) * w..(i * s + q) * w + 1 + e]);
+                }
+            }
+            let (nx, gr) = g.run(
+                alloc.as_ref(),
+                Call {
+                    b,
+                    s: c,
+                    x: rows(&x, dm),
+                    cos: rows(&cos, T_HD / 2),
+                    sin: rows(&sin, T_HD / 2),
+                    ctx: &dummy_ctx,
+                    ctx_bias: vec![neg; b * c],
+                    grow: acc.as_ref().unwrap_or(&dummy_gen),
+                    gen_bias: gb,
+                },
+                dm,
+            )?;
+            first = nx;
+            acc = Some(gr);
+        }
+        let grow = acc.ok_or_else(|| VlmError::Runtime("empty prompt".into()))?;
+        drop(dummy_ctx);
+        let ctx = SharedDecoder::into_ctx(grow);
+        let ctx_bias: Vec<f32> = (0..b)
+            .flat_map(|i| {
+                std::iter::once(neg).chain(
+                    valid[i * s..(i + 1) * s]
+                        .iter()
+                        .map(move |&v| if v { 0.0 } else { neg }),
+                )
+            })
+            .collect();
+        let mut grow = dummy_gen;
+        let mut tok: Vec<u32> = first.iter().map(|&t| t as u32).collect();
+        let max_new = caps.iter().copied().max().unwrap_or(DEFAULT_MAX_NEW_TOKENS) as usize;
+        let mut out: Vec<Vec<u32>> = vec![Vec::new(); b];
+        let mut done: Vec<bool> = caps.iter().map(|&c| c == 0).collect();
+        for step in 0..max_new {
+            for i in 0..b {
+                if done[i] {
+                    continue;
+                }
+                if tok[i] == EOS {
+                    done[i] = true;
+                } else {
+                    out[i].push(tok[i]);
+                    if out[i].len() >= caps[i] as usize {
+                        done[i] = true;
+                    }
+                }
+            }
+            if done.iter().all(|&d| d) || step + 1 == max_new {
+                break;
+            }
+            let t = SharedDecoder::len(&grow);
+            let mut xs = Vec::with_capacity(b * dm);
+            let mut cs = Vec::with_capacity(b * T_HD);
+            let mut sn = Vec::with_capacity(b * T_HD);
+            for i in 0..b {
+                let id = if done[i] { 0 } else { tok[i] as usize };
+                self.embed_row(id, &mut xs);
+                let p = base[i] + step as i64;
+                self.mrope(p, p, p, &mut cs, &mut sn);
+            }
+            let gen_bias: Vec<f32> = (0..b)
+                .flat_map(|_| std::iter::once(neg).chain(std::iter::repeat_n(0.0, t)))
+                .collect();
+            let (got, grown) = g.run(
+                alloc.as_ref(),
+                Call {
+                    b,
+                    s: 1,
+                    x: xs,
+                    cos: half(&cs),
+                    sin: half(&sn),
+                    ctx: &ctx,
+                    ctx_bias: ctx_bias.clone(),
+                    grow: &grow,
+                    gen_bias,
+                },
+                dm,
+            )?;
+            grow = grown;
+            tok = got.iter().map(|&t| t as u32).collect();
+        }
+        drop((ctx, grow));
+        Ok(out
+            .into_iter()
+            .zip(caps)
+            .map(|(mut t, &cap)| {
+                t.truncate(cap as usize);
+                py_strip(&self.detok.decode(&t)).to_owned()
+            })
+            .collect())
+    }
+
     /// Reads crops with one token cap each: sorted by (cap, area, index), batches of
     /// [`BATCH`], results in input order (spec §6.11).
     pub fn read_crops(&self, crops: &[&Rgb], caps: &[u32]) -> Result<Vec<String>, VlmError> {
@@ -541,11 +754,38 @@ impl PaddleManga {
                 .then(a.cmp(&b))
         });
         let mut texts = vec![String::new(); crops.len()];
-        for group in order.chunks(BATCH) {
-            let gc: Vec<&Rgb> = group.iter().map(|&i| crops[i]).collect();
-            let gcaps: Vec<u32> = group.iter().map(|&i| caps[i]).collect();
-            for (&i, t) in group.iter().zip(self.generate(&gc, &gcaps)?) {
-                texts[i] = t;
+        for batch in order.chunks(BATCH) {
+            // WebGPU: a batch of big crops is split so rows x prompt^2 stays bounded (rows
+            // are independent: the texts do not change)
+            let mut groups: Vec<Vec<usize>> = Vec::new();
+            if self.gpu.is_some() {
+                let mut cost = 0usize;
+                for &i in batch {
+                    let p = super::gpu::prompt_len(crops[i].height, crops[i].width);
+                    let s2 = p.saturating_mul(p);
+                    match groups.last_mut() {
+                        Some(g)
+                            if (g.len() + 1).saturating_mul(cost.max(s2))
+                                <= super::gpu::BATCH_COST =>
+                        {
+                            g.push(i);
+                            cost = cost.max(s2);
+                        }
+                        _ => {
+                            groups.push(vec![i]);
+                            cost = s2;
+                        }
+                    }
+                }
+            } else {
+                groups.push(batch.to_vec());
+            }
+            for group in groups {
+                let gc: Vec<&Rgb> = group.iter().map(|&i| crops[i]).collect();
+                let gcaps: Vec<u32> = group.iter().map(|&i| caps[i]).collect();
+                for (&i, t) in group.iter().zip(self.generate(&gc, &gcaps)?) {
+                    texts[i] = t;
+                }
             }
         }
         Ok(texts)

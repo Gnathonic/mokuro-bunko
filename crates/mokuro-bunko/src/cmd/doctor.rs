@@ -201,6 +201,12 @@ fn processor_checks(ctx: &Ctx, flag: bool) -> Vec<Check> {
     if let Some(c) = check_packages(&target, &bunko_core::Config::default()) {
         results.push(c);
     }
+    let backend = std::env::var("MOKURO_OCR_BACKEND")
+        .map(|b| bunko_engines::Backend::parse(&b))
+        .unwrap_or(bunko_engines::Backend::Auto);
+    if let Some(c) = check_vulkan(&target, backend) {
+        results.push(c);
+    }
     if let Some(c) = check_processor_storage(&target.storage) {
         results.push(c);
     }
@@ -372,7 +378,101 @@ fn library_ocr_checks(target: &crate::ocr_target::OcrTarget, config: &Config) ->
         ),
     ];
     out.extend(check_packages(target, config));
+    out.extend(check_vulkan(
+        target,
+        bunko_engines::Backend::parse(config.ocr.effective_backend()),
+    ));
     out
+}
+
+/// The Vulkan route (docs/rust-port/VULKAN.md): per GPU, each runtime a benchmark
+/// candidate or skipped with why. None when the route is off or no pack is wanted here.
+#[cfg(feature = "ocr")]
+fn check_vulkan(
+    target: &crate::ocr_target::OcrTarget,
+    backend: bunko_engines::Backend,
+) -> Option<Check> {
+    let hw = crate::hwdetect::detect();
+    let wanted =
+        crate::hwdetect::vulkan_wanted(&target.backend_preference(), &hw, bunko_update::TARGET);
+    let pipeline = bunko_engines::EnginePipeline::new(target.engine_config(backend));
+    let r = pipeline.vulkan_report();
+    if r.mode == "off" {
+        return None;
+    }
+    if let Some(e) = &r.error {
+        return wanted.map(|why| {
+            Check::warn(
+                "Vulkan runtimes",
+                format!("no Vulkan backend pack ({e}); wanted here: {why}"),
+                Some("Run: mokuro-bunko install-ocr --if-needed".into()),
+            )
+        });
+    }
+    let mut lines = Vec::new();
+    for d in &r.devices {
+        let mut parts = Vec::new();
+        for s in &d.runtimes {
+            parts.push(format!(
+                "{} {} {}: {}",
+                s.engine, s.runtime, s.status, s.reason
+            ));
+        }
+        lines.push(format!(
+            "{} {} [{}{}{}]: {}",
+            d.id,
+            d.name,
+            d.driver,
+            if d.radv { "" } else { ", not RADV" },
+            d.beside
+                .as_ref()
+                .map_or(String::new(), |b| format!(", beside {b}")),
+            parts.join("; ")
+        ));
+    }
+    for c in &r.crashes {
+        lines.push(format!(
+            "{} on {} demoted: {}",
+            c.runtime, c.device, c.reason
+        ));
+    }
+    if r.devices.is_empty() {
+        lines.push(format!(
+            "no GPU the pack's runtimes serve{}",
+            if r.warnings.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", r.warnings.join("; "))
+            }
+        ));
+    }
+    let detail = format!(
+        "{} ({}; order {}): {}",
+        r.pack.clone().unwrap_or_default(),
+        if r.mode == "pinned" {
+            "ocr.backend: vulkan, no benchmark"
+        } else {
+            "candidates of the machine's benchmark"
+        },
+        r.order.join(", "),
+        lines.join(" | ")
+    );
+    let any = r
+        .devices
+        .iter()
+        .any(|d| d.runtimes.iter().any(|s| s.status != "skipped"));
+    Some(if any || r.devices.is_empty() {
+        Check::info("Vulkan runtimes", detail)
+    } else {
+        Check::warn(
+            "Vulkan runtimes",
+            detail,
+            Some(
+                "Every Vulkan runtime is skipped here: the GPU reads with libtorch or the CPU."
+                    .into(),
+            ),
+        )
+    })
 }
 
 /// The OCR backend pack for this machine (install-ocr): present, complete, host

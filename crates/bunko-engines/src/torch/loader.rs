@@ -303,6 +303,14 @@ impl Pack {
         Ok(pack)
     }
 
+    /// An optional entry point of the pack's library (beyond the ABI's).
+    pub fn optional_symbol(&self, name: &[u8]) -> Option<*const c_void> {
+        // SAFETY: looking up a symbol; the caller knows its type.
+        unsafe { self._lib.get::<*const c_void>(name) }
+            .ok()
+            .map(|s| *s)
+    }
+
     /// libtorch libraries mapped into this process from outside the pack (Linux; empty
     /// elsewhere). Anything here means a system libtorch got in: results are undefined.
     pub fn foreign_libraries(&self) -> Vec<String> {

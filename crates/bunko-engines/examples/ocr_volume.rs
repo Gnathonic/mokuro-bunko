@@ -57,12 +57,15 @@ fn main() -> Result<()> {
     let mut pools = PoolsSpec::default();
     let mut models = std::env::temp_dir().join("bunko-engines-models");
     let mut uuids: (Option<String>, Option<String>) = (None, None);
+    let mut pick: Option<String> = None;
     let mut i = 3;
     while i + 1 < args.len() {
         let v = &args[i + 1];
         match args[i].as_str() {
             "--backend" => backend = Backend::parse(v),
             "--precision" => precision = v.clone(),
+            // A benchmark's pick (`fp32@ncnn`: a backend-qualified format).
+            "--pick" => pick = Some(v.clone()),
             "--device" => {
                 pools.stage_device.insert("engine".into(), v.clone());
             }
@@ -92,7 +95,7 @@ fn main() -> Result<()> {
         patch_budget: 512,
         precision,
         pools,
-        precision_pick: None,
+        precision_pick: pick,
         precision_why: String::new(),
         primary: true,
     };

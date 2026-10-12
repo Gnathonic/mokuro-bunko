@@ -397,7 +397,7 @@ pub struct OcrTargetArgs {
 pub struct InstallOcrArgs {
     /// Backend pack: auto (detect the GPU), cpu, cu130 (NVIDIA), rocm7.1 (AMD, Linux)
     /// [default: what ocr.backend in the config asks for on this hardware]
-    #[arg(long, value_parser = PossibleValuesParser::new(["auto", "cpu", "cu130", "rocm7.1"]))]
+    #[arg(long, value_parser = PossibleValuesParser::new(["auto", "cpu", "cu130", "rocm7.1", "vulkan"]))]
     pub variant: Option<String>,
     /// Only when needed (what the Docker images run on start): nothing when local OCR
     /// is off or a fitting pack of this release is installed; otherwise install the

@@ -1336,7 +1336,7 @@ impl Scheduler {
         }
         let mut out = Map::new();
         if run.row.precision_applies()
-            && let Some(ran) = ran.filter(|r| policy::PRECISIONS.contains(&r.as_str()))
+            && let Some(ran) = ran.filter(|r| policy::is_format(r))
         {
             out.insert("precision".into(), json!(ran));
             if let Some(mode) = event

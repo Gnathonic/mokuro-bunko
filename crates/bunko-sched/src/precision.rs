@@ -31,6 +31,66 @@ pub const BENCHED_MODES: [&str; 2] = [MODE_BALANCED, MODE_SPEED];
 /// Two candidates this close in pages/s are a tie, won by the earlier (more accurate).
 pub const PRECISION_TIE: f64 = 0.05;
 
+/// A format names a precision and, optionally, the backend that runs it: `fp32` is the
+/// device's default backend, `fp32@ncnn` the same precision on another backend of that
+/// device (docs/rust-port/VULKAN.md §4). A machine's catalog lists both kinds; the
+/// benchmark measures every one a row may run and keeps the fastest.
+pub const BACKEND_SEP: char = '@';
+
+/// `fp32@ncnn` → `fp32`.
+pub fn base_format(fmt: &str) -> &str {
+    fmt.split(BACKEND_SEP).next().unwrap_or(fmt)
+}
+
+/// `fp32@ncnn` → `ncnn`; None for a plain format.
+pub fn format_backend(fmt: &str) -> Option<&str> {
+    fmt.split_once(BACKEND_SEP).map(|(_, b)| b)
+}
+
+/// A precision, plain or backend-qualified.
+pub fn is_format(fmt: &str) -> bool {
+    PRECISIONS.contains(&base_format(fmt)) && format_backend(fmt).is_none_or(|b| !b.is_empty())
+}
+
+/// `bases`, each followed by the device's backend-qualified variants of it (in name
+/// order): the formats a row may run at.
+pub fn with_variants(bases: &[String], supported: &BTreeSet<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for b in bases {
+        out.push(b.clone());
+        out.extend(
+            supported
+                .iter()
+                .filter(|f| format_backend(f).is_some() && base_format(f) == b)
+                .cloned(),
+        );
+    }
+    out
+}
+
+/// A device's formats as `engine` sees them: a backend-qualified format that the device
+/// reports for other engines only (`format_engines`, bunko-proto `Device`) is left out.
+pub fn formats_for_engine(
+    formats: &[String],
+    format_engines: &std::collections::BTreeMap<String, Vec<String>>,
+    engine: Option<&str>,
+) -> Vec<String> {
+    formats
+        .iter()
+        .filter(|f| match (engine, format_engines.get(f.as_str())) {
+            (Some(e), Some(only)) => only.iter().any(|x| x == e),
+            _ => true,
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether a row's usable formats call for this machine's benchmark: a balanced/speed
+/// mode with a choice, or any mode whose precision more than one backend runs.
+pub fn needs_bench(mode: &str, usable: &[String]) -> bool {
+    (is_benched(mode) && usable.len() > 1) || usable.iter().any(|f| format_backend(f).is_some())
+}
+
 pub fn is_forced(mode: &str) -> bool {
     PRECISIONS.contains(&mode)
 }
@@ -174,7 +234,19 @@ pub fn resolve_mode(
             None => mode == FP32,
         };
         if runs {
-            return ModeResolution::new(Some(mode), true, mode, vec![mode.to_string()]);
+            let usable = match supported {
+                Some(s) => with_variants(&[mode.to_string()], s),
+                None => vec![mode.to_string()],
+            };
+            if let Some(p) = pick.filter(|p| usable.len() > 1 && usable.iter().any(|u| u == p)) {
+                let why = if pick_why.is_empty() {
+                    "benchmark"
+                } else {
+                    pick_why
+                };
+                return ModeResolution::new(Some(p), true, why, usable);
+            }
+            return ModeResolution::new(Some(mode), true, mode, usable);
         }
         if supported.is_none() {
             return ModeResolution::new(None, false, "card not reported", Vec::new());
@@ -189,13 +261,19 @@ pub fn resolve_mode(
             Vec::new(),
         );
     };
-    let usable: Vec<String> = candidates(engine, mode)
+    let mut bases: Vec<String> = candidates(engine, mode)
         .iter()
         .filter(|c| **c == FP32 || supported.contains(**c))
         .map(|c| c.to_string())
         .collect();
+    // The accuracy mode fixes its precision (the first supported); only the backends
+    // that run it are left to measure.
+    if !is_benched(mode) {
+        bases.truncate(1);
+    }
+    let usable = with_variants(&bases, supported);
     let first = usable.first().cloned().unwrap_or_else(|| FP32.to_string());
-    if !is_benched(mode) || usable.len() == 1 {
+    if !needs_bench(mode, &usable) {
         return ModeResolution::new(Some(&first), true, mode, usable);
     }
     if let Some(p) = pick.filter(|p| usable.iter().any(|u| u == p)) {
@@ -285,9 +363,7 @@ pub fn bench_trials(bench: Option<&Map<String, Value>>) -> Vec<(String, f64)> {
         .filter_map(|t| {
             let fmt = t.get("precision")?.as_str()?;
             let rate = t.get("pages_per_second").filter(|v| is_number(v))?;
-            PRECISIONS
-                .contains(&fmt)
-                .then(|| (fmt.to_string(), rate.as_f64().unwrap_or(0.0)))
+            is_format(fmt).then(|| (fmt.to_string(), rate.as_f64().unwrap_or(0.0)))
         })
         .collect()
 }
@@ -297,7 +373,7 @@ pub fn bench_trials(bench: Option<&Map<String, Value>>) -> Vec<(String, f64)> {
 pub fn bench_pick(bench: Option<&Map<String, Value>>, mode: &str) -> (Option<String>, String) {
     let none = (None, String::new());
     let Some(b) = bench else { return none };
-    if !is_benched(mode) || b.get("precision_mode").and_then(Value::as_str) != Some(mode) {
+    if b.get("precision_mode").and_then(Value::as_str) != Some(mode) {
         return none;
     }
     let trials = bench_trials(bench);
@@ -321,7 +397,7 @@ pub fn bench_precision(bench: &Map<String, Value>) -> Option<String> {
     if let Some(p) = bench
         .get("precision")
         .and_then(Value::as_str)
-        .filter(|p| PRECISIONS.contains(p))
+        .filter(|p| is_format(p))
     {
         return Some(p.to_string());
     }
@@ -333,7 +409,7 @@ pub fn bench_precision(bench: &Map<String, Value>) -> Option<String> {
         .filter_map(Value::as_object)
         .find(|t| crate::py::truthy(t.get("chosen")))
         .and_then(|t| t.get("precision")?.as_str())
-        .filter(|p| PRECISIONS.contains(p))
+        .filter(|p| is_format(p))
         .map(str::to_string)
 }
 
@@ -388,7 +464,7 @@ pub fn stale_bench_reason(
     if !resolved.eligible {
         return None;
     }
-    if is_benched(mode) && resolved.usable.len() > 1 {
+    if needs_bench(mode, &resolved.usable) {
         let tried: BTreeSet<String> = bench_trials(Some(bench)).into_iter().map(|t| t.0).collect();
         let usable: BTreeSet<String> = resolved.usable.iter().cloned().collect();
         if measured_for != Some(Some(mode_static(mode))) || tried != usable {
@@ -430,8 +506,7 @@ pub fn resolution_entry(
     );
     entry.insert("eligible".into(), Value::Bool(resolved.eligible));
     entry.insert("why".into(), Value::String(resolved.why.clone()));
-    if is_benched(mode)
-        && let Some(b) = bench
+    if let Some(b) = bench
         && b.get("precision_mode").and_then(Value::as_str) == Some(mode)
     {
         let trials = bench_trials(bench);
@@ -661,5 +736,91 @@ mod tests {
         );
         let r = resolve_mode("hayai-nova", "auto-speed", Some(&gpu), None, "");
         assert!(!resolution_entry(&r, Some(&b), "auto-speed").contains_key("trials"));
+    }
+
+    #[test]
+    fn backend_variants_are_benchmarked_in_every_mode() {
+        // A Polaris card: fp32 on its default Vulkan runtime, and on WebGPU.
+        let polaris = set(&[FP32, "fp32@webgpu"]);
+        let r = resolve_mode("hayai-nova", MODE_ACCURACY, Some(&polaris), None, "");
+        assert_eq!(r.usable, vec!["fp32", "fp32@webgpu"]);
+        assert_eq!(r.precision.as_deref(), Some("fp32"));
+        assert!(needs_bench(MODE_ACCURACY, &r.usable));
+        let r = resolve_mode(
+            "hayai-nova",
+            MODE_ACCURACY,
+            Some(&polaris),
+            Some("fp32@webgpu"),
+            "benchmark: fp32@webgpu 0.45 p/s beat fp32 0.41 p/s",
+        );
+        assert_eq!(r.precision.as_deref(), Some("fp32@webgpu"));
+        // A forced fp32 still measures its backends.
+        let r = resolve_mode("hayai-nova", FP32, Some(&polaris), Some("fp32@webgpu"), "");
+        assert_eq!(r.precision.as_deref(), Some("fp32@webgpu"));
+        // bf16 native: the accuracy mode runs bf16, which only libtorch has: no bench.
+        let rdna4 = set(&[FP32, FP16, BF16, "fp32@ncnn"]);
+        let r = resolve_mode("hayai-nova", MODE_ACCURACY, Some(&rdna4), None, "");
+        assert_eq!(r.usable, vec!["bf16"]);
+        assert!(!needs_bench(MODE_ACCURACY, &r.usable));
+        // Speed: every candidate precision, each with its backends.
+        let rdna2 = set(&[FP32, FP16, "fp32@ncnn", "fp32@webgpu"]);
+        let r = resolve_mode("hayai-nova", MODE_SPEED, Some(&rdna2), None, "");
+        assert_eq!(r.usable, vec!["fp16", "fp32", "fp32@ncnn", "fp32@webgpu"]);
+        // Trials of qualified formats are stored and picked like any other.
+        let bench = obj(json!({
+            "precision": "fp32@ncnn", "precision_mode": "auto-accuracy",
+            "precision_trials": [
+                {"precision": "fp32", "pages_per_second": 0.20},
+                {"precision": "fp32@ncnn", "pages_per_second": 0.45},
+            ],
+        }));
+        let (pick, _) = bench_pick(Some(&bench), MODE_ACCURACY);
+        assert_eq!(pick.as_deref(), Some("fp32@ncnn"));
+        assert_eq!(bench_precision(&bench).as_deref(), Some("fp32@ncnn"));
+        assert!(
+            stale_bench_reason(
+                Some("hayai-nova"),
+                &bench,
+                MODE_ACCURACY,
+                Some(&set(&[FP32, "fp32@ncnn"]))
+            )
+            .is_none()
+        );
+        assert!(
+            stale_bench_reason(Some("hayai-nova"), &bench, MODE_ACCURACY, Some(&polaris)).is_some(),
+            "other candidates now: measure again"
+        );
+        assert_eq!(base_format("fp32@ncnn"), "fp32");
+        assert!(
+            is_format("fp16")
+                && is_format("fp32@webgpu")
+                && !is_format("fp32@")
+                && !is_format("int8")
+        );
+    }
+
+    #[test]
+    fn engine_scoped_formats() {
+        let formats: Vec<String> = ["fp32", "fp32@ncnn", "fp32@webgpu"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let only: std::collections::BTreeMap<String, Vec<String>> =
+            [("fp32@webgpu".to_string(), vec!["hayai-nova".to_string()])].into();
+        assert_eq!(
+            formats_for_engine(&formats, &only, Some("paddle-manga")),
+            ["fp32", "fp32@ncnn"]
+        );
+        assert_eq!(
+            formats_for_engine(&formats, &only, Some("hayai-nova")).len(),
+            3
+        );
+        assert_eq!(formats_for_engine(&formats, &only, None).len(), 3);
+        // paddle-manga's accuracy mode on that device: only ncnn's variant to measure.
+        let set: BTreeSet<String> = formats_for_engine(&formats, &only, Some("paddle-manga"))
+            .into_iter()
+            .collect();
+        let r = resolve_mode("paddle-manga", MODE_ACCURACY, Some(&set), None, "");
+        assert_eq!(r.usable, vec!["fp32", "fp32@ncnn"]);
     }
 }

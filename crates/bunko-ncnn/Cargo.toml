@@ -1,0 +1,20 @@
+[package]
+name = "bunko-ncnn"
+description = "hayai-nova and paddle-manga on ncnn Vulkan: any GPU with a Vulkan driver, the KV cache kept on the GPU"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Links a static ncnn (Vulkan, glslang) from BUNKO_NCNN_DIR (an ncnn
+# `cmake --install` prefix, built by packaging/vulkan/build-ncnn.sh). Without
+# BUNKO_NCNN_DIR the crate builds a stub whose loads fail.
+
+[dependencies]
+bunko-vlm.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+cc = "1"

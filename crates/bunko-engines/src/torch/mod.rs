@@ -54,7 +54,9 @@ pub fn discover(backends_dir: &Path) -> Vec<PathBuf> {
             let variant = loader::read_manifest(&p)
                 .map(|m| m.variant)
                 .unwrap_or_else(|_| name.clone());
-            Some((rank(&variant), name, p))
+            // The Vulkan pack speaks the same ABI but is not a libtorch backend: it is
+            // opened beside one (`crate::vulkan`).
+            (variant != crate::vulkan::VARIANT).then(|| (rank(&variant), name, p))
         })
         .collect();
     // Best rank first; within a rank the newest name (torch version) first.
@@ -310,6 +312,7 @@ impl TorchBackend {
         }
         let opts = LoadOptions {
             tokenizer: files.tokenizer.to_string_lossy().into_owned(),
+            backend: None,
             pos_table: files
                 .pos_table
                 .as_ref()
@@ -495,6 +498,7 @@ mod tests {
             vram_mb: None,
             pci: None,
             formats: formats.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         }
     }
 
@@ -552,6 +556,7 @@ mod tests {
             .devices
             .iter()
             .map(|d| bunko_proto::Device {
+                format_engines: Default::default(),
                 id: d.id.clone(),
                 label: d.name.clone(),
                 formats: d.formats.clone(),

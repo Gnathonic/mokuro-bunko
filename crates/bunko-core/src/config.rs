@@ -38,11 +38,14 @@ pub const DEFAULT_ROLES: &[&str] = &["registered", "uploader", "inviter", "edito
 pub const QUEUE_DISPLAY_LEVELS: &[&str] = &["minimal", "normal", "detailed"];
 /// `ocr.backend`: which devices local OCR may use and so which backend pack
 /// `install-ocr` and the Docker images fetch (`cuda`: NVIDIA, `rocm`: AMD, `cpu`, `auto`:
-/// the hardware decides; `skip`: no local OCR). `webgpu`, `directml`, `coreml` are the
-/// unreleased ONNX Runtime providers.
+/// the hardware decides; `vulkan`: any GPU with a Vulkan driver through the Vulkan pack;
+/// `skip`: no local OCR). `webgpu`, `directml`, `coreml` are the unreleased ONNX Runtime
+/// providers.
 pub const OCR_BACKENDS: &[&str] = &[
-    "auto", "cuda", "rocm", "webgpu", "directml", "coreml", "cpu", "skip",
+    "auto", "cuda", "rocm", "vulkan", "webgpu", "directml", "coreml", "cpu", "skip",
 ];
+/// The Vulkan pack's runtimes (`ocr.vulkan_backends`), in the default order.
+pub const VULKAN_RUNTIMES: &[&str] = &["ncnn", "webgpu"];
 pub const DYNDNS_PROVIDERS: &[&str] = &["duckdns", "generic"];
 pub const MAX_OCR_CONCURRENCY: u32 = 8;
 
@@ -268,6 +271,8 @@ pub struct OcrConfig {
     pub autobench: bool,
     pub generations: Vec<Generation>,
     pub upgrade: UpgradeConfig,
+    /// The Vulkan pack's runtimes in order of preference (docs/rust-port/VULKAN.md).
+    pub vulkan_backends: Vec<String>,
 }
 
 impl Default for OcrConfig {
@@ -281,6 +286,7 @@ impl Default for OcrConfig {
             autobench: true,
             generations: generations::default_generations(),
             upgrade: UpgradeConfig::default(),
+            vulkan_backends: VULKAN_RUNTIMES.iter().map(|s| s.to_string()).collect(),
         }
     }
 }
@@ -703,6 +709,12 @@ impl Config {
                 &UpgradeConfig::default().replace,
             )?;
         }
+        c.ocr.vulkan_backends = get_list(
+            &s,
+            "ocr",
+            "vulkan_backends",
+            &OcrConfig::default().vulkan_backends,
+        )?;
         c.ocr.validate()?;
         let ocr_extra = leftovers(
             s,
@@ -715,6 +727,7 @@ impl Config {
                 "autobench",
                 "generations",
                 "upgrade",
+                "vulkan_backends",
             ],
         );
 
@@ -922,6 +935,9 @@ impl Config {
             "autobench": self.ocr.autobench,
             "generations": self.ocr.generations.iter().map(Generation::to_value).collect::<Vec<_>>(),
         });
+        if self.ocr.vulkan_backends != OcrConfig::default().vulkan_backends {
+            ocr["vulkan_backends"] = json!(self.ocr.vulkan_backends);
+        }
         if self.ocr.upgrade != UpgradeConfig::default() {
             ocr["upgrade"] =
                 json!({"enabled": self.ocr.upgrade.enabled, "replace": self.ocr.upgrade.replace});
@@ -1075,6 +1091,11 @@ impl Config {
             "ocr.sessions" => self.ocr.sessions = b()?,
             "ocr.local_processing" => self.ocr.local_processing = b()?,
             "ocr.autobench" => self.ocr.autobench = b()?,
+            "ocr.vulkan_backends" => {
+                let list = split_list(value);
+                validate_vulkan_backends(&list)?;
+                self.ocr.vulkan_backends = list;
+            }
             "ocr.generations" => {
                 let parsed = generations::parse_generation_list(&Value::String(value.to_string()))?;
                 self.apply_parsed_generations(parsed);
@@ -1155,6 +1176,7 @@ impl Config {
         "ocr.sessions",
         "ocr.local_processing",
         "ocr.autobench",
+        "ocr.vulkan_backends",
         "ocr.generations",
         "dyndns.enabled",
         "dyndns.provider",
@@ -1247,6 +1269,7 @@ impl OcrConfig {
                 self.poll_interval
             )));
         }
+        validate_vulkan_backends(&self.vulkan_backends)?;
         Ok(())
     }
 
@@ -1285,6 +1308,28 @@ fn validate_concurrency(slots: i64) -> Result<u32, ConfigError> {
         )));
     }
     Ok(slots as u32)
+}
+
+/// `ocr.vulkan_backends`: one or more of [`VULKAN_RUNTIMES`], each once.
+pub fn validate_vulkan_backends(list: &[String]) -> Result<(), ConfigError> {
+    if list.is_empty() {
+        return Err(invalid(format!(
+            "ocr.vulkan_backends: name at least one of {}",
+            VULKAN_RUNTIMES.join(", ")
+        )));
+    }
+    for (i, r) in list.iter().enumerate() {
+        if !VULKAN_RUNTIMES.contains(&r.as_str()) {
+            return Err(invalid(format!(
+                "ocr.vulkan_backends: unknown runtime {r} (expected {})",
+                VULKAN_RUNTIMES.join(", ")
+            )));
+        }
+        if list[..i].contains(r) {
+            return Err(invalid(format!("ocr.vulkan_backends: {r} is listed twice")));
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_trusted_proxies(list: &[String]) -> Result<(), ConfigError> {

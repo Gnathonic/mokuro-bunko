@@ -40,9 +40,13 @@ enum DecIn {
 /// The hayai-nova recognizer. One instance (two sessions) serves every thread.
 pub struct HayaiNova {
     vision: SharedSession,
-    decoder: SharedSession,
+    /// The exported decoder; None when the GPU-resident graphs replace it.
+    decoder: Option<SharedSession>,
+    gpu: Option<super::gpu::GpuDecode>,
     vis_in: Vec<&'static str>,
     vis_kind: FloatKind,
+    /// Crops per vision-graph run on a GPU ([`HayaiNova::set_gpu_vision_rows`]).
+    gpu_vision_rows: usize,
     dec_kind: FloatKind,
     dec_in: Vec<DecIn>,
     n_kv: usize,
@@ -50,13 +54,13 @@ pub struct HayaiNova {
     grid: usize,
     pos_dim: usize,
     pos_cache: PosCache,
-    emb: Vec<f32>,
-    d_model: usize,
+    pub(super) emb: Vec<f32>,
+    pub(super) d_model: usize,
     vocab: usize,
-    detok: Detokenizer,
+    pub(super) detok: Detokenizer,
     budget: usize,
-    text_cos: Vec<f32>,
-    text_sin: Vec<f32>,
+    pub(super) text_cos: Vec<f32>,
+    pub(super) text_sin: Vec<f32>,
     info: RecognizerInfo,
 }
 
@@ -89,8 +93,11 @@ impl HayaiNova {
                 "patch budget {budget} out of range"
             )));
         }
-        let vision = factory.open(&assets.vision, opts)?;
-        let decoder = factory.open(&assets.decoder, opts)?;
+        let gpu_graphs = match opts.device {
+            crate::Device::Gpu(_) => assets.gpu.as_ref(),
+            crate::Device::Cpu => None,
+        };
+        let vision = factory.open(gpu_graphs.map_or(&assets.vision, |g| &g.vision), opts)?;
 
         let mut vis_in = Vec::new();
         for n in vision.input_names() {
@@ -109,38 +116,49 @@ impl HayaiNova {
         }
         let vis_kind = FloatKind::of(vision.input_type(0), "hayai vision input")?;
 
-        let outs: Vec<String> = decoder.output_names().map(str::to_owned).collect();
-        let mut dec_in = Vec::new();
-        for n in decoder.input_names() {
-            dec_in.push(match n {
-                "embeds" => DecIn::Embeds,
-                "mask" => DecIn::Mask,
-                "cos" => DecIn::Cos,
-                "sin" => DecIn::Sin,
-                p if p.starts_with("past_") => {
-                    let want = p.replacen("past_", "present_", 1);
-                    let j = outs.iter().position(|o| *o == want).ok_or_else(|| {
-                        VlmError::Asset(format!("hayai decoder: no output {want}"))
-                    })?;
-                    DecIn::Past(j)
+        let (decoder, gpu, dec_in, n_kv, dec_kind) = match gpu_graphs {
+            Some(g) => {
+                let d = super::gpu::GpuDecode::load(factory, &g.decoder, opts)?;
+                let kind = d.kind();
+                (None, Some(d), Vec::new(), 0, kind)
+            }
+            None => {
+                let decoder = factory.open(&assets.decoder, opts)?;
+                let outs: Vec<String> = decoder.output_names().map(str::to_owned).collect();
+                let mut dec_in = Vec::new();
+                for n in decoder.input_names() {
+                    dec_in.push(match n {
+                        "embeds" => DecIn::Embeds,
+                        "mask" => DecIn::Mask,
+                        "cos" => DecIn::Cos,
+                        "sin" => DecIn::Sin,
+                        p if p.starts_with("past_") => {
+                            let want = p.replacen("past_", "present_", 1);
+                            let j = outs.iter().position(|o| *o == want).ok_or_else(|| {
+                                VlmError::Asset(format!("hayai decoder: no output {want}"))
+                            })?;
+                            DecIn::Past(j)
+                        }
+                        other => {
+                            return Err(VlmError::Asset(format!(
+                                "hayai decoder: unknown input {other}"
+                            )));
+                        }
+                    });
                 }
-                other => {
-                    return Err(VlmError::Asset(format!(
-                        "hayai decoder: unknown input {other}"
-                    )));
+                let n_kv = dec_in
+                    .iter()
+                    .filter(|d| matches!(d, DecIn::Past(_)))
+                    .count();
+                let dec_kind = FloatKind::of(decoder.input_type(0), "hayai decoder input")?;
+                if outs.first().map(String::as_str) != Some("logits") {
+                    return Err(VlmError::Asset(
+                        "hayai decoder: first output is not logits".into(),
+                    ));
                 }
-            });
-        }
-        let n_kv = dec_in
-            .iter()
-            .filter(|d| matches!(d, DecIn::Past(_)))
-            .count();
-        let dec_kind = FloatKind::of(decoder.input_type(0), "hayai decoder input")?;
-        if outs.first().map(String::as_str) != Some("logits") {
-            return Err(VlmError::Asset(
-                "hayai decoder: first output is not logits".into(),
-            ));
-        }
+                (Some(decoder), None, dec_in, n_kv, dec_kind)
+            }
+        };
 
         let pos = Npy::load(&assets.pos_table)?;
         let (np, pos_dim) = match pos.shape[..] {
@@ -198,8 +216,10 @@ impl HayaiNova {
         Ok(Self {
             vision,
             decoder,
+            gpu,
             vis_in,
             vis_kind,
+            gpu_vision_rows: BATCH,
             dec_kind,
             dec_in,
             n_kv,
@@ -216,6 +236,13 @@ impl HayaiNova {
             text_sin,
             info,
         })
+    }
+
+    /// Crops per vision-graph run on a GPU (default: the whole batch). The vision
+    /// working set grows with it (attention scores over 512 patches per crop): a 4 GB
+    /// card wants 4. Rows are independent, so the texts do not change.
+    pub fn set_gpu_vision_rows(&mut self, rows: usize) {
+        self.gpu_vision_rows = rows.clamp(1, BATCH);
     }
 
     /// The resized position table for an (hp, wp) patch grid, `(hp*wp, 768)` (spec §5.4).
@@ -263,6 +290,31 @@ impl HayaiNova {
 
     /// One generation call over up to [`BATCH`] crops; texts stripped, in order.
     fn generate(&self, crops: &[&Rgb]) -> Result<Vec<String>, VlmError> {
+        // `_webgpu`: the WebGPU lock from the vision run on (see `vision_tokens`), held
+        // across every device tensor of this call and dropped last.
+        let (vis, outs, valid, m, _webgpu) = self.vision_tokens(crops)?;
+        match &self.gpu {
+            Some(g) => g.decode(self, crops.len(), vis, &outs, &valid, m),
+            None => self.decode(crops.len(), vis, &outs, &valid, m),
+        }
+    }
+
+    /// §5.3–§5.6: preprocessing and the vision graph. Returns the vision tokens (b, m, d),
+    /// each crop's (hp, wp, ho, wo) grid, its valid token count and m.
+    #[allow(clippy::type_complexity)]
+    fn vision_tokens(
+        &self,
+        crops: &[&Rgb],
+    ) -> Result<
+        (
+            Vec<f32>,
+            Vec<(usize, usize, usize, usize)>,
+            Vec<usize>,
+            usize,
+            Option<crate::runtime::WebGpuGuard>,
+        ),
+        VlmError,
+    > {
         let b = crops.len();
         let p = self.budget;
         let dm = self.d_model;
@@ -326,10 +378,15 @@ impl HayaiNova {
         }
 
         // vision graph, in row chunks (see `VISION_ROWS_CPU`)
+        // WebGPU: one context per process, not thread-safe (see `runtime::WebGpuGuard`).
+        // Taken after the host preprocessing so another engine thread can prepare its
+        // batch while this one runs.
+        let webgpu = (self.vision.provider() == crate::runtime::Provider::WebGpu)
+            .then(crate::runtime::WebGpuGuard::lock);
         let vk = self.vis_kind;
         let chunk = match self.info.device {
             crate::Device::Cpu => VISION_ROWS_CPU,
-            crate::Device::Gpu(_) => b,
+            crate::Device::Gpu(_) => self.gpu_vision_rows,
         }
         .clamp(1, b.max(1));
         // Rows `r0..r1` of a row-major input with `per` values a row (moved out when
@@ -371,6 +428,24 @@ impl HayaiNova {
             )));
         }
 
+        Ok((vis, outs, valid, m, webgpu))
+    }
+
+    /// §5.7–§5.9 on the exported decoder: prefill, then the greedy loop with the KV cache
+    /// passed from step to step.
+    fn decode(
+        &self,
+        b: usize,
+        vis: Vec<f32>,
+        outs: &[(usize, usize, usize, usize)],
+        valid: &[usize],
+        m: usize,
+    ) -> Result<Vec<String>, VlmError> {
+        let dm = self.d_model;
+        let decoder = self
+            .decoder
+            .as_ref()
+            .ok_or_else(|| VlmError::Runtime("hayai decoder not loaded".into()))?;
         // §5.7/§5.8 prefill inputs
         let l0 = m + 1;
         let mut x = vec![0f32; b * l0 * dm];
@@ -420,7 +495,13 @@ impl HayaiNova {
         for _ in 0..self.n_kv {
             past.push(floats(dk, &[b, KV_HEADS, 0, HEAD_DIM], Vec::new())?);
         }
-        let alloc = self.decoder.device_allocator()?;
+        // Device-resident KV for CUDA only: on WebGPU this loop's growing presents are
+        // left to ONNX Runtime (the GPU-resident graphs in `gpu.rs` replace it there).
+        let alloc = if decoder.provider() == crate::runtime::Provider::WebGpu {
+            None
+        } else {
+            decoder.device_allocator()?
+        };
         let mut seqlen = 0usize; // past length
         let mut step_in = (
             floats(dk, &[b, l0, dm], x)?,
@@ -455,7 +536,7 @@ impl HayaiNova {
                     )?));
                 }
             }
-            let mut out = self.decoder.run(&feeds, pre)?;
+            let mut out = decoder.run(&feeds, pre)?;
             drop(feeds);
             let logits = to_f32(&out[0])?;
             if logits.len() != b * self.vocab {

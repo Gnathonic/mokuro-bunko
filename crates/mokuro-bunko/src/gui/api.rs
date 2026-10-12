@@ -258,7 +258,7 @@ async fn ocr_request(State(state): S, Json(b): Json<OcrRequestBody>) -> Response
             force: b.force,
         };
         if let Some(v) = &req.variant
-            && !["cpu", "cu130", "rocm7.1"].contains(&v.as_str())
+            && !["cpu", "cu130", "rocm7.1", "vulkan"].contains(&v.as_str())
         {
             return bad(format!("variant: {v}?"));
         }
@@ -745,11 +745,13 @@ async fn ocr_hardware(State(state): S) -> Response {
                 "nvidia_driver": hw.nvidia_driver,
                 "nvidia_gpus": hw.nvidia_gpus,
                 "amd_gfx": hw.amd_gfx,
+                "vulkan_gpus": hw.vulkan_gpus.iter().map(crate::hwdetect::Adapter::label).collect::<Vec<_>>(),
+                "vulkan_pack": crate::hwdetect::vulkan_wanted("auto", &hw, bunko_update::TARGET),
                 "hidden": hw.hidden,
                 "auto_variant": choice.variant,
                 "reason": choice.reason,
                 "hint": choice.hint,
-                "variants": ["cpu", "cu130", "rocm7.1"],
+                "variants": ["cpu", "cu130", "rocm7.1", "vulkan"],
                 "packs": packs,
                 // The offline OCR files shipped with this app (macOS disk image):
                 // install-ocr takes them when no folder is given.
@@ -1008,7 +1010,7 @@ pub fn job_args(r: &JobRequest, processor_config: &Path) -> Result<(Vec<String>,
                 a.push("--list".into());
             }
             if let Some(v) = r.variant.as_deref().filter(|v| !v.is_empty()) {
-                if !["auto", "cpu", "cu130", "rocm7.1"].contains(&v) {
+                if !["auto", "cpu", "cu130", "rocm7.1", "vulkan"].contains(&v) {
                     return Err(format!("variant: {v}?"));
                 }
                 a.extend(s(&["--variant", v]));

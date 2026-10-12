@@ -150,11 +150,11 @@
     renderEngineNote();
     try {
       const h = await get('/app/api/ocr/hardware');
-      const gpus = (h.nvidia_gpus || []).concat(h.amd_gfx || []);
+      const gpus = (h.nvidia_gpus || []).concat(h.amd_gfx || [], h.vulkan_gpus || []);
       const packs = h.packs.filter((p) => p.role !== 'server');
       $('ocr-kv').innerHTML =
         '<dt>This machine</dt><dd>' + esc(h.target) + (gpus.length ? ' · ' + gpus.map(esc).join(', ') : ' · no GPU found') + '</dd>' +
-        '<dt>Best pack</dt><dd>' + esc(h.auto_variant) + ' — ' + esc(h.reason) + '</dd>' +
+        '<dt>Best pack</dt><dd>' + esc(h.auto_variant) + ' — ' + esc(h.reason) + (h.vulkan_pack ? '<br>vulkan — ' + esc(h.vulkan_pack) : '') + '</dd>' +
         '<dt>Installed</dt><dd>' + (packs.length
           ? packs.map((p) => esc(p.variant) + ' (' + esc(p.dir) + ')' + (p.complete ? '' : ' <span class="badge badge--warning">incomplete</span>')).join('<br>')
           : 'none — <a href="/app/setup/ocr">install one</a>') + '</dd>';

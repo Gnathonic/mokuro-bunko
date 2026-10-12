@@ -13,11 +13,12 @@
     const g = [];
     if (hw.nvidia_driver != null) g.push('NVIDIA ' + (hw.nvidia_gpus.length ? hw.nvidia_gpus.join(', ') : 'driver ' + hw.nvidia_driver));
     if (hw.amd_gfx.length) g.push('AMD ' + hw.amd_gfx.join(', '));
+    if (hw.vulkan_gpus && hw.vulkan_gpus.length) g.push(hw.vulkan_gpus.join(', '));
     return g.join('; ');
   }
 
   // A GPU the automatic pack uses (not only one that is present).
-  const usableGpu = (hw) => !!hw && hw.auto_variant !== 'cpu';
+  const usableGpu = (hw) => !!hw && (hw.auto_variant !== 'cpu' || !!hw.vulkan_pack);
 
   // The OCR step: hardware, the pack, the advanced options. `el` gets the fields.
   function ocrStep(el, role, hw) {
@@ -48,7 +49,7 @@
     const mine = (hw.packs || []).filter((p) => p.role === role || p.role === 'bundled');
     $('ocr-hw').innerHTML =
       '<dt>GPU</dt><dd>' + esc(g || 'none found') + '</dd>' +
-      '<dt>Recommended</dt><dd><strong>' + esc(hw.auto_variant) + '</strong> — ' + esc(hw.reason) + '</dd>' +
+      '<dt>Recommended</dt><dd><strong>' + esc(hw.auto_variant) + '</strong> — ' + esc(hw.reason) + (hw.vulkan_pack ? '<br><strong>vulkan</strong> — ' + esc(hw.vulkan_pack) : '') + '</dd>' +
       (hw.bundled_offline ? '<dt>Source</dt><dd>Bundled with this app (nothing to download)</dd>' : '') +
       (mine.length ? '<dt>Installed</dt><dd>' + mine.map((p) => esc(p.name) + (p.complete ? '' : ' (incomplete)')).join(', ') + '</dd>' : '');
     $('ocr-hint').hidden = !hw.hint;
@@ -57,7 +58,7 @@
     $('ocr-variant').querySelector('option[value="auto"]').textContent = 'Automatic (' + hw.auto_variant + ')';
     const cpuNote = () => {
       const v = $('ocr-variant').value;
-      const cpu = v === 'cpu' || (v === 'auto' && hw.auto_variant === 'cpu');
+      const cpu = v === 'cpu' || (v === 'auto' && hw.auto_variant === 'cpu' && !hw.vulkan_pack);
       $('ocr-cpu-note').hidden = !cpu;
       $('ocr-cpu-note').textContent = cpu ? PADDLE_CPU_NOTE : '';
     };

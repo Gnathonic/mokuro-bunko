@@ -42,6 +42,8 @@ pub mod session;
 pub mod stages;
 #[cfg(feature = "torch")]
 pub mod torch;
+#[cfg(feature = "torch")]
+pub mod vulkan;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
@@ -82,6 +84,9 @@ pub struct EngineConfig {
     /// [`EngineConfig::backends_dir`] (a processor also uses a pack `install-ocr` put in
     /// the library's default storage).
     pub fallback_backends: Vec<PathBuf>,
+    /// `ocr.vulkan_backends`: the Vulkan pack's runtimes in order of preference
+    /// (default `ncnn`, `webgpu`; docs/rust-port/VULKAN.md).
+    pub vulkan_backends: Vec<String>,
 }
 
 impl EngineConfig {
@@ -92,6 +97,7 @@ impl EngineConfig {
             jobs: 1,
             generator: format!("mokuro-bunko {}", env!("CARGO_PKG_VERSION")),
             fallback_backends: Vec::new(),
+            vulkan_backends: default_vulkan_backends(),
         }
     }
 
@@ -140,6 +146,11 @@ impl EngineConfig {
             Manifest::builtin(),
         )
     }
+}
+
+/// `ocr.vulkan_backends` when unset: ncnn, then WebGPU.
+pub fn default_vulkan_backends() -> Vec<String> {
+    ["ncnn", "webgpu"].into_iter().map(String::from).collect()
 }
 
 /// What a default row of an engine runs on here ([`EnginePipeline::default_need`]).
@@ -245,14 +256,17 @@ impl EnginePipeline {
     /// The devices this machine offers under the configured backend: the libtorch
     /// pack's when one is loaded, else ONNX Runtime's.
     pub fn devices(&self) -> Vec<Device> {
+        #[cfg_attr(not(feature = "torch"), allow(unused_mut))]
+        let mut devices: Vec<Device> = Vec::new();
         #[cfg(feature = "torch")]
         if let Ok(tb) = self.torch() {
-            return tb
+            devices = tb
                 .report
                 .devices
                 .iter()
                 .filter(|d| self.config.backend.allows(&d.kind))
                 .map(|d| Device {
+                    format_engines: Default::default(),
                     id: d.id.clone(),
                     label: torch::label(d),
                     formats: d.formats.clone(),
@@ -261,7 +275,277 @@ impl EnginePipeline {
                 })
                 .collect();
         }
-        runtime::devices(self.config.backend)
+        if devices.is_empty() {
+            devices = runtime::devices(self.config.backend);
+        }
+        #[cfg(feature = "torch")]
+        for (id, p) in self.vulkan_pairings() {
+            if p.torch_id.is_none() {
+                devices.push(Device {
+                    format_engines: Default::default(),
+                    id,
+                    label: format!("{} (Vulkan)", torch::label(&p.entry)),
+                    formats: vec!["fp32".into()],
+                    provider: Some("vulkan".into()),
+                    arch: Some(p.entry.arch.clone()),
+                });
+            }
+        }
+        devices
+    }
+
+    /// The Vulkan pack of this process, when the configured backend may use it.
+    #[cfg(feature = "torch")]
+    pub fn vulkan(&self) -> Result<Arc<vulkan::VulkanBackend>, String> {
+        if !matches!(self.config.backend, Backend::Auto | Backend::Vulkan) {
+            return Err(format!(
+                "ocr.backend {:?} does not use the Vulkan pack",
+                self.config.backend
+            ));
+        }
+        vulkan::backend_in(&self.config.backends_dirs())
+    }
+
+    /// The Vulkan pack's GPUs with their catalog ids: a GPU libtorch also drives keeps
+    /// libtorch's id (its runtimes are more candidates of that device); the others are
+    /// `gpu:<n>` numbered after the libtorch GPUs, in the pack's order.
+    #[cfg(feature = "torch")]
+    pub fn vulkan_pairings(&self) -> Vec<(String, vulkan::Pairing)> {
+        let Ok(vb) = self.vulkan() else {
+            return Vec::new();
+        };
+        let torch: Vec<bunko_torch::abi::DeviceEntry> = self
+            .torch()
+            .map(|tb| {
+                tb.report
+                    .devices
+                    .iter()
+                    .filter(|d| self.config.backend.allows(&d.kind))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut next = torch.iter().filter(|d| d.kind != "cpu").count();
+        vb.pairings(self.config.backend, &torch)
+            .into_iter()
+            .map(|p| {
+                let id = match &p.torch_id {
+                    Some(t) => t.clone(),
+                    None => {
+                        next += 1;
+                        format!("gpu:{}", next - 1)
+                    }
+                };
+                (id, p)
+            })
+            .collect()
+    }
+
+    /// The Vulkan pairing of a placement's device.
+    #[cfg(feature = "torch")]
+    fn vulkan_pairing(&self, placement: &Placement) -> Option<vulkan::Pairing> {
+        self.vulkan_pairings()
+            .into_iter()
+            .find(|(id, _)| *id == placement.device)
+            .map(|(_, p)| p)
+    }
+
+    /// The Vulkan runtimes that may run `engine` on a pairing, in `ocr.vulkan_backends`
+    /// order: served by the pack there, not excluded ([`vulkan::EXCEPTIONS`]), with no
+    /// failed self-test, their files here or downloadable. A forced runtime is alone.
+    /// Each with its verdict key and graph directory.
+    #[cfg(feature = "torch")]
+    fn vulkan_runtimes(&self, engine: &str, p: &vulkan::Pairing) -> Vec<vulkan::Candidate> {
+        self.vulkan_ranked(engine, p).0
+    }
+
+    /// The Vulkan runtimes of `engine` on a pairing kept as fallbacks only
+    /// ([`vulkan::Action::FallbackOnly`]): not benchmarked, not fetched ahead.
+    #[cfg(feature = "torch")]
+    fn vulkan_fallbacks(&self, engine: &str, p: &vulkan::Pairing) -> Vec<vulkan::Candidate> {
+        self.vulkan_ranked(engine, p).1
+    }
+
+    /// `(candidates, fallbacks)` of `engine` on a pairing, each in `ocr.vulkan_backends`
+    /// order, by [`vulkan::standing`]; excluded runtimes and ones with a failed verdict or
+    /// no files obtainable are in neither.
+    #[cfg(feature = "torch")]
+    fn vulkan_ranked(
+        &self,
+        engine: &str,
+        p: &vulkan::Pairing,
+    ) -> (Vec<vulkan::Candidate>, Vec<vulkan::Candidate>) {
+        let Ok(vb) = self.vulkan() else {
+            return (Vec::new(), Vec::new());
+        };
+        let all = vb.candidates(
+            &self.config.vulkan_backends,
+            engine,
+            &p.entry,
+            self.store.locate_vulkan_golden(engine).as_deref(),
+            |rt| self.store.locate_vulkan(engine, rt),
+        );
+        let usable = |c: &vulkan::Candidate| {
+            self.store.vulkan_obtainable(engine, &c.runtime)
+                && vb.store.verdict(&c.key).is_none_or(|v| v.pass)
+        };
+        let (mut ranked, mut fallback) = (Vec::new(), Vec::new());
+        for c in all {
+            match self.vulkan_standing(&c.runtime, engine, p) {
+                vulkan::Standing::Forced(_) if usable(&c) => return (vec![c], Vec::new()),
+                vulkan::Standing::Candidate if usable(&c) => ranked.push(c),
+                vulkan::Standing::FallbackOnly(_) if usable(&c) => fallback.push(c),
+                _ => {}
+            }
+        }
+        (ranked, fallback)
+    }
+
+    /// A runtime's standing on a pairing ([`vulkan::EXCEPTIONS`]).
+    #[cfg(feature = "torch")]
+    fn vulkan_standing(
+        &self,
+        runtime: &str,
+        engine: &str,
+        p: &vulkan::Pairing,
+    ) -> vulkan::Standing {
+        vulkan::standing(
+            vulkan::EXCEPTIONS,
+            runtime,
+            engine,
+            std::env::consts::OS,
+            vulkan::vendor_of(&p.entry),
+            p.gfx.as_deref(),
+            p.torch_id.is_some(),
+        )
+    }
+
+    /// The formats the Vulkan runtimes add on a placement: on a GPU of their own, `fp32`
+    /// (the first runtime) and, unless `ocr.backend: vulkan` pins the order, `fp32@<rt>`
+    /// for each other one; beside libtorch, `fp32@<rt>` for each (benchmarked against
+    /// libtorch's own formats).
+    #[cfg(feature = "torch")]
+    fn vulkan_formats(&self, engine: &str, placement: &Placement) -> Vec<&'static str> {
+        let Some(p) = self.vulkan_pairing(placement) else {
+            return Vec::new();
+        };
+        let rts = self.vulkan_runtimes(engine, &p);
+        let pinned = self.config.backend == Backend::Vulkan;
+        if p.torch_id.is_some() {
+            return rts.iter().map(|c| vulkan::qualified(&c.runtime)).collect();
+        }
+        // Fallbacks alone still make the GPU usable (they are tried in order).
+        if rts.is_empty() && !self.vulkan_fallbacks(engine, &p).is_empty() {
+            return vec!["fp32"];
+        }
+        let mut out = Vec::new();
+        for (i, c) in rts.iter().enumerate() {
+            if i == 0 {
+                out.push("fp32");
+            } else if !pinned {
+                out.push(vulkan::qualified(&c.runtime));
+            }
+        }
+        out
+    }
+
+    /// What the Vulkan route does on this machine, for `doctor` and the admin panel:
+    /// per GPU of the pack, each runtime × engine as a candidate (with its self-test
+    /// state) or skipped (with why). Opens the pack (not the runtimes' models).
+    #[cfg(feature = "torch")]
+    pub fn vulkan_report(&self) -> vulkan::Report {
+        let mode = match self.config.backend {
+            Backend::Auto => "benchmark",
+            Backend::Vulkan => "pinned",
+            _ => "off",
+        };
+        let vb = match self.vulkan() {
+            Ok(vb) => vb,
+            Err(e) => {
+                return vulkan::Report {
+                    mode,
+                    error: Some(e),
+                    ..Default::default()
+                };
+            }
+        };
+        let mut devices = Vec::new();
+        for (id, p) in self.vulkan_pairings() {
+            let mut runtimes = Vec::new();
+            for engine in [models::HAYAI, models::PADDLE] {
+                let cands = vb.candidates(
+                    &self.config.vulkan_backends,
+                    engine,
+                    &p.entry,
+                    self.store.locate_vulkan_golden(engine).as_deref(),
+                    |rt| self.store.locate_vulkan(engine, rt),
+                );
+                let usable: Vec<String> = self
+                    .vulkan_runtimes(engine, &p)
+                    .into_iter()
+                    .map(|c| c.runtime)
+                    .collect();
+                for rt in &self.config.vulkan_backends {
+                    let c = cands.iter().find(|c| &c.runtime == rt);
+                    let v = c.and_then(|c| vb.store.verdict(&c.key));
+                    let standing = self.vulkan_standing(rt, engine, &p);
+                    let (status, reason) = if c.is_none() {
+                        (
+                            "skipped",
+                            format!("the pack's {rt} does not run on this GPU"),
+                        )
+                    } else if let vulkan::Standing::Excluded(why) = standing {
+                        ("skipped", why.to_string())
+                    } else if !self.store.vulkan_obtainable(engine, rt) {
+                        (
+                            "skipped",
+                            format!("no {engine} graphs for {rt} here or in the release"),
+                        )
+                    } else if let Some(v) = v.as_ref().filter(|v| !v.pass) {
+                        ("skipped", v.reason.clone())
+                    } else if let vulkan::Standing::FallbackOnly(why) = standing {
+                        ("fallback-only", why.to_string())
+                    } else if !usable.contains(rt) {
+                        ("skipped", "another runtime is forced here".to_string())
+                    } else if let Some(v) = v {
+                        ("candidate", v.reason)
+                    } else {
+                        (
+                            "candidate",
+                            "not self-tested yet (tested when first used)".to_string(),
+                        )
+                    };
+                    runtimes.push(vulkan::RuntimeStatus {
+                        runtime: rt.clone(),
+                        engine,
+                        status,
+                        reason,
+                    });
+                }
+            }
+            devices.push(vulkan::DeviceReport {
+                id,
+                name: p.entry.name.clone(),
+                driver: p.entry.driver.clone().unwrap_or_default(),
+                radv: p
+                    .entry
+                    .driver
+                    .as_deref()
+                    .is_some_and(|d| d.to_ascii_lowercase().starts_with("radv")),
+                beside: p.torch_id.as_ref().map(|_| "libtorch".to_string()),
+                gfx: p.gfx.clone(),
+                runtimes,
+            });
+        }
+        vulkan::Report {
+            mode,
+            pack: Some(format!("{} ({})", vb.pack.dir.display(), vb.report.torch)),
+            order: self.config.vulkan_backends.clone(),
+            warnings: vb.report.warnings.clone(),
+            crashes: vb.crashes.clone(),
+            devices,
+            error: None,
+        }
     }
 
     /// The devices for the catalog: with the libtorch backend each device lists only the
@@ -273,10 +557,37 @@ impl EnginePipeline {
         let mut devices = self.devices();
         #[cfg(feature = "torch")]
         if let Ok(tb) = self.torch() {
-            for d in &mut devices {
+            for d in devices
+                .iter_mut()
+                .filter(|d| d.provider.as_deref() != Some("vulkan"))
+            {
                 d.formats = torch::runnable_formats(&tb.report, &d.id, |engine, p, targets| {
                     self.store.torch_package_obtainable(engine, p, targets)
                 });
+            }
+        }
+        // The Vulkan runtimes' formats (either engine), after the device's own.
+        #[cfg(feature = "torch")]
+        for d in &mut devices {
+            if d.id == "cpu" {
+                continue;
+            }
+            let pl = runtime::place(Some(&d.id), std::slice::from_ref(&*d)).0;
+            let mut by: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
+            for engine in [models::HAYAI, models::PADDLE] {
+                for f in self.vulkan_formats(engine, &pl) {
+                    if !d.formats.iter().any(|x| x == f) {
+                        d.formats.push(f.to_string());
+                    }
+                    by.entry(f).or_default().push(engine.to_string());
+                }
+            }
+            // A Vulkan format only some engines run here (WebGPU has no paddle-manga):
+            // the library and the benchmark offer it to those engines only.
+            for (f, engines) in by {
+                if f.contains('@') && engines.len() < 2 {
+                    d.format_engines.insert(f.to_string(), engines);
+                }
             }
         }
         devices
@@ -293,11 +604,21 @@ impl EnginePipeline {
     /// The formats `engine` can run in on `placement`: what the device computes in
     /// and what this machine has (or may download) the files for.
     fn formats(&self, engine: &str, placement: &runtime::Placement) -> Vec<&'static str> {
+        if placement.provider == "vulkan" {
+            #[cfg(feature = "torch")]
+            return self.vulkan_formats(engine, placement);
+            #[cfg(not(feature = "torch"))]
+            return Vec::new();
+        }
         #[cfg(feature = "torch")]
         if let Ok(tb) = self.torch() {
-            return torch::device_formats(&tb.report, &placement.device, |p, targets| {
+            let mut f = torch::device_formats(&tb.report, &placement.device, |p, targets| {
                 self.store.torch_package_obtainable(engine, p, targets)
             });
+            if placement.is_gpu() {
+                f.extend(self.vulkan_formats(engine, placement));
+            }
+            return f;
         }
         let _ = engine;
         precision::supported(placement.is_gpu()).to_vec()
@@ -349,6 +670,10 @@ impl EnginePipeline {
             return None;
         }
         #[cfg(feature = "torch")]
+        if !self.vulkan_pairings().is_empty() {
+            return None;
+        }
+        #[cfg(feature = "torch")]
         let why = self.torch().err().unwrap_or_default();
         #[cfg(not(feature = "torch"))]
         let why = "this build has no recognizer backend".to_string();
@@ -382,6 +707,16 @@ impl EnginePipeline {
                 !self.formats(engine, &placement).is_empty()
             });
         }
+        // No libtorch pack: the Vulkan pack's GPUs alone (ocr.backend vulkan beside no
+        // CPU pack) still run the recognizers.
+        #[cfg(feature = "torch")]
+        if !self.vulkan_pairings().is_empty() {
+            return models::obtainable(&self.store, &models::vulkan_host_ids(engine, &[]))
+                && devices.iter().any(|d| {
+                    let (placement, _) = runtime::place(Some(&d.id), devices);
+                    placement.provider == "vulkan" && !self.formats(engine, &placement).is_empty()
+                });
+        }
         let _ = devices;
         cfg!(feature = "onnx-vlm")
             && models::obtainable(&self.store, &models::engine_ids(engine, Precision::Fp32))
@@ -399,7 +734,12 @@ impl EnginePipeline {
     /// runs on here, as [`default_need`](Self::default_need).
     #[cfg(feature = "torch")]
     pub fn need_for(&self, engine: &str, mode: &str) -> Result<EngineNeed, String> {
-        let tb = self.torch()?;
+        // Without a libtorch pack the Vulkan pack's GPUs still have a plan.
+        let tb = match self.torch() {
+            Ok(tb) => Some(tb),
+            Err(_) if !self.vulkan_pairings().is_empty() => None,
+            Err(e) => return Err(e),
+        };
         let engine: &'static str = match engine {
             models::HAYAI => models::HAYAI,
             models::PADDLE => models::PADDLE,
@@ -425,7 +765,10 @@ impl EnginePipeline {
             .unwrap_or(Precision::Fp32);
         Ok(EngineNeed {
             engine,
-            targets: Self::torch_targets(&tb, &placement.device, precision),
+            targets: tb
+                .as_ref()
+                .map(|tb| Self::torch_targets(tb, &placement.device, precision))
+                .unwrap_or_default(),
             device: placement.device,
             label,
             precision,
@@ -465,12 +808,25 @@ impl EnginePipeline {
                 _ => continue,
             };
             let r = self.need_for(e, mode).and_then(|need| {
+                #[cfg(feature = "torch")]
+                if self.is_vulkan_device(&need.device) {
+                    return self.prefetch_vulkan(e, need);
+                }
                 let pkg = self
                     .store
                     .ensure_torch_package(e, need.precision.as_str(), &need.targets)
                     .map_err(|err| err.to_string())?;
                 let files =
                     models::torch_host_files(&self.store, e, need.precision, pkg.dir.clone())?;
+                // The Vulkan runtimes beside libtorch on this GPU are benchmark candidates
+                // of every fp32 row (and of the balanced/speed modes): fetched now too,
+                // smallest first, so a benchmark never waits on them.
+                #[cfg(feature = "torch")]
+                if need.precision == Precision::Fp32
+                    || bunko_sched::precision::is_benched(&precision::normalize_mode(mode))
+                {
+                    self.fetch_vulkan_beside(e, &need.device);
+                }
                 Ok(Prefetched {
                     need,
                     package: pkg.dir,
@@ -484,6 +840,117 @@ impl EnginePipeline {
             out.push((e, r));
         }
         out
+    }
+
+    /// Fetch the graphs of the Vulkan runtimes paired with libtorch GPU `device` for
+    /// `engine` (smallest first) and the goldens; failures are logged (the runtime then
+    /// is no candidate until its files are here).
+    #[cfg(feature = "torch")]
+    fn fetch_vulkan_beside(&self, engine: &str, device: &str) {
+        let pl = runtime::place(Some(device), &self.devices()).0;
+        let Some(pairing) = self.vulkan_pairing(&pl) else {
+            return;
+        };
+        let size = |rt: &str| -> u64 {
+            self.store
+                .vulkan_ids(engine, rt)
+                .iter()
+                .filter_map(|id| self.store.manifest().get(id))
+                .map(|f| f.size)
+                .sum()
+        };
+        let mut rts = self.vulkan_runtimes(engine, &pairing);
+        rts.sort_by_key(|c| size(&c.runtime));
+        for c in rts.iter().filter(|c| c.model_dir.is_none()) {
+            info!(
+                "{engine}: fetching the {} graphs ({:.0} MB), a benchmark candidate on {device}",
+                c.runtime,
+                size(&c.runtime) as f64 / 1e6
+            );
+            if let Err(e) = self.store.ensure_vulkan(engine, &c.runtime) {
+                warn!("{engine} graphs for {}: {e}", c.runtime);
+            }
+        }
+        if !rts.is_empty() {
+            let names: Vec<&str> = rts.iter().map(|c| c.runtime.as_str()).collect();
+            if let Err(e) = self
+                .store
+                .ensure_vulkan_golden(engine)
+                .map_err(|e| e.to_string())
+                .and_then(|_| models::vulkan_host_files(&self.store, engine, &names))
+            {
+                warn!("{engine}: Vulkan host files: {e}");
+            }
+        }
+    }
+
+    /// Whether catalog device `id` is a GPU only the Vulkan pack drives.
+    #[cfg(feature = "torch")]
+    fn is_vulkan_device(&self, id: &str) -> bool {
+        self.devices()
+            .iter()
+            .any(|d| d.id == id && d.provider.as_deref() == Some("vulkan"))
+    }
+
+    /// [`prefetch_rows`](Self::prefetch_rows) on a Vulkan-only GPU: every candidate
+    /// runtime's graphs (smallest download first), the self-test goldens and the host
+    /// files. The package reported is the first runtime's.
+    #[cfg(feature = "torch")]
+    fn prefetch_vulkan(
+        &self,
+        engine: &'static str,
+        need: EngineNeed,
+    ) -> Result<Prefetched, String> {
+        let pl = runtime::place(Some(&need.device), &self.devices()).0;
+        let pairing = self
+            .vulkan_pairing(&pl)
+            .ok_or_else(|| format!("{} has no Vulkan runtime here", need.device))?;
+        let mut rts = self.vulkan_runtimes(engine, &pairing);
+        let size = |rt: &str| -> u64 {
+            self.store
+                .vulkan_ids(engine, rt)
+                .iter()
+                .filter_map(|id| self.store.manifest().get(id))
+                .map(|f| f.size)
+                .sum()
+        };
+        rts.sort_by_key(|c| size(&c.runtime));
+        let mut first = None;
+        let mut errors = Vec::new();
+        for c in &rts {
+            info!(
+                "{engine}: fetching the {} graphs ({:.0} MB)",
+                c.runtime,
+                size(&c.runtime) as f64 / 1e6
+            );
+            match self.store.ensure_vulkan(engine, &c.runtime) {
+                Ok(d) => {
+                    first.get_or_insert((d, c.runtime.clone()));
+                }
+                Err(e) => errors.push(format!("{}: {e}", c.runtime)),
+            }
+        }
+        let (package, rt) = first.ok_or_else(|| {
+            format!(
+                "no Vulkan runtime's {engine} graphs could be fetched: {}",
+                errors.join("; ")
+            )
+        })?;
+        if let Err(e) = self.store.ensure_vulkan_golden(engine) {
+            warn!("{engine}: no Vulkan self-test goldens ({e})");
+        }
+        let names: Vec<&str> = rts.iter().map(|c| c.runtime.as_str()).collect();
+        let (tokenizer, pos_table, embeddings) =
+            models::vulkan_host_files(&self.store, engine, &names)?;
+        Ok(Prefetched {
+            need,
+            package,
+            target: format!("vulkan/{rt}"),
+            host_files: [Some(tokenizer), pos_table, embeddings]
+                .into_iter()
+                .flatten()
+                .collect(),
+        })
     }
 
     /// Whether the default rows of `engine` can run here without a download (`doctor`);
@@ -518,6 +985,36 @@ impl EnginePipeline {
     #[cfg(feature = "torch")]
     pub fn package_plan(&self, engine: &str, mode: &str) -> Result<PackagePlan, String> {
         let need = self.need_for(engine, mode)?;
+        if self.is_vulkan_device(&need.device) {
+            let pl = runtime::place(Some(&need.device), &self.devices()).0;
+            let rt = self
+                .vulkan_pairing(&pl)
+                .and_then(|p| self.vulkan_runtimes(need.engine, &p).into_iter().next())
+                .map(|c| c.runtime);
+            let rts: Vec<String> = self
+                .vulkan_pairing(&pl)
+                .map(|p| {
+                    self.vulkan_runtimes(need.engine, &p)
+                        .into_iter()
+                        .map(|c| c.runtime)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let names: Vec<&str> = rts.iter().map(String::as_str).collect();
+            let host_ids = models::vulkan_host_ids(need.engine, &names);
+            return Ok(PackagePlan {
+                target: rt.as_ref().map(|r| format!("vulkan/{r}")),
+                package_ids: rt
+                    .as_deref()
+                    .map(|r| self.store.vulkan_ids(need.engine, r))
+                    .unwrap_or_default(),
+                package: rt
+                    .as_deref()
+                    .and_then(|r| self.store.locate_vulkan(need.engine, r)),
+                host_ids,
+                need,
+            });
+        }
         let precision = need.precision.as_str();
         let present = self
             .store
@@ -608,10 +1105,45 @@ impl EnginePipeline {
         spec: &RowSpec,
         placement: &Placement,
         precision: Precision,
+        backend: Option<&str>,
     ) -> Result<Arc<dyn Recognizer>, String> {
         #[cfg(feature = "torch")]
+        if placement.provider == "vulkan" {
+            return self.vulkan_recognizer(spec, placement, precision, backend);
+        }
+        // A libtorch GPU's format on one of the Vulkan runtimes (`fp32@ncnn`); when none
+        // of them starts there, libtorch's own fp32 serves.
+        #[cfg(feature = "torch")]
+        if let Some(rt) = backend {
+            match self.vulkan_recognizer(spec, placement, precision, Some(rt)) {
+                Ok(r) => return Ok(r),
+                Err(e) => warn!(
+                    "{} on {} with {rt}: {e}; libtorch serves",
+                    spec.engine, placement.device
+                ),
+            }
+        }
+        #[cfg(not(feature = "torch"))]
+        let _ = backend;
+        #[cfg(feature = "torch")]
         if let Ok(tb) = self.torch() {
-            return self.torch_recognizer(&tb, spec, placement, precision);
+            let r = self.torch_recognizer(&tb, spec, placement, precision);
+            // libtorch cannot start on this GPU: its Vulkan runtimes (the candidates, then
+            // the fallbacks, fetched now) before the session falls back to the CPU.
+            if let Err(e) = &r
+                && placement.is_gpu()
+                && precision == Precision::Fp32
+                && self.vulkan_pairing(placement).is_some()
+            {
+                warn!(
+                    "{} on {}: libtorch failed ({e}); trying its Vulkan runtimes",
+                    spec.engine, placement.device
+                );
+                if let Ok(v) = self.vulkan_recognizer(spec, placement, precision, None) {
+                    return Ok(v);
+                }
+            }
+            return r;
         }
         #[cfg(feature = "onnx-vlm")]
         {
@@ -624,6 +1156,103 @@ impl EnginePipeline {
                 .no_recognizer_backend(&spec.engine)
                 .unwrap_or_else(|| format!("{} has no recognizer here", spec.engine)))
         }
+    }
+
+    /// A recognizer on a Vulkan GPU: the first runtime of `ocr.vulkan_backends` that
+    /// loads and passes the self-test there ([`vulkan`]); fp32 only.
+    #[cfg(feature = "torch")]
+    fn vulkan_recognizer(
+        &self,
+        spec: &RowSpec,
+        placement: &Placement,
+        precision: Precision,
+        backend: Option<&str>,
+    ) -> Result<Arc<dyn Recognizer>, String> {
+        let engine: &'static str = match spec.engine.as_str() {
+            models::HAYAI => models::HAYAI,
+            models::PADDLE => models::PADDLE,
+            other => return Err(format!("{other} has no recognizer")),
+        };
+        if precision != Precision::Fp32 {
+            return Err(format!(
+                "the Vulkan runtimes compute in fp32 only (asked for {precision})"
+            ));
+        }
+        let vb = self.vulkan()?;
+        let pairing = self
+            .vulkan_pairing(placement)
+            .ok_or_else(|| format!("{} has no Vulkan runtime here", placement.device))?;
+        let dev = pairing.entry.clone();
+        // The goldens first: the verdicts are keyed on them.
+        let golden = match self.store.ensure_vulkan_golden(engine) {
+            Ok(p) => Some(vulkan::Golden::load(&p)?),
+            Err(e) => {
+                warn!("{engine}: no Vulkan self-test goldens ({e})");
+                None
+            }
+        };
+        // Fetch the graphs of every runtime that may be tried (a fallback must not wait
+        // for a download in the middle of a volume), then key them on the files.
+        for c in self.vulkan_runtimes(engine, &pairing) {
+            if c.model_dir.is_none()
+                && let Err(e) = self.store.ensure_vulkan(engine, &c.runtime)
+            {
+                warn!("{engine} graphs for {}: {e}", c.runtime);
+            }
+        }
+        // The runtime the format names first (a benchmarked `fp32@<rt>`), then the other
+        // candidates, then the fallbacks (fetched only when reached).
+        let (mut candidates, fallbacks) = self.vulkan_ranked(engine, &pairing);
+        let ranked = candidates.len();
+        candidates.extend(fallbacks);
+        if let Some(rt) = backend {
+            match candidates.iter().position(|c| c.runtime == rt) {
+                Some(i) => {
+                    let c = candidates.remove(i);
+                    candidates.insert(0, c);
+                }
+                None => return Err(format!("{rt} cannot run {engine} on {} here", dev.name)),
+            }
+        }
+        // Only what the runtimes that may read here load (not libtorch's host files): the
+        // ranked ones' fetched now, a fallback's when it is reached.
+        let all: Vec<&str> = candidates.iter().map(|c| c.runtime.as_str()).collect();
+        let now: Vec<&str> =
+            all[..ranked.max(usize::from(backend.is_some())).min(all.len())].to_vec();
+        if !now.is_empty() {
+            models::vulkan_host_files(&self.store, engine, &now)?;
+        }
+        let (tokenizer, pos_table, embeddings) =
+            models::vulkan_host_paths(&self.store, engine, &all);
+        let tokenizer = tokenizer.ok_or_else(|| format!("{engine} has no tokenizer"))?;
+        let store = self.store.clone();
+        let fetch: Arc<vulkan::Fetch> = Arc::new(move |rt: &str| {
+            info!("{engine}: fetching the {rt} files (a fallback is needed now)");
+            models::vulkan_host_files(&store, engine, &[rt])?;
+            store.ensure_vulkan(engine, rt).map_err(|e| e.to_string())
+        });
+        let opts = bunko_torch::abi::LoadOptions {
+            tokenizer: tokenizer.to_string_lossy().into_owned(),
+            backend: None,
+            pos_table: pos_table.map(|p| p.to_string_lossy().into_owned()),
+            embeddings: embeddings.map(|p| p.to_string_lossy().into_owned()),
+            patch_budget: (engine == models::HAYAI).then_some(spec.patch_budget),
+            threads: 1,
+            ..Default::default()
+        };
+        let info = torch::recognizer_info(
+            engine,
+            precision,
+            placement.vlm_device,
+            if engine == models::HAYAI {
+                bunko_vlm::hayai::BATCH
+            } else {
+                1
+            },
+            spec.patch_budget,
+        );
+        let r = vb.recognizer(engine, &dev, candidates, opts, golden, info, Some(fetch))?;
+        Ok(r)
     }
 
     #[cfg(feature = "torch")]
@@ -749,7 +1378,7 @@ impl EnginePipeline {
             precision_why: String::new(),
             primary: true,
         };
-        self.recognizer(&spec, &placement, precision)
+        self.recognizer(&spec, &placement, precision, None)
     }
 
     fn open_session(&self, spec: &RowSpec) -> Result<EngineRunner, String> {
@@ -808,7 +1437,7 @@ impl EnginePipeline {
 
         let mut recognizer = None;
         if let Some(r) = &resolved {
-            match self.recognizer(spec, &placement, r.precision) {
+            match self.recognizer(spec, &placement, r.precision, r.backend.as_deref()) {
                 Ok(rec) => recognizer = Some(rec),
                 Err(e) if placement.is_gpu() => {
                     let gpu = placement.device.clone();
@@ -832,7 +1461,7 @@ impl EnginePipeline {
                     .map_err(both)?;
                     resolved = again;
                     let p = resolved.as_ref().map_or(Precision::Fp32, |r| r.precision);
-                    recognizer = Some(self.recognizer(spec, &placement, p).map_err(both)?);
+                    recognizer = Some(self.recognizer(spec, &placement, p, None).map_err(both)?);
                 }
                 Err(e) => return Err(e),
             }
@@ -862,7 +1491,11 @@ impl EnginePipeline {
             }
             // The export set the recognizer's files come from: the torch package release
             // for the libtorch recognizers, models-v1 for the ONNX ones.
-            let release = if self.torch_loaded() {
+            let vulkan = placement.provider == "vulkan"
+                || resolved.as_ref().is_some_and(|r| r.backend.is_some());
+            let release = if vulkan {
+                bunko_ocr::models::vulkan_release_name()
+            } else if self.torch_loaded() {
                 bunko_ocr::models::torch_release_name()
             } else {
                 bunko_ocr::models_release::RELEASE.to_string()
@@ -872,13 +1505,19 @@ impl EnginePipeline {
         let (stage_workers, queue_capacity) = plan::tables(&stages);
         let pipeline = plan::graph_line(&stages);
         let precision = resolved.as_ref().map(|r| r.precision.to_string());
+        // What ran, backend included (`fp32@ncnn`): the benchmark tells its candidates
+        // apart by it. The sidecar keeps the plain precision.
+        let ran = resolved.as_ref().map(|r| match &r.backend {
+            Some(b) => format!("{}@{b}", r.precision),
+            None => r.precision.to_string(),
+        });
         let ready = ReadyInfo {
             weights: weights.iter().cloned().collect(),
             stage_workers,
             queue_capacity,
             stage_device: session::stage_devices(&stages),
             pipeline: pipeline.clone(),
-            precision: precision.clone(),
+            precision: ran,
         };
         let info = SessionInfo {
             engine: engine.to_string(),

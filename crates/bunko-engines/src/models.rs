@@ -57,6 +57,92 @@ pub fn torch_host_ids(engine: &str, _precision: Precision) -> Vec<&'static str> 
     }
 }
 
+/// The host files the Vulkan runtimes in `runtimes` read for `engine`: ncnn's graphs
+/// carry their own embeddings (hayai-nova's `token_embeddings.f32`, paddle-manga's
+/// `embeddings.f32` and position table), so only WebGPU reads the token embeddings
+/// (hayai-nova's, and paddle-manga's 424 MB `embed-fp32`).
+pub fn vulkan_host_ids(engine: &str, runtimes: &[&str]) -> Vec<&'static str> {
+    match engine {
+        HAYAI => {
+            let mut v = vec!["hayai-nova/pos-table", "hayai-nova/tokenizer"];
+            if runtimes.contains(&"webgpu") {
+                v.push("hayai-nova/token-embeddings");
+            }
+            v
+        }
+        PADDLE => {
+            let mut v = vec!["paddle-manga/tokenizer"];
+            if runtimes.contains(&"webgpu") {
+                v.push("paddle-manga/embed-fp32");
+            }
+            v
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// [`vulkan_host_ids`] fetched as needed: `(tokenizer, pos_table, embeddings)`.
+pub fn vulkan_host_files(
+    store: &ModelStore,
+    engine: &str,
+    runtimes: &[&str],
+) -> Result<
+    (
+        std::path::PathBuf,
+        Option<std::path::PathBuf>,
+        Option<std::path::PathBuf>,
+    ),
+    String,
+> {
+    let ids = vulkan_host_ids(engine, runtimes);
+    let r = ensure_all(store, &ids)?;
+    let path = |id: &str| ids.iter().position(|x| *x == id).map(|i| r[i].path.clone());
+    let tokenizer = path(if engine == HAYAI {
+        "hayai-nova/tokenizer"
+    } else {
+        "paddle-manga/tokenizer"
+    })
+    .ok_or_else(|| format!("{engine} has no tokenizer"))?;
+    Ok((
+        tokenizer,
+        path("hayai-nova/pos-table"),
+        path("hayai-nova/token-embeddings").or_else(|| path("paddle-manga/embed-fp32")),
+    ))
+}
+
+/// Where [`vulkan_host_ids`] are or will be (found, else the store's path), without
+/// fetching: `(tokenizer, pos_table, embeddings)`. A fallback runtime's files are fetched
+/// only when it is reached; its paths are known up front.
+pub fn vulkan_host_paths(
+    store: &ModelStore,
+    engine: &str,
+    runtimes: &[&str],
+) -> (
+    Option<std::path::PathBuf>,
+    Option<std::path::PathBuf>,
+    Option<std::path::PathBuf>,
+) {
+    let ids = vulkan_host_ids(engine, runtimes);
+    let path = |id: &str| {
+        ids.contains(&id)
+            .then(|| {
+                store
+                    .locate(id)
+                    .or_else(|| store.manifest().get(id).map(|f| store.store_path(f)))
+            })
+            .flatten()
+    };
+    (
+        path(if engine == HAYAI {
+            "hayai-nova/tokenizer"
+        } else {
+            "paddle-manga/tokenizer"
+        }),
+        path("hayai-nova/pos-table"),
+        path("hayai-nova/token-embeddings").or_else(|| path("paddle-manga/embed-fp32")),
+    )
+}
+
 /// paddle-manga's input-embedding table for packages that do not carry it: the fp32
 /// table (cast to bf16 on load) or, for fp16, the fp16 one (both bit-identical to the
 /// model's own table at that precision).
@@ -255,6 +341,16 @@ pub(crate) fn ensure_all(store: &ModelStore, ids: &[&str]) -> Result<Vec<Resolve
         .collect()
 }
 
+/// Development only: a directory of WebGPU graphs (`tools/webgpu_export`) that the
+/// in-process ONNX recognizers use on a GPU (`BUNKO_WEBGPU_GRAPHS`). Releases run them
+/// from the Vulkan pack instead (docs/rust-port/VULKAN.md).
+#[cfg(feature = "onnx-vlm")]
+fn webgpu_graphs_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("BUNKO_WEBGPU_GRAPHS")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 /// The hayai-nova assets at `precision`, fetched if needed.
 #[cfg(feature = "onnx-vlm")]
 pub fn hayai_assets(store: &ModelStore, precision: Precision) -> Result<HayaiAssets, String> {
@@ -265,6 +361,7 @@ pub fn hayai_assets(store: &ModelStore, precision: Precision) -> Result<HayaiAss
         pos_table: r[2].path.clone(),
         token_embeddings: r[3].path.clone(),
         tokenizer: r[4].path.clone(),
+        gpu: webgpu_graphs_dir().and_then(|d| bunko_vlm::HayaiGpuGraphs::in_dir(&d, precision)),
     })
 }
 
@@ -297,6 +394,8 @@ pub fn paddle_assets(store: &ModelStore, precision: Precision) -> Result<PaddleA
         decoder: r[2].path.clone(),
         embed: r[4].path.clone(),
         tokenizer: r[5].path.clone(),
+        gpu_dir: webgpu_graphs_dir()
+            .filter(|d| precision == Precision::Fp32 && bunko_vlm::paddle::webgpu_complete(d)),
     })
 }
 
@@ -370,5 +469,22 @@ mod tests {
         );
         // no recognizer backend: ppocr-manga only
         assert_eq!(available_engines(&online, |_| false), vec!["ppocr-manga"]);
+    }
+
+    #[test]
+    fn vulkan_runtimes_need_only_their_own_host_files() {
+        // ncnn's paddle-manga graphs carry their embeddings: the 424 MB embed-fp32 only
+        // when WebGPU (which reads it) is a candidate.
+        for rts in [&["ncnn"][..], &[][..]] {
+            assert_eq!(vulkan_host_ids(PADDLE, rts), ["paddle-manga/tokenizer"]);
+        }
+        assert_eq!(
+            vulkan_host_ids(PADDLE, &["ncnn", "webgpu"]),
+            ["paddle-manga/tokenizer", "paddle-manga/embed-fp32"]
+        );
+        assert!(!vulkan_host_ids(HAYAI, &["ncnn"]).contains(&"hayai-nova/token-embeddings"));
+        assert!(
+            vulkan_host_ids(HAYAI, &["ncnn", "webgpu"]).contains(&"hayai-nova/token-embeddings")
+        );
     }
 }

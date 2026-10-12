@@ -112,7 +112,8 @@ jobs:
           want_archives=(aarch64-apple-darwin/full aarch64-unknown-linux-musl/lite
             x86_64-pc-windows-msvc/full x86_64-unknown-linux-gnu/full)
           want_packs=(x86_64-unknown-linux-gnu/cpu x86_64-unknown-linux-gnu/cu130 x86_64-unknown-linux-gnu/rocm7.1
-            x86_64-pc-windows-msvc/cpu x86_64-pc-windows-msvc/cu130 aarch64-apple-darwin/cpu)
+            x86_64-unknown-linux-gnu/vulkan x86_64-pc-windows-msvc/cpu x86_64-pc-windows-msvc/cu130
+            x86_64-pc-windows-msvc/vulkan aarch64-apple-darwin/cpu)
           bad=0
           for f in "${want_files[@]}"; do
             [ -s "dist/$f" ] || { echo "missing $f"; bad=1; continue; }

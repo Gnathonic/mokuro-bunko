@@ -49,6 +49,7 @@ pub fn recorded_formats(
     bench: &Map<String, Value>,
     profile: &Map<String, Value>,
     mode: &str,
+    row_engine: Option<&str>,
 ) -> Option<BTreeSet<String>> {
     let engine = bench
         .get("host")
@@ -60,7 +61,8 @@ pub fn recorded_formats(
     }
     let catalog: bunko_proto::Catalog =
         serde_json::from_value(profile.get("catalog")?.clone()).ok()?;
-    crate::ocr::sched::supported_for(&catalog, "auto", mode).map(|s| s.into_iter().collect())
+    crate::ocr::sched::supported_for(&catalog, "auto", mode, row_engine)
+        .map(|s| s.into_iter().collect())
 }
 
 /// The profile key of a machine name (`"local"` is this server).
@@ -283,7 +285,7 @@ impl Profiles {
             let supported = match formats {
                 Formats::Known(s) => s,
                 Formats::Recorded => {
-                    recorded = recorded_formats(b, &profile, wanted);
+                    recorded = recorded_formats(b, &profile, wanted, engine.as_deref());
                     recorded.as_ref()
                 }
             };

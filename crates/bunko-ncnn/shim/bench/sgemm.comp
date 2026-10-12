@@ -1,0 +1,68 @@
+#version 450
+// The same GEMM body bunko_ncnn.cpp embeds as BN_SGEMM_BODY (fp32 buffers here): keep the two in step.
+// out(M,N) = A(M,K) * B(N,K)^T + bias(N); fp32; tile TM x TN, 16x16 threads, RM x RN per thread
+#ifndef TM
+#define TM 64
+#endif
+#ifndef TN
+#define TN 64
+#endif
+#define TK 16
+#define RM (TM / 16)
+#define RN (TN / 16)
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(binding = 0) readonly buffer A_blob { vec4 a4[]; };
+layout(binding = 1) readonly buffer B_blob { vec4 b4[]; };
+layout(binding = 2) readonly buffer C_blob { float bias[]; };
+layout(binding = 3) writeonly buffer O_blob { float o[]; };
+layout(push_constant) uniform parameter { int M; int N; int K; } p;
+shared float As[TK][TM + 1];
+shared float Bs[TK][TN + 1];
+void main()
+{
+    const int tx = int(gl_LocalInvocationID.x);
+    const int ty = int(gl_LocalInvocationID.y);
+    const int tid = ty * 16 + tx;
+    const int row0 = int(gl_WorkGroupID.y) * TM;
+    const int col0 = int(gl_WorkGroupID.x) * TN;
+    float acc[RM][RN];
+    for (int i = 0; i < RM; i++) for (int j = 0; j < RN; j++) acc[i][j] = 0.f;
+    const int K4 = p.K / 4;
+    for (int k0 = 0; k0 < p.K; k0 += TK)
+    {
+        // TM rows x TK cols of A = TM*4 vec4; 256 threads
+        for (int e = tid; e < TM * (TK / 4); e += 256)
+        {
+            int r = e / (TK / 4), kq = e % (TK / 4);
+            int gr = row0 + r, gk = k0 / 4 + kq;
+            vec4 v = (gr < p.M && gk < K4) ? a4[gr * K4 + gk] : vec4(0.f);
+            As[kq * 4 + 0][r] = v.x; As[kq * 4 + 1][r] = v.y; As[kq * 4 + 2][r] = v.z; As[kq * 4 + 3][r] = v.w;
+        }
+        for (int e = tid; e < TN * (TK / 4); e += 256)
+        {
+            int r = e / (TK / 4), kq = e % (TK / 4);
+            int gr = col0 + r, gk = k0 / 4 + kq;
+            vec4 v = (gr < p.N && gk < K4) ? b4[gr * K4 + gk] : vec4(0.f);
+            Bs[kq * 4 + 0][r] = v.x; Bs[kq * 4 + 1][r] = v.y; Bs[kq * 4 + 2][r] = v.z; Bs[kq * 4 + 3][r] = v.w;
+        }
+        barrier();
+        for (int kk = 0; kk < TK; kk++)
+        {
+            float av[RM], bv[RN];
+            for (int i = 0; i < RM; i++) av[i] = As[kk][ty + 16 * i];
+            for (int j = 0; j < RN; j++) bv[j] = Bs[kk][tx + 16 * j];
+            for (int i = 0; i < RM; i++) for (int j = 0; j < RN; j++) acc[i][j] = fma(av[i], bv[j], acc[i][j]);
+        }
+        barrier();
+    }
+    for (int i = 0; i < RM; i++)
+    {
+        int r = row0 + ty + 16 * i;
+        if (r >= p.M) continue;
+        for (int j = 0; j < RN; j++)
+        {
+            int c = col0 + tx + 16 * j;
+            if (c < p.N) o[r * p.N + c] = acc[i][j] + bias[c];
+        }
+    }
+}

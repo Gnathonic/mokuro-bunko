@@ -1,0 +1,43 @@
+[package]
+name = "bunko-vulkan"
+description = "The Vulkan backend pack: the recognizers on GPUs no compiled libtorch package covers, through two interchangeable runtimes (ncnn Vulkan, ONNX Runtime WebGPU) behind the libtorch pack's C ABI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Built once per platform for the `vulkan` backend pack (docs/rust-port/VULKAN.md):
+#
+#   BUNKO_NCNN_DIR=<ncnn install prefix> \
+#   cargo build --release -p bunko-vulkan --features ncnn,webgpu
+#
+# Without features (the normal workspace build) the library has no runtime: its devices
+# are listed but every load fails. `webgpu` makes ONNX Runtime's WebGPU build a NEEDED
+# library of this cdylib only (libwebgpu_dawn beside it in the pack's lib/), never of the
+# mokuro-bunko binary: build this package on its own, not in one cargo invocation with
+# the binary (cargo would unify the `ort` features).
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+ncnn = ["dep:bunko-ncnn"]
+webgpu = ["dep:ort", "bunko-vlm/webgpu"]
+
+[dependencies]
+bunko-torch = { path = "../bunko-torch" }
+bunko-vlm.workspace = true
+bunko-ncnn = { path = "../bunko-ncnn", optional = true }
+ort = { workspace = true, optional = true, features = ["std"] }
+# The device catalog: the Vulkan loader opened at run time (no link-time libvulkan).
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# The release description the store compiles in: it must list every file the adapters load.
+bunko-ocr.workspace = true

@@ -519,6 +519,7 @@ mod tests {
             formats: Vec::new(),
             provider: Some(provider.into()),
             arch: Some(arch.into()),
+            format_engines: Default::default(),
         }
     }
 

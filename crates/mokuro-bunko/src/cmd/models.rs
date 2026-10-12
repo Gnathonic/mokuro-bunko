@@ -728,7 +728,13 @@ pub fn download(target: &OcrTarget, engine: Option<&str>) -> CmdResult {
         let pipeline = bunko_engines::EnginePipeline::new(
             target.engine_config(Backend::parse(&target.backend_preference())),
         );
-        match pipeline.torch() {
+        match pipeline.torch().map(drop).or_else(|e| {
+            if pipeline.vulkan_pairings().is_empty() {
+                Err(e)
+            } else {
+                Ok(())
+            }
+        }) {
             Err(e) => {
                 println!(
                     "  compiled packages: FAILED: the OCR backend is not installed ({e}); run 'mokuro-bunko install-ocr'"

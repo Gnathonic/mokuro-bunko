@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use crate::Precision;
 
 #[cfg(feature = "onnx-vlm")]
+mod gpu;
+#[cfg(feature = "onnx-vlm")]
 mod onnx;
 #[cfg(feature = "onnx-vlm")]
 pub use onnx::HayaiNova;
@@ -50,6 +52,31 @@ pub struct HayaiAssets {
     pub token_embeddings: PathBuf,
     /// The model repo's `tokenizer.json`.
     pub tokenizer: PathBuf,
+    /// The WebGPU backend's graphs (`tools/webgpu_export`), used instead of
+    /// `vision`/`decoder` on a GPU when present.
+    pub gpu: Option<HayaiGpuGraphs>,
+}
+
+/// The WebGPU backend's hayai-nova graphs: the vision tower + projector, and the shared
+/// decoder graph that serves prefill and every decode step (`crate::gpudec`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct HayaiGpuGraphs {
+    pub vision: PathBuf,
+    pub decoder: PathBuf,
+}
+
+impl HayaiGpuGraphs {
+    pub const VISION: &'static str = "hayai-nova_webgpu_vision_fp32.onnx";
+    pub const DECODER: &'static str = "hayai-nova_webgpu_decoder_fp32.onnx";
+
+    /// Both graphs in `dir` (fp32 only), when both exist.
+    pub fn in_dir(dir: &Path, precision: Precision) -> Option<Self> {
+        let g = Self {
+            vision: dir.join(Self::VISION),
+            decoder: dir.join(Self::DECODER),
+        };
+        (precision == Precision::Fp32 && g.vision.is_file() && g.decoder.is_file()).then_some(g)
+    }
 }
 
 impl HayaiAssets {
@@ -68,6 +95,7 @@ impl HayaiAssets {
             pos_table: dir.join("pos_table.npy"),
             token_embeddings: dir.join("token_embeddings.npy"),
             tokenizer: tokenizer.to_path_buf(),
+            gpu: None,
         }
     }
 }

@@ -22,10 +22,14 @@ pub enum Backend {
     WebGpu,
     DirectMl,
     CoreMl,
+    /// Any GPU with a Vulkan driver, through the Vulkan backend pack (ncnn / WebGPU):
+    /// docs/rust-port/VULKAN.md. `auto` takes it only for the GPUs `vulkan::ROUTES`
+    /// sends there.
+    Vulkan,
 }
 
 impl Backend {
-    /// `auto|cpu|cuda|rocm|webgpu|directml|coreml`. `skip` never reaches here (no local
+    /// `auto|cpu|cuda|rocm|webgpu|directml|coreml|vulkan`. `skip` never reaches here (no local
     /// processor is started).
     pub fn parse(s: &str) -> Backend {
         match s.trim().to_ascii_lowercase().as_str() {
@@ -35,6 +39,7 @@ impl Backend {
             "webgpu" => Backend::WebGpu,
             "directml" | "dml" => Backend::DirectMl,
             "coreml" => Backend::CoreMl,
+            "vulkan" => Backend::Vulkan,
             _ => Backend::Auto,
         }
     }
@@ -49,6 +54,7 @@ impl Backend {
             Backend::WebGpu => Some("webgpu"),
             Backend::DirectMl => Some("directml"),
             Backend::CoreMl => Some("coreml"),
+            Backend::Vulkan => Some("vulkan"),
         }
     }
 
@@ -145,6 +151,7 @@ pub fn devices(backend: Backend) -> Vec<Device> {
         .into_iter()
         .filter(|d| d.id == "cpu" || backend.allows(d.provider.as_deref().unwrap_or("")))
         .map(|d| Device {
+            format_engines: Default::default(),
             id: d.id,
             label: d.label,
             formats: d.formats,
@@ -240,7 +247,7 @@ impl Placement {
     }
 }
 
-const GPU_PROVIDERS: [&str; 5] = ["cuda", "rocm", "webgpu", "directml", "coreml"];
+const GPU_PROVIDERS: [&str; 6] = ["cuda", "rocm", "webgpu", "directml", "coreml", "vulkan"];
 
 /// Resolve `pools.stage_device.engine` (`auto`, `cpu`, `gpu:<n>`) against the devices:
 /// `auto` = `gpu:0` when there is one, else the CPU. A GPU the catalog does not list
@@ -320,6 +327,7 @@ mod tests {
 
     fn dev(id: &str, provider: &str) -> Device {
         Device {
+            format_engines: Default::default(),
             id: id.into(),
             label: id.into(),
             formats: vec!["fp32".into()],

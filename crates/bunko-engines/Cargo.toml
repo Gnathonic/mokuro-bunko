@@ -35,6 +35,8 @@ bunko-proto.workspace = true
 bunko-sched.workspace = true
 ort = { workspace = true, features = ["std"] }
 serde_json.workspace = true
+serde.workspace = true
+base64.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
@@ -50,4 +52,8 @@ mimalloc = { version = "0.1", default-features = false }
 
 [[example]]
 name = "torch_crops"
+required-features = ["torch"]
+
+[[example]]
+name = "vulkan_check"
 required-features = ["torch"]

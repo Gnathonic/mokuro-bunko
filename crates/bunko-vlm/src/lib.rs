@@ -32,6 +32,8 @@ pub mod warp;
 #[cfg(feature = "onnx-vlm")]
 mod cache;
 #[cfg(feature = "onnx-vlm")]
+mod gpudec;
+#[cfg(feature = "onnx-vlm")]
 mod tensor;
 
 use std::fmt;
@@ -40,9 +42,9 @@ use std::fmt;
 pub use cache::{EngineKey, RecognizerCache};
 pub use crop::Quad;
 pub use device::Device;
-pub use hayai::HayaiAssets;
 #[cfg(feature = "onnx-vlm")]
 pub use hayai::HayaiNova;
+pub use hayai::{HayaiAssets, HayaiGpuGraphs};
 pub use image::{Bgr, Rgb};
 pub use paddle::PaddleAssets;
 #[cfg(feature = "onnx-vlm")]

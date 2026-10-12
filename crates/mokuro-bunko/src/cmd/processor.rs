@@ -46,6 +46,17 @@ fn pipeline(storage: &Path, sessions: u32) -> EnginePipeline {
         .unwrap_or(Backend::Auto);
     let mut config = EngineConfig::new(storage.join("models"), backend);
     config.jobs = sessions.max(1) as usize;
+    if let Ok(v) = std::env::var("MOKURO_VULKAN_BACKENDS") {
+        let list: Vec<String> = v
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        match bunko_core::config::validate_vulkan_backends(&list) {
+            Ok(()) => config.vulkan_backends = list,
+            Err(e) => tracing::warn!("MOKURO_VULKAN_BACKENDS ignored: {e}"),
+        }
+    }
     config.fallback_backends = crate::ocr_target::library_fallback_backends();
     config
         .fallback_backends

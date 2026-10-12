@@ -1,8 +1,9 @@
 //! Which OCR backend pack fits this machine (`install-ocr`, `doctor`), found without
 //! loading any GPU library: NVIDIA from the kernel driver (`/proc/driver/nvidia/version`,
 //! `nvidia-smi`), AMD from the ROCm kernel interface (`/dev/kfd` + KFD topology),
-//! Windows NVIDIA from `nvcuda.dll`. The pack's own `bt_devices` is the authority once
-//! a pack is installed; this only picks which pack to download.
+//! Windows NVIDIA from `nvcuda.dll`, Windows AMD and Intel GPUs from DXGI's adapter list
+//! (only the Vulkan pack drives those). The packs' own device lists are the authority
+//! once a pack is installed; this only picks which packs to download.
 //!
 //! GPUs the runtimes are told to hide count as absent: `CUDA_VISIBLE_DEVICES` for
 //! NVIDIA; `HIP_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES` and (as HIP honours it on AMD
@@ -42,6 +43,114 @@ pub struct Hardware {
     /// GPUs left out because the environment hides them (`HIP_VISIBLE_DEVICES=` ->
     /// `AMD gfx1201 (hidden by HIP_VISIBLE_DEVICES="")`), for the reason shown.
     pub hidden: Vec<String>,
+    /// GPUs no libtorch pack drives on this platform, so only the Vulkan pack can use
+    /// them: Windows AMD and Intel adapters (DXGI). Empty elsewhere.
+    pub vulkan_gpus: Vec<Adapter>,
+}
+
+/// PCI vendor ids as DXGI reports them.
+pub const VENDOR_AMD: u32 = 0x1002;
+pub const VENDOR_INTEL: u32 = 0x8086;
+pub const VENDOR_NVIDIA: u32 = 0x10de;
+/// Microsoft's Basic Render Driver (WARP): a CPU rasterizer listed as an adapter.
+pub const VENDOR_MICROSOFT: u32 = 0x1414;
+
+/// One display adapter as the system lists it (Windows: `IDXGIAdapter1::GetDesc1`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Adapter {
+    pub vendor_id: u32,
+    /// The driver's name for it (`AMD Radeon RX 580 2048SP`).
+    pub name: String,
+    /// Dedicated video memory, MiB (an integrated GPU has little: it shares system RAM).
+    pub vram_mib: u64,
+    /// The adapter's LUID (`0000000000012345`), stable until the next reboot.
+    pub luid: String,
+    /// DXGI_ADAPTER_FLAG_SOFTWARE.
+    pub software: bool,
+}
+
+impl Adapter {
+    pub fn vendor(&self) -> &'static str {
+        match self.vendor_id {
+            VENDOR_AMD => "AMD",
+            VENDOR_INTEL => "Intel",
+            VENDOR_NVIDIA => "NVIDIA",
+            VENDOR_MICROSOFT => "Microsoft",
+            _ => "other",
+        }
+    }
+
+    /// `AMD Radeon RX 580 2048SP (8 GiB)`, `Intel(R) UHD Graphics 770 (128 MiB dedicated)`.
+    pub fn label(&self) -> String {
+        let mem = if self.vram_mib >= 1024 {
+            format!("{} GiB", (self.vram_mib + 512) / 1024)
+        } else {
+            format!("{} MiB dedicated", self.vram_mib)
+        };
+        let name = if self
+            .name
+            .to_ascii_lowercase()
+            .contains(&self.vendor().to_ascii_lowercase())
+        {
+            self.name.clone()
+        } else {
+            format!("{} {}", self.vendor(), self.name)
+        };
+        format!("{name} ({mem})")
+    }
+}
+
+/// The adapters only the Vulkan pack can drive: AMD and Intel hardware adapters.
+/// NVIDIA is found through its driver (the CUDA pack, Vulkan as its fallback); software
+/// adapters (WARP) and other vendors are left out.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn vulkan_only(adapters: &[Adapter]) -> Vec<Adapter> {
+    adapters
+        .iter()
+        .filter(|a| !a.software && matches!(a.vendor_id, VENDOR_AMD | VENDOR_INTEL))
+        .cloned()
+        .collect()
+}
+
+/// DXGI's hardware adapters, in its order (the first drives the main display). Empty
+/// when DXGI cannot be created (no display stack: Server Core, a service session).
+#[cfg(windows)]
+pub fn dxgi_adapters() -> Vec<Adapter> {
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIFactory1,
+    };
+    let mut out = Vec::new();
+    // SAFETY: plain COM calls on interfaces this function owns; DXGI ends the list with
+    // DXGI_ERROR_NOT_FOUND, any error stops the walk.
+    unsafe {
+        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else {
+            return out;
+        };
+        let mut i = 0u32;
+        while let Ok(adapter) = factory.EnumAdapters1(i) {
+            i += 1;
+            let Ok(d) = adapter.GetDesc1() else { continue };
+            let end = d
+                .Description
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(d.Description.len());
+            out.push(Adapter {
+                vendor_id: d.VendorId,
+                name: String::from_utf16_lossy(&d.Description[..end])
+                    .trim()
+                    .to_string(),
+                vram_mib: (d.DedicatedVideoMemory as u64) / (1024 * 1024),
+                luid: format!(
+                    "{:08x}{:08x}",
+                    d.AdapterLuid.HighPart as u32, d.AdapterLuid.LowPart
+                ),
+                software: d.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0
+                    || d.VendorId == VENDOR_MICROSOFT,
+            });
+        }
+    }
+    out
 }
 
 /// A `*_VISIBLE_DEVICES` value that hides every device: empty, or a list starting with
@@ -113,6 +222,10 @@ pub fn detect() -> Hardware {
             .is_file()
         {
             hw.nvidia_driver = Some(String::new());
+        }
+        #[cfg(windows)]
+        {
+            hw.vulkan_gpus = vulkan_only(&dxgi_adapters());
         }
     }
     if hw.nvidia_driver.is_some() || cfg!(target_os = "linux") {
@@ -372,6 +485,7 @@ pub fn gfx_name(v: u32) -> String {
 pub fn choose(hw: &Hardware, target: &str) -> Choice {
     nvidia_choice(hw, target)
         .or_else(|| amd_choice(hw, target))
+        .or_else(|| vulkan_only_choice(hw, target))
         .unwrap_or_else(|| Choice {
             variant: "cpu",
             reason: if hw.hidden.is_empty() {
@@ -417,7 +531,48 @@ pub fn preferred(pref: &str, hw: &Hardware, target: &str) -> Choice {
         },
         "cuda" => gpu("NVIDIA", "cu130", nvidia_choice(hw, target)),
         "rocm" | "hip" => gpu("AMD", "rocm7.1", amd_choice(hw, target)),
+        // The GPU is the Vulkan pack's ([`vulkan_wanted`]); libtorch's CPU pack is the floor.
+        "vulkan" => Choice {
+            variant: "cpu",
+            reason: "ocr.backend: vulkan (the GPU reads with the Vulkan pack; libtorch's CPU pack is the floor)".into(),
+            hint: None,
+        },
         _ => choose(hw, target),
+    }
+}
+
+/// Why this machine also wants the Vulkan backend pack (docs/rust-port/VULKAN.md), or
+/// None. With `ocr.backend: auto` every GPU's runtimes are candidates the benchmark
+/// measures, so any GPU here asks for it; `vulkan` always does; a pinned libtorch
+/// backend or the CPU never. On Windows automatically only for the GPUs no libtorch
+/// pack drives (AMD, Intel): beside the CUDA pack an NVIDIA GPU's Vulkan runtimes are
+/// fallback-only, so an NVIDIA-only Windows machine fetches nothing for them.
+pub fn vulkan_wanted(pref: &str, hw: &Hardware, target: &str) -> Option<String> {
+    let linux = target.starts_with("x86_64") && target.contains("-linux-");
+    let windows = is_windows_x64(target);
+    if !(linux || windows) {
+        return None;
+    }
+    let gpus: Vec<String> = if windows {
+        hw.vulkan_gpus.iter().map(Adapter::label).collect()
+    } else {
+        hw.amd_gfx
+            .iter()
+            .map(|g| format!("AMD {g}"))
+            .chain(hw.nvidia_gpus.iter().cloned())
+            .chain(
+                (hw.nvidia_gpus.is_empty() && hw.nvidia_driver.is_some())
+                    .then(|| "NVIDIA GPU".to_string()),
+            )
+            .collect()
+    };
+    match pref.trim().to_ascii_lowercase().as_str() {
+        "vulkan" => Some("ocr.backend: vulkan".into()),
+        "" | "auto" if !gpus.is_empty() => Some(format!(
+            "its ncnn and WebGPU runtimes are benchmark candidates on {}",
+            gpus.join(", ")
+        )),
+        _ => None,
     }
 }
 
@@ -501,6 +656,38 @@ fn amd_choice(hw: &Hardware, target: &str) -> Option<Choice> {
         });
     }
     None
+}
+
+/// A machine whose GPUs only the Vulkan pack drives (Windows AMD/Intel): libtorch's CPU
+/// pack is the floor, the Vulkan pack ([`vulkan_wanted`]) reads on the GPU.
+fn vulkan_only_choice(hw: &Hardware, target: &str) -> Option<Choice> {
+    if hw.vulkan_gpus.is_empty() || !is_windows_x64(target) {
+        return None;
+    }
+    Some(Choice {
+        variant: "cpu",
+        reason: format!(
+            "{}: no libtorch GPU pack for it on Windows",
+            labels(&hw.vulkan_gpus)
+        ),
+        hint: Some(
+            "The Vulkan pack (ncnn and WebGPU) reads on this GPU; the CPU pack is the floor \
+             the machine's benchmark measures it against."
+                .into(),
+        ),
+    })
+}
+
+fn labels(adapters: &[Adapter]) -> String {
+    adapters
+        .iter()
+        .map(Adapter::label)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn is_windows_x64(target: &str) -> bool {
+    target.starts_with("x86_64") && target.contains("windows")
 }
 
 /// What an RDNA2 card that runs the gfx1030 kernels (RX 6600: gfx1032) needs: nothing
@@ -869,5 +1056,129 @@ mod tests {
             ("CUDA_VISIBLE_DEVICES", ""),
         ];
         assert_eq!(choose(&with(&amd, &all), linux).variant, "cpu");
+    }
+
+    #[test]
+    fn the_vulkan_pack_is_wanted_where_its_runtimes_are_candidates() {
+        let linux = "x86_64-unknown-linux-gnu";
+        let win = "x86_64-pc-windows-msvc";
+        let polaris = Hardware {
+            amd_gfx: vec!["gfx803".into()],
+            ..Hardware::default()
+        };
+        assert!(vulkan_wanted("auto", &polaris, linux).is_some());
+        assert!(vulkan_wanted("vulkan", &Hardware::default(), linux).is_some());
+        assert!(
+            vulkan_wanted("auto", &Hardware::default(), linux).is_none(),
+            "no GPU"
+        );
+        assert!(
+            vulkan_wanted("rocm", &polaris, linux).is_none(),
+            "libtorch pinned"
+        );
+        assert!(vulkan_wanted("auto", &polaris, win).is_none());
+        assert!(vulkan_wanted("vulkan", &polaris, win).is_some());
+        assert_eq!(preferred("vulkan", &polaris, linux).variant, "cpu");
+    }
+
+    fn adapter(vendor_id: u32, name: &str, vram_mib: u64) -> Adapter {
+        Adapter {
+            vendor_id,
+            name: name.into(),
+            vram_mib,
+            luid: "000000000000abcd".into(),
+            software: false,
+        }
+    }
+
+    /// Windows, as `detect` builds it: NVIDIA from its driver, the rest from DXGI.
+    fn windows_hw(nvidia: bool, adapters: &[Adapter]) -> Hardware {
+        Hardware {
+            nvidia_driver: nvidia.then(|| "610.62".to_string()),
+            nvidia_gpus: if nvidia {
+                vec!["NVIDIA GeForce RTX 3070".into()]
+            } else {
+                Vec::new()
+            },
+            vulkan_gpus: vulkan_only(adapters),
+            ..Hardware::default()
+        }
+    }
+
+    #[test]
+    fn windows_amd_and_intel_gpus_get_the_vulkan_pack() {
+        let win = "x86_64-pc-windows-msvc";
+        let rx580 = adapter(VENDOR_AMD, "Radeon RX 580 Series", 8192);
+        let uhd = adapter(VENDOR_INTEL, "Intel(R) UHD Graphics 770", 128);
+        let rtx = adapter(VENDOR_NVIDIA, "NVIDIA GeForce RTX 3070", 8192);
+        let warp = Adapter {
+            software: true,
+            ..adapter(VENDOR_MICROSOFT, "Microsoft Basic Render Driver", 0)
+        };
+        assert_eq!(rx580.label(), "AMD Radeon RX 580 Series (8 GiB)");
+        assert_eq!(uhd.label(), "Intel(R) UHD Graphics 770 (128 MiB dedicated)");
+        assert_eq!(
+            warp.label(),
+            "Microsoft Basic Render Driver (0 MiB dedicated)"
+        );
+
+        // AMD only: the CPU pack is the floor, the Vulkan pack reads on the GPU.
+        let hw = windows_hw(false, &[rx580.clone(), warp.clone()]);
+        assert_eq!(
+            hw.vulkan_gpus,
+            vec![rx580.clone()],
+            "software adapter ignored"
+        );
+        let c = choose(&hw, win);
+        assert_eq!(c.variant, "cpu");
+        assert!(c.reason.contains("Radeon RX 580"), "{}", c.reason);
+        assert!(c.hint.unwrap().contains("Vulkan pack"));
+        let why = vulkan_wanted("auto", &hw, win).expect("AMD on Windows wants the pack");
+        assert!(why.contains("Radeon RX 580"), "{why}");
+        assert!(vulkan_wanted("", &hw, win).is_some());
+        assert!(vulkan_wanted("cpu", &hw, win).is_none());
+        assert!(vulkan_wanted("cuda", &hw, win).is_none());
+
+        // Intel iGPU only.
+        let hw = windows_hw(false, std::slice::from_ref(&uhd));
+        assert_eq!(choose(&hw, win).variant, "cpu");
+        assert!(
+            vulkan_wanted("auto", &hw, win)
+                .unwrap()
+                .contains("UHD Graphics 770")
+        );
+
+        // NVIDIA only (DXGI lists it too): unchanged, CUDA and no Vulkan pack.
+        let hw = windows_hw(true, &[rtx.clone(), warp.clone()]);
+        assert!(hw.vulkan_gpus.is_empty());
+        assert_eq!(choose(&hw, win).variant, "cu130");
+        assert!(vulkan_wanted("auto", &hw, win).is_none());
+        assert!(
+            vulkan_wanted("vulkan", &hw, win).is_some(),
+            "pinned: always"
+        );
+
+        // NVIDIA + Intel iGPU: CUDA for the NVIDIA GPU, the Vulkan pack for the iGPU.
+        let hw = windows_hw(true, &[rtx, uhd.clone(), warp]);
+        assert_eq!(hw.vulkan_gpus, vec![uhd]);
+        assert_eq!(choose(&hw, win).variant, "cu130");
+        let why = vulkan_wanted("auto", &hw, win).unwrap();
+        assert!(why.contains("UHD") && !why.contains("RTX"), "{why}");
+
+        // No GPU at all (WARP only): nothing.
+        let hw = windows_hw(
+            false,
+            &[adapter(
+                VENDOR_MICROSOFT,
+                "Microsoft Basic Render Driver",
+                0,
+            )],
+        );
+        assert!(hw.vulkan_gpus.is_empty());
+        assert!(vulkan_wanted("auto", &hw, win).is_none());
+        assert_eq!(choose(&hw, win).reason, "no supported GPU found");
+        // Linux never fills vulkan_gpus; on a non-Windows target they don't count.
+        let hw = windows_hw(false, &[rx580]);
+        assert!(vulkan_only_choice(&hw, "x86_64-unknown-linux-gnu").is_none());
     }
 }

@@ -483,7 +483,7 @@ impl<'a> BenchRun<'a> {
                 .collect();
         }
         if let Some(p) = precision {
-            spec.precision = p.to_string();
+            apply_format(&mut spec, p);
         }
         spec
     }
@@ -1007,7 +1007,11 @@ impl<'a> BenchRun<'a> {
         match self.catalog.devices.iter().find(|d| d.id == device) {
             Some(d) => policy::device_formats(
                 self.mode,
-                &d.formats,
+                &policy::formats_for_engine(
+                    &d.formats,
+                    &d.format_engines,
+                    Some(self.op.spec.engine.as_str()),
+                ),
                 d.provider.as_deref().or(Some("cpu")),
                 d.arch.as_deref(),
             ),
@@ -1018,7 +1022,7 @@ impl<'a> BenchRun<'a> {
     /// The candidates a balanced/speed row tries here (empty: nothing to try).
     fn precision_candidates(&self) -> Vec<String> {
         let engine = self.op.spec.engine.as_str();
-        if !policy::is_benched(self.mode) || !policy::is_precision_engine(engine) {
+        if !policy::is_precision_engine(engine) {
             return Vec::new();
         }
         let device = self
@@ -1028,7 +1032,11 @@ impl<'a> BenchRun<'a> {
             .map(String::as_str);
         let formats = self.device_formats(device);
         let usable = policy::resolve_mode(engine, self.mode, Some(&formats), None, "").usable;
-        if usable.len() > 1 { usable } else { Vec::new() }
+        if policy::needs_bench(self.mode, &usable) {
+            usable
+        } else {
+            Vec::new()
+        }
     }
 
     /// `precision_phase(widths)`: one trial per candidate; the winning trial's index.
@@ -1364,8 +1372,37 @@ impl<'a> BenchRun<'a> {
     }
 }
 
+/// A trial's format on the row: its precision forced, and for a backend-qualified
+/// candidate (`fp32@ncnn`) the backend as the pick (the engines resolve the pair).
+fn apply_format(spec: &mut RowSpec, fmt: &str) {
+    spec.precision = policy::base_format(fmt).to_string();
+    if policy::format_backend(fmt).is_some() {
+        spec.precision_pick = Some(fmt.to_string());
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_backend_candidate_is_its_precision_plus_a_pick() {
+        let row = || -> bunko_proto::RowSpec {
+            serde_json::from_value(serde_json::json!({
+                "id": "g-1", "name": "hayai", "engine": "hayai-nova", "precision": "auto-accuracy"
+            }))
+            .unwrap()
+        };
+        let mut spec = row();
+        super::apply_format(&mut spec, "fp32@ncnn");
+        assert_eq!(spec.precision, "fp32");
+        assert_eq!(spec.precision_pick.as_deref(), Some("fp32@ncnn"));
+        let mut spec = row();
+        super::apply_format(&mut spec, "fp16");
+        assert_eq!(
+            (spec.precision.as_str(), spec.precision_pick),
+            ("fp16", None)
+        );
+    }
+
     use super::*;
 
     #[test]

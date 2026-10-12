@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.7.1] - 2026-10-12
+
+GPU OCR for graphics cards no compiled libtorch package covers, through Vulkan.
+
+### Added
+- **The Vulkan route.** A second, download-on-demand backend pack (`vulkan`, about
+  18 MB) carries two runtimes for hayai-nova and paddle-manga: **ncnn** (Vulkan, with
+  its own matrix and attention kernels) and **WebGPU** (ONNX Runtime over Dawn: Vulkan
+  on Linux, Direct3D 12 on Windows). Both keep the decode loop and KV cache on the GPU
+  and read fp32 text identical to the libtorch fp32 reference. This brings GPU OCR to
+  AMD cards without a ROCm package (Polaris RX 400/500, Vega, RX 5000 on Linux), AMD and
+  Intel GPUs on Windows, and any GPU when asked for.
+- **Every backend is a benchmark candidate.** With the defaults, each GPU's candidates
+  are libtorch (where its pack covers the card), ncnn and WebGPU, with the CPU as the
+  floor; the machine's benchmark measures them and the fastest is used per GPU and
+  engine. `ocr.backend: vulkan` pins the Vulkan runtimes and `ocr.vulkan_backends`
+  orders them.
+- **Self-test before use.** A runtime reads 16 synthetic golden crops on each GPU and
+  must return the reference text exactly; one that fails, does not load or does not
+  fit the GPU's memory is skipped there with its reason, and the next one serves.
+  Verdicts are cached and re-checked when the runtime, pack, driver, GPU or models
+  change. A runtime that crashes is demoted on that GPU at the next start; one that
+  fails mid-volume hands the same read to the next.
+- **Exceptions where a runtime measurably offers nothing:** on NVIDIA GPUs the CUDA
+  pack drives, ncnn and WebGPU are fallback-only (0.40–0.53x of CUDA): not benchmarked,
+  and no Vulkan models are fetched unless CUDA fails. WebGPU is fallback-only for
+  paddle-manga on AMD, behind ncnn.
+- `install-ocr` installs the Vulkan pack beside the libtorch pack where a GPU can use
+  it, including Windows machines with AMD or Intel graphics; `--variant vulkan`
+  installs it alone. Its models are a separate release (`vulkan-models-v1`), fetched
+  per runtime and engine as they are first needed.
+- `doctor` checks "Vulkan runtimes" (loader, driver, each runtime × engine per GPU:
+  candidate, fallback-only or skipped with the reason); admin → This server shows the
+  same as "GPU runtimes".
+
+### Known issues
+- No Polaris (gfx803) card has run 0.7.1: the kernels assume no wavefront size and check
+  themselves at load, and a runtime that fails its self-test is skipped, but speed and
+  correctness there are unmeasured.
+- paddle-manga needs about 4.6 GiB of free GPU memory on ncnn and 7 GB on WebGPU; on
+  smaller cards it reads on the CPU (hayai-nova fits 4 GB cards).
+- WebGPU drives one GPU per machine (the system's high-performance adapter); machines
+  with several GPUs are untested on both runtimes.
+- AMD and Intel GPUs on Windows have not been tested on real hardware.
+
 ## [0.7.0] - 2026-10-11
 
 A rewrite in Rust, as a drop-in over 0.5.2 and 0.5.3 storage (same `config.yaml`,

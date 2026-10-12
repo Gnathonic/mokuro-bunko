@@ -45,6 +45,7 @@ pub fn factory(
             jobs: config.ocr.concurrency.max(1) as usize,
             generator: format!("mokuro-bunko {}", bunko_core::VERSION),
             fallback_backends: crate::ocr_target::shipped_backends().into_iter().collect(),
+            vulkan_backends: config.ocr.vulkan_backends.clone(),
         },
     }))
 }

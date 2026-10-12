@@ -39,11 +39,12 @@ pub fn supported_for(
     catalog: &bunko_proto::Catalog,
     device: &str,
     mode: &str,
+    engine: Option<&str>,
 ) -> Option<HashSet<String>> {
     let of = |d: &bunko_proto::Device| -> HashSet<String> {
         bunko_sched::precision::device_formats(
             mode,
-            &d.formats,
+            &bunko_sched::precision::formats_for_engine(&d.formats, &d.format_engines, engine),
             d.provider
                 .as_deref()
                 .or(Some(if d.id == "cpu" { "cpu" } else { "" })),
@@ -91,7 +92,7 @@ pub fn precision_refusal(
         .and_then(Value::as_str)
         .unwrap_or("auto");
     let mode = &row.precision;
-    match supported_for(catalog, device, mode) {
+    match supported_for(catalog, device, mode, Some(&row.engine)) {
         Some(s) if s.contains(mode.as_str()) => None,
         Some(_) => Some(format!("it cannot run {mode} ({mode} not supported)")),
         None if mode == "fp32" => None,
@@ -160,17 +161,15 @@ pub fn precision_pick_needed(
     supported: Option<&BTreeSet<String>>,
 ) -> bool {
     use bunko_sched::precision as policy;
-    if !row.precision_applies() || !policy::is_benched(&row.precision) {
+    if !row.precision_applies() {
         return false;
     }
     let Some(supported) = supported else {
         return false;
     };
-    if policy::resolve_mode(&row.engine, &row.precision, Some(supported), None, "")
-        .usable
-        .len()
-        < 2
-    {
+    let usable =
+        policy::resolve_mode(&row.engine, &row.precision, Some(supported), None, "").usable;
+    if !policy::needs_bench(&row.precision, &usable) {
         return false;
     }
     policy::bench_pick(profile.and_then(|p| p.bench.as_ref()), &row.precision)
@@ -314,8 +313,13 @@ impl Scheduler {
         row: &Generation,
     ) -> Option<BTreeSet<String>> {
         let machine = self.machine_by_name(machine_name)?;
-        supported_for(&machine.catalog, model_device(row), &row.precision)
-            .map(|s| s.into_iter().collect())
+        supported_for(
+            &machine.catalog,
+            model_device(row),
+            &row.precision,
+            Some(&row.engine),
+        )
+        .map(|s| s.into_iter().collect())
     }
 
     /// The machine's profile entry for the row, its benchmark judged for the row's mode
@@ -333,7 +337,7 @@ impl Scheduler {
 
     /// `_machine_pick`: this machine's benchmarked pick for a balanced/speed row.
     pub fn machine_pick(&self, machine_name: &str, row: &Generation) -> (Option<String>, String) {
-        if !row.precision_applies() || !bunko_sched::precision::is_benched(&row.precision) {
+        if !row.precision_applies() {
             return (None, String::new());
         }
         let bench = self
@@ -400,7 +404,8 @@ impl Scheduler {
             for mode in policy::engine_modes(&row.engine) {
                 // What the engines there resolve THIS mode on that device.
                 let supported: Option<BTreeSet<String>> =
-                    supported_for(&machine.catalog, device, mode).map(|s| s.into_iter().collect());
+                    supported_for(&machine.catalog, device, mode, Some(&row.engine))
+                        .map(|s| s.into_iter().collect());
                 let (pick, why) = policy::bench_pick(bench.as_ref(), mode);
                 let resolved = policy::resolve_mode(
                     &row.engine,
@@ -410,7 +415,7 @@ impl Scheduler {
                     &why,
                 );
                 let mut entry = policy::resolution_entry(&resolved, bench.as_ref(), mode);
-                if policy::is_benched(mode) && resolved.usable.len() > 1 {
+                if policy::needs_bench(mode, &resolved.usable) {
                     let done = pick.as_ref().is_some_and(|p| resolved.usable.contains(p));
                     entry.insert(
                         "bench".into(),

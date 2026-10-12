@@ -11,11 +11,12 @@
     const gpus = [];
     if (hw.nvidia_driver != null) gpus.push('NVIDIA driver ' + (hw.nvidia_driver || 'present') + (hw.nvidia_gpus.length ? ' (' + hw.nvidia_gpus.join(', ') + ')' : ''));
     if (hw.amd_gfx.length) gpus.push('AMD ' + hw.amd_gfx.join(', '));
+    if (hw.vulkan_gpus && hw.vulkan_gpus.length) gpus.push(hw.vulkan_gpus.join(', '));
     $('hw').innerHTML =
       '<dt>Platform</dt><dd>' + esc(hw.target) + '</dd>' +
       '<dt>GPU</dt><dd>' + esc(gpus.length ? gpus.join('; ') : 'none found (the CPU pack works everywhere)') + '</dd>' +
       (hw.hidden.length ? '<dt>Hidden</dt><dd>' + esc(hw.hidden.join(', ')) + '</dd>' : '') +
-      '<dt>Recommended</dt><dd><strong>' + esc(hw.auto_variant) + '</strong> — ' + esc(hw.reason) + '</dd>' +
+      '<dt>Recommended</dt><dd><strong>' + esc(hw.auto_variant) + '</strong> — ' + esc(hw.reason) + (hw.vulkan_pack ? '<br><strong>vulkan</strong> — ' + esc(hw.vulkan_pack) : '') + '</dd>' +
       '<dt>Source</dt><dd>' + (hw.bundled_offline
         ? '<strong>Bundled with this app</strong> (nothing to download)'
         : 'Download from the release') + '</dd>';
@@ -38,7 +39,7 @@
   // The CPU pack (picked, or what Automatic means here): hayai-nova is its engine.
   function renderCpuNote() {
     const v = $('variant').value;
-    const cpu = v === 'cpu' || (v === 'auto' && !!hw && hw.auto_variant === 'cpu');
+    const cpu = v === 'cpu' || (v === 'auto' && !!hw && hw.auto_variant === 'cpu' && !hw.vulkan_pack);
     $('cpu-note').hidden = !cpu;
     $('cpu-note').textContent = cpu ? PADDLE_CPU_NOTE : '';
   }

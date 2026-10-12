@@ -869,7 +869,7 @@ fn copy_tree_filtered(
     Ok(())
 }
 
-fn link_or_copy(src: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn link_or_copy(src: &Path, dest: &Path) -> Result<()> {
     if dest.exists() {
         std::fs::remove_file(dest)?;
     }
@@ -1086,7 +1086,7 @@ fn build_cdylib(
 
 /// `BT_ABI_VERSION` from bunko-torch's source (the cdylib cannot be loaded here: a GPU
 /// pack needs the driver).
-fn abi_version(root: &Path) -> Result<u32> {
+pub(crate) fn abi_version(root: &Path) -> Result<u32> {
     let src = std::fs::read_to_string(root.join("crates/bunko-torch/src/abi.rs"))
         .context("reading crates/bunko-torch/src/abi.rs")?;
     src.lines()

@@ -109,6 +109,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "ash"
+version = "0.38.0+1.3.281"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
+dependencies = [
+ "libloading 0.8.9",
+]
+
+[[package]]
 name = "asn1-rs"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -412,7 +421,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bunko-android"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "bunko-core",
@@ -428,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-control"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "axum",
  "bunko-proto",
@@ -450,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "ipnet",
  "serde",
@@ -463,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-dav"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -494,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-db"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -516,9 +525,10 @@ dependencies = [
 
 [[package]]
 name = "bunko-engines"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bunko-layout",
  "bunko-ocr",
  "bunko-processor",
@@ -527,10 +537,11 @@ dependencies = [
  "bunko-torch",
  "bunko-vlm",
  "image",
- "libloading",
+ "libloading 0.9.0",
  "mimalloc",
  "ort",
  "parking_lot",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -542,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-layout"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "flate2",
  "serde",
@@ -554,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-library"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bunko-core",
  "crc32fast",
@@ -570,8 +581,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bunko-ncnn"
+version = "0.7.1"
+dependencies = [
+ "bunko-vlm",
+ "cc",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "bunko-ocr"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -596,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-processor"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -638,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-proto"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "semver",
  "serde",
@@ -647,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-sched"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -657,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-server"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -714,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-thumb"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -725,13 +746,13 @@ dependencies = [
 
 [[package]]
 name = "bunko-torch"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "bunko-vlm",
  "cc",
  "image",
- "libloading",
+ "libloading 0.9.0",
  "serde",
  "serde_json",
  "tch",
@@ -742,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-tray"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "bunko-control",
@@ -771,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-update"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "base64 0.22.1",
  "bunko-core",
@@ -799,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-vlm"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "half",
@@ -809,6 +830,22 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "unicode-normalization",
+]
+
+[[package]]
+name = "bunko-vulkan"
+version = "0.7.1"
+dependencies = [
+ "ash",
+ "bunko-ncnn",
+ "bunko-ocr",
+ "bunko-torch",
+ "bunko-vlm",
+ "ort",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
@@ -2542,6 +2579,16 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link 0.2.1",
+]
+
+[[package]]
+name = "libloading"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
@@ -2733,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "mokuro-bunko"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2770,6 +2817,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "windows",
  "windows-sys 0.60.2",
  "x509-parser",
 ]
@@ -5614,7 +5662,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

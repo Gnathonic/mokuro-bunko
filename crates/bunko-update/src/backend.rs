@@ -555,8 +555,8 @@ pub fn verify_installed(dir: &Path) -> Result<PackManifest> {
     Ok(m)
 }
 
-/// Packs installed under `root` (directories `torch-*` with a readable pack.json),
-/// newest torch first. Does not hash the files (see [`verify_installed`]).
+/// Packs installed under `root` (directories `torch-*`, and the Vulkan pack's
+/// `vulkan-*`, with a readable pack.json), newest torch first. Does not hash the files (see [`verify_installed`]).
 pub fn installed(root: &Path) -> Vec<(PathBuf, PackManifest)> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(root) else {
@@ -565,7 +565,7 @@ pub fn installed(root: &Path) -> Vec<(PathBuf, PackManifest)> {
     for e in rd.flatten() {
         let dir = e.path();
         let name = e.file_name().to_string_lossy().to_string();
-        if !name.starts_with("torch-") || !dir.is_dir() {
+        if !(name.starts_with("torch-") || name.starts_with("vulkan-")) || !dir.is_dir() {
             continue;
         }
         if let Ok(bytes) = std::fs::read(dir.join(PACK_JSON))

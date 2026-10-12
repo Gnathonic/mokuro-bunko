@@ -209,6 +209,7 @@ impl Manifest {
             });
         }
         files.extend(torch_release_files());
+        files.extend(vulkan_release_files());
         Manifest { files }
     }
 
@@ -1023,9 +1024,15 @@ fn torch_release_files() -> Vec<ModelFile> {
 /// flat release file name; one that names neither fails the load, so a package
 /// never silently loses the weights it binds.
 fn torch_release_files_from(json: &str) -> std::result::Result<Vec<ModelFile>, String> {
+    release_files_from(json, TORCH_MIRROR_ENV)
+}
+
+/// The files of a `tools/*` release json (`torch-models.json`, `vulkan-models.json`: the
+/// same schema), with the mirror named by `mirror_env` tried first.
+fn release_files_from(json: &str, mirror_env: &str) -> std::result::Result<Vec<ModelFile>, String> {
     let rel: TorchRelease =
-        serde_json::from_str(json).map_err(|e| format!("torch-models.json: {e}"))?;
-    let mirror = std::env::var(TORCH_MIRROR_ENV)
+        serde_json::from_str(json).map_err(|e| format!("{mirror_env} release json: {e}"))?;
+    let mirror = std::env::var(mirror_env)
         .ok()
         .filter(|v| !v.trim().is_empty())
         .map(|v| {
@@ -1089,6 +1096,123 @@ fn torch_release_files_from(json: &str) -> std::result::Result<Vec<ModelFile>, S
             })
         })
         .collect()
+}
+
+/// Where the Vulkan pack's runtimes keep their graphs: `vulkan/<engine>/<runtime>/` and
+/// the self-test goldens `vulkan/selftest/<engine>.json` (docs/rust-port/VULKAN.md §3).
+pub const VULKAN_DIR: &str = "vulkan";
+/// Dev/test override laid out like `<storage>/models/vulkan/`, searched before the store.
+pub const VULKAN_MODELS_DIR_ENV: &str = "MOKURO_VULKAN_MODELS_DIR";
+/// A mirror of the Vulkan model release (base URL or directory of the flat assets).
+pub const VULKAN_MIRROR_ENV: &str = "MOKURO_VULKAN_MODELS_MIRROR";
+/// `tools/vulkan_models`' release description, compiled in like `torch_models.json`.
+const VULKAN_MODELS_JSON: &str = include_str!("vulkan_models.json");
+
+/// The Vulkan model release this build fetches from (`vulkan-models-v1`).
+pub fn vulkan_release_name() -> String {
+    serde_json::from_str::<TorchRelease>(VULKAN_MODELS_JSON)
+        .map_or_else(|_| "unknown".into(), |r| r.release)
+}
+
+fn vulkan_release_files() -> Vec<ModelFile> {
+    release_files_from(VULKAN_MODELS_JSON, VULKAN_MIRROR_ENV).unwrap_or_else(|e| {
+        tracing::error!("the compiled-in Vulkan model release does not load: {e}");
+        Vec::new()
+    })
+}
+
+/// `vulkan/<engine>/<runtime>`.
+pub fn vulkan_rel(engine: &str, runtime: &str) -> String {
+    format!("{VULKAN_DIR}/{engine}/{runtime}")
+}
+
+/// The manifest id of an engine's self-test goldens.
+pub fn vulkan_golden_id(engine: &str) -> String {
+    format!("{VULKAN_DIR}/selftest/{engine}")
+}
+
+fn vulkan_override_dir() -> Option<PathBuf> {
+    std::env::var_os(VULKAN_MODELS_DIR_ENV)
+        .filter(|v| !v.is_empty())
+        .map(|v| expand_home(Path::new(&v)))
+}
+
+impl ModelStore {
+    /// The manifest ids of `engine`'s graphs for a Vulkan runtime (empty when the release
+    /// has none).
+    pub fn vulkan_ids(&self, engine: &str, runtime: &str) -> Vec<String> {
+        let prefix = format!("{}/", vulkan_rel(engine, runtime));
+        self.manifest
+            .files
+            .iter()
+            .filter(|f| f.id.starts_with(&prefix))
+            .map(|f| f.id.clone())
+            .collect()
+    }
+
+    /// The runtime's graph directory of `engine` when it is wholly here: the override
+    /// directory's (any files), else the store's (every manifest file present).
+    pub fn locate_vulkan(&self, engine: &str, runtime: &str) -> Option<PathBuf> {
+        let rel = format!("{engine}/{runtime}");
+        if let Some(o) = vulkan_override_dir() {
+            let d = o.join(&rel);
+            if fs::read_dir(&d).is_ok_and(|mut r| r.next().is_some()) {
+                return Some(d);
+            }
+        }
+        let ids = self.vulkan_ids(engine, runtime);
+        (!ids.is_empty() && ids.iter().all(|id| self.locate(id).is_some()))
+            .then(|| self.opts.root.join(vulkan_rel(engine, runtime)))
+    }
+
+    /// Whether the runtime's graphs of `engine` are here or downloadable.
+    pub fn vulkan_obtainable(&self, engine: &str, runtime: &str) -> bool {
+        self.locate_vulkan(engine, runtime).is_some()
+            || (self.can_download() && !self.vulkan_ids(engine, runtime).is_empty())
+    }
+
+    /// The runtime's graph directory of `engine`, fetched and verified as needed.
+    pub fn ensure_vulkan(&self, engine: &str, runtime: &str) -> Result<PathBuf> {
+        if let Some(d) = self.locate_vulkan(engine, runtime) {
+            return Ok(d);
+        }
+        let ids = self.vulkan_ids(engine, runtime);
+        if ids.is_empty() {
+            return Err(Error::Model {
+                id: vulkan_rel(engine, runtime),
+                msg: format!(
+                    "the {} release has no {engine} graphs for {runtime}",
+                    vulkan_release_name()
+                ),
+            });
+        }
+        for id in &ids {
+            self.ensure(id)?;
+        }
+        Ok(self.opts.root.join(vulkan_rel(engine, runtime)))
+    }
+
+    /// The self-test goldens of `engine` when they are here (override directory first).
+    pub fn locate_vulkan_golden(&self, engine: &str) -> Option<PathBuf> {
+        if let Some(o) = vulkan_override_dir() {
+            let p = o.join("selftest").join(format!("{engine}.json"));
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+        self.locate(&vulkan_golden_id(engine))
+    }
+
+    /// The self-test goldens of `engine` (override directory first), fetched as needed.
+    pub fn ensure_vulkan_golden(&self, engine: &str) -> Result<PathBuf> {
+        if let Some(o) = vulkan_override_dir() {
+            let p = o.join("selftest").join(format!("{engine}.json"));
+            if p.is_file() {
+                return Ok(p);
+            }
+        }
+        self.ensure(&vulkan_golden_id(engine)).map(|r| r.path)
+    }
 }
 
 /// `torch/<engine>/<precision>/<target>`: a package directory relative to the store.
@@ -2072,9 +2196,24 @@ mod tests {
         let models_v1 = |e: &str| -> Vec<&ModelFile> {
             m.engine_files(e)
                 .into_iter()
-                .filter(|f| !f.id.starts_with("torch/"))
+                .filter(|f| !f.id.starts_with("torch/") && !f.id.starts_with("vulkan/"))
                 .collect()
         };
+        // The Vulkan release: every runtime's graphs and the goldens, store paths = ids.
+        let vulkan: Vec<&ModelFile> = m
+            .files
+            .iter()
+            .filter(|f| f.id.starts_with("vulkan/"))
+            .collect();
+        assert!(
+            vulkan
+                .iter()
+                .any(|f| f.id == vulkan_golden_id("hayai-nova"))
+        );
+        for f in &vulkan {
+            assert!(f.url.contains(&vulkan_release_name()), "{}", f.url);
+            assert_eq!(f.sha256.len(), 64);
+        }
         let hayai = models_v1("hayai-nova");
         assert_eq!(hayai.len(), 8);
         let paddle = models_v1("paddle-manga");
