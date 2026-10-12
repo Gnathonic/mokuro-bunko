@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.2] - 2026-10-12
+
+A hotfix for 0.7.1.
+
+### Fixed
+- **The tray now restarts into an updated program.** An automatic update restarted the
+  server and processor into the new version but left the tray running the old one
+  (its menu kept showing the old version). The tray now notices when its program file
+  is replaced by a newer version, asks the instances it runs to pause after their
+  current volume, stops them once idle, restarts itself and starts them again, which
+  takes a few seconds. It never interrupts a volume being read or a download, and
+  lifts only the pause it set. Trays from before 0.7.2 still need one restart by hand.
+- **Vulkan crash detection on Windows and macOS.** A Vulkan runtime that crashed its
+  process was demoted at the next start only on Linux; on Windows and macOS only after
+  15 minutes, so a quick restart could crash on it again. The process check now works
+  on every platform.
+
 ## [0.7.1] - 2026-10-12
 
 GPU OCR for graphics cards no compiled libtorch package covers, through Vulkan.

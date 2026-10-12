@@ -35,6 +35,8 @@ fs4 = { version = "1", default-features = false, features = ["sync"] }
 # The control API's wire types and its `.control.json` checks (no runtime: no axum or
 # tokio); tests/contract.rs checks the tray reads exactly what the instances send.
 bunko-control = { path = "../bunko-control", default-features = false }
+# Comparing the release on disk with the running one (selfupdate.rs).
+semver.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The Linux tray: a KDE/freedesktop StatusNotifierItem + com.canonical.dbusmenu menu over

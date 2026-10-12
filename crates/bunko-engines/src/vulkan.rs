@@ -273,10 +273,48 @@ fn now() -> u64 {
 /// checked (loads and self-tests take seconds).
 const STALE_MARKER_SECS: u64 = 15 * 60;
 
+/// Whether process `pid` exists and has not exited (`None`: cannot tell). The same
+/// check as bunko-tray's `discover::pid_alive`.
 fn pid_alive(pid: u32) -> Option<bool> {
-    if cfg!(target_os = "linux") {
-        Some(Path::new(&format!("/proc/{pid}")).exists())
-    } else {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return Some(false);
+        };
+        // SAFETY: kill with signal 0 only checks for existence and permission.
+        let rc = unsafe { libc::kill(pid, 0) };
+        if rc == 0 {
+            return Some(true);
+        }
+        let err = std::io::Error::last_os_error().raw_os_error();
+        Some(err == Some(libc::EPERM))
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: plain Win32 calls on a handle this function owns and closes.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                // No such process, or one of another user's that we may not open.
+                let err = std::io::Error::last_os_error().raw_os_error();
+                return Some(err == Some(ERROR_ACCESS_DENIED as i32));
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code);
+            CloseHandle(h);
+            if ok == 0 {
+                return None;
+            }
+            Some(code == STILL_ACTIVE as u32)
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
         None
     }
 }
@@ -1495,6 +1533,24 @@ mod tests {
         };
         assert!(err[0].contains("files are not here"), "{err:?}");
         assert!(store.verdict("other").is_none());
+    }
+
+    #[test]
+    fn pid_alive_tells_a_running_process_from_an_exited_one() {
+        assert_eq!(pid_alive(std::process::id()), Some(true));
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", "exit"])
+                .spawn()
+        } else {
+            std::process::Command::new("true").spawn()
+        }
+        .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        // Reaped (and its handle closed by `wait` on Windows): the pid is gone.
+        drop(child);
+        assert_eq!(pid_alive(pid), Some(false));
     }
 
     #[test]

@@ -41,6 +41,13 @@ tracing.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
 
+# Whether the process that left a Vulkan marker is still running (vulkan::pid_alive).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [dev-dependencies]
 anyhow.workspace = true
 tempfile.workspace = true

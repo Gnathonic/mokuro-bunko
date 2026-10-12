@@ -14,13 +14,14 @@ use crate::model::{self, InstanceView, MenuModel};
 use crate::monitor::{Live, Monitor};
 use crate::notify;
 use crate::paths::{self, Env, Layout, ProcessEnv};
+use crate::selfupdate::{self, FileId};
 use crate::status::Status;
 use crate::supervise::{self, Launch, Supervisor, World};
 use crate::trayconf::TrayConfig;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -127,6 +128,39 @@ pub struct App {
     last_good: HashMap<String, (Status, Instant)>,
     /// Which "the update needs you" alarms were already shown.
     notified: Notified,
+    /// Following an update of this program's own executable (`selfupdate`).
+    follow: Follow,
+}
+
+/// A `--version` answer: the replaced file that was asked, and the version it told.
+type ProbeAnswer = (FileId, Option<String>);
+
+/// The tray's own executable, as it was at start and as last looked at.
+struct Follow {
+    restart: Option<crate::RestartFn>,
+    /// The executable when the tray started.
+    started_as: Option<FileId>,
+    /// The last replaced file whose version was asked (asked once per file).
+    asked: Option<FileId>,
+    next_check: Instant,
+    /// A `--version` answer from the probe thread: (the file asked, its version).
+    answer: Arc<Mutex<Option<ProbeAnswer>>>,
+    probing: bool,
+    /// A newer release is on disk: its version, and since when it waits.
+    pending: Option<(String, Instant)>,
+    /// Why it still waits (logged when it changes).
+    waiting_for: Option<String>,
+    /// The instances are stopped: the run loop restarts the process.
+    restart_now: bool,
+    /// The pauses this tray asked for to get the instances idle: role → their `until`.
+    ours: HashMap<String, String>,
+    /// When each role was last asked to pause (not more than every few seconds).
+    asked_at: HashMap<String, Instant>,
+    /// The previous tray's pauses for its restart, to lift once the role answers.
+    resume: HashMap<String, String>,
+    resume_by: Instant,
+    /// `<tray data>/.tray-resume.json`.
+    resume_file: PathBuf,
 }
 
 /// Run the tray until Quit (the toolkit of this platform).
@@ -202,6 +236,35 @@ impl App {
             });
         }
         let tray_config_mtime = mtime(&tray_config_path);
+        let resume_file = layout.writable_log_dir(&env).join(selfupdate::RESUME_FILE);
+        // The pauses the previous tray made for its restart into this program.
+        let resume: HashMap<String, String> = std::fs::read(&resume_file)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+        if !resume.is_empty() {
+            let _ = std::fs::remove_file(&resume_file);
+            tracing::info!(
+                "lifting the pauses the previous tray made for its restart: {}",
+                resume.keys().cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+        let follow = Follow {
+            restart: opts.restart,
+            started_as: selfupdate::file_id(&exe),
+            asked: None,
+            next_check: Instant::now() + selfupdate::CHECK_EVERY,
+            answer: Arc::new(Mutex::new(None)),
+            probing: false,
+            pending: None,
+            waiting_for: None,
+            restart_now: false,
+            ours: HashMap::new(),
+            asked_at: HashMap::new(),
+            resume,
+            resume_by: Instant::now() + selfupdate::RESUME_WITHIN,
+            resume_file,
+        };
         let app = App {
             exe,
             layout,
@@ -219,14 +282,22 @@ impl App {
             first_run_checked: false,
             last_good: HashMap::new(),
             notified: Notified::default(),
+            follow,
         };
         (app, lock)
     }
 
-    /// Handle one event; returns true to exit.
+    /// Handle one event; returns true to exit (Quit, or a restart into the updated
+    /// program: then [`App::restart_process`]).
     pub fn on_event(&mut self, ui: &mut dyn Ui, event: UserEvent) -> bool {
         match event {
-            UserEvent::Changed => self.refresh(ui),
+            UserEvent::Changed => {
+                self.refresh(ui);
+                if self.follow_update() {
+                    self.stop_for_restart(ui);
+                    return true;
+                }
+            }
             UserEvent::Menu(id) => {
                 if self.on_menu(ui, &id) {
                     return true;
@@ -303,13 +374,265 @@ impl App {
             .map(|s| s.views(&visible))
             .unwrap_or_default();
         let notice = self.monitor.notice();
-        model::build(&model::Inputs {
+        let mut m = model::build(&model::Inputs {
             instances: &instances,
             supervised: &supervised,
             updating: &updating,
             notice: notice.as_deref(),
             now: chrono::Local::now(),
-        })
+        });
+        if let Some((v, _)) = &self.follow.pending
+            && self.follow.waiting_for.is_some()
+        {
+            m.status_lines.push(selfupdate::waiting_line(v));
+        }
+        m
+    }
+
+    /// What each instance this tray runs (its children and the ones it adopted) is
+    /// doing; instances it only watches (services, other processes) do not count.
+    fn supervised_activity(&self) -> Vec<(String, selfupdate::Activity)> {
+        self.supervised_lives()
+            .into_iter()
+            .map(|(role, live)| {
+                let status = live
+                    .as_ref()
+                    .filter(|l| l.error.is_none())
+                    .and_then(|l| l.status.as_ref());
+                (role, selfupdate::activity(status))
+            })
+            .collect()
+    }
+
+    /// The instances this tray runs, by role, with what the monitor knows of them.
+    fn supervised_lives(&self) -> Vec<(String, Option<Live>)> {
+        let Some(sup) = &self.supervisor else {
+            return Vec::new();
+        };
+        let lives = self.monitor.instances();
+        sup.slots
+            .iter()
+            .filter_map(|slot| {
+                let pid = slot.child_pid().or_else(|| slot.adopted_pid())?;
+                let live = lives.iter().find(|l| l.control.pid == pid).cloned();
+                Some((slot.managed.role.clone(), live))
+            })
+            .collect()
+    }
+
+    /// An instance that reads volume after volume is never idle by itself: ask the
+    /// ones reading to pause after their current volume (a pause that lifts itself after
+    /// [`selfupdate::PAUSE_FOR`]); the restarted tray lifts it.
+    fn make_gaps(&mut self) {
+        let now = chrono::Utc::now();
+        for (role, live) in self.supervised_lives() {
+            let Some(live) = live else { continue };
+            let (Some(status), None) = (&live.status, &live.error) else {
+                continue;
+            };
+            let ours = self.follow.ours.get(&role).map(String::as_str);
+            if !selfupdate::should_pause(status, ours, now)
+                || self
+                    .follow
+                    .asked_at
+                    .get(&role)
+                    .is_some_and(|t| t.elapsed() < Duration::from_secs(20))
+            {
+                continue;
+            }
+            let until = selfupdate::pause_until(now);
+            self.follow.asked_at.insert(role.clone(), Instant::now());
+            self.follow.ours.insert(role.clone(), until.clone());
+            let (monitor, send) = (self.monitor.clone(), self.send.clone());
+            std::thread::spawn(move || {
+                let req = PauseRequest {
+                    mode: "after_volume",
+                    until: Some(until),
+                    reason: Some("schedule"),
+                };
+                match Client::new(&live.control).pause(&req) {
+                    Ok(status) => {
+                        tracing::info!(
+                            "{role} (pid {}) pauses after its current volume, for the tray's restart",
+                            live.control.pid
+                        );
+                        monitor.record(live.control.pid, status);
+                    }
+                    Err(e) => tracing::warn!("asking {role} to pause for the restart: {e}"),
+                }
+                send(UserEvent::Changed);
+            });
+        }
+    }
+
+    /// Lift the pauses the previous tray made for its restart, once their roles answer.
+    fn lift_restart_pauses(&mut self) {
+        if self.follow.resume.is_empty() {
+            return;
+        }
+        if Instant::now() > self.follow.resume_by {
+            tracing::warn!(
+                "the restart pauses of {} were not lifted in time; they lift by themselves",
+                self.follow
+                    .resume
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            self.follow.resume.clear();
+            return;
+        }
+        for l in self.monitor.instances() {
+            let (Some(status), None) = (&l.status, &l.error) else {
+                continue;
+            };
+            let Some(until) = self.follow.resume.remove(&l.control.role) else {
+                continue;
+            };
+            if !selfupdate::is_our_pause(status, &until) {
+                tracing::info!(
+                    "{} is not in the restart's pause any more; leaving its state as it is",
+                    l.control.role
+                );
+                continue;
+            }
+            let (monitor, send) = (self.monitor.clone(), self.send.clone());
+            std::thread::spawn(move || {
+                match Client::new(&l.control).resume() {
+                    Ok(status) => {
+                        tracing::info!(
+                            "{} (pid {}) resumed after the tray's restart",
+                            l.control.role,
+                            l.control.pid
+                        );
+                        monitor.record(l.control.pid, status);
+                    }
+                    Err(e) => tracing::warn!(
+                        "resuming {} after the restart: {e} (its pause lifts by itself)",
+                        l.control.role
+                    ),
+                }
+                send(UserEvent::Changed);
+            });
+        }
+    }
+
+    /// Look at this program's executable (every [`selfupdate::CHECK_EVERY`]); with a
+    /// newer release on disk, true once every instance this tray runs is idle.
+    fn follow_update(&mut self) -> bool {
+        if self.follow.restart.is_none() || self.follow.restart_now {
+            return false;
+        }
+        let now = Instant::now();
+        // The probe thread's answer about a replaced file.
+        let answer = self
+            .follow
+            .answer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some((id, version)) = answer {
+            self.follow.probing = false;
+            self.follow.asked = Some(id);
+            let mine = env!("CARGO_PKG_VERSION");
+            match version {
+                Some(v) if selfupdate::is_newer(&v, mine) => {
+                    tracing::info!(
+                        "{} was updated to {v} (this tray runs {mine}): restarting into it once the instances it runs are idle",
+                        self.exe.display()
+                    );
+                    self.follow.pending = Some((v, now));
+                }
+                Some(v) => tracing::info!(
+                    "{} changed but is {v} (this tray runs {mine}): not restarting",
+                    self.exe.display()
+                ),
+                None => tracing::warn!(
+                    "{} changed but did not tell its version: not restarting",
+                    self.exe.display()
+                ),
+            }
+        }
+        if self.follow.pending.is_none() && !self.follow.probing && now >= self.follow.next_check {
+            self.follow.next_check = now + selfupdate::CHECK_EVERY;
+            if let Some(id) = selfupdate::file_id(&self.exe)
+                && Some(&id) != self.follow.started_as.as_ref()
+                && Some(&id) != self.follow.asked.as_ref()
+            {
+                self.follow.probing = true;
+                let (exe, cli, slot) = (
+                    self.exe.clone(),
+                    self.cli.clone(),
+                    self.follow.answer.clone(),
+                );
+                let send = self.send.clone();
+                std::thread::spawn(move || {
+                    // Let the update finish writing every copy before asking.
+                    std::thread::sleep(Duration::from_secs(5));
+                    let t = Duration::from_secs(20);
+                    let v = selfupdate::query_version(&exe, t)
+                        .or_else(|| cli.and_then(|c| selfupdate::query_version(&c, t)));
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, v));
+                    send(UserEvent::Changed);
+                });
+            }
+        }
+        let Some((version, since)) = self.follow.pending.clone() else {
+            return false;
+        };
+        self.make_gaps();
+        match selfupdate::decide(&self.supervised_activity(), now.duration_since(since)) {
+            selfupdate::Decision::Wait(why) => {
+                if self.follow.waiting_for.as_deref() != Some(why.as_str()) {
+                    tracing::info!("restart into {version} waits: {why}");
+                    self.follow.waiting_for = Some(why);
+                }
+                false
+            }
+            selfupdate::Decision::Restart => {
+                tracing::info!("restarting the tray into {version}");
+                true
+            }
+        }
+    }
+
+    /// Before the restart: hide the icon and stop the instances this tray runs, as
+    /// Quit does (the new tray starts them again, as at login).
+    fn stop_for_restart(&mut self, ui: &mut dyn Ui) {
+        if !self.follow.ours.is_empty() {
+            match serde_json::to_vec(&self.follow.ours)
+                .map_err(std::io::Error::other)
+                .and_then(|b| std::fs::write(&self.follow.resume_file, b))
+            {
+                Ok(()) => {}
+                Err(e) => tracing::warn!(
+                    "{}: {e} (the restart's pauses lift by themselves)",
+                    self.follow.resume_file.display()
+                ),
+            }
+        }
+        self.quit(ui);
+        self.follow.restart_now = true;
+    }
+
+    /// Whether the loop ended for a restart into the updated program.
+    pub fn wants_restart(&self) -> bool {
+        self.follow.restart_now
+    }
+
+    /// Replace this process with the updated program (Unix: exec, same pid; Windows:
+    /// a new process, then this one exits). The tray lock is released first so the new
+    /// tray can take it. Returns only when that failed.
+    pub fn restart_process(&self, lock: &std::fs::File) {
+        let Some(restart) = self.follow.restart else {
+            return;
+        };
+        let _ = fs4::FileExt::unlock(lock);
+        // The log writer runs on its own thread: give it a moment to write the last lines.
+        std::thread::sleep(Duration::from_millis(300));
+        let Err(e) = restart();
+        tracing::error!("could not restart the tray into the updated program: {e}");
     }
 
     /// One desktop notification per distinct "the update needs you" problem. These are
@@ -396,6 +719,7 @@ impl App {
 
     fn refresh(&mut self, ui: &mut dyn Ui) {
         self.reload_tray_config();
+        self.lift_restart_pauses();
         if let Err(e) = self.refresh_or_fail(ui) {
             tracing::error!("tray: {e:#}");
         }
@@ -585,18 +909,22 @@ impl App {
             id::PAUSE_AFTER => self.pause_all(Some(PauseRequest {
                 mode: "after_volume",
                 until: None,
+                reason: None,
             })),
             id::PAUSE_NOW => self.pause_all(Some(PauseRequest {
                 mode: "now",
                 until: None,
+                reason: None,
             })),
             id::PAUSE_HOUR => self.pause_all(Some(PauseRequest {
                 mode: "now",
                 until: Some(model::in_one_hour(now)),
+                reason: None,
             })),
             id::PAUSE_TOMORROW => self.pause_all(Some(PauseRequest {
                 mode: "now",
                 until: Some(model::tomorrow_at_8(now)),
+                reason: None,
             })),
             id::RESUME => self.pause_all(None),
             id::ADMIN => {

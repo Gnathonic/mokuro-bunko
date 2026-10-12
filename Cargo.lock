@@ -421,7 +421,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bunko-android"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "bunko-core",
@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-control"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "axum",
  "bunko-proto",
@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-core"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "ipnet",
  "serde",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-dav"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-db"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-engines"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -537,6 +537,7 @@ dependencies = [
  "bunko-torch",
  "bunko-vlm",
  "image",
+ "libc",
  "libloading 0.9.0",
  "mimalloc",
  "ort",
@@ -548,12 +549,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.60.2",
  "zip 2.4.2",
 ]
 
 [[package]]
 name = "bunko-layout"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "flate2",
  "serde",
@@ -565,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-library"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "bunko-core",
  "crc32fast",
@@ -582,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-ncnn"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "bunko-vlm",
  "cc",
@@ -592,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-ocr"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -617,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-processor"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -659,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-proto"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "semver",
  "serde",
@@ -668,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-sched"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -678,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-server"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -735,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-thumb"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -746,7 +748,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-torch"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "bunko-vlm",
@@ -763,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-tray"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "bunko-control",
@@ -774,6 +776,7 @@ dependencies = [
  "mslnk",
  "open",
  "png",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -792,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-update"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "base64 0.22.1",
  "bunko-core",
@@ -820,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-vlm"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "half",
@@ -834,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "bunko-vulkan"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "ash",
  "bunko-ncnn",
@@ -2780,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "mokuro-bunko"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -5662,7 +5665,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

@@ -27,6 +27,9 @@ pub struct PauseRequest {
     pub mode: &'static str,
     /// ISO-8601 with offset, or none for "until resumed".
     pub until: Option<String>,
+    /// `user` (what the instance assumes when absent) or `schedule`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
 }
 
 #[derive(Clone)]

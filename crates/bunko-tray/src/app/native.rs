@@ -246,6 +246,9 @@ pub fn run(setup: Setup) -> anyhow::Result<()> {
             }
             Event::UserEvent(e) => {
                 if app.on_event(&mut ui, e) {
+                    if app.wants_restart() {
+                        app.restart_process(&lock);
+                    }
                     *control_flow = ControlFlow::Exit;
                 }
             }

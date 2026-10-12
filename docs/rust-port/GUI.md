@@ -276,6 +276,23 @@ X…" (waiting, downloading, installing, restarting), "Updated to X (from Y)", o
 to X failed: … — will retry"; a `blocked` update (needs the owner) is a problem in the
 Problems panel instead.
 
+**The tray follows its own update** (`crates/bunko-tray/src/selfupdate.rs`, 0.7.2). The
+instances exec into the updated executable; the tray is a separate process. Every 30 s
+it compares its executable with the file it started from (size, time, and inode on
+Unix); a replaced file is asked `--version`, and only a newer release counts (equal or
+older: nothing; a rollback is the updater's). Then the tray waits until every instance
+it runs (its children and adopted ones, not services or other processes) is idle: not
+reading a volume, installing, mid-update or measuring. An instance that reads volume
+after volume is never idle by itself, so the tray asks it to pause after its current
+volume (`reason: schedule`, `until` two hours out, so it lifts by itself if nothing
+else does; a pause someone else made is left alone) and the menu says "Restarting the
+tray for X after the current job". Once idle the tray stops them as Quit does, writes
+the pauses it made to `.tray-resume.json` next to `.tray.lock`, and restarts with
+`bunko_update::restart` (exec on Unix; on Windows a new process, the lock released
+first). The new tray starts its instances as at login and lifts exactly those pauses
+(their `until` must match). A tray older than 0.7.2 cannot do this: it needs one Quit
+and start by hand.
+
 **OCR backend install** (`status.install`, 0.7): `serve` and `processor serve` install a
 missing OCR backend in the background (`crates/mokuro-bunko/src/ocr_install.rs`). The
 dashboard's "OCR backend" panel shows the stage, a progress bar and the bytes while it

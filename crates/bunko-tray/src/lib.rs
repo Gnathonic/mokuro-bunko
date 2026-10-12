@@ -17,6 +17,7 @@ pub mod model;
 pub mod monitor;
 pub mod notify;
 pub mod paths;
+pub mod selfupdate;
 #[cfg(target_os = "linux")]
 pub mod session;
 pub mod status;
@@ -39,7 +40,14 @@ pub struct Options {
     pub supervise: bool,
     /// Log to stderr instead of the log file.
     pub log_stderr: bool,
+    /// Replaces this process with the program on disk, same arguments (the app passes
+    /// `bunko_update::restart`): how the tray follows an update of its own executable
+    /// (`selfupdate`). None: it keeps running the old one.
+    pub restart: Option<RestartFn>,
 }
+
+/// See [`Options::restart`]: returns only on failure.
+pub type RestartFn = fn() -> std::io::Result<std::convert::Infallible>;
 
 impl Default for Options {
     fn default() -> Self {
@@ -47,6 +55,7 @@ impl Default for Options {
             storages: Vec::new(),
             supervise: true,
             log_stderr: false,
+            restart: None,
         }
     }
 }

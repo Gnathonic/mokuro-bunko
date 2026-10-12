@@ -13,6 +13,7 @@ pub fn run(_ctx: &Ctx, args: TrayArgs) -> CmdResult {
             storages: args.storages,
             supervise: !args.no_supervise,
             log_stderr: args.log_stderr,
+            restart: Some(bunko_update::restart),
         },
         exe,
     )

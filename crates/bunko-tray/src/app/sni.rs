@@ -283,7 +283,7 @@ pub fn run(setup: Setup) -> anyhow::Result<()> {
             send(UserEvent::Menu(id::QUIT.to_string()));
         });
     }
-    let (mut app, _lock) = App::start(setup, send.clone());
+    let (mut app, lock) = App::start(setup, send.clone());
     let mut ui = SniUi {
         rt,
         send,
@@ -294,6 +294,9 @@ pub fn run(setup: Setup) -> anyhow::Result<()> {
         if app.on_event(&mut ui, event) {
             break;
         }
+    }
+    if app.wants_restart() {
+        app.restart_process(&lock);
     }
     Ok(())
 }
