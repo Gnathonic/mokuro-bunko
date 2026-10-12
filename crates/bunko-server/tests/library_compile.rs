@@ -200,6 +200,13 @@ async fn dav_writes_schedule_the_series_without_the_watcher() {
     })
     .await;
     assert!(grew);
+    // The batch that wrote it may still be publishing the catalog.
+    let runtime = env.runtime.clone();
+    assert!(
+        tokio::task::spawn_blocking(move || runtime.wait_idle(Duration::from_secs(5)))
+            .await
+            .unwrap()
+    );
     // A series.json write is not a change that needs compiling.
     bunko_dav::DavHooks::library_changed(env.runtime.as_ref(), std::slice::from_ref(&series_file));
     assert!(!env.runtime.has_pending_pass());
