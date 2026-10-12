@@ -1,0 +1,15 @@
+# torch_export build environment, variant cpu (python 3.12). Install with:
+#   uv pip install --index-strategy unsafe-best-match -r requirements-cpu.txt
+--index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://pypi.org/simple
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
+transformers==5.17.0
+peft==0.21.0
+accelerate==1.15.0
+numpy==2.5.2
+pillow==12.3.0
+tokenizers==0.23.2
+safetensors==0.8.0
+huggingface_hub==1.31.0
+sentencepiece==0.2.2

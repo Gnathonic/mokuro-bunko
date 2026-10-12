@@ -1,0 +1,53 @@
+[package]
+name = "bunko-processor"
+description = "The mokuro-bunko OCR processor runtime: sessions, archive fetching, the remote client and the in-process local link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bunko-proto.workspace = true
+# The local control API's pause + activity (GUI.md §2-3) the session hub obeys and feeds.
+bunko-control = { path = "../bunko-control" }
+bunko-sched.workspace = true
+# Automatic updates (`processor.auto_update`): the retry/marker rules and the installer
+# trait the binary implements.
+bunko-update.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+http.workspace = true
+bytes.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true
+zip.workspace = true
+percent-encoding.workspace = true
+uuid.workspace = true
+parking_lot.workspace = true
+webpki-roots = "1"
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "__rustls-tls"] }
+crc32fast = "1"
+hostname = "0.4"
+fs4 = { version = "1", default-features = false, features = ["sync"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+axum = { workspace = true, features = ["ws"] }
+# auto_update: the processor's log lines in a failing test's output
+tracing-subscriber.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+rcgen.workspace = true
+tokio-rustls.workspace = true

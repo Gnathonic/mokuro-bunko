@@ -1,0 +1,18 @@
+# systemd USER service for a remote OCR processor (full build) installed without root.
+#   cp deploy/mokuro-bunko-processor.user.service ~/.config/systemd/user/mokuro-bunko-processor.service
+#   systemctl --user enable --now mokuro-bunko-processor
+[Unit]
+Description=Mokuro Bunko OCR processor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# %E = $XDG_CONFIG_HOME (~/.config). processor.yaml holds a password: chmod 600 it.
+ExecStart=%h/.local/bin/mokuro-bunko processor serve --config %E/mokuro-bunko/processor.yaml
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=60s
+
+[Install]
+WantedBy=default.target

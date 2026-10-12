@@ -1,5 +1,517 @@
 # Changelog
 
+## [0.7.0] - 2026-10-11
+
+A rewrite in Rust, as a drop-in over 0.5.2 and 0.5.3 storage (same `config.yaml`,
+`mokuro.db` and library tree, same reader-facing APIs) and at parity with 0.5.3's
+features. See [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
+
+This section compares 0.7.0 with 0.5.3. The 0.7.0-beta entries below it list what
+changed from one pre-release to the next; all of it is in 0.7.0.
+
+### Added
+- One native `mokuro-bunko` program: no Python, uv or venvs. With no arguments it
+  starts the app: in a desktop session the tray, headless what is set up (`serve`,
+  `processor serve` or both), or `setup` in a terminal when nothing is. On Windows
+  `mokuro-bunko.exe` is the app (no console window) and `mokuro-bunko-cli.exe` the
+  same program for terminals.
+- Lite and full builds. Lite is the server only and runs in 1 GB of RAM (about
+  16 MiB idle in Docker); full adds local OCR, the `processor` command and the
+  desktop tray.
+- OCR recognizers on libtorch, the same torch 0.5.2 used, from compiled model
+  packages: `install-ocr` installs a *backend pack* for the hardware it finds —
+  NVIDIA CUDA (Turing or newer, Linux and Windows), AMD ROCm (RX 6000/7000/9000,
+  Linux) or the CPU (all platforms). The pack is checked against the signed
+  `release.json`, and its `pack.json` pins every file, NVIDIA's CUDA libraries
+  included; the model packages are checked against sha256 values built into the
+  program.
+- **The OCR backend installs in the background; serving never waits for it.** `serve`
+  and `processor serve` start at once and, when local OCR is on and an enabled
+  generation needs the libtorch backend that is missing, run the same detection and
+  install as `install-ocr --if-needed` meanwhile, on any system. The progress is in the
+  log, the admin panel, the dashboard, the tray and `/control/status`; the server's
+  local OCR starts by itself when it is done, and a processor takes work once its
+  backend is ready. A failed install is a problem with a Retry button, retried after
+  5, 15 and 60 minutes. A new server installs nothing before its first-run setup;
+  `MOKURO_OCR_AUTO_INSTALL=false` means never by itself (the missing backend is then a
+  problem with an Install button). `install-ocr` stays a foreground command.
+- Four downloads per release: `mokuro-bunko-<ver>-windows.zip` (x86_64, with a portable
+  mode), `-macos.dmg` (Apple silicon, a drag-to-Applications disk image),
+  `-linux-x64.tar.gz` (glibc 2.28+) and `-linux-arm64-server.tar.gz` (a static server;
+  OCR from a processor), plus the Docker images `:latest` (local OCR; the backend for
+  the container's GPU is downloaded once it serves) and `:latest-lite` (amd64 + arm64).
+  The release notes start with a table linking each one. `:beta` / `:beta-lite` follow
+  every release, beta or stable.
+- `scripts/install.sh` and `scripts/install.ps1` install a release, checking the
+  archive's sha256 against `release.json`. install.sh also checks its ed25519
+  signature when OpenSSL 3 is available (without it, it warns, or fails with
+  `--require-signature`); install.ps1 relies on HTTPS to GitHub. mokuro-bunko itself
+  checks the signature when it updates.
+- One-click updates: the admin panel's Updates card checks for new releases and,
+  on self-managed installs (a release archive, the disk image, `install.ps1`, or
+  `install.sh` run as a user), installs them (ed25519-signed `release.json`,
+  sha256-checked archive). Elsewhere it reports the new release and says how to
+  update (re-run install.sh, pull the image, or use the package manager). Also
+  `mokuro-bunko update check|apply`, and `update.*` settings. `update.channel`
+  defaults to `auto`: a pre-release install (a beta or release candidate) follows
+  later pre-releases, a stable install only stable releases; `stable` or
+  `prerelease` pins it.
+- Processor protocol v3: one WebSocket per processor plus streamed result
+  uploads, replacing 0.5's long-lived chunked streams.
+- `mokuro-bunko models list|download|verify` and `mokuro-bunko healthcheck`.
+- A processor needs no checkout or Python: `processor setup` and `processor serve` come
+  with the binary, and `processor service` also installs a launchd agent on macOS.
+- `server.threads` and `server.cache_mb` settings.
+- Generation upgrade (`ocr.upgrade`, off by default) replaces old primary OCR
+  with the current primary generation's output. The old file is not kept (extra OCR
+  beside the primary is what non-primary generations are for); a volume a person
+  edited is skipped unless an admin forces it, and a short archive is never
+  regenerated.
+- **One web interface for a library server**, the same locally, from another
+  computer and in Docker. Its first-run page (`/setup`) is the setup wizard: the
+  admin account, who may join, remote access (Cloudflare tunnel, Dynamic DNS, HTTPS,
+  other web apps) and OCR on this machine (on by default when a usable GPU is found;
+  Auto, CPU or the GPU found). Answers the environment fixes are shown, not asked.
+  Finishing signs the admin in and opens the admin panel, whose new **This server**
+  tab covers the machine: OCR on or off, the hardware, the backend in use and the
+  preference (`ocr.backend`), Install / Reinstall / Remove with live progress, the
+  engines' models, diagnostics (`doctor`) and the server log. Installs come only from
+  the signed release or the `ocr-offline` folder next to the program.
+- First-run setup from another computer (Docker, a NAS): while no admin exists the
+  server prints a one-time **setup code** in its log at every start (`First run:
+  create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`). `/setup`
+  opened from another address asks for it (five tries per address, one more every
+  12 s; a flood of wrong codes replaces it with a new one in the log rather than
+  locking the owner out); scripts may send it as `X-Setup-Code`. Localhost needs no
+  code. The code lives in memory only and dies once an admin exists. Every setup
+  route answers only while no admin exists, and HTTPS certificate files can be named
+  only from the server itself. 0.5 allowed setup from localhost only.
+- The desktop app keeps what is local (`mokuro-bunko` with no arguments on a desktop,
+  or `mokuro-bunko gui`): a chooser (**Library server**: pick the folder, the tray
+  starts the server on a free port and the browser moves to its `/setup`;
+  **Processor**: the pairing page: library address, login, connection test, name,
+  OCR choices), then the processor's own status and settings pages. Every running
+  server and processor serves these pages on 127.0.0.1 only, behind a per-run token.
+  `docs/rust-port/GUI-COVERAGE.md` gives every command-line option its place (the
+  admin panel, these pages or the tray) or says why it is CLI-only; a test checks it.
+- The running version is shown at the foot of the admin panel, on the local
+  processor pages and as the tray menu's first line.
+- Pause OCR on a processor or on the server's own OCR: after the running volume,
+  now, or until a time; the pause survives restarts. Pausing now hands the claimed
+  volumes straight back to the queue without counting a failure, and the admin
+  panel's processor list shows who is paused until when.
+- A processor downloads ahead of work only the models of the engines its library
+  runs: the library names them when the processor registers, and the processor fetches
+  the models of an engine the library enables later at its next registration. Any
+  engine's models are still fetched when a session first needs them.
+- `install-ocr`, `doctor` and `models` take `--processor` to act on the
+  processor's storage (picked automatically on a processor-only machine), and a
+  processor also uses a backend pack installed for the library on the same machine.
+- A tray icon for Windows, macOS and Linux (`mokuro-bunko tray`, and what
+  `mokuro-bunko` with no arguments runs on a desktop): what the server or processor
+  is doing (volume, pages, rate), statistics, pause after this volume / now / for an
+  hour / until tomorrow, resume, Open admin panel, Open processor, Open library, and
+  a Start at login checkbox. It starts the server or processor `tray.json` lists,
+  restarts it if it crashes, and its Quit stops what it started (an instance it does
+  not manage, a system service, keeps running). It is part of the full build (the
+  app `mokuro-bunko.exe` on Windows, the `Mokuro Bunko` app on macOS, a `.desktop`
+  entry on Linux, where it needs no GTK or AppIndicator library); the lite build and
+  the Docker images have none.
+- Opt-in automatic updates. `update.auto: true` (config, the admin panel's Updates
+  card) installs a newer release on the channel by itself: new OCR work is
+  held, the running volumes and uploads finish, the release is fetched and checked
+  as one unit — the program, its OCR backend pack for the installed variant and its
+  models — before anything is switched, then the server restarts (exec under the
+  tray, a service or a terminal; exit 75 under the Windows tray or `run.bat`). If the
+  new release's pack does not load after the switch, program and pack roll back
+  together. A processor with `processor.auto_update: true` (`processor setup
+  --auto-update`, the processor's pairing and settings pages) follows its library:
+  when the library reports a newer version it finishes its running volume, installs
+  exactly that release, restarts and reconnects; it never downgrades. Self-managed
+  installs only: Docker, package-manager and root `install.sh` installs are told how
+  to update instead (the admin panel shows that line in place of the checkbox, and a
+  saved `update.auto: true` is ignored there); a processor there finishes its
+  volumes, then its install is refused with a `fail` problem and retried later.
+  `/control/status` has an `update` block,
+  the tray shows "Updating to X…" / "Updated to X", and anything that needs the
+  owner (a driver, disk space, a bad signature, a rollback, a library older than its
+  processor, a changed GPU) raises a `fail` problem the tray flags and announces
+  once with a desktop notification.
+- Processor protocol v3 additions: `version_mismatch` in the registration reply
+  and the `update_status` event; the admin panel's processor list shows both.
+- `update.public_key` (config file only, logged loudly) for fork and test releases.
+
+### Changed
+- Library paths are case-insensitive, as on Windows and as in 0.5.3: `kingdom/` reaches
+  `Kingdom/`, an upload spelled in another case lands in the existing folder, renaming
+  a folder or file to fix its case works (0.5.2 refused it as locked), and the catalog
+  keeps one row per series folder, so case-variant folders that already exist no longer
+  hide each other.
+- A backend pack belongs to exactly one release: the program refuses a pack from
+  another release ("the backend pack is from mokuro-bunko A, this is B: run
+  install-ocr"), and `doctor`, `/control/status` and the tray name the pack as
+  "<variant> for <release>". The admin panel's Update button and `update apply`
+  install the release's pack and models together with the program.
+- OCR engines are `hayai-nova` (the new default primary), `paddle-manga` and
+  `ppocr-manga`, all Apache-2.0. A fresh config has one `hayai-nova` primary row.
+  At fp32 their text is identical to 0.5.2's; default speed is above a tuned 0.5.2
+  on every GPU tested (e.g. RTX 4090 13.9 vs 10.5 pages/s, RX 6900 XT 4.35 vs 2.75).
+- The CPU's compiled model packages no longer carry their own copy of the weights:
+  like the GPU packages they use the engine's shared weights files. hayai-nova on the
+  CPU downloads 0.57 GB in fp32 (was 0.79 GB) and 0.29 GB in bf16 (was 0.40 GB), uses
+  about 200 MB less memory, and reads the same text at the same speed.
+  paddle-manga's CPU packages use its fp32 GPU packages' 3.6 GB of weights
+  instead of 4.65 GB each of their own (and about 1.3 GB less memory, same text,
+  same speed). The compiled-models release shrinks
+  from 25.6 GB to 8.96 GB.
+- Where the CPU is picked for paddle-manga, the processor's OCR pages and the admin
+  panel's pools table say it is slow there (about 40 s a page on 16 threads) and that
+  hayai-nova is the CPU engine of choice.
+- OCR backends and models are downloaded on demand, after hardware detection and
+  by the owner's preference, never baked into a release:
+  - The full Docker image carries no backend pack and no model. Once it serves, the
+    server (or `processor serve`) installs them in the background as on any system
+    (above): it detects the GPU the container was given (NVIDIA through the container
+    toolkit, AMD through `/dev/kfd` + `/dev/dri`, a host GPU not passed in does not
+    count), applies `ocr.backend`, downloads the matching pack into `/data/backends`
+    and the enabled engines' models into `/data/models`, and does nothing on later
+    starts. A new GPU gets its pack (the replaced one is removed).
+    `MOKURO_OCR_AUTO_INSTALL=false` turns it off; 0.5.2's `OCR_AUTO_INSTALL=false` is
+    ignored, as it never stopped 0.5.2 from installing. The entrypoint installs
+    nothing before the server, so it answers within seconds of the first start (the
+    health check's start period is 30 s).
+  - AMD GPUs work in Docker (`--device /dev/kfd --device /dev/dri`); the server keeps
+    the device nodes' groups when it drops to `PUID:PGID`.
+  - `:latest-cuda` / `:<ver>-cuda` is a second tag of the full image (the 0.7 CUDA
+    image with its pack built in is gone). Templates written for the 0.5.2 CUDA
+    image keep their volumes and variables but name the locally built
+    `mokuro-bunko:unraid-cuda`: change their Repository to
+    `ghcr.io/gnathonic/mokuro-bunko:latest` (or `:latest-cuda`).
+    `BAKE_PACK=1` (`PACK_VARIANT=cpu|cu130|rocm7.1`, default `cpu`) builds a backend
+    pack into a self-built image. The models are not included: a host without
+    internet needs a populated `/data/models`.
+  - `install-ocr` without `--variant` installs the pack `ocr.backend` asks for on
+    this hardware: `cpu` stays on the CPU with a GPU present, `cuda`/`rocm` fall back
+    to `cpu` with a hint when that GPU is not usable; `--variant auto` is the hardware
+    alone. `doctor` judges the installed pack the same way. Model downloads follow
+    the enabled generations: a library that only enables hayai-nova never fetches
+    paddle-manga.
+  - The macOS disk image does not bundle the OCR backend and models: the server
+    (after its setup's OCR step) or the processor downloads them in the background,
+    as on the other platforms (`make-dmg.sh --bundle-ocr <dir>` still builds an
+    offline image).
+- `ocr.backend` is `auto`, `cuda`, `rocm`, `cpu` or `skip`. Automatic precision
+  picks bf16 only where the hardware runs it natively (NVIDIA Ampere and newer,
+  AMD RDNA3/4); RDNA2 and the CPU run fp32. On RDNA2 (RX 6000) that is a change:
+  0.5.2 ran hayai-nova there in emulated bf16 by default, which was slower.
+- RX 6600/6700-class cards (gfx1031/1032) get `HSA_OVERRIDE_GFX_VERSION=10.3.0`
+  automatically, as in 0.5.2.
+- Old configs are migrated at load: a `mokuro` row is retired (kept, disabled),
+  rows on removed detectors move to `ppocr-manga`, and a `hayai-nova` primary is
+  added when none is left. Existing `.mokuro` files are kept and served.
+- The licence is MPL-2.0 everywhere, including the image labels (0.5 images said MIT).
+- nginx download offload is off by default. `MOKURO_NGINX_ACCEL=1` turns it on in
+  the full image when the container starts as root (the default); the lite images
+  have no nginx and ignore it. The in-image nginx passes WebSockets for `/_processor/`.
+- Request threads are gone: the server is async, `MOKURO_THREADS` is no longer read.
+- Memory: the server streams downloads and uploads from and to disk, and caches
+  are byte-bounded (`server.cache_mb`); OCR uses less RAM than 0.5.2 on every
+  platform measured.
+- The admin panel's users list is newest first with a fixed order for accounts
+  created in the same second (the newer one first); 0.5 left those in whatever order
+  SQLite returned them.
+
+### Removed
+- The `mokuro` engine (manga-ocr and its GPL detector).
+- The `ctd`, `animetext` and `rtdetr` detectors.
+- Python packaging: the PyPI package, zipapp, `uv` portable zip, `setup-windows.ps1`
+  source install (it forwards to `install.ps1`), `docs/make_volume.py`.
+- Python OCR environments and `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`,
+  `MOKURO_BUNKO_MOKURO_SPEC`, `MOKURO_PPOCR_THREADS` and `MOKURO_EFT_TRACE`.
+- `processor install` and the install step of `processor setup`.
+- Protocol v2: 0.5.2 processors cannot connect to a 0.7 library, nor the reverse.
+- OCR on arm64 Linux (that platform gets the lite build; OCR from a remote x86_64
+  processor).
+- Intel Mac builds: there is no macOS x86_64 download, and install.sh fails there.
+  The full Docker image (linux/amd64, with OCR) runs on them.
+
+### Fixed
+- WebDAV `MOVE`/`COPY` between a reader's own files and library files, of a file
+  onto a folder, and of the library root used to delete data and answer 201;
+  they are now refused (403, or 409 for a file/folder mismatch). `DELETE` of the
+  library root is refused too.
+- `If-Modified-Since` with an equal date answers 304 instead of 200.
+- `config set`, `cors-add/-remove`, `ssl enable/disable` and the `dyndns` commands no
+  longer write `MOKURO_*` overrides into `config.yaml` (Docker's `MOKURO_STORAGE=/data`
+  or the nginx backend port used to be saved).
+- The server shuts down gracefully on SIGTERM (`docker stop`, systemd), not only on
+  Ctrl+C, also while OCR is running; 0.5.2 was simply killed.
+- Removing a folder over WebDAV no longer forgets upload ownership of other
+  folders whose names matched by `_` or case.
+- Invites with an unreadable expiry are treated as expired instead of causing a 500,
+  and an invite and its audit row are written together.
+- The failed-login limiter's table is bounded in size.
+- `ocr.backend: rocm` drives the AMD GPU again: pre-release 0.7 builds read it as
+  WebGPU (an ONNX Runtime provider releases do not have), which left the GPU unused.
+- A processor's result for a volume whose name holds `? : * " < > |` or is a Windows
+  device name (`CON`) is accepted again: 0.7.0-beta.1 refused it, so such volumes
+  never got OCR from a processor. A processor holds the finished file under a fixed
+  name, so a Windows processor can read them too, and the library logs every result
+  it refuses.
+- `/api/health`'s `ocr.pending` counts the volumes without a primary sidecar again,
+  as in 0.5 (0.7.0-beta.1 counted the waiting jobs); the job count is the new
+  `ocr.queued_jobs`.
+- The admin panel's generations list shows a retired `mokuro` primary's sidecar as
+  `<Volume>.mokuro` (it read `<Volume>.mokuro.mokuro`) and counts its files, and the
+  volume totals count series volumes as 0.5.3 did, not loose archives at the library
+  root.
+- Archives with an upper-case extension (`Vol 1.CBZ`) get a cover and OCR; 0.5 and
+  0.7.0-beta.1 listed them in the catalog but their library walks skipped them.
+- `doctor` no longer asks for `install-ocr` and a model download when
+  `ocr.local_processing` is off (one INFO line instead), and checks only the models
+  of the engines the enabled generations use.
+- `models verify` accepts an unpacked libtorch model package (its archive was checked
+  before the unpack and its stamp names the manifest's sha256) instead of failing
+  with "Is a directory", as 0.7.0-beta.1 did after every `install-ocr`.
+- At start the server no longer logs "OCR is waiting for hardware" while its own OCR
+  is still coming up, and prints each config migration warning once, not twice.
+
+### Known issues
+- On a Mac (Apple silicon, CPU OCR) hayai-nova runs about 3–4% slower than 0.5.2
+  (0.497 vs 0.516 pages/s on an M2 Pro, consistent across runs); its text matches
+  the reference exactly, where 0.5.2's differed on arm64.
+- Windows packs are not yet tested on a machine without the VC++ runtime installed
+  (they ship it app-local).
+
+## [0.7.0-beta.6] - 2026-10-11
+
+A pre-release of 0.7.0.
+
+### Changed
+- **A processor downloads only the models its library uses.** The library names the
+  engines of its enabled generations when a processor registers (`RegisterReply.engines`);
+  the processor keeps the list (`library-engines.json` in its storage) and its install,
+  `models download` and automatic updates fetch those engines' models, not every
+  engine's (paddle-manga alone is 3.4 GB). When the library enables another engine, the
+  processor fetches its models in the background at its next registration. Before the
+  first registration, or with an older library, it fetches PP-OCR's only; any engine's
+  models are still fetched when a session first needs them.
+
+### Fixed
+- **Big model files download on slow links.** A download had 120 seconds for the
+  whole file, so the 1.8 GB paddle-manga weights failed below about 10 MB/s and the
+  install (or automatic update) failed with them. Each request now gets 120 seconds and
+  the next one asks for the rest (`Range`), so the file finishes at any speed; a
+  download fails only when four requests in a row add nothing.
+- **An OCR install whose models failed finishes on its retry.** The pack was in place,
+  so the automatic retry found nothing to do and the missing models stayed missing.
+  The install now leaves `backends/.models-incomplete` when its models do not all
+  download, and `install-ocr --if-needed` (the background installer's retry) fetches
+  them while it is there.
+- **A processor tells the library what it can run after its install changes.** It
+  registered again only when an install it had registered beside finished. An install
+  started later (from the dashboard, or a retry) or a failure that cleared now
+  registers it again too, so engines whose models arrived are offered work.
+
+## [0.7.0-beta.5] - 2026-10-10
+
+A pre-release of 0.7.0.
+
+### Fixed
+- **This server → Engines and models tells the truth about the models folder.** Each
+  engine's row counts what it needs on this machine: the models-v1 files and the
+  compiled package (graphs and shared weights) for the device and precision it runs at
+  ("bf16 · linux-cuda-sm_80 on gpu:0"), present out of needed, and bytes on disk. An
+  engine not in use says what enabling it would download (from the manifest). The
+  total line is the folder's size (as `du --apparent-size`), every file counted once:
+  what the engines in use need, files of engines not in use, files nothing needs, and
+  the rest (checksum stamps). The OCR backend's own size (and the part NVIDIA's CUDA
+  wheels added) is on the OCR backend card. `models list` prints the same plan, and
+  `models download` / `doctor` share its planning code, so they cannot disagree.
+- **"Install updates automatically" is honest in Docker and package-managed
+  installs.** They cannot update themselves, so the admin panel shows one line instead
+  of the checkbox ("Runs in Docker: update by pulling the new image", with the image
+  when known; a managed install names its manager), `GET /_admin/api/update` says
+  `auto_supported: false` (and `manual_update`), a saved `update.auto: true` is ignored
+  without an error, and a newer release is reported as available, not as a failure
+  (no problem, no tray warning).
+- **Big WebDAV listings arrive whole.** At some listing sizes a `PROPFIND` of a large
+  folder or of the whole library lost up to 4 KiB at its end: the plain answer came out
+  shorter than its Content-Length and the gzip one did not decode. Rare (a few listings
+  in a thousand), but the same listing compresses the same way every time, so a client
+  kept getting the broken one until the folder changed.
+- **A processor installing its OCR backend says so, like a server.** Its dashboard
+  showed "Idle — waiting for volumes" and the problem "Run 'mokuro-bunko install-ocr
+  --processor'" for up to two minutes while the background install was already
+  running (its problems check ran before the install started). Now no such problem
+  shows while the install runs, and a server or processor with nothing to read until
+  its backend is in place reads **Installing OCR backend** (`/control/status` `state:
+  "installing"`; the dashboard's state, the tray's status line with the percent).
+- **AMD GPUs: no crash when the temporary folder is unusable.** When `TMPDIR` (or
+  `TMP`/`TEMP`, or `/tmp` with none set) names a folder that is missing or read-only,
+  the ROCm runtime cannot build its copy kernels and crashed the process (SIGSEGV) at
+  its first GPU copy -- the first-run benchmark took the server down at every start.
+  The backend now checks that folder before the ROCm runtime starts and, when it is
+  unusable, points `TMPDIR` at `/tmp`, `/var/tmp` or a `.tmp` folder beside the backend
+  pack, with a warning in the log and `doctor`. With no usable folder at all the GPU
+  stays off (OCR on the CPU) and the log says why.
+
+## [0.7.0-beta.4] - 2026-10-09
+
+A pre-release of 0.7.0.
+
+### Added
+- **The OCR backend installs in the background; getting up and serving never waits
+  for it.** `serve` and `processor serve` start at once and, when local OCR is on and an
+  enabled generation needs the libtorch backend that is missing (any OS, not only
+  Docker), run the same detection and install as `install-ocr --if-needed` in the
+  background. The progress (stage, percent, bytes, pack) is in the log, the admin panel
+  (Settings → OCR → Processors), the dashboard, the tray and `/control/status`
+  (`install`). The server's local OCR starts by itself when it is done; a processor
+  registers at once as not available (reason `installing`; the library's list shows
+  "installing OCR backend: NN%") and takes work once its backend is ready. A failed
+  install is a problem ("needs you", tray "!") with a Retry button, retried after 5, 15
+  and 60 minutes. `MOKURO_OCR_AUTO_INSTALL=false` still means never (the missing backend
+  is then a problem with an Install button). One install at a time per backends
+  directory; an interrupted one resumes its downloads at the next start. `install-ocr`
+  stays a foreground command for scripts.
+- **One web interface for a library server, the same locally, remotely and in Docker.**
+  The server's own first-run page (`/setup`) is the setup wizard: the admin account,
+  who may join, remote access (Cloudflare tunnel, Dynamic DNS, HTTPS, other web apps)
+  and **OCR on this machine** (on by default when a usable GPU is found; Auto, CPU or
+  the GPU found). Finishing signs the admin in and opens the admin panel, where the
+  OCR backend's background install shows its progress. Answers the environment fixes
+  (`MOKURO_REGISTRATION_MODE`, `MOKURO_SSL_ENABLED`, `MOKURO_OCR_BACKEND`) are shown, not
+  asked. Before setup, a new server does not start installing OCR by itself. Every
+  setup route, its reads included, answers only while no admin exists and only to
+  localhost or a holder of the setup code; HTTPS certificate files can be named only
+  from the server itself.
+- The admin panel's new **This server** tab: OCR on this machine, the hardware, the
+  backend in use ("rocm7.1 for 0.7.0-beta.4"), the backend preference (`ocr.backend`:
+  Auto, CPU or the GPU found; a switch installs what is missing, and restarts the
+  server when another backend is already loaded), Install / Reinstall / Remove with
+  live progress, the engines' models (download, verify, details), diagnostics
+  (`doctor`) and the server log. Admin only, behind the panel's CSRF checks; installs
+  come only from the signed release or the `ocr-offline` folder next to the program (no
+  folder from a page); one install at a time and a short cooldown between actions.
+- The running version is shown at the foot of the admin panel, on the local processor
+  pages and as the tray menu's first (greyed) line.
+- First-run setup from another computer (Docker, a NAS): while no admin exists the
+  server prints a one-time **setup code** in its log at every start (`First run:
+  create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`). `/setup`
+  opened from another address asks for it (an HTML page; five tries per address,
+  one more every 12 s; after 30 wrong codes within a minute from everyone the code is
+  replaced and the new one logged, so a flood never locks the owner out), then shows
+  the wizard; scripts may send it as `X-Setup-Code`.
+  Localhost still needs no code. The code lives in memory only and dies once an admin
+  exists. 0.5 allowed setup from localhost only.
+
+### Changed
+- The desktop app is only what is local. With nothing set up, `mokuro-bunko` opens a
+  chooser: **Library server** (pick the folder; the tray starts the server on a free
+  port and the browser moves to its `/setup`) or **Processor** (the local pairing page:
+  library address, login, connection test, name, sessions, automatic updates; then
+  its own status and settings pages). The tray menu: status, pause, Statistics, Open
+  admin panel, Open processor, Open library, Start at login, Quit. Removed: the
+  desktop server setup and server settings pages, the "Start with the machine" step,
+  the Start-up settings page and installing services from a page (the tray's "Start at
+  login" checkbox replaces them; `processor service --install` stays a command). The
+  login page now returns to the page that sent you there.
+- The full Docker image's entrypoint no longer runs `install-ocr --if-needed` before
+  the server: the server answers within seconds of the first start (health check start
+  period 30 s instead of 20 min).
+- Docker images: Publish also moves `beta` / `beta-lite` (every release, beta or
+  stable). The Unraid templates and compose files of the 0.7 branch default to them (no
+  `latest*` exists before 0.7.0) and the templates' `<TemplateURL>` points at the `0.7`
+  branch (`main` still has the 0.5 templates); both go back to `latest` / `main` with
+  0.7.0.
+- **Generation upgrade (`ocr.upgrade`) replaces the old primary file; it no longer
+  keeps it as a layer.** beta.3 kept the replaced `<Volume>.mokuro` beside the new one
+  as `<Volume>.<old-name>.mokuro` (usually `<Volume>.mokuro.mokuro`); now the new file
+  replaces it outright, atomically, and the old bytes are gone. Every gate stays: a
+  volume a person edited is skipped (an admin can force one), a short archive is never
+  regenerated. A direct replace removes the layer it copied when that layer is
+  byte-identical and no enabled generation writes it. The audit event
+  `ocr_sidecar_upgraded` says `replaced: true` (no `kept_as`). The admin panel's
+  per-volume Revert and `POST /_admin/api/ocr/upgrade/<volume>/revert` are gone (410):
+  with no kept layer there is nothing to revert to. Extra OCR beside the primary is
+  what non-primary generations are for.
+- The layers beta.3's upgrade kept (stamped `ocr_engine.upgraded_from_primary: true`)
+  are removed, with their saved originals under `<storage>/.upgrade-originals/`, at
+  startup (the ones its audit names) and at the next census, once the volume's bare
+  file is the upgraded output. One log line per file. A layer without that stamp (a
+  person's, another generation's, what a forced upgrade kept of an edit) is never
+  touched.
+- The setup token of the earlier 0.7 betas (`<storage>/.setup-token`,
+  `/setup?token=`, `MOKURO_SETUP_TOKEN`) is gone: its file is deleted at startup and
+  the setup code replaces it. A remote setup API call without a code is answered with
+  how to get one ("…see the server log for the setup code").
+
+### Fixed
+- A library server set up without its OCR backend (beta.3's wizard had OCR install as
+  a separate card) ran with ppocr-manga only and said so in one INFO line: a missing
+  backend for an enabled generation is now installed in the background, or shown as a
+  problem everywhere.
+- The tray's Quit did not stop a server the setup wizard had just started (it was the
+  wizard's child, and the tray treated it as someone else's): what the wizard starts is
+  handed to a running tray (tray.json, picked up live; an instance started for the tray
+  is adopted), so Quit stops it; an instance the tray does not manage (a system service)
+  still keeps running, and Quit says so.
+- A failed libtorch backend load was remembered for the life of the process; a backend
+  installed later is now picked up without a restart.
+- Generation upgrade marked every volume uploaded together with its existing `.mokuro`
+  "skipped (edited)": adding a volume's OCR file counted as a hand edit. Only changing
+  an existing one does now (a WebDAV overwrite with different bytes, a revert, or a file
+  newer than its provenance row). A PUT that re-sends a `.mokuro` byte for byte (a
+  backup, a re-upload) leaves the file, its mtime and its provenance alone and is
+  audited as an `edit` with `"unchanged": true`, which is not an edit either. Volumes
+  flagged before are judged again at the next start.
+- The admin panel's pools table said a stage left on Auto runs on the CPU ("Auto →
+  CPU") whatever the machine had, so after a GPU backend was installed it kept saying
+  the engine would use the CPU while volumes were read on the card. Auto now reads as
+  the device it resolves to (this server's first card while its OCR runs, a processor's
+  own first card in its table), as soon as the backend is loaded; the copies box of an
+  engine on a card says "auto" rather than 1 (a fast card on a large host runs two).
+- A benchmark run by hand on this server was saved for the admin panel only, so the
+  scheduler benchmarked the same row again before its first volume. It is now this
+  server's benchmark of the row (its rate; the pools stay as set), and one benchmark
+  per engine and machine is enough.
+- After a failed OCR backend install the server started its OCR anyway and logged
+  "Starting this server's OCR: its OCR backend is installed". With no backend in place
+  it now waits (the failure shows with a Retry, and the automatic retries go on) and
+  starts once an install succeeds; a failed install never restarts OCR that runs.
+
+## [0.7.0-beta.3] - 2026-10-09
+
+A pre-release of 0.7.0.
+
+### Changed
+- Four downloads per release, named for people: `mokuro-bunko-<ver>-windows.zip`,
+  `-macos.dmg` (Apple silicon), `-linux-x64.tar.gz`, `-linux-arm64-server.tar.gz`
+  (the server; OCR from a processor), plus the Docker images. The notes start with a
+  table linking each one. No lite Windows/macOS download, no Intel macOS build, no
+  static x64 Linux tarball (the lite Docker image stays). OCR backend packs are
+  `mokuro-bunko-backend-<ver>-<platform>-<variant>.tar.zst`; the per-file `.sha256`
+  files are gone (`SHA256SUMS` and the signed `release.json` cover everything).
+- One program: the tray is `mokuro-bunko tray`, and `mokuro-bunko` with no arguments
+  starts the app (on a desktop the tray, the first time with the setup wizard;
+  headless what is set up, or `setup`). On Linux the tray needs no GTK or AppIndicator
+  library (`doctor` checks for a tray host; GNOME needs the AppIndicator extension).
+  On Windows `mokuro-bunko.exe` is the app (no console window) and
+  `mokuro-bunko-cli.exe` the same program for terminals. On macOS opening the app runs it.
+- The macOS updater installs from the disk image, and the app is sealed (ad hoc) when
+  built and again after an update: `codesign --verify` passes before and after.
+
+### Fixed
+- An automatic update's download progress reaches the log as it happens.
+- A server with automatic updates off logs "X is available" once per version.
+
+## [0.7.0-beta.2] - 2026-10-09
+
+A pre-release of 0.7.0: an
+install of 0.7.0-beta.1 finds it on the pre-release channel and can update to
+it. Fixes `models verify` after `install-ocr` (see 0.7.0, Fixed).
+
 ## [0.5.3] - 2026-10-06
 
 ### Changed

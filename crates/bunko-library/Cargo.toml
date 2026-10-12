@@ -1,0 +1,22 @@
+[package]
+name = "bunko-library"
+description = "Archive access, library index and the metadata compiler (series.json / catalog.json) for mokuro-bunko"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bunko-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+sha2.workspace = true
+hex.workspace = true
+flate2 = "1"
+crc32fast = "1"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile.workspace = true
+rusqlite.workspace = true

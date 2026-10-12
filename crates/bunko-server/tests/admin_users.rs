@@ -1,0 +1,553 @@
+//! Admin users endpoints, the role gate, the static SPA and body parsing.
+
+mod admin_support;
+
+use admin_support::Harness;
+use bunko_core::Role;
+use serde_json::json;
+
+#[tokio::test]
+async fn static_spa_is_ungated_with_fallback_and_no_cache() {
+    let h = Harness::new();
+    for path in [
+        "/_admin",
+        "/_admin/",
+        "/_admin/index.html",
+        "/_admin/users/whatever",
+    ] {
+        let r = h.call("GET", path, None, None).await;
+        assert_eq!(r.status, 200, "{path}");
+        assert_eq!(
+            r.headers["content-type"], "text/html; charset=utf-8",
+            "{path}"
+        );
+        assert_eq!(r.headers["cache-control"], "no-cache");
+        assert!(r.text().contains("<html"), "{path}");
+    }
+    let js = h.call("GET", "/_admin/admin.js", None, None).await;
+    assert_eq!(js.status, 200);
+    assert_eq!(
+        js.headers["content-type"],
+        "application/javascript; charset=utf-8"
+    );
+    assert!(js.text().contains("API_BASE"));
+    let bad = h
+        .call("GET", "/_admin/..%2f..%2fCargo.toml", None, None)
+        .await;
+    assert_eq!(bad.status, 403);
+    assert_eq!(bad.text(), "Forbidden");
+}
+
+#[tokio::test]
+async fn role_gate_runs_before_routing() {
+    let h = Harness::new();
+    let r = h.call("GET", "/_admin/api/users", None, None).await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (403, json!({"error": "Admin access required"}))
+    );
+    let inviter = h.login("ivy", Role::Inviter);
+    let r = h
+        .call("GET", "/_admin/api/users", Some(&inviter), None)
+        .await;
+    assert_eq!(r.status, 403);
+    let r = h
+        .call("GET", "/_admin/api/nonsense", Some(&inviter), None)
+        .await;
+    assert_eq!(r.json()["error"], "Admin access required");
+    let r = h
+        .call("GET", "/_admin/api/invites", Some(&inviter), None)
+        .await;
+    assert_eq!(r.status, 200);
+    let editor = h.login("eddy", Role::Editor);
+    let r = h
+        .call("GET", "/_admin/api/invites", Some(&editor), None)
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (403, json!({"error": "Admin or inviter access required"}))
+    );
+
+    let admin = h.admin();
+    let r = h
+        .call("GET", "/_admin/api/nonsense", Some(&admin), None)
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (404, json!({"error": "API endpoint not found"}))
+    );
+    // A wrong method on a known path is the same 404.
+    let r = h
+        .call("PATCH", "/_admin/api/users", Some(&admin), None)
+        .await;
+    assert_eq!(r.status, 404);
+    assert_eq!(r.headers["content-type"], "application/json");
+}
+
+#[tokio::test]
+async fn bodies_are_parsed_like_0_5_2() {
+    let h = Harness::new();
+    let admin = h.admin();
+    let r = h
+        .raw("POST", "/_admin/api/users", Some(&admin), b"{nope".to_vec())
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (400, json!({"error": "Invalid JSON body"}))
+    );
+    let r = h
+        .raw("POST", "/_admin/api/users", Some(&admin), b"[1,2]".to_vec())
+        .await;
+    assert_eq!(r.json(), json!({"error": "Invalid JSON body"}));
+    let big = format!("{{\"notes\": \"{}\"}}", "x".repeat(70_000)).into_bytes();
+    let r = h.raw("POST", "/_admin/api/users", Some(&admin), big).await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (400, json!({"error": "Request body too large"}))
+    );
+    // An empty body is `{}`.
+    let r = h
+        .raw("POST", "/_admin/api/users", Some(&admin), vec![])
+        .await;
+    assert_eq!(r.json(), json!({"error": "Username is required"}));
+}
+
+#[tokio::test]
+async fn create_list_and_validate_users() {
+    let h = Harness::new();
+    let admin = h.admin();
+    let r = h.call("POST", "/_admin/api/users", Some(&admin), Some(json!({"username": "  alice ", "password": "password123", "role": "uploader", "notes": "hi"}))).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let body = r.json();
+    assert_eq!(body["success"], true);
+    assert_eq!(body["user"]["username"], "alice");
+    assert_eq!(body["user"]["role"], "uploader");
+    assert_eq!(body["user"]["status"], "active");
+    assert_eq!(body["user"]["notes"], "hi");
+    let keys: Vec<&String> = body["user"].as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        ["id", "username", "role", "status", "notes", "created_at"]
+    );
+
+    let ev = &h.audit()[0];
+    assert_eq!(ev.action, "admin_create_user");
+    assert_eq!(ev.actor_username.as_deref(), Some("boss"));
+    assert_eq!(ev.target_username.as_deref(), Some("alice"));
+    assert_eq!(ev.details.as_deref(), Some(r#"{"role":"uploader"}"#));
+
+    let dup = h
+        .call(
+            "POST",
+            "/_admin/api/users",
+            Some(&admin),
+            Some(json!({"username": "alice", "password": "password123"})),
+        )
+        .await;
+    assert_eq!(
+        (dup.status.as_u16(), dup.json()),
+        (409, json!({"error": "Username 'alice' already exists"}))
+    );
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users",
+            Some(&admin),
+            Some(json!({"username": "bob"})),
+        )
+        .await;
+    assert_eq!(r.json(), json!({"error": "Password is required"}));
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users",
+            Some(&admin),
+            Some(json!({"username": "bad name!", "password": "password123"})),
+        )
+        .await;
+    assert_eq!(r.status, 400);
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users",
+            Some(&admin),
+            Some(json!({"username": "bob", "password": "password123", "role": "wizard"})),
+        )
+        .await;
+    assert_eq!(
+        r.json(),
+        json!({"error": "Invalid role: wizard. Must be one of: ['admin', 'anonymous', 'editor', 'inviter', 'processor', 'registered', 'uploader']"})
+    );
+    // The legacy spelling is accepted on create.
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users",
+            Some(&admin),
+            Some(json!({"username": "wally", "password": "password123", "role": "writer"})),
+        )
+        .await;
+    assert_eq!(r.json()["user"]["role"], "uploader");
+
+    let r = h.call("GET", "/_admin/api/users", Some(&admin), None).await;
+    let names: Vec<String> = r.json()["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["username"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        names.contains(&"alice".to_string())
+            && names.contains(&"boss".to_string())
+            && names.contains(&"wally".to_string())
+    );
+}
+
+#[tokio::test]
+async fn role_notes_approve_disable_delete() {
+    let h = Harness::new();
+    let admin = h.admin();
+    h.login("proc1", Role::Processor);
+
+    let r = h
+        .call(
+            "PUT",
+            "/_admin/api/users/proc1/role",
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(r.json(), json!({"error": "Role is required"}));
+    let r = h
+        .call(
+            "PUT",
+            "/_admin/api/users/proc1/role",
+            Some(&admin),
+            Some(json!({"role": "writer"})),
+        )
+        .await;
+    assert_eq!(
+        r.json(),
+        json!({"error": "Invalid role. Must be one of: ['registered', 'uploader', 'inviter', 'editor', 'admin', 'processor']"})
+    );
+    let r = h
+        .call(
+            "PUT",
+            "/_admin/api/users/ghost/role",
+            Some(&admin),
+            Some(json!({"role": "editor"})),
+        )
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (404, json!({"error": "User 'ghost' not found"}))
+    );
+    let r = h
+        .call(
+            "PUT",
+            "/_admin/api/users/proc1/role",
+            Some(&admin),
+            Some(json!({"role": "processor"})),
+        )
+        .await;
+    assert_eq!(r.status, 200);
+    assert!(
+        h.dropped.lock().is_empty(),
+        "a processor kept as processor is not dropped"
+    );
+    let r = h
+        .call(
+            "PUT",
+            "/_admin/api/users/proc1/role",
+            Some(&admin),
+            Some(json!({"role": "editor"})),
+        )
+        .await;
+    assert_eq!(r.json()["user"]["role"], "editor");
+    assert_eq!(
+        h.dropped.lock().last().unwrap(),
+        &(
+            "proc1".to_string(),
+            "its account's role was changed to editor".to_string()
+        )
+    );
+    assert_eq!(
+        h.audit()[0].details.as_deref(),
+        Some(r#"{"role":"editor"}"#)
+    );
+
+    let r = h
+        .call(
+            "PUT",
+            "/_admin/api/users/proc1/notes",
+            Some(&admin),
+            Some(json!({"notes": 5})),
+        )
+        .await;
+    assert_eq!(r.json(), json!({"error": "notes must be a string"}));
+    let r = h
+        .call(
+            "PUT",
+            "/_admin/api/users/proc1/notes",
+            Some(&admin),
+            Some(json!({"notes": "night shift"})),
+        )
+        .await;
+    assert_eq!(r.json()["user"]["notes"], "night shift");
+    assert_eq!(h.audit()[0].action, "admin_update_notes");
+    assert_eq!(h.audit()[0].details, None);
+
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users/proc1/approve",
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (
+            404,
+            json!({"error": "User 'proc1' not found or not pending"})
+        )
+    );
+    h.db.create_user(
+        "newbie",
+        "password123",
+        Role::Registered,
+        bunko_db::UserStatus::Pending,
+        "",
+    )
+    .unwrap();
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users/newbie/approve",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.json()["user"]["status"], "active");
+
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users/newbie/disable",
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(r.json()["user"]["status"], "disabled");
+    assert_eq!(
+        h.dropped.lock().last().unwrap().1,
+        "its account was disabled"
+    );
+
+    // Percent-encoded names are decoded once.
+    h.login("dash-name", Role::Registered);
+    let r = h
+        .call(
+            "DELETE",
+            "/_admin/api/users/dash%2Dname",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (
+            200,
+            json!({"success": true, "message": "User 'dash-name' deleted"})
+        )
+    );
+    assert_eq!(
+        h.dropped.lock().last().unwrap(),
+        &(
+            "dash-name".to_string(),
+            "its account was deleted".to_string()
+        )
+    );
+    assert_eq!(h.audit()[0].action, "admin_delete_user");
+    let r = h
+        .call("DELETE", "/_admin/api/users/dash-name", Some(&admin), None)
+        .await;
+    assert_eq!(
+        (r.status.as_u16(), r.json()),
+        (404, json!({"error": "User 'dash-name' not found"}))
+    );
+}
+
+/// Regression (review finding): a cross-site page could drive the admin API with the
+/// admin's browser credentials (a `text/plain` form post parses as JSON here). Bodies
+/// must be declared JSON (415) and a foreign `Origin` is refused (403).
+#[tokio::test]
+async fn state_changes_refuse_forged_cross_site_requests() {
+    use axum::body::Body;
+    use http::{Request, header};
+    let h = Harness::new();
+    let admin = h.admin();
+    h.login("victim", Role::Editor);
+    let req = |method: &str, path: &str, headers: &[(&str, &str)], body: &'static str| {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {admin}"))
+            .header(header::HOST, "library.example:8080")
+            .header(header::CONTENT_LENGTH, body.len());
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        b.body(Body::from(body)).unwrap()
+    };
+    let promote = r#"{"role": "admin"}"#;
+    // A form-shaped body: 415, nothing changed.
+    for ct in [
+        None,
+        Some("text/plain"),
+        Some("application/x-www-form-urlencoded"),
+    ] {
+        let headers: Vec<(&str, &str)> = ct.map(|c| ("content-type", c)).into_iter().collect();
+        let r = h
+            .send(req(
+                "PUT",
+                "/_admin/api/users/victim/role",
+                &headers,
+                promote,
+            ))
+            .await;
+        assert_eq!(r.status.as_u16(), 415, "{ct:?}");
+        assert_eq!(
+            r.json(),
+            json!({"error": "Content-Type must be application/json"})
+        );
+    }
+    assert_eq!(h.db.get_user("victim").unwrap().unwrap().role, Role::Editor);
+    // A foreign Origin: 403 even with a JSON body, and for a body-less DELETE.
+    let r = h
+        .send(req(
+            "PUT",
+            "/_admin/api/users/victim/role",
+            &[
+                ("content-type", "application/json"),
+                ("origin", "https://evil.example"),
+            ],
+            promote,
+        ))
+        .await;
+    assert_eq!(r.status.as_u16(), 403);
+    assert_eq!(r.json(), json!({"error": "Cross-origin request refused"}));
+    let r = h
+        .send(req(
+            "DELETE",
+            "/_admin/api/users/victim",
+            &[("origin", "https://evil.example")],
+            "",
+        ))
+        .await;
+    assert_eq!(r.status.as_u16(), 403);
+    let victim = h.db.get_user("victim").unwrap().unwrap();
+    assert_eq!(
+        (victim.role, victim.status),
+        (Role::Editor, bunko_db::UserStatus::Active)
+    );
+    // The admin page itself (same origin), an allowed CORS origin, and no Origin at all
+    // (curl, scripts) still work; reads are never refused.
+    for origin in [
+        Some("http://library.example:8080"),
+        Some("http://localhost:5173"),
+        None,
+    ] {
+        let mut headers = vec![("content-type", "application/json")];
+        headers.extend(origin.map(|o| ("origin", o)));
+        let r = h
+            .send(req(
+                "PUT",
+                "/_admin/api/users/victim/notes",
+                &headers,
+                r#"{"notes": "ok"}"#,
+            ))
+            .await;
+        assert_eq!(r.status.as_u16(), 200, "{origin:?}: {}", r.text());
+    }
+    let r = h
+        .send(req(
+            "GET",
+            "/_admin/api/users",
+            &[("origin", "https://evil.example")],
+            "",
+        ))
+        .await;
+    assert_eq!(r.status.as_u16(), 200);
+}
+
+/// Regression (review finding): the admin API deleted, disabled or demoted the only
+/// active admin. Refused with 409 now; with a second admin it works.
+#[tokio::test]
+async fn the_last_active_admin_cannot_be_removed() {
+    let h = Harness::new();
+    let admin = h.admin(); // "boss", the only admin
+    for (method, path, body) in [
+        ("DELETE", "/_admin/api/users/boss", None),
+        ("POST", "/_admin/api/users/boss/disable", Some(json!({}))),
+        (
+            "PUT",
+            "/_admin/api/users/boss/role",
+            Some(json!({"role": "editor"})),
+        ),
+    ] {
+        let r = h.call(method, path, Some(&admin), body).await;
+        assert_eq!(r.status.as_u16(), 409, "{method} {path}: {}", r.text());
+        assert_eq!(r.json()["error"], bunko_db::LAST_ADMIN_MESSAGE);
+    }
+    let boss = h.db.get_user("boss").unwrap().unwrap();
+    assert_eq!(
+        (boss.role, boss.status),
+        (Role::Admin, bunko_db::UserStatus::Active)
+    );
+    h.login("second", Role::Admin);
+    let r = h
+        .call(
+            "PUT",
+            "/_admin/api/users/boss/role",
+            Some(&admin),
+            Some(json!({"role": "editor"})),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 200, "{}", r.text());
+}
+
+/// The users list is newest first, and accounts created in the same second (the
+/// `created_at` resolution) are in a fixed order too: the newer account (higher id)
+/// first. 0.5.3 sorted by `created_at` alone, leaving such ties in whatever order SQLite
+/// returned them; 0.7 keeps this deterministic order on purpose (upgrade test).
+#[tokio::test]
+async fn users_list_newest_first_with_a_stable_order_for_same_second_accounts() {
+    let h = Harness::new();
+    let admin = h.admin();
+    for name in ["user1", "user2", "user3", "user4"] {
+        h.db.create_user(
+            name,
+            "password123",
+            Role::Registered,
+            bunko_db::UserStatus::Active,
+            "",
+        )
+        .unwrap();
+    }
+    let list = || async {
+        h.call("GET", "/_admin/api/users", Some(&admin), None)
+            .await
+            .json()["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u["username"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let first = list().await;
+    assert_eq!(first, ["user4", "user3", "user2", "user1", "boss"]);
+    for _ in 0..3 {
+        assert_eq!(list().await, first);
+    }
+}

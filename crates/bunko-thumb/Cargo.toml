@@ -1,0 +1,18 @@
+[package]
+name = "bunko-thumb"
+description = "mokuro-bunko cover thumbnails: Pillow-exact contain + Lanczos, lossy WebP (no ONNX Runtime; safe for the lite build)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+image = { workspace = true }
+thiserror = { workspace = true }
+# libwebp (BSD-3-Clause) for the lossy encoder; the `image` crate writes lossless WebP only.
+webp = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+base64 = { workspace = true }

@@ -1,0 +1,177 @@
+{
+ "id": "opm20-060",
+ "archive": "D049-213 One-Punch Man - One-Punch Man 20.cbz",
+ "page_index": 60,
+ "compose": null,
+ "member": "One-Punch Man 20/One-Punch Man 20 - 060.webp",
+ "crop": null,
+ "threads": 4,
+ "timing": {
+  "read_page": 0.039,
+  "read_lines": 0.0571
+ },
+ "first": {
+  "format": "ppocr-lines/1",
+  "width": 1712,
+  "height": 2800,
+  "detector": {
+   "side": 1120,
+   "tile": "auto",
+   "passes": [
+    {
+     "scale": 0.3925,
+     "tiles": 1,
+     "lines": 2,
+     "why": "first"
+    }
+   ]
+  },
+  "lines": [
+   {
+    "quad": [
+     [
+      1510.3,
+      2559.57
+     ],
+     [
+      1564.67,
+      2559.57
+     ],
+     [
+      1564.67,
+      2607.93
+     ],
+     [
+      1510.3,
+      2607.93
+     ]
+    ],
+    "score": 0.8855,
+    "text": "58",
+    "conf": 0.9998,
+    "vertical": false,
+    "angle": 0.0,
+    "char_confs": [
+     0.9999,
+     0.9998
+    ]
+   },
+   {
+    "quad": [
+     [
+      569.49,
+      981.34
+     ],
+     [
+      686.49,
+      981.34
+     ],
+     [
+      686.49,
+      1336.16
+     ],
+     [
+      569.49,
+      1336.16
+     ]
+    ],
+    "score": 0.9362,
+    "text": "行くぞ!!!",
+    "conf": 0.9887,
+    "vertical": true,
+    "angle": 0.0,
+    "char_confs": [
+     1.0,
+     0.9996,
+     0.9998,
+     0.9769,
+     0.9651,
+     0.9911
+    ]
+   }
+  ]
+ },
+ "final": {
+  "format": "ppocr-lines/1",
+  "width": 1712,
+  "height": 2800,
+  "detector": {
+   "side": 1120,
+   "tile": "auto",
+   "passes": [
+    {
+     "scale": 0.3925,
+     "tiles": 1,
+     "lines": 2,
+     "why": "first"
+    }
+   ],
+   "recovered_ends": 0,
+   "second_opinions": 0
+  },
+  "lines": [
+   {
+    "quad": [
+     [
+      1510.3,
+      2559.57
+     ],
+     [
+      1564.67,
+      2559.57
+     ],
+     [
+      1564.67,
+      2607.93
+     ],
+     [
+      1510.3,
+      2607.93
+     ]
+    ],
+    "score": 0.8855,
+    "text": "58",
+    "conf": 0.9998,
+    "vertical": false,
+    "angle": 0.0,
+    "char_confs": [
+     0.9999,
+     0.9998
+    ]
+   },
+   {
+    "quad": [
+     [
+      569.49,
+      981.34
+     ],
+     [
+      686.49,
+      981.34
+     ],
+     [
+      686.49,
+      1336.16
+     ],
+     [
+      569.49,
+      1336.16
+     ]
+    ],
+    "score": 0.9362,
+    "text": "行くぞ!!!",
+    "conf": 0.9887,
+    "vertical": true,
+    "angle": 0.0,
+    "char_confs": [
+     1.0,
+     0.9996,
+     0.9998,
+     0.9769,
+     0.9651,
+     0.9911
+    ]
+   }
+  ]
+ }
+}

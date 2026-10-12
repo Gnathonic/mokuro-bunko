@@ -1,152 +1,171 @@
-# Mokuro Bunko on Windows with NVIDIA (CUDA) OCR
+# Mokuro Bunko on Windows: GPU OCR
+
+mokuro-bunko 0.7 is one native program with no Python, uv or CUDA toolkit to
+install. On Windows the **full** build runs OCR; its recognizers (hayai-nova,
+paddle-manga) run on libtorch, which the server installs by itself (or
+`install-ocr` does) as a *backend pack* for the hardware it finds:
+
+| Pack | Hardware | Extra requirements |
+|---|---|---|
+| `cu130` | NVIDIA; GPU OCR needs Turing (GTX 16xx / RTX 20xx) or newer | NVIDIA driver **580 or newer**. Nothing else: the pack brings the CUDA libraries. |
+| `cpu` | Everything else (AMD and Intel GPUs run OCR on the CPU on Windows) | Nothing. |
+
+ppocr-manga and the PP-OCR text detector run on the CPU in either case. The
+CPU is always the fallback. On the CPU, hayai-nova and paddle-manga need AVX2
+and FMA (x86-64-v3); without them only ppocr-manga runs.
+
+The pack is chosen by the driver alone: an older card (Pascal or Volta, e.g.
+GTX 10xx) with driver 580+ gets the `cu130` pack but OCRs on the CPU. Set
+`ocr.backend: cpu` (or run `install-ocr --variant cpu`) for the smaller CPU
+pack.
 
 > [!TIP]
-> **You probably don't need this document.** The one-command setup script
-> does all of it:
-> ```powershell
-> powershell -c "irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/setup-windows.ps1 | iex"
-> ```
-> Or use the portable folder edition (`scripts\build-portable.ps1`). This page
-> is the manual route, and what to check when something goes wrong. Start
-> with `mokuro-bunko doctor` and [troubleshooting.md](troubleshooting.md).
+> Run `mokuro-bunko-cli.exe doctor` (or `doctor.bat`) first when something does
+> not work. See [troubleshooting.md](troubleshooting.md). In a terminal always use
+> `mokuro-bunko-cli.exe`: `mokuro-bunko.exe` is the app, with no console window.
 
-## Prerequisites
-
-- **An NVIDIA GPU with a recent driver.** Check with:
-  ```powershell
-  nvidia-smi
-  ```
-  The CUDA Toolkit is not needed: the PyTorch wheels bring their own CUDA
-  runtime. Only the driver matters.
-- **Git for Windows** ([git-scm.com](https://git-scm.com/download/win)), on
-  `PATH`. The OCR installer fetches the optimized mokuro fork from GitHub.
-- No system Python: `uv` provisions its own.
-
-## 1. Install uv
+## 1. Install
 
 ```powershell
-irm https://astral.sh/uv/install.ps1 | iex
+powershell -c "irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1 | iex"
 ```
 
-It installs to `%USERPROFILE%\.local\bin`; open a new terminal (or add that
-folder to `PATH`) so `uv --version` works.
-
-Run everything below in a normal terminal, not one opened with "Run as
-administrator" and not an SSH session: both are elevated, and there
-`uv sync` can fail with "os error 448"
-([troubleshooting](troubleshooting.md#windows-uv-sync-fails-with-os-error-448-untrusted-mount-point)).
-
-## 2. Get the source and install the server
+It installs the full build into `%LOCALAPPDATA%\mokuro-bunko\app`, keeps your
+library, config and logs in `%LOCALAPPDATA%\mokuro-bunko`, adds Start-menu
+shortcuts, runs `doctor` and starts the app: a tray icon by the clock, which
+runs the server, and your browser at `http://127.0.0.1:8080`. No administrator
+is needed. Add `-Startup` to start the app at every logon, `-Portable` to keep
+everything beside the program:
 
 ```powershell
-git clone https://github.com/Gnathonic/mokuro-bunko.git
-cd mokuro-bunko
-uv sync
-uv run mokuro-bunko --version
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.ps1))) -Startup
 ```
 
-The repository pins Python 3.12 (`.python-version`), which `uv sync` uses.
-CUDA OCR needs Python below 3.13, and the installer refuses CUDA on newer
-interpreters.
+These take the latest release; for a specific version, use the script of its
+tag with `-Version`, e.g. `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/v0.7.0/scripts/install.ps1))) -Version 0.7.0`.
 
-## 3. Install OCR for CUDA
+Prefer a zip? Download `mokuro-bunko-<version>-windows.zip` from the
+[releases page](https://github.com/Gnathonic/mokuro-bunko/releases), extract
+it anywhere and double-click `mokuro-bunko.exe` (the tray; the first time it
+opens a chooser in your browser: pick **Library server**), or run `run.bat`
+for the server in a console window. In the zip everything stays in `data\`
+next to it (portable mode).
+
+## 2. Check the GPU driver
+
+Open a terminal and run:
 
 ```powershell
-uv run mokuro-bunko install-ocr --list-backends   # "cuda" should be listed
-uv run mokuro-bunko install-ocr --backend cuda
+nvidia-smi
 ```
 
-This creates the OCR environment in `.ocr-env` inside the checkout: a CUDA
-build of PyTorch (a download of about 2 GB) and mokuro. It ends by
-smoke-testing the environment, so a broken install fails here rather than
-silently later. Then check the whole setup:
+The "Driver Version" must be **580 or newer** for the CUDA pack. The CUDA
+Toolkit and cuDNN are not needed: the pack carries the CUDA libraries it uses.
+With an older driver `install-ocr` installs the CPU pack and tells you to
+update the driver.
+
+## 3. Set up the server and the OCR backend
+
+The first visit to `http://127.0.0.1:8080` walks you through the setup: the
+admin account, who may join, remote access and, last, **OCR on this machine**
+(on by default when a usable GPU is found; Auto, CPU or the GPU found). When
+you finish, the server installs the OCR backend by itself, in the background
+while it already serves, and opens the admin panel's **This server** tab,
+which shows the progress (and has Install / Reinstall / Remove).
+
+On an NVIDIA GPU it installs the `cu130` pack: the pack from the release plus
+about 1.3 GB of CUDA libraries from NVIDIA's own packages on PyPI, each
+checked against its pinned sha256 (about 1.9 GB on disk). Otherwise it
+installs the `cpu` pack (about 0.3 GB on disk). The pack goes into
+`backends\` under your data folder, and the models are fetched right after;
+local OCR starts by itself when it is done.
+
+To do it by hand instead, from a terminal in the install folder
+(`%LOCALAPPDATA%\mokuro-bunko\app`, or the folder you extracted the zip into):
 
 ```powershell
-uv run mokuro-bunko doctor
+.\mokuro-bunko-cli.exe install-ocr --list    # what it detects and would install
+.\mokuro-bunko-cli.exe install-ocr
 ```
 
-`OCR stack` should report `cuda available: True` and your GPU's name.
+A server that was running while you did that picks the pack up after a
+restart (Quit in the tray and start it again, or close the `run.bat` window and
+run it again).
 
-Optional: the other OCR engines (`hayai-nova`, `paddle-manga`, `ppocr-manga`)
-use a second environment, `.ocr-engines-env`, which the server creates when
-a configured generation needs it. To install it up front:
+## 4. Choose the backend
+
+`ocr.backend: auto` (the default) uses the pack's GPU when there is one, else
+the CPU. To keep OCR off the GPU, choose CPU in the admin panel (**This
+server** → OCR), or from the command line:
 
 ```powershell
-uv run mokuro-bunko install-ocr --backend cuda --engines hayai-nova,paddle-manga,ppocr-manga
+.\mokuro-bunko-cli.exe serve --ocr cpu      # or: auto, cuda
+.\mokuro-bunko-cli.exe config set ocr.backend cpu
 ```
 
-## 4. Configure and start
+If the GPU cannot be used (an old driver, say), the server logs why in
+`logs\server.log` under your data folder (`%LOCALAPPDATA%\mokuro-bunko`, or
+`data\` next to the program in portable mode) and runs OCR on the CPU.
+Without any pack, hayai-nova and paddle-manga do not run at all (only
+ppocr-manga does) until the backend is installed.
+
+## 5. First OCR run: models
+
+The OCR models are fetched by `install-ocr`, or the first time a volume is
+OCR'd, into `models\` under your data folder, and verified: about 0.5 GB for
+hayai-nova (its compiled package for your GPU or CPU) and, once you enable
+paddle-manga, about 3.6 GB more for it in fp32 (the default, auto-accuracy) or
+about 1.8 GB in bf16/fp16 (auto-balanced or auto-speed, on a GPU that supports
+them). To fetch them up front later (for example after enabling paddle-manga):
 
 ```powershell
-uv run mokuro-bunko serve
+.\mokuro-bunko-cli.exe models download
 ```
 
-Open `http://localhost:8080/` in a browser: the first visit walks you through
-creating the admin account and the basic settings. (`uv run mokuro-bunko
-setup` does the same in the console.) The config file is
-`%LOCALAPPDATA%\mokuro-bunko\config.yaml`; everything in it is described in
-the [configuration reference](configuration.md). To force the GPU backend
-rather than let `auto` choose:
+Drop a `.cbz` into `<data>\library\<Series>\` (or upload it over WebDAV or
+the reader) and watch it appear on `http://127.0.0.1:8080/queue`. A
+`<Volume>.mokuro` file and a `.webp` cover appear beside it when it is done.
 
-```yaml
-ocr:
-  backend: cuda
-```
+## Using this PC as an OCR processor for another library
 
-## 5. See it work
-
-Upload a `.cbz` through a WebDAV client or Mokuro Reader, or copy one into
-`%LOCALAPPDATA%\mokuro-bunko\library\<Series>\`. Within `poll_interval`
-seconds (30 by default) the OCR worker picks it up; the Queue page
-(`http://localhost:8080/queue`) shows it running, and when it is done
-`<Volume>.mokuro` and `<Volume>.webp` appear beside the archive. The server
-log (`%LOCALAPPDATA%\mokuro-bunko\logs\server.log`) says which backend the
-OCR worker started with (`OCR worker enabled (configured=cuda, active=cuda,
-…)`).
-
-For a test volume without copyright concerns, [`make_volume.py`](make_volume.py)
-draws four pages of vertical Japanese text in speech bubbles (using
-`C:\Windows\Fonts\msgothic.ttc`) and packs them into a `.cbz`:
+If the library runs on another (small) server, make this PC its processor:
+double-click `mokuro-bunko.exe` and choose **Processor** in the chooser (with
+nothing set up yet it opens by itself). Its pairing page checks the account,
+saves `processor.yaml` and starts the processor from the tray; its OCR backend
+installs in the background. Or from a terminal:
 
 ```powershell
-uv run python docs\make_volume.py .\pages ".\Bunko Test 01.cbz"
+.\mokuro-bunko-cli.exe processor setup
 ```
 
-## As an OCR processor for another library
+The processor keeps its pack and models in `%LOCALAPPDATA%\mokuro-bunko-processor`.
+It also finds a pack installed in the library's default storage, as the one
+above is. Once `processor.yaml` exists, `install-ocr --processor` installs
+into the processor's own storage.
 
-To lend this GPU to a library running on another machine instead of
-running a library here, the machine needs only steps 1 and 2 (Git, the
-driver, uv, the checkout and `uv sync`). Then:
+It asks for the library URL and a `processor` account, writes
+`processor.yaml` and can start the processor at every logon (a Startup
+entry). See [deployment.md](deployment.md#remote-ocr-processors).
 
-```powershell
-uv run mokuro-bunko processor setup
-```
+## Troubleshooting
 
-It asks for the library's URL and the `processor` account an admin created
-there, checks them, writes `processor.yaml` (readable by your account only),
-installs the CUDA OCR environments and offers to start the processor now
-and at every logon (a Startup entry, no administrator needed). To add the
-Startup entry later:
-
-```powershell
-uv run mokuro-bunko processor service --config processor.yaml --install
-```
-
-The processor then runs in its own minimized window while you are logged
-in. The full walkthrough is in
-[deployment](deployment.md#remote-ocr-processors).
-
-## If it goes wrong
-
-- **No `.mokuro` files appear.** Open the Queue page: failed volumes are
-  listed with the reason. The full engine output is in
-  `%LOCALAPPDATA%\mokuro-bunko\logs\ocr\`. See
-  [troubleshooting.md](troubleshooting.md).
-- **The install fails fetching mokuro.** Git is missing or not on `PATH`.
-  Install Git for Windows, open a new terminal, and run `install-ocr` again.
-- **`cuda available: False`.** Check `nvidia-smi` works, then reinstall:
-  `uv run mokuro-bunko install-ocr --backend cuda --force`.
-- **`uv` prints a warning about a missing minor-version link** while
-  installing Python. It is cosmetic; `uv sync` still works.
-- **Output does not appear live when piping the server's output.** Set
-  `PYTHONUNBUFFERED=1`; everything also goes to `server.log`.
+- `doctor` should show the build as `full`, an `OCR backend` line naming the
+  `cu130` pack in use, and the models as present. A WARN line saying "the
+  cu130 pack would use this machine's GPU" means the CPU pack is installed:
+  run `mokuro-bunko-cli.exe install-ocr --variant cu130`.
+- The server log lists the devices the pack found when it loaded
+  (`libtorch backend cu130 ... loaded`), and why a GPU was not used.
+- `install-ocr` says the driver is too old: update the NVIDIA driver to 580 or
+  newer, then run `install-ocr` again.
+- An update installs the new release's pack together with the program. A
+  pack of another release does not load ("the backend pack is from
+  mokuro-bunko A, this is B"): the server installs its own in the background,
+  or run `mokuro-bunko-cli.exe install-ocr`.
+- Windows SmartScreen may warn about the downloaded executable; the binaries
+  are not Authenticode signed. Choose "More info", then "Run anyway".
+- Antivirus software that quarantines `mokuro-bunko.exe` or the pack's DLLs
+  breaks the install; add an exception for the install and data folders.
+- Updates come from the admin panel's Updates card (signed, checksum-verified)
+  or by running `install.ps1` again; your data is kept. Re-run a `-Portable`
+  install with `-Portable`: without it the script removes `PORTABLE.txt` and
+  the server uses `%LOCALAPPDATA%\mokuro-bunko` instead of your `data\` folder.

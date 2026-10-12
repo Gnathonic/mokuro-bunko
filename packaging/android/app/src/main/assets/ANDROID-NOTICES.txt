@@ -1,0 +1,7 @@
+# Android app components
+
+| Component | Licence |
+|---|---|
+| Kotlin standard library (org.jetbrains.kotlin:kotlin-stdlib), Copyright JetBrains s.r.o. and Kotlin Programming Language contributors | Apache-2.0 |
+
+The Apache License 2.0 text appears in the Rust section below.
