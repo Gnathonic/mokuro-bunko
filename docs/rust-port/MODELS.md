@@ -1,7 +1,12 @@
 # Models: the `models-v1` artifact set
 
-How the ONNX files the Rust recognizers load are produced, checked, described and
-published. ARCHITECTURE.md §7 states the policy; `spec/ocr-recognizers.md` §5/§6/§8
+How the `models-v1` ONNX files and host tables are produced, checked, described and
+published. In 0.7 the hayai-nova and paddle-manga recognizers run compiled libtorch
+packages from a separate release, `torch-models-v1` (TORCH-BACKEND.md). Of `models-v1`
+the shipped build uses only the PP-OCR files and the recognizers' host files (tokenizers,
+hayai-nova's pos table and token embeddings, paddle-manga's embeddings for packages
+without them); the hayai/paddle ONNX graphs serve only the unshipped `onnx-vlm`
+recognizers. ARCHITECTURE.md §7 states the policy; `spec/ocr-recognizers.md` §5/§6/§8
 defines the graphs' inputs and outputs and the host-side arithmetic around them.
 The tool is `tools/onnx_export/` (Python, dev-only, never on users' machines).
 
@@ -25,12 +30,15 @@ caps an asset at 2 GiB; larger external-data files would be split into
 | `paddle-manga_tokenizer.json` | the base repo's tokenizer, byte for byte | |
 | `paddle-manga_config.json` | prompt prefix/suffix ids, image token 100295, eos 2, pad 0, `skip_ids`, constants | |
 | `ppocr-manga_det_v0.2.onnx`, `ppocr-manga_rec_v0.2.onnx`, `ppocr-manga_dict.txt` | PP-OCRv6 manga detector / CTC recognizer / dictionary, copied as-is | |
-| `models.json` | the manifest (§4) | |
+
+`models.json` (the manifest, §4) is written beside the exports but is not a release
+asset; the program checks downloads against a table generated from it
+(`crates/bunko-ocr/src/models_release.rs`).
 
 `.npy` files are NumPy v1.0 format, little-endian, C order (a 128-byte header then the raw
 array) — trivial to read from Rust (`ndarray-npy`, or skip the header).
 
-Every exported graph carries `metadata_props` the Rust side can read at session load:
+Every exported graph carries `metadata_props` an ONNX session can read at load:
 `mokuro.export_id` (e.g. `models-v1/hayai-nova/decoder/fp16`), `mokuro.export_tool_version`,
 `mokuro.engine`, `mokuro.role`, `mokuro.precision`, `mokuro.sources` (JSON
 `{repo: revision}`) and, for fp16, how it was made. Q9 (sidecar provenance) can use these
@@ -149,10 +157,13 @@ How each engine is exported:
 
 ### Parity (`check_parity.py`)
 
-Reference = the **0.5.2 runner's own recognizer classes**, imported from this checkout's
-`src/mokuro_bunko/ocr/engine_runner.py`, torch CPU fp32, `fold=False` (the un-folded texts
-the reconciled road consumes). Candidate = the torch-free numpy/PIL host in `host.py` (the
-reference implementation for the Rust host) over the exported files on ORT's CPU EP.
+Reference = the **0.5.2 runner's own recognizer classes**, imported from
+`src/mokuro_bunko/ocr/engine_runner.py` of a 0.5.2 checkout (commit `199cff5`) named by
+`MOKURO_REF_052` (default: the sibling worktree from
+`git worktree add --detach ../ref-0.5.2 199cff5`), torch CPU fp32, `fold=False` (the
+un-folded texts the reconciled road consumes). Candidate = the torch-free numpy/PIL host
+in `host.py` (the reference implementation for the Rust host) over the exported files on
+ORT's CPU EP.
 Texts must be identical; CER is reported for information.
 
 - hayai-nova: 220 line crops (`~/.cache/mokuro-bunko-demo/onnx-spike/hayai/crops`, made with
@@ -161,7 +172,7 @@ Texts must be identical; CER is reported for information.
   default cap 64, and tight per-crop caps (2..15 tokens) under which 32 of the 100 reference
   texts stop at their cap — so the per-row truncation of a batch that runs to its longest
   cap, the (cap, area)-sorted batch grouping, and byte-fallback decoding of a cut-off
-  multi-byte character (one reference text ends in U+FFFD) are all exercised.
+  multi-byte character (two tight-cap reference texts end in U+FFFD) are all exercised.
 
 The crop images are derived from copyrighted manga and are not in the repo; `--crops`
 points the scripts at another set with the same layout.
@@ -178,7 +189,7 @@ points the scripts at another set with the same layout.
  "files": [
   {"engine": "paddle-manga", "file": "paddle-manga_vision_fp32.onnx.data",
    "url": "https://github.com/Gnathonic/mokuro-bunko/releases/download/models-v1/paddle-manga_vision_fp32.onnx.data",
-   "size": 1757216768, "sha256": "…", "licence": "Apache-2.0",
+   "size": 1755789760, "sha256": "…", "licence": "Apache-2.0",
    "sources": [{"repo": "PaddlePaddle/PaddleOCR-VL-1.6", "revision": "c5630ab…", "licence": "Apache-2.0"}, …],
    "export_tool_version": "1.0.0",
    "kind": "onnx-external-data", "role": "vision", "precision": "fp32",
@@ -190,10 +201,13 @@ points the scripts at another set with the same layout.
 
 `kind` ∈ `onnx`, `onnx-external-data` (with `part_of`), `npy`, `tokenizer`, `config`,
 `dictionary`. The PP-OCR entries add `"exported": false` and `source_path`
-(`repo@revision:path`). A Rust client downloads the files of one (engine, precision) — the
-`onnx` file, every `onnx-external-data` file whose `part_of` names it, and the
-precision-less/matching `npy`/`tokenizer`/`config` files — into `<storage>/models/`,
-verifies size + sha256, and only then renames them into place.
+(`repo@revision:path`). The Rust client reads the table compiled from this file (§1), not
+the file itself. It fetches a fixed id list per (engine, precision) into
+`<storage>/models/`, checks sha256 and only then renames each file into place. `onnx-vlm`
+builds fetch the vision and decoder `.onnx` files with their `.data` files, the `npy`
+tables and the tokenizer; paddle-manga uses the fp16 embed table at both precisions.
+Config files are never fetched. Default (libtorch) builds fetch only the host tables and
+tokenizers they need.
 
 ## 5. fp16 and the RMSNorm overflow question (spec Q12)
 
@@ -271,7 +285,7 @@ byte-identical files (all 20 exported files' sha256 equal), so the sha256 values
 | ppocr-manga_rec_v0.2.onnx | 21,167,540 | `de12c84c63e62c80339e882e675983d886670dcb6f0147e1ed041afd6fa81888` |
 | ppocr-manga_dict.txt | 74,947 | `b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d` |
 
-Total 6,360,175,075 bytes in 23 files (+ `models.json`); largest 1,755,789,760.
+Total 6,360,175,075 bytes in 23 files (`models.json` is not uploaded); largest 1,755,789,760.
 
 ### Not covered yet
 
@@ -309,7 +323,9 @@ The steps, for the next export:
    gh release upload models-v1 --repo Gnathonic/mokuro-bunko \
       $(ls | grep -v '^_' | grep -vx models.json)   # the 23 files
    ```
-   The release notes carry the licence/attribution text from §2.
+   The release notes must carry the licence/attribution text from §2. The published
+   `models-v1` notes do not yet, and there is no `LICENSE-models.txt` asset; add one or
+   the other (`gh release edit models-v1 --notes-file …`).
 4. Verify: download a few assets back and compare sha256 with `models.json`
    (`gh release download models-v1 -p 'hayai-nova_*' -D /tmp/check && sha256sum …`).
 5. A later re-export with a pin or tool change is a **new** release (`models-v2`), never a

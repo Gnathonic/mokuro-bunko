@@ -16,8 +16,9 @@ A missing file means "all defaults". A 0.5.2 file loads as it is (see
 `mokuro-bunko config show` prints the configuration in effect, and
 `mokuro-bunko config set <section.key> <value>` changes one value. Most
 settings can also be changed in the admin panel (`/_admin`), which saves them
-back to the same file. [`config.example.yaml`](../config.example.yaml) is a
-commented starting point.
+back to the same file, together with any values set by `MOKURO_*` variables
+or `serve` flags (see [Environment Variables](#environment-variables)).
+[`config.example.yaml`](../config.example.yaml) is a commented starting point.
 
 ## Configuration Options
 
@@ -36,9 +37,9 @@ server:
 |--------|------|---------|-------------|
 | `host` | string | `"0.0.0.0"` | Network interface to bind to. Use `127.0.0.1` for local-only access. |
 | `port` | integer | `8080` | TCP port for the server. |
-| `trusted_proxies` | list | `[]` | Networks or addresses of reverse proxies whose `X-Real-IP` / `X-Forwarded-For` are believed. A proxy on this machine (the Docker image's own nginx, or nginx/Caddy on the same host) is always trusted. Add one only when the proxy runs on another host or container; otherwise every client is counted as the proxy and login rate limits are shared. Set as `MOKURO_SERVER_TRUSTED_PROXIES=172.16.0.0/12,10.0.0.5`. |
+| `trusted_proxies` | list | `[]` | Networks or addresses of reverse proxies whose `X-Real-IP` / `X-Forwarded-For` are believed. Only a loopback peer (such as the Docker image's own nginx) is trusted without an entry. Add one for a proxy on another host or container, or on the host in front of a published Docker port (the server then sees the Docker gateway address); otherwise every client is counted as the proxy and login rate limits are shared. With `MOKURO_NGINX_ACCEL=1` the bundled nginx already takes the client from `X-Forwarded-For` of private-range proxies. Set as `MOKURO_SERVER_TRUSTED_PROXIES=172.16.0.0/12,10.0.0.5`. |
 | `threads` | integer | `0` | Worker threads of the async runtime, 0-256. `0` means the smaller of the CPU count and 4. Each connected processor costs a socket, not a thread, so this rarely needs raising. Replaces 0.5's `MOKURO_THREADS`. At startup. |
-| `cache_mb` | integer | `32` | Byte budget, in MiB (1-65536), of the in-memory caches: WebDAV directory listings, the library index and compiled metadata. Raise it for a very large library on a machine with spare RAM, lower it on a tiny host. At startup. |
+| `cache_mb` | integer | `32` | Byte budget, in MiB (1-65536), of the in-memory caches: half for WebDAV `Depth: infinity` listings, a quarter for the library index (a soft cap). Raise it for a very large library on a machine with spare RAM, lower it on a tiny host. At startup. |
 
 ### Storage
 
@@ -52,8 +53,9 @@ storage:
 | `base_path` | string | Platform-specific | Base directory for all data storage. |
 
 Default paths:
-- **Linux/macOS**: `~/.local/share/mokuro-bunko`
-- **Windows**: `%LOCALAPPDATA%\mokuro-bunko`
+- **Linux/macOS**: `$XDG_DATA_HOME/mokuro-bunko` (`~/.local/share/mokuro-bunko` when `XDG_DATA_HOME` is unset)
+- **Windows**: `%LOCALAPPDATA%\mokuro-bunko`; the portable zip uses the `data\` folder next to `mokuro-bunko.exe`
+- **Docker**: `/data` (the images set `MOKURO_STORAGE=/data`)
 
 #### Storage Structure
 
@@ -67,10 +69,10 @@ base_path/
 │   │   ├── Volume 01.webp               # cover thumbnail
 │   │   └── series.json                  # compiled by the server
 │   └── catalog.json                     # compiled by the server
-├── inbox/                   # Upload queue
+├── inbox/                   # Legacy 0.5 directory: created and must be writable, but unused
 ├── users/                   # Per-user reading progress
 │   └── alice/volume-data.json, profiles.json, goals.json
-├── logs/                    # server.log, and logs/ocr/ per volume
+├── logs/                    # server.log (rotated to .1–.5), *-console.log from the desktop app/tray
 ├── processors/              # Per-machine OCR profiles (remote processors)
 ├── backends/                # OCR backend pack: libtorch for CUDA / ROCm / CPU (install-ocr; full build)
 ├── models/                  # Downloaded OCR models: compiled libtorch packages, PP-OCR ONNX (full build)
@@ -79,13 +81,15 @@ base_path/
 
 #### Upload verdicts
 
-Every WebDAV `PUT` under `/mokuro-reader/` or `/inbox/` is written to a
+Every WebDAV `PUT` under `/mokuro-reader/` is written to a
 hidden temporary file beside its destination (`.<name>.upload-*.tmp`) and
 moved into place only once it checks out, so a failed upload never replaces
 or deletes the file that was there, and a read during the upload sees the
 old file. The body must be as long as its `Content-Length`; a `.cbz` must
 also open as a zip with every member matching its CRC-32 (the check the OCR
-processors run on their downloads — about 80–100 ms per 200 MB).
+processors run on their downloads — about 80–100 ms per 200 MB; encrypted
+members are skipped). Its members must be stored or deflated, and it may not
+inflate to more than 20 times its size (at least 256 MiB, at most 16 GiB).
 
 - Success keeps the usual 201/204 and adds `X-Mokuro-Upload: verified` (an
   archive) or `stored` (any other file) and `X-Mokuro-Size: <bytes stored>`.
@@ -96,8 +100,11 @@ processors run on their downloads — about 80–100 ms per 200 MB).
 - Failure answers JSON `{"ok": false, "reason", "detail", "retry"}`:
   `truncated` (422, retry), `corrupted-in-transit` (422, retry: the body
   does not match its digest; the zip is not checked), `not-an-archive`
-  (422), `disk-full` (507), `forbidden` (401/403), `server-error` (500,
-  retry), and `archive-damaged` (422). An archive whose digest matched but
+  (422), `archive-refused` (422: another compression method, or inflating too
+  far; re-pack it as an ordinary zip), `disk-full` (507), `forbidden`
+  (401/403/429), `server-error` (500, retry; any other refused PUT, such as
+  409 or 423, also answers `server-error` with its own status, with `retry`
+  only for 5xx, 408 and 423), and `archive-damaged` (422). An archive whose digest matched but
   whose CRCs fail is the client's own damaged copy (no retry: re-import it).
   Without a digest the first damage to a path is `retry: true` (it may have
   happened in transit); the same size and damaged members arriving again
@@ -125,7 +132,7 @@ registration:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `mode` | string | `"self"` | Registration mode (see below). |
-| `default_role` | string | `"registered"` | Role given to new accounts: `registered`, `uploader`, `inviter` or `editor`. |
+| `default_role` | string | `"registered"` | Role given to self-registered accounts (`self` and `approval` modes): `registered`, `uploader`, `inviter` or `editor` (`writer` reads as `uploader`). An invited account gets its invite's role. |
 | `allow_anonymous_browse` | boolean | `true` | Allow listing the library (WebDAV `PROPFIND`) without logging in. |
 | `allow_anonymous_download` | boolean | `true` | Allow downloading files without logging in. |
 | `require_login` | boolean | `false` | Older shorthand: `true` turns both anonymous options off. Only read when neither of them is set. |
@@ -180,6 +187,11 @@ it is refused. Basic auth still works for any WebDAV client.
 | `inviter` | Yes | Own only | Yes | Yes | Yes | No |
 | `admin` | Yes | Own only | Yes | Yes | Yes | Yes |
 | `processor` | Yes | No | No | No | No | No |
+
+For `uploader`, "Own uploads" means deleting or overwriting volumes it
+uploaded (with their sidecars), and updating `series.json` of a series where
+it is the only uploader. Moving, copying, locking or PROPPATCH of library
+files, its own included, needs `editor` or higher.
 
 `inviter` has everything `editor` has, plus the invite-management endpoints,
 without full admin privileges.
@@ -248,8 +260,9 @@ ssl:
      enabled: true
      auto_cert: true
    ```
-   Certificates are stored in `~/.local/share/mokuro-bunko/certs/`
-   (`%LOCALAPPDATA%\mokuro-bunko\certs\` on Windows).
+   Certificates are stored in `$XDG_DATA_HOME/mokuro-bunko/certs/` (default
+   `~/.local/share/mokuro-bunko/certs/`); on Windows in
+   `%LOCALAPPDATA%\mokuro-bunko\certs\` (the portable zip: `data\certs\`).
 
 3. **Custom certificate**: Use your own certificates (e.g., from Let's Encrypt).
    ```yaml
@@ -270,7 +283,7 @@ admin:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | boolean | `true` | Enable the admin web panel. |
-| `path` | string | `"/_admin"` | URL path for the admin panel. |
+| `path` | string | `"/_admin"` | Kept for older files; leave it as is. The panel is always served at `/_admin` (only the desktop app's admin link reads this value). |
 
 Access the admin panel at `http://your-server:8080/_admin/` (requires admin credentials).
 
@@ -306,10 +319,14 @@ the actors, actions and target types in the log.
 
 Every OCR sidecar written is logged as `ocr_sidecar_written` (target type
 `sidecar`), with the generation, engine, detector, precision, pages, failed
-pages and runner build in its details. Every result the library refused is
-logged as `ocr_sidecar_rejected` with the reason: a file that failed
-validation, a volume deleted or replaced while it was read, or a sidecar a
-processor sent under the wrong name. The actor is the processor's account, or
+pages and runner build in its details. A result the library refused when
+installing it is logged as `ocr_sidecar_rejected` with the reason: a file
+that failed validation, a volume deleted or replaced while it was read, a
+sidecar a processor sent under the wrong name, a destination locked by a
+WebDAV write, or a failed move into place. A replaced volume or a locked
+destination is OCRed again. Results refused while they are uploaded (a bad
+header, too large, a sha256 mismatch, a claim no longer outstanding) appear
+only in the server log. The actor is the processor's account, or
 empty for this server's own OCR, so filtering by a processor's account shows
 everything it delivered.
 
@@ -331,7 +348,7 @@ catalog:
 | `enabled` | boolean | `false` | Serve the web catalog at `/catalog`. |
 | `reader_url` | string | `"https://reader.mokuro.app"` | Where the catalog's "read" links open. |
 | `use_as_homepage` | boolean | `false` | Redirect browser visits to `/` to the catalog. |
-| `enrich_community` | boolean | `true` | Fetch ratings, tags and genres from AniList/MAL for series linked to an external id (no API key needed). |
+| `enrich_community` | boolean | `true` | Fetch ratings, tags and genres for series linked to an AniList or MAL id (no API key needed; MAL, through Jikan, gives no tags). Only while `enabled` is on. |
 
 #### Volume manifest
 
@@ -370,14 +387,24 @@ JSON (`Cache-Control: no-store`) naming every file of that volume with its
   earliest `eta` plus 10, clamped to 30–3600; 300 when nothing is priced;
   `null` when nothing is pending.
 
+The manifest is read with exactly the rules of the volume's `.cbz` (anonymous
+download setting, credentials, 401 challenge) and gets the same CORS
+headers, whether or not `catalog.enabled` is on. A missing `series` or
+`volume` parameter is 400, a series or volume that resolves outside the
+library is 403, and a missing volume is 404.
+
 #### OCR queue file
 
-`GET /mokuro-reader/.mokuro-queue.json` (also `HEAD`) is the whole pending
-OCR queue, one entry per volume, for a reader to poll instead of a timer
-per volume:
+`GET /mokuro-reader/.mokuro-queue.json` (also `HEAD`) is the head of the
+pending OCR queue, one entry per volume, for a reader to poll instead of a
+timer per volume. It lists every volume with a job running, then at most the
+next 100 waiting volumes in queue order. `pending_volumes` counts all waiting
+volumes, so a reader can tell when the list is cut short (an unlisted
+volume's timing is in its manifest):
 
 ```json
 {"version": 1, "generated_at": "2026-09-28T16:00:00Z", "held": null, "next_check_after": 95,
+ "pending_volumes": 0,
  "volumes": [{"series": "Dr Stone", "volume": "Dr Stone 01",
    "path": "/mokuro-reader/Dr%20Stone/Dr%20Stone%2001.cbz",
    "manifest": "/catalog/api/manifest?series=Dr%20Stone&volume=Dr%20Stone%2001",
@@ -394,8 +421,9 @@ rules and CORS, is listed by no PROPFIND, and refuses every write (405).
 It carries `Cache-Control: no-cache` and a strong `ETag`, with a 304 on
 `If-None-Match`, and is gzipped when accepted. It is rebuilt at most once
 a second, and an ETA is republished only when it moves by a minute or
-more, so a quiet queue keeps its ETag. 2,000 jobs build in about 120 ms
-into 370 kB (20 kB gzipped).
+more, so ETA jitter alone does not change the ETag; a running job's
+`progress` does, as pages complete. With the 100-volume cap, the file does
+not grow with the queue.
 
 A `.cbz` written over WebDAV (PUT, or MOVE/COPY into place) joins the OCR
 queue as the request completes, instead of at the next poll. A PUT that
@@ -403,11 +431,6 @@ queued OCR answers with `X-Mokuro-Manifest` (that volume's manifest URL) and
 `X-Mokuro-Recheck-After` (seconds, same rule), both exposed through CORS.
 Pricing on the PUT uses the queue's cached pending list and gives up (300)
 rather than walk the library or more than 300 queued items.
-
-It is read with exactly the rules of the volume's `.cbz` (anonymous
-download setting, credentials, 401 challenge) and gets the same CORS
-headers, whether or not `catalog.enabled` is on. A missing volume is 404; a
-path outside the library is 403.
 
 ### Queue
 
@@ -429,7 +452,7 @@ The display levels:
 | Level | What the page shows |
 |-------|---------------------|
 | `minimal` | A compact card per connected machine: a line per running volume (percentage and finishing time) and the volume on deck. Then the first few pending volumes, how many wait in all, and when the queue ends. |
-| `normal` | One card per machine: the volume it is reading with a progress bar, pages and finishing time, and the volume on deck as a single "Next" line. The pending list with a finishing time per volume, the run order, pending thumbnails, volumes skipped for missing pages, and failures with a generic reason ("engine error", "archive incomplete", "failed — will retry"). |
+| `normal` | One card per machine: the volume it is reading with a progress bar, pages and finishing time, and the volume on deck as a single "On deck" line. The pending list with a finishing time per volume, the run order, pending thumbnails, volumes skipped for missing pages, and failures with a generic reason ("engine error", "archive incomplete", "interrupted — will retry"…). |
 | `detailed` | `normal`, plus each running volume's stage pipeline (widths, devices, queue depths, busy share), the congestion verdict, the machine's real throughput on that layer and its startup, and one line per layer with what the machines reading it deliver together. For tuning. |
 
 Whatever the level, raw error messages, log paths, processor names, hardware
@@ -442,10 +465,13 @@ per viewer, so a lower level never carries a field it does not show.
 
 The page polls `GET /queue/api/status` about once a second (less often in a
 hidden tab); an unchanged answer is a `304 Not Modified`. A logged-in
-viewer's credentials are checked against the same rate limit as every other
-login, and a wrong or stale password is answered exactly as a visitor is,
-with an `X-Queue-Auth: failed` header on which the page drops its stored
-login.
+viewer is identified by the session token the page sends as
+`Authorization: Bearer`. An unknown or expired token is answered exactly as
+a visitor is, with an `X-Queue-Auth: failed` header on which the page drops
+its stored login. Other clients can send `Authorization: Basic` instead; a
+wrong password also gets `X-Queue-Auth: failed`. Basic credentials count
+against the WebDAV login rate limit, and a client over it is served as a
+visitor with `X-Queue-Auth: limited`.
 
 Set with `MOKURO_QUEUE_DISPLAY` or `mokuro-bunko config set queue.display minimal`.
 
@@ -461,7 +487,7 @@ database:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `busy_timeout_ms` | integer | `5000` | How long a SQLite statement waits on a lock (at least 100). |
-| `lock_retries` | integer | `5` | Retries when another process (such as the admin CLI) holds the write lock. |
+| `lock_retries` | integer | `5` | How many times a step (BEGIN, COMMIT, a read) is tried while SQLite reports the database locked, the first try included (at least 1: no retries). |
 | `retry_initial_delay_seconds` | float | `0.05` | First retry delay; doubles on each retry. |
 
 These rarely need changing.
@@ -493,7 +519,7 @@ update:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `check` | boolean | `true` | Look for new releases in the background (first check a minute after start, then every 12 hours) and show the result in the admin panel's **Updates** card (Status tab). With `false`, nothing is fetched unless you press **Check now**. |
+| `check` | boolean | `true` | Look for new releases in the background (first check a minute after start, then every 12 hours) and show the result in the admin panel's **Updates** card (Status tab). With `false` and `auto` off, nothing is fetched in the background; **Check now**, the desktop app's Settings page and `mokuro-bunko update check` still fetch. |
 | `channel` | string | `auto` | Which releases count as updates. `auto` follows the installed build: a pre-release (such as `0.7.0-beta.1`) is on `prerelease`, so it sees the next beta or release candidate as well as the next stable release, and a stable release is on `stable`, so it only sees stable releases. `stable` or `prerelease` pins the channel whatever is installed. On `prerelease` with the GitHub URL, the newest published release that carries a `release.json` is looked up through GitHub's releases API (unauthenticated: 60 requests an hour per address), since `releases/latest` never points at a pre-release. A processor following its library (`processor.auto_update`) installs exactly the library's version and ignores the channel. |
 | `auto` | boolean | `false` | Install a newer release on the channel by itself, at a quiet moment, then restart. See [Automatic updates](#automatic-updates). Also settable in the admin panel's **Updates** card. An install that cannot update itself (Docker, a package manager) ignores it, and the card says how to update it instead. |
 | `manifest_url` | string | the GitHub `releases/latest` `release.json` | Where the release manifest comes from. Change it for a mirror or a fork (a fork also needs its own signing key: compiled in, or `public_key`). |
@@ -510,8 +536,10 @@ depends on how mokuro-bunko was installed:
 | `install.sh` as root with the system unit, a distro package, Homebrew, Nix | Notice only; update through the package manager or re-run `install.sh`. |
 | Docker (`/.dockerenv`, or `MOKURO_INSTALL_KIND=docker`) | Notice with the image to pull. |
 
-`MOKURO_INSTALL_KIND` (`self`, `docker`, or a manager's name) overrides the
-detection. `mokuro-bunko update check` and `update apply [--yes] [--restart]`
+`MOKURO_INSTALL_KIND=docker` or a manager's name (for example `apt`)
+overrides the detection; `self` only skips the Docker check (a binary under
+`/usr/bin`, `/usr/sbin`, a Homebrew `Cellar` or `/nix/store` still gets the
+notice only). `mokuro-bunko update check` and `update apply [--yes] [--restart]`
 do the same from a terminal. The button and `update apply` install a release the
 same way the automatic update does (below): the program, its OCR backend pack and
 its models together.
@@ -536,13 +564,14 @@ ever arrive with a new release. An update therefore installs, together: the
 program (the tray is part of it), the release's pack for the variant installed
 here, and the release's model files.
 
-**Server.** With `auto` on, every check (12 h; `MOKURO_UPDATE_CHECK_SECONDS`
-shortens it) that finds a newer release on the channel starts an update:
+**Server.** With `auto` on, every check (12 h by default;
+`MOKURO_UPDATE_CHECK_SECONDS` sets the period) that finds a newer release on
+the channel starts an update:
 
 1. New OCR work stops on every machine (the scheduler hands out no new claims);
    the volumes in flight (on this server and on remote processors) and the
-   uploads finish. The Updates card, `/control/status` (`update.state:
-   "waiting"`) and the tray say "Updating to X…".
+   uploads finish. `/control/status` reports `update.state: "waiting"`, and
+   the Updates card, the tray and the app dashboard show the update waiting.
 2. The release's `release.json` (signature checked) and archive (sha256 checked)
    are downloaded; the new program is unpacked next to the running one but not
    installed. It then runs its own `update prefetch` (internal): it downloads and
@@ -646,7 +675,7 @@ run on this machine.
 | `poll_interval` | integer | `30` | Seconds between library scans for volumes missing a sidecar or a thumbnail. Also the base of the retry backoff for failed volumes. | Raise it on a very large library where a scan is expensive. |
 | `concurrency` | integer | `1` | How many OCR jobs this machine runs at once (1–8). Not a pool size. At startup. | See [Concurrency](#concurrency). |
 | `sessions` | boolean | `true` | Accepted so old files load, and ignored: models always stay loaded between volumes. | Never. |
-| `local_processing` | boolean | `true` | Whether the machine serving the library runs OCR at all. At startup. | `false` on a small always-on server that leaves OCR to [remote processors](#remote-ocr-processors). |
+| `local_processing` | boolean | `true` | Whether the machine serving the library runs OCR at all. A file edit applies at the next start; the admin panel's Machine card applies it at once (refused when `MOKURO_OCR_LOCAL_PROCESSING` sets it). | `false` on a small always-on server that leaves OCR to [remote processors](#remote-ocr-processors). |
 | `autobench` | boolean | `true` | Benchmark a generation on a machine the first time it is seen there, and apply the widths found, before offering it volumes. At startup. | `false` if you prefer to run the derived settings and benchmark by hand. |
 | `upgrade.enabled` | boolean | `false` | Replace old primary OCR with the current primary generation's (see [Replacing old OCR](#replacing-old-ocr)). | After moving from 0.5.x, when you want the whole library on the new engine. |
 | `upgrade.replace` | list | `[mokuro-legacy, mokuro]` | Which existing primary sidecars may be replaced: an engine id, or `mokuro-legacy` for files written by mokuro itself. | To also re-run when you change the primary's recipe, list the primary's own engine. |
@@ -673,7 +702,7 @@ carries no pack, relies on this.
 
 | Backend | Description |
 |---------|-------------|
-| `auto` | The installed pack's GPUs, else the CPU. `install-ocr` installs the pack for the GPU it finds (`cu130`, `rocm7.1`, else `cpu`). |
+| `auto` | The installed pack's GPUs, else the CPU. `install-ocr` and the background install pick the pack for the GPU found (`cu130` for NVIDIA with driver 580 or newer, `rocm7.1` for AMD, else `cpu`), but keep a variant picked by hand while the hardware stays the same (see [`install-ocr`](#install-ocr)). |
 | `cuda` | NVIDIA GPUs (the `cu130` pack): Turing (GTX 16xx / RTX 20xx) or newer, driver 580 or newer. Nothing else to install: the pack brings the CUDA libraries. |
 | `rocm` | AMD GPUs on Linux (the `rocm7.1` pack): Radeon RX 6000 (gfx1030; RX 6600/6700 too: `HSA_OVERRIDE_GFX_VERSION=10.3.0` is set automatically), RX 7000, RX 9000. Needs `libnuma` from the system (Debian/Ubuntu: `libnuma-dev`). |
 | `cpu` | CPU only (slower). `install-ocr` installs the `cpu` pack even with a GPU present (an installed GPU pack is kept and runs on the CPU). |
@@ -729,8 +758,8 @@ ocr:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `id` | minted (`g-1`, `g-2`, …) | Internal and never shown. It keys the row's history, benchmarks and working directories, so renaming or reordering costs nothing but the file name. Leave it out for a new row; the server writes it back. |
-| `name` | engine, or `<engine>-<detector>` | The row's label **and its file-name postfix**: `<Volume>.<name>.mokuro`. Rules below. |
+| `id` | minted (`g-1`, `g-2`, …) | Internal and never shown. It keys the row's history and benchmarks, so reordering or renaming keeps them. Leave it out for a new row: the next free `g-N` is minted when the config loads and written to `config.yaml` at the next save (admin panel, setup wizard or `config set`). Until then it follows the row's position, so do not reorder id-less rows. |
+| `name` | `<engine>-<detector>` (e.g. `paddle-manga-ppocr-manga`), or the engine for `ppocr-manga` | The row's label **and its file-name postfix**: `<Volume>.<name>.mokuro`. A derived name gets `-2`, `-3`… on a clash. Rules below. |
 | `primary` | `false` | Exactly one enabled row must have it. That row writes the bare `<Volume>.mokuro`, which readers take character counts from. Every OCR file of a volume carries the same volume id: the `.mokuro`'s when one exists, else the id readers already give a volume with no `.mokuro`. Any engine may be the primary one. |
 | `enabled` | `true` | A disabled row queues nothing and writes nothing. Its name stays reserved. |
 | `engine` | — (required) | One of the [engines](#ocr-engines). |
@@ -755,11 +784,14 @@ would not recognise the file as a layer. `original`, `gcv`, `updated-ocr`
 and anything starting with `tr-` are reserved by readers. Names must be
 unique across all rows, enabled or not.
 
-**Renaming a row** means its files are now looked for under the new name:
-volumes are OCRed again under it, and the old files stay where they are. A
-job already running finishes under the name it started with. **Deleting or
-disabling a row** leaves its files alone too; every layer file goes when its
-archive is deleted. To take over files that are already on disk (for example
+**Renaming a non-primary row** means its files are now looked for as
+`<Volume>.<new-name>.mokuro`: volumes are OCRed again under it, and the old
+files stay where they are. A job already running finishes under the name it
+started with. Renaming the primary row only changes its label: its files are
+always the bare `<Volume>.mokuro`, so nothing is OCRed again. **Deleting or
+disabling a row** leaves its files alone too. Deleting an archive over WebDAV
+also removes its layer files; deleting it directly on disk does not. To take
+over files that are already on disk (for example
 `Volume 01.paddle-manga.mokuro`), name the row after them.
 
 **Editing applies live.** Generations saved in the admin panel reach the
@@ -769,12 +801,13 @@ or patch budget; renames, reorders and pool changes never stop a job.
 
 **Volumes missing pages** get no other layers: when a volume arrives with a
 `.mokuro` that names pages its archive does not contain, every layer would
-have the same holes. This is checked as soon as the volume is found, before
-any OCR runs. Replace the archive with a complete one and the other rows pick
+have the same holes. This is checked when the archive arrives and on each
+periodic library walk, against the `.mokuro` beside it at that moment, so
+upload the `.mokuro` first. Replace the archive with a complete one and the other rows pick
 it up. A volume without a `.mokuro` is never held back: its primary sidecar
 is read from the archive itself.
 
-Set the list in the admin panel (OCR → Generations), in the config file, or
+Set the list in the admin panel (Settings → OCR → Generations), in the config file, or
 as JSON:
 
 ```bash
@@ -785,7 +818,8 @@ mokuro-bunko serve --generations '[{"name":"hayai-nova","engine":"hayai-nova","p
 
 **Old configs.** A 0.5.x list that names the removed `mokuro` engine or the
 removed `ctd`, `animetext` or `rtdetr` detectors still loads; it is migrated
-and every change is logged and shown in the admin panel:
+and every change is logged (and printed by `config` commands); the admin
+panel marks a retired row "Retired: <reason>":
 
 - a `mokuro` row is **retired**: kept (its name stays reserved) but never run,
   no longer primary, and written back disabled;
@@ -812,8 +846,10 @@ current primary generation:
   family is the engine id, or `mokuro-legacy` for a file written by mokuro
   itself (no `ocr_engine` block).
 - It is skipped when its archive is **missing pages**, or when a person
-  **edited** the sidecar (an audit-log write by a user account, or a file
-  newer than the OCR provenance row). An admin can force one edited volume.
+  **edited** the sidecar (a WebDAV overwrite that changed its bytes, a
+  revert, or a file newer than the OCR provenance row; uploading it fresh or
+  re-sending the same bytes is not an edit). An admin can force one edited
+  volume.
 - If another layer already holds the primary's recipe made from the current
   archive, its bytes become the new primary at once. Otherwise the volume
   gets an upgrade job, queued behind every ordinary job (a volume with no OCR
@@ -839,35 +875,40 @@ pack), ppocr-manga on ONNX Runtime on the CPU.
 | Engine | What it is | Runs on | Use it for |
 |--------|-----------|---------|------------|
 | `hayai-nova` | [hayai-ocr v2.5 "Nova"](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova) | card or CPU | The default. Better text than 0.5's mokuro engine, especially display lettering, sound effects and colour pages. Reads at the row's `patch_budget`. Needs a detector. |
-| `paddle-manga` | [PaddleOCR-VL 1.6 + manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora) | card recommended | The most accurate and the slowest; about 2 GB of model files (3.6 GB in fp32, which the CPU runs). Needs a detector. On the CPU about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
-| `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector + CTC recognizer, 23 MB | CPU only | Reads lines rather than bubbles, removes furigana, and is the one engine that reads scanned **novel** pages. Brings its own detector. |
+| `paddle-manga` | [PaddleOCR-VL 1.6 + manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora) | card recommended | The most accurate and the slowest; about 1.8 GB of model files in bf16/fp16, 3.6 GB in fp32, which the CPU and the default `auto-accuracy` mode run. Needs a detector. On the CPU about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
+| `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector + CTC recognizer, 23 MB | CPU only | Reads lines rather than bubbles, removes furigana, and reads scanned **novel** pages (as do the other engines on the `ppocr-manga` detector). Brings its own detector. |
 
 Sidecars from every engine, and every non-primary layer, carry an
 `ocr_engine` block saying what produced them (engine, detector, generator
 and, where they apply, the patch budget, precision and the model revisions).
 The mokuro engine of 0.5.x no longer exists; sidecars it wrote stay as they
-are.
+are unless [Replacing old OCR](#replacing-old-ocr) is turned on.
 
 #### OCR models
 
 Models are not shipped in the archives. A full build downloads what the
-configured generations need into `<storage>/models/` the first time they run,
-verifies each file's sha256 and only then moves it into place: the PP-OCR ONNX
+configured generations need into `<storage>/models/`: `serve` and
+`processor serve` fetch missing models (and the backend pack) in the
+background as they start, and an engine that needs a file before then, or with
+`MOKURO_OCR_AUTO_INSTALL=false`, downloads it on first use. Each file's
+sha256 is verified before it is moved into place: the PP-OCR ONNX
 files, hayai-nova's and paddle-manga's host tables (tokenizer, embeddings), and
 the **compiled libtorch packages** for this machine's devices
-(`models/torch/<engine>/<precision>/<target>/`, e.g. `linux-cuda-sm_89`,
+(`models/torch/<engine>/<precision>/<target>/`, e.g. `linux-cuda-sm_80`,
 `linux-rocm-gfx1201`, `linux-cpu-x86_64-v3`, with the shared weights next to them).
+CUDA packages exist for sm_75 and sm_80; newer NVIDIA cards (sm_86, sm_89,
+sm_120) use the sm_80 package.
 `mokuro-bunko install-ocr` and `models download [--engine E]` fetch them up front
 (for example before going offline); `models list|verify` inspect them. Sizes:
-hayai-nova about 0.5 GB per precision, ppocr-manga about 23 MB, paddle-manga
-about 2 GB per precision.
+hayai-nova about 0.3 GB in bf16/fp16 and 0.6 GB in fp32, ppocr-manga about
+23 MB, paddle-manga about 1.8 GB in bf16/fp16 and 3.6 GB in fp32.
 
 | Setting | Meaning |
 |---|---|
 | `MOKURO_MODELS_DIR` | A directory of model files to use instead of the store (also `MOKURO_PPOCR_MODELS`). Files found there are used as they are. |
-| `MOKURO_MODELS_DOWNLOAD` | `0`, `false`, `no` or `off` forbids downloads (also `MOKURO_PPOCR_DOWNLOAD`). A model that is not on disk then makes the generation fail. |
+| `MOKURO_MODELS_DOWNLOAD` | `0`, `false`, `no` or `off` forbids downloads (also `MOKURO_PPOCR_DOWNLOAD`). A machine then offers only the engines and precisions whose files are on disk, and generations needing missing models stay queued rather than fail. |
 | `MOKURO_TORCH_MODELS_DIR` | A directory laid out like `<storage>/models/torch/` searched first (development, air-gapped hosts). |
-| `MOKURO_TORCH_PACK`, `MOKURO_BACKENDS_DIR` | Use this backend pack directory / look for packs here instead of `<storage>/backends/`. Neither is set by the Docker images (a pack built into a self-built image, `<exe dir>/backends`, is searched after `<storage>/backends/`). |
+| `MOKURO_TORCH_PACK`, `MOKURO_BACKENDS_DIR` | Use only this backend pack directory / install packs here instead of `<storage>/backends/`, which is still searched after it. Neither is set by the Docker images (a pack built into a self-built image, `<exe dir>/backends`, is searched after `<storage>/backends/`). |
 | `MOKURO_TORCH_THREADS` | CPU threads of a CPU recognizer (default: the session's share of the physical cores). |
 
 #### OCR detectors
@@ -884,8 +925,11 @@ removed; a row naming one is switched to `ppocr-manga` when the config loads.
 #### Pools: stages and devices
 
 Each engine reads a page in **stages**: detection, recognition, assembly.
-Each stage has a pool of workers. A row's `pools` sets them for that row;
-`{}` (the default) derives everything from the host, which is the right
+Each stage has a pool of workers. A row's `pools` applies on every machine
+that runs the row; a machine's own values (its profile in
+`<storage>/processors/`, saved from the admin panel or by an automatic
+benchmark) replace it there, table by table. `{}` (the default) derives
+everything from the host or from that machine's benchmark, which is the right
 starting point. None of these settings changes what is written, only how fast
 it is written, so editing them never stops a running job.
 
@@ -900,12 +944,14 @@ it is written, so editing them never stops a running job.
 
 | Key | Values | Meaning |
 |---|---|---|
-| `stage_workers` | `{stage: 1–64}` | How many workers a stage runs. A stage holding a model on a card runs one worker; for the `engine` stage a number above 1 instead runs that many recognizer copies on the card (up to 8), only worth it on a card with spare memory and compute. |
+| `stage_workers` | `{stage: 1–64}` | How many workers a stage runs. For the `engine` stage on a card, a number above 1 (up to 8) runs that many threads over the one loaded model, only worth it on a card with spare compute; unset, it is 1, or 2 on a fast card in a host with 16 or more physical cores. On the CPU the engine stage stays at 1. |
 | `queue_capacity` | `{stage: 1–256}` | How many pages may wait in the queue a stage fills. Capacity is memory (a decoded page can be ~14 MB); the default is small on purpose. |
 | `stage_device` | `{stage: cpu \| "gpu:<n>"}` | Where a stage's model runs. Absent means auto: card 0 when there is one, else the CPU. Only stages holding a model take one. |
 
-Which stage names a row has depends on its engine; a name from another road
-is refused when the config loads:
+Which stage names a row has depends on its engine. A stage the row does not
+have (such as a 0.5.2 stage name), or a `stage_device` for a stage without a
+model, is dropped with a warning when the config loads; an unknown pools
+key, an out-of-range number or a GPU for a CPU-only stage is refused:
 
 | Row | Stages | Take a device |
 |---|---|---|
@@ -920,10 +966,13 @@ Some placements worth knowing:
   side by side.
 - **Everything on the CPU** is for a machine with no card.
 
-The admin panel's pools table offers only the devices a machine really has,
-and shows what each blank cell derives to. A machine's pools never carry a
-precision: that is the row's [precision mode](#precision-modes). A
-`precision` left in an older file's pools is read without error.
+In the admin panel, a processor's pools table offers only that processor's
+own cards (plus Auto and CPU); this server's offers every card any known
+machine reports. A blank Device cell shows what it resolves to ("Auto →
+GPU 0"). A machine's pools never carry a precision: that is the row's
+[precision mode](#precision-modes). A `precision` left under a row's `pools`
+in an older file becomes the row's mode when the row has none (an invalid
+one is refused); in a machine's profile it is dropped.
 
 #### Precision modes
 
@@ -944,26 +993,32 @@ sample pages; two within 5% of each other count as a tie, and the tie goes to
 the more accurate one. The pick is kept with the machine's benchmark of the
 row; changing the row's mode, or the machine's candidates changing, makes it
 stale and it is measured again. A machine whose pools you set by hand is
-never width-tuned, but still gets this precision-only benchmark. Only with
-automatic benchmarks off (`ocr.autobench: false`), or when a machine's
-benchmark failed, does it run the first candidate its card supports.
+never width-tuned, but still gets this precision-only benchmark. With
+automatic benchmarks off (`ocr.autobench: false`), or after a machine's
+benchmark of the row failed, nothing is measured automatically: a machine
+keeps its current pick if it has one, else runs the first candidate its card
+supports.
 
 Each device reports the formats it computes in (the backend pack's
 `bt_devices`): GPUs fp32, fp16 and bf16 (as 0.5.2's torch probe said); the CPU
 fp32, plus bf16 on CPUs with AVX512-BF16 (Zen 4/5, Sapphire Rapids and newer).
+The auto modes use bf16 only where it runs natively: NVIDIA sm_80+ (Ampere and
+newer) and AMD RDNA3/RDNA4 (gfx11xx/gfx12xx), never the CPU; elsewhere bf16 is
+dropped from the auto candidates (a forced `bf16` still runs on any GPU).
 A format also needs its compiled package for the device; one without is "not
 supported" there. On the CPU, `auto-accuracy` runs fp32, as 0.5.2 did; bf16 on
 the CPU is an opt-in (force `bf16`). A **forced** mode (`fp32`, `bf16`, `fp16`) runs only on machines
 that support it; every other machine is not eligible for the row and is never
 offered its volumes. When no connected machine can run it, the row is
-**held**: the admin card, the queue page (for admins) and `.mokuro-queue.json`
-(jobs in state `held`) say "No connected machine can run …". `ppocr-manga`
-fixes its own precision and ignores the mode. Each sidecar records the
-precision it was read at.
+**held**: the admin card and the queue page (for admins) say "No connected
+machine can run …", and `.mokuro-queue.json` shows its jobs as `held`.
+`ppocr-manga` fixes its own precision and ignores the mode. Sidecars from
+hayai-nova and paddle-manga record the format they ran at in
+`ocr_engine.precision`.
 
 #### Benchmark and tune
 
-Every row in the admin panel (OCR → Generations) has a **Benchmark & tune**
+Every row in the admin panel (Settings → OCR → Generations) has a **Benchmark & tune**
 button. It measures the row **as currently edited**, saved or not, on the
 selected machine (this server, or a connected processor) and on pages sampled
 from your own library: 32 by default (4–512), a few interior pages from each of
@@ -974,13 +1029,16 @@ the result.
   stopped and simply run again afterwards; they are not recorded as
   failures. Other machines keep working. The queue page shows the machine as
   "Benchmarking …" (or "Auto configuring …" for an automatic benchmark).
-- It loads the models once, as the row would run, and warms up on the first
-  pages. The load appears only as "first page after X s"; it is never part of
-  a speed.
-- For an `auto-balanced` or `auto-speed` row it first runs one trial per format
-  the machine's card supports (see [Precision modes](#precision-modes)); the
-  fastest wins, and two within 5% count as a tie that goes to the more
-  accurate format. A format with no compiled package for the card is skipped.
+- It loads the models once, with the row's engine, mode and device pins, and
+  warms up on the first few pages, which are discarded. The load appears only
+  as "first page after X s"; it is never part of a speed. Widths start from
+  the derived values, not the row's pools.
+- For an `auto-balanced` or `auto-speed` row it first runs one trial per
+  format of the mode that the machine's card can use (auto-balanced: bf16,
+  fp32; auto-speed: bf16, fp16, fp32; bf16 only where native, see
+  [Precision modes](#precision-modes)); the fastest wins, and two within 5%
+  count as a tie that goes to the more accurate format. A format with no
+  compiled package for the card is skipped.
 - It then tries pool widths, following the pipeline's own bottleneck: it
   widens the stage the pipeline says is in the way while that gains at least
   3%, then gives back workers that are not needed while the speed stays within
@@ -988,13 +1046,15 @@ the result.
   placement to search. At most 8 width trials (plus the format trials) and
   15 minutes.
 - Every speed is timed by when pages come out of the pipeline: each trial
-  feeds the sample again, as one continuous run, until it has at least 20
-  seconds of output to measure. A trial measured over less than 10 seconds is
-  shown but flagged, and never decides anything.
+  feeds the sample again until it has 20 seconds of output, or after 8 feeds
+  or at the 15-minute budget. A trial measured over less than 10 seconds is
+  shown but flagged and never decides a width (a short format trial still
+  picks the format).
 - It reports pages per second, what a 200-page volume would take, how long
-  the rest of the queue would take at that rate, how busy the GPU and CPU
-  were during each trial (sampled on the machine that ran it), the process's
-  peak memory and how far the card's VRAM use rose. **Apply** writes the
+  the volumes still owing this generation a sidecar would take at that rate,
+  and, where the machine can measure them, how busy the GPU and CPU were
+  during each trial, the process's peak memory and how far the card's VRAM
+  use rose. **Apply** writes the
   widths it found into the row you are editing (or into that processor's
   settings); you still save.
 - Benchmarks queue: several can be requested at once and run one at a time
@@ -1005,29 +1065,38 @@ The last result of each saved row on this server is kept in
 (`<storage>/processors/`). A benchmark of an unsaved row is kept in memory
 only, until a restart.
 
-With `ocr.autobench: true`, a row that has never been measured on a machine
-(or whose measurement no longer matches its precision mode or that machine's
-card) is benchmarked there automatically before that machine is offered its
-volumes, and the widths found are kept in that machine's profile
-(`<storage>/processors/`), never in `config.yaml`. On this server that
-happens only for a row whose pools table is empty; set any value in the
-table and the table is used as written, though a balanced/speed row still
+With `ocr.autobench: true`, a row is benchmarked on a machine automatically,
+before that machine is offered its volumes, when the machine has no entry for
+the row's current recipe (engine, detector, patch budget), or when the stored
+measurement no longer matches the row's precision mode or the formats the
+machine's card supports. A machine that already has an entry without a
+benchmark (it ran the row with autobench off, or pools were saved for it)
+gets no width benchmark. The widths found are kept in that machine's profile
+(`<storage>/processors/`), never in `config.yaml`. On this server the width
+benchmark runs only for a row whose pools table is empty, though widths an
+earlier automatic benchmark saved (`@local.json`) keep precedence over the
+table until the row's recipe changes. In every case a balanced/speed row still
 gets its precision-only benchmark. A machine whose automatic benchmark fails
 runs the row untuned (and on its first supported format) rather than never.
 
 #### Concurrency
 
-`ocr.concurrency` is how many **volumes** this machine OCRs at once, each
-with its own copy of the models. It is not how wide the stages inside one
-volume run; that is a row's `pools`. Models stay loaded between volumes.
+`ocr.concurrency` is how many **volumes** this machine OCRs at once. Slots
+running the same row on the same device share its loaded models; a different
+engine, device, precision or patch budget loads its own copy. It is not how
+wide the stages inside one volume run; that is a row's `pools`. Models stay
+loaded between volumes.
 
 - Two jobs never run the same generation of a volume; different generations
   of one volume may run at once.
 - One job already keeps several CPU cores busy, so about `cores / 3` is a
-  useful ceiling on the CPU; on a card the limit is usually card memory,
-  since every slot holds its own model. Values above 8 are refused.
-- A GPU-bound engine gains least: the slots queue for the same card. Two
-  cards are where it pays most.
+  useful ceiling on the CPU. On a card, each extra slot of the same row adds
+  only working memory (batches and pages in flight). Values above 8 are
+  refused.
+- A GPU-bound engine gains least: the slots queue for the same card. With the
+  default `auto` placement every slot uses card 0; a second card is used
+  only by rows pinned to it with `pools.stage_device.engine` (for example one
+  row on `gpu:0`, another on `gpu:1`).
 - It takes effect at startup.
 
 #### Remote OCR processors
@@ -1074,9 +1143,10 @@ mokuro-bunko processor service --config processor.yaml --install   # start it wi
 mokuro-bunko processor status  --config processor.yaml             # what it last did
 ```
 
-The models a processor needs are downloaded the first time a generation
-runs (see [OCR models](#ocr-models)). A processor with no models yet
-registers anyway and shows as installing.
+A processor fetches the models it is missing in the background, at startup
+and again once the library names the engines it uses (see
+[OCR models](#ocr-models)). It registers anyway and shows as installing
+while that runs.
 
 `processor.yaml`:
 
@@ -1084,23 +1154,25 @@ registers anyway and shows as installing.
 |---|---|---|
 | `library.url` | — (required) | The library's address, as a browser reaches it. A path prefix is kept. |
 | `library.username`, `library.password` | — (required) | The `processor` account. Keep the file mode `600`. |
-| `library.password_file` | unset | The first line of this file (relative to `processor.yaml`) replaces `library.password`. `MOKURO_PROCESSOR_PASSWORD` overrides both. |
+| `library.password_file` | unset | Used only when `library.password` is empty or absent: the first line of this file (relative to `processor.yaml`'s folder). `MOKURO_PROCESSOR_PASSWORD` overrides both. |
 | `library.tls_verify` | `true` | `true`, `false` (a self-signed certificate on a LAN), or the path to the certificate to trust. |
 | `processor.name` | the hostname | How the library shows this machine to admins, and the name its settings are filed under. |
 | `processor.public_name` | unset | What queue-page visitors see; unset, they see "machine 1", "machine 2"…. At most 64 characters. |
 | `processor.max_sessions` | `1` | How many OCR pipelines this machine runs at once: one per card is the rule, like `ocr.concurrency`. |
-| `processor.storage` | `$XDG_DATA_HOME/mokuro-bunko-processor` (`~/.local/share/...`) on Linux and macOS, `%LOCALAPPDATA%\mokuro-bunko-processor` on Windows | Logs, working directories, archives too big for memory, and the status file. One per processor; a second processor on the same storage refuses to start. |
+| `processor.storage` | `$XDG_DATA_HOME/mokuro-bunko-processor` (`~/.local/share/...`) on Linux and macOS, `%LOCALAPPDATA%\mokuro-bunko-processor` on Windows | Logs, working directories, archives too big for memory, the status file, the downloaded OCR models (`<storage>/models`, several GB), the backend pack (`<storage>/backends`) and update state. One per processor; a second processor on the same storage refuses to start. |
 | `processor.archive_memory_mb` | `2048` | RAM for the archives being read and the one on deck, shared by every session (in-memory files on Linux); an archive that does not fit goes to `storage`. `0` keeps every archive on disk. Other platforms always use `storage`. |
 | `processor.auto_update` | `false` | Follow the library: when it reports a newer version, finish the running volume, install exactly the library's release and restart (never a downgrade). See [Automatic updates](#automatic-updates). |
-| `update.manifest_url`, `update.public_key` | GitHub latest, empty | Only for `auto_update`: a mirror or fork's latest `release.json`, and its signing key (from this file only; logged loudly). |
+| `update.manifest_url`, `update.public_key` | GitHub latest, empty | A mirror or fork's latest `release.json`, and its signing key (from this file only; logged loudly). Used by `auto_update` and by the processor's OCR backend pack downloads. |
 
 A 0.5 `ocr:` section in the file (`ocr.backend` chose a torch build) is
 accepted and ignored. The processor uses every device its backend pack and
 hardware can run; `MOKURO_OCR_BACKEND` (`cuda`, `rocm`, `cpu`) in its
 environment narrows that (`processor setup --backend` is accepted for 0.5
-scripts and only says so). Install the pack first, as 0.5.2 needed its OCR
-environment. `install-ocr --processor` installs it into `processor.storage`, and
-that is automatic on a machine with a `processor.yaml` and no library
+scripts and only says so). `processor serve` installs a missing pack in the
+background and is not available until it finishes (with
+`MOKURO_OCR_AUTO_INSTALL=false` it reports the pack missing instead).
+`install-ocr --processor` installs it into `processor.storage` beforehand,
+and that is automatic on a machine with a `processor.yaml` and no library
 configuration. The processor also looks in the default library storage's
 `backends/`, after `MOKURO_BACKENDS_DIR` and its own storage (see
 [deployment](deployment.md#3-the-processor-machine)).
@@ -1110,15 +1182,19 @@ it first, counting what that machine is already doing, whether it has to
 load the model, and its measured speed on that generation, so a slower
 machine may leave a volume for a faster one that will be free soon. If the
 faster machine has not taken it within 15 seconds of when it was expected
-to, anyone may. Until every machine has a measured speed for a row, the
-first free machine simply takes the next volume.
+to, anyone may. A machine without its own speed for a row is priced from the
+row's history or other machines' speeds; only when no speed is known for the
+row anywhere, or only one session slot is active, does the first free
+machine simply take the next volume.
 
 **Per-machine settings.** Pools, devices and benchmarks belong to a machine:
 widths tuned on a 16-core box mean nothing on a 48-core one. While a
-processor is connected, a generation's pools table has a machine selector;
-its Device select lists that machine's cards, **Save for …** stores the
-values in that machine's profile (never in `config.yaml`), and
-**Benchmark & tune** runs on it. A processor with no saved values uses the
+processor is connected, a saved generation's card has a **Machine** select:
+All machines (the default), this server, and each connected processor. Pick
+a machine and its Device select lists that machine's cards, **Save for …**
+stores the pools in that machine's profile (never in `config.yaml`), and
+**Benchmark & tune** runs on it; with All machines the table is the row's
+own and **Benchmark & tune** benchmarks every machine. A processor with no saved values uses the
 generation's own table (or what autobench found). Changing a row's engine,
 detector or patch budget makes every machine measure it afresh.
 
@@ -1128,8 +1204,11 @@ volumes back to the queue unrecorded, and reconnects with a backoff from
 no OCR itself, the queue holds and says so. Disabling, deleting, re-roling
 or changing the password of a processor's account cuts it off within about
 15 seconds; its failed login is shown in the admin panel's Processors card.
-The Processors card also shows each machine's hardware, what it is running,
-its real throughput per generation and how its downloads are going.
+The Processors card also shows each machine's hardware, its pages a minute
+per generation (the benchmark figure until it has finished a volume) and its
+state: connected or offline, installing, paused, updating or on another
+version, rows that cannot start, and archive downloads failing. What each
+machine is working on is on the queue page.
 
 **Versions.** A processor of another protocol version is refused at
 registration ("this server speaks protocol 3, not 2"). Update the library
@@ -1152,8 +1231,11 @@ mokuro-bunko install-ocr [--variant auto|cpu|cu130|rocm7.1] [--from DIR] [--dir 
                          [--no-models] [--force] [--list]
 ```
 
-`auto` (default) picks `cu130` for an NVIDIA driver 580 or newer, `rocm7.1` for
-a supported AMD GPU on Linux, else `cpu`. The pack comes from this version's
+With no `--variant`, it installs what `ocr.backend` asks for on this
+hardware (`cuda`, `rocm` and `cpu` force that family); under `auto`, the
+default, a variant picked by hand at the last install is kept while the
+hardware is unchanged. `--variant auto` goes by the hardware alone: `cu130` for an NVIDIA driver 580 or newer, `rocm7.1` for a supported AMD
+GPU on Linux, else `cpu`. The pack comes from this version's
 release, checked against the signed release manifest; the `cu130` pack's NVIDIA
 CUDA libraries are fetched from NVIDIA's own packages on PyPI (about 1.6 GB),
 each file pinned by sha256. `--from DIR` installs from downloaded files (air-gapped
@@ -1168,7 +1250,7 @@ Unlike 0.5.2 it fails visibly (non-zero exit) when it cannot install.
 | `<storage>/logs/server.log` | The server log (rotated at 2 MiB, 5 backups), including OCR and queue messages. |
 | `<storage>/.ocr-failures.json` | Failed volumes, per generation, with attempt counts. Retries back off from `poll_interval` up to 1 hour; replacing the archive clears its record. |
 | `<storage>/.ocr-bench.json` | The last benchmark of each saved row. |
-| `<storage>/.ocr-congestion.json` | The last few runs of each row, shown as the Congestion column. |
+| `<storage>/.ocr-congestion.json` | The last 5 runs of each row on this server, averaged in each generation card's congestion details. Processors keep theirs in their profiles. |
 | `<storage>/processors/*.json` | Each machine's profile: hardware, per-generation pools and benchmarks (`@local.json` is this server's own). |
 | `<storage>/backends/` | The OCR backend pack (`install-ocr`). |
 | `<storage>/models/` | The downloaded models: compiled libtorch packages and PP-OCR ONNX files. |
@@ -1211,20 +1293,25 @@ cached with it; entries cached by an older version gain it on the next backgroun
 metadata pass (one read of each sidecar, never on a request).
 
 Clients do not write these files. A `PUT` of `<Series>/series.json` is accepted as
-an update *request*: the facts are validated and merged (newest stamp wins), the
-volume list in the request is ignored in favour of the server's own compilation,
-and both files are regenerated. A body carrying only facts, with no volume list at
+an update *request*: the facts are validated and merged (newest stamp wins), and
+both files are regenerated. The server compiles the volume list itself; of each
+listed volume it reads only `volume_uuid` and `offset`, the shelf offset (a listed
+volume without `offset` has its offset cleared, an unlisted one keeps it), and a
+top-level `spine_offset` replaces the stored one. Offsets apply whatever the
+`updated_at` stamp, so a client sends back the offsets it read, or no volume list.
+A body carrying only facts, with no volume list at
 all, is an equally valid update. Writing `catalog.json`, or deleting/moving either
 file, is refused for every account. Submitting an update is ownership-gated, not a
 plain progress-write permission: an editor-tier account (or above) may update any
-series, an uploader account only a series it uploaded, and a registered-only
+series, an uploader account only a series where it is the only recorded uploader
+(otherwise 403), and a registered-only
 account cannot submit updates at all. The account that submitted an accepted
 update is recorded in the audit log.
 
 ## Environment Variables
 
-Every config key can be set as `MOKURO_<SECTION>_<KEY>`, which overrides the
-config file:
+Most config keys can be set as `MOKURO_<SECTION>_<KEY>`, which overrides the
+config file (for the exceptions, see below):
 
 ```bash
 MOKURO_SERVER_HOST=127.0.0.1
@@ -1240,10 +1327,13 @@ MOKURO_OCR_GENERATIONS='[{"name":"hayai-nova","engine":"hayai-nova","primary":tr
 Booleans take `true`/`false` (or `1`/`0`, `yes`/`no`). Lists such as
 `MOKURO_SERVER_TRUSTED_PROXIES` are comma-separated. `MOKURO_OCR_GENERATIONS`
 is the JSON text of the whole list. `cors.allowed_origins` has no variable;
-set it in the file or with `mokuro-bunko config cors-add`; `ocr.upgrade.*`
-has none either. Bad values are refused at startup with the variable's name
-in the message. Overrides are never written back into `config.yaml` by the
-CLI or the admin panel.
+set it in the file or with `mokuro-bunko config cors-add`; `ocr.upgrade.*`,
+`update.public_key` and the `database` section have none either. Bad values
+are refused at startup with the variable's name in the message. The CLI's
+config commands never write overrides back into `config.yaml`, but an admin
+panel save or the setup wizard writes the whole running configuration,
+overrides and `serve` flags included (behind the bundled nginx, the backend's
+`127.0.0.1:8081` too).
 
 Other variables:
 
@@ -1252,16 +1342,17 @@ Other variables:
 | `MOKURO_CONFIG` | platform default | Config file path (the same as `--config`). |
 | `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` | — | Short aliases for `server.host`, `server.port`, `storage.base_path`. |
 | `MOKURO_LOG` | `info` (`debug` with `-v`) | The log filter (`tracing` syntax), for example `debug` or `info,bunko_server=debug`. |
-| `MOKURO_NGINX_ACCEL` | unset | `1` when an nginx in front serves library downloads via `X-Accel-Redirect`. Set by the Docker images only when their nginx runs; never set it without that nginx. |
+| `MOKURO_NGINX_ACCEL` | unset | On the full Docker image, `1` (or `true`/`yes`) starts the bundled nginx in front, which serves library downloads via `X-Accel-Redirect`; the server moves to `127.0.0.1:MOKURO_BACKEND_PORT`. Without nginx (a lite image, or a container not started as root) it is dropped with a warning. Outside Docker, set `1` only when your own nginx serves the `/internal-library/` location. |
 | `MOKURO_INSTALL_KIND` | detected | `self`, `docker` or a package manager's name; decides what the updater does (see [Updates](#updates)). |
 | `MOKURO_UPDATE_CHECK_SECONDS` | `43200` | The background release check's period (and, up to 60 s, its first delay), for mirrors that publish often and tests. |
 | `MOKURO_UPDATE_RETRY_SECONDS` | `600` | The first wait after a failed automatic update (doubling to 12 h). |
 | `MOKURO_MODELS_DIR`, `MOKURO_MODELS_DOWNLOAD` | — | A directory of model files to use; `0` forbids model downloads (see [OCR models](#ocr-models)). The 0.5 names `MOKURO_PPOCR_MODELS` and `MOKURO_PPOCR_DOWNLOAD` still work. |
-| `MOKURO_PROCESSOR_CONFIG` | — | `processor.yaml` path for the `processor` commands (the same as `--config`). |
+| `MOKURO_PROCESSOR_CONFIG` | — | `processor.yaml` path for `processor serve`, `status` and `service` (the same as their `--config`); `install-ocr`, `doctor` and the tray find it there too. `processor setup` ignores it. |
 | `MOKURO_PROCESSOR_PASSWORD` | — | The processor's password; overrides `library.password` and `password_file`. |
+| `MOKURO_DEBUG` | unset | Any value but empty/`0`/`false`: one line per request on stderr (`[REQUEST] METHOD path -> status (seconds)`), as in 0.5.2. |
 | `MOKURO_OCR_AUTO_INSTALL` | `true` | `false`: `serve` / `processor serve` never install a missing OCR backend by themselves (anywhere, not only in Docker); the missing backend is a problem with an Install button (dashboard, admin panel), or run `mokuro-bunko install-ocr`. 0.5.2's `OCR_AUTO_INSTALL=true` also keeps it on; `OCR_AUTO_INSTALL=false` is ignored. |
 
-The 0.5 variables `MOKURO_THREADS`, `MOKURO_DEBUG`, `MOKURO_EFT_TRACE`,
+The 0.5 variables `MOKURO_THREADS` (use `MOKURO_SERVER_THREADS`), `MOKURO_EFT_TRACE`,
 `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`,
 `MOKURO_BUNKO_MOKURO_SPEC`, the `MOKURO_PPOCR_*` tuning variables and the
 `MOKURO_OCR_STAGE_*` / `MOKURO_OCR_CPU_WORKERS` pipeline overrides are no

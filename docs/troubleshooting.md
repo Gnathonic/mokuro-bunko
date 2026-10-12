@@ -16,8 +16,10 @@ It prints PASS / WARN / FAIL lines, with a fix hint under anything wrong:
 - ONNX Runtime (full build): the CPU runtime ppocr-manga and the PP-OCR
   detector run on
 - OCR backend (full build): which backend pack is in use and where, whether
-  its files are complete and its host libraries present, and whether another
-  pack would use this machine's GPU
+  it is this release's, whether its files are complete and its host libraries
+  present, and whether another pack would use this machine's GPU. With local
+  OCR off (`ocr.local_processing: false` or `ocr.backend: skip`), one INFO
+  line, `Local OCR: not used`, replaces this check and the next two
 - Models (full build): whether the PP-OCR and host model files are downloaded
 - Compiled packages (full build, when a hayai-nova or paddle-manga
   generation is enabled): whether the compiled package each one needs on
@@ -37,10 +39,11 @@ that on a machine that has both.
 | Log | Location |
 |---|---|
 | Server log (rotating, 2 MiB x 5) | `<storage>/logs/server.log` |
-| More detail | start with `-v`, or set `MOKURO_LOG`, e.g. `MOKURO_LOG=debug` |
+| More detail (console only; `server.log` stays at info) | `mokuro-bunko -v serve`, or set `MOKURO_LOG`, e.g. `MOKURO_LOG=debug` |
 | Failure records (JSON) | `<storage>/.ocr-failures.json` |
 | Processor state | `mokuro-bunko processor status --config processor.yaml` (on the processor) |
-| Processor output | `journalctl --user -u mokuro-bunko-processor` (Linux user service), its window (Windows) |
+| Processor log | `<processor storage>/logs/server.log` (default `~/.local/share/mokuro-bunko-processor`, `%LOCALAPPDATA%\mokuro-bunko-processor` on Windows) |
+| Processor console output | `journalctl [--user] -u mokuro-bunko-processor` (systemd), `~/Library/Logs/mokuro-bunko-processor.log` (macOS) or its minimized window (Windows) for `processor service --install`, `logs/processor-console.log` (started from the setup page) or `logs/tray-processor-console.log` (started by the tray) in its storage, `docker logs mokuro-bunko-processor` |
 | Docker | `docker logs <container>` |
 
 `<storage>` defaults to `%LOCALAPPDATA%\mokuro-bunko` on Windows and
@@ -61,9 +64,10 @@ inside the folder). `mokuro-bunko config path` prints the real locations.
 4. Run `mokuro-bunko doctor`. The usual causes are no OCR backend pack (then
    hayai-nova and paddle-manga cannot run here; see below) or models that
    could not be downloaded (no internet, a full disk).
-5. To force a retry immediately: fix the cause, then either replace the
-   `.cbz` file (updating its timestamp resets the failure record) or
-   restart the server.
+5. To force a retry immediately: fix the cause, then replace or touch the
+   `.cbz` file (a newer timestamp resets its failure record). A restart does
+   not: the records are kept in `<storage>/.ocr-failures.json` (to clear them
+   all, stop the server and delete it).
 6. A volume whose `.mokuro` names pages its archive does not contain gets no
    extra layers: replace the archive with a complete one.
 
@@ -100,15 +104,19 @@ without installing anything.
 - **"release X has no <variant> backend pack for <target>"**: there are packs
   for Linux x86_64 (`cpu`, `cu130`, `rocm7.1`), Windows x86_64 (`cpu`,
   `cu130`) and macOS on Apple silicon (`cpu`) only.
-- **"... is release X, this is mokuro-bunko Y"**: the pack must come from the
-  release of the running version. A source build of an unreleased version
-  needs its own pack (`cargo run -p xtask -- torch-pack`, then
-  `install-ocr --from dist`).
+- **"... is release X, not Y"** or **"the archive holds the backend pack of
+  mokuro-bunko X, not Y"**: the pack must come from the release of the
+  running version. A source build of an unreleased version needs its own pack
+  (`cargo run -p xtask -- torch-pack --variant <variant>` writes it to
+  `dist/`; then `install-ocr --from dist`).
 - **A host without internet**: download the pack archive
   (`mokuro-bunko-backend-<version>-<platform>-<variant>.tar.zst`, or its numbered
-  parts), `release.json` with `release.json.sig`, and for `cu130` the NVIDIA
-  wheels it lists, into one directory elsewhere, then
-  `mokuro-bunko install-ocr --from <dir>`.
+  parts) and, for `cu130`, the NVIDIA wheels listed under `external` in its
+  `pack.json` (PyPI file names) into one directory elsewhere, then
+  `mokuro-bunko install-ocr --from <dir>`. Add `release.json` and
+  `release.json.sig` to check the archive against the signed manifest; without
+  them only the pack's own checksums are checked. A wheel missing from the
+  directory is fetched from PyPI.
 - **A processor machine**: `install-ocr` installs into the processor's own
   storage when the machine has a `processor.yaml` and no library
   configuration, or with `install-ocr --processor`. The processor also finds
@@ -122,10 +130,12 @@ without installing anything.
   (the admin panel then offers Install), when local OCR is off
   (`MOKURO_OCR_BACKEND=skip`, `MOKURO_OCR_LOCAL_PROCESSING=false`), or on a new
   server before its first-run setup (its OCR step decides). A failed
-  download is a problem with a Retry button, tried again after 5, 15 and 60
-  minutes and at the next start; `docker exec <container> mokuro-bunko
-  install-ocr` installs it by hand (local OCR then starts with the next
-  Retry or restart).
+  install is a problem with a Retry button and is tried again at the next
+  start. Network and checksum errors are also retried after 5, 15 and 60
+  minutes; failures only you can fix (no disk space, the NVIDIA driver, no
+  pack for this machine, a pack that does not load) are not.
+  `docker exec <container> mokuro-bunko install-ocr` installs it by hand
+  (local OCR then starts with the next Retry or restart).
 - **A processor that stays "installing OCR backend: NN%"** in the library's
   processor list is downloading its own backend; it takes work as soon as
   that is done.
@@ -144,8 +154,9 @@ without installing anything.
   driver 550.120: too old for CUDA 13)` and `Update the NVIDIA driver to
   580.65 or newer to OCR on the GPU, then run install-ocr again.` The `cu130`
   pack needs driver 580 or newer (`nvidia-smi` shows it). With an older
-  driver an installed `cu130` pack runs on the CPU only, and the server log
-  has a `libtorch backend:` warning saying why.
+  driver an installed `cu130` pack runs on the CPU only. The server log then
+  warns `libtorch backend: cuda libtorch is loaded but sees no GPU`; `doctor`
+  and `install-ocr` name the driver.
 - **GPUs older than Turing** (GTX 10xx and older): there are no compiled
   packages for them. OCR runs on the CPU; `models download` says
   `note: running on the CPU: ...`.
@@ -154,9 +165,11 @@ without installing anything.
   `AMD gfx906 is not one of the supported ROCm GPUs (...)` and the `cpu`
   pack. On Windows an AMD or Intel GPU runs OCR on the CPU.
 - **A hidden GPU**: `install-ocr` says `no GPU visible: AMD gfx1201 (hidden by
-  HIP_VISIBLE_DEVICES="")`. `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES` or
-  `ROCR_VISIBLE_DEVICES` set to an empty value or `-1` hide every GPU of that
-  vendor; unset them.
+  HIP_VISIBLE_DEVICES="")`. `HIP_VISIBLE_DEVICES` and `ROCR_VISIBLE_DEVICES`
+  apply to AMD GPUs, `CUDA_VISIBLE_DEVICES` to NVIDIA GPUs (and to AMD ones
+  when `HIP_VISIBLE_DEVICES` is unset). Set to an empty value, or to a list
+  starting with a negative entry such as `-1`, each hides every GPU it
+  applies to; unset them.
 - `ocr.backend` (or `serve --ocr`) limits the devices: `cuda`, `rocm` or
   `cpu` (the CPU is always allowed). `webgpu`, `directml` and `coreml` are
   accepted for old configs, but no release has those runtimes, so they leave
@@ -207,8 +220,10 @@ reading as an extra layer and can wait for it, or connect a
 ## `doctor`: "Compiled packages" FAIL
 
 The recognizers load **compiled packages**, one per engine, precision and
-device type (e.g. `linux-cuda-sm_89`, `linux-rocm-gfx1201`,
-`linux-cpu-x86_64-v3`), downloaded into `<storage>/models/torch/`.
+device type (e.g. `linux-cuda-sm_80`, `linux-rocm-gfx1201`,
+`linux-cpu-x86_64-v3`), downloaded into `<storage>/models/torch/`. NVIDIA
+packages exist for sm_75 and sm_80; newer cards (sm_86, sm_89, sm_120) use the
+sm_80 one.
 
 - **`NOT DOWNLOADED: hayai-nova bf16 on gpu:0 (...)`**: the package an enabled
   generation needs is not on disk yet. OCR would download it on first use;
@@ -219,7 +234,8 @@ device type (e.g. `linux-cuda-sm_89`, `linux-rocm-gfx1201`,
   they were deleted or never fetched; `models download` gets them.
 - **`NOT RUNNABLE HERE: ...`**: no device here can run that row, e.g. a forced
   precision the hardware lacks, or an x86_64 CPU without AVX2 and FMA (the CPU
-  packages are built for x86-64-v3). If no pack is installed, run
+  packages are built for x86-64-v3; the Linux-only bf16 one needs AVX-512 with
+  AVX512_BF16, so use fp32 on other CPUs). If no pack is installed, run
   `mokuro-bunko install-ocr`; otherwise use another precision for the row, or
   a processor on other hardware.
 
@@ -240,7 +256,10 @@ exits non-zero when anything failed. If it fails:
   ...)"**: the release has no package for this device type; see
   ["Compiled packages" FAIL](#doctor-compiled-packages-fail) above;
 - on a host without internet, download the files elsewhere and point
-  `MOKURO_MODELS_DIR` at the directory, or copy them into `<storage>/models/`;
+  `MOKURO_MODELS_DIR` at the directory, or copy them into `<storage>/models/`
+  in its own layout (`torch/<engine>/<precision>/<target>/<role>.pt2` with the
+  `weights-*.safetensors` one level up, `ppocr-manga/<file>`, the `models-v1`
+  files flat);
   `MOKURO_TORCH_MODELS_MIRROR` names a directory (or a base URL) holding the
   compiled packages' release assets under their release names, and
   `MOKURO_MODELS_MIRROR` does the same for the `models-v1` files. Simplest: put
@@ -262,7 +281,8 @@ release X's pack. After a manual copy of a new executable (or an old pack pinned
 with `MOKURO_TORCH_PACK`) the log, `doctor` and `/control/status` say
 `the backend pack is from mokuro-bunko A, this is B: each release runs only its
 own pack`. Run `mokuro-bunko install-ocr` (it installs this release's pack and
-replaces the old one) and restart. The admin panel's **Update** button,
+removes older ones of the same variant) and restart; if `MOKURO_TORCH_PACK` is
+set, unset it or point it at the new pack first. The admin panel's **Update** button,
 `update apply` and automatic updates install the program and its pack together,
 so this does not happen with them; an automatic update whose new pack does not
 load rolls back to the previous release and says so (see
@@ -306,8 +326,10 @@ Also check:
   hayai-nova or paddle-manga row at all; `processor setup` shows
   `engines: ...` for the machine, and see
   ["No backend pack installed"](#no-backend-pack-installed).
-- The admin panel's Processors card shows each processor's state, its last
-  refused login and how its downloads have gone.
+- The admin panel's Processors card shows each processor's state (connected,
+  offline, installing, paused, version mismatch, unable to start), "held until
+  … — downloads failing" while its archive downloads keep failing, and the
+  last 20 refused processor logins.
 
 ## A processor is refused at registration
 
@@ -318,8 +340,9 @@ Also check:
   [Updating a library and its processors](deployment.md#updating-a-library-and-its-processors)).
 - **Login refused**: the account does not exist, has the wrong password, is
   disabled, or does not have the `processor` role. The Processors card lists
-  refused logins with the username tried, and the processor exits with a
-  non-zero status.
+  refused logins with the username tried, except for an account without the
+  `processor` role (the processor gets HTTP 403 "Processor access required").
+  The processor exits with a non-zero status.
 - **"another processor is running on …"**: two processors share one
   `processor.storage`; give each its own.
 - **The lite build cannot run a processor**: `processor` needs a full build.
@@ -328,14 +351,16 @@ Also check:
 
 In the first seconds after the processor starts this is normal: the status
 file catches up a few seconds after the connection. Ask again a little
-later. If it stays, the processor's own output (`journalctl --user -u
-mokuro-bunko-processor`, or its window on Windows) says why.
+later. If it stays, the processor's own log says why:
+`<processor storage>/logs/server.log`, or its console output (see
+[Where the logs are](#where-the-logs-are)).
 
 ## On the library, a processor delivers bad results
 
 Results the library refused are in the admin panel's audit log as
-`ocr_sidecar_rejected` with the processor's account as the actor, and every
-sidecar on disk records which machine wrote it (see
+`ocr_sidecar_rejected` with the processor's account as the actor, and the
+library database records which machine wrote each sidecar the scheduler
+installed (see
 [configuration](configuration.md#audit-log) and
 [OCR internals](ocr-internals.md#who-wrote-each-sidecar)). A machine that
 corrupts its downloads in memory (unstable RAM, an overclock or XMP profile,
@@ -353,24 +378,28 @@ card and the queue page's detailed level show each machine's speeds; see
 ## Updates
 
 - **No Update button, only a notice.** The install is not one the server may
-  replace: Docker (pull the new image), a root-owned system install (re-run
-  `install.sh`) or a distro package. A copy installed by
+  replace: Docker (pull the new image), the system service of a root
+  `install.sh --systemd` (re-run `install.sh`) or a distro package. A copy installed by
   `install.sh` as a user, the Windows zip or `install.ps1` has the button.
 - **"signature does not verify" / checksum errors.** The download was
   tampered with or truncated, or `update.manifest_url` points at a mirror
   signed with another key. Nothing is installed; try again, and check the URL.
 - **Checks do nothing.** `update.check` may be `false`; **Check now** still
   works. The server needs outbound HTTPS to GitHub.
-- On Windows the tray and `run.bat` restart the server after an update; if you
-  started `mokuro-bunko-cli.exe serve` by hand, start it again if it does not
-  come back.
+- On Windows the tray and `run.bat` restart the server after an update. A
+  `mokuro-bunko-cli.exe serve` started by hand restarts as a new process, so
+  the prompt returns while the server keeps running: check it is down before
+  starting it again.
 - **Automatic update "waiting" for a long time.** It installs only when no OCR
   volume is in flight anywhere (on this server and on remote processors) and no
-  upload is running; new OCR work is held meanwhile. The Updates card and the
-  tray say what it waits for. Turning `update.auto` off releases the hold.
-- **"The update to X was rolled back".** X's OCR backend did not load on this
-  machine after the switch, so the previous release and its pack came back. X is
-  not tried again automatically (`<storage>/.update-blocked.json`); fix the cause
+  upload is running; new OCR work is held meanwhile. The admin panel's Updates
+  card and the server log say what it waits for. Turning `update.auto` off
+  releases the hold.
+- **"The update to X was rolled back: <reason>".** "its OCR backend failed to
+  load on this machine": X's backend did not load after the switch, so the
+  previous release and its pack came back. "after installing it, this machine
+  still started <version>": nothing was rolled back; a launcher, shortcut or
+  service started an older copy of the program. Either way X is not tried again automatically (`<storage>/.update-blocked.json`); fix the cause
   shown (often a `MOKURO_TORCH_PACK` pinning another release's pack, a driver, a
   missing host library), then install it by hand. A newer release clears the block.
 - **"The automatic update to X needs you".** Only you can fix it: the message
@@ -395,17 +424,22 @@ other process.
 
 `pending` is the number of volumes without a primary sidecar (`<Volume>.mokuro`), as
 in 0.5; `queued_jobs` counts the OCR jobs waiting, one per volume and generation
-(a volume owed two layers counts twice). `worker_alive: false` means the background OCR loop stopped heartbeating:
-restart the server and check `server.log`. With `ocr.backend: skip` (or a
-lite build) the section reads `{"backend": "skip", "worker_alive": null,
-"pending": null, "failed": 0}`: this server runs no OCR, so there is no loop
-to report on. `mokuro-bunko healthcheck` exits 0 when the local server
+(a volume owed two layers counts twice). `worker_alive: false` means the OCR
+scheduler has stopped or did not answer within 2 seconds (`queued_jobs` is
+then null); if it stays false, restart the server and check `server.log`. With
+`ocr.backend: skip` the section reads like `{"backend": "skip",
+"worker_alive": true, "pending": null, "failed": 0, "queued_jobs": 0}`: this
+server runs no OCR itself, but its scheduler still hands work to remote
+processors. A lite build reports its configured backend (default `auto`) with
+normal counts. `mokuro-bunko healthcheck` exits 0 when the local server
 answers (what the Docker health check runs).
 
 ## Windows install issues
 
-`install.ps1` prints each step and its failure; re-running it is safe and
-updates in place (your data is kept). If SmartScreen blocks the executable,
+`install.ps1` prints each step and its failure; re-running it updates in
+place and keeps your data, stopping a running copy first (it asks, unless
+`-NonInteractive`). Re-run a portable install with `-Portable`: without it the
+server switches from `data\` to `%LOCALAPPDATA%\mokuro-bunko`. If SmartScreen blocks the executable,
 choose "More info" then "Run anyway": the binaries are not Authenticode
 signed. `doctor.bat` or `mokuro-bunko-cli.exe doctor` checks the
 installation (in a terminal use `mokuro-bunko-cli.exe`: `mokuro-bunko.exe` is
