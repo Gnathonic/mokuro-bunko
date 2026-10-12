@@ -7,11 +7,17 @@ paddle-manga) run on libtorch, which the server installs by itself (or
 
 | Pack | Hardware | Extra requirements |
 |---|---|---|
-| `cu130` | NVIDIA, Turing (GTX 16xx / RTX 20xx) or newer | NVIDIA driver **580 or newer**. Nothing else: the pack brings the CUDA libraries. |
+| `cu130` | NVIDIA; GPU OCR needs Turing (GTX 16xx / RTX 20xx) or newer | NVIDIA driver **580 or newer**. Nothing else: the pack brings the CUDA libraries. |
 | `cpu` | Everything else (AMD and Intel GPUs run OCR on the CPU on Windows) | Nothing. |
 
 ppocr-manga and the PP-OCR text detector run on the CPU in either case. The
-CPU is always the fallback.
+CPU is always the fallback. On the CPU, hayai-nova and paddle-manga need AVX2
+and FMA (x86-64-v3); without them only ppocr-manga runs.
+
+The pack is chosen by the driver alone: an older card (Pascal or Volta, e.g.
+GTX 10xx) with driver 580+ gets the `cu130` pack but OCRs on the CPU. Set
+`ocr.backend: cpu` (or run `install-ocr --variant cpu`) for the smaller CPU
+pack.
 
 > [!TIP]
 > Run `mokuro-bunko-cli.exe doctor` (or `doctor.bat`) first when something does
@@ -98,7 +104,8 @@ server** → OCR), or from the command line:
 ```
 
 If the GPU cannot be used (an old driver, say), the server logs why in
-`%LOCALAPPDATA%\mokuro-bunko\logs\server.log` and runs OCR on the CPU.
+`logs\server.log` under your data folder (`%LOCALAPPDATA%\mokuro-bunko`, or
+`data\` next to the program in portable mode) and runs OCR on the CPU.
 Without any pack, hayai-nova and paddle-manga do not run at all (only
 ppocr-manga does) until the backend is installed.
 
@@ -106,9 +113,10 @@ ppocr-manga does) until the backend is installed.
 
 The OCR models are fetched by `install-ocr`, or the first time a volume is
 OCR'd, into `models\` under your data folder, and verified: about 0.5 GB for
-hayai-nova (its compiled package for your GPU or CPU), about 2 GB more for
-paddle-manga if you enable it. To fetch them up front later (for example
-after enabling paddle-manga):
+hayai-nova (its compiled package for your GPU or CPU) and, once you enable
+paddle-manga, about 3.6 GB more for it in fp32 (the default, auto-accuracy) or
+about 1.8 GB in bf16/fp16 (auto-balanced or auto-speed, on a GPU that supports
+them). To fetch them up front later (for example after enabling paddle-manga):
 
 ```powershell
 .\mokuro-bunko-cli.exe models download
@@ -158,4 +166,6 @@ entry). See [deployment.md](deployment.md#remote-ocr-processors).
 - Antivirus software that quarantines `mokuro-bunko.exe` or the pack's DLLs
   breaks the install; add an exception for the install and data folders.
 - Updates come from the admin panel's Updates card (signed, checksum-verified)
-  or by running `install.ps1` again; your data is kept.
+  or by running `install.ps1` again; your data is kept. Re-run a `-Portable`
+  install with `-Portable`: without it the script removes `PORTABLE.txt` and
+  the server uses `%LOCALAPPDATA%\mokuro-bunko` instead of your `data\` folder.

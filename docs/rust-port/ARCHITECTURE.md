@@ -34,12 +34,13 @@
 ## 1. One program, two builds
 
 `mokuro-bunko` is a single executable with subcommands (the same CLI surface as 0.5.2,
-plus `models`, `healthcheck`, `gui` and `tray`). Cargo features choose what is linked in:
+plus `update`, `models`, `healthcheck`, `gui` and `tray`; the lite build has no `models`,
+`processor` or `tray`). Cargo features choose what is linked in:
 
 | Build | Features | Contains | Released for |
 |---|---|---|---|
 | **lite** | `--no-default-features` | server, WebDAV, catalog, admin panel, first-run setup, the scheduler for remote processors, the updater, the local control API and app pages | Linux arm64 (static, musl), the lite Docker image (amd64 + arm64) |
-| **full** | `ocr`, `tray` (the defaults) | lite + ONNX Runtime on the CPU (PP-OCR), the libtorch pack loader, the engines, local OCR, `processor`, the desktop tray | Linux x86_64 (glibc 2.28+), Windows x86_64, macOS on Apple silicon, the full Docker image (amd64; built with `--no-tray`, so `ocr` only) |
+| **full** | `ocr`, `tray` (the defaults) | lite + ONNX Runtime on the CPU (PP-OCR), the libtorch pack loader, the engines, local OCR, `processor`, the desktop tray | Linux x86_64 (glibc 2.28+), Windows x86_64, macOS on Apple silicon, the full Docker image (amd64; the release image reuses the Linux x86_64 binary, whose tray goes unused; an image built from source uses `--no-tray`) |
 
 GPU support is not a build: the full binary runs whatever backend pack is installed (§8).
 In the lite build the server reads no OCR itself (`Config::processes_locally`); OCR comes
@@ -58,8 +59,11 @@ only difference (PACKAGING.md §1).
 crates/
   bunko-core       config (YAML + MOKURO_* env overrides), the storage layout, roles, the
                    OCR engine and generation registry. No network, no database.
-  bunko-db         mokuro.db (rusqlite, bundled): 0.5.2's schema + forward migrations, one
-                   writer connection + a small read pool, busy/lock retry. Sync.
+  bunko-db         mokuro.db (rusqlite, bundled): 0.5.3's schema byte for byte, brought
+                   up to date on every open by 0.5.3's idempotent steps in one
+                   transaction; no migrations of its own (schema_version stays 6, so
+                   0.5.x still opens the file). One writer connection + a small read
+                   pool, busy/lock retry. Sync.
   bunko-library    the library tree: archives (zip/cbz, dirs), sidecar naming, natural sort,
                    the library index, the metadata compiler (series.json / catalog.json),
                    the reader manifest, the Python/reader semantics they rest on. Sync.
@@ -132,8 +136,9 @@ free of ONNX Runtime.
   accepting waits). Blocking work (SQLite, archive reads, fs walks, image decode) goes
   through `spawn_blocking`.
 - OCR runs on dedicated OS threads, never on tokio workers: a volume's pages flow through
-  stages (detect → engine → post) that are pools of threads joined by small bounded
-  queues (`bunko-engines` `stages.rs`). Models are shared: one PP-OCR detector/recognizer
+  stages (detect → engine → post for hayai-nova and paddle-manga, detect → layout for
+  ppocr-manga) that are pools of threads joined by small bounded queues (`bunko-engines`
+  `stages.rs`, widths from `plan.rs`). Models are shared: one PP-OCR detector/recognizer
   pair, one recognizer per (engine, package, device, precision) across sessions. No
   process sharding, no pickling.
 - Shutdown: a `CancellationToken` stops the services in 0.5.2's order (`server.py
@@ -147,8 +152,9 @@ Target steady-state RSS ≤ 64 MB with a 10k-volume library; peak ≤ 256 MB (me
 
 - Responses stream from disk, never buffered; uploads stream to a temp file beside the
   destination, are checked, then renamed (atomic, as 0.5.2 batch 5).
-- Caches are byte-bounded by `server.cache_mb` (default 32): the `Depth: infinity`
-  PROPFIND cache gets half, the library index a quarter.
+- `server.cache_mb` (default 32) bounds the `Depth: infinity` PROPFIND cache to half
+  of it (LRU). The library index gets a quarter as a soft budget: a larger index is
+  still kept, with a warning in the log.
 - SQLite's page cache is 8 MiB split across all connections; `mmap` stays off.
 - mimalloc is the global allocator (returns memory to the OS better than glibc malloc
   under fragmentation; musl's allocator is too slow for the static Linux build).
@@ -197,7 +203,8 @@ JSON-over-stdio, and remote processors used an HTTP API. 0.7 has one path:
   `ocr::LocalProcessorFactory` (local OCR over `bunko_engines::EnginePipeline`),
   `ocr::BackgroundInstall` (the OCR backend install, `ocr_install.rs`) and
   `machine::Machine` (This server and the setup's OCR step, `server_machine.rs`). The
-  lite build passes none.
+  lite build passes no `LocalProcessorFactory` or `BackgroundInstall`; its
+  `machine::Machine` answers OCR actions with "this build runs no OCR of its own".
 
 ## 7. Models
 

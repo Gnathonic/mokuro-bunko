@@ -27,11 +27,18 @@ volume" and "now" (plus timed pauses); tray on Windows, macOS and Linux.
   - `/setup`, the first-run wizard: admin account, who may join, remote access (tunnel,
     Dynamic DNS, HTTPS, other web apps' CORS origins), OCR on this machine (a toggle, on
     when a usable GPU is found; backend Auto, CPU or the GPU found). `POST
-    /setup/api/complete` takes `{admin, registration, remote, ocr}`; every answer is
-    checked before the admin is made. Values the environment sets are shown read-only
-    (`GET /setup/api/options` `pinned`, and the OCR step's `backend_locked`). Every
-    `/setup` route, the reads included, answers only while no admin exists and only past
-    the setup gate: localhost, the **setup code**, or a setup session the code earned.
+    /setup/api/complete` takes `{admin, registration, remote, ocr}`; the admin account and
+    the remote and OCR answers are checked before the admin is made (an unknown
+    registration mode is ignored, keeping the old one; the OCR answer is ignored on a
+    server without local OCR). Values the environment sets are shown read-only for the
+    registration mode and HTTPS (`GET /setup/api/options` `pinned`), the OCR backend
+    (`backend_locked`) and OCR on/off (`local_locked`); others, such as `MOKURO_DYNDNS_*`,
+    stay editable and the environment wins again at the next start. While no admin
+    exists, every `/setup` route but `setup.css` and the code form answers only past the
+    setup gate: localhost, the **setup code**, or a setup session the code earned. After
+    that the page, its files and `GET /setup/api/status` answer anyone (`needs_setup:
+    false` sends the page to `/`), and `POST /setup/api/complete` is 400 (403 from another
+    address).
     While no admin exists the server logs a new one-time code at every start (`First
     run: create the admin account at http://…/setup (setup code: XXXXX-XXXXX)`); from
     another address `/setup` asks for it (5 tries per address, one more every 12 s;
@@ -61,9 +68,10 @@ volume" and "now" (plus timed pauses); tray on Windows, macOS and Linux.
   the browser launcher's command line, which other local users can read, in the history and
   in terminal output): the browser gets a one-time `/app/login?c=<code>`, a single-use code
   valid for 5 minutes that a token holder asks for (`POST /control/login-code`), and the
-  login sets an HttpOnly, SameSite=Strict cookie scoped to the loopback origin. Never bound
-  to a non-loopback address. The tray discovers instances through the default storage dirs
-  (server and processor) plus `MOKURO_STORAGE` / `processor.yaml`, and trusts a
+  login sets the HttpOnly, SameSite=Strict cookie `bunko_control_<port>` holding the token
+  (`Path=/`; cookies do not separate ports, so the browser also sends it to other ports on
+  127.0.0.1). Never bound to a non-loopback address. The tray looks for `.control.json` in
+  every server and processor storage the machine might use (the list is in §5), and trusts a
   `.control.json` only when (on Unix) it is a regular file owned by the user with no
   group/other permission bits.
 - **The local pages** (`/app/...`, `crates/mokuro-bunko/src/gui/`), mounted on every
@@ -72,8 +80,10 @@ volume" and "now" (plus timed pauses); tray on Windows, macOS and Linux.
   and the browser goes to its `/setup`, or to its admin panel when it is set up already;
   **Processor** — the pairing page), the processor's **pairing** (`/app/setup/processor`:
   the library and a tested login, this machine's name, sessions, working folder and
-  automatic updates, the OCR choices; saving hands the processor to the tray and waits
-  for it to connect), its **status** (`/app/dashboard`) and **settings** (`/app/settings`:
+  automatic updates, the OCR choices; saving writes processor.yaml, keeps the OCR choices
+  and starts the processor through the tray, else itself, then waits until the processor
+  is up, not until it has connected: §4), its **status** (`/app/dashboard`) and
+  **settings** (`/app/settings`:
   processor, OCR backend & models with the install page `/app/setup/ocr`, logs,
   diagnostics, updates). A library server has no local settings pages: its setup and
   settings are its own pages above.
@@ -115,12 +125,14 @@ All JSON. `GET /control/status`:
   "managed": false, "can_pause": true,
   "update": {"state": "idle|available|waiting|downloading|installing|restarting|updated|failed|blocked",
              "version": "...", "from": "...", "message": "...", "auto": false, "since": "ISO-8601"},
-  "install": {"state": "running|done|failed|missing", "stage": "checking|waiting|downloading|unpacking|libraries|models|done|failed",
+  "install": {"state": "running|done|failed|missing", "stage": "checking|waiting|downloading|unpacking|libraries|installed|models|done|failed|missing",
               "percent": 42, "done_bytes": 0, "total_bytes": 0, "variant": "cu130", "pack": "...",
               "message": "...", "needs_owner": false, "action": "..."} }
 ```
 
-(`update` and `install` are null when the instance has nothing to say: §4.)
+(`update` and `install` are null when the instance has nothing to say: §4. Stage
+`installed`: the pack is in place, models next; `missing` comes with state `missing`,
+automatic installs off.)
 
 - `POST /control/pause {"mode": "after_volume"|"now", "until": ISO-8601|null}` → 200 status.
 - `POST /control/resume` → 200 status.
@@ -148,15 +160,18 @@ All JSON. `GET /control/status`:
 - Extra status fields: `pause.since` (when the pause began), `library.error` (why a
   processor is not connected: login refused, unreachable), `managed` (stop allowed),
   `can_pause` (false on the `gui` role and on a server that reads no OCR itself — lite build,
-  `local_processing: false`; `POST /control/pause` there is 409). `state` is `error` when the
-  library refused the processor's login. `stats.today.busy_seconds` sums the processing time of
+  `local_processing: false`; `POST /control/pause` there is 409). A refused login is `state`
+  `error` only briefly: `processor serve` then exits with code 1 (a supervising tray
+  restarts it); the refusal stays in its status file (`refused`) and log.
+  `stats.today.busy_seconds` sums the processing time of
   the volumes finished today; `today` resets at local midnight; counts persist in `<storage>/.stats.json`.
   `gpu_busy_percent` / `cpu_cores_busy` come from the bench utilisation sampler (sampling
   every 5 s, started on the first status read); `problems` are the doctor's WARN/FAIL rows
   (backend pack, disk, failing volumes), re-run every 2 min.
 - `POST /control/pause` body also takes `"reason": "user"|"schedule"` (default user); a past
   `until` or a malformed one is 400. Pausing while paused keeps `since` and takes the new
-  mode/until. Times come back whole-second RFC 3339 UTC.
+  `until` (none when omitted) and `reason`; the mode can go from `after_volume` to `now`,
+  never back. Times come back whole-second RFC 3339 UTC.
 - `GET /control/events`: `event: status`, `data: <status JSON>`; one at connect, then on
   change (at most one per 500 ms, identical statuses not repeated), and a refresh every 5 s
   (rates, ETA); the stream ends when the instance shuts down.
@@ -171,7 +186,8 @@ All JSON. `GET /control/status`:
   `ControlServer::login_url` mints a code in-process (what `gui` opens); the tray asks for
   one and opens the link; the app's "open its dashboard" link for another instance is
   `/app/api/instances/{server|processor}/dashboard`, which asks that instance for a code
-  with its bearer token and redirects to its login, so its token never reaches the browser.
+  with its bearer token and redirects to its login, so the token never appears in a URL
+  or page script; the browser gets it only as that instance's HttpOnly login cookie.
 - Auth: `Authorization: Bearer <token>`, or the login cookie (`bunko_control`, or
   `bunko_control_<port>` as `/app/login` sets it); the `Host` header must be a loopback
   name (DNS-rebinding guard) and a cookie-authenticated POST must carry our own `Origin`
@@ -181,11 +197,12 @@ All JSON. `GET /control/status`:
   ignore a file that is a symlink, not owned by the user, or group/other-accessible (Unix).
   `gui` writes its file into the server's storage, else the processor's, else (both taken)
   a private per-user directory: `$XDG_RUNTIME_DIR/mokuro-bunko-gui` on Linux when set,
-  otherwise `<local data dir>/mokuro-bunko/gui`, created 0700 (never the shared temp dir). One live
-  owner per storage: a second instance does not overwrite a live one's file (it runs without
-  the control API and says so in its log), except that `serve` / `processor serve` take over
-  from a `gui` (setup) instance. `processor serve` only starts it when it holds the storage
-  lock.
+  otherwise `<local data dir>/mokuro-bunko/gui`, created 0700 (never the shared temp dir). A live
+  owner's `.control.json` is never overwritten, except that `serve` / `processor serve` take
+  over from a `gui` (setup) instance. A second `serve` runs on without the control API
+  (`Control API not started: …` in its log), a second `processor serve` exits because the
+  storage is locked, and a second `gui` on a storage with a live `gui` exits with an error.
+  `processor serve` only starts the control API when it holds the storage lock.
 - `MOKURO_CONTROL=off` disables the listener on `serve` / `processor serve`.
 - Admin `/_admin/api/processors`: each machine gains `"pause": {"paused": true, "until":
   "...|null", "reason": "...|null"}` or `null`; the admin panel shows "paused until HH:MM".
@@ -228,8 +245,12 @@ Flows (the chooser picks a role first; a machine can be both):
    certificate (TLS verify), the opt-in "Update this processor automatically when its
    library updates" (unchecked; `processor.auto_update`, CLI `--auto-update`) — today's
    `processor setup` — and the OCR choices (pack, a folder to install from, no models).
-   Saving writes processor.yaml, hands the processor to the tray and waits for it to
-   connect; its OCR backend installs in the background meanwhile.
+   Saving writes processor.yaml and adds the processor to tray.json, starting the tray if
+   none runs, and waits up to 25 s for the processor's control file; with no tray
+   (headless), or when the tray has not started it by then, the page starts `processor
+   serve` itself and waits up to 60 s for its first status. It waits for the process, not
+   the connection, then moves to the processor's dashboard; its OCR backend installs in the
+   background meanwhile.
 3. **Starting with the machine**: the tray's **Start at login** checkbox (the tray then
    starts what `tray.json` lists). No page installs a service: `processor service
    --install`, `install.sh --systemd` / `--autostart` and `install.ps1 -Startup` stay
@@ -271,7 +292,10 @@ its OCR choices (`<backends>/.install-request.json`, used by the next background
 install) and starts the processor; as soon as it serves, the browser moves to its
 dashboard, signed in through a single-use code from its control API, and the `gui`
 process exits: from then on the processor's dashboard (serving, the install's progress,
-"OCR ready", the first-run benchmark as `library.activity`) and the tray report on it.
+"OCR ready") and the tray report on it. The first-run benchmark shows as
+`library.activity` ("Measuring <engine>'s speed on <machine>…") only in the library
+server's status (its tray line, remote processors' benchmarks included), not on a paired
+processor's dashboard.
 When a tray runs, what the chooser or the pairing page starts is handed to it
 (tray.json; a running tray picks up added roles, and adopts an instance started for it
 with `MOKURO_CONTROL_MANAGED=1`), so the tray's Quit stops it.
@@ -305,7 +329,8 @@ instance when a service-managed one is running.
   Windows Startup `.cmd`), the server default storage, the processor configs' storage, the
   processor default storage, `gui`'s private fallback (`$XDG_RUNTIME_DIR/mokuro-bunko-gui`
   on Linux, else `<data>/mokuro-bunko/gui`), and (Linux) `/var/lib/mokuro-bunko/storage`.
-  A control file that is a symlink, not the user's, or group/other-accessible is ignored.
+  On Unix a control file that is a symlink, not the user's, or group/other-accessible is
+  ignored (Windows makes no such check).
   Rescanned every 3 s; a control file counts once `GET /control/status` answers. Each
   instance is followed by SSE, else polled every 2 s; 3 failures in a row drop it.
 - **Tray-managed running is `tray.json`** next to `config.yaml` (`~/.config/mokuro-bunko/`,
@@ -335,9 +360,12 @@ instance when a service-managed one is running.
   in there). Open processor opens the processor's `/app/dashboard` and Set up… the chooser
   `/app/`, each through an instance's control host (`POST /control/login-code`, then
   `/app/login?c=<code>&next=…`), else `mokuro-bunko gui --open <page>`.
-- One tray per user (`.tray.lock` in the log folder). Logs: `<server storage>/logs/
-  mokuro-bunko-tray.<date>.log` (portable `data\logs`; falls back to
-  `<config>/mokuro-bunko/logs`, then the temp folder, when that cannot be created).
+- One tray per user and data folder: `.tray.lock` sits in the tray's log folder, so a
+  portable copy or a tray with another `MOKURO_STORAGE` runs alongside. Logs:
+  `<server storage>/logs/mokuro-bunko-tray.<date>.log` (`$MOKURO_STORAGE` or the default;
+  portable `data\logs`); when that cannot be created, `<config>/mokuro-bunko/logs`, then
+  `$XDG_RUNTIME_DIR/mokuro-bunko-tray` on Linux (never `/tmp`) or
+  `<temp>/mokuro-bunko-tray-<user>` on Windows and macOS.
   Start at login: `~/.config/autostart/mokuro-bunko-tray.desktop` (`Exec=<mokuro-bunko> tray`),
   LaunchAgent `io.github.gnathonic.mokuro-bunko-tray` (the app's `mokuro-bunko`, `tray`), or
   Startup `Mokuro Bunko.lnk` (→ `mokuro-bunko.exe`).

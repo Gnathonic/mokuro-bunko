@@ -3,7 +3,8 @@
 # The easy way to make this file is not to: `processor setup` asks for the
 # library URL, username and password, checks them against the library, and
 # writes a processor.yaml holding only what differs from the defaults below
-# (then offers to start the processor with the machine):
+# (then offers to start the processor now and at every login; `--no-service`
+# skips that):
 #
 #   mokuro-bunko processor setup
 #
@@ -12,16 +13,23 @@
 #
 #   mokuro-bunko processor serve   --config processor.yaml
 #   mokuro-bunko processor status  --config processor.yaml
-#   mokuro-bunko processor service --config processor.yaml --install  # start with the machine
+#   mokuro-bunko processor service --config processor.yaml --install  # start now and at every login
 #
+# That is a systemd user unit on Linux (it runs at boot and after logout only
+# if the account lingers: `loginctl enable-linger $USER`), a Startup-folder
+# entry on Windows and a launchd agent on macOS. To run with nobody logged in,
+# see the system service in docs/deployment.md.
 # The full walkthrough, for Linux, Windows, macOS and Docker, is in
 # docs/deployment.md ("Remote OCR processors").
 #
 # A processor needs a FULL build of mokuro-bunko (it carries the OCR
 # engines); the lite build cannot run one. The OCR models (a few hundred MB
 # to several GB, depending on the engines the library asks for) are downloaded
-# on first use and checked by sha256; `mokuro-bunko models download` fetches
-# them up front.
+# into the processor's storage on first use and checked by sha256.
+# `mokuro-bunko install-ocr --processor` fetches the OCR backend pack and the
+# models up front (`models download --processor` the models only), for the
+# engines the library asked for at the last registration (PP-OCR only before
+# the first).
 #
 # This machine holds no library, no users and no admin UI: it logs in to a
 # library server as an ordinary account whose role is `processor`, and runs
@@ -52,9 +60,10 @@ processor:
   # How many OCR pipelines this hardware can hold at once -- one per card is
   # the rule, the same one `ocr.concurrency` follows on the library server.
   max_sessions: 1
-  # Logs, the volume workspaces, archives too big for memory and the status
-  # file -- one storage per processor; a second processor on the same storage
-  # refuses to start.
+  # The OCR backend pack (backends/; MOKURO_BACKENDS_DIR moves it), the models
+  # (models/), the update state, logs, the volume workspaces, archives too big
+  # for memory and the status file -- one storage per processor; a second
+  # processor on the same storage refuses to start.
   # Defaults to $XDG_DATA_HOME/mokuro-bunko-processor (~/.local/share/...)
   # on Linux and macOS, and %LOCALAPPDATA%\mokuro-bunko-processor on Windows.
   # storage: /data/mokuro-bunko-processor
@@ -72,7 +81,8 @@ processor:
   # reported. Only a self-managed install updates itself.
   auto_update: false
 
-# Where releases come from (only auto_update uses this section).
+# Where releases come from: for auto_update, and for the OCR backend pack
+# download even with `auto_update: false`.
 # update:
 #   # The latest release's release.json: a mirror or a fork. The library's
 #   # version's manifest is derived from it.
@@ -82,7 +92,7 @@ processor:
 #   # public_key: ""
 
 # The 0.5 `ocr:` section (ocr.backend picked a torch build) is accepted and
-# ignored. The processor runs on the OCR backend pack in its storage
-# (`mokuro-bunko install-ocr` with MOKURO_STORAGE set to this storage) and uses
-# every device it can run; MOKURO_OCR_BACKEND=cuda|rocm|cpu in its environment
-# narrows that.
+# ignored. The processor runs on the OCR backend pack in its storage, which
+# `processor serve` installs in the background when it is missing, models too
+# (MOKURO_OCR_AUTO_INSTALL=false turns that off). It uses every device it can
+# run; MOKURO_OCR_BACKEND=cuda|rocm|cpu in its environment narrows that.

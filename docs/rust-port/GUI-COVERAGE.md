@@ -34,7 +34,7 @@ front (`--config`).
 
 | Command | Where |
 |---|---|
-| `--config` | CLI-only because the server's pages work on the config it runs with (its path is in [This server](/_admin#server) → Log); `-c` picks another file for a command |
+| `--config` | CLI-only because the server's pages work on the config it runs with, and no page shows that file's path (`config path` does); `-c` picks another file for a command |
 | `--verbose` | CLI-only because it only adds detail to terminal output. [This server](/_admin#server) → Log shows the server log |
 | `--version` | [Status](/_admin#status) → Updates shows this version and the latest one |
 
@@ -129,8 +129,8 @@ front (`--config`).
 | `dyndns setup` | [setup](/setup) → Remote access → Dynamic DNS (provider, domain, token); later [Connectivity](/_admin#connectivity) → Dynamic DNS → Save Settings |
 | `dyndns status` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Last Update |
 | `dyndns update` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Test Update |
-| `dyndns enable` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Start |
-| `dyndns disable` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Stop |
+| `dyndns enable` | CLI-only after [setup](/setup) (which saves it enabled) because it saves enabled=true for the next start, which no admin control does. [Connectivity](/_admin#connectivity) → Dynamic DNS → Start runs it only until the server restarts |
+| `dyndns disable` | CLI-only because it saves enabled=false for the next start, which no page does. [Connectivity](/_admin#connectivity) → Dynamic DNS → Stop pauses it only until the server restarts |
 
 ## Updates
 
@@ -158,7 +158,7 @@ front (`--config`).
 | `install-ocr --force` | [This server](/_admin#server) → OCR → Reinstall; [OCR install](/app/setup/ocr) → More options → Reinstall |
 | `install-ocr --list` | [This server](/_admin#server) → OCR shows the hardware and the installed packs; [OCR & models](/app/settings/ocr) → Packs and hardware |
 | `install-ocr --processor` | A processor's [OCR install](/app/setup/ocr) (its pages always mean the processor) |
-| `install-ocr --probe` | CLI-only because it is internal (hidden): an automatic update loads a new backend pack in a child process to check it works before switching to it |
+| `install-ocr --probe` | CLI-only because it is internal (hidden): after an automatic update restarts into the new release, that release runs it in a child process to check its backend pack loads, and rolls back the program and the pack (and blocks the release) if it does not |
 | `install-ocr --backend` | CLI-only because it is the hidden 0.5 spelling of `--variant`, kept for old scripts |
 | `install-ocr --engines` | CLI-only because it is a hidden 0.5 flag that 0.7 accepts and ignores (the models follow the configured engines) |
 | `install-ocr --detector` | CLI-only because it is a hidden 0.5 flag that 0.7 accepts and ignores |
@@ -185,11 +185,11 @@ front (`--config`).
 | `processor setup --username` | [Pair a processor](/app/setup/processor) → Processor username |
 | `processor setup --password-stdin` | [Pair a processor](/app/setup/processor) → Password |
 | `processor setup --name` | [Pair a processor](/app/setup/processor) → Name; [Connection](/app/settings/processor) → Name |
-| `processor setup --backend` | [Pair a processor](/app/setup/processor) → OCR install → Backend pack |
+| `processor setup --backend` | CLI-only because it is a 0.5 flag that 0.7 accepts and ignores (any value but auto prints how to narrow the devices with MOKURO_OCR_BACKEND). [Pair a processor](/app/setup/processor) → OCR install → Backend pack is `install-ocr --processor --variant` |
 | `processor setup --tls-verify` | [Pair a processor](/app/setup/processor) → Check the library's certificate; [Connection](/app/settings/processor) |
 | `processor setup --auto-update` | [Pair a processor](/app/setup/processor) → "Update this processor automatically when its library updates" (off by default); [Updates](/app/settings/update) changes it later |
 | `processor setup --yes` | CLI-only because it answers terminal prompts, and the pages have no prompts |
-| `processor setup --no-install` | CLI-only because the [pairing](/app/setup/processor) always installs OCR (a processor without it does nothing) |
+| `processor setup --no-install` | CLI-only because it is a hidden 0.5 flag that 0.7 accepts and ignores: neither `processor setup` nor the [pairing](/app/setup/processor) installs OCR; the processor installs its backend pack and models in the background when it first runs |
 | `processor setup --no-service` | CLI-only because the pages never write a service: the tray runs the processor, and `Tray → "Start at login"` starts it at login |
 | `processor setup --force` | [Pair a processor](/app/setup/processor) says when a processor.yaml exists, and replaces it only when that box is ticked |
 | `processor status` | [Connection](/app/settings/processor) → Last status; its [status page](/app/dashboard) shows it live |

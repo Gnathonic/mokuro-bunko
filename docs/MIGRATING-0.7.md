@@ -14,7 +14,9 @@ exist, and how OCR processors talk to the library.
 - Plan to update **processors at the same time**. A 0.5.2 processor cannot
   talk to a 0.7 library (see [Processors](#processors)).
 - Decide on a build. **Lite** is the server only (OCR by remote processors)
-  and fits a 1 GB VPS. **Full** adds local OCR and the `processor` command; it
+  and fits a 1 GB VPS. Its only archive is for arm64 Linux; elsewhere it is the
+  Docker `-lite` image (`install.sh --flavor lite` fails on x86_64). **Full** adds
+  local OCR and the `processor` command; it
   installs its OCR backend by itself in the background once it serves (or run
   `mokuro-bunko install-ocr`, as with 0.5.2). The Linux full build is x86_64 only
   and runs on glibc 2.28+ (Debian 11+, Ubuntu 20.04+, RHEL 8+).
@@ -30,11 +32,11 @@ exist, and how OCR processors talk to the library.
 | `config.yaml` | Same location and format. Every 0.5.2 key still loads. |
 | `mokuro.db` | Opened and upgraded in place by 0.5.3's own idempotent steps (a 0.5.2 database gains 0.5.3's `catalog_folders` table; its `catalog_series` is left as it was). |
 | Library tree | `library/`, `inbox/`, `users/`, sidecars (`.mokuro`, `.<name>.mokuro`), `.webp` covers, compiled `series.json` / `catalog.json`. |
-| Storage defaults | `~/.local/share/mokuro-bunko` (Linux, macOS), `%LOCALAPPDATA%\mokuro-bunko` (Windows); config in `~/.config/mokuro-bunko/config.yaml`. |
+| Storage defaults | `~/.local/share/mokuro-bunko` (Linux, macOS), `%LOCALAPPDATA%\mokuro-bunko` (Windows); config in `~/.config/mokuro-bunko/config.yaml` (or `$XDG_CONFIG_HOME`), `%LOCALAPPDATA%\mokuro-bunko\config.yaml` (Windows; the portable zip keeps both in its `data\` folder). |
 | Accounts, invites, tokens, audit log | In the database. Passwords and bearer tokens keep working. |
 | OCR state files | `.ocr-failures.json`, `.ocr-bench.json`, `.ocr-congestion.json` and `processors/*.json` keep their formats. |
-| Environment variables | `MOKURO_<SECTION>_<KEY>`, `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE`, `MOKURO_CONFIG` and `MOKURO_NGINX_ACCEL` work as before. |
-| Admin panel, catalog, queue page | The same web pages. |
+| Environment variables | `MOKURO_<SECTION>_<KEY>`, `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` and `MOKURO_CONFIG` work as before. `MOKURO_NGINX_ACCEL=1` still turns on the nginx offload in the full image; it is now off by default (see [Docker images](#docker-images)). |
+| Admin panel, catalog, queue page | The same web pages. The admin panel adds a "This server" tab (local OCR backend, engines and models), an Updates card and the "Upgrade old OCR" settings, and drops the "mokuro env" row. |
 
 ## What changed
 
@@ -46,7 +48,8 @@ comic-text-detector) was removed, together with the `ctd`, `animetext` and
 `rtdetr` detectors.
 
 Your config keeps loading, and the server migrates it when it reads it
-(each change is logged at start and shown in the admin panel):
+(each change is logged as a warning at start; in the admin panel a retired row
+shows a "Retired: …" banner):
 
 - A generation row on the `mokuro` engine is kept, **retired**: it never
   runs, it loses `primary`, and its name stays reserved. When it is saved
@@ -78,15 +81,17 @@ ocr:
     replace: [mokuro-legacy, mokuro]   # which kinds of existing primary sidecar to replace
 ```
 
-(set it in `config.yaml`; there is no environment variable for the nested
-key). For every volume whose primary
+(set it in `config.yaml`, or under "Upgrade old OCR" in the admin panel's OCR
+settings, which applies it without a restart; there is no environment variable
+for it). For every volume whose primary
 sidecar was written by an older recipe the server either reuses an existing
 layer made by the new engine, or queues an upgrade job behind all ordinary
-jobs. The new file replaces the old one outright: the old OCR is not kept
-(add a non-primary generation if you want another recipe's OCR beside the
-primary). Volumes whose archive is missing pages, or whose sidecar a person
-has edited, are skipped and listed; an admin can force one edited volume. Reading progress is untouched because the `volume_uuid` is
-preserved. It is off by default because it rewrites what readers see and
+jobs. The new file replaces the old one outright: the old OCR is not kept, and
+0.7 cannot re-create it, so back up the old files first if you need them.
+Volumes whose sidecar a person has edited are skipped and listed; an admin can
+force one. Volumes whose archive is missing pages are skipped and only counted
+(replace the archive with a whole volume). Reading progress is untouched because
+the `volume_uuid` is preserved. It is off by default because it rewrites what readers see and
 costs OCR time.
 
 ### Processors
@@ -122,10 +127,11 @@ with a GPU present, `cuda`/`rocm` pick that GPU (or fall back to `cpu` with a hi
 it is not there). Every
 file is checked against the signed release manifest; NVIDIA's CUDA libraries come
 from NVIDIA's own packages on PyPI, as they did with pip. On the CPU, OCR runs in fp32
-as in 0.5.2 (bf16 is an opt-in). `MOKURO_BACKENDS_DIR` moves the packs elsewhere. `--backend cuda|rocm|cpu|auto`
+as in 0.5.2 (bf16 is an opt-in, a row's `precision: bf16`, on x86-64 CPUs with
+AVX-512 BF16 only; other CPUs refuse that row's volumes). `MOKURO_BACKENDS_DIR` moves the packs elsewhere. `--backend cuda|rocm|cpu|auto`
 still works (it maps to `--variant cu130|rocm7.1|cpu|auto`); `--engines` and
-`--detector` are ignored. Unlike 0.5.2 it fails visibly (non-zero exit) when it cannot
-install. `serve` and `processor serve` run the same install by themselves, in the
+`--detector` are ignored. It exits non-zero when it cannot install the pack or the
+models (0.5.2 fell back from a failed GPU install to the CPU and exited 0). `serve` and `processor serve` run the same install by themselves, in the
 background while they already serve, when local OCR needs a backend that is
 missing, on any system and in Docker (0.5.2's server installed its OCR environment
 on start too); the Docker image itself carries no pack.
@@ -144,15 +150,18 @@ downloads are no longer used and can be deleted.
 | `OCR_AUTO_INSTALL` | The OCR backend is installed by the server itself, in the background, when local OCR needs it (`MOKURO_OCR_AUTO_INSTALL`, default on). `true` keeps that on; `false` (the 0.5.2 Unraid template's default) is noted and ignored, because in 0.5.2 it never stopped the server from installing OCR on start. |
 | (new) `MOKURO_OCR_AUTO_INSTALL` | Any full build, Docker included; default `true`. `false`: `serve` and `processor serve` never install a missing backend by themselves; it shows as a problem with an Install button (admin panel, dashboard), or run `mokuro-bunko install-ocr`. |
 | `MOKURO_PPOCR_MODELS`, `MOKURO_PPOCR_DOWNLOAD` | Still honoured as aliases of `MOKURO_MODELS_DIR` (a directory of model files to use) and `MOKURO_MODELS_DOWNLOAD` (`0` forbids downloads). |
-| `MOKURO_DEBUG`, `MOKURO_EFT_TRACE` | Not read. Use `MOKURO_LOG` (a log filter such as `debug`, or `info,bunko_server=debug`) or `-v`. |
+| `MOKURO_EFT_TRACE` | Not read. |
+| `MOKURO_DEBUG` | As in 0.5.2: any value but empty, `0` or `false` logs one line per HTTP request to stderr. For more logging use `MOKURO_LOG` (a log filter such as `debug`, or `info,bunko_server=debug`) or `-v`. |
 | `MOKURO_PPOCR_THREADS` / `_SIDE` / `_TILE` / `_PRECISION`, `MOKURO_OCR_STAGE_*` | Not read. Pools and devices are per-row settings (`pools`). |
 
 New: `server.threads`, `server.cache_mb`, `update.check`, `update.channel`,
-`update.manifest_url` (each also settable as `MOKURO_<SECTION>_<KEY>`;
-`update.channel` defaults to `auto`, which follows the installed build: a
+`update.manifest_url`, `update.auto` (each also settable as `MOKURO_<SECTION>_<KEY>`),
+`update.public_key` (`config.yaml` only) and `ocr.upgrade.*` (no environment
+variable). `update.channel` defaults to `auto`, which follows the installed build: a
 pre-release install sees every later release, pre-release or stable (so a
-0.7.0 beta is offered 0.7.0), a stable install only stable releases) and
-`ocr.upgrade.*` (`config.yaml` only). `ocr.sessions` is accepted and ignored;
+0.7.0 beta is offered 0.7.0), a stable install only stable releases.
+`update.auto` (off by default) lets a self-managed install install a newer release
+on its channel at a quiet moment and restart. `ocr.sessions` is accepted and ignored;
 `ocr.backend` keeps 0.5.2's values (`auto`, `cuda`, `rocm`, `cpu`, `skip`).
 The 0.5 refusals of `ocr.engines`, `ocr.detector`, `ocr.patch_budget` and
 `ocr.char_map` still apply.
@@ -164,20 +173,24 @@ Images are published as `ghcr.io/gnathonic/mokuro-bunko`:
 | Tag | What | Replaces |
 |---|---|---|
 | `latest`, `<ver>` | Server + local OCR + nginx for downloads; amd64. The OCR backend for the GPU the container is given (none, NVIDIA, AMD) is downloaded on first start | the generic `deploy/Dockerfile` image and the `unraid-cuda` image (`Dockerfile.unraid`) |
-| `latest-cuda`, `<ver>-cuda` | The same image under the CUDA image's name, so existing templates keep working | the `unraid-cuda` image |
+| `latest-cuda`, `<ver>-cuda` | The same image under a second tag. 0.5.2 Unraid templates name the locally built `mokuro-bunko:unraid-cuda`, so change their repository (see below) | the `unraid-cuda` image |
 | `latest-lite`, `<ver>-lite` | Server only, no OCR, no nginx (12 MB download, 43 MB on disk, ~16 MiB RSS idle); amd64 + arm64 | new |
 
 `PUID`, `PGID`, `UMASK`, `TAKE_OWNERSHIP`, `MOKURO_CONFIG` and the other
 `MOKURO_*` variables work as before. Defaults: PUID/PGID 1000:1000 (the Unraid
-template passes 99:100, as before); `MOKURO_CONFIG` defaults to
+template passes 99:100, as before; the 0.5.2 CUDA image defaulted to 99:100, so set
+`PUID=99 PGID=100` if you ran it without the template);
+`MOKURO_CONFIG` defaults to
 `/data/config.yaml` (the Unraid template sets `/config/config.yaml`, as before; set it
 yourself if you ran the 0.5.2 CUDA image without the template and keep `config.yaml`
 in `/config`). Differences:
 
 - The first start installs the OCR backend pack for the GPU the container sees into
-  `/data/backends` (~100 MB for the CPU, ~2 GB for NVIDIA, ~3 GB for AMD) and the
-  enabled engines' models into `/data/models`, instead of 0.5.2's pip-installed torch
-  environments; later starts reuse them. There is no `nvidia/cuda` base any more (the
+  `/data/backends` (a download of ~80 MB for the CPU, ~2 GB for NVIDIA, ~3 GB for
+  AMD; 0.4 / 2.5 / 6.8 GB on disk) and the enabled engines' models into
+  `/data/models`, instead of 0.5.2's pip-installed torch environments. Later starts
+  reuse them; a new image version downloads its own pack in the background and
+  removes the old one, keeping the models. There is no `nvidia/cuda` base any more (the
   CUDA libraries come with the pack), but an NVIDIA GPU still needs the driver (≥ 580)
   and the container toolkit on the host. **AMD GPUs now work in Docker**:
   `--device /dev/kfd --device /dev/dri`.
@@ -202,9 +215,12 @@ has the full list of volumes, variables and GPU prerequisites.
 There is no Python package any more. Install from a release archive,
 `scripts/install.sh`, `scripts/install.ps1`, the Windows portable zip, a
 Docker image, or build from source (see the [README](../README.md)).
-Tarball and Windows installs update themselves from the admin panel's
-Updates card (signed manifest, checksum, one click); Docker installs are told
-which image to pull.
+Self-managed installs (an unpacked tarball, `install.sh` run as a normal user,
+the Windows zip or `install.ps1`, the macOS dmg) update themselves from the admin
+panel's Updates card (signed manifest, checksum, one click). A root `install.sh`
+with a system unit is updated by re-running `install.sh`; a binary under
+`/usr/bin`, Homebrew or `/nix/store` by its package manager. Docker installs are
+told which image to pull.
 
 ### Library paths are case-insensitive (as since 0.5.3)
 
@@ -212,13 +228,20 @@ As on Windows, `kingdom/` and `Kingdom/` are one folder: a request in any case
 reaches the spelling already on disk, an upload spelled in another case lands in the
 existing folder, and a folder or file can be renamed to fix its case. Coming straight
 from 0.5.2 on a case-sensitive host (Linux, Docker), check the library for folders
-whose names differ only in case (`ls library | sort -f | uniq -di`): both stay
+and files whose names differ only in case: `ls library | sort -f | uniq -Di` lists
+such series folders; run it in each series folder too (`Vol 1.cbz` / `vol 1.cbz`).
+It folds ASCII letters only; the server also folds other letters' case and Unicode
+normalization. Both spellings stay
 listed in the catalog, but a request in a third spelling reaches only one of them,
 and the library cannot be copied to Windows or macOS as it is. Merge them while the
-server is stopped (move the volumes into one folder; the next metadata pass picks it
-up). Upload ownership is keyed by path, so a merged volume needs its
-`volume_uploads`, `ocr_sidecars` and `volume_identities` rows renamed too, or
-re-uploaded by its uploader.
+server is stopped: move each volume with all its files (`<stem>.cbz`, its
+`.mokuro[.gz]` and layer files `<stem>.<layer>.mokuro[.gz]`, `<stem>.webp`, any
+`<stem>.nocover`) into one folder; the next metadata pass picks it up. Upload
+ownership and OCR records are keyed by exact path, so a merged volume needs its
+`volume_uploads`, `ocr_sidecars` and `volume_identities` rows renamed too. Its
+uploader cannot fix that by uploading it again if they have only the Uploader role
+(the upload over the merged file is refused) unless an admin, editor or inviter
+deletes the merged copy first.
 
 ### First-run setup from another computer
 
@@ -256,9 +279,12 @@ go back:
    `server.cache_mb` and `ocr.upgrade` (0.5.2 refuses unknown keys inside a
    section; 0.7 writes them only when you changed them from the defaults).
    An `update:` section is ignored by 0.5.2.
-4. A migrated config has a `hayai-nova` primary row and a disabled `mokuro`
-   row. 0.5.2 loads that; re-enable the `mokuro` row and make it primary
-   again if you want mokuro back as the primary engine.
+4. 0.7 rewrites `config.yaml` only when it saves the config (admin panel,
+   setup, `config set`); 0.5.2 loads what it wrote, with `hayai-nova` as the
+   primary row. To get mokuro back as the primary engine, set `enabled: true`
+   and `primary: true` on the disabled `mokuro` row (or, if there is none, add
+   `{name: mokuro, engine: mokuro, primary: true}`), and set `primary: false`
+   on the `hayai-nova` row: 0.5.2 refuses more than one enabled primary.
 5. Start 0.5.2, with 0.5.2 processors. Sidecars 0.7 wrote, the generation upgrade's
    replacements included, are normal `.mokuro` files that 0.5.2 serves (the upgrade
    keeps no old file to go back to: restore those from your backup).

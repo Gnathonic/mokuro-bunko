@@ -5,7 +5,7 @@
   <Registry>https://github.com/Gnathonic/mokuro-bunko/pkgs/container/mokuro-bunko</Registry>
   <Network>bridge</Network>
   <MyIP/>
-  <Shell>sh</Shell>
+  <Shell/>
   <Privileged>false</Privileged>
   <Support>https://github.com/Gnathonic/mokuro-bunko/issues</Support>
   <Project>https://github.com/Gnathonic/mokuro-bunko</Project>
@@ -34,5 +34,5 @@
   <Config Name="MOKURO_HOST" Target="MOKURO_HOST" Default="0.0.0.0" Mode="" Description="Bind host" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="MOKURO_PORT" Target="MOKURO_PORT" Default="8080" Mode="" Description="Bind port" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="MOKURO_STORAGE" Target="MOKURO_STORAGE" Default="/data" Mode="" Description="Storage base path inside container" Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="OCR Generations" Target="MOKURO_OCR_GENERATIONS" Default="" Mode="" Description="Leave empty to use config.yaml, or the JSON list of OCR generations (run by remote processors). Engines: hayai-nova, paddle-manga, ppocr-manga." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OCR Generations" Target="MOKURO_OCR_GENERATIONS" Default="" Mode="" Description="JSON list of OCR generations (run by remote processors). While present, even empty, it replaces config.yaml's list at every start, undoing admin-panel edits; empty means the built-in default (one hayai-nova generation). Remove this variable to use config.yaml. Engines: hayai-nova, paddle-manga, ppocr-manga." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 </Container>

@@ -50,7 +50,11 @@ Proxies: Caddy forwards WebSockets as-is. The bundled nginx template sets
    same way. If the upload fails, it sends `volume_failed` with
    "the finished sidecar could not be sent from the processor".
 6. A claim that never reached the pipeline is sent back as `volume_returned{class,…}`
-   and never counts as a failure of the volume (see the v2 class table).
+   (see the v2 class table), and the library requeues it without a failure. After
+   `DOWNLOAD_RETURN_LIMIT` (3) counted returns of the same file (`no_room` never
+   counts), the library records the volume as failed ("download failed on N tries …").
+   A `stalled` or `differs` return fails it at once if the library cannot read its own
+   copy of the archive.
 7. `cancel{sid, claim}` records nothing for that claim. `close_session{sid}` finishes
    accepted volumes and then sends `exit`. Every session ends with exactly one `exit`.
 8. The processor is gone when any of these happens: the socket closes, nothing has
@@ -80,8 +84,9 @@ Proxies: Caddy forwards WebSockets as-is. The bundled nginx template sets
    work as while paused, and when the install is done registers again (a fresh
    catalog); a failed install says `availability{paused:false}` (or the owner's pause).
    The library shows "installing OCR backend: NN%" in the processor list
-   (`pause.install`) and logs only the transitions. Older libraries ignore both events (unknown events are logged
-   and dropped), so the claims time out as before.
+   (`pause.install`) and logs only the transitions. Libraries 0.7.0-beta.1 to beta.3
+   ignore `install` and treat an installing processor as an ordinary pause (listed as
+   paused, without progress). Pre-0.7 (v2) libraries refuse a v3 registration.
 
 10. **Version mismatch** (0.7, additive). The library compares the
    version the processor registers with (`host.version`, which every processor
@@ -124,4 +129,7 @@ Proxies: Caddy forwards WebSockets as-is. The bundled nginx template sets
 The full build runs the same `bunko-processor` code in-process. Ops and events travel over
 tokio channels. The archive path in `volume` is a local filesystem path, and the
 "upload" is the processor writing the sidecar into the volume's workspace. The scheduler
-treats the local processor exactly like a remote one named `local`.
+registers it as machine `local` with a few rules of its own: it gets work only while
+`ocr.local_processing` is on, the silence timeout and the archive-download circuit
+breaker do not apply to it, its stage placement comes from the generation's hand-set
+pools rather than a per-machine profile, and the UI shows it as "this server".

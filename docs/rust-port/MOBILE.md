@@ -32,7 +32,7 @@ JNI surface, class `app.mokuro.bunko.BunkoNative` (Kotlin `object`, `@JvmStatic 
 | `start(storageDir, configPath, port, lan): String` | `"ok:<local url>"` or `"error:<message>"`. Blocks until the server accepts connections (≤ 15 s) or fails. A second call while running is a no-op. |
 | `stop(): Boolean` | cancels `Services.stop` (the same token SIGTERM uses), waits for the graceful shutdown (≤ 5 s for in-flight requests) and the ordered service shutdown; returns whether a server was running |
 | `isRunning(): Boolean` | the server thread is alive |
-| `logTail(): String` | the last 300 log lines (shown on the settings screen) |
+| `logTail(): String` | the last 300 log lines (the settings screen shows the last 80) |
 | `lastError(): String` | why the server last failed, or `""` |
 
 - The server runs on its own OS thread with its own multi-thread tokio runtime
@@ -58,7 +58,7 @@ JNI surface, class `app.mokuro.bunko.BunkoNative` (Kotlin `object`, `@JvmStatic 
   cargo-ndk), `notify` (inotify), `hostname`, `fs4`, rustls/webpki-roots. The `.so`
   needs only `liblog`, `libdl`, `libm`, `libc` (no `libc++_shared.so`) and its LOAD
   segments are 16 KiB aligned (NDK r28+ default), as Android 15+ devices with 16 KiB
-  pages require. Size: 13.7 MB (arm64), 15.1 MB (x86_64), stripped.
+  pages require. Size: 16.5 MB (arm64), 18.4 MB (x86_64), stripped.
 
 ## 3. The app (`packaging/android`)
 
@@ -80,9 +80,9 @@ JNI surface, class `app.mokuro.bunko.BunkoNative` (Kotlin `object`, `@JvmStatic 
   (the WebView); everything else keeps the platform default. The Rust side's outgoing
   HTTPS (update check, DynDNS) uses rustls and is unaffected.
 - **Storage**: `<external files dir>/bunko/` (`library/`, the database, `logs/`), i.e.
-  `Android/data/app.mokuro.bunko/files/bunko/library` — reachable over USB (MTP) to copy
-  manga in, and by uploads through Mokuro Reader or the web UI. No storage permission is
-  needed. `android:hasFragileUserData="true"` makes uninstall offer to keep it;
+  `Android/data/app.mokuro.bunko/files/bunko/library`. Manga gets in over USB (MTP) or
+  by uploading through Mokuro Reader; the web UI has no upload page. No storage
+  permission is needed. `android:hasFragileUserData="true"` makes uninstall offer to keep it;
   `allowBackup="false"` (a library is far too big for Auto Backup).
 - Icon: adaptive vector (open book with vertical text lines and a ribbon) with a
   monochrome layer for themed icons. Platform Material theme, light/dark, edge-to-edge
@@ -98,7 +98,8 @@ JNI surface, class `app.mokuro.bunko.BunkoNative` (Kotlin `object`, `@JvmStatic 
   `((major·100 + minor)·100 + patch)·100 + pre`, with pre = alpha.N → N, beta.N → 30+N,
   rc.N → 60+N, release → 99 (0.7.0-alpha.1 = 70001, 0.7.0 = 70099). minSdk 26,
   targetSdk/compileSdk 36. ABIs: arm64-v8a and x86_64 (32-bit devices are not built;
-  `build.sh --abi armeabi-v7a` would add one).
+  `--abi` replaces the default list: `build.sh --abi arm64-v8a --abi x86_64 --abi
+  armeabi-v7a` would add one).
 - Updates: `bunko_update::InstallKind::detect()` is `Mobile` on Android, so the admin
   panel only shows a notice; the APK is installed over the old one (data kept when the
   signing key is the same). The APK is not in `release.json`.
@@ -182,8 +183,11 @@ or `SHA256SUMS`.
   restriction. There is no start-on-boot.
 - **Mixed content.** Browsers block an `https://` page (reader.mokuro.app) from fetching a
   plain `http://` LAN address; `http://127.0.0.1` is allowed. From other devices use a
-  native Mokuro Reader build, enable HTTPS (admin panel → SSL, self-signed: the device
-  must trust it) or the tunnel. The settings screen says so.
+  native Mokuro Reader build, enable self-signed HTTPS (the device must trust it) or the
+  tunnel. HTTPS is turned on in the setup wizard or in `config.yaml` (`ssl.enabled`,
+  `auto_cert`), not in the admin panel, although the settings screen's note says
+  "admin panel". Turning it on in the wizard stops the server (see the restart note
+  below), and the app keeps showing `http://` URLs.
 - **Storage**: app-specific external storage. Since Android 11 file manager apps on the
   phone cannot browse `Android/data/`; USB (MTP) from a computer and uploads work.
   Uninstalling deletes it unless the user keeps the app data. A user-chosen folder
@@ -193,12 +197,16 @@ or `SHA256SUMS`.
   (the server's full metadata pass at start-up picks them up in any case: stop/start
   the server after a large copy).
 - Ports below 1024 need root; the app accepts 1024–65535. A port in use is reported.
-- The phone's IP changes between networks; the settings screen and notification show
-  the current one. No mDNS/Bonjour announcement yet.
+- The phone's IP changes between networks. The settings screen shows the current one;
+  the notification keeps the address from the last start until the server is
+  restarted. No mDNS/Bonjour announcement yet.
 - WebView downloads (e.g. a volume download link in the web UI) are not wired to
   `DownloadManager`.
 - The admin panel's "update and restart" is not available (mobile installs update by
-  APK/store); a restart request just stops the server and the app restarts it.
+  APK/store). A restart request (on Android only the setup wizard enabling HTTPS)
+  stops the server and the app does not start it again: the notification still says
+  running until the app is relaunched (auto-start) or the server is started from the
+  settings screen.
 
 ## 6. Verification (2026-10-01)
 
@@ -240,8 +248,9 @@ or `SHA256SUMS`.
   developer account and re-signing every 7 days for free accounts; EU alternative
   marketplaces still require notarization and the same background rules). Review would
   question a local HTTP server for "other devices".
-- **Build host**: iOS builds need Xcode on macOS; no macOS machine is available to this
-  project (CI macOS runners could build, but nothing could be tested or signed here).
+- **Build host**: iOS builds need Xcode on macOS. The project's Mac (or a CI macOS
+  runner) could build an iOS app and test it in the Simulator; installing on a device
+  needs an Apple Developer Program membership, which the project does not have.
 
 What an iOS **companion** could be instead — a client, not a host:
 

@@ -21,8 +21,10 @@ changed from one pre-release to the next; all of it is in 0.7.0.
 - OCR recognizers on libtorch, the same torch 0.5.2 used, from compiled model
   packages: `install-ocr` installs a *backend pack* for the hardware it finds —
   NVIDIA CUDA (Turing or newer, Linux and Windows), AMD ROCm (RX 6000/7000/9000,
-  Linux) or the CPU (all platforms) — and the packages for the GPU, verified
-  against the signed release manifest.
+  Linux) or the CPU (all platforms). The pack is checked against the signed
+  `release.json`, and its `pack.json` pins every file, NVIDIA's CUDA libraries
+  included; the model packages are checked against sha256 values built into the
+  program.
 - **The OCR backend installs in the background; serving never waits for it.** `serve`
   and `processor serve` start at once and, when local OCR is on and an enabled
   generation needs the libtorch backend that is missing, run the same detection and
@@ -40,10 +42,16 @@ changed from one pre-release to the next; all of it is in 0.7.0.
   the container's GPU is downloaded once it serves) and `:latest-lite` (amd64 + arm64).
   The release notes start with a table linking each one. `:beta` / `:beta-lite` follow
   every release, beta or stable.
-- `scripts/install.sh` and `scripts/install.ps1` install a release, checking its
-  signed manifest and sha256.
-- One-click updates: the admin panel's Updates card checks for new releases
-  and installs them (ed25519-signed `release.json`, sha256-checked archive). Also
+- `scripts/install.sh` and `scripts/install.ps1` install a release, checking the
+  archive's sha256 against `release.json`. install.sh also checks its ed25519
+  signature when OpenSSL 3 is available (without it, it warns, or fails with
+  `--require-signature`); install.ps1 relies on HTTPS to GitHub. mokuro-bunko itself
+  checks the signature when it updates.
+- One-click updates: the admin panel's Updates card checks for new releases and,
+  on self-managed installs (a release archive, the disk image, `install.ps1`, or
+  `install.sh` run as a user), installs them (ed25519-signed `release.json`,
+  sha256-checked archive). Elsewhere it reports the new release and says how to
+  update (re-run install.sh, pull the image, or use the package manager). Also
   `mokuro-bunko update check|apply`, and `update.*` settings. `update.channel`
   defaults to `auto`: a pre-release install (a beta or release candidate) follows
   later pre-releases, a stable install only stable releases; `stable` or
@@ -120,9 +128,11 @@ changed from one pre-release to the next; all of it is in 0.7.0.
   --auto-update`, the processor's pairing and settings pages) follows its library:
   when the library reports a newer version it finishes its running volume, installs
   exactly that release, restarts and reconnects; it never downgrades. Self-managed
-  installs only; Docker and package-managed installs are told how to update instead
-  (the admin panel shows that line in place of the checkbox, and a saved
-  `update.auto: true` is ignored there). `/control/status` has an `update` block,
+  installs only: Docker, package-manager and root `install.sh` installs are told how
+  to update instead (the admin panel shows that line in place of the checkbox, and a
+  saved `update.auto: true` is ignored there); a processor there finishes its
+  volumes, then its install is refused with a `fail` problem and retried later.
+  `/control/status` has an `update` block,
   the tray shows "Updating to X…" / "Updated to X", and anything that needs the
   owner (a driver, disk space, a bad signature, a rollback, a library older than its
   processor, a changed GPU) raises a `fail` problem the tray flags and announces
@@ -173,9 +183,13 @@ changed from one pre-release to the next; all of it is in 0.7.0.
   - AMD GPUs work in Docker (`--device /dev/kfd --device /dev/dri`); the server keeps
     the device nodes' groups when it drops to `PUID:PGID`.
   - `:latest-cuda` / `:<ver>-cuda` is a second tag of the full image (the 0.7 CUDA
-    image with its pack built in is gone), so templates written for the 0.5.2 CUDA
-    image keep working (they set `PUID`/`PGID` and `MOKURO_CONFIG` themselves).
-    `BAKE_PACK=1` builds a pack into a self-built image for hosts without internet.
+    image with its pack built in is gone). Templates written for the 0.5.2 CUDA
+    image keep their volumes and variables but name the locally built
+    `mokuro-bunko:unraid-cuda`: change their Repository to
+    `ghcr.io/gnathonic/mokuro-bunko:latest` (or `:latest-cuda`).
+    `BAKE_PACK=1` (`PACK_VARIANT=cpu|cu130|rocm7.1`, default `cpu`) builds a backend
+    pack into a self-built image. The models are not included: a host without
+    internet needs a populated `/data/models`.
   - `install-ocr` without `--variant` installs the pack `ocr.backend` asks for on
     this hardware: `cpu` stays on the CPU with a GPU present, `cuda`/`rocm` fall back
     to `cpu` with a hint when that GPU is not usable; `--variant auto` is the hardware
@@ -188,15 +202,17 @@ changed from one pre-release to the next; all of it is in 0.7.0.
     offline image).
 - `ocr.backend` is `auto`, `cuda`, `rocm`, `cpu` or `skip`. Automatic precision
   picks bf16 only where the hardware runs it natively (NVIDIA Ampere and newer,
-  AMD RDNA3/4); RDNA2 and the CPU run fp32 like 0.5.2.
+  AMD RDNA3/4); RDNA2 and the CPU run fp32. On RDNA2 (RX 6000) that is a change:
+  0.5.2 ran hayai-nova there in emulated bf16 by default, which was slower.
 - RX 6600/6700-class cards (gfx1031/1032) get `HSA_OVERRIDE_GFX_VERSION=10.3.0`
   automatically, as in 0.5.2.
 - Old configs are migrated at load: a `mokuro` row is retired (kept, disabled),
   rows on removed detectors move to `ppocr-manga`, and a `hayai-nova` primary is
   added when none is left. Existing `.mokuro` files are kept and served.
 - The licence is MPL-2.0 everywhere, including the image labels (0.5 images said MIT).
-- nginx download offload is off by default in the images; `MOKURO_NGINX_ACCEL=1`
-  still turns it on. The in-image nginx passes WebSockets for `/_processor/`.
+- nginx download offload is off by default. `MOKURO_NGINX_ACCEL=1` turns it on in
+  the full image when the container starts as root (the default); the lite images
+  have no nginx and ignore it. The in-image nginx passes WebSockets for `/_processor/`.
 - Request threads are gone: the server is async, `MOKURO_THREADS` is no longer read.
 - Memory: the server streams downloads and uploads from and to disk, and caches
   are byte-bounded (`server.cache_mb`); OCR uses less RAM than 0.5.2 on every
@@ -211,12 +227,13 @@ changed from one pre-release to the next; all of it is in 0.7.0.
 - Python packaging: the PyPI package, zipapp, `uv` portable zip, `setup-windows.ps1`
   source install (it forwards to `install.ps1`), `docs/make_volume.py`.
 - Python OCR environments and `MOKURO_BUNKO_OCR_ENV`, `MOKURO_BUNKO_OCR_ENGINES_ENV`,
-  `MOKURO_BUNKO_MOKURO_SPEC`, `MOKURO_PPOCR_THREADS`, `MOKURO_EFT_TRACE`,
-  `MOKURO_DEBUG` (use `MOKURO_LOG` or `-v`).
+  `MOKURO_BUNKO_MOKURO_SPEC`, `MOKURO_PPOCR_THREADS` and `MOKURO_EFT_TRACE`.
 - `processor install` and the install step of `processor setup`.
 - Protocol v2: 0.5.2 processors cannot connect to a 0.7 library, nor the reverse.
 - OCR on arm64 Linux (that platform gets the lite build; OCR from a remote x86_64
-  processor) and on Intel Macs.
+  processor).
+- Intel Mac builds: there is no macOS x86_64 download, and install.sh fails there.
+  The full Docker image (linux/amd64, with OCR) runs on them.
 
 ### Fixed
 - WebDAV `MOVE`/`COPY` between a reader's own files and library files, of a file

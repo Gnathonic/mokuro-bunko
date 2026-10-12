@@ -1,10 +1,14 @@
 # Mokuro Bunko Server Configuration (0.7)
 # Copy this file to ~/.config/mokuro-bunko/config.yaml (Linux/macOS)
-# or %LOCALAPPDATA%\mokuro-bunko\config.yaml (Windows).
+# or %LOCALAPPDATA%\mokuro-bunko\config.yaml (Windows). The portable Windows
+# zip (PORTABLE.txt next to mokuro-bunko.exe) uses data\config.yaml instead.
 # A 0.5.2 config.yaml works unchanged; see docs/MIGRATING-0.7.md.
 #
-# Every key can also be set from the environment as MOKURO_<SECTION>_<KEY>
+# Most keys can also be set from the environment as MOKURO_<SECTION>_<KEY>
 # (for example MOKURO_OCR_LOCAL_PROCESSING=false), which wins over this file.
+# cors.allowed_origins, database.*, ocr.upgrade.* and update.public_key are
+# read from this file only. MOKURO_HOST, MOKURO_PORT and MOKURO_STORAGE are
+# aliases, and MOKURO_OCR_GENERATIONS takes the list as JSON text.
 # docs/configuration.md describes every key.
 
 server:
@@ -12,8 +16,10 @@ server:
   host: "0.0.0.0"
   # Port to listen on
   port: 8080
-  # Reverse proxies on ANOTHER host or container whose X-Forwarded-For is
-  # believed (a proxy on this machine always is). Example: ["172.16.0.0/12"]
+  # Reverse proxies whose X-Forwarded-For is believed, besides loopback
+  # (always trusted). A proxy on the host in front of a Docker container
+  # connects from the bridge gateway (e.g. 172.17.0.1), so list it too.
+  # Example: ["172.16.0.0/12"]
   trusted_proxies: []
   # Async worker threads. 0 (the default) means min(CPU cores, 4). Takes
   # effect at startup.
@@ -27,7 +33,10 @@ storage:
   # Base path for all data storage
   # Default: ~/.local/share/mokuro-bunko (Linux/macOS)
   #          %LOCALAPPDATA%\mokuro-bunko (Windows)
-  # Holds library/, inbox/, users/, logs/, models/ and mokuro.db.
+  #          data\ next to mokuro-bunko.exe (Windows portable zip)
+  # Holds library/ (with thumbnails/), inbox/, users/, logs/, models/,
+  # backends/ (OCR backend packs, several GB; MOKURO_BACKENDS_DIR moves
+  # them), processors/, mokuro.db and a few .ocr-*.json state files.
   base_path: "/var/lib/mokuro-bunko"
 
 registration:
@@ -73,7 +82,8 @@ ssl:
 admin:
   # Enable admin web panel
   enabled: true
-  # URL path for admin panel
+  # The panel is always served at /_admin. This key only changes the link the
+  # desktop app builds; leave it at "/_admin".
   path: "/_admin"
 
 catalog:
@@ -93,7 +103,8 @@ queue:
   # If false, queue status API requires authenticated user credentials
   public_access: true
   # How much the queue page shows, to every viewer:
-  #   minimal   one line per working machine, the pending count, speeds
+  #   minimal   a compact card per machine (percent and finish time of each
+  #             running volume, what is next), the first 10 pending; no speeds
   #   normal    a card per machine, the pending list, failures (generic reasons)
   #   detailed  normal + stage pipelines and rate details, for tuning
   # Raw errors, log paths and hardware names reach admins only, at any level.
@@ -148,9 +159,10 @@ ocr:
   # Seconds between library scans for volumes missing a sidecar or a
   # thumbnail. Also the base of the retry backoff for failed volumes.
   poll_interval: 30
-  # How many OCR jobs run at once on this machine, 1-8 (default 1). Concurrent
-  # jobs are always on DIFFERENT volumes, and each holds its own copy of the
-  # models in RAM (or VRAM). Takes effect at startup.
+  # How many OCR jobs (volumes) run at once on this machine, 1-8 (default 1).
+  # Jobs running the same row on the same device share one loaded copy of the
+  # models, so each extra job adds only working memory; another engine,
+  # precision or device loads its own. Takes effect at startup.
   concurrency: 1
   # Accepted so old config files keep loading, and ignored: 0.7 always keeps
   # the models loaded between volumes.
@@ -163,7 +175,9 @@ ocr:
   # A generation that has never been measured on a machine is benchmarked
   # there before that machine is offered its volumes, and the widths found
   # are kept in that machine's profile (never in this file). On this server
-  # that happens only for a row whose pools are empty. Off means "run with
+  # a row with hand-set pools gets only a precision benchmark (pools kept),
+  # and only when its precision is auto-balanced or auto-speed and the
+  # machine has more than one format to choose from. Off means "run with
   # the derived settings and benchmark by hand". At startup.
   autobench: true
 
@@ -180,36 +194,39 @@ ocr:
   # The OCR generations: named recipes, IN THE ORDER THE QUEUE RUNS THEM.
   # Every enabled row writes its own sidecar beside every archive, named
   # after the row -- `<Volume>.<name>.mokuro`, or the bare `<Volume>.mokuro`
-  # for the one row flagged `primary`. Rearranging the rows is how the queue
-  # is prioritised: every volume gets the first row's file before the second
-  # row starts.
+  # for the one row flagged `primary`. Row order is the queue's priority:
+  # earlier rows' files come first, but a machine that cannot take an earlier
+  # row's job right now runs a later row's instead.
   #
   #   id           server-minted (g-1, g-2, ...), never shown; keys every
   #                piece of internal state. Leave it out for a new row.
   #   name         the label AND the file-name postfix. Editable.
   #                ^[a-z0-9][a-z0-9-]{0,31}$ -- lowercase ASCII, digits and
   #                hyphens, 32 characters at most. No dot, no uppercase, no
-  #                space, no underscore: a name outside that grammar is
-  #                SILENTLY invisible on every reader. `original`, `gcv`,
+  #                space, no underscore: readers would silently ignore such
+  #                a file, so the name is refused. `original`, `gcv`,
   #                `updated-ocr` and anything starting with `tr-` are
   #                reserved. Unique across every row, enabled or not.
   #   primary      exactly one ENABLED row must have it. That row writes the
   #                bare <Volume>.mokuro: the only source of a volume's
-  #                character counts and of the volume_uuid every other layer
-  #                inherits. Any engine may be the primary one.
+  #                character counts, and of the volume_uuid the other files
+  #                share when it exists. Any engine may be the primary one.
   #   enabled      a disabled row queues nothing and writes nothing; its name
   #                and its files stay reserved.
   #   engine       - hayai-nova:   hayai-ocr v2.5 Nova (Apache-2.0); reads
   #                                each line at patch_budget. The default.
   #                - paddle-manga: PaddleOCR-VL 1.6 + manga LoRA (Apache-2.0);
-  #                                ~2 GB of model files, slowest, most accurate
+  #                                ~3.6 GB of model files in fp32 (the default),
+  #                                ~1.8 GB in bf16/fp16; slowest, most accurate
   #                - ppocr-manga:  PP-OCRv6 manga (Apache-2.0), a small line
   #                                detector + CTC recognizer on the CPU; brings
-  #                                its own detector and is the one engine that
-  #                                reads scanned NOVEL pages
+  #                                its own detector.
+  #                Every engine also reads scanned NOVEL pages.
   #                The 0.5 engine `mokuro` was removed. A row that still names
-  #                it is kept (disabled, its name stays reserved) and a
-  #                hayai-nova primary is added; see docs/MIGRATING-0.7.md.
+  #                it is kept but retired: it never runs, loses `primary` and
+  #                keeps its name reserved. If it was the primary, an enabled
+  #                hayai-nova row becomes primary, or a new one is added; see
+  #                docs/MIGRATING-0.7.md.
   #   detector     ppocr-manga (Apache-2.0 rotated line quads, CPU only) is the
   #                only detector. hayai-nova and paddle-manga re-read every
   #                line it finds and the two reads are merged. Ignored (and
@@ -217,7 +234,10 @@ ocr:
   #                removed ctd / animetext / rtdetr is switched to ppocr-manga.
   #   precision    the row's precision MODE, one for every machine:
   #                  auto-accuracy (default) what tested most accurate for the engine
-  #                  auto-balanced  a little accuracy for a lot of speed
+  #                  auto-balanced  each machine benchmarks bf16 (where the
+  #                                 card runs it natively) against fp32 and
+  #                                 keeps the faster; a tie within 5% goes
+  #                                 to bf16. Never fp16
   #                  auto-speed     the fastest format each card runs well
   #                  fp32 / fp16 / bf16  that format only; a machine whose
   #                                 card cannot run it is never given the row
@@ -235,8 +255,9 @@ ocr:
   #                                 detector is CPU only.
   #
   # See docs/configuration.md for the full reference and docs/ocr-internals.md
-  # for how it works. Renaming a row means its files are looked for under the
-  # new name: volumes re-OCR under it and the old files stay where they are.
+  # for how it works. Renaming a row other than the primary means its files
+  # are looked for under the new name: volumes re-OCR under it and the old
+  # files stay where they are. The primary's file is always <Volume>.mokuro.
   generations:
     - name: hayai-nova
       engine: hayai-nova

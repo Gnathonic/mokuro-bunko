@@ -3,7 +3,7 @@
 A self-hosted manga library server with WebDAV, built-in OCR processing, and multi-user support. Designed as a backend for [Mokuro Reader](https://reader.mokuro.app).
 
 > [!NOTE]
-> **0.7 is a rewrite in Rust.** It replaces the Python 0.5 line as a drop-in: the same `config.yaml`, database and library tree, the same reader-facing APIs. One native binary, no Python, OCR on the same libtorch 0.5.2 used (installed as a backend pack by `mokuro-bunko install-ocr`, for NVIDIA CUDA, AMD ROCm or the CPU) with Apache-2.0 models only, release packages for Linux, Windows, macOS and Docker, and one-click updates. Coming from 0.5.2? Read [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
+> **0.7 is a rewrite in Rust.** It replaces the Python 0.5 line as a drop-in: the same `config.yaml`, database and library tree, the same reader-facing APIs. One native binary, no Python, OCR on the same libtorch 0.5.2 used (installed as a backend pack by `mokuro-bunko install-ocr`, for NVIDIA CUDA, AMD ROCm or the CPU) with Apache-2.0 models only, release packages for Linux, Windows, macOS and Docker, and one-click updates for self-managed installs (see [Updates](#updates)). Coming from 0.5.x? Read [docs/MIGRATING-0.7.md](docs/MIGRATING-0.7.md).
 
 ## What it does
 
@@ -13,8 +13,8 @@ A self-hosted manga library server with WebDAV, built-in OCR processing, and mul
 - Runs OCR automatically on uploaded manga with [hayai-nova](https://huggingface.co/JustANormalTinkerer/hayai-ocr-v2.5-nova) by default, plus optional extra OCR layers from PaddleOCR-VL (`paddle-manga`) and PP-OCRv6 (`ppocr-manga`, which also reads scanned novels)
 - Can hand OCR to a stronger computer: a remote processor logs in to the library and works the queue, and each volume goes to whichever machine will finish it first
 - Manages users with role-based permissions (anonymous browse, registered, uploader, editor, inviter, admin)
-- Provides a web catalog for browsing the library (display-title language options, sorting, genre filters, ratings and tags fetched from AniList/MAL for linked series, no API key required) plus an admin panel for user, config and OCR management
-- Checks for new releases and installs them from the admin panel in one click (signed releases)
+- Provides a web catalog for browsing the library (display-title language options, sorting, genre filters and ratings fetched from AniList/MAL for linked series, no API key required) plus an admin panel for user, config and OCR management
+- Checks for new releases (signed) and shows them in the admin panel; self-managed installs update in one click, Docker and package installs get a notice (see [Updates](#updates))
 - Asks search engines and crawlers to stay out (`X-Robots-Tag: noindex` on every response, deny-all `robots.txt`)
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
@@ -26,7 +26,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 Or in one line:
 
 ```bash
-# Linux (x64 or arm64; checks the release signature)
+# Linux (x64 or arm64; checks the release signature when OpenSSL 3 is installed)
 curl -fsSL https://raw.githubusercontent.com/Gnathonic/mokuro-bunko/main/scripts/install.sh | sh
 ```
 ```powershell
@@ -42,14 +42,14 @@ These take the latest release; for a specific version, use the script of its tag
 
 ## Editions
 
-Every release has two builds of the same `mokuro-bunko` executable:
+There are two editions of the same `mokuro-bunko` executable; each platform's release download is one of them (lite on x64 only as the Docker image):
 
 | Edition | Contains | Use it for |
 |---|---|---|
 | **full** | The server, WebDAV, catalog, admin panel, local OCR, the `processor` command and the desktop tray (which never starts in Docker). | Windows, macOS (Apple silicon), Linux x64, the Docker `:latest` image. |
 | **lite** (server) | The server without OCR engines: OCR comes from **remote processors**. A static binary; idles around 16 MiB of RAM in Docker. | Linux arm64 (Raspberry Pi, NAS), the Docker `:latest-lite` image, a 1 GB VPS. |
 
-The full build runs on any GPU: the OCR recognizers run on **libtorch**, which the server downloads by itself in the background (or `mokuro-bunko install-ocr` does) as a *backend pack* for the hardware it finds — CUDA for NVIDIA GPUs (Linux, Windows; driver 580 or newer), ROCm for AMD Radeon RX 6000/7000/9000 (Linux), or the CPU (all platforms).
+The full build runs OCR on most GPUs: the OCR recognizers run on **libtorch**, which the server downloads by itself in the background (or `mokuro-bunko install-ocr` does) as a *backend pack* for the hardware it finds: CUDA for NVIDIA GPUs from Turing (GTX 16xx / RTX 20xx) on (x64 Linux and Windows, driver 580 or newer; older NVIDIA GPUs get the CPU pack), ROCm for AMD Radeon RX 6000/7000/9000 (Linux), or the CPU (all platforms).
 
 ## Quick start
 
@@ -59,7 +59,7 @@ The first browser visit to a new server (`http://localhost:8080`) walks you thro
 
 ### Linux
 
-`install.sh` downloads the release for your CPU, checks the signed manifest and the archive's sha256, installs into `~/.local/lib/mokuro-bunko` (`/usr/local/lib/mokuro-bunko` as root), links `mokuro-bunko` into `~/.local/bin` and adds the tray to the applications menu. Options: `--version X.Y.Z`, `--systemd` (a systemd unit; a user unit, or a system unit when run as root), `--processor` (the OCR processor unit), `--autostart` (the tray at login), `--prefix DIR`, `--dry-run`. The x64 build needs glibc 2.28 or newer (Debian 11+, Ubuntu 20.04+, RHEL/Alma 8+). Or unpack the archive yourself and run `./mokuro-bunko serve`, or `./mokuro-bunko tray` for the tray icon.
+`install.sh` downloads the release for your CPU, checks the archive's sha256 and (with OpenSSL 3, or always with `--require-signature`) the manifest's signature, installs into `~/.local/lib/mokuro-bunko` (`/usr/local/lib/mokuro-bunko` as root), links `mokuro-bunko` into `~/.local/bin` (`/usr/local/bin` as root) and, for the full build, adds the tray to the applications menu. Options: `--version X.Y.Z`, `--systemd` (a systemd unit; a user unit, or a system unit when run as root), `--processor` (also writes the OCR processor unit, not started; full build), `--autostart` (the tray at login), `--prefix DIR`, `--dry-run`. The x64 build needs glibc 2.28 or newer (Debian 11+, Ubuntu 20.04+, RHEL/Alma 8+). Or unpack the archive yourself and run `./mokuro-bunko serve`, or `./mokuro-bunko tray` for the tray icon (x64 full build only; the arm64 lite build has no tray).
 
 ### Windows
 
@@ -67,7 +67,7 @@ Unzip the release anywhere and double-click **`mokuro-bunko.exe`**: a tray icon 
 
 ### macOS
 
-Open the disk image and drag **Mokuro Bunko** to Applications (Apple silicon). Opening it puts an icon in the menu bar and the first time opens a chooser in your browser. The app is not notarized: if macOS says it cannot be opened, right-click it and choose Open once. The command line is `/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko`. Intel Macs have no build: use the Docker image.
+Open the disk image and drag **Mokuro Bunko** to Applications (Apple silicon). Opening it puts an icon in the menu bar and the first time opens a chooser in your browser. The app is not notarized: if macOS says it cannot be opened, right-click it and choose Open once (macOS 15 and later: try once, then System Settings → Privacy & Security → Open Anyway); if it says the app is damaged, run `xattr -dr com.apple.quarantine "/Applications/Mokuro Bunko.app"`. The command line is `/Applications/Mokuro Bunko.app/Contents/MacOS/mokuro-bunko`. Intel Macs have no build: use the Docker image.
 
 ### Docker
 
@@ -76,7 +76,7 @@ Images are published at `ghcr.io/gnathonic/mokuro-bunko`:
 | Tag | What | Replaces (0.5.2) |
 |---|---|---|
 | `latest` | Server + local OCR + optional nginx for fast downloads. linux/amd64. No OCR backend inside: once it serves, it detects the GPU the container was given (none, NVIDIA or AMD), follows `ocr.backend` and downloads the matching backend pack and the models of the enabled OCR engines into `/data`, in the background. | `deploy/Dockerfile` and `deploy/Dockerfile.unraid` (`unraid-cuda`) |
-| `latest-cuda` | The same image as `latest` under the name the 0.5.2 CUDA image used, so existing templates keep working. | `unraid-cuda` |
+| `latest-cuda` | Another tag for the same image as `latest`. | new |
 | `latest-lite` | Server only, distroless, a 12 MB download (43 MB on disk), amd64 + arm64 (the only image for arm64 hosts). OCR by remote processors. | new |
 
 Each tag also has a versioned form (`0.7.0`, `0.7.0-cuda`, `0.7.0-lite`); pin one for production. The `latest*` tags follow stable releases; `beta` / `beta-lite` follow every release, pre-releases included.
@@ -86,12 +86,12 @@ Each tag also has a versioned form (`0.7.0`, `0.7.0-cuda`, `0.7.0-lite`); pin on
 ```bash
 docker run -d --name mokuro-bunko -p 8080:8080 -v mokuro-data:/data \
   -e PUID=1000 -e PGID=1000 ghcr.io/gnathonic/mokuro-bunko:latest
-docker logs mokuro-bunko      # First run: … /setup (setup code: XXXXX-XXXXX), then the OCR download
+docker logs mokuro-bunko      # First run: … /setup (setup code: XXXXX-XXXXX); the OCR download starts once setup is done
 ```
 
-The server answers within seconds. **First admin**: open `http://<host>:8080/setup` and enter the one-time setup code from the log (from the machine itself no code is needed).
+The server answers within seconds. **First admin**: open `http://<host>:8080/setup` and enter the one-time setup code from the log (needed even from a browser on the Docker host: the container does not see it as localhost).
 
-**OCR backend**: downloaded in the background while the server already serves: ~100 MB for the CPU, ~2 GB for NVIDIA (~350 MB from the release, the rest NVIDIA's CUDA libraries from PyPI), ~3 GB for AMD, then the models of the enabled engines. The log and the admin panel (This server, and Settings → OCR → Processors) show the progress; local OCR starts by itself when it is done; a failed download is shown there with a Retry button (and retried by itself). Later starts reuse it. Starting the container with a different GPU (or setting `MOKURO_OCR_BACKEND` to a GPU it now sees) installs that GPU's backend the same way.
+**OCR backend**: downloaded in the background while the server already serves (on a first run, once the setup is finished): ~80 MB for the CPU, ~2 GB for NVIDIA (~350 MB from the release, the rest NVIDIA's CUDA libraries from PyPI), ~3 GB for AMD, then the models of the enabled engines. The log and the admin panel (This server, and Settings → OCR → Processors) show the progress; local OCR starts by itself when it is done; a failed download is shown there with a Retry button (and retried by itself after 5, 15 and 60 minutes, unless the cause needs fixing first, such as disk space or the NVIDIA driver). Later starts of the same version reuse it; a new version downloads its own pack again in the background (~80 MB for the CPU, ~350 MB for NVIDIA as unchanged CUDA libraries are taken from the old pack, ~3 GB for AMD) and removes the old one; the models are kept. Starting the container with a different GPU (or setting `MOKURO_OCR_BACKEND` to a GPU it now sees) installs that GPU's backend the same way.
 
 **NVIDIA GPU**: the host needs an NVIDIA driver **580 or newer** (CUDA 13), the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) and a Turing (GTX 16xx / RTX 20xx) or newer GPU. Check with `docker run --rm --gpus all ghcr.io/gnathonic/mokuro-bunko:latest install-ocr --list` (it prints the driver and GPU it sees, and the pack it would install).
 
@@ -122,8 +122,8 @@ The server keeps the groups that own those devices when it switches to `PUID:PGI
 | `PUID`, `PGID`, `UMASK`, `TAKE_OWNERSHIP` | The user the server runs as (1000:1000 by default; the Unraid template passes 99:100), file mode mask, recursive chown on start. |
 | `MOKURO_NGINX_ACCEL=1` | Put the bundled nginx in front for library downloads (as in 0.5). |
 | `MOKURO_OCR_BACKEND` | `auto` (default: the GPU the container sees), `cuda`, `rocm`, `cpu` (stay on the CPU even with a GPU), or `skip` (no OCR here; remote processors only, nothing downloaded). Decides which backend is downloaded. |
-| `MOKURO_OCR_AUTO_INSTALL` | `true` (default): download the OCR backend in the background when it is missing. `false`: never by itself; the admin panel shows it missing, with an Install button (or `docker exec mokuro-bunko mokuro-bunko install-ocr`). |
-| `MOKURO_*` | Any config key (`MOKURO_<SECTION>_<KEY>`), see [docs/configuration.md](docs/configuration.md). |
+| `MOKURO_OCR_AUTO_INSTALL` | `true` (default): download the OCR backend in the background when it is missing. `false`: never by itself; the admin panel shows it missing, with an Install button (or `docker exec -u <PUID>:<PGID> mokuro-bunko mokuro-bunko install-ocr`, then restart the container: a running server does not notice it). |
+| `MOKURO_*` | Most config keys (`MOKURO_<SECTION>_<KEY>`), see [docs/configuration.md](docs/configuration.md); not `cors.allowed_origins`, `ocr.upgrade.*`, `database.*` or `update.public_key` (config file only). |
 
 The compiled models are unpacked once into the data volume (`/data/models`) and loaded from there. `docker exec mokuro-bunko mokuro-bunko doctor` checks the setup, including the OCR backend.
 
@@ -131,7 +131,7 @@ The compiled models are unpacked once into the data volume (`/data/models`) and 
 
 - The Python OCR environments in the data volume (`.ocr-env`, `.ocr-engines-env`, `.pip-cache`, `.tmp`) are no longer used and can be deleted; the volume now holds the OCR backend pack (`/data/backends`) and the models (`/data/models`).
 - `OCR_AUTO_INSTALL` is no longer needed: the backend is installed on start by default. `true` keeps that on; `false` (the 0.5.2 template's default) is ignored, as in 0.5.2 it never stopped the install. To opt out, set `MOKURO_OCR_AUTO_INSTALL=false`. `MOKURO_BUNKO_OCR_ENV` / `_ENGINES_ENV` are ignored.
-- `MOKURO_NGINX_ACCEL` now defaults to off; set it to `1` to keep nginx in front (useful when nginx serves downloads).
+- `MOKURO_NGINX_ACCEL` defaults to off (as in the 0.5.2 `unraid-cuda` image; `deploy/Dockerfile` defaulted to `1`); set it to `1` to keep nginx in front (useful when nginx serves downloads).
 - The health check is `mokuro-bunko healthcheck` (no curl or Python in the image).
 - 0.5.2 processors cannot talk to a 0.7 library: update them too (see the [migration guide](docs/MIGRATING-0.7.md)).
 
@@ -147,15 +147,15 @@ See [Building from source](#building-from-source).
 
 A library server is set up and run from its own web pages, the same on a desktop, from another computer and in Docker: the first-run page `/setup` (admin account, who may join, remote access, OCR on this machine) and the admin panel, whose **This server** tab covers the OCR backend, models, diagnostics and the log.
 
-On a desktop, `mokuro-bunko` starts the tray (or `mokuro-bunko tray`). With nothing set up it opens a chooser in your browser: **Library server** (the tray starts the server and opens its `/setup`) or **Processor** (pair this machine with a library elsewhere; its status and settings pages stay on this machine, `127.0.0.1` with a one-time sign-in link). The tray shows what runs, pauses OCR (after this volume, now, for an hour, until morning), opens the admin panel, the processor and the library, and has **Start at login**. On Linux it shows in any panel with a system tray (GNOME needs the AppIndicator extension); it needs no GTK or AppIndicator library.
+On a desktop, `mokuro-bunko` starts the tray (or `mokuro-bunko tray`). With nothing set up it opens a chooser in your browser: **Library server** (the tray starts the server and opens its `/setup`) or **Processor** (pair this machine with a library elsewhere; its status and settings pages stay on this machine, `127.0.0.1` with a one-time sign-in link). The tray shows what runs, pauses OCR (after this volume, now, for an hour, until morning), opens the admin panel, the processor and the library, and has **Start at login**. On Linux it is a StatusNotifierItem: it shows in panels that host StatusNotifierItem/AppIndicator icons (KDE Plasma, Xfce, LXQt, Cinnamon, MATE, Budgie; GNOME needs the AppIndicator extension), not in trays that only support legacy XEmbed (i3bar, stalonetray); it needs no GTK or AppIndicator library.
 
-Windows 11 puts a new tray icon in the hidden-icons overflow (the **^** by the clock) at first: drag it onto the taskbar, or turn **Mokuro Bunko** on under Settings → Personalization → Taskbar → Other system tray icons. Everything the app does is also a CLI command; [docs/rust-port/GUI-COVERAGE.md](docs/rust-port/GUI-COVERAGE.md) maps each command and flag to its page, tray item or admin panel tab.
+Windows 11 puts a new tray icon in the hidden-icons overflow (the **^** by the clock) at first: drag it onto the taskbar, or turn **Mokuro Bunko** on under Settings → Personalization → Taskbar → Other system tray icons. Every CLI command and flag has a home in the app: [docs/rust-port/GUI-COVERAGE.md](docs/rust-port/GUI-COVERAGE.md) maps each to its page, tray item or admin panel tab (or marks it CLI-only). The tray's OCR pause and **Start at login** have no CLI command (`mokuro-bunko processor service` starts a processor at login).
 
 ## Configuration
 
 `mokuro-bunko setup` (or the first visit in a browser) creates an admin account and writes a config file. After that, edit `config.yaml` directly, use `mokuro-bunko config set <section.key> <value>`, or use the admin panel at `/_admin`.
 
-Copy [`config.example.yaml`](config.example.yaml) for a documented starting point. Key settings:
+Copy [`config.example.yaml`](config.example.yaml) for a documented starting point (it sets `storage.base_path` to `/var/lib/mokuro-bunko`, which usually needs root; change or remove that line to keep the per-user default). Key settings:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -170,7 +170,7 @@ Copy [`config.example.yaml`](config.example.yaml) for a documented starting poin
 | `update.check` | `true` | Look for new releases in the background |
 | `catalog.enabled` | `false` | Web-based library browser |
 
-Every key can also be set from the environment (`MOKURO_<SECTION>_<KEY>`, e.g. `MOKURO_OCR_BACKEND`), plus the shortcuts `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` and `MOKURO_CONFIG`. The full reference is [docs/configuration.md](docs/configuration.md).
+Most keys can also be set from the environment (`MOKURO_<SECTION>_<KEY>`, e.g. `MOKURO_OCR_BACKEND`; not `cors.allowed_origins`, the `database.*` keys, `ocr.upgrade.*` or `update.public_key`, which only the config file sets), plus the shortcuts `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` and `MOKURO_CONFIG`. The full reference is [docs/configuration.md](docs/configuration.md).
 
 ## OCR
 
@@ -182,7 +182,7 @@ The recognizers (hayai-nova, paddle-manga) run on [libtorch](https://pytorch.org
 | `paddle-manga` | [PaddleOCR-VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) with a [manga LoRA](https://huggingface.co/sorryhyun/paddleocr-vl-1.6-manga-lora): the most accurate and the slowest, about 2 GB of model files (3.6 GB in fp32). It runs on the CPU too, at about 40 s a page on 16 threads: there hayai-nova is the engine of choice. |
 | `ppocr-manga` | [PP-OCRv6 manga](https://huggingface.co/Kellenok/PP-OCRv6_manga) line detector and CTC recognizer on the CPU: small, reads scanned novel pages too. Its detector also feeds the other two. |
 
-The 0.5 `mokuro` engine and the GPL `ctd`, `animetext` and `rtdetr` detectors are gone; see the [migration guide](docs/MIGRATING-0.7.md) for what happens to old configs and existing `.mokuro` files.
+The 0.5 `mokuro` engine, the GPL `ctd` and `animetext` detectors and the `rtdetr` detector are gone; see the [migration guide](docs/MIGRATING-0.7.md) for what happens to old configs and existing `.mokuro` files.
 
 **The OCR backend** is installed once on a full build: the server (and a processor) does it by itself, in the background while it already serves, when local OCR needs it (a new server after its first-run setup), or run `mokuro-bunko install-ocr`. It looks at the hardware and installs the matching *backend pack* into `<storage>/backends/`:
 
@@ -190,7 +190,7 @@ The 0.5 `mokuro` engine and the GPL `ctd`, `animetext` and `rtdetr` detectors ar
 |---|---|---|---|
 | `cu130` | NVIDIA GPUs, Turing or newer, driver ≥ 580 (Linux, Windows) | ~350 MB from the release + ~1.6 GB of NVIDIA CUDA libraries from NVIDIA's packages on PyPI | 2.5 GB |
 | `rocm7.1` | AMD Radeon RX 6000 (gfx1030; RX 6600/6700 too: `HSA_OVERRIDE_GFX_VERSION=10.3.0` is set automatically), RX 7000, RX 9000 (Linux) | ~3 GB | 6.8 GB |
-| `cpu` | everything else (Linux x86_64, Windows, macOS on Apple silicon) | ~75 MB | 0.4 GB |
+| `cpu` | everything else (Linux x86_64, Windows, macOS on Apple silicon) | ~80 MB | 0.4 GB |
 
 On the CPU, OCR runs in fp32 like 0.5.2 (bf16 is an opt-in on CPUs with AVX512-BF16). Every file is checked against the signed release manifest. `install-ocr` picks the pack `ocr.backend` asks for on this hardware (`auto`: the GPU it finds; `cpu`: the CPU even with a GPU; `cuda`/`rocm`: that GPU, or the CPU with a hint when there is none). `install-ocr --list` shows what it detected, `--variant` picks a pack by hand, `--from <dir>` installs from downloaded files (air-gapped hosts). The Docker image carries no pack and installs it the same way. ROCm needs a few system libraries (`libnuma`, including the unversioned `libnuma.so`; Debian/Ubuntu: `libnuma-dev`, Arch: `numactl`) — `install-ocr` and `doctor` name what is missing.
 
@@ -206,10 +206,10 @@ OCR can run on another machine, which is how a lite server on a 1 GB VPS gets it
 
 ```bash
 mokuro-bunko admin add-user gpu-box --role processor   # on the library; asks for the password
-mokuro-bunko processor setup                           # on the GPU machine: checks the account, writes processor.yaml, starts it
+mokuro-bunko processor setup                           # on the GPU machine: checks the account, writes processor.yaml, offers to run it as a service
 ```
 
-`processor setup` also offers to start the processor with the machine (a systemd user unit on Linux, a launchd agent on macOS, a Startup entry on Windows). The processor dials out to the library over HTTPS and one WebSocket, so nothing has to be opened on it and it works behind NAT. Behind a reverse proxy the `/_processor/` paths must pass WebSockets and unbuffered uploads: see the [deployment walkthrough](docs/deployment.md#remote-ocr-processors) and [remote OCR processors](docs/configuration.md#remote-ocr-processors). A Docker processor is in [`deploy/docker-compose.processor.yml`](deploy/docker-compose.processor.yml). Libraries and processors must both be 0.7 (protocol v3).
+That service starts the processor now and at every login (a systemd user unit on Linux, a launchd agent on macOS, a Startup entry on Windows); without it (declined, `--no-service`, or no systemd) setup prints the `mokuro-bunko processor serve --config processor.yaml` command to run yourself. The processor dials out to the library over HTTPS and one WebSocket, so nothing has to be opened on it and it works behind NAT. Behind a reverse proxy the `/_processor/` paths must pass WebSockets and unbuffered uploads: see the [deployment walkthrough](docs/deployment.md#remote-ocr-processors) and [remote OCR processors](docs/configuration.md#remote-ocr-processors). A Docker processor is in [`deploy/docker-compose.processor.yml`](deploy/docker-compose.processor.yml). Libraries and processors must both be 0.7 (protocol v3).
 
 ## Updates
 
@@ -220,7 +220,7 @@ The server checks `releases/latest` for a signed `release.json` every 12 hours (
 | Tarball, `install.sh` as a user, Windows zip or `install.ps1` | One click: downloads the archive, checks the ed25519 signature of the manifest and the sha256, swaps the executable and restarts. |
 | `install.sh` as root (system unit), Docker, distro packages | Notice only: re-run `install.sh`, or pull the new image. |
 
-From a terminal: `mokuro-bunko update check` and `mokuro-bunko update apply [--yes] [--restart]`. A processor machine updates with the same commands. Turn the background check off with `update.check: false`.
+From a terminal: `mokuro-bunko update check` and `mokuro-bunko update apply [--yes] [--restart]`. On a processor machine `update apply` replaces the binary, but `--restart` starts a library server, so restart the processor yourself (its service); `processor.auto_update: true` in processor.yaml makes a processor follow its library's version. Turn the background check off with `update.check: false`.
 
 ## User roles
 
@@ -271,10 +271,10 @@ cd mokuro-bunko
 cargo build --release -p mokuro-bunko                           # full build
 cargo build --release -p mokuro-bunko --no-default-features     # lite: server only
 cargo run -p xtask -- torch-pack --variant cpu --out dist       # an OCR backend pack (cpu|cu130|rocm7.1)
-mokuro-bunko install-ocr --from dist                            # install it
+mokuro-bunko install-ocr --from dist --variant cpu              # install it (same --variant)
 ```
 
-Cargo features of `mokuro-bunko`: `ocr` (on by default: ONNX Runtime on the CPU, the libtorch pack loader, local OCR and the `processor` command) and `tray` (on by default: the desktop tray). The ONNX Runtime binaries are fetched at build time; libtorch only by `xtask torch-pack` (the binary never links it). The ONNX Runtime GPU execution providers `cuda`, `webgpu`, `directml`, `coreml` still build but are not released. Release archives, signing and Docker images are built with `cargo run -p xtask -- <command>` (see [docs/rust-port/PACKAGING.md](docs/rust-port/PACKAGING.md)); the design is in [docs/rust-port/ARCHITECTURE.md](docs/rust-port/ARCHITECTURE.md).
+Cargo features of `mokuro-bunko`: `ocr` (on by default: ONNX Runtime on the CPU, the libtorch pack loader, local OCR and the `processor` command) and `tray` (on by default: the desktop tray). The ONNX Runtime binaries are fetched at build time; libtorch only by `xtask torch-pack` (the binary never links it). The ONNX Runtime GPU execution providers `cuda`, `webgpu`, `directml`, `coreml` remain as features but no release ships them (CI checks only `cuda` and `webgpu`). Release archives, backend packs, the manifest and signatures are built with `cargo run -p xtask -- <command>`; Docker images with `docker build -f deploy/docker/Dockerfile[.lite] .` (see [docs/rust-port/PACKAGING.md](docs/rust-port/PACKAGING.md)); the design is in [docs/rust-port/ARCHITECTURE.md](docs/rust-port/ARCHITECTURE.md).
 
 ```bash
 cargo test --workspace      # run tests
@@ -283,4 +283,4 @@ cargo clippy --workspace    # lints
 
 ## License
 
-[Mozilla Public License 2.0](LICENSE). Every release archive carries a `THIRD-PARTY-LICENSES.md` listing the licences of all bundled dependencies and native components (generated at build time; a copyleft licence with no permissive alternative fails the build). The OCR models are Apache-2.0 and are credited in the release notes, as are the datasets their model cards name.
+[Mozilla Public License 2.0](LICENSE). Every program archive carries a `THIRD-PARTY-LICENSES.md` listing the licences of all bundled dependencies and native components (generated at build time; a copyleft licence with no permissive alternative fails the build); the OCR backend packs carry theirs in a `licenses/` folder. The OCR models are Apache-2.0; their sources, attributions and the datasets their model cards name are listed in [docs/rust-port/MODELS.md](docs/rust-port/MODELS.md) §2.
