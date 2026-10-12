@@ -355,7 +355,7 @@ pub fn set_omp_threads(n: u32) {
 /// (libtorch has its own, libiomp5md). When the last package is freed (a session
 /// closes), Windows unloads vcomp140.dll while its worker threads are still parked in
 /// it, and the process dies with an access violation (`VCOMP140.DLL_unloaded`,
-/// 0xC0000005, measured on host-c after every CPU volume). Pin it once loaded: it then
+/// 0xC0000005, measured on a Windows Ryzen 3800X host after every CPU volume). Pin it once loaded: it then
 /// stays mapped for the life of the process. A no-op for packages that do not use it.
 #[cfg(windows)]
 fn pin_msvc_openmp() {

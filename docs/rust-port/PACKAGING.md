@@ -633,7 +633,7 @@ Verified locally 2026-10-02 (stream C, libtorch backend; details in §8):
   keep rules, ROCm arch trimming, split + reassembly, pack.json round trip;
   `bunko-update` tests cover unpacking split archives, whole-archive / per-file
   checksums, unlisted and unsafe entries, links, wheel member extraction.
-- `install-ocr --from` installed the cpu pack (desktop), the cu130 pack on host-a with
+- `install-ocr --from` installed the cpu pack (desktop), the cu130 pack on an RTX 4090 host with
   the NVIDIA wheels **downloaded from PyPI** (1.67 GB, 27 s) and the 2-part rocm7.1 pack
   (desktop); the packs then ran hayai-nova / paddle-manga through their C ABI on the
   CPU, an RTX 4090 and an RX 9070 XT (§8 table), the ROCm one also in a clean Debian
@@ -656,7 +656,7 @@ Verified locally 2026-10-02 (stream C, libtorch backend; details in §8):
   (`OCR backend: torch-cpu-2.13.0`), `install-ocr --list` reports the baked pack, an
   admin account is created with `admin add-user`, and a 10-page cut of Dr. Stone 01
   dropped into the library is OCRed by hayai-nova bf16 on the CPU in 9.2 s — **10/10
-  pages, 54/54 blocks identical to 0.5.2 torch fp32** (host-a reference). The compiled
+  pages, 54/54 blocks identical to 0.5.2 torch fp32** (RTX 4090 reference). The compiled
   package had to be built in Debian 12 and have its exec-stack flag cleared (§8 open
   items): packages built on Arch need GLIBC_2.43.
 - **CUDA image, with the cu130 pack baked in** (the design before 2026-10-07; since
@@ -668,9 +668,9 @@ Verified locally 2026-10-02 (stream C, libtorch backend; details in §8):
   libtorch is loaded but sees no GPU") and the server OCRs the 10-page volume on the CPU
   with hayai-nova fp32 (54/54 blocks = 0.5.2 fp32) and a ppocr-manga layer. (The first
   run offered only ppocr-manga: the CPU package was under the old target name.)
-  **Not run on an NVIDIA GPU**: host-a has no Docker / NVIDIA Container Toolkit (podman
+  **Not run on an NVIDIA GPU**: the RTX 4090 host has no Docker / NVIDIA Container Toolkit (podman
   without CDI), so per the owner's instructions it stayed build-only; the identical
-  cu130 pack was verified natively on host-a's RTX 4090 (§8). Both containers stop
+  cu130 pack was verified natively on that RTX 4090 (§8). Both containers stop
   cleanly on `docker stop` (exit 0).
 - `xtask docker-context` with a stand-in full archive and the real cpu + cu130 pack
   archives (the baked design): `amd64/full` and `amd64/cuda` got the binary,
@@ -768,7 +768,7 @@ sha256 + size, every extracted file pinned by sha256 + size) and `links`: every 
 library whose SONAME differs from its file name is also reachable under the SONAME
 (the ROCm zip names `libamd_comgr.so` what `libtorch_cpu.so` and others NEED as
 `libamd_comgr.so.3`; without it ld.so searches the host, picks `/opt/rocm` where there is
-one and fails where there is not — seen on host-e). The links are symlink entries in the
+one and fails where there is not — seen on an RX 6600 host). The links are symlink entries in the
 archive (so a plain `tar -x` works), listed in pack.json (the installer checks each
 against it and creates them, as copies on Windows) and created by `--no-archive` too. The
 closure check resolves NEEDED names by **file or link name inside the pack** only, never
@@ -980,13 +980,13 @@ What links them (readelf, the cu130 zip + wheels): `libtorch_cuda.so` NEEDS
 `libcufile.so.0` but imports **no** symbol from it; `libtorch_nvshmem.so` (NEEDED by
 libtorch_cuda) imports 19 `nvshmem*@NVSHMEM` functions from `libnvshmem_host.so.3`;
 `libcusparse.so.12` imports 8 `__nvJitLink*_13_0@libnvJitLink.so.13` functions. All
-three load at start-up only because of those NEEDED entries (LD_DEBUG on host-a showed
+three load at start-up only because of those NEEDED entries (LD_DEBUG on the RTX 4090 host showed
 them loaded before any OCR). `xtask torch-pack` therefore builds stand-ins
 (`Spec::stubs`, `make_stubs`): for each SONAME it collects the functions the pack's
 libraries import from it, with their GNU symbol versions (from the importers'
 `.gnu.version_r`), and compiles a ~16 KB library with that SONAME and version script
 in which every function prints "mokuro-bunko: <fn> (<lib>) was called, but this OCR
-backend pack carries a stub for it" and aborts. **Measured (host-a RTX 4090, 2026-10-03,
+backend pack carries a stub for it" and aborts. **Measured (RTX 4090, 2026-10-03,
 manylinux binary, the real server)**: with the stubs loaded (LD_DEBUG lists them),
 hayai-nova bf16 and paddle-manga bf16 each OCRed the 10-page volume (0 failed pages; hayai
 1.3 s, paddle 2.8 s) and the abort message never appeared; text 10/10 pages vs 0.5.2
@@ -999,15 +999,15 @@ three NVIDIA libraries the CUDA EULA does not list as redistributable.
 | pack | where | engine, precision | crops | result |
 |---|---|---|---|---|
 | `cpu` | desktop Ryzen 9 7950X, 16 threads | hayai-nova bf16 (x86-64-v3 packages) | 40 | 40/40 = 0.5.2 torch fp32 reference, 19 crops/s |
-| `cu130` (installed by `install-ocr --from`, wheels from PyPI) | host-a RTX 4090, driver 595.58 | hayai-nova bf16 (sm_89) | 220 | 219/220 vs fp32 ref, 252 crops/s |
-| `cu130` | host-a RTX 4090 | paddle-manga bf16 | 100 | 86/100 vs fp32 ref (bf16), 80 crops/s |
-| `cu130` with stubs, manylinux binary, **real server** | host-a RTX 4090, B's sm_89 packages (weightless + shared weights) | hayai-nova bf16 + paddle-manga bf16 layer | 10 pages each | 0 failed; 10/10 pages vs 0.5.2; stubs loaded, never called |
+| `cu130` (installed by `install-ocr --from`, wheels from PyPI) | RTX 4090, driver 595.58 | hayai-nova bf16 (sm_89) | 220 | 219/220 vs fp32 ref, 252 crops/s |
+| `cu130` | RTX 4090 | paddle-manga bf16 | 100 | 86/100 vs fp32 ref (bf16), 80 crops/s |
+| `cu130` with stubs, manylinux binary, **real server** | RTX 4090, B's sm_89 packages (weightless + shared weights) | hayai-nova bf16 + paddle-manga bf16 layer | 10 pages each | 0 failed; 10/10 pages vs 0.5.2; stubs loaded, never called |
 | `rocm7.1` | desktop RX 9070 XT (gfx1201) | hayai-nova bf16 | 220 | 219/220, 89 crops/s; strace: only gfx1201 kernel files read |
 | `rocm7.1` | same GPU, **clean debian:trixie-slim container, no ROCm installed** (`/dev/kfd`, `/dev/dri`) | hayai-nova bf16 | 220 | 219/220, 86 crops/s (after `libnuma.so` was provided) |
 
 These runs used `LD_PRELOAD=<pack>/lib/libtorch.so` to work around a loader bug in
 bunko-torch at the time: AOTInductor's model `.so` needs `libtorch.so`, which the cdylib
-did not load (`--as-needed`), so ld.so searched the host — it failed on host-a
+did not load (`--as-needed`), so ld.so searched the host — it failed on the RTX 4090 host
 ("libtorch.so: cannot open shared object file") and picked Arch's ROCm
 `/usr/lib/libtorch.so` on the desktop. Fixed since: `bt_init` loads the pack's CPU
 half, GPU half and `libtorch` from its `lib/` with `RTLD_GLOBAL` before any package
@@ -1078,7 +1078,7 @@ libtorch from outside the pack is mapped (TORCH-BACKEND.md, `bt_init`).
 - **libdrm's GPU name table** (rocm7.1 pack): the bundled `libdrm_amdgpu.so.1` has
   `/opt/amdgpu/share/libdrm/amdgpu.ids` compiled in; without that file it walks the
   executable's directory looking for it (a stray "(null): No such file or directory",
-  +3 s per load, generic GPU names — seen on the fleet). The pack ships the table as
+  +3 s per load, generic GPU names — seen on test machines). The pack ships the table as
   `share/libdrm/amdgpu.ids` (libdrm `data/amdgpu.ids`, tag `libdrm-2.4.131`; MIT, the
   licence header is in `licenses/rocm/libdrm/`; repo copy in
   `packaging/torch/share/rocm7.1/`, `Spec::share_dir`) and bunko-torch's `bt_init` sets

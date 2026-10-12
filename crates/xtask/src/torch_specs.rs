@@ -261,7 +261,7 @@ const CU130_WINDOWS_WHEELS: &[Wheel] = &[
     // The AOTInductor model DLLs (`*.wrapper.pyd`) import cudart64_13.dll; nothing in
     // the pack itself does (torch_cuda.dll links the runtime statically), so the
     // closure check cannot see it. Without it every GPU package fails to load
-    // (`WinError 126`, measured on host-c).
+    // (`WinError 126`, measured on a Windows RTX 3070 host).
     Wheel {
         name: "nvidia-cuda-runtime",
         version: "13.0.96",

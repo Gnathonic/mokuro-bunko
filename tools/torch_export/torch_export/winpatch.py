@@ -1,7 +1,7 @@
 """torch 2.13 inductor fixes for NATIVE Windows (MSVC) AOTInductor builds, applied in
 memory (the venv is not edited) and only when a Windows target is built on Windows.
 
-Found by the shootout on host-c (scratch/patch_inductor.py, which edited the venv):
+Found by the shootout on a Windows host (its patch_inductor.py edited the venv):
 
 1. The GPU wrapper codegen emits ``static __attribute__((noinline)) void`` for every
    Triton launcher: GCC-only syntax, MSVC rejects it. Rewritten to ``AOTI_NOINLINE static

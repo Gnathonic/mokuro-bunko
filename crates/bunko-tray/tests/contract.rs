@@ -9,7 +9,7 @@ fn full_status() -> bc::Status {
     bc::Status {
         role: bc::Role::Processor,
         version: "0.7.0".into(),
-        name: "host-a".into(),
+        name: "gpu-box".into(),
         state: bc::State::Paused,
         pause: bc::PauseView {
             mode: Some(bc::PauseMode::Now),

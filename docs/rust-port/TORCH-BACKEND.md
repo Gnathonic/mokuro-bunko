@@ -142,7 +142,7 @@ non-empty `bunko.weights` (the `bunko.bind = "pairs"` that `build.py` writes int
 packages is not read): get the wrapper's container handle, enumerate constants with `AOTInductorModelContainerGetNumConstants` /
 `GetConstantName` / `GetConstantOriginalFQN` (the pairs are keyed by the internal constant
 *name*, not the FQN; `bunko.weights` maps FQN → weights key), build the pairs from
-`AtenTensorHandle`s of the shared tensors, call Pairs. Proven on host-c with a ctypes driver over
+`AtenTensorHandle`s of the shared tensors, call Pairs. Proven on Windows (RTX 3070) with a ctypes driver over
 the wrapper's C ABI (`wincheck.py`): paddle fp32 sm_80 bound 443/110/110 constants, crops 100/100
 vs 0.5.2 fp32 (identical to the embedded-weights packages' texts); device memory peak 5.15 GB
 vs 5.97 GB with per-package weights (−0.82 GB here, −1.24 GB once the runtime's own embedding
@@ -169,7 +169,7 @@ hoc. Every Linux/macOS package is checked for absolute build-host paths in ELF
 RUNPATH/RPATH/NEEDED/SONAME, Mach-O install name/imports/LC_RPATH and the package metadata
 (OpenMP source-location strings with the build path remain inside CPU kernels; harmless).
 
-**Run-to-run differences (paddle bf16 on host-c, 6/196 pages between two full runs).** Not the
+**Run-to-run differences (paddle bf16 on the Windows RTX 3070, 6/196 pages between two full runs).** Not the
 package: on the RTX 3070 (and the 4090) every graph is bitwise repeatable for the same inputs
 (vision/prefill/step 30/30 identical, `det2.py`; eager SDPA flash/efficient and the GEMMs too).
 But a row's result depends on the *shape* of the batch it is read in: same row, other rows
@@ -194,26 +194,26 @@ paths (`torch/<engine>/<precision>/<target>/<role>.pt2`, `torch/<engine>/<precis
 All GPU packages and all Linux CPU packages were compiled on the desktop (RX 9070 XT, **no
 NVIDIA GPU**) without touching any GPU, the Linux ones inside the glibc-2.28 container, the
 Windows CUDA ones cross-built with llvm-mingw on the host. `macos-cpu-arm64` is built on
-the Mac, `windows-cpu-x86_64-v3` with MSVC (host-c; since 2026-10-08 a GitHub runner). They run
-unchanged on the fleet (crop gates:
+the Mac, `windows-cpu-x86_64-v3` with MSVC (a Windows Ryzen 3800X host; since 2026-10-08 a GitHub runner). They run
+unchanged on other machines (crop gates:
 220 hayai / 100 paddle crops vs 0.5.2 torch on that card at that precision):
 
 | package (built on desktop) | ran on | result | crops/s (0.5.2 / shootout libtorch) |
 |---|---|---|---|
-| hayai bf16 `linux-cuda-sm_89` | host-a RTX 4090 | 220/220 | **377** (0.5.2 336 / shootout 334; same graphs compiled *on* the 4090 with autotuning: 360) |
-| hayai fp32/bf16/fp16 `linux-cuda-sm_80` | host-a 4090 · host-b RTX 4060 | 220/220 ×6 | 190/380/383 · 49/133/132 (host-b shootout bf16 123) |
-| hayai fp32/fp16 `linux-cuda-sm_75` (PTX JIT on sm_89) | host-a · host-b | 220/220 ×4 | 187/376 · 49/131 (+0.3–0.5 s first-load JIT) |
-| hayai bf16 `windows-cuda-sm_86` / `sm_80` (cross-built on Linux) | host-c RTX 3070, Windows | 220/220 ×2 | 126.5 / 130.7 (shootout, compiled on host-c with MSVC: 122.2) |
-| paddle bf16 `windows-cuda-sm_80` (cross-built) | host-c | 100/100 | 29.3 (shootout on host-c: 27.7) |
-| hayai fp32/bf16/fp16 `linux-rocm-gfx1030` | server 6900 XT · host-d 6800 · host-e 6600 (gfx1032, HSA override) | 220/220 ×9 | 88/44/115 · 64/34/85 · 37/21/50 (0.5.2 on server: 65/34/72) |
+| hayai bf16 `linux-cuda-sm_89` | RTX 4090 | 220/220 | **377** (0.5.2 336 / shootout 334; same graphs compiled *on* the 4090 with autotuning: 360) |
+| hayai fp32/bf16/fp16 `linux-cuda-sm_80` | RTX 4090 · RTX 4060 | 220/220 ×6 | 190/380/383 · 49/133/132 (4060 shootout bf16 123) |
+| hayai fp32/fp16 `linux-cuda-sm_75` (PTX JIT on sm_89) | RTX 4090 · RTX 4060 | 220/220 ×4 | 187/376 · 49/131 (+0.3–0.5 s first-load JIT) |
+| hayai bf16 `windows-cuda-sm_86` / `sm_80` (cross-built on Linux) | RTX 3070, Windows | 220/220 ×2 | 126.5 / 130.7 (shootout, compiled on that host with MSVC: 122.2) |
+| paddle bf16 `windows-cuda-sm_80` (cross-built) | RTX 3070, Windows | 100/100 | 29.3 (shootout on the same host: 27.7) |
+| hayai fp32/bf16/fp16 `linux-rocm-gfx1030` | RX 6900 XT · RX 6800 · RX 6600 (gfx1032, HSA override) | 220/220 ×9 | 88/44/115 · 64/34/85 · 37/21/50 (0.5.2 on the 6900 XT: 65/34/72) |
 | hayai bf16 `linux-rocm-gfx1201` | desktop 9070 XT | 220/220 | 174–183 (shootout frozen: 175–184) |
-| paddle fp32/bf16/fp16 `linux-cuda-sm_80` | host-a · host-b | 100/100 ×5 | 32.4/97.5/99.4 · –/26.3/26.5 (shootout 4090: 31.9/94.9/96.5, host-b bf16 26.1) |
-| paddle fp32/bf16 `linux-rocm-gfx1030` | server | 100/100 ×2 | 12.6/7.7 (0.5.2: 12.2/6.5) |
-| hayai fp32 `linux-cpu-x86_64-v3` | host-b Zen 3 (AVX2 only) | 220/220 | 5.5 (8 threads) |
+| paddle fp32/bf16/fp16 `linux-cuda-sm_80` | RTX 4090 · RTX 4060 | 100/100 ×5 | 32.4/97.5/99.4 · –/26.3/26.5 (shootout 4090: 31.9/94.9/96.5, 4060 bf16 26.1) |
+| paddle fp32/bf16 `linux-rocm-gfx1030` | RX 6900 XT | 100/100 ×2 | 12.6/7.7 (0.5.2: 12.2/6.5) |
+| hayai fp32 `linux-cpu-x86_64-v3` | Zen 3 (AVX2 only) | 220/220 | 5.5 (8 threads) |
 | hayai bf16 `linux-cpu-x86_64-v4bf16` | desktop Zen 4 | 220/220 (= shootout CPU bf16) | 18.4 (16 threads, host load 16) |
 | paddle fp32 `linux-cpu-x86_64-v3` | desktop Zen 4 | 100/100 | 1.05 (16 threads) |
 | hayai, paddle fp32 `macos-cpu-arm64` (built on the Mac) | M2 Pro | ids equal to eager, max \|Δ\| 2e-5 / 7e-5 | (verify.py; no crop harness on the Mac) |
-| hayai, paddle fp32 `windows-cpu-x86_64-v3` (native MSVC on host-c) | host-c 3800X | ids equal to eager, max \|Δ\| 9e-6 / 2e-5 | (verify.py) |
+| hayai, paddle fp32 `windows-cpu-x86_64-v3` (native MSVC on Windows) | Ryzen 3800X, Windows | ids equal to eager, max \|Δ\| 9e-6 / 2e-5 | (verify.py) |
 | **weightless CPU (2026-10-08)**, vs the embedded packages, alternating runs, Dr Stone 01 20 pages | | | |
 | hayai fp32 `linux-cpu-x86_64-v3` (container) | Ryzen 7 5800X, idle | ids = eager (= embedded's max \|Δ\|); `.mokuro` byte-identical to embedded (8/8 runs) | 0.256 vs 0.257 p/s; peak RSS 1643 vs 1864 MiB (one buffer per weights file; 1714 with one allocation per tensor) |
 | hayai bf16 `linux-cpu-x86_64-v4bf16` (container) | Ryzen 9 7950X, host load 18–30 | ids = eager; `.mokuro` byte-identical (14/14) | 0.709 vs 0.723 p/s (noise: same-process graph times equal); peak RSS 1220 vs 1337 MiB |
@@ -255,8 +255,8 @@ fake-device flow (`Failed to compile multi-arch bundle`); not pursued, see above
   `cpp.simdlen=256`; the build fails on any AVX-512 (zmm) instruction in x86-64-v3 code.
   `windows-cpu-x86_64-v3` is MSVC `cpp.simdlen=256` (`/arch:AVX2`); `linux-cpu-x86_64-v4bf16`
   is `-march=x86-64-v4`, `cpp.simdlen=512`, used only on AVX512_BF16 hosts.
-  Desktop-built (Zen 4) packages ran on Zen 3 (host-b 5800X, server 5800X, host-d 5500),
-  Zen 2 (host-c 3800X) and Zen 5 (host-a). The shootout's host-b SIGILL (host-a-native packages)
+  Desktop-built (Zen 4) packages ran on Zen 3 (two 5800X hosts, a 5500),
+  Zen 2 (3800X) and Zen 5. The shootout's SIGILL on Zen 3 (packages built natively on Zen 5)
   cannot recur.
 * glibc/libstdc++: packages built in the manylinux_2_28 container need GLIBC_2.14,
   GLIBCXX_3.4.21, CXXABI_1.3.11 (libtorch 2.13 itself: 2.28 / 3.4.22 / 1.3.11); host-built
@@ -265,7 +265,7 @@ fake-device flow (`Failed to compile multi-arch bundle`); not pursued, see above
 * CPU packages: `cpp.dynamic_threads=True` (OpenMP width set at run time).
 * Reproducible: two container builds of the same target are byte-identical after
   normalization; weights files are identical across all targets of an engine × precision.
-  (Stream A's 4/196-page difference was between the shootout's host-a-native build and a
+  (Stream A's 4/196-page difference was between the shootout's Zen 5-native build and a
   different build — different SDPA backend/fusion/precast: different numerics, each within
   0.5.2's own fp32-vs-bf16 range. A release ships one pinned build.)
 
@@ -361,7 +361,7 @@ the variant-free torch version (`2.13.0`): every target shares them.
 #### The release set (2026-10-03)
 
 Built with the final tool (container for Linux, Linux cross-build for `windows-cuda-*`, native
-MSVC on host-c for `windows-cpu-x86_64-v3`, native on the Mac for `macos-cpu-arm64`):
+MSVC on Windows for `windows-cpu-x86_64-v3`, native on the Mac for `macos-cpu-arm64`):
 hayai-nova fp32/bf16/fp16 and paddle-manga fp32/bf16/fp16 × `linux-cuda-sm_80`, `sm_75`
 (no bf16), `linux-rocm-gfx1030/1100/1101/1102/1200/1201`, `windows-cuda-sm_80/sm_75`; CPU:
 hayai fp32 `linux-cpu-x86_64-v3`, `windows-cpu-x86_64-v3`, `macos-cpu-arm64`, hayai bf16
@@ -386,10 +386,10 @@ random inputs: in bf16 the step's argmax can tie-flip between eager and compiled
   All but the driver and glibc/libstdc++ are in the pack's `lib/`.
 * The rocm7.1 wheel's `torch/lib` names its libraries without SONAME versions
   (`libamd_comgr.so` has SONAME `libamd_comgr.so.3`, `libhiprtc`, `librocroller` and
-  `librocprofiler-sdk` need it): on a host without /opt/rocm (host-d, host-e) libtorch fails
+  `librocprofiler-sdk` need it): on a host without /opt/rocm (the RX 6800 and RX 6600 hosts) libtorch fails
   with `libamd_comgr.so.3: cannot open`. The ROCm pack must add the SONAME symlinks (26 of
   them: `libamdhip64.so.7`, `libhsa-runtime64.so.1`, `librocblas.so.5`, … — list with
-  `readelf -d $f | grep SONAME` over `torch/lib`). On server/desktop the system ROCm 7.2's
+  `readelf -d $f | grep SONAME` over `torch/lib`). On hosts with ROCm 7.2 installed (the RX 6900 XT host, the desktop) the system ROCm 7.2's
   comgr was silently used instead.
 * Windows packages import `torch_cpu.dll`, `torch_cuda.dll`, `nvcuda.dll` (driver),
   `cudart64_13.dll` (in the wheel's `torch/lib`), the UCRT (`api-ms-win-crt-*`, Windows 10+).
@@ -412,7 +412,7 @@ random inputs: in bf16 the step's argmax can tie-flip between eager and compiled
 
 | stream | owns | deliverable |
 |---|---|---|
-| **A. runtime** | `crates/bunko-torch` (new), `crates/bunko-engines`, `crates/bunko-vlm` (gate the ORT recognizer behind `onnx-vlm`), `crates/bunko-ocr/src/models.rs` (torch package locations) | cdylib + loader; hayai/paddle via libtorch; parity on desktop ROCm, host-a CUDA, CPU |
+| **A. runtime** | `crates/bunko-torch` (new), `crates/bunko-engines`, `crates/bunko-vlm` (gate the ORT recognizer behind `onnx-vlm`), `crates/bunko-ocr/src/models.rs` (torch package locations) | cdylib + loader; hayai/paddle via libtorch; parity on desktop ROCm, RTX 4090 CUDA, CPU |
 | **B. export** | `tools/torch_export/` (new; the shootout's `export_aoti.py` grown up) | per-target `.pt2` builds, manifest entries, answers to A1–A3 |
 | **C. packaging + Docker** | `xtask`, `packaging/`, `deploy/`, `crates/mokuro-bunko` (features, `install-ocr`), `docs/` (README, MIGRATING, PACKAGING) | pack builder, install flow, flavors, Docker images + instructions; local builds only — **no CI runs, pushes or uploads** until the owner approves |
 
@@ -421,7 +421,7 @@ Open questions B answers first, because they decide the pipeline:
 - **A1** Can `.pt2` packages be compiled without the target GPU (CUDA: `TORCH_CUDA_ARCH_LIST`,
   `aot_inductor.emit_multi_arch_kernel`; ROCm: `PYTORCH_ROCM_ARCH`)? Triton autotuning off.
 - **A2** Portability: does one package run on every card of its arch family, and on any x86-64-v3
-  host CPU? (Fleet: 4090/4060 sm_89, 3070 sm_86; 6900 XT/6800/6600 gfx1030; 9070 XT gfx1201.)
+  host CPU? (Test GPUs: 4090/4060 sm_89, 3070 sm_86; 6900 XT/6800/6600 gfx1030; 9070 XT gfx1201.)
 - **A3** Weight split: one weights blob shared by vision/prefill/step (today each `.pt2` embeds
   its own copy: hayai 0.8 GB, paddle 2.3 GB per precision).
 - **A4** Minimal libtorch file set per variant (CUDA ~2.8 GB, ROCm ~6.6 GB unpacked) and the
@@ -432,8 +432,8 @@ Open questions B answers first, because they decide the pipeline:
 1. Crop parity: 220 hayai / 100 paddle crops identical to 0.5.2 torch at each precision.
 2. Full volume (Dr Stone 01, 196 pages): fp32 sidecars text-identical to 0.5.2; half precision
    within 0.5.2's own fp32-vs-half differences.
-3. Speed ≥ tuned 0.5.2 on every fleet machine (desktop 9070 XT, host-a 4090, host-b 4060,
-   server/host-d/host-e RDNA2, host-c 3070 Windows, Mac M2 Pro CPU).
+3. Speed ≥ tuned 0.5.2 on every test machine (desktop 9070 XT, RTX 4090, RTX 4060,
+   RDNA2 cards (RX 6900 XT, 6800, 6600), RTX 3070 Windows, Mac M2 Pro CPU).
 4. Docker: the full image (pack downloaded on first start) runs a full volume end to end on the
    CPU and on a GPU.
 5. Dry run against a copy of a real library + database.
@@ -572,7 +572,7 @@ threads and detect is derived against that pace (x6). Measured, default pools, D
 `/usr/share/libdrm` (else libdrm walks the executable's directory tree, prints "(null): No
 such file or directory" and names every card "AMD Radeon Graphics"), and 0.5.2's
 `rocm_gfx.override_for`: a card whose target is not built but whose family's `…0` is gets
-`HSA_OVERRIDE_GFX_VERSION` (RX 6600 gfx1032 → 10.3.0, verified on host-e). A user's
+`HSA_OVERRIDE_GFX_VERSION` (RX 6600 gfx1032 → 10.3.0, verified on an RX 6600). A user's
 `HSA_OVERRIDE_GFX_VERSION` is kept; a user's `AMDGPU_ASIC_ID_TABLE_PATHS` too, with the two
 directories (those holding `amdgpu.ids`) put in front of it.
 
@@ -649,7 +649,7 @@ the release since its CPU packages became weightless, 2026-10-09). (2) SIGTERM m
 server's OCR stop now awaits the local processor (`LocalChannels::finished`), whose
 sessions drop their runner -- joining the stage threads and freeing the recognizers --
 before they report their end; `bt_free` after the exit hook has run leaks the handle
-instead of freeing into a torn-down CUDA/HIP allocator. Before: host-a CUDA 3/3 crashed
+instead of freeing into a torn-down CUDA/HIP allocator. Before: RTX 4090 CUDA 3/3 crashed
 (SIGABRT, SIGSEGV x2), desktop ROCm 1/3 SIGSEGV + 2/3 "API call failed"; after: 10/10
 clean (rc 0, 5 mid-volume + 5 mid-benchmark) on each.
 
@@ -666,7 +666,7 @@ clean (rc 0, 5 mid-volume + 5 mid-benchmark) on each.
 
 ### Verified (2026-10-02)
 
-| gate | desktop RX 9070 XT (ROCm 7.1) | host-a RTX 4090 (cu130) | desktop CPU (7950X) |
+| gate | desktop RX 9070 XT (ROCm 7.1) | RTX 4090 (cu130) | desktop CPU (7950X) |
 |---|---|---|---|
 | crops hayai fp32/bf16/fp16 vs 0.5.2 | 220/220 ×3 (23.9/158.5/161.4 crops/s) | 220/220 ×3 (181/336/347) | bf16 220/220 (cpu pack) |
 | crops paddle fp32/bf16/fp16 | 100/100 ×3 (2.4*/50.0/50.3) | 100/100 ×3 (32.1/92.4/94.3) | — (no CPU paddle package) |

@@ -26,7 +26,7 @@ HALF = (torch.float16, torch.bfloat16)
 def cuda_backend(sm: int, dtype: torch.dtype, has_mask: bool, hd_q: int, hd_v: int, flash: bool = True) -> str:
     """torch 2.13 cu130 select_sdp_backend for dense, inference-mode, non-causal, no-dropout calls.
     ``flash=False``: the Windows wheels are built without flash attention (USE_FLASH_ATTENTION
-    off; measured on host-c: "USE_FLASH_ATTENTION was not enabled for build")."""
+    off; measured on Windows: "USE_FLASH_ATTENTION was not enabled for build")."""
     major = sm // 10
     if major in (9, 10) and dtype in HALF and hd_q == hd_v and hd_q <= 256 and hd_q % 8 == 0:
         return "cudnn"  # check_prefer_cudnn_attention: cuDNN >= 9.15.1 first on sm9x/sm10x

@@ -203,7 +203,7 @@ pub(crate) mod tests {
     use super::*;
 
     /// The example from GUI.md §2, verbatim.
-    pub(crate) const CONTRACT_EXAMPLE: &str = r#"{ "role": "processor", "version": "0.7.0", "name": "host-a",
+    pub(crate) const CONTRACT_EXAMPLE: &str = r#"{ "role": "processor", "version": "0.7.0", "name": "gpu-box",
   "state": "working",
   "pause": {"mode": null, "until": null, "reason": null},
   "library": {"url": "https://lib.example", "connected": true, "queue_pending": 12},

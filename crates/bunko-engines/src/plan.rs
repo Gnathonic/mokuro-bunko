@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_defaults() {
+    fn host_shape_defaults() {
         let none = PoolsSpec::default();
         let line = |logical: usize, physical: usize, fast: bool, engine: &str| {
             let h = Host {
@@ -436,7 +436,7 @@ mod tests {
             };
             graph_line(&plan(engine, Road::Reconciled, "gpu:0", &none, &h))
         };
-        // 8-core/16-thread hosts (host-b 4060, server/host-e RDNA2): detect 3, was 1.
+        // 8-core/16-thread hosts (5800X + RTX 4060, 5800X + RDNA2): detect 3, was 1.
         assert!(
             line(16, 8, true, "hayai-nova")
                 .starts_with("detect (cpu x3, queue 4) -> engine (gpu:0 x1")
@@ -445,9 +445,9 @@ mod tests {
             line(16, 8, false, "hayai-nova")
                 .starts_with("detect (cpu x3, queue 4) -> engine (gpu:0 x1")
         );
-        // 6-core/12-thread (host-d): detect 3.
+        // 6-core/12-thread (Ryzen 5500): detect 3.
         assert!(line(12, 6, false, "hayai-nova").starts_with("detect (cpu x3"));
-        // 16-core desktop 9070 XT, 24-core host-a 4090: engine 2, detect 6.
+        // 16-core desktop 9070 XT, 24-core RTX 4090 host: engine 2, detect 6.
         assert!(
             line(32, 16, true, "hayai-nova")
                 .starts_with("detect (cpu x6, queue 6) -> engine (gpu:0 x2, queue 2)")

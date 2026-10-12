@@ -13,7 +13,7 @@ A target names what a package runs on: ``<os>-<backend>-<arch>``.
 Packages never contain weights: every target of one engine x precision, GPU or CPU,
 shares the same ``weights-{vision,decoder}.safetensors`` (see build.py). Their host code (the AOTI wrapper) is
 compiled for x86-64-v3 so one package runs on any AVX2 host (a package built with the
-default ``-march=native`` on a Zen 5 SIGILLs on a Zen 3: the shootout's host-b failure).
+default ``-march=native`` on a Zen 5 SIGILLs on a Zen 3: the shootout's Zen 3 failure).
 CPU packages are not frozen either (freezing folds prepacked copies of the weights into
 the package; ``TORCH_EXPORT_CPU_EMBED=1`` still builds that layout).
 """

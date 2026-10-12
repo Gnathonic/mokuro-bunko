@@ -108,7 +108,7 @@ volume" and "now" (plus timed pauses); tray on Windows, macOS and Linux.
 All JSON. `GET /control/status`:
 
 ```json
-{ "role": "processor|server|gui", "version": "0.7.0", "name": "host-a",
+{ "role": "processor|server|gui", "version": "0.7.0", "name": "gpu-box",
   "state": "working|idle|installing|paused|pausing|connecting|disconnected|error|setup",
   "pause": {"mode": "after_volume|now|null", "until": "ISO-8601|null", "reason": "user|schedule|null",
             "since": "ISO-8601|null"},
@@ -426,4 +426,4 @@ pages (§1) and dropped the rest.
 |---|---|---|
 | **G1 control** | control API + `.control.json` in serve/processor/gui, pause state machine + persistence, protocol `Availability`/`Released` + scheduler + admin processor list, stats aggregation | unit + integration tests (pause after/now/until, requeue without failure, restart keeps pause, token required, loopback only) |
 | **G2 web app** | `mokuro-bunko gui`, `/app` wizard + settings + dashboard pages and `/app/api`, GUI-COVERAGE.md + coverage test, install progress | Playwright end-to-end on the desktop for each flow (library, processor, OCR install, autostart) against real binaries; coverage test green |
-| **G3 tray + packaging** | `crates/bunko-tray`, icons, menus, supervision, autostart, packaging in xtask/scripts/deploy | runs on Linux (KDE/GNOME+AppIndicator), Windows (host-c), macOS (mac): screenshots of each menu state, pause/resume round trip against a real processor |
+| **G3 tray + packaging** | `crates/bunko-tray`, icons, menus, supervision, autostart, packaging in xtask/scripts/deploy | runs on Linux (KDE/GNOME+AppIndicator), Windows, macOS: screenshots of each menu state, pause/resume round trip against a real processor |
