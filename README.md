@@ -17,7 +17,7 @@ A self-hosted manga library server with WebDAV, built-in OCR processing, and mul
 - Checks for new releases (signed) and shows them in the admin panel; self-managed installs update in one click, Docker and package installs get a notice (see [Updates](#updates))
 - Asks search engines and crawlers to stay out (`X-Robots-Tag: noindex` on every response, deny-all `robots.txt`)
 
-See [CHANGELOG.md](CHANGELOG.md) for release history.
+See [CHANGELOG.md](CHANGELOG.md) for release history and [ROADMAP.md](ROADMAP.md) for what comes next (0.8 remote storage, 0.9 streaming, 1.0 books).
 
 ## Download
 
