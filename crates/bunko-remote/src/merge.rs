@@ -33,7 +33,9 @@
 //!   not `Online` (a `Suspect` mid-merge included).
 //! - **Commits:** a move or trash rewrites its ledger row and the index at COMMITTED
 //!   (the outbox's own `commit_move`/`commit_trash`), so the feed's echo is exact: no
-//!   hooks run twice and nothing counts toward D19. The DB hooks run once per file
+//!   hooks run twice and nothing counts toward D19. Each step holds the commit window
+//!   from its provider call through COMMITTED, so a feed poll that lands in between
+//!   (MEGA's push wakes the feed at once) waits for the ledger row. The DB hooks run once per file
 //!   ([`CloudHooks::merged`](crate::CloudHooks::merged) for a move,
 //!   [`CloudHooks::removed`](crate::CloudHooks::removed) for a trashed loser file).
 //! - **Finishing:** an emptied losing member node is trashed only after a direct
@@ -54,6 +56,7 @@ use parking_lot::{Condvar, Mutex};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::OwnedRwLockReadGuard;
 
 use crate::backend::{BErr, Backend, OpCtx, Pid, RNode, UploadSource, UploadTarget};
 use crate::cache::{SMALL_MAX, now_ms};
@@ -1893,7 +1896,7 @@ impl<B: Backend> RemoteStore<B> {
             && n.parent.as_deref() == Some(parent.as_str())
             && nfc(&n.name_raw) == name
         {
-            return self.moved(gid, op, &src, &pid, n, ex, hooks);
+            return self.moved(gid, op, &src, &pid, n, ex, hooks, None);
         }
         let current = match self.stat(&pid) {
             Ok(Some(n)) if !n.trashed => n,
@@ -1916,6 +1919,7 @@ impl<B: Backend> RemoteStore<B> {
         let new_name = (nfc(&current.name_raw) != name).then_some(name.clone());
         let backend = self.core.backend.clone();
         let p2 = pid.clone();
+        let window = self.block_on("case merge", self.core.commit_window());
         let r = self.block_on_as("case merge", Some(ApiClass::Background), async move {
             backend
                 .update(&p2, new_parent.as_deref(), new_name.as_deref(), None)
@@ -1924,7 +1928,7 @@ impl<B: Backend> RemoteStore<B> {
         match r {
             Ok(n) => {
                 self.core.fail_at("MERGE_MOVED")?;
-                self.moved(gid, op, &src, &pid, n, ex, hooks)
+                self.moved(gid, op, &src, &pid, n, ex, hooks, Some(window))
             }
             Err(BErr::NameConflict | BErr::PreconditionFailed) => {
                 // WebDAV `Overwrite: F` answered 412: the name is taken.
@@ -1952,7 +1956,8 @@ impl<B: Backend> RemoteStore<B> {
     }
 
     /// COMMITTED for a merge move: ledger, index, events, the DB hooks once, then (on
-    /// providers that allow duplicate names) a direct re-list of the winner.
+    /// providers that allow duplicate names) a direct re-list of the winner. `window`
+    /// (the commit window, held since the provider call) is released once committed.
     #[allow(clippy::too_many_arguments)]
     fn moved(
         &self,
@@ -1963,12 +1968,14 @@ impl<B: Backend> RemoteStore<B> {
         n: RNode,
         ex: &Extra,
         hooks: &mut Vec<HookCall>,
+        window: Option<OwnedRwLockReadGuard<()>>,
     ) -> Result<StepEnd, Crash> {
         let is_dir = n.is_dir;
         let parent = op.parent_pid.clone().unwrap_or_default();
         let name = nfc(&n.name_raw);
         let dest = op.dest.clone();
         self.core.commit_move(op, src, pid, n)?;
+        drop(window);
         self.group_bump(gid, "moved");
         if ex.hooks {
             hooks.push(HookCall::Merged(
@@ -2072,6 +2079,7 @@ impl<B: Backend> RemoteStore<B> {
             (self.core.caps.cas_overwrite && !current.is_dir).then(|| current.cver.clone());
         let core = self.core.clone();
         let p2 = pid.to_string();
+        let _window = self.block_on("case merge", self.core.commit_window());
         let r = self.block_on_as("case merge", Some(ApiClass::Background), async move {
             core.discard_node(&p2, false, if_cver.as_deref()).await
         });
@@ -2150,6 +2158,7 @@ impl<B: Backend> RemoteStore<B> {
         };
         let backend = self.core.backend.clone();
         let (p2, n2, s2, oid) = (parent.clone(), name.clone(), staged.clone(), op.op_id());
+        let _window = self.block_on("case merge", self.core.commit_window());
         let r = self.block_on_as("case merge", Some(ApiClass::Background), async move {
             let mut ctx = OpCtx {
                 op_id: oid,
@@ -2253,6 +2262,8 @@ impl<B: Backend> RemoteStore<B> {
         let if_cver = self.core.caps.cas_overwrite.then(|| base.clone());
         let backend = self.core.backend.clone();
         let (p2, s2, oid) = (pid.clone(), staged.clone(), op.op_id());
+        // Held through `replaced` (its trash of a superseded node included).
+        let _window = self.block_on("case merge", self.core.commit_window());
         let r = self.block_on_as("case merge", Some(ApiClass::Background), async move {
             let mut ctx = OpCtx {
                 op_id: oid,

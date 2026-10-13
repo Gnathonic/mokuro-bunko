@@ -42,8 +42,15 @@
 //! delivery replays them at the next start). Events are delivered after commit too;
 //! a lost one is covered by the `Rescan` every start emits.
 //!
-//! Lock order: [`FeedState`] methods run with the index locked and must not lock it
-//! themselves; [`CloudHooks`], the foreign-JSON callback and the sinks run unlocked.
+//! **Own writes in flight**: a STEADY page applies under the exclusive side of the
+//! commit window ([`Feed::with_commit_gate`]), which Bunko's own writes hold shared
+//! from their provider call through COMMITTED; a page that already shows such a
+//! write waits for its ledger row, so its echo runs no hooks however the poll was
+//! timed (MEGA's push wakes the feed the moment the provider changes).
+//!
+//! Lock order: the commit window, then the index. [`FeedState`] methods run with the
+//! index locked and must not lock it themselves; [`CloudHooks`], the foreign-JSON
+//! callback and the sinks run unlocked (the commit window released too).
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
@@ -55,7 +62,7 @@ use bunko_store::{WatchEvent, WatchSink};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{OwnedRwLockWriteGuard, RwLock, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -445,6 +452,9 @@ struct Core<B: Backend> {
     clock: Clock,
     state_tx: watch::Sender<EngineState>,
     active: Arc<AtomicBool>,
+    /// The commit window ([`Feed::with_commit_gate`]): a STEADY page applies under
+    /// its exclusive side.
+    commit_gate: Arc<RwLock<()>>,
 }
 
 impl<B: Backend> Core<B> {
@@ -988,6 +998,7 @@ impl<B: Backend> Feed<B> {
                 clock: Clock::now(),
                 state_tx,
                 active: Arc::new(AtomicBool::new(false)),
+                commit_gate: Arc::new(RwLock::new(())),
             },
         }
     }
@@ -1001,6 +1012,17 @@ impl<B: Backend> Feed<B> {
     /// The durable state's answers (echoes, sweep keeps).
     pub fn with_state(mut self, state: Arc<dyn FeedState>) -> Self {
         self.core.fstate = state;
+        self
+    }
+
+    /// The writer's commit window. Bunko's own writes hold it shared from just
+    /// before the provider call that changes a node until their COMMITTED rewrite
+    /// of the ledger and the index; a STEADY change page applies (its echo checks,
+    /// its hooks queued) only under the exclusive side. A page fetched while such a
+    /// write was in flight may already show the change, and so waits for the
+    /// commit: the echo is recognized whenever the poll ran.
+    pub fn with_commit_gate(mut self, gate: Arc<RwLock<()>>) -> Self {
+        self.core.commit_gate = gate;
         self
     }
 
@@ -1639,7 +1661,8 @@ impl<B: Backend> Engine<B> {
             self.core.sinks.emit(&[WatchEvent::Rescan]);
         }
         if std::mem::take(&mut self.confirmed) && self.suspect && !self.root_suspect {
-            self.apply_confirm()?;
+            let gate = self.core.commit_gate.clone().write_owned().await;
+            self.apply_confirm(gate)?;
         }
         self.publish_state();
         loop {
@@ -1656,7 +1679,10 @@ impl<B: Backend> Engine<B> {
                 }
                 ChangePage::Page { items, next, more } => {
                     let items = self.expand_new_dirs(items).await?;
-                    self.apply_batch(items, next)?;
+                    // An own write in flight may already be in this page: its
+                    // commit first (the commit window), so its echo is exact.
+                    let gate = self.core.commit_gate.clone().write_owned().await;
+                    self.apply_batch(items, next, gate)?;
                     self.ok();
                     self.publish_state();
                     if self.phase != Phase::Steady {
@@ -1748,8 +1774,14 @@ impl<B: Backend> Engine<B> {
         Ok(items)
     }
 
-    /// Apply one change page and its cursor in one transaction.
-    fn apply_batch(&mut self, items: Vec<ChangeItem>, next: Cursor) -> Result<(), Fail> {
+    /// Apply one change page and its cursor in one transaction, under the commit
+    /// window's exclusive side (`gate`, released before events and hooks go out).
+    fn apply_batch(
+        &mut self,
+        items: Vec<ChangeItem>,
+        next: Cursor,
+        gate: OwnedRwLockWriteGuard<()>,
+    ) -> Result<(), Fail> {
         let pid_of = |i: &ChangeItem| -> Pid {
             match i {
                 ChangeItem::Upsert(n) => n.pid.clone(),
@@ -1826,6 +1858,7 @@ impl<B: Backend> Engine<B> {
             tx.commit()?;
             (stashed, if hold { 0 } else { count })
         };
+        drop(gate);
         self.cursor = Some(next);
         if counted > 0 {
             self.window.push_back((now, counted));
@@ -1850,8 +1883,9 @@ impl<B: Backend> Engine<B> {
         Ok(())
     }
 
-    /// The admin confirmed: apply the stashed removals.
-    fn apply_confirm(&mut self) -> Result<(), Fail> {
+    /// The admin confirmed: apply the stashed removals (under the commit window's
+    /// exclusive side, as a page is).
+    fn apply_confirm(&mut self, gate: OwnedRwLockWriteGuard<()>) -> Result<(), Fail> {
         let pids: Vec<Pid> = self.stash.iter().cloned().collect();
         let mut out = Vec::new();
         {
@@ -1862,6 +1896,7 @@ impl<B: Backend> Engine<B> {
             stash_save(&idx, &BTreeSet::new())?;
             tx.commit()?;
         }
+        drop(gate);
         self.stash.clear();
         self.suspect = false;
         self.prev_relist = None;

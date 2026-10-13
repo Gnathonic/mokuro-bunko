@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bunko_remote::fake::{FakeBackend, FakeOp};
@@ -37,11 +37,19 @@ struct T {
 struct Rec {
     discarded: Mutex<Vec<PathBuf>>,
     submissions: Mutex<Vec<(PathBuf, Vec<u8>)>>,
+    moved: Mutex<Vec<(PathBuf, PathBuf)>>,
+    removed: Mutex<Vec<PathBuf>>,
 }
 
 impl CloudHooks for Rec {
-    fn moved(&self, _from: &Path, _to: &Path, _is_dir: bool) {}
-    fn removed(&self, _path: &Path, _is_dir: bool) {}
+    fn moved(&self, from: &Path, to: &Path, _is_dir: bool) {
+        self.moved
+            .lock()
+            .push((from.to_path_buf(), to.to_path_buf()));
+    }
+    fn removed(&self, path: &Path, _is_dir: bool) {
+        self.removed.lock().push(path.to_path_buf());
+    }
     fn sidecar_overwritten(&self, _path: &Path) {}
     fn series_submission(&self, dir: &Path, bytes: &[u8]) -> SubmissionResult {
         self.submissions
@@ -621,6 +629,84 @@ fn rename_moves_by_id_including_case_only_renames() {
         t.sync_feed();
         assert_eq!(t.events(), vec![]);
         assert_eq!(fs::read(t.abs("U/S2/B.mokuro")).unwrap(), b"a");
+    }
+}
+
+#[test]
+fn a_feed_poll_between_an_own_move_and_its_commit_still_sees_an_echo() {
+    // The provider applied the move (or trash) but answers slowly, and a feed poll
+    // lands in between (MEGA's push wakes the feed at once): the page waits for the
+    // op's COMMITTED rewrite of the ledger and the index, so it is an own echo.
+    for mk in [
+        FakeBackend::drive_like,
+        FakeBackend::mega_like,
+        FakeBackend::webdav_cas,
+    ] {
+        let t = T::new(mk(), &[("S/a.mokuro", b"a"), ("S/x.json", b"x")]);
+        t.wait_steady();
+        let fake = Arc::downgrade(&t.fake);
+        let store = Arc::downgrade(t.s());
+        let raced = Arc::new(AtomicUsize::new(0));
+        let r2 = raced.clone();
+        // The feed's poll count as each call starts: a poll after that (which the
+        // push may start even before the after-hook runs) can show the change.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let (p1, f1) = (polls.clone(), fake.clone());
+        t.fake.set_call_hook(Some(Arc::new(move |op| {
+            if matches!(op, FakeOp::Update | FakeOp::Trash)
+                && let Some(fake) = f1.upgrade()
+            {
+                p1.store(fake.calls(FakeOp::Changes), Ordering::SeqCst);
+            }
+        })));
+        t.fake.set_after_hook(Some(Arc::new(move |op| {
+            if !matches!(op, FakeOp::Update | FakeOp::Trash) {
+                return;
+            }
+            let (Some(fake), Some(store)) = (fake.upgrade(), store.upgrade()) else {
+                return;
+            };
+            let n = polls.load(Ordering::SeqCst);
+            store.feed().poll_now();
+            // A poll that started before this call may be waiting for this very
+            // commit: a fresh one gets a moment, not forever.
+            let t0 = Instant::now();
+            while fake.calls(FakeOp::Changes) <= n && t0.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if fake.calls(FakeOp::Changes) > n {
+                r2.fetch_add(1, Ordering::SeqCst);
+                // Room for the poll to apply its page (it must wait for the commit).
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        })));
+        t.events();
+        fs::rename(t.abs("S/a.mokuro"), t.abs("S/b.mokuro")).unwrap();
+        fs::remove_file(t.abs("S/x.json")).unwrap();
+        t.fake.set_after_hook(None);
+        t.fake.set_call_hook(None);
+        assert!(
+            raced.load(Ordering::SeqCst) >= 1,
+            "a poll ran between an op's provider call and its commit"
+        );
+        let ev = t.events();
+        assert_eq!(
+            ev.iter()
+                .filter(|e| matches!(e, WatchEvent::Removed { .. }))
+                .count(),
+            2,
+            "one event set per op: {ev:?}"
+        );
+        t.sync_feed();
+        assert_eq!(t.events(), vec![]);
+        assert!(
+            t.hooks.moved.lock().is_empty(),
+            "{:?}",
+            t.hooks.moved.lock()
+        );
+        assert!(t.hooks.removed.lock().is_empty());
+        assert_eq!(fs::read(t.abs("S/b.mokuro")).unwrap(), b"a");
+        assert_eq!(t.s().health(), Health::Online);
     }
 }
 

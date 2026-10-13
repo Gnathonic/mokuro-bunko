@@ -495,6 +495,12 @@ pub(crate) struct Core<B: Backend> {
     pub seq: AtomicU64,
     /// One op runs at a time: the worker's, or a Sync caller's (the barrier).
     pub exec: tokio::sync::Mutex<()>,
+    /// The commit window, shared with the feed ([`Feed::with_commit_gate`]): an op
+    /// holds it shared from just before the provider call that changes a node until
+    /// its COMMITTED ledger and index rewrite (`commit_window`), so no feed page that
+    /// shows the change applies before the ledger knows it. Lock order: `exec`, then
+    /// this, then the index.
+    pub commit_gate: Arc<tokio::sync::RwLock<()>>,
     pub wake: tokio::sync::Notify,
     /// `(pid, cver)` echoes the feed delivered (COMMITTED → CONFIRMED).
     pub echoed: Arc<Mutex<HashSet<(String, String)>>>,
@@ -858,8 +864,10 @@ impl<B: Backend> RemoteStore<B> {
             tracing::warn!("api log: {e}");
         }
         let backend = Arc::new(Governed::new(backend, gov.clone()));
+        let commit_gate = Arc::new(tokio::sync::RwLock::new(()));
         let feed = Feed::new(backend.clone(), index.clone(), cfg.feed_config())
             .with_hooks(hooks.clone() as Arc<dyn CloudHooks>)
+            .with_commit_gate(commit_gate.clone())
             .with_state(Arc::new(LedgerFeed {
                 state: state.clone(),
                 echoed: echoed.clone(),
@@ -923,6 +931,7 @@ impl<B: Backend> RemoteStore<B> {
             ops,
             seq: AtomicU64::new(0),
             exec: tokio::sync::Mutex::new(()),
+            commit_gate,
             wake: tokio::sync::Notify::new(),
             echoed,
             gate: Mutex::new(None),
