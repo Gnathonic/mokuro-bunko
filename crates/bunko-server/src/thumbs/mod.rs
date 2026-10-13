@@ -19,8 +19,15 @@
 //!   row forgotten. Validity is Python's `json.load`: a file serde rejects is checked
 //!   again with `bunko-layout`'s Python-compatible parser (`NaN`/`Infinity`), and a
 //!   lone-surrogate escape (which Python accepts) never gets a file deleted.
+//!
+//! **A cloud library** (0.8 §8, D13, D14): covers are made as archives arrive (the
+//! store's change events, plus one walk of its index at start and after a `Rescan`),
+//! never by a periodic walk; there is no corrupt-sidecar sweep (report-only on
+//! remote); and `.nocover` is not a file in the cloud but a local-only record,
+//! [`NoCoverSet`], kept in `<base>/cloud/<store-id>/nocover.json` until the store's
+//! durable `local_row` table carries it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,12 +64,101 @@ pub fn nocover_path(cbz: &Path) -> PathBuf {
 
 /// `needs_thumbnail`.
 pub fn needs_thumbnail(cbz: &Path) -> bool {
+    needs_thumbnail_with(cbz, None)
+}
+
+/// [`needs_thumbnail`], with a cloud library's local `.nocover` records.
+pub fn needs_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> bool {
     fs::is_file(cbz)
         && cbz
             .extension()
             .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
         && !fs::exists(cover_path(cbz))
         && !fs::exists(nocover_path(cbz))
+        && nocover.is_none_or(|n| !n.contains(cbz))
+}
+
+/// D14: the `.nocover` markers of a cloud library, as local-only records keyed by the
+/// archive's library path and version `(size, mtime_ns)` (a new version of the archive
+/// is looked at again). Persisted as JSON in the store's own directory; a stand-in for
+/// the store's `local_row` table, which lands with the write path.
+pub struct NoCoverSet {
+    file: PathBuf,
+    library: PathBuf,
+    set: Mutex<HashSet<(String, u64, i128)>>,
+}
+
+impl NoCoverSet {
+    /// The set kept in `file` for the library at `library` (empty when unreadable).
+    // unmounted: `file` is in the store's local directory, not in the library.
+    #[allow(clippy::disallowed_methods)]
+    pub fn load(file: PathBuf, library: PathBuf) -> NoCoverSet {
+        let set = std::fs::read(&file)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Vec<(String, u64, String)>>(&b).ok())
+            .map(|rows| {
+                rows.into_iter()
+                    .filter_map(|(p, s, m)| Some((p, s, m.parse().ok()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        NoCoverSet {
+            file,
+            library,
+            set: Mutex::new(set),
+        }
+    }
+
+    fn key(&self, cbz: &Path) -> Option<(String, u64, i128)> {
+        let rel = crate::ocr::types::rel_of(&self.library, cbz)?;
+        let (size, mtime) = stamp(cbz)?;
+        Some((rel, size, mtime))
+    }
+
+    pub fn contains(&self, cbz: &Path) -> bool {
+        self.key(cbz).is_some_and(|k| self.set.lock().contains(&k))
+    }
+
+    pub fn len(&self) -> usize {
+        self.set.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Record that `cbz` (this version of it) has no cover.
+    // unmounted: `file` is in the store's local directory, not in the library.
+    #[allow(clippy::disallowed_methods)]
+    pub fn insert(&self, cbz: &Path) -> std::io::Result<()> {
+        let Some(k) = self.key(cbz) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the archive is not in the library",
+            ));
+        };
+        let rows: Vec<(String, u64, String)> = {
+            let mut set = self.set.lock();
+            // A path keeps one record: its newest version.
+            set.retain(|(p, _, _)| *p != k.0);
+            set.insert(k);
+            let mut rows: Vec<_> = set
+                .iter()
+                .map(|(p, s, m)| (p.clone(), *s, m.to_string()))
+                .collect();
+            rows.sort();
+            rows
+        };
+        if let Some(dir) = self.file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = self.file.with_extension("json.tmp");
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec(&rows).map_err(std::io::Error::other)?,
+        )?;
+        std::fs::rename(&tmp, &self.file)
+    }
 }
 
 fn suffix_lower(name: &str) -> String {
@@ -123,7 +219,13 @@ pub fn cover_image(cbz: &Path) -> Cover {
 /// `ensure_thumbnail` for one archive: true when a cover was written (or was not
 /// needed).
 pub fn ensure_thumbnail(cbz: &Path) -> Result<bool, String> {
-    if !needs_thumbnail(cbz) {
+    ensure_thumbnail_with(cbz, None)
+}
+
+/// [`ensure_thumbnail`]; on a cloud library a missing cover is recorded in `nocover`
+/// instead of a `.nocover` file (D14).
+pub fn ensure_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> Result<bool, String> {
+    if !needs_thumbnail_with(cbz, nocover) {
         return Ok(true);
     }
     let name = cbz
@@ -134,8 +236,15 @@ pub fn ensure_thumbnail(cbz: &Path) -> Result<bool, String> {
         Cover::Image(b) => b,
         Cover::None(why) => {
             info!("No cover image found in: {name} ({why})");
-            fs::File::create(nocover_path(cbz))
-                .map_err(|e| format!("could not write the .nocover marker: {e}"))?;
+            match nocover {
+                Some(set) => set
+                    .insert(cbz)
+                    .map_err(|e| format!("could not record the missing cover: {e}"))?,
+                None => {
+                    fs::File::create(nocover_path(cbz))
+                        .map_err(|e| format!("could not write the .nocover marker: {e}"))?;
+                }
+            }
             return Ok(false);
         }
     };
@@ -178,17 +287,31 @@ fn walk(dir: &Path, keep: &mut dyn FnMut(&Path)) {
 
 /// Every library `.cbz` still waiting for a cover (`_thumbnail_candidates`).
 pub fn thumbnail_candidates(library: &Path) -> Vec<PathBuf> {
+    thumbnail_candidates_with(library, None)
+}
+
+/// [`thumbnail_candidates`] under `dir`, with a cloud library's `.nocover` records.
+pub fn thumbnail_candidates_with(dir: &Path, nocover: Option<&NoCoverSet>) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    walk(library, &mut |p| {
+    walk(dir, &mut |p| {
         if p.extension()
             .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
-            && needs_thumbnail(p)
+            && needs_thumbnail_with(p, nocover)
         {
             out.push(p.to_path_buf());
         }
     });
     out.sort();
     out
+}
+
+/// What a cloud library's cover loop has been told to look at.
+#[derive(Default)]
+struct Arrivals {
+    /// Walk the whole library (start, `Rescan`).
+    full: bool,
+    /// Archives (or folders) that appeared.
+    paths: BTreeSet<PathBuf>,
 }
 
 type Stamp = (u64, i128);
@@ -219,9 +342,20 @@ impl Thumbnails {
 
     /// One pass over the library (`_scan_thumbnails_once`); returns covers written.
     pub fn scan_once(&self, library: &Path, stop: &CancellationToken) -> usize {
+        let candidates = thumbnail_candidates(library);
+        self.make_covers(candidates, None, stop)
+    }
+
+    /// Covers for `candidates` (minus those that would not decode at this version).
+    fn make_covers(
+        &self,
+        candidates: Vec<PathBuf>,
+        nocover: Option<&NoCoverSet>,
+        stop: &CancellationToken,
+    ) -> usize {
         let candidates: Vec<PathBuf> = {
             let failed = self.failed.lock();
-            thumbnail_candidates(library)
+            candidates
                 .into_iter()
                 .filter(|p| failed.get(p).is_none_or(|s| stamp(p).as_ref() != Some(s)))
                 .collect()
@@ -237,7 +371,7 @@ impl Thumbnails {
             if stop.is_cancelled() {
                 break;
             }
-            match ensure_thumbnail(&cbz) {
+            match ensure_thumbnail_with(&cbz, nocover) {
                 Ok(true) => made += 1,
                 Ok(false) => {}
                 Err(e) => {
@@ -271,6 +405,95 @@ impl Thumbnails {
                 tokio::select! {
                     _ = stop.cancelled() => return,
                     _ = tokio::time::sleep(Duration::from_secs(u64::from(wait))) => {}
+                }
+            }
+        })
+    }
+
+    /// The cover loop of a cloud library mounted at `library` (no periodic walk): one
+    /// walk of the store's index now and after every `Rescan`, then the archives its
+    /// change events announce. `.nocover` records go to
+    /// `<library's parent>/nocover.json` ([`NoCoverSet`]).
+    pub fn spawn_remote(
+        self: &Arc<Self>,
+        library: PathBuf,
+        stop: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        use bunko_store::WatchEvent;
+        let file = library
+            .parent()
+            .map_or_else(|| PathBuf::from("nocover.json"), |d| d.join("nocover.json"));
+        let nocover = Arc::new(NoCoverSet::load(file, library.clone()));
+        let queue = Arc::new((
+            Mutex::new(Arrivals {
+                full: true,
+                ..Arrivals::default()
+            }),
+            tokio::sync::Notify::new(),
+        ));
+        let guard = {
+            let q = queue.clone();
+            let sink: bunko_store::WatchSink = Arc::new(move |ev: WatchEvent| {
+                let mut a = q.0.lock();
+                match ev {
+                    WatchEvent::Added { path, is_dir } => {
+                        let cbz = path
+                            .extension()
+                            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"));
+                        if is_dir || cbz {
+                            a.paths.insert(path);
+                        } else {
+                            return;
+                        }
+                    }
+                    WatchEvent::Rescan => a.full = true,
+                    WatchEvent::Removed { .. } => return,
+                }
+                drop(a);
+                q.1.notify_one();
+            });
+            match bunko_store::store_for(&library).map(|s| s.watch(sink)) {
+                Some(Ok(g)) => Some(g),
+                Some(Err(e)) => {
+                    warn!("Thumbnails: the library's change events are unavailable: {e}");
+                    None
+                }
+                None => None,
+            }
+        };
+        let me = self.clone();
+        tokio::spawn(async move {
+            let _watching = guard;
+            loop {
+                let work = std::mem::take(&mut *queue.0.lock());
+                if !work.full && work.paths.is_empty() {
+                    tokio::select! {
+                        _ = stop.cancelled() => return,
+                        _ = queue.1.notified() => continue,
+                    }
+                }
+                let (m, lib, s, n) = (me.clone(), library.clone(), stop.clone(), nocover.clone());
+                let scan = tokio::task::spawn_blocking(move || {
+                    let candidates = if work.full {
+                        thumbnail_candidates_with(&lib, Some(&n))
+                    } else {
+                        let mut out = BTreeSet::new();
+                        for p in &work.paths {
+                            if fs::is_dir(p) {
+                                out.extend(thumbnail_candidates_with(p, Some(&n)));
+                            } else if needs_thumbnail_with(p, Some(&n)) {
+                                out.insert(p.clone());
+                            }
+                        }
+                        out.into_iter().collect()
+                    };
+                    m.make_covers(candidates, Some(&n), &s)
+                });
+                if let Err(e) = scan.await {
+                    warn!("Thumbnail scan error: {e}");
+                }
+                if stop.is_cancelled() {
+                    return;
                 }
             }
         })
