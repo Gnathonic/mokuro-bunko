@@ -25,7 +25,8 @@ const ALLOW_FILE: &str =
     "OPTIONS, HEAD, GET, PROPFIND, PUT, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
 const ALLOW_UNMAPPED: &str = "OPTIONS, PUT, MKCOL";
 
-/// Would a GET of this file be offloaded to nginx (spec §8.10)?
+/// Would a GET of this file be offloaded to nginx (spec §8.10)? Only where the file is
+/// on this disk (`caps().local_paths`): nginx cannot read a remote store.
 fn accel_path(inner: &Inner, req: &Req, res: &Resource) -> Option<String> {
     if !req.ctx.nginx_accel {
         return None;
@@ -35,7 +36,7 @@ fn accel_path(inner: &Inner, req: &Req, res: &Resource) -> Option<String> {
             phys,
             kind: FileKind::Library,
             ..
-        } => {
+        } if bunko_store::store_for(phys).is_none_or(|s| s.caps().local_paths) => {
             let rel = inner.roots.library_rel(phys)?;
             Some(format!("/internal-library/{}", paths::quote_path(&rel)))
         }
@@ -218,17 +219,12 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     };
     // Open first and describe what was opened: the validators match the bytes sent even
     // if an upload renames a new file into place meanwhile.
-    let mut file = bunko_store::afs::File::open(phys)
+    // A remote store's file has no local handle: its body streams from the store (spool
+    // or pinned ranged reads, spec §10), memory flat, with the same validators.
+    let file = bunko_store::afs::File::open(phys)
         .await
-        .map_err(|e| DavError::new(StatusCode::NOT_FOUND, e.to_string()))?
-        .into_std()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "this store has no local file to stream",
-            )
-        })?;
-    let stat = Stat::from_meta(&file.metadata().await?.into());
+        .map_err(|e| DavError::new(StatusCode::NOT_FOUND, e.to_string()))?;
+    let stat = Stat::from_meta(&file.metadata().await?);
     let res = match res {
         Resource::File {
             path, phys, kind, ..
@@ -314,10 +310,15 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     if head {
         return Ok(resp);
     }
-    if start > 0 {
-        file.seek(SeekFrom::Start(start)).await?;
+    match file {
+        bunko_store::afs::File::Tokio(mut file) => {
+            if start > 0 {
+                file.seek(SeekFrom::Start(start)).await?;
+            }
+            let stream = ReaderStream::with_capacity(file.take(len), 64 * 1024);
+            *resp.body_mut() = Body::from_stream(stream);
+        }
+        remote => *resp.body_mut() = Body::from_stream(remote.into_stream(start, len)),
     }
-    let stream = ReaderStream::with_capacity(file.take(len), 64 * 1024);
-    *resp.body_mut() = Body::from_stream(stream);
     Ok(resp)
 }

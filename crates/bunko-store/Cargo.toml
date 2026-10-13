@@ -8,15 +8,19 @@ rust-version.workspace = true
 
 [features]
 default = []
-tokio = ["dep:tokio"]
+tokio = ["dep:tokio", "dep:bytes", "dep:futures-util"]
 watch = ["dep:notify"]
 
 [dependencies]
 parking_lot.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, optional = true }
+# afs: a remote file's body as a stream of chunks read on the blocking pool.
+bytes = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+futures-util.workspace = true

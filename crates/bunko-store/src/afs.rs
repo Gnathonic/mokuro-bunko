@@ -59,7 +59,27 @@ pub async fn remove_file(p: impl AsRef<Path>) -> io::Result<()> {
 #[derive(Debug)]
 pub enum File {
     Tokio(tokio::fs::File),
+    /// A remote store's file (spec §10): its bytes come through
+    /// [`File::into_stream`], read on the blocking pool in chunks, so memory stays
+    /// flat whatever the size.
+    Stream(RemoteStream),
 }
+
+/// A remote store's open file and the metadata of the version it reads. The file sits
+/// behind a mutex only so that `&File` is `Sync` (futures that hold it stay `Send`);
+/// it is never contended.
+#[derive(Debug)]
+pub struct RemoteStream {
+    file: parking_lot::Mutex<crate::file::File>,
+    meta: Meta,
+}
+
+/// A file body: chunks of at most [`STREAM_CHUNK`] bytes.
+pub type BodyStream =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = io::Result<bytes::Bytes>> + Send>>;
+
+/// The largest chunk [`File::into_stream`] yields.
+pub const STREAM_CHUNK: usize = 256 * 1024;
 
 impl File {
     pub async fn open(p: impl AsRef<Path>) -> io::Result<File> {
@@ -68,13 +88,26 @@ impl File {
             return tokio::fs::File::open(p).await.map(File::Tokio);
         }
         let p = p.to_path_buf();
-        let f = blocking(move || crate::fs::File::open(&p)).await?;
-        match f.into_std() {
-            Some(std) => Ok(File::Tokio(tokio::fs::File::from_std(std))),
-            None => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "this store has no local file to open",
-            )),
+        blocking(move || {
+            let f = crate::fs::File::open(&p)?;
+            if let Some(std) = f.as_std() {
+                let std = std.try_clone()?;
+                return Ok(File::Tokio(tokio::fs::File::from_std(std)));
+            }
+            let meta = f.metadata()?;
+            Ok(File::Stream(RemoteStream {
+                file: parking_lot::Mutex::new(f),
+                meta,
+            }))
+        })
+        .await
+    }
+
+    /// The metadata of what was opened (a remote file's is bound to its version).
+    pub async fn metadata(&self) -> io::Result<Meta> {
+        match self {
+            File::Tokio(f) => f.metadata().await.map(Meta::Std),
+            File::Stream(s) => Ok(s.meta.clone()),
         }
     }
 
@@ -82,8 +115,101 @@ impl File {
     pub fn into_std(self) -> Option<tokio::fs::File> {
         match self {
             File::Tokio(f) => Some(f),
+            File::Stream(_) => None,
         }
     }
+
+    /// `len` bytes from offset `start`, as a stream. A remote file reads on the
+    /// blocking pool, one chunk at a time; a file that ends before `len` bytes (a new
+    /// version replaced the one opened) ends the stream with `UnexpectedEof`.
+    pub fn into_stream(self, start: u64, len: u64) -> BodyStream {
+        use futures_util::StreamExt;
+        enum St {
+            Tokio(tokio::fs::File),
+            Remote(crate::file::File),
+        }
+        let st = match self {
+            File::Tokio(f) => St::Tokio(f),
+            File::Stream(s) => St::Remote(s.file.into_inner()),
+        };
+        let init = (Some(st), start, len, true);
+        futures_util::stream::unfold(init, |(st, start, left, first)| async move {
+            let st = st?;
+            if left == 0 {
+                return None;
+            }
+            let want = left.min(STREAM_CHUNK as u64) as usize;
+            let res: io::Result<(St, Vec<u8>)> = match st {
+                St::Tokio(mut f) => {
+                    use tokio::io::AsyncSeekExt;
+                    async {
+                        if first && start > 0 {
+                            f.seek(io::SeekFrom::Start(start)).await?;
+                        }
+                        let mut buf = vec![0u8; want];
+                        let n = read_full_async(&mut f, &mut buf).await?;
+                        buf.truncate(n);
+                        Ok((St::Tokio(f), buf))
+                    }
+                    .await
+                }
+                St::Remote(mut f) => {
+                    blocking(move || {
+                        use std::io::{Read, Seek};
+                        if first && start > 0 {
+                            f.seek(io::SeekFrom::Start(start))?;
+                        }
+                        let mut buf = vec![0u8; want];
+                        let mut n = 0;
+                        while n < want {
+                            match f.read(&mut buf[n..]) {
+                                Ok(0) => break,
+                                Ok(k) => n += k,
+                                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        buf.truncate(n);
+                        Ok((St::Remote(f), buf))
+                    })
+                    .await
+                }
+            };
+            match res {
+                Ok((_, buf)) if buf.is_empty() => Some((
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the file ended before its announced length",
+                    )),
+                    (None, start, 0, false),
+                )),
+                Ok((st, buf)) => {
+                    let n = buf.len() as u64;
+                    Some((
+                        Ok(bytes::Bytes::from(buf)),
+                        (Some(st), start, left - n, false),
+                    ))
+                }
+                Err(e) => Some((Err(e), (None, start, 0, false))),
+            }
+        })
+        .boxed()
+    }
+}
+
+/// Fill `buf` from `f` (short only at the end of the file).
+async fn read_full_async(f: &mut tokio::fs::File, buf: &mut [u8]) -> io::Result<usize> {
+    use tokio::io::AsyncReadExt;
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]).await {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(n)
 }
 
 /// `tokio::fs::OpenOptions`, store-routed.

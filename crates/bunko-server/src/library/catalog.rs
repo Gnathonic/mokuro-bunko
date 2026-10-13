@@ -369,19 +369,26 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str) -> Response {
         Ok((file, meta.len(), content_type))
     })
     .await;
-    let (file, size, content_type) = match checked {
+    let (file, mut size, content_type) = match checked {
         Some(Ok(found)) => found,
         Some(Err(resp)) => return resp,
         None => return internal_error(),
     };
-    let Some(handle) = bunko_store::afs::File::open(&file)
-        .await
-        .ok()
-        .and_then(bunko_store::afs::File::into_std)
-    else {
+    let Ok(handle) = bunko_store::afs::File::open(&file).await else {
         return util::text(500, "Error");
     };
-    let mut resp = Response::new(Body::from_stream(tokio_util::io::ReaderStream::new(handle)));
+    // A remote cover streams from the store; its length is the opened version's.
+    let body = match handle {
+        bunko_store::afs::File::Tokio(f) => Body::from_stream(tokio_util::io::ReaderStream::new(f)),
+        remote => {
+            let Ok(meta) = remote.metadata().await else {
+                return util::text(500, "Error");
+            };
+            size = meta.len();
+            Body::from_stream(remote.into_stream(0, size))
+        }
+    };
+    let mut resp = Response::new(body);
     let h = resp.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
