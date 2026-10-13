@@ -494,7 +494,29 @@ impl Scheduler {
     }
 
     pub fn held(&self, machine_name: &str) -> bool {
-        self.update_drain || self.holds.get(machine_name).copied().unwrap_or(0) > 0
+        self.update_drain
+            || self.storage_hold().is_some()
+            || self.holds.get(machine_name).copied().unwrap_or(0) > 0
+    }
+
+    /// Why a remote library store takes no new claims now (spec §3.5, §9.1
+    /// `held.reason`): `storage-offline`, `storage-auth`, `storage-full`,
+    /// `storage-transfer-quota` or `storage-lease`. None on a local library, and while
+    /// the store is online or still syncing.
+    pub fn storage_hold(&self) -> Option<&'static str> {
+        use bunko_store::{Blocked, Health};
+        let store = bunko_store::store_for(&self.library())?;
+        if !store.caps().remote {
+            return None;
+        }
+        match store.health() {
+            Health::Online | Health::Syncing { .. } | Health::Suspect => None,
+            Health::Degraded { .. } | Health::Offline => Some("storage-offline"),
+            Health::NeedsReauth => Some("storage-auth"),
+            Health::Blocked(Blocked::StorageFull) => Some("storage-full"),
+            Health::Blocked(_) => Some("storage-transfer-quota"),
+            Health::LeaseHeld { .. } => Some("storage-lease"),
+        }
     }
 
     /// Hold (or release) every machine for an automatic update: no new claims; the

@@ -90,6 +90,9 @@ impl Scheduler {
 
     /// `queue_hold()`: why the WHOLE queue is not moving, or None.
     pub fn queue_hold(&self) -> Option<&'static str> {
+        if let Some(reason) = self.storage_hold() {
+            return Some(reason);
+        }
         if self.processing_hold().is_some() {
             return Some("no-processor");
         }

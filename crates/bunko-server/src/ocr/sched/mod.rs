@@ -355,6 +355,8 @@ pub struct Scheduler {
     /// Ended sessions per processor, for late events: sid → when.
     pub ended_sessions: HashMap<String, f64>,
     pub hold_logged: bool,
+    /// The last [`Scheduler::storage_hold`] the tick saw (logged on change).
+    pub storage_held: Option<&'static str>,
     /// This server's own OCR has come up at least once (`LocalUp`).
     pub local_was_up: bool,
     /// An automatic update is waiting for a quiet moment: no machine gets a new claim
@@ -427,6 +429,7 @@ impl Scheduler {
             results: HashMap::new(),
             ended_sessions: HashMap::new(),
             hold_logged: false,
+            storage_held: None,
             local_was_up: false,
             update_drain: false,
             last_poll_tick: f64::NEG_INFINITY,
@@ -610,6 +613,7 @@ impl Scheduler {
             return;
         }
         self.check_sessions();
+        self.check_storage_hold();
         let now = self.mono();
         if now - self.last_poll_tick >= self.settings.poll_interval {
             self.last_poll_tick = now;
@@ -622,6 +626,33 @@ impl Scheduler {
                 lane.idle_at = None;
             }
         }
+    }
+
+    /// A remote store's hold began or ended: log it once; on release, let every lane
+    /// look for work again.
+    fn check_storage_hold(&mut self) {
+        let now = self.storage_hold();
+        if now == self.storage_held {
+            return;
+        }
+        let was = std::mem::replace(&mut self.storage_held, now);
+        match now {
+            Some(reason) => self.log(format!(
+                "OCR holds new work: the library storage is unavailable ({reason})"
+            )),
+            None => {
+                self.log(format!(
+                    "OCR takes new work again (the library storage is back from {})",
+                    was.unwrap_or("a hold")
+                ));
+                for lane in &mut self.lanes {
+                    lane.idle_at = None;
+                }
+                self.maybe_start_scan();
+            }
+        }
+        self.bump();
+        self.bump_page();
     }
 
     /// Start a full walk on a helper thread (single-flight).
