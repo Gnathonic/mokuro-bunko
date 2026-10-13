@@ -87,7 +87,7 @@ pub struct WebDavConfig {
 impl std::fmt::Debug for WebDavConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WebDavConfig")
-            .field("url", &self.url)
+            .field("url", &redact_userinfo(&self.url))
             .field("username", &self.username)
             .field("password", &"<redacted>")
             .field("folder", &self.folder)
@@ -359,7 +359,7 @@ impl WebDavBackend {
         let url = cfg.url.trim();
         let (scheme, rest) = url
             .split_once("://")
-            .ok_or_else(|| BErr::Fatal(format!("not a URL: {url}")))?;
+            .ok_or_else(|| BErr::Fatal(format!("not a URL: {}", redact_userinfo(url))))?;
         match scheme.to_ascii_lowercase().as_str() {
             "https" => {}
             "http" if cfg.allow_http => {}
@@ -377,8 +377,13 @@ impl WebDavBackend {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, "/"),
         };
+        if authority.contains('@') {
+            return Err(BErr::Fatal(
+                "the WebDAV URL may not carry a username or password; set them in the WebDAV settings".into(),
+            ));
+        }
         if authority.is_empty() {
-            return Err(BErr::Fatal(format!("no host in {url}")));
+            return Err(BErr::Fatal(format!("no host in {}", redact_userinfo(url))));
         }
         let mut base = Vec::new();
         for seg in path.split('/').chain(cfg.folder.split('/')) {
@@ -455,8 +460,14 @@ impl WebDavBackend {
 
     /// The pid an href names, or `None` when it is outside the folder (or not a path).
     pub(crate) fn pid_from_href(&self, href: &str) -> Option<Pid> {
-        let path = if let Some((_, rest)) = href.split_once("://") {
-            &rest[rest.find('/')?..]
+        let path = if let Some((scheme, rest)) = href.split_once("://") {
+            // An absolute href must name our own server.
+            let slash = rest.find('/')?;
+            let origin = format!("{scheme}://{}", &rest[..slash]);
+            if !origin.eq_ignore_ascii_case(&self.origin) {
+                return None;
+            }
+            &rest[slash..]
         } else if href.starts_with('/') {
             href
         } else {
@@ -466,7 +477,13 @@ impl WebDavBackend {
         let mut segs = Vec::new();
         for raw in path.split('/').filter(|s| !s.is_empty()) {
             let seg = percent_decode_str(raw).decode_utf8().ok()?;
-            if seg == "." || seg == ".." || seg.contains('\0') {
+            // A decoded segment is one name: `%2F`, `%5C`, `..` or control characters
+            // would make the pid split differently from the server's path.
+            if seg == "."
+                || seg == ".."
+                || seg.contains(['/', '\\'])
+                || seg.chars().any(|c| c.is_control())
+            {
                 return None;
             }
             segs.push(seg.into_owned());
@@ -480,7 +497,16 @@ impl WebDavBackend {
             .iter()
             .zip(&segs)
             .all(|(a, b)| a == b || a.to_lowercase() == b.to_lowercase());
-        same.then(|| segs[self.base.len()..].join("/"))
+        if !same {
+            return None;
+        }
+        let rest = &segs[self.base.len()..];
+        // Names under the folder must be safe library segments (the index refuses the
+        // rest anyway; refusing here keeps them out of pids altogether).
+        if !rest.iter().all(|s| crate::names::is_safe_segment(s)) {
+            return None;
+        }
+        Some(rest.join("/"))
     }
 
     fn node_from(&self, e: &DavEntry) -> Option<RNode> {
@@ -1283,6 +1309,20 @@ pub fn snapshot_path(state_dir: &Path) -> PathBuf {
     state_dir.join(SNAPSHOT_FILE)
 }
 
+/// `url` with any `user:password@` removed, for messages and logs.
+fn redact_userinfo(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let end = rest.find('/').unwrap_or(rest.len());
+            match rest[..end].rfind('@') {
+                Some(at) => format!("{scheme}://<redacted>@{}", &rest[at + 1..]),
+                None => url.to_string(),
+            }
+        }
+        None => url.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1310,6 +1350,51 @@ mod tests {
             roots: Mutex::new(Vec::new()),
             snap: tokio::sync::Mutex::new(None),
         }
+    }
+
+    #[test]
+    fn hrefs_with_smuggled_separators_or_foreign_hosts_are_refused() {
+        let b = backend("https://h/dav/", "mokuro-reader");
+        // %2F / %5C inside one segment, encoded dot-dot, control characters
+        assert_eq!(b.pid_from_href("/dav/mokuro-reader/a%2Fb/v.cbz"), None);
+        assert_eq!(b.pid_from_href("/dav/mokuro-reader/a%5Cb"), None);
+        assert_eq!(b.pid_from_href("/dav/mokuro-reader/%2e%2e/x"), None);
+        assert_eq!(b.pid_from_href("/dav/mokuro-reader/a%07b"), None);
+        assert_eq!(b.pid_from_href("/dav/mokuro-reader/C%3Ax"), None);
+        // an absolute href must name our own server
+        assert_eq!(b.pid_from_href("https://evil/dav/mokuro-reader/x"), None);
+        assert_eq!(
+            b.pid_from_href("HTTPS://H/dav/mokuro-reader/x"),
+            Some("x".into())
+        );
+    }
+
+    #[test]
+    fn userinfo_is_redacted_and_refused() {
+        assert_eq!(
+            redact_userinfo("https://bob:s3cret@h/dav/"),
+            "https://<redacted>@h/dav/"
+        );
+        assert_eq!(redact_userinfo("https://h/dav/"), "https://h/dav/");
+        let cfg = WebDavConfig {
+            url: "https://bob:s3cret@h/dav/".into(),
+            username: "bob".into(),
+            password: "s3cret".into(),
+            folder: "mokuro-reader".into(),
+            allow_http: false,
+            allow_bunko_backend_for_tests: false,
+            disable_cas: false,
+            state_dir: PathBuf::new(),
+        };
+        assert!(!format!("{cfg:?}").contains("s3cret"));
+        let err = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(WebDavBackend::connect(cfg))
+            .err()
+            .expect("refused");
+        assert!(!format!("{err:?}").contains("s3cret"), "{err:?}");
     }
 
     #[test]
