@@ -6,47 +6,40 @@ use std::path::{Path, PathBuf};
 
 pub use crate::file::{DirEntry, File, OpenOptions, ReadDir};
 use crate::meta::Meta;
-use crate::mount::{same_store, store_for};
+use crate::mount::{route, same_store, store_for};
 use crate::store::{Published, WriteIntent, crosses_devices};
 
 pub fn metadata(p: impl AsRef<Path>) -> io::Result<Meta> {
     let p = p.as_ref();
-    match store_for(p) {
-        Some(s) => s.metadata(p),
-        None => std::fs::metadata(p).map(Meta::Std),
-    }
+    route(p, |s| s.metadata(p), || std::fs::metadata(p).map(Meta::Std))
 }
 
 pub fn symlink_metadata(p: impl AsRef<Path>) -> io::Result<Meta> {
     let p = p.as_ref();
-    match store_for(p) {
-        Some(s) => s.symlink_metadata(p),
-        None => std::fs::symlink_metadata(p).map(Meta::Std),
-    }
+    route(
+        p,
+        |s| s.symlink_metadata(p),
+        || std::fs::symlink_metadata(p).map(Meta::Std),
+    )
 }
 
 pub fn read_dir(p: impl AsRef<Path>) -> io::Result<ReadDir> {
     let p = p.as_ref();
-    match store_for(p) {
-        Some(s) => s.read_dir(p),
-        None => std::fs::read_dir(p).map(ReadDir::Std),
-    }
+    route(
+        p,
+        |s| s.read_dir(p),
+        || std::fs::read_dir(p).map(ReadDir::Std),
+    )
 }
 
 pub fn canonicalize(p: impl AsRef<Path>) -> io::Result<PathBuf> {
     let p = p.as_ref();
-    match store_for(p) {
-        Some(s) => s.canonicalize(p),
-        None => std::fs::canonicalize(p),
-    }
+    route(p, |s| s.canonicalize(p), || std::fs::canonicalize(p))
 }
 
 pub fn read_link(p: impl AsRef<Path>) -> io::Result<PathBuf> {
     let p = p.as_ref();
-    match store_for(p) {
-        Some(s) => s.read_link(p),
-        None => std::fs::read_link(p),
-    }
+    route(p, |s| s.read_link(p), || std::fs::read_link(p))
 }
 
 /// `Path::exists`: follows symlinks; any error is `false`.
@@ -74,17 +67,15 @@ pub fn is_dir(p: impl AsRef<Path>) -> bool {
 }
 
 pub(crate) fn open(p: &Path) -> io::Result<File> {
-    match store_for(p) {
-        Some(s) => s.open(p),
-        None => std::fs::File::open(p).map(File::Std),
-    }
+    route(p, |s| s.open(p), || std::fs::File::open(p).map(File::Std))
 }
 
 pub(crate) fn open_with(p: &Path, o: &OpenOptions) -> io::Result<File> {
-    match store_for(p) {
-        Some(s) => s.open_with(p, o),
-        None => o.to_std().open(p).map(File::Std),
-    }
+    route(
+        p,
+        |s| s.open_with(p, o),
+        || o.to_std().open(p).map(File::Std),
+    )
 }
 
 pub fn read(p: impl AsRef<Path>) -> io::Result<Vec<u8>> {
@@ -132,42 +123,27 @@ pub fn write(p: impl AsRef<Path>, data: impl AsRef<[u8]>) -> io::Result<()> {
 
 pub fn create_dir(p: impl AsRef<Path>) -> io::Result<()> {
     let p = p.as_ref();
-    match store_for(p) {
-        Some(s) => s.create_dir(p),
-        None => std::fs::create_dir(p),
-    }
+    route(p, |s| s.create_dir(p), || std::fs::create_dir(p))
 }
 
 pub fn create_dir_all(p: impl AsRef<Path>) -> io::Result<()> {
     let p = p.as_ref();
-    match store_for(p) {
-        Some(s) => s.create_dir_all(p),
-        None => std::fs::create_dir_all(p),
-    }
+    route(p, |s| s.create_dir_all(p), || std::fs::create_dir_all(p))
 }
 
 pub fn remove_file(p: impl AsRef<Path>) -> io::Result<()> {
     let p = p.as_ref();
-    match store_for(p) {
-        Some(s) => s.remove_file(p),
-        None => std::fs::remove_file(p),
-    }
+    route(p, |s| s.remove_file(p), || std::fs::remove_file(p))
 }
 
 pub fn remove_dir(p: impl AsRef<Path>) -> io::Result<()> {
     let p = p.as_ref();
-    match store_for(p) {
-        Some(s) => s.remove_dir(p),
-        None => std::fs::remove_dir(p),
-    }
+    route(p, |s| s.remove_dir(p), || std::fs::remove_dir(p))
 }
 
 pub fn remove_dir_all(p: impl AsRef<Path>) -> io::Result<()> {
     let p = p.as_ref();
-    match store_for(p) {
-        Some(s) => s.remove_dir_all(p),
-        None => std::fs::remove_dir_all(p),
-    }
+    route(p, |s| s.remove_dir_all(p), || std::fs::remove_dir_all(p))
 }
 
 /// `std::fs::rename` (spec §3.4): within one store, the store's `rename`; from an
