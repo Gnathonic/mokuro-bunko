@@ -14,6 +14,36 @@ fn rel(s: &str) -> RelPath {
 }
 
 #[test]
+fn windows_device_names_are_recognised() {
+    use bunko_remote::names::is_windows_device_name;
+    for dev in [
+        "CON",
+        "con",
+        "nul.txt",
+        "Com1",
+        "LPT9.cbz",
+        "aux ",
+        "CONIN$",
+        "prn.tar.gz",
+    ] {
+        assert!(is_windows_device_name(dev), "{dev:?}");
+    }
+    for ok in [
+        "CONAN",
+        "console.cbz",
+        "COM",
+        "COM10",
+        "LPTX",
+        "Nullpunkt",
+        "Why?",
+    ] {
+        assert!(!is_windows_device_name(ok), "{ok:?}");
+    }
+    // refused as a segment only on Windows
+    assert_eq!(is_safe_segment("CON"), !cfg!(windows));
+}
+
+#[test]
 fn safe_segment_rule() {
     for bad in BAD.iter().chain(&[
         "\u{7f}",

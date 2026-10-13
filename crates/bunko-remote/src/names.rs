@@ -25,6 +25,9 @@ pub fn is_safe_segment(name: &str) -> bool {
     {
         return false;
     }
+    if cfg!(windows) && is_windows_device_name(name) {
+        return false;
+    }
     // Exactly one normal component on this platform: no drive or UNC prefix (Windows
     // `C:x` would replace the base on `join`), no root, nothing that parses as more.
     let mut parts = Path::new(name).components();
@@ -32,6 +35,27 @@ pub fn is_safe_segment(name: &str) -> bool {
         (parts.next(), parts.next()),
         (Some(Component::Normal(part)), None) if part == std::ffi::OsStr::new(name)
     )
+}
+
+/// `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, `CONIN$`, `CONOUT$`, with
+/// or without an extension and trailing dots or spaces, in any case. On Windows a path
+/// ending in one of these opens a device, so a remote entry with such a name is
+/// refused there. Names NTFS merely forbids (`<>"|?*`, a trailing dot) are allowed:
+/// they cannot alias another path, the remote store never writes a file to the local
+/// disk under its cloud name, and `?` is common in real titles.
+pub fn is_windows_device_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end_matches([' ', '.']);
+    let upper = stem.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || (upper.len() == 4
+        && (upper.starts_with("COM") || upper.starts_with("LPT"))
+        && upper.as_bytes()[3].is_ascii_digit())
 }
 
 /// The spelling-insensitive form two names collide under: NFC, then a full Unicode
