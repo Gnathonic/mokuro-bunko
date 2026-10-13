@@ -138,7 +138,7 @@ impl LibraryFacts for FileFacts {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let meta = std::fs::metadata(&sidecar).ok();
+        let meta = std::fs::metadata(&sidecar).ok().map(Into::into);
         let (entry, _) =
             bunko_library::compiler::compile_volume(&series, cbz, Some(&sidecar), meta.as_ref());
         bunko_library::schema::missing_page_count(entry.page_count, entry.matched_page_count)

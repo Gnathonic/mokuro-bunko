@@ -3,10 +3,10 @@
 //! (`ocr/generations.py` helpers and `metadata/compiler.py::_load_sidecar`).
 
 use std::collections::HashSet;
-use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use bunko_store::fs;
 use sha2::{Digest, Sha256};
 
 use crate::pyjson::{self, JsonObject, JsonValue};

@@ -1,22 +1,19 @@
 //! Filesystem helpers with Python's exact numeric semantics.
 
 use std::collections::hash_map::RandomState;
-use std::fs::{self, File, Metadata, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use bunko_store::fs::{self, File, OpenOptions};
+use bunko_store::{Durability, Meta, Mode, Origin, Version, WriteIntent};
+
 /// `os.stat(...).st_mtime`: CPython computes `sec + nsec * 1e-9` in doubles;
 /// the entry cache compares it EXACTLY and embeds its `repr` in keys.
-pub fn py_mtime(meta: &Metadata) -> f64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.mtime() as f64 + meta.mtime_nsec() as f64 * 1e-9
-    }
-    #[cfg(not(unix))]
-    {
-        match meta
+pub fn py_mtime(meta: &Meta) -> f64 {
+    match meta.unix_mtime() {
+        Some((secs, nanos)) => secs as f64 + nanos as f64 * 1e-9,
+        None => match meta
             .modified()
             .map(|time| time.duration_since(std::time::UNIX_EPOCH))
         {
@@ -30,22 +27,22 @@ pub fn py_mtime(meta: &Metadata) -> f64 {
                 secs + nanos * 1e-9
             }
             Err(_) => 0.0,
-        }
+        },
     }
 }
 
 /// `int(st_mtime)` (truncation toward zero).
-pub fn py_mtime_int(meta: &Metadata) -> i64 {
+pub fn py_mtime_int(meta: &Meta) -> i64 {
     py_mtime(meta).trunc() as i64
 }
 
 /// `st_size` as Python's int.
-pub fn size_of(meta: &Metadata) -> i64 {
+pub fn size_of(meta: &Meta) -> i64 {
     i64::try_from(meta.len()).unwrap_or(i64::MAX)
 }
 
 /// `Path.stat()` (follows symlinks).
-pub fn stat(path: &Path) -> Option<Metadata> {
+pub fn stat(path: &Path) -> Option<Meta> {
     fs::metadata(path).ok()
 }
 
@@ -98,15 +95,10 @@ fn create_temp(dir: &Path, name: &str) -> io::Result<(File, PathBuf)> {
     for _ in 0..100 {
         let temp = dir.join(format!(".{name}.compile-{}.tmp", temp_suffix()));
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            // 0o666 & ~umask, applied by the kernel: what 0.5.2's chmod after
-            // `mkstemp` arrived at (mkstemp's 0600 would break nginx-served
-            // downloads).
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o666);
-        }
+        // 0o666 & ~umask, applied by the kernel on unix: what 0.5.2's chmod
+        // after `mkstemp` arrived at (mkstemp's 0600 would break nginx-served
+        // downloads). Ignored elsewhere.
+        options.write(true).create_new(true).mode(0o666);
         match options.open(&temp) {
             Ok(file) => return Ok((file, temp)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -122,6 +114,13 @@ fn create_temp(dir: &Path, name: &str) -> io::Result<(File, PathBuf)> {
 /// `atomic_write_bytes`: temp file in the same directory, write, fsync,
 /// rename over the target (a reader mid-GET never sees half a document).
 pub fn atomic_write_bytes(path: &Path, data: &[u8]) -> io::Result<()> {
+    atomic_write_bytes_with(path, data, None)
+}
+
+/// [`atomic_write_bytes`], publishing only over `base` when it is set (the
+/// version of the file the caller compared against; spec §3.8). The final step
+/// is a store `publish`, which for a local or unmounted path is the rename.
+pub fn atomic_write_bytes_with(path: &Path, data: &[u8], base: Option<Version>) -> io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir)?;
     let name = path
@@ -134,7 +133,16 @@ pub fn atomic_write_bytes(path: &Path, data: &[u8]) -> io::Result<()> {
         file.flush()?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&temp, path)
+        fs::publish(
+            &temp,
+            path,
+            &WriteIntent::new(
+                Mode::Replace { base },
+                Origin::Compiler,
+                Durability::Deferred,
+            ),
+        )
+        .map(|_| ())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);

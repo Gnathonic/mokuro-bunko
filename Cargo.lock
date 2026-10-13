@@ -570,6 +570,7 @@ name = "bunko-library"
 version = "0.7.3"
 dependencies = [
  "bunko-core",
+ "bunko-store",
  "crc32fast",
  "flate2",
  "hex",

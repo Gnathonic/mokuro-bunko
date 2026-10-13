@@ -3,6 +3,9 @@
 //! compiled file must come out byte-identical; the database rows, the library
 //! index, the manifests and the archive page lists must match too.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::collections::BTreeMap;

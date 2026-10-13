@@ -7,8 +7,9 @@
 //! `Vol 1.5.mokuro` is the primary OCR of `Vol 1.5` when `Vol 1.5.cbz` is there.
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
+
+use bunko_store::{Meta, fs};
 
 use crate::fsutil::{self, py_mtime, size_of};
 use crate::isodate;
@@ -51,7 +52,7 @@ pub fn manifest_url(series: &str, volume: &str) -> String {
     )
 }
 
-fn file_entry(series: &str, name: &str, meta: &fs::Metadata) -> JsonObject {
+fn file_entry(series: &str, name: &str, meta: &Meta) -> JsonObject {
     let mut entry = JsonObject::new();
     entry.insert("url", JsonValue::from(reader_file_url(series, name)));
     entry.insert("size", JsonValue::from(size_of(meta)));
@@ -63,14 +64,14 @@ fn file_entry(series: &str, name: &str, meta: &fs::Metadata) -> JsonObject {
 }
 
 /// A regular file (symlinks followed), with its stat.
-fn file_meta(path: &Path) -> Option<fs::Metadata> {
+fn file_meta(path: &Path) -> Option<Meta> {
     fsutil::stat(path).filter(|meta| meta.is_file())
 }
 
 fn with_meta<'a>(
     entries: &HashMap<String, PathBuf>,
     name: Option<&'a str>,
-) -> Option<(&'a str, fs::Metadata)> {
+) -> Option<(&'a str, Meta)> {
     let name = name?;
     Some((name, file_meta(entries.get(name)?)?))
 }
@@ -133,7 +134,7 @@ pub fn build_volume_manifest(
             }
         }
     }
-    let layer_files: HashMap<&str, (&str, fs::Metadata)> = layers
+    let layer_files: HashMap<&str, (&str, Meta)> = layers
         .into_iter()
         .filter_map(|(id, name)| Some((id, (name, file_meta(&entries[name])?))))
         .collect();
@@ -158,7 +159,7 @@ pub fn build_volume_manifest(
         .and_then(|path| file_meta(path))
         .map(|meta| (crate::paths::SERIES_FILE_NAME, meta));
 
-    let entry_or_null = |item: Option<(&str, fs::Metadata)>| match item {
+    let entry_or_null = |item: Option<(&str, Meta)>| match item {
         Some((name, meta)) => JsonValue::Object(file_entry(series, name, &meta)),
         None => JsonValue::Null,
     };
