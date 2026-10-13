@@ -702,6 +702,125 @@ impl Index {
         &self.conn
     }
 
+    // ---- pending Deferred writes (§5.7 STAGED) ------------------------------------
+
+    /// Show `rel` with the staged bytes of the Deferred op `op` (read-after-write):
+    /// an existing file entry gets the marker; a missing one becomes a local-only
+    /// entry (no node) and is reported `Added`. `Ok(None)` and nothing changes when
+    /// the parent folder is not indexed or `rel` is a folder.
+    pub fn set_pending(&self, rel: &RelPath, op: &str) -> rusqlite::Result<Option<IndexChange>> {
+        let Some((name, parent)) = rel.0.split_last() else {
+            return Ok(None);
+        };
+        let parent = RelPath(parent.to_vec());
+        let Some(pe) = self.lookup(&parent).filter(|e| e.is_dir) else {
+            return Ok(None);
+        };
+        self.savepoint(|c| {
+            let existing: Option<(i64, i64)> = c
+                .prepare_cached("SELECT eid, kind FROM entry WHERE parent_eid = ?1 AND name = ?2")?
+                .query_row(params![pe.eid, name], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            match existing {
+                Some((_, KIND_DIR)) => Ok(None),
+                Some((eid, _)) => {
+                    c.execute(
+                        "UPDATE entry SET pending_op = ?1 WHERE eid = ?2",
+                        params![op, eid],
+                    )?;
+                    Ok(Some(IndexChange::ContentChanged { rel: rel.clone() }))
+                }
+                None => {
+                    c.execute(
+                        "INSERT INTO entry(parent_eid, name, fold, kind, mtime_ns, members, pending_op) \
+                         VALUES(?1, ?2, ?3, ?4, 0, 0, ?5)",
+                        params![pe.eid, name, fold(name), KIND_FILE, op],
+                    )?;
+                    self.bump(c, pe.eid)?;
+                    Ok(Some(IndexChange::Added {
+                        rel: rel.clone(),
+                        is_dir: false,
+                    }))
+                }
+            }
+        })
+    }
+
+    /// Drop the marker of op `op`; a local-only entry it held goes (`Removed`).
+    pub fn clear_pending(&self, op: &str) -> rusqlite::Result<Vec<IndexChange>> {
+        self.savepoint(|c| {
+            let eids: Vec<i64> = c
+                .prepare_cached("SELECT eid FROM entry WHERE pending_op = ?1")?
+                .query_map([op], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut out = Vec::new();
+            for eid in eids {
+                let rel = self.path_c(c, eid)?;
+                let parent = self.entry_parent(c, eid)?;
+                c.execute("UPDATE entry SET pending_op = NULL WHERE eid = ?1", [eid])?;
+                let members: i64 =
+                    c.query_row("SELECT COUNT(*) FROM node WHERE eid = ?1", [eid], |r| {
+                        r.get(0)
+                    })?;
+                if members == 0 && eid != ROOT_EID {
+                    c.execute("DELETE FROM entry WHERE eid = ?1", [eid])?;
+                    if let Some(rel) = rel {
+                        out.push(IndexChange::Removed { rel, is_dir: false });
+                    }
+                    if let Some(p) = parent {
+                        self.bump(c, p)?;
+                    }
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// Where the entry marked with op `op` is now (it moves with its folder).
+    pub fn pending_path(&self, op: &str) -> Option<RelPath> {
+        let eid: i64 = soft(
+            self.conn
+                .query_row("SELECT eid FROM entry WHERE pending_op = ?1", [op], |r| {
+                    r.get(0)
+                })
+                .optional(),
+            "pending_path",
+        )??;
+        self.path_of(eid)
+    }
+
+    /// Path-id providers (WebDAV): a move of `old` to `new` renamed every pid in its
+    /// subtree. Rewrite the subtree's pids so the entries (and pending markers under
+    /// them) stay put; the moved node's own upsert then relocates it. Nothing is done
+    /// when `new` is already indexed (the feed got there first).
+    pub fn rebase_pids(&self, tx: &Transaction<'_>, old: &str, new: &str) -> rusqlite::Result<()> {
+        let c: &Connection = tx;
+        if old == new || self.node_row(c, new)?.is_some() {
+            return Ok(());
+        }
+        let n = old.chars().count() as i64;
+        let under = "(pid = ?1 OR substr(pid, 1, ?3 + 1) = ?1 || '/')";
+        c.execute(
+            &format!("UPDATE node SET pid = ?2 || substr(pid, ?3 + 1) WHERE {under}"),
+            params![old, new, n],
+        )?;
+        c.execute(
+            &format!(
+                "UPDATE node SET parent_pid = ?2 || substr(parent_pid, ?3 + 1) WHERE {}",
+                under.replace("pid", "parent_pid")
+            ),
+            params![old, new, n],
+        )?;
+        c.execute(
+            &format!(
+                "UPDATE entry SET winner_pid = ?2 || substr(winner_pid, ?3 + 1) WHERE {}",
+                under.replace("pid", "winner_pid")
+            ),
+            params![old, new, n],
+        )?;
+        Ok(())
+    }
+
     /// Shadowed duplicates, files hidden by a folder, and nested roots.
     pub fn conflicts(&self) -> Vec<IndexConflict> {
         let rows: Vec<(String, i64, i64, i64)> = soft(
@@ -934,6 +1053,14 @@ impl Index {
                 c.execute("UPDATE entry SET members = 0 WHERE eid = ?1", [eid])?;
                 return self.snap(c, eid);
             }
+            // Node-less children are pending local writes (their nodes, if any, were
+            // detached first): they go with the folder, and their ops find the parent
+            // gone at PREFLIGHT (never recreating it).
+            c.execute(
+                "DELETE FROM entry WHERE parent_eid = ?1 \
+                 AND NOT EXISTS (SELECT 1 FROM node n WHERE n.eid = entry.eid)",
+                [eid],
+            )?;
             c.execute("DELETE FROM entry WHERE eid = ?1", [eid])?;
             self.fresh.borrow_mut().remove(&eid);
             return Ok(None);

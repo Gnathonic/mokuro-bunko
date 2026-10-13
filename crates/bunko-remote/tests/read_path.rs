@@ -74,6 +74,7 @@ fn config(tmp: &TempDir) -> RemoteStoreConfig {
     cfg.poll_active = Duration::from_secs(3600);
     cfg.poll_idle = Duration::from_secs(3600);
     cfg.mount_id = MOUNT_ID;
+    cfg.lease = false;
     cfg
 }
 
@@ -245,12 +246,12 @@ fn metadata_and_read_dir_match_the_fake_tree() {
             Some("Series A")
         );
         assert_eq!(t.store.case_winner(&t.root, "nothing"), None);
-        // Mutations wait for the write path; an indexed folder already exists.
+        // An indexed folder already exists (no network); a write is one Sync publish.
+        t.fake().reset_calls();
         fs::create_dir_all(t.abs("Series A")).unwrap();
-        assert_eq!(
-            fs::write(t.abs("Series A/x.txt"), b"x").unwrap_err().kind(),
-            std::io::ErrorKind::Unsupported
-        );
+        assert_eq!(t.fake().calls(FakeOp::Mkdir), 0);
+        fs::write(t.abs("Series A/x.txt"), b"x").unwrap();
+        assert_eq!(fs::read(t.abs("Series A/x.txt")).unwrap(), b"x");
         assert!(t.store.caps().remote && t.store.caps().case_sensitive);
         assert!(!t.store.caps().local_paths && !t.store.caps().symlinks);
         assert_eq!(t.store.health(), bunko_store::Health::Online);
