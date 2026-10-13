@@ -758,10 +758,17 @@ pub fn start_library_services(
                 r = wait => r.unwrap_or(false),
             };
             if steady {
-                info!(
-                    "[STORAGE] The {} library is in sync: starting the library services",
-                    storage.backend.as_str()
-                );
+                if storage.connected() {
+                    info!(
+                        "[STORAGE] The {} library is in sync: starting the library services",
+                        storage.backend.as_str()
+                    );
+                } else {
+                    info!(
+                        "[STORAGE] The {} library is not connected: starting the library services on an empty library",
+                        storage.backend.as_str()
+                    );
+                }
                 break;
             }
             if started.elapsed() >= CLOUD_STEADY_WAIT {
@@ -782,8 +789,46 @@ pub fn start_library_services(
         library.start();
         let covers = thumbs.spawn_remote(library_dir, stop.child_token());
         ocr.start(stop.child_token());
+        publish_cloud_queue(ocr, storage, stop.child_token());
         let _ = covers.await;
     })
+}
+
+/// How often the cloud copy of the queue file is offered to the store (which writes it
+/// only on change, at most once per provider floor).
+pub const CLOUD_QUEUE_EVERY: Duration = Duration::from_secs(2);
+
+/// Keep the cloud library's `.mokuro-queue.json` current (§9.1): the scheduler's queue
+/// document, as the reader's WebDAV copy is built, until `stop`.
+fn publish_cloud_queue(
+    ocr: crate::ocr::OcrControl,
+    storage: Arc<crate::storage::StoreHandle>,
+    stop: CancellationToken,
+) {
+    if !storage.connected() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            if let Some(((held, volumes, pending), now)) =
+                ocr.ask(|s| (s.queue_document(), s.now())).await
+            {
+                let doc = serde_json::Value::Object(crate::ocr::queue_file::build_document(
+                    held, volumes, pending, now,
+                ));
+                let st = storage.clone();
+                match tokio::task::spawn_blocking(move || st.publish_queue_doc(doc)).await {
+                    Ok(Err(e)) => tracing::debug!("[STORAGE] queue file not published: {e}"),
+                    Err(e) => tracing::warn!("[STORAGE] queue file task: {e}"),
+                    Ok(Ok(_)) => {}
+                }
+            }
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep(CLOUD_QUEUE_EVERY) => {}
+            }
+        }
+    });
 }
 
 /// Build every module router and the WebDAV fallback for these services. Modules are

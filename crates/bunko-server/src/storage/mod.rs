@@ -13,7 +13,8 @@
 //! * **gdrive / onedrive**: the sign-in from the credentials file
 //!   (`<base>/cloud/credentials.json`). The entry whose own store id matches the
 //!   configured provider, pairing and folder is used; its `account_id` is part of the id.
-//! * **mega**: refused with a clear error until the MEGA driver lands.
+//! * **mega**: the session on file (`mega_session`, from `library connect mega`);
+//!   the password is never stored, so a lapsed session means a new sign-in.
 //!
 //! A cloud library that cannot be opened (not signed in, no password, the pairing
 //! changed) is not a startup failure: an [`UnconnectedStore`] is mounted instead, the
@@ -100,6 +101,9 @@ pub trait CloudStore: Send + Sync {
     /// feed is steady; false on timeout.
     fn wait_steady(&self, timeout: Duration) -> bool;
     fn set_hooks(&self, hooks: Arc<dyn CloudHooks>);
+    /// Publish the cloud queue file from the server's queue document (§9.1; the store
+    /// dedups and throttles). `true` when a write was queued or scheduled.
+    fn publish_queue_doc(&self, doc: Value) -> io::Result<bool>;
 }
 
 impl<B: Backend> CloudStore for RemoteStore<B> {
@@ -117,6 +121,9 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     }
     fn set_hooks(&self, hooks: Arc<dyn CloudHooks>) {
         RemoteStore::set_hooks(self, hooks)
+    }
+    fn publish_queue_doc(&self, doc: Value) -> io::Result<bool> {
+        RemoteStore::publish_queue_doc(self, doc)
     }
 }
 
@@ -201,6 +208,14 @@ impl StoreHandle {
         match &self.store {
             Some(s) => s.wait_steady(timeout),
             None => true,
+        }
+    }
+
+    /// Publish the cloud copy of the queue file (§9.1); nothing without a store.
+    pub fn publish_queue_doc(&self, doc: Value) -> io::Result<bool> {
+        match &self.store {
+            Some(s) => s.publish_queue_doc(doc),
+            None => Ok(false),
         }
     }
 
@@ -308,10 +323,16 @@ enum Plan {
         account: Option<String>,
         backend: OAuthBackend,
     },
+    Mega {
+        id: String,
+        account: Option<String>,
+        session: bunko_remote::mega::SessionBlob,
+    },
     #[cfg(feature = "testing")]
     Fake {
         id: String,
-        fake: bunko_remote::fake::FakeBackend,
+        fake: Arc<bunko_remote::fake::FakeBackend>,
+        tune: Option<testing::Tune>,
     },
     Unconnected(String),
 }
@@ -324,8 +345,7 @@ enum OAuthBackend {
 /// Open the library store `config` names and mount it. `None` for a local library (the
 /// server mounts its `LocalStore` itself). A cloud library is always mounted: its
 /// `RemoteStore`, or an [`UnconnectedStore`] (with the reason in the handle) when it
-/// cannot be opened yet. The only error is a backend this build cannot run (MEGA) or a
-/// store directory that cannot be created.
+/// cannot be opened yet. The only error is a store directory that cannot be created.
 pub fn open_library_store(
     config: &Config,
     layout: &StorageLayout,
@@ -334,6 +354,8 @@ pub fn open_library_store(
         return Ok(None);
     }
     let lib = &config.storage.library;
+    // Provider errors answer clients by class (412, 503 + Retry-After, 507; §3.5).
+    bunko_store::register_classifier(classify_berr);
     let plan = plan(lib, layout)?;
     let cloud = layout.cloud_dir();
     let open_remote = |id: &str| -> (PathBuf, RemoteStoreConfig) {
@@ -347,6 +369,8 @@ pub fn open_library_store(
         rc.poll_active = active;
         rc.poll_idle = idle;
         rc.mount_id = u64::from_str_radix(&id[..id.len().min(15)], 16).unwrap_or(1) | 1;
+        rc.instance_name = instance_name();
+        rc.bunko_version = bunko_core::VERSION.to_string();
         (root, rc)
     };
     let unconnected_root = layout
@@ -383,7 +407,7 @@ pub fn open_library_store(
             let (root, rc) = open_remote(&id);
             let mut cfg = *cfg;
             cfg.state_dir = rc.dir.clone();
-            match connect_webdav(cfg) {
+            match connect_on_own_runtime(bunko_remote::webdav::WebDavBackend::connect(cfg)) {
                 Ok((backend, rt)) => {
                     let store = RemoteStore::open(rc, backend)?;
                     let mut h = handle_of(id, root, Some(account));
@@ -437,10 +461,42 @@ pub fn open_library_store(
             };
             (store, h)
         }
-        #[cfg(feature = "testing")]
-        Plan::Fake { id, fake } => {
+        Plan::Mega {
+            id,
+            account,
+            session,
+        } => {
             let (root, rc) = open_remote(&id);
-            let s = RemoteStore::open(rc, fake)?;
+            let mc = bunko_remote::mega::MegaConfig::new(rc.dir.clone());
+            match connect_on_own_runtime(async move {
+                bunko_remote::mega::MegaBackend::resume(&session, mc).await
+            }) {
+                Ok((backend, rt)) => {
+                    let store = RemoteStore::open(rc, backend)?;
+                    let mut h = handle_of(id, root, account);
+                    h.store = Some(store.clone());
+                    h._connect_rt = Some(rt);
+                    (store, h)
+                }
+                Err(e) => {
+                    let problem = format!(
+                        "could not resume the MEGA session ({e}): sign in again with `mokuro-bunko library connect mega`"
+                    );
+                    let store = Arc::new(UnconnectedStore::new(unconnected_root.clone(), &problem));
+                    (
+                        store,
+                        StoreHandle::unconnected(lib, unconnected_root, problem),
+                    )
+                }
+            }
+        }
+        #[cfg(feature = "testing")]
+        Plan::Fake { id, fake, tune } => {
+            let (root, mut rc) = open_remote(&id);
+            if let Some(tune) = tune {
+                tune(&mut rc);
+            }
+            let s = RemoteStore::open_shared(rc, fake)?;
             let mut h = handle_of(id, root, Some("fake".into()));
             h.store = Some(s.clone());
             h.fake = Some(s.clone());
@@ -479,6 +535,7 @@ pub fn describe_offline(config: &Config) -> Value {
     let (id, account, problem) = match plan_inner(lib, &layout) {
         Ok(Plan::WebDav { id, account, .. }) => (Some(id), Some(account), None),
         Ok(Plan::OAuth { id, account, .. }) => (Some(id), account, None),
+        Ok(Plan::Mega { id, account, .. }) => (Some(id), account, None),
         #[cfg(feature = "testing")]
         Ok(Plan::Fake { id, .. }) => (Some(id), None, None),
         Ok(Plan::Unconnected(why)) => (None, None, Some(why)),
@@ -500,10 +557,11 @@ pub fn describe_offline(config: &Config) -> Value {
 /// The id and the way to open the configured cloud store.
 fn plan(lib: &LibraryConfig, layout: &StorageLayout) -> io::Result<Plan> {
     #[cfg(feature = "testing")]
-    if let Some(fake) = testing::take(&layout.base) {
+    if let Some((fake, tune)) = testing::take(&layout.base) {
         return Ok(Plan::Fake {
             id: store_id("fake", "", "fake", &lib.folder),
             fake,
+            tune,
         });
     }
     plan_inner(lib, layout)
@@ -513,10 +571,7 @@ fn plan_inner(lib: &LibraryConfig, layout: &StorageLayout) -> io::Result<Plan> {
     let cloud = layout.cloud_dir();
     match lib.backend {
         LibraryBackend::Local => Err(io::Error::other("not a cloud library")),
-        LibraryBackend::Mega => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "MEGA support is not built yet: choose another storage.library.backend",
-        )),
+        LibraryBackend::Mega => signed_in_plan(lib, &cloud),
         LibraryBackend::WebDav => {
             let (Some(url), Some(user)) = (
                 lib.webdav.url.clone().filter(|u| !u.trim().is_empty()),
@@ -548,12 +603,12 @@ fn plan_inner(lib: &LibraryConfig, layout: &StorageLayout) -> io::Result<Plan> {
                 account,
             })
         }
-        LibraryBackend::GDrive | LibraryBackend::OneDrive => oauth_plan(lib, &cloud),
+        LibraryBackend::GDrive | LibraryBackend::OneDrive => signed_in_plan(lib, &cloud),
     }
 }
 
 /// Find the credentials entry of the configured OAuth store (§5.1, §7).
-fn oauth_plan(lib: &LibraryConfig, cloud: &Path) -> io::Result<Plan> {
+fn signed_in_plan(lib: &LibraryConfig, cloud: &Path) -> io::Result<Plan> {
     use bunko_remote::auth::{CredentialStore, google_clients, microsoft_client};
     let provider = lib.backend.as_str();
     let pairing = pairing_of(lib);
@@ -581,6 +636,16 @@ fn oauth_plan(lib: &LibraryConfig, cloud: &Path) -> io::Result<Plan> {
             continue;
         }
         let label = c.account_label.clone().or(c.account_id.clone());
+        if lib.backend == LibraryBackend::Mega {
+            let Some(session) = c.mega_session.clone().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            return Ok(Plan::Mega {
+                id,
+                account: label,
+                session: bunko_remote::mega::SessionBlob::new(session),
+            });
+        }
         let backend = if lib.backend == LibraryBackend::GDrive {
             let clients = google_clients(lib.google_project, &lib.oauth.google);
             let issued = c.client_id.as_deref();
@@ -606,10 +671,10 @@ fn oauth_plan(lib: &LibraryConfig, cloud: &Path) -> io::Result<Plan> {
             backend,
         });
     }
-    let name = if lib.backend == LibraryBackend::GDrive {
-        "Google Drive"
-    } else {
-        "OneDrive"
+    let name = match lib.backend {
+        LibraryBackend::GDrive => "Google Drive",
+        LibraryBackend::Mega => "MEGA",
+        _ => "OneDrive",
     };
     Ok(Plan::Unconnected(if other_pairing {
         format!(
@@ -648,22 +713,55 @@ fn webdav_password(cloud: &Path, id: &str) -> io::Result<Option<String>> {
         .filter(|p| !p.is_empty()))
 }
 
-/// Run the WebDAV connect probe on a runtime that stays alive with the backend (its
-/// pooled connections live there), from a thread of its own so this works inside or
-/// outside an async context.
-fn connect_webdav(
-    cfg: bunko_remote::webdav::WebDavConfig,
-) -> Result<(bunko_remote::webdav::WebDavBackend, ConnectRuntime), String> {
+/// This machine's name in the lease marker ("Another Bunko (nas) manages this library").
+fn instance_name() -> String {
+    hostname::get()
+        .ok()
+        .map(|h| h.to_string_lossy().into_owned())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "bunko".into())
+}
+
+/// A provider error by what it means for a client (spec §3.5), for
+/// `bunko_store::classify`.
+fn classify_berr(
+    e: &(dyn std::error::Error + Send + Sync + 'static),
+) -> Option<bunko_store::ErrorClass> {
+    use bunko_remote::BErr;
+    use bunko_store::ErrorClass;
+    Some(match e.downcast_ref::<BErr>()? {
+        BErr::Throttled(after) => ErrorClass::Unavailable {
+            retry_after: *after,
+        },
+        BErr::Transient(_) => ErrorClass::Unavailable { retry_after: None },
+        BErr::AuthExpired | BErr::AuthRevoked => ErrorClass::NeedsAuth,
+        BErr::PreconditionFailed | BErr::NameConflict => ErrorClass::Conflict,
+        BErr::StorageFull => ErrorClass::StorageFull,
+        BErr::TransferQuota(after) => ErrorClass::TransferQuota {
+            retry_after: *after,
+        },
+        BErr::InvalidName => ErrorClass::InvalidName,
+        BErr::NotFound => ErrorClass::NotFound,
+        _ => return None,
+    })
+}
+
+/// Run a driver's connect step (the WebDAV probe, a MEGA session resume) on a runtime
+/// that stays alive with the backend (its pooled connections live there), from a
+/// thread of its own so this works inside or outside an async context.
+fn connect_on_own_runtime<T: Send + 'static>(
+    connect: impl Future<Output = Result<T, bunko_remote::BErr>> + Send + 'static,
+) -> Result<(T, ConnectRuntime), String> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
-        .thread_name("bunko-webdav-connect")
+        .thread_name("bunko-store-connect")
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
     let handle = rt.handle().clone();
     let joined = std::thread::Builder::new()
-        .name("bunko-webdav-connect".into())
-        .spawn(move || handle.block_on(bunko_remote::webdav::WebDavBackend::connect(cfg)))
+        .name("bunko-store-connect".into())
+        .spawn(move || handle.block_on(connect))
         .map_err(|e| e.to_string())?
         .join();
     match joined {
@@ -866,13 +964,43 @@ mod tests {
     }
 
     #[test]
-    fn mega_is_refused_clearly() {
+    fn mega_without_a_session_is_unconnected() {
         let dir = tempfile::tempdir().unwrap();
         let c = cloud_config(dir.path(), LibraryBackend::Mega);
-        let err = open_library_store(&c, &c.storage.layout()).err().unwrap();
+        let (_s, _g, h) = open_library_store(&c, &c.storage.layout())
+            .unwrap()
+            .unwrap();
+        assert!(!h.connected());
         assert!(
-            err.to_string().contains("MEGA support is not built yet"),
-            "{err}"
+            h.problem()
+                .is_some_and(|p| p.contains("library connect mega")),
+            "{:?}",
+            h.problem()
+        );
+    }
+
+    #[test]
+    fn provider_errors_classify_for_clients() {
+        use bunko_remote::{BErr, berr_to_io};
+        use bunko_store::{ErrorClass, classify};
+        bunko_store::register_classifier(classify_berr);
+        assert_eq!(
+            classify(&berr_to_io(BErr::AuthRevoked)),
+            ErrorClass::NeedsAuth
+        );
+        assert_eq!(
+            classify(&berr_to_io(BErr::Throttled(Some(Duration::from_secs(9))))),
+            ErrorClass::Unavailable {
+                retry_after: Some(Duration::from_secs(9))
+            }
+        );
+        assert_eq!(
+            classify(&berr_to_io(BErr::PreconditionFailed)),
+            ErrorClass::Conflict
+        );
+        assert_eq!(
+            classify(&berr_to_io(BErr::StorageFull)),
+            ErrorClass::StorageFull
         );
     }
 
