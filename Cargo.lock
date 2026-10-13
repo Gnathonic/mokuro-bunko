@@ -695,6 +695,7 @@ dependencies = [
  "bunko-processor",
  "bunko-proto",
  "bunko-sched",
+ "bunko-store",
  "bunko-thumb",
  "bunko-update",
  "bytes",

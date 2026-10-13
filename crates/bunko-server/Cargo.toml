@@ -61,6 +61,7 @@ flate2 = "1"
 zip.workspace = true
 # library module (catalog + metadata runtime): the filesystem watcher
 notify.workspace = true
+bunko-store = { workspace = true, features = ["watch", "tokio"] }
 # thumbs module: cover thumbnails (Pillow-exact contain + Lanczos, lossy WebP; no ONNX
 # Runtime)
 bunko-thumb = { path = "../bunko-thumb" }
