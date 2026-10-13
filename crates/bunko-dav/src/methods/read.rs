@@ -221,9 +221,15 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     // if an upload renames a new file into place meanwhile.
     // A remote store's file has no local handle: its body streams from the store (spool
     // or pinned ranged reads, spec §10), memory flat, with the same validators.
-    let file = bunko_store::afs::File::open(phys)
-        .await
-        .map_err(|e| DavError::new(StatusCode::NOT_FOUND, e.to_string()))?;
+    let file =
+        bunko_store::afs::File::open(phys)
+            .await
+            .map_err(|e| match bunko_store::classify(&e) {
+                bunko_store::ErrorClass::NotFound | bunko_store::ErrorClass::Other => {
+                    DavError::new(StatusCode::NOT_FOUND, e.to_string())
+                }
+                _ => DavError::from(e),
+            })?;
     let stat = Stat::from_meta(&file.metadata().await?);
     let res = match res {
         Resource::File {

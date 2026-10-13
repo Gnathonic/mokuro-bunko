@@ -256,10 +256,148 @@ pub fn is_unavailable(e: &io::Error) -> bool {
     matches!(store_error(e), Some(StoreError::Unavailable(_)))
 }
 
+/// What an error means for a caller that answers clients (spec §3.5 table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    NotFound,
+    AlreadyExists,
+    /// A precondition failed (bridge: 412).
+    Conflict,
+    /// An outage, throttling or a pause (bridge: 503 + Retry-After).
+    Unavailable {
+        retry_after: Option<std::time::Duration>,
+    },
+    /// Expired or revoked credentials (bridge: 503, never 401: the reader would blame
+    /// its own login).
+    NeedsAuth,
+    /// Out of space (bridge: 507).
+    StorageFull,
+    /// A download quota (bridge: 503 + Retry-After).
+    TransferQuota {
+        retry_after: Option<std::time::Duration>,
+    },
+    /// Another Bunko holds the lease (bridge: 503, `storage-lease`).
+    LeaseHeld,
+    /// A name the provider refuses (bridge: 400).
+    InvalidName,
+    /// Anything else (a local I/O error).
+    Other,
+}
+
+/// Recognises a store's own error types inside an `io::Error` (the provider error of
+/// a remote store); registered by whoever links the store (the server).
+pub type Classifier = fn(&(dyn std::error::Error + Send + Sync + 'static)) -> Option<ErrorClass>;
+
+static CLASSIFIERS: parking_lot::RwLock<Vec<Classifier>> = parking_lot::RwLock::new(Vec::new());
+
+/// Add a [`Classifier`] that [`classify`] consults (idempotent per function).
+pub fn register_classifier(f: Classifier) {
+    let mut list = CLASSIFIERS.write();
+    if !list.iter().any(|g| std::ptr::fn_addr_eq(*g, f)) {
+        list.push(f);
+    }
+}
+
+/// The [`ErrorClass`] of `e` (spec §3.5): a [`StoreError`], a registered store error
+/// type, else the `io::ErrorKind`.
+pub fn classify(e: &io::Error) -> ErrorClass {
+    match store_error(e) {
+        Some(StoreError::Conflict(_)) => return ErrorClass::Conflict,
+        Some(StoreError::Unavailable(m)) => {
+            return if m.contains("storage-lease") {
+                ErrorClass::LeaseHeld
+            } else {
+                ErrorClass::Unavailable { retry_after: None }
+            };
+        }
+        None => {}
+    }
+    if let Some(inner) = e.get_ref() {
+        for f in CLASSIFIERS.read().iter() {
+            if let Some(c) = f(inner) {
+                return c;
+            }
+        }
+    }
+    match e.kind() {
+        io::ErrorKind::NotFound => ErrorClass::NotFound,
+        io::ErrorKind::AlreadyExists => ErrorClass::AlreadyExists,
+        io::ErrorKind::StorageFull => ErrorClass::StorageFull,
+        io::ErrorKind::NotConnected => ErrorClass::NeedsAuth,
+        _ => ErrorClass::Other,
+    }
+}
+
 /// The error for an operation that spans two stores.
 pub fn crosses_devices() -> io::Error {
     io::Error::new(
         io::ErrorKind::CrossesDevices,
         "the paths are in different stores",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct ProviderErr(bool);
+
+    impl std::fmt::Display for ProviderErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("provider")
+        }
+    }
+
+    impl std::error::Error for ProviderErr {}
+
+    fn provider(e: &(dyn std::error::Error + Send + Sync + 'static)) -> Option<ErrorClass> {
+        e.downcast_ref::<ProviderErr>().map(|p| {
+            if p.0 {
+                ErrorClass::NeedsAuth
+            } else {
+                ErrorClass::Unavailable {
+                    retry_after: Some(std::time::Duration::from_secs(7)),
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn errors_classify_by_store_error_registered_type_then_kind() {
+        assert_eq!(classify(&conflict("x")), ErrorClass::Conflict);
+        assert_eq!(
+            classify(&unavailable("y")),
+            ErrorClass::Unavailable { retry_after: None }
+        );
+        assert_eq!(
+            classify(&unavailable("storage-lease: held by nas")),
+            ErrorClass::LeaseHeld
+        );
+        assert_eq!(
+            classify(&io::Error::other(ProviderErr(true))),
+            ErrorClass::Other
+        );
+        register_classifier(provider);
+        register_classifier(provider);
+        assert_eq!(CLASSIFIERS.read().len(), 1);
+        assert_eq!(
+            classify(&io::Error::other(ProviderErr(true))),
+            ErrorClass::NeedsAuth
+        );
+        assert_eq!(
+            classify(&io::Error::other(ProviderErr(false))),
+            ErrorClass::Unavailable {
+                retry_after: Some(std::time::Duration::from_secs(7))
+            }
+        );
+        assert_eq!(
+            classify(&io::Error::from(io::ErrorKind::StorageFull)),
+            ErrorClass::StorageFull
+        );
+        assert_eq!(
+            classify(&io::Error::from(io::ErrorKind::PermissionDenied)),
+            ErrorClass::Other
+        );
+    }
 }
