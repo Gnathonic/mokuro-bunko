@@ -6,10 +6,13 @@
 //!   the last 256 KiB the first time a read lands there; other ranges come from the
 //!   spool when one exists (waiting for a progressive fill when the read is within
 //!   4 MiB of it), else from pinned ranged reads through the 256 KiB block cache. A
-//!   handle whose first operation is a read at offset 0 (a whole-file consumer such
-//!   as a copy or an HTTP GET) joins or starts the spool instead, falling back to
-//!   ranged passthrough when the spool budget is full. A handle that seeks first (the
-//!   zip reader) never starts a download.
+//!   ranged read fetches only the blocks the read covers, until the handle has proven
+//!   itself sequential ([`SEQ_READS`] contiguous reads spanning [`SEQ_BYTES`]): then
+//!   it reads ahead (doubling, up to 4 MiB a fetch), and a run that started at offset
+//!   0 (a whole-file consumer such as a copy or an HTTP GET) joins or starts the
+//!   spool, falling back to ranged passthrough when the spool budget is full. One
+//!   read, wherever it lands (a magic sniff at 0, a zip reader's local headers), never
+//!   starts a download or reads ahead.
 //! - [`PendingFile`]: the staged bytes of a pending Deferred write.
 //! - [`StagingFile`]: the local staging file `open_with` hands out.
 //!
@@ -32,6 +35,10 @@ use crate::store::{RemoteStore, Ver, berr_to_io};
 
 /// The largest read-ahead of a sequential ranged reader.
 const MAX_READAHEAD: u64 = 4 << 20;
+/// Contiguous reads (the first included) before a handle counts as sequential…
+const SEQ_READS: u32 = 4;
+/// …spanning at least this many bytes.
+const SEQ_BYTES: u64 = 4 << 20;
 
 fn read_only() -> io::Error {
     io::Error::new(
@@ -106,16 +113,21 @@ pub struct ArchiveFile<B: Backend> {
     v: Ver,
     meta: Meta,
     pos: u64,
-    /// No read or seek happened yet.
-    fresh: bool,
-    /// The first operation was a read at 0: a whole-file consumer.
-    sequential: bool,
     tail: Option<Arc<ZipTail>>,
     tail_fetched: bool,
     spool: Option<(SpoolPinGuard, Option<std::fs::File>)>,
-    /// A spool was looked for (or refused) already.
-    spool_tried: bool,
+    /// An existing spool was looked for already.
+    spool_attach_tried: bool,
+    /// Starting a spool was tried (or refused) already.
+    spool_start_tried: bool,
+    /// A spool this handle started: wait for its fill up to here rather than read
+    /// the same bytes ranged.
+    spool_wait_to: u64,
+    /// Where the last read ended (`u64::MAX`: no read yet).
     last_end: u64,
+    /// The current run of contiguous reads: where it started, how many reads.
+    run_start: u64,
+    run_reads: u32,
     readahead: u64,
 }
 
@@ -127,15 +139,23 @@ impl<B: Backend> ArchiveFile<B> {
             v,
             meta,
             pos: 0,
-            fresh: true,
-            sequential: false,
             tail,
             tail_fetched: false,
             spool: None,
-            spool_tried: false,
+            spool_attach_tried: false,
+            spool_start_tried: false,
+            spool_wait_to: 0,
             last_end: u64::MAX,
+            run_start: 0,
+            run_reads: 0,
             readahead: BLOCK,
         }
+    }
+
+    /// The read run has proven sequential: contiguous reads, enough of them, over a
+    /// large enough span.
+    fn sequential(&self) -> bool {
+        self.run_reads >= SEQ_READS && self.pos - self.run_start >= SEQ_BYTES
     }
 
     fn pinned(&self, range: (u64, u64)) -> io::Result<Vec<u8>> {
@@ -177,15 +197,25 @@ impl<B: Backend> ArchiveFile<B> {
 
     /// Serve `buf` from the spool when it holds (or will soon hold) `pos`.
     fn read_spool(&mut self, pos: u64, buf: &mut [u8]) -> io::Result<Option<usize>> {
-        if self.spool.is_none() && !self.spool_tried {
-            self.spool_tried = true;
-            let key = self.v.key();
-            let pin = match self.store.core.spool.attach(&key) {
-                Some(p) => Some(p),
-                None if self.sequential => self.store.spool_for(&self.v, false)?,
-                None => None,
-            };
-            self.spool = pin.map(|p| (p, None));
+        // An existing spool costs nothing to read from: any handle uses it.
+        if self.spool.is_none() && !self.spool_attach_tried {
+            self.spool_attach_tried = true;
+            self.spool = self
+                .store
+                .core
+                .spool
+                .attach(&self.v.key())
+                .map(|p| (p, None));
+        }
+        // A download of the whole file only for a proven whole-file reader.
+        if self.spool.is_none()
+            && !self.spool_start_tried
+            && self.run_start == 0
+            && self.sequential()
+        {
+            self.spool_start_tried = true;
+            self.spool = self.store.spool_for(&self.v, false)?.map(|p| (p, None));
+            self.spool_wait_to = pos.saturating_add(SPOOL_AHEAD);
         }
         loop {
             let Some((pin, _)) = &self.spool else {
@@ -213,7 +243,9 @@ impl<B: Backend> ArchiveFile<B> {
                     self.spool = None;
                     return Ok(None);
                 }
-                None if pos < fill.filled.saturating_add(SPOOL_AHEAD) => {
+                None if pos < fill.filled.saturating_add(SPOOL_AHEAD)
+                    || pos < self.spool_wait_to =>
+                {
                     self.store.block_on("read", entry.wait(pos + 1));
                 }
                 None => return Ok(None),
@@ -230,12 +262,16 @@ impl<B: Backend> ArchiveFile<B> {
         let block = match core.blocks.get(pid, cver, b0) {
             Some(b) => b,
             None => {
-                self.readahead = if pos == self.last_end {
-                    (self.readahead * 2).min(MAX_READAHEAD)
+                // Only a proven sequential reader reads ahead; any other read fetches
+                // just the blocks it covers.
+                let ahead = if self.sequential() {
+                    self.readahead = (self.readahead * 2).min(MAX_READAHEAD);
+                    self.readahead
                 } else {
-                    BLOCK
+                    self.readahead = BLOCK;
+                    1
                 };
-                let end = size.min(pos.saturating_add((buf.len() as u64).max(self.readahead)));
+                let end = size.min(pos.saturating_add((buf.len() as u64).max(ahead)));
                 let b_last = (end - 1) / BLOCK;
                 let mut b1 = b0;
                 while b1 < b_last && !core.blocks.contains(pid, cver, b1 + 1) {
@@ -279,14 +315,16 @@ impl<B: Backend> fmt::Debug for ArchiveFile<B> {
 impl<B: Backend> Read for ArchiveFile<B> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let size = self.v.size;
-        if self.fresh {
-            self.fresh = false;
-            self.sequential = self.pos == 0;
-        }
         if buf.is_empty() || self.pos >= size {
             return Ok(0);
         }
         let pos = self.pos;
+        if pos == self.last_end {
+            self.run_reads = self.run_reads.saturating_add(1);
+        } else {
+            self.run_start = pos;
+            self.run_reads = 1;
+        }
         let mut want = (buf.len() as u64).min(size - pos) as usize;
         // 1. The cached tail.
         if let Some(t) = &self.tail {
@@ -295,6 +333,7 @@ impl<B: Backend> Read for ArchiveFile<B> {
                 let n = want.min(t.bytes.len() - at);
                 buf[..n].copy_from_slice(&t.bytes[at..at + n]);
                 self.pos += n as u64;
+                self.last_end = self.pos;
                 return Ok(n);
             }
             want = want.min((t.start - pos) as usize);
@@ -308,6 +347,8 @@ impl<B: Backend> Read for ArchiveFile<B> {
         // 3. The tail, fetched once, when the read lands in it.
         if self.tail.is_none() && !self.tail_fetched && pos >= size - TAIL.min(size) {
             self.fetch_tail()?;
+            // The same read again, not a new one in the run.
+            self.run_reads -= 1;
             return self.read(buf);
         }
         // 4. Blocks.
@@ -320,7 +361,6 @@ impl<B: Backend> Read for ArchiveFile<B> {
 
 impl<B: Backend> Seek for ArchiveFile<B> {
     fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
-        self.fresh = false;
         let size = self.v.size as i128;
         let target = match to {
             SeekFrom::Start(n) => i128::from(n),
