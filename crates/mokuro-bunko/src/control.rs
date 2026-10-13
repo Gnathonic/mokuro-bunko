@@ -93,12 +93,14 @@ pub fn watch_problems(
     });
 }
 
-/// The server's library queue for the status (`library.queue_pending`), every few
-/// seconds until `stop`.
+/// The server's library queue for the status (`library.queue_pending`) and its
+/// storage (`library.storage`, what `library status` prints), every few seconds until
+/// `stop`.
 pub fn watch_queue(
     control: Control,
     url: String,
     ocr: bunko_server::ocr::OcrControl,
+    storage: Option<std::sync::Arc<bunko_server::storage::StoreHandle>>,
     stop: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -128,12 +130,19 @@ pub fn watch_queue(
                     }
                 )
             });
+            let st = storage.clone();
+            let storage_block = tokio::task::spawn_blocking(move || {
+                bunko_server::admin::storage_block(st.as_deref())
+            })
+            .await
+            .ok();
             control.set_library(bunko_control::LibraryView {
                 url: Some(url.clone()),
                 connected: true,
                 queue_pending: pending,
                 error: None,
                 activity,
+                storage: storage_block,
             });
             tokio::select! {
                 _ = stop.cancelled() => break,

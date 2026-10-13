@@ -252,6 +252,7 @@ impl ControlSetup {
             control.clone(),
             self.library_url.clone(),
             services.ocr.clone(),
+            services.storage.clone(),
             stop.clone(),
         );
         #[cfg(feature = "ocr")]

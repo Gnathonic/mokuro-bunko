@@ -334,16 +334,10 @@ pub enum DyndnsCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum LibraryCmd {
-    /// Show the library's storage: backend, folder, store, and (asking the running
-    /// server's admin API with --user) its health, sync state and caches.
+    /// Show the library's storage: backend, folder, store, and (when a server runs on
+    /// this storage, asked through its local control API) its health, sync state and
+    /// caches.
     Status {
-        /// Ask the server at this URL instead of the configured local one
-        #[arg(long)]
-        url: Option<String>,
-        /// An admin account to ask the running server with (password from
-        /// MOKURO_ADMIN_PASSWORD, else asked); without it, only the configuration is shown
-        #[arg(long, env = "MOKURO_ADMIN_USER")]
-        user: Option<String>,
         /// Print the status as JSON
         #[arg(long)]
         json: bool,

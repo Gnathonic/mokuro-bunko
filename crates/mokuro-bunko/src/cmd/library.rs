@@ -1,9 +1,12 @@
 //! `library status` (0.8 §11): where the library lives and how its store is doing.
 //!
-//! With `--user` (or `MOKURO_ADMIN_USER`) the running server's `/_admin/api/status` is
-//! asked for its `library.storage` block (health, sync state, caches); without it, or
-//! when no server answers, the configuration is read instead (no network): backend,
-//! folder, store id and whether a sign-in is on file.
+//! A server running on this storage is asked through its local control API, the way
+//! the tray asks it: `.control.json`'s token as a bearer, over plain http to
+//! 127.0.0.1 only (the URL is built from the file's port; the file's own `url` is never
+//! followed, so nothing leaves this machine). Its `status.library.storage` is the
+//! admin panel's block (health, sync state, caches; never secrets). Without a running
+//! server the configuration is read instead, with no network: backend, folder, store
+//! id and whether a sign-in is on file. No credential is taken on the command line.
 
 use super::Ctx;
 use crate::cfgfile;
@@ -14,25 +17,21 @@ use std::time::Duration;
 
 pub fn run(ctx: &Ctx, cmd: LibraryCmd) -> CmdResult {
     match cmd {
-        LibraryCmd::Status { url, user, json } => status(ctx, url, user, json),
+        LibraryCmd::Status { json } => status(ctx, json),
     }
 }
 
-fn status(ctx: &Ctx, url: Option<String>, user: Option<String>, json: bool) -> CmdResult {
+fn status(ctx: &Ctx, json: bool) -> CmdResult {
     let config = cfgfile::load_effective(&ctx.config_path)?;
-    let live = match user {
-        Some(user) => {
-            let base = url.unwrap_or_else(|| local_url(&config));
-            match ask_server(&base, &user) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    eprintln!("Could not ask the server at {base}: {e}; showing the configuration");
-                    None
-                }
+    let live = bunko_control::file::live_instance(&config.storage.base_path).and_then(|file| {
+        match ask_control(&file) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Could not ask the running server ({e}); showing the configuration");
+                None
             }
         }
-        None => None,
-    };
+    });
     let (block, source) = match live {
         Some(v) => (v, "running server"),
         None => (
@@ -53,49 +52,43 @@ fn status(ctx: &Ctx, url: Option<String>, user: Option<String>, json: bool) -> C
     Ok(())
 }
 
-/// `http(s)://127.0.0.1:<port>` of the configured server (as `healthcheck`).
-fn local_url(config: &bunko_core::Config) -> String {
-    let scheme = if config.ssl.enabled { "https" } else { "http" };
-    let host = match config.server.host.as_str() {
-        "0.0.0.0" | "" | "::" => "127.0.0.1".to_string(),
-        h if h.contains(':') => format!("[{h}]"),
-        h => h.to_string(),
-    };
-    format!("{scheme}://{host}:{}", config.server.port)
+/// The control API's status URL: loopback http on the file's port, whatever else the
+/// file says.
+pub fn control_status_url(file: &bunko_control::ControlFile) -> String {
+    format!("http://127.0.0.1:{}/control/status", file.port)
 }
 
-fn ask_server(base: &str, user: &str) -> Result<Value, String> {
-    let password = match std::env::var("MOKURO_ADMIN_PASSWORD") {
-        Ok(p) if !p.is_empty() => p,
-        _ => crate::prompt::hidden(&format!("Password for {user}"), false)
-            .map_err(|e| e.to_string())?,
-    };
+/// `status.library.storage` of the running instance (`None`: it reports none, e.g. a
+/// processor or an older version). Errors never carry the token.
+fn ask_control(file: &bunko_control::ControlFile) -> Result<Option<Value>, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
-        // Our own, often self-signed, certificate (as `healthcheck`).
-        .danger_accept_invalid_certs(true)
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| e.to_string())?;
-    let url = format!("{}/_admin/api/status", base.trim_end_matches('/'));
+    let url = control_status_url(file);
     let rt = runtime().map_err(|e| e.to_string())?;
     let body: Value = rt.block_on(async {
         let resp = client
             .get(&url)
-            .basic_auth(user, Some(password))
+            .bearer_auth(&file.token)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.without_url().to_string())?;
         let status = resp.status();
         if !status.is_success() {
             return Err(format!("HTTP {}", status.as_u16()));
         }
-        resp.json::<Value>().await.map_err(|e| e.to_string())
+        resp.json::<Value>()
+            .await
+            .map_err(|e| e.without_url().to_string())
     })?;
-    body.get("library")
+    Ok(body
+        .get("library")
         .and_then(|l| l.get("storage"))
-        .cloned()
-        .ok_or_else(|| "the server reports no library.storage block (an older version?)".into())
+        .filter(|s| s.is_object())
+        .cloned())
 }
 
 fn text(v: &Value) -> Option<String> {
@@ -198,6 +191,38 @@ pub fn describe(v: &Value, source: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The control file's own `url` is never followed: the request goes to loopback
+    /// http on its port, and the token is not part of the URL.
+    #[test]
+    fn the_control_api_is_only_asked_on_loopback() {
+        let file = bunko_control::ControlFile {
+            role: bunko_control::Role::Server,
+            pid: 1,
+            port: 4321,
+            token: "sekrit-token".into(),
+            version: "0.8.0".into(),
+            started_at: "2026-10-12T00:00:00Z".into(),
+            url: "https://evil.example:4321".into(),
+            managed: false,
+        };
+        let url = control_status_url(&file);
+        assert_eq!(url, "http://127.0.0.1:4321/control/status");
+        assert!(!url.contains("sekrit"));
+        assert!(bunko_control::http::is_loopback_host("127.0.0.1:4321"));
+        // Nothing listens there: the error names no token.
+        let err = ask_control(&bunko_control::ControlFile { port: 1, ..file }).unwrap_err();
+        assert!(!err.contains("sekrit"), "{err}");
+    }
+
+    /// A store block never carries the credentials it was opened with.
+    #[test]
+    fn printed_lines_carry_no_secret() {
+        let v = json!({"backend": "webdav", "folder": "mokuro-reader", "store_id": "x",
+            "account": "me@https://dav.example/", "problem": null});
+        let all = describe(&v, "configuration").join("\n");
+        assert!(!all.contains("password"));
+    }
 
     #[test]
     fn live_blocks_read_as_lines() {

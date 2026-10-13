@@ -38,6 +38,7 @@ use std::sync::Arc;
 
 pub use machine::CHOOSABLE_BACKENDS;
 pub use ocr::{NoOcr, OcrAdmin};
+pub use status::storage_block;
 pub use update::{AutoDeps, Quiet, UpdateService, UpdateSource};
 
 /// Max JSON body (0.5.2 `MAX_JSON_BODY_BYTES`).
