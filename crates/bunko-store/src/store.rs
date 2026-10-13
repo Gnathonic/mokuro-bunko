@@ -208,6 +208,54 @@ pub trait LibraryStore: Send + Sync + 'static {
     }
 }
 
+/// A store-level failure that has no `io::ErrorKind` of its own, carried inside an
+/// `io::Error` of kind `Other` (spec §3.5). [`classify`]-style helpers recognise it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreError {
+    /// A precondition failed: the destination changed since its base version, a
+    /// create found the name taken, or the parent is gone (bridge: 412).
+    Conflict(String),
+    /// The store cannot do this now (an outage, another Bunko holds the lease, a
+    /// barrier timed out); try again later (bridge: 503).
+    Unavailable(String),
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::Conflict(m) => write!(f, "conflict: {m}"),
+            StoreError::Unavailable(m) => write!(f, "unavailable: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+/// An `io::Error` carrying [`StoreError::Conflict`].
+pub fn conflict(msg: impl Into<String>) -> io::Error {
+    io::Error::other(StoreError::Conflict(msg.into()))
+}
+
+/// An `io::Error` carrying [`StoreError::Unavailable`].
+pub fn unavailable(msg: impl Into<String>) -> io::Error {
+    io::Error::other(StoreError::Unavailable(msg.into()))
+}
+
+/// The [`StoreError`] inside `e`, if any.
+pub fn store_error(e: &io::Error) -> Option<&StoreError> {
+    e.get_ref().and_then(|x| x.downcast_ref::<StoreError>())
+}
+
+/// Whether `e` is a write conflict (the DAV layer answers 412).
+pub fn is_conflict(e: &io::Error) -> bool {
+    matches!(store_error(e), Some(StoreError::Conflict(_)))
+}
+
+/// Whether `e` means "not now" (the DAV layer answers 503).
+pub fn is_unavailable(e: &io::Error) -> bool {
+    matches!(store_error(e), Some(StoreError::Unavailable(_)))
+}
+
 /// The error for an operation that spans two stores.
 pub fn crosses_devices() -> io::Error {
     io::Error::new(

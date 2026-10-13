@@ -7,7 +7,9 @@
 //! fold and effective-mtime rules; [`feed::Feed`] keeps the index current from the
 //! provider's change feed and replays cloud-side changes to the server.
 //! [`store::RemoteStore`] puts it all behind `bunko_store::LibraryStore`, with the
-//! read caches of [`cache`] and the open files of [`file`](mod@file). [`status`]
+//! read caches of [`cache`] and the open files of [`file`](mod@file); writes go
+//! through the outbox of [`outbox`] (durable state in [`state`], the mutation methods
+//! in [`write`](mod@write)), fenced by the lease of [`status`]. [`status`]
 //! holds the marker lease (`.mokuro-bunko.json`) and the cloud queue document. Default
 //! features add the providers' drivers (`webdav::WebDavBackend`,
 //! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`) and
@@ -29,12 +31,15 @@ pub mod mega;
 pub mod names;
 #[cfg(feature = "onedrive")]
 pub mod onedrive;
+pub mod outbox;
+pub mod state;
 pub mod status;
+pub mod store;
 #[cfg(any(feature = "gdrive", feature = "onedrive"))]
 pub mod token_dyn;
-pub mod store;
 #[cfg(feature = "webdav")]
 pub mod webdav;
+pub mod write;
 
 pub use backend::{
     AccountInfo, BErr, Backend, BackendCaps, ChangeItem, ChangePage, Cursor, HashKind, OpCtx, Pid,

@@ -10,7 +10,8 @@
 //!   as a copy or an HTTP GET) joins or starts the spool instead, falling back to
 //!   ranged passthrough when the spool budget is full. A handle that seeks first (the
 //!   zip reader) never starts a download.
-//! - [`StagingFile`]: the local staging file of the write path (M2 task 5).
+//! - [`PendingFile`]: the staged bytes of a pending Deferred write.
+//! - [`StagingFile`]: the local staging file `open_with` hands out.
 //!
 //! A version-pin mismatch fails the read with `io::Error(Other, BErr::PreconditionFailed)`
 //! and caches nothing (D24).
@@ -234,14 +235,14 @@ impl<B: Backend> ArchiveFile<B> {
                 } else {
                     BLOCK
                 };
-                let end = size.min(pos + (buf.len() as u64).max(self.readahead));
+                let end = size.min(pos.saturating_add((buf.len() as u64).max(self.readahead)));
                 let b_last = (end - 1) / BLOCK;
                 let mut b1 = b0;
                 while b1 < b_last && !core.blocks.contains(pid, cver, b1 + 1) {
                     b1 += 1;
                 }
                 let first = b0 * BLOCK;
-                let last = size.min((b1 + 1) * BLOCK) - 1;
+                let last = size.min((b1 + 1).saturating_mul(BLOCK)) - 1;
                 let data = Bytes::from(self.pinned((first, last))?);
                 let mut b = b0;
                 let mut off = 0usize;
@@ -362,8 +363,65 @@ impl<B: Backend> RemoteFile for ArchiveFile<B> {
     }
 }
 
-/// A local staging file under `<dir>/staging/` that a publish sends to `dest`
-/// (M2 task 5; `open_with` does not hand these out yet).
+/// The staged bytes of a pending Deferred write (read-after-write), read-only.
+pub struct PendingFile {
+    file: std::fs::File,
+    meta: Meta,
+}
+
+impl PendingFile {
+    pub(crate) fn new(file: std::fs::File, meta: Meta) -> PendingFile {
+        PendingFile { file, meta }
+    }
+}
+
+impl fmt::Debug for PendingFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingFile")
+            .field("version", &self.meta.version())
+            .finish()
+    }
+}
+
+impl Read for PendingFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Seek for PendingFile {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+impl Write for PendingFile {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        Err(read_only())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl RemoteFile for PendingFile {
+    fn metadata(&self) -> io::Result<Meta> {
+        Ok(self.meta.clone())
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn set_len(&self, _len: u64) -> io::Result<()> {
+        Err(read_only())
+    }
+}
+
+/// A local staging file under `<dir>/staging/` for the library path `dest`: what
+/// `open_with` hands out. It reaches the cloud only through an explicit `publish`
+/// (or a `rename` of `dest`), never on drop; until then it is a local-only file.
 pub struct StagingFile {
     pub(crate) file: std::fs::File,
     pub(crate) path: PathBuf,
