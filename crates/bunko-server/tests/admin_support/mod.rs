@@ -105,6 +105,7 @@ impl Harness {
                 r2.fetch_add(1, Ordering::SeqCst);
             })),
             machine: opts.machine,
+            storage: None,
         });
         Harness {
             dir,

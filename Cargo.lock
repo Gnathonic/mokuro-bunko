@@ -742,7 +742,9 @@ dependencies = [
  "bunko-library",
  "bunko-processor",
  "bunko-proto",
+ "bunko-remote",
  "bunko-sched",
+ "bunko-server",
  "bunko-store",
  "bunko-thumb",
  "bunko-update",
@@ -789,6 +791,8 @@ dependencies = [
 name = "bunko-store"
 version = "0.7.3"
 dependencies = [
+ "bytes",
+ "futures-util",
  "notify",
  "parking_lot",
  "tempfile",

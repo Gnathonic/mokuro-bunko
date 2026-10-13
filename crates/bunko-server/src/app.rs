@@ -111,8 +111,14 @@ pub struct Services {
     /// First-run state: the setup code and its sessions (shared with the accounts
     /// routes; [`announce_setup`] issues the code).
     pub setup: crate::accounts::SetupFlag,
-    /// The library root mounted as a `LocalStore` for as long as the services live
-    /// (last, so it is unmounted after everything else has been dropped).
+    /// A cloud library's store (`storage.library.backend` is not `local`): status for
+    /// the admin panel, the first-sync wait; `None` for a library on this disk.
+    pub storage: Option<Arc<crate::storage::StoreHandle>>,
+    /// A cloud library: the store's change events drop the PROPFIND listings they
+    /// touch at once (spec §10).
+    _listing_watch: Option<bunko_store::WatchGuard>,
+    /// The library root mounted (a `LocalStore`, or the cloud store) for as long as the
+    /// services live (last, so it is unmounted after everything else has been dropped).
     _library_mount: bunko_store::MountGuard,
 }
 
@@ -212,8 +218,16 @@ impl Services {
         let flavor = opts.flavor;
         let db_options = DbOptions::from(&config.database);
         let layout = config.storage.layout();
-        // Before anything below touches the library.
-        let library_mount = crate::library::mount_local(&layout.library());
+        // Before anything below touches the library: the cloud store (mounted at its
+        // synthetic root, which every `layout.library()` below names), or the disk.
+        let (library_mount, storage, layout) =
+            match crate::storage::open_library_store(&config, &layout)? {
+                Some((store, guard, handle)) => {
+                    let layout = layout.with_library_root(store.root());
+                    (guard, Some(handle), layout)
+                }
+                None => (crate::library::mount_local(&layout.library()), None, layout),
+            };
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
@@ -229,7 +243,7 @@ impl Services {
         };
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
         let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
-        let core = Core::new(config, config_path, backend);
+        let core = Core::with_layout(config, config_path, backend, layout.clone());
         let late_ocr: Arc<std::sync::OnceLock<crate::ocr::OcrControl>> =
             Arc::new(std::sync::OnceLock::new());
         let library = {
@@ -267,7 +281,21 @@ impl Services {
         };
         let _ = late_ocr.set(ocr.clone());
         dav_hooks.add_listener(Arc::new(ocr.clone()));
+        let listing_watch = storage
+            .as_ref()
+            .and_then(|_| watch_listings(&dav, &layout.library()));
+        if let Some(handle) = &storage {
+            // Changes made directly in the cloud run the hooks a DAV write runs (D20).
+            handle.set_hooks(Arc::new(crate::storage::ServerCloudHooks::new(
+                layout.library(),
+                dav_hooks.clone(),
+                library.clone(),
+                db.clone(),
+            )));
+        }
         Ok(Services {
+            storage,
+            _listing_watch: listing_watch,
             core,
             db,
             dyndns,
@@ -284,6 +312,27 @@ impl Services {
             setup: crate::accounts::SetupFlag::default(),
             _library_mount: library_mount,
         })
+    }
+}
+
+/// Drop the cached PROPFIND listings a store change touches (the path's own, its
+/// ancestors' and its descendants'), as a DAV write does for its own changes; a
+/// `Rescan` drops them all (spec §10).
+fn watch_listings(dav: &bunko_dav::Dav, library: &Path) -> Option<bunko_store::WatchGuard> {
+    let store = bunko_store::store_for(library)?;
+    let (dav, root) = (dav.clone(), library.to_path_buf());
+    let sink: bunko_store::WatchSink = Arc::new(move |ev: bunko_store::WatchEvent| {
+        match ev.path().and_then(|p| crate::ocr::types::rel_of(&root, p)) {
+            Some(rel) => dav.invalidate_listing(&[format!("/{}/{rel}", auth::paths::READER_ROOT)]),
+            None => dav.propfind_cache().invalidate(),
+        }
+    });
+    match store.watch(sink) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            tracing::warn!("[STORAGE] PROPFIND listings refresh on a timer only: {e}");
+            None
+        }
     }
 }
 
@@ -643,23 +692,7 @@ pub async fn serve_router_with(
             });
         }
         services.updates.start(stop.clone());
-        services.library.start();
-        let library_dir = services.core.layout.library();
-        {
-            // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
-            // request path.
-            let (lib, db) = (library_dir.clone(), services.db.clone());
-            tokio::task::spawn_blocking(move || {
-                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db))
-            });
-        }
-        let thumbs = services.thumbs.spawn(
-            services.core.config.clone(),
-            library_dir,
-            stop.child_token(),
-        );
-        services.ocr.start(stop.child_token());
-        thumbs
+        start_library_services(services, stop.clone())
     };
     crate::serve::serve(listener, app, tls, stop, Duration::from_secs(5)).await?;
     // Ordered shutdown (0.5.2 shutdown_app order, plus the new services).
@@ -671,6 +704,86 @@ pub async fn serve_router_with(
     services.updates.stop().await;
     services.tunnel.stop().await;
     Ok(())
+}
+
+/// How long the library services wait for a cloud store's first sync before they start
+/// on what the index holds so far.
+pub const CLOUD_STEADY_WAIT: Duration = Duration::from_secs(15 * 60);
+/// How often that wait logs its progress.
+const CLOUD_STEADY_LOG_EVERY: Duration = Duration::from_secs(30);
+
+/// Start the library runtime (watcher, metadata timers), the cover loop and the OCR
+/// scheduler. The returned task ends with the cover loop (at `stop`).
+///
+/// On a library on this disk they start at once, after 0.5.2's one-shot corrupt-sidecar
+/// sweep. On a cloud library they start once the store's change feed is STEADY (or after
+/// [`CLOUD_STEADY_WAIT`], with a warning), so the first metadata compile and the
+/// scheduler's first census see the whole library; admin, health and setup are served
+/// meanwhile. The sweep is skipped (D13: corrupt sidecars are report-only on remote)
+/// and covers are made as archives arrive, not by a periodic walk.
+pub fn start_library_services(
+    services: &Services,
+    stop: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let config = services.core.config.clone();
+    let library_dir = services.core.layout.library();
+    let Some(storage) = services.storage.clone() else {
+        services.library.start();
+        {
+            // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
+            // request path.
+            let (lib, db) = (library_dir.clone(), services.db.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db))
+            });
+        }
+        let thumbs = services
+            .thumbs
+            .spawn(config, library_dir, stop.child_token());
+        services.ocr.start(stop.child_token());
+        return thumbs;
+    };
+    let (library, thumbs, ocr) = (
+        services.library.clone(),
+        services.thumbs.clone(),
+        services.ocr.clone(),
+    );
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        loop {
+            let h = storage.clone();
+            let wait = tokio::task::spawn_blocking(move || h.wait_steady(CLOUD_STEADY_LOG_EVERY));
+            let steady = tokio::select! {
+                _ = stop.cancelled() => return,
+                r = wait => r.unwrap_or(false),
+            };
+            if steady {
+                info!(
+                    "[STORAGE] The {} library is in sync: starting the library services",
+                    storage.backend.as_str()
+                );
+                break;
+            }
+            if started.elapsed() >= CLOUD_STEADY_WAIT {
+                tracing::warn!(
+                    "[STORAGE] The {} library is still not in sync after {} min ({:?}): starting the library services on what is indexed so far",
+                    storage.backend.as_str(),
+                    CLOUD_STEADY_WAIT.as_secs() / 60,
+                    storage.engine_state()
+                );
+                break;
+            }
+            info!(
+                "[STORAGE] Waiting for the first sync of the {} library: {:?}",
+                storage.backend.as_str(),
+                storage.engine_state()
+            );
+        }
+        library.start();
+        let covers = thumbs.spawn_remote(library_dir, stop.child_token());
+        ocr.start(stop.child_token());
+        let _ = covers.await;
+    })
 }
 
 /// Build every module router and the WebDAV fallback for these services. Modules are
@@ -740,6 +853,7 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         drop_processors: Some(drop),
         restart: Some(restart),
         machine: opts.machine.clone(),
+        storage: services.storage.clone(),
     };
     let mut modules: Vec<Router> = vec![
         crate::accounts::router(accounts.clone()),

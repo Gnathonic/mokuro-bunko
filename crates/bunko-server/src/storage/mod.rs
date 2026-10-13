@@ -1,0 +1,889 @@
+//! Where the library lives (0.8 design §1, §5.1, §11): on this disk, or in a cloud
+//! folder behind a `bunko_remote::RemoteStore`.
+//!
+//! [`open_library_store`] builds the store `storage.library` names and returns it
+//! mounted at its synthetic root `<base>/cloud/<store-id>/library` (D2), which never
+//! exists on disk: every library access in the server goes through the mount. The
+//! store id is `sha256(provider ‖ pairing ‖ account_id ‖ folder)[..16]` (§5.1); its
+//! local state (index, caches, spool) lives in `<base>/cloud/<store-id>/`.
+//!
+//! * **webdav**: the URL and user from config; the password from
+//!   `MOKURO_WEBDAV_PASSWORD_FILE` or the credentials file. The account id is
+//!   `user@url`.
+//! * **gdrive / onedrive**: the sign-in from the credentials file
+//!   (`<base>/cloud/credentials.json`). The entry whose own store id matches the
+//!   configured provider, pairing and folder is used; its `account_id` is part of the id.
+//! * **mega**: refused with a clear error until the MEGA driver lands.
+//!
+//! A cloud library that cannot be opened (not signed in, no password, the pairing
+//! changed) is not a startup failure: an [`UnconnectedStore`] is mounted instead, the
+//! server runs with an empty library, and the admin panel reports why
+//! ([`StoreHandle::status_json`]).
+//!
+//! With the `testing` feature, [`testing::register`] hands a `FakeBackend` to the next
+//! server opened over a storage base path, whatever cloud backend its config names.
+
+pub mod hooks;
+mod unconnected;
+
+#[cfg(feature = "testing")]
+pub mod testing;
+
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use bunko_core::config::{GoogleProject, LibraryBackend, LibraryConfig};
+use bunko_core::{Config, StorageLayout};
+use bunko_remote::{Backend, CacheStats, CloudHooks, EngineState, RemoteStore, RemoteStoreConfig};
+use bunko_store::{Health, LibraryStore, MountGuard};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+pub use hooks::ServerCloudHooks;
+pub use unconnected::UnconnectedStore;
+
+/// `MOKURO_WEBDAV_PASSWORD_FILE`: a file holding the WebDAV password (§11).
+pub const WEBDAV_PASSWORD_FILE_ENV: &str = "MOKURO_WEBDAV_PASSWORD_FILE";
+
+/// The store id of §5.1: the first 16 hex digits of
+/// `sha256(provider ‖ pairing ‖ account_id ‖ folder)`, fields NUL-separated.
+pub fn store_id(provider: &str, pairing: &str, account_id: &str, folder: &str) -> String {
+    let mut h = Sha256::new();
+    for (i, part) in [provider, pairing, account_id, folder].iter().enumerate() {
+        if i > 0 {
+            h.update([0u8]);
+        }
+        h.update(part.as_bytes());
+    }
+    hex::encode(h.finalize())[..16].to_string()
+}
+
+/// The Google pairing part of the store id (D25): `release`, `beta`, or
+/// `custom:<client_id>` (the Desktop override's id, else the device override's). Empty
+/// for every other provider.
+pub fn pairing_of(lib: &LibraryConfig) -> String {
+    if lib.backend != LibraryBackend::GDrive {
+        return String::new();
+    }
+    let o = &lib.oauth.google;
+    if lib.google_project == GoogleProject::Custom || o.any() {
+        let id = o
+            .client_id
+            .as_deref()
+            .or(o.device_client_id.as_deref())
+            .unwrap_or("");
+        return format!("custom:{id}");
+    }
+    lib.google_project.as_str().to_string()
+}
+
+/// The provider defaults of the poll cadence (§5.3), overridden by `storage.library.poll`.
+fn poll_intervals(lib: &LibraryConfig) -> (Duration, Duration) {
+    let (active, idle) = match lib.backend {
+        LibraryBackend::GDrive => (30, 300),
+        _ => (60, 300),
+    };
+    (
+        Duration::from_secs(u64::from(lib.poll.active_s.unwrap_or(active).max(1))),
+        Duration::from_secs(u64::from(lib.poll.idle_s.unwrap_or(idle).max(1))),
+    )
+}
+
+/// What the admin panel and `library status` show of a running cloud store.
+pub trait CloudStore: Send + Sync {
+    fn health(&self) -> Health;
+    fn engine_state(&self) -> EngineState;
+    fn cache_stats(&self) -> CacheStats;
+    /// Block (a content-kind call: never from inside an async task) until the change
+    /// feed is steady; false on timeout.
+    fn wait_steady(&self, timeout: Duration) -> bool;
+    fn set_hooks(&self, hooks: Arc<dyn CloudHooks>);
+}
+
+impl<B: Backend> CloudStore for RemoteStore<B> {
+    fn health(&self) -> Health {
+        LibraryStore::health(self)
+    }
+    fn engine_state(&self) -> EngineState {
+        RemoteStore::engine_state(self)
+    }
+    fn cache_stats(&self) -> CacheStats {
+        RemoteStore::cache_stats(self)
+    }
+    fn wait_steady(&self, timeout: Duration) -> bool {
+        RemoteStore::wait_steady(self, timeout)
+    }
+    fn set_hooks(&self, hooks: Arc<dyn CloudHooks>) {
+        RemoteStore::set_hooks(self, hooks)
+    }
+}
+
+/// Keeps the runtime a driver connected on alive (its pooled connections run there),
+/// and shuts it down without waiting when the store goes.
+struct ConnectRuntime(Option<tokio::runtime::Runtime>);
+
+impl Drop for ConnectRuntime {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
+/// The opened cloud library: what it is, and the running store (or why there is none).
+pub struct StoreHandle {
+    pub backend: LibraryBackend,
+    pub folder: String,
+    /// `None` until a store could be identified (no sign-in yet).
+    pub store_id: Option<String>,
+    /// The synthetic library root the store is mounted at.
+    pub root: PathBuf,
+    /// The account's display label (never a secret).
+    pub account: Option<String>,
+    /// The Google pairing (D25); `None` for other providers.
+    pub pairing: Option<String>,
+    store: Option<Arc<dyn CloudStore>>,
+    /// Why there is no store.
+    problem: Option<String>,
+    #[cfg(feature = "testing")]
+    fake: Option<Arc<RemoteStore<bunko_remote::fake::FakeBackend>>>,
+    // Last: the store (and its runtime) goes first.
+    _connect_rt: Option<ConnectRuntime>,
+}
+
+impl StoreHandle {
+    fn unconnected(lib: &LibraryConfig, root: PathBuf, problem: String) -> StoreHandle {
+        tracing::warn!(
+            "[STORAGE] The {} library is not connected: {problem}",
+            lib.backend.as_str()
+        );
+        StoreHandle {
+            backend: lib.backend,
+            folder: lib.folder.clone(),
+            store_id: None,
+            root,
+            account: None,
+            pairing: (lib.backend == LibraryBackend::GDrive).then(|| pairing_of(lib)),
+            store: None,
+            problem: Some(problem),
+            #[cfg(feature = "testing")]
+            fake: None,
+            _connect_rt: None,
+        }
+    }
+
+    /// A store runs (it may still be syncing, offline or need a new sign-in).
+    pub fn connected(&self) -> bool {
+        self.store.is_some()
+    }
+
+    /// Why no store runs, if none does.
+    pub fn problem(&self) -> Option<&str> {
+        self.problem.as_deref()
+    }
+
+    pub fn health(&self) -> Health {
+        match &self.store {
+            Some(s) => s.health(),
+            None => Health::NeedsReauth,
+        }
+    }
+
+    pub fn engine_state(&self) -> Option<EngineState> {
+        self.store.as_ref().map(|s| s.engine_state())
+    }
+
+    /// Block until the feed is steady (true at once without a store: there is nothing
+    /// to wait for). Never call from inside an async task.
+    pub fn wait_steady(&self, timeout: Duration) -> bool {
+        match &self.store {
+            Some(s) => s.wait_steady(timeout),
+            None => true,
+        }
+    }
+
+    /// Install the server's cloud hooks (D20).
+    pub fn set_hooks(&self, hooks: Arc<dyn CloudHooks>) {
+        if let Some(s) = &self.store {
+            s.set_hooks(hooks);
+        }
+    }
+
+    /// The test fake behind this store (feature `testing`).
+    #[cfg(feature = "testing")]
+    pub fn fake_store(&self) -> Option<&Arc<RemoteStore<bunko_remote::fake::FakeBackend>>> {
+        self.fake.as_ref()
+    }
+
+    /// The admin status's `library.storage` block (§11).
+    pub fn status_json(&self) -> Value {
+        let (engine, progress) = match self.engine_state() {
+            None => ("unconnected".to_string(), Value::Null),
+            Some(e) => engine_json(&e),
+        };
+        let cache = self.store.as_ref().map(|s| {
+            let c = s.cache_stats();
+            json!({
+                "blobs": c.blobs,
+                "blob_bytes": c.blob_bytes,
+                "zipdirs": c.zipdirs,
+                "blocks": c.blocks,
+                "block_bytes": c.block_bytes,
+                "spools": c.spools,
+                "spool_bytes": c.spool_bytes,
+            })
+        });
+        json!({
+            "backend": self.backend.as_str(),
+            "folder": self.folder,
+            "store_id": self.store_id,
+            "account": self.account,
+            "pairing": self.pairing,
+            "connected": self.connected(),
+            "problem": self.problem,
+            "health": health_json(&self.health()),
+            "engine": engine,
+            "sync": progress,
+            "cache": cache,
+        })
+    }
+}
+
+/// `{"state": "online" | ..., ...}` of a store's health.
+pub fn health_json(h: &Health) -> Value {
+    match h {
+        Health::Online => json!({"state": "online"}),
+        Health::Syncing { done, total } => {
+            json!({"state": "syncing", "done": done, "total": total})
+        }
+        Health::Degraded { retry_at } => json!({
+            "state": "degraded",
+            "retry_at": retry_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |d| d.as_secs_f64()),
+        }),
+        Health::Offline => json!({"state": "offline"}),
+        Health::NeedsReauth => json!({"state": "needs-reauth"}),
+        Health::Blocked(b) => json!({"state": "blocked", "reason": format!("{b:?}")}),
+        Health::Suspect => json!({"state": "suspect"}),
+        Health::LeaseHeld { by } => json!({"state": "lease-held", "by": by}),
+    }
+}
+
+fn engine_json(e: &EngineState) -> (String, Value) {
+    match e {
+        EngineState::Init => ("init".into(), Value::Null),
+        EngineState::LocateRoots => ("locate-roots".into(), Value::Null),
+        EngineState::FullSync { done, total } => {
+            ("full-sync".into(), json!({"done": done, "total": total}))
+        }
+        EngineState::Steady => ("steady".into(), Value::Null),
+        EngineState::Suspect {
+            pending_removals,
+            root_changed,
+        } => (
+            "suspect".into(),
+            json!({"pending_removals": pending_removals, "root_changed": root_changed}),
+        ),
+        EngineState::Offline => ("offline".into(), Value::Null),
+        EngineState::NeedsReauth => ("needs-reauth".into(), Value::Null),
+    }
+}
+
+/// A mounted library store, its mount, and (for a cloud library) its handle.
+pub type OpenedStore = (Arc<dyn LibraryStore>, MountGuard, Arc<StoreHandle>);
+
+/// What identifies the store `storage.library` names, and how to open it.
+#[allow(clippy::large_enum_variant)] // one short-lived value per start
+enum Plan {
+    WebDav {
+        id: String,
+        cfg: Box<bunko_remote::webdav::WebDavConfig>,
+        account: String,
+    },
+    OAuth {
+        id: String,
+        account: Option<String>,
+        backend: OAuthBackend,
+    },
+    #[cfg(feature = "testing")]
+    Fake {
+        id: String,
+        fake: bunko_remote::fake::FakeBackend,
+    },
+    Unconnected(String),
+}
+
+enum OAuthBackend {
+    GDrive(bunko_remote::auth::OAuthClient),
+    OneDrive(bunko_remote::auth::OAuthClient),
+}
+
+/// Open the library store `config` names and mount it. `None` for a local library (the
+/// server mounts its `LocalStore` itself). A cloud library is always mounted: its
+/// `RemoteStore`, or an [`UnconnectedStore`] (with the reason in the handle) when it
+/// cannot be opened yet. The only error is a backend this build cannot run (MEGA) or a
+/// store directory that cannot be created.
+pub fn open_library_store(
+    config: &Config,
+    layout: &StorageLayout,
+) -> io::Result<Option<OpenedStore>> {
+    if !config.is_cloud_library() {
+        return Ok(None);
+    }
+    let lib = &config.storage.library;
+    let plan = plan(lib, layout)?;
+    let cloud = layout.cloud_dir();
+    let open_remote = |id: &str| -> (PathBuf, RemoteStoreConfig) {
+        let dir = cloud.join(id);
+        let root = dir.join("library");
+        let (active, idle) = poll_intervals(lib);
+        let mut rc = RemoteStoreConfig::new(root.clone(), dir, lib.folder.clone());
+        rc.cache_bytes = u64::from(lib.cache_mb) << 20;
+        rc.spool_bytes = u64::from(lib.spool_gb) << 30;
+        rc.quiet = Duration::from_secs(u64::from(lib.quiet_s));
+        rc.poll_active = active;
+        rc.poll_idle = idle;
+        rc.mount_id = u64::from_str_radix(&id[..id.len().min(15)], 16).unwrap_or(1) | 1;
+        (root, rc)
+    };
+    let unconnected_root = layout
+        .clone()
+        .with_library_root(
+            cloud
+                .join(bunko_core::storage::UNCONNECTED_STORE)
+                .join("library"),
+        )
+        .library();
+    let pairing = (lib.backend == LibraryBackend::GDrive).then(|| pairing_of(lib));
+    let handle_of = |id: String, root: PathBuf, account: Option<String>| StoreHandle {
+        backend: lib.backend,
+        folder: lib.folder.clone(),
+        store_id: Some(id),
+        root,
+        account,
+        pairing: pairing.clone(),
+        store: None,
+        problem: None,
+        #[cfg(feature = "testing")]
+        fake: None,
+        _connect_rt: None,
+    };
+    let opened: (Arc<dyn LibraryStore>, StoreHandle) = match plan {
+        Plan::Unconnected(problem) => {
+            let store = Arc::new(UnconnectedStore::new(unconnected_root.clone(), &problem));
+            (
+                store,
+                StoreHandle::unconnected(lib, unconnected_root, problem),
+            )
+        }
+        Plan::WebDav { id, cfg, account } => {
+            let (root, rc) = open_remote(&id);
+            let mut cfg = *cfg;
+            cfg.state_dir = rc.dir.clone();
+            match connect_webdav(cfg) {
+                Ok((backend, rt)) => {
+                    let store = RemoteStore::open(rc, backend)?;
+                    let mut h = handle_of(id, root, Some(account));
+                    h.store = Some(store.clone());
+                    h._connect_rt = Some(rt);
+                    (store, h)
+                }
+                Err(e) => {
+                    let problem = format!("could not reach the WebDAV server: {e}");
+                    let store = Arc::new(UnconnectedStore::new(unconnected_root.clone(), &problem));
+                    (
+                        store,
+                        StoreHandle::unconnected(lib, unconnected_root, problem),
+                    )
+                }
+            }
+        }
+        Plan::OAuth {
+            id,
+            account,
+            backend,
+        } => {
+            let (root, rc) = open_remote(&id);
+            let creds = Arc::new(
+                bunko_remote::auth::CredentialStore::open(&cloud).map_err(io::Error::other)?,
+            );
+            let mut h = handle_of(id.clone(), root, account);
+            let store: Arc<dyn LibraryStore> = match backend {
+                OAuthBackend::GDrive(client) => {
+                    let token = token_source(client, &id, creds);
+                    let b = bunko_remote::gdrive::GDriveBackend::new(
+                        token,
+                        bunko_remote::gdrive::GDriveConfig::new(rc.dir.clone()),
+                    )
+                    .map_err(bunko_remote::berr_to_io)?;
+                    let s = RemoteStore::open(rc, b)?;
+                    h.store = Some(s.clone());
+                    s
+                }
+                OAuthBackend::OneDrive(client) => {
+                    let token = token_source(client, &id, creds);
+                    let b = bunko_remote::onedrive::OneDriveBackend::new(
+                        token,
+                        bunko_remote::onedrive::OneDriveConfig::default(),
+                    )
+                    .map_err(bunko_remote::berr_to_io)?;
+                    let s = RemoteStore::open(rc, b)?;
+                    h.store = Some(s.clone());
+                    s
+                }
+            };
+            (store, h)
+        }
+        #[cfg(feature = "testing")]
+        Plan::Fake { id, fake } => {
+            let (root, rc) = open_remote(&id);
+            let s = RemoteStore::open(rc, fake)?;
+            let mut h = handle_of(id, root, Some("fake".into()));
+            h.store = Some(s.clone());
+            h.fake = Some(s.clone());
+            (s, h)
+        }
+    };
+    let (store, handle) = opened;
+    if let Some(id) = &handle.store_id {
+        tracing::info!(
+            "[STORAGE] Library: {} folder {:?} (store {id}) mounted at {}",
+            handle.backend.as_str(),
+            handle.folder,
+            handle.root.display()
+        );
+    }
+    let guard = bunko_store::mount(store.clone());
+    Ok(Some((store, guard, Arc::new(handle))))
+}
+
+/// What `config` says about the library's storage without opening anything (no
+/// network): `mokuro-bunko library status` when no server answers. The same keys as
+/// [`StoreHandle::status_json`] where they can be known offline, plus `store_dir` and
+/// `indexed` (whether a first sync left an index there).
+// unmounted: the store's own local directory.
+#[allow(clippy::disallowed_methods)]
+pub fn describe_offline(config: &Config) -> Value {
+    let lib = &config.storage.library;
+    if !config.is_cloud_library() {
+        return json!({
+            "backend": "local",
+            "folder": config.storage.layout().library(),
+        });
+    }
+    let layout = config.storage.layout();
+    let pairing = (lib.backend == LibraryBackend::GDrive).then(|| pairing_of(lib));
+    let (id, account, problem) = match plan_inner(lib, &layout) {
+        Ok(Plan::WebDav { id, account, .. }) => (Some(id), Some(account), None),
+        Ok(Plan::OAuth { id, account, .. }) => (Some(id), account, None),
+        #[cfg(feature = "testing")]
+        Ok(Plan::Fake { id, .. }) => (Some(id), None, None),
+        Ok(Plan::Unconnected(why)) => (None, None, Some(why)),
+        Err(e) => (None, None, Some(e.to_string())),
+    };
+    let dir = id.as_ref().map(|id| layout.cloud_dir().join(id));
+    json!({
+        "backend": lib.backend.as_str(),
+        "folder": lib.folder,
+        "store_id": id,
+        "account": account,
+        "pairing": pairing,
+        "problem": problem,
+        "store_dir": dir,
+        "indexed": dir.as_ref().is_some_and(|d| d.join("index.sqlite").is_file()),
+    })
+}
+
+/// The id and the way to open the configured cloud store.
+fn plan(lib: &LibraryConfig, layout: &StorageLayout) -> io::Result<Plan> {
+    #[cfg(feature = "testing")]
+    if let Some(fake) = testing::take(&layout.base) {
+        return Ok(Plan::Fake {
+            id: store_id("fake", "", "fake", &lib.folder),
+            fake,
+        });
+    }
+    plan_inner(lib, layout)
+}
+
+fn plan_inner(lib: &LibraryConfig, layout: &StorageLayout) -> io::Result<Plan> {
+    let cloud = layout.cloud_dir();
+    match lib.backend {
+        LibraryBackend::Local => Err(io::Error::other("not a cloud library")),
+        LibraryBackend::Mega => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "MEGA support is not built yet: choose another storage.library.backend",
+        )),
+        LibraryBackend::WebDav => {
+            let (Some(url), Some(user)) = (
+                lib.webdav.url.clone().filter(|u| !u.trim().is_empty()),
+                lib.webdav.username.clone().filter(|u| !u.is_empty()),
+            ) else {
+                return Ok(Plan::Unconnected(
+                    "storage.library.webdav.url and .username must be set".into(),
+                ));
+            };
+            let account = format!("{user}@{url}");
+            let id = store_id("webdav", "", &account, &lib.folder);
+            let Some(password) = webdav_password(&cloud, &id)? else {
+                return Ok(Plan::Unconnected(format!(
+                    "no WebDAV password: set {WEBDAV_PASSWORD_FILE_ENV} or run `mokuro-bunko library connect webdav`"
+                )));
+            };
+            Ok(Plan::WebDav {
+                id,
+                cfg: Box::new(bunko_remote::webdav::WebDavConfig {
+                    url,
+                    username: user,
+                    password,
+                    folder: lib.folder.clone(),
+                    allow_http: lib.webdav.allow_http,
+                    allow_bunko_backend_for_tests: false,
+                    state_dir: PathBuf::new(),
+                    disable_cas: false,
+                }),
+                account,
+            })
+        }
+        LibraryBackend::GDrive | LibraryBackend::OneDrive => oauth_plan(lib, &cloud),
+    }
+}
+
+/// Find the credentials entry of the configured OAuth store (§5.1, §7).
+fn oauth_plan(lib: &LibraryConfig, cloud: &Path) -> io::Result<Plan> {
+    use bunko_remote::auth::{CredentialStore, google_clients, microsoft_client};
+    let provider = lib.backend.as_str();
+    let pairing = pairing_of(lib);
+    let creds = match CredentialStore::open(cloud) {
+        Ok(c) => c,
+        Err(e) => return Ok(Plan::Unconnected(format!("the credentials file: {e}"))),
+    };
+    let ids = match creds.store_ids() {
+        Ok(ids) => ids,
+        Err(e) => return Ok(Plan::Unconnected(format!("the credentials file: {e}"))),
+    };
+    let mut other_pairing = false;
+    for id in ids {
+        let Ok(Some(c)) = creds.get(&id) else {
+            continue;
+        };
+        if c.provider != provider {
+            continue;
+        }
+        let Some(account) = c.account_id.as_deref() else {
+            continue;
+        };
+        if store_id(provider, &pairing, account, &lib.folder) != id {
+            other_pairing = true;
+            continue;
+        }
+        let label = c.account_label.clone().or(c.account_id.clone());
+        let backend = if lib.backend == LibraryBackend::GDrive {
+            let clients = google_clients(lib.google_project, &lib.oauth.google);
+            let issued = c.client_id.as_deref();
+            let client = [clients.loopback.clone(), clients.device.clone()]
+                .into_iter()
+                .flatten()
+                .find(|cl| Some(cl.client_id.as_str()) == issued)
+                .or(clients.loopback)
+                .or(clients.device);
+            let Some(client) = client else {
+                return Ok(Plan::Unconnected(
+                    "no Google sign-in client for the configured pairing (storage.library.oauth.google)"
+                        .into(),
+                ));
+            };
+            OAuthBackend::GDrive(client)
+        } else {
+            OAuthBackend::OneDrive(microsoft_client(&lib.oauth.microsoft))
+        };
+        return Ok(Plan::OAuth {
+            id,
+            account: label,
+            backend,
+        });
+    }
+    let name = if lib.backend == LibraryBackend::GDrive {
+        "Google Drive"
+    } else {
+        "OneDrive"
+    };
+    Ok(Plan::Unconnected(if other_pairing {
+        format!(
+            "the {name} sign-in on file is for another pairing or folder; disconnect the old library first, then run `mokuro-bunko library connect {provider}`"
+        )
+    } else {
+        format!("not signed in to {name}: run `mokuro-bunko library connect {provider}`")
+    }))
+}
+
+/// The WebDAV password: `MOKURO_WEBDAV_PASSWORD_FILE`, else the credentials entry.
+// unmounted: the password file is a local secret named by the environment.
+#[allow(clippy::disallowed_methods)]
+fn webdav_password(cloud: &Path, id: &str) -> io::Result<Option<String>> {
+    if let Some(file) = std::env::var_os(WEBDAV_PASSWORD_FILE_ENV).filter(|v| !v.is_empty()) {
+        let text = std::fs::read_to_string(&file).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "{WEBDAV_PASSWORD_FILE_ENV} ({}): {e}",
+                    Path::new(&file).display()
+                ),
+            )
+        })?;
+        let pw = text.trim_end_matches(['\r', '\n']).to_string();
+        return Ok((!pw.is_empty()).then_some(pw));
+    }
+    let Ok(creds) = bunko_remote::auth::CredentialStore::open(cloud) else {
+        return Ok(None);
+    };
+    Ok(creds
+        .get(id)
+        .ok()
+        .flatten()
+        .and_then(|c| c.webdav_password)
+        .filter(|p| !p.is_empty()))
+}
+
+/// Run the WebDAV connect probe on a runtime that stays alive with the backend (its
+/// pooled connections live there), from a thread of its own so this works inside or
+/// outside an async context.
+fn connect_webdav(
+    cfg: bunko_remote::webdav::WebDavConfig,
+) -> Result<(bunko_remote::webdav::WebDavBackend, ConnectRuntime), String> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("bunko-webdav-connect")
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    let handle = rt.handle().clone();
+    let joined = std::thread::Builder::new()
+        .name("bunko-webdav-connect".into())
+        .spawn(move || handle.block_on(bunko_remote::webdav::WebDavBackend::connect(cfg)))
+        .map_err(|e| e.to_string())?
+        .join();
+    match joined {
+        Ok(Ok(b)) => Ok((b, ConnectRuntime(Some(rt)))),
+        Ok(Err(e)) => {
+            rt.shutdown_background();
+            Err(e.to_string())
+        }
+        Err(_) => {
+            rt.shutdown_background();
+            Err("the connect probe panicked".into())
+        }
+    }
+}
+
+/// A refreshing OAuth token as the drivers' object-safe token seam.
+fn token_source(
+    client: bunko_remote::auth::OAuthClient,
+    store_id: &str,
+    creds: Arc<bunko_remote::auth::CredentialStore>,
+) -> Arc<dyn bunko_remote::token_dyn::TokenSourceDyn> {
+    Arc::new(DynToken(bunko_remote::auth::RefreshingToken::new(
+        client, store_id, creds,
+    )))
+}
+
+struct DynToken(bunko_remote::auth::RefreshingToken);
+
+impl bunko_remote::token_dyn::TokenSourceDyn for DynToken {
+    fn access_token(
+        &self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<String, bunko_remote::BErr>> + Send + '_>>
+    {
+        use bunko_remote::auth::TokenSource;
+        Box::pin(self.0.access_token())
+    }
+    fn invalidate(&self) {
+        use bunko_remote::auth::TokenSource;
+        self.0.invalidate()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_ids_separate_every_field() {
+        let a = store_id("gdrive", "release", "acct", "mokuro-reader");
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(a, store_id("gdrive", "release", "acct", "mokuro-reader"));
+        assert_ne!(a, store_id("gdrive", "beta", "acct", "mokuro-reader"));
+        assert_ne!(a, store_id("gdrive", "release", "acct", "manga"));
+        assert_ne!(a, store_id("onedrive", "release", "acct", "mokuro-reader"));
+        // The separator keeps field boundaries apart.
+        assert_ne!(store_id("a", "bc", "", ""), store_id("ab", "c", "", ""));
+    }
+
+    #[test]
+    fn pairing_names_the_reader_project() {
+        let mut lib = LibraryConfig {
+            backend: LibraryBackend::GDrive,
+            ..LibraryConfig::default()
+        };
+        assert_eq!(pairing_of(&lib), "release");
+        lib.google_project = GoogleProject::Beta;
+        assert_eq!(pairing_of(&lib), "beta");
+        lib.oauth.google.device_client_id = Some("dev-id".into());
+        assert_eq!(pairing_of(&lib), "custom:dev-id");
+        lib.oauth.google.client_id = Some("desk-id".into());
+        assert_eq!(pairing_of(&lib), "custom:desk-id");
+        lib.backend = LibraryBackend::OneDrive;
+        assert_eq!(pairing_of(&lib), "");
+    }
+
+    fn cloud_config(dir: &Path, backend: LibraryBackend) -> Config {
+        let mut c = Config::default();
+        c.storage.base_path = dir.to_path_buf();
+        c.storage.library.backend = backend;
+        c
+    }
+
+    /// No sign-in yet: an empty unconnected library is mounted, nothing is created
+    /// on disk for it, and the handle says why.
+    #[test]
+    fn missing_credentials_mount_an_unconnected_library() {
+        let dir = tempfile::tempdir().unwrap();
+        for backend in [
+            LibraryBackend::GDrive,
+            LibraryBackend::OneDrive,
+            LibraryBackend::WebDav,
+        ] {
+            let c = cloud_config(dir.path(), backend);
+            let layout = c.storage.layout();
+            let (store, _guard, handle) = open_library_store(&c, &layout).unwrap().unwrap();
+            assert!(!handle.connected(), "{backend:?}");
+            assert_eq!(handle.health(), Health::NeedsReauth);
+            assert!(handle.problem().is_some());
+            assert_eq!(store.root(), layout.library());
+            let root = layout.library();
+            assert!(bunko_store::fs::is_dir(&root));
+            assert_eq!(bunko_store::fs::read_dir(&root).unwrap().count(), 0);
+            assert!(bunko_store::fs::File::create(root.join("x")).is_err());
+            // unmounted check of the real disk.
+            #[allow(clippy::disallowed_methods)]
+            let on_disk = root.exists();
+            assert!(!on_disk, "the synthetic root must not exist on disk");
+            let st = handle.status_json();
+            assert_eq!(st["connected"], false);
+            assert_eq!(st["health"]["state"], "needs-reauth");
+            assert_eq!(st["backend"], backend.as_str());
+        }
+    }
+
+    /// A WebDAV server that cannot be reached at start: an unconnected library with the
+    /// reason, from inside an async context too (the probe runs on its own runtime).
+    #[tokio::test]
+    async fn an_unreachable_webdav_server_mounts_an_unconnected_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cloud_config(dir.path(), LibraryBackend::WebDav);
+        c.storage.library.webdav.url = Some("https://127.0.0.1:9/dav".into());
+        c.storage.library.webdav.username = Some("me".into());
+        let layout = c.storage.layout();
+        let id = store_id("webdav", "", "me@https://127.0.0.1:9/dav", "mokuro-reader");
+        let creds = bunko_remote::auth::CredentialStore::open(&layout.cloud_dir()).unwrap();
+        creds
+            .put(
+                &id,
+                bunko_remote::auth::StoredCredential {
+                    provider: "webdav".into(),
+                    webdav_password: Some("secret".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let offline = describe_offline(&c);
+        assert_eq!(offline["store_id"], id.as_str());
+        assert_eq!(offline["problem"], Value::Null);
+        let (_store, _guard, handle) = open_library_store(&c, &layout).unwrap().unwrap();
+        assert!(!handle.connected());
+        assert!(
+            handle
+                .problem()
+                .is_some_and(|p| p.contains("could not reach the WebDAV server")),
+            "{:?}",
+            handle.problem()
+        );
+        assert!(!handle.status_json().to_string().contains("secret"));
+    }
+
+    /// A Drive sign-in on file opens a RemoteStore with that account's store id; a grant
+    /// without tokens reads as revoked (no network): the store reports NeedsReauth.
+    #[test]
+    fn a_drive_sign_in_on_file_opens_its_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cloud_config(dir.path(), LibraryBackend::GDrive);
+        let layout = c.storage.layout();
+        let id = store_id("gdrive", "release", "acct-1", "mokuro-reader");
+        let creds = bunko_remote::auth::CredentialStore::open(&layout.cloud_dir()).unwrap();
+        let cred = bunko_remote::auth::StoredCredential {
+            provider: "gdrive".into(),
+            account_id: Some("acct-1".into()),
+            account_label: Some("me@example.com".into()),
+            client_id: Some(bunko_remote::auth::clients::RELEASE_DESKTOP_CLIENT_ID.into()),
+            ..Default::default()
+        };
+        creds.put(&id, cred).unwrap();
+        let (store, _guard, handle) = open_library_store(&c, &layout).unwrap().unwrap();
+        assert!(handle.connected(), "{:?}", handle.problem());
+        assert_eq!(handle.store_id.as_deref(), Some(id.as_str()));
+        assert_eq!(handle.account.as_deref(), Some("me@example.com"));
+        assert_eq!(
+            store.root(),
+            layout.cloud_dir().join(&id).join("library").as_path()
+        );
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while handle.health() != Health::NeedsReauth {
+            assert!(
+                std::time::Instant::now() < until,
+                "{:?}",
+                handle.engine_state()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(handle.status_json()["health"]["state"], "needs-reauth");
+        drop((store, _guard, handle));
+        // Another pairing does not pick the release sign-in up.
+        c.storage.library.google_project = GoogleProject::Beta;
+        let (_s, _g, beta) = open_library_store(&c, &c.storage.layout())
+            .unwrap()
+            .unwrap();
+        assert!(!beta.connected());
+        assert!(
+            beta.problem()
+                .is_some_and(|p| p.contains("another pairing")),
+            "{:?}",
+            beta.problem()
+        );
+    }
+
+    #[test]
+    fn mega_is_refused_clearly() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cloud_config(dir.path(), LibraryBackend::Mega);
+        let err = open_library_store(&c, &c.storage.layout()).err().unwrap();
+        assert!(
+            err.to_string().contains("MEGA support is not built yet"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_local_library_opens_no_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cloud_config(dir.path(), LibraryBackend::Local);
+        assert!(
+            open_library_store(&c, &c.storage.layout())
+                .unwrap()
+                .is_none()
+        );
+    }
+}

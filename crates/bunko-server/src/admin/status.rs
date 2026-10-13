@@ -22,17 +22,31 @@ fn disk_usage(path: &std::path::Path) -> (u64, u64, u64) {
     }
 }
 
+/// The `library.storage` block: the cloud store's status, or a library on this disk.
+pub fn storage_block(storage: Option<&crate::storage::StoreHandle>) -> Value {
+    match storage {
+        Some(h) => h.status_json(),
+        None => json!({
+            "backend": "local",
+            "connected": true,
+            "health": {"state": "online"},
+        }),
+    }
+}
+
 pub(super) async fn status(s: &AdminState) -> Response {
     let uptime = s.core().started_at.elapsed().as_secs_f64();
-    let (host, port, base, library) = {
+    let (host, port, base) = {
         let c = s.core().config.read();
         (
             c.server.host.clone(),
             c.server.port,
             c.storage.base_path.clone(),
-            c.storage.library_path(),
         )
     };
+    // A cloud library's root is its store's synthetic mount point (0.8).
+    let library = s.core().layout.library();
+    let storage = s.deps.storage.clone();
     let db = s.db();
     let result = blocking(move || -> Result<Value, bunko_db::DbError> {
         let users = db.list_users(None)?;
@@ -64,6 +78,8 @@ pub(super) async fn status(s: &AdminState) -> Response {
             "stats": {},
             // 0.7: the running version (the panel's footer).
             "version": bunko_core::VERSION,
+            // 0.8: where the library lives (spec §11, the Storage panel).
+            "library": {"storage": storage_block(storage.as_deref())},
         }))
     })
     .await;

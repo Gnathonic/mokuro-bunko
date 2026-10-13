@@ -67,6 +67,9 @@ pub struct AdminDeps {
     pub restart: Option<Restart>,
     /// The machine this server runs on (the "This server" tab); `None`: 404.
     pub machine: Option<Arc<dyn crate::machine::Machine>>,
+    /// A cloud library's store (`/api/status` `library.storage`); `None`: the library
+    /// is on this disk.
+    pub storage: Option<Arc<crate::storage::StoreHandle>>,
 }
 
 #[derive(Clone)]
