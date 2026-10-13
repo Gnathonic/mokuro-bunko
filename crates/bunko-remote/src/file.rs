@@ -234,14 +234,14 @@ impl<B: Backend> ArchiveFile<B> {
                 } else {
                     BLOCK
                 };
-                let end = size.min(pos + (buf.len() as u64).max(self.readahead));
+                let end = size.min(pos.saturating_add((buf.len() as u64).max(self.readahead)));
                 let b_last = (end - 1) / BLOCK;
                 let mut b1 = b0;
                 while b1 < b_last && !core.blocks.contains(pid, cver, b1 + 1) {
                     b1 += 1;
                 }
                 let first = b0 * BLOCK;
-                let last = size.min((b1 + 1) * BLOCK) - 1;
+                let last = size.min((b1 + 1).saturating_mul(BLOCK)) - 1;
                 let data = Bytes::from(self.pinned((first, last))?);
                 let mut b = b0;
                 let mut off = 0usize;

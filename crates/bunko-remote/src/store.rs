@@ -43,7 +43,7 @@ use futures_util::StreamExt;
 use parking_lot::Mutex;
 use tokio::runtime::{Handle, Runtime};
 
-use crate::backend::{BErr, Backend, BackendCaps, HashKind, Pid, read_to_vec};
+use crate::backend::{BErr, Backend, BackendCaps, HashKind, Pid, read_to_vec_max};
 use crate::cache::{
     BlobCache, BlockCache, CacheDb, CacheStats, Hasher, SMALL_MAX, Spool, SpoolPinGuard,
     ZipDirCache,
@@ -390,20 +390,32 @@ impl<B: Backend> Core<B> {
     ) -> Result<Vec<u8>, BErr> {
         let pinned = self.caps.pinned_read && v.pin.is_some();
         let pin = if pinned { v.pin.as_deref() } else { None };
+        // The bound comes first: never ask for, or buffer, more than the indexed
+        // version holds.
+        let want = match range {
+            None => v.size,
+            Some((a, b)) if a <= b && b < v.size => b - a + 1,
+            Some((a, b)) => {
+                return Err(BErr::Fatal(format!(
+                    "range {a}-{b} is outside the indexed {} bytes",
+                    v.size
+                )));
+            }
+        };
         let r = async {
             let body = self
                 .backend
                 .read(&v.pid, pin, range.map(|(a, b)| (a, Some(b))))
                 .await?;
-            let data = read_to_vec(body)
+            let data = read_to_vec_max(body, want)
                 .await
-                .map_err(|e| BErr::Transient(format!("read body: {e}")))?;
+                .map_err(|e| BErr::Transient(format!("read body: {e}")));
             // Unpinned: the re-stat decides first (another version is a likelier
             // cause of a wrong length than a broken transfer).
             if !pinned {
                 self.check_version(v).await?;
             }
-            let want = range.map_or(v.size, |(a, b)| b + 1 - a);
+            let data = data?;
             if data.len() as u64 != want {
                 return Err(BErr::Transient(format!(
                     "read returned {} of {want} bytes",

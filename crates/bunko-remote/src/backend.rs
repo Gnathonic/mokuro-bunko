@@ -181,6 +181,24 @@ pub async fn read_to_vec(mut body: RemoteBody) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Collect a [`RemoteBody`] of at most `max` bytes: a longer body fails as soon as
+/// it passes `max` (InvalidData), so a provider that streams more than it listed
+/// cannot make Bunko buffer it.
+pub async fn read_to_vec_max(mut body: RemoteBody, max: u64) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(max.min(1 << 20) as usize);
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk?;
+        if out.len() as u64 + chunk.len() as u64 > max {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("the body is longer than the expected {max} bytes"),
+            ));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 /// A backend failure, classified for the governor and the outbox.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BErr {

@@ -26,9 +26,9 @@ pub mod index;
 pub mod names;
 #[cfg(feature = "onedrive")]
 pub mod onedrive;
+pub mod store;
 #[cfg(any(feature = "gdrive", feature = "onedrive"))]
 pub mod token_dyn;
-pub mod store;
 #[cfg(feature = "webdav")]
 pub mod webdav;
 

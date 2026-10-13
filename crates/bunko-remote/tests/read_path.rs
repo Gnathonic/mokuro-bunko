@@ -2,7 +2,7 @@
 //! a store over FakeBackend, mounted, driven through `bunko_store::fs` from std
 //! threads, with real temp dirs.
 
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::{Duration, Instant};
@@ -774,4 +774,119 @@ fn store_dir_layout() {
         std::fs::read(dir.join("blobs").join(&blob[..2]).join(&blob)).unwrap(),
         SIDECAR
     );
+}
+
+// ---- untrusted sizes (resource bounds) ------------------------------------------
+
+#[test]
+fn an_oversize_stream_on_a_small_node_is_refused() {
+    let t = start(
+        FakeBackend::drive_like(),
+        &[("S/a.mokuro", SIDECAR)],
+        |_| {},
+    );
+    let pid = t
+        .fake()
+        .node_at(&format!("{FOLDER}/S/a.mokuro"))
+        .unwrap()
+        .pid;
+    // The node lists 30 bytes; the provider streams 10 MiB.
+    t.fake().serve_instead(&pid, Some(noise(10 << 20, 3)));
+    let e = fs::read(t.abs("S/a.mokuro")).unwrap_err();
+    let msg = e.to_string();
+    assert!(
+        matches!(berr(&e), Some(BErr::Transient(_))) && msg.contains("longer than"),
+        "{msg}"
+    );
+    assert_eq!(t.store.cache_stats().blobs, 0);
+    // Short is refused too.
+    t.fake().serve_instead(&pid, Some(b"{}".to_vec()));
+    assert!(fs::read(t.abs("S/a.mokuro")).is_err());
+    t.fake().serve_instead(&pid, None);
+    assert_eq!(fs::read(t.abs("S/a.mokuro")).unwrap(), SIDECAR);
+}
+
+#[test]
+fn a_spool_whose_bytes_do_not_match_the_listed_size_fails() {
+    let (zip, _) = archive(3, 2 << 20, 100);
+    let t = start(FakeBackend::webdav_cas(), &[("S/v.cbz", &zip)], |_| {});
+    let p = t.abs("S/v.cbz");
+    let pid = t.fake().node_at(&format!("{FOLDER}/S/v.cbz")).unwrap().pid;
+    let spool_dir = t.store.config().dir.join("spool");
+    for lie in [noise(zip.len() + (2 << 20), 4), noise(zip.len() - 1000, 5)] {
+        t.fake().serve_instead(&pid, Some(lie));
+        let e = t.store.local_path(&p, None).err().unwrap();
+        assert!(matches!(berr(&e), Some(BErr::Transient(_))), "{e}");
+        assert_eq!(t.store.cache_stats().spools, 0);
+        assert_eq!(std::fs::read_dir(&spool_dir).unwrap().count(), 0);
+        // A ranged read of the same node is bounded the same way.
+        let mut f = fs::File::open(&p).unwrap();
+        let mut b = [0u8; 16];
+        f.seek(std::io::SeekFrom::Start(1000)).unwrap();
+        assert!(f.read(&mut b).is_err());
+    }
+    t.fake().serve_instead(&pid, None);
+    let lp = t.store.local_path(&p, None).unwrap();
+    assert_eq!(std::fs::read(lp.path()).unwrap(), zip);
+}
+
+/// `len` bytes of noise ending in `tail`.
+fn ending_in(len: usize, tail: &[u8]) -> Vec<u8> {
+    let mut v = noise(len - tail.len(), 6);
+    v.extend_from_slice(tail);
+    v
+}
+
+fn eocd(entries: u16, size_cd: u32, offset_cd: u32) -> Vec<u8> {
+    let mut r = b"PK\x05\x06".to_vec();
+    r.extend_from_slice(&[0; 4]);
+    r.extend_from_slice(&entries.to_le_bytes());
+    r.extend_from_slice(&entries.to_le_bytes());
+    r.extend_from_slice(&size_cd.to_le_bytes());
+    r.extend_from_slice(&offset_cd.to_le_bytes());
+    r.extend_from_slice(&[0, 0]);
+    r
+}
+
+#[test]
+fn a_hostile_zip_tail_costs_one_bounded_read() {
+    // A central directory larger than the file.
+    let huge = ending_in(6 << 20, &eocd(9, 0xFFFF_FF00, 0));
+    // One inside the file but beyond MAX_CD.
+    let big_cd = ending_in(20 << 20, &eocd(9, 17 << 20, 1));
+    // A zip64 record claiming 2^62 bytes of directory.
+    let mut z64 = b"PK\x06\x06".to_vec();
+    z64.extend_from_slice(&44u64.to_le_bytes());
+    z64.extend_from_slice(&[0; 28]);
+    z64.extend_from_slice(&(1u64 << 62).to_le_bytes()); // dirsize at +40
+    z64.extend_from_slice(&0u64.to_le_bytes()); // diroffset at +48
+    let mut loc = b"PK\x06\x07".to_vec();
+    loc.extend_from_slice(&0u32.to_le_bytes());
+    loc.extend_from_slice(&((6u64 << 20) - 98).to_le_bytes());
+    loc.extend_from_slice(&1u32.to_le_bytes());
+    let mut tail = z64;
+    tail.extend_from_slice(&loc);
+    tail.extend_from_slice(&eocd(0xFFFF, 0xFFFF_FFFF, 0xFFFF_FFFF));
+    let zip64 = ending_in(6 << 20, &tail);
+    let t = start(
+        FakeBackend::webdav_cas(),
+        &[
+            ("S/huge.cbz", &huge),
+            ("S/big.cbz", &big_cd),
+            ("S/z64.cbz", &zip64),
+        ],
+        |_| {},
+    );
+    for name in ["huge", "big", "z64"] {
+        t.fake().reset_calls();
+        let mut f = fs::File::open(t.abs(&format!("S/{name}.cbz"))).unwrap();
+        f.seek(std::io::SeekFrom::End(-22)).unwrap();
+        let mut rec = [0u8; 22];
+        f.read_exact(&mut rec).unwrap();
+        assert_eq!(&rec[..4], b"PK\x05\x06");
+        let log = t.fake().read_log();
+        assert_eq!(log.len(), 1, "{name}: {log:?}");
+        let (first, last) = log[0].range.unwrap();
+        assert!(last.unwrap() + 1 - first <= 256 << 10, "{name}");
+    }
 }
