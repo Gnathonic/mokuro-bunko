@@ -131,6 +131,9 @@ front (`--config`).
 | `dyndns update` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Test Update |
 | `dyndns enable` | CLI-only after [setup](/setup) (which saves it enabled) because it saves enabled=true for the next start, which no admin control does. [Connectivity](/_admin#connectivity) → Dynamic DNS → Start runs it only until the server restarts |
 | `dyndns disable` | CLI-only because it saves enabled=false for the next start, which no page does. [Connectivity](/_admin#connectivity) → Dynamic DNS → Stop pauses it only until the server restarts |
+| `library` | CLI-only because the admin Storage panel that shows the same block (`/_admin/api/status` → `library.storage`) lands with the 0.8 wizard and panels (M6) |
+| `library status` | CLI-only because the admin Storage panel lands with M6; the running server's answer is the `library.storage` block of its admin status and of its local control status |
+| `library status --json` | CLI-only because it is the same report for scripts |
 
 ## Updates
 
