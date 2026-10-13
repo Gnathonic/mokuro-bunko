@@ -35,7 +35,7 @@ fn file(pid: &str, parent: &str, name: &str, created_ms: i64) -> RNode {
 }
 
 fn rel(s: &str) -> RelPath {
-    RelPath::parse(s)
+    RelPath::parse(s).expect("a safe test path")
 }
 
 struct Fx {
@@ -99,7 +99,11 @@ fn nfd_name_is_stored_nfc_with_raw_kept() {
     let e = f.idx.lookup(&rel("ガ")).expect("NFC lookup");
     assert_eq!(e.name, "ガ");
     // Lookup is byte-exact: the NFD spelling is not an index name.
-    assert!(f.idx.lookup(&RelPath(vec![nfd.clone()])).is_none());
+    assert!(
+        f.idx
+            .lookup(&RelPath::from_segments([nfd.clone()]).unwrap())
+            .is_none()
+    );
     assert_eq!(f.idx.winner_node(e.eid).unwrap().name_raw, nfd.as_bytes());
     assert_eq!(nfc(nfd.as_bytes()), "ガ");
 }

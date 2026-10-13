@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 
 use crate::backend::{HashKind, Pid, RNode};
-use crate::names::{effective_mtime_ns, fold, nfc};
+use crate::names::{effective_mtime_ns, fold, is_safe_segment, nfc};
 
 /// The merged root's entry id.
 pub const ROOT_EID: i64 = 1;
@@ -65,18 +65,66 @@ INSERT OR IGNORE INTO entry(eid, parent_eid, name, fold, kind, mtime_ns, members
 ";
 
 /// A library path under the merged root: NFC segments, `[]` for the root itself.
+///
+/// Every segment passes [`is_safe_segment`] (no `..`, `.`, separators or control
+/// characters): the constructors refuse anything else, so a `RelPath` can always be
+/// joined under the store root without aliasing or escaping it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RelPath(pub Vec<String>);
+pub struct RelPath(Vec<String>);
 
 impl RelPath {
-    /// Split a `/`-separated path (empty segments dropped).
-    pub fn parse(s: &str) -> RelPath {
-        RelPath(
-            s.split('/')
-                .filter(|x| !x.is_empty())
-                .map(String::from)
-                .collect(),
-        )
+    /// The merged root.
+    pub fn root() -> RelPath {
+        RelPath(Vec::new())
+    }
+
+    /// Split a `/`-separated path; empty segments (doubled or edge slashes) are
+    /// dropped. `None` when any segment is unsafe (`..`, `.`, `\`, control chars).
+    pub fn parse(s: &str) -> Option<RelPath> {
+        let mut p = RelPath::root();
+        for seg in s.split('/').filter(|x| !x.is_empty()) {
+            p.push_checked(seg).ok()?;
+        }
+        Some(p)
+    }
+
+    /// A path from segments; `None` when any segment is unsafe.
+    pub fn from_segments<I, S>(segs: I) -> Option<RelPath>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut p = RelPath::root();
+        for seg in segs {
+            p.push_checked(seg).ok()?;
+        }
+        Some(p)
+    }
+
+    /// Append one segment if it is safe; otherwise hand it back unchanged.
+    pub fn push_checked(&mut self, seg: impl Into<String>) -> Result<(), String> {
+        let seg = seg.into();
+        if is_safe_segment(&seg) {
+            self.0.push(seg);
+            Ok(())
+        } else {
+            Err(seg)
+        }
+    }
+
+    /// This path with one more segment, if it is safe.
+    pub fn join(&self, seg: impl Into<String>) -> Option<RelPath> {
+        let mut p = self.clone();
+        p.push_checked(seg).ok()?;
+        Some(p)
+    }
+
+    pub fn segments(&self) -> &[String] {
+        &self.0
+    }
+
+    pub fn into_segments(self) -> Vec<String> {
+        self.0
     }
 
     pub fn is_root(&self) -> bool {
@@ -141,6 +189,9 @@ pub enum ConflictKind {
     DupFile,
     FileVsDir,
     NestedRoot,
+    /// A provider name that cannot be a path segment (`..`, `a/b`, control chars):
+    /// the node and its subtree are not indexed.
+    InvalidName,
 }
 
 impl ConflictKind {
@@ -149,16 +200,20 @@ impl ConflictKind {
             ConflictKind::DupFile => "dup-file",
             ConflictKind::FileVsDir => "file-vs-dir",
             ConflictKind::NestedRoot => "nested-root",
+            ConflictKind::InvalidName => "invalid-name",
         }
     }
 }
 
-/// A node the index hides or demotes, and the path it would have had.
+/// A node the index hides or demotes, and the path it would have had (for
+/// `InvalidName`: its parent's path, the name being unusable).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexConflict {
     pub kind: ConflictKind,
     pub pid: Pid,
     pub rel: Option<RelPath>,
+    /// `InvalidName`: the name, debug-escaped.
+    pub detail: Option<String>,
 }
 
 /// What an entry looked like, for change reporting.
@@ -323,6 +378,8 @@ impl Index {
             let mut cands: Vec<&RNode> = roots.iter().collect();
             cands.sort_by(|a, b| (a.created_ms, &a.pid).cmp(&(b.created_ms, &b.pid)));
             cands.dedup_by(|a, b| a.pid == b.pid);
+            // A candidate whose name could not be a path segment is no root at all.
+            cands.retain(|r| is_safe_segment(&nfc(&r.name_raw)));
             let pids: HashSet<&str> = cands.iter().map(|r| r.pid.as_str()).collect();
             let mut keep = Vec::new();
             let mut nested = self.nested_roots();
@@ -472,6 +529,10 @@ impl Index {
     pub fn lookup(&self, rel: &RelPath) -> Option<Entry> {
         let mut eid = ROOT_EID;
         for seg in &rel.0 {
+            // RelPath constructors refuse unsafe segments; stay strict regardless.
+            if !is_safe_segment(seg) {
+                return None;
+            }
             eid = soft(
                 self.conn
                     .prepare_cached("SELECT eid FROM entry WHERE parent_eid = ?1 AND name = ?2")
@@ -599,6 +660,7 @@ impl Index {
                 },
                 pid,
                 rel: self.path_of(eid),
+                detail: None,
             })
             .collect();
         for pid in self.nested_roots() {
@@ -607,9 +669,40 @@ impl Index {
                 kind: ConflictKind::NestedRoot,
                 pid,
                 rel,
+                detail: None,
             });
         }
+        out.extend(self.invalid_names());
         out
+    }
+
+    /// Nodes in a visible folder whose names cannot be a path segment (their
+    /// subtrees are unreachable, so only the top of each is reported).
+    fn invalid_names(&self) -> Vec<IndexConflict> {
+        let rows: Vec<(String, Vec<u8>, i64)> = soft(
+            self.conn
+                .prepare(
+                    "SELECT n.pid, n.name_raw, p.eid FROM node n JOIN node p ON p.pid = n.parent_pid \
+                     WHERE n.eid IS NULL AND p.eid IS NOT NULL ORDER BY n.pid",
+                )
+                .and_then(|mut s| {
+                    s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                        .collect()
+                }),
+            "invalid_names",
+        )
+        .unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|(pid, raw, parent_eid)| {
+                let name = nfc(&raw);
+                (!is_safe_segment(&name)).then(|| IndexConflict {
+                    kind: ConflictKind::InvalidName,
+                    pid,
+                    rel: self.path_of(parent_eid),
+                    detail: Some(format!("{name:?}")),
+                })
+            })
+            .collect()
     }
 
     // ---- internals ----------------------------------------------------------------
@@ -720,7 +813,8 @@ impl Index {
             }
         }
         segs.reverse();
-        Ok(Some(RelPath(segs)))
+        // Entry names are checked at ingest; re-check so no row can yield an unsafe path.
+        Ok(RelPath::from_segments(segs))
     }
 
     fn snap(&self, c: &Connection, eid: i64) -> rusqlite::Result<Option<Snap>> {
@@ -913,6 +1007,12 @@ impl Index {
             return Ok(()); // the parent is not known (yet)
         };
         let name = nfc(&row.name_raw);
+        if !is_safe_segment(&name) {
+            // Never a path segment: the node (and so its subtree) stays unplaced and
+            // `conflicts()` reports it as `invalid-name`.
+            tracing::warn!(pid, name = ?name, "cloud name cannot be a library path segment");
+            return Ok(());
+        }
         let existing: Option<i64> = c
             .prepare_cached("SELECT eid FROM entry WHERE parent_eid = ?1 AND name = ?2")?
             .query_row(params![peid, name], |r| r.get(0))
@@ -1005,6 +1105,7 @@ impl Index {
         })?;
         let was_dir = self.snap(c, eid)?.is_some_and(|s| s.is_dir);
         if let Some(np) = new_parent
+            && is_safe_segment(&name)
             && alone == 1
             && was_dir == n.is_dir
             && !self.name_used(c, np, &name)?

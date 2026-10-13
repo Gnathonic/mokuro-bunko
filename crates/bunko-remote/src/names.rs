@@ -8,6 +8,20 @@ pub fn nfc(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).nfc().collect()
 }
 
+/// A provider name that can be one library path segment. Provider names are
+/// untrusted (Drive and MEGA allow `..`, `a/b` or control characters), so the empty
+/// name, `.`, `..`, anything holding `/`, `\` or NUL, and any other ASCII control
+/// character are refused. Lossy-UTF-8 replacement characters are allowed: the raw
+/// bytes stay in `node.name_raw` for addressing.
+pub fn is_safe_segment(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c.is_ascii_control())
+}
+
 /// The spelling-insensitive form two names collide under: NFC, then a full Unicode
 /// lowercase (the same rule as bunko-dav's `fold_name`).
 pub fn fold(name: &str) -> String {
