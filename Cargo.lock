@@ -670,6 +670,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "bunko-remote"
+version = "0.7.3"
+dependencies = [
+ "bunko-remote",
+ "bunko-store",
+ "bytes",
+ "futures-util",
+ "hex",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "bunko-sched"
 version = "0.7.3"
 dependencies = [
