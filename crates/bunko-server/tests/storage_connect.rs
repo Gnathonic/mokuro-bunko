@@ -465,10 +465,24 @@ mod admin_panel {
                 "POST",
                 "/_admin/api/storage/disconnect",
                 Some(&t),
+                Some(json!({"mode": "export", "folder": "/tmp/anywhere"})),
+            )
+            .await;
+        assert_eq!(r.status, 400, "a request never chooses the export folder");
+        assert!(
+            r.text().contains("cannot choose the folder"),
+            "{}",
+            r.text()
+        );
+        let r = h
+            .call(
+                "POST",
+                "/_admin/api/storage/disconnect",
+                Some(&t),
                 Some(json!({"mode": "export"})),
             )
             .await;
-        assert_eq!(r.status, 400, "export needs a folder");
+        assert_eq!(r.status, 200, "Bunko's own folder: {}", r.text());
         // Back to this disk.
         let r = h
             .call("POST", "/_admin/api/storage/local", Some(&t), None)
@@ -622,9 +636,10 @@ fn the_storage_block_of_a_cloud_store() {
     assert_eq!(v["provider"], "the WebDAV server");
 }
 
-/// Wait: results still owed are counted and nothing happens; Export copies them and
-/// goes on; the credentials go, the directory is removed at the next start, and
-/// nothing is deleted in the cloud.
+/// Wait: results still owed are counted and nothing happens; Export copies them into
+/// a new folder Bunko owns (`<base>/exports/<store-id>-<time>/`, flat safe names and
+/// an `index.json`) and goes on; the credentials go, the directory is removed at the
+/// next start, and nothing is deleted in the cloud.
 #[test]
 fn disconnect_waits_then_exports() {
     let c = open_cloud();
@@ -658,15 +673,52 @@ fn disconnect_waits_then_exports() {
         1,
         "a refused Disconnect changes nothing"
     );
-    let out = c.base.join("exported");
-    let report = c
-        .control
-        .disconnect(&DisconnectMode::Export(out.clone()))
-        .unwrap();
+    let report = c.control.disconnect(&DisconnectMode::Export).unwrap();
     assert_eq!(report.exported.len(), 2, "{report:?}");
-    assert_eq!(
-        std::fs::read(out.join("Series/Vol 1.mokuro")).unwrap(),
-        b"{\"ocr\": 1}"
+    let out = report
+        .export_dir
+        .clone()
+        .expect("the folder Bunko wrote to");
+    let id = c.handle.store_id.clone().unwrap();
+    assert_eq!(out.parent(), Some(c.base.join("exports").as_path()));
+    let leaf = out.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(leaf.starts_with(&format!("{id}-")), "{leaf}");
+    let mut names: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names.len(), 3, "{names:?}");
+    assert_eq!(names[2], "index.json");
+    for (name, body) in names[..2]
+        .iter()
+        .zip([&b"{\"ocr\": 1}"[..], b"{\"ocr\": 2}"])
+    {
+        assert!(!name.contains('/') && !name.contains(".."), "{name}");
+        assert!(name.ends_with(".mokuro"), "{name}");
+        assert_eq!(std::fs::read(out.join(name)).unwrap(), body, "{name}");
+    }
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("index.json")).unwrap()).unwrap();
+    let dests: Vec<&str> = index
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["dest"].as_str().unwrap())
+        .collect();
+    assert!(dests.contains(&"Series/Vol 1.mokuro"), "{index}");
+    for e in index.as_array().unwrap() {
+        let op = e["op"].as_u64().expect("each file names its op");
+        let file = e["file"].as_str().unwrap();
+        assert!(file.starts_with(&format!("{op}-Series__Vol ")), "{file}");
+    }
+    assert!(
+        !std::fs::read_dir(c.base.join("exports"))
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with(".staging")),
+        "the staging folder is gone"
     );
     assert!(report.credentials_removed);
     assert!(c.creds_ids().is_empty());
@@ -689,6 +741,54 @@ fn disconnect_waits_then_exports() {
     assert!(dir.join(".upgrade-originals/keep.mokuro").is_file());
     assert!(!dir.join("state.sqlite").exists());
     assert!(!dir.join(".disconnected").exists());
+}
+
+/// The CLI's own folder (`library disconnect --export DIR`, in-process): a non-empty
+/// folder or a symlink is refused before anything is disconnected; a new one gets the
+/// same flat files, created new.
+#[test]
+fn export_to_a_chosen_folder_refuses_non_empty_and_symlinks() {
+    let c = open_cloud();
+    c.fake.throttle_for(Duration::from_secs(120));
+    c.publish("Series/Vol 1.mokuro", b"{\"ocr\": 1}");
+    let full = c.base.join("full");
+    std::fs::create_dir_all(&full).unwrap();
+    std::fs::write(full.join("mine.txt"), b"keep").unwrap();
+    let err = c
+        .control
+        .disconnect(&DisconnectMode::ExportTo(full.clone()))
+        .unwrap_err();
+    assert!(err.to_string().contains("not empty"), "{err}");
+    assert_eq!(std::fs::read(full.join("mine.txt")).unwrap(), b"keep");
+    let target = c.base.join("elsewhere");
+    std::fs::create_dir_all(&target).unwrap();
+    let link = c.base.join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let err = c
+        .control
+        .disconnect(&DisconnectMode::ExportTo(link))
+        .unwrap_err();
+    assert!(err.to_string().contains("symlink"), "{err}");
+    assert_eq!(c.creds_ids().len(), 1, "a refused Export changes nothing");
+
+    let out = c.base.join("new/export");
+    let report = c
+        .control
+        .disconnect(&DisconnectMode::ExportTo(out.clone()))
+        .unwrap();
+    assert_eq!(report.export_dir.as_deref(), Some(out.as_path()));
+    assert_eq!(report.exported.len(), 1, "{report:?}");
+    let file = &report.exported[0];
+    assert_eq!(file.parent(), Some(out.as_path()));
+    assert!(
+        file.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("-Series__Vol 1.mokuro"),
+        "{file:?}"
+    );
+    assert_eq!(std::fs::read(file).unwrap(), b"{\"ocr\": 1}");
+    assert!(std::fs::read_dir(&target).unwrap().next().is_none());
 }
 
 /// Discard drops what is owed; Wait succeeds once the outbox drained.
@@ -731,6 +831,16 @@ fn disconnect_modes_parse_from_the_pages() {
         DisconnectMode::from_json(&json!({"mode": "discard"})).unwrap(),
         DisconnectMode::Discard
     );
-    assert!(DisconnectMode::from_json(&json!({"mode": "export", "folder": "rel/dir"})).is_err());
+    // An HTTP request never chooses the export folder: Bunko's own, or refused.
+    assert_eq!(
+        DisconnectMode::from_json(&json!({"mode": "export"})).unwrap(),
+        DisconnectMode::Export
+    );
+    for folder in ["rel/dir", "/etc", "/tmp/x", "~/.ssh", "../../x"] {
+        assert!(
+            DisconnectMode::from_json(&json!({"mode": "export", "folder": folder})).is_err(),
+            "{folder}"
+        );
+    }
     assert!(DisconnectMode::from_json(&json!({"mode": "nuke"})).is_err());
 }

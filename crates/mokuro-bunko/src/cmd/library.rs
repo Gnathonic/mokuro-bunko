@@ -697,12 +697,17 @@ fn connect_here(
 }
 
 pub fn disconnect(ctx: &Ctx, a: crate::cli::LibraryDisconnectArgs) -> CmdResult {
+    use bunko_server::storage::disconnect::{DisconnectMode, copy_export, prepare_export_dir};
     let config = cfgfile::load_effective(&ctx.config_path)?;
-    let mode = match (&a.export, a.discard) {
-        (Some(dir), _) => {
-            let dir = std::path::absolute(dir).map_err(Fail::msg)?;
-            json!({"mode": "export", "folder": dir})
-        }
+    // `--export DIR` is this user's own folder: written here, in-process. A running
+    // server is never told a folder (no HTTP API takes one): it exports into its own
+    // `<base>/exports/...`, and the files are copied from there into DIR.
+    let export_to = match &a.export {
+        Some(dir) => Some(std::path::absolute(dir).map_err(Fail::msg)?),
+        None => None,
+    };
+    let mode = match (&export_to, a.discard) {
+        (Some(_), _) => json!({"mode": "export"}),
         (None, true) => json!({"mode": "discard"}),
         (None, false) => json!({"mode": "wait", "wait_s": a.wait}),
     };
@@ -721,7 +726,12 @@ pub fn disconnect(ctx: &Ctx, a: crate::cli::LibraryDisconnectArgs) -> CmdResult 
             return Err(Fail::Exit(1));
         }
     }
-    let answer = match bunko_control::file::live_instance(&config.storage.base_path) {
+    let live = bunko_control::file::live_instance(&config.storage.base_path);
+    if let (Some(_), Some(dir)) = (&live, &export_to) {
+        // Refused before anything is disconnected: a new or empty plain folder.
+        prepare_export_dir(dir).map_err(Fail::msg)?;
+    }
+    let answer = match live {
         Some(file) => {
             let rt = runtime()?;
             rt.block_on(async {
@@ -743,8 +753,10 @@ pub fn disconnect(ctx: &Ctx, a: crate::cli::LibraryDisconnectArgs) -> CmdResult 
         }
         None => {
             let control = local_control(ctx)?;
-            let m = bunko_server::storage::disconnect::DisconnectMode::from_json(&mode)
-                .map_err(Fail::msg)?;
+            let m = match &export_to {
+                Some(dir) => DisconnectMode::ExportTo(dir.clone()),
+                None => DisconnectMode::from_json(&mode).map_err(Fail::msg)?,
+            };
             match control.disconnect(&m) {
                 Ok(report) => Ok(json!({"report": report, "restarting": false})),
                 Err(e) => Err(e.as_json()),
@@ -755,7 +767,28 @@ pub fn disconnect(ctx: &Ctx, a: crate::cli::LibraryDisconnectArgs) -> CmdResult 
         Ok(v) => {
             let r = &v["report"];
             if let Some(n) = r["exported"].as_array().filter(|a| !a.is_empty()) {
-                println!("Exported {} result(s).", n.len());
+                let written = r["export_dir"].as_str().map(std::path::PathBuf::from);
+                match (&written, &export_to) {
+                    // The server wrote them into its own folder: copy them into DIR.
+                    (Some(from), Some(to)) if from != to => match copy_export(from, to) {
+                        Ok(_) => println!(
+                            "Exported {} result(s) to {} (the server's copy: {}).",
+                            n.len(),
+                            to.display(),
+                            from.display()
+                        ),
+                        Err(e) => eprintln!(
+                            "Exported {} result(s) to {}; copying them into {} failed: {e}",
+                            n.len(),
+                            from.display(),
+                            to.display()
+                        ),
+                    },
+                    (Some(dir), _) => {
+                        println!("Exported {} result(s) to {}.", n.len(), dir.display())
+                    }
+                    (None, _) => println!("Exported {} result(s).", n.len()),
+                }
             }
             if r["discarded"].as_u64().unwrap_or(0) > 0 {
                 println!("Discarded {} result(s).", r["discarded"]);

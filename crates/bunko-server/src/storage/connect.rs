@@ -678,11 +678,19 @@ pub fn store_ran(cloud_dir: &Path, id: &str) -> bool {
 
 /// Mark a store directory for removal at the next start (§7 Disconnect step 3; the
 /// running store keeps it open until then). Nothing happens when it does not exist.
+/// Refused for an id that is not a store id, or a path that is not a plain store
+/// directory under `cloud_dir` (`disconnect::store_dir_checked`).
 pub fn mark_disconnected(cloud_dir: &Path, id: &str) -> std::io::Result<()> {
-    let dir = cloud_dir.join(id);
-    if !bunko_store::fs::is_dir(&dir) {
+    if !super::is_store_id(id) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{id:?} is not a store id"),
+        ));
+    }
+    if !bunko_store::fs::is_dir(cloud_dir.join(id)) {
         return Ok(());
     }
+    let dir = super::disconnect::store_dir_checked(cloud_dir, id)?;
     bunko_store::fs::write(dir.join(DISCONNECTED_MARK), b"disconnected\n")
 }
 

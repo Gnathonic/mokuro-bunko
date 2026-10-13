@@ -363,9 +363,9 @@ async function storageDisconnect(mode, waitS) {
         if (waitS == null && !confirm('Disconnect the ' + (st.provider || 'cloud') + ' library? Bunko uploads what it still owes first, then forgets its sign-in and local index. Nothing in the cloud is deleted.')) return false;
         body.wait_s = waitS || 20;
     } else if (mode === 'export') {
-        const folder = prompt('Copy the results not yet uploaded into this folder on the server (full path):');
-        if (!folder) return false;
-        body.folder = folder;
+        // Bunko picks the folder (a new one under its storage folder's exports/); the
+        // reply names it.
+        if (!confirm('Copy the results not yet uploaded into a new folder under Bunko\'s storage folder (exports/), then disconnect?')) return false;
     } else if (mode === 'discard') {
         if (!confirm('Discard the results not yet uploaded and disconnect?')) return false;
     }
@@ -374,7 +374,7 @@ async function storageDisconnect(mode, waitS) {
     try {
         const r = await apiPost('/storage/disconnect', body);
         const rep = r.report || {};
-        showToast('Disconnected' + (rep.exported && rep.exported.length ? ' (' + rep.exported.length + ' exported)' : '') + (r.restarting ? '; the server restarts.' : '.'), 'success');
+        showToast('Disconnected' + (rep.exported && rep.exported.length ? ' (' + rep.exported.length + ' exported to ' + rep.export_dir + ')' : '') + (r.restarting ? '; the server restarts.' : '.'), 'success');
         if (r.restarting) setTimeout(() => window.location.reload(), 6000);
         loadStorage();
         return true;

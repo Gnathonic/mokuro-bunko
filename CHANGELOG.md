@@ -13,7 +13,10 @@
   Bunko as before. The admin panel's new **Storage** tab shows the library's health,
   first sync, uploads, conflicts, lease and quota, and connects, signs in again,
   changes the Drive pairing or disconnects (waiting for, exporting or discarding what
-  is not uploaded yet; nothing in the cloud is deleted). The same from a terminal or
+  is not uploaded yet; nothing in the cloud is deleted). An export from the admin panel
+  goes to a new folder under Bunko's storage folder (`exports/`), named in the reply;
+  `library disconnect --export DIR` copies it into a new or empty folder of your own.
+  The same from a terminal or
   `docker exec`: `mokuro-bunko library connect gdrive|onedrive|mega|webdav` and
   `library disconnect`; `doctor` checks the pairing, the spool and the credentials
   file. The tray shows one library line ("Google Drive · synced 1 min ago") and

@@ -66,6 +66,16 @@ pub fn store_id(provider: &str, pairing: &str, account_id: &str, folder: &str) -
     hex::encode(h.finalize())[..16].to_string()
 }
 
+/// `id` has the shape [`store_id`] gives: 16 lowercase hex digits. Checked before any
+/// path is built from an id (a credentials file, a request), so `<base>/cloud/<id>` is
+/// always one plain directory name.
+pub fn is_store_id(id: &str) -> bool {
+    id.len() == 16
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// The Google pairing part of the store id (D25): `release`, `beta`, or
 /// `custom:<client_id>` (the Desktop override's id, else the device override's). Empty
 /// for every other provider.
