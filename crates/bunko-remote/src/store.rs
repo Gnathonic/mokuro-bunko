@@ -853,6 +853,95 @@ impl<B: Backend> RemoteStore<B> {
         self.core.state.submissions()
     }
 
+    /// Disconnect step 1, "Export to a folder" (§7): copy the bytes of every op that
+    /// still owes its write (HELD and FAILED ones included) to `<to>/<library path>`.
+    /// A name already taken in `to` gets ` (<op id>)` before its extension. Moves and
+    /// trashes carry no bytes and are skipped. Returns the files written.
+    pub fn export_outbox(&self, to: &Path) -> io::Result<Vec<PathBuf>> {
+        let ops: Vec<Op> = self
+            .core
+            .ops
+            .lock()
+            .values()
+            .filter(|o| {
+                o.state.live()
+                    || matches!(
+                        o.state,
+                        crate::outbox::OpState::Failed | crate::outbox::OpState::Prepared
+                    )
+            })
+            .cloned()
+            .collect();
+        let mut written = Vec::new();
+        for op in ops {
+            let Some(src) = self.core.staged_path(&op) else {
+                continue;
+            };
+            if !src.is_file() {
+                continue;
+            }
+            let mut dest = to.join(op.dest.to_string());
+            if dest.exists() {
+                let stem = dest
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let ext = dest
+                    .extension()
+                    .map(|e| format!(".{}", e.to_string_lossy()))
+                    .unwrap_or_default();
+                dest.set_file_name(format!("{stem} ({}){ext}", op.id));
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src, &dest)?;
+            written.push(dest);
+        }
+        Ok(written)
+    }
+
+    /// Disconnect step 2 (§7): write `state: "released"` into this install's marker
+    /// and stop heartbeating. `Ok(false)` when no lease runs (off, or the first sync
+    /// never finished).
+    pub fn release_lease(&self, timeout: Duration) -> io::Result<bool> {
+        let Some(lease) = self.lease.get() else {
+            return Ok(false);
+        };
+        self.block_on("release_lease", async {
+            tokio::time::timeout(timeout, lease.release()).await
+        })
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "releasing the lease timed out"))?
+        .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(true)
+    }
+
+    /// The admin's [Take over] (§9.2): bump the epoch and hold the lease. Fails when no
+    /// lease runs yet (it starts after the first sync).
+    pub fn take_over_lease(&self, timeout: Duration) -> io::Result<()> {
+        let Some(lease) = self.lease.get() else {
+            return Err(io::Error::other(
+                "the lease has not started yet (it starts after the first sync)",
+            ));
+        };
+        self.block_on("take_over_lease", async {
+            tokio::time::timeout(timeout, lease.take_over()).await
+        })
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "taking over timed out"))?
+        .map(|_| ())
+        .map_err(|e| io::Error::other(e.to_string()))
+    }
+
+    /// The provider's storage quota, asked once (`None`: the provider reports none).
+    pub fn quota(&self, timeout: Duration) -> io::Result<Option<bunko_store::Capacity>> {
+        let backend = self.core.backend.clone();
+        self.block_on("quota", async move {
+            tokio::time::timeout(timeout, backend.quota()).await
+        })
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the quota request timed out"))?
+        .map_err(berr_to_io)
+    }
+
     /// This install's id (`state.sqlite`).
     pub fn instance_id(&self) -> &str {
         &self.core.instance_id
