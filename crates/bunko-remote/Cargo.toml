@@ -1,0 +1,33 @@
+[package]
+name = "bunko-remote"
+description = "Remote library storage for mokuro-bunko: the provider Backend trait, the index and RemoteStore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# The in-memory FakeBackend (tests here and in dependent crates).
+testing = []
+
+[dependencies]
+bunko-store.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+futures-util.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+# Turns on `testing` for this crate's own integration tests.
+bunko-remote = { path = ".", features = ["testing"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
