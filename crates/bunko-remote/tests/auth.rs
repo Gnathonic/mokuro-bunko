@@ -614,9 +614,25 @@ fn plain_store_round_trip() {
 }
 
 #[test]
+fn only_random_32_byte_keys_are_accepted() {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+    assert_eq!(
+        SecretKey::from_material(&b64).unwrap(),
+        SecretKey::from_bytes([9u8; 32])
+    );
+    for bad in ["a long passphrase", "nope", "", "AAAA"] {
+        assert!(
+            matches!(SecretKey::from_material(bad), Err(CredError::BadKey)),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
 fn sealed_round_trip_and_wrong_key() {
     let dir = tempfile::tempdir().unwrap();
-    let key = SecretKey::from_material("a long passphrase");
+    let key = SecretKey::from_bytes([7u8; 32]);
     let store = CredentialStore::open_with_key(dir.path(), Some(key.clone())).unwrap();
     assert!(store.is_sealed());
     store.put("s", full_cred()).unwrap();
@@ -636,7 +652,7 @@ fn sealed_round_trip_and_wrong_key() {
         raw
     );
 
-    let wrong = CredentialStore::open_with_key(dir.path(), Some(SecretKey::from_material("nope")));
+    let wrong = CredentialStore::open_with_key(dir.path(), Some(SecretKey::from_bytes([8u8; 32])));
     assert!(matches!(wrong, Err(CredError::WrongKey)), "{wrong:?}");
     let none = CredentialStore::open_with_key(dir.path(), None);
     assert!(matches!(none, Err(CredError::Sealed)), "{none:?}");

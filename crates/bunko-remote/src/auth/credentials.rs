@@ -23,7 +23,6 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 pub const FILE_NAME: &str = "credentials.json";
@@ -49,6 +48,10 @@ pub enum CredError {
     Corrupt(String),
     #[error("MOKURO_SECRETS_KEY_FILE {path}: {source}")]
     KeyFile { path: PathBuf, source: io::Error },
+    #[error(
+        "the secrets key must be 32 random bytes in base64 (generate one with `openssl rand -base64 32`); passphrases are not accepted"
+    )]
+    BadKey,
 }
 
 /// The 32-byte sealing key.
@@ -66,23 +69,24 @@ impl SecretKey {
         SecretKey(bytes)
     }
 
-    /// Base64 (standard or URL-safe, padded or not) of exactly 32 bytes is the key
-    /// itself; anything else is a passphrase and the key is its SHA-256.
-    pub fn from_material(material: &str) -> Self {
+    /// Base64 (standard or URL-safe, padded or not) of exactly 32 bytes. Anything else
+    /// is refused: a passphrase hashed once would be cheap to brute-force from a copy
+    /// of the sealed file, and a random key needs no slow KDF.
+    pub fn from_material(material: &str) -> Result<Self, CredError> {
         let m = material.trim();
         for engine in [&STANDARD, &URL_SAFE] {
             if let Ok(b) = engine.decode(m)
                 && let Ok(k) = <[u8; 32]>::try_from(b.as_slice())
             {
-                return SecretKey(k);
+                return Ok(SecretKey(k));
             }
         }
         if let Ok(b) = URL_SAFE_NO_PAD.decode(m.trim_end_matches('='))
             && let Ok(k) = <[u8; 32]>::try_from(b.as_slice())
         {
-            return SecretKey(k);
+            return Ok(SecretKey(k));
         }
-        SecretKey(Sha256::digest(m.as_bytes()).into())
+        Err(CredError::BadKey)
     }
 
     /// The key from `MOKURO_SECRETS_KEY` (preferred) or `MOKURO_SECRETS_KEY_FILE`;
@@ -99,7 +103,7 @@ impl SecretKey {
         key_file: Option<&Path>,
     ) -> Result<Option<SecretKey>, CredError> {
         if let Some(k) = key.filter(|k| !k.trim().is_empty()) {
-            return Ok(Some(Self::from_material(k)));
+            return Self::from_material(k).map(Some);
         }
         let Some(path) = key_file.filter(|p| !p.as_os_str().is_empty()) else {
             return Ok(None);
@@ -114,7 +118,7 @@ impl SecretKey {
                 source: io::Error::new(io::ErrorKind::InvalidData, "the key file is empty"),
             });
         }
-        Ok(Some(Self::from_material(&text)))
+        Self::from_material(&text).map(Some)
     }
 
     fn cipher(&self) -> ChaCha20Poly1305 {
@@ -405,23 +409,27 @@ mod tests {
             URL_SAFE.encode(raw),
             URL_SAFE_NO_PAD.encode(raw),
         ] {
-            assert_eq!(SecretKey::from_material(&enc), SecretKey(raw), "{enc}");
             assert_eq!(
-                SecretKey::from_material(&format!("{enc}\n")),
+                SecretKey::from_material(&enc).unwrap(),
+                SecretKey(raw),
+                "{enc}"
+            );
+            assert_eq!(
+                SecretKey::from_material(&format!("{enc}\n")).unwrap(),
                 SecretKey(raw)
             );
         }
-        let pass = SecretKey::from_material("correct horse battery staple");
-        assert_eq!(
-            pass.0,
-            <[u8; 32]>::from(Sha256::digest(b"correct horse battery staple"))
-        );
-        // Base64 of the wrong length is a passphrase.
+        // Passphrases and base64 of the wrong length are refused.
+        assert!(matches!(
+            SecretKey::from_material("correct horse battery staple"),
+            Err(CredError::BadKey)
+        ));
         let short = STANDARD.encode([1u8; 16]);
-        assert_eq!(
-            SecretKey::from_material(&short).0,
-            <[u8; 32]>::from(Sha256::digest(short.as_bytes()))
-        );
+        assert!(matches!(
+            SecretKey::from_material(&short),
+            Err(CredError::BadKey)
+        ));
+        let pass = SecretKey(raw);
         assert_eq!(format!("{pass:?}"), "SecretKey(<redacted>)");
     }
 
@@ -431,16 +439,23 @@ mod tests {
         assert_eq!(SecretKey::from_sources(Some("  "), None).unwrap(), None);
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("key");
-        std::fs::write(&f, "file passphrase\n").unwrap();
+        let file_key = STANDARD.encode([3u8; 32]);
+        let env_key = STANDARD.encode([4u8; 32]);
+        std::fs::write(&f, format!("{file_key}\n")).unwrap();
         assert_eq!(
             SecretKey::from_sources(None, Some(&f)).unwrap(),
-            Some(SecretKey::from_material("file passphrase"))
+            Some(SecretKey([3u8; 32]))
         );
         // The variable wins over the file.
         assert_eq!(
-            SecretKey::from_sources(Some("env"), Some(&f)).unwrap(),
-            Some(SecretKey::from_material("env"))
+            SecretKey::from_sources(Some(&env_key), Some(&f)).unwrap(),
+            Some(SecretKey([4u8; 32]))
         );
+        // A passphrase in either place is refused.
+        assert!(matches!(
+            SecretKey::from_sources(Some("env passphrase"), None),
+            Err(CredError::BadKey)
+        ));
         assert!(matches!(
             SecretKey::from_sources(None, Some(&d.path().join("missing"))),
             Err(CredError::KeyFile { .. })
