@@ -128,6 +128,8 @@ pub struct RemoteStoreConfig {
     pub bunko_version: String,
     /// `ttl_s` of the marker; `None`: 900 s, 3600 s on MEGA-like providers.
     pub lease_ttl: Option<Duration>,
+    /// CLAIM_LEASE's settle wait; `None`: `max(60 s, 2 × poll_idle)` (tests shorten it).
+    pub lease_settle: Option<Duration>,
     /// The first retry delay of an outbox op (doubles per attempt, capped at 5 min).
     pub retry_base: Duration,
     /// The shortest interval between two cloud queue-file writes; `None`: per
@@ -198,6 +200,7 @@ impl RemoteStoreConfig {
             instance_name: "bunko".into(),
             bunko_version: env!("CARGO_PKG_VERSION").into(),
             lease_ttl: None,
+            lease_settle: None,
             retry_base: Duration::from_secs(1),
             queue_floor: None,
             local_sources,
@@ -1484,7 +1487,11 @@ async fn start_lease<B: Backend>(
         cfg.instance_name.clone(),
         cfg.bunko_version.clone(),
     );
-    lc.last_boot_id = store.load().and_then(|r| r.boot_id);
+    // The previous runs' boot ids come from the record `Lease::new` loads, before
+    // anything of this run is written; the data folder ties that record to this copy.
+    let home = std::fs::canonicalize(&cfg.dir).unwrap_or_else(|_| cfg.dir.clone());
+    lc.home = Some(home.to_string_lossy().into_owned());
+    lc.claim_settle = cfg.lease_settle;
     let mega = core.caps.push && !core.caps.atomic_replace;
     lc.ttl = cfg
         .lease_ttl

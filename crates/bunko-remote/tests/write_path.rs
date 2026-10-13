@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bunko_remote::fake::{FakeBackend, FakeOp};
+use bunko_remote::status::{LeaseEvent, MARKER_NAME, Marker};
 use bunko_remote::{Backend, CloudHooks, RemoteStore, RemoteStoreConfig, SubmissionResult};
 use bunko_store::{
     Durability, Health, LibraryStore, Mode, MountGuard, Origin, WatchEvent, WriteIntent, fs,
@@ -804,6 +805,121 @@ fn standby_holds_deferred_ops_and_refuses_sync_writes() {
     assert_eq!(t.fake.calls(FakeOp::Upload), 0);
     let e = fs::write(t.abs("S/a.json"), b"x").unwrap_err();
     assert!(bunko_store::is_unavailable(&e), "{e}");
+}
+
+/// The lease on, with a short CLAIM_LEASE settle wait.
+fn lease_quick(c: &mut RemoteStoreConfig) {
+    c.lease = true;
+    c.lease_settle = Some(Duration::from_millis(300));
+}
+
+/// The lease on, with a settle wait no test outlasts: a run that reaches Holder
+/// within [`WAIT`] resumed without settling.
+fn lease_slow(c: &mut RemoteStoreConfig) {
+    c.lease = true;
+    c.lease_settle = Some(Duration::from_secs(3600));
+}
+
+fn lease_event(s: &Store) -> Option<LeaseEvent> {
+    s.lease().map(|l| l.event())
+}
+
+fn wait_holder(s: &Store) {
+    wait_until("the lease", || lease_event(s) == Some(LeaseEvent::Acquired));
+}
+
+/// Every marker node in the cloud root.
+fn markers(fake: &FakeBackend) -> Vec<(bunko_remote::RNode, Marker)> {
+    let root = fake.node_at(FOLDER).unwrap().pid;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let nodes = rt.block_on(fake.find_named(&root, MARKER_NAME)).unwrap().0;
+    nodes
+        .into_iter()
+        .filter(|n| !n.trashed)
+        .map(|n| {
+            let m = Marker::parse(&fake.content(&n.pid).unwrap()).unwrap();
+            (n, m)
+        })
+        .collect()
+}
+
+#[test]
+fn a_clean_restart_resumes_the_lease_at_once_with_the_same_epoch() {
+    let mut t = T::with(FakeBackend::drive_like(), &[], lease_quick);
+    t.wait_steady();
+    wait_holder(t.s());
+    let before = markers(&t.fake);
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].1.epoch, 1);
+    t.stop();
+    t.tune = lease_slow;
+    t.start();
+    t.wait_steady();
+    wait_holder(t.s());
+    let after = markers(&t.fake);
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].0.pid, before[0].0.pid, "rewritten in place");
+    assert_eq!(after[0].1.instance_id, before[0].1.instance_id);
+    assert_eq!(after[0].1.epoch, before[0].1.epoch, "the same epoch");
+    assert_eq!(after[0].1.claimed_at, before[0].1.claimed_at);
+    assert_ne!(after[0].1.boot_id, before[0].1.boot_id, "the new boot id");
+    assert_eq!(t.s().health(), Health::Online);
+}
+
+#[test]
+fn a_crash_during_the_claim_settle_resumes_the_lease_at_once() {
+    let mut t = T::with(FakeBackend::drive_like(), &[], lease_slow);
+    t.wait_steady();
+    // The claim wrote its marker and now waits out the settle period: crash.
+    wait_until("the claim's marker", || markers(&t.fake).len() == 1);
+    assert_eq!(lease_event(t.s()), Some(LeaseEvent::Claiming));
+    let before = markers(&t.fake);
+    t.stop();
+    t.start();
+    t.wait_steady();
+    wait_holder(t.s());
+    let after = markers(&t.fake);
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0].0.pid, before[0].0.pid, "rewritten in place");
+    assert_eq!(after[0].1.epoch, 1);
+    assert_ne!(after[0].1.boot_id, before[0].1.boot_id);
+    assert_eq!(t.s().health(), Health::Online);
+}
+
+#[test]
+fn a_cloned_state_folder_goes_standby_while_the_original_runs() {
+    let t = T::with(FakeBackend::drive_like(), &[], lease_quick);
+    t.wait_steady();
+    wait_holder(t.s());
+    let original = markers(&t.fake);
+    // Copy state.sqlite (and its WAL) into a second store folder.
+    let src = t.tmp.path().join("cloud/s");
+    let dir2 = t.tmp.path().join("cloud/s2");
+    std::fs::create_dir_all(&dir2).unwrap();
+    for f in ["state.sqlite", "state.sqlite-wal"] {
+        if src.join(f).exists() {
+            std::fs::copy(src.join(f), dir2.join(f)).unwrap();
+        }
+    }
+    let mut cfg = t.cfg();
+    cfg.root = dir2.join("library");
+    cfg.dir = dir2;
+    cfg.mount_id = 5;
+    let clone = RemoteStore::open_shared(cfg, t.fake.clone()).unwrap();
+    assert_eq!(clone.instance_id(), t.s().instance_id());
+    assert!(clone.wait_steady(WAIT), "{:?}", clone.engine_state());
+    wait_until("the clone's standby", || {
+        matches!(lease_event(&clone), Some(LeaseEvent::Standby { .. }))
+    });
+    assert!(matches!(clone.health(), Health::LeaseHeld { .. }));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(lease_event(t.s()), Some(LeaseEvent::Acquired));
+    let now = markers(&t.fake);
+    assert_eq!(now.len(), 1, "the clone wrote nothing: {now:?}");
+    assert_eq!(now[0].1.boot_id, original[0].1.boot_id);
 }
 
 #[test]
