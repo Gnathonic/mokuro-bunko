@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Internal: the library goes through a storage seam.** Every library file access in
+  the server, the WebDAV layer and the metadata compiler now passes through one
+  interface (`bunko-store`), so the library can live somewhere other than the local disk
+  in 0.8. Local libraries behave exactly as before.
+
 ## [0.7.3] - 2026-10-12
 
 Background work can no longer make the web server stop answering.
