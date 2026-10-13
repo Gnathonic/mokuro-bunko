@@ -15,9 +15,10 @@ use bunko_store::{
 use crate::backend::Backend;
 use crate::file::StagingFile;
 use crate::index::RelPath;
+use crate::names::{fold, is_reserved_name};
 use crate::outbox::{Op, OpKind, OpState};
 use crate::state::{ConflictRow, random_id};
-use crate::status::{QUEUE_DOC_MAX_BYTES, cloud_queue_doc, queue_doc_changed};
+use crate::status::{MARKER_NAME, QUEUE_DOC_MAX_BYTES, cloud_queue_doc, queue_doc_changed};
 use crate::store::{Core, RemoteStore};
 
 /// What a remove may remove.
@@ -40,14 +41,19 @@ fn kind_err(kind: io::ErrorKind, p: &Path, what: &str) -> io::Error {
     io::Error::new(kind, format!("{}: {what}", p.display()))
 }
 
+fn denied(p: &Path, what: &str) -> io::Error {
+    kind_err(io::ErrorKind::PermissionDenied, p, what)
+}
+
 /// Reload the staging map from `local_row`; sweep staging files nothing names.
 pub(crate) fn load_staging<B: Backend>(core: &Core<B>) {
     let dir = core.dir.join("staging");
     let mut map = core.staging.lock();
     for (path, file) in core.state.local_rows("staging") {
         let local = dir.join(&file);
+        let plain = Path::new(&file).file_name() == Some(std::ffi::OsStr::new(&file));
         match RelPath::parse(&path) {
-            Some(rel) if local.is_file() => {
+            Some(rel) if plain && local.is_file() => {
                 map.insert(rel, local);
             }
             _ => core.state.local_del(&path),
@@ -68,8 +74,11 @@ impl<B: Backend> Core<B> {
     pub(crate) fn stage_put(&self, src: &Path, rel: RelPath, w: &WriteIntent) -> io::Result<Op> {
         let id = self.next_seq();
         let (name, size, sha) = self.take_bytes(src, id)?;
+        // The folder the write is for: a replaced folder is a conflict (outbox.rs).
+        let parent = self.parent_pid_of(&rel);
         let mut op = Op::new(id, OpKind::Put, rel, w.origin.clone(), w.durability);
         op.mode = w.mode.clone();
+        op.parent_pid = parent;
         op.staged = Some(name);
         op.size = size;
         op.sha256 = Some(sha);
@@ -106,6 +115,92 @@ impl<B: Backend> RemoteStore<B> {
     pub(crate) fn staging_file(&self, p: &Path) -> Option<PathBuf> {
         let rel = self.rel(p).ok()?;
         self.core.staging.lock().get(&rel).cloned()
+    }
+
+    /// Who may change what (authorization of every mutation through the shim):
+    /// nothing may create, move or remove a name Bunko reserves for its transient
+    /// files, or the lease marker (only the lease writes it, directly); the cloud
+    /// queue file is the [`Origin::Status`] writer's alone. `origin` is `None` for
+    /// mutations without an intent (rename, remove, folders, `open_with`). Names
+    /// compare folded, as a case-insensitive provider resolves them. Paths outside
+    /// the store root never get here (`rel` refuses them).
+    pub(crate) fn check_target(
+        &self,
+        rel: &RelPath,
+        p: &Path,
+        origin: Option<&Origin>,
+    ) -> io::Result<()> {
+        if rel.segments().iter().any(|s| is_reserved_name(s)) {
+            return Err(denied(
+                p,
+                "a name Bunko reserves for its own transient files",
+            ));
+        }
+        if let [name] = rel.segments() {
+            let name = fold(name);
+            if name == MARKER_NAME {
+                return Err(denied(p, "the lease marker is written by the lease only"));
+            }
+            if name == QUEUE_FILE && origin != Some(&Origin::Status) {
+                return Err(denied(
+                    p,
+                    "the queue file is written by Bunko's status writer only",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A local file outside the store may be published or copied into it only from
+    /// the folders Bunko stages files in ([`RemoteStoreConfig::local_sources`]): a
+    /// regular file (no symlink, no extra hard link), owned by the user that owns
+    /// the store's folder, and not in the cloud state folder (credentials, the state
+    /// and outbox of any store) unless it is this store's own `staging/`.
+    ///
+    /// [`RemoteStoreConfig::local_sources`]: crate::RemoteStoreConfig::local_sources
+    pub(crate) fn check_local_source(&self, src: &Path) -> io::Result<()> {
+        let meta = std::fs::symlink_metadata(src)?;
+        if !meta.file_type().is_file() {
+            return Err(denied(
+                src,
+                "not a regular file (symlinks are not followed)",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if meta.nlink() > 1 {
+                return Err(denied(src, "a hard-linked file"));
+            }
+            if let Ok(d) = std::fs::metadata(&self.cfg.dir)
+                && d.uid() != meta.uid()
+            {
+                return Err(denied(src, "owned by another user"));
+            }
+        }
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let real = std::fs::canonicalize(src)?;
+        if real.starts_with(canon(&self.cfg.dir.join("staging"))) {
+            return Ok(());
+        }
+        let private = self
+            .cfg
+            .dir
+            .parent()
+            .filter(|c| c.file_name().is_some_and(|n| n == "cloud"))
+            .unwrap_or(&self.cfg.dir);
+        if real.starts_with(canon(private)) {
+            return Err(denied(src, "inside Bunko's cloud state folder"));
+        }
+        if self
+            .cfg
+            .local_sources
+            .iter()
+            .any(|r| real.starts_with(canon(r)))
+        {
+            return Ok(());
+        }
+        Err(denied(src, "outside the folders Bunko stages files in"))
     }
 
     fn alive(&self) -> io::Result<()> {
@@ -173,6 +268,7 @@ impl<B: Backend> RemoteStore<B> {
         if rel.is_root() {
             return Err(kind_err(io::ErrorKind::IsADirectory, p, "the library root"));
         }
+        self.check_target(&rel, p, None)?;
         self.parent_dir_exists(&rel, p)?;
         let indexed = self.core.index.lock().lookup(&rel);
         if indexed.as_ref().is_some_and(|e| e.is_dir) {
@@ -237,6 +333,7 @@ impl<B: Backend> RemoteStore<B> {
                 "the library root",
             ));
         }
+        self.check_target(&rel, dest, Some(&w.origin))?;
         self.parent_dir_exists(&rel, dest)?;
         let existing = self.core.index.lock().lookup(&rel);
         if existing.as_ref().is_some_and(|e| e.is_dir) {
@@ -258,6 +355,9 @@ impl<B: Backend> RemoteStore<B> {
             };
         if !src.is_file() {
             return Err(kind_err(io::ErrorKind::NotFound, staged, "no such file"));
+        }
+        if staging_rel.is_none() {
+            self.check_local_source(&src)?;
         }
         let forget_staging = |s: &Self| {
             if let Some(srel) = &staging_rel {
@@ -288,25 +388,36 @@ impl<B: Backend> RemoteStore<B> {
                 _ => return Err(kind_err(io::ErrorKind::AlreadyExists, dest, "exists")),
             }
         }
-        // PREPARED: a Compiler base must be own or an applied submission (D8).
+        // PREPARED: a Compiler base must be own or a submission (D8).
         if w.origin == Origin::Compiler
             && let Mode::Replace { base: Some(b) } = &w.mode
             && !b.as_str().starts_with("pending:")
         {
             let pid = existing.as_ref().and_then(|e| e.winner_pid.clone());
             let own = pid.is_some_and(|p| self.core.state.is_own(&p, b.as_str()));
-            let applied = self
+            // A captured submission (merged, being merged, or refused) counts as
+            // merged: the compile publishes on top of it (§9.3).
+            let merged = self
                 .core
                 .state
-                .submissions()
-                .iter()
-                .any(|(path, cver, st)| {
-                    *path == rel.to_string() && cver == b.as_str() && st == "applied"
-                });
-            if !own && !applied {
+                .submission_base_ok(&rel.to_string(), b.as_str());
+            if !own && !merged {
                 return Err(conflict(format!(
-                    "{rel}: the compile base is neither Bunko's own version nor an applied submission"
+                    "{rel}: the compile base is neither Bunko's own version nor a submitted one"
                 )));
+            }
+        }
+        // §5.11: above `outbox_max_gb` a Deferred write is refused (507), so an
+        // outage cannot fill the disk; the caller keeps its bytes.
+        if w.durability == Durability::Deferred {
+            let size = std::fs::metadata(&src)?.len();
+            let queued = self.core.outbox_bytes();
+            if queued.saturating_add(size) > self.core.outbox_max {
+                return Err(kind_err(
+                    io::ErrorKind::StorageFull,
+                    dest,
+                    &format!("the outbox is full ({queued} bytes wait for the provider)"),
+                ));
             }
         }
         let op = self.core.stage_put(&src, rel, w)?;
@@ -333,6 +444,8 @@ impl<B: Backend> RemoteStore<B> {
     pub(crate) fn rename_impl(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.alive()?;
         let (frel, trel) = (self.rel(from)?, self.rel(to)?);
+        self.check_target(&frel, from, None)?;
+        self.check_target(&trel, to, None)?;
         if frel == trel {
             return Ok(());
         }
@@ -414,6 +527,7 @@ impl<B: Backend> RemoteStore<B> {
     pub(crate) fn remove_impl(&self, p: &Path, how: Remove) -> io::Result<()> {
         self.alive()?;
         let rel = self.rel(p)?;
+        self.check_target(&rel, p, None)?;
         let staged = self.core.staging.lock().get(&rel).cloned();
         let indexed = self.core.index.lock().lookup(&rel);
         let Some(e) = indexed else {
@@ -504,6 +618,7 @@ impl<B: Backend> RemoteStore<B> {
     pub(crate) fn create_dir_impl(&self, p: &Path, all: bool) -> io::Result<()> {
         self.alive()?;
         let rel = self.rel(p)?;
+        self.check_target(&rel, p, None)?;
         let segs = rel.segments().to_vec();
         if segs.is_empty() {
             return if all {
@@ -559,6 +674,7 @@ impl<B: Backend> RemoteStore<B> {
         let mut src: Box<dyn Read> = if from.starts_with(&self.cfg.root) {
             Box::new(self.open(from)?)
         } else {
+            self.check_local_source(from)?;
             Box::new(std::fs::File::open(from)?)
         };
         let mut o = OpenOptions::new();

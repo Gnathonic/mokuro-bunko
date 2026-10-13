@@ -383,10 +383,10 @@ async fn the_bridge_lists_and_streams_a_cloud_library() {
     assert_eq!(v["volume_count"], 1);
 }
 
-/// Spec §3.5: a provider failure answers the bridge client by class: a lapsed sign-in
-/// 503 (never 401), throttling 503 with the provider's Retry-After.
+/// Spec §3.5: a lapsed sign-in answers the bridge client 503 (never 401), and the
+/// governor then holds every provider call until the admin signs in again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn provider_failures_answer_503_with_retry_after() {
+async fn a_lapsed_sign_in_answers_503_and_holds_provider_calls() {
     use bunko_remote::BErr;
     use bunko_remote::fake::FakeOp;
     let env = Env::new(true).await;
@@ -397,14 +397,32 @@ async fn provider_failures_answer_503_with_retry_after() {
     assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.text());
     assert_eq!(r.header("retry-after"), Some("300"));
     assert!(r.text().contains("sign-in"), "{}", r.text());
+    // Until a new sign-in, no request reaches the provider.
+    fake.reset_calls();
+    let r = env.request(Some("reader"), "GET", url, &[]).await;
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.text());
+    assert_eq!(fake.calls(FakeOp::Read), 0);
+}
+
+/// Spec §3.5 / §5.11: throttling answers 503 with the provider's Retry-After, and the
+/// pause holds later interactive calls instead of hammering the provider.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn throttling_answers_503_with_the_providers_retry_after() {
+    use bunko_remote::BErr;
+    use bunko_remote::fake::FakeOp;
+    let env = Env::new(true).await;
+    let fake = env.fake().backend().clone();
+    let url = "/mokuro-reader/Series/Vol%202.cbz";
     fake.fail_next(FakeOp::Read, BErr::Throttled(Some(Duration::from_secs(42))));
     let r = env.request(Some("reader"), "GET", url, &[]).await;
-    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.text());
     assert_eq!(r.header("retry-after"), Some("42"));
-    // Once the provider answers, the file is served.
+    fake.reset_calls();
     let r = env.request(Some("reader"), "GET", url, &[]).await;
-    assert_eq!(r.status, StatusCode::OK);
-    assert!(r.body == env.lib.vol2);
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.text());
+    let after: u64 = r.header("retry-after").unwrap().parse().unwrap();
+    assert!(after <= 42 && after > 0, "{after}");
+    assert_eq!(fake.calls(FakeOp::Read), 0, "paused: no provider call");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -774,6 +792,8 @@ fn a_store_that_needs_a_sign_in_holds_the_queue() {
     assert!(sched.held("local"), "no new claims");
     sched.handle(Msg::Tick);
     assert_eq!(sched.storage_held, Some("storage-auth"));
+    // Signing in again clears the governor's hold and resumes the feed.
+    c.remote.reauthorized();
     c.remote.feed().resume();
     eventually_sync("the store back online", || sched.storage_hold().is_none());
     sched.handle(Msg::Tick);

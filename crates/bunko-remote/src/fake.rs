@@ -31,6 +31,9 @@ const READ_CHUNK: usize = 64 * 1024;
 
 /// Called by `list_all` after each node it hands to the sink, with the count so far.
 pub type ListHook = std::sync::Arc<dyn Fn(usize) + Send + Sync>;
+/// Called with every backend call as it starts (before latency and fault
+/// injection), outside the fake's lock: a test can act as the reader at that moment.
+pub type CallHook = std::sync::Arc<dyn Fn(FakeOp) + Send + Sync>;
 
 /// A backend call, for [`FakeBackend::fail_next`] and [`FakeBackend::calls`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -133,6 +136,9 @@ struct State {
     /// A misbehaving provider: these bytes answer every read of the pid.
     serve_instead: HashMap<Pid, Bytes>,
     upload_log: Vec<String>,
+    /// A misbehaving provider: this many next uploads store their bytes with the
+    /// last one dropped.
+    mangle_uploads: usize,
 }
 
 /// The in-memory provider.
@@ -141,6 +147,7 @@ pub struct FakeBackend {
     state: Mutex<State>,
     notify: Notify,
     list_hook: Mutex<Option<ListHook>>,
+    call_hook: Mutex<Option<CallHook>>,
     clock0: Instant,
 }
 
@@ -282,11 +289,18 @@ impl FakeBackend {
             state: Mutex::new(st),
             notify: Notify::new(),
             list_hook: Mutex::new(None),
+            call_hook: Mutex::new(None),
             clock0: Instant::now(),
         }
     }
 
     // ---- knobs ------------------------------------------------------------------
+
+    /// The next `n` uploads store their bytes minus the last one (and answer with
+    /// that node), as a provider that corrupts a transfer would.
+    pub fn mangle_uploads(&self, n: usize) {
+        self.state.lock().mangle_uploads = n;
+    }
 
     /// Every backend call waits this long first.
     pub fn set_latency(&self, d: Duration) {
@@ -329,6 +343,11 @@ impl FakeBackend {
     /// mid-listing); `None` removes it.
     pub fn set_list_hook(&self, hook: Option<ListHook>) {
         *self.list_hook.lock() = hook;
+    }
+
+    /// Every backend call runs `hook` first (see [`CallHook`]); `None` removes it.
+    pub fn set_call_hook(&self, hook: Option<CallHook>) {
+        *self.call_hook.lock() = hook;
     }
 
     /// The names of successful uploads (new files and new versions), in order.
@@ -534,6 +553,10 @@ impl FakeBackend {
 
     /// Count the call, apply latency, throttling and injected failures.
     async fn enter(&self, op: FakeOp) -> Result<(), BErr> {
+        let hook = self.call_hook.lock().clone();
+        if let Some(h) = hook {
+            h(op);
+        }
         let latency = {
             let mut st = self.state.lock();
             *st.calls.entry(op).or_default() += 1;
@@ -1185,8 +1208,12 @@ impl Backend for FakeBackend {
         _op: &mut OpCtx,
     ) -> Result<RNode, BErr> {
         self.enter(FakeOp::Upload).await?;
-        let data = load_source(src)?;
+        let mut data = load_source(src)?;
         self.mutate(|st, prof, now| {
+            if st.mangle_uploads > 0 && !data.is_empty() {
+                st.mangle_uploads -= 1;
+                data = data.slice(..data.len() - 1);
+            }
             let pid = match to {
                 UploadTarget::New { parent, name } => {
                     st.live_dir(parent)?;

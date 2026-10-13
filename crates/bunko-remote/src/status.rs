@@ -1096,7 +1096,11 @@ impl<B: Backend> Lease<B> {
         let (tx, rx) = watch::channel(LeaseEvent::Claiming);
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let fence = self.fence();
-        let join = tokio::spawn(self.run(cmd_rx, tx));
+        // Marker writes and heartbeats outrank OCR and background calls (§5.11).
+        let join = tokio::spawn(crate::governor::scoped(
+            crate::governor::ApiClass::Lease,
+            self.run(cmd_rx, tx),
+        ));
         LeaseHandle {
             events: rx,
             cmds: cmd_tx,

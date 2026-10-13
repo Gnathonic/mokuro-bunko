@@ -84,3 +84,14 @@ pub fn effective_mtime_ns(base_ms: i64, granularity_ns: i64, pid: &str, cver: &s
     let trunc = base - base.rem_euclid(g);
     trunc + i128::from(version_salt(pid, cver)) % g
 }
+
+/// A name Bunko reserves on the provider for its own transient files: the WebDAV
+/// driver's staged uploads (`.<name>.bunko-<op>.tmp`) and its probe leftovers
+/// (`.bunko-probe-*`). Compared folded, because a case-insensitive provider resolves
+/// any spelling to the same node. The store never lists one, and its shim never
+/// creates, moves or removes one.
+pub fn is_reserved_name(seg: &str) -> bool {
+    let s = fold(seg);
+    s.starts_with(".bunko-probe-")
+        || (s.starts_with('.') && s.ends_with(".tmp") && s.contains(".bunko-"))
+}

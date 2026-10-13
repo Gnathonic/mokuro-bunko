@@ -433,6 +433,7 @@ impl Inner {
                 Payload::Raw(b, ct) => rb.header(header::CONTENT_TYPE, *ct).body(b.clone()),
             };
             self.units.fetch_add(c.units, Ordering::Relaxed);
+            crate::governor::charge(c.units);
             let resp = rb.send().await.map_err(transient)?;
             if c.auth && resp.status() == StatusCode::UNAUTHORIZED {
                 if refreshed {
@@ -1079,6 +1080,11 @@ fn post_checked(inner: RemoteBody, be: Arc<Inner>, pid: String, pin: String) -> 
 }
 
 impl Backend for OneDriveBackend {
+    /// 8 req/s, 2 transfers.
+    fn limits(&self) -> crate::governor::Limits {
+        crate::governor::Limits::onedrive()
+    }
+
     /// OneDrive names are case-insensitive (no two siblings differ only in case) and
     /// case-preserving; `BackendCaps` has no field for it, and the index compares names
     /// byte-exact anyway.

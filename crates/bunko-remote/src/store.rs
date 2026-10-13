@@ -30,6 +30,15 @@
 //! are Sync ops. `state.sqlite` holds the outbox, the ledger and the lease (D7).
 //! The lease ([`crate::status::Lease`]) starts after the first sync; its fence gates
 //! Deferred ops and Sync writes alike.
+//!
+//! **Governor (§5.11).** The feed, the outbox, the lease and every read reach the
+//! driver through one [`Governor`] ([`Governed`]): content calls made inside
+//! `bunko_store::interactive` run in the interactive class and fail with
+//! `bunko_store::unavailable_for` instead of waiting out a pause longer than 2 s;
+//! bridge writes (`Origin::Dav`) wait up to 60 s. `health()` reports the governor's
+//! `NeedsReauth`, `Blocked(..)` and `Degraded{retry_at}` first;
+//! [`RemoteStore::accepting_claims`] adds the `outbox_hold_mb` threshold, and a
+//! Deferred write past `outbox_max_gb` fails with `StorageFull`.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -59,6 +68,7 @@ use crate::feed::{
     CloudHooks, EngineState, Feed, FeedConfig, FeedHandle, FeedState, SubmissionResult,
 };
 use crate::file::{ArchiveFile, CachedFile};
+use crate::governor::{self, ApiClass, ApiStats, Governed, Governor, Limits};
 use crate::index::{Entry, Index, RelPath};
 use crate::outbox::{Failpoint, Gate, Op, OpSummary};
 use crate::state::StateDb;
@@ -123,6 +133,26 @@ pub struct RemoteStoreConfig {
     /// The shortest interval between two cloud queue-file writes; `None`: per
     /// provider (WebDAV 30 s, Drive and OneDrive 60 s, MEGA 300 s).
     pub queue_floor: Option<Duration>,
+    /// Local folders a file published (or copied) into the store from outside it
+    /// may come from: the OCR result spool, upload temp files, scratch copies. A
+    /// source anywhere else, a symlink, a hard-linked file, a file of another user,
+    /// or one under the cloud state folder (credentials, other stores) apart from
+    /// this store's `staging/` is refused, so no crafted path can carry an arbitrary
+    /// local file into the cloud. Default: the storage base (`dir`'s grandparent,
+    /// `<base>` of `<base>/cloud/<store-id>`) and the OS temp folder.
+    pub local_sources: Vec<PathBuf>,
+    /// The governor's limits; `None`: the provider's defaults
+    /// ([`Backend::limits`], §5.11).
+    pub limits: Option<Limits>,
+    /// `drive_background_units_per_min`: the background budget in provider units per
+    /// minute, for providers that have one (Drive: 20,000).
+    pub background_units_per_min: Option<u64>,
+    /// `outbox_hold_mb`: above this many bytes of Deferred writes waiting in the
+    /// outbox, [`RemoteStore::accepting_claims`] says no (default 2 GiB).
+    pub outbox_hold_bytes: u64,
+    /// `outbox_max_gb`: a Deferred write that would take the outbox above this fails
+    /// with `StorageFull` (507; default 8 GiB).
+    pub outbox_max_bytes: u64,
 }
 
 impl RemoteStoreConfig {
@@ -135,10 +165,19 @@ impl RemoteStoreConfig {
     ) -> RemoteStoreConfig {
         let root = root.into();
         let folder = folder.into();
+        let dir: PathBuf = dir.into();
         let feed = FeedConfig::new(root.clone(), folder.clone());
+        let local_sources = dir
+            .parent()
+            .and_then(Path::parent)
+            .filter(|b| !b.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .into_iter()
+            .chain([std::env::temp_dir()])
+            .collect();
         RemoteStoreConfig {
             root,
-            dir: dir.into(),
+            dir,
             folder,
             create_root: false,
             cache_bytes: 1024 << 20,
@@ -156,6 +195,11 @@ impl RemoteStoreConfig {
             lease_ttl: None,
             retry_base: Duration::from_secs(1),
             queue_floor: None,
+            local_sources,
+            limits: None,
+            background_units_per_min: None,
+            outbox_hold_bytes: 2048 << 20,
+            outbox_max_bytes: 8 << 30,
         }
     }
 
@@ -172,11 +216,16 @@ impl RemoteStoreConfig {
 }
 
 /// A backend error as the `io::Error` the shim's callers see: `NotFound` keeps its
-/// kind, `StorageFull` too; everything else is `Other`, wrapping the [`BErr`].
+/// kind, `StorageFull` too; throttling, a daily limit and a transfer quota are
+/// `bunko_store::unavailable_for` with the provider's delay (spec §3.5: 503 with
+/// `Retry-After`); everything else is `Other`, wrapping the [`BErr`].
 pub fn berr_to_io(e: BErr) -> io::Error {
     match e {
         BErr::NotFound => io::Error::new(io::ErrorKind::NotFound, e),
         BErr::StorageFull => io::Error::new(io::ErrorKind::StorageFull, e),
+        BErr::Throttled(d) | BErr::DailyLimit(d) | BErr::TransferQuota(d) => {
+            bunko_store::unavailable_for(e.to_string(), d.unwrap_or(Duration::from_secs(30)))
+        }
         e => io::Error::other(e),
     }
 }
@@ -325,6 +374,9 @@ struct SlotState {
 struct HookSlot {
     events: Arc<Events>,
     state: Mutex<SlotState>,
+    /// Set once the server installed its hooks (submissions wait for it).
+    installed: Arc<AtomicBool>,
+    installed_notify: Arc<tokio::sync::Notify>,
 }
 
 impl HookSlot {
@@ -342,6 +394,8 @@ impl HookSlot {
     fn set(&self, h: Arc<dyn CloudHooks>) {
         let mut g = self.state.lock();
         g.hooks = Some(h.clone());
+        self.installed.store(true, Ordering::Release);
+        self.installed_notify.notify_waiters();
         let pending = std::mem::take(&mut g.pending);
         if !pending.is_empty() {
             // Under the lock, so a concurrent notification cannot overtake these.
@@ -401,7 +455,11 @@ impl CloudHooks for HookSlot {
 /// What the store, its open files and its download tasks share. Holds no runtime, so a
 /// task that owns the last reference never drops the runtime it runs on.
 pub(crate) struct Core<B: Backend> {
-    pub backend: Arc<B>,
+    /// The driver behind the governor: every call is budgeted, prioritised and logged.
+    pub backend: Arc<Governed<B>>,
+    pub gov: Arc<Governor>,
+    /// Deferred writes above this many outbox bytes fail with `StorageFull`.
+    pub outbox_max: u64,
     pub caps: BackendCaps,
     pub index: Arc<Mutex<Index>>,
     pub blobs: BlobCache,
@@ -439,6 +497,16 @@ pub(crate) struct Core<B: Backend> {
     pub queue_floor: Duration,
     /// Staging files by library path (never published on drop).
     pub staging: Mutex<HashMap<RelPath, PathBuf>>,
+    // ---- submissions and adoption (submissions.rs) ----
+    /// First adoption is done: Compiler ops may leave HELD, the lease may claim.
+    pub adopted: AtomicBool,
+    pub adopted_tx: tokio::sync::watch::Sender<bool>,
+    /// INGEST_FACTS is running.
+    pub adopting: AtomicBool,
+    pub hooks_set: Arc<AtomicBool>,
+    pub hooks_notify: Arc<tokio::sync::Notify>,
+    /// One submission is fetched and applied at a time.
+    pub subs_lock: tokio::sync::Mutex<()>,
 }
 
 /// The cloud queue file writer's state.
@@ -448,6 +516,38 @@ pub(crate) struct QueueState {
     pub last_write: Option<std::time::Instant>,
     pub pending: Option<serde_json::Value>,
     pub timer: bool,
+}
+
+/// Delivers the feed's foreign-JSON notifications to the core once it exists; the
+/// ones that arrive before are kept and delivered then.
+#[derive(Default)]
+struct JsonRelay {
+    target: OnceLock<crate::feed::ForeignJsonFn>,
+    early: Mutex<Vec<(RelPath, String, String)>>,
+}
+
+impl JsonRelay {
+    fn call(&self, rel: &RelPath, pid: &str, cver: &str) {
+        if let Some(f) = self.target.get() {
+            return f(rel, pid, cver);
+        }
+        let mut early = self.early.lock();
+        match self.target.get() {
+            Some(f) => {
+                drop(early);
+                f(rel, pid, cver)
+            }
+            None => early.push((rel.clone(), pid.to_string(), cver.to_string())),
+        }
+    }
+
+    fn set(&self, f: crate::feed::ForeignJsonFn) {
+        let mut early = self.early.lock();
+        let _ = self.target.set(f.clone());
+        for (rel, pid, cver) in early.drain(..) {
+            f(&rel, &pid, &cver);
+        }
+    }
 }
 
 /// The ledger's answers to the feed (D20).
@@ -701,18 +801,43 @@ impl<B: Backend> RemoteStore<B> {
             .build()?;
         let events = Events::start()?;
         let sinks = Arc::new(SinkList::default());
+        let hooks_set = Arc::new(AtomicBool::new(false));
+        let hooks_notify = Arc::new(tokio::sync::Notify::new());
         let hooks = Arc::new(HookSlot {
             events: events.clone(),
             state: Mutex::new(SlotState::default()),
+            installed: hooks_set.clone(),
+            installed_notify: hooks_notify.clone(),
         });
+        // Foreign series.json versions, from the feed to the submissions (§9.3).
+        let json = Arc::new(JsonRelay::default());
         let caps = backend.caps();
+        let mut limits = cfg.limits.clone().unwrap_or_else(|| backend.limits());
+        if let Some(u) = cfg.background_units_per_min
+            && limits.background_units_per_min.is_some()
+        {
+            limits.background_units_per_min = Some(u);
+        }
+        // Its clock follows the store runtime's.
+        let gov = {
+            let _g = rt.handle().enter();
+            Governor::new(limits)
+        };
+        if let Err(e) = gov.attach_log(&index_path) {
+            tracing::warn!("api log: {e}");
+        }
+        let backend = Arc::new(Governed::new(backend, gov.clone()));
         let feed = Feed::new(backend.clone(), index.clone(), cfg.feed_config())
             .with_hooks(hooks.clone() as Arc<dyn CloudHooks>)
             .with_state(Arc::new(LedgerFeed {
                 state: state.clone(),
                 echoed: echoed.clone(),
                 ops: ops.clone(),
-            }));
+            }))
+            .on_foreign_json({
+                let json = json.clone();
+                Arc::new(move |rel: &RelPath, pid: &str, cver: &str| json.call(rel, pid, cver))
+            });
         {
             let (events, sinks) = (Arc::downgrade(&events), Arc::downgrade(&sinks));
             feed.add_sink(Arc::new(move |ev: WatchEvent| {
@@ -738,8 +863,21 @@ impl<B: Backend> RemoteStore<B> {
         });
         let handle = rt.handle().clone();
         let feed = feed.spawn(&handle);
+        {
+            // The api log reaches index.sqlite every 30 s.
+            let g = Arc::downgrade(&gov);
+            handle.spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    let Some(g) = g.upgrade() else { return };
+                    tokio::task::block_in_place(|| g.flush_log());
+                }
+            });
+        }
         let core = Arc::new(Core {
             backend,
+            gov,
+            outbox_max: cfg.outbox_max_bytes,
             caps,
             index,
             blobs,
@@ -769,10 +907,27 @@ impl<B: Backend> RemoteStore<B> {
             instance_id,
             queue_floor,
             staging: Mutex::new(HashMap::new()),
+            adopted: AtomicBool::new(false),
+            adopted_tx: tokio::sync::watch::channel(false).0,
+            adopting: AtomicBool::new(false),
+            hooks_set,
+            hooks_notify,
+            subs_lock: tokio::sync::Mutex::new(()),
         });
         core.seq.store(core.max_seq(), Ordering::Release);
         core.replay();
         crate::write::load_staging(&core);
+        {
+            let weak = Arc::downgrade(&core);
+            let h = handle.clone();
+            json.set(Arc::new(move |rel: &RelPath, pid: &str, cver: &str| {
+                if let Some(core) = weak.upgrade() {
+                    let _g = h.enter();
+                    core.foreign_json(rel, pid, cver);
+                }
+            }));
+        }
+        handle.spawn(core.clone().adopt());
         handle.spawn(core.clone().worker());
         let lease: Arc<OnceLock<LeaseHandle>> = Arc::default();
         if cfg.lease {
@@ -861,6 +1016,14 @@ impl<B: Backend> RemoteStore<B> {
     /// The server's cloud hooks (D20); notifications from before are replayed now.
     pub fn set_hooks(&self, hooks: Arc<dyn CloudHooks>) {
         self.hooks.set(hooks);
+        // Submissions that waited for the hooks are answered now.
+        self.handle.spawn(self.core.clone().resume_submissions());
+    }
+
+    /// First adoption (INGEST_FACTS, §9.4) is done: every `series.json` and the
+    /// `catalog.json` facts were handed to the server's hooks.
+    pub fn adopted(&self) -> bool {
+        self.core.adopted()
     }
 
     /// The change feed.
@@ -885,7 +1048,39 @@ impl<B: Backend> RemoteStore<B> {
 
     /// The provider driver.
     pub fn backend(&self) -> &Arc<B> {
-        &self.core.backend
+        self.core.backend.inner()
+    }
+
+    /// The governor between the store and the provider (§5.11).
+    pub fn governor(&self) -> &Arc<Governor> {
+        &self.core.gov
+    }
+
+    /// The api log per class over the last hour and day (admin: per-install units
+    /// and egress, §5.11).
+    pub fn api_stats(&self) -> ApiStats {
+        self.core.gov.stats()
+    }
+
+    /// Bytes of Deferred writes waiting in the outbox.
+    pub fn outbox_bytes(&self) -> u64 {
+        self.core.outbox_bytes()
+    }
+
+    /// Whether the scheduler may claim new OCR work (§5.11): the store is `Online`
+    /// (not paused, blocked, offline, suspect, in standby or unauthorized) and the
+    /// outbox holds no more than `outbox_hold_mb`. Running jobs finish into the outbox
+    /// either way.
+    pub fn accepting_claims(&self) -> bool {
+        self.health() == Health::Online && self.outbox_bytes() <= self.cfg.outbox_hold_bytes
+    }
+
+    /// New credentials are in place after `NeedsReauth`: provider calls resume, the
+    /// feed polls again and the outbox drains.
+    pub fn reauthorized(&self) {
+        self.core.gov.reauthorized();
+        self.core.feed.resume();
+        self.core.wake.notify_one();
     }
 
     /// Debug builds: fail a content method called from inside an async task at once,
@@ -914,10 +1109,33 @@ impl<B: Backend> RemoteStore<B> {
 
     /// Run the network part of a content method on the store runtime.
     pub(crate) fn block_on<F: Future>(&self, what: &'static str, f: F) -> F::Output {
+        self.block_on_as(what, None, f)
+    }
+
+    /// [`RemoteStore::block_on`] with the backend calls in `class` (`None`: the
+    /// background class), or in the interactive class when the caller runs inside
+    /// `bunko_store::interactive`.
+    pub(crate) fn block_on_as<F: Future>(
+        &self,
+        what: &'static str,
+        class: Option<ApiClass>,
+        f: F,
+    ) -> F::Output {
         debug_assert!(
             !on_store_runtime(),
             "RemoteStore::{what} called on a store runtime thread (re-entry)"
         );
+        let class = if bunko_store::is_interactive() {
+            Some(ApiClass::Interactive)
+        } else {
+            class
+        };
+        let f = async move {
+            match class {
+                Some(c) => governor::scoped(c, f).await,
+                None => f.await,
+            }
+        };
         let h = &self.handle;
         match catch_unwind(AssertUnwindSafe(move || h.block_on(f))) {
             Ok(v) => v,
@@ -1075,13 +1293,25 @@ impl<B: Backend> RemoteStore<B> {
     pub(crate) fn spool_for(&self, v: &Ver, wait: bool) -> io::Result<Option<SpoolPinGuard>> {
         let key = v.key();
         let core = self.core.clone();
-        self.block_on("spool", async move {
+        // A whole-file spool for a waiting caller is OCR work (`local_path`); a
+        // sequential archive read spools in the background.
+        let class = if wait {
+            ApiClass::Ocr
+        } else {
+            ApiClass::Background
+        };
+        self.block_on_as("spool", Some(class), async move {
             let Some((pin, new)) = core.spool.admit(&key, v.size, wait).await? else {
                 return Ok(None);
             };
             if new {
                 let task_pin = SpoolPinGuard::clone_pin(&pin);
-                tokio::spawn(core.clone().download(task_pin, v.clone()));
+                // The download runs in the class of the call that started it.
+                let class = governor::current_class().unwrap_or(class);
+                tokio::spawn(governor::scoped(
+                    class,
+                    core.clone().download(task_pin, v.clone()),
+                ));
             }
             Ok(Some(pin))
         })
@@ -1095,6 +1325,11 @@ async fn start_lease<B: Backend>(
     cfg: RemoteStoreConfig,
     slot: Arc<OnceLock<LeaseHandle>>,
 ) {
+    // §5.3: … → FULL_SYNC → INGEST_FACTS → CLAIM_LEASE → replay → STEADY.
+    let mut adopted = core.adopted_tx.subscribe();
+    if adopted.wait_for(|a| *a).await.is_err() {
+        return;
+    }
     let mut rx = core.feed.subscribe();
     if rx.wait_for(|s| *s == EngineState::Steady).await.is_err() {
         return;
@@ -1161,6 +1396,7 @@ async fn start_lease<B: Backend>(
 impl<B: Backend> Drop for RemoteStore<B> {
     fn drop(&mut self) {
         // Safe in any context, async included; the feed is crash-safe.
+        self.core.gov.flush_log();
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }
@@ -1186,6 +1422,21 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
     }
 
     fn health(&self) -> Health {
+        // The governor's view first: no credentials, a hard stop, a pause.
+        let gov = self.core.gov.health();
+        if let Some(h @ (Health::NeedsReauth | Health::Blocked(_))) = &gov {
+            return h.clone();
+        }
+        if self.core.feed.state() == EngineState::NeedsReauth {
+            return Health::NeedsReauth;
+        }
+        if let Some(h) = gov {
+            return h;
+        }
+        if self.core.adopting.load(Ordering::Acquire) {
+            // INGEST_FACTS: part of the first sync.
+            return Health::Syncing { done: 0, total: 0 };
+        }
         if let Some(l) = self.lease.get()
             && let LeaseEvent::Standby { holder } | LeaseEvent::Lost { holder } = l.event()
             && self.core.feed.state() == EngineState::Steady

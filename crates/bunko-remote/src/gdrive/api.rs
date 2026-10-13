@@ -33,7 +33,7 @@ pub mod units {
     pub const UPDATE: u64 = 50;
     /// `files.create` (metadata, multipart, or a resumable session start) and `files.copy`.
     pub const CREATE: u64 = 50;
-    /// `changes.list`; not on the limits page [unverified], costed like a list.
+    /// `changes.list`; not on the limits page \[unverified\], costed like a list.
     pub const CHANGES: u64 = 100;
 }
 
@@ -266,7 +266,7 @@ impl ApiError {
                     "Google Drive: the project's daily API limit is exhausted; every install \
                      sharing it is paused (dailyLimitExceeded)"
                 );
-                BErr::Throttled(Some(retry_after.unwrap_or(DAILY_LIMIT_PAUSE)))
+                BErr::DailyLimit(Some(retry_after.unwrap_or(DAILY_LIMIT_PAUSE)))
             }
             403 | 429 if self.is_throttle() => {
                 BErr::Throttled(Some(retry_after.unwrap_or(backoff)))

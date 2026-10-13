@@ -102,10 +102,13 @@ pub(crate) async fn dispatch(inner: Arc<Inner>, req: Request<Body>, ctx: DavCont
 }
 
 /// Run filesystem work off the async workers.
+/// WebDAV work on the blocking pool. It answers a client, so a remote store treats it
+/// as interactive: a provider pause fails fast with a retry-after error (503) instead
+/// of holding the request (spec §3.1).
 pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> DavResult<T> {
-    tokio::task::spawn_blocking(f)
+    tokio::task::spawn_blocking(move || bunko_store::interactive(f))
         .await
         .map_err(|_| DavError::new(crate::SERVER_ERROR, "internal error"))
 }

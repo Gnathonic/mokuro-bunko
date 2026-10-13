@@ -1059,6 +1059,12 @@ impl Inner {
 }
 
 impl Backend for MegaBackend {
+    /// 2 transfers; the client paces its own `cs` batches (1/s), so calls are only
+    /// counted.
+    fn limits(&self) -> crate::governor::Limits {
+        crate::governor::Limits::mega()
+    }
+
     fn caps(&self) -> BackendCaps {
         BackendCaps {
             cas_create: false,

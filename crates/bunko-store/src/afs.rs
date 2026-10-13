@@ -11,10 +11,13 @@ fn local(p: &Path) -> bool {
     store_for(p).is_none_or(|s| !s.caps().remote)
 }
 
+/// The tokio shim serves requests (bridge reads and writes, catalog covers), so its
+/// store calls run in the interactive latency class: a provider pause answers at once
+/// with a retry-after error instead of holding the request (spec §3.1).
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
-    tokio::task::spawn_blocking(f)
+    tokio::task::spawn_blocking(move || crate::interactive(f))
         .await
         .map_err(io::Error::other)?
 }

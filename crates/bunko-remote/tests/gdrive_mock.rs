@@ -1608,7 +1608,7 @@ async fn errors_map_to_backend_errors() {
     e.mock.fault(None, &path, 403, "dailyLimitExceeded");
     assert_eq!(
         e.be.stat(&f).await,
-        Err(BErr::Throttled(Some(Duration::from_secs(3600))))
+        Err(BErr::DailyLimit(Some(Duration::from_secs(3600))))
     );
     e.mock.fault(None, "/upload/", 403, "storageQuotaExceeded");
     let s = src(b"new bytes");
