@@ -24,6 +24,8 @@ pub struct ServerCloudHooks {
     dav: Arc<ServerDavHooks>,
     library: Arc<LibraryRuntime>,
     db: Arc<Database>,
+    /// A cloud library's `.nocover` records (dropped for a merged-away archive).
+    thumbs: Option<Arc<crate::thumbs::Thumbnails>>,
 }
 
 fn lower(p: &Path) -> String {
@@ -74,6 +76,19 @@ impl ServerCloudHooks {
             dav,
             library,
             db,
+            thumbs: None,
+        }
+    }
+
+    /// The cover loop whose `.nocover` records a case merge clears (§5.9).
+    pub fn with_thumbnails(mut self, thumbs: Arc<crate::thumbs::Thumbnails>) -> Self {
+        self.thumbs = Some(thumbs);
+        self
+    }
+
+    fn forget_nocover(&self, cbz: &Path) {
+        if let Some(t) = &self.thumbs {
+            t.forget_nocover(cbz);
         }
     }
 
@@ -194,6 +209,10 @@ impl CloudHooks for ServerCloudHooks {
                 tracing::warn!("case merge: the OCR row of {old}: {e}");
             }
         }
+        if is_cbz(from) {
+            // The record was keyed by the old path.
+            self.forget_nocover(from);
+        }
         if is_dir || is_cbz(from) {
             self.dav.archives_removed(&[from.to_path_buf()]);
         }
@@ -220,6 +239,7 @@ impl CloudHooks for ServerCloudHooks {
             self.dav.forget_volume_upload(&rel);
             self.dav.forget_volume_uuid(&rel);
             self.dav.forget_ocr_sidecars_of_volume(&rel);
+            self.forget_nocover(path);
             self.dav.archives_removed(&[path.to_path_buf()]);
         } else if is_sidecar(path) {
             // The file is gone from the index by now, so its volume id cannot be read
