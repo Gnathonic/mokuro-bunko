@@ -10,8 +10,8 @@
 //! read caches of [`cache`] and the open files of [`file`](mod@file). [`status`]
 //! holds the marker lease (`.mokuro-bunko.json`) and the cloud queue document. Default
 //! features add the providers' drivers (`webdav::WebDavBackend`,
-//! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`) and [`auth`], which signs in
-//! to the OAuth providers and keeps their credentials.
+//! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`) and
+//! [`auth`], which signs in to the OAuth providers and keeps their credentials.
 
 #[cfg(feature = "oauth")]
 pub mod auth;
@@ -24,6 +24,8 @@ pub mod file;
 #[cfg(feature = "gdrive")]
 pub mod gdrive;
 pub mod index;
+#[cfg(feature = "mega")]
+pub mod mega;
 pub mod names;
 #[cfg(feature = "onedrive")]
 pub mod onedrive;
