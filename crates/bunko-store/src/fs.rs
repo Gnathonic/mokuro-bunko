@@ -104,8 +104,8 @@ pub fn read_to_string(p: impl AsRef<Path>) -> io::Result<String> {
     }
 }
 
-/// `std::fs::write`. On a remote store the opened file is a staging file that the
-/// store publishes when it is closed (spec §3.4).
+/// `std::fs::write`. On a remote store: one Sync publish through a staging file
+/// (spec §3.4); nothing is ever published on drop.
 pub fn write(p: impl AsRef<Path>, data: impl AsRef<[u8]>) -> io::Result<()> {
     let p = p.as_ref();
     match store_for(p) {
@@ -116,7 +116,9 @@ pub fn write(p: impl AsRef<Path>, data: impl AsRef<[u8]>) -> io::Result<()> {
             o.write(true).create(true).truncate(true);
             let mut f = s.open_with(p, &o)?;
             f.write_all(data.as_ref())?;
-            f.flush()
+            f.flush()?;
+            drop(f);
+            s.publish(p, p, &WriteIntent::default_publish()).map(|_| ())
         }
     }
 }

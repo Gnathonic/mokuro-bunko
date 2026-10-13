@@ -130,6 +130,9 @@ struct State {
     trashed_log: Vec<Pid>,
     deleted_log: Vec<Pid>,
     read_log: Vec<FakeRead>,
+    /// A misbehaving provider: these bytes answer every read of the pid.
+    serve_instead: HashMap<Pid, Bytes>,
+    upload_log: Vec<String>,
 }
 
 /// The in-memory provider.
@@ -326,6 +329,21 @@ impl FakeBackend {
     /// mid-listing); `None` removes it.
     pub fn set_list_hook(&self, hook: Option<ListHook>) {
         *self.list_hook.lock() = hook;
+    }
+
+    /// The names of successful uploads (new files and new versions), in order.
+    pub fn upload_log(&self) -> Vec<String> {
+        self.state.lock().upload_log.clone()
+    }
+
+    /// Make every read of `pid` return `data` whatever its range or pin (a provider
+    /// that lies about sizes); `None` restores honest reads.
+    pub fn serve_instead(&self, pid: &str, data: Option<Vec<u8>>) {
+        let mut st = self.state.lock();
+        match data {
+            Some(d) => st.serve_instead.insert(pid.to_string(), Bytes::from(d)),
+            None => st.serve_instead.remove(pid),
+        };
     }
 
     /// Account storage limit in bytes; `None` (the default) reports no quota.
@@ -1127,6 +1145,10 @@ impl Backend for FakeBackend {
             range,
         });
         self.enter(FakeOp::Read).await?;
+        let lie = self.state.lock().serve_instead.get(pid).cloned();
+        if let Some(d) = lie {
+            return Ok(body(d));
+        }
         let data = {
             let st = self.state.lock();
             let n = st.live(pid).filter(|n| !n.is_dir).ok_or(BErr::NotFound)?;
@@ -1196,6 +1218,8 @@ impl Backend for FakeBackend {
                     st.replace(prof, pid, data, now)
                 }
             };
+            let name = String::from_utf8_lossy(&st.nodes[&pid].name).into_owned();
+            st.upload_log.push(name);
             Ok(st.rnode(prof, &pid))
         })
     }

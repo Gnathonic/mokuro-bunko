@@ -7,11 +7,13 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["webdav", "gdrive", "onedrive", "oauth"]
+default = ["webdav", "gdrive", "onedrive", "mega", "oauth"]
 # The Google Drive driver (`gdrive::GDriveBackend`).
 gdrive = ["dep:reqwest", "dep:time", "dep:httpdate"]
 # The OneDrive (Microsoft Graph v1.0) driver (`onedrive::OneDriveBackend`).
 onedrive = ["dep:reqwest", "dep:time", "dep:httpdate", "dep:base64"]
+# The MEGA driver (`mega::MegaBackend`) on the vendored `bunko-mega` client.
+mega = ["dep:bunko-mega", "dep:zeroize"]
 # The in-memory FakeBackend (tests here and in dependent crates).
 testing = []
 # The WebDAV driver (`webdav::WebDavBackend`).
@@ -64,8 +66,12 @@ rand = { workspace = true, optional = true }
 chacha20poly1305 = { version = "0.10", optional = true }
 # Verifies provider md5 hashes of downloads (§5.5, §5.6).
 md-5 = "0.10"
+bunko-mega = { path = "../bunko-mega", optional = true }
+zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
+# tests/mega_mock.rs: the in-process MEGA mock.
+bunko-mega = { path = "../bunko-mega", features = ["mock"] }
 # Turns on `testing` for this crate's own integration tests.
 bunko-remote = { path = ".", features = ["testing"] }
 tempfile.workspace = true

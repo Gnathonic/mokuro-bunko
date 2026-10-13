@@ -21,6 +21,7 @@ pub use meta::{FileType, Meta, RemoteMeta, Version};
 pub use mount::{MountGuard, mount, same_store, store_for};
 pub use store::{
     Blocked, Capacity, Caps, Durability, Health, LibraryStore, LocalPath, Mode, OpId, Origin,
-    Published, SpoolPin, WatchEvent, WatchGuard, WatchSink, WriteIntent, crosses_devices,
+    Published, SpoolPin, StoreError, WatchEvent, WatchGuard, WatchSink, WriteIntent, conflict,
+    crosses_devices, is_conflict, is_unavailable, store_error, unavailable,
 };
 pub use watch::Translate;

@@ -250,7 +250,7 @@ impl BlobCache {
             .with("evict", |c| {
                 let total: i64 =
                     c.query_row("SELECT COALESCE(SUM(size), 0) FROM blob", [], |r| r.get(0))?;
-                let mut over = total - self.budget as i64;
+                let mut over = total.saturating_sub(i64::try_from(self.budget).unwrap_or(i64::MAX));
                 let mut out = Vec::new();
                 if over <= 0 {
                     return Ok(out);
@@ -794,8 +794,8 @@ impl Spool {
     /// bytes fit. `false` when they cannot.
     fn make_room(&self, m: &mut HashMap<Key, Arc<SpoolEntry>>, size: u64) -> bool {
         loop {
-            let reserved: u64 = m.values().map(|e| e.size).sum();
-            if reserved + size <= self.budget {
+            let reserved = m.values().fold(0u64, |a, e| a.saturating_add(e.size));
+            if reserved.saturating_add(size) <= self.budget {
                 return true;
             }
             let victim = m
@@ -854,7 +854,10 @@ impl Spool {
     /// `(entries, reserved bytes)`.
     pub(crate) fn stats(&self) -> (u64, u64) {
         let m = self.entries.lock();
-        (m.len() as u64, m.values().map(|e| e.size).sum())
+        (
+            m.len() as u64,
+            m.values().fold(0u64, |a, e| a.saturating_add(e.size)),
+        )
     }
 }
 
