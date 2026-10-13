@@ -7,7 +7,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
+default = ["gdrive"]
+# The Google Drive driver (`gdrive::GDriveBackend`).
+gdrive = ["dep:reqwest", "dep:md-5", "dep:time", "dep:httpdate"]
 # The in-memory FakeBackend (tests here and in dependent crates).
 testing = []
 
@@ -25,9 +27,16 @@ hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unicode-normalization = "0.1"
+reqwest = { workspace = true, optional = true }
+md-5 = { version = "0.10", optional = true }
+time = { workspace = true, optional = true }
+httpdate = { version = "1", optional = true }
 
 [dev-dependencies]
 # Turns on `testing` for this crate's own integration tests.
 bunko-remote = { path = ".", features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+axum.workspace = true
+md-5 = "0.10"
+time.workspace = true
