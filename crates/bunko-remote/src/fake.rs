@@ -55,6 +55,14 @@ pub enum FakeOp {
     Quota,
 }
 
+/// One [`Backend::read`] call, for [`FakeBackend::read_log`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeRead {
+    pub pid: Pid,
+    pub pin: Option<String>,
+    pub range: Option<(u64, Option<u64>)>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ids {
     /// pid = path from the account root; a move changes it.
@@ -121,6 +129,7 @@ struct State {
     quota: Option<u64>,
     trashed_log: Vec<Pid>,
     deleted_log: Vec<Pid>,
+    read_log: Vec<FakeRead>,
 }
 
 /// The in-memory provider.
@@ -331,9 +340,11 @@ impl FakeBackend {
         self.state.lock().calls.get(&op).copied().unwrap_or(0)
     }
 
-    /// Reset every call counter.
+    /// Reset every call counter and the read log.
     pub fn reset_calls(&self) {
-        self.state.lock().calls.clear();
+        let mut st = self.state.lock();
+        st.calls.clear();
+        st.read_log.clear();
     }
 
     /// Pids passed to [`Backend::trash`], in order.
@@ -344,6 +355,12 @@ impl FakeBackend {
     /// Pids passed to [`Backend::delete_permanent`], in order.
     pub fn deleted_log(&self) -> Vec<Pid> {
         self.state.lock().deleted_log.clone()
+    }
+
+    /// Every [`Backend::read`] call since the last [`FakeBackend::reset_calls`], in
+    /// order (failed ones included).
+    pub fn read_log(&self) -> Vec<FakeRead> {
+        self.state.lock().read_log.clone()
     }
 
     /// The server clock (unix ms).
@@ -1104,6 +1121,11 @@ impl Backend for FakeBackend {
         pin: Option<&str>,
         range: Option<(u64, Option<u64>)>,
     ) -> Result<RemoteBody, BErr> {
+        self.state.lock().read_log.push(FakeRead {
+            pid: pid.to_string(),
+            pin: pin.map(str::to_string),
+            range,
+        });
         self.enter(FakeOp::Read).await?;
         let data = {
             let st = self.state.lock();
