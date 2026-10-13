@@ -7,9 +7,21 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
+default = ["oauth"]
 # The in-memory FakeBackend (tests here and in dependent crates).
 testing = []
+# OAuth sign-in (loopback + PKCE, device flow), the embedded clients, the
+# credential store and refreshing access tokens (§7).
+oauth = [
+    "dep:bunko-core",
+    "dep:reqwest",
+    "dep:base64",
+    "dep:rand",
+    "dep:chacha20poly1305",
+    "dep:time",
+    "tokio/net",
+    "tokio/io-util",
+]
 
 [dependencies]
 bunko-store.workspace = true
@@ -25,9 +37,17 @@ hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unicode-normalization = "0.1"
+bunko-core = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+# MIT/Apache-2.0; seals credentials.json when MOKURO_SECRETS_KEY is set (D12).
+chacha20poly1305 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 # Turns on `testing` for this crate's own integration tests.
 bunko-remote = { path = ".", features = ["testing"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
+axum.workspace = true
