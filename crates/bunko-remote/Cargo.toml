@@ -9,7 +9,7 @@ rust-version.workspace = true
 [features]
 default = ["webdav", "gdrive", "oauth"]
 # The Google Drive driver (`gdrive::GDriveBackend`).
-gdrive = ["dep:reqwest", "dep:md-5", "dep:time", "dep:httpdate"]
+gdrive = ["dep:reqwest", "dep:time", "dep:httpdate"]
 # The in-memory FakeBackend (tests here and in dependent crates).
 testing = []
 # The WebDAV driver (`webdav::WebDavBackend`).
@@ -37,7 +37,7 @@ oauth = [
 
 [dependencies]
 bunko-store.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 futures-util.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true
@@ -60,7 +60,8 @@ bunko-core = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 # MIT/Apache-2.0; seals credentials.json when MOKURO_SECRETS_KEY is set (D12).
 chacha20poly1305 = { version = "0.10", optional = true }
-md-5 = { version = "0.10", optional = true }
+# Verifies provider md5 hashes of downloads (§5.5, §5.6).
+md-5 = "0.10"
 
 [dev-dependencies]
 # Turns on `testing` for this crate's own integration tests.
@@ -72,5 +73,7 @@ bunko-dav.workspace = true
 bunko-core.workspace = true
 axum.workspace = true
 http.workspace = true
-md-5 = "0.10"
 time.workspace = true
+# tests/read_path.rs: real zips, parsed by the library's own reader.
+zip.workspace = true
+bunko-library.workspace = true
