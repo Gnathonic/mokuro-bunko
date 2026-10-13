@@ -7,7 +7,8 @@ Run by `tests/golden_rust_to_py.rs` (or by hand):
 
 `manifest.json` is what the Rust test wrote and expects Python to see. The script
 - under 0.5.3 (the version bunko-db tracks), compares the schema text with a fresh Python
-  database's (byte equality); under 0.5.2 (0.5.3's rollback), checks that its open only
+  database's (byte equality, but for the one nullable column 0.8 adds by `ALTER TABLE`,
+  `ocr_sidecars.written_sha256`, which 0.5.x names no column for); under 0.5.2 (0.5.3's rollback), checks that its open only
   ADDS its own `catalog_series` table (empty: it reads its catalog from there until its
   first pass) and leaves every table bunko-db made as it was;
 - opens the file with Python's `Database` (running its migrations over it);
@@ -45,6 +46,17 @@ def schema_rows(path: Path) -> list[list]:
         conn.close()
 
 
+def with_08_columns(schema: list[list]) -> list[list]:
+    """A 0.5.3 schema as bunko-db 0.8 leaves it: `ocr_sidecars` gains `written_sha256`."""
+    out = []
+    for kind, name, tbl, sql in schema:
+        if kind == "table" and name == "ocr_sidecars":
+            check(sql.endswith(")"), "the ocr_sidecars statement")
+            sql = sql[:-1] + ", written_sha256 TEXT)"
+        out.append([kind, name, tbl, sql])
+    return out
+
+
 def check(cond: bool, what: str) -> None:
     if not cond:
         raise SystemExit(f"MISMATCH: {what}")
@@ -68,8 +80,11 @@ def main() -> None:
         expected_schema = rust_schema + legacy
         m = {**m, "catalog_series": []}
     else:
-        check(rust_schema == python_schema, "schema text differs from a fresh Python database")
-        expected_schema = python_schema
+        check(
+            rust_schema == with_08_columns(python_schema),
+            "schema text differs from a fresh Python database (plus the 0.8 column)",
+        )
+        expected_schema = rust_schema
 
     db = Database(db_path)
     check(schema_rows(db_path) == expected_schema, "Python's open changed the schema")

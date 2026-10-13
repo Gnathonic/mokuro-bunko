@@ -352,6 +352,15 @@ fn install(req: &CollectRequest) -> Outcome {
             row.name
         ));
     }
+    // The proof of what Bunko installed (`ocr_sidecars.written_sha256`): the normalised
+    // bytes, hashed before they leave the spool, so a write that lands on the destination
+    // after the move is never recorded as Bunko's.
+    let installed_sha256 = match sha256_file(&req.result) {
+        Ok(sha) => sha,
+        Err(e) => {
+            return Outcome::Failed(format!("the {} sidecar could not be read: {e}", row.name));
+        }
+    };
     // 5. Into place, under the DAV write lock.
     let destination = if req.job.upgrade {
         match super::upgrade::swap_in_generated(req, &cbz) {
@@ -391,19 +400,37 @@ fn install(req: &CollectRequest) -> Outcome {
         dest
     };
     // 6. Provenance + audit; 7. metadata.
-    record_written(req, &cbz, &destination, detector, precision, facts_pages);
+    record_written(
+        req,
+        &cbz,
+        &destination,
+        Written {
+            detector,
+            precision,
+            facts_pages,
+            sha256: installed_sha256,
+        },
+    );
     req.facts.sidecar_installed(&cbz);
     Outcome::Installed(destination)
 }
 
-fn record_written(
-    req: &CollectRequest,
-    cbz: &Path,
-    sidecar: &Path,
+/// What one installation wrote, for its provenance row.
+struct Written {
     detector: Option<String>,
     precision: Option<String>,
     facts_pages: Option<i64>,
-) {
+    /// sha256 of the exact bytes installed.
+    sha256: String,
+}
+
+fn record_written(req: &CollectRequest, cbz: &Path, sidecar: &Path, written: Written) {
+    let Written {
+        detector,
+        precision,
+        facts_pages,
+        sha256,
+    } = written;
     let Some(db) = &req.db else { return };
     let (Some(sidecar_rel), Some(volume_key)) = (
         crate::ocr::types::rel_of(&req.library, sidecar),
@@ -429,6 +456,7 @@ fn record_written(
         archive_size: archive.map(|a| a.0 as i64),
         archive_mtime_ns: archive.map(|a| a.1 as i64),
         written_at: String::new(),
+        written_sha256: Some(sha256),
     };
     if let Err(e) = db.record_ocr_sidecar(&row) {
         tracing::warn!(

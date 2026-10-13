@@ -22,11 +22,13 @@ way to re-OCR a volume is to delete its sidecar by hand.
    - **Generate then swap:** otherwise the file is generated, then swapped in.
 
    Either way, the new file **replaces** the old one. The main `.mokuro` is
-   model output (0.8 decision D4): an old file Bunko wrote itself (it carries
-   Bunko's `ocr_engine` stamp) is replaced with no copy; any other (stock
-   mokuro output, an adopted file, or one a reader corrected) is first kept as
-   the layer `<Volume>.pre-upgrade.mokuro`, so a person's corrections are never
-   lost. The upgrade runs only when the archive holds every page the old file
+   model output (0.8 decision D4): an old file proven to be Bunko's own bytes
+   (§5: its provenance row records their sha256, and on a remote store the
+   store's ledger records the version as Bunko's) is replaced with no copy; any
+   other (stock mokuro output, an adopted file, one a reader corrected, or one
+   that merely carries Bunko's `ocr_engine` stamp, which anyone who can write
+   the file can add) is first kept as the layer `<Volume>.pre-upgrade.mokuro`,
+   so a person's corrections are never lost. The upgrade runs only when the archive holds every page the old file
    names. It never skips a file for having been edited.
 
 ## 1. Deprecation (soft; removal in 0.7)
@@ -110,8 +112,8 @@ A volume is an **upgrade candidate** when all of the following hold:
    That rule could not tell a reader's correction from stock mokuro output:
    Mokuro Reader rebuilds every `.mokuro` it uploads from its own database,
    with no `ocr_engine` and no edit marker. 0.8 removes the skip, the force
-   and the admin's edited list, and preserves instead (§5): a bare file
-   without Bunko's own stamp is kept as a `pre-upgrade` layer before it is
+   and the admin's edited list, and preserves instead (§5): a bare file not
+   proven to be Bunko's own bytes is kept as a `pre-upgrade` layer before it is
    replaced.
 
    A file whose recipe is **unknown** (neither `ocr_engine` nor `version`) is
@@ -131,7 +133,7 @@ Settings apply live through `OcrControl.apply()`, like the rest of `ocr.*`.
 For each candidate, in this order:
 
 1. **Direct replace.** The first existing sidecar of that volume is taken if
-   it meets all three conditions:
+   it meets all four conditions:
    - its recipe equals the target recipe;
    - it was produced from the current archive, meaning either:
      - its `ocr_sidecars` row's `archive_size`/`archive_mtime_ns` match the
@@ -141,7 +143,14 @@ For each candidate, in this order:
    - **its own file carries the stamp:** a top-level `ocr_engine` block whose
      `id` (with its detector and budget) is the target recipe. Its
      `ocr_sidecars` row alone is not enough: `classify` reads the row first,
-     and a reader pushing a layer back drops the stamp.
+     and a reader pushing a layer back drops the stamp;
+   - **it is proven to be Bunko's own bytes** (the same proof as §5 step 1:
+     its row's `written_sha256` is the sha256 of the file, and on a remote
+     store the version read is one the ledger records as Bunko's). A stamp
+     alone is not enough: anyone who can write the file can add one, and a
+     forged stamp would make a person's file the model output. The bytes
+     proven are exactly the bytes installed (read once, pinned to one version
+     on a remote store).
 
    Only layers that carry an `ocr_engine` stamp or have an `ocr_sidecars` row
    are read at all. Unstamped layers (a reader's edits, `pre-upgrade` copies)
@@ -174,9 +183,16 @@ validated and normalized in the workspace. The bare file must still be the
 version the census judged (its stat, and on a remote store its content
 version); if it changed, the swap skips and the next census judges it again.
 
-1. **Keep the old file, unless Bunko wrote it (D4).** A bare file that carries
-   Bunko's own top-level `ocr_engine` stamp (with an `id`) is replaced with no
-   copy. Any other is first published as the layer `<Volume>.pre-upgrade.mokuro`
+1. **Keep the old file, unless it is proven Bunko's own (D4).** A bare file is
+   replaced with no copy only on proof that Bunko wrote exactly these bytes:
+   its `ocr_sidecars` row records their sha256 (`written_sha256`, recorded
+   from the installed bytes at every OCR install and moved to the bare file by
+   a direct replace), and on a remote store the version the swap replaces is
+   one the store's ledger records as Bunko's (`own`). A top-level `ocr_engine`
+   stamp proves nothing: anyone who can write the file (a reader's edit, a
+   WebDAV PUT, a cloud upload) can add one, and a re-upload of edited text can
+   keep one. A row an older build wrote has no `written_sha256`, so a file it
+   describes is kept once. Any other is first published as the layer `<Volume>.pre-upgrade.mokuro`
    (`CreateNew`, Sync), exactly the bytes the swap replaces (on a remote store
    read pinned to the judged version), with a top-level block
    `"preserved": {"by": "mokuro-bunko", "reason": "generation-upgrade",
@@ -209,14 +225,15 @@ still sees an old recipe and redoes the upgrade, reusing that layer.
 
 **Bookkeeping.**
 - `ocr_sidecars`: the old bare file's row is dropped with it, and the new bare
-  file gets a row (a direct replace copies the layer's).
-- The audit log records `ocr_sidecar_upgraded` with `{from_recipe, to_recipe, replaced: true, mode: direct|generated, preserved_as}`; `preserved_as` (the `pre-upgrade` layer's path) is absent when a Bunko-stamped file was replaced.
+  file gets a row (a direct replace copies the layer's, with the sha256 of the
+  bytes it installed).
+- The audit log records `ocr_sidecar_upgraded` with `{from_recipe, to_recipe, replaced: true, mode: direct|generated, preserved_as}`; `preserved_as` (the `pre-upgrade` layer's path) is absent when a file proven to be Bunko's own bytes was replaced.
 - The metadata recompile runs from the existing filesystem callback.
 - `volume_uuid` is preserved, because `_normalize_mokuro_metadata` stamps the
   volume's own uuid, so reading progress is untouched.
 - The manifest's `modified` changes, which is what tells readers to refetch.
 
-**Undo.** There is no revert action. A file Bunko did not write is still there
+**Undo.** There is no revert action. A file not proven Bunko's own is still there
 as the `pre-upgrade` layer: a reader can show it, and an admin who wants it back
 as the main file copies it over the bare file with a WebDAV PUT (while the
 upgrade stays enabled, the next census keeps that file as a `pre-upgrade` layer
@@ -279,11 +296,13 @@ counts them.
   - recipe classification for each of the four sources in §2;
   - the four candidate conditions, each alone;
   - the redundant-layer rule;
-  - an upgrade keeps a stamp-less old file as `pre-upgrade` (committed before
-    the swap, `-2` when taken, reused for the same bytes) and replaces a
-    Bunko-stamped one with no copy;
-  - only a layer whose own file carries the stamp is swapped in; unstamped
-    layers are never read or deleted;
+  - an upgrade keeps an old file not proven Bunko's own as `pre-upgrade`
+    (committed before the swap, `-2` when taken, reused for the same bytes),
+    including one with a forged stamp or Bunko's stamp left in after an edit,
+    and replaces a proven one with no copy;
+  - only a layer proven Bunko's own whose own file carries the stamp is
+    swapped in (a stamped layer a reader uploaded is not); unstamped layers
+    are never read or deleted;
   - the clean-up removes a stamped kept layer and never an unstamped one.
 - **Swap:** an injected crash after the rename, before the bookkeeping. The
   rerun must converge.

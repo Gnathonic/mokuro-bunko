@@ -28,6 +28,11 @@ fn enabled() -> UpgradeConfig {
     }
 }
 
+fn sha(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
 fn json(path: &std::path::Path) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
@@ -46,11 +51,11 @@ fn sidecars(dir: &std::path::Path) -> Vec<String> {
 
 #[test]
 fn direct_replace_swaps_a_matching_layer_in() {
-    let mut h = harness_full(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
     h.add("A/V1.cbz", 3);
     let lib = h.library();
     std::fs::write(lib.join("A/V1.mokuro"), LEGACY).unwrap();
-    std::fs::write(lib.join("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    h.bunko_wrote("A/V1.hayai-nova.mokuro", HAYAI, &layer("g-2", "hayai-nova"));
     h.at(0.0);
     assert_eq!(
         std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),
@@ -66,19 +71,81 @@ fn direct_replace_swaps_a_matching_layer_in() {
         !h.s.owed.volumes.contains_key("A/V1.cbz"),
         "nothing left to do"
     );
+    let row =
+        h.db.as_ref()
+            .unwrap()
+            .get_ocr_sidecar("A/V1.mokuro")
+            .unwrap();
+    assert_eq!(
+        row.and_then(|r| r.written_sha256),
+        Some(sha(HAYAI.as_bytes())),
+        "the proof moved with the bytes"
+    );
+}
+
+/// An OCR install records the sha256 of exactly the bytes it put in place.
+#[test]
+fn an_install_records_the_sha256_of_the_bytes_it_wrote() {
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    h.add("B/V9.cbz", 3);
+    let lib = h.library();
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let vols = volumes(&ops);
+    let sid = opened(&ops)[0].clone();
+    h.event(&p, ready(&sid));
+    h.event(&p, started(&sid, &vols[0].1, 3));
+    h.done_with(&p, &sid, &vols[0].1, "V9.mokuro", 3, 1.0, HAYAI.as_bytes());
+    let installed = std::fs::read(lib.join("B/V9.mokuro")).unwrap();
+    let row =
+        h.db.as_ref()
+            .unwrap()
+            .get_ocr_sidecar("B/V9.mokuro")
+            .unwrap();
+    assert_eq!(
+        row.and_then(|r| r.written_sha256),
+        Some(sha(&installed)),
+        "the normalised bytes on disk, not the processor's"
+    );
+}
+
+/// The same layer with no proof that Bunko wrote it (no database row recording its
+/// sha256): its stamp alone does not make it the main sidecar, so the volume needs a job.
+#[test]
+fn a_stamped_layer_without_proof_is_not_swapped_in() {
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    h.add("A/V1.cbz", 3);
+    let lib = h.library();
+    std::fs::write(lib.join("A/V1.mokuro"), LEGACY).unwrap();
+    std::fs::write(lib.join("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    h.at(0.0);
+    assert_eq!(
+        std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),
+        LEGACY
+    );
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.hayai-nova.mokuro", "V1.mokuro"]
+    );
+    assert!(
+        h.s.owed.volumes["A/V1.cbz"].upgrade,
+        "an upgrade job instead"
+    );
 }
 
 #[test]
 fn a_direct_replace_keeps_a_layer_an_enabled_row_writes() {
-    let mut h = harness_full(
-        vec![primary(), layer("g-2", "nova")],
+    let nova = layer("g-2", "nova");
+    let mut h = harness_db(
+        vec![primary(), nova.clone()],
         Arc::new(FileFacts),
         Some(enabled()),
     );
     h.add("A/V1.cbz", 3);
     let lib = h.library();
     std::fs::write(lib.join("A/V1.mokuro"), LEGACY).unwrap();
-    std::fs::write(lib.join("A/V1.nova.mokuro"), HAYAI).unwrap();
+    h.bunko_wrote("A/V1.nova.mokuro", HAYAI, &nova);
     h.at(0.0);
     assert_eq!(
         std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),

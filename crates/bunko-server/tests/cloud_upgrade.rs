@@ -3,9 +3,11 @@
 //! not stamp is kept as `<Vol>.pre-upgrade.mokuro`, which commits before the swap
 //! uploads; a failed layer upload skips the volume until the next census; the node a
 //! swap replaces is never deleted for good; a reader's overwrite of a Bunko-written
-//! main sidecar forgets its row, so the next census upgrades it after keeping it; a
-//! Bunko-stamped one is replaced with no copy; unstamped layers are never swapped in
-//! or deleted.
+//! main sidecar forgets its row, so the next census upgrades it after keeping it; one
+//! proven to be Bunko's own bytes (its version in the store's ledger, its sha256 in its
+//! row) is replaced with no copy, while one that only carries Bunko's stamp is kept
+//! first; a layer is swapped in only on the same proof, and unstamped layers are never
+//! swapped in or deleted.
 
 // Fixtures are checked with std::fs on purpose (none here touch the cloud through it).
 #![allow(clippy::disallowed_methods)]
@@ -172,22 +174,57 @@ impl Cloud {
             .collect()
     }
 
-    fn row(&self, rel: &str) {
+    /// `bytes` published at `rel` by Bunko itself (the store's ledger records the version
+    /// as its own), with the row an OCR install records: the sha256 of those bytes.
+    async fn bunko_put(&self, rel: &str, bytes: &'static str, engine: &str, detector: &str) {
+        let dest = self.lib(rel);
+        blocking(move || {
+            let tmp = dest.with_file_name(format!(
+                ".{}.part",
+                dest.file_name().unwrap().to_string_lossy()
+            ));
+            let mut f = bunko_store::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)
+                .unwrap();
+            f.write_all(bytes.as_bytes()).unwrap();
+            drop(f);
+            let intent = WriteIntent::new(
+                Mode::CreateNew,
+                Origin::Ocr {
+                    claim: "c-1".into(),
+                },
+                Durability::Sync,
+            );
+            bunko_store::fs::publish(&tmp, &dest, &intent).unwrap();
+        })
+        .await;
+        self.proof(rel, bytes, engine, detector);
+    }
+
+    /// The row an OCR install records for `bytes` at `rel` (whoever wrote the file).
+    fn proof(&self, rel: &str, bytes: &str, engine: &str, detector: &str) {
         self.services
             .db
             .record_ocr_sidecar(&OcrSidecar {
                 sidecar_path: rel.into(),
-                volume_key: "Series/Vol 1.cbz".into(),
+                volume_key: format!("{}.cbz", rel.split('.').next().unwrap()),
                 generation_id: "g-1".into(),
-                generation_name: "hayai-nova".into(),
+                generation_name: engine.into(),
                 machine: "local".into(),
-                engine: Some("hayai-nova".into()),
-                detector: Some("ppocr-manga".into()),
-                pages: Some(3),
-                failed_pages: Some(0),
+                engine: Some(engine.into()),
+                detector: Some(detector.into()),
+                written_sha256: Some(sha(bytes.as_bytes())),
                 ..Default::default()
             })
             .unwrap();
+    }
+
+    async fn bunko_layer(&self, rel: &str) {
+        self.bunko_put(rel, HAYAI, "hayai-nova", "ppocr-manga")
+            .await;
     }
 }
 
@@ -204,7 +241,9 @@ fn assert_preserves(kept: Option<Value>, old: &str) {
     assert_eq!(block["sha256"], sha(old.as_bytes()));
     assert_eq!(block["replaced_by"], "hayai-nova");
     assert!(kept.get("ocr_engine").is_none(), "{kept}");
-    assert_eq!(kept, serde_json::from_str::<Value>(old).unwrap());
+    let mut want: Value = serde_json::from_str(old).unwrap();
+    want.as_object_mut().unwrap().shift_remove("ocr_engine");
+    assert_eq!(kept, want, "the old content, unchanged");
 }
 
 fn library(fake: &FakeBackend, main: &str) {
@@ -218,11 +257,8 @@ fn library(fake: &FakeBackend, main: &str) {
 async fn a_stamp_less_cloud_sidecar_is_kept_then_replaced_and_never_deleted_for_good() {
     let fake = Arc::new(FakeBackend::mega_like());
     library(&fake, LEGACY);
-    fake.reader_put(
-        &format!("{ROOT}/Series/Vol 1.hayai-nova.mokuro"),
-        HAYAI.as_bytes(),
-    );
     let cloud = Cloud::start(fake.clone()).await;
+    cloud.bunko_layer("Series/Vol 1.hayai-nova.mokuro").await;
     let old = fake
         .node_at(&format!("{ROOT}/Series/Vol 1.mokuro"))
         .unwrap();
@@ -271,11 +307,8 @@ async fn a_stamp_less_cloud_sidecar_is_kept_then_replaced_and_never_deleted_for_
 async fn a_failed_layer_upload_skips_the_cloud_volume_until_the_next_census() {
     let fake = Arc::new(FakeBackend::drive_like());
     library(&fake, LEGACY);
-    fake.reader_put(
-        &format!("{ROOT}/Series/Vol 1.hayai-nova.mokuro"),
-        HAYAI.as_bytes(),
-    );
     let cloud = Cloud::start(fake.clone()).await;
+    cloud.bunko_layer("Series/Vol 1.hayai-nova.mokuro").await;
     fake.fail_next(
         FakeOp::Upload,
         BErr::Fatal("the provider refused it".into()),
@@ -331,7 +364,7 @@ async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_kept_before_the_
         bunko_store::fs::publish(&tmp, &bare, &intent).unwrap();
     })
     .await;
-    cloud.row("Series/Vol 1.mokuro");
+    cloud.proof("Series/Vol 1.mokuro", HAYAI, "hayai-nova", "ppocr-manga");
     assert_eq!(cloud.judge("Series/Vol 1.cbz").await, Verdict::Current);
 
     // The reader re-uploads it from its DB: no stamp.
@@ -355,14 +388,14 @@ async fn a_reader_overwrite_in_the_cloud_forgets_the_row_and_is_kept_before_the_
     assert_preserves(cloud.cloud_json("Series/Vol 1.pre-upgrade.mokuro"), LEGACY);
 }
 
+/// Bunko's own main sidecar (its version in the ledger, its bytes in its row) is replaced
+/// with no copy; a stamped one a reader uploaded is kept first, as is one whose row
+/// matches but whose version Bunko did not write; reader-uploaded layers, stamped or
+/// not, are never swapped in or deleted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_bunko_stamped_cloud_sidecar_is_replaced_without_a_copy_and_unstamped_layers_stay() {
+async fn a_cloud_sidecar_proven_bunkos_own_is_replaced_without_a_copy_and_others_are_kept() {
     let fake = Arc::new(FakeBackend::drive_like());
-    library(&fake, BUNKO_OLD);
-    fake.reader_put(
-        &format!("{ROOT}/Series/Vol 1.hayai-nova.mokuro"),
-        HAYAI.as_bytes(),
-    );
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), &cbz(3));
     // Vol 2: a reader pushed the hayai-nova layer back without its stamp; its row
     // still names hayai-nova. A person's own layer, with no row, beside it.
     fake.reader_put(&format!("{ROOT}/Series/Vol 2.cbz"), &cbz(3));
@@ -375,7 +408,22 @@ async fn a_bunko_stamped_cloud_sidecar_is_replaced_without_a_copy_and_unstamped_
         &format!("{ROOT}/Series/Vol 2.mine.mokuro"),
         HAYAI_UNSTAMPED.as_bytes(),
     );
+    // Vol 3: a reader's upload carrying Bunko's stamp, beside a layer a reader uploaded
+    // with the matching stamp. Vol 4: the same stamped main, with a row whose sha256
+    // matches it, but the version is not one Bunko wrote.
+    for v in ["Vol 3", "Vol 4"] {
+        fake.reader_put(&format!("{ROOT}/Series/{v}.cbz"), &cbz(3));
+        fake.reader_put(&format!("{ROOT}/Series/{v}.mokuro"), BUNKO_OLD.as_bytes());
+    }
+    fake.reader_put(
+        &format!("{ROOT}/Series/Vol 3.hayai-nova.mokuro"),
+        HAYAI.as_bytes(),
+    );
     let cloud = Cloud::start(fake.clone()).await;
+    cloud
+        .bunko_put("Series/Vol 1.mokuro", BUNKO_OLD, "mokuro", "ctd")
+        .await;
+    cloud.bunko_layer("Series/Vol 1.hayai-nova.mokuro").await;
 
     cloud.upgrade_direct("Series/Vol 1.cbz").await.unwrap();
     assert_eq!(
@@ -388,6 +436,47 @@ async fn a_bunko_stamped_cloud_sidecar_is_replaced_without_a_copy_and_unstamped_
             .is_none()
     );
     assert!(cloud.upgrade_audits()[0].get("preserved_as").is_none());
+
+    // Vol 3: the reader-uploaded stamped layer is no source; a job's result replaces
+    // the stamped main only after keeping it.
+    assert_eq!(cloud.judge("Series/Vol 3.cbz").await, Verdict::NeedsOcr);
+    let (up, cbz3, layer3) = (
+        cloud.up(),
+        cloud.lib("Series/Vol 3.cbz"),
+        cloud.lib("Series/Vol 3.hayai-nova.mokuro"),
+    );
+    let err = blocking(move || up.direct_replace(&cbz3, &layer3))
+        .await
+        .unwrap_err();
+    assert!(err.contains("not proven"), "{err}");
+    cloud
+        .upgrade_generated("Series/Vol 3.cbz", HAYAI)
+        .await
+        .unwrap();
+    assert_preserves(
+        cloud.cloud_json("Series/Vol 3.pre-upgrade.mokuro"),
+        BUNKO_OLD,
+    );
+    assert_eq!(
+        cloud
+            .cloud_bytes("Series/Vol 3.hayai-nova.mokuro")
+            .as_deref(),
+        Some(HAYAI),
+        "never deleted"
+    );
+
+    // Vol 4: the row alone is no proof on a cloud library: the ledger must hold the
+    // version too.
+    cloud.proof("Series/Vol 4.mokuro", BUNKO_OLD, "mokuro", "ctd");
+    assert_eq!(cloud.judge("Series/Vol 4.cbz").await, Verdict::NeedsOcr);
+    cloud
+        .upgrade_generated("Series/Vol 4.cbz", HAYAI)
+        .await
+        .unwrap();
+    assert_preserves(
+        cloud.cloud_json("Series/Vol 4.pre-upgrade.mokuro"),
+        BUNKO_OLD,
+    );
 
     cloud
         .services
@@ -412,7 +501,7 @@ async fn a_bunko_stamped_cloud_sidecar_is_replaced_without_a_copy_and_unstamped_
     let err = blocking(move || up.direct_replace(&cbz2, &layer))
         .await
         .unwrap_err();
-    assert!(err.contains("stamp"), "{err}");
+    assert!(err.contains("not proven"), "{err}");
     let trashed = fake.trashed_log().len();
     cloud
         .upgrade_generated("Series/Vol 2.cbz", HAYAI)

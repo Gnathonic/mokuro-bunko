@@ -34,6 +34,8 @@ pub struct H {
     pub dir: tempfile::TempDir,
     pub s: Scheduler,
     pub clock: Arc<ManualClock>,
+    /// The database, when the harness has one ([`harness_db`]).
+    pub db: Option<Arc<bunko_db::Database>>,
 }
 
 pub fn primary() -> Generation {
@@ -72,13 +74,43 @@ pub fn harness_full(
     facts: Arc<dyn LibraryFacts>,
     upgrade: Option<UpgradeConfig>,
 ) -> H {
+    harness_inner(rows, facts, upgrade, false)
+}
+
+/// [`harness_full`] with a database (provenance rows: the proof a direct replace needs).
+pub fn harness_db(
+    rows: Vec<Generation>,
+    facts: Arc<dyn LibraryFacts>,
+    upgrade: Option<UpgradeConfig>,
+) -> H {
+    harness_inner(rows, facts, upgrade, true)
+}
+
+fn harness_inner(
+    rows: Vec<Generation>,
+    facts: Arc<dyn LibraryFacts>,
+    upgrade: Option<UpgradeConfig>,
+    with_db: bool,
+) -> H {
     let dir = tempfile::tempdir().unwrap();
     let layout = StorageLayout::new(dir.path());
     layout.ensure_directories().unwrap();
+    let db = with_db.then(|| {
+        Arc::new(
+            bunko_db::Database::open_with(
+                dir.path().join("mokuro.db"),
+                &bunko_db::DbOptions {
+                    bcrypt_cost: 4,
+                    ..bunko_db::DbOptions::default()
+                },
+            )
+            .unwrap(),
+        )
+    });
     let up = upgrade.map(|cfg| {
         let u = Arc::new(bunko_server::ocr::upgrade::Upgrade::new(
             layout.library(),
-            None,
+            db.clone(),
             facts.clone(),
             Arc::new(bunko_library::service::NoPathLocks),
             "mokuro-bunko test".into(),
@@ -91,7 +123,7 @@ pub fn harness_full(
     let s = Scheduler::new(
         SchedDeps {
             layout,
-            db: None,
+            db: db.clone(),
             facts,
             locks: Arc::new(bunko_library::service::NoPathLocks),
             clock: clock.clone(),
@@ -102,7 +134,13 @@ pub fn harness_full(
         },
         settings(rows),
     );
-    H { t0, dir, s, clock }
+    H {
+        t0,
+        dir,
+        s,
+        clock,
+        db,
+    }
 }
 
 /// A `.cbz` with `pages` image members.
@@ -129,6 +167,29 @@ pub struct Proc {
 impl H {
     pub fn library(&self) -> PathBuf {
         self.dir.path().join("library")
+    }
+
+    /// `bytes` written at the library path `rel` as Bunko's OCR install writes them: the
+    /// file, and its provenance row recording their sha256 (the proof D4 asks for).
+    pub fn bunko_wrote(&self, rel: &str, bytes: &str, generation: &Generation) {
+        use sha2::Digest;
+        let path = self.library().join(rel);
+        std::fs::write(&path, bytes).unwrap();
+        let volume = format!("{}.cbz", rel.split('.').next().unwrap());
+        self.db
+            .as_ref()
+            .expect("a harness with a database")
+            .record_ocr_sidecar(&bunko_db::OcrSidecar {
+                sidecar_path: rel.into(),
+                volume_key: volume,
+                generation_id: generation.id.clone(),
+                generation_name: generation.name.clone(),
+                machine: "local".into(),
+                engine: Some(generation.engine.clone()),
+                written_sha256: Some(hex::encode(sha2::Sha256::digest(bytes.as_bytes()))),
+                ..Default::default()
+            })
+            .unwrap();
     }
 
     pub fn storage(&self) -> PathBuf {

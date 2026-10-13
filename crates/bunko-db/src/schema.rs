@@ -5,14 +5,19 @@
 //!
 //! The DDL strings are 0.5.3's byte for byte, indentation included: SQLite keeps the
 //! statement text in `sqlite_master.sql`, so a database created here is
-//! indistinguishable from one Python created (pinned by the golden schema test).
+//! indistinguishable from one Python created but for the one 0.8 column below (pinned
+//! by the golden schema test).
 //!
 //! Every step is idempotent (`IF NOT EXISTS`, `PRAGMA table_info` probes), as in 0.5.2;
 //! nothing is gated on `schema_version`, which is bookkeeping only. Differences:
 //! - the whole run is ONE transaction (Python autocommitted DDL statement by statement),
 //!   so an interrupted upgrade leaves the file as it was;
 //! - `schema_version` is set to 6 unless it already holds a larger number (spec open
-//!   question 2: never downgrade a newer build's marker; Python rewrites it to 6).
+//!   question 2: never downgrade a newer build's marker; Python rewrites it to 6);
+//! - one additive nullable column, `ocr_sidecars.written_sha256` (0.8), is added by
+//!   `ALTER TABLE` on every open that lacks it. It is the only schema text that differs
+//!   from 0.5.3's. A 0.5.x rollback names its columns on insert (so its rows leave it
+//!   NULL: no proof) and only carries the extra key in what `SELECT *` returns.
 
 use crate::database::column_exists;
 use crate::error::Result;
@@ -176,6 +181,11 @@ const OCR_SIDECARS_DDL: &str = "
                 )
             ";
 
+/// The one column 0.8 adds to a 0.5.3 schema (step 3-5). Always added by `ALTER`, on a
+/// fresh database too, so every file carries the same `sqlite_master` text.
+pub const WRITTEN_SHA256: &str = "written_sha256";
+const OCR_SIDECARS_WRITTEN_SHA256: &str = "ALTER TABLE ocr_sidecars ADD COLUMN written_sha256 TEXT";
+
 const OCR_SIDECARS_INDEX: &str = "
                 CREATE INDEX IF NOT EXISTS idx_ocr_sidecars_volume
                 ON ocr_sidecars(volume_key)
@@ -280,6 +290,14 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
     }
     if !column_exists(conn, "invites", "invited_by")? {
         conn.execute("ALTER TABLE invites ADD COLUMN invited_by TEXT", [])?;
+    }
+    // 0.8 (not in 0.5.3): the sha256 of the bytes Bunko installed, the proof the
+    // generation upgrade needs before it replaces a main sidecar without keeping a copy
+    // (an `ocr_engine` stamp alone is user-writable). Nullable and additive: 0.5.x
+    // names its columns on insert, so a rollback writes NULL here (= no proof, the
+    // upgrade keeps a copy) and reads the extra key it does not know.
+    if !column_exists(conn, "ocr_sidecars", WRITTEN_SHA256)? {
+        conn.execute(OCR_SIDECARS_WRITTEN_SHA256, [])?;
     }
 
     // 6. Indexes.

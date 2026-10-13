@@ -5,7 +5,8 @@
 //! Two generations of fixture: `py052` (made by 0.5.2, before the catalog was keyed by
 //! folder) and `py053` (made by 0.5.3, the version bunko-db tracks, with data shaped like
 //! a library that went through 0.5.3's case merge). Every content check runs over both; what opening a
-//! 0.5.2-era file does to it is pinned against what 0.5.3 does (`upgrade053.json`).
+//! 0.5.2-era file does to it is pinned against what 0.5.3 does (`upgrade053.json`), plus
+//! the one column 0.8 adds (`ocr_sidecars.written_sha256`).
 
 use bunko_db::{AuditDetails, AuditQuery, CommunityDetails, Database, DbOptions, SeriesFacts};
 use serde_json::{Value, json};
@@ -48,6 +49,32 @@ fn schema_rows(path: &Path) -> Value {
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     Value::Array(rows)
+}
+
+/// What 0.8 adds to a 0.5.3 schema, and nothing else: `ocr_sidecars.written_sha256`, by
+/// `ALTER TABLE` (SQLite appends it to the table's statement text).
+fn with_08_columns(mut schema: Value) -> Value {
+    let mut found = false;
+    for row in schema.as_array_mut().unwrap() {
+        if row[0] == "table" && row[1] == "ocr_sidecars" {
+            let sql = row[3].as_str().unwrap();
+            let head = sql.strip_suffix(')').unwrap();
+            row[3] = json!(format!("{head}, written_sha256 TEXT)"));
+            found = true;
+        }
+    }
+    assert!(found, "an ocr_sidecars table");
+    schema
+}
+
+/// A 0.5.x `ocr_sidecars` row as 0.8 reads it: the same, plus `written_sha256: null`.
+fn with_08_ocr_rows(mut rows: Value) -> Value {
+    for row in rows.as_array_mut().unwrap() {
+        row.as_object_mut()
+            .unwrap()
+            .insert("written_sha256".into(), Value::Null);
+    }
+    rows
 }
 
 fn open(path: &Path) -> Database {
@@ -105,12 +132,15 @@ per_fixture!(
 );
 
 #[test]
-fn a_fresh_rust_schema_is_byte_identical_to_python() {
+fn a_fresh_rust_schema_is_byte_identical_to_python_but_for_the_08_column() {
     let m = manifest("py053.json");
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mokuro.db");
     drop(open(&path));
-    assert_eq!(schema_rows(&path), m["fresh_schema"]);
+    assert_eq!(
+        schema_rows(&path),
+        with_08_columns(m["fresh_schema"].clone())
+    );
 }
 
 /// A 0.5.3 database opens unchanged; a 0.5.2 one gains exactly what 0.5.3 gives it
@@ -118,10 +148,13 @@ fn a_fresh_rust_schema_is_byte_identical_to_python() {
 #[test]
 fn a_python_database_opens_as_python_053_opens_it() {
     for (tag, want) in [
-        ("py053", manifest("py053.json")["schema"].clone()),
+        (
+            "py053",
+            with_08_columns(manifest("py053.json")["schema"].clone()),
+        ),
         (
             "py052",
-            manifest("upgrade053.json")["py052"]["schema"].clone(),
+            with_08_columns(manifest("upgrade053.json")["py052"]["schema"].clone()),
         ),
     ] {
         let (_dir, path) = copy_fixture(&format!("{tag}.db"));
@@ -349,7 +382,7 @@ fn ocr_and_identities(tag: &str) {
     let db = open(&path);
     assert_eq!(
         serde_json::to_value(db.list_ocr_sidecars().unwrap()).unwrap(),
-        m["ocr_sidecars"]
+        with_08_ocr_rows(m["ocr_sidecars"].clone())
     );
     assert_eq!(
         json!(db.ocr_sidecar_producers().unwrap()),
@@ -494,7 +527,7 @@ fn a_legacy_database_is_migrated_as_python_053_migrates_it() {
         bunko_core::Role::Uploader
     );
     drop(db);
-    assert_eq!(schema_rows(&path), m["schema"]);
+    assert_eq!(schema_rows(&path), with_08_columns(m["schema"].clone()));
 
     let conn = rusqlite::Connection::open(&path).unwrap();
     let q = |sql: &str| query(&conn, sql);
@@ -525,7 +558,7 @@ fn a_legacy_database_is_migrated_as_python_053_migrates_it() {
 
     // Idempotent: opening again changes nothing.
     drop(open(&path));
-    assert_eq!(schema_rows(&path), m["schema"]);
+    assert_eq!(schema_rows(&path), with_08_columns(m["schema"].clone()));
 }
 
 /// A `Kingdom/` after 0.5.3's case merge: `kingdom/` merged into `Kingdom/`, the rows

@@ -375,6 +375,8 @@ fn reads_and_writes(var: &str, env: &str, version: &str) {
         detector: Some("ctd".into()),
         pages: Some(20),
         archive_mtime_ns: Some(1_700_000_000_123_456_789),
+        // 0.8's column: a rollback reads it back as an extra key.
+        written_sha256: Some("ab".repeat(32)),
         ..Default::default()
     })
     .unwrap();

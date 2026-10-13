@@ -1,11 +1,12 @@
 //! The main `<Vol>.mokuro` is model output (D4, generation-upgrade.md §3), through the
 //! whole server on a local library: WebDAV writes land in the real audit log and the
-//! upgrade census never skips a volume for them. An outdated main sidecar Bunko did not
-//! stamp (stock mokuro, or one a person PUT over) is first kept as the layer
-//! `<Vol>.pre-upgrade.mokuro`, committed before the swap; one Bunko stamped is replaced
-//! with no copy. A layer becomes the main sidecar only when its own file carries the
-//! matching stamp, and unstamped layers are never read or deleted. The same rules on a
-//! cloud library: `cloud_upgrade.rs`.
+//! upgrade census never skips a volume for them. An outdated main sidecar not proven to
+//! be Bunko's own bytes (stock mokuro, one a person PUT over, or one whose `ocr_engine`
+//! stamp anyone could have written) is first kept as the layer `<Vol>.pre-upgrade.mokuro`,
+//! committed before the swap; one whose row records the sha256 of its bytes is replaced
+//! with no copy. A layer becomes the main sidecar only when it is proven Bunko's own the
+//! same way and its own file carries the matching stamp, and unstamped layers are never
+//! read or deleted. The same rules on a cloud library: `cloud_upgrade.rs`.
 
 // Fixtures are set up and checked with std::fs on purpose.
 #![allow(clippy::disallowed_methods)]
@@ -27,10 +28,14 @@ use tower::ServiceExt;
 
 const LEGACY: &str = r#"{"version": "0.2.1", "title": "A", "volume": "V1", "pages": [{"img_path": "001.jpg", "blocks": []}, {"img_path": "002.jpg", "blocks": []}, {"img_path": "003.jpg", "blocks": []}]}"#;
 const HAYAI: &str = r#"{"version":"0.2.5","title":"A","volume":"V1","volume_uuid":"vu","ocr_engine":{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512},"pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
+/// HAYAI with a person's correction, its stamp left in.
+const HAYAI_EDITED: &str = r#"{"version":"0.2.5","title":"A","volume":"V1","volume_uuid":"vu","ocr_engine":{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512},"pages":[{"img_path":"001.jpg","blocks":[{"lines":["fixed"]}]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
 /// HAYAI as a reader pushes a layer back: the same pages, no stamp.
 const HAYAI_UNSTAMPED: &str = r#"{"version":"0.2.5","title":"A","volume":"V1","volume_uuid":"vu","pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
 /// An old recipe Bunko itself wrote (0.5's served mokuro carries its stamp).
 const BUNKO_OLD: &str = r#"{"version":"0.2.1","title":"A","volume":"V1","ocr_engine":{"id":"mokuro","generator":"mokuro-bunko 0.5.3"},"pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
+/// BUNKO_OLD with a person's correction, its stamp left in.
+const BUNKO_OLD_EDITED: &str = r#"{"version":"0.2.1","title":"A","volume":"V1","ocr_engine":{"id":"mokuro","generator":"mokuro-bunko 0.5.3"},"pages":[{"img_path":"001.jpg","blocks":[{"lines":["fixed"]}]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
 /// Neither `ocr_engine` nor `version`: no recipe can be read.
 const UNKNOWN: &str = r#"{"title":"A","volume":"V1","pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
 /// The old file as 0.7.0-beta.3's upgrade kept it beside the new one.
@@ -167,6 +172,21 @@ impl Env {
             .collect()
     }
 
+    /// `content` at `rel` as Bunko's OCR install writes it: the file, and its row with
+    /// the sha256 of those bytes (the proof D4 asks for; a stamp alone proves nothing).
+    fn bunko_wrote(&self, rel: &str, content: &str, engine: &str, detector: &str) {
+        std::fs::write(self.lib(rel), content).unwrap();
+        self.row(rel, engine, detector);
+        let mut row = self.services.db.get_ocr_sidecar(rel).unwrap().unwrap();
+        row.written_sha256 = Some(sha(content.as_bytes()));
+        self.services.db.record_ocr_sidecar(&row).unwrap();
+    }
+
+    /// A hayai-nova layer Bunko wrote.
+    fn bunko_layer(&self, rel: &str) {
+        self.bunko_wrote(rel, HAYAI, "hayai-nova", "ppocr-manga");
+    }
+
     fn row(&self, rel: &str, engine: &str, detector: &str) {
         self.services
             .db
@@ -263,7 +283,7 @@ async fn a_stamp_less_main_sidecar_is_upgraded_after_being_kept_as_pre_upgrade()
     assert!(census.get("skipped_edited").is_none(), "{census}");
     assert!(census.get("edited_volumes").is_none(), "{census}");
 
-    std::fs::write(env.lib("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
     env.upgrade_direct("A/V1.cbz").unwrap();
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
@@ -354,7 +374,7 @@ async fn reverts_edit_rows_and_newer_files_no_longer_skip_a_volume() {
 async fn the_swap_waits_for_the_kept_layer_and_a_failed_layer_skips_the_volume() {
     let env = Env::new();
     env.volume_on_disk("A", LEGACY);
-    std::fs::write(env.lib("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
     // A folder nothing can be created in: the layer cannot be written.
     use std::os::unix::fs::PermissionsExt;
     let folder = env.lib("A");
@@ -402,7 +422,7 @@ async fn a_taken_pre_upgrade_id_gives_pre_upgrade_2_and_the_same_bytes_are_kept_
     // Some other file's copy holds the id.
     let other = r#"{"version":"0.2.1","pages":[],"preserved":{"by":"mokuro-bunko","sha256":"00"}}"#;
     std::fs::write(env.lib("A/V1.pre-upgrade.mokuro"), other).unwrap();
-    std::fs::write(env.lib("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
     env.upgrade_direct("A/V1.cbz").unwrap();
     assert_eq!(
         sidecars(&env.lib("A")),
@@ -425,8 +445,13 @@ async fn a_taken_pre_upgrade_id_gives_pre_upgrade_2_and_the_same_bytes_are_kept_
 
     // The same old bytes again (a retried swap, a restored file): not kept twice.
     let kept = std::fs::read(env.lib("A/V1.pre-upgrade-2.mokuro")).unwrap();
-    std::fs::write(env.lib("A/V1.mokuro"), LEGACY).unwrap();
-    std::fs::write(env.lib("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    // (Put back the way a reader does: the PUT forgets the new file's row.)
+    assert_eq!(
+        env.put("/mokuro-reader/A/V1.mokuro", LEGACY.as_bytes())
+            .await,
+        204
+    );
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
     env.upgrade_direct("A/V1.cbz").unwrap();
     assert_eq!(
         sidecars(&env.lib("A")),
@@ -450,11 +475,14 @@ async fn a_taken_pre_upgrade_id_gives_pre_upgrade_2_and_the_same_bytes_are_kept_
     );
 }
 
+/// A main sidecar is replaced with no copy only on proof that Bunko wrote exactly its
+/// bytes: its row records their sha256.
 #[tokio::test]
-async fn a_bunko_stamped_main_sidecar_is_replaced_without_a_copy() {
+async fn a_main_sidecar_proven_bunkos_own_is_replaced_without_a_copy() {
     let env = Env::new();
     env.volume_on_disk("A", BUNKO_OLD);
-    std::fs::write(env.lib("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    env.bunko_wrote("A/V1.mokuro", BUNKO_OLD, "mokuro", "ctd");
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
     env.upgrade_direct("A/V1.cbz").unwrap();
     assert_eq!(sidecars(&env.lib("A")), ["V1.mokuro"]);
     assert_eq!(
@@ -465,10 +493,66 @@ async fn a_bunko_stamped_main_sidecar_is_replaced_without_a_copy() {
     assert_eq!(audit["replaced"], true);
     assert!(audit.get("preserved_as").is_none(), "{audit}");
     assert!(audit.get("kept_as").is_none(), "{audit}");
+    let row = env.services.db.get_ocr_sidecar("A/V1.mokuro").unwrap();
+    assert_eq!(
+        row.and_then(|r| r.written_sha256),
+        Some(sha(HAYAI.as_bytes())),
+        "the new main sidecar is proven in turn"
+    );
 
     env.volume_on_disk("B", BUNKO_OLD);
+    env.bunko_wrote("B/V1.mokuro", BUNKO_OLD, "mokuro", "ctd");
     env.upgrade_generated("B/V1.cbz", HAYAI).unwrap();
     assert_eq!(sidecars(&env.lib("B")), ["V1.mokuro"]);
+}
+
+/// Bunko's `ocr_engine` stamp in a file anyone could write proves nothing: a reader's
+/// upload that carries it, and Bunko's own file edited afterwards with the stamp left
+/// in, are kept as `pre-upgrade` layers before the upgrade replaces them.
+#[tokio::test]
+async fn a_forged_or_kept_stamp_on_an_edited_main_sidecar_is_preserved_then_upgraded() {
+    let env = Env::new();
+    // A: a WebDAV PUT of a stamped file (no row: the PUT forgets it).
+    env.mkcol("A");
+    assert_eq!(env.put("/mokuro-reader/A/V1.cbz", &cbz(3)).await, 201);
+    assert_eq!(
+        env.put("/mokuro-reader/A/V1.mokuro", BUNKO_OLD.as_bytes())
+            .await,
+        201
+    );
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
+    env.upgrade_direct("A/V1.cbz").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
+        HAYAI
+    );
+    assert_preserves(&env.lib("A/V1.pre-upgrade.mokuro"), BUNKO_OLD);
+    assert_eq!(
+        env.upgrade_audits()[0]["preserved_as"],
+        "A/V1.pre-upgrade.mokuro"
+    );
+
+    // B: Bunko's own file, then corrected on disk with the stamp left in: the row
+    // still names Bunko's write, but not these bytes.
+    env.volume_on_disk("B", BUNKO_OLD);
+    env.bunko_wrote("B/V1.mokuro", BUNKO_OLD, "mokuro", "ctd");
+    std::fs::write(env.lib("B/V1.mokuro"), BUNKO_OLD_EDITED).unwrap();
+    env.bunko_layer("B/V1.hayai-nova.mokuro");
+    env.upgrade_direct("B/V1.cbz").unwrap();
+    assert_preserves(&env.lib("B/V1.pre-upgrade.mokuro"), BUNKO_OLD_EDITED);
+    assert_eq!(
+        std::fs::read_to_string(env.lib("B/V1.mokuro")).unwrap(),
+        HAYAI
+    );
+
+    // C: a stamped file on disk with no row, upgraded by a job: kept the same way.
+    env.volume_on_disk("C", BUNKO_OLD);
+    env.upgrade_generated("C/V1.cbz", HAYAI).unwrap();
+    assert_eq!(
+        sidecars(&env.lib("C")),
+        ["V1.mokuro", "V1.pre-upgrade.mokuro"]
+    );
+    assert_preserves(&env.lib("C/V1.pre-upgrade.mokuro"), BUNKO_OLD);
 }
 
 #[tokio::test]
@@ -476,7 +560,7 @@ async fn a_layer_is_swapped_in_only_when_its_own_file_carries_the_stamp() {
     let env = Env::new();
     // A: the stamped layer is ready.
     env.volume_on_disk("A", LEGACY);
-    std::fs::write(env.lib("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
     assert_eq!(
         env.judge("A/V1.cbz"),
         Verdict::Ready(env.lib("A/V1.hayai-nova.mokuro"))
@@ -526,13 +610,49 @@ async fn a_layer_is_swapped_in_only_when_its_own_file_carries_the_stamp() {
     // Once upgraded, the census sweep leaves every unstamped layer alone too.
     assert_eq!(env.judge("B/V1.cbz"), Verdict::Current);
     assert_eq!(sidecars(&env.lib("B")).len(), 4);
+
+    // C: a reader uploads a layer carrying the matching stamp (no proof Bunko wrote
+    // it); D: Bunko's own layer, corrected on disk afterwards with its stamp left in.
+    // Neither is a source: a forged stamp would make a person's file the model output.
+    env.mkcol("C");
+    assert_eq!(env.put("/mokuro-reader/C/V1.cbz", &cbz(3)).await, 201);
+    assert_eq!(
+        env.put("/mokuro-reader/C/V1.mokuro", LEGACY.as_bytes())
+            .await,
+        201
+    );
+    assert_eq!(
+        env.put("/mokuro-reader/C/V1.hayai-nova.mokuro", HAYAI.as_bytes())
+            .await,
+        201
+    );
+    env.volume_on_disk("D", LEGACY);
+    env.bunko_layer("D/V1.hayai-nova.mokuro");
+    std::fs::write(env.lib("D/V1.hayai-nova.mokuro"), HAYAI_EDITED).unwrap();
+    for v in ["C", "D"] {
+        let (cbz, layer) = (
+            env.lib(&format!("{v}/V1.cbz")),
+            env.lib(&format!("{v}/V1.hayai-nova.mokuro")),
+        );
+        assert_eq!(env.judge(&format!("{v}/V1.cbz")), Verdict::NeedsOcr, "{v}");
+        let err = env.up().direct_replace(&cbz, &layer).unwrap_err();
+        assert!(err.contains("not proven"), "{v}: {err}");
+        let err = env.up().swap(&cbz, &layer, "direct").unwrap_err();
+        assert!(err.contains("not proven"), "{v}: {err}");
+        assert_eq!(
+            std::fs::read_to_string(env.lib(&format!("{v}/V1.mokuro"))).unwrap(),
+            LEGACY,
+            "{v}"
+        );
+        assert_eq!(sidecars(&env.lib(v)), ["V1.hayai-nova.mokuro", "V1.mokuro"]);
+    }
 }
 
 #[tokio::test]
 async fn an_unknown_main_sidecar_is_never_upgraded() {
     let env = Env::new();
     env.volume_on_disk("A", UNKNOWN);
-    std::fs::write(env.lib("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
     assert_eq!(env.judge("A/V1.cbz"), Verdict::Current);
     assert_eq!(env.up().census()["families"]["unknown"], 1);
     let err = env.upgrade_generated("A/V1.cbz", HAYAI).unwrap_err();
@@ -554,7 +674,7 @@ async fn an_unknown_main_sidecar_is_never_upgraded() {
 async fn a_put_during_an_upgrade_is_refused_as_locked_or_makes_the_swap_skip() {
     let env = Env::new();
     env.add_volume("A").await;
-    std::fs::write(env.lib("A/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
 
     // 1. During the swap: 423, and the swap goes through with the old file kept.
     let refused = Arc::new(parking_lot::Mutex::new(None));
@@ -590,7 +710,7 @@ async fn a_put_during_an_upgrade_is_refused_as_locked_or_makes_the_swap_skip() {
 
     // 2. Between the judge and the swap: the swap skips, the PUT stands.
     env.add_volume("B").await;
-    std::fs::write(env.lib("B/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    env.bunko_layer("B/V1.hayai-nova.mokuro");
     let Verdict::Ready(layer) = env.judge("B/V1.cbz") else {
         panic!("ready");
     };
@@ -620,7 +740,7 @@ async fn a_put_during_an_upgrade_is_refused_as_locked_or_makes_the_swap_skip() {
     // file's stat just before the rename skips the swap; the next census keeps the
     // newer file as its own `pre-upgrade-2` layer before swapping.
     env.add_volume("C").await;
-    std::fs::write(env.lib("C/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    env.bunko_layer("C/V1.hayai-nova.mokuro");
     env.up().set_swap_hook(Some(Arc::new(|bare: &Path| {
         std::fs::write(bare, CORRECTED).unwrap();
     })));
