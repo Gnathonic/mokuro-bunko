@@ -5,8 +5,11 @@
 //! injection that the store's tests run on. [`index::Index`] is the disposable
 //! `index.sqlite` that maps provider nodes to library paths; [`names`] holds the NFC,
 //! fold and effective-mtime rules. The default `webdav` feature adds
-//! `webdav::WebDavBackend`, the WebDAV driver.
+//! `webdav::WebDavBackend`, the WebDAV driver; [`auth`] (default feature `oauth`)
+//! signs in to the OAuth providers and keeps their credentials.
 
+#[cfg(feature = "oauth")]
+pub mod auth;
 pub mod backend;
 #[cfg(feature = "testing")]
 pub mod fake;
