@@ -72,6 +72,11 @@ pub fn compute(
     if !bunko_library::sidecar::is_cbz_name(&name) {
         return None;
     }
+    // A case merge is moving this volume: the census skips it (it is judged again
+    // where the merge puts it).
+    if merge_busy(cbz) {
+        return None;
+    }
     let meta = fs::metadata(cbz).ok()?;
     if !meta.is_file() {
         return None;
@@ -103,6 +108,8 @@ pub fn compute(
         && primary_done
         && let Some(rel) = rel_of(library, cbz)
     {
+        // While judged, a case merge leaves the volume alone.
+        let _judging = super::busy::judging(cbz);
         wants_upgrade = probe.wants_upgrade(cbz, &rel);
     }
     if owed.is_empty() && skipped.is_empty() && !wants_upgrade {
@@ -199,10 +206,20 @@ pub fn still_owed(library: &Path, rel: &str, row: &Generation, upgrade: bool) ->
     if !fs::is_file(&cbz) {
         return false;
     }
+    // Held while a case merge is open on the volume's folder (spec §5.9).
+    if merge_busy(&cbz) {
+        return false;
+    }
     if sidecar_recently_removed(&cbz, row) {
         return false;
     }
     if upgrade { true } else { !row_done(&cbz, row) }
+}
+
+/// A case merge journal group is open on `cbz` (or its folder) on a remote store
+/// ([`bunko_store::LibraryStore::merge_busy`]). Always false locally.
+pub fn merge_busy(cbz: &Path) -> bool {
+    bunko_store::store_for(cbz).is_some_and(|s| s.merge_busy(cbz))
 }
 
 /// A sidecar of `cbz` (the primary's, or `row`'s) left a remote store within its quiet

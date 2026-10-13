@@ -296,6 +296,12 @@ impl Services {
                 library.clone(),
                 db.clone(),
             )));
+            // Case variants merge into the oldest spelling (§5.9).
+            handle.set_case_merge_policy(Arc::new(crate::storage::ServerCaseMergePolicy::new(
+                layout.library(),
+                core.clone(),
+                db.clone(),
+            )));
         }
         Ok(Services {
             storage,

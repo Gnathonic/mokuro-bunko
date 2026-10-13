@@ -526,6 +526,17 @@ fn open_cloud() -> Cloud {
         )
         .unwrap();
     assert!(handle.wait_steady(Duration::from_secs(20)));
+    // STEADY comes before first adoption (INGEST_FACTS) ends; health is `syncing`
+    // until it does.
+    let t0 = std::time::Instant::now();
+    while handle.health() != bunko_store::Health::Online {
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            handle.health()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let c2 = config.clone();
     let control = StorageControl::new(
         cloud.clone(),

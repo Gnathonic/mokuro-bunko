@@ -24,6 +24,7 @@
 //! With the `testing` feature, [`testing::register`] hands a `FakeBackend` to the next
 //! server opened over a storage base path, whatever cloud backend its config names.
 
+pub mod case_merge;
 pub mod connect;
 mod control;
 pub mod disconnect;
@@ -46,6 +47,7 @@ use bunko_store::{Health, LibraryStore, MountGuard};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub use case_merge::ServerCaseMergePolicy;
 pub use control::{StorageControl, storage_problems};
 pub use hooks::ServerCloudHooks;
 pub use unconnected::UnconnectedStore;
@@ -129,6 +131,14 @@ pub trait CloudStore: Send + Sync {
     fn quota(&self, timeout: Duration) -> io::Result<Option<bunko_store::Capacity>>;
     /// This install's id.
     fn instance_id(&self) -> String;
+    /// Install the server's case-merge policy (§5.9): merges may run from now on.
+    fn set_case_merge_policy(&self, p: Arc<dyn bunko_remote::CaseMergePolicy>);
+    /// Unresolved conflicts with their ids (and a blocked merge's two sides).
+    fn conflict_rows(&self) -> Vec<bunko_remote::Conflict>;
+    /// "Keep this copy" / "Keep that copy" of a `case-merge-blocked` conflict.
+    fn resolve_conflict(&self, id: i64, choice: bunko_remote::ResolveChoice) -> io::Result<String>;
+    /// The latest case merges, newest first.
+    fn recent_merges(&self) -> Vec<bunko_remote::MergeRecord>;
 }
 
 impl<B: Backend> CloudStore for RemoteStore<B> {
@@ -179,6 +189,18 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     }
     fn instance_id(&self) -> String {
         RemoteStore::instance_id(self).to_string()
+    }
+    fn set_case_merge_policy(&self, p: Arc<dyn bunko_remote::CaseMergePolicy>) {
+        RemoteStore::set_case_merge_policy(self, p)
+    }
+    fn conflict_rows(&self) -> Vec<bunko_remote::Conflict> {
+        RemoteStore::conflict_rows(self)
+    }
+    fn resolve_conflict(&self, id: i64, choice: bunko_remote::ResolveChoice) -> io::Result<String> {
+        RemoteStore::resolve_conflict(self, id, choice)
+    }
+    fn recent_merges(&self) -> Vec<bunko_remote::MergeRecord> {
+        RemoteStore::recent_merges(self)
     }
 }
 
@@ -297,6 +319,26 @@ impl StoreHandle {
         }
     }
 
+    /// Install the server's case-merge policy (§5.9).
+    pub fn set_case_merge_policy(&self, p: Arc<dyn bunko_remote::CaseMergePolicy>) {
+        if let Some(s) = &self.store {
+            s.set_case_merge_policy(p);
+        }
+    }
+
+    /// "Keep this copy" / "Keep that copy" (§5.9) of conflict `id`: the other side goes
+    /// to the provider trash through a merge journal group.
+    pub fn resolve_conflict(
+        &self,
+        id: i64,
+        choice: bunko_remote::ResolveChoice,
+    ) -> io::Result<String> {
+        match &self.store {
+            Some(s) => s.resolve_conflict(id, choice),
+            None => Err(io::Error::other("the library is not connected")),
+        }
+    }
+
     /// The test fake behind this store (feature `testing`).
     #[cfg(feature = "testing")]
     pub fn fake_store(&self) -> Option<&Arc<RemoteStore<bunko_remote::fake::FakeBackend>>> {
@@ -333,10 +375,25 @@ impl StoreHandle {
         let conflicts: Vec<Value> = self
             .store
             .as_ref()
-            .map(|s| s.conflicts())
+            .map(|s| s.conflict_rows())
             .unwrap_or_default()
             .into_iter()
-            .map(|(kind, path, detail)| json!({"kind": kind, "path": path, "detail": detail}))
+            .map(|c| {
+                // A blocked case merge offers "Keep this copy" / "Keep that copy".
+                let resolvable = c.kind == "case-merge-blocked" && !c.this.is_empty();
+                json!({"id": c.id, "kind": c.kind, "path": c.path, "detail": c.detail,
+                       "first_seen": c.first_seen, "this": c.this, "that": c.that,
+                       "resolvable": resolvable})
+            })
+            .collect();
+        let merges: Vec<Value> = self
+            .store
+            .as_ref()
+            .map(|s| s.recent_merges())
+            .unwrap_or_default()
+            .into_iter()
+            .take(20)
+            .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
             .collect();
         let submissions = self.store.as_ref().map(|s| {
             let rows = s.submissions();
@@ -371,6 +428,7 @@ impl StoreHandle {
             "cache": cache,
             "outbox": outbox,
             "conflicts": conflicts,
+            "recent_merges": merges,
             "submissions": submissions,
             "lease": lease,
             "quota": self.quota_json(),

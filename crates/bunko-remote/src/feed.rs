@@ -116,6 +116,13 @@ pub trait CloudHooks: Send + Sync {
     fn has_series_facts(&self, _series_dir: &Path) -> bool {
         true
     }
+    /// A case merge (spec §5.9) moved one file (or a folder only the loser had) at
+    /// COMMITTED: the per-volume DB renames, never the folder-prefix forms (blocked
+    /// volumes may stay in the losing folder). Runs once per moved item; the feed's
+    /// echo of the move runs nothing. The default is [`CloudHooks::moved`].
+    fn merged(&self, from: &Path, to: &Path, is_dir: bool) {
+        self.moved(from, to, is_dir);
+    }
 }
 
 /// What the durable state (task 5) tells the engine. The default answers "nothing is

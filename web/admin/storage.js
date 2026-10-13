@@ -2,7 +2,8 @@
 // from `/_admin/api/storage` (the same block as `/api/status` → library.storage).
 // Actions: Connect (one button; the server picks the sign-in flow), the account
 // choice, "Create it?", Sign in again, Change pairing (a Disconnect, then a Connect
-// with the other reader), Disconnect (Wait / Export / Discard), Take over, readers.
+// with the other reader), Disconnect (Wait / Export / Discard), Take over, readers,
+// "Keep this copy" / "Keep that copy" of a blocked case merge; "Recent merges".
 // Nothing here ever sees a token or a password beyond the form it was typed into.
 'use strict';
 
@@ -135,6 +136,29 @@ async function loadStorage() {
         stEl('so-conflicts').replaceChildren(...conflicts.map((k) => {
             const li = document.createElement('li');
             li.textContent = k.kind + ': ' + k.path + (k.detail ? ' — ' + k.detail : '');
+            if (k.resolvable) {
+                const row = document.createElement('div');
+                row.className = 'connectivity-section__actions';
+                const keep = (choice, paths) => {
+                    const b = document.createElement('button');
+                    b.className = 'btn btn--secondary btn--sm';
+                    b.textContent = (choice === 'this' ? 'Keep this copy' : 'Keep that copy') + ' (' + paths.join(', ') + ')';
+                    b.onclick = () => storageKeepCopy(k, choice);
+                    return b;
+                };
+                row.append(keep('this', k.this || []), keep('that', k.that || []));
+                li.appendChild(row);
+            }
+            return li;
+        }));
+        const merges = st.recent_merges || [];
+        stEl('so-merges-none').hidden = merges.length > 0;
+        stEl('so-merges').replaceChildren(...merges.map((m) => {
+            const li = document.createElement('li');
+            const when = stAgo((m.finished_at || m.created_at) / 1000);
+            const what = m.origin === 'admin' ? 'Kept one copy in ' + m.winner : (m.losers || []).join(', ') + ' → ' + m.winner;
+            const counts = m.moved + ' moved, ' + m.trashed + ' to the trash' + (m.blocked ? ', ' + m.blocked + ' left (see Conflicts)' : '');
+            li.textContent = what + ': ' + (m.state === 'done' ? counts : 'in progress (' + counts + ')') + (when ? ' · ' + when : '');
             return li;
         }));
     }
@@ -401,6 +425,19 @@ async function storagePairingChange() {
     stEl('sc-reader-select').value = other;
     stEl('storage-connect').hidden = false;
     showToast('Disconnected. Connect with ' + stPairing(other) + ' once the server is back.', 'info');
+}
+
+async function storageKeepCopy(k, choice) {
+    const keep = choice === 'this' ? (k.this || []) : (k.that || []);
+    const gone = choice === 'this' ? (k.that || []) : (k.this || []);
+    if (!confirm('Keep ' + keep.join(', ') + '? ' + gone.join(', ') + ' goes to the provider\'s trash (restorable there).')) return;
+    try {
+        await apiPost('/storage/conflicts/' + encodeURIComponent(k.id) + '/resolve', { choice: choice });
+        showToast('The other copy goes to the trash; the merge finishes by itself.', 'success');
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+    loadStorage();
 }
 
 async function storageTakeOver() {

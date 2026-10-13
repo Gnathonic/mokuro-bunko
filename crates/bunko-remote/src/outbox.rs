@@ -237,6 +237,11 @@ pub(crate) struct Op {
     pub reconcile_only: bool,
     /// Not persisted: overwrites of foreign versions so far.
     pub overwrites: u32,
+    /// A case-merge journal group (§5.9, `merge.rs`) this op is a step of: the merge
+    /// runs it, never the outbox worker.
+    pub group: Option<String>,
+    /// The merge step's own fields (JSON, `merge.rs`).
+    pub extra: Option<String>,
 }
 
 impl Op {
@@ -270,6 +275,8 @@ impl Op {
             created_at: now_ms(),
             reconcile_only: false,
             overwrites: 0,
+            group: None,
+            extra: None,
         }
     }
 
@@ -364,7 +371,7 @@ fn classify(e: &BErr) -> Class {
 
 /// Whether a provider node holds an op's staged bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Proof {
+pub(crate) enum Proof {
     Proven,
     Mismatch,
     /// Nothing Bunko can check says either way.
@@ -477,8 +484,8 @@ impl<B: Backend> Core<B> {
             c.execute(
                 "INSERT OR REPLACE INTO outbox(op_id, seq, kind, dest, src, mode, origin, durability, base_cver, \
                  target_pid, parent_pid, name, staged, sha256, size, state, attempts, next_at, last_error, \
-                 result_pid, result_cver, superseded_pid, created_at) \
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                 result_pid, result_cver, superseded_pid, created_at, group_id, resume) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                 params![
                     op.op_id(),
                     op.id as i64,
@@ -503,6 +510,8 @@ impl<B: Backend> Core<B> {
                     op.result_cver,
                     op.superseded_pid,
                     op.created_at,
+                    op.group,
+                    op.extra,
                 ],
             )
             .map(|_| ())
@@ -529,7 +538,7 @@ impl<B: Backend> Core<B> {
                 let mut s = c.prepare(
                     "SELECT seq, kind, dest, src, mode, origin, durability, base_cver, target_pid, parent_pid, \
                      staged, sha256, size, state, attempts, next_at, last_error, result_pid, result_cver, \
-                     superseded_pid, created_at FROM outbox ORDER BY seq",
+                     superseded_pid, created_at, group_id, resume FROM outbox ORDER BY seq",
                 )?;
                 let rows = s.query_map([], |r| {
                     let kind: String = r.get(1)?;
@@ -562,11 +571,12 @@ impl<B: Backend> Core<B> {
                             r.get::<_, Option<String>>(19)?,
                         ),
                         r.get::<_, i64>(20)?,
+                        (r.get::<_, Option<String>>(21)?, r.get::<_, Option<String>>(22)?),
                     ))
                 })?;
                 let mut out = Vec::new();
                 for row in rows {
-                    let (seq, kind, dest, src, mode, origin, dur, base, (target, parent), staged, sha, size, state, (attempts, next_at, last_error), (rp, rc, sp), created) = row?;
+                    let (seq, kind, dest, src, mode, origin, dur, base, (target, parent), staged, sha, size, state, (attempts, next_at, last_error), (rp, rc, sp), created, (group, extra)) = row?;
                     let (Some(kind), Some(dest), Some(state)) =
                         (OpKind::parse(&kind), RelPath::parse(&dest), OpState::parse(&state))
                     else {
@@ -608,6 +618,8 @@ impl<B: Backend> Core<B> {
                         created_at: created,
                         reconcile_only: false,
                         overwrites: 0,
+                        group,
+                        extra,
                     });
                 }
                 Ok(out)
@@ -1036,7 +1048,7 @@ impl<B: Backend> Core<B> {
     /// What the provider's own report on `n` (size, and a hash Bunko can compute)
     /// says about whether it holds the op's staged bytes. `digest` is the staged
     /// file's, when already computed.
-    fn hash_proof(&self, n: &RNode, op: &Op, digest: Option<&Digests>) -> Proof {
+    pub(crate) fn hash_proof(&self, n: &RNode, op: &Op, digest: Option<&Digests>) -> Proof {
         if n.is_dir || n.size != op.size {
             return Proof::Mismatch;
         }
@@ -1067,7 +1079,7 @@ impl<B: Backend> Core<B> {
     /// [`SMALL_MAX`] whose sha256 matches. A larger file without a usable hash is
     /// never adopted: matching sizes prove nothing, and adopting a foreign file as
     /// own would let a later permanent delete or replace destroy it.
-    async fn content_proof(&self, n: &RNode, op: &Op) -> Proof {
+    pub(crate) async fn content_proof(&self, n: &RNode, op: &Op) -> Proof {
         match self.hash_proof(n, op, None) {
             Proof::Unknown if n.size <= SMALL_MAX => {
                 let Some(sha) = op.sha256 else {
@@ -1344,7 +1356,7 @@ impl<B: Backend> Core<B> {
     }
 
     /// COMMITTED (§5.7 step 6): ledger, index, caches, event.
-    fn commit_put(&self, op: &mut Op, node: RNode, parent: &str) -> Result<Step, Crash> {
+    pub(crate) fn commit_put(&self, op: &mut Op, node: RNode, parent: &str) -> Result<Step, Crash> {
         let name = nfc(&node.name_raw);
         let sha = op.sha256.map(hex::encode);
         let _ = self.state.ledger_put(&LedgerRow {
@@ -1605,7 +1617,7 @@ impl<B: Backend> Core<B> {
     /// COMMITTED for a move: the ledger row follows the node (or an `echo_only` row
     /// is written), the index relocates it (path-id subtrees are rebased first), and
     /// pending ops under the moved path follow.
-    fn commit_move(
+    pub(crate) fn commit_move(
         &self,
         op: &mut Op,
         src: &RelPath,
@@ -1725,7 +1737,12 @@ impl<B: Backend> Core<B> {
         }
     }
 
-    fn commit_trash(&self, op: &mut Op, pid: &str, node: Option<RNode>) -> Result<Step, Crash> {
+    pub(crate) fn commit_trash(
+        &self,
+        op: &mut Op,
+        pid: &str,
+        node: Option<RNode>,
+    ) -> Result<Step, Crash> {
         let is_dir = node.as_ref().is_some_and(|n| n.is_dir);
         if self.state.ledger_rows(pid).is_empty() {
             if let Some(n) = &node {
@@ -1798,6 +1815,10 @@ impl<B: Backend> Core<B> {
             let ops = self.ops.lock();
             let mut pick = None;
             for o in ops.values() {
+                // Case-merge steps run in their journal group (merge.rs).
+                if o.group.is_some() {
+                    continue;
+                }
                 if o.reconcile_only || o.state == OpState::SupersedeOld {
                     pick = pick.or(Some(o.id));
                     continue;
@@ -1908,7 +1929,10 @@ impl<B: Backend> Core<B> {
                     keep.extend(op.staged.clone());
                     // A restart retries at once.
                     op.next_at = 0;
-                    let _ = self.index.lock().set_pending(&op.dest, &op.op_id());
+                    // A case-merge step shows nothing early: it applies at COMMITTED.
+                    if op.group.is_none() {
+                        let _ = self.index.lock().set_pending(&op.dest, &op.op_id());
+                    }
                     self.ops.lock().insert(op.id, op);
                 }
                 // The node and its ledger row are durable; the echo is not needed.

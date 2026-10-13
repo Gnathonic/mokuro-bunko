@@ -589,6 +589,44 @@ impl Index {
         v
     }
 
+    /// Every `(parent_eid, fold)` that more than one entry shares: the case-variant
+    /// sets a case merge looks at (§5.9), by parent then fold.
+    pub fn fold_collisions(&self) -> Vec<(i64, String)> {
+        soft(
+            self.conn
+                .prepare_cached(
+                    "SELECT parent_eid, fold FROM entry WHERE parent_eid IS NOT NULL \
+                     GROUP BY parent_eid, fold HAVING COUNT(*) > 1 ORDER BY parent_eid, fold",
+                )
+                .and_then(|mut s| {
+                    s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }),
+            "fold_collisions",
+        )
+        .unwrap_or_default()
+    }
+
+    /// The provider nodes an entry is (its winner and the members of a merged
+    /// folder; shadowed duplicates are left out), oldest created first. The merged
+    /// root's are its roots.
+    pub fn members(&self, eid: i64) -> Vec<RNode> {
+        soft(
+            self.conn
+                .prepare_cached(
+                    "SELECT pid, parent_pid, name_raw, kind, size, base_mtime_ms, created_ms, version, \
+                     cver, pin, hash_kind, hash FROM node WHERE eid = ?1 AND role IN (0, 1) \
+                     ORDER BY created_ms, pid",
+                )
+                .and_then(|mut s| {
+                    s.query_map([eid], node_from_row)?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }),
+            "members",
+        )
+        .unwrap_or_default()
+    }
+
     fn entries(&self, sql: &str, p: impl rusqlite::Params, what: &str) -> Vec<Entry> {
         soft(
             self.conn.prepare_cached(sql).and_then(|mut s| {

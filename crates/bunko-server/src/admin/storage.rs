@@ -2,7 +2,8 @@
 //! only. What the panel shows is `library.storage` of `/api/status` (also answered
 //! here alone); its actions are Connect (one button, the flow chosen from where the
 //! request comes from), the account choice, "Create it?", Disconnect (Wait / Export /
-//! Discard), "This computer", Take over and whether readers connect. No answer ever
+//! Discard), "This computer", Take over, "Keep this copy" / "Keep that copy" of a
+//! blocked case merge, and whether readers connect. No answer ever
 //! carries a token, password or session blob.
 
 use super::{AdminState, ApiRequest, blocking, error, ok};
@@ -144,6 +145,36 @@ pub(super) async fn take_over(s: &AdminState, req: &ApiRequest) -> Response {
     let c = control(s);
     match blocking(move || c.take_over()).await {
         Ok(Ok(())) => ok(json!({"success": true})),
+        Ok(Err(e)) => error(409, e),
+        Err(r) => r,
+    }
+}
+
+/// `POST /api/storage/conflicts/{id}/resolve` `{choice: "this"|"that"}`: "Keep this
+/// copy" / "Keep that copy" of a `case-merge-blocked` conflict (§5.9). The other copy
+/// goes to the provider trash; the merge then finishes by itself.
+pub(super) async fn resolve_conflict(s: &AdminState, req: &ApiRequest, id: &str) -> Response {
+    let Ok(id) = id.parse::<i64>() else {
+        return error(400, "a conflict id is a number");
+    };
+    let body = match req.json() {
+        Ok(b) => b.clone(),
+        Err(r) => return r,
+    };
+    let Some(choice) = body
+        .get("choice")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return error(400, "choice (\"this\" or \"that\") is required");
+    };
+    tracing::info!(
+        "admin: {} resolves storage conflict {id} (keep {choice})",
+        req.actor().unwrap_or_default()
+    );
+    let c = control(s);
+    match blocking(move || c.resolve_conflict(id, &choice)).await {
+        Ok(Ok(group)) => ok(json!({"success": true, "merge": group})),
         Ok(Err(e)) => error(409, e),
         Err(r) => r,
     }
