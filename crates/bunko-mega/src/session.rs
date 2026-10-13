@@ -361,6 +361,7 @@ mod tests {
         };
         let d = format!("{s:?}");
         assert!(!d.contains("SECRETSID"));
+        assert!(!d.contains("9, 9") && !d.contains("8, 8"), "{d}");
         assert!(d.contains("user"));
     }
 }

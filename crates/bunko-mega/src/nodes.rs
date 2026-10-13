@@ -98,7 +98,7 @@ impl Snapshot {
         let mut de = serde_json::Deserializer::from_reader(BufReader::with_capacity(1 << 16, f));
         let out = de
             .deserialize_any(TopVisitor { visit })
-            .map_err(|e| Error::Protocol(format!("fetch nodes: {e}")))?;
+            .map_err(|e| Error::Protocol(format!("fetch nodes: {}", crate::error::json_err(&e))))?;
         match out {
             Top::Code(code) => Err(Error::Api(code)),
             Top::Tree(Some(sn)) => Ok(sn),

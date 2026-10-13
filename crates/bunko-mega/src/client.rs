@@ -61,13 +61,27 @@ impl Default for ClientConfig {
     }
 }
 
-/// A reply of the `sc` endpoint.
-#[derive(Debug, Clone, PartialEq)]
+/// A reply of the `sc` endpoint. `Debug` leaves the wait URL out (it can carry a
+/// token).
+#[derive(Clone, PartialEq)]
 pub enum ScReply {
     /// Action packets after the requested `sn`, and the `sn` that follows them.
     Packets { packets: Vec<Value>, sn: String },
     /// Nothing new: long-poll this URL, then ask again with the same `sn`.
     Wait { url: String },
+}
+
+impl std::fmt::Debug for ScReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScReply::Packets { packets, sn } => f
+                .debug_struct("Packets")
+                .field("packets", &packets.len())
+                .field("sn", sn)
+                .finish(),
+            ScReply::Wait { .. } => f.write_str("Wait { url: <redacted> }"),
+        }
+    }
 }
 
 /// A MEGA API client. Cheap to clone; the session (if any) is fixed at construction.
@@ -101,6 +115,18 @@ fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
+}
+
+/// The JSON type of `v`, for error messages that must not quote a body.
+fn kind_of(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// A top-level error code (`-3`), as opposed to a JSON array or object.
@@ -264,7 +290,7 @@ impl Client {
             let resp = match rb.send().await {
                 Ok(r) => r,
                 Err(e) if attempt < self.0.cfg.max_retries => {
-                    tracing::debug!(error = %e, attempt, "mega: cs request failed, retrying");
+                    tracing::debug!(error = %Error::from(e), attempt, "mega: cs request failed, retrying");
                     tokio::time::sleep(self.backoff(attempt)).await;
                     attempt += 1;
                     continue;
@@ -313,7 +339,7 @@ impl Client {
                     let b = match resp.bytes().await {
                         Ok(b) => b,
                         Err(e) if attempt < self.0.cfg.max_retries => {
-                            tracing::debug!(error = %e, "mega: cs body failed, retrying");
+                            tracing::debug!(error = %Error::from(e), "mega: cs body failed, retrying");
                             tokio::time::sleep(self.backoff(attempt)).await;
                             attempt += 1;
                             continue;
@@ -325,6 +351,7 @@ impl Client {
                 Sink::File(f) => match spool(f, resp).await {
                     Ok(head) => (head, Bytes::new()),
                     Err(Error::Network(e)) if attempt < self.0.cfg.max_retries => {
+                        // Already URL-free (From<reqwest::Error>).
                         tracing::debug!(error = %e, "mega: cs body failed, retrying");
                         tokio::time::sleep(self.backoff(attempt)).await;
                         attempt += 1;
@@ -358,7 +385,10 @@ impl Client {
             let body = self.cs_raw(&values, extra, Sink::Memory).await?;
             let parsed: Value = serde_json::from_slice(&body)?;
             let Value::Array(items) = parsed else {
-                return Err(Error::Protocol(format!("cs answered {parsed}")));
+                return Err(Error::Protocol(format!(
+                    "cs answered a {}",
+                    kind_of(&parsed)
+                )));
             };
             if items.len() != values.len() {
                 return Err(Error::Protocol(format!(
@@ -422,7 +452,7 @@ impl Client {
             let resp = match res {
                 Ok(r) => r,
                 Err(e) if attempt < self.0.cfg.max_retries => {
-                    tracing::debug!(error = %e, "mega: sc failed, retrying");
+                    tracing::debug!(error = %Error::from(e), "mega: sc failed, retrying");
                     tokio::time::sleep(self.backoff(attempt)).await;
                     attempt += 1;
                     continue;
@@ -459,12 +489,19 @@ impl Client {
             let sn = v
                 .get("sn")
                 .and_then(Value::as_str)
-                .ok_or_else(|| Error::Protocol(format!("sc answered {v}")))?
+                .ok_or_else(|| {
+                    Error::Protocol(format!("sc answered a {} without sn", kind_of(&v)))
+                })?
                 .to_string();
             let packets = match v.get("a") {
                 Some(Value::Array(a)) => a.clone(),
                 None | Some(Value::Null) => Vec::new(),
-                Some(other) => return Err(Error::Protocol(format!("sc packets {other}"))),
+                Some(other) => {
+                    return Err(Error::Protocol(format!(
+                        "sc packets are a {}",
+                        kind_of(other)
+                    )));
+                }
             };
             return Ok(ScReply::Packets { packets, sn });
         }
@@ -479,7 +516,7 @@ impl Client {
                 let _ = resp.bytes().await;
             }
             Ok(Err(e)) => {
-                tracing::debug!(error = %e, "mega: sc wait failed");
+                tracing::debug!(error = %Error::from(e), "mega: sc wait failed");
                 let rest = max.saturating_sub(started.elapsed());
                 tokio::time::sleep(rest.min(Duration::from_secs(1))).await;
             }
@@ -516,6 +553,26 @@ async fn spool(f: &mut tokio::fs::File, resp: reqwest::Response) -> Result<Bytes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_of_urls_is_redacted() {
+        let secret = "https://gfs.example/dl/TOKENsecret123";
+        let reply = ScReply::Wait { url: secret.into() };
+        let target = crate::DownloadTarget {
+            url: secret.into(),
+            size: 9,
+        };
+        let poll = crate::Poll::Idle {
+            wait_url: secret.into(),
+        };
+        for s in [
+            format!("{reply:?}"),
+            format!("{target:?}"),
+            format!("{poll:?}"),
+        ] {
+            assert!(!s.contains("TOKENsecret123"), "{s}");
+        }
+    }
 
     #[test]
     fn bare_codes() {

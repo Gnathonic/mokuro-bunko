@@ -76,7 +76,7 @@ struct DPacket {
 
 pub fn parse_packet(v: &Value) -> Packet {
     let Some(a) = v.get("a").and_then(Value::as_str) else {
-        return Packet::Unknown(v.to_string().chars().take(80).collect());
+        return Packet::Unknown("<packet without an action>".into());
     };
     let unknown = || Packet::Unknown(a.to_string());
     match a {
@@ -175,14 +175,23 @@ pub fn fold_batch(packets: &[Value]) -> Vec<Event> {
     out
 }
 
-/// What [`Client::poll_events`] found.
-#[derive(Debug, Clone, PartialEq)]
+/// What [`Client::poll_events`] found (`Debug` leaves the wait URL out).
+#[derive(Clone, PartialEq)]
 pub enum Poll {
     Batch(EventBatch),
     /// Nothing after this `sn`; [`Client::sc_wait`] on the URL blocks until there is.
     Idle {
         wait_url: String,
     },
+}
+
+impl std::fmt::Debug for Poll {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Poll::Batch(b) => f.debug_tuple("Batch").field(b).finish(),
+            Poll::Idle { .. } => f.write_str("Idle { wait_url: <redacted> }"),
+        }
+    }
 }
 
 impl Client {

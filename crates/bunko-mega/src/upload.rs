@@ -225,10 +225,10 @@ impl Client {
                     progress(state);
                     return Ok(t);
                 }
-                Posted::Token(t) => {
-                    return Err(Error::Protocol(format!(
-                        "completion token {t:?} before the last chunk"
-                    )));
+                Posted::Token(_) => {
+                    return Err(Error::Protocol(
+                        "completion token before the last chunk".into(),
+                    ));
                 }
                 Posted::More if end == size => {
                     return Err(Error::Protocol("last chunk answered no token".into()));

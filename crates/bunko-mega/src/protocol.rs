@@ -69,8 +69,9 @@ impl<'de> Deserialize<'de> for NodeKind {
     }
 }
 
-/// A node as `f` (fetch nodes), `p` (put nodes) and `t` packets carry it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A node as `f` (fetch nodes), `p` (put nodes) and `t` packets carry it. `Debug`
+/// leaves the wrapped key and the encrypted attributes out.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileNode {
     #[serde(rename = "h")]
     pub handle: String,
@@ -94,6 +95,18 @@ pub struct FileNode {
     /// File attributes (thumbnails), unused.
     #[serde(rename = "fa", default, skip_serializing_if = "Option::is_none")]
     pub file_attr: Option<String>,
+}
+
+impl std::fmt::Debug for FileNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileNode")
+            .field("handle", &self.handle)
+            .field("parent", &self.parent)
+            .field("kind", &self.kind)
+            .field("ts", &self.ts)
+            .field("size", &self.size)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A `cs` command.
@@ -159,8 +172,8 @@ impl Request {
     }
 }
 
-/// One node of a `p` command.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One node of a `p` command (no `Debug`: it carries a wrapped key).
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewNode {
     /// The upload completion token, or `xxxxxxxx` for a folder.
     pub h: String,
@@ -211,7 +224,7 @@ pub struct QuotaResponse {
     pub used: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct DownloadResponse {
     /// The URL (absent when over quota).
     #[serde(rename = "g", default)]
@@ -226,7 +239,7 @@ pub struct DownloadResponse {
     pub time_left: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct UploadResponse {
     #[serde(rename = "p")]
     pub url: String,

@@ -64,14 +64,36 @@ impl From<ErrorCode> for Error {
 
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Self {
-        Error::Network(e.to_string())
+        // The URL carries the session id (`sid=`) or a transfer token: never keep it.
+        let e = e.without_url();
+        let kind = if e.is_timeout() {
+            "timeout"
+        } else if e.is_connect() {
+            "connect"
+        } else if e.is_body() || e.is_decode() {
+            "body"
+        } else {
+            "request"
+        };
+        Error::Network(format!("{kind}: {e}"))
     }
 }
 
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Self {
-        Error::Protocol(format!("JSON: {e}"))
+        Error::Protocol(json_err(&e))
     }
+}
+
+/// A JSON error without the text serde quotes from the input (which can be a key,
+/// a session id or a file name): its category and position only.
+pub(crate) fn json_err(e: &serde_json::Error) -> String {
+    format!(
+        "JSON {:?} error at line {} column {}",
+        e.classify(),
+        e.line(),
+        e.column()
+    )
 }
 
 impl From<base64::DecodeError> for Error {
@@ -271,6 +293,48 @@ impl ErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No variant's Display or Debug carries a secret, however the error was made.
+    #[test]
+    fn errors_never_format_secrets() {
+        const SECRET: &str = "S3CRETsidVALUE";
+        // A JSON error over a body that quotes the secret.
+        let json = serde_json::from_str::<u64>(&format!("\"{SECRET}\"")).unwrap_err();
+        let mut all = vec![
+            Error::from(json),
+            Error::Api(ErrorCode::ESID),
+            Error::Http {
+                status: 403,
+                retry_after: None,
+            },
+            Error::OverQuota { retry_after: None },
+            Error::MacMismatch,
+            Error::ShortRead {
+                expected: 1,
+                got: 2,
+            },
+            Error::InvalidSession("too short".into()),
+        ];
+        // A transport error for a URL with the sid in its query.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let req = rt.block_on(async {
+            reqwest::Client::new()
+                .post(format!("http://127.0.0.1:9/cs?id=1&sid={SECRET}"))
+                .send()
+                .await
+                .unwrap_err()
+        });
+        all.push(Error::from(req));
+        for e in &all {
+            for s in [e.to_string(), format!("{e:?}")] {
+                assert!(!s.contains(SECRET), "{s}");
+                assert!(!s.contains("sid="), "{s}");
+            }
+        }
+    }
 
     #[test]
     fn codes_round_trip() {

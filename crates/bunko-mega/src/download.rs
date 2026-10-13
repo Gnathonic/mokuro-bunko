@@ -25,10 +25,20 @@ use crate::protocol::{DownloadResponse, Request};
 pub type ByteStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send>>;
 
 /// Where a file's ciphertext can be fetched (short-lived; fetch one per read).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` leaves the URL out (it is a bearer token for the file).
+#[derive(Clone, PartialEq, Eq)]
 pub struct DownloadTarget {
     pub url: String,
     pub size: u64,
+}
+
+impl std::fmt::Debug for DownloadTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DownloadTarget")
+            .field("url", &"<redacted>")
+            .field("size", &self.size)
+            .finish()
+    }
 }
 
 impl Client {

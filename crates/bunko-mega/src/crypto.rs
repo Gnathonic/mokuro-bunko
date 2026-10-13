@@ -232,7 +232,7 @@ impl NodeAttributes {
         }
         let len = buffer.iter().take_while(|b| **b != 0).count();
         serde_json::from_slice(&buffer[4..len])
-            .map_err(|e| Error::Crypto(format!("attributes: {e}")))
+            .map_err(|e| Error::Crypto(format!("attributes: {}", crate::error::json_err(&e))))
     }
 
     /// Decrypt the base64 `a`/`at` field.
