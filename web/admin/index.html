@@ -33,6 +33,7 @@
             <button class="tab" data-tab="invites">Invites</button>
             <button class="tab" data-tab="audit">Audit</button>
             <button class="tab" data-tab="settings">Settings</button>
+            <button class="tab" data-tab="storage">Storage</button>
             <button class="tab" data-tab="status">Status</button>
             <button class="tab" data-tab="connectivity">Connectivity</button>
             <button class="tab" data-tab="server">This server</button>
@@ -407,6 +408,124 @@
                                 <p class="form-hint">Precision is one mode per generation, for every machine. <strong>Auto: accuracy</strong> (the default) picks what tested most accurate for each engine; <strong>Auto: balanced</strong> gives up a little accuracy for a lot of speed; <strong>Auto: speed</strong> takes the fastest format each card runs well. For balanced and speed, each machine benchmarks the generation automatically before its first volume, and again when the mode changes, and keeps the fastest format its card supports. <strong>fp32</strong>, <strong>bf16</strong> or <strong>fp16 only</strong> force that format, and a machine whose card cannot run it is skipped: it is never given that generation's volumes.</p>
                             </details>
                         </section>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Storage Tab (0.8): where the library lives -->
+            <section id="storage-tab" class="tab-content">
+                <div class="toolbar">
+                    <h2 class="toolbar__title">Storage</h2>
+                    <button class="btn btn--secondary btn--sm" onclick="loadStorage()">Refresh</button>
+                </div>
+                <div id="storage-problems"></div>
+                <div class="alert alert--info" id="storage-restart" role="status" hidden>The library changed: the server restarts to open it.</div>
+
+                <div class="card" id="storage-summary">
+                    <h3 class="settings-section__title">Library</h3>
+                    <dl class="kv">
+                        <div><dt>Where</dt><dd id="st-provider">-</dd></div>
+                        <div><dt>Account</dt><dd id="st-account">-</dd></div>
+                        <div><dt>Folder</dt><dd id="st-folder">-</dd></div>
+                        <div id="st-pairing-row" hidden><dt>Pairing</dt><dd id="st-pairing">-</dd></div>
+                        <div><dt>Health</dt><dd id="st-health">-</dd></div>
+                        <div><dt>Sync</dt><dd id="st-sync">-</dd></div>
+                        <div id="st-store-row" hidden><dt>Store</dt><dd id="st-store">-</dd></div>
+                        <div id="st-quota-row" hidden><dt>Provider quota</dt><dd id="st-quota">-</dd></div>
+                    </dl>
+                    <div class="connectivity-section__actions">
+                        <button class="btn btn--secondary btn--sm" id="st-reauth" onclick="storageShowConnect(true)" hidden>Sign in again…</button>
+                        <button class="btn btn--secondary btn--sm" id="st-change" onclick="storageShowConnect(false)">Connect a library…</button>
+                        <button class="btn btn--secondary btn--sm" id="st-pairing-change" onclick="storagePairingChange()" hidden>Change pairing…</button>
+                        <button class="btn btn--danger btn--sm" id="st-disconnect" onclick="storageDisconnect('wait')" hidden>Disconnect</button>
+                    </div>
+                    <div class="form-hint" id="st-owed" role="alert" hidden></div>
+                    <div class="connectivity-section__actions" id="st-owed-actions" hidden>
+                        <button class="btn btn--secondary btn--sm" onclick="storageDisconnect('wait', 300)">Wait 5 minutes</button>
+                        <button class="btn btn--secondary btn--sm" onclick="storageDisconnect('export')">Export to a folder…</button>
+                        <button class="btn btn--danger btn--sm" onclick="storageDisconnect('discard')">Discard</button>
+                    </div>
+                </div>
+
+                <div class="card mt-4" id="storage-connect" hidden>
+                    <h3 class="settings-section__title">Connect</h3>
+                    <div class="form-group">
+                        <label class="form-label" for="sc-provider">Where does your library live?</label>
+                        <select class="form-select" id="sc-provider" onchange="storageConnectForm()">
+                            <option value="local">This computer</option>
+                            <option value="gdrive">Google Drive</option>
+                            <option value="onedrive">OneDrive</option>
+                            <option value="mega">MEGA</option>
+                            <option value="webdav">A WebDAV server</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="sc-reader" hidden>
+                        <label class="form-label" for="sc-reader-select">Which Mokuro Reader do you use?</label>
+                        <select class="form-select" id="sc-reader-select">
+                            <option value="release">reader.mokuro.app</option>
+                            <option value="beta">Mokuro Reader beta</option>
+                        </select>
+                        <p class="form-hint">Bunko sees the Drive files of that reader only.</p>
+                    </div>
+                    <p class="form-hint" id="sc-custom" hidden></p>
+                    <div id="sc-mega" hidden>
+                        <div class="form-group"><label class="form-label" for="sc-mega-email">Email</label><input class="form-input" id="sc-mega-email" type="email" autocomplete="off"></div>
+                        <div class="form-group"><label class="form-label" for="sc-mega-password">Password</label><input class="form-input" id="sc-mega-password" type="password" autocomplete="off"><p class="form-hint">Used once; Bunko keeps the session, never the password.</p></div>
+                        <div class="form-group"><label class="form-label" for="sc-mega-totp">Two-factor code (if any)</label><input class="form-input" id="sc-mega-totp" autocomplete="one-time-code"></div>
+                    </div>
+                    <div id="sc-webdav" hidden>
+                        <div class="form-group"><label class="form-label" for="sc-dav-url">Server address</label><input class="form-input" id="sc-dav-url" placeholder="https://cloud.example.com/remote.php/dav/files/me" autocomplete="off"></div>
+                        <div class="form-group"><label class="form-label" for="sc-dav-user">User</label><input class="form-input" id="sc-dav-user" autocomplete="off"></div>
+                        <div class="form-group"><label class="form-label" for="sc-dav-password">App password</label><input class="form-input" id="sc-dav-password" type="password" autocomplete="off"></div>
+                        <label class="check"><input type="checkbox" id="sc-dav-http"> Allow http:// (a server on your own network)</label>
+                    </div>
+                    <div class="connectivity-section__actions">
+                        <button class="btn btn--primary btn--sm" id="sc-connect" onclick="storageConnect(false)">Connect</button>
+                        <button class="btn btn--ghost btn--sm" id="sc-code" onclick="storageConnect(true)" hidden>Use a code instead</button>
+                        <button class="btn btn--ghost btn--sm" onclick="storageCancel()">Cancel</button>
+                    </div>
+                    <div class="storage-live" id="sc-live" role="status" aria-live="polite" hidden></div>
+                </div>
+
+                <div class="card mt-4" id="storage-readers">
+                    <h3 class="settings-section__title">Readers</h3>
+                    <label class="check"><input type="checkbox" id="sr-serve" onchange="saveStorageReaders()"> Readers connect to this Bunko (its catalog and WebDAV)</label>
+                    <div class="form-group mt-2" id="sr-progress-row" hidden>
+                        <label class="form-label" for="sr-progress">Reading progress linked to the cloud</label>
+                        <select class="form-select" id="sr-progress" onchange="saveStorageReaders()"></select>
+                        <p class="form-hint">This Bunko user's progress files are the ones Mokuro Reader keeps in the cloud folder.</p>
+                    </div>
+                </div>
+
+                <div class="card mt-4" id="storage-outbox" hidden>
+                    <h3 class="settings-section__title">Uploads, caches and conflicts</h3>
+                    <dl class="kv">
+                        <div><dt>Waiting to upload</dt><dd id="so-owed">-</dd></div>
+                        <div><dt>Oldest</dt><dd id="so-oldest">-</dd></div>
+                        <div><dt>Last error</dt><dd id="so-error">-</dd></div>
+                        <div><dt>Held / failed</dt><dd id="so-held">-</dd></div>
+                        <div><dt>Series edits waiting</dt><dd id="so-submissions">-</dd></div>
+                        <div><dt>Cache</dt><dd id="so-cache">-</dd></div>
+                        <div><dt>Spool</dt><dd id="so-spool">-</dd></div>
+                    </dl>
+                    <ul class="storage-list" id="so-ops"></ul>
+                    <h4 class="form-label mt-3">Conflicts</h4>
+                    <p class="form-hint" id="so-conflicts-none">None.</p>
+                    <ul class="storage-list" id="so-conflicts"></ul>
+                    <p class="form-hint" id="so-conflicts-hint" hidden>Resolve them in the cloud folder (keep one copy, or move the extra one aside); Bunko picks the change up by itself.</p>
+                </div>
+
+                <div class="card mt-4" id="storage-lease" hidden>
+                    <h3 class="settings-section__title">Lease</h3>
+                    <p class="form-hint">Exactly one Bunko manages a cloud library.</p>
+                    <dl class="kv">
+                        <div><dt>State</dt><dd id="sl-state">-</dd></div>
+                        <div><dt>Holder</dt><dd id="sl-holder">-</dd></div>
+                        <div><dt>Epoch</dt><dd id="sl-epoch">-</dd></div>
+                        <div><dt>Last seen</dt><dd id="sl-seen">-</dd></div>
+                    </dl>
+                    <div class="connectivity-section__actions">
+                        <button class="btn btn--danger btn--sm" id="sl-takeover" onclick="storageTakeOver()" hidden>Take over</button>
                     </div>
                 </div>
             </section>
@@ -843,5 +962,6 @@
 
     <script src="/_static/nav.js"></script>
     <script src="/_admin/admin.js"></script>
+    <script src="/_admin/storage.js"></script>
 </body>
 </html>

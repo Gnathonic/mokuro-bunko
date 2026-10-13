@@ -50,6 +50,143 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/app/api/jobs/{id}/events", get(job_events))
         .route("/app/api/jobs/{id}/cancel", post(job_cancel))
         .route("/app/api/handoff", post(handoff))
+        .route("/app/api/library/storage", get(library_storage))
+        .route(
+            "/app/api/library/connect",
+            get(library_connect_status).post(library_connect),
+        )
+        .route(
+            "/app/api/library/connect/cancel",
+            post(library_connect_cancel),
+        )
+        .route(
+            "/app/api/library/connect/account",
+            post(library_connect_account),
+        )
+        .route(
+            "/app/api/library/connect/create",
+            post(library_connect_create),
+        )
+        .route("/app/api/library/disconnect", post(library_disconnect))
+}
+
+// ---- the library's storage (`library connect` / `disconnect`, 0.8 §7) ----------------
+//
+// The running server's Connect and Disconnect, for `mokuro-bunko library connect` and
+// `library disconnect` (they ask here when a server runs on this storage, through
+// `docker exec` too). The control token guards them like every other route; the
+// answers carry the sign-in's code and state, never a secret.
+
+// A refusal is the handler's whole answer.
+#[allow(clippy::result_large_err)]
+fn storage_of(state: &AppState) -> Result<Arc<bunko_server::storage::StorageControl>, Response> {
+    state.storage.clone().ok_or_else(|| {
+        fail(
+            StatusCode::NOT_FOUND,
+            "no library server runs on this control port",
+        )
+    })
+}
+
+async fn library_storage(State(state): S) -> Response {
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match blocking(move || s.status_json()).await {
+        Some(v) => ok(v),
+        None => fail(StatusCode::INTERNAL_SERVER_ERROR, "status failed"),
+    }
+}
+
+/// `POST /app/api/library/connect` (a `ConnectRequest`): the device flow unless the
+/// body asks otherwise; the server restarts onto the library once connected.
+async fn library_connect(State(state): S, Json(body): Json<Value>) -> Response {
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let req: bunko_server::storage::connect::ConnectRequest = match serde_json::from_value(body) {
+        Ok(r) => r,
+        Err(e) => return bad(format!("invalid connect request: {e}")),
+    };
+    tracing::info!(
+        "[STORAGE] library connect {} (local control API)",
+        req.provider
+    );
+    // This listener is loopback only; a terminal never opens a browser here.
+    let origin = bunko_server::storage::connect::RequestOrigin::cli();
+    match s.connect(req, origin, true) {
+        Ok(st) => ok(st.as_json()),
+        Err(e) => bad(e),
+    }
+}
+
+async fn library_connect_status(State(state): S) -> Response {
+    match storage_of(&state) {
+        Ok(s) => ok(s.connector().status().as_json()),
+        Err(r) => r,
+    }
+}
+
+async fn library_connect_cancel(State(state): S) -> Response {
+    match storage_of(&state) {
+        Ok(s) => {
+            s.connector().cancel();
+            ok(s.connector().status().as_json())
+        }
+        Err(r) => r,
+    }
+}
+
+async fn library_connect_account(State(state): S, Json(body): Json<Value>) -> Response {
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let yes = body["use_this_account"].as_bool().unwrap_or(false);
+    match s.decide_account(yes, true).await {
+        Ok(st) => ok(st.as_json()),
+        Err(e) => bad(e),
+    }
+}
+
+/// `POST /app/api/library/connect/create`: "Create it?" after the Check.
+async fn library_connect_create(State(state): S) -> Response {
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match s.connector().create_folder().await {
+        Ok(check) => ok(json!({"check": check})),
+        Err(e) => bad(e),
+    }
+}
+
+/// `POST /app/api/library/disconnect` `{mode, wait_s?, folder?}`: 409 with `owed` when
+/// results are still owed.
+async fn library_disconnect(State(state): S, Json(body): Json<Value>) -> Response {
+    use bunko_server::storage::disconnect::{DisconnectError, DisconnectMode};
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let mode = match DisconnectMode::from_json(&body) {
+        Ok(m) => m,
+        Err(e) => return bad(e),
+    };
+    let s2 = s.clone();
+    match blocking(move || s2.disconnect(&mode)).await {
+        Some(Ok(report)) => {
+            let restarting = s.restart_soon();
+            ok(json!({"report": report, "restarting": restarting}))
+        }
+        Some(Err(e @ DisconnectError::Owed(_))) => {
+            (StatusCode::CONFLICT, Json(e.as_json())).into_response()
+        }
+        Some(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(e.as_json())).into_response(),
+        None => fail(StatusCode::INTERNAL_SERVER_ERROR, "disconnect failed"),
+    }
 }
 
 fn fail(status: StatusCode, msg: impl std::fmt::Display) -> Response {

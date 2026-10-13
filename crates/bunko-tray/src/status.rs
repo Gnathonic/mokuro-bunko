@@ -113,6 +113,85 @@ pub struct Library {
     pub error: Option<String>,
     /// What holds the queue now (0.7: an engine's first-run speed measurement).
     pub activity: Option<String>,
+    /// Where the library lives and how its store is doing (0.8; absent before).
+    pub storage: Option<Storage>,
+}
+
+/// `status.library.storage` (0.8): the library's store, as the admin Storage panel
+/// shows it. Every field optional.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Storage {
+    /// local | gdrive | onedrive | mega | webdav
+    pub backend: String,
+    pub connected: Option<bool>,
+    pub health: Option<StorageHealth>,
+    /// Unix seconds: when the store was last seen in sync.
+    pub synced_at: Option<f64>,
+    pub serve_readers: Option<bool>,
+    /// The sign-in in progress (a device code to enter).
+    pub connect: Option<StorageConnect>,
+    /// `storage-*` problems.
+    pub problems: Vec<Problem>,
+    pub restart_pending: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct StorageHealth {
+    /// online | syncing | degraded | offline | needs-reauth | blocked | suspect |
+    /// lease-held
+    pub state: String,
+    pub done: Option<f64>,
+    pub total: Option<f64>,
+    /// Unix seconds (degraded).
+    pub retry_at: Option<f64>,
+    /// lease-held: the other Bunko.
+    pub by: Option<String>,
+    /// blocked: StorageFull | TransferQuota | DailyLimit.
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct StorageConnect {
+    pub state: String,
+    pub provider: Option<String>,
+    pub user_code: Option<String>,
+    pub verification_url: Option<String>,
+}
+
+impl Storage {
+    /// The library is in a cloud folder.
+    pub fn is_cloud(&self) -> bool {
+        !self.backend.is_empty() && self.backend != "local"
+    }
+
+    /// "Google Drive", "OneDrive", "MEGA", "WebDAV".
+    pub fn name(&self) -> &'static str {
+        match self.backend.as_str() {
+            "gdrive" => "Google Drive",
+            "onedrive" => "OneDrive",
+            "mega" => "MEGA",
+            "webdav" => "WebDAV",
+            _ => "This computer",
+        }
+    }
+
+    pub fn state(&self) -> &str {
+        self.health.as_ref().map_or("", |h| h.state.as_str())
+    }
+
+    /// It needs the owner to sign in again (no sign-in is under way).
+    pub fn needs_sign_in(&self) -> bool {
+        self.is_cloud() && self.state() == "needs-reauth" && self.live_code().is_none()
+    }
+
+    /// The device code being shown, and where to enter it.
+    pub fn live_code(&self) -> Option<(&str, &str)> {
+        let c = self.connect.as_ref().filter(|c| c.state == "code")?;
+        Some((c.user_code.as_deref()?, c.verification_url.as_deref()?))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]

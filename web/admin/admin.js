@@ -97,6 +97,12 @@ function initTabs() {
             } else if ((window.location.hash || '').startsWith('#audit')) {
                 try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (_) { /* ignore */ }
             }
+            if (tabId === 'storage') {
+                loadStorage();
+                startStoragePolling();
+            } else if (typeof stopStoragePolling === 'function') {
+                stopStoragePolling();
+            }
             if (tabId === 'status') {
                 loadStatus();
                 loadUpdate(false);

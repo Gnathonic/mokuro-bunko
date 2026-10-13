@@ -19,6 +19,7 @@ mod machine;
 pub mod ocr;
 mod settings;
 mod status;
+mod storage;
 pub mod update;
 
 use crate::core::{Core, RequestCtx};
@@ -71,6 +72,8 @@ pub struct AdminDeps {
     /// A cloud library's store (`/api/status` `library.storage`); `None`: the library
     /// is on this disk.
     pub storage: Option<Arc<crate::storage::StoreHandle>>,
+    /// Connect / Disconnect (the Storage panel). `None`: one is made over `storage`.
+    pub storage_control: Option<Arc<crate::storage::StorageControl>>,
 }
 
 #[derive(Clone)]
@@ -83,6 +86,8 @@ pub(crate) struct AdminInner {
     /// When each long-running "This server" action last started (a short cooldown).
     pub machine_actions:
         parking_lot::Mutex<std::collections::HashMap<&'static str, std::time::Instant>>,
+    /// The Storage panel's Connect / Disconnect.
+    pub storage_control: Arc<crate::storage::StorageControl>,
 }
 
 impl std::ops::Deref for AdminState {
@@ -121,7 +126,14 @@ impl AdminState {
 
 /// `/_admin`, `/_admin/` and `/_admin/<anything>`.
 pub fn router(deps: AdminDeps) -> Router {
+    let storage_control = deps.storage_control.clone().unwrap_or_else(|| {
+        crate::storage::StorageControl::for_core(&deps.core, deps.storage.clone())
+    });
+    if let Some(r) = deps.restart.clone() {
+        storage_control.set_restart(r);
+    }
     let state = AdminState(Arc::new(AdminInner {
+        storage_control,
         deps,
         config_lock: parking_lot::Mutex::new(()),
         machine_actions: parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -186,6 +198,9 @@ pub(crate) struct ApiRequest {
     /// `_parse_json_body`: `{}` for an empty body; `Err(message)` for a body that is too
     /// large, not JSON or not a JSON object. Only read for POST/PUT.
     pub body: Result<Map<String, Value>, String>,
+    /// The `User-Agent` (the Storage panel's Connect: an embedded WebView gets the
+    /// device flow).
+    pub user_agent: Option<String>,
 }
 
 impl ApiRequest {
@@ -288,6 +303,11 @@ async fn entry(State(state): State<AdminState>, req: Request) -> Response {
         return error(status, msg);
     }
     let method = parts.method.clone();
+    let user_agent = parts
+        .headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let body = if method == Method::POST || method == Method::PUT {
         read_body(&parts.headers, body).await
     } else {
@@ -298,6 +318,7 @@ async fn entry(State(state): State<AdminState>, req: Request) -> Response {
         method,
         query: parts.uri.query().unwrap_or("").to_string(),
         body,
+        user_agent,
     };
     dispatch(&state, &sub["/api/".len()..], req).await
 }
@@ -370,6 +391,17 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
         ["machine", "jobs"] if post => machine::start_job(s, &req).await,
         ["machine", "jobs", id] if get => machine::job(s, &req, id).await,
         ["machine", "logs"] if get => machine::logs(s, &req).await,
+
+        ["storage"] if get => storage::get(s).await,
+        ["storage", "connect"] if post => storage::connect(s, &req).await,
+        ["storage", "connect"] if get => storage::connect_status(s),
+        ["storage", "connect", "cancel"] if post => storage::connect_cancel(s),
+        ["storage", "connect", "account"] if post => storage::connect_account(s, &req).await,
+        ["storage", "connect", "create"] if post => storage::connect_create(s).await,
+        ["storage", "disconnect"] if post => storage::disconnect(s, &req).await,
+        ["storage", "local"] if post => storage::local(s).await,
+        ["storage", "lease", "take-over"] if post => storage::take_over(s, &req).await,
+        ["storage", "readers"] if put => storage::readers(s, &req).await,
 
         ["update"] if get => update::http::get(s, &req).await,
         ["update", "apply"] if post => update::http::apply(s, &req).await,

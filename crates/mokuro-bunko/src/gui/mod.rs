@@ -64,6 +64,9 @@ pub struct AppState {
     pub last_seen: AtomicU64,
     /// Set by `/app/api/handoff`: the `gui` command exits once the browser moved on.
     pub handoff: tokio::sync::watch::Sender<bool>,
+    /// The library server's storage (`serve` only): `library connect` / `disconnect`
+    /// through this listener (`/app/api/library/...`).
+    pub storage: Option<Arc<bunko_server::storage::StorageControl>>,
 }
 
 impl AppState {
@@ -89,6 +92,7 @@ impl AppState {
             jobs: jobs::Jobs::default(),
             last_seen: AtomicU64::new(now_secs()),
             handoff: tokio::sync::watch::channel(false).0,
+            storage: None,
         }
     }
 
@@ -115,14 +119,17 @@ pub fn app(
     codes: LoginCodes,
     config_path: PathBuf,
     processor_config: Option<PathBuf>,
+    storage: Option<Arc<bunko_server::storage::StorageControl>>,
 ) -> Router {
-    router(Arc::new(AppState::new(
+    let mut state = AppState::new(
         role,
         token.to_string(),
         codes,
         config_path,
         processor_config,
-    )))
+    );
+    state.storage = storage;
+    router(Arc::new(state))
 }
 
 /// `/app/login`, the shared assets (`/_static/...`, public as on the library server),

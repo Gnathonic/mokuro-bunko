@@ -37,7 +37,11 @@ pub struct Options {
     pub updates: Option<Arc<dyn UpdateSource>>,
     pub configure: Option<Configure>,
     pub machine: Option<Arc<dyn bunko_server::machine::Machine>>,
+    /// The Storage panel's control, built over the harness's core.
+    pub storage: Option<StorageFactory>,
 }
+
+pub type StorageFactory = Box<dyn FnOnce(&Core) -> Arc<bunko_server::storage::StorageControl>>;
 
 pub struct Reply {
     pub status: StatusCode,
@@ -89,7 +93,9 @@ impl Harness {
         let restarts = Arc::new(AtomicUsize::new(0));
         let d2 = dropped.clone();
         let r2 = restarts.clone();
+        let storage_control = opts.storage.map(|f| f(&core));
         let app = admin::router(AdminDeps {
+            storage_control,
             core: core.clone(),
             db: db.clone(),
             ocr: opts.ocr.unwrap_or_else(|| Arc::new(NoOcr)),

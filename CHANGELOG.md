@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+- **Set a library up in Google Drive, OneDrive, MEGA or a WebDAV server.** The setup
+  wizard asks where the library lives, then connects it with one button: a browser on
+  the server signs in directly, anything else (Docker, a NAS, a phone) gets a code to
+  enter on any device, shown in the wizard, the admin panel, the tray and the log. The
+  Check step counts the volumes Bunko can see; on Google Drive it asks which Mokuro
+  Reader you use and offers the other one when few volumes are visible. Readers can
+  keep reading straight from the cloud (the default for a cloud library), or connect to
+  Bunko as before. The admin panel's new **Storage** tab shows the library's health,
+  first sync, uploads, conflicts, lease and quota, and connects, signs in again,
+  changes the Drive pairing or disconnects (waiting for, exporting or discarding what
+  is not uploaded yet; nothing in the cloud is deleted). The same from a terminal or
+  `docker exec`: `mokuro-bunko library connect gdrive|onedrive|mega|webdav` and
+  `library disconnect`; `doctor` checks the pairing, the spool and the credentials
+  file. The tray shows one library line ("Google Drive · synced 1 min ago") and
+  "Sign in again…" when needed.
+
 ### Changed
 - **Internal: the library goes through a storage seam.** Every library file access in
   the server, the WebDAV layer and the metadata compiler now passes through one

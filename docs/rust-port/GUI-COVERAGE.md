@@ -47,7 +47,7 @@ front (`--config`).
 | `serve --port` | CLI-only because where the server listens is fixed before it serves (`server.port`, `MOKURO_PORT`); the chooser picks a free port from 8080 |
 | `serve --ocr` | [This server](/_admin#server) → OCR → Run it on (`ocr.backend`: auto, CPU, or the GPU found) |
 | `serve --generations` | [Settings](/_admin#settings) → OCR → Generations |
-| `setup` | The server's own [setup](/setup): admin account, who may join, remote access (tunnel, Dynamic DNS, HTTPS), OCR on this machine. From another computer it asks for the one-time code in the server log |
+| `setup` | The server's own [setup](/setup): where the library lives (this computer, Google Drive, OneDrive, MEGA, a WebDAV server), Connect and Check, whether readers connect, admin account, who may join and remote access (tunnel, Dynamic DNS, HTTPS) when they do, OCR on this machine (lite build: connect a processor). From another computer it asks for the one-time code in the server log |
 | `setup --skip-if-exists` | CLI-only because it exists for container entrypoints and scripts; [setup](/setup) only runs while no admin exists |
 | `doctor` | [This server](/_admin#server) → Diagnostics → Run checks |
 | `doctor --processor` | [Diagnostics](/app/settings/doctor) on the processor's own page |
@@ -131,9 +131,25 @@ front (`--config`).
 | `dyndns update` | [Connectivity](/_admin#connectivity) → Dynamic DNS → Test Update |
 | `dyndns enable` | CLI-only after [setup](/setup) (which saves it enabled) because it saves enabled=true for the next start, which no admin control does. [Connectivity](/_admin#connectivity) → Dynamic DNS → Start runs it only until the server restarts |
 | `dyndns disable` | CLI-only because it saves enabled=false for the next start, which no page does. [Connectivity](/_admin#connectivity) → Dynamic DNS → Stop pauses it only until the server restarts |
-| `library` | CLI-only because the admin Storage panel that shows the same block (`/_admin/api/status` → `library.storage`) lands with the 0.8 wizard and panels (M6) |
-| `library status` | CLI-only because the admin Storage panel lands with M6; the running server's answer is the `library.storage` block of its admin status and of its local control status |
-| `library status --json` | CLI-only because it is the same report for scripts |
+| `library` | [Storage](/_admin#storage): where the library lives and how its store is doing (the same `library.storage` block as `/_admin/api/status`); `Tray → "Open library"` opens it when readers do not connect to this Bunko |
+| `library status` | [Storage](/_admin#storage) → Library (health, sync, store, quota), Uploads, caches and conflicts, Lease; the tray's library line ("Google Drive · synced 1 min ago", "Syncing 412/1000", "Needs sign-in") |
+| `library status --json` | CLI-only because it is the same report for scripts ([Storage](/_admin#storage) reads it as `/_admin/api/storage`) |
+| `library connect` | [setup](/setup) → Where does your library live? → Connect → Check; later [Storage](/_admin#storage) → Connect a library… / Sign in again… (`Tray → "Sign in again…"` opens it). One Connect button: a browser on the server signs in through the loopback page, anything else gets a code to enter on any device |
+| `library connect <PROVIDER>` | [setup](/setup) → Where does your library live? (This computer, Google Drive, OneDrive, MEGA, A WebDAV server); [Storage](/_admin#storage) → Connect → Where does your library live? |
+| `library connect --reader` | [setup](/setup) → Connect → "Which Mokuro Reader do you use?" (reader.mokuro.app or the beta); [Storage](/_admin#storage) → Change pairing… (a Disconnect, then a Connect with the other reader) |
+| `library connect --folder` | CLI-only because the pages connect the reader's own `mokuro-reader/` folder; another name is for a folder made by hand (`storage.library.folder`) |
+| `library connect --url` | [setup](/setup) → Connect → Server address; [Storage](/_admin#storage) → A WebDAV server → Server address |
+| `library connect --username` | [setup](/setup) → Connect → User; [Storage](/_admin#storage) → A WebDAV server → User |
+| `library connect --password-file` | [setup](/setup) → Connect → App password; [Storage](/_admin#storage) → A WebDAV server → App password (the pages take it in the form; the file is for scripts and Docker secrets) |
+| `library connect --allow-http` | [setup](/setup) → Connect → Allow http://; [Storage](/_admin#storage) → A WebDAV server → Allow http:// |
+| `library connect --email` | [setup](/setup) → Connect → Email (MEGA; the password and two-factor code beside it); [Storage](/_admin#storage) → MEGA |
+| `library connect --create` | [setup](/setup) → Check → Create mokuro-reader/; [Storage](/_admin#storage) → Connect → Create mokuro-reader/ |
+| `library connect --use-this-account` | [setup](/setup) → Connect → "Use this account's library instead"; [Storage](/_admin#storage) → Connect → the same choice |
+| `library disconnect` | [Storage](/_admin#storage) → Disconnect (uploads what is still owed first; nothing in the cloud is deleted) |
+| `library disconnect --wait` | [Storage](/_admin#storage) → Disconnect → Wait 5 minutes (shown when results are still owed) |
+| `library disconnect --export` | [Storage](/_admin#storage) → Disconnect → Export to a folder… |
+| `library disconnect --discard` | [Storage](/_admin#storage) → Disconnect → Discard |
+| `library disconnect --yes` | CLI-only because it answers the terminal's confirmation; the panel asks in its own dialog |
 
 ## Updates
 

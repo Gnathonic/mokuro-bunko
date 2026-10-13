@@ -114,6 +114,9 @@ pub struct Services {
     /// A cloud library's store (`storage.library.backend` is not `local`): status for
     /// the admin panel, the first-sync wait; `None` for a library on this disk.
     pub storage: Option<Arc<crate::storage::StoreHandle>>,
+    /// Connect / Disconnect a cloud library (setup wizard, admin Storage panel, the
+    /// local control API).
+    pub storage_control: Arc<crate::storage::StorageControl>,
     /// A cloud library: the store's change events drop the PROPFIND listings they
     /// touch at once (spec §10).
     _listing_watch: Option<bunko_store::WatchGuard>,
@@ -244,6 +247,7 @@ impl Services {
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
         let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
         let core = Core::with_layout(config, config_path, backend, layout.clone());
+        let storage_control = crate::storage::StorageControl::for_core(&core, storage.clone());
         let late_ocr: Arc<std::sync::OnceLock<crate::ocr::OcrControl>> =
             Arc::new(std::sync::OnceLock::new());
         let library = {
@@ -295,6 +299,7 @@ impl Services {
         }
         Ok(Services {
             storage,
+            storage_control,
             _listing_watch: listing_watch,
             core,
             db,
@@ -888,6 +893,8 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
     accounts.machine = opts.machine.clone();
     accounts.dyndns = Some(services.dyndns.clone());
     accounts.restart = Some(restart.clone());
+    services.storage_control.set_restart(restart.clone());
+    accounts.storage = Some(services.storage_control.clone());
     let admin = crate::admin::AdminDeps {
         core: services.core.clone(),
         db: services.db.clone(),
@@ -899,6 +906,7 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         restart: Some(restart),
         machine: opts.machine.clone(),
         storage: services.storage.clone(),
+        storage_control: Some(services.storage_control.clone()),
     };
     let mut modules: Vec<Router> = vec![
         crate::accounts::router(accounts.clone()),
