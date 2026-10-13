@@ -7,8 +7,8 @@
 //! fold and effective-mtime rules; [`feed::Feed`] keeps the index current from the
 //! provider's change feed and replays cloud-side changes to the server. Default
 //! features add the providers' drivers (`webdav::WebDavBackend`,
-//! `gdrive::GDriveBackend`) and [`auth`], which signs in to the OAuth providers and
-//! keeps their credentials.
+//! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`) and [`auth`], which signs in
+//! to the OAuth providers and keeps their credentials.
 
 #[cfg(feature = "oauth")]
 pub mod auth;
@@ -20,6 +20,10 @@ pub mod feed;
 pub mod gdrive;
 pub mod index;
 pub mod names;
+#[cfg(feature = "onedrive")]
+pub mod onedrive;
+#[cfg(any(feature = "gdrive", feature = "onedrive"))]
+pub mod token_dyn;
 #[cfg(feature = "webdav")]
 pub mod webdav;
 

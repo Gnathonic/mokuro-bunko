@@ -16,10 +16,8 @@ pub mod api;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::future::Future;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -55,31 +53,9 @@ pub const DEFAULT_MAX_ORPHANS: usize = 100_000;
 /// handing the error to the outbox.
 const CHUNK_RETRIES: u32 = 3;
 
-/// A source of OAuth access tokens. Defined here so the driver does not depend on the
-/// auth crate; that crate's token source implements it.
-pub trait TokenSourceDyn: Send + Sync {
-    /// A currently valid access token (refreshing it if due).
-    fn access_token(&self) -> Pin<Box<dyn Future<Output = Result<String, BErr>> + Send + '_>>;
-    /// The last token was refused (401): the next `access_token` must refresh.
-    fn invalidate(&self);
-}
-
-/// A fixed access token (tests, the live test, short scripts).
-#[derive(Debug, Clone)]
-pub struct StaticToken(String);
-
-impl StaticToken {
-    pub fn new(token: impl Into<String>) -> Self {
-        StaticToken(token.into())
-    }
-}
-
-impl TokenSourceDyn for StaticToken {
-    fn access_token(&self) -> Pin<Box<dyn Future<Output = Result<String, BErr>> + Send + '_>> {
-        Box::pin(async move { Ok(self.0.clone()) })
-    }
-    fn invalidate(&self) {}
-}
+/// The token seam lives in [`crate::token_dyn`] (shared with the OneDrive driver);
+/// re-exported here so existing paths keep working.
+pub use crate::token_dyn::{StaticToken, TokenSourceDyn};
 
 /// Driver settings.
 #[derive(Debug, Clone)]
