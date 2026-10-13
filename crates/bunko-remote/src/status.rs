@@ -14,9 +14,10 @@
 //! before any lease exists. [`Lease::spawn`] runs it all as a background task that
 //! reports [`LeaseEvent`]s through a watch channel.
 //!
-//! The lease's own state (epoch, state, `lease_ok_at`, its marker node) persists
-//! through a [`LeaseStore`]: [`MemoryLeaseStore`] for tests, [`SqliteLeaseStore`] over
-//! the `meta` table of a caller's connection (`state.sqlite`, D7).
+//! The lease's own state (epoch, state, `lease_ok_at`, its marker node, the boot ids
+//! its markers may carry, its data folder) persists through a [`LeaseStore`]:
+//! [`MemoryLeaseStore`] for tests, [`SqliteLeaseStore`] over the `meta` table of a
+//! caller's connection (`state.sqlite`, D7).
 //!
 //! **Queue document.** [`cloud_queue_doc`] turns the server's `build_document` output
 //! into the cloud copy (instance id, `truncated`, `done[]`, progress quantised to 0.1,
@@ -62,6 +63,8 @@ const MARKER_MAX_BYTES: u64 = 64 * 1024;
 const CLAIM_ATTEMPTS: usize = 4;
 /// Re-listings when a node changes between the listing and its read.
 const LIST_ATTEMPTS: usize = 3;
+/// How many of this install's recent `boot_id`s a [`LeaseRecord`] remembers.
+pub const BOOT_HISTORY: usize = 8;
 
 /// A marker's `state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,9 +236,16 @@ pub struct LeaseConfig {
     pub instance_id: String,
     /// This run's id (new on every start).
     pub boot_id: String,
-    /// The previous run's `boot_id` ([`LeaseRecord::boot_id`]); a fresh marker with
-    /// our `instance_id` and this boot id is our own restart, and resumes at once.
+    /// A previous run's `boot_id`; a fresh marker with our `instance_id` and this
+    /// boot id is our own restart, and resumes at once. Optional: the boot ids in the
+    /// loaded [`LeaseRecord::boot_ids`] count the same way.
     pub last_boot_id: Option<String>,
+    /// This install's data folder (the store's directory). A loaded record written in
+    /// another folder (a copied `state.sqlite`) is not ours: its boot ids are dropped,
+    /// so the marker it describes reads as another Bunko's. `None`: not checked.
+    pub home: Option<String>,
+    /// Overrides [`LeaseConfig::settle`] (tests).
+    pub claim_settle: Option<Duration>,
     pub instance_name: String,
     pub bunko_version: String,
     /// `ttl_s`: [`DEFAULT_TTL`], [`MEGA_TTL`] on MEGA.
@@ -266,6 +276,8 @@ impl LeaseConfig {
             instance_id: instance_id.into(),
             boot_id: boot_id.into(),
             last_boot_id: None,
+            home: None,
+            claim_settle: None,
             instance_name: instance_name.into(),
             bunko_version: bunko_version.into(),
             ttl: DEFAULT_TTL,
@@ -279,7 +291,8 @@ impl LeaseConfig {
 
     /// How long CLAIM_LEASE waits before re-listing: `max(60 s, 2 × feed interval)`.
     pub fn settle(&self) -> Duration {
-        CLAIM_SETTLE_MIN.max(self.feed_interval.saturating_mul(2))
+        self.claim_settle
+            .unwrap_or_else(|| CLAIM_SETTLE_MIN.max(self.feed_interval.saturating_mul(2)))
     }
 
     /// The heartbeat period, `ttl / 3`.
@@ -359,9 +372,36 @@ pub struct LeaseRecord {
     pub lease_ok_at: Option<i64>,
     /// Our marker node.
     pub marker_pid: Option<Pid>,
-    /// The `boot_id` of the run that wrote this record: the next run's
-    /// [`LeaseConfig::last_boot_id`].
-    pub boot_id: Option<String>,
+    /// The `boot_id`s this install's markers may carry, newest first (at most
+    /// [`BOOT_HISTORY`]). A run records its own *before* its first marker write, so
+    /// whenever a crash, kill or clean stop happens, the marker on the provider
+    /// carries one of these and the next run resumes it at once (§9.2 (a)).
+    pub boot_ids: Vec<String>,
+    /// The data folder that wrote this record ([`LeaseConfig::home`]).
+    pub home: Option<String>,
+}
+
+impl LeaseRecord {
+    /// The newest recorded `boot_id`.
+    pub fn boot_id(&self) -> Option<&str> {
+        self.boot_ids.first().map(String::as_str)
+    }
+
+    /// Record `boot` as the newest boot id.
+    fn remember_boot(&mut self, boot: &str) {
+        if self.boot_id() == Some(boot) {
+            return;
+        }
+        self.boot_ids.retain(|b| b != boot);
+        self.boot_ids.insert(0, boot.to_string());
+        self.boot_ids.truncate(BOOT_HISTORY);
+    }
+}
+
+/// Do two [`LeaseConfig::home`] strings name the same folder? Case-insensitively:
+/// library hosts may be case-insensitive (NTFS, APFS).
+fn same_home(a: &str, b: &str) -> bool {
+    a == b || a.to_lowercase() == b.to_lowercase()
 }
 
 /// Is `lease_ok_at` within `window` of `now_ms` (either side, so a small clock step
@@ -410,7 +450,8 @@ impl LeaseStore for MemoryLeaseStore {
 
 /// A [`LeaseStore`] in the `meta(k, v)` table of a caller's SQLite connection
 /// (`state.sqlite`, D7). Keys: `lease_epoch`, `lease_state`, `lease_ok_at`,
-/// `lease_marker_pid`, `lease_boot_id`; a `None` field has no row.
+/// `lease_marker_pid`, `lease_boot_id` (the boot ids, comma-separated, newest first),
+/// `lease_home`; a `None` (or empty) field has no row.
 pub struct SqliteLeaseStore {
     conn: Arc<Mutex<Connection>>,
 }
@@ -439,18 +480,28 @@ impl SqliteLeaseStore {
             lease_state: LeaseRecordState::parse(&state),
             lease_ok_at: get("lease_ok_at")?.and_then(|v| v.parse().ok()),
             marker_pid: get("lease_marker_pid")?,
-            boot_id: get("lease_boot_id")?,
+            boot_ids: get("lease_boot_id")?
+                .map(|v| {
+                    v.split(',')
+                        .filter(|b| !b.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            home: get("lease_home")?,
         }))
     }
 
     fn write(conn: &mut Connection, rec: &LeaseRecord) -> rusqlite::Result<()> {
         let sp = conn.savepoint()?;
-        let fields: [(&str, Option<String>); 5] = [
+        let boot_ids = (!rec.boot_ids.is_empty()).then(|| rec.boot_ids.join(","));
+        let fields: [(&str, Option<String>); 6] = [
             ("lease_epoch", Some(rec.lease_epoch.to_string())),
             ("lease_state", Some(rec.lease_state.as_str().to_string())),
             ("lease_ok_at", rec.lease_ok_at.map(|v| v.to_string())),
             ("lease_marker_pid", rec.marker_pid.clone()),
-            ("lease_boot_id", rec.boot_id.clone()),
+            ("lease_boot_id", boot_ids),
+            ("lease_home", rec.home.clone()),
         ];
         for (k, v) in fields {
             match v {
@@ -589,7 +640,25 @@ impl<B: Backend> Lease<B> {
         scratch: impl Into<PathBuf>,
     ) -> Lease<B> {
         let cas = backend.caps().cas_overwrite;
-        let rec = store.load().unwrap_or_default();
+        let mut rec = store.load().unwrap_or_default();
+        if let (Some(home), Some(was)) = (&cfg.home, &rec.home)
+            && !same_home(home, was)
+        {
+            tracing::warn!(
+                was = %was,
+                now = %home,
+                "lease: this lease state was written in another data folder (a copied \
+                 data folder?); a fresh marker it wrote counts as another Bunko's (if the \
+                 folder was moved, the old marker expires after its ttl)"
+            );
+            rec.boot_ids.clear();
+            rec.lease_state = LeaseRecordState::None;
+            rec.lease_ok_at = None;
+            rec.marker_pid = None;
+        }
+        if cfg.home.is_some() {
+            rec.home = cfg.home.clone();
+        }
         Lease {
             backend,
             root: root.into(),
@@ -694,11 +763,18 @@ impl<B: Backend> Lease<B> {
         m.instance_id == self.cfg.instance_id && m.boot_id == self.cfg.boot_id
     }
 
-    /// Ours from this run or the previous one.
+    /// Ours from this run or an earlier one of this install (a recorded boot id).
     fn is_ours(&self, m: &Marker) -> bool {
         m.instance_id == self.cfg.instance_id
             && (m.boot_id == self.cfg.boot_id
-                || self.cfg.last_boot_id.as_deref() == Some(m.boot_id.as_str()))
+                || self.cfg.last_boot_id.as_deref() == Some(m.boot_id.as_str())
+                || self.record.lock().boot_ids.contains(&m.boot_id))
+    }
+
+    /// Another Bunko with our `instance_id` (a cloned data folder): a boot id this
+    /// install never recorded.
+    fn is_twin(&self, m: &Marker) -> bool {
+        m.instance_id == self.cfg.instance_id && !self.is_ours(m)
     }
 
     fn now_iso(&self) -> String {
@@ -759,11 +835,12 @@ impl<B: Backend> Lease<B> {
                     return Ok(LeaseState::Holder);
                 }
                 let holder = top.marker.clone();
-                if holder.instance_id == self.cfg.instance_id {
+                if self.is_twin(&holder) {
                     tracing::warn!(
                         boot_id = %holder.boot_id,
-                        "lease: a fresh marker carries this install's instance id but an \
-                         unknown boot id; treating it as another Bunko (a cloned data folder?)"
+                        "lease: a fresh marker carries this install's instance id but a \
+                         boot id this install never recorded; treating it as another Bunko \
+                         (a cloned data folder?)"
                     );
                 }
                 self.become_standby(&set, false).await?;
@@ -816,10 +893,16 @@ impl<B: Backend> Lease<B> {
         let ok_at = self.clock.now_ms();
         for _ in 0..2 {
             let set = self.marker_set().await?;
+            // A twin (our instance id, a boot id we never recorded) holding a fresh
+            // marker is a cloned data folder that resumed our marker: it ranks level
+            // with ours, so step down rather than have two holders.
             let above = set
                 .fresh()
                 .into_iter()
-                .find(|n| !self.is_mine(&n.marker) && rank(&n.marker, &mine) == Ordering::Less)
+                .find(|n| {
+                    !self.is_mine(&n.marker)
+                        && (rank(&n.marker, &mine) == Ordering::Less || self.is_twin(&n.marker))
+                })
                 .map(|n| n.marker.clone());
             if let Some(holder) = above {
                 tracing::warn!(
@@ -886,10 +969,24 @@ impl<B: Backend> Lease<B> {
         let rec = {
             let mut r = self.record.lock();
             f(&mut r);
-            r.boot_id = Some(self.cfg.boot_id.clone());
+            r.remember_boot(&self.cfg.boot_id);
             r.clone()
         };
         self.store.save(&rec)
+    }
+
+    /// Before writing a marker with `epoch` and this run's boot id: persist both, so
+    /// the next run recognises the marker as its own however this run stops (during
+    /// a claim's settle wait included).
+    fn note_write(&self, epoch: u64) -> Result<(), LeaseError> {
+        let recorded = {
+            let r = self.record.lock();
+            r.boot_id() == Some(self.cfg.boot_id.as_str()) && r.lease_epoch >= epoch
+        };
+        if recorded {
+            return Ok(());
+        }
+        self.update_record(|r| r.lease_epoch = r.lease_epoch.max(epoch))
     }
 
     fn become_holder(&mut self, m: Marker, node: &RNode, ok_at: i64) -> Result<(), LeaseError> {
@@ -1050,6 +1147,7 @@ impl<B: Backend> Lease<B> {
 
     /// Stage `m` in a scratch file and upload it.
     async fn put(&mut self, m: &Marker, target: Target) -> Result<RNode, LeaseError> {
+        self.note_write(m.epoch)?;
         let bytes = serde_json::to_vec(m).map_err(|e| LeaseError::Staging(e.to_string()))?;
         let seq = STAGING_SEQ.fetch_add(1, AtomicOrdering::Relaxed);
         let tag: String = self

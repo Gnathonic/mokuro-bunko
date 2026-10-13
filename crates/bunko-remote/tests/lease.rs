@@ -221,7 +221,7 @@ async fn restart_with_same_boot_lineage_resumes_at_once() {
 
     tokio::time::advance(Duration::from_secs(120)).await;
     let mut c = cfg("aaaa", "boot-2");
-    c.last_boot_id = store.load().unwrap().boot_id;
+    c.last_boot_id = store.load().unwrap().boot_id().map(str::to_string);
     assert_eq!(c.last_boot_id.as_deref(), Some("boot-1"));
     let mut a2 = env.lease(c, 0, store.clone());
     let t = Instant::now();
@@ -234,7 +234,7 @@ async fn restart_with_same_boot_lineage_resumes_at_once() {
     assert_eq!(after[0].1.epoch, first[0].1.epoch);
     assert_eq!(after[0].1.claimed_at, first[0].1.claimed_at);
     assert!(a2.fence_ok(EPOCH_MS + 120_000));
-    assert_eq!(store.load().unwrap().boot_id.as_deref(), Some("boot-2"));
+    assert_eq!(store.load().unwrap().boot_id(), Some("boot-2"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -434,13 +434,13 @@ async fn sqlite_store_persists_the_lease() {
     assert_eq!(loaded, rec);
     assert_eq!(loaded.lease_state, LeaseRecordState::Holder);
     assert_eq!(loaded.lease_epoch, 1);
-    assert_eq!(loaded.boot_id.as_deref(), Some("boot-1"));
+    assert_eq!(loaded.boot_id(), Some("boot-1"));
     assert_eq!(
         loaded.marker_pid.as_deref(),
         Some(env.markers().await[0].0.pid.as_str())
     );
     let mut c = cfg("aaaa", "boot-2");
-    c.last_boot_id = loaded.boot_id.clone();
+    c.last_boot_id = loaded.boot_id().map(str::to_string);
     let mut a2 = env.lease(c, 0, store.clone());
     assert_eq!(a2.claim().await.unwrap(), LeaseState::Holder);
     assert_eq!(env.markers().await.len(), 1);
@@ -498,4 +498,96 @@ async fn background_tasks_settle_on_one_holder_and_hand_over() {
     assert!(calls > 0);
     ha.shutdown().await;
     hb.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_stopped_during_the_claim_settle_resumes_on_restart() {
+    let env = Env::new(FakeBackend::drive_like()).await;
+    let store: Arc<dyn LeaseStore> = Arc::new(MemoryLeaseStore::new());
+    let mut a = env.lease(cfg("aaaa", "boot-1"), 0, store.clone());
+    // Stopped mid-settle (60 s): the marker is written, the claim not yet decided.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), a.claim())
+            .await
+            .is_err()
+    );
+    drop(a);
+    let first = env.markers().await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        (first[0].1.boot_id.as_str(), first[0].1.epoch),
+        ("boot-1", 1)
+    );
+    // The boot id and epoch were recorded before the marker write.
+    let rec = store.load().unwrap();
+    assert_eq!((rec.boot_id(), rec.lease_epoch), (Some("boot-1"), 1));
+
+    // The next run knows nothing but its record (no `last_boot_id`).
+    let mut a2 = env.lease(cfg("aaaa", "boot-2"), 0, store.clone());
+    let t = Instant::now();
+    assert_eq!(a2.claim().await.unwrap(), LeaseState::Holder);
+    assert!(t.elapsed() < Duration::from_secs(1), "resume must not wait");
+    let after = env.markers().await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].0.pid, first[0].0.pid, "rewritten in place");
+    assert_eq!(
+        (after[0].1.boot_id.as_str(), after[0].1.epoch),
+        ("boot-2", 1)
+    );
+    let rec = store.load().unwrap();
+    assert_eq!(rec.lease_state, LeaseRecordState::Holder);
+    assert_eq!((rec.boot_id(), rec.lease_epoch), (Some("boot-2"), 1));
+    assert!(rec.boot_ids.contains(&"boot-1".to_string()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_record_from_another_data_folder_is_not_ours() {
+    let env = Env::new(FakeBackend::drive_like()).await;
+    let store = Arc::new(MemoryLeaseStore::new());
+    let mut c = cfg("aaaa", "boot-1");
+    c.home = Some("/data/a".into());
+    let mut a = env.lease(c, 0, store.clone());
+    assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
+
+    // A copy of state.sqlite in another folder, while the first one runs.
+    let copy = Arc::new(MemoryLeaseStore::new());
+    copy.save(&store.load().unwrap()).unwrap();
+    let mut c = cfg("aaaa", "boot-clone");
+    c.home = Some("/data/b".into());
+    let mut clone = env.lease(c, 0, copy.clone());
+    let s = clone.claim().await.unwrap();
+    let holder = holder_of(&s).expect("standby");
+    assert_eq!(holder.boot_id, "boot-1");
+    assert_eq!(env.markers().await.len(), 1, "the clone wrote nothing");
+    let copied = copy.load().unwrap();
+    assert_eq!(copied.home.as_deref(), Some("/data/b"));
+    assert!(!copied.boot_ids.contains(&"boot-1".to_string()));
+    assert_eq!(a.heartbeat().await.unwrap(), Heartbeat::Held);
+
+    // The same folder (spelled in another case) is this install's restart.
+    let mut c = cfg("aaaa", "boot-2");
+    c.home = Some("/DATA/A".into());
+    let mut a2 = env.lease(c, 0, store.clone());
+    assert_eq!(a2.claim().await.unwrap(), LeaseState::Holder);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_twin_that_resumed_our_marker_makes_us_step_down() {
+    let env = Env::new(FakeBackend::drive_like()).await;
+    let mut a = env.lease_mem(cfg("aaaa", "boot-1"), 0);
+    assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
+    // A clone the folder check cannot see (the same path on another host) resumes it.
+    let mut c = cfg("aaaa", "boot-twin");
+    c.last_boot_id = Some("boot-1".into());
+    let mut twin = env.lease_mem(c, 0);
+    assert_eq!(twin.claim().await.unwrap(), LeaseState::Holder);
+    match a.heartbeat().await.unwrap() {
+        Heartbeat::Lost { holder } => assert_eq!(holder.boot_id, "boot-twin"),
+        h => panic!("{h:?}"),
+    }
+    assert!(holder_of(&a.claim().await.unwrap()).is_some(), "standby");
+    assert_eq!(twin.heartbeat().await.unwrap(), Heartbeat::Held);
+    let fresh = env.fresh().await;
+    assert_eq!(fresh.len(), 1, "{fresh:?}");
+    assert_eq!(fresh[0].boot_id, "boot-twin");
 }
