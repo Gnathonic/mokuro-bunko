@@ -25,7 +25,10 @@
   emptied folder in the provider's trash (never a permanent delete). A copy that is
   byte-for-byte the same goes to the trash; covers, layers and OCR files only the
   younger folder has move in under the older spelling; its `series.json` is merged into
-  the series first. Two different archives (or OCR files Bunko cannot choose between)
+  the series first. When both spellings hold different OCR for the same archive, the
+  one matching the primary OCR setting becomes the main file and the other is always
+  kept beside it as `<Volume>.pre-upgrade.mokuro` first, so no OCR or edit is lost.
+  Two different archives (or OCR files Bunko cannot choose between)
   stay where they are, listed under the Storage tab's conflicts with **Keep this copy**
   / **Keep that copy**; the tab also lists the **Recent merges**. Upload owners, OCR
   records and volume ids follow every moved volume. A folder Mokuro Reader keeps

@@ -290,12 +290,15 @@ impl Services {
             .and_then(|_| watch_listings(&dav, &layout.library()));
         if let Some(handle) = &storage {
             // Changes made directly in the cloud run the hooks a DAV write runs (D20).
-            handle.set_hooks(Arc::new(crate::storage::ServerCloudHooks::new(
-                layout.library(),
-                dav_hooks.clone(),
-                library.clone(),
-                db.clone(),
-            )));
+            handle.set_hooks(Arc::new(
+                crate::storage::ServerCloudHooks::new(
+                    layout.library(),
+                    dav_hooks.clone(),
+                    library.clone(),
+                    db.clone(),
+                )
+                .with_thumbnails(thumbs.clone()),
+            ));
             // Case variants merge into the oldest spelling (§5.9).
             handle.set_case_merge_policy(Arc::new(crate::storage::ServerCaseMergePolicy::new(
                 layout.library(),

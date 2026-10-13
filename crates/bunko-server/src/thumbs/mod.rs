@@ -128,8 +128,6 @@ impl NoCoverSet {
     }
 
     /// Record that `cbz` (this version of it) has no cover.
-    // unmounted: `file` is in the store's local directory, not in the library.
-    #[allow(clippy::disallowed_methods)]
     pub fn insert(&self, cbz: &Path) -> std::io::Result<()> {
         let Some(k) = self.key(cbz) else {
             return Err(std::io::Error::new(
@@ -137,25 +135,53 @@ impl NoCoverSet {
                 "the archive is not in the library",
             ));
         };
-        let rows: Vec<(String, u64, String)> = {
+        let rows = {
             let mut set = self.set.lock();
             // A path keeps one record: its newest version.
             set.retain(|(p, _, _)| *p != k.0);
             set.insert(k);
-            let mut rows: Vec<_> = set
-                .iter()
-                .map(|(p, s, m)| (p.clone(), *s, m.to_string()))
-                .collect();
-            rows.sort();
-            rows
+            Self::rows(&set)
         };
+        self.save(&rows)
+    }
+
+    /// Drop the record of `cbz` (whatever its version): a case merge trashed or moved
+    /// the archive (spec §5.9).
+    pub fn remove(&self, cbz: &Path) -> std::io::Result<()> {
+        let Some(rel) = crate::ocr::types::rel_of(&self.library, cbz) else {
+            return Ok(());
+        };
+        let rows = {
+            let mut set = self.set.lock();
+            let before = set.len();
+            set.retain(|(p, _, _)| *p != rel);
+            if set.len() == before {
+                return Ok(());
+            }
+            Self::rows(&set)
+        };
+        self.save(&rows)
+    }
+
+    fn rows(set: &HashSet<(String, u64, i128)>) -> Vec<(String, u64, String)> {
+        let mut rows: Vec<_> = set
+            .iter()
+            .map(|(p, s, m)| (p.clone(), *s, m.to_string()))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    // unmounted: `file` is in the store's local directory, not in the library.
+    #[allow(clippy::disallowed_methods)]
+    fn save(&self, rows: &[(String, u64, String)]) -> std::io::Result<()> {
         if let Some(dir) = self.file.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = self.file.with_extension("json.tmp");
         std::fs::write(
             &tmp,
-            serde_json::to_vec(&rows).map_err(std::io::Error::other)?,
+            serde_json::to_vec(rows).map_err(std::io::Error::other)?,
         )?;
         std::fs::rename(&tmp, &self.file)
     }
@@ -345,9 +371,24 @@ pub struct Thumbnails {
     pending: AtomicI64,
     /// Covers that would not decode, by archive stamp (not retried until it changes).
     failed: Mutex<HashMap<PathBuf, Stamp>>,
+    /// A cloud library's `.nocover` records (set by [`Thumbnails::spawn_remote`]).
+    nocover: std::sync::OnceLock<Arc<NoCoverSet>>,
 }
 
 impl Thumbnails {
+    /// Forget the `.nocover` record of `cbz` on a cloud library (a case merge trashed
+    /// or moved the archive); nothing on a local one, where the marker is a file.
+    pub fn forget_nocover(&self, cbz: &Path) {
+        if let Some(n) = self.nocover.get()
+            && let Err(e) = n.remove(cbz)
+        {
+            tracing::warn!(
+                "could not drop the .nocover record of {}: {e}",
+                cbz.display()
+            );
+        }
+    }
+
     /// Volumes still waiting for a cover, as of the last scan.
     pub fn pending(&self) -> i64 {
         self.pending.load(Ordering::Relaxed)
@@ -437,6 +478,7 @@ impl Thumbnails {
             .parent()
             .map_or_else(|| PathBuf::from("nocover.json"), |d| d.join("nocover.json"));
         let nocover = Arc::new(NoCoverSet::load(file, library.clone()));
+        let _ = self.nocover.set(nocover.clone());
         let queue = Arc::new((
             Mutex::new(Arrivals {
                 full: true,
@@ -646,6 +688,26 @@ pub fn remove_corrupt_sidecars(library: &Path, db: Option<&Database>) -> usize {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn a_nocover_record_is_dropped_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("nocover.json");
+        std::fs::write(
+            &file,
+            br#"[["kingdom/Vol 1.cbz", 3, "7"], ["Kingdom/Vol 1.cbz", 3, "7"]]"#,
+        )
+        .unwrap();
+        let lib = dir.path().join("library");
+        let set = NoCoverSet::load(file.clone(), lib.clone());
+        assert_eq!(set.len(), 2);
+        set.remove(&lib.join("kingdom/Vol 1.cbz")).unwrap();
+        assert_eq!(set.len(), 1);
+        let again = NoCoverSet::load(file, lib.clone());
+        assert_eq!(again.len(), 1, "persisted");
+        set.remove(&lib.join("Other/none.cbz")).unwrap();
+        assert_eq!(set.len(), 1);
+    }
 
     fn cbz(path: &Path, members: &[(&str, &[u8])]) {
         let f = std::fs::File::create(path).unwrap();

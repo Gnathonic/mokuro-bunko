@@ -756,6 +756,133 @@ fn differing_main_sidecars_keep_the_one_matching_the_primary_recipe() {
     assert_eq!(t.names("Kingdom"), ["Vol 1.cbz", "Vol 1.mokuro"]);
 }
 
+fn stamped_mokuro(text: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "pages": [], "note": text, "ocr_engine": {"id": "hayai-nova", "detector": "rtdetr"}
+    }))
+    .unwrap()
+}
+
+/// The loser's main wins: the winner's is kept as a layer first (stamped or not), then
+/// replaced in place; the winner's is never trashed before the replacement is in.
+#[test]
+fn a_winning_loser_main_replaces_the_winners_in_place_after_keeping_it() {
+    for (name, make) in [
+        ("drive_like", FakeBackend::drive_like as fn() -> FakeBackend),
+        ("mega_like", FakeBackend::mega_like),
+        ("webdav_cas", FakeBackend::webdav_cas),
+    ] {
+        let t = T::new(
+            make(),
+            &[
+                ("Kingdom/Vol 1.cbz", b"same"),
+                ("Kingdom/Vol 1.mokuro", &stamped_mokuro("winner")),
+                ("kingdom/Vol 1.cbz", b"same"),
+                ("kingdom/Vol 1.mokuro", &mokuro("loser")),
+            ],
+        );
+        t.steady();
+        let old_main = t.at("Kingdom/Vol 1.mokuro").unwrap().pid;
+        let loser_main = t.at("kingdom/Vol 1.mokuro").unwrap().pid;
+        *t.policy.choice.lock() = MergeChoice::B;
+        t.policy();
+        t.wait_merges(1);
+        assert_eq!(
+            t.names("Kingdom"),
+            ["Vol 1.cbz", "Vol 1.mokuro", "Vol 1.pre-upgrade.mokuro"],
+            "{name}"
+        );
+        assert_eq!(
+            t.bytes("Kingdom/Vol 1.mokuro").unwrap(),
+            mokuro("loser"),
+            "{name}"
+        );
+        // Bunko's own stamp is no shortcut here: the winner's is kept.
+        let kept: serde_json::Value =
+            serde_json::from_slice(&t.bytes("Kingdom/Vol 1.pre-upgrade.mokuro").unwrap()).unwrap();
+        assert_eq!(kept["note"], "winner", "{name}");
+        assert!(kept.get("ocr_engine").is_none(), "{name}");
+        assert!(t.at("kingdom").is_none(), "{name}");
+        let trashed = t.fake.trashed_log();
+        assert!(
+            trashed.contains(&loser_main),
+            "{name}: the loser's copy is trashed"
+        );
+        if name == "mega_like" {
+            // A replace there is a new node: the old one leaves after the commit.
+            assert_ne!(
+                t.at("Kingdom/Vol 1.mokuro").unwrap().pid,
+                old_main,
+                "{name}"
+            );
+        } else {
+            // Replaced in place: same node, new version.
+            assert_eq!(
+                t.at("Kingdom/Vol 1.mokuro").unwrap().pid,
+                old_main,
+                "{name}"
+            );
+        }
+        assert!(t.fake.deleted_log().is_empty(), "{name}: nothing deleted");
+        assert!(
+            t.s().conflicts().is_empty(),
+            "{name}: {:?}",
+            t.s().conflicts()
+        );
+        // The DB hooks: the loser's OCR row now names the winner's main.
+        assert!(
+            t.hooks.merged.lock().contains(&(
+                "kingdom/Vol 1.mokuro".into(),
+                "Kingdom/Vol 1.mokuro".into(),
+                false
+            )),
+            "{name}: {:?}",
+            t.hooks.merged.lock()
+        );
+    }
+}
+
+#[test]
+fn a_refused_replace_leaves_the_winners_main_and_blocks_the_group() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("Kingdom/Vol 1.cbz", b"same"),
+            ("Kingdom/Vol 1.mokuro", &mokuro("winner")),
+            ("kingdom/Vol 1.cbz", b"same"),
+            ("kingdom/Vol 1.mokuro", &mokuro("loser")),
+        ],
+    );
+    t.steady();
+    // The first upload is the pre-upgrade layer; the replace (the second) gets a 412.
+    let fake = t.fake.clone();
+    let n = Arc::new(AtomicUsize::new(0));
+    let n2 = n.clone();
+    t.fake.set_call_hook(Some(Arc::new(move |op| {
+        if op == FakeOp::Upload && n2.fetch_add(1, Ordering::SeqCst) == 1 {
+            fake.fail_next(FakeOp::Upload, BErr::PreconditionFailed);
+        }
+    })));
+    *t.policy.choice.lock() = MergeChoice::B;
+    t.policy();
+    t.wait_merges(1);
+    assert_eq!(
+        n.load(Ordering::SeqCst),
+        2,
+        "layer, then the refused replace"
+    );
+    assert_eq!(t.bytes("Kingdom/Vol 1.mokuro").unwrap(), mokuro("winner"));
+    assert_eq!(t.names("kingdom"), ["Vol 1.cbz", "Vol 1.mokuro"]);
+    assert!(
+        t.fake.trashed_log().is_empty(),
+        "nothing of the group is trashed"
+    );
+    let b = t.blocked();
+    assert_eq!(b.len(), 1, "{b:?}");
+    assert_eq!(b[0].this, ["kingdom/Vol 1.mokuro"]);
+    assert_eq!(b[0].that, ["Kingdom/Vol 1.mokuro"]);
+}
+
 #[test]
 fn identical_archives_move_a_loser_only_layer_in_under_the_winners_stem() {
     let t = T::new(
