@@ -568,15 +568,15 @@ impl OcrAdmin for OcrControl {
         let _ = ask(self, |s| s.bump_page_pub());
     }
 
-    /// `/api/ocr/upgrade` (GET census), `/api/ocr/upgrade/<volume>` (POST, `force`).
-    /// `/api/ocr/upgrade/<volume>/revert` is gone (410): an upgrade replaces the old file.
+    /// `/api/ocr/upgrade` (GET census), `/api/ocr/upgrade/<volume>` (POST: upgrade that
+    /// volume now). `/api/ocr/upgrade/<volume>/revert` is gone (410).
     fn other(
         &self,
         _config: &Config,
         method: &Method,
         path: &[&str],
         _query: &str,
-        body: &Value,
+        _body: &Value,
     ) -> Option<Result<(u16, Value), OcrError>> {
         // 0.7: `GET /api/ocr/install` (where this server's background OCR backend
         // install stands) and `POST /api/ocr/install` (start it, or retry a failed one).
@@ -609,7 +609,7 @@ impl OcrAdmin for OcrControl {
         if path.last() == Some(&"revert") {
             return Some(Err(OcrError::new(
                 410,
-                "an upgrade replaces the old OCR file, so there is nothing to revert to",
+                "there is no revert: an upgrade keeps an OCR file Bunko did not write as the volume's pre-upgrade layer",
             )));
         }
         let rel: String = path[2..]
@@ -639,9 +639,6 @@ impl OcrAdmin for OcrControl {
         if !bunko_store::fs::is_file(&cbz) {
             return Some(Err(OcrError::new(404, "no such volume")));
         }
-        if bunko_sched::py::truthy(body.get("force")) {
-            up.force(&rel);
-        }
         let verdict = up.judge(&cbz, &rel).1;
         let answer = match verdict {
             super::upgrade::Verdict::Ready(layer) => match up.direct_replace(&cbz, &layer) {
@@ -656,12 +653,6 @@ impl OcrAdmin for OcrControl {
                 return Some(Err(OcrError::new(
                     409,
                     "the archive is missing pages its sidecar names; replace it with a whole volume first",
-                )));
-            }
-            super::upgrade::Verdict::SkippedEdited => {
-                return Some(Err(OcrError::new(
-                    409,
-                    "its sidecar was edited by a person; send force to upgrade it anyway",
                 )));
             }
             super::upgrade::Verdict::Current => json!({"success": true, "mode": "current"}),

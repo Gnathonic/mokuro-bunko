@@ -1,5 +1,6 @@
 //! Generation upgrade (spec generation-upgrade.md): census, direct replace, generate then
-//! swap through the scheduler. The upgrade replaces the old file and keeps no layer of it;
+//! swap through the scheduler. The upgrade replaces the old file; stock mokuro output
+//! (no Bunko stamp) is first kept as the `pre-upgrade` layer (D4, `ocr_upgrade_edited.rs`);
 //! layers an earlier beta kept are cleaned up.
 
 // Fixtures are set up and checked with std::fs on purpose.
@@ -58,8 +59,8 @@ fn direct_replace_swaps_a_matching_layer_in() {
     );
     assert_eq!(
         sidecars(&lib.join("A")),
-        ["V1.mokuro"],
-        "the old file is replaced, not kept; the layer it came from is not kept twice"
+        ["V1.mokuro", "V1.pre-upgrade.mokuro"],
+        "the old file is kept as `pre-upgrade`; the layer it came from is not kept twice"
     );
     assert!(
         !h.s.owed.volumes.contains_key("A/V1.cbz"),
@@ -84,7 +85,10 @@ fn a_direct_replace_keeps_a_layer_an_enabled_row_writes() {
         HAYAI
     );
     // Removing it would only queue the `nova` row to write it again.
-    assert_eq!(sidecars(&lib.join("A")), ["V1.mokuro", "V1.nova.mokuro"]);
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.mokuro", "V1.nova.mokuro", "V1.pre-upgrade.mokuro"]
+    );
 }
 
 #[test]
@@ -119,10 +123,13 @@ fn a_volume_without_a_match_gets_an_upgrade_job_after_ordinary_work() {
     h.event(&p, ready(&sid));
     h.event(&p, started(&sid, &vols[1].1, 3));
     h.done_with(&p, &sid, &vols[1].1, &name, 3, 1.0, HAYAI.as_bytes());
-    // Swapped in, never `_1`-suffixed; the old file replaced, no layer kept.
+    // Swapped in, never `_1`-suffixed; the old file (no Bunko stamp) kept first.
     let bare = json(&lib.join("A/V1.mokuro"));
     assert_eq!(bare["ocr_engine"]["id"], "hayai-nova");
-    assert_eq!(sidecars(&lib.join("A")), ["V1.mokuro"]);
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.mokuro", "V1.pre-upgrade.mokuro"]
+    );
     assert!(h.s.failures.is_empty());
     // The next walk sees the current recipe: nothing more.
     h.at(31.0);
@@ -202,5 +209,8 @@ fn a_layer_an_earlier_beta_kept_goes_once_the_volume_is_upgraded() {
         "hayai-nova"
     );
     h.at(31.0);
-    assert_eq!(sidecars(&lib.join("B")), ["V1.mokuro"]);
+    assert_eq!(
+        sidecars(&lib.join("B")),
+        ["V1.mokuro", "V1.pre-upgrade.mokuro"]
+    );
 }

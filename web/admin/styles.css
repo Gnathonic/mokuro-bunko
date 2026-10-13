@@ -1935,28 +1935,6 @@ details[open] > .bench-res__summary::before {
     font-variant-numeric: tabular-nums;
 }
 
-.upgrade-edited {
-    list-style: none;
-    margin: 0.5rem 0;
-    padding: 0;
-    max-height: 14rem;
-    overflow-y: auto;
-}
-
-.upgrade-edited li {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    padding: 0.25rem 0;
-    font-size: 0.8125rem;
-}
-
-.upgrade-edited__name {
-    flex: 1 1 14rem;
-    overflow-wrap: anywhere;
-}
-
 .gen-dirty {
     margin-left: auto;
     font-size: 0.75rem;
