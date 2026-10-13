@@ -5,7 +5,7 @@
 //! injection that the store's tests run on. [`index::Index`] is the disposable
 //! `index.sqlite` that maps provider nodes to library paths; [`names`] holds the NFC,
 //! fold and effective-mtime rules. Default features add the providers' drivers
-//! (`webdav::WebDavBackend`, `gdrive::GDriveBackend`) and [`auth`], which signs in to
+//! (`webdav::WebDavBackend`, `gdrive::GDriveBackend`, `mega::MegaBackend`) and [`auth`], which signs in to
 //! the OAuth providers and keeps their credentials.
 
 #[cfg(feature = "oauth")]
@@ -16,6 +16,8 @@ pub mod fake;
 #[cfg(feature = "gdrive")]
 pub mod gdrive;
 pub mod index;
+#[cfg(feature = "mega")]
+pub mod mega;
 pub mod names;
 #[cfg(feature = "webdav")]
 pub mod webdav;

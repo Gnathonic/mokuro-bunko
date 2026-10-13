@@ -728,6 +728,7 @@ dependencies = [
  "base64 0.22.1",
  "bunko-core",
  "bunko-dav",
+ "bunko-mega",
  "bunko-remote",
  "bunko-store",
  "bytes",
@@ -753,6 +754,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
