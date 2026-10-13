@@ -5,6 +5,9 @@
 //! Adding a volume together with its existing OCR file is not an edit; changing that file
 //! afterwards is; re-sending its exact bytes is not.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;

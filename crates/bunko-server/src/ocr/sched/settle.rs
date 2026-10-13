@@ -32,7 +32,7 @@ pub struct ReturnContext {
 pub fn read_own_copy(path: &Path) -> Option<String> {
     use std::io::Read;
     let started = std::time::Instant::now();
-    let mut f = match std::fs::File::open(path) {
+    let mut f = match bunko_store::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => return Some(format!("{e} at byte 0")),
     };
@@ -191,6 +191,8 @@ impl Scheduler {
             if let Some((path, _)) = uploaded
                 && let Some(dir) = path.parent()
             {
+                // unmounted: an uploaded result's `.processing` spool directory.
+                #[allow(clippy::disallowed_methods)]
                 let _ = std::fs::remove_dir_all(dir);
             }
             return;
@@ -310,6 +312,8 @@ impl Scheduler {
                     .insert((sid.to_string(), claim.to_string()), (path, sha256));
             }
             Some(expected) => {
+                // unmounted: the result's `.processing` spool directory.
+                #[allow(clippy::disallowed_methods)]
                 let _ = std::fs::remove_dir_all(&dir);
                 let reason = format!(
                     "its sidecar arrived as {}, not {}",
@@ -329,6 +333,8 @@ impl Scheduler {
             }
             None => {
                 // A cancelled or ended claim may still be answered: nothing to do.
+                // unmounted: the result's `.processing` spool directory.
+                #[allow(clippy::disallowed_methods)]
                 let _ = std::fs::remove_dir_all(&dir);
             }
         }
@@ -450,7 +456,7 @@ impl Scheduler {
             return;
         }
         let path = job.path(&self.library());
-        let meta = match std::fs::metadata(&path) {
+        let meta = match bunko_store::fs::metadata(&path) {
             Ok(m) => Some(m),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 self.release(&job, &format!("{label}: the archive is gone"), false);

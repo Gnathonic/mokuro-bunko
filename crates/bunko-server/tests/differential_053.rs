@@ -9,6 +9,9 @@
 //! when it is absent, or set `BUNKO_REQUIRE_REF_PYTHON=1` to fail instead.
 //! `BUNKO_DAV_DIFF_REPORT=1` prints every step.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 #[path = "../../bunko-dav/tests/common/diff.rs"]
 mod diff;
 

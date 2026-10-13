@@ -1,6 +1,9 @@
 //! The metadata runtime: startup compile, watcher-triggered recompiles, the store over
 //! bunko-db, and shutdown.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod library_support;
 
 use bunko_library::MetadataStore;

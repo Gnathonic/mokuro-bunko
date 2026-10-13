@@ -6,6 +6,8 @@ use bunko_db::UserStatus;
 use serde_json::{Map, Value, json};
 
 /// `shutil.disk_usage`: (total, used, free); zeros when the path cannot be asked.
+// unmounted: statvfs measures the storage disk, not the library store (a remote
+// store's `capacity()` arrives in M2).
 fn disk_usage(path: &std::path::Path) -> (u64, u64, u64) {
     match fs4::statvfs(path) {
         Ok(st) => {
@@ -42,10 +44,10 @@ pub(super) async fn status(s: &AdminState) -> Response {
         let (disk_total, disk_used, disk_free) = disk_usage(&storage_path);
         // Series folders: the immediate directories of the library (0.5.2 counts these
         // as "volumes").
-        let volume_count = std::fs::read_dir(&library)
+        let volume_count = bunko_store::fs::read_dir(&library)
             .map(|it| {
                 it.filter_map(Result::ok)
-                    .filter(|e| e.path().is_dir())
+                    .filter(|e| bunko_store::fs::is_dir(e.path()))
                     .count()
             })
             .unwrap_or(0);

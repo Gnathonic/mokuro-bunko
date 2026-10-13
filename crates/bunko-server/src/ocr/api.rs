@@ -382,6 +382,8 @@ enum UploadCheck {
     Refused(u16, &'static str, &'static str),
 }
 
+// unmounted: the result is stored in the `.processing` spool, beside the library.
+#[allow(clippy::disallowed_methods)]
 async fn result_upload(
     State(ocr): State<OcrControl>,
     ctx: RequestCtx,
@@ -612,6 +614,8 @@ pub fn parse_range(value: &str, size: u64) -> Result<(u64, u64), u16> {
     Ok((start, end.min(size - 1)))
 }
 
+// unmounted: the benchmark sample lives in the `.processing` spool.
+#[allow(clippy::disallowed_methods)]
 async fn bench_sample(
     State(ocr): State<OcrControl>,
     ctx: RequestCtx,

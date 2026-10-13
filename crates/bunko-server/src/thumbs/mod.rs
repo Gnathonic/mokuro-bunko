@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use bunko_core::Config;
 use bunko_db::Database;
+use bunko_store::{Durability, Mode, Origin, WriteIntent, fs};
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -56,12 +57,12 @@ pub fn nocover_path(cbz: &Path) -> PathBuf {
 
 /// `needs_thumbnail`.
 pub fn needs_thumbnail(cbz: &Path) -> bool {
-    cbz.is_file()
+    fs::is_file(cbz)
         && cbz
             .extension()
             .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
-        && !cover_path(cbz).exists()
-        && !nocover_path(cbz).exists()
+        && !fs::exists(cover_path(cbz))
+        && !fs::exists(nocover_path(cbz))
 }
 
 fn suffix_lower(name: &str) -> String {
@@ -85,7 +86,7 @@ pub enum Cover {
 /// an image suffix (directories, `__MACOSX` and the embedded `<stem>.webp` included,
 /// as in 0.5.2).
 pub fn cover_image(cbz: &Path) -> Cover {
-    let file = match std::fs::File::open(cbz) {
+    let file = match fs::File::open(cbz) {
         Ok(f) => f,
         Err(e) => return Cover::None(e.to_string()),
     };
@@ -133,7 +134,7 @@ pub fn ensure_thumbnail(cbz: &Path) -> Result<bool, String> {
         Cover::Image(b) => b,
         Cover::None(why) => {
             info!("No cover image found in: {name} ({why})");
-            std::fs::File::create(nocover_path(cbz))
+            fs::File::create(nocover_path(cbz))
                 .map_err(|e| format!("could not write the .nocover marker: {e}"))?;
             return Ok(false);
         }
@@ -145,10 +146,11 @@ pub fn ensure_thumbnail(cbz: &Path) -> Result<bool, String> {
     let mut tmp = out.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, &webp)
-        .and_then(|()| std::fs::rename(&tmp, &out))
+    let intent = WriteIntent::new(Mode::CreateNew, Origin::Thumbs, Durability::Deferred);
+    fs::write(&tmp, &webp)
+        .and_then(|()| fs::publish(&tmp, &out, &intent).map(|_| ()))
         .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = fs::remove_file(&tmp);
             format!("Failed to generate thumbnail for {name}: {e}")
         })?;
     info!(
@@ -161,7 +163,7 @@ pub fn ensure_thumbnail(cbz: &Path) -> Result<bool, String> {
 }
 
 fn walk(dir: &Path, keep: &mut dyn FnMut(&Path)) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -192,7 +194,7 @@ pub fn thumbnail_candidates(library: &Path) -> Vec<PathBuf> {
 type Stamp = (u64, i128);
 
 fn stamp(path: &Path) -> Option<Stamp> {
-    let m = std::fs::metadata(path).ok()?;
+    let m = fs::metadata(path).ok()?;
     let mtime = m
         .modified()
         .ok()
@@ -320,7 +322,7 @@ pub fn check_sidecar(path: &Path) -> SidecarCheck {
 fn check_sidecar_capped(path: &Path, cap: u64) -> SidecarCheck {
     let too_large = |e: &std::io::Error| e.kind() == std::io::ErrorKind::FileTooLarge;
     let open = || -> std::io::Result<Box<dyn Read>> {
-        let file = std::fs::File::open(path)?;
+        let file = fs::File::open(path)?;
         let gz = path.to_string_lossy().ends_with(".mokuro.gz");
         let reader: Box<dyn Read> = if gz {
             Box::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file)))
@@ -371,7 +373,7 @@ pub fn remove_corrupt_sidecars(library: &Path, db: Option<&Database>) -> usize {
     found.sort();
     let mut removed = 0;
     for path in found {
-        if !path.is_file() {
+        if !fs::is_file(&path) {
             continue;
         }
         match check_sidecar(&path) {
@@ -386,7 +388,7 @@ pub fn remove_corrupt_sidecars(library: &Path, db: Option<&Database>) -> usize {
             }
             SidecarCheck::Invalid => {}
         }
-        match std::fs::remove_file(&path) {
+        match fs::remove_file(&path) {
             Ok(()) => {
                 removed += 1;
                 info!("Removed corrupt mokuro sidecar: {}", path.display());
@@ -404,6 +406,7 @@ pub fn remove_corrupt_sidecars(library: &Path, db: Option<&Database>) -> usize {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
     use std::io::Write;

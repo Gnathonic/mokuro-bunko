@@ -313,6 +313,8 @@ pub fn normalize_code(input: &str) -> String {
 }
 
 /// Delete the 0.7 betas' `<storage>/.setup-token` (it no longer opens anything).
+// unmounted: a file in the storage dir, beside the library.
+#[allow(clippy::disallowed_methods)]
 pub fn remove_legacy_token(layout: &StorageLayout) {
     let path = layout.base.join(LEGACY_TOKEN_FILE);
     match std::fs::remove_file(&path) {
@@ -891,7 +893,10 @@ impl SetupPlan {
             "files" => {
                 let (cert, key) = (text(ssl, "cert_file"), text(ssl, "key_file"));
                 for (label, p) in [("certificate", &cert), ("private key", &key)] {
-                    if p.is_empty() || !std::path::Path::new(p).is_file() {
+                    // unmounted: TLS certificate and key files (config).
+                    #[allow(clippy::disallowed_methods)]
+                    let present = !p.is_empty() && std::path::Path::new(p).is_file();
+                    if !present {
                         return Err(format!(
                             "HTTPS: the {label} file {p} does not exist on the server"
                         ));

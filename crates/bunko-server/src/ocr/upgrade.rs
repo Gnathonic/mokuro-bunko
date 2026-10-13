@@ -18,6 +18,7 @@ use std::time::Duration;
 use bunko_core::config::UpgradeConfig;
 use bunko_core::generations::Generation;
 use bunko_db::{AuditDetails, Database, NewAuditEvent};
+use bunko_store::{Durability, Mode, Origin, WriteIntent, fs};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
@@ -242,7 +243,7 @@ impl Upgrade {
     /// 2 s. Adding the file (`upload`: it did not exist before) is not an edit, nor is
     /// re-sending its exact bytes (`edit` with `unchanged`).
     fn edited(&self, bare: &Path, bare_rel: &str, row: Option<&bunko_db::OcrSidecar>) -> bool {
-        if let (Some(r), Ok(meta)) = (row, std::fs::metadata(bare))
+        if let (Some(r), Ok(meta)) = (row, fs::metadata(bare))
             && let Some(written) = sqlite_utc_to_epoch(&r.written_at)
         {
             let mtime = mtime_ns(&meta) as f64 / 1e9;
@@ -286,7 +287,7 @@ impl Upgrade {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let Ok(rd) = std::fs::read_dir(dir) else {
+        let Ok(rd) = fs::read_dir(dir) else {
             return Vec::new();
         };
         let names: Vec<String> = rd
@@ -556,11 +557,16 @@ impl Upgrade {
             .db
             .as_ref()
             .and_then(|db| db.get_ocr_sidecar(&bare_rel).ok().flatten());
-        let recipe = if bare.exists() {
+        let recipe = if fs::exists(&bare) {
             classify(&bare, row.as_ref())
         } else {
             Recipe::unknown()
         };
+        let intent = WriteIntent::new(
+            Mode::Replace { base: None },
+            Origin::Upgrade,
+            Durability::Sync,
+        );
         if mode == "direct" {
             let tmp = bare.with_file_name(format!(
                 ".{}.upgrade.tmp",
@@ -568,12 +574,11 @@ impl Upgrade {
                     .map(|f| f.to_string_lossy().into_owned())
                     .unwrap_or_default()
             ));
-            std::fs::copy(new, &tmp)
-                .map_err(|e| format!("could not copy {}: {e}", new.display()))?;
-            std::fs::rename(&tmp, &bare)
+            fs::copy(new, &tmp).map_err(|e| format!("could not copy {}: {e}", new.display()))?;
+            fs::publish(&tmp, &bare, &intent)
                 .map_err(|e| format!("could not install {}: {e}", bare.display()))?;
         } else {
-            super::collect::move_into_place(new, &bare)
+            super::collect::move_into_place(new, &bare, &intent)
                 .map_err(|e| format!("could not install {}: {e}", bare.display()))?;
         }
         // Bookkeeping: the old file's provenance row goes with it (the caller records the
@@ -640,7 +645,7 @@ impl Upgrade {
             (Ok(a), Ok(b)) if a == b
         );
         if !enabled && identical {
-            let _ = std::fs::remove_file(layer);
+            let _ = fs::remove_file(layer);
             if let Some(db) = &self.db {
                 let _ = db.forget_ocr_sidecar(&layer_rel);
             }
@@ -667,7 +672,7 @@ impl Upgrade {
         let Some(target) = self.primary.lock().clone().map(|p| p.output_affecting()) else {
             return false;
         };
-        if !bare.is_file() {
+        if !fs::is_file(bare) {
             return false;
         }
         let bare_rel = rel_of(&self.library, bare).unwrap_or_default();
@@ -681,22 +686,22 @@ impl Upgrade {
     /// Remove `layer` when an earlier beta's upgrade kept it (stamped) and the caller
     /// found the bare file already the upgraded output. One log line per file.
     fn drop_kept_layer(&self, bare: &Path, layer: &Path) -> bool {
-        if !layer.is_file() || !Self::kept_by_upgrade(layer) {
+        if !fs::is_file(layer) || !Self::kept_by_upgrade(layer) {
             return false;
         }
         let Some(_guard) = self.locks.try_lock(layer) else {
             return false;
         };
         let layer_rel = rel_of(&self.library, layer).unwrap_or_default();
-        if let Err(e) = std::fs::remove_file(layer) {
+        if let Err(e) = fs::remove_file(layer) {
             tracing::warn!("could not remove {layer_rel}, the old OCR an upgrade kept: {e}");
             return false;
         }
         if let Some(db) = &self.db {
             let _ = db.forget_ocr_sidecar(&layer_rel);
         }
-        let _ = std::fs::remove_file(self.backup_of(layer));
-        let _ = std::fs::remove_dir(self.backups_dir());
+        let _ = fs::remove_file(self.backup_of(layer));
+        let _ = fs::remove_dir(self.backups_dir());
         tracing::info!(
             "Removed {layer_rel}: the old OCR an earlier beta's upgrade kept as a layer; {} has replaced it",
             rel_of(&self.library, bare).unwrap_or_default()
@@ -784,13 +789,16 @@ impl Upgrade {
         for (bare_rel, kept_rel) in seen {
             let bare = self.library.join(&bare_rel);
             let layer = self.library.join(&kept_rel);
-            if layer.is_file() && self.bare_upgraded(&bare) && self.drop_kept_layer(&bare, &layer) {
+            if fs::is_file(&layer)
+                && self.bare_upgraded(&bare)
+                && self.drop_kept_layer(&bare, &layer)
+            {
                 removed += 1;
                 touched.insert(bare.with_extension("cbz"));
             }
         }
         for cbz in touched {
-            if cbz.is_file() {
+            if fs::is_file(&cbz) {
                 self.facts.sidecar_installed(&cbz);
             }
             if let Some(rel) = rel_of(&self.library, &cbz) {
@@ -836,6 +844,7 @@ impl super::sched::Scheduler {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
 

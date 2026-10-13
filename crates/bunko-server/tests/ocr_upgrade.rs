@@ -2,6 +2,9 @@
 //! swap through the scheduler. The upgrade replaces the old file and keeps no layer of it;
 //! layers an earlier beta kept are cleaned up.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod ocr_common;
 
 use std::sync::Arc;

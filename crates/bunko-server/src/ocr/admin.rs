@@ -143,7 +143,7 @@ fn compute_stats(ocr: &OcrControl, rows: &[Generation]) -> Value {
             let rel = super::types::rel_of(&library, cbz).unwrap_or_default();
             // The row's own files: a row retired from primary left bare ones.
             let (plain, gz) = super::owed::sidecar_paths(cbz, &row.files_suffix());
-            if plain.exists() || gz.exists() {
+            if bunko_store::fs::exists(&plain) || bunko_store::fs::exists(&gz) {
                 done += 1;
                 present.insert(rel.clone());
             } else if !row.primary && skipped.get(&rel).is_some_and(|g| g.contains(&row.id)) {
@@ -636,7 +636,7 @@ impl OcrAdmin for OcrControl {
             return Some(Err(OcrError::new(400, "not a volume of the library")));
         }
         let cbz = self.core().layout.library().join(&rel);
-        if !cbz.is_file() {
+        if !bunko_store::fs::is_file(&cbz) {
             return Some(Err(OcrError::new(404, "no such volume")));
         }
         if bunko_sched::py::truthy(body.get("force")) {

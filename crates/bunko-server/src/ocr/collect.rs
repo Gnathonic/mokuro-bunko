@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use bunko_core::generations::Generation;
 use bunko_db::{AuditDetails, Database, NewAuditEvent, OcrSidecar};
+use bunko_store::{Durability, Mode, Origin, WriteIntent, fs};
 use serde_json::{Map, Value};
 use sha2::Digest;
 
@@ -98,7 +99,7 @@ pub fn audit_rejected(req: &CollectRequest, reason: &str) {
 
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
-    let mut f = std::fs::File::open(path)?;
+    let mut f = fs::File::open(path)?;
     let mut hasher = sha2::Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
@@ -155,7 +156,7 @@ pub fn volume_uuid_for(
             let Some(uuid) = sidecar_volume_uuid(&candidate) else {
                 continue;
             };
-            let Some(mtime) = std::fs::metadata(&candidate)
+            let Some(mtime) = fs::metadata(&candidate)
                 .ok()
                 .and_then(|m| m.modified().ok())
             else {
@@ -181,7 +182,7 @@ pub fn volume_uuid_for(
 
 /// `_get_unique_path`: `<stem>_<n><suffix>` (Python `Path.stem` / `Path.suffix`).
 pub fn unique_path(path: &Path) -> PathBuf {
-    if !path.exists() {
+    if !fs::exists(path) {
         return path.to_path_buf();
     }
     let name = path
@@ -196,18 +197,19 @@ pub fn unique_path(path: &Path) -> PathBuf {
     let mut n = 1;
     loop {
         let candidate = parent.join(format!("{stem}_{n}{suffix}"));
-        if !candidate.exists() {
+        if !fs::exists(&candidate) {
             return candidate;
         }
         n += 1;
     }
 }
 
-/// Move `from` to `to`: a rename, or a copy into a temp file beside `to` then a rename
-/// when they are on different filesystems.
-pub fn move_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
+/// Move `from` to `to`: a publish (a rename on a local library), or a copy into a temp
+/// file beside `to` then a publish when they are on different filesystems (the
+/// rename's `CrossesDevices`). `intent` is what the store is told about the write.
+pub fn move_into_place(from: &Path, to: &Path, intent: &WriteIntent) -> std::io::Result<()> {
+    match fs::publish(from, to, intent) {
+        Ok(_) => Ok(()),
         Err(_) => {
             let tmp = to.with_file_name(format!(
                 ".{}.part",
@@ -215,9 +217,9 @@ pub fn move_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default()
             ));
-            std::fs::copy(from, &tmp)?;
-            std::fs::rename(&tmp, to)?;
-            let _ = std::fs::remove_file(from);
+            fs::copy(from, &tmp)?;
+            fs::publish(&tmp, to, intent)?;
+            let _ = fs::remove_file(from);
             Ok(())
         }
     }
@@ -235,6 +237,8 @@ pub fn lock_with_patience(locks: &PathLocks, path: &Path) -> Option<Box<dyn Send
 }
 
 /// Install one result.
+// unmounted: the cleanup removes the result's `.processing` spool directory.
+#[allow(clippy::disallowed_methods)]
 pub fn run(req: CollectRequest) -> CollectDone {
     let outcome = install(&req);
     match &outcome {
@@ -265,14 +269,17 @@ fn install(req: &CollectRequest) -> Outcome {
     // 1. The archive is still the one the claim read.
     let current = match req.stamp {
         Some(stamp) => stamp_of(&cbz) == Some(stamp),
-        None => cbz.is_file(),
+        None => fs::is_file(&cbz),
     };
     if !current {
         return Outcome::Discarded;
     }
     let row = &req.row;
     // 2. The bytes are the ones announced.
-    if !req.result.is_file() {
+    // unmounted: the result is in the `.processing` spool.
+    #[allow(clippy::disallowed_methods)]
+    let arrived = req.result.is_file();
+    if !arrived {
         return Outcome::Failed(format!("no valid {} sidecar generated", row.name));
     }
     if let Some(expected) = &req.expected_sha256 {
@@ -350,12 +357,19 @@ fn install(req: &CollectRequest) -> Outcome {
         let Some(_guard) = lock_with_patience(&req.locks, &plain) else {
             return Outcome::Busy(format!("{} is locked by a WebDAV write", plain.display()));
         };
-        let dest = if plain.exists() || gz.exists() {
+        let dest = if fs::exists(&plain) || fs::exists(&gz) {
             unique_path(&plain)
         } else {
             plain
         };
-        if let Err(e) = move_into_place(&req.result, &dest) {
+        let intent = WriteIntent::new(
+            Mode::CreateNew,
+            Origin::Ocr {
+                claim: req.claim.clone(),
+            },
+            Durability::Deferred,
+        );
+        if let Err(e) = move_into_place(&req.result, &dest, &intent) {
             return Outcome::Failed(format!(
                 "could not move the {} sidecar to {}: {e}",
                 row.name,
@@ -438,6 +452,7 @@ fn record_written(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
 

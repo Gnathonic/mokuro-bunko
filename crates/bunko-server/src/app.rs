@@ -38,6 +38,8 @@ pub struct ServeOptions {
 /// 0.5.2 `_validate_startup_environment`: directories exist and are writable; TLS
 /// material is present and valid. The message is printed as
 /// `Startup validation failed: <msg>` and the process exits 2.
+// unmounted: the std calls here touch only the TLS certificate and key paths (config).
+#[allow(clippy::disallowed_methods)]
 pub fn validate_startup(config: &Config) -> Result<(), String> {
     let layout = config.storage.layout();
     layout.ensure_directories().map_err(|e| {
@@ -106,6 +108,9 @@ pub struct Services {
     /// First-run state: the setup code and its sessions (shared with the accounts
     /// routes; [`announce_setup`] issues the code).
     pub setup: crate::accounts::SetupFlag,
+    /// The library root mounted as a `LocalStore` for as long as the services live
+    /// (last, so it is unmounted after everything else has been dropped).
+    _library_mount: bunko_store::MountGuard,
 }
 
 /// Counts the writing requests in flight ([`Services::writes`]).
@@ -204,6 +209,8 @@ impl Services {
         let flavor = opts.flavor;
         let db_options = DbOptions::from(&config.database);
         let layout = config.storage.layout();
+        // Before anything below touches the library.
+        let library_mount = crate::library::mount_local(&layout.library());
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
@@ -272,6 +279,7 @@ impl Services {
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writes: WritesInFlight::default(),
             setup: crate::accounts::SetupFlag::default(),
+            _library_mount: library_mount,
         })
     }
 }
@@ -757,6 +765,8 @@ pub fn setup_banner(
 
 /// Running in a container (Docker's `/.dockerenv`, Podman's `/run/.containerenv`, or
 /// the images' `MOKURO_INSTALL_KIND=docker`).
+// unmounted: container marker files at the filesystem root.
+#[allow(clippy::disallowed_methods)]
 fn in_container() -> bool {
     std::path::Path::new("/.dockerenv").exists()
         || std::path::Path::new("/run/.containerenv").exists()

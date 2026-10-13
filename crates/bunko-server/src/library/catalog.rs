@@ -359,7 +359,7 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str) -> Response {
         if !is_within(&file, &base) {
             return Err(util::text(403, "Forbidden"));
         }
-        let meta = std::fs::metadata(&file)
+        let meta = bunko_store::fs::metadata(&file)
             .ok()
             .filter(|m| m.is_file())
             .ok_or_else(|| util::text(404, "Not found"))?;
@@ -374,7 +374,11 @@ async fn serve_cover(deps: &LibraryDeps, cover: &str) -> Response {
         Some(Err(resp)) => return resp,
         None => return internal_error(),
     };
-    let Ok(handle) = tokio::fs::File::open(&file).await else {
+    let Some(handle) = bunko_store::afs::File::open(&file)
+        .await
+        .ok()
+        .and_then(bunko_store::afs::File::into_std)
+    else {
         return util::text(500, "Error");
     };
     let mut resp = Response::new(Body::from_stream(tokio_util::io::ReaderStream::new(handle)));

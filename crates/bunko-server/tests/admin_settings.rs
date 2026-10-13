@@ -1,6 +1,9 @@
 //! `GET /api/settings` and the settings editors: live config, saved config, round trips;
 //! `GET /api/status`; DynDNS/tunnel wrappers.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod admin_support;
 
 use admin_support::Harness;

@@ -1,6 +1,9 @@
 //! The OCR module over HTTP: the queue page status (levels, ETag/304, viewers), the
 //! reader's queue file, and a whole remote round trip over a real WebSocket.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod ocr_common;
 
 use std::sync::Arc;

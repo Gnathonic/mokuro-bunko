@@ -718,6 +718,8 @@ impl Scheduler {
         Some(entry)
     }
 
+    // unmounted: removes a result's `.processing` spool directory.
+    #[allow(clippy::disallowed_methods)]
     pub(super) fn drop_result(&mut self, sid: &str, claim: &str) {
         if let Some((path, _)) = self.results.remove(&(sid.to_string(), claim.to_string()))
             && let Some(dir) = path.parent()

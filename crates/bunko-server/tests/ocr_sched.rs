@@ -1,6 +1,9 @@
 //! The scheduler, driven deterministically: a manual clock, inline helper work, fake
 //! processors on channels (spec ocr-scheduling §5–§16).
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod ocr_common;
 
 use std::sync::Arc;

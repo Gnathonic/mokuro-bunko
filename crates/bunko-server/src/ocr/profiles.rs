@@ -210,6 +210,8 @@ impl Profiles {
         self.dir.join(profile_filename(name))
     }
 
+    // unmounted: processor profiles are config under the storage dir, not the library.
+    #[allow(clippy::disallowed_methods)]
     fn read(path: &Path) -> Map<String, Value> {
         std::fs::read_to_string(path)
             .ok()
@@ -320,6 +322,8 @@ impl Profiles {
     }
 
     /// Every processor with a profile, by the name inside the file.
+    // unmounted: processor profiles are config under the storage dir, not the library.
+    #[allow(clippy::disallowed_methods)]
     pub fn names(&self) -> Vec<String> {
         let Ok(rd) = std::fs::read_dir(&self.dir) else {
             return Vec::new();
@@ -343,6 +347,8 @@ impl Profiles {
         out
     }
 
+    // unmounted: processor profiles are config under the storage dir, not the library.
+    #[allow(clippy::disallowed_methods)]
     fn update(&self, name: &str, create: bool, edit: impl FnOnce(&mut Map<String, Value>)) {
         let _guard = WRITE_LOCK.lock();
         let path = self.path(name);

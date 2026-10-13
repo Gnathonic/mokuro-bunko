@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bunko_core::generations::Generation;
+use bunko_store::fs;
 
 use super::types::{LibraryFacts, mtime_ns, rel_of};
 
@@ -50,7 +51,7 @@ pub fn sidecar_paths(cbz: &Path, suffix: &str) -> (std::path::PathBuf, std::path
 /// `needs_sidecar`: neither the row's sidecar nor its `.gz` exists.
 pub fn row_done(cbz: &Path, row: &Generation) -> bool {
     let (plain, gz) = sidecar_paths(cbz, &row.sidecar_suffix());
-    plain.exists() || gz.exists()
+    fs::exists(&plain) || fs::exists(&gz)
 }
 
 /// Decides whether a volume whose primary is done is owed a generation upgrade
@@ -71,7 +72,7 @@ pub fn compute(
     if !bunko_library::sidecar::is_cbz_name(&name) {
         return None;
     }
-    let meta = std::fs::metadata(cbz).ok()?;
+    let meta = fs::metadata(cbz).ok()?;
     if !meta.is_file() {
         return None;
     }
@@ -129,7 +130,7 @@ pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![library.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+        let Ok(rd) = fs::read_dir(&dir) else {
             continue;
         };
         for entry in rd.flatten() {
@@ -191,7 +192,7 @@ pub fn walk(
 /// upgrade job: the bare file still exists, i.e. the swap has not happened yet).
 pub fn still_owed(library: &Path, rel: &str, row: &Generation, upgrade: bool) -> bool {
     let cbz = library.join(rel);
-    if !cbz.is_file() {
+    if !fs::is_file(&cbz) {
         return false;
     }
     if upgrade { true } else { !row_done(&cbz, row) }
@@ -205,6 +206,7 @@ pub fn archive_pages(cbz: &Path) -> Option<i64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
     use crate::ocr::types::FileFacts;
