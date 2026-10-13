@@ -1,10 +1,11 @@
-//! A server whose library is in a cloud folder (0.8 configurations b and c), read
-//! side: the in-memory `FakeBackend` holds a series with one OCR'd and one un-OCR'd
-//! volume. The bridge WebDAV lists and serves it (ranges included), the catalog lists
-//! it, the admin status reports the store, a rename made in the cloud carries the DB
-//! rows along, and a local OCR claim reads a spooled copy of the archive. Writing a
-//! result back waits for the store's write path: the install is refused and the claim
-//! goes back to the queue, unrecorded.
+//! A server whose library is in a cloud folder (0.8 configurations b and c), mostly
+//! the read side: the in-memory `FakeBackend` holds a series with one OCR'd and one
+//! un-OCR'd volume. The bridge WebDAV lists and serves it (ranges included) and maps
+//! provider failures to 503 + Retry-After, the catalog lists it, the admin status
+//! reports the store, a rename made in the cloud carries the DB rows along, a store
+//! that needs a sign-in holds the queue, and a local OCR claim reads a spooled copy of
+//! the archive and installs into the cloud (or, refused, goes back to the queue
+//! unrecorded). The whole server's write side is `cloud_e2e.rs`.
 
 // Fixtures are checked with std::fs on purpose (the spool is a real local file).
 #![allow(clippy::disallowed_methods)]
@@ -71,8 +72,8 @@ struct Library {
 
 /// The reader's folder: `Series/Vol 1.cbz` (large) with its `.mokuro`, and
 /// `Series/Vol 2.cbz` with none.
-fn fake_library() -> (FakeBackend, Library) {
-    let fake = FakeBackend::drive_like();
+fn fake_library() -> (Arc<FakeBackend>, Library) {
+    let fake = Arc::new(FakeBackend::drive_like());
     let lib = Library {
         vol1: cbz(1, 5 << 20),
         vol1_mokuro: mokuro("vol-1-uuid", 1),
@@ -130,7 +131,7 @@ impl Env {
         Env::with_fake(fake, lib, serve_readers).await
     }
 
-    async fn with_fake(fake: FakeBackend, lib: Library, serve_readers: bool) -> Env {
+    async fn with_fake(fake: Arc<FakeBackend>, lib: Library, serve_readers: bool) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("storage");
         bunko_server::storage::testing::register(&base, fake);
@@ -380,6 +381,30 @@ async fn the_bridge_lists_and_streams_a_cloud_library() {
     assert_eq!(st["pairing"], "release");
     assert!(st["cache"]["blobs"].as_u64().unwrap() >= 1, "{st}");
     assert_eq!(v["volume_count"], 1);
+}
+
+/// Spec §3.5: a provider failure answers the bridge client by class: a lapsed sign-in
+/// 503 (never 401), throttling 503 with the provider's Retry-After.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_failures_answer_503_with_retry_after() {
+    use bunko_remote::BErr;
+    use bunko_remote::fake::FakeOp;
+    let env = Env::new(true).await;
+    let fake = env.fake().backend().clone();
+    let url = "/mokuro-reader/Series/Vol%202.cbz";
+    fake.fail_next(FakeOp::Read, BErr::AuthRevoked);
+    let r = env.request(Some("reader"), "GET", url, &[]).await;
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "{}", r.text());
+    assert_eq!(r.header("retry-after"), Some("300"));
+    assert!(r.text().contains("sign-in"), "{}", r.text());
+    fake.fail_next(FakeOp::Read, BErr::Throttled(Some(Duration::from_secs(42))));
+    let r = env.request(Some("reader"), "GET", url, &[]).await;
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.header("retry-after"), Some("42"));
+    // Once the provider answers, the file is served.
+    let r = env.request(Some("reader"), "GET", url, &[]).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body == env.lib.vol2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -728,6 +753,34 @@ fn remote_arrivals_are_judged_off_the_actor() {
     assert_eq!(v.rows.len(), 1);
 }
 
+/// Spec §3.5 / §9.1: while the store needs a new sign-in the queue holds with
+/// `storage-auth` (no new claims); it takes work again once the store is back.
+#[test]
+fn a_store_that_needs_a_sign_in_holds_the_queue() {
+    use bunko_remote::BErr;
+    use bunko_remote::fake::FakeOp;
+    let c = cloud_sched();
+    let mut sched = sched_over(&c.layout, Exec::Inline);
+    sched.handle(Msg::Tick);
+    assert_eq!(sched.storage_hold(), None);
+    c.remote
+        .backend()
+        .fail_next(FakeOp::Changes, BErr::AuthRevoked);
+    c.remote.feed().poll_now();
+    eventually_sync("the store to need a sign-in", || {
+        sched.storage_hold() == Some("storage-auth")
+    });
+    assert_eq!(sched.queue_hold(), Some("storage-auth"));
+    assert!(sched.held("local"), "no new claims");
+    sched.handle(Msg::Tick);
+    assert_eq!(sched.storage_held, Some("storage-auth"));
+    c.remote.feed().resume();
+    eventually_sync("the store back online", || sched.storage_hold().is_none());
+    sched.handle(Msg::Tick);
+    assert_eq!(sched.storage_held, None);
+    assert_ne!(sched.queue_hold(), Some("storage-auth"));
+}
+
 /// Spec §5.4: a sidecar the reader just deleted (its archive stayed) is being
 /// replaced: the volume is not owed until the quiet period is over.
 #[test]
@@ -765,15 +818,29 @@ fn a_sidecar_removed_in_the_cloud_holds_its_volume_for_the_quiet_period() {
     ));
 }
 
+fn no_lease(c: &mut bunko_remote::RemoteStoreConfig) {
+    c.lease = false;
+}
+
 /// The scheduler over a cloud library: the census sees the one volume owed, a local
-/// claim spools the archive before it is submitted, and the result's install (which
-/// needs the store's write path) is refused without losing or failing the volume.
+/// claim spools the archive before it is submitted, and the result lands in the cloud.
 #[test]
-fn local_claims_spool_the_cloud_archive_and_a_refused_install_is_held() {
+fn local_claims_spool_the_cloud_archive_and_install_into_the_cloud() {
+    run_local_claim(false);
+}
+
+/// The same, with the store refusing the install (it stopped): the claim goes back to
+/// the queue, the volume is neither lost nor recorded as failed.
+#[test]
+fn an_install_the_cloud_store_refuses_is_held() {
+    run_local_claim(true);
+}
+
+fn run_local_claim(refuse: bool) {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("storage");
     let (fake, lib) = fake_library();
-    bunko_server::storage::testing::register(&base, fake);
+    bunko_server::storage::testing::register_tuned(&base, fake, Some(no_lease));
     let config = cloud_config(base.clone(), true);
     let layout = config.storage.layout();
     layout.ensure_directories().unwrap();
@@ -876,7 +943,10 @@ fn local_claims_spool_the_cloud_archive_and_a_refused_install_is_held() {
         .expect("the claim is held");
     assert!(sched.claims[&job].spool.is_some(), "pinned while claimed");
 
-    // The runner finishes; the install needs the write path and is refused.
+    if refuse {
+        remote.set_failpoint(Some(Arc::new(|at: &str| at == "STAGED")));
+    }
+    // The runner finishes.
     let local = sched
         .machines
         .values()
@@ -911,8 +981,26 @@ fn local_claims_spool_the_cloud_archive_and_a_refused_install_is_held() {
             sidecar_sha256: Some(sha),
         },
     );
+    assert!(sched.claims.is_empty(), "the claim ended");
+    assert!(sched.failures.is_empty(), "no failure recorded");
+    if !refuse {
+        assert!(!sched.owed.volumes.contains_key("Series/Vol 2.cbz"));
+        assert!(remote.wait_outbox_idle(Duration::from_secs(20)));
+        let node = remote
+            .backend()
+            .node_at(&format!("{ROOT}/Series/Vol 2.mokuro"))
+            .expect("the sidecar is in the cloud");
+        let bytes = remote.backend().content(&node.pid).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["volume"], "Vol 2", "normalised before the upload");
+        assert!(
+            bunko_store::fs::metadata(layout.library().join("Series/Vol 2.mokuro"))
+                .unwrap()
+                .own()
+        );
+        return;
+    }
     // Returned to the queue, not lost and not a failure of the volume.
-    assert!(sched.claims.is_empty(), "the claim was returned");
     assert!(
         sched.owed.volumes.contains_key("Series/Vol 2.cbz"),
         "the volume is still owed"
