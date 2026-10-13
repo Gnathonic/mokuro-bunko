@@ -77,6 +77,9 @@ pub enum Command {
     /// Manage Dynamic DNS settings.
     #[command(subcommand)]
     Dyndns(DyndnsCmd),
+    /// Where the library lives (this disk or a cloud folder) and how its store is doing.
+    #[command(subcommand)]
+    Library(LibraryCmd),
     /// Check for and install new releases.
     #[command(subcommand)]
     Update(UpdateCmd),
@@ -327,6 +330,24 @@ pub enum DyndnsCmd {
     Enable,
     /// Disable DynDNS updates.
     Disable,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LibraryCmd {
+    /// Show the library's storage: backend, folder, store, and (asking the running
+    /// server's admin API with --user) its health, sync state and caches.
+    Status {
+        /// Ask the server at this URL instead of the configured local one
+        #[arg(long)]
+        url: Option<String>,
+        /// An admin account to ask the running server with (password from
+        /// MOKURO_ADMIN_PASSWORD, else asked); without it, only the configuration is shown
+        #[arg(long, env = "MOKURO_ADMIN_USER")]
+        user: Option<String>,
+        /// Print the status as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
