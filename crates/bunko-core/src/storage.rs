@@ -6,11 +6,25 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageLayout {
     pub base: PathBuf,
+    /// The library lives in a cloud folder (`storage.library.backend` is not `local`):
+    /// `library/` is a mount point that is never created on disk.
+    cloud_library: bool,
 }
 
 impl StorageLayout {
     pub fn new(base: impl Into<PathBuf>) -> Self {
-        Self { base: base.into() }
+        Self {
+            base: base.into(),
+            cloud_library: false,
+        }
+    }
+    /// The same layout for a library in a cloud folder (`cloud`) or on this disk.
+    pub fn with_cloud_library(mut self, cloud: bool) -> Self {
+        self.cloud_library = cloud;
+        self
+    }
+    pub fn cloud_library(&self) -> bool {
+        self.cloud_library
     }
     /// The shared manga library (served at the WebDAV root's `mokuro-reader/`).
     pub fn library(&self) -> PathBuf {
@@ -35,8 +49,20 @@ impl StorageLayout {
     pub fn models(&self) -> PathBuf {
         self.base.join("models")
     }
+    /// A cloud library's local state: index, state, caches, spool, credentials (new in 0.8).
+    pub fn cloud_dir(&self) -> PathBuf {
+        self.base.join("cloud")
+    }
 
+    /// The directories the server needs. A cloud library gets no `library/` or
+    /// `library/thumbnails/` on disk.
     pub fn ensure_directories(&self) -> io::Result<()> {
+        if self.cloud_library {
+            std::fs::create_dir_all(&self.base)?;
+            std::fs::create_dir_all(self.inbox())?;
+            std::fs::create_dir_all(self.users())?;
+            return Ok(());
+        }
         std::fs::create_dir_all(self.library())?;
         std::fs::create_dir_all(self.inbox())?;
         std::fs::create_dir_all(self.users())?;
@@ -185,6 +211,39 @@ mod tests {
         assert_eq!(portable_data_in(dir.path()), Some(dir.path().join("data")));
         // The test binary itself is no portable copy.
         assert_eq!(portable_data_dir(), None);
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// A local library gets `library/` and `library/thumbnails/` as before.
+    #[test]
+    fn local_layout_creates_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path().join("data"));
+        assert!(!layout.cloud_library());
+        layout.ensure_directories().unwrap();
+        assert_eq!(names(&layout.base), ["inbox", "library", "users"]);
+        assert_eq!(names(&layout.library()), ["thumbnails"]);
+    }
+
+    /// A cloud library never gets `library/` on disk; the rest is still created.
+    #[test]
+    fn cloud_layout_skips_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path().join("data")).with_cloud_library(true);
+        assert!(layout.cloud_library());
+        layout.ensure_directories().unwrap();
+        assert_eq!(names(&layout.base), ["inbox", "users"]);
+        assert_eq!(layout.cloud_dir(), layout.base.join("cloud"));
+        // The paths themselves are unchanged (the library root is a mount point).
+        assert_eq!(layout.library(), layout.base.join("library"));
     }
 
     /// The probe leaves nothing behind, never touches an existing file, and fails

@@ -49,7 +49,10 @@ pub fn validate_startup(config: &Config) -> Result<(), String> {
         )
     })?;
     StorageLayout::assert_writable_dir(&layout.base, "storage.base_path")?;
-    StorageLayout::assert_writable_dir(&layout.library(), "storage.library_path")?;
+    // A cloud library's root is a mount point, never a folder on this disk.
+    if !layout.cloud_library() {
+        StorageLayout::assert_writable_dir(&layout.library(), "storage.library_path")?;
+    }
     StorageLayout::assert_writable_dir(&layout.inbox(), "storage.inbox_path")?;
     StorageLayout::assert_writable_dir(&layout.users(), "storage.users_path")?;
     if !config.ssl.enabled {
@@ -355,6 +358,16 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
             resp
         };
     }
+    // Without readers WebDAV only serves processors' archive fetches (also checked in
+    // `readers_gate`); the rest (`/`, `/inbox`, ...) is not mounted.
+    if !st.core.config.read().server.serve_readers {
+        if !is_reader_path(&path) {
+            return text_status(StatusCode::NOT_FOUND, "Not found");
+        }
+        if let Some(refused) = refuse_reader(req.method(), &path, &ctx.identity) {
+            return refused;
+        }
+    }
     if let Some(lib) = &st.library
         && crate::library::is_series_put(req.method(), &path)
     {
@@ -419,6 +432,89 @@ async fn auth_gate(
     next.run(req).await
 }
 
+/// `/mokuro-reader` and everything under it (percent-decoded).
+fn is_reader_path(path: &str) -> bool {
+    path.strip_prefix('/')
+        .and_then(|p| p.strip_prefix(auth::paths::READER_ROOT))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Without readers, a `/mokuro-reader/` request passes only as a processor's `GET` or
+/// `HEAD` of a library file (the archive fetch, PROTOCOL.md step 5): `None`. Anything
+/// else is refused, 401 anonymous (or the credential's own 401/429), 403 signed in.
+fn refuse_reader(method: &http::Method, path: &str, identity: &auth::Identity) -> Option<Response> {
+    let fetch = matches!(method.as_str(), "GET" | "HEAD")
+        && auth::paths::is_library_path(path)
+        && identity.role() == bunko_core::Role::Processor;
+    if fetch {
+        return None;
+    }
+    if !identity.authenticated() {
+        let message = identity
+            .error
+            .clone()
+            .unwrap_or_else(|| "Authentication required".into());
+        let status = if message.contains("Too many failed attempts") {
+            StatusCode::TOO_MANY_REQUESTS
+        } else {
+            StatusCode::UNAUTHORIZED
+        };
+        return Some(
+            auth::Denied {
+                status,
+                message,
+                bearer: identity.bearer_failed,
+            }
+            .into_response(),
+        );
+    }
+    Some(text_status(
+        StatusCode::FORBIDDEN,
+        "This server does not serve readers (server.serve_readers is off)",
+    ))
+}
+
+fn text_status(status: StatusCode, message: &str) -> Response {
+    auth::Denied {
+        status,
+        message: message.to_string(),
+        bearer: false,
+    }
+    .into_response()
+}
+
+/// `server.serve_readers: false` (read per request): the catalog (`/catalog*`, its
+/// manifest included) answers 404, and `/mokuro-reader/` is limited to processors'
+/// archive fetches ([`refuse_reader`]) before the queue file or WebDAV see it. The rest
+/// of WebDAV is cut off in [`dav_fallback`].
+async fn readers_gate(
+    State(core): State<Core>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if core.config.read().server.serve_readers || req.method() == http::Method::OPTIONS {
+        return next.run(req).await;
+    }
+    let path = percent_encoding::percent_decode_str(req.uri().path())
+        .decode_utf8_lossy()
+        .into_owned();
+    if path == "/catalog" || path.starts_with("/catalog/") {
+        return text_status(StatusCode::NOT_FOUND, "Not found");
+    }
+    if !is_reader_path(&path) {
+        return next.run(req).await;
+    }
+    let (mut parts, body) = req.into_parts();
+    let Ok(ctx) = <RequestCtx as axum::extract::FromRequestParts<Core>>::from_request_parts(
+        &mut parts, &core,
+    )
+    .await;
+    match refuse_reader(&parts.method, &path, &ctx.identity) {
+        Some(refused) => refused,
+        None => next.run(Request::from_parts(parts, body)).await,
+    }
+}
+
 type RefusalHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 /// Where refused processor logins are reported (the registry's admin-panel list).
 static PROCESSOR_REFUSALS: std::sync::OnceLock<RefusalHook> = std::sync::OnceLock::new();
@@ -468,6 +564,10 @@ pub fn build_router_with(
         core.clone(),
         auth_gate,
     )))
+    .layer(axum::middleware::from_fn_with_state(
+        core.clone(),
+        readers_gate,
+    ))
     .layer(axum::middleware::from_fn_with_state(
         core.clone(),
         cors::cors,

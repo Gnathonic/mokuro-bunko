@@ -58,6 +58,9 @@ pub struct ServerConfig {
     pub threads: u32,
     /// New in 0.7: byte budget for in-memory caches, in MiB.
     pub cache_mb: u32,
+    /// New in 0.8: serve readers (the catalog and the reader WebDAV). Off, only admin,
+    /// setup, login, `/_processor/*` and processors' archive GETs are served.
+    pub serve_readers: bool,
 }
 
 impl Default for ServerConfig {
@@ -68,6 +71,7 @@ impl Default for ServerConfig {
             trusted_proxies: vec![],
             threads: 0,
             cache_mb: 32,
+            serve_readers: true,
         }
     }
 }
@@ -75,12 +79,15 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StorageConfig {
     pub base_path: PathBuf,
+    /// New in 0.8: where the library lives (`storage.library`).
+    pub library: LibraryConfig,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             base_path: storage::default_storage_path(),
+            library: LibraryConfig::default(),
         }
     }
 }
@@ -88,6 +95,7 @@ impl Default for StorageConfig {
 impl StorageConfig {
     pub fn layout(&self) -> StorageLayout {
         StorageLayout::new(self.base_path.clone())
+            .with_cloud_library(self.library.backend.is_cloud())
     }
     pub fn library_path(&self) -> PathBuf {
         self.layout().library()
@@ -346,6 +354,509 @@ impl Default for UpdateConfig {
     }
 }
 
+/// `storage.library.backend`: where the library lives (0.8 remote storage, §1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LibraryBackend {
+    /// `<base>/library` on this machine.
+    #[default]
+    Local,
+    GDrive,
+    OneDrive,
+    Mega,
+    WebDav,
+}
+
+impl LibraryBackend {
+    pub const ALL: [LibraryBackend; 5] = [
+        LibraryBackend::Local,
+        LibraryBackend::GDrive,
+        LibraryBackend::OneDrive,
+        LibraryBackend::Mega,
+        LibraryBackend::WebDav,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LibraryBackend::Local => "local",
+            LibraryBackend::GDrive => "gdrive",
+            LibraryBackend::OneDrive => "onedrive",
+            LibraryBackend::Mega => "mega",
+            LibraryBackend::WebDav => "webdav",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<LibraryBackend> {
+        let s = s.trim();
+        Self::ALL.into_iter().find(|b| b.as_str() == s)
+    }
+
+    /// Every backend but `local` keeps the library in a cloud folder.
+    pub fn is_cloud(self) -> bool {
+        self != LibraryBackend::Local
+    }
+}
+
+/// `storage.library.google_project`: which Mokuro Reader's Google project Bunko signs
+/// in with, so it sees that reader's Drive files (D25).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GoogleProject {
+    /// reader.mokuro.app.
+    #[default]
+    Release,
+    /// The beta reader.
+    Beta,
+    /// `storage.library.oauth.google` overrides; set automatically when they are present.
+    Custom,
+}
+
+impl GoogleProject {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GoogleProject::Release => "release",
+            GoogleProject::Beta => "beta",
+            GoogleProject::Custom => "custom",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<GoogleProject> {
+        match s.trim() {
+            "release" => Some(GoogleProject::Release),
+            "beta" => Some(GoogleProject::Beta),
+            "custom" => Some(GoogleProject::Custom),
+            _ => None,
+        }
+    }
+}
+
+/// `storage.library.webdav`. The password is never kept here: it lives in the
+/// credentials file or comes from `MOKURO_WEBDAV_PASSWORD_FILE`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WebDavLibraryConfig {
+    pub url: Option<String>,
+    pub username: Option<String>,
+    /// Allow an `http://` URL (refused otherwise).
+    pub allow_http: bool,
+}
+
+/// `storage.library.poll`: change-feed intervals; `None` = the provider's default.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PollConfig {
+    pub active_s: Option<u32>,
+    pub idle_s: Option<u32>,
+}
+
+/// `storage.library.oauth.google`: clients replacing both embedded Google clients
+/// (local development, forks). Each sign-in flow needs its own id and secret.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GoogleOAuthOverrides {
+    /// The Desktop client (loopback flow).
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// The "TVs and Limited Input" client (device flow).
+    pub device_client_id: Option<String>,
+    pub device_client_secret: Option<String>,
+}
+
+impl GoogleOAuthOverrides {
+    pub fn any(&self) -> bool {
+        self.client_id.is_some()
+            || self.client_secret.is_some()
+            || self.device_client_id.is_some()
+            || self.device_client_secret.is_some()
+    }
+    pub fn loopback(&self) -> bool {
+        self.client_id.is_some() && self.client_secret.is_some()
+    }
+    pub fn device(&self) -> bool {
+        self.device_client_id.is_some() && self.device_client_secret.is_some()
+    }
+}
+
+/// `storage.library.oauth.microsoft`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MicrosoftOAuthOverrides {
+    pub client_id: Option<String>,
+}
+
+/// `storage.library.oauth`: overrides of the clients embedded in every build.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OAuthOverrides {
+    pub google: GoogleOAuthOverrides,
+    pub microsoft: MicrosoftOAuthOverrides,
+}
+
+/// `storage.library` (0.8 remote storage, spec §11).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LibraryConfig {
+    pub backend: LibraryBackend,
+    /// The library folder in the cloud account.
+    pub folder: String,
+    pub webdav: WebDavLibraryConfig,
+    pub cache_mb: u32,
+    pub spool_gb: u32,
+    pub outbox_hold_mb: u32,
+    pub outbox_max_gb: u32,
+    pub quiet_s: u32,
+    pub poll: PollConfig,
+    pub drive_background_units_per_min: u32,
+    pub status_files: bool,
+    /// Bridge mode: the Bunko user whose progress files are the cloud root's.
+    pub progress_user: Option<String>,
+    pub google_project: GoogleProject,
+    pub oauth: OAuthOverrides,
+}
+
+impl Default for LibraryConfig {
+    fn default() -> Self {
+        Self {
+            backend: LibraryBackend::Local,
+            folder: "mokuro-reader".into(),
+            webdav: WebDavLibraryConfig::default(),
+            cache_mb: 1024,
+            spool_gb: 4,
+            outbox_hold_mb: 2048,
+            outbox_max_gb: 8,
+            quiet_s: 120,
+            poll: PollConfig::default(),
+            drive_background_units_per_min: 20000,
+            status_files: true,
+            progress_user: None,
+            google_project: GoogleProject::Release,
+            oauth: OAuthOverrides::default(),
+        }
+    }
+}
+
+/// The `storage.library` variables, beside the dotted keys they set.
+const LIBRARY_ENV: &[(&str, &str)] = &[
+    ("MOKURO_LIBRARY_BACKEND", "storage.library.backend"),
+    ("MOKURO_LIBRARY_FOLDER", "storage.library.folder"),
+    ("MOKURO_WEBDAV_URL", "storage.library.webdav.url"),
+    ("MOKURO_WEBDAV_USERNAME", "storage.library.webdav.username"),
+    (
+        "MOKURO_WEBDAV_ALLOW_HTTP",
+        "storage.library.webdav.allow_http",
+    ),
+    ("MOKURO_GOOGLE_PROJECT", "storage.library.google_project"),
+];
+
+const WEBDAV_PASSWORD_REFUSED: &str = "storage.library.webdav.password: passwords are never kept in config.yaml; \
+     use MOKURO_WEBDAV_PASSWORD_FILE or `mokuro-bunko library connect webdav`";
+
+impl LibraryConfig {
+    /// Which Google sign-in flows have a client: `(loopback, device)`. Both, with the
+    /// embedded clients; with overrides (`custom`), those whose id and secret are set.
+    pub fn google_flows(&self) -> (bool, bool) {
+        match self.google_project {
+            GoogleProject::Custom => (self.oauth.google.loopback(), self.oauth.google.device()),
+            _ => (true, true),
+        }
+    }
+
+    fn from_map(m: Map<String, Value>) -> Result<(LibraryConfig, Map<String, Value>), ConfigError> {
+        const SEC: &str = "storage.library";
+        let mut l = LibraryConfig::default();
+        let d = LibraryConfig::default();
+        if let Some(raw) = m.get("backend").filter(|v| !v.is_null()) {
+            l.backend = parse_backend(&value_text(raw))?;
+        }
+        l.folder = get_str(&m, "folder", &d.folder);
+        let webdav = section(&m, "webdav")?;
+        if webdav.contains_key("password") {
+            return Err(invalid(WEBDAV_PASSWORD_REFUSED));
+        }
+        l.webdav.url = get_opt_str(&webdav, "url");
+        l.webdav.username = get_opt_str(&webdav, "username");
+        l.webdav.allow_http = get_bool(&webdav, "storage.library.webdav", "allow_http", false)?;
+        l.cache_mb = get_positive(&m, SEC, "cache_mb", d.cache_mb)?;
+        l.spool_gb = get_positive(&m, SEC, "spool_gb", d.spool_gb)?;
+        l.outbox_hold_mb = get_positive(&m, SEC, "outbox_hold_mb", d.outbox_hold_mb)?;
+        l.outbox_max_gb = get_positive(&m, SEC, "outbox_max_gb", d.outbox_max_gb)?;
+        l.quiet_s = get_positive(&m, SEC, "quiet_s", d.quiet_s)?;
+        let poll = section(&m, "poll")?;
+        l.poll.active_s = get_opt_positive(&poll, "storage.library.poll", "active_s")?;
+        l.poll.idle_s = get_opt_positive(&poll, "storage.library.poll", "idle_s")?;
+        l.drive_background_units_per_min = get_positive(
+            &m,
+            SEC,
+            "drive_background_units_per_min",
+            d.drive_background_units_per_min,
+        )?;
+        l.status_files = get_bool(&m, SEC, "status_files", true)?;
+        l.progress_user = get_opt_str(&m, "progress_user");
+        if let Some(raw) = m.get("google_project").filter(|v| !v.is_null()) {
+            l.google_project = parse_google_project(&value_text(raw))?;
+        }
+        let oauth = section(&m, "oauth")?;
+        let google = section(&oauth, "google")?;
+        l.oauth.google = GoogleOAuthOverrides {
+            client_id: get_opt_str(&google, "client_id"),
+            client_secret: get_opt_str(&google, "client_secret"),
+            device_client_id: get_opt_str(&google, "device_client_id"),
+            device_client_secret: get_opt_str(&google, "device_client_secret"),
+        };
+        let microsoft = section(&oauth, "microsoft")?;
+        l.oauth.microsoft.client_id = get_opt_str(&microsoft, "client_id");
+        l.validate()?;
+
+        // Whatever is left, at every level, is preserved.
+        let mut extra = leftovers(
+            m,
+            &[
+                "backend",
+                "folder",
+                "webdav",
+                "cache_mb",
+                "spool_gb",
+                "outbox_hold_mb",
+                "outbox_max_gb",
+                "quiet_s",
+                "poll",
+                "drive_background_units_per_min",
+                "status_files",
+                "progress_user",
+                "google_project",
+                "oauth",
+            ],
+        );
+        let nest = |into: &mut Map<String, Value>, name: &str, rest: Map<String, Value>| {
+            if !rest.is_empty() {
+                into.insert(name.to_string(), Value::Object(rest));
+            }
+        };
+        nest(
+            &mut extra,
+            "webdav",
+            leftovers(webdav, &["url", "username", "allow_http"]),
+        );
+        nest(&mut extra, "poll", leftovers(poll, &["active_s", "idle_s"]));
+        let mut oauth_extra = leftovers(oauth, &["google", "microsoft"]);
+        nest(
+            &mut oauth_extra,
+            "google",
+            leftovers(
+                google,
+                &[
+                    "client_id",
+                    "client_secret",
+                    "device_client_id",
+                    "device_client_secret",
+                ],
+            ),
+        );
+        nest(
+            &mut oauth_extra,
+            "microsoft",
+            leftovers(microsoft, &["client_id"]),
+        );
+        nest(&mut extra, "oauth", oauth_extra);
+        Ok((l, extra))
+    }
+
+    /// The checks across keys, run after the file and after the environment; also sets
+    /// `google_project: custom` when Google overrides are present.
+    fn validate(&mut self) -> Result<(), ConfigError> {
+        if self.folder.trim().trim_matches('/').is_empty() {
+            return Err(invalid("storage.library.folder: name the library folder"));
+        }
+        if let Some(url) = &self.webdav.url {
+            let lower = url.trim().to_ascii_lowercase();
+            if lower.starts_with("http://") {
+                if !self.webdav.allow_http {
+                    return Err(invalid(format!(
+                        "storage.library.webdav.url: {url} is plain http://; use https://, or set \
+                         storage.library.webdav.allow_http: true (MOKURO_WEBDAV_ALLOW_HTTP) to send the \
+                         password unencrypted"
+                    )));
+                }
+            } else if !lower.starts_with("https://") {
+                return Err(invalid(format!(
+                    "storage.library.webdav.url: {url} is not an http:// or https:// URL"
+                )));
+            }
+        }
+        if self.backend == LibraryBackend::WebDav && self.webdav.url.is_none() {
+            return Err(invalid(
+                "storage.library.backend: webdav needs storage.library.webdav.url (MOKURO_WEBDAV_URL)",
+            ));
+        }
+        if u64::from(self.outbox_hold_mb) > u64::from(self.outbox_max_gb) * 1024 {
+            return Err(invalid(format!(
+                "storage.library.outbox_hold_mb ({} MB) must not exceed storage.library.outbox_max_gb ({} GB)",
+                self.outbox_hold_mb, self.outbox_max_gb
+            )));
+        }
+        let g = &self.oauth.google;
+        for (id, id_key, secret, secret_key) in [
+            (&g.client_id, "client_id", &g.client_secret, "client_secret"),
+            (
+                &g.device_client_id,
+                "device_client_id",
+                &g.device_client_secret,
+                "device_client_secret",
+            ),
+        ] {
+            match (id.is_some(), secret.is_some()) {
+                (true, false) => {
+                    return Err(invalid(format!(
+                        "storage.library.oauth.google.{id_key} is set without its {secret_key}"
+                    )));
+                }
+                (false, true) => {
+                    return Err(invalid(format!(
+                        "storage.library.oauth.google.{secret_key} is set without its {id_key}"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        if g.any() {
+            self.google_project = GoogleProject::Custom;
+        } else if self.google_project == GoogleProject::Custom {
+            return Err(invalid(
+                "storage.library.google_project: custom needs storage.library.oauth.google overrides \
+                 (client_id + client_secret, device_client_id + device_client_secret, or both); \
+                 use release or beta for the embedded clients",
+            ));
+        }
+        Ok(())
+    }
+
+    fn to_value(&self) -> Value {
+        json!({
+            "backend": self.backend.as_str(),
+            "folder": self.folder,
+            "webdav": {
+                "url": self.webdav.url,
+                "username": self.webdav.username,
+                "allow_http": self.webdav.allow_http,
+            },
+            "cache_mb": self.cache_mb,
+            "spool_gb": self.spool_gb,
+            "outbox_hold_mb": self.outbox_hold_mb,
+            "outbox_max_gb": self.outbox_max_gb,
+            "quiet_s": self.quiet_s,
+            "poll": {"active_s": self.poll.active_s, "idle_s": self.poll.idle_s},
+            "drive_background_units_per_min": self.drive_background_units_per_min,
+            "status_files": self.status_files,
+            "progress_user": self.progress_user,
+            "google_project": self.google_project.as_str(),
+            "oauth": {
+                "google": {
+                    "client_id": self.oauth.google.client_id,
+                    "client_secret": self.oauth.google.client_secret,
+                    "device_client_id": self.oauth.google.device_client_id,
+                    "device_client_secret": self.oauth.google.device_client_secret,
+                },
+                "microsoft": {"client_id": self.oauth.microsoft.client_id},
+            },
+        })
+    }
+
+    /// One `storage.library.<field>` from its string form (`null` or empty clears an
+    /// optional value). Checks the value alone; [`Self::validate`] checks the whole.
+    fn set_field(&mut self, field: &str, value: &str) -> Result<(), ConfigError> {
+        let key = format!("storage.library.{field}");
+        let opt = || {
+            let v = value.trim();
+            (!v.is_empty() && v != "null").then(|| v.to_string())
+        };
+        let b =
+            || parse_bool(value).ok_or_else(|| invalid(format!("Invalid boolean value: {value}")));
+        let pos = || {
+            positive(
+                &key,
+                value.trim().parse::<i64>().map_err(|_| {
+                    invalid(format!("{key}: expected a whole number, got '{value}'"))
+                })?,
+            )
+        };
+        let opt_pos = || match opt() {
+            None => Ok(None),
+            Some(_) => pos().map(Some),
+        };
+        match field {
+            "backend" => self.backend = parse_backend(value)?,
+            "folder" => self.folder = value.to_string(),
+            "webdav.url" => self.webdav.url = opt(),
+            "webdav.username" => self.webdav.username = opt(),
+            "webdav.allow_http" => self.webdav.allow_http = b()?,
+            "webdav.password" => return Err(invalid(WEBDAV_PASSWORD_REFUSED)),
+            "cache_mb" => self.cache_mb = pos()?,
+            "spool_gb" => self.spool_gb = pos()?,
+            "outbox_hold_mb" => self.outbox_hold_mb = pos()?,
+            "outbox_max_gb" => self.outbox_max_gb = pos()?,
+            "quiet_s" => self.quiet_s = pos()?,
+            "poll.active_s" => self.poll.active_s = opt_pos()?,
+            "poll.idle_s" => self.poll.idle_s = opt_pos()?,
+            "drive_background_units_per_min" => self.drive_background_units_per_min = pos()?,
+            "status_files" => self.status_files = b()?,
+            "progress_user" => self.progress_user = opt(),
+            "google_project" => self.google_project = parse_google_project(value)?,
+            "oauth.google.client_id" => self.oauth.google.client_id = opt(),
+            "oauth.google.client_secret" => self.oauth.google.client_secret = opt(),
+            "oauth.google.device_client_id" => self.oauth.google.device_client_id = opt(),
+            "oauth.google.device_client_secret" => self.oauth.google.device_client_secret = opt(),
+            "oauth.microsoft.client_id" => self.oauth.microsoft.client_id = opt(),
+            _ => {
+                return Err(ConfigError::UnknownKey(format!(
+                    "Unknown field '{field}' in section 'storage.library'"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Every field [`Self::set_field`] takes, for `config set storage.library.<field>`.
+    pub const KEYS: &'static [&'static str] = &[
+        "backend",
+        "folder",
+        "webdav.url",
+        "webdav.username",
+        "webdav.allow_http",
+        "cache_mb",
+        "spool_gb",
+        "outbox_hold_mb",
+        "outbox_max_gb",
+        "quiet_s",
+        "poll.active_s",
+        "poll.idle_s",
+        "drive_background_units_per_min",
+        "status_files",
+        "progress_user",
+        "google_project",
+        "oauth.google.client_id",
+        "oauth.google.client_secret",
+        "oauth.google.device_client_id",
+        "oauth.google.device_client_secret",
+        "oauth.microsoft.client_id",
+    ];
+}
+
+fn value_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn parse_backend(s: &str) -> Result<LibraryBackend, ConfigError> {
+    LibraryBackend::parse(s).ok_or_else(|| {
+        invalid(format!(
+            "storage.library.backend: unknown backend '{s}' (expected one of: {})",
+            LibraryBackend::ALL.map(LibraryBackend::as_str).join(", ")
+        ))
+    })
+}
+
+fn parse_google_project(s: &str) -> Result<GoogleProject, ConfigError> {
+    GoogleProject::parse(s).ok_or_else(|| {
+        invalid(format!(
+            "storage.library.google_project: '{s}' is not one of release, beta, custom"
+        ))
+    })
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Config {
     pub server: ServerConfig,
@@ -439,6 +950,48 @@ fn get_str(m: &Map<String, Value>, key: &str, default: &str) -> String {
         None | Some(Value::Null) => default.to_string(),
         Some(Value::String(s)) => s.clone(),
         Some(other) => other.to_string(),
+    }
+}
+
+/// An optional string: missing, `null` or empty is `None`.
+fn get_opt_str(m: &Map<String, Value>, key: &str) -> Option<String> {
+    match m.get(key) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s.trim().is_empty() => None,
+        Some(v) => Some(value_text(v)),
+    }
+}
+
+fn positive(key: &str, v: i64) -> Result<u32, ConfigError> {
+    if v < 1 || v > i64::from(u32::MAX) {
+        return Err(invalid(format!(
+            "{key}: must be a whole number above 0, got {v}"
+        )));
+    }
+    Ok(v as u32)
+}
+
+fn get_positive(
+    m: &Map<String, Value>,
+    sec: &str,
+    key: &str,
+    default: u32,
+) -> Result<u32, ConfigError> {
+    positive(
+        &format!("{sec}.{key}"),
+        get_int(m, sec, key, i64::from(default))?,
+    )
+}
+
+/// An optional count above 0: missing or `null` is `None`.
+fn get_opt_positive(
+    m: &Map<String, Value>,
+    sec: &str,
+    key: &str,
+) -> Result<Option<u32>, ConfigError> {
+    match m.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => get_positive(m, sec, key, 1).map(Some),
     }
 }
 
@@ -555,9 +1108,17 @@ impl Config {
         validate_trusted_proxies(&c.server.trusted_proxies)?;
         c.server.threads = get_int(&s, "server", "threads", 0)?.clamp(0, 256) as u32;
         c.server.cache_mb = get_int(&s, "server", "cache_mb", 32)?.clamp(1, 65536) as u32;
+        c.server.serve_readers = get_bool(&s, "server", "serve_readers", true)?;
         let server_extra = leftovers(
             s,
-            &["host", "port", "trusted_proxies", "threads", "cache_mb"],
+            &[
+                "host",
+                "port",
+                "trusted_proxies",
+                "threads",
+                "cache_mb",
+                "serve_readers",
+            ],
         );
 
         let s = section(data, "storage")?;
@@ -568,7 +1129,12 @@ impl Config {
             };
             c.storage.base_path = storage::expand_user(Path::new(&raw));
         }
-        let storage_extra = leftovers(s, &["base_path"]);
+        let (library, library_extra) = LibraryConfig::from_map(section(&s, "library")?)?;
+        c.storage.library = library;
+        let mut storage_extra = leftovers(s, &["base_path", "library"]);
+        if !library_extra.is_empty() {
+            storage_extra.insert("library".into(), Value::Object(library_extra));
+        }
 
         let mut s = section(data, "registration")?;
         if !s.contains_key("allow_anonymous_browse") && !s.contains_key("allow_anonymous_download")
@@ -815,12 +1381,8 @@ impl Config {
     pub fn to_value(&self) -> Value {
         let merge = |name: &str, base: Value| -> Value {
             let mut base = base;
-            if let (Value::Object(b), Some(Value::Object(extra))) =
-                (&mut base, self.extra.get(name))
-            {
-                for (k, v) in extra {
-                    b.entry(k.clone()).or_insert_with(|| v.clone());
-                }
+            if let Some(extra) = self.extra.get(name) {
+                merge_missing(&mut base, extra);
             }
             base
         };
@@ -842,13 +1404,16 @@ impl Config {
         if self.server.cache_mb != 32 {
             out["server"]["cache_mb"] = json!(self.server.cache_mb);
         }
-        out.insert(
-            "storage".into(),
-            merge(
-                "storage",
-                json!({"base_path": self.storage.base_path.to_string_lossy()}),
-            ),
-        );
+        if !self.server.serve_readers {
+            out["server"]["serve_readers"] = json!(false);
+        }
+        // The library block is written once it differs from the default (a local
+        // library's file stays as 0.7 wrote it); unknown keys inside it merge in below.
+        let mut storage = json!({"base_path": self.storage.base_path.to_string_lossy()});
+        if self.storage.library != LibraryConfig::default() {
+            storage["library"] = self.storage.library.to_value();
+        }
+        out.insert("storage".into(), merge("storage", storage));
         out.insert(
             "registration".into(),
             merge(
@@ -985,6 +1550,10 @@ impl Config {
     /// Set a value by dotted key (`server.port`) from its string form, as `config set`
     /// and `MOKURO_*` environment variables do.
     pub fn set_by_dotted_key(&mut self, key: &str, value: &str) -> Result<(), ConfigError> {
+        if let Some(field) = key.strip_prefix("storage.library.") {
+            self.storage.library.set_field(field, value)?;
+            return self.storage.library.validate();
+        }
         let parts: Vec<&str> = key.split('.').collect();
         if parts.len() != 2 {
             return Err(ConfigError::UnknownKey(format!(
@@ -1015,6 +1584,7 @@ impl Config {
             }
             "server.threads" => self.server.threads = i()?.clamp(0, 256) as u32,
             "server.cache_mb" => self.server.cache_mb = i()?.clamp(1, 65536) as u32,
+            "server.serve_readers" => self.server.serve_readers = b()?,
             "storage.base_path" => self.storage.base_path = storage::expand_user(Path::new(value)),
             "registration.mode" => {
                 if !REGISTRATION_MODES.contains(&value) {
@@ -1142,13 +1712,16 @@ impl Config {
         Ok(())
     }
 
-    /// Every dotted key `set_by_dotted_key` accepts (also the `MOKURO_*` env names).
+    /// The dotted keys `set_by_dotted_key` accepts, which are also the `MOKURO_*` env
+    /// names; `storage.library.<field>` ([`LibraryConfig::KEYS`]) is accepted as well,
+    /// with its own variables (`MOKURO_LIBRARY_BACKEND`, ...).
     pub const KEYS: &'static [&'static str] = &[
         "server.port",
         "server.host",
         "server.trusted_proxies",
         "server.threads",
         "server.cache_mb",
+        "server.serve_readers",
         "storage.base_path",
         "registration.mode",
         "registration.default_role",
@@ -1227,13 +1800,48 @@ impl Config {
             ("MOKURO_HOST", "server.host"),
             ("MOKURO_PORT", "server.port"),
             ("MOKURO_STORAGE", "storage.base_path"),
+            ("MOKURO_SERVE_READERS", "server.serve_readers"),
         ] {
             if let Some(v) = env(name) {
                 self.set_by_dotted_key(key, &v)
                     .map_err(|e| invalid(format!("{name}: {e}")))?;
             }
         }
+        // Each library variable is checked alone, then the block as a whole, so the
+        // backend and its URL may arrive in any order.
+        let mut named = Vec::new();
+        for (name, key) in LIBRARY_ENV {
+            if let Some(v) = env(name) {
+                let field = key.strip_prefix("storage.library.").unwrap_or(key);
+                self.storage
+                    .library
+                    .set_field(field, &v)
+                    .map_err(|e| invalid(format!("{name}: {e}")))?;
+                named.push(*name);
+            }
+        }
+        if !named.is_empty() {
+            self.storage
+                .library
+                .validate()
+                .map_err(|e| invalid(format!("{}: {e}", named.join(", "))))?;
+        }
         Ok(())
+    }
+
+    /// Where the library lives (`storage.library.backend`).
+    pub fn library_backend(&self) -> LibraryBackend {
+        self.storage.library.backend
+    }
+
+    /// The library is in a cloud folder, not `<base>/library`.
+    pub fn is_cloud_library(&self) -> bool {
+        self.library_backend().is_cloud()
+    }
+
+    /// [`LibraryConfig::google_flows`]: `(loopback, device)`.
+    pub fn google_flows(&self) -> (bool, bool) {
+        self.storage.library.google_flows()
     }
 
     /// The server only reads the library over WebDAV when this holds; mirrors
@@ -1342,6 +1950,20 @@ pub fn validate_trusted_proxies(list: &[String]) -> Result<(), ConfigError> {
         }
     }
     Ok(())
+}
+
+/// Add the keys of `extra` that `base` lacks, at every level of nested mappings.
+fn merge_missing(base: &mut Value, extra: &Value) {
+    if let (Value::Object(b), Value::Object(extra)) = (base, extra) {
+        for (k, v) in extra {
+            match b.get_mut(k) {
+                Some(existing) => merge_missing(existing, v),
+                None => {
+                    b.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
 }
 
 fn sort_value(v: &Value) -> Value {
@@ -1501,5 +2123,275 @@ mod tests {
             .unwrap();
         assert_eq!(paddle.detector.as_deref(), Some("ppocr-manga"));
         assert!(c.to_yaml().contains("engine: mokuro"));
+    }
+
+    #[test]
+    fn library_defaults_are_local() {
+        let c = Config::from_value(&Value::Null).unwrap();
+        let l = &c.storage.library;
+        assert_eq!(c.library_backend(), LibraryBackend::Local);
+        assert!(!c.is_cloud_library());
+        assert_eq!(l.folder, "mokuro-reader");
+        assert_eq!(l.webdav, WebDavLibraryConfig::default());
+        assert!(!l.webdav.allow_http);
+        assert_eq!(
+            (
+                l.cache_mb,
+                l.spool_gb,
+                l.outbox_hold_mb,
+                l.outbox_max_gb,
+                l.quiet_s
+            ),
+            (1024, 4, 2048, 8, 120)
+        );
+        assert_eq!(l.poll, PollConfig::default());
+        assert_eq!(l.drive_background_units_per_min, 20000);
+        assert!(l.status_files);
+        assert_eq!(l.progress_user, None);
+        assert_eq!(l.google_project, GoogleProject::Release);
+        assert_eq!(c.google_flows(), (true, true));
+        assert!(c.server.serve_readers);
+        // A default config saves no library block and no serve_readers: files written
+        // by 0.7 and 0.8 stay the same for a local library.
+        let v = c.to_value();
+        assert!(v["storage"].get("library").is_none());
+        assert!(v["server"].get("serve_readers").is_none());
+    }
+
+    #[test]
+    fn library_block_parses_and_roundtrips() {
+        let c = Config::from_value(&yaml(
+            "storage:\n  library:\n    backend: webdav\n    folder: manga\n    webdav: {url: 'https://dav.example/remote.php/dav', username: alice}\n    cache_mb: 512\n    spool_gb: 6\n    outbox_hold_mb: 1024\n    outbox_max_gb: 4\n    quiet_s: 60\n    poll: {active_s: 15, idle_s: null}\n    drive_background_units_per_min: 5000\n    status_files: false\n    progress_user: alice\n    future_knob: 1\n    webdav_future: {x: 2}\nserver: {serve_readers: false}\n",
+        ))
+        .unwrap();
+        assert_eq!(c.library_backend(), LibraryBackend::WebDav);
+        assert!(c.is_cloud_library());
+        assert!(!c.server.serve_readers);
+        let l = &c.storage.library;
+        assert_eq!(l.folder, "manga");
+        assert_eq!(
+            l.webdav.url.as_deref(),
+            Some("https://dav.example/remote.php/dav")
+        );
+        assert_eq!(l.webdav.username.as_deref(), Some("alice"));
+        assert_eq!(l.poll.active_s, Some(15));
+        assert_eq!(l.poll.idle_s, None);
+        assert_eq!((l.cache_mb, l.spool_gb, l.quiet_s), (512, 6, 60));
+        assert!(!l.status_files);
+        assert_eq!(l.progress_user.as_deref(), Some("alice"));
+        let v = c.to_value();
+        assert_eq!(v["storage"]["library"]["backend"], "webdav");
+        assert_eq!(v["storage"]["library"]["future_knob"], 1);
+        assert_eq!(v["storage"]["library"]["webdav_future"]["x"], 2);
+        assert_eq!(v["server"]["serve_readers"], false);
+        let again = Config::from_value(&v).unwrap();
+        assert_eq!(again.storage, c.storage);
+        assert_eq!(again.server, c.server);
+        assert_eq!(again.extra, c.extra);
+    }
+
+    #[test]
+    fn library_unknown_nested_keys_are_preserved() {
+        let c = Config::from_value(&yaml(
+            "storage:\n  library:\n    webdav: {url: 'https://h/d', future: 3}\n    poll: {future: 4}\n    oauth: {google: {future: 5}, future_provider: {a: 6}}\n",
+        ))
+        .unwrap();
+        let v = c.to_value();
+        let lib = &v["storage"]["library"];
+        assert_eq!(lib["webdav"]["future"], 3);
+        assert_eq!(lib["webdav"]["url"], "https://h/d");
+        assert_eq!(lib["poll"]["future"], 4);
+        assert_eq!(lib["oauth"]["google"]["future"], 5);
+        assert_eq!(lib["oauth"]["future_provider"]["a"], 6);
+        assert_eq!(Config::from_value(&v).unwrap().to_value(), v);
+    }
+
+    #[test]
+    fn library_validation() {
+        let bad = |y: &str| {
+            Config::from_value(&yaml(y))
+                .err()
+                .unwrap_or_else(|| panic!("accepted: {y}"))
+                .to_string()
+        };
+        assert!(bad("storage: {library: {backend: ftp}}").contains("backend"));
+        assert!(bad("storage: {library: {backend: webdav}}").contains("webdav.url"));
+        assert!(
+            bad("storage: {library: {backend: webdav, webdav: {url: 'http://nas/dav'}}}")
+                .contains("allow_http")
+        );
+        assert!(bad("storage: {library: {webdav: {url: 'ftp://nas/dav'}}}").contains("http"));
+        assert!(
+            bad("storage: {library: {webdav: {url: 'https://h/d', password: hunter2}}}")
+                .contains("MOKURO_WEBDAV_PASSWORD_FILE")
+        );
+        for key in [
+            "cache_mb",
+            "spool_gb",
+            "outbox_hold_mb",
+            "outbox_max_gb",
+            "quiet_s",
+            "drive_background_units_per_min",
+        ] {
+            assert!(bad(&format!("storage: {{library: {{{key}: 0}}}}")).contains(key));
+            assert!(bad(&format!("storage: {{library: {{{key}: -5}}}}")).contains(key));
+        }
+        assert!(bad("storage: {library: {poll: {active_s: 0}}}").contains("poll.active_s"));
+        assert!(
+            bad("storage: {library: {outbox_hold_mb: 9000, outbox_max_gb: 8}}")
+                .contains("outbox_hold_mb")
+        );
+        assert!(bad("storage: {library: {folder: ''}}").contains("folder"));
+        assert!(bad("storage: {library: {google_project: alpha}}").contains("google_project"));
+        // `custom` names the override clients, so it needs them.
+        assert!(bad("storage: {library: {google_project: custom}}").contains("oauth.google"));
+        // An override client is an id with its secret.
+        assert!(
+            bad("storage: {library: {oauth: {google: {client_id: a}}}}").contains("client_secret")
+        );
+        assert!(
+            bad("storage: {library: {oauth: {google: {device_client_secret: s}}}}")
+                .contains("device_client_id")
+        );
+        let ok = Config::from_value(&yaml(
+            "storage: {library: {backend: webdav, webdav: {url: 'http://nas/dav', allow_http: true}}}",
+        ))
+        .unwrap();
+        assert!(ok.storage.library.webdav.allow_http);
+    }
+
+    #[test]
+    fn google_overrides_set_custom_and_flows() {
+        let c = Config::from_value(&yaml(
+            "storage: {library: {backend: gdrive, google_project: beta, oauth: {google: {device_client_id: d, device_client_secret: ds}}}}",
+        ))
+        .unwrap();
+        assert_eq!(c.storage.library.google_project, GoogleProject::Custom);
+        // Device only: the loopback flow has no client.
+        assert_eq!(c.google_flows(), (false, true));
+        let c = Config::from_value(&yaml(
+            "storage: {library: {oauth: {google: {client_id: a, client_secret: b}}}}",
+        ))
+        .unwrap();
+        assert_eq!(c.google_flows(), (true, false));
+        let c = Config::from_value(&yaml(
+            "storage: {library: {oauth: {google: {client_id: a, client_secret: b, device_client_id: d, device_client_secret: ds}, microsoft: {client_id: m}}}}",
+        ))
+        .unwrap();
+        assert_eq!(c.google_flows(), (true, true));
+        assert_eq!(
+            c.storage.library.oauth.microsoft.client_id.as_deref(),
+            Some("m")
+        );
+        // Saved as custom, and it loads again.
+        let v = c.to_value();
+        assert_eq!(v["storage"]["library"]["google_project"], "custom");
+        assert_eq!(Config::from_value(&v).unwrap().storage, c.storage);
+        // Microsoft overrides alone leave the Google pairing alone.
+        let c = Config::from_value(&yaml(
+            "storage: {library: {oauth: {microsoft: {client_id: m}}}}",
+        ))
+        .unwrap();
+        assert_eq!(c.storage.library.google_project, GoogleProject::Release);
+        let beta = Config::from_value(&yaml("storage: {library: {google_project: beta}}")).unwrap();
+        assert_eq!(beta.storage.library.google_project, GoogleProject::Beta);
+        assert_eq!(beta.google_flows(), (true, true));
+    }
+
+    #[test]
+    fn library_env_overrides() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let mut c = Config::default();
+        // The backend comes before its URL in the loop; the pair is checked as a whole.
+        c.apply_env_overrides(env(&[
+            ("MOKURO_LIBRARY_BACKEND", "webdav"),
+            ("MOKURO_LIBRARY_FOLDER", "manga"),
+            ("MOKURO_WEBDAV_URL", "http://nas:8080/dav"),
+            ("MOKURO_WEBDAV_USERNAME", "bunko"),
+            ("MOKURO_WEBDAV_ALLOW_HTTP", "true"),
+            ("MOKURO_SERVE_READERS", "false"),
+            ("MOKURO_GOOGLE_PROJECT", "beta"),
+        ]))
+        .unwrap();
+        assert_eq!(c.library_backend(), LibraryBackend::WebDav);
+        assert_eq!(c.storage.library.folder, "manga");
+        assert_eq!(
+            c.storage.library.webdav.url.as_deref(),
+            Some("http://nas:8080/dav")
+        );
+        assert_eq!(c.storage.library.webdav.username.as_deref(), Some("bunko"));
+        assert!(c.storage.library.webdav.allow_http);
+        assert!(!c.server.serve_readers);
+        assert_eq!(c.storage.library.google_project, GoogleProject::Beta);
+        assert!(c.storage.layout().cloud_library());
+        // The long form of the serve_readers variable works too.
+        let mut c = Config::default();
+        c.apply_env_overrides(env(&[("MOKURO_SERVER_SERVE_READERS", "0")]))
+            .unwrap();
+        assert!(!c.server.serve_readers);
+        let mut c = Config::default();
+        let e = c
+            .apply_env_overrides(env(&[("MOKURO_LIBRARY_BACKEND", "webdav")]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("webdav.url"), "{e}");
+        let mut c = Config::default();
+        let e = c
+            .apply_env_overrides(env(&[("MOKURO_LIBRARY_BACKEND", "dropbox")]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("MOKURO_LIBRARY_BACKEND"), "{e}");
+        let mut c = Config::default();
+        let e = c
+            .apply_env_overrides(env(&[("MOKURO_GOOGLE_PROJECT", "custom")]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("oauth.google"), "{e}");
+    }
+
+    #[test]
+    fn library_dotted_keys() {
+        let mut c = Config::default();
+        c.set_by_dotted_key("storage.library.webdav.url", "https://h/dav")
+            .unwrap();
+        c.set_by_dotted_key("storage.library.backend", "webdav")
+            .unwrap();
+        c.set_by_dotted_key("storage.library.poll.idle_s", "600")
+            .unwrap();
+        c.set_by_dotted_key("storage.library.progress_user", "alice")
+            .unwrap();
+        c.set_by_dotted_key("server.serve_readers", "no").unwrap();
+        assert!(c.is_cloud_library());
+        assert_eq!(c.storage.library.poll.idle_s, Some(600));
+        assert_eq!(c.storage.library.progress_user.as_deref(), Some("alice"));
+        assert!(!c.server.serve_readers);
+        c.set_by_dotted_key("storage.library.poll.idle_s", "null")
+            .unwrap();
+        assert_eq!(c.storage.library.poll.idle_s, None);
+        assert!(
+            c.set_by_dotted_key("storage.library.cache_mb", "0")
+                .is_err()
+        );
+        // Without its URL a WebDAV library is refused.
+        let mut c = Config::default();
+        assert!(
+            c.set_by_dotted_key("storage.library.backend", "webdav")
+                .is_err()
+        );
+        assert!(matches!(
+            Config::default().set_by_dotted_key("storage.library.nope", "1"),
+            Err(ConfigError::UnknownKey(_))
+        ));
+        assert!(matches!(
+            Config::default().set_by_dotted_key("storage.library.webdav.password", "x"),
+            Err(ConfigError::Invalid(_))
+        ));
     }
 }

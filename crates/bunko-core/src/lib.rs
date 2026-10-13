@@ -9,7 +9,7 @@ pub mod generations;
 pub mod roles;
 pub mod storage;
 
-pub use config::{Config, ConfigError};
+pub use config::{Config, ConfigError, LibraryBackend};
 pub use roles::Role;
 pub use storage::StorageLayout;
 
