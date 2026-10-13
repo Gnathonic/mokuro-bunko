@@ -264,6 +264,25 @@ fn entry_from_row(r: &Row<'_>) -> rusqlite::Result<Entry> {
     })
 }
 
+fn node_from_row(r: &Row<'_>) -> rusqlite::Result<RNode> {
+    let hash_kind: Option<String> = r.get(10)?;
+    let hash: Option<String> = r.get(11)?;
+    Ok(RNode {
+        pid: r.get(0)?,
+        parent: r.get(1)?,
+        name_raw: r.get(2)?,
+        is_dir: r.get::<_, i64>(3)? == KIND_DIR,
+        size: r.get::<_, i64>(4)? as u64,
+        base_mtime_ms: r.get(5)?,
+        created_ms: r.get(6)?,
+        version: r.get(7)?,
+        cver: r.get(8)?,
+        pin: r.get(9)?,
+        hash: hash_kind.as_deref().and_then(HashKind::parse).zip(hash),
+        trashed: false,
+    })
+}
+
 fn now_ns() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -608,29 +627,79 @@ impl Index {
                      cver, pin, hash_kind, hash FROM node WHERE eid = ?1 AND role = 0 \
                      ORDER BY created_ms, pid LIMIT 1",
                     [eid],
-                    |r| {
-                        let hash_kind: Option<String> = r.get(10)?;
-                        let hash: Option<String> = r.get(11)?;
-                        Ok(RNode {
-                            pid: r.get(0)?,
-                            parent: r.get(1)?,
-                            name_raw: r.get(2)?,
-                            is_dir: r.get::<_, i64>(3)? == KIND_DIR,
-                            size: r.get::<_, i64>(4)? as u64,
-                            base_mtime_ms: r.get(5)?,
-                            created_ms: r.get(6)?,
-                            version: r.get(7)?,
-                            cver: r.get(8)?,
-                            pin: r.get(9)?,
-                            hash: hash_kind.as_deref().and_then(HashKind::parse).zip(hash),
-                            trashed: false,
-                        })
-                    },
+                    node_from_row,
                 )
                 .optional(),
             "winner_node",
         )
         .flatten()
+    }
+
+    /// One node by pid, whatever its role or placement.
+    pub fn node(&self, pid: &str) -> Option<RNode> {
+        soft(
+            self.conn
+                .query_row(
+                    "SELECT pid, parent_pid, name_raw, kind, size, base_mtime_ms, created_ms, version, \
+                     cver, pin, hash_kind, hash FROM node WHERE pid = ?1",
+                    [pid],
+                    node_from_row,
+                )
+                .optional(),
+            "node",
+        )
+        .flatten()
+    }
+
+    /// How many provider nodes are placed in the library, roots excluded (the
+    /// unplaced children of a removed folder, kept for an untrash, do not count).
+    pub fn node_count(&self) -> u64 {
+        soft(
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM node WHERE eid IS NOT NULL AND eid != ?1",
+                [ROOT_EID],
+                |r| r.get::<_, i64>(0),
+            ),
+            "node_count",
+        )
+        .unwrap_or(0) as u64
+    }
+
+    /// Nodes not seen since `generation` (what a sweep would remove before its
+    /// `keep` filter), roots excluded, by pid.
+    pub fn stale_pids(&self, generation: u64) -> Vec<Pid> {
+        soft(
+            self.conn
+                .prepare(
+                    "SELECT pid FROM node WHERE seen_gen < ?1 AND (eid IS NULL OR eid != ?2) ORDER BY pid",
+                )
+                .and_then(|mut s| {
+                    s.query_map(params![generation as i64, ROOT_EID], |r| r.get(0))?
+                        .collect()
+                }),
+            "stale_pids",
+        )
+        .unwrap_or_default()
+    }
+
+    /// The node `pid` plus every known descendant (by provider parent), 0 when unknown.
+    pub fn subtree_size(&self, pid: &str) -> u64 {
+        soft(
+            self.conn.query_row(
+                "WITH RECURSIVE t(pid) AS (SELECT pid FROM node WHERE pid = ?1 \
+                 UNION SELECT n.pid FROM node n JOIN t ON n.parent_pid = t.pid) \
+                 SELECT COUNT(*) FROM t",
+                [pid],
+                |r| r.get::<_, i64>(0),
+            ),
+            "subtree_size",
+        )
+        .unwrap_or(0) as u64
+    }
+
+    /// The connection, for the feed's own tables (tombstones, its hook queue).
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
     }
 
     /// Shadowed duplicates, files hidden by a folder, and nested roots.
