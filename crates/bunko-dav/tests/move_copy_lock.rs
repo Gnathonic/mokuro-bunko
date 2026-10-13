@@ -1,5 +1,8 @@
 //! MOVE/COPY (incl. the fixed destructive quirks 14.1–14.3), LOCK/UNLOCK and PROPPATCH.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use common::*;

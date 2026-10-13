@@ -1,8 +1,9 @@
 //! Resources of the DAV tree and their live properties (spec §8.1–8.2).
 
-use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use bunko_store::{Meta, fs};
 
 use crate::paths::{self, READER_ROOT, Target};
 
@@ -18,15 +19,11 @@ pub struct Stat {
 }
 
 impl Stat {
-    pub fn from_meta(meta: &Metadata) -> Self {
+    pub fn from_meta(meta: &Meta) -> Self {
         let (mtime_secs, mtime_nanos) = split_time(meta.modified().ok());
-        #[cfg(unix)]
-        let ctime_secs = {
-            use std::os::unix::fs::MetadataExt;
-            meta.ctime()
-        };
-        #[cfg(not(unix))]
-        let ctime_secs = split_time(meta.created().ok()).0;
+        let ctime_secs = meta
+            .unix_ctime()
+            .unwrap_or_else(|| split_time(meta.as_std().and_then(|m| m.created().ok())).0);
         Stat {
             size: meta.len(),
             mtime_secs,
@@ -240,7 +237,7 @@ impl Roots {
             Target::Root | Target::ReaderRoot => Some(Resource::Virtual { path: norm }),
             Target::Progress(name) => {
                 let phys = self.user_file(username?, name)?;
-                let meta = std::fs::metadata(&phys).ok()?;
+                let meta = fs::metadata(&phys).ok()?;
                 Some(Resource::File {
                     path: norm,
                     phys,
@@ -250,7 +247,7 @@ impl Roots {
             }
             Target::Library(rel) => {
                 let phys = paths::resolve_under(&self.library, &rel)?;
-                let meta = std::fs::metadata(&phys).ok()?;
+                let meta = fs::metadata(&phys).ok()?;
                 let stat = Stat::from_meta(&meta);
                 if stat.is_dir {
                     Some(Resource::Folder {
@@ -352,7 +349,7 @@ impl Roots {
                 if let Some(user) = username {
                     for name in paths::PER_USER_FILES {
                         if let Some(phys) = self.user_file(user, name)
-                            && let Ok(meta) = std::fs::metadata(&phys)
+                            && let Ok(meta) = fs::metadata(&phys)
                         {
                             out.push(Resource::File {
                                 path: format!("/{READER_ROOT}/{name}"),
@@ -374,7 +371,7 @@ impl Roots {
     }
 
     fn list_dir(&self, dir: &Path, vpath: &str, reader_root: bool) -> Vec<Resource> {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+        let Ok(entries) = fs::read_dir(dir) else {
             return Vec::new();
         };
         let mut out: Vec<Resource> = Vec::new();
@@ -389,7 +386,7 @@ impl Roots {
             let phys = entry.path();
             // Follow symlinks for the stat, as 0.5.2's DirEntry did; a dangling link is
             // skipped (0.5.2 listed it with no properties).
-            let Ok(meta) = std::fs::metadata(&phys) else {
+            let Ok(meta) = fs::metadata(&phys) else {
                 continue;
             };
             let stat = Stat::from_meta(&meta);
@@ -417,7 +414,7 @@ impl Roots {
     /// leading out of the library (or into a loop) is listed but not walked.
     pub fn walkable(&self, folder: &Resource, ancestors: &[PathBuf]) -> Option<PathBuf> {
         let phys = folder.phys()?;
-        let canon = std::fs::canonicalize(phys).ok()?;
+        let canon = fs::canonicalize(phys).ok()?;
         // Outside the library, or the folder (or an ancestor of it) is already being
         // walked: a symlink loop.
         if !canon.starts_with(&self.library) || ancestors.iter().any(|a| a.starts_with(&canon)) {

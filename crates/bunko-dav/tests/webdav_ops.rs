@@ -1,6 +1,9 @@
 //! Ported from `tests/integration/test_webdav_ops.py` (the parts below the auth gate), plus
 //! the method/status matrix of spec §8.3.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use common::*;

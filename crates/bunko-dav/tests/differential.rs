@@ -8,6 +8,9 @@
 //! prints every step. The harness itself is `common/diff.rs` (shared with
 //! `bunko-server/tests/differential_053.rs`).
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::collections::HashMap;

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+use bunko_store::{Durability, Mode, Origin, WriteIntent, afs, fs};
 use parking_lot::Mutex;
 use rand::RngCore;
 use sha2::Digest;
@@ -209,7 +210,7 @@ pub struct Staging {
 impl Drop for Staging {
     fn drop(&mut self) {
         if !self.finished {
-            let _ = std::fs::remove_file(&self.temp);
+            let _ = fs::remove_file(&self.temp);
         }
     }
 }
@@ -228,7 +229,7 @@ impl Staging {
                 true,
             )
         })?;
-        tokio::fs::create_dir_all(dir)
+        afs::create_dir_all(dir)
             .await
             .map_err(|e| Rejection::from_io(&e, "writing the upload"))?;
         let name = paths::file_name(dest);
@@ -239,7 +240,7 @@ impl Staging {
             let temp = dir.join(format!(".{name}.upload-{suffix}.tmp"));
             // Mode 0o666 & ~umask, the mode the published file must end with (0.5.2 staged
             // at 0600 and chmod'ed after the rename).
-            match tokio::fs::OpenOptions::new()
+            match afs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&temp)
@@ -299,9 +300,13 @@ impl Staging {
         Ok(())
     }
 
-    /// Flush, fsync and check the staged bytes, then rename them over the destination.
-    /// `damage` remembers archive damage per destination (`.cbz` only).
-    pub async fn commit(mut self, damage: &DamageMemory) -> Result<Stored, Rejection> {
+    /// Flush, fsync and check the staged bytes, then publish them over the destination
+    /// for `user`. `damage` remembers archive damage per destination (`.cbz` only).
+    pub async fn commit(
+        mut self,
+        damage: &DamageMemory,
+        user: Option<&str>,
+    ) -> Result<Stored, Rejection> {
         if let Some(mut file) = self.file.take() {
             file.flush()
                 .await
@@ -318,7 +323,7 @@ impl Staging {
                 return Err(Rejection::from_io(&e, "saving the upload"));
             }
         }
-        let size = tokio::fs::metadata(&self.temp)
+        let size = afs::metadata(&self.temp)
             .await
             .map_err(|e| Rejection::from_io(&e, "checking the upload"))?
             .len();
@@ -379,8 +384,17 @@ impl Staging {
                 });
             }
         }
-        tokio::fs::rename(&self.temp, &self.dest)
+        let (temp, dest) = (self.temp.clone(), self.dest.clone());
+        let intent = WriteIntent::new(
+            Mode::Replace { base: None },
+            Origin::Dav {
+                user: user.map(str::to_owned),
+            },
+            Durability::Sync,
+        );
+        tokio::task::spawn_blocking(move || fs::publish(&temp, &dest, &intent))
             .await
+            .unwrap_or_else(|e| Err(io::Error::other(e)))
             .map_err(|e| Rejection::from_io(&e, "moving the upload into place"))?;
         self.finished = true;
         damage.forget(&self.dest.to_string_lossy());
@@ -395,7 +409,7 @@ impl Staging {
 
 /// Do two files hold the same bytes? (Any read error: no.) Blocking.
 fn same_bytes(a: &Path, b: &Path) -> bool {
-    let (Ok(fa), Ok(fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+    let (Ok(fa), Ok(fb)) = (fs::File::open(a), fs::File::open(b)) else {
         return false;
     };
     match (fa.metadata(), fb.metadata()) {
@@ -521,7 +535,7 @@ pub fn verify_staged(path: &Path) -> Verified {
 
 fn verify_with_allowance(path: &Path, allowance: fn(u64) -> u64) -> Verified {
     let mut result = Verified::default();
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Ok(mut file) = fs::File::open(path) else {
         result.structural = Some("OSError: cannot open the staged upload".to_string());
         return result;
     };
@@ -626,7 +640,7 @@ fn verify_with_allowance(path: &Path, allowance: fn(u64) -> u64) -> Verified {
     result
 }
 
-fn read_up_to(file: &mut std::fs::File, buf: &mut [u8]) -> usize {
+fn read_up_to(file: &mut fs::File, buf: &mut [u8]) -> usize {
     let mut n = 0;
     while n < buf.len() {
         match file.read(&mut buf[n..]) {
@@ -822,6 +836,7 @@ pub fn failure_for_status(code: u16) -> (u16, &'static str, String, bool) {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
 

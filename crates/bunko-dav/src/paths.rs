@@ -218,13 +218,13 @@ pub fn resolve_under(base: &Path, rel: &str) -> Option<PathBuf> {
         if !probing {
             continue;
         }
-        match std::fs::symlink_metadata(&cur) {
+        match bunko_store::fs::symlink_metadata(&cur) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 links += 1;
                 if links > 40 {
                     return None;
                 }
-                let target = std::fs::read_link(&cur).ok()?;
+                let target = bunko_store::fs::read_link(&cur).ok()?;
                 cur.pop();
                 let mut front: Vec<OsString> = Vec::new();
                 if target.is_absolute() {
@@ -316,6 +316,7 @@ pub fn is_staging_name(name: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
 

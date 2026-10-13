@@ -218,10 +218,17 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     };
     // Open first and describe what was opened: the validators match the bytes sent even
     // if an upload renames a new file into place meanwhile.
-    let mut file = tokio::fs::File::open(phys)
+    let mut file = bunko_store::afs::File::open(phys)
         .await
-        .map_err(|e| DavError::new(StatusCode::NOT_FOUND, e.to_string()))?;
-    let stat = Stat::from_meta(&file.metadata().await?);
+        .map_err(|e| DavError::new(StatusCode::NOT_FOUND, e.to_string()))?
+        .into_std()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this store has no local file to stream",
+            )
+        })?;
+    let stat = Stat::from_meta(&file.metadata().await?.into());
     let res = match res {
         Resource::File {
             path, phys, kind, ..

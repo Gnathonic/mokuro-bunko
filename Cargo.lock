@@ -477,6 +477,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bunko-core",
+ "bunko-store",
  "bytes",
  "crc32fast",
  "flate2",

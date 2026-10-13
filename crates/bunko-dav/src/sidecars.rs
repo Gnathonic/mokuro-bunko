@@ -56,7 +56,7 @@ pub fn siblings(cbz: &Path) -> Vec<PathBuf> {
         .iter()
         .map(|s| dir.join(format!("{stem}{s}")))
         .collect();
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = bunko_store::fs::read_dir(dir) else {
         return out;
     };
     let mut names: Vec<String> = entries
@@ -93,6 +93,7 @@ pub fn primary_sidecar_stem(name: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
 

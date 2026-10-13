@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use bunko_store::fs;
 use http::StatusCode;
 use serde_json::json;
 
@@ -76,14 +77,14 @@ fn delete_resource(
         Resource::Virtual { .. } => Ok(()),
         Resource::File { path, phys, .. } => delete_file(inner, req, path, phys, effects),
         Resource::Folder { path, phys, .. } => {
-            if !phys.exists() {
+            if !fs::exists(phys) {
                 return Ok(());
             }
             let target = folder_audit_target(inner, path, Some(phys));
             let Some(_guard) = inner.write_locks.try_lock(phys) else {
                 return Err(write_lock_conflict(req, target, "delete", None));
             };
-            std::fs::remove_dir_all(phys)?;
+            fs::remove_dir_all(phys)?;
             if let Some(rel) = inner.roots.library_rel(phys).filter(|r| !r.is_empty()) {
                 req.ctx.hooks.forget_volume_uploads_under_prefix(&rel);
                 req.ctx.hooks.forget_ocr_sidecars_under_prefix(&rel);
@@ -104,7 +105,7 @@ fn delete_file(
     phys: &Path,
     effects: &mut Effects,
 ) -> DavResult<()> {
-    if !phys.exists() {
+    if !fs::exists(phys) {
         return Ok(());
     }
     let target = file_audit_target(inner, vpath, phys);
@@ -116,10 +117,10 @@ fn delete_file(
     let cbz = is_cbz(phys);
     if cbz {
         for sidecar in sidecars::siblings(phys) {
-            let _ = std::fs::remove_file(&sidecar);
+            let _ = fs::remove_file(&sidecar);
         }
     }
-    match std::fs::remove_file(phys) {
+    match fs::remove_file(phys) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
@@ -177,7 +178,7 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
         else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
-        std::fs::create_dir_all(&dir)?;
+        fs::create_dir_all(&dir)?;
         let member = paths::join_uri(parent.path(), &name);
         audit(
             &req2,
@@ -493,14 +494,14 @@ fn same_physical(a: &Path, b: &Path) -> bool {
 
 /// Is `dest` (which may not exist yet) inside the folder `src` on disk?
 fn physically_below(dest: &Path, src: &Path) -> bool {
-    let Ok(src) = std::fs::canonicalize(src) else {
+    let Ok(src) = fs::canonicalize(src) else {
         return dest.starts_with(src);
     };
     // The deepest existing ancestor of `dest`, canonical, with the rest re-attached.
     let mut probe = dest.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     loop {
-        if let Ok(canon) = std::fs::canonicalize(&probe) {
+        if let Ok(canon) = fs::canonicalize(&probe) {
             let mut full = canon;
             full.extend(tail.iter().rev());
             return full.starts_with(&src);
@@ -533,9 +534,9 @@ fn move_file(
     let new_rel = inner.roots.library_rel(dest);
     primary_leaving(inner, req, src);
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)?;
     }
-    std::fs::rename(src, dest)?;
+    fs::rename(src, dest)?;
     if is_cbz(src) {
         effects.note_removed(inner, src);
     }
@@ -583,29 +584,29 @@ fn copy_one(src: &Path, dest: &Path) -> std::io::Result<()> {
     let dir = dest
         .parent()
         .ok_or_else(|| std::io::Error::other("no parent"))?;
-    std::fs::create_dir_all(dir)?;
+    fs::create_dir_all(dir)?;
     let temp = dir.join(format!(
         ".{}.upload-copy{}.tmp",
         paths::file_name(dest),
         std::process::id()
     ));
     let result = (|| {
-        std::fs::copy(src, &temp)?;
-        let meta = std::fs::metadata(src)?;
-        let file = std::fs::File::options().write(true).open(&temp)?;
+        fs::copy(src, &temp)?;
+        let meta = fs::metadata(src)?;
+        let file = fs::File::options().write(true).open(&temp)?;
         let mut times = std::fs::FileTimes::new();
         if let Ok(m) = meta.modified() {
             times = times.set_modified(m);
         }
-        if let Ok(a) = meta.accessed() {
+        if let Some(a) = meta.as_std().and_then(|m| m.accessed().ok()) {
             times = times.set_accessed(a);
         }
         file.set_times(times)?;
         drop(file);
-        std::fs::rename(&temp, dest)
+        fs::rename(&temp, dest)
     })();
     if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        let _ = fs::remove_file(&temp);
     }
     result
 }
@@ -629,9 +630,9 @@ fn move_folder(
     let new_prefix = inner.roots.library_rel(dest);
     let volumes = cbz_under(src);
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)?;
     }
-    std::fs::rename(src, dest)?;
+    fs::rename(src, dest)?;
     effects.note_removed(inner, src);
     match (old_prefix.as_deref(), new_prefix.as_deref()) {
         (Some(old_prefix), Some(new_prefix)) => {
@@ -674,7 +675,7 @@ fn cbz_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
+        let Ok(entries) = fs::read_dir(&d) else {
             continue;
         };
         for e in entries.flatten() {
@@ -712,7 +713,7 @@ fn copy_folder(
     {
         prune_unmatched(inner, req, existing, src_phys, dest_phys, effects)?;
     }
-    std::fs::create_dir_all(dest_phys)?;
+    fs::create_dir_all(dest_phys)?;
     effects.touch(dest_v, Some(dest_phys));
     if !infinity {
         return Ok(());
@@ -723,7 +724,7 @@ fn copy_folder(
         dest_v.trim_end_matches('/').to_string(),
     )];
     while let Some((from, to, vto)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&from) else {
+        let Ok(entries) = fs::read_dir(&from) else {
             continue;
         };
         let mut entries: Vec<_> = entries.flatten().collect();
@@ -734,18 +735,18 @@ fn copy_folder(
                 continue;
             }
             let (f, t, v) = (e.path(), to.join(&name), format!("{vto}/{name}"));
-            match std::fs::metadata(&f) {
+            match fs::metadata(&f) {
                 Ok(m) if m.is_dir() => {
                     // Never descend into a symlink leading out of the library.
-                    if std::fs::canonicalize(&f).is_ok_and(|c| {
+                    if fs::canonicalize(&f).is_ok_and(|c| {
                         c.starts_with(&inner.roots.library) && !dest_phys.starts_with(&c)
                     }) {
-                        std::fs::create_dir_all(&t)?;
+                        fs::create_dir_all(&t)?;
                         stack.push((f, t, v));
                     }
                 }
                 Ok(_) => {
-                    if t.exists() {
+                    if fs::exists(&t) {
                         delete_file(inner, req, &v, &t, effects)?;
                     }
                     copy_file(inner, req, &f, &v, &t, effects)?;
@@ -769,7 +770,7 @@ fn prune_unmatched(
     let base_v = existing.path().trim_end_matches('/').to_string();
     let mut stack = vec![(src.to_path_buf(), dest.to_path_buf(), base_v)];
     while let Some((s, d, v)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
+        let Ok(entries) = fs::read_dir(&d) else {
             continue;
         };
         for e in entries.flatten() {
@@ -779,8 +780,8 @@ fn prune_unmatched(
                 e.path(),
                 format!("{v}/{}", name.to_string_lossy()),
             );
-            let d_is_dir = std::fs::metadata(&dp).map(|m| m.is_dir()).unwrap_or(false);
-            let s_meta = std::fs::metadata(&sp).ok();
+            let d_is_dir = fs::metadata(&dp).map(|m| m.is_dir()).unwrap_or(false);
+            let s_meta = fs::metadata(&sp).ok();
             match s_meta {
                 Some(m) if m.is_dir() == d_is_dir => {
                     if d_is_dir {
@@ -788,7 +789,7 @@ fn prune_unmatched(
                     }
                 }
                 _ => {
-                    let stat = std::fs::metadata(&dp).map(|m| crate::resource::Stat::from_meta(&m));
+                    let stat = fs::metadata(&dp).map(|m| crate::resource::Stat::from_meta(&m));
                     if let Ok(stat) = stat {
                         let res = if d_is_dir {
                             Resource::Folder {

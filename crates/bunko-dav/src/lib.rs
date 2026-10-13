@@ -121,8 +121,8 @@ impl Dav {
     pub fn new(layout: &StorageLayout, config: DavConfig) -> Result<Dav, DavInitError> {
         layout.ensure_directories()?;
         let roots = Roots {
-            library: std::fs::canonicalize(layout.library())?,
-            users: std::fs::canonicalize(layout.users())?,
+            library: bunko_store::fs::canonicalize(layout.library())?,
+            users: bunko_store::fs::canonicalize(layout.users())?,
         };
         let cache = PropfindCache::new(config.propfind_cache, roots.clone());
         let path_case = PathCase::new(LibraryPathCanonicalizer::new(roots.library.clone(), None));

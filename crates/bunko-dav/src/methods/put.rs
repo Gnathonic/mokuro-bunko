@@ -190,7 +190,7 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
         )
         .into());
     };
-    let existed_before = tokio::fs::metadata(&dest).await.is_ok();
+    let existed_before = bunko_store::afs::metadata(&dest).await.is_ok();
     let expected = expected_size(req);
     let digest = upload::parse_content_digest(req.header("content-digest"));
     let mut staging = Staging::create(&dest, expected, digest).await?;
@@ -231,7 +231,7 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
             }
         }
     }
-    let stored: Stored = staging.commit(&inner.damage).await?;
+    let stored: Stored = staging.commit(&inner.damage, req.username()).await?;
 
     // Committed: the rest reports it and never fails the request.
     let (inner2, req2, dest2) = (inner.clone(), req.clone(), dest.clone());
@@ -241,7 +241,7 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
             .await
             .unwrap_or(None);
 
-    let etag = tokio::fs::metadata(&dest)
+    let etag = bunko_store::afs::metadata(&dest)
         .await
         .map(|m| Stat::from_meta(&m).file_etag())
         .ok();

@@ -265,7 +265,7 @@ pub(crate) fn primary_leaving(inner: &Inner, req: &Req, phys: &Path) {
     let Some(stem) = crate::sidecars::primary_sidecar_stem(&name) else {
         return;
     };
-    if phys.with_file_name(format!("{stem}.cbz")).is_file() {
+    if bunko_store::fs::is_file(phys.with_file_name(format!("{stem}.cbz"))) {
         req.ctx.hooks.primary_sidecar_leaving(&rel, phys);
     }
 }
