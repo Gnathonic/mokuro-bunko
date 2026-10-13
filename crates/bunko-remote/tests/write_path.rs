@@ -298,7 +298,8 @@ fn a_deferred_publish_is_visible_at_once_with_own() {
 fn deferred_publish_survives_outage_and_restart() {
     let mut t = T::new(FakeBackend::drive_like(), &[("S/", b"")]);
     t.wait_steady();
-    t.fake.throttle_for(Duration::from_secs(3600));
+    // Long enough to outlast the restart; the store honours its Retry-After.
+    t.fake.throttle_for(Duration::from_secs(2));
     t.publish("S/v.mokuro", b"result", deferred(ocr(), Mode::CreateNew));
     wait_until("an attempt", || {
         t.s()
@@ -312,7 +313,6 @@ fn deferred_publish_survives_outage_and_restart() {
     // Still pending (and visible) after the restart, while the outage lasts.
     assert!(fs::metadata(t.abs("S/v.mokuro")).unwrap().own());
     assert_eq!(t.s().outbox().len(), 1);
-    t.fake.throttle_for(Duration::ZERO);
     t.idle();
     assert_eq!(t.remote_named("S", "v.mokuro").len(), 1);
     assert_eq!(t.remote_bytes("S/v.mokuro").unwrap(), b"result");
@@ -840,4 +840,234 @@ fn the_queue_file_is_written_on_change_within_its_floor_with_done_entries() {
     t.idle();
     assert_eq!(t.fake.calls(FakeOp::Upload), uploads + 1);
     assert_eq!(read(&t)["pending_volumes"], 3);
+}
+
+// ---- ownership and integrity hardening ---------------------------------------------
+
+/// Restart a store that stopped right after UPLOADING was persisted, with `meddle`
+/// run on the provider while it was down.
+fn crash_before_upload(
+    t: &mut T,
+    rel: &str,
+    bytes: &[u8],
+    w: WriteIntent,
+    meddle: impl FnOnce(&T),
+) {
+    t.s()
+        .set_failpoint(Some(Arc::new(|at: &str| at == "UPLOADING")));
+    let src = t.local(&rel.replace('/', "_"), bytes);
+    let _ = fs::publish(&src, t.abs(rel), &w);
+    wait_until("the crash", || t.s().crashed());
+    t.stop();
+    meddle(t);
+    t.start();
+    t.wait_steady();
+    t.idle();
+}
+
+#[test]
+fn reconcile_never_adopts_a_large_foreign_file_of_the_same_size() {
+    // No provider hash and no pin: the size is all the provider says.
+    let mut t = T::new(FakeBackend::webdav_plain(), &[("S/v.cbz", b"zip")]);
+    t.wait_steady();
+    let ours = vec![1u8; 5 << 20];
+    let theirs = vec![2u8; 5 << 20];
+    crash_before_upload(
+        &mut t,
+        "S/v.mokuro",
+        &ours,
+        deferred(ocr(), Mode::CreateNew),
+        |t| {
+            t.fake.reader_put(&format!("{FOLDER}/S/v.mokuro"), &theirs);
+        },
+    );
+    // The reader's file stays the reader's: never own, never overwritten, and a
+    // later remove only trashes it.
+    assert_eq!(t.remote_bytes("S/v.mokuro").unwrap(), theirs);
+    assert!(!fs::metadata(t.abs("S/v.mokuro")).unwrap().own());
+    assert_eq!(t.hooks.discarded.lock().len(), 1);
+    fs::remove_file(t.abs("S/v.mokuro")).unwrap();
+    assert!(
+        t.fake.deleted_log().is_empty(),
+        "{:?}",
+        t.fake.deleted_log()
+    );
+    assert_eq!(t.fake.trashed_log().len(), 1);
+}
+
+#[test]
+fn reconcile_proves_a_small_file_by_a_pinned_re_download() {
+    for (theirs, adopted) in [(b"OCR B".as_slice(), false), (b"OCR A".as_slice(), true)] {
+        let mut t = T::new(FakeBackend::webdav_plain(), &[("S/v.cbz", b"zip")]);
+        t.wait_steady();
+        crash_before_upload(
+            &mut t,
+            "S/v.mokuro",
+            b"OCR A",
+            deferred(ocr(), Mode::CreateNew),
+            |t| {
+                t.fake.reader_put(&format!("{FOLDER}/S/v.mokuro"), theirs);
+            },
+        );
+        let m = fs::metadata(t.abs("S/v.mokuro")).unwrap();
+        assert_eq!(m.own(), adopted, "{theirs:?}");
+        assert_eq!(t.hooks.discarded.lock().len(), usize::from(!adopted));
+        assert_eq!(t.remote_named("S", "v.mokuro").len(), 1);
+    }
+}
+
+#[test]
+fn a_permanent_delete_needs_the_providers_current_version_to_be_proven_own() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/", b"")]);
+    t.wait_steady();
+    fs::write(t.abs("S/own.json"), b"mine").unwrap();
+    let pid = t.fake.node_at(&format!("{FOLDER}/S/own.json")).unwrap().pid;
+    assert!(fs::metadata(t.abs("S/own.json")).unwrap().own());
+    // The reader replaces it (same id, new version); the index has not seen it yet.
+    t.fake
+        .reader_put(&format!("{FOLDER}/S/own.json"), b"the reader's");
+    fs::remove_file(t.abs("S/own.json")).unwrap();
+    assert!(t.fake.deleted_log().is_empty());
+    assert_eq!(t.fake.trashed_log(), vec![pid]);
+}
+
+#[test]
+fn control_files_and_reserved_names_are_not_writable_through_the_shim() {
+    let t = T::new(FakeBackend::onedrive_like(), &[("S/v.cbz", b"zip")]);
+    t.wait_steady();
+    let denied = |r: std::io::Result<()>| {
+        let e = r.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
+    };
+    let dav = WriteIntent::new(
+        Mode::Replace { base: None },
+        Origin::Dav {
+            user: Some("u".into()),
+        },
+        Durability::Sync,
+    );
+    for name in [
+        ".mokuro-bunko.json",
+        ".MOKURO-Bunko.json",
+        ".mokuro-queue.json",
+    ] {
+        let src = t.local("ctl", b"{}");
+        denied(fs::publish(&src, t.abs(name), &dav).map(|_| ()));
+        denied(fs::rename(&src, t.abs(name)));
+        denied(fs::write(t.abs(name), b"{}"));
+        denied(fs::rename(t.abs("S/v.cbz"), t.abs(name)));
+    }
+    // The WebDAV driver's staged-upload and probe names.
+    denied(fs::write(t.abs("S/.v.mokuro.bunko-7.tmp"), b"x"));
+    denied(fs::create_dir(t.abs(".bunko-probe-Aa")));
+    assert_eq!(t.fake.calls(FakeOp::Upload), 0);
+    // Only the status writer may publish the queue file.
+    let src = t.local("q", b"{}");
+    let status = WriteIntent::new(
+        Mode::Replace { base: None },
+        Origin::Status,
+        Durability::Deferred,
+    );
+    fs::publish(&src, t.abs(".mokuro-queue.json"), &status).unwrap();
+    t.idle();
+    assert_eq!(t.fake.calls(FakeOp::Upload), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn local_sources_outside_the_staging_folders_are_refused() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/", b"")]);
+    t.wait_steady();
+    let denied = |r: std::io::Result<u64>| {
+        let e = r.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied, "{e}");
+    };
+    let w = deferred(Origin::Compiler, Mode::Replace { base: None });
+    // An arbitrary local file, directly or through a rename or a copy.
+    denied(fs::publish("/etc/passwd", t.abs("S/a"), &w).map(|_| 0));
+    denied(fs::rename("/etc/passwd", t.abs("S/a")).map(|_| 0));
+    denied(fs::copy("/etc/passwd", t.abs("S/a")));
+    // A symlink or a hard link inside an allowed folder.
+    let link = t.tmp.path().join("link");
+    std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
+    denied(fs::publish(&link, t.abs("S/a"), &w).map(|_| 0));
+    let orig = t.local("orig", b"x");
+    let hard = t.tmp.path().join("hard");
+    std::fs::hard_link(&orig, &hard).unwrap();
+    denied(fs::publish(&hard, t.abs("S/a"), &w).map(|_| 0));
+    // Bunko's own cloud state (the store's databases, credentials).
+    let state = t.tmp.path().join("cloud/s/state.sqlite");
+    denied(fs::publish(&state, t.abs("S/a"), &w).map(|_| 0));
+    let creds = t.tmp.path().join("cloud/credentials.json");
+    std::fs::write(&creds, b"{}").unwrap();
+    denied(fs::copy(&creds, t.abs("S/a")));
+    assert!(state.is_file() && creds.is_file());
+    assert!(t.s().outbox().is_empty());
+    // A file staged under the storage base is fine.
+    let ok = t.local("ok", b"fine");
+    fs::publish(&ok, t.abs("S/a"), &w).unwrap();
+    t.idle();
+    assert_eq!(t.remote_bytes("S/a").unwrap(), b"fine");
+}
+
+#[test]
+fn staged_bytes_changed_after_staging_fail_the_op() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/", b"")]);
+    t.wait_steady();
+    t.gate(false);
+    t.publish(
+        "S/v.mokuro",
+        b"ocr result",
+        deferred(ocr(), Mode::CreateNew),
+    );
+    let outbox = t.tmp.path().join("cloud/s/outbox");
+    let staged = std::fs::read_dir(&outbox)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(&staged, b"tampered!!").unwrap();
+    t.gate(true);
+    t.idle();
+    assert_eq!(t.fake.calls(FakeOp::Upload), 0);
+    assert_eq!(t.s().outbox()[0].state, "FAILED");
+    assert!(t.s().conflicts().iter().any(|c| c.0 == "failed-op"));
+}
+
+#[test]
+fn a_write_response_with_other_bytes_is_not_own_and_is_retried() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/", b"")]);
+    t.wait_steady();
+    t.fake.mangle_uploads(1);
+    t.publish(
+        "S/v.mokuro",
+        b"ocr result",
+        deferred(ocr(), Mode::CreateNew),
+    );
+    t.idle();
+    let copies = t.remote_named("S", "v.mokuro");
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(t.fake.content(&copies[0].pid).unwrap(), b"ocr result");
+    assert_eq!(t.fake.trashed_log().len(), 1, "the corrupt copy is trashed");
+    assert!(t.fake.deleted_log().is_empty());
+    assert!(t.s().conflicts().iter().any(|c| c.0 == "corrupt"));
+    assert!(fs::metadata(t.abs("S/v.mokuro")).unwrap().own());
+}
+
+#[test]
+fn a_queued_write_never_lands_in_a_replacement_folder() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/v.cbz", b"zip")]);
+    t.wait_steady();
+    t.gate(false);
+    t.publish("S/v.mokuro", b"sidecar", deferred(ocr(), Mode::CreateNew));
+    // The reader deletes the folder and makes a new one by the same name.
+    t.fake.reader_delete(&format!("{FOLDER}/S"));
+    t.fake.reader_mkdir(&format!("{FOLDER}/S"));
+    t.sync_feed();
+    t.gate(true);
+    t.idle();
+    assert_eq!(t.fake.calls(FakeOp::Upload), 0);
+    assert_eq!(t.s().outbox()[0].state, "CONFLICT");
+    assert!(t.remote_named("S", "v.mokuro").is_empty());
 }

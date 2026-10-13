@@ -123,6 +123,14 @@ pub struct RemoteStoreConfig {
     /// The shortest interval between two cloud queue-file writes; `None`: per
     /// provider (WebDAV 30 s, Drive and OneDrive 60 s, MEGA 300 s).
     pub queue_floor: Option<Duration>,
+    /// Local folders a file published (or copied) into the store from outside it
+    /// may come from: the OCR result spool, upload temp files, scratch copies. A
+    /// source anywhere else, a symlink, a hard-linked file, a file of another user,
+    /// or one under the cloud state folder (credentials, other stores) apart from
+    /// this store's `staging/` is refused, so no crafted path can carry an arbitrary
+    /// local file into the cloud. Default: the storage base (`dir`'s grandparent,
+    /// `<base>` of `<base>/cloud/<store-id>`) and the OS temp folder.
+    pub local_sources: Vec<PathBuf>,
 }
 
 impl RemoteStoreConfig {
@@ -135,10 +143,19 @@ impl RemoteStoreConfig {
     ) -> RemoteStoreConfig {
         let root = root.into();
         let folder = folder.into();
+        let dir: PathBuf = dir.into();
         let feed = FeedConfig::new(root.clone(), folder.clone());
+        let local_sources = dir
+            .parent()
+            .and_then(Path::parent)
+            .filter(|b| !b.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .into_iter()
+            .chain([std::env::temp_dir()])
+            .collect();
         RemoteStoreConfig {
             root,
-            dir: dir.into(),
+            dir,
             folder,
             create_root: false,
             cache_bytes: 1024 << 20,
@@ -156,6 +173,7 @@ impl RemoteStoreConfig {
             lease_ttl: None,
             retry_base: Duration::from_secs(1),
             queue_floor: None,
+            local_sources,
         }
     }
 

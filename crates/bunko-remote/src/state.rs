@@ -59,6 +59,8 @@ pub enum ConflictRow {
     LostWrite,
     FailedOp,
     Discarded,
+    /// The provider stored other bytes than Bunko uploaded (size or hash differ).
+    Corrupt,
 }
 
 impl ConflictRow {
@@ -67,6 +69,7 @@ impl ConflictRow {
             ConflictRow::LostWrite => "lost-write",
             ConflictRow::FailedOp => "failed-op",
             ConflictRow::Discarded => "discarded",
+            ConflictRow::Corrupt => "corrupt",
         }
     }
 }
@@ -294,6 +297,29 @@ impl StateDb {
         self.own
             .lock()
             .contains(&(pid.to_string(), cver.to_string()))
+    }
+
+    /// `(pid, cver)` is a file version Bunko wrote *and proved* (D16): a ledger row
+    /// that is not `echo_only` or trashed and records the sha256 of the bytes Bunko
+    /// staged — written only when the provider's hash, a pinned re-download, or the
+    /// write response's size and hash showed those bytes landed. Folders, lease
+    /// markers and moved or trashed foreign files never qualify. The only versions
+    /// Bunko may delete permanently.
+    pub fn is_own_proven(&self, pid: &str, cver: &str) -> bool {
+        self.is_own(pid, cver)
+            && self
+                .with("is_own_proven", |c| {
+                    c.query_row(
+                        "SELECT 1 FROM ledger WHERE pid = ?1 AND cver = ?2 AND echo_only = 0 \
+                         AND trashed = 0 AND sha256 IS NOT NULL AND length(sha256) = 64",
+                        params![pid, cver],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                })
+                .ok()
+                .flatten()
+                .is_some()
     }
 
     /// The feed's upsert matches a ledger row exactly (D20).

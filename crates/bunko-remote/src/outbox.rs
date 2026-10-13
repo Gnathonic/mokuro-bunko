@@ -22,8 +22,18 @@
 //! writes the ledger row, then the node into the index (so the feed's echo changes
 //! nothing and runs no hooks), fills the blob cache, and emits the event. An upload
 //! with an uncertain outcome is reconciled at the next PREFLIGHT: a node at the
-//! destination with the staged size (and hash, where the provider reports one) is
-//! the op's own commit.
+//! destination is the op's own commit only with a content proof (the provider's
+//! sha256 or md5 equal to the staged bytes', or a pinned re-download of a small
+//! file); a larger file without a usable hash is never adopted, so it is never
+//! deleted permanently or replaced as own.
+//!
+//! **Integrity.** The staged bytes are re-hashed before every upload (a change
+//! since STAGED fails the op); a write response whose size or hash differs from
+//! the staged bytes is not own (`corrupt` conflict, retried); a queued write whose
+//! destination folder was replaced by another folder of the same name (an opaque
+//! id changed) is a conflict, never an upload into the stranger's folder.
+//! Permanent deletes go through one helper, `discard_node`, which re-stats the
+//! node and trashes anything that is not a proven own version (D16).
 //!
 //! Retries back off exponentially with jitter (`Retry-After` honoured); attempts
 //! count only while the feed is steady. FAILED is for permanent errors only
@@ -50,7 +60,7 @@ use crate::index::{IndexChange, ROOT_EID, RelPath};
 use crate::names::nfc;
 use crate::state::{ConflictRow, LedgerRow};
 use crate::status::DoneEntry;
-use crate::store::Core;
+use crate::store::{Core, Ver};
 
 /// Decides whether Deferred ops may run (the lease fence, or a caller's gate).
 pub type Gate = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -350,6 +360,55 @@ fn classify(e: &BErr) -> Class {
     }
 }
 
+/// Whether a provider node holds an op's staged bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Proof {
+    Proven,
+    Mismatch,
+    /// Nothing Bunko can check says either way.
+    Unknown,
+}
+
+impl Proof {
+    fn of(equal: bool) -> Proof {
+        if equal {
+            Proof::Proven
+        } else {
+            Proof::Mismatch
+        }
+    }
+}
+
+/// A staged file's size and digests.
+pub(crate) struct Digests {
+    pub size: u64,
+    pub sha256: [u8; 32],
+    pub md5: [u8; 16],
+}
+
+/// Hash a local file (blocking).
+pub(crate) fn digest_file(p: &Path) -> io::Result<Digests> {
+    let mut f = std::fs::File::open(p)?;
+    let mut sha = Sha256::new();
+    let mut md5 = <md5::Md5 as md5::Digest>::new();
+    let mut buf = vec![0u8; 256 << 10];
+    let mut size = 0u64;
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        size += n as u64;
+        sha.update(&buf[..n]);
+        md5::Digest::update(&mut md5, &buf[..n]);
+    }
+    Ok(Digests {
+        size,
+        sha256: sha.finalize().into(),
+        md5: md5::Digest::finalize(md5).into(),
+    })
+}
+
 fn parent_of(rel: &RelPath) -> RelPath {
     let s = rel.segments();
     RelPath::from_segments(s[..s.len().saturating_sub(1)].iter().cloned()).unwrap_or_default()
@@ -637,7 +696,7 @@ impl<B: Backend> Core<B> {
     }
 
     /// The parent folder's pid of `dest`, from the index.
-    fn parent_pid_of(&self, dest: &RelPath) -> Option<Pid> {
+    pub(crate) fn parent_pid_of(&self, dest: &RelPath) -> Option<Pid> {
         let idx = self.index.lock();
         let p = idx.lookup(&parent_of(dest)).filter(|e| e.is_dir)?;
         if p.eid == ROOT_EID {
@@ -960,21 +1019,95 @@ impl<B: Backend> Core<B> {
 
     // ---- Put ----------------------------------------------------------------------
 
-    fn same_bytes(&self, n: &RNode, op: &Op) -> bool {
+    /// What the provider's own report on `n` (size, and a hash Bunko can compute)
+    /// says about whether it holds the op's staged bytes. `digest` is the staged
+    /// file's, when already computed.
+    fn hash_proof(&self, n: &RNode, op: &Op, digest: Option<&Digests>) -> Proof {
         if n.is_dir || n.size != op.size {
-            return false;
+            return Proof::Mismatch;
         }
         match (&n.hash, op.sha256) {
-            (Some((HashKind::Sha256, h)), Some(sha)) => h.eq_ignore_ascii_case(&hex::encode(sha)),
-            (Some((HashKind::Md5, h)), _) => self
-                .staged_path(op)
-                .and_then(|p| std::fs::read(p).ok())
-                .is_some_and(|d| {
-                    hex::encode(<md5::Md5 as md5::Digest>::digest(&d)).eq_ignore_ascii_case(h)
-                }),
-            // No hash to compare: the size, and that it is not the version replaced.
-            _ => op.base() != Some(n.cver.as_str()),
+            (Some((HashKind::Sha256, h)), Some(sha)) => {
+                Proof::of(h.eq_ignore_ascii_case(&hex::encode(sha)))
+            }
+            (Some((HashKind::Md5, h)), _) => {
+                let md5 = match digest {
+                    Some(d) => Some(d.md5),
+                    None => self
+                        .staged_path(op)
+                        .and_then(|p| digest_file(&p).ok())
+                        .map(|d| d.md5),
+                };
+                md5.map_or(Proof::Unknown, |m| {
+                    Proof::of(hex::encode(m).eq_ignore_ascii_case(h))
+                })
+            }
+            // QuickXor, SHA-1: not computed here, so they prove nothing either way.
+            _ => Proof::Unknown,
         }
+    }
+
+    /// Whether the node `n` found at the destination is the op's own upload
+    /// (§5.7 own-version capture, D16): the provider's sha256 or md5 equal to the
+    /// staged bytes', or — with no such hash — a pinned re-download of a file up to
+    /// [`SMALL_MAX`] whose sha256 matches. A larger file without a usable hash is
+    /// never adopted: matching sizes prove nothing, and adopting a foreign file as
+    /// own would let a later permanent delete or replace destroy it.
+    async fn content_proof(&self, n: &RNode, op: &Op) -> Proof {
+        match self.hash_proof(n, op, None) {
+            Proof::Unknown if n.size <= SMALL_MAX => {
+                let Some(sha) = op.sha256 else {
+                    return Proof::Unknown;
+                };
+                let v = Ver {
+                    pid: n.pid.clone(),
+                    cver: n.cver.clone(),
+                    pin: n.pin.clone(),
+                    size: n.size,
+                    hash: n.hash.clone(),
+                };
+                match self.read_pinned(&v, None).await {
+                    Ok(data) => Proof::of(<[u8; 32]>::from(Sha256::digest(&data)) == sha),
+                    Err(_) => Proof::Unknown,
+                }
+            }
+            p => p,
+        }
+    }
+
+    /// D16, structurally: the one place an op removes a provider node. `pid` is
+    /// deleted permanently only when `permanent` is asked for **and** the
+    /// provider's current version of it is a ledger version Bunko wrote with a
+    /// content proof ([`StateDb::is_own_proven`](crate::state::StateDb::is_own_proven));
+    /// anything else (a foreign file, a folder, a version a reader replaced since
+    /// it was judged) goes to the provider trash, guarded by `if_cver` where the
+    /// provider has CAS. `Ok(true)`: deleted permanently.
+    pub(crate) async fn discard_node(
+        &self,
+        pid: &str,
+        permanent: bool,
+        if_cver: Option<&str>,
+    ) -> Result<bool, BErr> {
+        if permanent {
+            match self.backend.stat(pid).await? {
+                None => return Err(BErr::NotFound),
+                Some(n) if n.trashed => return Ok(false),
+                Some(n) if !n.is_dir && self.state.is_own_proven(pid, &n.cver) => {
+                    self.backend.delete_permanent(pid).await?;
+                    return Ok(true);
+                }
+                Some(n) => {
+                    tracing::info!(pid, "not Bunko's proven version: trashed, not deleted");
+                    let cas = (self.caps.cas_overwrite && !n.is_dir).then_some(n.cver);
+                    return self
+                        .backend
+                        .trash(pid, cas.as_deref().or(if_cver))
+                        .await
+                        .map(|_| false);
+                }
+            }
+        }
+        self.backend.trash(pid, if_cver).await.map(|_| false)
     }
 
     /// `Ok(None)`: ask again (an overwrite); otherwise how the run ended.
@@ -999,6 +1132,18 @@ impl<B: Backend> Core<B> {
                 .on_conflict(op, "the parent folder is gone".into(), None)
                 .await);
         };
+        // The folder at the destination's path is no longer the one the write was
+        // queued for (deleted and recreated while Bunko was down, say): never land
+        // in a stranger's folder. Path-id providers cannot tell, and their pids
+        // follow renames, so this holds for opaque ids only.
+        if !self.caps.path_ids
+            && let Some(was) = &op.parent_pid
+            && *was != parent
+        {
+            return Ok(self
+                .on_conflict(op, "the destination folder was replaced".into(), None)
+                .await);
+        }
         let existing = match self.backend.find_named(&parent, &name).await {
             Ok((nodes, _)) => nodes,
             Err(BErr::NotFound) => {
@@ -1023,9 +1168,13 @@ impl<B: Backend> Core<B> {
                     .max_by_key(|n| (n.created_ms, n.pid.clone()))
             })
             .cloned();
-        if uncertain && let Some(n) = existing.iter().find(|n| self.same_bytes(n, op)) {
-            let n = n.clone();
-            return self.commit_put(op, n, &parent).map(Some);
+        if uncertain {
+            for n in &existing {
+                if self.content_proof(n, op).await == Proof::Proven {
+                    let n = n.clone();
+                    return self.commit_put(op, n, &parent).map(Some);
+                }
+            }
         }
         if op.reconcile_only {
             self.finish(op, OpState::Discarded);
@@ -1074,7 +1223,30 @@ impl<B: Backend> Core<B> {
         let Some(staged) = self.staged_path(op) else {
             return Ok(Some(self.give_up(op, "the op has no staged bytes".into())));
         };
-        let sha = op.sha256.unwrap_or_default();
+        // The bytes must still be the ones hashed at STAGED (a writer that kept its
+        // handle open, a truncated or tampered outbox file).
+        let digest = {
+            let p = staged.clone();
+            tokio::task::spawn_blocking(move || digest_file(&p))
+                .await
+                .map_err(io::Error::other)
+                .and_then(|r| r)
+        };
+        let digest = match digest {
+            Ok(d) if d.size == op.size && Some(d.sha256) == op.sha256 => d,
+            Ok(_) => {
+                return Ok(Some(self.give_up(
+                    op,
+                    "the staged bytes changed after they were staged".into(),
+                )));
+            }
+            Err(e) => {
+                return Ok(Some(
+                    self.give_up(op, format!("the staged bytes cannot be read: {e}")),
+                ));
+            }
+        };
+        let sha = digest.sha256;
         let if_cver = target
             .as_ref()
             .filter(|_| self.caps.cas_overwrite)
@@ -1108,6 +1280,9 @@ impl<B: Backend> Core<B> {
         match r {
             Ok(node) => {
                 self.fail_at("uploaded")?;
+                if self.hash_proof(&node, op, Some(&digest)) == Proof::Mismatch {
+                    return Ok(Some(self.corrupt_upload(op, node, target.is_none()).await));
+                }
                 let step = self.commit_put(op, node.clone(), &parent)?;
                 if let Some(old) = &target
                     && old.pid != node.pid
@@ -1119,6 +1294,39 @@ impl<B: Backend> Core<B> {
             }
             Err(e) => Ok(self.on_error(op, e, current).await),
         }
+    }
+
+    /// The write response shows other bytes than were staged (size or hash): the
+    /// version is not own. A node the upload created goes to the trash; a replaced
+    /// one is overwritten again (its corrupt version becomes the op's base), at
+    /// most [`MAX_OVERWRITES`] times.
+    async fn corrupt_upload(&self, op: &mut Op, node: RNode, created: bool) -> Step {
+        let dest = op.dest.to_string();
+        tracing::warn!(op = op.id, %dest, "the provider stored other bytes than were uploaded");
+        self.state.conflict_add(
+            ConflictRow::Corrupt,
+            &dest,
+            Some(&node.pid),
+            "the provider stored other bytes than were uploaded",
+        );
+        op.overwrites += 1;
+        if op.overwrites > MAX_OVERWRITES {
+            return self.give_up(op, "the provider keeps storing other bytes".into());
+        }
+        if created {
+            if let Err(e) = self.backend.trash(&node.pid, None).await {
+                tracing::warn!(pid = %node.pid, "trashing a corrupt upload: {e}");
+            }
+        } else if matches!(op.mode, Mode::Replace { .. }) {
+            op.mode = Mode::Replace {
+                base: Some(Version::new(node.cver)),
+            };
+        }
+        self.retry(
+            op,
+            "the provider stored other bytes than were uploaded".into(),
+            None,
+        )
     }
 
     /// COMMITTED (§5.7 step 6): ledger, index, caches, event.
@@ -1183,18 +1391,14 @@ impl<B: Backend> Core<B> {
         op.state = OpState::SupersedeOld;
         op.superseded_pid = Some(old.pid.clone());
         let _ = self.save_op(op);
-        if let Ok(Some(n)) = self.backend.stat(&old.pid).await
-            && !n.trashed
+        // An upgrade swap always trashes (D4); otherwise only a proven own version
+        // is deleted permanently (D16, decided by `discard_node`).
+        if self
+            .discard_node(&old.pid, op.origin != Origin::Upgrade, None)
+            .await
+            .is_ok()
         {
-            let own = self.state.is_own(&old.pid, &old.cver);
-            let r = if own && op.origin != Origin::Upgrade {
-                self.backend.delete_permanent(&old.pid).await
-            } else {
-                self.backend.trash(&old.pid, None).await
-            };
-            if r.is_ok() {
-                let _ = self.state.ledger_trash(&old.pid);
-            }
+            let _ = self.state.ledger_trash(&old.pid);
         }
         op.state = OpState::Committed;
         let _ = self.save_op(op);
@@ -1490,17 +1694,15 @@ impl<B: Backend> Core<B> {
         op.state = OpState::Uploading;
         let _ = self.save_op(op);
         self.fail_at("UPLOADING")?;
-        let r = if op.kind == OpKind::Delete {
-            self.backend.delete_permanent(&pid).await
-        } else {
-            let if_cver = node
-                .as_ref()
-                .filter(|n| self.caps.cas_overwrite && !n.is_dir)
-                .map(|n| n.cver.clone());
-            self.backend.trash(&pid, if_cver.as_deref()).await
-        };
+        let if_cver = node
+            .as_ref()
+            .filter(|n| self.caps.cas_overwrite && !n.is_dir)
+            .map(|n| n.cver.clone());
+        let r = self
+            .discard_node(&pid, op.kind == OpKind::Delete, if_cver.as_deref())
+            .await;
         match r {
-            Ok(()) | Err(BErr::NotFound) => {
+            Ok(_) | Err(BErr::NotFound) => {
                 self.fail_at("uploaded")?;
                 self.commit_trash(op, &pid, node).map(Some)
             }
