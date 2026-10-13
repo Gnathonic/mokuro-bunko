@@ -30,6 +30,15 @@
 //! are Sync ops. `state.sqlite` holds the outbox, the ledger and the lease (D7).
 //! The lease ([`crate::status::Lease`]) starts after the first sync; its fence gates
 //! Deferred ops and Sync writes alike.
+//!
+//! **Governor (§5.11).** The feed, the outbox, the lease and every read reach the
+//! driver through one [`Governor`] ([`Governed`]): content calls made inside
+//! `bunko_store::interactive` run in the interactive class and fail with
+//! `bunko_store::unavailable_for` instead of waiting out a pause longer than 2 s;
+//! bridge writes (`Origin::Dav`) wait up to 60 s. `health()` reports the governor's
+//! `NeedsReauth`, `Blocked(..)` and `Degraded{retry_at}` first;
+//! [`RemoteStore::accepting_claims`] adds the `outbox_hold_mb` threshold, and a
+//! Deferred write past `outbox_max_gb` fails with `StorageFull`.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -59,6 +68,7 @@ use crate::feed::{
     CloudHooks, EngineState, Feed, FeedConfig, FeedHandle, FeedState, SubmissionResult,
 };
 use crate::file::{ArchiveFile, CachedFile};
+use crate::governor::{self, ApiClass, ApiStats, Governed, Governor, Limits};
 use crate::index::{Entry, Index, RelPath};
 use crate::outbox::{Failpoint, Gate, Op, OpSummary};
 use crate::state::StateDb;
@@ -131,6 +141,18 @@ pub struct RemoteStoreConfig {
     /// local file into the cloud. Default: the storage base (`dir`'s grandparent,
     /// `<base>` of `<base>/cloud/<store-id>`) and the OS temp folder.
     pub local_sources: Vec<PathBuf>,
+    /// The governor's limits; `None`: the provider's defaults
+    /// ([`Backend::limits`], §5.11).
+    pub limits: Option<Limits>,
+    /// `drive_background_units_per_min`: the background budget in provider units per
+    /// minute, for providers that have one (Drive: 20,000).
+    pub background_units_per_min: Option<u64>,
+    /// `outbox_hold_mb`: above this many bytes of Deferred writes waiting in the
+    /// outbox, [`RemoteStore::accepting_claims`] says no (default 2 GiB).
+    pub outbox_hold_bytes: u64,
+    /// `outbox_max_gb`: a Deferred write that would take the outbox above this fails
+    /// with `StorageFull` (507; default 8 GiB).
+    pub outbox_max_bytes: u64,
 }
 
 impl RemoteStoreConfig {
@@ -174,6 +196,10 @@ impl RemoteStoreConfig {
             retry_base: Duration::from_secs(1),
             queue_floor: None,
             local_sources,
+            limits: None,
+            background_units_per_min: None,
+            outbox_hold_bytes: 2048 << 20,
+            outbox_max_bytes: 8 << 30,
         }
     }
 
@@ -190,11 +216,16 @@ impl RemoteStoreConfig {
 }
 
 /// A backend error as the `io::Error` the shim's callers see: `NotFound` keeps its
-/// kind, `StorageFull` too; everything else is `Other`, wrapping the [`BErr`].
+/// kind, `StorageFull` too; throttling, a daily limit and a transfer quota are
+/// `bunko_store::unavailable_for` with the provider's delay (spec §3.5: 503 with
+/// `Retry-After`); everything else is `Other`, wrapping the [`BErr`].
 pub fn berr_to_io(e: BErr) -> io::Error {
     match e {
         BErr::NotFound => io::Error::new(io::ErrorKind::NotFound, e),
         BErr::StorageFull => io::Error::new(io::ErrorKind::StorageFull, e),
+        BErr::Throttled(d) | BErr::DailyLimit(d) | BErr::TransferQuota(d) => {
+            bunko_store::unavailable_for(e.to_string(), d.unwrap_or(Duration::from_secs(30)))
+        }
         e => io::Error::other(e),
     }
 }
@@ -419,7 +450,11 @@ impl CloudHooks for HookSlot {
 /// What the store, its open files and its download tasks share. Holds no runtime, so a
 /// task that owns the last reference never drops the runtime it runs on.
 pub(crate) struct Core<B: Backend> {
-    pub backend: Arc<B>,
+    /// The driver behind the governor: every call is budgeted, prioritised and logged.
+    pub backend: Arc<Governed<B>>,
+    pub gov: Arc<Governor>,
+    /// Deferred writes above this many outbox bytes fail with `StorageFull`.
+    pub outbox_max: u64,
     pub caps: BackendCaps,
     pub index: Arc<Mutex<Index>>,
     pub blobs: BlobCache,
@@ -724,6 +759,21 @@ impl<B: Backend> RemoteStore<B> {
             state: Mutex::new(SlotState::default()),
         });
         let caps = backend.caps();
+        let mut limits = cfg.limits.clone().unwrap_or_else(|| backend.limits());
+        if let Some(u) = cfg.background_units_per_min
+            && limits.background_units_per_min.is_some()
+        {
+            limits.background_units_per_min = Some(u);
+        }
+        // Its clock follows the store runtime's.
+        let gov = {
+            let _g = rt.handle().enter();
+            Governor::new(limits)
+        };
+        if let Err(e) = gov.attach_log(&index_path) {
+            tracing::warn!("api log: {e}");
+        }
+        let backend = Arc::new(Governed::new(backend, gov.clone()));
         let feed = Feed::new(backend.clone(), index.clone(), cfg.feed_config())
             .with_hooks(hooks.clone() as Arc<dyn CloudHooks>)
             .with_state(Arc::new(LedgerFeed {
@@ -756,8 +806,21 @@ impl<B: Backend> RemoteStore<B> {
         });
         let handle = rt.handle().clone();
         let feed = feed.spawn(&handle);
+        {
+            // The api log reaches index.sqlite every 30 s.
+            let g = Arc::downgrade(&gov);
+            handle.spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    let Some(g) = g.upgrade() else { return };
+                    tokio::task::block_in_place(|| g.flush_log());
+                }
+            });
+        }
         let core = Arc::new(Core {
             backend,
+            gov,
+            outbox_max: cfg.outbox_max_bytes,
             caps,
             index,
             blobs,
@@ -903,7 +966,39 @@ impl<B: Backend> RemoteStore<B> {
 
     /// The provider driver.
     pub fn backend(&self) -> &Arc<B> {
-        &self.core.backend
+        self.core.backend.inner()
+    }
+
+    /// The governor between the store and the provider (§5.11).
+    pub fn governor(&self) -> &Arc<Governor> {
+        &self.core.gov
+    }
+
+    /// The api log per class over the last hour and day (admin: per-install units
+    /// and egress, §5.11).
+    pub fn api_stats(&self) -> ApiStats {
+        self.core.gov.stats()
+    }
+
+    /// Bytes of Deferred writes waiting in the outbox.
+    pub fn outbox_bytes(&self) -> u64 {
+        self.core.outbox_bytes()
+    }
+
+    /// Whether the scheduler may claim new OCR work (§5.11): the store is `Online`
+    /// (not paused, blocked, offline, suspect, in standby or unauthorized) and the
+    /// outbox holds no more than `outbox_hold_mb`. Running jobs finish into the outbox
+    /// either way.
+    pub fn accepting_claims(&self) -> bool {
+        self.health() == Health::Online && self.outbox_bytes() <= self.cfg.outbox_hold_bytes
+    }
+
+    /// New credentials are in place after `NeedsReauth`: provider calls resume, the
+    /// feed polls again and the outbox drains.
+    pub fn reauthorized(&self) {
+        self.core.gov.reauthorized();
+        self.core.feed.resume();
+        self.core.wake.notify_one();
     }
 
     /// Debug builds: fail a content method called from inside an async task at once,
@@ -932,10 +1027,33 @@ impl<B: Backend> RemoteStore<B> {
 
     /// Run the network part of a content method on the store runtime.
     pub(crate) fn block_on<F: Future>(&self, what: &'static str, f: F) -> F::Output {
+        self.block_on_as(what, None, f)
+    }
+
+    /// [`RemoteStore::block_on`] with the backend calls in `class` (`None`: the
+    /// background class), or in the interactive class when the caller runs inside
+    /// `bunko_store::interactive`.
+    pub(crate) fn block_on_as<F: Future>(
+        &self,
+        what: &'static str,
+        class: Option<ApiClass>,
+        f: F,
+    ) -> F::Output {
         debug_assert!(
             !on_store_runtime(),
             "RemoteStore::{what} called on a store runtime thread (re-entry)"
         );
+        let class = if bunko_store::is_interactive() {
+            Some(ApiClass::Interactive)
+        } else {
+            class
+        };
+        let f = async move {
+            match class {
+                Some(c) => governor::scoped(c, f).await,
+                None => f.await,
+            }
+        };
         let h = &self.handle;
         match catch_unwind(AssertUnwindSafe(move || h.block_on(f))) {
             Ok(v) => v,
@@ -1093,13 +1211,25 @@ impl<B: Backend> RemoteStore<B> {
     pub(crate) fn spool_for(&self, v: &Ver, wait: bool) -> io::Result<Option<SpoolPinGuard>> {
         let key = v.key();
         let core = self.core.clone();
-        self.block_on("spool", async move {
+        // A whole-file spool for a waiting caller is OCR work (`local_path`); a
+        // sequential archive read spools in the background.
+        let class = if wait {
+            ApiClass::Ocr
+        } else {
+            ApiClass::Background
+        };
+        self.block_on_as("spool", Some(class), async move {
             let Some((pin, new)) = core.spool.admit(&key, v.size, wait).await? else {
                 return Ok(None);
             };
             if new {
                 let task_pin = SpoolPinGuard::clone_pin(&pin);
-                tokio::spawn(core.clone().download(task_pin, v.clone()));
+                // The download runs in the class of the call that started it.
+                let class = governor::current_class().unwrap_or(class);
+                tokio::spawn(governor::scoped(
+                    class,
+                    core.clone().download(task_pin, v.clone()),
+                ));
             }
             Ok(Some(pin))
         })
@@ -1179,6 +1309,7 @@ async fn start_lease<B: Backend>(
 impl<B: Backend> Drop for RemoteStore<B> {
     fn drop(&mut self) {
         // Safe in any context, async included; the feed is crash-safe.
+        self.core.gov.flush_log();
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }
@@ -1204,6 +1335,17 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
     }
 
     fn health(&self) -> Health {
+        // The governor's view first: no credentials, a hard stop, a pause.
+        let gov = self.core.gov.health();
+        if let Some(h @ (Health::NeedsReauth | Health::Blocked(_))) = &gov {
+            return h.clone();
+        }
+        if self.core.feed.state() == EngineState::NeedsReauth {
+            return Health::NeedsReauth;
+        }
+        if let Some(h) = gov {
+            return h;
+        }
         if let Some(l) = self.lease.get()
             && let LeaseEvent::Standby { holder } | LeaseEvent::Lost { holder } = l.event()
             && self.core.feed.state() == EngineState::Steady

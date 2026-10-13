@@ -3,7 +3,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::file::{File, OpenOptions, ReadDir};
 use crate::meta::{Meta, Version};
@@ -218,6 +218,10 @@ pub enum StoreError {
     /// The store cannot do this now (an outage, another Bunko holds the lease, a
     /// barrier timed out); try again later (bridge: 503).
     Unavailable(String),
+    /// [`StoreError::Unavailable`] with the provider's delay: throttling, a transfer
+    /// quota, or an interactive call during a longer pause (spec §3.5
+    /// `Unavailable{retry_after}`; bridge: 503 with `Retry-After`).
+    UnavailableFor { msg: String, retry_after: Duration },
 }
 
 impl std::fmt::Display for StoreError {
@@ -225,6 +229,13 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::Conflict(m) => write!(f, "conflict: {m}"),
             StoreError::Unavailable(m) => write!(f, "unavailable: {m}"),
+            StoreError::UnavailableFor { msg, retry_after } => {
+                write!(
+                    f,
+                    "unavailable for {} s: {msg}",
+                    retry_after.as_secs().max(1)
+                )
+            }
         }
     }
 }
@@ -241,6 +252,22 @@ pub fn unavailable(msg: impl Into<String>) -> io::Error {
     io::Error::other(StoreError::Unavailable(msg.into()))
 }
 
+/// An `io::Error` carrying [`StoreError::UnavailableFor`].
+pub fn unavailable_for(msg: impl Into<String>, retry_after: Duration) -> io::Error {
+    io::Error::other(StoreError::UnavailableFor {
+        msg: msg.into(),
+        retry_after,
+    })
+}
+
+/// How long `e` says to wait before trying again, when it says.
+pub fn retry_after(e: &io::Error) -> Option<Duration> {
+    match store_error(e) {
+        Some(StoreError::UnavailableFor { retry_after, .. }) => Some(*retry_after),
+        _ => None,
+    }
+}
+
 /// The [`StoreError`] inside `e`, if any.
 pub fn store_error(e: &io::Error) -> Option<&StoreError> {
     e.get_ref().and_then(|x| x.downcast_ref::<StoreError>())
@@ -253,7 +280,10 @@ pub fn is_conflict(e: &io::Error) -> bool {
 
 /// Whether `e` means "not now" (the DAV layer answers 503).
 pub fn is_unavailable(e: &io::Error) -> bool {
-    matches!(store_error(e), Some(StoreError::Unavailable(_)))
+    matches!(
+        store_error(e),
+        Some(StoreError::Unavailable(_) | StoreError::UnavailableFor { .. })
+    )
 }
 
 /// The error for an operation that spans two stores.

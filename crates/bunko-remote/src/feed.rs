@@ -1375,7 +1375,9 @@ impl<B: Backend> Engine<B> {
                 tracing::error!("feed: index error: {e}");
                 self.backoff().await;
             }
-            Fail::B(BErr::Throttled(d)) | Fail::B(BErr::TransferQuota(d)) => {
+            Fail::B(BErr::Throttled(d))
+            | Fail::B(BErr::TransferQuota(d))
+            | Fail::B(BErr::DailyLimit(d)) => {
                 let d = d.unwrap_or(THROTTLE_DEFAULT);
                 tracing::info!("feed: throttled, pausing {d:?}");
                 self.idle(d).await;

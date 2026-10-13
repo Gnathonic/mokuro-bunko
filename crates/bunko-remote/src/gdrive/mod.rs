@@ -355,6 +355,7 @@ impl Inner {
                 Payload::Raw(b, ct) => rb.header(header::CONTENT_TYPE, ct).body(b.clone()),
             };
             self.units.fetch_add(c.units, Ordering::Relaxed);
+            crate::governor::charge(c.units);
             let resp = rb
                 .send()
                 .await
@@ -754,6 +755,7 @@ impl Inner {
                     _ => {
                         return Err(match self.fail(resp).await {
                             e @ (BErr::Throttled(_)
+                            | BErr::DailyLimit(_)
                             | BErr::AuthExpired
                             | BErr::AuthRevoked
                             | BErr::StorageFull) => ChunkErr::Keep(e),
@@ -1097,6 +1099,12 @@ impl<'s> Resolver<'s> {
 }
 
 impl Backend for GDriveBackend {
+    /// 20,000 background quota units/min per install (the store's
+    /// `background_units_per_min` overrides it), 5 req/s, 2 writes/s, 3 transfers.
+    fn limits(&self) -> crate::governor::Limits {
+        crate::governor::Limits::drive(20_000)
+    }
+
     fn caps(&self) -> BackendCaps {
         BackendCaps {
             cas_create: false,

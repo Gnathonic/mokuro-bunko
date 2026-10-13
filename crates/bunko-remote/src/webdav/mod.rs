@@ -923,6 +923,11 @@ impl Backend for WebDavBackend {
         self.caps.read().clone()
     }
 
+    /// 3 concurrent requests.
+    fn limits(&self) -> crate::governor::Limits {
+        crate::governor::Limits::webdav()
+    }
+
     async fn account(&self) -> Result<AccountInfo, BErr> {
         // Checks the credentials; a missing folder is fine here.
         self.stat_node("", true).await?;

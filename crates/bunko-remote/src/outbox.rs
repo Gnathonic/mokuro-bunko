@@ -49,6 +49,7 @@ use std::time::Duration;
 
 use bunko_store::{
     Durability, Mode, Origin, Published, Version, WatchEvent, conflict, unavailable,
+    unavailable_for,
 };
 use rusqlite::params;
 use sha2::{Digest, Sha256};
@@ -56,6 +57,7 @@ use sha2::{Digest, Sha256};
 use crate::backend::{BErr, Backend, HashKind, OpCtx, Pid, RNode, UploadSource, UploadTarget};
 use crate::cache::{SMALL_MAX, now_ms};
 use crate::feed::{EngineState, SubmissionResult};
+use crate::governor::{self, ApiClass};
 use crate::index::{IndexChange, ROOT_EID, RelPath};
 use crate::names::nfc;
 use crate::state::{ConflictRow, LedgerRow};
@@ -350,7 +352,7 @@ fn classify(e: &BErr) -> Class {
     match e {
         BErr::PreconditionFailed | BErr::NameConflict => Class::Conflict,
         BErr::NotFound => Class::Gone,
-        BErr::Throttled(d) | BErr::TransferQuota(d) => Class::Retry(*d),
+        BErr::Throttled(d) | BErr::TransferQuota(d) | BErr::DailyLimit(d) => Class::Retry(*d),
         BErr::Transient(_)
         | BErr::AuthExpired
         | BErr::AuthRevoked
@@ -407,6 +409,16 @@ pub(crate) fn digest_file(p: &Path) -> io::Result<Digests> {
         sha256: sha.finalize().into(),
         md5: md5::Digest::finalize(md5).into(),
     })
+}
+
+/// The governor class an op's calls run in (§5.11 priorities).
+fn class_of(o: &Origin) -> ApiClass {
+    match o {
+        Origin::Dav { .. } => ApiClass::Interactive,
+        Origin::Status => ApiClass::Lease,
+        Origin::Ocr { .. } => ApiClass::Ocr,
+        Origin::Compiler | Origin::Upgrade | Origin::Thumbs | Origin::Admin => ApiClass::Background,
+    }
 }
 
 fn parent_of(rel: &RelPath) -> RelPath {
@@ -692,7 +704,17 @@ impl<B: Backend> Core<B> {
 
     /// The feed is steady (retries count only then, §5.7 Retries).
     fn online(&self) -> bool {
-        self.feed.state() == EngineState::Steady
+        self.feed.state() == EngineState::Steady && self.gov.health().is_none()
+    }
+
+    /// Bytes of Deferred writes still owed to the provider (§5.11 outbox limits).
+    pub(crate) fn outbox_bytes(&self) -> u64 {
+        self.ops
+            .lock()
+            .values()
+            .filter(|o| o.durability == Durability::Deferred && o.state.live())
+            .map(|o| o.size)
+            .sum()
     }
 
     /// The parent folder's pid of `dest`, from the index.
@@ -785,7 +807,23 @@ impl<B: Backend> Core<B> {
     // ---- running ops ------------------------------------------------------------------
 
     /// Run a Sync op through COMMITTED (or its error), inline.
-    pub(crate) async fn run_sync(self: &Arc<Self>, mut op: Op) -> io::Result<Published> {
+    pub(crate) async fn run_sync(self: &Arc<Self>, op: Op) -> io::Result<Published> {
+        // A bridge write waits out pauses up to `upload_wait` (60 s), then answers
+        // 503; others run in their origin's class unless the caller set one.
+        match (&op.origin, governor::current_class()) {
+            (Origin::Dav { .. }, None | Some(ApiClass::Interactive)) => {
+                let wait = self.gov.limits().upload_wait;
+                governor::scoped_interactive(wait, self.run_sync_inner(op)).await
+            }
+            (_, Some(_)) => self.run_sync_inner(op).await,
+            (o, None) => {
+                let class = class_of(o);
+                governor::scoped(class, self.run_sync_inner(op)).await
+            }
+        }
+    }
+
+    async fn run_sync_inner(self: &Arc<Self>, mut op: Op) -> io::Result<Published> {
         let barrier = matches!(op.kind, OpKind::Move | OpKind::Trash | OpKind::Delete);
         let _g = if barrier {
             match tokio::time::timeout(BARRIER, self.exec.lock()).await {
@@ -812,6 +850,15 @@ impl<B: Backend> Core<B> {
                 Step::Done(p) => return Ok(p),
                 Step::Gave(e) => return Err(e),
                 Step::Blocked => break,
+                // A pause the caller should not wait out (a long Retry-After, an
+                // interactive call past its wait): 503 with the delay now.
+                Step::Retry(msg, Some(after)) if after > Duration::from_secs(5) => {
+                    self.finish(&mut op, OpState::Discarded);
+                    return Err(unavailable_for(
+                        format!("the provider asked to wait: {msg}"),
+                        after,
+                    ));
+                }
                 Step::Retry(msg, after) => {
                     last = msg;
                     let d = after
@@ -904,6 +951,12 @@ impl<B: Backend> Core<B> {
         current: Option<RNode>,
     ) -> Option<Step> {
         match classify(&e) {
+            // A Sync caller hears of a full provider at once (507); a Deferred op
+            // stays in the outbox until writes are accepted again.
+            Class::Retry(_) if e == BErr::StorageFull && op.durability == Durability::Sync => {
+                self.finish(op, OpState::Discarded);
+                Some(Step::Gave(io::Error::new(io::ErrorKind::StorageFull, e)))
+            }
             Class::Retry(after) => Some(self.retry(op, e.to_string(), after)),
             Class::Permanent => Some(self.give_up(op, e.to_string())),
             Class::Conflict => self.on_conflict(op, e.to_string(), current).await,
@@ -1823,6 +1876,13 @@ impl<B: Backend> Core<B> {
                 let _ = tokio::time::timeout(Duration::from_millis(200), notified).await;
                 continue;
             };
+            // Wait out a pause or an empty budget before taking the op lock, so a
+            // Sync write (a bridge PUT) is never queued behind a governed wait.
+            let Some(origin) = self.ops.lock().get(&id).map(|o| o.origin.clone()) else {
+                continue;
+            };
+            let class = class_of(&origin);
+            self.gov.ready(class, self.gov.limits().costs.upload).await;
             let _g = self.exec.lock().await;
             let Some(mut op) = self.ops.lock().get(&id).cloned() else {
                 continue;
@@ -1845,14 +1905,14 @@ impl<B: Backend> Core<B> {
                         hash: None,
                         trashed: false,
                     };
-                    self.supersede(&mut op, &n).await;
+                    governor::scoped(class, self.supersede(&mut op, &n)).await;
                 } else {
                     op.state = OpState::Committed;
                     let _ = self.save_op(&op);
                 }
                 continue;
             }
-            match self.drive(&mut op).await {
+            match governor::scoped(class, self.drive(&mut op)).await {
                 Err(Crash) => return,
                 Ok(Step::Blocked) => {
                     drop(_g);

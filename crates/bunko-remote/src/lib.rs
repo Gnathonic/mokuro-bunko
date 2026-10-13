@@ -9,7 +9,9 @@
 //! [`store::RemoteStore`] puts it all behind `bunko_store::LibraryStore`, with the
 //! read caches of [`cache`] and the open files of [`file`](mod@file); writes go
 //! through the outbox of [`outbox`] (durable state in [`state`], the mutation methods
-//! in [`write`](mod@write)), fenced by the lease of [`status`]. [`status`]
+//! in [`write`](mod@write)), fenced by the lease of [`status`]. Every provider call
+//! goes through the [`governor`] (budgets, priorities, pauses, hard stops, the api
+//! log). [`status`]
 //! holds the marker lease (`.mokuro-bunko.json`) and the cloud queue document. Default
 //! features add the providers' drivers (`webdav::WebDavBackend`,
 //! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`) and
@@ -25,6 +27,7 @@ pub mod feed;
 pub mod file;
 #[cfg(feature = "gdrive")]
 pub mod gdrive;
+pub mod governor;
 pub mod index;
 #[cfg(feature = "mega")]
 pub mod mega;
@@ -49,4 +52,5 @@ pub use cache::CacheStats;
 pub use feed::{
     CloudHooks, EngineState, Feed, FeedConfig, FeedHandle, FeedState, NoFeedState, SubmissionResult,
 };
+pub use governor::{ApiClass, ApiStats, ClassStats, Governed, Governor, Limits};
 pub use store::{RemoteStore, RemoteStoreConfig, berr_to_io, on_store_runtime};

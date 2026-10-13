@@ -220,6 +220,10 @@ pub enum BErr {
     StorageFull,
     #[error("transfer quota exceeded (retry after {0:?})")]
     TransferQuota(Option<Duration>),
+    /// The provider's daily request limit (Drive `dailyLimitExceeded`, project-wide):
+    /// every call pauses (`Health::Blocked(DailyLimit)`).
+    #[error("the provider's daily limit is reached (retry after {0:?})")]
+    DailyLimit(Option<Duration>),
     #[error("change cursor lost")]
     CursorLost,
     #[error("too large")]
@@ -236,6 +240,10 @@ pub enum BErr {
 /// inclusive, or `(first, None)` to the end.
 pub trait Backend: Send + Sync + 'static {
     fn caps(&self) -> BackendCaps;
+    /// The governor's limits for this provider (§5.11 Defaults).
+    fn limits(&self) -> crate::governor::Limits {
+        crate::governor::Limits::unlimited()
+    }
     fn account(&self) -> impl Future<Output = Result<AccountInfo, BErr>> + Send;
     /// Every folder named exactly `name` that the reader would use as its root.
     fn locate_roots(&self, name: &str) -> impl Future<Output = Result<Vec<RNode>, BErr>> + Send;

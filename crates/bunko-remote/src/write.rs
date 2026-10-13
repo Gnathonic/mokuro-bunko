@@ -409,6 +409,19 @@ impl<B: Backend> RemoteStore<B> {
                 )));
             }
         }
+        // §5.11: above `outbox_max_gb` a Deferred write is refused (507), so an
+        // outage cannot fill the disk; the caller keeps its bytes.
+        if w.durability == Durability::Deferred {
+            let size = std::fs::metadata(&src)?.len();
+            let queued = self.core.outbox_bytes();
+            if queued.saturating_add(size) > self.core.outbox_max {
+                return Err(kind_err(
+                    io::ErrorKind::StorageFull,
+                    dest,
+                    &format!("the outbox is full ({queued} bytes wait for the provider)"),
+                ));
+            }
+        }
         let op = self.core.stage_put(&src, rel, w)?;
         forget_staging(self);
         match w.durability {
