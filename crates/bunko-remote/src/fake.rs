@@ -29,6 +29,9 @@ use crate::backend::{
 pub const EPOCH_MS: i64 = 1_760_000_000_000;
 const READ_CHUNK: usize = 64 * 1024;
 
+/// Called by `list_all` after each node it hands to the sink, with the count so far.
+pub type ListHook = std::sync::Arc<dyn Fn(usize) + Send + Sync>;
+
 /// A backend call, for [`FakeBackend::fail_next`] and [`FakeBackend::calls`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FakeOp {
@@ -103,6 +106,8 @@ struct State {
     revisions: HashMap<(Pid, u64), Bytes>,
     log: Vec<ChangeItem>,
     log_floor: usize,
+    /// A cursor equal to `log_floor` was issued after the loss (and so is valid).
+    floor_reissued: bool,
     next_id: u64,
     next_ver: u64,
     last_ms: i64,
@@ -123,6 +128,7 @@ pub struct FakeBackend {
     profile: Profile,
     state: Mutex<State>,
     notify: Notify,
+    list_hook: Mutex<Option<ListHook>>,
     clock0: Instant,
 }
 
@@ -241,6 +247,7 @@ impl FakeBackend {
         let mut st = State {
             page_size: 500,
             last_ms: EPOCH_MS,
+            floor_reissued: true,
             ..State::default()
         };
         st.nodes.insert(
@@ -262,6 +269,7 @@ impl FakeBackend {
             profile,
             state: Mutex::new(st),
             notify: Notify::new(),
+            list_hook: Mutex::new(None),
             clock0: Instant::now(),
         }
     }
@@ -287,6 +295,7 @@ impl FakeBackend {
     pub fn lose_cursor(&self) {
         let mut st = self.state.lock();
         st.log_floor = st.log.len();
+        st.floor_reissued = false;
     }
 
     /// Deliver each page's items in reverse order.
@@ -302,6 +311,12 @@ impl FakeBackend {
     /// Items per change page (default 500).
     pub fn set_page_size(&self, n: usize) {
         self.state.lock().page_size = n.max(1);
+    }
+
+    /// `list_all` calls `hook` after every node it streams (to observe the consumer
+    /// mid-listing); `None` removes it.
+    pub fn set_list_hook(&self, hook: Option<ListHook>) {
+        *self.list_hook.lock() = hook;
     }
 
     /// Account storage limit in bytes; `None` (the default) reports no quota.
@@ -418,6 +433,56 @@ impl FakeBackend {
         out
     }
 
+    /// The first half of a move that the feed reports in two steps (a MEGA delete and
+    /// create of the same handle spanning two batches; opaque ids only): `path` leaves
+    /// the tree and the feed logs `Removed` for it. [`FakeBackend::reader_attach`]
+    /// finishes the move.
+    pub fn reader_detach(&self, path: &str) -> Pid {
+        assert_eq!(
+            self.profile.ids,
+            Ids::Opaque,
+            "reader_detach needs opaque ids"
+        );
+        let pid = {
+            let mut st = self.state.lock();
+            let pid = st
+                .resolve(&self.profile, path)
+                .unwrap_or_else(|| panic!("reader_detach: no {path}"));
+            let parent = st.nodes[&pid].parent.clone().unwrap_or_default();
+            if let Some(set) = st.children.get_mut(&parent) {
+                set.remove(&pid);
+            }
+            let n = st.nodes.get_mut(&pid).expect("resolved node");
+            n.trashed = true;
+            st.log.push(ChangeItem::Removed { pid: pid.clone() });
+            pid
+        };
+        self.notify.notify_waiters();
+        pid
+    }
+
+    /// The second half of [`FakeBackend::reader_detach`]: `pid` reappears at `to`
+    /// (missing parents are created) and the feed logs one `Upsert` for it.
+    pub fn reader_attach(&self, pid: &str, to: &str) -> RNode {
+        let now = self.now_ms();
+        let out = {
+            let mut st = self.state.lock();
+            let (parent, name) = split(to);
+            let dir = st.mkdir_p(&self.profile, parent, now);
+            let v = st.next_ver();
+            let n = st.nodes.get_mut(pid).expect("reader_attach: unknown pid");
+            n.trashed = false;
+            n.parent = Some(dir.clone());
+            n.name = name.as_bytes().to_vec();
+            n.version = v;
+            st.children.entry(dir).or_default().insert(pid.to_string());
+            st.log_upsert(&self.profile, pid);
+            st.rnode(&self.profile, pid)
+        };
+        self.notify.notify_waiters();
+        out
+    }
+
     /// The reader creates the folder `path` (and missing parents).
     pub fn reader_mkdir(&self, path: &str) -> RNode {
         let now = self.now_ms();
@@ -496,6 +561,19 @@ fn fold(name: &[u8]) -> String {
 }
 
 impl State {
+    /// Cursors issued before the last `lose_cursor` are lost (positions are reused,
+    /// so one equal to the floor counts only once it is reissued).
+    fn valid_cursor(&self, at: usize) -> bool {
+        at <= self.log.len()
+            && (at > self.log_floor || (at == self.log_floor && self.floor_reissued))
+    }
+
+    fn issued(&mut self, at: usize) {
+        if at == self.log_floor {
+            self.floor_reissued = true;
+        }
+    }
+
     fn tick(&mut self, now: i64) -> i64 {
         self.last_ms = now.max(self.last_ms + 1);
         self.last_ms
@@ -905,7 +983,10 @@ impl Backend for FakeBackend {
 
     async fn start_cursor(&self) -> Result<Cursor, BErr> {
         self.enter(FakeOp::StartCursor).await?;
-        Ok(Cursor(self.state.lock().log.len().to_string()))
+        let mut st = self.state.lock();
+        let at = st.log.len();
+        st.issued(at);
+        Ok(Cursor(at.to_string()))
     }
 
     async fn list_all(
@@ -928,7 +1009,13 @@ impl Backend for FakeBackend {
             }
             out
         };
-        nodes.into_iter().for_each(sink);
+        let hook = self.list_hook.lock().clone();
+        for (i, n) in nodes.into_iter().enumerate() {
+            sink(n);
+            if let Some(h) = &hook {
+                h(i + 1);
+            }
+        }
         Ok(())
     }
 
@@ -961,9 +1048,9 @@ impl Backend for FakeBackend {
 
     async fn changes(&self, c: &Cursor) -> Result<ChangePage, BErr> {
         self.enter(FakeOp::Changes).await?;
-        let st = self.state.lock();
+        let mut st = self.state.lock();
         let at: usize = match c.0.parse() {
-            Ok(at) if at >= st.log_floor && at <= st.log.len() => at,
+            Ok(at) if st.valid_cursor(at) => at,
             _ => return Ok(ChangePage::CursorLost),
         };
         let end = (at + st.page_size).min(st.log.len());
@@ -974,6 +1061,7 @@ impl Backend for FakeBackend {
         if st.duplicate {
             items = items.into_iter().flat_map(|i| [i.clone(), i]).collect();
         }
+        st.issued(end);
         Ok(ChangePage::Page {
             items,
             next: Cursor(end.to_string()),
