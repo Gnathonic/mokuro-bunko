@@ -163,7 +163,7 @@ impl StorageControl {
         let Some(f) = self.restart.lock().clone() else {
             return false;
         };
-        tracing::info!("[STORAGE] Restarting the server to open the library");
+        tracing::info!("[STORAGE] Restarting the server to apply the library change");
         tokio::spawn(async move {
             tokio::time::sleep(RESTART_DELAY).await;
             f();

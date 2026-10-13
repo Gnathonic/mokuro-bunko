@@ -120,13 +120,13 @@ pub fn checks(config: &Config) -> Vec<Row> {
 }
 
 /// `storage.library.spool_gb` against 2 × lanes × the largest archive (the biggest one
-/// spooled here so far, else [`DEFAULT_LARGEST_ARCHIVE`]).
+/// spooled here so far, at least [`DEFAULT_LARGEST_ARCHIVE`]).
 fn spool_row(config: &Config, store_dir: Option<std::path::PathBuf>) -> Row {
     let lanes = u64::from(config.ocr.concurrency.max(1));
     let largest = store_dir
         .map(|d| largest_file(&d.join("spool")))
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_LARGEST_ARCHIVE);
+        .unwrap_or(0)
+        .max(DEFAULT_LARGEST_ARCHIVE);
     let need = 2 * lanes * largest;
     let have = u64::from(config.storage.library.spool_gb) << 30;
     let gib = |n: u64| format!("{:.1} GiB", n as f64 / f64::from(1u32 << 30));

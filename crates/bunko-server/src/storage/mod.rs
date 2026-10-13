@@ -439,6 +439,7 @@ fn outbox_json(ops: &[bunko_remote::outbox::OpSummary]) -> Value {
         "failed": count("FAILED"),
         "oldest": owed.iter().min_by_key(|o| o.id).map(|o| op(o)),
         "last_error": last_error,
+        "owed_ops": owed.iter().take(50).map(|o| op(o)).collect::<Vec<_>>(),
         "held_ops": ops.iter().filter(|o| o.state == "HELD").take(20).map(op).collect::<Vec<_>>(),
         "failed_ops": ops.iter().filter(|o| o.state == "FAILED").take(20).map(op).collect::<Vec<_>>(),
     })
