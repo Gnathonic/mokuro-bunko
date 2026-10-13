@@ -7,9 +7,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["webdav", "gdrive", "oauth"]
+default = ["webdav", "gdrive", "onedrive", "oauth"]
 # The Google Drive driver (`gdrive::GDriveBackend`).
 gdrive = ["dep:reqwest", "dep:md-5", "dep:time", "dep:httpdate"]
+# The OneDrive (Microsoft Graph v1.0) driver (`onedrive::OneDriveBackend`).
+onedrive = ["dep:reqwest", "dep:time", "dep:httpdate", "dep:base64"]
 # The in-memory FakeBackend (tests here and in dependent crates).
 testing = []
 # The WebDAV driver (`webdav::WebDavBackend`).
