@@ -15,10 +15,17 @@ fn rel(s: &str) -> RelPath {
 
 #[test]
 fn safe_segment_rule() {
-    for bad in BAD
-        .iter()
-        .chain(&["\u{7f}", "tab\there", "nl\n", "/", "\\"])
-    {
+    for bad in BAD.iter().chain(&[
+        "\u{7f}",
+        "tab\there",
+        "nl\n",
+        "/",
+        "\\",
+        "a:b",
+        "C:x",
+        "C:",
+        "x:",
+    ]) {
         assert!(!is_safe_segment(bad), "{bad:?}");
     }
     for good in [
@@ -28,7 +35,7 @@ fn safe_segment_rule() {
         ".hidden",
         "ガ",
         "\u{fffd}",
-        "a:b",
+        "a.b c",
     ] {
         assert!(is_safe_segment(good), "{good:?}");
     }
