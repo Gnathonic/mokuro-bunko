@@ -225,8 +225,10 @@ pub struct RemoteEntry {
     pub meta: Meta,
 }
 
-/// `std::fs::DirEntry`, or a remote store's entry.
+/// `std::fs::DirEntry`, or a remote store's entry. Not boxed: listings are hot paths
+/// and the std variant is the one every local entry takes.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum DirEntry {
     Std(std::fs::DirEntry),
     Remote(RemoteEntry),
@@ -265,6 +267,7 @@ impl DirEntry {
 }
 
 /// `std::fs::ReadDir`, or a remote listing.
+#[allow(clippy::large_enum_variant)]
 pub enum ReadDir {
     Std(std::fs::ReadDir),
     Remote(std::vec::IntoIter<io::Result<DirEntry>>),
