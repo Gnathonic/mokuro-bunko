@@ -1,0 +1,22 @@
+[package]
+name = "bunko-store"
+description = "The library storage seam of mokuro-bunko: one interface over the local disk and remote backends"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+tokio = ["dep:tokio"]
+watch = ["dep:notify"]
+
+[dependencies]
+parking_lot.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

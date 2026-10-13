@@ -736,6 +736,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bunko-store"
+version = "0.7.3"
+dependencies = [
+ "notify",
+ "parking_lot",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bunko-thumb"
 version = "0.7.3"
 dependencies = [
