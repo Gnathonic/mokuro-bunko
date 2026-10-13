@@ -24,6 +24,10 @@
 //! With the `testing` feature, [`testing::register`] hands a `FakeBackend` to the next
 //! server opened over a storage base path, whatever cloud backend its config names.
 
+pub mod connect;
+mod control;
+pub mod disconnect;
+pub mod doctor;
 pub mod hooks;
 mod unconnected;
 
@@ -42,6 +46,7 @@ use bunko_store::{Health, LibraryStore, MountGuard};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub use control::{StorageControl, storage_problems};
 pub use hooks::ServerCloudHooks;
 pub use unconnected::UnconnectedStore;
 
@@ -104,6 +109,26 @@ pub trait CloudStore: Send + Sync {
     /// Publish the cloud queue file from the server's queue document (§9.1; the store
     /// dedups and throttles). `true` when a write was queued or scheduled.
     fn publish_queue_doc(&self, doc: Value) -> io::Result<bool>;
+    /// Every op in the outbox.
+    fn outbox(&self) -> Vec<bunko_remote::outbox::OpSummary>;
+    /// Unresolved conflict rows `(kind, path, detail)`.
+    fn conflicts(&self) -> Vec<(String, String, String)>;
+    /// Submission rows `(path, cver, state)`.
+    fn submissions(&self) -> Vec<(String, String, String)>;
+    /// Block until no op waits to commit; false on timeout.
+    fn wait_outbox_idle(&self, timeout: Duration) -> bool;
+    /// Copy the owed results' bytes to a folder (Disconnect → Export).
+    fn export_outbox(&self, to: &Path) -> io::Result<Vec<PathBuf>>;
+    /// Write `released` into the marker (Disconnect step 2).
+    fn release_lease(&self, timeout: Duration) -> io::Result<bool>;
+    /// The lease's latest event (`None`: no lease runs yet).
+    fn lease_event(&self) -> Option<bunko_remote::status::LeaseEvent>;
+    /// The admin's Take over (blocking).
+    fn take_over(&self, timeout: Duration) -> io::Result<()>;
+    /// The provider's storage quota (one call).
+    fn quota(&self, timeout: Duration) -> io::Result<Option<bunko_store::Capacity>>;
+    /// This install's id.
+    fn instance_id(&self) -> String;
 }
 
 impl<B: Backend> CloudStore for RemoteStore<B> {
@@ -124,6 +149,36 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     }
     fn publish_queue_doc(&self, doc: Value) -> io::Result<bool> {
         RemoteStore::publish_queue_doc(self, doc)
+    }
+    fn outbox(&self) -> Vec<bunko_remote::outbox::OpSummary> {
+        RemoteStore::outbox(self)
+    }
+    fn conflicts(&self) -> Vec<(String, String, String)> {
+        RemoteStore::conflicts(self)
+    }
+    fn submissions(&self) -> Vec<(String, String, String)> {
+        RemoteStore::submissions(self)
+    }
+    fn wait_outbox_idle(&self, timeout: Duration) -> bool {
+        RemoteStore::wait_outbox_idle(self, timeout)
+    }
+    fn export_outbox(&self, to: &Path) -> io::Result<Vec<PathBuf>> {
+        RemoteStore::export_outbox(self, to)
+    }
+    fn release_lease(&self, timeout: Duration) -> io::Result<bool> {
+        RemoteStore::release_lease(self, timeout)
+    }
+    fn lease_event(&self) -> Option<bunko_remote::status::LeaseEvent> {
+        self.lease().map(|l| l.event())
+    }
+    fn take_over(&self, timeout: Duration) -> io::Result<()> {
+        RemoteStore::take_over_lease(self, timeout)
+    }
+    fn quota(&self, timeout: Duration) -> io::Result<Option<bunko_store::Capacity>> {
+        RemoteStore::quota(self, timeout)
+    }
+    fn instance_id(&self) -> String {
+        RemoteStore::instance_id(self).to_string()
     }
 }
 
@@ -154,11 +209,23 @@ pub struct StoreHandle {
     store: Option<Arc<dyn CloudStore>>,
     /// Why there is no store.
     problem: Option<String>,
+    /// D25: the configured Google pairing differs from the connected store's
+    /// (configured, connected); held with `storage-auth` until Disconnect.
+    pub pairing_change: Option<(String, String)>,
+    /// `<base>/cloud`.
+    pub cloud_dir: PathBuf,
+    /// When the feed was last seen in sync (sampled by every status read).
+    synced_at: parking_lot::Mutex<Option<std::time::SystemTime>>,
+    /// The provider quota, asked at most every [`QUOTA_EVERY`].
+    quota: parking_lot::Mutex<Option<(std::time::Instant, Value)>>,
     #[cfg(feature = "testing")]
     fake: Option<Arc<RemoteStore<bunko_remote::fake::FakeBackend>>>,
     // Last: the store (and its runtime) goes first.
     _connect_rt: Option<ConnectRuntime>,
 }
+
+/// How often the admin status asks the provider for its quota.
+pub const QUOTA_EVERY: Duration = Duration::from_secs(600);
 
 impl StoreHandle {
     fn unconnected(lib: &LibraryConfig, root: PathBuf, problem: String) -> StoreHandle {
@@ -175,6 +242,10 @@ impl StoreHandle {
             pairing: (lib.backend == LibraryBackend::GDrive).then(|| pairing_of(lib)),
             store: None,
             problem: Some(problem),
+            pairing_change: None,
+            cloud_dir: PathBuf::new(),
+            synced_at: parking_lot::Mutex::new(None),
+            quota: parking_lot::Mutex::new(None),
             #[cfg(feature = "testing")]
             fake: None,
             _connect_rt: None,
@@ -232,12 +303,20 @@ impl StoreHandle {
         self.fake.as_ref()
     }
 
-    /// The admin status's `library.storage` block (§11).
+    /// The admin status's `library.storage` block (§11): what the store is, its
+    /// health and sync, caches, the outbox, conflicts, the lease, the provider quota and
+    /// the `problems[]` of kinds `storage-*`. Never a secret.
     pub fn status_json(&self) -> Value {
         let (engine, progress) = match self.engine_state() {
             None => ("unconnected".to_string(), Value::Null),
             Some(e) => engine_json(&e),
         };
+        let health = self.health();
+        let now = std::time::SystemTime::now();
+        if self.store.is_some() && health == Health::Online && engine == "steady" {
+            *self.synced_at.lock() = Some(now);
+        }
+        let synced_at = *self.synced_at.lock();
         let cache = self.store.as_ref().map(|s| {
             let c = s.cache_stats();
             json!({
@@ -250,20 +329,183 @@ impl StoreHandle {
                 "spool_bytes": c.spool_bytes,
             })
         });
+        let outbox = self.store.as_ref().map(|s| outbox_json(&s.outbox()));
+        let conflicts: Vec<Value> = self
+            .store
+            .as_ref()
+            .map(|s| s.conflicts())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(kind, path, detail)| json!({"kind": kind, "path": path, "detail": detail}))
+            .collect();
+        let submissions = self.store.as_ref().map(|s| {
+            let rows = s.submissions();
+            let waiting = rows
+                .iter()
+                .filter(|(_, _, st)| !matches!(st.as_str(), "applied" | "refused"))
+                .count();
+            json!({"total": rows.len(), "waiting": waiting})
+        });
+        let lease = self
+            .store
+            .as_ref()
+            .map(|s| lease_json(s.lease_event(), &s.instance_id()));
+        let problems = storage_problems(self, &health, conflicts.len());
         json!({
             "backend": self.backend.as_str(),
+            "provider": connect::provider_name(self.backend),
             "folder": self.folder,
             "store_id": self.store_id,
             "account": self.account,
             "pairing": self.pairing,
+            "pairing_label": self.pairing.as_deref().map(connect::pairing_label),
+            "pairing_change": self.pairing_change.as_ref().map(|(configured, connected)| json!({
+                "configured": configured, "connected": connected,
+            })),
             "connected": self.connected(),
             "problem": self.problem,
-            "health": health_json(&self.health()),
+            "health": health_json(&health),
             "engine": engine,
             "sync": progress,
+            "synced_at": synced_at.map(unix_s),
             "cache": cache,
+            "outbox": outbox,
+            "conflicts": conflicts,
+            "submissions": submissions,
+            "lease": lease,
+            "quota": self.quota_json(),
+            "problems": problems,
         })
     }
+
+    /// The provider's quota, asked at most every [`QUOTA_EVERY`] (`null` until then,
+    /// or when the provider reports none).
+    fn quota_json(&self) -> Value {
+        let Some(store) = &self.store else {
+            return Value::Null;
+        };
+        if let Some((at, v)) = &*self.quota.lock()
+            && at.elapsed() < QUOTA_EVERY
+        {
+            return v.clone();
+        }
+        let v = match store.quota(Duration::from_secs(10)) {
+            Ok(Some(c)) => json!({"total": c.total, "available": c.available,
+                "used": c.total.saturating_sub(c.available)}),
+            Ok(None) => Value::Null,
+            Err(e) => json!({"error": e.to_string()}),
+        };
+        *self.quota.lock() = Some((std::time::Instant::now(), v.clone()));
+        v
+    }
+
+    /// The admin's Take over (§9.2).
+    pub fn take_over(&self) -> io::Result<()> {
+        match &self.store {
+            Some(s) => s.take_over(Duration::from_secs(60)),
+            None => Err(io::Error::other("the library is not connected")),
+        }
+    }
+}
+
+fn unix_s(t: std::time::SystemTime) -> f64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// The outbox as the Storage panel shows it: counts by state, the oldest op still
+/// owed, the last error, the held and failed ops.
+fn outbox_json(ops: &[bunko_remote::outbox::OpSummary]) -> Value {
+    use bunko_remote::outbox::OpSummary;
+    let owed: Vec<&OpSummary> = ops
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.state,
+                "PREPARED" | "STAGED" | "HELD" | "PREFLIGHT" | "UPLOADING" | "FAILED"
+            )
+        })
+        .collect();
+    let count = |st: &str| ops.iter().filter(|o| o.state == st).count();
+    let op = |o: &OpSummary| {
+        json!({"id": o.id, "kind": o.kind, "path": o.dest, "state": o.state,
+               "attempts": o.attempts, "last_error": o.last_error, "origin": o.origin})
+    };
+    let last_error = owed.iter().rev().find_map(|o| o.last_error.clone());
+    json!({
+        "owed": owed.len(),
+        "uploading": count("UPLOADING") + count("PREFLIGHT"),
+        "held": count("HELD"),
+        "failed": count("FAILED"),
+        "oldest": owed.iter().min_by_key(|o| o.id).map(|o| op(o)),
+        "last_error": last_error,
+        "held_ops": ops.iter().filter(|o| o.state == "HELD").take(20).map(op).collect::<Vec<_>>(),
+        "failed_ops": ops.iter().filter(|o| o.state == "FAILED").take(20).map(op).collect::<Vec<_>>(),
+    })
+}
+
+/// The lease as the Storage panel shows it (holder, epoch, last seen).
+fn lease_json(ev: Option<bunko_remote::status::LeaseEvent>, ours: &str) -> Value {
+    use bunko_remote::status::LeaseEvent;
+    let holder = |m: &bunko_remote::status::Marker| {
+        json!({
+            "instance_id": m.instance_id,
+            "name": m.instance_name,
+            "epoch": m.epoch,
+            "last_seen": m.heartbeat_at,
+            "version": m.bunko_version,
+            "ours": m.instance_id == ours,
+        })
+    };
+    match ev {
+        None => json!({"state": "not-started", "can_take_over": false}),
+        Some(LeaseEvent::Claiming) => json!({"state": "claiming", "can_take_over": false}),
+        Some(LeaseEvent::Acquired) => json!({"state": "held", "can_take_over": false,
+            "holder": {"instance_id": ours, "ours": true}}),
+        Some(LeaseEvent::Standby { holder: m }) => {
+            json!({"state": "standby", "can_take_over": true, "holder": holder(&m)})
+        }
+        Some(LeaseEvent::Lost { holder: m }) => {
+            json!({"state": "lost", "can_take_over": true, "holder": holder(&m)})
+        }
+        Some(LeaseEvent::HeartbeatFailed { error }) => {
+            json!({"state": "heartbeat-failed", "can_take_over": false, "error": error})
+        }
+        Some(LeaseEvent::Released) => json!({"state": "released", "can_take_over": false}),
+    }
+}
+
+/// D25: the configured Google pairing and the one the Drive sign-in on file was made
+/// with, when they differ (configured, connected). Overrides count as `custom`.
+pub fn pairing_change(lib: &LibraryConfig, cloud: &Path) -> Option<(String, String)> {
+    if lib.backend != LibraryBackend::GDrive {
+        return None;
+    }
+    let configured = pairing_of(lib);
+    let creds = bunko_remote::auth::CredentialStore::open(cloud).ok()?;
+    let mut connected = None;
+    for id in creds.store_ids().ok()? {
+        let Ok(Some(c)) = creds.get(&id) else {
+            continue;
+        };
+        if c.provider != "gdrive" {
+            continue;
+        }
+        let Some(account) = c.account_id.as_deref() else {
+            continue;
+        };
+        if store_id("gdrive", &configured, account, &lib.folder) == id {
+            return None;
+        }
+        let theirs = match c.client_id.as_deref().and_then(connect::pairing_of_client) {
+            Some(p) => p.as_str().to_string(),
+            None => format!("custom:{}", c.client_id.as_deref().unwrap_or("")),
+        };
+        if theirs != configured {
+            connected = Some(theirs);
+        }
+    }
+    connected.map(|c| (configured, c))
 }
 
 /// `{"state": "online" | ..., ...}` of a store's health.
@@ -350,6 +592,9 @@ pub fn open_library_store(
     config: &Config,
     layout: &StorageLayout,
 ) -> io::Result<Option<OpenedStore>> {
+    let cloud = layout.cloud_dir();
+    // What a Disconnect left for this start to remove (nothing has it open now).
+    disconnect::sweep_disconnected(&cloud);
     if !config.is_cloud_library() {
         return Ok(None);
     }
@@ -357,7 +602,6 @@ pub fn open_library_store(
     // Provider errors answer clients by class (412, 503 + Retry-After, 507; §3.5).
     bunko_store::register_classifier(classify_berr);
     let plan = plan(lib, layout)?;
-    let cloud = layout.cloud_dir();
     let open_remote = |id: &str| -> (PathBuf, RemoteStoreConfig) {
         let dir = cloud.join(id);
         let root = dir.join("library");
@@ -391,6 +635,10 @@ pub fn open_library_store(
         pairing: pairing.clone(),
         store: None,
         problem: None,
+        pairing_change: None,
+        cloud_dir: PathBuf::new(),
+        synced_at: parking_lot::Mutex::new(None),
+        quota: parking_lot::Mutex::new(None),
         #[cfg(feature = "testing")]
         fake: None,
         _connect_rt: None,
@@ -503,7 +751,9 @@ pub fn open_library_store(
             (s, h)
         }
     };
-    let (store, handle) = opened;
+    let (store, mut handle) = opened;
+    handle.cloud_dir = cloud.clone();
+    handle.pairing_change = pairing_change(lib, &cloud);
     if let Some(id) = &handle.store_id {
         tracing::info!(
             "[STORAGE] Library: {} folder {:?} (store {id}) mounted at {}",
@@ -676,13 +926,21 @@ fn signed_in_plan(lib: &LibraryConfig, cloud: &Path) -> io::Result<Plan> {
         LibraryBackend::Mega => "MEGA",
         _ => "OneDrive",
     };
-    Ok(Plan::Unconnected(if other_pairing {
-        format!(
-            "the {name} sign-in on file is for another pairing or folder; disconnect the old library first, then run `mokuro-bunko library connect {provider}`"
-        )
-    } else {
-        format!("not signed in to {name}: run `mokuro-bunko library connect {provider}`")
-    }))
+    Ok(Plan::Unconnected(
+        if other_pairing && lib.backend == LibraryBackend::GDrive {
+            // D25: never applied silently; held with storage-auth until Disconnect.
+            format!(
+                "The Google pairing changed: the Google Drive sign-in on file is for another pairing or folder than {}. Disconnect the old library first (admin → Storage → Disconnect, or `mokuro-bunko library disconnect`), then connect again",
+                connect::pairing_label(&pairing)
+            )
+        } else if other_pairing {
+            format!(
+                "the {name} sign-in on file is for another pairing or folder; disconnect the old library first, then run `mokuro-bunko library connect {provider}`"
+            )
+        } else {
+            format!("not signed in to {name}: run `mokuro-bunko library connect {provider}`")
+        },
+    ))
 }
 
 /// The WebDAV password: `MOKURO_WEBDAV_PASSWORD_FILE`, else the credentials entry.

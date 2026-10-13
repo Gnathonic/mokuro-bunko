@@ -246,13 +246,14 @@ impl ControlSetup {
         config_path: PathBuf,
     ) -> Option<bunko_control::ControlServer> {
         let stop = services.stop.clone();
+        let storage_control = services.storage_control.clone();
         control.set_stop(stop.clone());
         control.set_library_url(&self.library_url);
         crate::control::watch_queue(
             control.clone(),
             self.library_url.clone(),
             services.ocr.clone(),
-            services.storage.clone(),
+            services.storage_control.clone(),
             stop.clone(),
         );
         #[cfg(feature = "ocr")]
@@ -285,6 +286,6 @@ impl ControlSetup {
             problems.extend(crate::cmd::doctor::control_problems(&storage, true));
             problems
         });
-        crate::control::start(control, config_path, None).await
+        crate::control::start(control, config_path, None, Some(storage_control)).await
     }
 }
