@@ -25,7 +25,7 @@
 //! never by a periodic walk; there is no corrupt-sidecar sweep (report-only on
 //! remote); and `.nocover` is not a file in the cloud but a local-only record,
 //! [`NoCoverSet`], kept in `<base>/cloud/<store-id>/nocover.json` until the store's
-//! durable `local_row` table carries it.
+//! durable `local_row` table offers `nocover` rows (it keeps only staging rows today).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
@@ -81,7 +81,7 @@ pub fn needs_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> bool {
 /// D14: the `.nocover` markers of a cloud library, as local-only records keyed by the
 /// archive's library path and version `(size, mtime_ns)` (a new version of the archive
 /// is looked at again). Persisted as JSON in the store's own directory; a stand-in for
-/// the store's `local_row` table, which lands with the write path.
+/// the store's `local_row` table, which holds only staging rows so far.
 pub struct NoCoverSet {
     file: PathBuf,
     library: PathBuf,
@@ -256,7 +256,20 @@ pub fn ensure_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> Result
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
     let intent = WriteIntent::new(Mode::CreateNew, Origin::Thumbs, Durability::Deferred);
-    fs::write(&tmp, &webp)
+    // A staging file (on a remote store: local until published; `fs::write` would
+    // publish the temporary name itself), then one publish onto the cover's name.
+    let staged = || -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(&webp)?;
+        f.flush()?;
+        f.sync_all()
+    };
+    staged()
         .and_then(|()| fs::publish(&tmp, &out, &intent).map(|_| ()))
         .map_err(|e| {
             let _ = fs::remove_file(&tmp);
