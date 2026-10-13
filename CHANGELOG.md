@@ -21,6 +21,18 @@
   `library disconnect`; `doctor` checks the pairing, the spool and the credentials
   file. The tray shows one library line ("Google Drive · synced 1 min ago") and
   "Sign in again…" when needed.
+- **Folders and volumes whose names differ only in case are joined in a cloud
+  library.** Google Drive, MEGA and many WebDAV servers can hold `Kingdom/` beside
+  `kingdom/`; Bunko now moves the younger spelling's volumes into the oldest one by
+  itself, once neither has changed for a while and no OCR runs on them, and puts the
+  emptied folder in the provider's trash (never a permanent delete). A copy that is
+  byte-for-byte the same goes to the trash; covers, layers and OCR files only the
+  younger folder has move in under the older spelling; its `series.json` is merged into
+  the series first. Two different archives (or OCR files Bunko cannot choose between)
+  stay where they are, listed under the Storage tab's conflicts with **Keep this copy**
+  / **Keep that copy**; the tab also lists the **Recent merges**. Upload owners, OCR
+  records and volume ids follow every moved volume. A folder Mokuro Reader keeps
+  recreating is left alone after the fourth merge in a day.
 
 ### Changed
 - **Internal: the library goes through a storage seam.** Every library file access in

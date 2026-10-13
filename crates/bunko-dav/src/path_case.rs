@@ -111,8 +111,10 @@ impl LibraryPathCanonicalizer {
 
     /// The name `name` is spelled with in `parent`, or `None` when absent. The exact
     /// spelling wins over a variant (a library that already holds both keeps both
-    /// addressable); among variants only, the first in sorted order, so the choice is
-    /// stable.
+    /// addressable); among variants only, the store's case winner
+    /// ([`bunko_store::LibraryStore::case_winner`]: on a remote store the oldest
+    /// spelling, the one a case merge keeps), else the first in sorted order, so the
+    /// choice is stable.
     fn on_disk_name(&self, parent: &Path, name: &str) -> Option<String> {
         if self.case_sensitive && fs::symlink_metadata(parent.join(name)).is_ok() {
             return Some(name.to_string());
@@ -131,6 +133,15 @@ impl LibraryPathCanonicalizer {
             if fold_name(entry_name) == target {
                 variants.push(entry_name.to_string());
             }
+        }
+        // Several variants: a remote store names its case-merge winner, the oldest
+        // spelling (spec §5.9); a local library keeps the first in sorted order.
+        if variants.len() > 1
+            && let Some(w) =
+                bunko_store::store_for(parent).and_then(|s| s.case_winner(parent, &target))
+            && variants.contains(&w)
+        {
+            return Some(w);
         }
         variants.into_iter().min()
     }

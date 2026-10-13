@@ -550,6 +550,18 @@ impl Scheduler {
                 break;
             }
         }
+        self.publish_busy();
+    }
+
+    /// What the case merge must wait for (spec §5.9 "When"): the claims in flight (a
+    /// claim holds its spooled archive, and an upgrade swap settles inside it).
+    fn publish_busy(&self) {
+        if !self.remote_library() {
+            return;
+        }
+        let library = self.library();
+        let claims = self.claims.keys().map(|j| j.path(&library)).collect();
+        super::busy::set_claims(&library, claims);
     }
 
     fn dispatch(&mut self, msg: Msg) {
@@ -715,6 +727,8 @@ impl Scheduler {
             return;
         }
         self.direct_running = true;
+        let library = self.library();
+        super::busy::set_direct(&library, volumes.iter().map(|v| library.join(v)).collect());
         self.log(format!(
             "Upgrading {} volume(s) from layers already on disk (no OCR needed), one at a time",
             volumes.len()
@@ -731,6 +745,7 @@ impl Scheduler {
 
     fn direct_upgraded(&mut self, done: u64, failed: u64) {
         self.direct_running = false;
+        super::busy::set_direct(&self.library(), Default::default());
         let tail = if failed > 0 {
             format!(", {failed} failed (retried after the next walk)")
         } else {

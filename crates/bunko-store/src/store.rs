@@ -206,6 +206,11 @@ pub trait LibraryStore: Send + Sync + 'static {
     fn case_winner(&self, _parent: &Path, _fold: &str) -> Option<String> {
         None
     }
+    /// A case merge (spec §5.9) is open on `p` or a folder above it: the OCR scheduler
+    /// claims nothing there and the upgrade census skips it until the merge ends.
+    fn merge_busy(&self, _p: &Path) -> bool {
+        false
+    }
 }
 
 /// A store-level failure that has no `io::ErrorKind` of its own, carried inside an

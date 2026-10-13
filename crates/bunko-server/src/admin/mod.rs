@@ -401,6 +401,9 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
         ["storage", "disconnect"] if post => storage::disconnect(s, &req).await,
         ["storage", "local"] if post => storage::local(s).await,
         ["storage", "lease", "take-over"] if post => storage::take_over(s, &req).await,
+        ["storage", "conflicts", id, "resolve"] if post => {
+            storage::resolve_conflict(s, &req, id).await
+        }
         ["storage", "readers"] if put => storage::readers(s, &req).await,
 
         ["update"] if get => update::http::get(s, &req).await,

@@ -37,6 +37,13 @@ CREATE TABLE IF NOT EXISTS conflict(id INTEGER PRIMARY KEY, kind TEXT, path TEXT
   first_seen INTEGER, resolved INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS local_row(path TEXT PRIMARY KEY, kind TEXT NOT NULL, anchor_pid TEXT,
   anchor_cver TEXT, file TEXT);
+CREATE TABLE IF NOT EXISTS merge_group(id TEXT PRIMARY KEY, scope TEXT NOT NULL, stem INTEGER NOT NULL,
+  parent TEXT NOT NULL, winner TEXT NOT NULL, losers TEXT NOT NULL, origin TEXT NOT NULL, state TEXT NOT NULL,
+  created_at INTEGER NOT NULL, finished_at INTEGER, moved INTEGER NOT NULL DEFAULT 0,
+  trashed INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0,
+  no_trash INTEGER NOT NULL DEFAULT 0, note TEXT);
+CREATE TABLE IF NOT EXISTS merge_block(conflict_id INTEGER PRIMARY KEY, this TEXT NOT NULL,
+  that TEXT NOT NULL);
 ";
 
 /// One ledger row.
@@ -80,6 +87,22 @@ impl SubmissionRow {
     }
 }
 
+/// One unresolved `conflict` row, as the admin panel lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    pub id: i64,
+    pub kind: String,
+    pub path: String,
+    pub pid: Option<String>,
+    pub detail: String,
+    /// Unix ms.
+    pub first_seen: i64,
+    /// `case-merge-blocked`: the losing spelling's paths ("Keep this copy").
+    pub this: Vec<String>,
+    /// `case-merge-blocked`: the winner's paths ("Keep that copy").
+    pub that: Vec<String>,
+}
+
 /// A conflict row's kind (§5.1 vocabulary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictRow {
@@ -88,15 +111,21 @@ pub enum ConflictRow {
     Discarded,
     /// The provider stored other bytes than Bunko uploaded (size or hash differ).
     Corrupt,
+    /// A case merge left a group (or a folder) in the losing spelling (§5.9).
+    CaseMergeBlocked,
+    /// A name that has duplicates after a case-merge move (a reader upload raced it).
+    DupFile,
 }
 
 impl ConflictRow {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ConflictRow::LostWrite => "lost-write",
             ConflictRow::FailedOp => "failed-op",
             ConflictRow::Discarded => "discarded",
             ConflictRow::Corrupt => "corrupt",
+            ConflictRow::CaseMergeBlocked => "case-merge-blocked",
+            ConflictRow::DupFile => "dup-file",
         }
     }
 }
@@ -405,6 +434,114 @@ impl StateDb {
                 params![kind.as_str(), path, pid, detail, now_ms()],
             )
         });
+    }
+
+    /// [`StateDb::conflict_add`], unless an unresolved row of that kind and path
+    /// exists; returns the row's id (new or existing).
+    pub fn conflict_once(
+        &self,
+        kind: ConflictRow,
+        path: &str,
+        pid: Option<&str>,
+        detail: &str,
+    ) -> Option<i64> {
+        self.with("conflict_once", |c| {
+            let found: Option<i64> = c
+                .query_row(
+                    "SELECT id FROM conflict WHERE kind = ?1 AND path = ?2 AND resolved = 0",
+                    params![kind.as_str(), path],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = found {
+                return Ok(id);
+            }
+            c.execute(
+                "INSERT INTO conflict(kind, path, pid, detail, first_seen) VALUES(?1, ?2, ?3, ?4, ?5)",
+                params![kind.as_str(), path, pid, detail, now_ms()],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .ok()
+    }
+
+    /// Every unresolved conflict with its id.
+    pub fn conflict_rows(&self) -> Vec<Conflict> {
+        self.with("conflict_rows", |c| {
+            c.prepare(
+                "SELECT c.id, c.kind, c.path, c.pid, c.detail, c.first_seen, b.this, b.that \
+                 FROM conflict c LEFT JOIN merge_block b ON b.conflict_id = c.id \
+                 WHERE c.resolved = 0 ORDER BY c.id",
+            )?
+            .query_map([], |r| {
+                let list = |s: Option<String>| -> Vec<String> {
+                    s.and_then(|j| serde_json::from_str(&j).ok())
+                        .unwrap_or_default()
+                };
+                Ok(Conflict {
+                    id: r.get(0)?,
+                    kind: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    path: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    pid: r.get(3)?,
+                    detail: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    first_seen: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    this: list(r.get(6)?),
+                    that: list(r.get(7)?),
+                })
+            })?
+            .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Mark a conflict resolved.
+    pub fn conflict_resolve(&self, id: i64) {
+        let _ = self.with("conflict_resolve", |c| {
+            c.execute("UPDATE conflict SET resolved = 1 WHERE id = ?1", [id])
+        });
+    }
+
+    /// A `case-merge-blocked` row with its two sides (library paths): `this` (the
+    /// losing spelling's files) and `that` (the winner's), in one transaction, unless
+    /// an unresolved row for `path` exists. Returns the row's id.
+    pub fn merge_block_add(
+        &self,
+        path: &str,
+        pid: Option<&str>,
+        detail: &str,
+        this: &[String],
+        that: &[String],
+    ) -> Option<i64> {
+        let j = |v: &[String]| serde_json::to_string(v).unwrap_or_else(|_| "[]".into());
+        let kind = ConflictRow::CaseMergeBlocked.as_str();
+        self.with("merge_block_add", |c| {
+            let tx = c.transaction()?;
+            let found: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM conflict WHERE kind = ?1 AND path = ?2 AND resolved = 0",
+                    params![kind, path],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let id = match found {
+                Some(id) => id,
+                None => {
+                    tx.execute(
+                        "INSERT INTO conflict(kind, path, pid, detail, first_seen) VALUES(?1, ?2, ?3, ?4, ?5)",
+                        params![kind, path, pid, detail, now_ms()],
+                    )?;
+                    let id = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT OR REPLACE INTO merge_block(conflict_id, this, that) VALUES(?1, ?2, ?3)",
+                        params![id, j(this), j(that)],
+                    )?;
+                    id
+                }
+            };
+            tx.commit()?;
+            Ok(id)
+        })
+        .ok()
     }
 
     /// `(kind, path, detail)` of every unresolved conflict.

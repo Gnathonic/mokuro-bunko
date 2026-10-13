@@ -282,6 +282,18 @@ impl StorageControl {
         }
     }
 
+    /// "Keep this copy" (`this`) / "Keep that copy" (`that`) of a `case-merge-blocked`
+    /// conflict (§5.9). Blocking. Returns the merge group that trashes the other copy.
+    pub fn resolve_conflict(&self, id: i64, choice: &str) -> Result<String, String> {
+        let Some(choice) = bunko_remote::ResolveChoice::parse(choice) else {
+            return Err("choice: \"this\" or \"that\"".into());
+        };
+        match &self.handle {
+            Some(h) => h.resolve_conflict(id, choice).map_err(|e| e.to_string()),
+            None => Err("the library is on this disk".into()),
+        }
+    }
+
     /// Disconnect the cloud library (§7). Blocking. The mounted store when one runs;
     /// otherwise the store on file (a pairing change, a server that could not open
     /// it), opened here to drain it. Afterwards a restart is pending.

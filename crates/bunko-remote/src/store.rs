@@ -153,6 +153,11 @@ pub struct RemoteStoreConfig {
     /// `outbox_max_gb`: a Deferred write that would take the outbox above this fails
     /// with `StorageFull` (507; default 8 GiB).
     pub outbox_max_bytes: u64,
+    /// Merge case variants automatically (§5.9, owner decision; default on). Merges
+    /// run only once a [`crate::merge::CaseMergePolicy`] is installed.
+    pub case_merge: bool,
+    /// How often the case merge looks for variant sets (default 30 s).
+    pub merge_interval: Duration,
 }
 
 impl RemoteStoreConfig {
@@ -200,6 +205,8 @@ impl RemoteStoreConfig {
             background_units_per_min: None,
             outbox_hold_bytes: 2048 << 20,
             outbox_max_bytes: 8 << 30,
+            case_merge: true,
+            merge_interval: Duration::from_secs(30),
         }
     }
 
@@ -346,6 +353,7 @@ impl Drop for SinkReg {
 
 enum Pending {
     Moved(PathBuf, PathBuf, bool),
+    Merged(PathBuf, PathBuf, bool),
     Removed(PathBuf, bool),
     Sidecar(PathBuf),
     Discarded(PathBuf),
@@ -355,6 +363,7 @@ impl Pending {
     fn run(self, h: &dyn CloudHooks) {
         match self {
             Pending::Moved(a, b, d) => h.moved(&a, &b, d),
+            Pending::Merged(a, b, d) => h.merged(&a, &b, d),
             Pending::Removed(a, d) => h.removed(&a, d),
             Pending::Sidecar(a) => h.sidecar_overwritten(&a),
             Pending::Discarded(a) => h.ocr_discarded(&a),
@@ -419,6 +428,10 @@ impl CloudHooks for HookSlot {
 
     fn removed(&self, path: &Path, is_dir: bool) {
         self.dispatch(Pending::Removed(path.into(), is_dir));
+    }
+
+    fn merged(&self, from: &Path, to: &Path, is_dir: bool) {
+        self.dispatch(Pending::Merged(from.into(), to.into(), is_dir));
     }
 
     fn sidecar_overwritten(&self, path: &Path) {
@@ -679,7 +692,7 @@ impl<B: Backend> Core<B> {
     }
 
     /// Download `entry` (a new spool file for `v`) once, for every reader.
-    async fn download(self: Arc<Self>, entry: SpoolPinGuard, v: Ver) {
+    pub(crate) async fn download(self: Arc<Self>, entry: SpoolPinGuard, v: Ver) {
         let e = entry.entry.clone();
         let mut r = self.download_inner(&e, &v).await;
         let pinned = self.caps.pinned_read && v.pin.is_some();
@@ -762,6 +775,8 @@ pub struct RemoteStore<B: Backend> {
     sinks: Arc<SinkList>,
     hooks: Arc<HookSlot>,
     lease: Arc<OnceLock<LeaseHandle>>,
+    /// The case merge (§5.9, `merge.rs`).
+    pub(crate) merge: Arc<crate::merge::MergeState>,
 }
 
 impl<B: Backend> RemoteStore<B> {
@@ -801,6 +816,19 @@ impl<B: Backend> RemoteStore<B> {
             .build()?;
         let events = Events::start()?;
         let sinks = Arc::new(SinkList::default());
+        let merge = Arc::new(crate::merge::MergeState::new(
+            cfg.root.clone(),
+            cfg.quiet,
+            cfg.merge_interval,
+        ));
+        {
+            // Every change the store shows, for the merge's quiet period.
+            let m = merge.clone();
+            sinks.list.lock().push((
+                sinks.next.fetch_add(1, Ordering::Relaxed),
+                Arc::new(move |ev: WatchEvent| m.note(&ev)),
+            ));
+        }
         let hooks_set = Arc::new(AtomicBool::new(false));
         let hooks_notify = Arc::new(tokio::sync::Notify::new());
         let hooks = Arc::new(HookSlot {
@@ -933,7 +961,8 @@ impl<B: Backend> RemoteStore<B> {
         if cfg.lease {
             handle.spawn(start_lease(core.clone(), cfg.clone(), lease.clone()));
         }
-        Ok(Arc::new_cyclic(|me| RemoteStore {
+        let case_merge = cfg.case_merge;
+        let store = Arc::new_cyclic(|me| RemoteStore {
             me: me.clone(),
             cfg,
             core,
@@ -943,7 +972,14 @@ impl<B: Backend> RemoteStore<B> {
             sinks,
             hooks,
             lease,
-        }))
+            merge: merge.clone(),
+        });
+        // Groups a crash left open are busy at once; they resume after the lease.
+        store.load_open_groups();
+        if case_merge {
+            crate::merge::spawn(Arc::downgrade(&store), merge);
+        }
+        Ok(store)
     }
 
     /// The marker lease, once it started (after the first sync).
@@ -1019,11 +1055,12 @@ impl<B: Backend> RemoteStore<B> {
             .lock()
             .values()
             .filter(|o| {
-                o.state.live()
-                    || matches!(
-                        o.state,
-                        crate::outbox::OpState::Failed | crate::outbox::OpState::Prepared
-                    )
+                o.group.is_none()
+                    && (o.state.live()
+                        || matches!(
+                            o.state,
+                            crate::outbox::OpState::Failed | crate::outbox::OpState::Prepared
+                        ))
             })
             .cloned()
             .collect();
@@ -1486,6 +1523,7 @@ impl<B: Backend> Drop for RemoteStore<B> {
     fn drop(&mut self) {
         // Safe in any context, async included; the feed is crash-safe.
         self.core.gov.flush_log();
+        self.merge.stop();
         if let Some(rt) = self.rt.take() {
             rt.shutdown_background();
         }
@@ -1748,6 +1786,10 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
 
     fn recently_removed(&self, p: &Path) -> Option<SystemTime> {
         self.core.feed.recently_removed(p)
+    }
+
+    fn merge_busy(&self, p: &Path) -> bool {
+        RemoteStore::merge_busy(self, p)
     }
 
     fn case_winner(&self, parent: &Path, fold: &str) -> Option<String> {

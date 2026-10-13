@@ -576,6 +576,7 @@ impl<B: Backend> RemoteStore<B> {
             .values()
             .filter(|o| {
                 o.durability == Durability::Deferred
+                    && o.group.is_none()
                     && matches!(o.state, OpState::Staged | OpState::Held)
                     && o.dest.segments().starts_with(rel.segments())
             })

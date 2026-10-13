@@ -150,6 +150,60 @@ impl CloudHooks for ServerCloudHooks {
             .library_changed(&[from.to_path_buf(), to.to_path_buf()]);
     }
 
+    fn merged(&self, from: &Path, to: &Path, is_dir: bool) {
+        // A case merge (§5.9): the per-volume forms only. Blocked volumes may stay in
+        // the losing folder, so no folder prefix is ever renamed.
+        let (Some(old), Some(new)) = (self.rel(from), self.rel(to)) else {
+            return;
+        };
+        let volumes: Vec<(String, PathBuf)> = if is_dir {
+            cbz_under(to)
+                .into_iter()
+                .filter_map(|cbz| {
+                    let new_rel = self.rel(&cbz)?;
+                    let suffix = new_rel
+                        .get(new.len()..)?
+                        .trim_start_matches('/')
+                        .to_string();
+                    Some((format!("{old}/{suffix}"), cbz))
+                })
+                .collect()
+        } else if is_cbz(to) {
+            vec![(old.clone(), to.to_path_buf())]
+        } else {
+            Vec::new()
+        };
+        for (old_rel, cbz) in &volumes {
+            let Some(new_rel) = self.rel(cbz) else {
+                continue;
+            };
+            self.dav.rename_volume_upload(old_rel, &new_rel);
+            if let Err(e) = self.db.rename_ocr_sidecars_of_volume(old_rel, &new_rel) {
+                tracing::warn!("case merge: OCR rows of {old_rel}: {e}");
+            }
+            if let Err(e) = self.db.rename_volume_uuid(old_rel, &new_rel) {
+                tracing::warn!("case merge: the volume id of {old_rel}: {e}");
+            }
+        }
+        if !is_dir && is_sidecar(to) {
+            // A sidecar or layer moved in on its own (under the winner's stem).
+            let volume = bunko_db::uploads::layer_sidecar_volume_path(&new)
+                .or_else(|| bunko_db::uploads::normalize_volume_key(&new))
+                .unwrap_or_else(|| new.clone());
+            if let Err(e) = self.db.rename_ocr_sidecar(&old, &new, &volume) {
+                tracing::warn!("case merge: the OCR row of {old}: {e}");
+            }
+        }
+        if is_dir || is_cbz(from) {
+            self.dav.archives_removed(&[from.to_path_buf()]);
+        }
+        for (_, cbz) in &volumes {
+            self.dav.archive_arrived(cbz);
+        }
+        self.dav
+            .library_changed(&[from.to_path_buf(), to.to_path_buf()]);
+    }
+
     fn removed(&self, path: &Path, is_dir: bool) {
         tracing::info!("[STORAGE] Deleted in the cloud: {}", path.display());
         let Some(rel) = self.rel(path) else {

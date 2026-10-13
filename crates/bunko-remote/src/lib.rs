@@ -12,7 +12,8 @@
 //! in [`write`](mod@write)), fenced by the lease of [`status`]. Every provider call
 //! goes through the [`governor`] (budgets, priorities, pauses, hard stops, the api
 //! log). Foreign `series.json` versions become [`submissions`], and the first
-//! adoption ingests the library's facts there. [`status`]
+//! adoption ingests the library's facts there. [`merge`] merges case variants into
+//! the oldest spelling (§5.9). [`status`]
 //! holds the marker lease (`.mokuro-bunko.json`) and the cloud queue document. Default
 //! features add the providers' drivers (`webdav::WebDavBackend`,
 //! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`) and
@@ -32,6 +33,7 @@ pub mod governor;
 pub mod index;
 #[cfg(feature = "mega")]
 pub mod mega;
+pub mod merge;
 pub mod names;
 #[cfg(feature = "onedrive")]
 pub mod onedrive;
@@ -55,4 +57,6 @@ pub use feed::{
     CloudHooks, EngineState, Feed, FeedConfig, FeedHandle, FeedState, NoFeedState, SubmissionResult,
 };
 pub use governor::{ApiClass, ApiStats, ClassStats, Governed, Governor, Limits};
+pub use merge::{CaseMergePolicy, MergeChoice, MergeRecord, ResolveChoice};
+pub use state::Conflict;
 pub use store::{RemoteStore, RemoteStoreConfig, berr_to_io, on_store_runtime};
