@@ -207,7 +207,15 @@ pub enum Cover {
 /// `_extract_cover_image_data`: the first name in code-point order whose suffix is
 /// an image suffix (directories, `__MACOSX` and the embedded `<stem>.webp` included,
 /// as in 0.5.2).
+///
+/// On a cloud library the archive is read with `bunko_library`'s central-directory
+/// reader: the directory at the tail plus the one member, a few ranged reads. The
+/// `zip` crate reads every member's local header while opening an archive, one ranged
+/// read per page across the whole file.
 pub fn cover_image(cbz: &Path) -> Cover {
+    if bunko_store::store_for(cbz).is_some_and(|s| s.caps().remote) {
+        return cover_image_zipdir(cbz);
+    }
     let file = match fs::File::open(cbz) {
         Ok(f) => f,
         Err(e) => return Cover::None(e.to_string()),
@@ -237,6 +245,41 @@ pub fn cover_image(cbz: &Path) -> Cover {
         .take(MAX_MEMBER_BYTES + 1)
         .read_to_end(&mut bytes)
     {
+        Ok(_) => Cover::Image(bytes),
+        Err(e) => Cover::None(e.to_string()),
+    }
+}
+
+/// [`cover_image`] through the central directory only: the same member (the first
+/// sorted image name; of duplicate names the last entry, as the `zip` crate keeps)
+/// and the same size cap.
+fn cover_image_zipdir(cbz: &Path) -> Cover {
+    use bunko_library::archive::zipdir;
+    let entries = match zipdir::list_entries(cbz) {
+        Ok(e) => e,
+        Err(e) => return Cover::None(e.to_string()),
+    };
+    let Some(first) = entries
+        .iter()
+        .map(|e| e.filename.as_str())
+        .filter(|n| COVER_EXTENSIONS.contains(&suffix_lower(n).as_str()))
+        .min()
+    else {
+        return Cover::None("no image".into());
+    };
+    let entry = entries
+        .iter()
+        .rfind(|e| e.filename == first)
+        .expect("the name came from these entries");
+    if entry.file_size > MAX_MEMBER_BYTES {
+        return Cover::Image(Vec::new());
+    }
+    let member = match zipdir::open_member(cbz, entry) {
+        Ok(m) => m,
+        Err(e) => return Cover::None(e.to_string()),
+    };
+    let mut bytes = Vec::with_capacity(entry.file_size as usize);
+    match member.take(MAX_MEMBER_BYTES + 1).read_to_end(&mut bytes) {
         Ok(_) => Cover::Image(bytes),
         Err(e) => Cover::None(e.to_string()),
     }

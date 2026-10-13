@@ -388,6 +388,57 @@ fn archive_reads_are_ranged_and_pinned_and_reuse_the_zipdir() {
     }
 }
 
+/// One read at offset 0 (a magic sniff) is a ranged read of the block it covers, not
+/// a whole-file download.
+#[test]
+fn a_single_read_at_zero_starts_no_download() {
+    let (zip, _) = archive(4, 2 << 20, 21);
+    let t = start(FakeBackend::drive_like(), &[("S/v.cbz", &zip)], |_| {});
+    t.fake().reset_calls();
+    let mut f = fs::File::open(t.abs("S/v.cbz")).unwrap();
+    let mut magic = [0u8; 4];
+    assert_eq!(f.read(&mut magic).unwrap(), 4);
+    assert_eq!(&magic[..2], b"PK");
+    let log = t.fake().read_log();
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0].range, Some((0, Some((256 << 10) - 1))), "one block");
+    drop(f);
+    assert_eq!(t.store.cache_stats().spools, 0, "no download");
+}
+
+/// The `zip` crate reads every member's local header while opening an archive: each
+/// such scattered read fetches only the block it lands in (no read-ahead, no spool).
+#[test]
+fn scattered_reads_fetch_only_their_blocks() {
+    let (zip, members) = archive(24, 1 << 20, 22);
+    let t = start(FakeBackend::drive_like(), &[("S/v.cbz", &zip)], |_| {});
+    t.fake().reset_calls();
+    let f = fs::File::open(t.abs("S/v.cbz")).unwrap();
+    let mut z = zip::ZipArchive::new(std::io::BufReader::new(f)).unwrap();
+    assert_eq!(z.len(), members.len());
+    let mut got = Vec::new();
+    z.by_name(&members[5].0)
+        .unwrap()
+        .read_to_end(&mut got)
+        .unwrap();
+    assert!(got == members[5].1);
+    let log = t.fake().read_log();
+    let mut total = 0u64;
+    for r in &log {
+        let (first, last) = r.range.unwrap_or_else(|| panic!("a full read: {log:?}"));
+        let n = last.unwrap() + 1 - first;
+        assert!(n <= 256 << 10, "one block at a time: {r:?}");
+        total += n;
+    }
+    // The tail, one block per local header, the member's own blocks.
+    assert!(
+        total <= (1 + members.len() as u64 + 5) * (256 << 10),
+        "{total} bytes in {} reads",
+        log.len()
+    );
+    assert_eq!(t.store.cache_stats().spools, 0, "no download");
+}
+
 #[test]
 fn zipdir_cache_survives_a_restart() {
     let (zip, members) = archive(3, 2 << 20, 30);
