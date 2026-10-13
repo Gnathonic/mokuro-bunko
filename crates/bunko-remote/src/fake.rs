@@ -490,13 +490,9 @@ fn join(parent: &str, name: &str) -> String {
     }
 }
 
-/// The case-insensitive name rule (NFC, then lowercase).
+/// The case-insensitive name rule.
 fn fold(name: &[u8]) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    String::from_utf8_lossy(name)
-        .nfc()
-        .collect::<String>()
-        .to_lowercase()
+    crate::names::fold(&crate::names::nfc(name))
 }
 
 impl State {
