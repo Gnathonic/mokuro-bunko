@@ -4,15 +4,17 @@
 //! The `testing` feature adds `fake::FakeBackend`, an in-memory provider with fault
 //! injection that the store's tests run on. [`index::Index`] is the disposable
 //! `index.sqlite` that maps provider nodes to library paths; [`names`] holds the NFC,
-//! fold and effective-mtime rules. The default `webdav` feature adds
-//! `webdav::WebDavBackend`, the WebDAV driver; [`auth`] (default feature `oauth`)
-//! signs in to the OAuth providers and keeps their credentials.
+//! fold and effective-mtime rules. Default features add the providers' drivers
+//! (`webdav::WebDavBackend`, `gdrive::GDriveBackend`) and [`auth`], which signs in to
+//! the OAuth providers and keeps their credentials.
 
 #[cfg(feature = "oauth")]
 pub mod auth;
 pub mod backend;
 #[cfg(feature = "testing")]
 pub mod fake;
+#[cfg(feature = "gdrive")]
+pub mod gdrive;
 pub mod index;
 pub mod names;
 #[cfg(feature = "webdav")]

@@ -7,7 +7,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["webdav", "oauth"]
+default = ["webdav", "gdrive", "oauth"]
+# The Google Drive driver (`gdrive::GDriveBackend`).
+gdrive = ["dep:reqwest", "dep:md-5", "dep:time", "dep:httpdate"]
 # The in-memory FakeBackend (tests here and in dependent crates).
 testing = []
 # The WebDAV driver (`webdav::WebDavBackend`).
@@ -58,6 +60,7 @@ bunko-core = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 # MIT/Apache-2.0; seals credentials.json when MOKURO_SECRETS_KEY is set (D12).
 chacha20poly1305 = { version = "0.10", optional = true }
+md-5 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 # Turns on `testing` for this crate's own integration tests.
@@ -69,3 +72,5 @@ bunko-dav.workspace = true
 bunko-core.workspace = true
 axum.workspace = true
 http.workspace = true
+md-5 = "0.10"
+time.workspace = true
