@@ -7,9 +7,19 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
+default = ["webdav"]
 # The in-memory FakeBackend (tests here and in dependent crates).
 testing = []
+# The WebDAV driver (`webdav::WebDavBackend`).
+webdav = [
+    "dep:reqwest",
+    "dep:quick-xml",
+    "dep:percent-encoding",
+    "dep:httpdate",
+    "dep:base64",
+    "dep:time",
+    "dep:tokio-util",
+]
 
 [dependencies]
 bunko-store.workspace = true
@@ -25,9 +35,22 @@ hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unicode-normalization = "0.1"
+# webdav
+reqwest = { workspace = true, optional = true }
+quick-xml = { workspace = true, optional = true, features = ["async-tokio"] }
+percent-encoding = { workspace = true, optional = true }
+httpdate = { version = "1", optional = true }
+base64 = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Turns on `testing` for this crate's own integration tests.
 bunko-remote = { path = ".", features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# tests/webdav.rs: a real WebDAV server in-process.
+bunko-dav.workspace = true
+bunko-core.workspace = true
+axum.workspace = true
+http.workspace = true
