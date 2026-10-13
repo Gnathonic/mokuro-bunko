@@ -374,6 +374,9 @@ struct SlotState {
 struct HookSlot {
     events: Arc<Events>,
     state: Mutex<SlotState>,
+    /// Set once the server installed its hooks (submissions wait for it).
+    installed: Arc<AtomicBool>,
+    installed_notify: Arc<tokio::sync::Notify>,
 }
 
 impl HookSlot {
@@ -391,6 +394,8 @@ impl HookSlot {
     fn set(&self, h: Arc<dyn CloudHooks>) {
         let mut g = self.state.lock();
         g.hooks = Some(h.clone());
+        self.installed.store(true, Ordering::Release);
+        self.installed_notify.notify_waiters();
         let pending = std::mem::take(&mut g.pending);
         if !pending.is_empty() {
             // Under the lock, so a concurrent notification cannot overtake these.
@@ -492,6 +497,16 @@ pub(crate) struct Core<B: Backend> {
     pub queue_floor: Duration,
     /// Staging files by library path (never published on drop).
     pub staging: Mutex<HashMap<RelPath, PathBuf>>,
+    // ---- submissions and adoption (submissions.rs) ----
+    /// First adoption is done: Compiler ops may leave HELD, the lease may claim.
+    pub adopted: AtomicBool,
+    pub adopted_tx: tokio::sync::watch::Sender<bool>,
+    /// INGEST_FACTS is running.
+    pub adopting: AtomicBool,
+    pub hooks_set: Arc<AtomicBool>,
+    pub hooks_notify: Arc<tokio::sync::Notify>,
+    /// One submission is fetched and applied at a time.
+    pub subs_lock: tokio::sync::Mutex<()>,
 }
 
 /// The cloud queue file writer's state.
@@ -501,6 +516,38 @@ pub(crate) struct QueueState {
     pub last_write: Option<std::time::Instant>,
     pub pending: Option<serde_json::Value>,
     pub timer: bool,
+}
+
+/// Delivers the feed's foreign-JSON notifications to the core once it exists; the
+/// ones that arrive before are kept and delivered then.
+#[derive(Default)]
+struct JsonRelay {
+    target: OnceLock<crate::feed::ForeignJsonFn>,
+    early: Mutex<Vec<(RelPath, String, String)>>,
+}
+
+impl JsonRelay {
+    fn call(&self, rel: &RelPath, pid: &str, cver: &str) {
+        if let Some(f) = self.target.get() {
+            return f(rel, pid, cver);
+        }
+        let mut early = self.early.lock();
+        match self.target.get() {
+            Some(f) => {
+                drop(early);
+                f(rel, pid, cver)
+            }
+            None => early.push((rel.clone(), pid.to_string(), cver.to_string())),
+        }
+    }
+
+    fn set(&self, f: crate::feed::ForeignJsonFn) {
+        let mut early = self.early.lock();
+        let _ = self.target.set(f.clone());
+        for (rel, pid, cver) in early.drain(..) {
+            f(&rel, &pid, &cver);
+        }
+    }
 }
 
 /// The ledger's answers to the feed (D20).
@@ -754,10 +801,16 @@ impl<B: Backend> RemoteStore<B> {
             .build()?;
         let events = Events::start()?;
         let sinks = Arc::new(SinkList::default());
+        let hooks_set = Arc::new(AtomicBool::new(false));
+        let hooks_notify = Arc::new(tokio::sync::Notify::new());
         let hooks = Arc::new(HookSlot {
             events: events.clone(),
             state: Mutex::new(SlotState::default()),
+            installed: hooks_set.clone(),
+            installed_notify: hooks_notify.clone(),
         });
+        // Foreign series.json versions, from the feed to the submissions (§9.3).
+        let json = Arc::new(JsonRelay::default());
         let caps = backend.caps();
         let mut limits = cfg.limits.clone().unwrap_or_else(|| backend.limits());
         if let Some(u) = cfg.background_units_per_min
@@ -780,7 +833,11 @@ impl<B: Backend> RemoteStore<B> {
                 state: state.clone(),
                 echoed: echoed.clone(),
                 ops: ops.clone(),
-            }));
+            }))
+            .on_foreign_json({
+                let json = json.clone();
+                Arc::new(move |rel: &RelPath, pid: &str, cver: &str| json.call(rel, pid, cver))
+            });
         {
             let (events, sinks) = (Arc::downgrade(&events), Arc::downgrade(&sinks));
             feed.add_sink(Arc::new(move |ev: WatchEvent| {
@@ -850,10 +907,27 @@ impl<B: Backend> RemoteStore<B> {
             instance_id,
             queue_floor,
             staging: Mutex::new(HashMap::new()),
+            adopted: AtomicBool::new(false),
+            adopted_tx: tokio::sync::watch::channel(false).0,
+            adopting: AtomicBool::new(false),
+            hooks_set,
+            hooks_notify,
+            subs_lock: tokio::sync::Mutex::new(()),
         });
         core.seq.store(core.max_seq(), Ordering::Release);
         core.replay();
         crate::write::load_staging(&core);
+        {
+            let weak = Arc::downgrade(&core);
+            let h = handle.clone();
+            json.set(Arc::new(move |rel: &RelPath, pid: &str, cver: &str| {
+                if let Some(core) = weak.upgrade() {
+                    let _g = h.enter();
+                    core.foreign_json(rel, pid, cver);
+                }
+            }));
+        }
+        handle.spawn(core.clone().adopt());
         handle.spawn(core.clone().worker());
         let lease: Arc<OnceLock<LeaseHandle>> = Arc::default();
         if cfg.lease {
@@ -942,6 +1016,14 @@ impl<B: Backend> RemoteStore<B> {
     /// The server's cloud hooks (D20); notifications from before are replayed now.
     pub fn set_hooks(&self, hooks: Arc<dyn CloudHooks>) {
         self.hooks.set(hooks);
+        // Submissions that waited for the hooks are answered now.
+        self.handle.spawn(self.core.clone().resume_submissions());
+    }
+
+    /// First adoption (INGEST_FACTS, §9.4) is done: every `series.json` and the
+    /// `catalog.json` facts were handed to the server's hooks.
+    pub fn adopted(&self) -> bool {
+        self.core.adopted()
     }
 
     /// The change feed.
@@ -1243,6 +1325,11 @@ async fn start_lease<B: Backend>(
     cfg: RemoteStoreConfig,
     slot: Arc<OnceLock<LeaseHandle>>,
 ) {
+    // §5.3: … → FULL_SYNC → INGEST_FACTS → CLAIM_LEASE → replay → STEADY.
+    let mut adopted = core.adopted_tx.subscribe();
+    if adopted.wait_for(|a| *a).await.is_err() {
+        return;
+    }
     let mut rx = core.feed.subscribe();
     if rx.wait_for(|s| *s == EngineState::Steady).await.is_err() {
         return;
@@ -1345,6 +1432,10 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
         }
         if let Some(h) = gov {
             return h;
+        }
+        if self.core.adopting.load(Ordering::Acquire) {
+            // INGEST_FACTS: part of the first sync.
+            return Health::Syncing { done: 0, total: 0 };
         }
         if let Some(l) = self.lease.get()
             && let LeaseEvent::Standby { holder } | LeaseEvent::Lost { holder } = l.event()

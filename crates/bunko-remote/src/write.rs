@@ -388,24 +388,22 @@ impl<B: Backend> RemoteStore<B> {
                 _ => return Err(kind_err(io::ErrorKind::AlreadyExists, dest, "exists")),
             }
         }
-        // PREPARED: a Compiler base must be own or an applied submission (D8).
+        // PREPARED: a Compiler base must be own or a submission (D8).
         if w.origin == Origin::Compiler
             && let Mode::Replace { base: Some(b) } = &w.mode
             && !b.as_str().starts_with("pending:")
         {
             let pid = existing.as_ref().and_then(|e| e.winner_pid.clone());
             let own = pid.is_some_and(|p| self.core.state.is_own(&p, b.as_str()));
-            let applied = self
+            // A captured submission (merged, being merged, or refused) counts as
+            // merged: the compile publishes on top of it (§9.3).
+            let merged = self
                 .core
                 .state
-                .submissions()
-                .iter()
-                .any(|(path, cver, st)| {
-                    *path == rel.to_string() && cver == b.as_str() && st == "applied"
-                });
-            if !own && !applied {
+                .submission_base_ok(&rel.to_string(), b.as_str());
+            if !own && !merged {
                 return Err(conflict(format!(
-                    "{rel}: the compile base is neither Bunko's own version nor an applied submission"
+                    "{rel}: the compile base is neither Bunko's own version nor a submitted one"
                 )));
             }
         }

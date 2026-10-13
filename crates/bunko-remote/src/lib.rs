@@ -11,7 +11,8 @@
 //! through the outbox of [`outbox`] (durable state in [`state`], the mutation methods
 //! in [`write`](mod@write)), fenced by the lease of [`status`]. Every provider call
 //! goes through the [`governor`] (budgets, priorities, pauses, hard stops, the api
-//! log). [`status`]
+//! log). Foreign `series.json` versions become [`submissions`], and the first
+//! adoption ingests the library's facts there. [`status`]
 //! holds the marker lease (`.mokuro-bunko.json`) and the cloud queue document. Default
 //! features add the providers' drivers (`webdav::WebDavBackend`,
 //! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`) and
@@ -38,6 +39,7 @@ pub mod outbox;
 pub mod state;
 pub mod status;
 pub mod store;
+pub mod submissions;
 #[cfg(any(feature = "gdrive", feature = "onedrive"))]
 pub mod token_dyn;
 #[cfg(feature = "webdav")]

@@ -56,7 +56,7 @@ use sha2::{Digest, Sha256};
 
 use crate::backend::{BErr, Backend, HashKind, OpCtx, Pid, RNode, UploadSource, UploadTarget};
 use crate::cache::{SMALL_MAX, now_ms};
-use crate::feed::{EngineState, SubmissionResult};
+use crate::feed::EngineState;
 use crate::governor::{self, ApiClass};
 use crate::index::{IndexChange, ROOT_EID, RelPath};
 use crate::names::nfc;
@@ -750,9 +750,13 @@ impl<B: Backend> Core<B> {
         };
         let name = last_name(&op.dest);
         match (&op.origin, name) {
+            // INGEST_FACTS first (§9.4): no compile write before the adoption.
+            (Origin::Compiler, _) if !self.adopted() => false,
             (Origin::Compiler, "series.json") => {
                 let series = parent_of(&op.dest);
-                !others().any(|o| o.origin != Origin::Compiler && under(&o.dest, &series))
+                // §9.3: an unanswered submission for the series holds its compile.
+                !self.state.submission_unanswered(&op.dest.to_string())
+                    && !others().any(|o| o.origin != Origin::Compiler && under(&o.dest, &series))
             }
             (Origin::Compiler, "catalog.json") if op.dest.segments().len() == 1 => {
                 !others().any(|o| last_name(&o.dest) == "series.json")
@@ -994,7 +998,9 @@ impl<B: Backend> Core<B> {
             (Origin::Compiler, Some(n))
                 if op.kind == OpKind::Put && last_name(&op.dest) == "series.json" =>
             {
-                self.capture_submission(&op.dest, n).await;
+                // D8: the foreign version is captured and merged before anything
+                // replaces it; the merge's recompile publishes on top of it.
+                self.capture_submission(&op.dest, n, &op.op_id()).await;
                 self.finish(op, OpState::Conflict);
                 Some(Step::Gave(conflict(format!(
                     "{dest}: a foreign version was submitted ({why})"
@@ -1021,51 +1027,6 @@ impl<B: Backend> Core<B> {
                 }
                 self.finish(op, OpState::Conflict);
                 Some(Step::Gave(conflict(format!("{dest}: {why}"))))
-            }
-        }
-    }
-
-    /// A foreign `series.json` version: keep its bytes under `submissions/`, record
-    /// it, and hand it to the server's merge (D8).
-    async fn capture_submission(&self, dest: &RelPath, n: &RNode) {
-        let pinned = self.caps.pinned_read && n.pin.is_some();
-        let bytes = match self
-            .backend
-            .read(&n.pid, if pinned { n.pin.as_deref() } else { None }, None)
-            .await
-        {
-            Ok(body) => crate::backend::read_to_vec_max(body, SMALL_MAX).await.ok(),
-            Err(_) => None,
-        };
-        let Some(bytes) = bytes else {
-            tracing::warn!(%dest, "series.json submission: the foreign version could not be read");
-            return;
-        };
-        let sha = hex::encode(Sha256::digest(&bytes));
-        let Some(id) = self
-            .state
-            .submission_add(&dest.to_string(), &n.pid, &n.cver, &sha)
-        else {
-            return;
-        };
-        let dir = self.dir.join("submissions");
-        if std::fs::create_dir_all(&dir)
-            .and_then(|_| std::fs::write(dir.join(format!("{id}.json")), &bytes))
-            .is_err()
-        {
-            tracing::warn!(%dest, "series.json submission: could not keep its bytes");
-        }
-        let series = self.abs(&parent_of(dest));
-        match self.hooks.series_submission(&series, &bytes) {
-            SubmissionResult::Applied => self.state.submission_set(id, "applied"),
-            SubmissionResult::Refused(r) => {
-                self.state.submission_set(id, "refused");
-                self.state.conflict_add(
-                    ConflictRow::LostWrite,
-                    &dest.to_string(),
-                    Some(&n.pid),
-                    &r,
-                );
             }
         }
     }
@@ -1396,10 +1357,6 @@ impl<B: Backend> Core<B> {
             trashed: false,
             echo_only: false,
         });
-        op.state = OpState::Committed;
-        op.result_pid = Some(node.pid.clone());
-        op.result_cver = Some(node.cver.clone());
-        let _ = self.save_op(op);
         let rel = {
             let idx = self.index.lock();
             let r = idx.begin().and_then(|tx| {
@@ -1430,6 +1387,11 @@ impl<B: Backend> Core<B> {
         if matches!(op.origin, Origin::Ocr { .. }) {
             self.record_done(&rel);
         }
+        // Last: whoever waits for the op to stop being live sees all of the above.
+        op.state = OpState::Committed;
+        op.result_pid = Some(node.pid.clone());
+        op.result_cver = Some(node.cver.clone());
+        let _ = self.save_op(op);
         self.fail_at("COMMITTED")?;
         Ok(Step::Done(Published {
             version: Some(Version::new(node.cver)),

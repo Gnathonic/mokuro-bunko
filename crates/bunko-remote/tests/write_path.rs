@@ -339,7 +339,10 @@ fn crash_at_each_state_yields_one_copy() {
         t.s().set_failpoint(Some(Arc::new(move |at: &str| at == p)));
         let src = t.local("v", b"ocr result");
         let r = fs::publish(&src, t.abs("S/v.mokuro"), &deferred(ocr(), Mode::CreateNew));
-        assert_eq!(r.is_err(), point == "STAGED", "{point}");
+        // The worker may mark the op HELD (and stop there) before publish returns.
+        if point != "HELD" {
+            assert_eq!(r.is_err(), point == "STAGED", "{point}");
+        }
         wait_until(point, || t.s().crashed());
         t.stop();
         t.gate(true);
@@ -530,10 +533,18 @@ fn a_compiler_conflict_on_series_json_becomes_a_submission() {
         t.remote_bytes("S/series.json").unwrap(),
         b"{\"reader\":true}"
     );
+    // The first adoption applied the reader's first version; the conflict, its second.
     let subs = t.hooks.submissions.lock().clone();
-    assert_eq!(subs, vec![(t.abs("S"), b"{\"reader\":true}".to_vec())]);
-    assert_eq!(t.s().submissions().len(), 1);
-    assert_eq!(t.s().submissions()[0].2, "applied");
+    assert_eq!(
+        subs,
+        vec![
+            (t.abs("S"), b"{\"r\":0}".to_vec()),
+            (t.abs("S"), b"{\"reader\":true}".to_vec())
+        ]
+    );
+    let rows = t.s().submissions();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.2 == "applied"), "{rows:?}");
 }
 
 // ---- deletes, moves, folders ---------------------------------------------------------

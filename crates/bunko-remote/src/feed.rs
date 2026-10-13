@@ -103,7 +103,10 @@ pub trait CloudHooks: Send + Sync {
     fn removed(&self, path: &Path, is_dir: bool);
     /// A foreign new version of a `.mokuro`, `.mokuro.gz` or `.<layer>.mokuro`.
     fn sidecar_overwritten(&self, path: &Path);
-    /// Apply a foreign `series.json` (`apply_series_update`, task 8).
+    /// Apply a foreign `series.json` (`apply_series_update`; `crate::submissions`).
+    /// Runs on the store-events thread while the store waits for the answer: it may
+    /// recompile (Deferred Compiler publishes, based on the version the index now
+    /// shows), but must not make Sync writes to the store.
     fn series_submission(&self, series_dir: &Path, bytes: &[u8]) -> SubmissionResult;
     /// A foreign sidecar found at install time (task 8).
     fn ocr_discarded(&self, path: &Path);

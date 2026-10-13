@@ -53,6 +53,33 @@ pub struct LedgerRow {
     pub echo_only: bool,
 }
 
+/// One `submission` row (§9.3): a foreign `series.json` version, or a facts-only
+/// series from `catalog.json` at first adoption.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmissionRow {
+    pub id: i64,
+    /// The `series.json` path it is for (`<Series>/series.json`).
+    pub path: String,
+    pub pid: String,
+    pub cver: String,
+    pub sha256: Option<String>,
+    /// `fetching` | `queued` | `applied` | `refused`.
+    pub state: String,
+}
+
+impl SubmissionRow {
+    fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SubmissionRow> {
+        Ok(SubmissionRow {
+            id: r.get(0)?,
+            path: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            pid: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            cver: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            sha256: r.get(4)?,
+            state: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        })
+    }
+}
+
 /// A conflict row's kind (§5.1 vocabulary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictRow {
@@ -390,16 +417,74 @@ impl StateDb {
         .unwrap_or_default()
     }
 
-    /// A captured foreign `series.json` version; returns its id.
-    pub fn submission_add(&self, path: &str, pid: &str, cver: &str, sha256: &str) -> Option<i64> {
-        self.with("submission_add", |c| {
-            c.execute(
-                "INSERT INTO submission(path, pid, cver, sha256, state, seen_at) VALUES(?1, ?2, ?3, ?4, 'queued', ?5)",
-                params![path, pid, cver, sha256, now_ms()],
-            )?;
-            Ok(c.last_insert_rowid())
+    /// The submission row for `(path, pid, cver)`, created in state `fetching` when
+    /// there is none. `(id, state, created)`.
+    pub fn submission_open(
+        &self,
+        path: &str,
+        pid: &str,
+        cver: &str,
+    ) -> Option<(i64, String, bool)> {
+        self.with("submission_open", |c| {
+            let tx = c.transaction()?;
+            let found: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT id, state FROM submission WHERE path = ?1 AND pid = ?2 AND cver = ?3",
+                    params![path, pid, cver],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let out = match found {
+                Some((id, state)) => (id, state, false),
+                None => {
+                    tx.execute(
+                        "INSERT INTO submission(path, pid, cver, state, seen_at) VALUES(?1, ?2, ?3, 'fetching', ?4)",
+                        params![path, pid, cver, now_ms()],
+                    )?;
+                    (tx.last_insert_rowid(), "fetching".to_string(), true)
+                }
+            };
+            tx.commit()?;
+            Ok(out)
         })
         .ok()
+    }
+
+    /// One submission row.
+    pub fn submission_get(&self, id: i64) -> Option<SubmissionRow> {
+        self.with("submission_get", |c| {
+            c.query_row(
+                "SELECT id, path, pid, cver, sha256, state FROM submission WHERE id = ?1",
+                [id],
+                SubmissionRow::from_row,
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+    }
+
+    /// Rows still owed an answer (`fetching` or `queued`), oldest first.
+    pub fn submissions_pending(&self) -> Vec<SubmissionRow> {
+        self.with("submissions_pending", |c| {
+            c.prepare(
+                "SELECT id, path, pid, cver, sha256, state FROM submission \
+                 WHERE state IN ('fetching', 'queued') ORDER BY id",
+            )?
+            .query_map([], SubmissionRow::from_row)?
+            .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// The bytes of submission `id` are pinned (`queued`, with their sha256).
+    pub fn submission_fetched(&self, id: i64, sha256: &str) {
+        let _ = self.with("submission_fetched", |c| {
+            c.execute(
+                "UPDATE submission SET state = 'queued', sha256 = ?2 WHERE id = ?1",
+                params![id, sha256],
+            )
+        });
     }
 
     pub fn submission_set(&self, id: i64, state: &str) {
@@ -409,6 +494,46 @@ impl StateDb {
                 params![id, state],
             )
         });
+    }
+
+    /// Forget a row whose version was superseded before its bytes were read.
+    pub fn submission_delete(&self, id: i64) {
+        let _ = self.with("submission_delete", |c| {
+            c.execute("DELETE FROM submission WHERE id = ?1", [id])
+        });
+    }
+
+    /// `path` (a `series.json`) has a submission not yet answered: Compiler ops for
+    /// its series stay HELD (§9.3).
+    pub fn submission_unanswered(&self, path: &str) -> bool {
+        self.with("submission_unanswered", |c| {
+            c.query_row(
+                "SELECT 1 FROM submission WHERE path = ?1 AND state IN ('fetching', 'queued') LIMIT 1",
+                [path],
+                |_| Ok(()),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
+    /// `cver` of `path` was captured as a submission (its bytes pinned, merged or
+    /// refused): a Compiler `Replace` base that counts as merged under D8.
+    pub fn submission_base_ok(&self, path: &str, cver: &str) -> bool {
+        self.with("submission_base_ok", |c| {
+            c.query_row(
+                "SELECT 1 FROM submission WHERE path = ?1 AND cver = ?2 \
+                 AND state IN ('queued', 'applied', 'refused') LIMIT 1",
+                params![path, cver],
+                |_| Ok(()),
+            )
+            .optional()
+        })
+        .ok()
+        .flatten()
+        .is_some()
     }
 
     /// `(path, cver, state)` of every submission.
