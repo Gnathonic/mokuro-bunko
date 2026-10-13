@@ -63,6 +63,13 @@ const OCR_COLUMNS: &str = "sidecar_path, volume_key, generation_id, generation_n
     account, engine, detector, precision, runner_build, pages, failed_pages, archive_size, \
     archive_mtime_ns, written_at";
 
+/// `S/Vol 1` of the archive key `S/Vol 1.cbz` (`.cbz` in any case).
+fn archive_stem(key: &str) -> Option<String> {
+    let cut = key.len().checked_sub(4)?;
+    (key.is_char_boundary(cut) && key[cut..].eq_ignore_ascii_case(".cbz"))
+        .then(|| key[..cut].to_string())
+}
+
 fn head(prefix: &str) -> Option<(String, i64)> {
     let p = prefix.trim_matches('/');
     if p.is_empty() {
@@ -164,6 +171,63 @@ impl Database {
             Ok(conn.execute(
                 "DELETE FROM ocr_sidecars WHERE substr(sidecar_path, 1, ?) = ?",
                 params![n, head],
+            )?)
+        })
+    }
+
+    /// One archive moved (a case merge, spec §5.9): the rows of `old_volume_key` follow
+    /// it to `new_volume_key`, each `sidecar_path` re-spelled under the new archive's
+    /// stem (colliding rows are replaced). The per-volume form of
+    /// [`Database::rename_ocr_sidecars_under_prefix`]: a merge never moves a whole folder
+    /// prefix, because blocked volumes may stay behind.
+    pub fn rename_ocr_sidecars_of_volume(
+        &self,
+        old_volume_key: &str,
+        new_volume_key: &str,
+    ) -> Result<usize> {
+        let (old_key, new_key) = (
+            old_volume_key.trim_matches('/'),
+            new_volume_key.trim_matches('/'),
+        );
+        let (Some(old_stem), Some(new_stem)) = (archive_stem(old_key), archive_stem(new_key))
+        else {
+            return Ok(0);
+        };
+        if old_key == new_key || old_key.is_empty() || new_key.is_empty() {
+            return Ok(0);
+        }
+        let n = old_stem.chars().count() as i64;
+        self.write(|conn| {
+            Ok(conn.execute(
+                "UPDATE OR REPLACE ocr_sidecars SET \
+                 sidecar_path = ? || substr(sidecar_path, ?), volume_key = ? \
+                 WHERE volume_key = ? AND substr(sidecar_path, 1, ?) = ?",
+                params![new_stem, n + 1, new_key, old_key, n, old_stem],
+            )?)
+        })
+    }
+
+    /// One sidecar file moved (a case merge moving a layer in under the winner's
+    /// stem): its row follows, now belonging to `new_volume_key`.
+    pub fn rename_ocr_sidecar(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        new_volume_key: &str,
+    ) -> Result<usize> {
+        let (old, new, key) = (
+            old_path.trim_matches('/'),
+            new_path.trim_matches('/'),
+            new_volume_key.trim_matches('/'),
+        );
+        if old == new || old.is_empty() || new.is_empty() {
+            return Ok(0);
+        }
+        self.write(|conn| {
+            Ok(conn.execute(
+                "UPDATE OR REPLACE ocr_sidecars SET sidecar_path = ?, volume_key = ? \
+                 WHERE sidecar_path = ?",
+                params![new, key, old],
             )?)
         })
     }
@@ -274,5 +338,53 @@ mod tests {
         assert_eq!(db.forget_ocr_sidecars_under_prefix("Dr_Stone").unwrap(), 1);
         assert_eq!(db.forget_ocr_sidecars_under_prefix("").unwrap(), 0);
         assert_eq!(db.list_ocr_sidecars().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn per_volume_renames_leave_the_folder_alone() {
+        let (_dir, db) = temp_db();
+        for (path, vol) in [
+            ("kingdom/Vol 1.mokuro", "kingdom/Vol 1.cbz"),
+            ("kingdom/Vol 1.hayai.mokuro.gz", "kingdom/Vol 1.cbz"),
+            ("kingdom/Vol 2.mokuro", "kingdom/Vol 2.cbz"),
+            ("kingdom/Vol 10.mokuro", "kingdom/Vol 10.cbz"),
+        ] {
+            db.record_ocr_sidecar(&row(path, vol, "g")).unwrap();
+        }
+        assert_eq!(
+            db.rename_ocr_sidecars_of_volume("kingdom/Vol 1.cbz", "Kingdom/Vol 1.cbz")
+                .unwrap(),
+            2
+        );
+        let moved = db
+            .get_ocr_sidecar("Kingdom/Vol 1.hayai.mokuro.gz")
+            .unwrap()
+            .unwrap();
+        assert_eq!(moved.volume_key, "Kingdom/Vol 1.cbz");
+        assert!(
+            db.get_ocr_sidecar("kingdom/Vol 2.mokuro")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.get_ocr_sidecar("kingdom/Vol 10.mokuro")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            db.rename_ocr_sidecar(
+                "kingdom/Vol 2.mokuro",
+                "Kingdom/Vol 2.mokuro",
+                "Kingdom/Vol 2.cbz"
+            )
+            .unwrap(),
+            1
+        );
+        let one = db.get_ocr_sidecar("Kingdom/Vol 2.mokuro").unwrap().unwrap();
+        assert_eq!(one.volume_key, "Kingdom/Vol 2.cbz");
+        assert_eq!(
+            db.rename_ocr_sidecars_of_volume("a.zip", "b.zip").unwrap(),
+            0
+        );
     }
 }
