@@ -837,6 +837,7 @@ impl Scheduler {
                 stamp,
                 settling: false,
                 row,
+                spool: None,
             },
         );
         self.bump();

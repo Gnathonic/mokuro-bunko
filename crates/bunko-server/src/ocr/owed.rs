@@ -190,12 +190,38 @@ pub fn walk(
 
 /// `_still_owed`: the archive is a file and the row's sidecar is still missing (for an
 /// upgrade job: the bare file still exists, i.e. the swap has not happened yet).
+///
+/// On a remote store (spec §5.4) a volume whose primary or row sidecar vanished within
+/// the quiet period while its archive stayed is not owed now: the reader is replacing
+/// that sidecar (MEGA deletes every copy before it uploads the new one).
 pub fn still_owed(library: &Path, rel: &str, row: &Generation, upgrade: bool) -> bool {
     let cbz = library.join(rel);
     if !fs::is_file(&cbz) {
         return false;
     }
+    if sidecar_recently_removed(&cbz, row) {
+        return false;
+    }
     if upgrade { true } else { !row_done(&cbz, row) }
+}
+
+/// A sidecar of `cbz` (the primary's, or `row`'s) left a remote store within its quiet
+/// period ([`bunko_store::LibraryStore::recently_removed`]). Always false locally.
+pub fn sidecar_recently_removed(cbz: &Path, row: &Generation) -> bool {
+    let Some(store) = bunko_store::store_for(cbz) else {
+        return false;
+    };
+    if !store.caps().remote {
+        return false;
+    }
+    let mut suffixes = vec![row.sidecar_suffix()];
+    if !row.primary {
+        suffixes.push(".mokuro".to_string());
+    }
+    suffixes.iter().any(|s| {
+        let (plain, gz) = sidecar_paths(cbz, s);
+        store.recently_removed(&plain).is_some() || store.recently_removed(&gz).is_some()
+    })
 }
 
 /// `_archive_pages`: image members of the zip that are pages (0 / unreadable: None).

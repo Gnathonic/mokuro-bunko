@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 
 use super::{Msg, Scheduler};
 use crate::ocr::collect::{CollectRequest, Outcome};
+use crate::ocr::owed::OwedVolume;
 use crate::ocr::types::{Job, LOCAL, Stamp, rel_of, stamp_of};
 
 /// The time `read_own_copy` may take.
@@ -284,6 +285,8 @@ impl Scheduler {
             Outcome::Failed(error) => self.finish(&done.job, false, Some(error), None),
             Outcome::Discarded => self.release(&done.job, super::DISCARDED, true),
             Outcome::Busy(reason) => self.release(&done.job, &reason, true),
+            // Not this scan: a store that refused once would refuse a retry at once.
+            Outcome::Held(reason) => self.release(&done.job, &reason, false),
         }
     }
 
@@ -613,6 +616,34 @@ impl Scheduler {
         }
         self.cancel_stale_jobs(|r| r == rel);
         let probe = self.upgrade_probe();
+        if self.remote_library() {
+            // Spec §8: judging the arrival reads sidecar bytes and the zip directory,
+            // which on a remote store may mean the network. A helper does it; the actor
+            // goes on, and takes the answer only if the archive is still that version.
+            let (rows, facts, path) = (
+                self.settings.rows.clone(),
+                self.deps.facts.clone(),
+                path.to_path_buf(),
+            );
+            self.run_background(Box::new(move || {
+                let stamp = stamp_of(&path);
+                let entry = crate::ocr::owed::compute(
+                    &library,
+                    &path,
+                    &rows,
+                    facts.as_ref(),
+                    probe
+                        .as_deref()
+                        .map(|p| p as &dyn crate::ocr::owed::UpgradeProbe),
+                )
+                .map(|mut v| {
+                    v.pages = crate::ocr::owed::pages_of(&path, facts.as_ref());
+                    v
+                });
+                Msg::ArrivalJudged { rel, stamp, entry }
+            }));
+            return;
+        }
         let entry = crate::ocr::owed::compute(
             &library,
             path,
@@ -621,10 +652,26 @@ impl Scheduler {
             probe
                 .as_deref()
                 .map(|p| p as &dyn crate::ocr::owed::UpgradeProbe),
-        );
+        )
+        .map(|mut v| {
+            v.pages = crate::ocr::owed::pages_of(path, self.deps.facts.as_ref());
+            v
+        });
+        self.take_arrival(rel, entry);
+    }
+
+    /// A remote arrival's judgement (see [`archive_arrived`](Self::archive_arrived)):
+    /// dropped when the archive changed again meanwhile (its own arrival follows).
+    pub fn arrival_judged(&mut self, rel: String, stamp: Option<Stamp>, entry: Option<OwedVolume>) {
+        if stamp != stamp_of(&self.library().join(&rel)) {
+            return;
+        }
+        self.take_arrival(rel, entry);
+    }
+
+    fn take_arrival(&mut self, rel: String, entry: Option<OwedVolume>) {
         match entry {
-            Some(mut v) => {
-                v.pages = crate::ocr::owed::pages_of(path, self.deps.facts.as_ref());
+            Some(v) => {
                 self.owed.volumes.insert(rel, v);
             }
             None => {

@@ -57,6 +57,10 @@ pub enum Outcome {
     Discarded,
     /// The destination is locked by a WebDAV write: retry the job this scan.
     Busy(String),
+    /// A remote library store did not take the result (offline, refused, or a write
+    /// it cannot do yet): not a failure of the volume; the job goes back to the queue
+    /// and is tried again next scan (spec §3.5: the queue holds, nothing is recorded).
+    Held(String),
 }
 
 #[derive(Debug)]
@@ -244,7 +248,9 @@ pub fn run(req: CollectRequest) -> CollectDone {
     match &outcome {
         Outcome::Installed(_) => {}
         Outcome::Discarded => audit_rejected(&req, super::sched::DISCARDED),
-        Outcome::Failed(reason) | Outcome::Busy(reason) => audit_rejected(&req, reason),
+        Outcome::Failed(reason) | Outcome::Busy(reason) | Outcome::Held(reason) => {
+            audit_rejected(&req, reason)
+        }
     }
     if !matches!(outcome, Outcome::Installed(_)) {
         let _ = std::fs::remove_file(&req.result);
@@ -370,6 +376,12 @@ fn install(req: &CollectRequest) -> Outcome {
             Durability::Deferred,
         );
         if let Err(e) = move_into_place(&req.result, &dest, &intent) {
+            if bunko_store::store_for(&dest).is_some_and(|s| s.caps().remote) {
+                return Outcome::Held(format!(
+                    "the cloud library did not take the {} sidecar: {e}",
+                    row.name
+                ));
+            }
             return Outcome::Failed(format!(
                 "could not move the {} sidecar to {}: {e}",
                 row.name,

@@ -20,7 +20,7 @@ mod settle;
 mod status;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,7 +39,7 @@ use serde_json::{Map, Value};
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
-use super::owed::OwedIndex;
+use super::owed::{OwedIndex, OwedVolume};
 use super::profiles::Profiles;
 use super::types::{Job, LibraryFacts, PathLocks};
 
@@ -187,6 +187,19 @@ pub enum Msg {
     },
     ArchiveArrived(PathBuf),
     ArchiveRemoved(PathBuf),
+    /// A remote store's arrival, judged on a helper thread (spec §8): what it is owed
+    /// when it had the version `stamp`.
+    ArrivalJudged {
+        rel: String,
+        stamp: Option<super::types::Stamp>,
+        entry: Option<OwedVolume>,
+    },
+    /// A local claim's archive was spooled from a remote store (spec §8, `spooling`).
+    Spooled {
+        sid: String,
+        job: Job,
+        result: Result<SpoolHold, String>,
+    },
     /// A benchmark's sample was packed on a helper thread: `(pages, volumes)`.
     BenchSample {
         machine: String,
@@ -220,6 +233,8 @@ impl std::fmt::Debug for Msg {
             Msg::OwnCopyRead { .. } => "OwnCopyRead",
             Msg::ArchiveArrived(_) => "ArchiveArrived",
             Msg::ArchiveRemoved(_) => "ArchiveRemoved",
+            Msg::ArrivalJudged { .. } => "ArrivalJudged",
+            Msg::Spooled { .. } => "Spooled",
             Msg::BenchSample { .. } => "BenchSample",
             Msg::Apply { .. } => "Apply",
             Msg::Query(_) => "Query",
@@ -255,6 +270,25 @@ pub struct Claimed {
     /// Its result is being installed: a disconnect must not take it back.
     pub settling: bool,
     pub row: Generation,
+    /// A local claim on a remote store: the spooled archive the runner reads, pinned
+    /// until the claim settles or is returned (dropped with the claim).
+    pub spool: Option<SpoolHold>,
+}
+
+/// A pinned local copy of a remote archive ([`bunko_store::LocalPath`]).
+#[derive(Clone)]
+pub struct SpoolHold(pub Arc<bunko_store::LocalPath>);
+
+impl SpoolHold {
+    pub fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl std::fmt::Debug for SpoolHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SpoolHold({})", self.path().display())
+    }
 }
 
 /// Autobench bookkeeping (§14.2).
@@ -415,6 +449,12 @@ impl Scheduler {
         self.deps.layout.library()
     }
 
+    /// The library is a remote store (spec §8): the actor never reads archive or
+    /// sidecar bytes inline, and local runners read a spooled copy.
+    pub fn remote_library(&self) -> bool {
+        bunko_store::store_for(&self.library()).is_some_and(|s| s.caps().remote)
+    }
+
     pub fn storage(&self) -> PathBuf {
         self.deps.layout.base.clone()
     }
@@ -544,6 +584,8 @@ impl Scheduler {
             Msg::OwnCopyRead { job, error, then } => self.own_copy_read(job, error, *then),
             Msg::ArchiveArrived(path) => self.archive_arrived(&path),
             Msg::ArchiveRemoved(path) => self.archive_removed(&path),
+            Msg::ArrivalJudged { rel, stamp, entry } => self.arrival_judged(rel, stamp, entry),
+            Msg::Spooled { sid, job, result } => self.spooled(&sid, &job, result),
             Msg::BenchSample {
                 machine,
                 bid,
