@@ -1198,10 +1198,6 @@ function initGenerations() {
     document.getElementById('gen-revert-btn').addEventListener('click', revertGenerations);
     document.getElementById('gen-save-btn').addEventListener('click', saveGenerations);
     document.getElementById('upgrade-save-btn').addEventListener('click', saveUpgrade);
-    document.getElementById('upgrade-edited').addEventListener('click', (e) => {
-        const b = e.target.closest('[data-upgrade]');
-        if (b) upgradeVolume(b.dataset.volume);
-    });
 }
 
 // ---- Upgrade old OCR: census + settings (hidden when the endpoint is 404).
@@ -1236,14 +1232,8 @@ function renderUpgrade() {
             ' (never upgraded)</span>' : '');
     document.getElementById('upgrade-counts').textContent = c.enabled
         ? 'Ready to replace ' + c.ready + ' · needs OCR ' + c.needs_ocr +
-          ' · skipped (missing pages) ' + c.skipped_missing_pages + ' · skipped (edited) ' + c.skipped_edited
+          ' · skipped (missing pages) ' + c.skipped_missing_pages
         : 'Counts appear once upgrading is enabled and saved.';
-    const list = document.getElementById('upgrade-edited');
-    const edited = c.edited_volumes || [];
-    list.hidden = !edited.length;
-    list.innerHTML = edited.map((v) => '<li><span class="upgrade-edited__name">' + escapeHtml(v) + '</span>' +
-        '<button type="button" class="btn btn--secondary btn--sm" data-upgrade="force" data-volume="' + escapeHtml(v) +
-        '">Upgrade anyway</button></li>').join('');
 }
 
 async function saveUpgrade() {
@@ -1258,18 +1248,6 @@ async function saveUpgrade() {
     } catch (err) {
         showToast(err.message, 'error');
     }
-}
-
-async function upgradeVolume(volume) {
-    const path = '/ocr/upgrade/' + volume.split('/').map(encodeURIComponent).join('/');
-    try {
-        const r = await apiPost(path, { force: true });
-        const done = { direct: 'Replaced ', generated: 'Queued for OCR, then replaced: ', current: 'Already current: ' };
-        showToast((done[r.mode] || 'Upgrade: ') + volume, 'success');
-    } catch (err) {
-        showToast(err.message, 'error');
-    }
-    loadUpgrade();
 }
 
 async function loadGenerations() {

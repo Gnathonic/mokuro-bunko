@@ -7,6 +7,20 @@
   the server, the WebDAV layer and the metadata compiler now passes through one
   interface (`bunko-store`), so the library can live somewhere other than the local disk
   in 0.8. Local libraries behave exactly as before.
+- **Upgrades never skip a main OCR file for being edited; a file Bunko didn't write is
+  kept as a "pre-upgrade" layer first.** With the generation upgrade on, an outdated
+  `<Volume>.mokuro` in a family listed under `ocr.upgrade.replace` is upgraded even if a
+  person or Mokuro Reader changed it. One Bunko wrote itself (it carries Bunko's
+  `ocr_engine` stamp) is replaced as before. Any other (stock mokuro output, or a file
+  the reader saved corrections into) is first copied, byte for byte, to
+  `<Volume>.pre-upgrade.mokuro` (`pre-upgrade-2` and so on if that name holds other
+  bytes), and the new file goes in only once that copy is safely written; if the copy
+  cannot be written, the volume is left alone until the next pass. A file whose recipe
+  cannot be read is still never upgraded. A layer is copied in as the new main file only
+  when its own file carries the matching stamp, and layers without a stamp (a reader's
+  edits, `pre-upgrade` copies) are never used or deleted. The admin page's "skipped
+  (edited)" count, its list of edited volumes and the "Upgrade anyway" button are gone,
+  as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
 
 ## [0.7.3] - 2026-10-12
 
