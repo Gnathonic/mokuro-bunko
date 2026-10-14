@@ -117,9 +117,9 @@ storage:
 |--------|------|---------|-------------|
 | `backend` | string | `local` | `local`, `gdrive` (Google Drive), `onedrive`, `mega` or `webdav`. `MOKURO_LIBRARY_BACKEND`. |
 | `folder` | string | `mokuro-reader` | The library folder in the cloud account (the one Mokuro Reader uses). `MOKURO_LIBRARY_FOLDER`. |
-| `webdav.url` | string | — | The WebDAV server's folder URL; required for `webdav`. `http://` is refused unless `webdav.allow_http` is `true`. `MOKURO_WEBDAV_URL`. |
+| `webdav.url` | string | — | The WebDAV server's folder URL; required for `webdav`. `http://` is refused unless `webdav.allow_http` is `true`, except for a server on this machine (`localhost`, `127.0.0.0/8`, `[::1]`). `MOKURO_WEBDAV_URL`. |
 | `webdav.username` | string | — | `MOKURO_WEBDAV_USERNAME`. |
-| `webdav.allow_http` | boolean | `false` | Allow a plain `http://` URL (the password then travels unencrypted). `MOKURO_WEBDAV_ALLOW_HTTP`. |
+| `webdav.allow_http` | boolean | `false` | Allow a plain `http://` URL (the password then travels unencrypted). Not needed for a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`). `MOKURO_WEBDAV_ALLOW_HTTP`. |
 | `cache_mb` | integer | `1024` | Local cache of cloud files, in MiB. |
 | `spool_gb` | integer | `4` | Room for archives being OCR'd, in GiB; at least 2 × OCR lanes × the largest archive. |
 | `outbox_hold_mb` | integer | `2048` | New OCR claims wait while this many MiB of results are still uploading. At most `outbox_max_gb`. |

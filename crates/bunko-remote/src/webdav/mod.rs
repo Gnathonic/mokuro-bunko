@@ -352,6 +352,43 @@ fn caps_from(p: &Probe, disable_cas: bool) -> BackendCaps {
     }
 }
 
+/// Is `authority` (`host[:port]` of a URL) a loopback host: `localhost`, an address in
+/// 127.0.0.0/8, or `::1`? A WebDAV server there is reached without leaving this
+/// machine, so plain `http://` exposes no password on a network and needs no
+/// `allow_http`. Anything with userinfo, or any other host, is not.
+pub fn is_loopback_authority(authority: &str) -> bool {
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((h, tail))
+                if tail.is_empty()
+                    || tail
+                        .strip_prefix(':')
+                        .is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit())) =>
+            {
+                h
+            }
+            _ => return false,
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((h, port)) if port.bytes().all(|b| b.is_ascii_digit()) => h,
+            Some(_) => return false,
+            None => authority,
+        }
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
+        return v4.is_loopback();
+    }
+    host.parse::<std::net::Ipv6Addr>()
+        .is_ok_and(|v6| v6 == std::net::Ipv6Addr::LOCALHOST)
+}
+
 impl WebDavBackend {
     /// Check the URL, run the capability probe and refuse what the config does not
     /// allow (`http://`, a Bunko server).
@@ -360,16 +397,6 @@ impl WebDavBackend {
         let (scheme, rest) = url
             .split_once("://")
             .ok_or_else(|| BErr::Fatal(format!("not a URL: {}", redact_userinfo(url))))?;
-        match scheme.to_ascii_lowercase().as_str() {
-            "https" => {}
-            "http" if cfg.allow_http => {}
-            "http" => {
-                return Err(BErr::Fatal(
-                    "refusing http:// (the password would travel in the clear); use https:// or allow plain http".into(),
-                ));
-            }
-            other => return Err(BErr::Fatal(format!("unsupported URL scheme {other}"))),
-        }
         if rest.contains(['?', '#']) {
             return Err(BErr::Fatal("the WebDAV URL may not have a query".into()));
         }
@@ -377,6 +404,18 @@ impl WebDavBackend {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, "/"),
         };
+        match scheme.to_ascii_lowercase().as_str() {
+            "https" => {}
+            "http" if cfg.allow_http => {}
+            // A server on this machine: its http never leaves the host.
+            "http" if is_loopback_authority(authority) => {}
+            "http" => {
+                return Err(BErr::Fatal(
+                    "refusing http:// (the password would travel in the clear); use https:// or allow plain http".into(),
+                ));
+            }
+            other => return Err(BErr::Fatal(format!("unsupported URL scheme {other}"))),
+        }
         if authority.contains('@') {
             return Err(BErr::Fatal(
                 "the WebDAV URL may not carry a username or password; set them in the WebDAV settings".into(),

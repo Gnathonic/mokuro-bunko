@@ -350,14 +350,35 @@ async fn refusals_at_connect() {
         "{log:?}"
     );
 
-    let err = WebDavBackend::connect(WebDavConfig {
+    // A loopback server (this mock, on 127.0.0.1) needs no allow_http: its http never
+    // leaves the machine.
+    assert!(s.url.starts_with("http://127.0.0.1"), "{}", s.url);
+    WebDavBackend::connect(WebDavConfig {
         allow_http: false,
         ..s.cfg()
     })
     .await
-    .err()
     .unwrap();
-    assert!(matches!(err, BErr::Fatal(m) if m.contains("http://")));
+    // Any other host is refused before a request is made.
+    for url in [
+        "http://nas.invalid/dav",
+        "http://localhost.invalid/dav",
+        "http://127.0.0.1.invalid/dav",
+        "http://192.0.2.1/dav",
+    ] {
+        let err = WebDavBackend::connect(WebDavConfig {
+            allow_http: false,
+            url: url.into(),
+            ..s.cfg()
+        })
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            matches!(&err, BErr::Fatal(m) if m.contains("http://")),
+            "{url}: {err:?}"
+        );
+    }
 
     let err = WebDavBackend::connect(WebDavConfig {
         password: "wrong".into(),

@@ -395,7 +395,8 @@ pub struct LibraryConnectArgs {
     /// The library folder in the cloud account  [default: mokuro-reader]
     #[arg(long, value_name = "NAME")]
     pub folder: Option<String>,
-    /// WebDAV: the server's URL (https)  [default: storage.library.webdav.url]
+    /// WebDAV: the server's URL (https, or http for a server on this machine)
+    /// [default: storage.library.webdav.url]
     #[arg(long)]
     pub url: Option<String>,
     /// WebDAV: the user  [default: storage.library.webdav.username]
@@ -405,7 +406,8 @@ pub struct LibraryConnectArgs {
     /// it is asked on the terminal)
     #[arg(long, value_name = "PATH")]
     pub password_file: Option<PathBuf>,
-    /// WebDAV: allow an http:// URL (the password then travels unencrypted)
+    /// WebDAV: allow an http:// URL (the password then travels unencrypted); not
+    /// needed for a server on this machine (localhost, 127.0.0.0/8, [::1])
     #[arg(long)]
     pub allow_http: bool,
     /// MEGA: the account's email (the password and two-factor code are asked on the

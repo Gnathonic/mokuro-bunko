@@ -34,6 +34,57 @@ fn invalid(msg: impl Into<String>) -> ConfigError {
 }
 
 pub const REGISTRATION_MODES: &[&str] = &["disabled", "self", "invite", "approval"];
+/// Is `authority` (`host[:port]` of a URL) a loopback host: `localhost`, an address in
+/// 127.0.0.0/8, or `::1`? A WebDAV server there is reached without leaving this
+/// machine, so plain `http://` exposes no password on a network and needs no
+/// `allow_http`. Anything with userinfo, or any other host, is not.
+pub fn is_loopback_authority(authority: &str) -> bool {
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((h, tail))
+                if tail.is_empty()
+                    || tail
+                        .strip_prefix(':')
+                        .is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit())) =>
+            {
+                h
+            }
+            _ => return false,
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((h, port)) if port.bytes().all(|b| b.is_ascii_digit()) => h,
+            Some(_) => return false,
+            None => authority,
+        }
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
+        return v4.is_loopback();
+    }
+    host.parse::<std::net::Ipv6Addr>()
+        .is_ok_and(|v6| v6 == std::net::Ipv6Addr::LOCALHOST)
+}
+
+/// Is `url` a plain `http://` URL whose host is loopback ([`is_loopback_authority`])?
+pub fn is_loopback_http_url(url: &str) -> bool {
+    let url = url.trim();
+    let Some(scheme_end) = url.find("://") else {
+        return false;
+    };
+    if !url[..scheme_end].eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let rest = &url[scheme_end + 3..];
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    is_loopback_authority(&rest[..end])
+}
+
 pub const DEFAULT_ROLES: &[&str] = &["registered", "uploader", "inviter", "editor"];
 pub const QUEUE_DISPLAY_LEVELS: &[&str] = &["minimal", "normal", "detailed"];
 /// `ocr.backend`: which devices local OCR may use and so which backend pack
@@ -665,11 +716,12 @@ impl LibraryConfig {
         if let Some(url) = &self.webdav.url {
             let lower = url.trim().to_ascii_lowercase();
             if lower.starts_with("http://") {
-                if !self.webdav.allow_http {
+                if !self.webdav.allow_http && !is_loopback_http_url(url) {
                     return Err(invalid(format!(
                         "storage.library.webdav.url: {url} is plain http://; use https://, or set \
                          storage.library.webdav.allow_http: true (MOKURO_WEBDAV_ALLOW_HTTP) to send the \
-                         password unencrypted"
+                         password unencrypted (a server on this machine, localhost or 127.0.0.1, \
+                         needs neither)"
                     )));
                 }
             } else if !lower.starts_with("https://") {
@@ -2261,6 +2313,68 @@ mod tests {
         ))
         .unwrap();
         assert!(ok.storage.library.webdav.allow_http);
+        // A loopback host needs no allow_http; every other host still does.
+        for url in [
+            "http://127.0.0.1:8080/dav",
+            "http://127.3.4.5/dav",
+            "http://localhost:8080/",
+            "HTTP://LocalHost/dav",
+            "http://[::1]:8080/dav",
+        ] {
+            let ok = Config::from_value(&yaml(&format!(
+                "storage: {{library: {{backend: webdav, webdav: {{url: '{url}'}}}}}}"
+            )));
+            assert!(ok.is_ok(), "{url}: {:?}", ok.err());
+        }
+        for url in [
+            "http://192.168.1.2/dav",
+            "http://localhost.example.com/dav",
+            "http://127.0.0.1.example.com/dav",
+            "http://128.0.0.1/dav",
+            "http://[::2]/dav",
+            "http://user@127.0.0.1/dav",
+            "http://10.0.0.1:80/dav",
+        ] {
+            assert!(
+                bad(&format!(
+                    "storage: {{library: {{backend: webdav, webdav: {{url: '{url}'}}}}}}"
+                ))
+                .contains("allow_http"),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_authorities() {
+        for a in [
+            "localhost",
+            "LOCALHOST:1",
+            "127.0.0.1",
+            "127.255.0.9:80",
+            "[::1]",
+            "[::1]:8080",
+        ] {
+            assert!(is_loopback_authority(a), "{a}");
+        }
+        for a in [
+            "",
+            "nas",
+            "localhost.evil",
+            "127.0.0.1.evil",
+            "127.1",
+            "[::2]",
+            "::1",
+            "[::1]x",
+            "u:p@localhost",
+            "localhost:x",
+            "0.0.0.0",
+        ] {
+            assert!(!is_loopback_authority(a), "{a}");
+        }
+        assert!(is_loopback_http_url("http://localhost"));
+        assert!(!is_loopback_http_url("https://localhost"));
+        assert!(!is_loopback_http_url("http://nas/?x=localhost"));
     }
 
     #[test]

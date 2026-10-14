@@ -38,6 +38,11 @@
   recreating is left alone after the fourth merge in a day.
 
 ### Changed
+- **A WebDAV library on this computer needs no "Allow http".** A plain `http://` URL
+  whose host is `localhost`, `127.x.x.x` or `[::1]` (a server on the same machine, such
+  as an rclone or Nextcloud container bound to loopback) is accepted without
+  `allow_http` / `--allow-http`, in the wizard, the admin panel, `library connect` and
+  the config file; any other `http://` URL still needs it.
 - **Internal: the library goes through a storage seam.** Every library file access in
   the server, the WebDAV layer and the metadata compiler now passes through one
   interface (`bunko-store`), so the library can live somewhere other than the local disk

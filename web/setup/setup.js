@@ -174,7 +174,9 @@
         if (where === 'webdav') {
             const url = $('dav-url').value.trim();
             if (!url || !$('dav-user').value.trim() || !$('dav-password').value) return 'Enter the server address, the user and the app password';
-            if (/^http:\/\//i.test(url) && !$('dav-http').checked) return 'http:// sends the password unencrypted: use https://, or allow http for a server on your own network';
+            // A server on this computer (localhost, 127.x.x.x, [::1]) needs no "Allow http".
+            const loopback = /^http:\/\/(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\])(:\d+)?(\/|$)/i.test(url);
+            if (/^http:\/\//i.test(url) && !loopback && !$('dav-http').checked) return 'http:// sends the password unencrypted: use https://, or allow http for a server on your own network';
         }
         return null;
     }
