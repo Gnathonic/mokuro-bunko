@@ -165,7 +165,11 @@ inflate to more than 20 times its size (at least 256 MiB, at most 16 GiB).
   far; re-pack it as an ordinary zip), `disk-full` (507), `forbidden`
   (401/403/429), `server-error` (500, retry; any other refused PUT, such as
   409 or 423, also answers `server-error` with its own status, with `retry`
-  only for 5xx, 408 and 423), and `archive-damaged` (422). An archive whose digest matched but
+  only for 5xx, 408 and 423; a cloud library that cannot take the upload right
+  now (an outage, a provider pause, Bunko still claiming the library or another
+  Bunko managing it) answers 503 with `Retry-After`, a file changed in the cloud
+  since the client's `If-Match` 412, and a full cloud account `disk-full` 507), and
+  `archive-damaged` (422). An archive whose digest matched but
   whose CRCs fail is the client's own damaged copy (no retry: re-import it).
   Without a digest the first damage to a path is `retry: true` (it may have
   happened in transit); the same size and damaged members arriving again

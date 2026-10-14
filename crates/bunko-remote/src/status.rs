@@ -398,6 +398,22 @@ impl LeaseRecord {
     }
 }
 
+/// A wait as people say it: "40 s", "3 min", "1 h 5 min".
+pub fn about(d: Duration) -> String {
+    let s = d.as_secs().max(1);
+    match s {
+        0..60 => format!("{s} s"),
+        60..3600 => format!("{} min", s.div_ceil(60)),
+        _ => {
+            let m = s.div_ceil(60);
+            match m % 60 {
+                0 => format!("{} h", m / 60),
+                r => format!("{} h {r} min", m / 60),
+            }
+        }
+    }
+}
+
 /// Do two [`LeaseConfig::home`] strings name the same folder? Case-insensitively:
 /// library hosts may be case-insensitive (NTFS, APFS).
 fn same_home(a: &str, b: &str) -> bool {
@@ -625,6 +641,9 @@ pub struct Lease<B: Backend> {
     mine: Option<Marker>,
     /// Parsed marker contents by `(pid, cver)`; `None` = not a marker.
     cache: HashMap<Pid, (String, Option<Marker>)>,
+    /// When CLAIM_LEASE's settle wait ends, while it runs (shared with the [`Fence`],
+    /// so a refused write can say how long this Bunko is still claiming).
+    settle_until: Arc<Mutex<Option<Instant>>>,
 }
 
 static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -670,6 +689,7 @@ impl<B: Backend> Lease<B> {
             record: Arc::new(Mutex::new(rec)),
             mine: None,
             cache: HashMap::new(),
+            settle_until: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -705,6 +725,7 @@ impl<B: Backend> Lease<B> {
             record: self.record.clone(),
             window: self.cfg.fence_window(),
             clock: self.clock.clone(),
+            settle_until: self.settle_until.clone(),
         }
     }
 
@@ -857,7 +878,16 @@ impl<B: Backend> Lease<B> {
             {
                 continue;
             }
-            tokio::time::sleep(self.cfg.settle()).await;
+            let settle = self.cfg.settle();
+            *self.settle_until.lock() = Some(Instant::now() + settle);
+            tracing::info!(
+                epoch,
+                settle_s = settle.as_secs(),
+                "lease: marker written; waiting for the marker set to settle before \
+                 holding the lease"
+            );
+            tokio::time::sleep(settle).await;
+            *self.settle_until.lock() = None;
             let ok_at = self.clock.now_ms();
             let after = self.marker_set().await?;
             match after.holder() {
@@ -1301,6 +1331,7 @@ pub struct Fence {
     record: Arc<Mutex<LeaseRecord>>,
     window: Duration,
     clock: Arc<dyn WallClock>,
+    settle_until: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Fence {
@@ -1312,6 +1343,18 @@ impl Fence {
     /// [`Fence::ok_at`] on the lease's clock.
     pub fn ok(&self) -> bool {
         self.ok_at(self.clock.now_ms())
+    }
+
+    /// How much of CLAIM_LEASE's settle wait is left, while it runs (§9.2 step 1.2):
+    /// this Bunko wrote its marker and waits before it may hold the lease.
+    pub fn claiming_left(&self) -> Option<Duration> {
+        let until = (*self.settle_until.lock())?;
+        Some(until.saturating_duration_since(Instant::now()))
+    }
+
+    /// The lease's persisted state as it stands.
+    pub fn state(&self) -> LeaseRecordState {
+        self.record.lock().lease_state
     }
 }
 
@@ -1336,6 +1379,11 @@ impl LeaseHandle {
 
     pub fn fence(&self) -> &Fence {
         &self.fence
+    }
+
+    /// What is left of this Bunko's first-claim settle wait, while it runs.
+    pub fn claiming_left(&self) -> Option<Duration> {
+        self.fence.claiming_left()
     }
 
     /// Run [`Lease::take_over`] in the task.

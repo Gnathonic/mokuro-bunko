@@ -134,19 +134,43 @@ pub struct Rejection {
     pub reason: &'static str,
     pub detail: String,
     pub retry: bool,
+    /// `Retry-After` seconds (a 503 from the library storage).
+    pub retry_after: Option<u64>,
 }
 
 impl Rejection {
-    fn new(status: u16, reason: &'static str, detail: impl Into<String>, retry: bool) -> Self {
+    pub(crate) fn new(
+        status: u16,
+        reason: &'static str,
+        detail: impl Into<String>,
+        retry: bool,
+    ) -> Self {
         Self {
             status,
             reason,
             detail: detail.into(),
             retry,
+            retry_after: None,
         }
     }
 
+    /// An I/O error while staging or publishing. A library store's own errors keep
+    /// their class (spec §3.5): not now (an outage, the lease, a sign-in, a quota) is
+    /// 503 with `Retry-After`, a precondition 412, a full store 507, a refused name
+    /// 400; anything else is the server's own failure (500).
     pub fn from_io(e: &io::Error, doing: &str) -> Self {
+        // An OS error (a local disk) carries no payload; a full cloud account comes
+        // from the library store with its provider's error inside.
+        let cloud_full = e.get_ref().is_some()
+            && bunko_store::classify(e) == bunko_store::ErrorClass::StorageFull;
+        if cloud_full {
+            return Rejection::new(
+                507,
+                "disk-full",
+                "The library storage is full; the upload was not stored.",
+                false,
+            );
+        }
         if is_disk_full(e) {
             return Rejection::new(
                 507,
@@ -155,12 +179,43 @@ impl Rejection {
                 false,
             );
         }
-        Rejection::new(
-            500,
-            "server-error",
-            format!("The server failed {doing}: {}.", strerror(e)),
-            true,
-        )
+        // An OS error (a local library, the staging disk) carries no payload and stays
+        // the server's own failure, as it always was; a library store's errors do.
+        if e.get_ref().is_none() {
+            return Rejection::new(
+                500,
+                "server-error",
+                format!("The server failed {doing}: {}.", strerror(e)),
+                true,
+            );
+        }
+        if bunko_store::classify(e) == bunko_store::ErrorClass::AlreadyExists {
+            // A create-only publish (If-None-Match: *) found the name taken.
+            return Rejection::new(
+                412,
+                "server-error",
+                "The upload was not stored: the file was created meanwhile.",
+                false,
+            );
+        }
+        let d = crate::response::DavError::from_io(e);
+        match d.status.as_u16() {
+            503 | 412 | 400 => Rejection {
+                retry_after: d.retry_after,
+                ..Rejection::new(
+                    d.status.as_u16(),
+                    "server-error",
+                    format!("The upload was not stored: {}.", d.context),
+                    d.status.as_u16() == 503,
+                )
+            },
+            _ => Rejection::new(
+                500,
+                "server-error",
+                format!("The server failed {doing}: {}.", strerror(e)),
+                true,
+            ),
+        }
     }
 }
 
@@ -205,6 +260,7 @@ pub struct Staging {
     written: u64,
     finished: bool,
     keep_identical: bool,
+    mode: Mode,
 }
 
 impl Drop for Staging {
@@ -257,6 +313,7 @@ impl Staging {
                         written: 0,
                         finished: false,
                         keep_identical: false,
+                        mode: Mode::Replace { base: None },
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -275,6 +332,11 @@ impl Staging {
     /// (a re-sent, unchanged file keeps its mtime and its history).
     pub fn keep_if_identical(&mut self) {
         self.keep_identical = true;
+    }
+
+    /// The publish's precondition (default: replace whatever is there).
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
     }
 
     pub fn written(&self) -> u64 {
@@ -386,7 +448,7 @@ impl Staging {
         }
         let (temp, dest) = (self.temp.clone(), self.dest.clone());
         let intent = WriteIntent::new(
-            Mode::Replace { base: None },
+            self.mode.clone(),
             Origin::Dav {
                 user: user.map(str::to_owned),
             },
@@ -839,6 +901,65 @@ pub fn failure_for_status(code: u16) -> (u16, &'static str, String, bool) {
 #[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
+
+    /// A library store's errors keep their class in the PUT verdict (spec §3.5): not now
+    /// is 503 with the store's Retry-After (the lease's settle wait included), a
+    /// precondition 412, a taken name 412; only the server's own failures are 500.
+    #[test]
+    fn store_errors_keep_their_class_in_the_verdict() {
+        use std::time::Duration;
+        let r = Rejection::from_io(
+            &bunko_store::unavailable_for(
+                "storage-lease-claiming: this Bunko is still claiming the library (about 9 min left)",
+                Duration::from_secs(530),
+            ),
+            "moving the upload into place",
+        );
+        assert_eq!((r.status, r.retry, r.retry_after), (503, true, Some(530)));
+        assert!(
+            r.detail
+                .contains("still claiming the library (about 9 min left)"),
+            "{}",
+            r.detail
+        );
+        let r = Rejection::from_io(
+            &bunko_store::unavailable("storage-lease: another Bunko manages this library"),
+            "x",
+        );
+        assert_eq!((r.status, r.retry), (503, true));
+        assert!(r.retry_after.is_some());
+        assert!(
+            r.detail.contains("another Bunko manages this library"),
+            "{}",
+            r.detail
+        );
+        let r = Rejection::from_io(
+            &bunko_store::unavailable_for("throttled", Duration::from_secs(7)),
+            "x",
+        );
+        assert_eq!((r.status, r.retry_after), (503, Some(7)));
+        let r = Rejection::from_io(&bunko_store::conflict("the base changed"), "x");
+        assert_eq!((r.status, r.retry), (412, false));
+        let r = Rejection::from_io(
+            &io::Error::new(io::ErrorKind::AlreadyExists, "S/v.cbz: exists"),
+            "x",
+        );
+        assert_eq!(r.status, 412);
+        let r = Rejection::from_io(&io::Error::from(io::ErrorKind::StorageFull), "x");
+        assert_eq!((r.status, r.reason), (507, "disk-full"));
+        let r = Rejection::from_io(&io::Error::other("boom"), "saving the upload");
+        assert_eq!((r.status, r.retry, r.retry_after), (500, true, None));
+        assert_eq!(r.detail, "The server failed saving the upload: boom.");
+        // OS errors (a local library) are the server's own, whatever their kind.
+        for errno in [
+            107, /* ENOTCONN */
+            17,  /* EEXIST */
+            13,  /* EACCES */
+        ] {
+            let r = Rejection::from_io(&io::Error::from_raw_os_error(errno), "x");
+            assert_eq!((r.status, r.reason), (500, "server-error"), "errno {errno}");
+        }
+    }
 
     /// A deflated one-member zip of `real` zero bytes whose headers declare `declared`.
     fn understated_zip(real: usize, declared: u32) -> Vec<u8> {

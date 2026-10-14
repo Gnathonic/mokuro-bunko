@@ -175,6 +175,18 @@ pub fn describe(v: &Value, source: &str) -> Vec<String> {
             }
         ));
     }
+    let lease = &v["lease"];
+    if let Some(state) = text(&lease["state"]) {
+        // This Bunko's own claim (with the time left), or the other Bunko's name.
+        let line = match (text(&lease["detail"]), text(&lease["holder"]["name"])) {
+            (Some(d), _) => format!("Lease:   {state}: {d}"),
+            (None, Some(by)) if lease["holder"]["ours"] != true => {
+                format!("Lease:   {state} (held by {by})")
+            }
+            _ => format!("Lease:   {state}"),
+        };
+        out.push(line);
+    }
     let c = &v["cache"];
     if c.is_object() {
         let n = |k: &str| c[k].as_u64().unwrap_or(0);
@@ -886,6 +898,21 @@ mod tests {
                 "Cache:   2 small files (2.0 KiB), 1 archive directories, 1 spooled archives (5.0 MiB)",
                 "(from the running server)",
             ]
+        );
+        // This Bunko's first claim: what the bridge's 503 says, with the time left.
+        let mut v = v;
+        v["lease"] = json!({"state": "claiming", "can_take_over": false, "claiming_left_s": 540,
+            "detail": "This Bunko is still claiming the library: about 9 min left"});
+        assert!(
+            describe(&v, "running server").contains(
+                &"Lease:   claiming: This Bunko is still claiming the library: about 9 min left"
+                    .to_string()
+            )
+        );
+        v["lease"] = json!({"state": "standby", "can_take_over": true,
+            "holder": {"name": "nas", "ours": false}});
+        assert!(
+            describe(&v, "running server").contains(&"Lease:   standby (held by nas)".to_string())
         );
     }
 

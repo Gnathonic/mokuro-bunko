@@ -105,6 +105,10 @@ impl RemoteFile for CachedFile {
     fn set_len(&self, _len: u64) -> io::Result<()> {
         Err(read_only())
     }
+
+    fn into_local(self: Box<Self>) -> Result<std::fs::File, Box<dyn RemoteFile>> {
+        Err(self)
+    }
 }
 
 /// A large remote file, read with version-pinned ranged reads.
@@ -401,6 +405,10 @@ impl<B: Backend> RemoteFile for ArchiveFile<B> {
     fn set_len(&self, _len: u64) -> io::Result<()> {
         Err(read_only())
     }
+
+    fn into_local(self: Box<Self>) -> Result<std::fs::File, Box<dyn RemoteFile>> {
+        Err(self)
+    }
 }
 
 /// The staged bytes of a pending Deferred write (read-after-write), read-only.
@@ -457,6 +465,10 @@ impl RemoteFile for PendingFile {
     fn set_len(&self, _len: u64) -> io::Result<()> {
         Err(read_only())
     }
+
+    fn into_local(self: Box<Self>) -> Result<std::fs::File, Box<dyn RemoteFile>> {
+        Err(self)
+    }
 }
 
 /// A local staging file under `<dir>/staging/` for the library path `dest`: what
@@ -510,5 +522,10 @@ impl RemoteFile for StagingFile {
 
     fn set_len(&self, len: u64) -> io::Result<()> {
         self.file.set_len(len)
+    }
+
+    /// The staging file itself: written in place, published later by path.
+    fn into_local(self: Box<Self>) -> Result<std::fs::File, Box<dyn RemoteFile>> {
+        Ok(self.file)
     }
 }

@@ -66,6 +66,9 @@ mod mem {
         fn set_len(&self, _: u64) -> io::Result<()> {
             Err(io::ErrorKind::Unsupported.into())
         }
+        fn into_local(self: Box<Self>) -> Result<std::fs::File, Box<dyn RemoteFile>> {
+            Err(self)
+        }
     }
 
     pub struct MemStore {

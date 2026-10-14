@@ -168,7 +168,7 @@ async function loadStorage() {
     if (lease) {
         stText('sl-state', {
             'not-started': 'Starts after the first sync',
-            claiming: 'Claiming: uploads wait until no other Bunko answers (the first claim takes a few minutes)',
+            claiming: lease.detail ? lease.detail + ' (uploads wait until then)' : 'Claiming: uploads wait until no other Bunko answers (the first claim takes a few minutes)',
             held: 'Held by this Bunko',
             standby: 'Standby: another Bunko manages this library',
             lost: 'Lost to another Bunko',

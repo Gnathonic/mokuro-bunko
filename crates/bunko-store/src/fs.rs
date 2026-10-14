@@ -180,6 +180,17 @@ pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
 }
 
 /// Commit a staged file as `dest` (spec D1). For an unmounted destination, a rename.
+/// [`LibraryStore::writable`] of the store holding `p` (unmounted: `Ok`).
+///
+/// [`LibraryStore::writable`]: crate::LibraryStore::writable
+pub fn writable(p: impl AsRef<Path>) -> io::Result<()> {
+    let p = p.as_ref();
+    match store_for(p) {
+        Some(s) => s.writable(p),
+        None => Ok(()),
+    }
+}
+
 pub fn publish(
     staged: impl AsRef<Path>,
     dest: impl AsRef<Path>,

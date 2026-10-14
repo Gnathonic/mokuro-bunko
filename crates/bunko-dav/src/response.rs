@@ -75,16 +75,22 @@ pub const DEFAULT_RETRY_AFTER: u64 = 30;
 pub const NEEDS_AUTH_RETRY_AFTER: u64 = 300;
 
 impl From<std::io::Error> for DavError {
+    fn from(e: std::io::Error) -> Self {
+        DavError::from_io(&e)
+    }
+}
+
+impl DavError {
     /// A store's errors by class (spec §3.5): a precondition 412, an outage, a quota,
     /// the lease or a lapsed sign-in 503 with `Retry-After` (never 401: the reader would
     /// blame its own login), a full store 507, a refused name 400.
-    fn from(e: std::io::Error) -> Self {
+    pub fn from_io(e: &std::io::Error) -> Self {
         use bunko_store::ErrorClass;
         let unavailable = |what: &str, after: Option<std::time::Duration>| DavError {
             retry_after: Some(after.map_or(DEFAULT_RETRY_AFTER, |d| d.as_secs().max(1))),
             ..DavError::new(StatusCode::SERVICE_UNAVAILABLE, format!("{what}: {e}"))
         };
-        match bunko_store::classify(&e) {
+        match bunko_store::classify(e) {
             ErrorClass::Conflict => DavError::new(StatusCode::PRECONDITION_FAILED, e.to_string()),
             ErrorClass::Unavailable { retry_after } => {
                 unavailable("the library storage is unavailable", retry_after)
@@ -100,11 +106,25 @@ impl From<std::io::Error> for DavError {
                     "the library storage needs a new sign-in on the server",
                 )
             },
+            // The store's message says which Bunko and why (`storage-lease: another
+            // Bunko manages this library`, or this one still claiming it, §9.2).
             ErrorClass::LeaseHeld => DavError {
-                retry_after: Some(DEFAULT_RETRY_AFTER),
+                retry_after: Some(
+                    bunko_store::retry_after(e).map_or(DEFAULT_RETRY_AFTER, |d| d.as_secs().max(1)),
+                ),
                 ..DavError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    format!("storage-lease: another Bunko manages this library ({e})"),
+                    lease_message(e, "storage-lease: another Bunko manages this library"),
+                )
+            },
+            ErrorClass::LeaseClaiming { retry_after } => DavError {
+                retry_after: Some(retry_after.map_or(DEFAULT_RETRY_AFTER, |d| d.as_secs().max(1))),
+                ..DavError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    lease_message(
+                        e,
+                        "storage-lease-claiming: this Bunko is still claiming the library",
+                    ),
                 )
             },
             ErrorClass::StorageFull => {
@@ -116,6 +136,16 @@ impl From<std::io::Error> for DavError {
             }
             _ => DavError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         }
+    }
+}
+
+/// A lease refusal's own message when it carries the tag, else `fallback (message)`.
+fn lease_message(e: &std::io::Error, fallback: &str) -> String {
+    let msg = bunko_store::error_message(e);
+    if msg.starts_with("storage-lease") {
+        msg
+    } else {
+        format!("{fallback} ({msg})")
     }
 }
 

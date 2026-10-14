@@ -45,7 +45,17 @@ fn denied(p: &Path, what: &str) -> io::Error {
     kind_err(io::ErrorKind::PermissionDenied, p, what)
 }
 
-/// Reload the staging map from `local_row`; sweep staging files nothing names.
+/// A staging file under a temporary name (`.<name>.upload-<r>.tmp`,
+/// `.<name>.compile-<r>.tmp`, `<name>.json.tmp`, ...): its writer publishes or removes
+/// it before it returns, so after a restart nothing will ever publish it.
+fn is_temp_name(rel: &RelPath) -> bool {
+    rel.segments()
+        .last()
+        .is_some_and(|n| fold(n).ends_with(".tmp"))
+}
+
+/// Reload the staging map from `local_row`; sweep staging files nothing names, and
+/// the orphans of writes a crash or kill cut short (temporary names, §5.10).
 pub(crate) fn load_staging<B: Backend>(core: &Core<B>) {
     let dir = core.dir.join("staging");
     let mut map = core.staging.lock();
@@ -53,8 +63,12 @@ pub(crate) fn load_staging<B: Backend>(core: &Core<B>) {
         let local = dir.join(&file);
         let plain = Path::new(&file).file_name() == Some(std::ffi::OsStr::new(&file));
         match RelPath::parse(&path) {
-            Some(rel) if plain && local.is_file() => {
+            Some(rel) if plain && local.is_file() && !is_temp_name(&rel) => {
                 map.insert(rel, local);
+            }
+            Some(rel) if plain && local.is_file() => {
+                tracing::info!(path = %rel, "staging: removing an unpublished temporary file");
+                core.state.local_del(&path);
             }
             _ => core.state.local_del(&path),
         }

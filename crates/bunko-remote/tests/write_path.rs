@@ -858,6 +858,100 @@ fn staging_files_publish_only_explicitly_and_survive_a_restart() {
     assert!(!fs::exists(t.abs("S/.nocover")));
 }
 
+/// A staging file under a temporary name (a bridge upload, a compile) is published or
+/// removed by its writer before it returns; one a crash cut short is never published,
+/// so the next start sweeps its file and its `state.sqlite` row (§5.10). A local-only
+/// final name stays (§3.4).
+#[test]
+fn a_crash_orphaned_temporary_staging_file_is_swept_at_startup() {
+    use std::io::Write;
+    let mut t = T::new(FakeBackend::drive_like(), &[("S/v.cbz", b"zip")]);
+    t.wait_steady();
+    for name in [
+        "S/.v2.cbz.upload-0a1b2c.tmp",
+        "S/.series.json.compile-9f.tmp",
+        "S/keep",
+    ] {
+        let mut f = fs::File::create(t.abs(name)).unwrap();
+        f.write_all(b"partial").unwrap();
+    }
+    assert_eq!(t.s().staging_rows().len(), 3);
+    let staging = t.tmp.path().join("cloud/s/staging");
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 3);
+    // The process dies mid-upload: nothing removes them.
+    t.stop();
+    t.start();
+    assert_eq!(t.s().staging_rows(), vec!["S/keep".to_string()]);
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 1);
+    assert!(!fs::exists(t.abs("S/.v2.cbz.upload-0a1b2c.tmp")));
+    assert!(!fs::exists(t.abs("S/.series.json.compile-9f.tmp")));
+    assert!(fs::exists(t.abs("S/keep")));
+    assert_eq!(t.fake.calls(FakeOp::Upload), 0);
+}
+
+/// The tokio shim's write-open (`afs::OpenOptions`, the bridge PUT's staging file)
+/// gets the store's local staging file to write at local speed; the publish takes
+/// those bytes, and a removed one leaves no file and no row.
+#[test]
+fn the_async_write_open_is_a_local_staging_file() {
+    let t = T::new(FakeBackend::drive_like(), &[("S/v.cbz", b"zip")]);
+    t.wait_steady();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (temp, dest) = (t.abs("S/.w.cbz.upload-1.tmp"), t.abs("S/w.cbz"));
+    rt.block_on(async {
+        use tokio::io::AsyncWriteExt;
+        let mut f = bunko_store::afs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .await
+            .unwrap();
+        f.write_all(b"new volume").await.unwrap();
+        f.sync_all().await.unwrap();
+        // create_new: the name is taken now.
+        let again = bunko_store::afs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .await
+            .unwrap_err();
+        assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(bunko_store::afs::metadata(&temp).await.unwrap().len(), 10);
+    });
+    let w = WriteIntent::new(
+        Mode::CreateNew,
+        Origin::Dav { user: None },
+        Durability::Sync,
+    );
+    fs::publish(&temp, &dest, &w).unwrap();
+    assert_eq!(t.remote_bytes("S/w.cbz").unwrap(), b"new volume");
+    assert!(t.s().staging_rows().is_empty());
+    // An abandoned one: removing it leaves nothing.
+    let other = t.abs("S/.x.cbz.upload-2.tmp");
+    rt.block_on(async {
+        bunko_store::afs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&other)
+            .await
+            .unwrap();
+    });
+    assert_eq!(t.s().staging_rows().len(), 1);
+    fs::remove_file(&other).unwrap();
+    assert!(t.s().staging_rows().is_empty());
+    let staging = t.tmp.path().join("cloud/s/staging");
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+    // A read-open has no local file: the shim says so (reads use afs::File::open).
+    let e = rt
+        .block_on(
+            bunko_store::afs::OpenOptions::new()
+                .read(true)
+                .open(t.abs("S/v.cbz")),
+        )
+        .unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::Unsupported);
+}
+
 #[test]
 fn conflicts_reach_sync_callers_as_conflict_errors() {
     let t = T::new(FakeBackend::webdav_cas(), &[("S/a.mokuro", b"v1")]);

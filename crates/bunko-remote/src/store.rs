@@ -1013,6 +1013,17 @@ impl<B: Backend> RemoteStore<B> {
         *self.core.failpoint.lock() = f;
     }
 
+    /// The library paths of this store's local staging files, as `state.sqlite`
+    /// records them (unpublished writes; empty when nothing is being written).
+    pub fn staging_rows(&self) -> Vec<String> {
+        self.core
+            .state
+            .local_rows("staging")
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect()
+    }
+
     /// The store stopped at a failpoint.
     pub fn crashed(&self) -> bool {
         self.core.crashed.load(Ordering::Acquire)
@@ -1806,6 +1817,17 @@ impl<B: Backend> LibraryStore for RemoteStore<B> {
 
     fn merge_busy(&self, p: &Path) -> bool {
         RemoteStore::merge_busy(self, p)
+    }
+
+    /// A Sync write needs the lease fence open (§9.2): otherwise the error its
+    /// publish would give (this Bunko still claiming, or another one holding it).
+    fn writable(&self, p: &Path) -> io::Result<()> {
+        self.rel(p)?;
+        if self.core.fence_open() {
+            Ok(())
+        } else {
+            Err(self.core.fence_refusal())
+        }
     }
 
     fn case_winner(&self, parent: &Path, fold: &str) -> Option<String> {

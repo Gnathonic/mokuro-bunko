@@ -668,6 +668,53 @@ impl<B: Backend> Core<B> {
             && (!self.lease_on || self.fence.get().is_some_and(|f| f.ok()))
     }
 
+    /// Why a Sync write may not reach the provider now (the fence is shut): this
+    /// Bunko is still claiming the lease (its first sync, or the settle wait of §9.2
+    /// step 1.2, with what is left as the retry delay), or another Bunko holds it.
+    pub(crate) fn fence_refusal(&self) -> io::Error {
+        use crate::status::LeaseRecordState;
+        const SOON: Duration = Duration::from_secs(30);
+        if self.crashed.load(Ordering::Acquire) {
+            return io::Error::other("the store stopped at a failpoint");
+        }
+        let claiming = bunko_store::LEASE_CLAIMING;
+        let Some(fence) = self.fence.get() else {
+            return unavailable_for(
+                format!(
+                    "{claiming}: this Bunko is still reading the library before it claims it; \
+                     changes through Bunko wait until then"
+                ),
+                SOON,
+            );
+        };
+        if let Some(left) = fence.claiming_left() {
+            let after = left.max(Duration::from_secs(1));
+            return unavailable_for(
+                format!(
+                    "{claiming}: this Bunko is still claiming the library (about {} left); \
+                     changes through Bunko wait until then",
+                    crate::status::about(after)
+                ),
+                after,
+            );
+        }
+        match fence.state() {
+            LeaseRecordState::Standby | LeaseRecordState::Lost => {
+                unavailable("storage-lease: another Bunko manages this library")
+            }
+            LeaseRecordState::Released => {
+                unavailable("storage-lease: this Bunko released the library")
+            }
+            LeaseRecordState::None | LeaseRecordState::Holder => unavailable_for(
+                format!(
+                    "{claiming}: this Bunko is confirming its claim on the library; \
+                     changes through Bunko wait until then"
+                ),
+                SOON,
+            ),
+        }
+    }
+
     /// Deferred ops may run: the fence is open and the caller's gate agrees.
     pub(crate) fn gate_open(&self) -> bool {
         let custom = self.gate.lock().clone();
@@ -866,9 +913,7 @@ impl<B: Backend> Core<B> {
         };
         if !self.fence_open() {
             self.finish(&mut op, OpState::Discarded);
-            return Err(unavailable(
-                "this Bunko does not hold the library lease (storage-lease)",
-            ));
+            return Err(self.fence_refusal());
         }
         let mut last = String::new();
         for attempt in 0..SYNC_ATTEMPTS {

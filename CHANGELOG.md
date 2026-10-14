@@ -60,6 +60,31 @@
   (edited)" count, its list of edited volumes and the "Upgrade anyway" button are gone,
   as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
 
+### Fixed
+- **Uploading through Bunko into a cloud library works.** Every WebDAV PUT into a
+  Google Drive, OneDrive, MEGA or WebDAV library failed with a server error (500, "this
+  store has no local file to open"), so neither Mokuro Reader nor an uploader could add
+  a volume or an OCR file through Bunko. The body is now staged on Bunko's disk,
+  checked (size, `Content-Digest`, the archive's CRCs) and uploaded before the answer,
+  so a 201/204 means the cloud has the file; an uploaded volume is then OCR'd like any
+  other. The client's `If-Match` / `If-None-Match: *` now travel with the upload, so a
+  file changed or created in the cloud meanwhile is a 412 instead of being
+  overwritten. A full cloud account answers 507, and an upload the library cannot take
+  right now (see below) a 503 with `Retry-After`, never a 500.
+- **A failed upload into a cloud library no longer leaves a staging file behind.** Its
+  empty staging file and record survived restarts; a start now also removes any a crash
+  left.
+- **While Bunko is still claiming a cloud library, it says so.** For about 10 minutes
+  after the first connect (on WebDAV; a minute or more elsewhere) Bunko waits to make
+  sure no other Bunko manages the library before it writes. Uploads and other changes
+  through Bunko in that time are refused with 503 and a `Retry-After` of the time left,
+  and the message says this Bunko is still claiming the library and roughly how long is
+  left, instead of "another Bunko manages this library". The admin Storage tab and
+  status show the same.
+- **Failed WebDAV requests are logged.** A request that ends in a server error (5xx),
+  uploads included, is logged with its method, path, user and cause (503s as warnings,
+  other failures as errors); before, a failed upload left no trace in the log.
+
 ## [0.7.3] - 2026-10-12
 
 Background work can no longer make the web server stop answering.
