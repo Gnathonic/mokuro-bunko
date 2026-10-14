@@ -343,10 +343,17 @@ pub enum LibraryCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Keep the library in a cloud folder: Google Drive or OneDrive with a sign-in code
-    /// printed here (any device can enter it; works through `docker exec`), MEGA with
-    /// its email and password (asked on the terminal, never stored), or a WebDAV server
-    /// with its URL, user and app password. A running server restarts onto it.
+    /// Keep the library in a cloud folder: Google Drive or OneDrive, MEGA with its email
+    /// and password (asked on the terminal, never stored), or a WebDAV server with its
+    /// URL, user and app password. A running server restarts onto it.
+    ///
+    /// Google Drive and OneDrive sign in through the browser on a desktop (it opens by
+    /// itself; the address is printed too). Without one (SSH, Docker, a NAS), Google
+    /// Drive prints a sign-in code to enter on any device, and OneDrive prints the
+    /// sign-in address to open on any device: the browser then ends on a page that
+    /// does not load (http://localhost:<port>/?code=…), whose address you paste back
+    /// here (`docker exec -it` for a terminal). Personal Microsoft accounts cannot use
+    /// a sign-in code; --device is for work or school accounts.
     Connect(LibraryConnectArgs),
     /// Leave the cloud library: upload what is still owed (or export or discard it),
     /// write "released" into the folder's marker, delete the credentials and the local
@@ -422,6 +429,18 @@ pub struct LibraryConnectArgs {
     /// library instead (the old library is disconnected first)
     #[arg(long)]
     pub use_this_account: bool,
+    /// Google Drive / OneDrive: sign in through a browser on this computer (opened
+    /// when there is a desktop; the address is printed either way)
+    #[arg(long, conflicts_with_all = ["device", "paste"])]
+    pub browser: bool,
+    /// Google Drive / OneDrive: sign in with a code entered on any device (OneDrive:
+    /// work or school accounts only)
+    #[arg(long, conflicts_with = "paste")]
+    pub device: bool,
+    /// Google Drive / OneDrive: sign in on any device, then paste the address the
+    /// browser ends on (http://localhost:<port>/?code=…) back here
+    #[arg(long)]
+    pub paste: bool,
 }
 
 #[derive(Args, Debug)]

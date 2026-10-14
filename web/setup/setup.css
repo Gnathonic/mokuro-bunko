@@ -265,6 +265,11 @@ details summary.form-label { display: list-item; }
 }
 
 .connect-live p { margin: 0.25rem 0; font-size: 0.875rem; color: var(--text-secondary); }
+.connect-live .btn { margin-top: 0.5rem; }
+
+/* The paste flow's field: kept outside .connect-live, which every poll redraws. */
+.connect-paste .form-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.connect-paste .btn { margin-top: 0.5rem; }
 
 .check-summary {
     font-size: 1rem;

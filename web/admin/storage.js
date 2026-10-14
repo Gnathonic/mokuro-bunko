@@ -1,6 +1,7 @@
 // The Storage tab (0.8 §11): where the library lives and how its store is doing,
 // from `/_admin/api/storage` (the same block as `/api/status` → library.storage).
-// Actions: Connect (one button; the server picks the sign-in flow), the account
+// Actions: Connect (one button; the server picks the sign-in flow: the browser here,
+// a code, or for OneDrive elsewhere the address the browser ends on, pasted), the account
 // choice, "Create it?", Sign in again, Change pairing (a Disconnect, then a Connect
 // with the other reader), Disconnect (Wait / Export / Discard), Take over, readers,
 // "Keep this copy" / "Keep that copy" of a blocked case merge; "Recent merges".
@@ -57,7 +58,7 @@ function startStoragePolling() {
     stopStoragePolling();
     const tick = async () => {
         await loadStorage();
-        const busy = storageState && storageState.connect && ['starting', 'browser', 'code', 'checking'].includes(storageState.connect.state);
+        const busy = storageState && storageState.connect && ['starting', 'browser', 'paste', 'code', 'checking'].includes(storageState.connect.state);
         storageTimer = setTimeout(tick, busy ? 1500 : 10000);
     };
     storageTimer = setTimeout(tick, 1500);
@@ -239,13 +240,16 @@ function storageConnectForm() {
     if (custom) stEl('sc-custom').textContent = 'Pairing: ' + (conf.custom_pairing_label || 'custom') + ' (storage.library.oauth.google).';
     stEl('sc-mega').hidden = p !== 'mega';
     stEl('sc-webdav').hidden = p !== 'webdav';
+    // OneDrive's code is for work or school accounts (personal ones cannot use one).
     stEl('sc-code').hidden = !(p === 'gdrive' || p === 'onedrive');
+    stEl('sc-code').textContent = p === 'onedrive' ? 'Use a sign-in code (work or school)' : 'Use a code instead';
     stEl('sc-connect').textContent = p === 'local' ? 'Use this computer' : 'Connect';
 }
 
 const STORAGE_LOOPBACK = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
 
-async function storageConnect(forceDevice) {
+// flow: null (the server chooses), 'device', 'paste' or 'loopback'.
+async function storageConnect(flow) {
     const p = stEl('sc-provider').value;
     const st = storageState || {};
     if (p === 'local') {
@@ -262,10 +266,11 @@ async function storageConnect(forceDevice) {
     if (p === 'gdrive' && !stEl('sc-reader').hidden) body.reader = stEl('sc-reader-select').value;
     if (p === 'mega') body.mega = { email: stEl('sc-mega-email').value.trim(), password: stEl('sc-mega-password').value, totp: stEl('sc-mega-totp').value.trim() || null };
     if (p === 'webdav') body.webdav = { url: stEl('sc-dav-url').value.trim(), username: stEl('sc-dav-user').value.trim(), password: stEl('sc-dav-password').value, allow_http: stEl('sc-dav-http').checked };
-    if (forceDevice) body.flow = 'device';
+    if (flow) body.flow = flow;
     // The loopback sign-in's tab, opened while the click still counts (pop-up blockers).
     let tab = null;
-    if ((p === 'gdrive' || p === 'onedrive') && STORAGE_LOOPBACK && !forceDevice) tab = window.open('', '_blank');
+    if ((p === 'gdrive' || p === 'onedrive') && STORAGE_LOOPBACK && flow !== 'device' && flow !== 'paste') tab = window.open('', '_blank');
+    stEl('sc-paste-url').value = '';
     try {
         await apiPost('/storage/connect', body);
     } catch (err) {
@@ -292,6 +297,23 @@ function storageFollowTab(tab) {
     tick();
 }
 
+// The paste flow: the address the browser ended on after signing in elsewhere.
+async function storagePaste() {
+    const url = stEl('sc-paste-url').value.trim();
+    if (!url) { showToast('Paste the address the browser ended on.', 'error'); return; }
+    stEl('sc-paste-btn').disabled = true;
+    try {
+        await apiPost('/storage/connect/paste', { url });
+        stEl('sc-paste-url').value = '';
+        stEl('sc-paste').hidden = true;
+        loadStorage();
+    } catch (err) {
+        showToast(err.message, 'error');
+    } finally {
+        stEl('sc-paste-btn').disabled = false;
+    }
+}
+
 async function storageCancel() {
     try { await apiPost('/storage/connect/cancel', {}); } catch (_) { /* fine */ }
     stEl('storage-connect').hidden = true;
@@ -300,6 +322,8 @@ async function storageCancel() {
 
 function renderStorageConnect(c, st) {
     const live = stEl('sc-live');
+    // The paste field sits outside the live area, so a poll does not wipe it.
+    stEl('sc-paste').hidden = !(c && c.state === 'paste');
     if (!c || c.state === 'idle') { live.hidden = true; return; }
     stEl('storage-connect').hidden = false;
     live.hidden = false;
@@ -310,6 +334,13 @@ function renderStorageConnect(c, st) {
     switch (c.state) {
         case 'starting': p('Starting the sign-in…'); break;
         case 'browser': p('Sign in to ' + name + ' in the tab that opened. '); live.appendChild(link(c.auth_url, 'Open the sign-in page')); break;
+        case 'paste': {
+            p('Sign in to ' + name + ' on any device, a phone included:');
+            live.appendChild(link(c.auth_url, 'Open the sign-in page'));
+            const left = c.expires_at ? Math.max(0, Math.round((new Date(c.expires_at) - Date.now()) / 60000)) : null;
+            p('The browser then ends on a page that does not load (' + (c.redirect_uri || 'http://localhost') + '/?code=…). Paste its address below' + (left != null ? ' within about ' + left + ' min' : '') + '.');
+            break;
+        }
         case 'code': {
             const intro = p('Open ');
             intro.appendChild(link(c.verification_url, c.verification_url));
@@ -364,7 +395,7 @@ function renderStorageConnect(c, st) {
                 const sw = document.createElement('button');
                 sw.className = 'btn btn--secondary btn--sm';
                 sw.textContent = 'Try ' + stPairing(ck.other_pairing);
-                sw.onclick = () => { stEl('sc-provider').value = 'gdrive'; storageConnectForm(); stEl('sc-reader-select').value = ck.other_pairing; storageConnect(false); };
+                sw.onclick = () => { stEl('sc-provider').value = 'gdrive'; storageConnectForm(); stEl('sc-reader-select').value = ck.other_pairing; storageConnect(null); };
                 row.appendChild(sw);
             }
             live.appendChild(row);
@@ -372,7 +403,21 @@ function renderStorageConnect(c, st) {
             break;
         }
         case 'stopped': p(c.message || 'No code was used: click Connect for a new one.'); break;
-        case 'failed': p('Not connected: ' + (c.error || 'the sign-in failed')); break;
+        case 'failed': {
+            p('Not connected: ' + (c.error || 'the sign-in failed'));
+            if (c.suggest_flow) {
+                // A personal Microsoft account with a code: the browser works.
+                const again = document.createElement('button');
+                again.className = 'btn btn--primary btn--sm';
+                again.textContent = 'Sign in through the browser instead';
+                again.onclick = () => { stEl('sc-provider').value = c.provider || 'onedrive'; storageConnectForm(); storageConnect(c.suggest_flow); };
+                const row = document.createElement('div');
+                row.className = 'connectivity-section__actions';
+                row.appendChild(again);
+                live.appendChild(row);
+            }
+            break;
+        }
         case 'cancelled': live.hidden = true; break;
         default: live.hidden = true;
     }

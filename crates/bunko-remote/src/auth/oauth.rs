@@ -1,5 +1,6 @@
 //! OAuth 2.0 for an installed app (§7): the loopback redirect with PKCE (RFC 8252,
-//! RFC 7636), the device authorization grant (RFC 8628) and refresh.
+//! RFC 7636), the same redirect with the address pasted back by hand (headless hosts),
+//! the device authorization grant (RFC 8628) and refresh.
 //!
 //! No function here calls a revoke endpoint. For Google that is a rule, not an
 //! omission: revocation removes every grant of the project, the reader's included.
@@ -36,12 +37,23 @@ pub const MICROSOFT_DEVICE_URL: &str =
     "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode";
 pub const MICROSOFT_SCOPES: [&str; 3] = ["Files.ReadWrite", "offline_access", "User.Read"];
 
-/// The path of Bunko's Microsoft native redirect, `http://localhost/bunko` (D17).
-/// Microsoft ignores the port when matching a loopback redirect.
-pub const MICROSOFT_REDIRECT_PATH: &str = "/bunko";
-
 /// How long a loopback sign-in waits for the browser to come back.
 pub const LOOPBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// How long a pasted-address sign-in waits for the address: the sign-in happens on
+/// another device, and the authorization code lives about ten minutes.
+pub const PASTE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// The redirect of a loopback sign-in on `port`. Google's Desktop clients take
+/// `http://127.0.0.1:<port>/`. Microsoft's registration has `http://localhost`, and
+/// Microsoft ignores the port of a loopback redirect, so Bunko sends
+/// `http://localhost:<port>` (D17); a path (`/bunko`) is refused by login.live.com.
+pub fn loopback_redirect(provider: Provider, port: u16) -> String {
+    match provider {
+        Provider::Google => format!("http://127.0.0.1:{port}/"),
+        Provider::Microsoft => format!("http://localhost:{port}"),
+    }
+}
 
 /// How long a token is assumed to live when the response does not say.
 const DEFAULT_EXPIRES_IN: u64 = 3600;
@@ -149,11 +161,20 @@ impl fmt::Debug for Tokens {
     }
 }
 
+/// What a personal Microsoft account gets from a device-code sign-in with Bunko's
+/// client (AADSTS70002): the client is not enabled for consumers' device codes.
+pub const PERSONAL_ACCOUNT_NO_CODE: &str = "Personal Microsoft accounts can't sign in with a code: sign in through the browser (or paste the redirect URL)";
+
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     /// The user refused consent (`access_denied`, `authorization_declined`).
     #[error("sign-in was refused")]
     Denied,
+    /// Microsoft's AADSTS70002 on a device-code request or poll: the client does not
+    /// run the device flow for personal accounts. The browser (loopback or pasted
+    /// address) flow does.
+    #[error("{PERSONAL_ACCOUNT_NO_CODE}")]
+    PersonalAccountNoCode,
     /// The device code expired before the user entered it.
     #[error("the sign-in code expired")]
     Expired,
@@ -264,17 +285,44 @@ async fn post_form<T: for<'de> Deserialize<'de>>(
         return serde_json::from_str(&body)
             .map_err(|e| AuthError::Protocol(format!("token endpoint response: {e}")));
     }
+    Err(error_response(status.as_u16(), body))
+}
+
+/// `AADSTS<code>` appears in `text` as a whole number (`AADSTS70002`, not
+/// `AADSTS7000215`).
+fn has_aadsts(text: &str, code: &str) -> bool {
+    let needle = format!("AADSTS{code}");
+    text.match_indices(&needle).any(|(i, m)| {
+        !text[i + m.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+    })
+}
+
+/// The error of a failed token or device-code call, from its status and body.
+pub fn error_response(status: u16, body: String) -> AuthError {
     match serde_json::from_str::<ErrorResponse>(&body) {
-        Ok(err) if err.error == "invalid_grant" => Err(AuthError::InvalidGrant),
-        Ok(err) => Err(AuthError::OAuth {
-            status: status.as_u16(),
+        Ok(err) if err.error == "invalid_grant" => AuthError::InvalidGrant,
+        // "AADSTS70002: The client does not exist or is not enabled for consumers."
+        // (`invalid_client`): only Microsoft numbers its errors AADSTS.
+        Ok(err)
+            if err
+                .error_description
+                .as_deref()
+                .is_some_and(|d| has_aadsts(d, "70002")) =>
+        {
+            AuthError::PersonalAccountNoCode
+        }
+        Ok(err) => AuthError::OAuth {
+            status,
             error: err.error,
             description: err.error_description.map(|d| truncate(d, 300)),
-        }),
-        Err(_) => Err(AuthError::Http {
-            status: status.as_u16(),
+        },
+        Err(_) => AuthError::Http {
+            status,
             body: truncate(body, 300),
-        }),
+        },
     }
 }
 
@@ -336,56 +384,83 @@ fn random_state() -> String {
 
 // ---------------------------------------------------------------- loopback
 
+/// The authorization URL of one sign-in, and the secrets it is redeemed with.
+struct Authorization {
+    url: String,
+    state: String,
+    verifier: String,
+}
+
+fn authorization(client: &OAuthClient, redirect_uri: &str) -> Result<Authorization, AuthError> {
+    let verifier = pkce_verifier();
+    let state = random_state();
+    let mut query: Vec<(&str, String)> = vec![
+        ("response_type", "code".into()),
+        ("client_id", client.client_id.clone()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("scope", client.scope()),
+        ("state", state.clone()),
+        ("code_challenge", pkce_challenge(&verifier)),
+        ("code_challenge_method", "S256".into()),
+    ];
+    if client.provider == Provider::Google {
+        query.push(("access_type", "offline".into()));
+    }
+    let url = reqwest::Url::parse_with_params(&client.auth_url, &query)
+        .map_err(|e| AuthError::Protocol(format!("authorization URL: {e}")))?;
+    Ok(Authorization {
+        url: url.into(),
+        state,
+        verifier,
+    })
+}
+
+/// Redeem an authorization code with its PKCE verifier and the exact redirect URI of
+/// the authorization request.
+async fn redeem(
+    client: &OAuthClient,
+    redirect_uri: &str,
+    verifier: &str,
+    code: String,
+) -> Result<Tokens, AuthError> {
+    let mut params = vec![
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("code_verifier", verifier.to_string()),
+    ];
+    client.credentials(&mut params);
+    if client.provider == Provider::Microsoft {
+        params.push(("scope", client.scope()));
+    }
+    token_request(client, &params).await
+}
+
 /// The loopback redirect flow with PKCE.
 pub struct LoopbackFlow;
 
 impl LoopbackFlow {
     /// Bind the redirect listener and build the authorization URL to open in the
-    /// browser. Google redirects to `http://127.0.0.1:<port>/`; Microsoft to
-    /// `http://localhost:<port>/bunko` (D17), so the listener takes both 127.0.0.1
-    /// and ::1 (where IPv6 is available).
+    /// browser ([`loopback_redirect`]). Microsoft's `localhost` may resolve to either
+    /// stack, so its listener takes both 127.0.0.1 and ::1 (where IPv6 is available).
     pub async fn start(client: &OAuthClient) -> Result<(String, Pending), AuthError> {
-        let (listeners, redirect_uri, path) = match client.provider {
+        let listeners = match client.provider {
             Provider::Google => {
-                let l = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
-                let port = l.local_addr()?.port();
-                (vec![l], format!("http://127.0.0.1:{port}/"), "/")
+                vec![TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?]
             }
-            Provider::Microsoft => {
-                let ls = bind_dual_stack().await?;
-                let port = ls[0].local_addr()?.port();
-                (
-                    ls,
-                    format!("http://localhost:{port}{MICROSOFT_REDIRECT_PATH}"),
-                    MICROSOFT_REDIRECT_PATH,
-                )
-            }
+            Provider::Microsoft => bind_dual_stack().await?,
         };
-        let verifier = pkce_verifier();
-        let state = random_state();
-        let mut query: Vec<(&str, String)> = vec![
-            ("response_type", "code".into()),
-            ("client_id", client.client_id.clone()),
-            ("redirect_uri", redirect_uri.clone()),
-            ("scope", client.scope()),
-            ("state", state.clone()),
-            ("code_challenge", pkce_challenge(&verifier)),
-            ("code_challenge_method", "S256".into()),
-        ];
-        if client.provider == Provider::Google {
-            query.push(("access_type", "offline".into()));
-        }
-        let url = reqwest::Url::parse_with_params(&client.auth_url, &query)
-            .map_err(|e| AuthError::Protocol(format!("authorization URL: {e}")))?;
+        let port = listeners[0].local_addr()?.port();
+        let redirect_uri = loopback_redirect(client.provider, port);
+        let a = authorization(client, &redirect_uri)?;
         Ok((
-            url.into(),
+            a.url,
             Pending {
                 client: client.clone(),
                 listeners,
                 redirect_uri,
-                path,
-                state,
-                verifier,
+                state: a.state,
+                verifier: a.verifier,
                 timeout: LOOPBACK_TIMEOUT,
             },
         ))
@@ -415,7 +490,6 @@ pub struct Pending {
     client: OAuthClient,
     listeners: Vec<TcpListener>,
     redirect_uri: String,
-    path: &'static str,
     state: String,
     verifier: String,
     timeout: Duration,
@@ -531,7 +605,9 @@ impl Pending {
         let Ok(url) = reqwest::Url::parse(&format!("http://loopback{target}")) else {
             return Callback::NotFound;
         };
-        if url.path() != self.path {
+        // Both redirects end in `/` (Microsoft's `http://localhost:<port>` is `/` on
+        // the wire).
+        if url.path() != "/" {
             return Callback::NotFound;
         }
         let (mut code, mut state, mut error, mut description) = (None, None, None, None);
@@ -558,17 +634,7 @@ impl Pending {
     }
 
     async fn exchange(&self, code: String) -> Result<Tokens, AuthError> {
-        let mut params = vec![
-            ("grant_type", "authorization_code".to_string()),
-            ("code", code),
-            ("redirect_uri", self.redirect_uri.clone()),
-            ("code_verifier", self.verifier.clone()),
-        ];
-        self.client.credentials(&mut params);
-        if self.client.provider == Provider::Microsoft {
-            params.push(("scope", self.client.scope()));
-        }
-        token_request(&self.client, &params).await
+        redeem(&self.client, &self.redirect_uri, &self.verifier, code).await
     }
 }
 
@@ -614,6 +680,179 @@ async fn respond(stream: &mut TcpStream, status: u16, text: &str) {
     );
     let _ = stream.write_all(resp.as_bytes()).await;
     let _ = stream.shutdown().await;
+}
+
+// ---------------------------------------------------------------- pasted address
+
+/// The loopback redirect without a listener, for a host the browser cannot reach
+/// (Docker, SSH, a NAS, a LAN browser): the person signs in on any device, their
+/// browser ends on an `http://localhost:<port>/?code=…&state=…` page that does not
+/// load, and they paste that address back (rclone's pattern). Bunko checks `state`
+/// and redeems the code with the PKCE verifier and the same `redirect_uri`.
+pub struct PasteFlow;
+
+impl PasteFlow {
+    /// Build the authorization URL. Nothing listens on the redirect's port: it is
+    /// random so that it is unlikely to reach a real service on the person's device.
+    pub fn start(client: &OAuthClient) -> Result<(String, PastePending), AuthError> {
+        let port: u16 = rand::rng().random_range(49152..=65535);
+        let redirect_uri = loopback_redirect(client.provider, port);
+        let a = authorization(client, &redirect_uri)?;
+        Ok((
+            a.url,
+            PastePending {
+                client: client.clone(),
+                redirect_uri,
+                state: a.state,
+                verifier: a.verifier,
+                timeout: PASTE_TIMEOUT,
+            },
+        ))
+    }
+}
+
+/// A pasted-address sign-in waiting for the address. The verifier lives here, in
+/// memory, and nowhere else; dropping this ends the sign-in.
+pub struct PastePending {
+    client: OAuthClient,
+    redirect_uri: String,
+    state: String,
+    verifier: String,
+    timeout: Duration,
+}
+
+impl fmt::Debug for PastePending {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PastePending")
+            .field("client", &self.client)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a pasted address was not taken. All but [`PasteError::Ended`] leave the
+/// sign-in waiting for another paste.
+#[derive(Debug, thiserror::Error)]
+pub enum PasteError {
+    #[error("that is not a web address: copy the whole address from the browser's address bar")]
+    NotAUrl,
+    #[error("that is not the address the sign-in ended on: it starts with {expected}")]
+    NotTheRedirect { expected: String },
+    #[error(
+        "that address belongs to another sign-in: paste the address the latest sign-in page ended on"
+    )]
+    WrongState,
+    #[error(
+        "that address carries no sign-in code: finish signing in, then paste the address the browser ends on"
+    )]
+    NoCode,
+    /// The provider sent an error back (with this sign-in's `state`): it is over.
+    #[error(transparent)]
+    Ended(AuthError),
+}
+
+impl PasteError {
+    /// The sign-in is over (the provider refused it); otherwise paste again.
+    pub fn is_final(&self) -> bool {
+        matches!(self, PasteError::Ended(_))
+    }
+}
+
+/// The longest address taken (a code is a few hundred bytes; Microsoft's ~1 KiB).
+const MAX_PASTED: usize = 8 * 1024;
+
+/// Take the authorization code out of a pasted redirect address, strictly: an
+/// `http` URL on exactly the redirect's host, port and path, with this sign-in's
+/// `state`. Only `code`, `state`, `error` and `error_description` are read; other
+/// parameters (Google's `scope`, `iss`) are ignored, a repeated one is refused.
+pub fn parse_pasted_redirect(
+    pasted: &str,
+    redirect_uri: &str,
+    expected_state: &str,
+) -> Result<String, PasteError> {
+    let s = pasted.trim();
+    if s.is_empty()
+        || s.len() > MAX_PASTED
+        || s.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(PasteError::NotAUrl);
+    }
+    let url = reqwest::Url::parse(s).map_err(|_| PasteError::NotAUrl)?;
+    let want = reqwest::Url::parse(redirect_uri).map_err(|_| PasteError::NotAUrl)?;
+    let not_it = || PasteError::NotTheRedirect {
+        expected: redirect_uri.to_string(),
+    };
+    if url.scheme() != "http"
+        || url.host_str() != want.host_str()
+        || url.port_or_known_default() != want.port_or_known_default()
+        || url.path() != want.path()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(not_it());
+    }
+    let (mut code, mut state, mut error, mut description) = (None, None, None, None);
+    for (k, v) in url.query_pairs() {
+        let slot = match &*k {
+            "code" => &mut code,
+            "state" => &mut state,
+            "error" => &mut error,
+            "error_description" => &mut description,
+            _ => continue,
+        };
+        if slot.replace(v.into_owned()).is_some() {
+            return Err(not_it());
+        }
+    }
+    if code.is_none() && error.is_none() {
+        return Err(PasteError::NoCode);
+    }
+    if !state.is_some_and(|s| constant_time_eq(s.as_bytes(), expected_state.as_bytes())) {
+        return Err(PasteError::WrongState);
+    }
+    if let Some(e) = error {
+        return Err(PasteError::Ended(if e == "access_denied" {
+            AuthError::Denied
+        } else {
+            AuthError::OAuth {
+                status: 400,
+                error: e,
+                description: description.map(|d| truncate(d, 300)),
+            }
+        }));
+    }
+    match code {
+        Some(c) if !c.is_empty() => Ok(c),
+        _ => Err(PasteError::NoCode),
+    }
+}
+
+impl PastePending {
+    /// Where the person's browser ends: what the pasted address starts with.
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Replace the default 10-minute timeout.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
+    /// The code of a pasted address ([`parse_pasted_redirect`] against this sign-in).
+    pub fn code_from(&self, pasted: &str) -> Result<String, PasteError> {
+        parse_pasted_redirect(pasted, &self.redirect_uri, &self.state)
+    }
+
+    /// Redeem the code with this sign-in's verifier and redirect URI. Single use:
+    /// the sign-in ends here whatever the provider answers.
+    pub async fn redeem(self, code: String) -> Result<Tokens, AuthError> {
+        redeem(&self.client, &self.redirect_uri, &self.verifier, code).await
+    }
 }
 
 // ---------------------------------------------------------------- device flow
@@ -787,6 +1026,225 @@ mod tests {
         let c = OAuthClient::google("id", "GOCSPX-secret");
         let s = format!("{c:?}");
         assert!(!s.contains("GOCSPX"), "{s}");
+    }
+
+    const MS_REDIRECT: &str = "http://localhost:51234";
+    const STATE: &str = "the-state_0123456789";
+
+    fn pasted(url: &str) -> Result<String, PasteError> {
+        parse_pasted_redirect(url, MS_REDIRECT, STATE)
+    }
+
+    #[test]
+    fn pasted_redirect_good() {
+        assert_eq!(
+            pasted("http://localhost:51234/?code=M.C507_abc-123&state=the-state_0123456789")
+                .unwrap(),
+            "M.C507_abc-123"
+        );
+        // What browsers show: no trailing slash, padding whitespace, percent-escapes.
+        assert_eq!(
+            pasted("  http://localhost:51234?code=a%2Fb&state=the-state_0123456789\n").unwrap(),
+            "a/b"
+        );
+        // Google's redirect, with its extra parameters (ignored).
+        let google = loopback_redirect(Provider::Google, 40000);
+        assert_eq!(google, "http://127.0.0.1:40000/");
+        assert_eq!(
+            parse_pasted_redirect(
+                "http://127.0.0.1:40000/?state=s1&iss=https%3A%2F%2Faccounts.google.com&code=4%2F0Ab&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.file",
+                &google,
+                "s1"
+            )
+            .unwrap(),
+            "4/0Ab"
+        );
+    }
+
+    #[test]
+    fn pasted_redirect_wrong_state() {
+        assert!(matches!(
+            pasted("http://localhost:51234/?code=c&state=another-sign-in"),
+            Err(PasteError::WrongState)
+        ));
+        assert!(matches!(
+            pasted("http://localhost:51234/?code=c"),
+            Err(PasteError::WrongState)
+        ));
+        // A state that is a prefix is not the state.
+        assert!(matches!(
+            pasted("http://localhost:51234/?code=c&state=the-state"),
+            Err(PasteError::WrongState)
+        ));
+        assert!(!PasteError::WrongState.is_final());
+    }
+
+    #[test]
+    fn pasted_redirect_access_denied() {
+        let e = pasted(
+            "http://localhost:51234/?error=access_denied&error_description=The+user+has+denied+access&state=the-state_0123456789",
+        )
+        .unwrap_err();
+        assert!(e.is_final());
+        assert!(matches!(e, PasteError::Ended(AuthError::Denied)), "{e:?}");
+        let e = pasted("http://localhost:51234/?error=server_error&state=the-state_0123456789")
+            .unwrap_err();
+        assert!(
+            matches!(e, PasteError::Ended(AuthError::OAuth { ref error, .. }) if error == "server_error")
+        );
+        // An error with another sign-in's state does not end this one.
+        assert!(matches!(
+            pasted("http://localhost:51234/?error=access_denied&state=x"),
+            Err(PasteError::WrongState)
+        ));
+    }
+
+    #[test]
+    fn pasted_redirect_with_junk() {
+        // Text around or inside the address.
+        for junk in [
+            "here: http://localhost:51234/?code=c&state=the-state_0123456789",
+            "http://localhost:51234/?code=c&state=the-state_0123456789 thanks",
+            "\"http://localhost:51234/?code=c&state=the-state_0123456789\"",
+            "<http://localhost:51234/?code=c&state=the-state_0123456789>",
+            "",
+            "c",
+        ] {
+            assert!(
+                matches!(
+                    pasted(junk),
+                    Err(PasteError::NotAUrl | PasteError::NotTheRedirect { .. })
+                ),
+                "{junk:?}: {:?}",
+                pasted(junk)
+            );
+        }
+        // Unknown parameters and a fragment are ignored; the code still counts.
+        assert_eq!(
+            pasted(
+                "http://localhost:51234/?session_state=x&code=c&state=the-state_0123456789#junk"
+            )
+            .unwrap(),
+            "c"
+        );
+        // A repeated code or state is ambiguous: refused.
+        assert!(matches!(
+            pasted("http://localhost:51234/?code=a&code=b&state=the-state_0123456789"),
+            Err(PasteError::NotTheRedirect { .. })
+        ));
+        assert!(matches!(
+            pasted("http://localhost:51234/?code=a&state=x&state=the-state_0123456789"),
+            Err(PasteError::NotTheRedirect { .. })
+        ));
+        // No code at all.
+        assert!(matches!(
+            pasted("http://localhost:51234/"),
+            Err(PasteError::NoCode)
+        ));
+        assert!(matches!(
+            pasted("http://localhost:51234/?code=&state=the-state_0123456789"),
+            Err(PasteError::NoCode)
+        ));
+        let huge = format!(
+            "http://localhost:51234/?code={}&state=the-state_0123456789",
+            "a".repeat(MAX_PASTED)
+        );
+        assert!(matches!(pasted(&huge), Err(PasteError::NotAUrl)));
+    }
+
+    #[test]
+    fn pasted_redirect_elsewhere_is_refused() {
+        for other in [
+            "https://evil.example/?code=c&state=the-state_0123456789",
+            "http://evil.example:51234/?code=c&state=the-state_0123456789",
+            "https://localhost:51234/?code=c&state=the-state_0123456789",
+            "http://localhost:51235/?code=c&state=the-state_0123456789",
+            "http://127.0.0.1:51234/?code=c&state=the-state_0123456789",
+            "http://localhost/?code=c&state=the-state_0123456789",
+            "http://localhost:51234/bunko?code=c&state=the-state_0123456789",
+            "http://user@localhost:51234/?code=c&state=the-state_0123456789",
+            "http://localhost.evil.example:51234/?code=c&state=the-state_0123456789",
+            "javascript:alert(1)//localhost:51234/?code=c&state=the-state_0123456789",
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?code=c&state=the-state_0123456789",
+        ] {
+            match pasted(other) {
+                Err(PasteError::NotTheRedirect { expected }) => assert_eq!(expected, MS_REDIRECT),
+                r => panic!("{other}: {r:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn paste_flow_builds_the_loopback_authorization() {
+        let c = OAuthClient::microsoft("ms-cid");
+        let (url, p) = PasteFlow::start(&c).unwrap();
+        let u = reqwest::Url::parse(&url).unwrap();
+        let q: std::collections::HashMap<_, _> = u.query_pairs().into_owned().collect();
+        assert_eq!(q["redirect_uri"], p.redirect_uri());
+        let port: u16 = p
+            .redirect_uri()
+            .strip_prefix("http://localhost:")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(port >= 49152);
+        assert_eq!(q["code_challenge"], pkce_challenge(&p.verifier));
+        assert_eq!(q["code_challenge_method"], "S256");
+        assert_eq!(q["state"], p.state);
+        assert_eq!(q["scope"], "Files.ReadWrite offline_access User.Read");
+        assert_eq!(p.timeout(), PASTE_TIMEOUT);
+        // The pending sign-in's Debug shows neither the state nor the verifier.
+        let d = format!("{p:?}");
+        assert!(!d.contains(&p.verifier) && !d.contains(&p.state), "{d}");
+        let ok = format!("{}/?code=abc&state={}", p.redirect_uri(), q["state"]);
+        assert_eq!(p.code_from(&ok).unwrap(), "abc");
+    }
+
+    #[test]
+    fn aadsts70002_means_use_the_browser() {
+        let body = json_body(
+            "invalid_client",
+            "AADSTS70002: The client does not exist or is not enabled for consumers. If you are the developer of this application, configure a new application through the App Registrations in the Azure Portal at https://go.microsoft.com/fwlink/?linkid=2083908. Trace ID: x Correlation ID: y Timestamp: 2026-10-14 10:00:00Z",
+        );
+        let e = error_response(400, body);
+        assert!(matches!(e, AuthError::PersonalAccountNoCode), "{e:?}");
+        assert_eq!(e.to_string(), PERSONAL_ACCOUNT_NO_CODE);
+        assert!(e.to_string().contains("through the browser"));
+        // Other errors keep their own mapping.
+        assert!(matches!(
+            error_response(400, json_body("invalid_grant", "AADSTS70000")),
+            AuthError::InvalidGrant
+        ));
+        assert!(matches!(
+            error_response(
+                401,
+                json_body("invalid_client", "AADSTS7000215: Invalid client secret")
+            ),
+            AuthError::OAuth { status: 401, .. }
+        ));
+        assert!(has_aadsts("x AADSTS7000215 y AADSTS70002: z", "70002"));
+        assert!(has_aadsts("AADSTS70002", "70002"));
+        assert!(!has_aadsts("AADSTS700021 AADSTS7000215", "70002"));
+        assert!(matches!(
+            error_response(502, "<html>bad gateway</html>".into()),
+            AuthError::Http { status: 502, .. }
+        ));
+    }
+
+    fn json_body(error: &str, description: &str) -> String {
+        serde_json::json!({"error": error, "error_description": description}).to_string()
+    }
+
+    #[test]
+    fn redirects_per_provider() {
+        assert_eq!(
+            loopback_redirect(Provider::Microsoft, 8080),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            loopback_redirect(Provider::Google, 8080),
+            "http://127.0.0.1:8080/"
+        );
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! The admin Storage panel's API (0.8 §11; M6): `/_admin/api/storage...`, admins
 //! only. What the panel shows is `library.storage` of `/api/status` (also answered
 //! here alone); its actions are Connect (one button, the flow chosen from where the
-//! request comes from), the account choice, "Create it?", Disconnect (Wait / Export /
+//! request comes from; a pasted redirect address for the paste flow), the account
+//! choice, "Create it?", Disconnect (Wait / Export /
 //! Discard), "This computer", Take over, "Keep this copy" / "Keep that copy" of a
 //! blocked case merge, and whether readers connect. No answer ever
 //! carries a token, password or session blob.
@@ -79,6 +80,22 @@ pub(super) async fn connect_account(s: &AdminState, req: &ApiRequest) -> Respons
         .and_then(Value::as_bool)
         .unwrap_or(false);
     match control(s).decide_account(yes, true).await {
+        Ok(st) => ok(st.as_json()),
+        Err(e) => error(400, e),
+    }
+}
+
+/// `POST /api/storage/connect/paste` `{url}`: the address the browser ended on after a
+/// `paste` sign-in (never logged). 400 when it is not this sign-in's redirect.
+pub(super) async fn connect_paste(s: &AdminState, req: &ApiRequest) -> Response {
+    let body = match req.json() {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let Some(url) = body.get("url").and_then(Value::as_str) else {
+        return error(400, "url (the address the browser ended on) is required");
+    };
+    match control(s).connector().paste(url.to_string()).await {
         Ok(st) => ok(st.as_json()),
         Err(e) => error(400, e),
     }

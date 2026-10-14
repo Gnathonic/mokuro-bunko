@@ -5,8 +5,13 @@
 ### Added
 - **Set a library up in Google Drive, OneDrive, MEGA or a WebDAV server.** The setup
   wizard asks where the library lives, then connects it with one button: a browser on
-  the server signs in directly, anything else (Docker, a NAS, a phone) gets a code to
-  enter on any device, shown in the wizard, the admin panel, the tray and the log. The
+  the server signs in directly. Anywhere else (Docker, a NAS, a phone), Google Drive
+  gives a code to enter on any device, shown in the wizard, the admin panel, the tray
+  and the log; OneDrive gives its sign-in page to open on any device, then you paste
+  back the address the browser ends on (`http://localhost:…/?code=…`), since personal
+  Microsoft accounts cannot sign in with a code (a code stays available for work or
+  school accounts, and a code refused for a personal account says to use the browser
+  instead). The
   Check step counts the volumes Bunko can see; on Google Drive it asks which Mokuro
   Reader you use and offers the other one when few volumes are visible. Readers can
   keep reading straight from the cloud (the default for a cloud library), or connect to
@@ -18,7 +23,10 @@
   `library disconnect --export DIR` copies it into a new or empty folder of your own.
   The same from a terminal or
   `docker exec`: `mokuro-bunko library connect gdrive|onedrive|mega|webdav` and
-  `library disconnect`; `doctor` checks the pairing, the spool and the credentials
+  `library disconnect`. `library connect` opens the sign-in page in the browser in a
+  desktop session, and otherwise prints a code (Google Drive) or the sign-in address
+  and asks for the address the browser ends on (OneDrive; `docker exec -it`);
+  `--browser`, `--device` and `--paste` choose instead; `doctor` checks the pairing, the spool and the credentials
   file. The tray shows one library line ("Google Drive · synced 1 min ago") and
   "Sign in again…" when needed.
 - **Folders and volumes whose names differ only in case are joined in a cloud
