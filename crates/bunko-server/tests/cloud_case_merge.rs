@@ -148,11 +148,21 @@ async fn a_case_merge_carries_the_db_rows_per_volume_and_holds_the_queue() {
             }
         }
     })));
-    let f2 = fake.clone();
-    eventually("the merge", || {
-        f2.node_at(&format!("{ROOT}/kingdom")).is_none()
-    })
-    .await;
+    // Finished as the admin sees it: "done" under Recent merges. The loser folder
+    // leaves the provider in the group's last step, before the group closes.
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (_, st) = e.call("GET", "/_admin/api/storage", None).await;
+        if st["recent_merges"][0]["state"] == "done" {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "timed out waiting for the merge: {st}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(fake.node_at(&format!("{ROOT}/kingdom")).is_none());
     fake.set_call_hook(None);
     assert!(!held.lock().is_empty());
     assert!(held.lock().iter().all(|owed| !owed), "{:?}", held.lock());
@@ -189,7 +199,7 @@ async fn a_case_merge_carries_the_db_rows_per_volume_and_holds_the_queue() {
             .as_deref(),
         Some("uuid-2")
     );
-    // Audited, and listed in the Storage tab.
+    // Audited by the time it shows done, and listed in the Storage tab.
     let audits = db.list_audit_events(100, None).unwrap();
     let a = audits
         .iter()

@@ -307,8 +307,24 @@ fn a_deferred_publish_is_visible_at_once_with_own() {
 fn deferred_publish_survives_outage_and_restart() {
     let mut t = T::new(FakeBackend::drive_like(), &[("S/", b"")]);
     t.wait_steady();
-    // Long enough to outlast the restart; the store honours its Retry-After.
-    t.fake.throttle_for(Duration::from_secs(2));
+    // The outage starts at the op's own first call (its preflight or upload) and
+    // lasts until the test ends it, past the restart: a timed throttle set up front
+    // could be met first by a feed poll, whose Retry-After pauses every class (the
+    // governor), so the op's first call came after the outage and never failed.
+    // Every call inside it answers Retry-After 300 ms, which the store honours.
+    let outage = Arc::new(AtomicBool::new(false));
+    let (o2, fake) = (outage.clone(), Arc::downgrade(&t.fake));
+    let armed = Arc::new(AtomicBool::new(false));
+    t.fake.set_call_hook(Some(Arc::new(move |op| {
+        if matches!(op, FakeOp::FindNamed | FakeOp::Upload) && !armed.swap(true, Ordering::AcqRel) {
+            o2.store(true, Ordering::Release);
+        }
+        if o2.load(Ordering::Acquire)
+            && let Some(f) = fake.upgrade()
+        {
+            f.throttle_for(Duration::from_millis(300));
+        }
+    })));
     t.publish("S/v.mokuro", b"result", deferred(ocr(), Mode::CreateNew));
     wait_until("an attempt", || {
         t.s()
@@ -322,6 +338,8 @@ fn deferred_publish_survives_outage_and_restart() {
     // Still pending (and visible) after the restart, while the outage lasts.
     assert!(fs::metadata(t.abs("S/v.mokuro")).unwrap().own());
     assert_eq!(t.s().outbox().len(), 1);
+    assert!(t.fake.node_at(&format!("{FOLDER}/S/v.mokuro")).is_none());
+    outage.store(false, Ordering::Release);
     t.idle();
     assert_eq!(t.remote_named("S", "v.mokuro").len(), 1);
     assert_eq!(t.remote_bytes("S/v.mokuro").unwrap(), b"result");
@@ -1282,5 +1300,5 @@ fn a_queued_write_never_lands_in_a_replacement_folder() {
     t.idle();
     assert_eq!(t.fake.calls(FakeOp::Upload), 0);
     assert_eq!(t.s().outbox()[0].state, "CONFLICT");
-    assert!(t.remote_named("S", "v.mokuro").is_empty());
+    assert!(t.fake.node_at(&format!("{FOLDER}/S/v.mokuro")).is_none());
 }
