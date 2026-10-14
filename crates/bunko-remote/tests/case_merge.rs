@@ -774,6 +774,13 @@ fn suspect_mid_merge_pauses_and_resumes_from_the_journal() {
     })));
     t.policy();
     wait_until("suspect", || t.s().health() == Health::Suspect);
+    // The second move was past its gate check when the hook ran: it goes on to its
+    // provider call and COMMITTED (several state-db writes, which can take seconds
+    // under load) before the group can pause. Then give a merge that wrongly went on
+    // the time to take a third step.
+    wait_until("the second move", || {
+        t.s().recent_merges().first().is_some_and(|m| m.moved >= 2)
+    });
     std::thread::sleep(QUIET * 2);
     let rec = t.s().recent_merges()[0].clone();
     assert_eq!(rec.state, "open", "paused, not finished");
