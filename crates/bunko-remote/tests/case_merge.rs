@@ -12,7 +12,7 @@ use bunko_remote::{
     BErr, Backend, CaseMergePolicy, CloudHooks, MergeChoice, MergeRecord, OpCtx, RemoteStore,
     RemoteStoreConfig, ResolveChoice, SubmissionResult, UploadSource, UploadTarget,
 };
-use bunko_store::{Health, LibraryStore, MountGuard, fs};
+use bunko_store::{Health, LibraryStore, MountGuard, WatchEvent, fs};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -534,18 +534,56 @@ fn a_different_copy_blocks_its_group_and_keeps_the_loser() {
 
 #[test]
 fn a_variant_still_changing_is_left_alone_until_quiet() {
-    let t = T::new(
+    // The quiet period runs from when the store notes a change, which trails the
+    // reader's upload by the feed's latency (a second or more under load): with the
+    // usual QUIET two arrivals could be noted farther apart than it, and the merge
+    // rightly started mid-loop. A longer one here, each arrival waited for until the
+    // merge has noted it, and a check that no two came farther apart than it.
+    const LONG: Duration = Duration::from_secs(5);
+    fn tune(c: &mut RemoteStoreConfig) {
+        c.quiet = LONG;
+    }
+    let t = T::with(
         FakeBackend::drive_like(),
         &[("Kingdom/Vol 1.cbz", b"one"), ("kingdom/Vol 2.cbz", b"two")],
+        tune,
     );
     t.steady();
-    t.policy();
+    // The merge's own sink was registered first, so it has noted what this one sees.
+    let seen: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+    let s2 = seen.clone();
+    let _watch = t
+        .s()
+        .watch(Arc::new(move |e: WatchEvent| {
+            if let WatchEvent::Added { path, .. } = e {
+                s2.lock().push(path);
+            }
+        }))
+        .unwrap();
     // A reader keeps uploading into the loser: each arrival resets its quiet period.
-    for i in 0..8 {
+    let arrive = |i: usize| -> Instant {
+        let put = Instant::now();
         t.fake
             .reader_put(&format!("{FOLDER}/kingdom/extra {i}.jpg"), b"x");
-        t.sync_feed();
-        assert_eq!(t.done_merges(), 0, "still uploading");
+        t.s().feed().poll_now();
+        let p = t.abs(&format!("kingdom/extra {i}.jpg"));
+        wait_until(&format!("extra {i} noted"), || seen.lock().contains(&p));
+        put
+    };
+    let mut prev = arrive(0);
+    // The policy goes in once a change is fresh (the adoption's may be old already).
+    t.policy();
+    for i in 1..8 {
+        let put = arrive(i);
+        let merges = t.s().recent_merges();
+        // Every pass so far saw a change noted after `prev`'s upload began.
+        let gap = prev.elapsed();
+        assert!(
+            gap < LONG,
+            "the harness fell behind: {gap:?} between arrivals"
+        );
+        assert!(merges.is_empty(), "still uploading: {merges:?}");
+        prev = put;
     }
     t.wait_merges(1);
     assert_eq!(t.names("Kingdom").len(), 10);
@@ -774,6 +812,13 @@ fn suspect_mid_merge_pauses_and_resumes_from_the_journal() {
     })));
     t.policy();
     wait_until("suspect", || t.s().health() == Health::Suspect);
+    // The second move was past its gate check when the hook ran: it goes on to its
+    // provider call and COMMITTED (several state-db writes, which can take seconds
+    // under load) before the group can pause. Then give a merge that wrongly went on
+    // the time to take a third step.
+    wait_until("the second move", || {
+        t.s().recent_merges().first().is_some_and(|m| m.moved >= 2)
+    });
     std::thread::sleep(QUIET * 2);
     let rec = t.s().recent_merges()[0].clone();
     assert_eq!(rec.state, "open", "paused, not finished");

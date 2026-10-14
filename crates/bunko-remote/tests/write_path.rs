@@ -287,7 +287,13 @@ fn a_deferred_publish_is_visible_at_once_with_own() {
     assert_eq!(names, ["v.mokuro"]);
     assert_eq!(t.fake.calls(FakeOp::Upload), 0);
     assert_eq!(t.events(), vec![added(t.abs("S/v.mokuro"))]);
+    // The publish returns at STAGED; the worker marks the op HELD when it next
+    // looks (it may not have yet under load). It never leaves while the gate is shut.
+    wait_until("the worker holds it", || {
+        t.s().outbox()[0].state != "STAGED"
+    });
     assert_eq!(t.s().outbox()[0].state, "HELD");
+    assert_eq!(t.fake.calls(FakeOp::Upload), 0);
     t.gate(true);
     t.idle();
     assert_eq!(t.remote_bytes("S/v.mokuro").unwrap(), b"{\"ocr\":1}");
@@ -904,6 +910,10 @@ fn standby_holds_deferred_ops_and_refuses_sync_writes() {
         t.s().health() == Health::LeaseHeld { by: "nas".into() }
     });
     t.publish("S/v.mokuro", b"x", deferred(ocr(), Mode::CreateNew));
+    // STAGED until the worker next looks (a fixed pause raced it under load).
+    wait_until("the worker holds it", || {
+        t.s().outbox()[0].state != "STAGED"
+    });
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(t.s().outbox()[0].state, "HELD");
     assert_eq!(t.fake.calls(FakeOp::Upload), 0);
