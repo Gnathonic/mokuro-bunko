@@ -513,6 +513,30 @@ pub fn storage_problems(h: &StoreHandle, health: &Health, conflicts: usize) -> V
                 .into(),
             Some("Check the folder, then apply the removals in Storage.".into()),
         ),
+        _ if h
+            .store
+            .as_ref()
+            .and_then(|s| s.lease_claiming_left())
+            .is_some() =>
+        {
+            let left = h
+                .store
+                .as_ref()
+                .and_then(|s| s.lease_claiming_left())
+                .unwrap_or_default();
+            push(
+                "storage-lease",
+                "warn",
+                format!(
+                    "This Bunko is still claiming the library: about {} left",
+                    bunko_remote::status::about(left)
+                ),
+                Some(
+                    "Uploads and changes through Bunko wait until then; reading works. The first claim waits so that two Bunkos never write to one library at once."
+                        .into(),
+                ),
+            )
+        }
         _ => {}
     }
     if conflicts > 0 {

@@ -175,6 +175,18 @@ pub fn describe(v: &Value, source: &str) -> Vec<String> {
             }
         ));
     }
+    let lease = &v["lease"];
+    if let Some(state) = text(&lease["state"]) {
+        // This Bunko's own claim (with the time left), or the other Bunko's name.
+        let line = match (text(&lease["detail"]), text(&lease["holder"]["name"])) {
+            (Some(d), _) => format!("Lease:   {state}: {d}"),
+            (None, Some(by)) if lease["holder"]["ours"] != true => {
+                format!("Lease:   {state} (held by {by})")
+            }
+            _ => format!("Lease:   {state}"),
+        };
+        out.push(line);
+    }
     let c = &v["cache"];
     if c.is_object() {
         let n = |k: &str| c[k].as_u64().unwrap_or(0);
@@ -387,8 +399,9 @@ impl Printer {
     }
 }
 
-/// The Check's lines.
-pub fn check_lines(v: &Value) -> Vec<String> {
+/// The Check's lines; with `create` (`--create`), a missing folder is a statement of
+/// what happens next, not the wizard's question.
+pub fn check_lines(v: &Value, create: bool) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(a) = v["account"].as_str() {
         out.push(format!("Signed in as {a}."));
@@ -400,7 +413,10 @@ pub fn check_lines(v: &Value) -> Vec<String> {
             bunko_server::storage::connect::pairing_label(p)
         ));
     }
-    if let Some(s) = c["summary"].as_str() {
+    if create && c["found"].as_bool() == Some(false) {
+        let folder = c["folder"].as_str().unwrap_or("mokuro-reader");
+        out.push(format!("Creating {folder}/…"));
+    } else if let Some(s) = c["summary"].as_str() {
         out.push(s.to_string());
     }
     for k in ["warning", "lease"] {
@@ -569,7 +585,7 @@ fn connect_through_server(
             }
             tokio::time::sleep(Duration::from_millis(700)).await;
         };
-        for l in check_lines(&v) {
+        for l in check_lines(&v, create) {
             println!("{l}");
         }
         if want_create(&v, create, interactive)? {
@@ -677,7 +693,7 @@ fn connect_here(
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
-        for l in check_lines(&v) {
+        for l in check_lines(&v, create) {
             println!("{l}");
         }
         if want_create(&v, create, interactive)? {
@@ -887,6 +903,21 @@ mod tests {
                 "(from the running server)",
             ]
         );
+        // This Bunko's first claim: what the bridge's 503 says, with the time left.
+        let mut v = v;
+        v["lease"] = json!({"state": "claiming", "can_take_over": false, "claiming_left_s": 540,
+            "detail": "This Bunko is still claiming the library: about 9 min left"});
+        assert!(
+            describe(&v, "running server").contains(
+                &"Lease:   claiming: This Bunko is still claiming the library: about 9 min left"
+                    .to_string()
+            )
+        );
+        v["lease"] = json!({"state": "standby", "can_take_over": true,
+            "holder": {"name": "nas", "ours": false}});
+        assert!(
+            describe(&v, "running server").contains(&"Lease:   standby (held by nas)".to_string())
+        );
     }
 
     #[test]
@@ -1032,7 +1063,7 @@ mod tests {
         let done = json!({"state": "connected", "account": "me@example.com", "pairing": "release",
             "check": {"summary": "Found mokuro-reader/ — 4 volumes in 2 series", "offer_switch": true,
                       "other_pairing": "beta", "warning": "Only 4 volumes are visible", "found": true}});
-        let lines = check_lines(&done);
+        let lines = check_lines(&done, false);
         assert_eq!(lines[0], "Signed in as me@example.com.");
         assert!(
             lines
@@ -1045,6 +1076,14 @@ mod tests {
                 .any(|l| l.ends_with("library connect gdrive --reader beta"))
         );
         assert!(finished(&done, false).unwrap());
+        // No folder yet: the wizard's question, or with --create what happens next.
+        let missing = json!({"state": "connected", "check": {"found": false,
+            "folder": "mokuro-reader", "summary": "No mokuro-reader/ folder yet. Create it?"}});
+        assert_eq!(
+            check_lines(&missing, false),
+            ["No mokuro-reader/ folder yet. Create it?"]
+        );
+        assert_eq!(check_lines(&missing, true), ["Creating mokuro-reader/…"]);
         let mismatch =
             json!({"state": "account-mismatch", "message": "belongs to old@example.com"});
         assert!(

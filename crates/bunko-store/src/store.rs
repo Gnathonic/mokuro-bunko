@@ -211,6 +211,12 @@ pub trait LibraryStore: Send + Sync + 'static {
     fn merge_busy(&self, _p: &Path) -> bool {
         false
     }
+    /// Can a Sync write at `p` (a bridge PUT, MOVE, DELETE) reach the store now? `Err`
+    /// is the error its publish would fail with (a remote store without the lease,
+    /// §9.2: 503), so a client hears it before it sends a body. Default: yes.
+    fn writable(&self, _p: &Path) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A store-level failure that has no `io::ErrorKind` of its own, carried inside an
@@ -291,6 +297,20 @@ pub fn is_unavailable(e: &io::Error) -> bool {
     )
 }
 
+/// The tag of a "this Bunko is still claiming the library lease" refusal (its own
+/// settle wait, §9.2), as opposed to `storage-lease` (another Bunko holds it).
+pub const LEASE_CLAIMING: &str = "storage-lease-claiming";
+
+/// The message of a store error without its class prefix (`unavailable: `), for a
+/// caller that shows it to a client; any other error as it displays.
+pub fn error_message(e: &io::Error) -> String {
+    match store_error(e) {
+        Some(StoreError::Conflict(m) | StoreError::Unavailable(m)) => m.clone(),
+        Some(StoreError::UnavailableFor { msg, .. }) => msg.clone(),
+        None => e.to_string(),
+    }
+}
+
 /// What an error means for a caller that answers clients (spec §3.5 table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorClass {
@@ -313,6 +333,12 @@ pub enum ErrorClass {
     },
     /// Another Bunko holds the lease (bridge: 503, `storage-lease`).
     LeaseHeld,
+    /// This Bunko is still claiming (or confirming) its lease: its own first-claim
+    /// settle wait, or the first sync before it (bridge: 503 with `Retry-After` set to
+    /// what is left, `storage-lease-claiming`).
+    LeaseClaiming {
+        retry_after: Option<std::time::Duration>,
+    },
     /// A name the provider refuses (bridge: 400).
     InvalidName,
     /// Anything else (a local I/O error).
@@ -339,14 +365,20 @@ pub fn classify(e: &io::Error) -> ErrorClass {
     match store_error(e) {
         Some(StoreError::Conflict(_)) => return ErrorClass::Conflict,
         Some(StoreError::Unavailable(m)) => {
-            return if m.contains("storage-lease") {
+            return if m.contains(LEASE_CLAIMING) {
+                ErrorClass::LeaseClaiming { retry_after: None }
+            } else if m.contains("storage-lease") {
                 ErrorClass::LeaseHeld
             } else {
                 ErrorClass::Unavailable { retry_after: None }
             };
         }
         Some(StoreError::UnavailableFor { msg, retry_after }) => {
-            return if msg.contains("storage-lease") {
+            return if msg.contains(LEASE_CLAIMING) {
+                ErrorClass::LeaseClaiming {
+                    retry_after: Some(*retry_after),
+                }
+            } else if msg.contains("storage-lease") {
                 ErrorClass::LeaseHeld
             } else {
                 ErrorClass::Unavailable {
@@ -417,6 +449,26 @@ mod tests {
         assert_eq!(
             classify(&unavailable("storage-lease: held by nas")),
             ErrorClass::LeaseHeld
+        );
+        assert_eq!(
+            classify(&unavailable_for(
+                "storage-lease-claiming: still claiming",
+                Duration::from_secs(90)
+            )),
+            ErrorClass::LeaseClaiming {
+                retry_after: Some(Duration::from_secs(90))
+            }
+        );
+        assert_eq!(
+            classify(&unavailable("storage-lease-claiming: starting")),
+            ErrorClass::LeaseClaiming { retry_after: None }
+        );
+        assert_eq!(
+            error_message(&unavailable_for(
+                "storage-lease-claiming: x",
+                Duration::from_secs(9)
+            )),
+            "storage-lease-claiming: x"
         );
         assert_eq!(
             classify(&io::Error::other(ProviderErr(true))),

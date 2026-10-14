@@ -776,6 +776,14 @@ async fn webdav_connects_with_its_form() {
     let s = settle(&e.connector).await;
     assert_eq!(s.state, "failed");
     assert!(s.error.unwrap().contains("http://"));
+    for url in ["http://192.168.1.5/dav", "http://localhost.example/dav"] {
+        e.connector
+            .start(form(url, "app-pass", false), RequestOrigin::cli())
+            .unwrap();
+        let s = settle(&e.connector).await;
+        assert_eq!(s.state, "failed", "{url}");
+        assert!(s.error.unwrap().contains("http://"), "{url}");
+    }
     e.connector
         .start(
             form("https://nas.local/dav", "wrong", false),
@@ -818,6 +826,46 @@ async fn webdav_connects_with_its_form() {
     let check = e.connector.create_folder().await.unwrap();
     assert!(check.found && check.created, "{check:?}");
     assert_eq!(e.connector.status().check.unwrap(), check);
+}
+
+/// A WebDAV server on this machine (localhost, 127.0.0.0/8, ::1) connects over plain
+/// http without "Allow http": nothing travels over a network. The config it writes
+/// keeps `allow_http` off.
+#[tokio::test]
+async fn a_loopback_webdav_url_needs_no_allow_http() {
+    for url in [
+        "http://127.0.0.1:8080/dav",
+        "http://localhost:8080/dav",
+        "http://[::1]:8080/dav",
+    ] {
+        let fake = Arc::new(FakeBackend::webdav_cas());
+        let e = env_with(fake, LibraryConfig::default(), None, 5);
+        e.connector
+            .start(
+                ConnectRequest {
+                    provider: "webdav".into(),
+                    webdav: Some(WebDavForm {
+                        url: url.into(),
+                        username: "me".into(),
+                        password: "app-pass".into(),
+                        allow_http: false,
+                    }),
+                    ..ConnectRequest::default()
+                },
+                RequestOrigin::cli(),
+            )
+            .unwrap();
+        let s = settle(&e.connector).await;
+        assert_eq!(s.state, "connected", "{url}: {s:?}");
+        let c = e.applied.lock().last().cloned().unwrap();
+        assert!(!c.webdav_allow_http);
+        let mut lib = e.lib.lock().clone();
+        c.apply_to(&mut lib);
+        assert_eq!(lib.webdav.url.as_deref(), Some(url));
+        assert!(!lib.webdav.allow_http);
+        // That config passes validation as written (bunko-core exempts loopback too).
+        assert!(bunko_core::config::is_loopback_http_url(url));
+    }
 }
 
 /// The Check names another Bunko's fresh lease, and ignores this machine's own.

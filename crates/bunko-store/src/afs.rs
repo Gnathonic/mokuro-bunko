@@ -264,12 +264,15 @@ impl OpenOptions {
         if local(p) {
             return tokio::fs::OpenOptions::from(self.0.to_std()).open(p).await;
         }
+        // A remote store's write-open is a local staging file (spec §3.3), written
+        // here at local speed and published later; a read-open streams from the
+        // provider and has no local file (`File::open` serves those).
         let (p, o) = (p.to_path_buf(), self.0.clone());
         let f = blocking(move || o.open(&p)).await?;
-        f.into_std().map(tokio::fs::File::from_std).ok_or_else(|| {
+        f.into_local().map(tokio::fs::File::from_std).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::Unsupported,
-                "this store has no local file to open",
+                "this store has no local file to open (open it with afs::File::open)",
             )
         })
     }

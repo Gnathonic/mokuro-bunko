@@ -135,6 +135,8 @@ pub trait CloudStore: Send + Sync {
     fn release_lease(&self, timeout: Duration) -> io::Result<bool>;
     /// The lease's latest event (`None`: no lease runs yet).
     fn lease_event(&self) -> Option<bunko_remote::status::LeaseEvent>;
+    /// What is left of this Bunko's first-claim settle wait, while it runs (§9.2).
+    fn lease_claiming_left(&self) -> Option<Duration>;
     /// The admin's Take over (blocking).
     fn take_over(&self, timeout: Duration) -> io::Result<()>;
     /// The provider's storage quota (one call).
@@ -190,6 +192,9 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     }
     fn lease_event(&self) -> Option<bunko_remote::status::LeaseEvent> {
         self.lease().map(|l| l.event())
+    }
+    fn lease_claiming_left(&self) -> Option<Duration> {
+        self.lease().and_then(|l| l.claiming_left())
     }
     fn take_over(&self, timeout: Duration) -> io::Result<()> {
         RemoteStore::take_over_lease(self, timeout)
@@ -416,7 +421,7 @@ impl StoreHandle {
         let lease = self
             .store
             .as_ref()
-            .map(|s| lease_json(s.lease_event(), &s.instance_id()));
+            .map(|s| lease_json(s.lease_event(), s.lease_claiming_left(), &s.instance_id()));
         let problems = storage_problems(self, &health, conflicts.len());
         json!({
             "backend": self.backend.as_str(),
@@ -514,7 +519,11 @@ fn outbox_json(ops: &[bunko_remote::outbox::OpSummary]) -> Value {
 }
 
 /// The lease as the Storage panel shows it (holder, epoch, last seen).
-fn lease_json(ev: Option<bunko_remote::status::LeaseEvent>, ours: &str) -> Value {
+fn lease_json(
+    ev: Option<bunko_remote::status::LeaseEvent>,
+    claiming_left: Option<Duration>,
+    ours: &str,
+) -> Value {
     use bunko_remote::status::LeaseEvent;
     let holder = |m: &bunko_remote::status::Marker| {
         json!({
@@ -528,7 +537,15 @@ fn lease_json(ev: Option<bunko_remote::status::LeaseEvent>, ours: &str) -> Value
     };
     match ev {
         None => json!({"state": "not-started", "can_take_over": false}),
-        Some(LeaseEvent::Claiming) => json!({"state": "claiming", "can_take_over": false}),
+        // This Bunko's own first-claim settle wait (§9.2 step 1.2): how long is left,
+        // as the bridge's 503 says it (and its Retry-After).
+        Some(LeaseEvent::Claiming) => match claiming_left {
+            Some(left) => json!({"state": "claiming", "can_take_over": false,
+                "claiming_left_s": left.as_secs().max(1),
+                "detail": format!("This Bunko is still claiming the library: about {} left",
+                    bunko_remote::status::about(left))}),
+            None => json!({"state": "claiming", "can_take_over": false}),
+        },
         Some(LeaseEvent::Acquired) => json!({"state": "held", "can_take_over": false,
             "holder": {"instance_id": ours, "ours": true}}),
         Some(LeaseEvent::Standby { holder: m }) => {

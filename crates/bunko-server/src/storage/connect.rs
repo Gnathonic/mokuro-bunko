@@ -1464,8 +1464,11 @@ impl Connector {
         let form = req.webdav.unwrap_or_default();
         let url = form.url.trim().to_string();
         let user = form.username.trim().to_string();
-        if url.starts_with("http://") && !form.allow_http {
-            return Err("http:// sends the password unencrypted: use https://, or tick \"Allow http\" for a server on your own network".into());
+        // A server on this machine (localhost, 127.0.0.0/8, ::1) is exempt: its http
+        // never leaves the host.
+        let loopback = bunko_core::config::is_loopback_http_url(&url);
+        if url.to_ascii_lowercase().starts_with("http://") && !form.allow_http && !loopback {
+            return Err("http:// sends the password unencrypted: use https://, or tick \"Allow http\" for a server on your own network (a server on this computer, localhost or 127.0.0.1, needs neither)".into());
         }
         let auth = Auth::WebDav {
             url: url.clone(),

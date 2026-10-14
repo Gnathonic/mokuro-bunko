@@ -13,6 +13,11 @@ pub trait RemoteFile: Read + Write + Seek + Send + fmt::Debug {
     fn metadata(&self) -> io::Result<Meta>;
     fn sync_all(&self) -> io::Result<()>;
     fn set_len(&self, len: u64) -> io::Result<()>;
+    /// The local file this handle writes, when it is one (a remote store's staging
+    /// file, spec §3.3 `open_with`): the bytes written to it are the staged bytes a
+    /// later `publish` takes. Anything else (a stream from the provider) gives itself
+    /// back.
+    fn into_local(self: Box<Self>) -> Result<std::fs::File, Box<dyn RemoteFile>>;
 }
 
 /// `std::fs::File`, or a remote store's file.
@@ -96,6 +101,15 @@ impl File {
         match self {
             File::Std(f) => Some(f),
             File::Remote(_) => None,
+        }
+    }
+
+    /// A local file to write through: `Std` as it is, a remote store's staging file
+    /// ([`RemoteFile::into_local`]); anything else is given back.
+    pub fn into_local(self) -> Result<std::fs::File, File> {
+        match self {
+            File::Std(f) => Ok(f),
+            File::Remote(f) => f.into_local().map_err(File::Remote),
         }
     }
 
