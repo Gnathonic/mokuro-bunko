@@ -64,6 +64,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(library_connect_account),
         )
         .route(
+            "/app/api/library/connect/paste",
+            post(library_connect_paste),
+        )
+        .route(
             "/app/api/library/connect/create",
             post(library_connect_create),
         )
@@ -99,8 +103,9 @@ async fn library_storage(State(state): S) -> Response {
     }
 }
 
-/// `POST /app/api/library/connect` (a `ConnectRequest`): the device flow unless the
-/// body asks otherwise; the server restarts onto the library once connected.
+/// `POST /app/api/library/connect` (a `ConnectRequest`): the flow the body names (the
+/// CLI decides: browser, code or pasted address); the server restarts onto the
+/// library once connected.
 async fn library_connect(State(state): S, Json(body): Json<Value>) -> Response {
     let s = match storage_of(&state) {
         Ok(s) => s,
@@ -114,7 +119,8 @@ async fn library_connect(State(state): S, Json(body): Json<Value>) -> Response {
         "[STORAGE] library connect {} (local control API)",
         req.provider
     );
-    // This listener is loopback only; a terminal never opens a browser here.
+    // This listener is loopback only: the terminal shares the machine with the
+    // server's loopback redirect, and opens the browser itself.
     let origin = bunko_server::storage::connect::RequestOrigin::cli();
     match s.connect(req, origin, true) {
         Ok(st) => ok(st.as_json()),
@@ -136,6 +142,22 @@ async fn library_connect_cancel(State(state): S) -> Response {
             ok(s.connector().status().as_json())
         }
         Err(r) => r,
+    }
+}
+
+/// `POST /app/api/library/connect/paste` `{url}`: the address the browser ended on
+/// (`library connect` asks for it on the terminal). Never logged.
+async fn library_connect_paste(State(state): S, Json(body): Json<Value>) -> Response {
+    let s = match storage_of(&state) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let Some(url) = body["url"].as_str() else {
+        return bad("url (the address the browser ended on) is required");
+    };
+    match s.connector().paste(url.to_string()).await {
+        Ok(st) => ok(st.as_json()),
+        Err(e) => bad(e),
     }
 }
 

@@ -208,8 +208,161 @@ pub fn describe(v: &Value, source: &str) -> Vec<String> {
 // With a server running on this storage, both ask it through its local control API
 // (`/app/api/library/...`, the control token as a bearer, loopback http only): the
 // server runs the sign-in, holds the store, and restarts onto the result. Otherwise
-// they run here, on the same code. Either way only the device flow's code and the
-// sign-in's state are printed: no token, password or session blob ever is.
+// they run here, on the same code. Either way only the device flow's code, the
+// sign-in address and the sign-in's state are printed: no token, password or session
+// blob ever is, and a pasted redirect address is sent once and not kept.
+//
+// The terminal picks the OAuth flow ([`cli_flow`]): the browser on a desktop session,
+// else a code (Drive) or the pasted redirect address (OneDrive: Microsoft refuses
+// device codes for personal accounts).
+
+/// How `library connect` signs in to Google Drive or OneDrive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CliFlow {
+    /// The loopback redirect: a browser on this machine comes back to Bunko. `open`:
+    /// the terminal opens it (a desktop session); the address is printed either way.
+    Browser { open: bool },
+    /// A code entered on any device.
+    Device,
+    /// Sign in on any device, paste the address the browser ends on back here.
+    Paste,
+}
+
+impl CliFlow {
+    /// The `flow` of the connect request.
+    pub fn as_request(self) -> &'static str {
+        match self {
+            CliFlow::Browser { .. } => "loopback",
+            CliFlow::Device => "device",
+            CliFlow::Paste => "paste",
+        }
+    }
+}
+
+/// What this terminal can do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Here {
+    /// A browser can be opened here ([`desktop_session`]).
+    pub desktop: bool,
+    /// `$BROWSER` names a browser (used with --browser even without a desktop).
+    pub browser_var: bool,
+    /// stdin is a terminal (a pasted address can be asked for).
+    pub interactive: bool,
+}
+
+impl Here {
+    fn now() -> Here {
+        let var = |k: &str| std::env::var(k).ok();
+        Here {
+            desktop: desktop_session(std::env::consts::OS, var),
+            browser_var: var("BROWSER").is_some_and(|v| !v.trim().is_empty()),
+            interactive: std::io::stdin().is_terminal(),
+        }
+    }
+}
+
+/// A browser can be opened on this machine: a desktop session (macOS and Windows
+/// always; elsewhere DISPLAY or WAYLAND_DISPLAY), and not over SSH.
+pub fn desktop_session(os: &str, var: impl Fn(&str) -> Option<String>) -> bool {
+    let set = |k: &str| var(k).is_some_and(|v| !v.is_empty());
+    if set("SSH_CONNECTION") || set("SSH_CLIENT") || set("SSH_TTY") {
+        return false;
+    }
+    match os {
+        "macos" | "windows" => true,
+        _ => set("DISPLAY") || set("WAYLAND_DISPLAY"),
+    }
+}
+
+/// The flow `library connect` asks for (`None`: MEGA and WebDAV have a form).
+pub fn cli_flow(a: &crate::cli::LibraryConnectArgs, here: Here) -> Result<Option<CliFlow>, Fail> {
+    use crate::cli::CloudProvider;
+    let oauth = matches!(a.provider, CloudProvider::Gdrive | CloudProvider::Onedrive);
+    if !oauth {
+        if a.browser || a.device || a.paste {
+            return Err(Fail::msg(
+                "--browser, --device and --paste apply to gdrive and onedrive only",
+            ));
+        }
+        return Ok(None);
+    }
+    let paste = || {
+        if here.interactive {
+            Ok(Some(CliFlow::Paste))
+        } else {
+            Err(Fail::msg(format!(
+                "signing in to {} here means pasting the address the browser ends on: run this on a terminal (docker exec -it …){}",
+                if a.provider == CloudProvider::Onedrive {
+                    "OneDrive"
+                } else {
+                    "Google Drive"
+                },
+                if a.provider == CloudProvider::Onedrive {
+                    ", or pass --device for a work or school account"
+                } else {
+                    ", or pass --device for a sign-in code"
+                }
+            )))
+        }
+    };
+    if a.device {
+        return Ok(Some(CliFlow::Device));
+    }
+    if a.paste {
+        return paste();
+    }
+    if a.browser {
+        return Ok(Some(CliFlow::Browser {
+            open: here.desktop || here.browser_var,
+        }));
+    }
+    if here.desktop {
+        return Ok(Some(CliFlow::Browser { open: true }));
+    }
+    match a.provider {
+        CloudProvider::Onedrive => paste(),
+        _ => Ok(Some(CliFlow::Device)),
+    }
+}
+
+/// Open `url` in a browser: `$BROWSER` first (a `:`-separated list of commands, `%s`
+/// standing for the URL, else it is the last argument), then the desktop's opener.
+/// The URL is never logged.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    if let Some(list) = std::env::var_os("BROWSER").filter(|v| !v.is_empty()) {
+        let list = list.to_string_lossy().into_owned();
+        let entries: Vec<&str> = if cfg!(windows) {
+            vec![list.as_str()]
+        } else {
+            list.split(':').collect()
+        };
+        for entry in entries {
+            let mut parts: Vec<String> = entry.split_whitespace().map(str::to_string).collect();
+            if parts.is_empty() {
+                continue;
+            }
+            if parts.iter().any(|p| p.contains("%s")) {
+                for p in &mut parts {
+                    *p = p.replace("%s", url);
+                }
+            } else {
+                parts.push(url.to_string());
+            }
+            let mut cmd = std::process::Command::new(&parts[0]);
+            cmd.args(&parts[1..])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Ok(mut child) = cmd.spawn() {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                return Ok(());
+            }
+        }
+    }
+    super::gui::open_browser(url)
+}
 
 /// The request `library connect` sends, from its flags, the configuration and what
 /// was asked on the terminal. `secret` is the WebDAV app password or the MEGA
@@ -219,6 +372,7 @@ pub fn connect_request(
     config: &bunko_core::Config,
     secret: Option<String>,
     totp: Option<String>,
+    flow: Option<CliFlow>,
 ) -> Result<bunko_server::storage::connect::ConnectRequest, Fail> {
     use crate::cli::{CloudProvider, ReaderPairing};
     use bunko_server::storage::connect::{ConnectRequest, MegaForm, WebDavForm};
@@ -243,7 +397,7 @@ pub fn connect_request(
             ReaderPairing::Beta => "beta".into(),
         }),
         folder: a.folder.clone(),
-        flow: Some("device".into()),
+        flow: flow.map(|f| f.as_request().to_string()),
         use_this_account: a.use_this_account,
         ..ConnectRequest::default()
     };
@@ -310,6 +464,7 @@ fn webdav_secret(a: &crate::cli::LibraryConnectArgs) -> Result<String, Fail> {
 pub fn connect(ctx: &Ctx, a: crate::cli::LibraryConnectArgs) -> CmdResult {
     use crate::cli::CloudProvider;
     let config = cfgfile::load_effective(&ctx.config_path)?;
+    let flow = cli_flow(&a, Here::now())?;
     let (secret, totp) = match a.provider {
         CloudProvider::Webdav => (Some(webdav_secret(&a)?), None),
         CloudProvider::Mega => {
@@ -331,11 +486,41 @@ pub fn connect(ctx: &Ctx, a: crate::cli::LibraryConnectArgs) -> CmdResult {
         }
         _ => (None, None),
     };
-    let req = connect_request(&a, &config, secret, totp)?;
+    let req = connect_request(&a, &config, secret, totp, flow)?;
     let interactive = std::io::stdin().is_terminal();
+    let open = matches!(flow, Some(CliFlow::Browser { open: true }));
     match bunko_control::file::live_instance(&config.storage.base_path) {
-        Some(file) => connect_through_server(&file, req, a.create, interactive),
-        None => connect_here(ctx, req, a.create, interactive),
+        Some(file) => connect_through_server(&file, req, a.create, interactive, open),
+        None => connect_here(ctx, req, a.create, interactive, open),
+    }
+}
+
+/// Ask for the address the browser ended on until one is taken. `submit` answers
+/// `true` when it was taken or the sign-in is over (its state says how), `false` when
+/// it was refused (its reason printed): then the address is asked again.
+async fn ask_pasted<F, Fut>(mut submit: F) -> Result<(), Fail>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<bool, Fail>>,
+{
+    loop {
+        let line = tokio::task::spawn_blocking(|| {
+            crate::prompt::text_opts("Paste the address here", None, false)
+        })
+        .await
+        .map_err(Fail::msg)??;
+        if submit(line.trim().to_string()).await? {
+            return Ok(());
+        }
+    }
+}
+
+/// Open the browser on the loopback sign-in's address (once).
+fn open_sign_in(v: &Value) {
+    if let Some(url) = v["auth_url"].as_str()
+        && let Err(e) = open_in_browser(url)
+    {
+        println!("(The browser did not open: {e}. Open the address above by hand.)");
     }
 }
 
@@ -344,6 +529,8 @@ pub fn connect(ctx: &Ctx, a: crate::cli::LibraryConnectArgs) -> CmdResult {
 struct Printer {
     code: Option<String>,
     state: String,
+    /// The terminal opens the browser on the loopback sign-in.
+    opening: bool,
 }
 
 impl Printer {
@@ -385,12 +572,44 @@ impl Printer {
                 self.code = code;
             }
         } else if state != self.state {
+            let until = v["expires_at"]
+                .as_str()
+                .and_then(|t| t.get(11..16))
+                .map(|t| format!(" (until {t} UTC)"))
+                .unwrap_or_default();
+            let url = v["auth_url"].as_str().unwrap_or("?");
             match state.as_str() {
                 "checking" => out.push(format!("Checking {name}…")),
-                "browser" => out.push(format!(
-                    "Open this address in a browser on this computer to sign in: {}",
-                    v["auth_url"].as_str().unwrap_or("?")
-                )),
+                "browser" => {
+                    out.push(String::new());
+                    out.push(if self.opening {
+                        format!(
+                            "Opening the {name} sign-in page in your browser. If it does not open, open this address in a browser on this computer:"
+                        )
+                    } else {
+                        format!("To sign in to {name}, open this address in a browser on this computer:")
+                    });
+                    out.push(String::new());
+                    out.push(format!("    {url}"));
+                    out.push(String::new());
+                    out.push(format!("Waiting for the sign-in{until}…"));
+                }
+                "paste" => {
+                    let redirect = v["redirect_uri"].as_str().unwrap_or("http://localhost");
+                    out.push(String::new());
+                    out.push(format!(
+                        "To sign in to {name}, open this address in a browser on any device (a phone works):"
+                    ));
+                    out.push(String::new());
+                    out.push(format!("    {url}"));
+                    out.push(String::new());
+                    out.push(format!(
+                        "After you sign in, the browser ends on a page that does not load: {redirect}/?code=…"
+                    ));
+                    out.push(format!(
+                        "Copy that page's whole address from the address bar and paste it below{until}."
+                    ));
+                }
                 _ => {}
             }
         }
@@ -458,12 +677,16 @@ fn finished(v: &Value, use_this_account: bool) -> Result<bool, Fail> {
             "{} Run again with --use-this-account to switch.",
             v["message"].as_str().unwrap_or("another account")
         ))),
-        "failed" => Err(Fail::msg(
-            v["error"]
-                .as_str()
-                .unwrap_or("the sign-in failed")
-                .to_string(),
-        )),
+        "failed" => {
+            let error = v["error"].as_str().unwrap_or("the sign-in failed");
+            Err(Fail::msg(match v["suggest_flow"].as_str() {
+                Some(_) => format!(
+                    "{error}.\nRun it again without --device: `mokuro-bunko library connect {}` signs in through the browser on a desktop (--browser), or with the address pasted back elsewhere (--paste).",
+                    v["provider"].as_str().unwrap_or("onedrive")
+                ),
+                None => error.to_string(),
+            }))
+        }
         "stopped" | "cancelled" => Err(Fail::msg(
             v["message"]
                 .as_str()
@@ -517,6 +740,7 @@ fn connect_through_server(
     req: bunko_server::storage::connect::ConnectRequest,
     create: bool,
     interactive: bool,
+    open: bool,
 ) -> CmdResult {
     let use_this = req.use_this_account;
     let body = connect_body(&req);
@@ -546,8 +770,11 @@ fn connect_through_server(
             ));
         }
         let session = v["session"].as_u64();
-        let mut p = Printer::default();
-        let mut asked_account = false;
+        let mut p = Printer {
+            opening: open,
+            ..Printer::default()
+        };
+        let (mut asked_account, mut opened, mut pasted) = (false, false, false);
         let v = loop {
             let (_, v) = call(
                 &client,
@@ -563,6 +790,44 @@ fn connect_through_server(
             p.show(&v);
             if finished(&v, use_this)? {
                 break v;
+            }
+            if v["state"] == "browser" && open && !opened {
+                opened = true;
+                open_sign_in(&v);
+            }
+            if v["state"] == "paste" && !pasted {
+                pasted = true;
+                let client = &client;
+                ask_pasted(move |url| async move {
+                    let (status, r) = call(
+                        client,
+                        file,
+                        reqwest::Method::POST,
+                        "/app/api/library/connect/paste",
+                        Some(&json!({ "url": url })),
+                    )
+                    .await?;
+                    if status == 200 {
+                        return Ok(true);
+                    }
+                    println!(
+                        "{}",
+                        r["error"]
+                            .as_str()
+                            .unwrap_or("the server refused the address")
+                    );
+                    let (_, now) = call(
+                        client,
+                        file,
+                        reqwest::Method::GET,
+                        "/app/api/library/connect",
+                        None,
+                    )
+                    .await?;
+                    Ok(now["state"] != "paste" || now["session"].as_u64() != session)
+                })
+                .await?;
+                continue;
             }
             if v["state"] == "account-mismatch" && !asked_account {
                 asked_account = true;
@@ -656,6 +921,7 @@ fn connect_here(
     req: bunko_server::storage::connect::ConnectRequest,
     create: bool,
     interactive: bool,
+    open: bool,
 ) -> CmdResult {
     let control = local_control(ctx)?;
     let use_this = req.use_this_account;
@@ -669,13 +935,20 @@ fn connect_here(
             )
             .map_err(Fail::msg)?;
         let session = first.session;
-        let mut p = Printer::default();
-        let mut asked_account = false;
+        let mut p = Printer {
+            opening: open,
+            ..Printer::default()
+        };
+        let (mut asked_account, mut opened, mut pasted) = (false, false, false);
         let v = loop {
             let s = control
                 .connector()
                 .wait_for(
-                    |s| s.session != session || !s.in_progress() || s.state == "code",
+                    |s| {
+                        s.session != session
+                            || !s.in_progress()
+                            || matches!(s.state, "code" | "browser" | "paste")
+                    },
                     Duration::from_secs(1),
                 )
                 .await;
@@ -683,6 +956,26 @@ fn connect_here(
             p.show(&v);
             if finished(&v, use_this)? {
                 break v;
+            }
+            if s.state == "browser" && open && !opened {
+                opened = true;
+                open_sign_in(&v);
+            }
+            if s.state == "paste" && !pasted {
+                pasted = true;
+                let connector = control.connector();
+                ask_pasted(move |url| async move {
+                    match connector.paste(url).await {
+                        Ok(_) => Ok(true),
+                        Err(e) => {
+                            println!("{e}");
+                            let now = connector.status();
+                            Ok(now.state != "paste" || now.session != session)
+                        }
+                    }
+                })
+                .await?;
+                continue;
             }
             if s.state == "account-mismatch" && !asked_account {
                 asked_account = true;
@@ -997,14 +1290,14 @@ mod tests {
         let mut config = bunko_core::Config::default();
         // --reader is for Drive, --email for MEGA, the WebDAV flags for WebDAV.
         let a = connect_args(&["onedrive", "--reader", "beta"]);
-        assert!(connect_request(&a, &config, None, None).is_err());
+        assert!(connect_request(&a, &config, None, None, None).is_err());
         let a = connect_args(&["gdrive", "--email", "x@y"]);
-        assert!(connect_request(&a, &config, None, None).is_err());
+        assert!(connect_request(&a, &config, None, None, None).is_err());
         let a = connect_args(&["mega", "--url", "https://x"]);
-        assert!(connect_request(&a, &config, None, None).is_err());
-        // Drive: always the device flow from a terminal.
+        assert!(connect_request(&a, &config, None, None, None).is_err());
+        // Drive: the flow the terminal chose.
         let a = connect_args(&["gdrive", "--reader", "beta", "--folder", "manga"]);
-        let r = connect_request(&a, &config, None, None).unwrap();
+        let r = connect_request(&a, &config, None, None, Some(CliFlow::Device)).unwrap();
         assert_eq!(
             (r.provider.as_str(), r.reader.as_deref(), r.flow.as_deref()),
             ("gdrive", Some("beta"), Some("device"))
@@ -1014,8 +1307,8 @@ mod tests {
         config.storage.library.webdav.url = Some("https://nas.example/dav".into());
         config.storage.library.webdav.username = Some("me".into());
         let a = connect_args(&["webdav"]);
-        assert!(connect_request(&a, &config, None, None).is_err());
-        let r = connect_request(&a, &config, Some("app-secret".into()), None).unwrap();
+        assert!(connect_request(&a, &config, None, None, None).is_err());
+        let r = connect_request(&a, &config, Some("app-secret".into()), None, None).unwrap();
         let w = r.webdav.as_ref().unwrap();
         assert_eq!(
             (w.url.as_str(), w.username.as_str()),
@@ -1024,7 +1317,8 @@ mod tests {
         assert!(!format!("{r:?}").contains("app-secret"));
         // MEGA: the 2FA code is optional.
         let a = connect_args(&["mega", "--email", "me@example.com"]);
-        let r = connect_request(&a, &config, Some("hunter2".into()), Some(" ".into())).unwrap();
+        let r =
+            connect_request(&a, &config, Some("hunter2".into()), Some(" ".into()), None).unwrap();
         assert_eq!(r.mega.as_ref().unwrap().totp, None);
         assert!(!format!("{r:?}").contains("hunter2"));
     }
@@ -1102,6 +1396,230 @@ mod tests {
         );
     }
 
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k: &str| m.get(k).cloned()
+    }
+
+    #[test]
+    fn a_desktop_session_opens_the_browser_unless_over_ssh() {
+        assert!(desktop_session("linux", env(&[("DISPLAY", ":0")])));
+        assert!(desktop_session(
+            "linux",
+            env(&[("WAYLAND_DISPLAY", "wayland-0")])
+        ));
+        assert!(!desktop_session("linux", env(&[])));
+        assert!(!desktop_session("linux", env(&[("DISPLAY", "")])));
+        assert!(!desktop_session(
+            "linux",
+            env(&[
+                ("DISPLAY", "localhost:10.0"),
+                ("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
+            ])
+        ));
+        assert!(desktop_session("macos", env(&[])));
+        assert!(desktop_session("windows", env(&[])));
+        assert!(!desktop_session(
+            "macos",
+            env(&[("SSH_TTY", "/dev/ttys001")])
+        ));
+        assert!(!desktop_session("freebsd", env(&[("SSH_CLIENT", "x")])));
+    }
+
+    #[test]
+    fn the_terminal_picks_the_sign_in_flow() {
+        let desktop = Here {
+            desktop: true,
+            browser_var: false,
+            interactive: true,
+        };
+        let ssh = Here {
+            desktop: false,
+            browser_var: false,
+            interactive: true,
+        };
+        let piped = Here {
+            desktop: false,
+            browser_var: false,
+            interactive: false,
+        };
+        let flow = |args: &[&str], here: Here| cli_flow(&connect_args(args), here);
+        let browser = Some(CliFlow::Browser { open: true });
+        // A desktop: the browser, for both providers.
+        assert_eq!(flow(&["onedrive"], desktop).unwrap(), browser);
+        assert_eq!(flow(&["gdrive"], desktop).unwrap(), browser);
+        // Headless: Drive gets a code, OneDrive the pasted address.
+        assert_eq!(flow(&["gdrive"], ssh).unwrap(), Some(CliFlow::Device));
+        assert_eq!(flow(&["onedrive"], ssh).unwrap(), Some(CliFlow::Paste));
+        // Pasting needs a terminal; a pipe gets a clear refusal for OneDrive.
+        assert_eq!(flow(&["gdrive"], piped).unwrap(), Some(CliFlow::Device));
+        let e = flow(&["onedrive"], piped).unwrap_err().to_string();
+        assert!(
+            e.contains("docker exec -it") && e.contains("--device"),
+            "{e}"
+        );
+        // The flags win.
+        assert_eq!(
+            flow(&["onedrive", "--device"], desktop).unwrap(),
+            Some(CliFlow::Device)
+        );
+        assert_eq!(
+            flow(&["onedrive", "--paste"], desktop).unwrap(),
+            Some(CliFlow::Paste)
+        );
+        assert_eq!(
+            flow(&["gdrive", "--paste"], ssh).unwrap(),
+            Some(CliFlow::Paste)
+        );
+        assert!(flow(&["gdrive", "--paste"], piped).is_err());
+        assert_eq!(
+            flow(&["onedrive", "--device"], piped).unwrap(),
+            Some(CliFlow::Device)
+        );
+        // --browser without a desktop prints the address; with $BROWSER it opens it.
+        assert_eq!(
+            flow(&["onedrive", "--browser"], ssh).unwrap(),
+            Some(CliFlow::Browser { open: false })
+        );
+        let ssh_browser = Here {
+            browser_var: true,
+            ..ssh
+        };
+        assert_eq!(
+            flow(&["onedrive", "--browser"], ssh_browser).unwrap(),
+            browser
+        );
+        // $BROWSER alone does not make a desktop (a global BROWSER over SSH).
+        assert_eq!(
+            flow(&["onedrive"], ssh_browser).unwrap(),
+            Some(CliFlow::Paste)
+        );
+        assert_eq!(flow(&["gdrive", "--browser"], desktop).unwrap(), browser);
+        // Forms have no flow, and refuse the flags.
+        assert_eq!(flow(&["mega", "--email", "a@b"], desktop).unwrap(), None);
+        assert!(flow(&["webdav", "--device"], desktop).is_err());
+        assert!(flow(&["mega", "--browser"], desktop).is_err());
+        // One flag at most.
+        assert!(parse(&["library", "connect", "onedrive", "--browser", "--device"]).is_err());
+        assert!(parse(&["library", "connect", "onedrive", "--device", "--paste"]).is_err());
+        assert!(parse(&["library", "connect", "onedrive", "--paste", "--browser"]).is_err());
+        // What each flow asks the server for.
+        assert_eq!(CliFlow::Browser { open: false }.as_request(), "loopback");
+        assert_eq!(CliFlow::Device.as_request(), "device");
+        assert_eq!(CliFlow::Paste.as_request(), "paste");
+        let r = connect_request(
+            &connect_args(&["onedrive"]),
+            &bunko_core::Config::default(),
+            None,
+            None,
+            Some(CliFlow::Paste),
+        )
+        .unwrap();
+        assert_eq!(r.flow.as_deref(), Some("paste"));
+    }
+
+    /// The browser and paste flows print the address and what to do with it.
+    #[test]
+    fn the_terminal_shows_the_sign_in_address() {
+        let browser = json!({"state": "browser", "provider": "onedrive",
+            "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?x=1",
+            "expires_at": "2026-10-14T10:05:00Z"});
+        let mut p = Printer {
+            opening: true,
+            ..Printer::default()
+        };
+        let lines = p.lines(&browser).join("\n");
+        assert!(
+            lines.contains("Opening the OneDrive sign-in page"),
+            "{lines}"
+        );
+        assert!(
+            lines
+                .contains("    https://login.microsoftonline.com/common/oauth2/v2.0/authorize?x=1"),
+            "{lines}"
+        );
+        assert!(lines.contains("until 10:05 UTC"), "{lines}");
+        assert!(p.lines(&browser).is_empty(), "printed once");
+        let lines = Printer::default().lines(&browser).join("\n");
+        assert!(
+            lines.contains("open this address in a browser on this computer"),
+            "{lines}"
+        );
+
+        let paste = json!({"state": "paste", "provider": "onedrive",
+            "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?y=2",
+            "redirect_uri": "http://localhost:51234", "expires_at": "2026-10-14T10:10:00Z"});
+        let mut p = Printer::default();
+        let lines = p.lines(&paste).join("\n");
+        assert!(lines.contains("on any device"), "{lines}");
+        assert!(
+            lines
+                .contains("    https://login.microsoftonline.com/common/oauth2/v2.0/authorize?y=2")
+        );
+        assert!(lines.contains("http://localhost:51234/?code=…"), "{lines}");
+        assert!(
+            lines.contains("paste it below (until 10:10 UTC)"),
+            "{lines}"
+        );
+        assert!(p.lines(&paste).is_empty());
+
+        // AADSTS70002: the failure says what to run instead.
+        let failed = json!({"state": "failed", "provider": "onedrive", "suggest_flow": "loopback",
+            "error": "Personal Microsoft accounts can't sign in with a code: sign in through the browser (or paste the redirect URL)"});
+        let e = finished(&failed, false).unwrap_err().to_string();
+        assert!(
+            e.starts_with("Personal Microsoft accounts can't sign in with a code"),
+            "{e}"
+        );
+        assert!(
+            e.contains("library connect onedrive") && e.contains("--paste"),
+            "{e}"
+        );
+        let plain = json!({"state": "failed", "error": "nope"});
+        assert_eq!(finished(&plain, false).unwrap_err().to_string(), "nope");
+    }
+
+    /// $BROWSER is tried before the desktop opener, with `%s` standing for the URL.
+    #[cfg(unix)]
+    #[test]
+    fn browser_var_opens_the_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("opened");
+        let script = dir.path().join("record");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}.tmp' && mv '{0}.tmp' '{0}'\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let url = "https://login.example/authorize?a=1&b=2";
+        // SAFETY: no other test reads or writes BROWSER.
+        unsafe {
+            std::env::set_var(
+                "BROWSER",
+                format!("/nonexistent/browser:{} --new-tab %s", script.display()),
+            )
+        };
+        let opened = open_in_browser(url);
+        unsafe { std::env::remove_var("BROWSER") };
+        opened.unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while !out.exists() && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            format!("--new-tab\n{url}\n")
+        );
+    }
+
     /// With a server running on this storage, `library connect` asks it through the
     /// control API (what `docker exec` does): the token as a bearer, loopback only, the
     /// device flow requested, the server's sign-in followed to its end.
@@ -1166,8 +1684,15 @@ mod tests {
         };
         assert_eq!(control_base(&file), format!("http://127.0.0.1:{port}"));
         let a = connect_args(&["gdrive", "--reader", "beta"]);
-        let req = connect_request(&a, &bunko_core::Config::default(), None, None).unwrap();
-        connect_through_server(&file, req, false, false).unwrap();
+        let req = connect_request(
+            &a,
+            &bunko_core::Config::default(),
+            None,
+            None,
+            Some(CliFlow::Device),
+        )
+        .unwrap();
+        connect_through_server(&file, req, false, false, false).unwrap();
         let seen = seen.lock().unwrap();
         assert_eq!(seen[0].0, "POST");
         assert_eq!(seen[0].1.as_deref(), Some("Bearer the-control-token"));

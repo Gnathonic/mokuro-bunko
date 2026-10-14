@@ -134,7 +134,7 @@ front (`--config`).
 | `library` | [Storage](/_admin#storage): where the library lives and how its store is doing (the same `library.storage` block as `/_admin/api/status`); `Tray → "Open library"` opens it when readers do not connect to this Bunko |
 | `library status` | [Storage](/_admin#storage) → Library (health, sync, store, quota), Uploads, caches and conflicts, Lease; the tray's library line ("Google Drive · synced 1 min ago", "Syncing 412/1000", "Needs sign-in") |
 | `library status --json` | CLI-only because it is the same report for scripts ([Storage](/_admin#storage) reads it as `/_admin/api/storage`) |
-| `library connect` | [setup](/setup) → Where does your library live? → Connect → Check; later [Storage](/_admin#storage) → Connect a library… / Sign in again… (`Tray → "Sign in again…"` opens it). One Connect button: a browser on the server signs in through the loopback page, anything else gets a code to enter on any device |
+| `library connect` | [setup](/setup) → Where does your library live? → Connect → Check; later [Storage](/_admin#storage) → Connect a library… / Sign in again… (`Tray → "Sign in again…"` opens it). One Connect button: a browser on the server signs in through the loopback page; elsewhere Google Drive gets a code to enter on any device, and OneDrive the sign-in page plus a field for the address the browser ends on |
 | `library connect <PROVIDER>` | [setup](/setup) → Where does your library live? (This computer, Google Drive, OneDrive, MEGA, A WebDAV server); [Storage](/_admin#storage) → Connect → Where does your library live? |
 | `library connect --reader` | [setup](/setup) → Connect → "Which Mokuro Reader do you use?" (reader.mokuro.app or the beta); [Storage](/_admin#storage) → Change pairing… (a Disconnect, then a Connect with the other reader) |
 | `library connect --folder` | CLI-only because the pages connect the reader's own `mokuro-reader/` folder; another name is for a folder made by hand (`storage.library.folder`) |
@@ -145,6 +145,9 @@ front (`--config`).
 | `library connect --email` | [setup](/setup) → Connect → Email (MEGA; the password and two-factor code beside it); [Storage](/_admin#storage) → MEGA |
 | `library connect --create` | [setup](/setup) → Check → Create mokuro-reader/; [Storage](/_admin#storage) → Connect → Create mokuro-reader/ |
 | `library connect --use-this-account` | [setup](/setup) → Connect → "Use this account's library instead"; [Storage](/_admin#storage) → Connect → the same choice |
+| `library connect --browser` | [setup](/setup) → Connect (opened on the server itself: the sign-in page opens in a new tab); [Storage](/_admin#storage) → Connect from `localhost` |
+| `library connect --device` | [setup](/setup) → Connect → "Use a code instead" / "Use a sign-in code instead (work or school accounts)"; [Storage](/_admin#storage) → Connect → "Use a code instead" / "Use a sign-in code (work or school)" |
+| `library connect --paste` | [setup](/setup) → Connect → OneDrive from another device → The address the browser ended on → Finish signing in; [Storage](/_admin#storage) → Connect → OneDrive → the same field |
 | `library disconnect` | [Storage](/_admin#storage) → Disconnect (uploads what is still owed first; nothing in the cloud is deleted) |
 | `library disconnect --wait` | [Storage](/_admin#storage) → Disconnect → Wait 5 minutes (shown when results are still owed) |
 | `library disconnect --export` | [Storage](/_admin#storage) → Disconnect → Export to a folder… |
