@@ -105,6 +105,9 @@ struct St {
     fragment_puts: usize,
     monitors: HashMap<String, Monitor>,
     send_ctag: bool,
+    /// The download's CTag in the storage host's own form, `{id},N,1` (personal
+    /// OneDrive, seen live 2026-10-14), not the JSON `c:{id},N`.
+    storage_ctag: bool,
     ignore_range: bool,
     permanent_delete: bool,
     quota_total: i64,
@@ -383,7 +386,11 @@ async fn handle(
                 let etag = st.etag(id);
                 r.headers_mut().insert(header::ETAG, etag.parse().unwrap());
                 if st.send_ctag {
-                    let ctag = st.ctag(id);
+                    let ctag = if st.storage_ctag {
+                        format!("{{{id}}},{},1", st.items[*id].ctag_n)
+                    } else {
+                        st.ctag(id)
+                    };
                     r.headers_mut().insert("ctag", ctag.parse().unwrap());
                 }
                 r
@@ -778,6 +785,7 @@ impl Mock {
             fragment_puts: 0,
             monitors: HashMap::new(),
             send_ctag: true,
+            storage_ctag: false,
             ignore_range: false,
             permanent_delete: true,
             quota_total: 1 << 30,
@@ -1316,6 +1324,32 @@ async fn pinned_reads_compare_the_ctag() {
     let e2 = last.unwrap().unwrap_err();
     assert_eq!(
         e2.get_ref().unwrap().downcast_ref::<BErr>(),
+        Some(&BErr::PreconditionFailed)
+    );
+}
+
+/// Personal OneDrive's download host sends `CTag: {id},N,1`, a form the JSON `cTag`
+/// (`"c:{id},N"`) never matches: the read is re-checked after the last byte instead of
+/// refused, and a changed file still ends in `PreconditionFailed`.
+#[tokio::test]
+async fn pinned_reads_take_the_storage_hosts_ctag_form() {
+    let e = env().await;
+    let l = library(&e.mock);
+    e.mock.0.lock().storage_ctag = true;
+    let pin = e.be.stat(&l.v1).await.unwrap().unwrap().pin.unwrap();
+    let got = read_to_vec(e.be.read(&l.v1, Some(&pin), None).await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(got, pattern(3000, 1));
+    e.mock.rewrite(&l.v1, b"changed");
+    let mut body = e.be.read(&l.v1, Some(&pin), None).await.unwrap();
+    let mut last = None;
+    while let Some(chunk) = body.next().await {
+        last = Some(chunk);
+    }
+    let err = last.unwrap().unwrap_err();
+    assert_eq!(
+        err.get_ref().unwrap().downcast_ref::<BErr>(),
         Some(&BErr::PreconditionFailed)
     );
 }

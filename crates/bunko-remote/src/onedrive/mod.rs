@@ -649,8 +649,11 @@ impl Inner {
             let Some(pin) = pin else {
                 return Ok(media_body(resp, range));
             };
-            // Pinned read (D24): the download's CTag/ETag against the expected cTag.
-            let ctag = header_str(&resp, "ctag");
+            // Pinned read (D24): the download's CTag/ETag against the expected cTag. Only
+            // a CTag in the JSON form (`c:…`) compares: personal OneDrive's download host
+            // sends its own `{id},N,1`, which is no evidence either way, so that read is
+            // re-checked after the last byte like one without a CTag.
+            let ctag = header_str(&resp, "ctag").filter(|c| bare_tag(c).starts_with("c:"));
             let etag = header_str(&resp, "etag");
             return match ctag {
                 Some(c) if bare_tag(&c) == bare_tag(pin) => Ok(media_body(resp, range)),
