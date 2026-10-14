@@ -20,7 +20,10 @@
 //! Compiler/Status elsewhere: overwrite the foreign version; Upgrade, Dav, Admin:
 //! CONFLICT, which a Sync caller sees as `bunko_store::is_conflict`). COMMITTED
 //! writes the ledger row, then the node into the index (so the feed's echo changes
-//! nothing and runs no hooks), fills the blob cache, and emits the event. An upload
+//! nothing and runs no hooks), fills the blob cache, and emits the event. A move or
+//! trash holds the commit window (`commit_window`) from its provider call through
+//! COMMITTED, so a feed poll that lands in between waits for the ledger row instead
+//! of taking the change for a reader's. An upload
 //! with an uncertain outcome is reconciled at the next PREFLIGHT: a node at the
 //! destination is the op's own commit only with a content proof (the provider's
 //! sha256 or md5 equal to the staged bytes', or a pinned re-download of a small
@@ -466,6 +469,13 @@ fn rebase_pid(pid: &str, old: &str, new: &str) -> Option<String> {
 // ---- persistence ------------------------------------------------------------------
 
 impl<B: Backend> Core<B> {
+    /// The shared side of the commit window ([`Core::commit_gate`]): taken just
+    /// before a provider call that changes a node, held through its COMMITTED
+    /// rewrite of the ledger and the index.
+    pub(crate) async fn commit_window(&self) -> tokio::sync::OwnedRwLockReadGuard<()> {
+        self.commit_gate.clone().read_owned().await
+    }
+
     pub(crate) fn outbox_dir(&self) -> PathBuf {
         self.dir.join("outbox")
     }
@@ -1605,12 +1615,18 @@ impl<B: Backend> Core<B> {
         let new_parent =
             (node.parent.as_deref() != Some(parent.as_str())).then_some(parent.as_str());
         let new_name = (nfc(&node.name_raw) != name).then_some(name.as_str());
+        let window = self.commit_window().await;
         match self.backend.update(&pid, new_parent, new_name, None).await {
             Ok(n) => {
                 self.fail_at("uploaded")?;
-                self.commit_move(op, &src, &pid, n).map(Some)
+                let step = self.commit_move(op, &src, &pid, n).map(Some);
+                drop(window);
+                step
             }
-            Err(e) => Ok(self.on_error(op, e, None).await),
+            Err(e) => {
+                drop(window);
+                Ok(self.on_error(op, e, None).await)
+            }
         }
     }
 
@@ -1725,15 +1741,21 @@ impl<B: Backend> Core<B> {
             .as_ref()
             .filter(|n| self.caps.cas_overwrite && !n.is_dir)
             .map(|n| n.cver.clone());
+        let window = self.commit_window().await;
         let r = self
             .discard_node(&pid, op.kind == OpKind::Delete, if_cver.as_deref())
             .await;
         match r {
             Ok(_) | Err(BErr::NotFound) => {
                 self.fail_at("uploaded")?;
-                self.commit_trash(op, &pid, node).map(Some)
+                let step = self.commit_trash(op, &pid, node).map(Some);
+                drop(window);
+                step
             }
-            Err(e) => Ok(self.on_error(op, e, None).await),
+            Err(e) => {
+                drop(window);
+                Ok(self.on_error(op, e, None).await)
+            }
         }
     }
 

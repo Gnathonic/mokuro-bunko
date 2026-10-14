@@ -148,6 +148,7 @@ pub struct FakeBackend {
     notify: Notify,
     list_hook: Mutex<Option<ListHook>>,
     call_hook: Mutex<Option<CallHook>>,
+    after_hook: Mutex<Option<CallHook>>,
     clock0: Instant,
 }
 
@@ -290,6 +291,7 @@ impl FakeBackend {
             notify: Notify::new(),
             list_hook: Mutex::new(None),
             call_hook: Mutex::new(None),
+            after_hook: Mutex::new(None),
             clock0: Instant::now(),
         }
     }
@@ -348,6 +350,13 @@ impl FakeBackend {
     /// Every backend call runs `hook` first (see [`CallHook`]); `None` removes it.
     pub fn set_call_hook(&self, hook: Option<CallHook>) {
         *self.call_hook.lock() = hook;
+    }
+
+    /// Every mutating call that succeeded runs `hook` after its change is in the
+    /// fake (and in the change log, push waiters woken) and before it answers: a
+    /// slow answer, so a test can let the feed poll in between. `None` removes it.
+    pub fn set_after_hook(&self, hook: Option<CallHook>) {
+        *self.after_hook.lock() = hook;
     }
 
     /// The names of successful uploads (new files and new versions), in order.
@@ -579,14 +588,22 @@ impl FakeBackend {
         Ok(())
     }
 
-    /// Run a mutation under the lock, then wake push waiters.
+    /// Run a mutation under the lock, then wake push waiters (and, when it
+    /// succeeded, run the after-hook).
     fn mutate<T>(
         &self,
+        op: FakeOp,
         f: impl FnOnce(&mut State, &Profile, i64) -> Result<T, BErr>,
     ) -> Result<T, BErr> {
         let now = self.now_ms();
         let out = f(&mut self.state.lock(), &self.profile, now);
         self.notify.notify_waiters();
+        if out.is_ok() {
+            let hook = self.after_hook.lock().clone();
+            if let Some(h) = hook {
+                h(op);
+            }
+        }
         out
     }
 }
@@ -1028,7 +1045,7 @@ impl Backend for FakeBackend {
 
     async fn create_root(&self, name: &str) -> Result<RNode, BErr> {
         self.enter(FakeOp::CreateRoot).await?;
-        self.mutate(|st, prof, now| {
+        self.mutate(FakeOp::CreateRoot, |st, prof, now| {
             let top = account_root(prof.ids);
             if st.name_taken(prof, &top, name, None).is_some() {
                 return Err(BErr::NameConflict);
@@ -1209,7 +1226,7 @@ impl Backend for FakeBackend {
     ) -> Result<RNode, BErr> {
         self.enter(FakeOp::Upload).await?;
         let mut data = load_source(src)?;
-        self.mutate(|st, prof, now| {
+        self.mutate(FakeOp::Upload, |st, prof, now| {
             if st.mangle_uploads > 0 && !data.is_empty() {
                 st.mangle_uploads -= 1;
                 data = data.slice(..data.len() - 1);
@@ -1253,7 +1270,7 @@ impl Backend for FakeBackend {
 
     async fn mkdir(&self, parent: &str, name: &str, _op: &OpCtx) -> Result<RNode, BErr> {
         self.enter(FakeOp::Mkdir).await?;
-        self.mutate(|st, prof, now| {
+        self.mutate(FakeOp::Mkdir, |st, prof, now| {
             st.live_dir(parent)?;
             if st.name_taken(prof, parent, name, None).is_some() {
                 return Err(BErr::NameConflict);
@@ -1272,7 +1289,7 @@ impl Backend for FakeBackend {
         if_cver: Option<&str>,
     ) -> Result<RNode, BErr> {
         self.enter(FakeOp::Update).await?;
-        self.mutate(|st, prof, _now| {
+        self.mutate(FakeOp::Update, |st, prof, _now| {
             let n = st.live(pid).ok_or(BErr::NotFound)?;
             let new_parent = parent
                 .map(str::to_string)
@@ -1302,7 +1319,7 @@ impl Backend for FakeBackend {
         if !self.profile.caps.server_copy {
             return Err(BErr::Unsupported);
         }
-        self.mutate(|st, prof, now| {
+        self.mutate(FakeOp::Copy, |st, prof, now| {
             let data = match st.live(pid) {
                 Some(n) if n.is_dir => return Err(BErr::Unsupported),
                 Some(n) => n.data.clone(),
@@ -1321,7 +1338,7 @@ impl Backend for FakeBackend {
 
     async fn trash(&self, pid: &str, if_cver: Option<&str>) -> Result<(), BErr> {
         self.enter(FakeOp::Trash).await?;
-        self.mutate(|st, prof, _now| {
+        self.mutate(FakeOp::Trash, |st, prof, _now| {
             st.live(pid).ok_or(BErr::NotFound)?;
             st.check_cas(prof, pid, if_cver)?;
             st.trash(prof, pid);
@@ -1332,7 +1349,7 @@ impl Backend for FakeBackend {
 
     async fn delete_permanent(&self, pid: &str) -> Result<(), BErr> {
         self.enter(FakeOp::DeletePermanent).await?;
-        self.mutate(|st, _prof, _now| {
+        self.mutate(FakeOp::DeletePermanent, |st, _prof, _now| {
             if !st.nodes.contains_key(pid) {
                 return Err(BErr::NotFound);
             }

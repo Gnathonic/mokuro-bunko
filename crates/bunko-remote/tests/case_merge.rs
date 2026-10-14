@@ -346,6 +346,102 @@ fn case_variants_merge_into_the_oldest_spelling() {
 }
 
 #[test]
+fn a_feed_poll_between_a_merge_step_and_its_commit_still_sees_an_own_echo() {
+    // Every merge move and trash answers slowly: the change is already at the
+    // provider (MEGA's push wakes the feed at once) and the feed polls it before
+    // the step's COMMITTED rewrite of the ledger and the index.
+    for (name, make) in profiles() {
+        let t = T::new(
+            make(),
+            &[
+                ("Kingdom/Vol 1.cbz", b"one"),
+                ("kingdom/Vol 2.cbz", b"two"),
+                ("kingdom/Vol 2.mokuro", b"{\"pages\":[]}"),
+            ],
+        );
+        t.steady();
+        let fake = Arc::downgrade(&t.fake);
+        let store = Arc::downgrade(t.s());
+        let raced = Arc::new(AtomicUsize::new(0));
+        let r2 = raced.clone();
+        // The feed's poll count as each call starts: a poll after that (which the
+        // push may start even before the after-hook runs) can show the change.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let (p1, f1) = (polls.clone(), fake.clone());
+        t.fake.set_call_hook(Some(Arc::new(move |op| {
+            if matches!(op, FakeOp::Update | FakeOp::Trash)
+                && let Some(fake) = f1.upgrade()
+            {
+                p1.store(fake.calls(FakeOp::Changes), Ordering::SeqCst);
+            }
+        })));
+        t.fake.set_after_hook(Some(Arc::new(move |op| {
+            if !matches!(op, FakeOp::Update | FakeOp::Trash) {
+                return;
+            }
+            let (Some(fake), Some(store)) = (fake.upgrade(), store.upgrade()) else {
+                return;
+            };
+            let n = polls.load(Ordering::SeqCst);
+            store.feed().poll_now();
+            // A poll that started before this call may be waiting for this very
+            // commit: a fresh one gets a moment, not forever.
+            let t0 = Instant::now();
+            while fake.calls(FakeOp::Changes) <= n && t0.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if fake.calls(FakeOp::Changes) > n {
+                r2.fetch_add(1, Ordering::SeqCst);
+                // Room for the poll to apply its page (it must wait for the commit).
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        })));
+        t.policy();
+        t.wait_merges(1);
+        t.fake.set_after_hook(None);
+        t.fake.set_call_hook(None);
+        assert!(
+            raced.load(Ordering::SeqCst) >= 1,
+            "{name}: a poll ran between a step's provider call and its commit"
+        );
+        t.sync_feed();
+        assert_eq!(
+            t.names("Kingdom"),
+            ["Vol 1.cbz", "Vol 2.cbz", "Vol 2.mokuro"],
+            "{name}"
+        );
+        assert!(t.at("kingdom").is_none(), "{name}");
+        assert!(fs::is_file(t.abs("Kingdom/Vol 2.mokuro")), "{name}");
+        assert!(!fs::exists(t.abs("kingdom")), "{name}");
+        let mut merged = t.hooks.merged.lock().clone();
+        merged.sort();
+        assert_eq!(
+            merged,
+            [
+                (
+                    "kingdom/Vol 2.cbz".to_string(),
+                    "Kingdom/Vol 2.cbz".to_string(),
+                    false
+                ),
+                (
+                    "kingdom/Vol 2.mokuro".to_string(),
+                    "Kingdom/Vol 2.mokuro".to_string(),
+                    false
+                ),
+            ],
+            "{name}: once per file"
+        );
+        assert!(
+            t.hooks.moved.lock().is_empty(),
+            "{name}: echoes run no hooks: {:?}",
+            t.hooks.moved.lock()
+        );
+        assert!(t.hooks.removed.lock().is_empty(), "{name}");
+        assert_eq!(t.s().health(), Health::Online, "{name}");
+    }
+}
+
+#[test]
 fn folders_merge_recursively() {
     for (name, make) in profiles() {
         let t = T::new(
@@ -648,13 +744,22 @@ fn suspect_mid_merge_pauses_and_resumes_from_the_journal() {
         .collect();
     let t = T::with(FakeBackend::drive_like(), &refs, tune);
     t.steady();
-    // During the second move, the reader removes a lot elsewhere and the feed sees it.
+    // As the second move starts (its stat; no feed page applies during the provider
+    // call itself, the commit window), the reader removes a lot elsewhere and the
+    // feed sees it.
     let fake = t.fake.clone();
     let store = Arc::downgrade(t.s());
     let n = Arc::new(AtomicUsize::new(0));
     let n2 = n.clone();
+    let fired = Arc::new(AtomicBool::new(false));
     t.fake.set_call_hook(Some(Arc::new(move |op| {
-        if op == FakeOp::Update && n2.fetch_add(1, Ordering::SeqCst) == 1 {
+        if op == FakeOp::Update {
+            n2.fetch_add(1, Ordering::SeqCst);
+        }
+        if op == FakeOp::Stat
+            && n2.load(Ordering::SeqCst) == 1
+            && !fired.swap(true, Ordering::SeqCst)
+        {
             for i in 0..10 {
                 fake.reader_delete(&format!("{FOLDER}/Other/f{i}.jpg"));
             }
@@ -1207,6 +1312,44 @@ fn a_loser_recreated_more_than_three_times_in_a_day_stops_being_merged() {
     std::thread::sleep(QUIET * 2);
     assert_eq!(t.done_merges(), 4);
     assert_eq!(t.names("kingdom"), ["r5.jpg"]);
+}
+
+#[test]
+fn a_pass_never_closes_a_resolve_whose_steps_are_still_being_journaled() {
+    // The admin's resolve journals its group on the caller's thread while merge
+    // passes keep running: here it pauses between the group row and its steps.
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("Kingdom/Vol 1.cbz", b"winner"),
+            ("kingdom/Vol 1.cbz", b"loser!"),
+        ],
+    );
+    t.steady();
+    t.policy();
+    wait_until("the block", || !t.blocked().is_empty());
+    let id = t.blocked()[0].id;
+    let loser = t.at("kingdom/Vol 1.cbz").unwrap().pid;
+    t.s().set_failpoint(Some(Arc::new(|at: &str| {
+        if at == "MERGE_GROUP" {
+            std::thread::sleep(QUIET);
+        }
+        false
+    })));
+    t.s().resolve_conflict(id, ResolveChoice::KeepThat).unwrap();
+    t.s().set_failpoint(None);
+    // Not closed with nothing done (its trash queued forever): the step runs.
+    wait_until("trashed", || t.fake.trashed_log().contains(&loser));
+    t.sync_feed();
+    wait_until("the loser folder goes", || t.at("kingdom").is_none());
+    wait_until("no step left queued", || t.s().outbox().is_empty());
+    let admin = t
+        .s()
+        .recent_merges()
+        .into_iter()
+        .find(|m| m.origin == "admin")
+        .unwrap();
+    assert_eq!((admin.state.as_str(), admin.trashed), ("done", 1));
 }
 
 #[test]
