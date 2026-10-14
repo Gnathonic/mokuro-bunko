@@ -343,9 +343,9 @@ pub enum LibraryCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Keep the library in a cloud folder: Google Drive or OneDrive, MEGA with its email
-    /// and password (asked on the terminal, never stored), or a WebDAV server with its
-    /// URL, user and app password. A running server restarts onto it.
+    /// Keep the library in a cloud folder: Google Drive or OneDrive, MEGA with --email
+    /// and its password (asked on the terminal, never stored), or a WebDAV server with
+    /// its URL, user and app password. A running server restarts onto it.
     ///
     /// Google Drive and OneDrive sign in through the browser on a desktop (it opens by
     /// itself; the address is printed too). Without one (SSH, Docker, a NAS), Google

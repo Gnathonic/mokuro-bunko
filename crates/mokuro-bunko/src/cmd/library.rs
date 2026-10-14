@@ -426,7 +426,7 @@ pub fn connect_request(
                 email: a
                     .email
                     .clone()
-                    .ok_or_else(|| Fail::msg("mega needs --email"))?,
+                    .ok_or_else(|| Fail::msg("mega needs --email <the account's email>; the password is asked on the terminal"))?,
                 password: secret.ok_or_else(|| Fail::msg("mega needs the account's password"))?,
                 totp: totp.filter(|t| !t.trim().is_empty()),
             });
@@ -469,7 +469,9 @@ pub fn connect(ctx: &Ctx, a: crate::cli::LibraryConnectArgs) -> CmdResult {
         CloudProvider::Webdav => (Some(webdav_secret(&a)?), None),
         CloudProvider::Mega => {
             if a.email.is_none() {
-                return Err(Fail::msg("mega needs --email"));
+                return Err(Fail::msg(
+                    "mega needs --email <the account's email>; the password is asked on the terminal",
+                ));
             }
             if !std::io::stdin().is_terminal() {
                 return Err(Fail::msg(
