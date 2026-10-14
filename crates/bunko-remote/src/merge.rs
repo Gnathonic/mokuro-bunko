@@ -232,6 +232,10 @@ pub(crate) struct MergeState {
     cv: Condvar,
     stop: AtomicBool,
     root: PathBuf,
+    /// Held while a group and its steps are journaled, and while a pass lists the
+    /// open groups: a pass never runs (and closes) a group whose steps are still
+    /// being written. An admin resolve journals on the caller's thread.
+    journal: Mutex<()>,
 }
 
 impl MergeState {
@@ -248,6 +252,7 @@ impl MergeState {
             cv: Condvar::new(),
             stop: AtomicBool::new(false),
             root,
+            journal: Mutex::new(()),
         }
     }
 
@@ -862,7 +867,11 @@ impl<B: Backend> RemoteStore<B> {
         if !self.can_run() {
             return;
         }
-        for gid in self.open_group_ids() {
+        let open = {
+            let _journal = self.merge.journal.lock();
+            self.open_group_ids()
+        };
+        for gid in open {
             match self.run_group(&gid, policy.as_ref()) {
                 Ok(GroupEnd::Done) => {}
                 Ok(GroupEnd::Paused) | Err(Crash) => return,
@@ -1664,6 +1673,8 @@ impl<B: Backend> RemoteStore<B> {
     ) -> io::Result<String> {
         let gid = random_id();
         let losers_j = serde_json::to_string(losers).unwrap_or_else(|_| "[]".into());
+        // A pass sees the group with all its steps, or not yet (`journal`).
+        let _journal = self.merge.journal.lock();
         self.core.state.with("merge_group", |c| {
             c.execute(
                 "INSERT INTO merge_group(id, scope, stem, parent, winner, losers, origin, state, created_at) \
@@ -1684,6 +1695,9 @@ impl<B: Backend> RemoteStore<B> {
         // Busy from now on, until the group closes.
         self.merge.unmark_probe(scope);
         self.merge.mark(Some(gid.clone()), scope.clone());
+        self.core
+            .fail_at("MERGE_GROUP")
+            .map_err(|_| io::Error::other("the store stopped (failpoint)"))?;
         for p in plan.ordered() {
             let kind = match p.kind {
                 StepKind::Move => OpKind::Move,

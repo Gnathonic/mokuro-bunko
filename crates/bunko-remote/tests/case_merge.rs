@@ -1315,6 +1315,44 @@ fn a_loser_recreated_more_than_three_times_in_a_day_stops_being_merged() {
 }
 
 #[test]
+fn a_pass_never_closes_a_resolve_whose_steps_are_still_being_journaled() {
+    // The admin's resolve journals its group on the caller's thread while merge
+    // passes keep running: here it pauses between the group row and its steps.
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("Kingdom/Vol 1.cbz", b"winner"),
+            ("kingdom/Vol 1.cbz", b"loser!"),
+        ],
+    );
+    t.steady();
+    t.policy();
+    wait_until("the block", || !t.blocked().is_empty());
+    let id = t.blocked()[0].id;
+    let loser = t.at("kingdom/Vol 1.cbz").unwrap().pid;
+    t.s().set_failpoint(Some(Arc::new(|at: &str| {
+        if at == "MERGE_GROUP" {
+            std::thread::sleep(QUIET);
+        }
+        false
+    })));
+    t.s().resolve_conflict(id, ResolveChoice::KeepThat).unwrap();
+    t.s().set_failpoint(None);
+    // Not closed with nothing done (its trash queued forever): the step runs.
+    wait_until("trashed", || t.fake.trashed_log().contains(&loser));
+    t.sync_feed();
+    wait_until("the loser folder goes", || t.at("kingdom").is_none());
+    wait_until("no step left queued", || t.s().outbox().is_empty());
+    let admin = t
+        .s()
+        .recent_merges()
+        .into_iter()
+        .find(|m| m.origin == "admin")
+        .unwrap();
+    assert_eq!((admin.state.as_str(), admin.trashed), ("done", 1));
+}
+
+#[test]
 fn keep_this_copy_and_keep_that_copy_resolve_a_block() {
     // Keep that copy (the winner's): the loser's goes, the folder then finishes.
     let t = T::new(
