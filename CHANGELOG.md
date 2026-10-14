@@ -89,6 +89,8 @@
 - **Failed WebDAV requests are logged.** A request that ends in a server error (5xx),
   uploads included, is logged with its method, path, user and cause (503s as warnings,
   other failures as errors); before, a failed upload left no trace in the log.
+- `library connect --create` no longer asks "Create it?" before creating the folder; it
+  prints "Creating mokuro-reader/…".
 
 ## [0.7.3] - 2026-10-12
 

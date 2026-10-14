@@ -399,8 +399,9 @@ impl Printer {
     }
 }
 
-/// The Check's lines.
-pub fn check_lines(v: &Value) -> Vec<String> {
+/// The Check's lines; with `create` (`--create`), a missing folder is a statement of
+/// what happens next, not the wizard's question.
+pub fn check_lines(v: &Value, create: bool) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(a) = v["account"].as_str() {
         out.push(format!("Signed in as {a}."));
@@ -412,7 +413,10 @@ pub fn check_lines(v: &Value) -> Vec<String> {
             bunko_server::storage::connect::pairing_label(p)
         ));
     }
-    if let Some(s) = c["summary"].as_str() {
+    if create && c["found"].as_bool() == Some(false) {
+        let folder = c["folder"].as_str().unwrap_or("mokuro-reader");
+        out.push(format!("Creating {folder}/…"));
+    } else if let Some(s) = c["summary"].as_str() {
         out.push(s.to_string());
     }
     for k in ["warning", "lease"] {
@@ -581,7 +585,7 @@ fn connect_through_server(
             }
             tokio::time::sleep(Duration::from_millis(700)).await;
         };
-        for l in check_lines(&v) {
+        for l in check_lines(&v, create) {
             println!("{l}");
         }
         if want_create(&v, create, interactive)? {
@@ -689,7 +693,7 @@ fn connect_here(
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
-        for l in check_lines(&v) {
+        for l in check_lines(&v, create) {
             println!("{l}");
         }
         if want_create(&v, create, interactive)? {
@@ -1059,7 +1063,7 @@ mod tests {
         let done = json!({"state": "connected", "account": "me@example.com", "pairing": "release",
             "check": {"summary": "Found mokuro-reader/ — 4 volumes in 2 series", "offer_switch": true,
                       "other_pairing": "beta", "warning": "Only 4 volumes are visible", "found": true}});
-        let lines = check_lines(&done);
+        let lines = check_lines(&done, false);
         assert_eq!(lines[0], "Signed in as me@example.com.");
         assert!(
             lines
@@ -1072,6 +1076,14 @@ mod tests {
                 .any(|l| l.ends_with("library connect gdrive --reader beta"))
         );
         assert!(finished(&done, false).unwrap());
+        // No folder yet: the wizard's question, or with --create what happens next.
+        let missing = json!({"state": "connected", "check": {"found": false,
+            "folder": "mokuro-reader", "summary": "No mokuro-reader/ folder yet. Create it?"}});
+        assert_eq!(
+            check_lines(&missing, false),
+            ["No mokuro-reader/ folder yet. Create it?"]
+        );
+        assert_eq!(check_lines(&missing, true), ["Creating mokuro-reader/…"]);
         let mismatch =
             json!({"state": "account-mismatch", "message": "belongs to old@example.com"});
         assert!(
