@@ -1,6 +1,7 @@
 //! Signing in to the OAuth providers and keeping their tokens (0.8 design §7).
 //!
-//! - [`oauth`]: the loopback + PKCE flow, the device flow and refresh.
+//! - [`oauth`]: the loopback + PKCE flow, the pasted-address flow, the device flow and
+//!   refresh.
 //! - [`clients`]: the installed-app clients embedded in every build, and the
 //!   Google project pairing (D25).
 //! - [`credentials`]: `<base>/cloud/credentials.json`, optionally sealed (D12).
@@ -20,7 +21,7 @@ pub use clients::{GoogleClients, google_clients, microsoft_client};
 pub use credentials::{CredError, CredentialStore, SecretKey, StoredCredential};
 pub use flow::{Flow, choose_flow};
 pub use oauth::{
-    AuthError, DeviceCode, DeviceFlow, LoopbackFlow, OAuthClient, Pending, Provider, Tokens,
-    refresh,
+    AuthError, DeviceCode, DeviceFlow, LoopbackFlow, OAuthClient, PasteError, PasteFlow,
+    PastePending, Pending, Provider, Tokens, parse_pasted_redirect, refresh,
 };
 pub use token::{RefreshingToken, StaticToken, TokenSource};

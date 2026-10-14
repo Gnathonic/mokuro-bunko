@@ -397,6 +397,7 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
         ["storage", "connect"] if get => storage::connect_status(s),
         ["storage", "connect", "cancel"] if post => storage::connect_cancel(s),
         ["storage", "connect", "account"] if post => storage::connect_account(s, &req).await,
+        ["storage", "connect", "paste"] if post => storage::connect_paste(s, &req).await,
         ["storage", "connect", "create"] if post => storage::connect_create(s).await,
         ["storage", "disconnect"] if post => storage::disconnect(s, &req).await,
         ["storage", "local"] if post => storage::local(s).await,

@@ -19,6 +19,7 @@ pub(super) fn routes() -> Router<AccountsDeps> {
             get(connect_status).post(connect),
         )
         .route("/setup/api/storage/connect/cancel", post(cancel))
+        .route("/setup/api/storage/connect/paste", post(paste))
         .route("/setup/api/storage/connect/account", post(account))
         .route("/setup/api/storage/connect/create", post(create))
         .route("/setup/api/storage/local", post(local))
@@ -142,6 +143,32 @@ async fn cancel(
     }
     c.connector().cancel();
     json_response(200, c.connector().status().as_json())
+}
+
+/// `POST /setup/api/storage/connect/paste` `{url}`: the address the browser ended on
+/// after a `paste` sign-in (never logged). 400 when it is not this sign-in's redirect;
+/// the sign-in then waits for another.
+async fn paste(
+    State(d): State<AccountsDeps>,
+    client: Client,
+    parts: Parts,
+    body: Body,
+) -> Response {
+    let c = match allowed(&d, &client, &parts).await {
+        Ok(c) => c,
+        Err(r) => return r,
+    };
+    let body = match json_body(&parts, body).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let Some(url) = body.get("url").and_then(Value::as_str) else {
+        return json_error(400, "url (the address the browser ended on) is required");
+    };
+    match c.connector().paste(url.to_string()).await {
+        Ok(st) => json_response(200, st.as_json()),
+        Err(e) => json_error(400, &e),
+    }
 }
 
 /// `POST /setup/api/storage/connect/account` `{use_this_account: bool}`.

@@ -4,17 +4,24 @@
 //! ([`ConnectStatus`]) to the setup wizard, the admin Storage panel, the tray and the
 //! CLI. The state never carries a token, a password or a session blob: only what the
 //! person needs to act (the device flow's user code and its verification URL, or the
-//! loopback flow's authorization URL to open), the account label and the Check.
+//! loopback and paste flows' authorization URL to open), the account label and the
+//! Check.
 //!
-//! * **Google Drive / OneDrive** (OAuth). The flow is chosen automatically
+//! * **Google Drive / OneDrive** (OAuth). Unless the request names a flow (`loopback`,
+//!   `device` or `paste`), it is chosen automatically
 //!   ([`bunko_remote::auth::choose_flow`]): loopback + PKCE when the request comes from
 //!   loopback (a browser on this machine, not an embedded WebView) and the pairing has
-//!   a loopback client; the device flow otherwise (Docker, a NAS, a LAN browser, the
-//!   CLI). A device code is shown in the wizard, admin and the tray and printed to the
-//!   log with its expiry; an expired code is replaced at once, and after
-//!   [`MAX_UNUSED_CODES`] unused codes the sign-in stops and waits for a click. Drive
-//!   signs in with the clients of the pairing the person chose ("Which Mokuro Reader do
-//!   you use?", D25); `storage.library.oauth.google.*` overrides make it `custom`.
+//!   a loopback client. Otherwise (Docker, a NAS, a LAN browser) Drive gets the device
+//!   flow and OneDrive the pasted address: Microsoft refuses device codes for personal
+//!   accounts (AADSTS70002), so the person signs in on any device and pastes back the
+//!   `http://localhost:<port>/?code=…` address their browser ends on
+//!   ([`Connector::paste`]); the PKCE verifier stays in this process's memory. The CLI
+//!   names its flow (it knows whether it can open a browser). A device code is shown
+//!   in the wizard, admin and the tray and printed to the log with its expiry; an
+//!   expired code is replaced at once, and after [`MAX_UNUSED_CODES`] unused codes the
+//!   sign-in stops and waits for a click. Drive signs in with the clients of the
+//!   pairing the person chose ("Which Mokuro Reader do you use?", D25);
+//!   `storage.library.oauth.google.*` overrides make it `custom`.
 //! * **MEGA**: email, password and the optional two-factor code, once; the session
 //!   blob is kept, the password never is.
 //! * **WebDAV**: URL, user and app password; the driver's capability probe runs live.
@@ -43,8 +50,8 @@ use std::time::Duration;
 
 use bunko_core::config::{GoogleProject, LibraryBackend, LibraryConfig};
 use bunko_remote::auth::{
-    AuthError, CredentialStore, DeviceFlow, Flow, LoopbackFlow, OAuthClient, StoredCredential,
-    Tokens, choose_flow, google_clients, microsoft_client,
+    AuthError, CredentialStore, DeviceFlow, Flow, LoopbackFlow, OAuthClient, PasteFlow, Provider,
+    StoredCredential, Tokens, choose_flow, google_clients, microsoft_client,
 };
 use bunko_remote::mega::{LoginError, SessionBlob};
 use bunko_remote::{AccountInfo, BErr, Backend, RNode};
@@ -131,7 +138,10 @@ pub struct ConnectRequest {
     pub reader: Option<String>,
     /// The cloud folder (default: the configured one, `mokuro-reader`).
     pub folder: Option<String>,
-    /// `device`: use a code even where the loopback flow could run.
+    /// Google Drive and OneDrive: `loopback` (or `browser`: a browser on the server's
+    /// computer comes back to it), `device` (a code; OneDrive: work or school accounts
+    /// only) or `paste` (sign in anywhere, paste the address back). None: chosen from
+    /// where the request comes from.
     pub flow: Option<String>,
     pub webdav: Option<WebDavForm>,
     pub mega: Option<MegaForm>,
@@ -169,12 +179,19 @@ pub struct RequestOrigin {
     pub loopback: bool,
     /// An embedded browser (Android WebView): Google refuses OAuth there.
     pub webview: bool,
+    /// `library connect` on this machine (in-process, or through the loopback-only
+    /// control API). It names its flow; `loopback` is honoured since the terminal
+    /// and the listener share the machine.
+    pub cli: bool,
 }
 
 impl RequestOrigin {
-    /// The CLI (`library connect`): the device flow, printed in the terminal.
+    /// The CLI (`library connect`).
     pub fn cli() -> RequestOrigin {
-        RequestOrigin::default()
+        RequestOrigin {
+            cli: true,
+            ..RequestOrigin::default()
+        }
     }
 
     /// A request's origin from its loopback-ness and its `User-Agent`.
@@ -182,7 +199,13 @@ impl RequestOrigin {
         RequestOrigin {
             loopback,
             webview: user_agent.is_some_and(is_webview),
+            cli: false,
         }
+    }
+
+    /// A browser on this machine could come back to a loopback redirect.
+    fn browser_here(self) -> bool {
+        self.loopback && !self.webview
     }
 }
 
@@ -497,15 +520,20 @@ impl ProviderOps for LiveOps {
 /// One sign-in's state, as every page shows it. Never holds a secret.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ConnectStatus {
-    /// `idle`, `starting`, `browser` (loopback: open `auth_url`), `code` (device: enter
-    /// `user_code` at `verification_url`), `checking`, `account-mismatch` (waiting for
-    /// "use this account's library instead"), `connected`, `failed`, `stopped`
-    /// (unused codes: waits for a click), `cancelled`.
+    /// `idle`, `starting`, `browser` (loopback: open `auth_url`), `paste` (open
+    /// `auth_url` on any device, then paste the address starting with `redirect_uri`
+    /// that the browser ends on), `code` (device: enter `user_code` at
+    /// `verification_url`), `checking`, `account-mismatch` (waiting for "use this
+    /// account's library instead"), `connected`, `failed`, `stopped` (unused codes:
+    /// waits for a click), `cancelled`.
     pub state: &'static str,
     pub provider: Option<&'static str>,
-    /// `loopback`, `device` or `form`.
+    /// `loopback`, `paste`, `device` or `form`.
     pub flow: Option<&'static str>,
     pub auth_url: Option<String>,
+    /// `paste`: where the person's browser ends (`http://localhost:<port>`); the
+    /// pasted address must start with it. Not a secret.
+    pub redirect_uri: Option<String>,
     pub user_code: Option<String>,
     pub verification_url: Option<String>,
     /// RFC 3339, UTC.
@@ -521,6 +549,9 @@ pub struct ConnectStatus {
     pub check: Option<CheckReport>,
     pub error: Option<String>,
     pub message: Option<String>,
+    /// `failed`: the flow that would work (`loopback` or `paste`), when the one that
+    /// ran cannot (a personal Microsoft account with a device code).
+    pub suggest_flow: Option<&'static str>,
     /// A new store (or new sign-in) waits for the server to restart onto it.
     pub needs_restart: bool,
     /// Bumped by every new sign-in.
@@ -534,6 +565,7 @@ impl ConnectStatus {
             provider: None,
             flow: None,
             auth_url: None,
+            redirect_uri: None,
             user_code: None,
             verification_url: None,
             expires_at: None,
@@ -546,6 +578,7 @@ impl ConnectStatus {
             check: None,
             error: None,
             message: None,
+            suggest_flow: None,
             needs_restart: false,
             session: 0,
         }
@@ -553,7 +586,10 @@ impl ConnectStatus {
 
     /// Still waiting for the person or the provider.
     pub fn in_progress(&self) -> bool {
-        matches!(self.state, "starting" | "browser" | "code" | "checking")
+        matches!(
+            self.state,
+            "starting" | "browser" | "paste" | "code" | "checking"
+        )
     }
 
     pub fn as_json(&self) -> serde_json::Value {
@@ -608,6 +644,7 @@ pub struct Tuning {
     /// Point the OAuth clients elsewhere (a mock authorization server).
     pub rewrite_client: Option<Arc<dyn Fn(OAuthClient) -> OAuthClient + Send + Sync>>,
     pub loopback_timeout: Option<Duration>,
+    pub paste_timeout: Option<Duration>,
 }
 
 impl Default for Tuning {
@@ -617,6 +654,7 @@ impl Default for Tuning {
             max_codes: MAX_UNUSED_CODES,
             rewrite_client: None,
             loopback_timeout: None,
+            paste_timeout: None,
         }
     }
 }
@@ -638,6 +676,15 @@ struct Held {
     session: u64,
 }
 
+/// A pasted address and where to answer whether it was taken.
+type PasteMsg = (String, tokio::sync::oneshot::Sender<Result<(), String>>);
+
+/// The paste flow's mailbox while it waits for the address.
+struct PasteSlot {
+    session: u64,
+    tx: tokio::sync::mpsc::Sender<PasteMsg>,
+}
+
 struct Inner {
     cloud_dir: PathBuf,
     config: ConfigFn,
@@ -650,6 +697,7 @@ struct Inner {
     session: AtomicU64,
     task: Mutex<Option<tokio::task::AbortHandle>>,
     held: Mutex<Option<Held>>,
+    paste: Mutex<Option<PasteSlot>>,
 }
 
 /// The one sign-in of this process (see the module docs).
@@ -754,6 +802,7 @@ impl Connector {
             session: AtomicU64::new(0),
             task: Mutex::new(None),
             held: Mutex::new(None),
+            paste: Mutex::new(None),
         }))
     }
 
@@ -809,16 +858,49 @@ impl Connector {
         }
         let session = self.0.session.load(Ordering::SeqCst);
         self.0.held.lock().take();
+        self.0.paste.lock().take();
         self.set(session, |s| {
             if s.in_progress() || s.state == "account-mismatch" {
                 s.state = "cancelled";
                 s.auth_url = None;
+                s.redirect_uri = None;
                 s.user_code = None;
                 s.verification_url = None;
                 s.expires_at = None;
                 s.message = Some("The sign-in was cancelled.".into());
             }
         });
+    }
+
+    /// The `paste` state's answer: the address the person's browser ended on after
+    /// signing in. `Ok`: taken (the sign-in goes on to `checking`) or the provider's
+    /// refusal ended it (`failed`); `Err`: not this sign-in's redirect (another
+    /// state, another address, no code), so the sign-in waits for another paste. The
+    /// address is never logged or kept: only its code is redeemed.
+    pub async fn paste(&self, pasted: String) -> Result<ConnectStatus, String> {
+        const NOT_WAITING: &str =
+            "No sign-in is waiting for a pasted address: click Connect to start one.";
+        let session = self.0.session.load(Ordering::SeqCst);
+        let tx = match &*self.0.paste.lock() {
+            Some(slot) if slot.session == session => slot.tx.clone(),
+            _ => return Err(NOT_WAITING.into()),
+        };
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        tx.send((pasted, reply))
+            .await
+            .map_err(|_| NOT_WAITING.to_string())?;
+        match answer.await {
+            Ok(Ok(())) => Ok(self.status()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(NOT_WAITING.into()),
+        }
+    }
+
+    fn clear_paste(&self, session: u64) {
+        let mut slot = self.0.paste.lock();
+        if slot.as_ref().is_some_and(|s| s.session == session) {
+            *slot = None;
+        }
     }
 
     /// Start a sign-in (replacing one in progress). Must run inside a tokio runtime.
@@ -869,11 +951,17 @@ impl Connector {
                 }
                 "form"
             }
-            LibraryBackend::GDrive => {
+            LibraryBackend::GDrive | LibraryBackend::OneDrive => {
                 if let Some(r) = req.reader.as_deref()
+                    && backend == LibraryBackend::GDrive
                     && !matches!(r, "release" | "beta")
                 {
                     return Err(format!("--reader {r:?}: release or beta"));
+                }
+                if let Some(f) = req.flow.as_deref()
+                    && Flow::parse(f).is_none()
+                {
+                    return Err(format!("flow {f:?}: loopback, device or paste"));
                 }
                 ""
             }
@@ -884,6 +972,7 @@ impl Connector {
             t.abort();
         }
         self.0.held.lock().take();
+        self.0.paste.lock().take();
         let session = self.0.session.fetch_add(1, Ordering::SeqCst) + 1;
         {
             let mut s = self.0.status.lock();
@@ -931,6 +1020,7 @@ impl Connector {
                 self.set(session, |s| {
                     s.state = "failed";
                     s.auth_url = None;
+                    s.redirect_uri = None;
                     s.user_code = None;
                     s.verification_url = None;
                     s.expires_at = None;
@@ -1092,6 +1182,7 @@ impl Connector {
         self.set(session, |s| {
             s.state = "connected";
             s.auth_url = None;
+            s.redirect_uri = None;
             s.user_code = None;
             s.verification_url = None;
             s.expires_at = None;
@@ -1150,6 +1241,7 @@ impl Connector {
         self.set(session, |s| {
             s.state = "checking";
             s.auth_url = None;
+            s.redirect_uri = None;
             s.user_code = None;
             s.verification_url = None;
             s.expires_at = None;
@@ -1229,16 +1321,46 @@ impl Connector {
             }
             _ => String::new(),
         };
-        let want_loopback =
-            origin.loopback && !origin.webview && req.flow.as_deref() != Some("device");
-        let mut flow = choose_flow(want_loopback, loopback.is_some());
+        let provider = if backend == LibraryBackend::GDrive {
+            Provider::Google
+        } else {
+            Provider::Microsoft
+        };
+        let asked = req.flow.as_deref().and_then(Flow::parse);
+        let browser_here = origin.browser_here();
+        let mut flow = match asked {
+            // The CLI shares the machine with the listener (it opens the browser).
+            Some(Flow::Loopback) if browser_here || origin.cli => Flow::Loopback,
+            Some(Flow::Loopback) => {
+                return Err("The browser sign-in needs a browser on the server's computer: sign in on any device and paste the address back instead.".into());
+            }
+            Some(f) => f,
+            None => choose_flow(provider, browser_here, loopback.is_some()),
+        };
         if flow == Flow::Device && device.is_none() {
-            if loopback.is_some() && origin.loopback && !origin.webview {
-                flow = Flow::Loopback;
+            if loopback.is_some() && asked != Some(Flow::Device) {
+                flow = if browser_here {
+                    Flow::Loopback
+                } else {
+                    Flow::Paste
+                };
             } else {
-                return Err("the Google override has no device client (storage.library.oauth.google.device_client_id and device_client_secret): sign in from a browser on this computer, or add one".into());
+                return Err("the Google override has no device client (storage.library.oauth.google.device_client_id and device_client_secret): sign in through the browser, or add one".into());
             }
         }
+        if flow != Flow::Device && loopback.is_none() {
+            if asked.is_none() && device.is_some() {
+                flow = Flow::Device;
+            } else {
+                return Err("the Google override has no Desktop client (storage.library.oauth.google.client_id and client_secret): use a sign-in code, or add one".into());
+            }
+        }
+        // What a failed device sign-in of a personal Microsoft account should use.
+        let instead = if browser_here || origin.cli {
+            Flow::Loopback
+        } else {
+            Flow::Paste
+        };
         let name = provider_name(backend);
         let (tokens, client) = match flow {
             Flow::Loopback => {
@@ -1270,9 +1392,17 @@ impl Connector {
                 let t = pending.wait().await.map_err(|e| sign_in_error(name, e))?;
                 (t, client)
             }
+            Flow::Paste => {
+                let client = loopback.expect("checked above");
+                let t = self.pasted(session, name, &client, &pairing).await?;
+                (t, client)
+            }
             Flow::Device => {
                 let client = device.expect("checked above");
-                match self.device_codes(session, name, &client, &pairing).await? {
+                match self
+                    .device_codes(session, name, &client, &pairing, instead)
+                    .await?
+                {
                     Some(t) => (t, client),
                     None => return Ok(None),
                 }
@@ -1322,20 +1452,116 @@ impl Connector {
         }))
     }
 
+    /// The paste flow: show the authorization URL, wait for the address the browser
+    /// ends on ([`Connector::paste`]), redeem its code. Another sign-in's address, or
+    /// not a redirect at all, is answered and waited past; the timeout ends it.
+    async fn pasted(
+        &self,
+        session: u64,
+        name: &str,
+        client: &OAuthClient,
+        pairing: &str,
+    ) -> Result<Tokens, String> {
+        let (url, mut pending) = PasteFlow::start(client).map_err(|e| e.to_string())?;
+        let timeout = self
+            .0
+            .tuning
+            .paste_timeout
+            .unwrap_or(bunko_remote::auth::oauth::PASTE_TIMEOUT);
+        pending.set_timeout(timeout);
+        let until = OffsetDateTime::now_utc() + timeout;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PasteMsg>(4);
+        *self.0.paste.lock() = Some(PasteSlot { session, tx });
+        // Neither the URL (its state) nor, later, the pasted address is logged.
+        tracing::info!(
+            "[STORAGE] Sign in to {name} on any device, then paste the address the browser ends on (waiting until {} UTC)",
+            hhmm(until)
+        );
+        let redirect = pending.redirect_uri().to_string();
+        self.set(session, |s| {
+            s.state = "paste";
+            s.flow = Some("paste");
+            s.auth_url = Some(url);
+            s.redirect_uri = Some(redirect.clone());
+            s.expires_at = Some(rfc3339(until));
+            s.pairing = (!pairing.is_empty()).then(|| pairing.to_string());
+            s.message = Some(format!(
+                "Open the sign-in page on any device and sign in to {name}. The browser then ends on a page that does not load ({redirect}/?code=…): copy that page's whole address and paste it here."
+            ));
+        });
+        let deadline = tokio::time::Instant::now() + timeout;
+        let code = loop {
+            let (pasted, reply) = match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(m)) => m,
+                Err(_) | Ok(None) => {
+                    self.clear_paste(session);
+                    return Err(sign_in_error(name, AuthError::Timeout));
+                }
+            };
+            match pending.code_from(&pasted) {
+                Ok(code) => {
+                    self.clear_paste(session);
+                    self.set(session, |s| {
+                        s.state = "checking";
+                        s.auth_url = None;
+                        s.redirect_uri = None;
+                        s.expires_at = None;
+                        s.message = Some(format!("Signing in to {name}…"));
+                    });
+                    let _ = reply.send(Ok(()));
+                    break code;
+                }
+                Err(bunko_remote::auth::PasteError::Ended(e)) => {
+                    self.clear_paste(session);
+                    let msg = sign_in_error(name, e);
+                    self.set(session, |s| {
+                        s.state = "failed";
+                        s.auth_url = None;
+                        s.redirect_uri = None;
+                        s.expires_at = None;
+                        s.error = Some(msg.clone());
+                    });
+                    let _ = reply.send(Ok(()));
+                    return Err(msg);
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(format!("Not taken: {e}.")));
+                }
+            }
+        };
+        pending
+            .redeem(code)
+            .await
+            .map_err(|e| sign_in_error(name, e))
+    }
+
     /// Device codes, one after another: an expired code is replaced at once; after
-    /// `max_codes` unused ones the sign-in stops (`Ok(None)`).
+    /// `max_codes` unused ones the sign-in stops (`Ok(None)`). A personal Microsoft
+    /// account (AADSTS70002) fails with `suggest_flow` = `instead`.
     async fn device_codes(
         &self,
         session: u64,
         name: &str,
         client: &OAuthClient,
         pairing: &str,
+        instead: Flow,
     ) -> Result<Option<Tokens>, String> {
         let max = self.0.tuning.max_codes;
+        let no_code = |e: AuthError| {
+            if matches!(e, AuthError::PersonalAccountNoCode) {
+                self.set(session, |s| s.suggest_flow = Some(instead.as_str()));
+            }
+            e
+        };
         for n in 1..=max {
-            let mut flow = DeviceFlow::start(client)
-                .await
-                .map_err(|e| format!("{name} gave no sign-in code: {e}"))?;
+            let mut flow =
+                DeviceFlow::start(client)
+                    .await
+                    .map_err(no_code)
+                    .map_err(|e| match e {
+                        AuthError::PersonalAccountNoCode => sign_in_error(name, e),
+                        e => format!("{name} gave no sign-in code: {e}"),
+                    })?;
             let unit = self.0.tuning.time_unit;
             if unit != Duration::from_secs(1) {
                 flow.set_time_unit(unit);
@@ -1372,7 +1598,7 @@ impl Connector {
                     );
                     continue;
                 }
-                Err(e) => return Err(sign_in_error(name, e)),
+                Err(e) => return Err(sign_in_error(name, no_code(e))),
             }
         }
         tracing::warn!(
@@ -1520,6 +1746,7 @@ fn sign_in_error(name: &str, e: AuthError) -> String {
         AuthError::Expired => {
             format!("The {name} sign-in code expired: click Connect for a new one.")
         }
+        e @ AuthError::PersonalAccountNoCode => e.to_string(),
         other => format!("{name} sign-in failed: {other}"),
     }
 }

@@ -198,6 +198,7 @@ fn env_with(
             }) as Arc<dyn Fn(OAuthClient) -> OAuthClient + Send + Sync>
         }),
         loopback_timeout: Some(Duration::from_secs(20)),
+        paste_timeout: Some(Duration::from_secs(20)),
     };
     let connector = Connector::with_ops(
         dir.path().join("cloud"),
@@ -384,7 +385,7 @@ async fn unused_codes_are_reissued_then_the_sign_in_stops_after_five() {
 }
 
 /// From a browser on this machine: the loopback flow with PKCE, Microsoft's
-/// `http://localhost:<port>/bunko` redirect, OneDrive's own client.
+/// `http://localhost:<port>` redirect (no path), OneDrive's own client.
 #[tokio::test]
 async fn a_local_request_signs_in_through_the_loopback_redirect() {
     let (m, base) = mock_server(900).await;
@@ -420,19 +421,15 @@ async fn a_local_request_signs_in_through_the_loopback_redirect() {
     );
     assert_eq!(q["code_challenge_method"], "S256");
     let redirect = q["redirect_uri"].clone();
-    assert!(
-        redirect.starts_with("http://localhost:") && redirect.ends_with("/bunko"),
-        "{redirect}"
-    );
+    let port: u16 = redirect
+        .strip_prefix("http://localhost:")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("{redirect}"));
     // The browser comes back.
-    let port = redirect
-        .trim_start_matches("http://localhost:")
-        .trim_end_matches("/bunko")
-        .to_string();
     let b = reqwest::Client::builder().no_proxy().build().unwrap();
     let r = b
         .get(format!(
-            "http://127.0.0.1:{port}/bunko?code=the-code&state={}",
+            "http://127.0.0.1:{port}/?code=the-code&state={}",
             q["state"]
         ))
         .send()
@@ -512,6 +509,347 @@ async fn the_flow_follows_where_the_request_comes_from() {
     }
 }
 
+// ---------------------------------------------------------------- the paste flow
+
+fn onedrive_env(base: &str) -> Env {
+    let fake = Arc::new(FakeBackend::onedrive_like());
+    fake.reader_put("mokuro-reader/S/V.cbz", b"z");
+    let lib = LibraryConfig {
+        backend: LibraryBackend::OneDrive,
+        ..LibraryConfig::default()
+    };
+    env_with(fake, lib, Some(base.to_string()), 5)
+}
+
+fn lan_browser() -> RequestOrigin {
+    RequestOrigin::of(false, Some("Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0"))
+}
+
+async fn until_paste(c: &Connector) -> ConnectStatus {
+    c.wait_for(
+        |s| s.state == "paste" || !s.in_progress(),
+        Duration::from_secs(10),
+    )
+    .await
+}
+
+fn query_of(url: &str) -> HashMap<String, String> {
+    reqwest::Url::parse(url)
+        .unwrap()
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect()
+}
+
+/// OneDrive from a LAN browser (or Docker, a NAS): no device code (personal accounts
+/// cannot use one) but the pasted redirect. The authorization URL is the loopback one;
+/// a wrong paste is answered and waited past; the right one is redeemed with the PKCE
+/// verifier and the same redirect URI; nothing secret shows.
+#[tokio::test]
+async fn onedrive_from_elsewhere_signs_in_with_the_pasted_address() {
+    let (m, base) = mock_server(900).await;
+    let e = onedrive_env(&base);
+    m.token.lock().push_back(tokens("paste-at", "paste-rt"));
+    e.connector.start(req("onedrive"), lan_browser()).unwrap();
+    let s = until_paste(&e.connector).await;
+    assert_eq!(s.state, "paste", "{s:?}");
+    assert_eq!(s.flow, Some("paste"));
+    assert!(s.in_progress());
+    assert!(s.expires_at.is_some());
+    let url = s.auth_url.clone().unwrap();
+    assert!(url.starts_with(&format!("{base}/authorize?")), "{url}");
+    let q = query_of(&url);
+    assert_eq!(
+        q["client_id"],
+        bunko_remote::auth::clients::MICROSOFT_CLIENT_ID
+    );
+    let redirect = s.redirect_uri.clone().unwrap();
+    assert_eq!(q["redirect_uri"], redirect);
+    assert!(redirect.starts_with("http://localhost:"), "{redirect}");
+    assert_eq!(q["code_challenge_method"], "S256");
+    assert!(q["scope"].contains("Files.ReadWrite") && q["scope"].contains("offline_access"));
+    assert!(s.message.as_deref().unwrap().contains(&redirect));
+    assert!(m.requests("/device").is_empty());
+
+    // Not the redirect, another sign-in's state, no code: refused, still waiting.
+    for wrong in [
+        "hello".to_string(),
+        format!("https://evil.example/?code=c&state={}", q["state"]),
+        format!("{redirect}/?code=c&state=another"),
+        format!("{redirect}/"),
+    ] {
+        let err = e.connector.paste(wrong.clone()).await.unwrap_err();
+        assert!(err.starts_with("Not taken: "), "{wrong}: {err}");
+        assert_eq!(e.connector.status().state, "paste");
+    }
+    assert!(m.requests("/token").is_empty());
+
+    let st = e
+        .connector
+        .paste(format!(
+            "  {redirect}/?code=the-code&state={}&session_state=x\n",
+            q["state"]
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(st.state, "checking" | "connected"), "{st:?}");
+    let done = settle(&e.connector).await;
+    assert_eq!(done.state, "connected", "{done:?}");
+    assert_eq!(done.flow, Some("paste"));
+    assert!(done.redirect_uri.is_none() && done.auth_url.is_none());
+    assert_no_secret(&done, &["paste-at", "paste-rt", "the-code"]);
+    let f = &m.requests("/token")[0];
+    assert_eq!(f["grant_type"], "authorization_code");
+    assert_eq!(f["code"], "the-code");
+    assert_eq!(f["redirect_uri"], redirect);
+    assert_eq!(
+        bunko_remote::auth::oauth::pkce_challenge(&f["code_verifier"]),
+        q["code_challenge"]
+    );
+    assert!(!f.contains_key("client_secret"));
+    let id = store_id("onedrive", "", "acct-1", "mokuro-reader");
+    let cred = e.creds().get(&id).unwrap().expect("stored");
+    assert_eq!(cred.refresh_token.as_deref(), Some("paste-rt"));
+    // The sign-in is over: another paste is refused.
+    let err = e
+        .connector
+        .paste(format!("{redirect}/?code=again&state={}", q["state"]))
+        .await
+        .unwrap_err();
+    assert!(err.contains("No sign-in is waiting"), "{err}");
+    assert_eq!(m.requests("/token").len(), 1);
+}
+
+/// `error=access_denied` with this sign-in's state ends it; a failed redemption is
+/// reported like the loopback flow's.
+#[tokio::test]
+async fn a_refused_paste_ends_the_sign_in() {
+    let (m, base) = mock_server(900).await;
+    let e = onedrive_env(&base);
+    e.connector.start(req("onedrive"), lan_browser()).unwrap();
+    let s = until_paste(&e.connector).await;
+    let (redirect, state) = (
+        s.redirect_uri.clone().unwrap(),
+        query_of(s.auth_url.as_deref().unwrap())["state"].clone(),
+    );
+    let st = e
+        .connector
+        .paste(format!("{redirect}/?error=access_denied&state={state}"))
+        .await
+        .unwrap();
+    assert_eq!(st.state, "failed", "{st:?}");
+    assert!(st.error.unwrap().contains("refused or cancelled"));
+    assert!(
+        e.connector
+            .paste(format!("{redirect}/?code=c&state={state}"))
+            .await
+            .is_err()
+    );
+    assert!(m.requests("/token").is_empty());
+
+    // The provider refuses the code.
+    m.token.lock().push_back((
+        400,
+        json!({"error": "invalid_grant", "error_description": "AADSTS54005: used"}),
+    ));
+    e.connector.start(req("onedrive"), lan_browser()).unwrap();
+    let s = until_paste(&e.connector).await;
+    let (redirect, state) = (
+        s.redirect_uri.clone().unwrap(),
+        query_of(s.auth_url.as_deref().unwrap())["state"].clone(),
+    );
+    e.connector
+        .paste(format!("{redirect}/?code=c&state={state}"))
+        .await
+        .unwrap();
+    let done = settle(&e.connector).await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    assert!(done.error.unwrap().contains("OneDrive sign-in failed"));
+    assert!(e.creds().store_ids().unwrap().is_empty());
+}
+
+/// The pasted-address sign-in times out; Cancel ends it too; a new sign-in's paste
+/// does not accept the old one's address.
+#[tokio::test]
+async fn a_paste_times_out_or_is_cancelled() {
+    let (_m, base) = mock_server(900).await;
+    let mut e = onedrive_env(&base);
+    // A short timeout: rebuild the connector with it.
+    let lib = e.lib.clone();
+    let (l, a) = (lib.clone(), e.applied.clone());
+    e.connector = Connector::with_ops(
+        e.cloud(),
+        Arc::new(move || l.lock().clone()),
+        Arc::new(move |c: &LibraryChoice| {
+            a.lock().push(c.clone());
+            Ok(())
+        }),
+        e.ops.clone(),
+        Tuning {
+            rewrite_client: {
+                let base = base.clone();
+                Some(Arc::new(move |mut c: OAuthClient| {
+                    c.auth_url = format!("{base}/authorize");
+                    c.token_url = format!("{base}/token");
+                    c
+                }))
+            },
+            paste_timeout: Some(Duration::from_millis(300)),
+            ..Tuning::default()
+        },
+    );
+    e.connector.start(req("onedrive"), lan_browser()).unwrap();
+    let s = until_paste(&e.connector).await;
+    assert_eq!(s.state, "paste");
+    let (redirect, state) = (
+        s.redirect_uri.clone().unwrap(),
+        query_of(s.auth_url.as_deref().unwrap())["state"].clone(),
+    );
+    let done = settle(&e.connector).await;
+    assert_eq!(done.state, "failed", "{done:?}");
+    assert!(done.error.unwrap().contains("timed out"));
+    assert!(
+        e.connector
+            .paste(format!("{redirect}/?code=c&state={state}"))
+            .await
+            .is_err()
+    );
+
+    e.connector.start(req("onedrive"), lan_browser()).unwrap();
+    let s = until_paste(&e.connector).await;
+    // The previous sign-in's address is another sign-in's state.
+    let err = e
+        .connector
+        .paste(format!(
+            "{}/?code=c&state={state}",
+            s.redirect_uri.as_deref().unwrap()
+        ))
+        .await
+        .unwrap_err();
+    assert!(err.contains("another sign-in"), "{err}");
+    e.connector.cancel();
+    assert_eq!(e.connector.status().state, "cancelled");
+    assert!(e.connector.status().auth_url.is_none());
+    let err = e
+        .connector
+        .paste("http://localhost:1/?code=c&state=s".into())
+        .await
+        .unwrap_err();
+    assert!(err.contains("No sign-in is waiting"), "{err}");
+}
+
+/// Which flow runs, by provider, origin and the request's `flow`.
+#[tokio::test]
+async fn the_flow_by_provider_origin_and_request() {
+    let (_m, base) = mock_server(900).await;
+    let local = RequestOrigin::of(true, Some("Mozilla/5.0"));
+    let webview = RequestOrigin::of(
+        true,
+        Some("Mozilla/5.0 (Linux; Android 14; wv) AppleWebKit; wv)"),
+    );
+    for (provider, origin, flow, want) in [
+        ("onedrive", lan_browser(), None, "paste"),
+        ("onedrive", lan_browser(), Some("device"), "code"),
+        ("onedrive", lan_browser(), Some("paste"), "paste"),
+        ("onedrive", webview, None, "paste"),
+        ("onedrive", local, None, "browser"),
+        ("onedrive", local, Some("paste"), "paste"),
+        ("onedrive", RequestOrigin::cli(), None, "paste"),
+        ("onedrive", RequestOrigin::cli(), Some("browser"), "browser"),
+        (
+            "onedrive",
+            RequestOrigin::cli(),
+            Some("loopback"),
+            "browser",
+        ),
+        ("onedrive", RequestOrigin::cli(), Some("paste"), "paste"),
+        ("onedrive", RequestOrigin::cli(), Some("device"), "code"),
+        ("gdrive", lan_browser(), None, "code"),
+        ("gdrive", lan_browser(), Some("paste"), "paste"),
+        ("gdrive", RequestOrigin::cli(), None, "code"),
+        ("gdrive", RequestOrigin::cli(), Some("loopback"), "browser"),
+        ("gdrive", local, None, "browser"),
+        // A LAN browser cannot come back to the server's loopback.
+        ("onedrive", lan_browser(), Some("loopback"), "failed"),
+    ] {
+        let e = if provider == "onedrive" {
+            onedrive_env(&base)
+        } else {
+            env_with(
+                library(),
+                drive(GoogleProject::Release),
+                Some(base.clone()),
+                5,
+            )
+        };
+        let mut r = req(provider);
+        r.flow = flow.map(str::to_string);
+        e.connector.start(r, origin).unwrap();
+        let s = e
+            .connector
+            .wait_for(
+                |s| matches!(s.state, "code" | "browser" | "paste") || !s.in_progress(),
+                Duration::from_secs(10),
+            )
+            .await;
+        assert_eq!(s.state, want, "{provider} {origin:?} {flow:?}: {s:?}");
+        if want == "paste" {
+            let q = query_of(s.auth_url.as_deref().unwrap());
+            assert_eq!(Some(&q["redirect_uri"]), s.redirect_uri.as_ref());
+            let r = &q["redirect_uri"];
+            assert!(
+                if provider == "onedrive" {
+                    r.starts_with("http://localhost:")
+                } else {
+                    r.starts_with("http://127.0.0.1:") && r.ends_with('/')
+                },
+                "{r}"
+            );
+        }
+        if want == "failed" {
+            assert!(s.error.unwrap().contains("paste the address"));
+        }
+        e.connector.cancel();
+    }
+    let e = onedrive_env(&base);
+    let mut r = req("onedrive");
+    r.flow = Some("magic".into());
+    assert!(
+        e.connector
+            .start(r, lan_browser())
+            .unwrap_err()
+            .contains("loopback, device or paste")
+    );
+}
+
+/// AADSTS70002: a personal Microsoft account's device code fails at the poll with the
+/// "use the browser" error, and the state suggests the flow that works from there.
+#[tokio::test]
+async fn a_personal_account_code_suggests_the_browser() {
+    let refused = json!({"error": "invalid_client",
+        "error_description": "AADSTS70002: The client does not exist or is not enabled for consumers. Trace ID: t"});
+    for (origin, suggest) in [(lan_browser(), "paste"), (RequestOrigin::cli(), "loopback")] {
+        let (m, base) = mock_server(900).await;
+        let e = onedrive_env(&base);
+        m.token.lock().push_back((400, refused.clone()));
+        let mut r = req("onedrive");
+        r.flow = Some("device".into());
+        e.connector.start(r, origin).unwrap();
+        let s = settle(&e.connector).await;
+        assert_eq!(s.state, "failed", "{s:?}");
+        assert_eq!(
+            s.error.as_deref(),
+            Some(bunko_remote::auth::oauth::PERSONAL_ACCOUNT_NO_CODE)
+        );
+        assert_eq!(s.suggest_flow, Some(suggest));
+        assert!(s.user_code.is_none());
+        // A new sign-in starts without the suggestion.
+        e.connector.start(req("onedrive"), origin).unwrap();
+        assert_eq!(e.connector.status().suggest_flow, None);
+        e.connector.cancel();
+    }
+}
+
 /// D25: overrides replace both embedded clients and make the pairing `custom`; the
 /// reader question does not apply. A device-only override cannot run the loopback
 /// flow, and a loopback-only one refuses a remote request.
@@ -540,16 +878,43 @@ async fn overrides_make_the_pairing_custom() {
         "no other pairing to offer"
     );
 
+    // A loopback-only override: a remote request pastes the redirect instead of a
+    // code; asking for a code by name fails.
     let mut lib = drive(GoogleProject::Custom);
     lib.oauth.google.client_id = Some("dev-desktop".into());
     lib.oauth.google.client_secret = Some("s".into());
-    let e = env_with(library(), lib, Some(base), 5);
+    let e = env_with(library(), lib.clone(), Some(base.clone()), 5);
     e.connector
         .start(req("gdrive"), RequestOrigin::cli())
         .unwrap();
+    let s = e
+        .connector
+        .wait_for(
+            |s| s.state == "paste" || !s.in_progress(),
+            Duration::from_secs(10),
+        )
+        .await;
+    assert_eq!(s.state, "paste", "{s:?}");
+    let mut r = req("gdrive");
+    r.flow = Some("device".into());
+    e.connector.start(r, RequestOrigin::cli()).unwrap();
     let s = settle(&e.connector).await;
     assert_eq!(s.state, "failed");
     assert!(s.error.unwrap().contains("device client"));
+    // A device-only override cannot paste either.
+    let mut lib = drive(GoogleProject::Custom);
+    lib.oauth.google.device_client_id = Some("dev-device".into());
+    lib.oauth.google.device_client_secret = Some("dev-secret".into());
+    let e = env_with(library(), lib, Some(base), 5);
+    let mut r = req("gdrive");
+    r.flow = Some("paste".into());
+    e.connector.start(r, RequestOrigin::cli()).unwrap();
+    let s = settle(&e.connector).await;
+    assert_eq!(s.state, "failed");
+    assert!(
+        s.error.as_deref().unwrap().contains("no Desktop client"),
+        "{s:?}"
+    );
 }
 
 /// §7: a library of another account that ran here is not replaced unless the admin

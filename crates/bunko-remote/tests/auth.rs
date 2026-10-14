@@ -13,8 +13,8 @@ use axum::{Json, Router};
 use bunko_remote::BErr;
 use bunko_remote::auth::oauth::pkce_challenge;
 use bunko_remote::auth::{
-    AuthError, CredError, CredentialStore, DeviceFlow, LoopbackFlow, OAuthClient, Provider,
-    RefreshingToken, SecretKey, StoredCredential, TokenSource,
+    AuthError, CredError, CredentialStore, DeviceFlow, LoopbackFlow, OAuthClient, PasteError,
+    PasteFlow, Provider, RefreshingToken, SecretKey, StoredCredential, TokenSource,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -198,8 +198,11 @@ async fn google_loopback_end_to_end() {
     assert_eq!(pkce_challenge(verifier), challenge);
 }
 
+/// Microsoft's registered native redirect is `http://localhost` (port ignored):
+/// Bunko sends `http://localhost:<port>`, with no path (login.live.com refuses
+/// `/bunko`), and listens on both stacks.
 #[tokio::test]
-async fn microsoft_loopback_uses_localhost_bunko_on_both_stacks() {
+async fn microsoft_loopback_uses_localhost_on_both_stacks() {
     let (m, base) = mock_server().await;
     m.push(200, tokens_json("ms-at", Some("ms-rt")));
     let c = client(Provider::Microsoft, &base);
@@ -208,10 +211,9 @@ async fn microsoft_loopback_uses_localhost_bunko_on_both_stacks() {
     let redirect = q["redirect_uri"].clone();
     let port: u16 = redirect
         .strip_prefix("http://localhost:")
-        .and_then(|r| r.strip_suffix("/bunko"))
         .unwrap_or_else(|| panic!("{redirect}"))
         .parse()
-        .unwrap();
+        .unwrap_or_else(|_| panic!("{redirect}"));
     assert_eq!(q["scope"], "Files.ReadWrite offline_access User.Read");
     assert!(!q.contains_key("access_type"));
     let state = q["state"].clone();
@@ -222,7 +224,7 @@ async fn microsoft_loopback_uses_localhost_bunko_on_both_stacks() {
     let v6 = tokio::net::TcpListener::bind("[::1]:0").await.is_ok();
     if v6 {
         let r = b
-            .get(format!("http://[::1]:{port}/bunko?code=x&state=wrong"))
+            .get(format!("http://[::1]:{port}/?code=x&state=wrong"))
             .send()
             .await
             .unwrap();
@@ -230,16 +232,18 @@ async fn microsoft_loopback_uses_localhost_bunko_on_both_stacks() {
     } else {
         eprintln!("no IPv6 loopback here: ::1 not checked");
     }
-    // The registered path only.
+    // The redirect's path only.
     let r = b
-        .get(format!("http://127.0.0.1:{port}/?code=c&state={state}"))
+        .get(format!(
+            "http://127.0.0.1:{port}/bunko?code=c&state={state}"
+        ))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 404);
     let r = b
         .get(format!(
-            "http://127.0.0.1:{port}/bunko?code=ms-code&state={state}"
+            "http://127.0.0.1:{port}/?code=ms-code&state={state}"
         ))
         .send()
         .await
@@ -398,6 +402,97 @@ async fn microsoft_device_expired_and_denied() {
     let mut flow = DeviceFlow::start(&c).await.unwrap();
     flow.set_time_unit(UNIT);
     assert!(matches!(flow.poll().await, Err(AuthError::Expired)));
+}
+
+// ---------------------------------------------------------------- pasted address
+
+/// The pasted-address flow: nothing listens, the pasted URL's code is redeemed with
+/// the verifier and the exact redirect URI of the authorization request.
+#[tokio::test]
+async fn microsoft_paste_redeems_with_the_same_redirect() {
+    let (m, base) = mock_server().await;
+    m.push(200, tokens_json("paste-at", Some("paste-rt")));
+    let c = client(Provider::Microsoft, &base);
+    let (url, pending) = PasteFlow::start(&c).unwrap();
+    let q = query(&url);
+    let redirect = q["redirect_uri"].clone();
+    assert_eq!(redirect, pending.redirect_uri());
+    assert!(redirect.starts_with("http://localhost:"), "{redirect}");
+    // Nobody listens there (the person's own device would answer, or nothing).
+    let port: u16 = redirect["http://localhost:".len()..].parse().unwrap();
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        pending.code_from(&format!("{redirect}/?code=c&state=nope")),
+        Err(PasteError::WrongState)
+    ));
+    let code = pending
+        .code_from(&format!("{redirect}/?code=the-code&state={}", q["state"]))
+        .unwrap();
+    let t = pending.redeem(code).await.unwrap();
+    assert_eq!(t.access_token, "paste-at");
+    let f = &m.requests("/token")[0];
+    assert_eq!(f["grant_type"], "authorization_code");
+    assert_eq!(f["code"], "the-code");
+    assert_eq!(f["redirect_uri"], redirect);
+    assert_eq!(pkce_challenge(&f["code_verifier"]), q["code_challenge"]);
+    assert!(!f.contains_key("client_secret"));
+}
+
+/// Google's paste: the Desktop client's `http://127.0.0.1:<port>/` redirect, its secret.
+#[tokio::test]
+async fn google_paste_uses_the_desktop_redirect() {
+    let (m, base) = mock_server().await;
+    m.push(200, tokens_json("g-at", Some("g-rt")));
+    let c = client(Provider::Google, &base);
+    let (url, pending) = PasteFlow::start(&c).unwrap();
+    let q = query(&url);
+    assert!(q["redirect_uri"].starts_with("http://127.0.0.1:"));
+    assert!(q["redirect_uri"].ends_with('/'));
+    assert_eq!(q["access_type"], "offline");
+    let code = pending
+        .code_from(&format!(
+            "{}?state={}&code=4%2F0A&scope=x",
+            q["redirect_uri"], q["state"]
+        ))
+        .unwrap();
+    pending.redeem(code).await.unwrap();
+    let f = &m.requests("/token")[0];
+    assert_eq!(f["code"], "4/0A");
+    assert_eq!(f["client_secret"], "google-csecret");
+    assert_eq!(f["redirect_uri"], q["redirect_uri"]);
+}
+
+/// AADSTS70002 from Microsoft's devicecode endpoint, and from the token poll once a
+/// personal account signed in (`/common`), is the "use the browser" error.
+#[tokio::test]
+async fn microsoft_device_aadsts70002_says_use_the_browser() {
+    let (m, base) = mock_server().await;
+    let c = client(Provider::Microsoft, &base);
+    let refused = json!({"error": "invalid_client",
+        "error_description": "AADSTS70002: The client does not exist or is not enabled for consumers. Trace ID: t",
+        "error_codes": [70002]});
+    m.push(400, refused.clone());
+    let e = DeviceFlow::start(&c).await.unwrap_err();
+    assert!(matches!(e, AuthError::PersonalAccountNoCode), "{e:?}");
+    assert!(e.to_string().contains("sign in through the browser"));
+
+    m.push(
+        200,
+        json!({"device_code": "d", "user_code": "U", "verification_uri": "https://microsoft.com/devicelogin",
+               "expires_in": 900, "interval": 1}),
+    );
+    m.push(400, json!({"error": "authorization_pending"}));
+    m.push(400, refused);
+    let mut flow = DeviceFlow::start(&c).await.unwrap();
+    flow.set_time_unit(UNIT);
+    assert!(matches!(
+        flow.poll().await,
+        Err(AuthError::PersonalAccountNoCode)
+    ));
 }
 
 // ---------------------------------------------------------------- refresh
