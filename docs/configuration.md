@@ -131,7 +131,7 @@ storage:
 | `progress_user` | string | — | When readers are served too: the Bunko user whose reading progress is the cloud folder's progress files. |
 | `google_project` | string | `release` | Which Mokuro Reader's Google project Bunko signs in with, so it sees that reader's Drive files: `release` (reader.mokuro.app) or `beta`. `MOKURO_GOOGLE_PROJECT`. Becomes `custom` by itself when `oauth.google` is set; `custom` without it is refused. |
 | `oauth.google.*` | string | — | Your own Google OAuth clients, replacing both built-in ones: `client_id` + `client_secret` (Desktop client, browser sign-in on this machine) and `device_client_id` + `device_client_secret` ("TVs and Limited Input" client, sign-in with a code). Either pair may be left out; that sign-in flow is then unavailable. An id without its secret (or the reverse) is refused. |
-| `oauth.microsoft.client_id` | string | — | Your own Microsoft app registration for OneDrive. |
+| `oauth.microsoft.client_id` | string | — | Your own Microsoft app registration for OneDrive: a public client with the "Mobile and desktop" redirect `http://localhost` (any port is used at sign-in). |
 
 All the numbers must be above 0. Passwords and tokens are never kept in
 `config.yaml`: a WebDAV password comes from the file named by
@@ -139,6 +139,30 @@ All the numbers must be above 0. Passwords and tokens are never kept in
 `cloud/credentials.json`; a `webdav.password` key is refused. The other
 `storage.library` keys are set in the file or with
 `mokuro-bunko config set storage.library.<key> <value>`.
+
+#### Signing in to Google Drive or OneDrive
+
+The setup wizard, the admin panel's Storage tab and
+`mokuro-bunko library connect gdrive|onedrive` pick the sign-in by where you are:
+
+- **A browser on the server's computer** (the wizard opened on `localhost`, or
+  `library connect` in a desktop session): the provider's page opens in the
+  browser and comes back to Bunko by itself.
+- **Anywhere else** (Docker, a NAS, SSH, the wizard opened from another device):
+  - Google Drive shows a code to enter at google.com/device on any device.
+  - OneDrive shows the Microsoft sign-in address to open on any device. After
+    you sign in, that browser ends on a page that does not load, at
+    `http://localhost:<port>/?code=…`. Copy that page's whole address and paste
+    it back into the wizard, the Storage tab or the terminal (within 10 minutes).
+    Bunko checks that the address belongs to this sign-in and redeems its code;
+    the address is not logged or kept. A personal Microsoft account cannot sign in
+    with a code, so the code is offered for work or school accounts only ("Use a
+    sign-in code instead", or `--device`).
+
+On the command line, `--browser`, `--device` or `--paste` choose the sign-in
+instead. `--browser` without a desktop prints the address to open on this
+computer; `$BROWSER` is used to open it when set. Pasting needs a terminal: run
+`docker exec -it <container> mokuro-bunko library connect onedrive`.
 
 #### Upload verdicts
 
