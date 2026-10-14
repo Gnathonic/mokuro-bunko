@@ -86,9 +86,14 @@ impl DavError {
     /// blame its own login), a full store 507, a refused name 400.
     pub fn from_io(e: &std::io::Error) -> Self {
         use bunko_store::ErrorClass;
+        // The store's own message (without its `unavailable:` class prefix, which
+        // `what` already says).
         let unavailable = |what: &str, after: Option<std::time::Duration>| DavError {
             retry_after: Some(after.map_or(DEFAULT_RETRY_AFTER, |d| d.as_secs().max(1))),
-            ..DavError::new(StatusCode::SERVICE_UNAVAILABLE, format!("{what}: {e}"))
+            ..DavError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("{what}: {}", bunko_store::error_message(e)),
+            )
         };
         match bunko_store::classify(e) {
             ErrorClass::Conflict => DavError::new(StatusCode::PRECONDITION_FAILED, e.to_string()),
