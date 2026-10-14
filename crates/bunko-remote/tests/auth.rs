@@ -198,9 +198,9 @@ async fn google_loopback_end_to_end() {
     assert_eq!(pkce_challenge(verifier), challenge);
 }
 
-/// Microsoft's registered native redirect is `http://localhost` (port ignored):
-/// Bunko sends `http://localhost:<port>`, with no path (login.live.com refuses
-/// `/bunko`), and listens on both stacks.
+/// Microsoft's registered native redirect is `http://localhost/bunko` (port ignored):
+/// Bunko sends `http://localhost:<port>/bunko` (a bare `http://localhost` also matches
+/// the reader's SPA entries) and listens on both stacks.
 #[tokio::test]
 async fn microsoft_loopback_uses_localhost_on_both_stacks() {
     let (m, base) = mock_server().await;
@@ -211,6 +211,7 @@ async fn microsoft_loopback_uses_localhost_on_both_stacks() {
     let redirect = q["redirect_uri"].clone();
     let port: u16 = redirect
         .strip_prefix("http://localhost:")
+        .and_then(|p| p.strip_suffix("/bunko"))
         .unwrap_or_else(|| panic!("{redirect}"))
         .parse()
         .unwrap_or_else(|_| panic!("{redirect}"));
@@ -224,7 +225,7 @@ async fn microsoft_loopback_uses_localhost_on_both_stacks() {
     let v6 = tokio::net::TcpListener::bind("[::1]:0").await.is_ok();
     if v6 {
         let r = b
-            .get(format!("http://[::1]:{port}/?code=x&state=wrong"))
+            .get(format!("http://[::1]:{port}/bunko?code=x&state=wrong"))
             .send()
             .await
             .unwrap();
@@ -234,16 +235,14 @@ async fn microsoft_loopback_uses_localhost_on_both_stacks() {
     }
     // The redirect's path only.
     let r = b
-        .get(format!(
-            "http://127.0.0.1:{port}/bunko?code=c&state={state}"
-        ))
+        .get(format!("http://127.0.0.1:{port}/?code=c&state={state}"))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 404);
     let r = b
         .get(format!(
-            "http://127.0.0.1:{port}/?code=ms-code&state={state}"
+            "http://127.0.0.1:{port}/bunko?code=ms-code&state={state}"
         ))
         .send()
         .await
@@ -419,18 +418,21 @@ async fn microsoft_paste_redeems_with_the_same_redirect() {
     assert_eq!(redirect, pending.redirect_uri());
     assert!(redirect.starts_with("http://localhost:"), "{redirect}");
     // Nobody listens there (the person's own device would answer, or nothing).
-    let port: u16 = redirect["http://localhost:".len()..].parse().unwrap();
+    let port: u16 = redirect["http://localhost:".len()..]
+        .trim_end_matches("/bunko")
+        .parse()
+        .unwrap();
     assert!(
         tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_err()
     );
     assert!(matches!(
-        pending.code_from(&format!("{redirect}/?code=c&state=nope")),
+        pending.code_from(&format!("{redirect}?code=c&state=nope")),
         Err(PasteError::WrongState)
     ));
     let code = pending
-        .code_from(&format!("{redirect}/?code=the-code&state={}", q["state"]))
+        .code_from(&format!("{redirect}?code=the-code&state={}", q["state"]))
         .unwrap();
     let t = pending.redeem(code).await.unwrap();
     assert_eq!(t.access_token, "paste-at");

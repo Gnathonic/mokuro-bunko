@@ -385,7 +385,7 @@ async fn unused_codes_are_reissued_then_the_sign_in_stops_after_five() {
 }
 
 /// From a browser on this machine: the loopback flow with PKCE, Microsoft's
-/// `http://localhost:<port>` redirect (no path), OneDrive's own client.
+/// `http://localhost:<port>/bunko` redirect, OneDrive's own client.
 #[tokio::test]
 async fn a_local_request_signs_in_through_the_loopback_redirect() {
     let (m, base) = mock_server(900).await;
@@ -423,13 +423,14 @@ async fn a_local_request_signs_in_through_the_loopback_redirect() {
     let redirect = q["redirect_uri"].clone();
     let port: u16 = redirect
         .strip_prefix("http://localhost:")
+        .and_then(|p| p.strip_suffix("/bunko"))
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(|| panic!("{redirect}"));
     // The browser comes back.
     let b = reqwest::Client::builder().no_proxy().build().unwrap();
     let r = b
         .get(format!(
-            "http://127.0.0.1:{port}/?code=the-code&state={}",
+            "http://127.0.0.1:{port}/bunko?code=the-code&state={}",
             q["state"]
         ))
         .send()
@@ -575,7 +576,7 @@ async fn onedrive_from_elsewhere_signs_in_with_the_pasted_address() {
     for wrong in [
         "hello".to_string(),
         format!("https://evil.example/?code=c&state={}", q["state"]),
-        format!("{redirect}/?code=c&state=another"),
+        format!("{redirect}?code=c&state=another"),
         format!("{redirect}/"),
     ] {
         let err = e.connector.paste(wrong.clone()).await.unwrap_err();
@@ -587,7 +588,7 @@ async fn onedrive_from_elsewhere_signs_in_with_the_pasted_address() {
     let st = e
         .connector
         .paste(format!(
-            "  {redirect}/?code=the-code&state={}&session_state=x\n",
+            "  {redirect}?code=the-code&state={}&session_state=x\n",
             q["state"]
         ))
         .await
@@ -613,7 +614,7 @@ async fn onedrive_from_elsewhere_signs_in_with_the_pasted_address() {
     // The sign-in is over: another paste is refused.
     let err = e
         .connector
-        .paste(format!("{redirect}/?code=again&state={}", q["state"]))
+        .paste(format!("{redirect}?code=again&state={}", q["state"]))
         .await
         .unwrap_err();
     assert!(err.contains("No sign-in is waiting"), "{err}");
@@ -634,14 +635,14 @@ async fn a_refused_paste_ends_the_sign_in() {
     );
     let st = e
         .connector
-        .paste(format!("{redirect}/?error=access_denied&state={state}"))
+        .paste(format!("{redirect}?error=access_denied&state={state}"))
         .await
         .unwrap();
     assert_eq!(st.state, "failed", "{st:?}");
     assert!(st.error.unwrap().contains("refused or cancelled"));
     assert!(
         e.connector
-            .paste(format!("{redirect}/?code=c&state={state}"))
+            .paste(format!("{redirect}?code=c&state={state}"))
             .await
             .is_err()
     );
@@ -659,7 +660,7 @@ async fn a_refused_paste_ends_the_sign_in() {
         query_of(s.auth_url.as_deref().unwrap())["state"].clone(),
     );
     e.connector
-        .paste(format!("{redirect}/?code=c&state={state}"))
+        .paste(format!("{redirect}?code=c&state={state}"))
         .await
         .unwrap();
     let done = settle(&e.connector).await;
@@ -710,7 +711,7 @@ async fn a_paste_times_out_or_is_cancelled() {
     assert!(done.error.unwrap().contains("timed out"));
     assert!(
         e.connector
-            .paste(format!("{redirect}/?code=c&state={state}"))
+            .paste(format!("{redirect}?code=c&state={state}"))
             .await
             .is_err()
     );
@@ -721,7 +722,7 @@ async fn a_paste_times_out_or_is_cancelled() {
     let err = e
         .connector
         .paste(format!(
-            "{}/?code=c&state={state}",
+            "{}?code=c&state={state}",
             s.redirect_uri.as_deref().unwrap()
         ))
         .await

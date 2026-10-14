@@ -152,7 +152,7 @@ The setup wizard, the admin panel's Storage tab and
   - Google Drive shows a code to enter at google.com/device on any device.
   - OneDrive shows the Microsoft sign-in address to open on any device. After
     you sign in, that browser ends on a page that does not load, at
-    `http://localhost:<port>/?code=…`. Copy that page's whole address and paste
+    `http://localhost:<port>/bunko?code=…`. Copy that page's whole address and paste
     it back into the wizard, the Storage tab or the terminal (within 10 minutes).
     Bunko checks that the address belongs to this sign-in and redeems its code;
     the address is not logged or kept. A personal Microsoft account cannot sign in

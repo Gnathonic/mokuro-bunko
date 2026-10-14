@@ -604,7 +604,7 @@ impl Printer {
                     out.push(format!("    {url}"));
                     out.push(String::new());
                     out.push(format!(
-                        "After you sign in, the browser ends on a page that does not load: {redirect}/?code=…"
+                        "After you sign in, the browser ends on a page that does not load: {redirect}?code=…"
                     ));
                     out.push(format!(
                         "Copy that page's whole address from the address bar and paste it below{until}."
@@ -1551,7 +1551,7 @@ mod tests {
 
         let paste = json!({"state": "paste", "provider": "onedrive",
             "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?y=2",
-            "redirect_uri": "http://localhost:51234", "expires_at": "2026-10-14T10:10:00Z"});
+            "redirect_uri": "http://localhost:51234/bunko", "expires_at": "2026-10-14T10:10:00Z"});
         let mut p = Printer::default();
         let lines = p.lines(&paste).join("\n");
         assert!(lines.contains("on any device"), "{lines}");
@@ -1559,7 +1559,10 @@ mod tests {
             lines
                 .contains("    https://login.microsoftonline.com/common/oauth2/v2.0/authorize?y=2")
         );
-        assert!(lines.contains("http://localhost:51234/?code=…"), "{lines}");
+        assert!(
+            lines.contains("http://localhost:51234/bunko?code=…"),
+            "{lines}"
+        );
         assert!(
             lines.contains("paste it below (until 10:10 UTC)"),
             "{lines}"

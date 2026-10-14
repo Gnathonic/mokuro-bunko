@@ -280,7 +280,7 @@
                 a.href = s.auth_url; a.target = '_blank'; a.rel = 'noopener';
                 a.textContent = 'Open the sign-in page';
                 live.appendChild(a);
-                p('The browser then ends on a page that does not load (' + (s.redirect_uri || 'http://localhost') + '/?code=…). Paste its address below. Waiting ' + countdown(s.expires_at) + ' more.');
+                p('The browser then ends on a page that does not load (' + (s.redirect_uri || 'http://localhost/bunko') + '?code=…). Paste its address below. Waiting ' + countdown(s.expires_at) + ' more.');
                 break;
             }
             case 'browser': {

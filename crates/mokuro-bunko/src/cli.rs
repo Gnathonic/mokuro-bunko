@@ -351,7 +351,7 @@ pub enum LibraryCmd {
     /// itself; the address is printed too). Without one (SSH, Docker, a NAS), Google
     /// Drive prints a sign-in code to enter on any device, and OneDrive prints the
     /// sign-in address to open on any device: the browser then ends on a page that
-    /// does not load (http://localhost:<port>/?code=…), whose address you paste back
+    /// does not load (http://localhost:<port>/bunko?code=…), whose address you paste back
     /// here (`docker exec -it` for a terminal). Personal Microsoft accounts cannot use
     /// a sign-in code; --device is for work or school accounts.
     Connect(LibraryConnectArgs),
@@ -438,7 +438,7 @@ pub struct LibraryConnectArgs {
     #[arg(long, conflicts_with = "paste")]
     pub device: bool,
     /// Google Drive / OneDrive: sign in on any device, then paste the address the
-    /// browser ends on (http://localhost:<port>/?code=…) back here
+    /// browser ends on (http://localhost:<port>/bunko?code=…) back here
     #[arg(long)]
     pub paste: bool,
 }

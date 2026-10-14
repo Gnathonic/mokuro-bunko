@@ -338,7 +338,7 @@ function renderStorageConnect(c, st) {
             p('Sign in to ' + name + ' on any device, a phone included:');
             live.appendChild(link(c.auth_url, 'Open the sign-in page'));
             const left = c.expires_at ? Math.max(0, Math.round((new Date(c.expires_at) - Date.now()) / 60000)) : null;
-            p('The browser then ends on a page that does not load (' + (c.redirect_uri || 'http://localhost') + '/?code=…). Paste its address below' + (left != null ? ' within about ' + left + ' min' : '') + '.');
+            p('The browser then ends on a page that does not load (' + (c.redirect_uri || 'http://localhost/bunko') + '?code=…). Paste its address below' + (left != null ? ' within about ' + left + ' min' : '') + '.');
             break;
         }
         case 'code': {

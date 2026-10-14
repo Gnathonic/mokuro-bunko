@@ -8,7 +8,7 @@
   the server signs in directly. Anywhere else (Docker, a NAS, a phone), Google Drive
   gives a code to enter on any device, shown in the wizard, the admin panel, the tray
   and the log; OneDrive gives its sign-in page to open on any device, then you paste
-  back the address the browser ends on (`http://localhost:…/?code=…`), since personal
+  back the address the browser ends on (`http://localhost:…/bunko?code=…`), since personal
   Microsoft accounts cannot sign in with a code (a code stays available for work or
   school accounts, and a code refused for a personal account says to use the browser
   instead). The

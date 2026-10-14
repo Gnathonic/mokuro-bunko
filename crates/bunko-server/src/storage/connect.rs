@@ -14,7 +14,7 @@
 //!   a loopback client. Otherwise (Docker, a NAS, a LAN browser) Drive gets the device
 //!   flow and OneDrive the pasted address: Microsoft refuses device codes for personal
 //!   accounts (AADSTS70002), so the person signs in on any device and pastes back the
-//!   `http://localhost:<port>/?code=…` address their browser ends on
+//!   `http://localhost:<port>/bunko?code=…` address their browser ends on
 //!   ([`Connector::paste`]); the PKCE verifier stays in this process's memory. The CLI
 //!   names its flow (it knows whether it can open a browser). A device code is shown
 //!   in the wizard, admin and the tray and printed to the log with its expiry; an
@@ -531,7 +531,7 @@ pub struct ConnectStatus {
     /// `loopback`, `paste`, `device` or `form`.
     pub flow: Option<&'static str>,
     pub auth_url: Option<String>,
-    /// `paste`: where the person's browser ends (`http://localhost:<port>`); the
+    /// `paste`: where the person's browser ends (`http://localhost:<port>/bunko`); the
     /// pasted address must start with it. Not a secret.
     pub redirect_uri: Option<String>,
     pub user_code: Option<String>,
@@ -1486,7 +1486,7 @@ impl Connector {
             s.expires_at = Some(rfc3339(until));
             s.pairing = (!pairing.is_empty()).then(|| pairing.to_string());
             s.message = Some(format!(
-                "Open the sign-in page on any device and sign in to {name}. The browser then ends on a page that does not load ({redirect}/?code=…): copy that page's whole address and paste it here."
+                "Open the sign-in page on any device and sign in to {name}. The browser then ends on a page that does not load ({redirect}?code=…): copy that page's whole address and paste it here."
             ));
         });
         let deadline = tokio::time::Instant::now() + timeout;
@@ -1742,7 +1742,7 @@ impl Connector {
 fn sign_in_error(name: &str, e: AuthError) -> String {
     match e {
         AuthError::Denied => format!("The {name} sign-in was refused or cancelled."),
-        AuthError::Timeout => format!("The {name} sign-in timed out: click Connect to try again."),
+        AuthError::Timeout => format!("The {name} sign-in timed out. Start it again to sign in."),
         AuthError::Expired => {
             format!("The {name} sign-in code expired: click Connect for a new one.")
         }

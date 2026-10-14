@@ -45,13 +45,15 @@ pub const LOOPBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub const PASTE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// The redirect of a loopback sign-in on `port`. Google's Desktop clients take
-/// `http://127.0.0.1:<port>/`. Microsoft's registration has `http://localhost`, and
-/// Microsoft ignores the port of a loopback redirect, so Bunko sends
-/// `http://localhost:<port>` (D17); a path (`/bunko`) is refused by login.live.com.
+/// `http://127.0.0.1:<port>/`. Microsoft's registration has `http://localhost/bunko`
+/// under Mobile and desktop applications, and Microsoft ignores the port of a loopback
+/// redirect, so Bunko sends `http://localhost:<port>/bunko` (D17). The path matters: a
+/// bare `http://localhost:<port>` also matches the reader's single-page-app entries,
+/// and a code issued to those redeems only from a browser (AADSTS90023).
 pub fn loopback_redirect(provider: Provider, port: u16) -> String {
     match provider {
         Provider::Google => format!("http://127.0.0.1:{port}/"),
-        Provider::Microsoft => format!("http://localhost:{port}"),
+        Provider::Microsoft => format!("http://localhost:{port}/bunko"),
     }
 }
 
@@ -605,9 +607,8 @@ impl Pending {
         let Ok(url) = reqwest::Url::parse(&format!("http://loopback{target}")) else {
             return Callback::NotFound;
         };
-        // Both redirects end in `/` (Microsoft's `http://localhost:<port>` is `/` on
-        // the wire).
-        if url.path() != "/" {
+        let want = reqwest::Url::parse(&self.redirect_uri);
+        if want.map_or(true, |want| url.path() != want.path()) {
             return Callback::NotFound;
         }
         let (mut code, mut state, mut error, mut description) = (None, None, None, None);
@@ -1028,7 +1029,7 @@ mod tests {
         assert!(!s.contains("GOCSPX"), "{s}");
     }
 
-    const MS_REDIRECT: &str = "http://localhost:51234";
+    const MS_REDIRECT: &str = "http://localhost:51234/bunko";
     const STATE: &str = "the-state_0123456789";
 
     fn pasted(url: &str) -> Result<String, PasteError> {
@@ -1038,13 +1039,14 @@ mod tests {
     #[test]
     fn pasted_redirect_good() {
         assert_eq!(
-            pasted("http://localhost:51234/?code=M.C507_abc-123&state=the-state_0123456789")
+            pasted("http://localhost:51234/bunko?code=M.C507_abc-123&state=the-state_0123456789")
                 .unwrap(),
             "M.C507_abc-123"
         );
         // What browsers show: no trailing slash, padding whitespace, percent-escapes.
         assert_eq!(
-            pasted("  http://localhost:51234?code=a%2Fb&state=the-state_0123456789\n").unwrap(),
+            pasted("  http://localhost:51234/bunko?code=a%2Fb&state=the-state_0123456789\n")
+                .unwrap(),
             "a/b"
         );
         // Google's redirect, with its extra parameters (ignored).
@@ -1064,16 +1066,16 @@ mod tests {
     #[test]
     fn pasted_redirect_wrong_state() {
         assert!(matches!(
-            pasted("http://localhost:51234/?code=c&state=another-sign-in"),
+            pasted("http://localhost:51234/bunko?code=c&state=another-sign-in"),
             Err(PasteError::WrongState)
         ));
         assert!(matches!(
-            pasted("http://localhost:51234/?code=c"),
+            pasted("http://localhost:51234/bunko?code=c"),
             Err(PasteError::WrongState)
         ));
         // A state that is a prefix is not the state.
         assert!(matches!(
-            pasted("http://localhost:51234/?code=c&state=the-state"),
+            pasted("http://localhost:51234/bunko?code=c&state=the-state"),
             Err(PasteError::WrongState)
         ));
         assert!(!PasteError::WrongState.is_final());
@@ -1082,19 +1084,20 @@ mod tests {
     #[test]
     fn pasted_redirect_access_denied() {
         let e = pasted(
-            "http://localhost:51234/?error=access_denied&error_description=The+user+has+denied+access&state=the-state_0123456789",
+            "http://localhost:51234/bunko?error=access_denied&error_description=The+user+has+denied+access&state=the-state_0123456789",
         )
         .unwrap_err();
         assert!(e.is_final());
         assert!(matches!(e, PasteError::Ended(AuthError::Denied)), "{e:?}");
-        let e = pasted("http://localhost:51234/?error=server_error&state=the-state_0123456789")
-            .unwrap_err();
+        let e =
+            pasted("http://localhost:51234/bunko?error=server_error&state=the-state_0123456789")
+                .unwrap_err();
         assert!(
             matches!(e, PasteError::Ended(AuthError::OAuth { ref error, .. }) if error == "server_error")
         );
         // An error with another sign-in's state does not end this one.
         assert!(matches!(
-            pasted("http://localhost:51234/?error=access_denied&state=x"),
+            pasted("http://localhost:51234/bunko?error=access_denied&state=x"),
             Err(PasteError::WrongState)
         ));
     }
@@ -1103,10 +1106,10 @@ mod tests {
     fn pasted_redirect_with_junk() {
         // Text around or inside the address.
         for junk in [
-            "here: http://localhost:51234/?code=c&state=the-state_0123456789",
-            "http://localhost:51234/?code=c&state=the-state_0123456789 thanks",
-            "\"http://localhost:51234/?code=c&state=the-state_0123456789\"",
-            "<http://localhost:51234/?code=c&state=the-state_0123456789>",
+            "here: http://localhost:51234/bunko?code=c&state=the-state_0123456789",
+            "http://localhost:51234/bunko?code=c&state=the-state_0123456789 thanks",
+            "\"http://localhost:51234/bunko?code=c&state=the-state_0123456789\"",
+            "<http://localhost:51234/bunko?code=c&state=the-state_0123456789>",
             "",
             "c",
         ] {
@@ -1122,31 +1125,31 @@ mod tests {
         // Unknown parameters and a fragment are ignored; the code still counts.
         assert_eq!(
             pasted(
-                "http://localhost:51234/?session_state=x&code=c&state=the-state_0123456789#junk"
+                "http://localhost:51234/bunko?session_state=x&code=c&state=the-state_0123456789#junk"
             )
             .unwrap(),
             "c"
         );
         // A repeated code or state is ambiguous: refused.
         assert!(matches!(
-            pasted("http://localhost:51234/?code=a&code=b&state=the-state_0123456789"),
+            pasted("http://localhost:51234/bunko?code=a&code=b&state=the-state_0123456789"),
             Err(PasteError::NotTheRedirect { .. })
         ));
         assert!(matches!(
-            pasted("http://localhost:51234/?code=a&state=x&state=the-state_0123456789"),
+            pasted("http://localhost:51234/bunko?code=a&state=x&state=the-state_0123456789"),
             Err(PasteError::NotTheRedirect { .. })
         ));
         // No code at all.
         assert!(matches!(
-            pasted("http://localhost:51234/"),
+            pasted("http://localhost:51234/bunko"),
             Err(PasteError::NoCode)
         ));
         assert!(matches!(
-            pasted("http://localhost:51234/?code=&state=the-state_0123456789"),
+            pasted("http://localhost:51234/bunko?code=&state=the-state_0123456789"),
             Err(PasteError::NoCode)
         ));
         let huge = format!(
-            "http://localhost:51234/?code={}&state=the-state_0123456789",
+            "http://localhost:51234/bunko?code={}&state=the-state_0123456789",
             "a".repeat(MAX_PASTED)
         );
         assert!(matches!(pasted(&huge), Err(PasteError::NotAUrl)));
@@ -1160,8 +1163,9 @@ mod tests {
             "https://localhost:51234/?code=c&state=the-state_0123456789",
             "http://localhost:51235/?code=c&state=the-state_0123456789",
             "http://127.0.0.1:51234/?code=c&state=the-state_0123456789",
-            "http://localhost/?code=c&state=the-state_0123456789",
-            "http://localhost:51234/bunko?code=c&state=the-state_0123456789",
+            "http://localhost/bunko?code=c&state=the-state_0123456789",
+            "http://localhost:51234/?code=c&state=the-state_0123456789",
+            "http://localhost:51234/bunko/x?code=c&state=the-state_0123456789",
             "http://user@localhost:51234/?code=c&state=the-state_0123456789",
             "http://localhost.evil.example:51234/?code=c&state=the-state_0123456789",
             "javascript:alert(1)//localhost:51234/?code=c&state=the-state_0123456789",
@@ -1184,6 +1188,7 @@ mod tests {
         let port: u16 = p
             .redirect_uri()
             .strip_prefix("http://localhost:")
+            .and_then(|p| p.strip_suffix("/bunko"))
             .unwrap()
             .parse()
             .unwrap();
@@ -1196,7 +1201,7 @@ mod tests {
         // The pending sign-in's Debug shows neither the state nor the verifier.
         let d = format!("{p:?}");
         assert!(!d.contains(&p.verifier) && !d.contains(&p.state), "{d}");
-        let ok = format!("{}/?code=abc&state={}", p.redirect_uri(), q["state"]);
+        let ok = format!("{}?code=abc&state={}", p.redirect_uri(), q["state"]);
         assert_eq!(p.code_from(&ok).unwrap(), "abc");
     }
 
@@ -1239,7 +1244,7 @@ mod tests {
     fn redirects_per_provider() {
         assert_eq!(
             loopback_redirect(Provider::Microsoft, 8080),
-            "http://localhost:8080"
+            "http://localhost:8080/bunko"
         );
         assert_eq!(
             loopback_redirect(Provider::Google, 8080),
