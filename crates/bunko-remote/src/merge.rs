@@ -40,6 +40,9 @@
 //!   [`CloudHooks::removed`](crate::CloudHooks::removed) for a trashed loser file).
 //! - **Finishing:** an emptied losing member node is trashed only after a direct
 //!   listing shows it empty; anything else is re-planned in a later pass.
+//! - **Closing:** a group is audited ([`CaseMergePolicy::audit`]) before it closes;
+//!   its row turns `done` and its paths stop being busy at once. Whoever sees a merge
+//!   finished, by either, finds its audit record.
 //!
 //! One std thread (`bunko-store-merge`) runs the passes: planning reads file bytes
 //! through the store's blocking content methods, which never run on the store runtime.
@@ -132,7 +135,8 @@ pub trait CaseMergePolicy: Send + Sync {
     fn busy(&self, _path: &Path) -> bool {
         false
     }
-    /// A merge group finished (the audit record).
+    /// A merge group finished (the audit record, as it reads once `done`). Called
+    /// before the group shows `done`; a crash in between calls it again on resume.
     fn audit(&self, _merge: &MergeRecord) {}
 }
 
@@ -220,7 +224,11 @@ fn last_name(rel: &RelPath) -> &str {
 /// The merge's shared state: the policy, open scopes, recent events, the thread.
 pub(crate) struct MergeState {
     policy: Mutex<Option<Arc<dyn CaseMergePolicy>>>,
-    /// Scopes a merge works on (`Some(group)`), or is checking (`None`).
+    /// Scopes a merge works on (`Some(group)`), or is checking (`None`). A group's
+    /// `merge_group` row changes state while this is held ([`MergeState::open_group`],
+    /// [`MergeState::close_group`]): a caller that sees a group `open` finds its
+    /// scope busy, one that sees it `done` (or its scope no longer busy) finds it
+    /// closed. The order is this, then the state db, never the other way.
     busy: Mutex<Vec<(Option<String>, Scope)>>,
     events: Mutex<VecDeque<(Instant, Vec<String>)>>,
     /// Scopes planned with nothing to do (only blocks), and when.
@@ -308,10 +316,29 @@ impl MergeState {
         }
     }
 
-    fn unmark_group(&self, group: &str) {
-        self.busy
-            .lock()
-            .retain(|(g, _)| g.as_deref() != Some(group));
+    /// Journal a group's row (`insert`) and swap the scope's check (if any) for the
+    /// group's mark, all under the busy lock: the scope never looks free in between.
+    fn open_group(
+        &self,
+        group: &str,
+        scope: &Scope,
+        insert: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
+        let mut b = self.busy.lock();
+        insert()?;
+        if let Some(i) = b.iter().position(|(g, s)| g.is_none() && s == scope) {
+            b.remove(i);
+        }
+        b.push((Some(group.to_string()), scope.clone()));
+        Ok(())
+    }
+
+    /// Mark a group's row done (`finish`) and drop its marks under the busy lock:
+    /// `done` is never visible while its scope is still busy, nor the other way.
+    fn close_group(&self, group: &str, finish: impl FnOnce()) {
+        let mut b = self.busy.lock();
+        finish();
+        b.retain(|(g, _)| g.as_deref() != Some(group));
     }
 
     pub(crate) fn wake(&self) {
@@ -1675,26 +1702,26 @@ impl<B: Backend> RemoteStore<B> {
         let losers_j = serde_json::to_string(losers).unwrap_or_else(|_| "[]".into());
         // A pass sees the group with all its steps, or not yet (`journal`).
         let _journal = self.merge.journal.lock();
-        self.core.state.with("merge_group", |c| {
-            c.execute(
-                "INSERT INTO merge_group(id, scope, stem, parent, winner, losers, origin, state, created_at) \
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'open', ?8)",
-                params![
-                    gid,
-                    scope.json(),
-                    scope.stem,
-                    parent.to_string(),
-                    winner,
-                    losers_j,
-                    origin,
-                    now_ms()
-                ],
-            )
-            .map(|_| ())
-        })?;
         // Busy from now on, until the group closes.
-        self.merge.unmark_probe(scope);
-        self.merge.mark(Some(gid.clone()), scope.clone());
+        self.merge.open_group(&gid, scope, || {
+            self.core.state.with("merge_group", |c| {
+                c.execute(
+                    "INSERT INTO merge_group(id, scope, stem, parent, winner, losers, origin, state, created_at) \
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'open', ?8)",
+                    params![
+                        gid,
+                        scope.json(),
+                        scope.stem,
+                        parent.to_string(),
+                        winner,
+                        losers_j,
+                        origin,
+                        now_ms()
+                    ],
+                )
+                .map(|_| ())
+            })
+        })?;
         self.core
             .fail_at("MERGE_GROUP")
             .map_err(|_| io::Error::other("the store stopped (failpoint)"))?;
@@ -1804,15 +1831,34 @@ impl<B: Backend> RemoteStore<B> {
         Ok(GroupEnd::Done)
     }
 
+    /// Audit the group, then mark it done and its scope free at once: whoever sees
+    /// the merge finished (`done` under "Recent merges", or the scope no longer
+    /// busy) finds its audit record. A crash between the audit and `done` audits the
+    /// group again when it resumes (at least once, never lost).
     fn close_group(&self, gid: &str, policy: &dyn CaseMergePolicy) {
-        let _ = self.core.state.with("merge_group_close", |c| {
-            c.execute(
-                "UPDATE merge_group SET state = 'done', finished_at = ?2 WHERE id = ?1",
-                params![gid, now_ms()],
-            )
+        let at = now_ms();
+        // The record as it reads once closed.
+        let rec = self
+            .recent_merges()
+            .into_iter()
+            .find(|r| r.id == gid)
+            .map(|r| MergeRecord {
+                state: "done".into(),
+                finished_at: Some(at),
+                ..r
+            });
+        if let Some(rec) = &rec {
+            policy.audit(rec);
+        }
+        self.merge.close_group(gid, || {
+            let _ = self.core.state.with("merge_group_close", |c| {
+                c.execute(
+                    "UPDATE merge_group SET state = 'done', finished_at = ?2 WHERE id = ?1",
+                    params![gid, at],
+                )
+            });
         });
-        self.merge.unmark_group(gid);
-        if let Some(rec) = self.recent_merges().into_iter().find(|r| r.id == gid) {
+        if let Some(rec) = rec {
             tracing::info!(
                 "[STORAGE] Case merge into {} done: {} moved, {} trashed, {} blocked",
                 rec.winner,
@@ -1820,7 +1866,6 @@ impl<B: Backend> RemoteStore<B> {
                 rec.trashed,
                 rec.blocked
             );
-            policy.audit(&rec);
         }
     }
 
