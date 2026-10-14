@@ -480,11 +480,19 @@
                         <label class="check"><input type="checkbox" id="sc-dav-http"> Allow http:// (a server on your own network; one on this computer, localhost or 127.0.0.1, needs no tick)</label>
                     </div>
                     <div class="connectivity-section__actions">
-                        <button class="btn btn--primary btn--sm" id="sc-connect" onclick="storageConnect(false)">Connect</button>
-                        <button class="btn btn--ghost btn--sm" id="sc-code" onclick="storageConnect(true)" hidden>Use a code instead</button>
+                        <button class="btn btn--primary btn--sm" id="sc-connect" onclick="storageConnect(null)">Connect</button>
+                        <button class="btn btn--ghost btn--sm" id="sc-code" onclick="storageConnect('device')" hidden>Use a code instead</button>
                         <button class="btn btn--ghost btn--sm" onclick="storageCancel()">Cancel</button>
                     </div>
                     <div class="storage-live" id="sc-live" role="status" aria-live="polite" hidden></div>
+                    <div class="storage-paste mt-3" id="sc-paste" hidden>
+                        <div class="form-group">
+                            <label class="form-label" for="sc-paste-url">The address the browser ended on</label>
+                            <input class="form-input" id="sc-paste-url" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="http://localhost:…/?code=…" onkeydown="if (event.key === 'Enter') { event.preventDefault(); storagePaste(); }">
+                            <p class="form-hint">After you sign in, the browser shows a page that does not load. Copy that page's whole address from the address bar and paste it here.</p>
+                        </div>
+                        <button class="btn btn--primary btn--sm" id="sc-paste-btn" onclick="storagePaste()">Finish signing in</button>
+                    </div>
                 </div>
 
                 <div class="card mt-4" id="storage-readers">

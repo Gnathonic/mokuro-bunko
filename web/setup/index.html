@@ -89,6 +89,13 @@
                     <label class="toggle"><input type="checkbox" role="switch" id="dav-http"><span class="toggle__text"><strong>Allow http://</strong><span>Only for a server on your own network: the password travels unencrypted. A server on this computer (localhost, 127.0.0.1) needs no tick.</span></span></label>
                 </div>
                 <div class="connect-live mt-3" id="connect-live" role="status" aria-live="polite" hidden></div>
+                <div class="connect-paste mt-3" id="connect-paste" hidden>
+                    <label class="form-label" for="connect-paste-url">The address the browser ended on</label>
+                    <input class="form-input" id="connect-paste-url" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="http://localhost:…/?code=…">
+                    <p class="form-hint">After you sign in, the browser shows a page that does not load. Copy that page's whole address from the address bar and paste it here.</p>
+                    <div id="connect-paste-error" class="form-error" role="alert" hidden></div>
+                    <button type="button" class="btn btn--primary btn--sm" id="connect-paste-btn">Finish signing in</button>
+                </div>
                 <div id="connect-error" class="form-error" role="alert" hidden></div>
                 <div class="setup-actions">
                     <button type="button" class="btn btn--secondary" id="connect-back">Back</button>

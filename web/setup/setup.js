@@ -127,7 +127,9 @@
         $('connect-lede').textContent = OAUTH.includes(where)
             ? (options.local
                 ? 'One sign-in: the ' + (where === 'gdrive' ? 'Google' : 'Microsoft') + ' page opens in a new tab.'
-                : 'One sign-in: you get a code to enter on any device, a phone included.')
+                : where === 'onedrive'
+                    ? 'One sign-in: open the Microsoft page on any device, then paste here the address it ends on.'
+                    : 'One sign-in: you get a code to enter on any device, a phone included.')
             : where === 'mega' ? 'Your MEGA account, once.' : 'The server\'s address, your user and an app password.';
         const custom = where === 'gdrive' && conf.custom_pairing;
         $('connect-reader').hidden = where !== 'gdrive' || custom;
@@ -147,13 +149,20 @@
             if (conf.webdav.username && !$('dav-user').value) $('dav-user').value = conf.webdav.username;
             $('dav-http').checked = !!conf.webdav.allow_http;
         }
-        $('connect-code-link').hidden = !(OAUTH.includes(where) && options.local);
+        // A code instead: where the browser flow is the default (this computer), and
+        // for OneDrive's work or school accounts (personal ones cannot use a code).
+        $('connect-code-link').hidden = !(OAUTH.includes(where) && (options.local || where === 'onedrive'));
+        $('connect-code-link').textContent = where === 'onedrive'
+            ? 'Use a sign-in code instead (work or school accounts)'
+            : 'Use a code instead';
         $('connect-btn').textContent = 'Connect';
         $('connect-live').hidden = true;
+        $('connect-paste').hidden = true;
         showError($('connect-error'), '');
     }
 
-    function connectBody(forceDevice) {
+    // flow: null (the server chooses), 'device', 'paste' or 'loopback'.
+    function connectBody(flow) {
         const body = { provider: where };
         if (where === 'gdrive' && $('connect-reader').hidden === false) body.reader = checked('reader') || 'release';
         if (where === 'mega') {
@@ -165,7 +174,7 @@
                 password: $('dav-password').value, allow_http: $('dav-http').checked,
             };
         }
-        if (forceDevice) body.flow = 'device';
+        if (flow) body.flow = flow;
         return body;
     }
 
@@ -181,7 +190,7 @@
         return null;
     }
 
-    async function connect(forceDevice) {
+    async function connect(flow) {
         const err = validateConnect();
         showError($('connect-error'), err);
         if (err) return;
@@ -189,12 +198,14 @@
         // The loopback sign-in's tab, opened while this click still counts (pop-up
         // blockers); it gets the sign-in page once the server says which flow runs.
         let tab = null;
-        if (OAUTH.includes(where) && options.local && !forceDevice) {
+        if (OAUTH.includes(where) && options.local && flow !== 'device' && flow !== 'paste') {
             tab = window.open('', '_blank');
         }
         $('connect-btn').disabled = true;
+        $('connect-paste-url').value = '';
+        showError($('connect-paste-error'), '');
         try {
-            await postJSON('/setup/api/storage/connect', connectBody(forceDevice));
+            await postJSON('/setup/api/storage/connect', connectBody(flow));
         } catch (e) {
             if (tab) tab.close();
             $('connect-btn').disabled = false;
@@ -228,6 +239,8 @@
             }
             if (s.state !== 'browser' && tab && !opened) { tab.close(); tab = null; }
             renderConnect(s);
+            // Outside the live area, so a tick does not wipe what is being pasted.
+            $('connect-paste').hidden = s.state !== 'paste';
             if (s.state === 'connected') {
                 check = s.check;
                 stopPolling();
@@ -261,6 +274,15 @@
         showError($('connect-error'), '');
         switch (s.state) {
             case 'starting': p('Starting the sign-in…'); break;
+            case 'paste': {
+                p('Sign in to ' + name + ' on any device, a phone included:');
+                const a = document.createElement('a');
+                a.href = s.auth_url; a.target = '_blank'; a.rel = 'noopener';
+                a.textContent = 'Open the sign-in page';
+                live.appendChild(a);
+                p('The browser then ends on a page that does not load (' + (s.redirect_uri || 'http://localhost') + '/?code=…). Paste its address below. Waiting ' + countdown(s.expires_at) + ' more.');
+                break;
+            }
             case 'browser': {
                 p('Sign in to ' + name + ' in the tab that opened, then come back here.');
                 const a = document.createElement('a');
@@ -314,8 +336,17 @@
                 $('connect-btn').textContent = 'Get a new code';
                 break;
             case 'failed':
-                live.hidden = true;
                 showError($('connect-error'), s.error || 'The sign-in failed.');
+                if (s.suggest_flow) {
+                    // A personal Microsoft account with a code: the browser works.
+                    const again = document.createElement('button');
+                    again.className = 'btn btn--primary btn--sm';
+                    again.textContent = 'Sign in through the browser instead';
+                    again.onclick = () => connect(s.suggest_flow);
+                    live.appendChild(again);
+                } else {
+                    live.hidden = true;
+                }
                 break;
             case 'cancelled':
                 live.hidden = true;
@@ -376,7 +407,23 @@
         const r = other && document.querySelector('input[name="reader"][value="' + other + '"]');
         if (r) r.checked = true;
         show('step-connect');
-        connect(false);
+        connect(null);
+    }
+
+    async function pasteAddress() {
+        const url = $('connect-paste-url').value.trim();
+        if (!url) { showError($('connect-paste-error'), 'Paste the address the browser ended on'); return; }
+        $('connect-paste-btn').disabled = true;
+        try {
+            await postJSON('/setup/api/storage/connect/paste', { url });
+            $('connect-paste-url').value = '';
+            showError($('connect-paste-error'), '');
+            $('connect-paste').hidden = true;
+        } catch (e) {
+            showError($('connect-paste-error'), e.message);
+        } finally {
+            $('connect-paste-btn').disabled = false;
+        }
     }
 
     // ---- readers -----------------------------------------------------------------------
@@ -743,9 +790,11 @@
         document.querySelectorAll('[data-prev]').forEach((b) => b.addEventListener('click', prev));
         document.querySelectorAll('[data-next]').forEach((b) => b.addEventListener('click', next));
         $('where-next').addEventListener('click', whereNext);
-        $('connect-btn').addEventListener('click', () => connect(false));
-        $('connect-back').addEventListener('click', () => { stopPolling(); show('step-where'); });
-        $('connect-code-link').addEventListener('click', (ev) => { ev.preventDefault(); connect(true); });
+        $('connect-btn').addEventListener('click', () => connect(null));
+        $('connect-paste-btn').addEventListener('click', pasteAddress);
+        $('connect-paste-url').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); pasteAddress(); } });
+        $('connect-back').addEventListener('click', () => { stopPolling(); $('connect-paste').hidden = true; show('step-where'); });
+        $('connect-code-link').addEventListener('click', (ev) => { ev.preventDefault(); connect('device'); });
         $('check-back').addEventListener('click', () => { setupConnect(); show('step-connect'); });
         $('check-next').addEventListener('click', next);
         $('check-create').addEventListener('click', createFolder);

@@ -2305,6 +2305,7 @@ details[open] > .bench-res__summary::before {
 }
 
 .storage-live p { margin: 0.25rem 0; font-size: 0.875rem; color: var(--text-secondary); }
+.storage-paste .form-input { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
 .storage-code {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
