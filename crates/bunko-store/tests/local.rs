@@ -137,7 +137,10 @@ fn read_dir_entry_vanishing_is_per_entry_error() {
         .collect();
     std::fs::remove_file(d.path().join("a")).unwrap();
     let results: Vec<_> = entries.iter().map(|e| e.metadata().is_ok()).collect();
-    assert_eq!(results.iter().filter(|ok| **ok).count(), 1);
+    // Windows answers an entry's metadata from the listing itself (FindNextFile), so
+    // the vanished entry still has some; elsewhere it is a fresh stat that fails alone.
+    let expected = if cfg!(windows) { 2 } else { 1 };
+    assert_eq!(results.iter().filter(|ok| **ok).count(), expected);
 }
 
 #[test]
