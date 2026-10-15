@@ -558,15 +558,20 @@ async fn a_rename_made_in_the_cloud_moves_the_db_rows() {
                     .flatten()
                     .as_deref()
                     == Some("alice")
+                // The sidecar rows follow in their own step.
+                && db
+                    .get_ocr_sidecar("Renamed/Vol 1.mokuro")
+                    .ok()
+                    .flatten()
+                    .is_some()
+                && db
+                    .get_ocr_sidecar("Series/Vol 1.mokuro")
+                    .ok()
+                    .flatten()
+                    .is_none()
         },
     )
     .await;
-    assert!(
-        db.get_ocr_sidecar("Renamed/Vol 1.mokuro")
-            .unwrap()
-            .is_some()
-    );
-    assert!(db.get_ocr_sidecar("Series/Vol 1.mokuro").unwrap().is_none());
     // The bridge sees the new spelling.
     let listing = env
         .request(
