@@ -1355,6 +1355,17 @@ impl Connector {
                 return Err("the Google override has no Desktop client (storage.library.oauth.google.client_id and client_secret): use a sign-in code, or add one".into());
             }
         }
+        let chosen = if flow == Flow::Device {
+            &device
+        } else {
+            &loopback
+        };
+        if chosen
+            .as_ref()
+            .is_some_and(OAuthClient::lacks_google_secret)
+        {
+            return Err(bunko_remote::auth::oauth::NO_GOOGLE_SECRET.into());
+        }
         // What a failed device sign-in of a personal Microsoft account should use.
         let instead = if browser_here || origin.cli {
             Flow::Loopback

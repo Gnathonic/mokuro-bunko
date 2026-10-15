@@ -1,14 +1,18 @@
 //! The OAuth clients embedded in every build (§7, D25).
 //!
-//! Google installed-app ("Desktop") and "TVs and Limited Input" client secrets are
-//! public by design: Google documents that installed apps cannot keep secrets, so
-//! the secret is not confidential and ships in the binary (prov-gdrive §A). They are
-//! constants here and are never read from the environment at build time.
+//! The Google client ids are constants. Their secrets are not in the source: a build
+//! takes them from the environment at compile time (`BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET`,
+//! `BUNKO_GOOGLE_RELEASE_DEVICE_SECRET`, `BUNKO_GOOGLE_BETA_DESKTOP_SECRET`,
+//! `BUNKO_GOOGLE_BETA_DEVICE_SECRET`; the release workflow sets them from repository
+//! secrets). Google documents that installed apps cannot keep a secret, so a release
+//! binary still carries them (prov-gdrive §A); they just stay out of the repository.
+//! A build made without them keeps its clients with no secret, and the real Google
+//! sign-in refuses them up front ([`OAuthClient::lacks_google_secret`]); such a build
+//! signs in through `storage.library.oauth.google` overrides (pairing `custom`).
 //!
 //! Pairings: `release` = project `mokuro-reader-414418` (reader.mokuro.app), `beta`
 //! = `mokuro-reader-tan`. The local-dev project (`mokuro-reader-tan-dev`) is not
-//! embedded; it is reachable only through `storage.library.oauth.google` overrides
-//! (pairing `custom`).
+//! embedded; it is reachable only through the overrides.
 
 use bunko_core::config::{GoogleOAuthOverrides, GoogleProject, MicrosoftOAuthOverrides};
 
@@ -17,20 +21,23 @@ use super::oauth::OAuthClient;
 /// `mokuro-reader-414418` (release), Desktop client: the loopback flow.
 pub const RELEASE_DESKTOP_CLIENT_ID: &str =
     "668077722590-5u0698aafve2udlcru7i184qrb7m59jv.apps.googleusercontent.com";
-pub const RELEASE_DESKTOP_CLIENT_SECRET: &str = "REDACTED-GOOGLE-CLIENT-SECRET";
+pub const RELEASE_DESKTOP_CLIENT_SECRET: Option<&str> =
+    option_env!("BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET");
 /// `mokuro-reader-414418` (release), TVs and Limited Input client: the device flow.
 pub const RELEASE_DEVICE_CLIENT_ID: &str =
     "668077722590-9pni7na6bv58fgnacdauenfhmg1d58g0.apps.googleusercontent.com";
-pub const RELEASE_DEVICE_CLIENT_SECRET: &str = "REDACTED-GOOGLE-CLIENT-SECRET";
+pub const RELEASE_DEVICE_CLIENT_SECRET: Option<&str> =
+    option_env!("BUNKO_GOOGLE_RELEASE_DEVICE_SECRET");
 
 /// `mokuro-reader-tan` (beta), Desktop client.
 pub const BETA_DESKTOP_CLIENT_ID: &str =
     "868461116957-anvbst1eiq2pbegk578f280mhj3umrbv.apps.googleusercontent.com";
-pub const BETA_DESKTOP_CLIENT_SECRET: &str = "REDACTED-GOOGLE-CLIENT-SECRET";
+pub const BETA_DESKTOP_CLIENT_SECRET: Option<&str> =
+    option_env!("BUNKO_GOOGLE_BETA_DESKTOP_SECRET");
 /// `mokuro-reader-tan` (beta), TVs and Limited Input client.
 pub const BETA_DEVICE_CLIENT_ID: &str =
     "868461116957-b494nfd65jv26p3ii067kkeihvi56m8l.apps.googleusercontent.com";
-pub const BETA_DEVICE_CLIENT_SECRET: &str = "REDACTED-GOOGLE-CLIENT-SECRET";
+pub const BETA_DEVICE_CLIENT_SECRET: Option<&str> = option_env!("BUNKO_GOOGLE_BETA_DEVICE_SECRET");
 
 /// Bunko's Microsoft registration: a public client (no secret), native redirect
 /// `http://localhost/bunko` (D17).
@@ -72,9 +79,14 @@ pub fn google_clients(pairing: GoogleProject, overrides: &GoogleOAuthOverrides) 
             RELEASE_DEVICE_CLIENT_SECRET,
         ),
     };
+    let embedded = |id: &str, secret: Option<&str>| {
+        let mut c = OAuthClient::google(id, "");
+        c.client_secret = secret.filter(|s| !s.is_empty()).map(str::to_string);
+        c
+    };
     GoogleClients {
-        loopback: Some(OAuthClient::google(desktop, desktop_secret)),
-        device: Some(OAuthClient::google(device, device_secret)),
+        loopback: Some(embedded(desktop, desktop_secret)),
+        device: Some(embedded(device, device_secret)),
     }
 }
 
@@ -116,14 +128,11 @@ mod tests {
         assert!(RELEASE_DEVICE_CLIENT_ID.starts_with("668077722590-"));
         let lb = r.loopback.unwrap();
         assert_eq!(lb.provider, Provider::Google);
-        assert_eq!(
-            lb.client_secret.as_deref(),
-            Some(RELEASE_DESKTOP_CLIENT_SECRET)
-        );
+        assert_eq!(lb.client_secret.as_deref(), RELEASE_DESKTOP_CLIENT_SECRET);
         assert_eq!(lb.scopes, vec![GOOGLE_SCOPE.to_string()]);
         assert_eq!(
             r.device.unwrap().client_secret.as_deref(),
-            Some(RELEASE_DEVICE_CLIENT_SECRET)
+            RELEASE_DEVICE_CLIENT_SECRET
         );
 
         let b = google_clients(GoogleProject::Beta, &none);
@@ -134,8 +143,36 @@ mod tests {
         assert!(BETA_DESKTOP_CLIENT_ID.starts_with("868461116957-"));
         assert_eq!(
             b.loopback.unwrap().client_secret.as_deref(),
-            Some(BETA_DESKTOP_CLIENT_SECRET)
+            BETA_DESKTOP_CLIENT_SECRET
         );
+    }
+
+    #[test]
+    fn no_secret_in_the_source() {
+        // The embedded secrets come only from the build environment.
+        let src = include_str!("clients.rs");
+        assert!(
+            !src.contains(concat!("GOCSPX", "-")),
+            "a Google client secret is in clients.rs"
+        );
+    }
+
+    #[test]
+    fn a_build_without_secrets_still_has_its_clients() {
+        let c = google_clients(GoogleProject::Release, &GoogleOAuthOverrides::default());
+        let lb = c.loopback.unwrap();
+        assert_eq!(
+            lb.client_secret.is_none(),
+            RELEASE_DESKTOP_CLIENT_SECRET.is_none()
+        );
+        assert_eq!(
+            lb.lacks_google_secret(),
+            RELEASE_DESKTOP_CLIENT_SECRET.is_none()
+        );
+        // Pointed elsewhere (a test server, a proxy), the missing secret is not refused.
+        let mut elsewhere = lb.clone();
+        elsewhere.token_url = "http://127.0.0.1:1/token".into();
+        assert!(!elsewhere.lacks_google_secret());
     }
 
     #[test]

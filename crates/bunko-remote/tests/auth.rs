@@ -805,3 +805,18 @@ fn debug_never_shows_secrets() {
     let s = format!("{:?}", bunko_remote::auth::StaticToken("tok-SECRET".into()));
     assert!(!s.contains("SECRET"), "{s}");
 }
+
+/// A Google client with no secret (a build without `BUNKO_GOOGLE_*_SECRET`) headed for
+/// Google itself fails its refresh with the clear message, without a request.
+#[tokio::test]
+async fn a_refresh_without_the_google_secret_is_not_sent() {
+    let mut c = OAuthClient::google("id.apps.googleusercontent.com", "");
+    c.client_secret = None;
+    assert!(c.lacks_google_secret());
+    let e = bunko_remote::auth::refresh(&c, "rt").await.unwrap_err();
+    assert!(matches!(e, AuthError::NoGoogleSecret), "{e:?}");
+    assert!(
+        e.to_string().contains("storage.library.oauth.google"),
+        "{e}"
+    );
+}

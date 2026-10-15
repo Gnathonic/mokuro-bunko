@@ -38,6 +38,10 @@ pub const MICROSOFT_DEVICE_URL: &str =
 pub const MICROSOFT_SCOPES: [&str; 3] = ["Files.ReadWrite", "offline_access", "User.Read"];
 
 /// How long a loopback sign-in waits for the browser to come back.
+/// What a sign-in or a stored Google credential says when this build has no Google
+/// client secret ([`OAuthClient::lacks_google_secret`]).
+pub const NO_GOOGLE_SECRET: &str = "this build of Bunko was made without the Google client secrets (BUNKO_GOOGLE_*_SECRET at build time), so it cannot sign in to Google Drive with the built-in clients: use an official release, or set your own client in storage.library.oauth.google";
+
 pub const LOOPBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// How long a pasted-address sign-in waits for the address: the sign-in happens on
@@ -110,6 +114,17 @@ impl OAuthClient {
             device_url: GOOGLE_DEVICE_URL.into(),
             scopes: vec![GOOGLE_SCOPE.into()],
         }
+    }
+
+    /// A Google client headed for Google's own token endpoint without a secret: an
+    /// embedded client of a build made without its `BUNKO_GOOGLE_*_SECRET`. Google
+    /// refuses such a sign-in only after the browser round trip, so callers refuse it
+    /// first ([`NO_GOOGLE_SECRET`]), and a refresh with it fails
+    /// without a request ([`AuthError::NoGoogleSecret`]).
+    pub fn lacks_google_secret(&self) -> bool {
+        self.provider == Provider::Google
+            && self.client_secret.is_none()
+            && self.token_url == GOOGLE_TOKEN_URL
     }
 
     /// A Microsoft public client (no secret) at the `/common` authority.
@@ -186,6 +201,10 @@ pub enum AuthError {
     /// The grant is gone (revoked, expired, password changed): sign in again.
     #[error("the sign-in is no longer valid (invalid_grant)")]
     InvalidGrant,
+    /// The client has no Google secret ([`OAuthClient::lacks_google_secret`]): Google
+    /// would refuse the request, so it is not sent.
+    #[error("{NO_GOOGLE_SECRET}")]
+    NoGoogleSecret,
     /// Another OAuth error response.
     #[error("OAuth error {error} (HTTP {status}){}", description.as_deref().map(|d| format!(": {d}")).unwrap_or_default())]
     OAuth {
@@ -347,6 +366,9 @@ async fn token_request(
 /// passed in. A caller that keeps credentials must persist a rotated token before it
 /// uses the new access token ([`crate::auth::RefreshingToken`] does).
 pub async fn refresh(client: &OAuthClient, refresh_token: &str) -> Result<Tokens, AuthError> {
+    if client.lacks_google_secret() {
+        return Err(AuthError::NoGoogleSecret);
+    }
     let mut params = vec![
         ("grant_type", "refresh_token".to_string()),
         ("refresh_token", refresh_token.to_string()),

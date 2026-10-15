@@ -274,6 +274,8 @@ cargo run -p xtask -- torch-pack --variant cpu --out dist       # an OCR backend
 mokuro-bunko install-ocr --from dist --variant cpu              # install it (same --variant)
 ```
 
+Google Drive's built-in sign-in needs the Google client secrets, which are not in the repository: the release builds compile them in from `BUNKO_GOOGLE_RELEASE_DESKTOP_SECRET`, `BUNKO_GOOGLE_RELEASE_DEVICE_SECRET`, `BUNKO_GOOGLE_BETA_DESKTOP_SECRET` and `BUNKO_GOOGLE_BETA_DEVICE_SECRET`. A build without them works the same except that it signs in to Google Drive only with your own client (`storage.library.oauth.google`, see [docs/configuration.md](docs/configuration.md)).
+
 Cargo features of `mokuro-bunko`: `ocr` (on by default: ONNX Runtime on the CPU, the libtorch pack loader, local OCR and the `processor` command) and `tray` (on by default: the desktop tray). The ONNX Runtime binaries are fetched at build time; libtorch only by `xtask torch-pack` (the binary never links it). The ONNX Runtime GPU execution providers `cuda`, `webgpu`, `directml`, `coreml` remain as features but no release ships them (CI checks only `cuda` and `webgpu`). Release archives, backend packs, the manifest and signatures are built with `cargo run -p xtask -- <command>`; Docker images with `docker build -f deploy/docker/Dockerfile[.lite] .` (see [docs/rust-port/PACKAGING.md](docs/rust-port/PACKAGING.md)); the design is in [docs/rust-port/ARCHITECTURE.md](docs/rust-port/ARCHITECTURE.md).
 
 ```bash
