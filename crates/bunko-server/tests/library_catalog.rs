@@ -1,5 +1,8 @@
 //! The public catalog API and the volume manifest.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod library_support;
 
 use axum::body::Body;

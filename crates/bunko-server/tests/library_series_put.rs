@@ -1,5 +1,8 @@
 //! `PUT /mokuro-reader/<Series>/series.json`: the client fact update.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod library_support;
 
 use axum::body::Body;

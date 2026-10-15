@@ -44,18 +44,36 @@ impl From<Rejection> for PutError {
 
 pub(crate) async fn put(inner: &Arc<Inner>, req: &Req, body: Body) -> Resp {
     let verdict = crate::put_gives_verdict(&req.path);
-    let mut resp = match put_inner(inner, req, body).await {
-        Ok(resp) => resp,
-        Err(PutError::Rejected(rej)) if verdict => {
-            failure_response(rej.status, rej.reason, &rej.detail, rej.retry)
+    let result = put_inner(inner, req, body).await;
+    match &result {
+        Err(PutError::Rejected(rej)) if rej.status >= 500 => {
+            super::log_server_error(req, rej.status, &rej.detail)
         }
-        Err(PutError::Rejected(rej)) => response::status_page(
-            StatusCode::from_u16(rej.status).unwrap_or(crate::SERVER_ERROR),
-            &rej.detail,
-        ),
+        Err(PutError::Dav(e)) if e.status.is_server_error() => {
+            super::log_server_error(req, e.status.as_u16(), &e.context)
+        }
+        _ => {}
+    }
+    let mut resp = match result {
+        Ok(resp) => resp,
+        Err(PutError::Rejected(rej)) if verdict => failure_response(&rej),
+        Err(PutError::Rejected(rej)) => {
+            let mut resp = response::status_page(
+                StatusCode::from_u16(rej.status).unwrap_or(crate::SERVER_ERROR),
+                &rej.detail,
+            );
+            set_retry_after(&mut resp, rej.retry_after);
+            resp
+        }
         Err(PutError::Dav(e)) if verdict => {
             let (status, reason, detail, retry) = upload::failure_for_status(e.status.as_u16());
-            failure_response(status, reason, &detail, retry)
+            failure_response(&Rejection {
+                status,
+                reason,
+                detail,
+                retry,
+                retry_after: e.retry_after,
+            })
         }
         Err(PutError::Dav(e)) => e.into_response(),
     };
@@ -65,16 +83,24 @@ pub(crate) async fn put(inner: &Arc<Inner>, req: &Req, body: Body) -> Resp {
     resp
 }
 
-fn failure_response(status: u16, reason: &str, detail: &str, retry: bool) -> Resp {
-    let body = upload::failure_json(reason, detail, retry).into_bytes();
+fn failure_response(rej: &Rejection) -> Resp {
+    let body = upload::failure_json(rej.reason, &rej.detail, rej.retry).into_bytes();
     let len = body.len();
     let mut resp = Response::new(Body::from(body));
-    *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(crate::SERVER_ERROR);
+    *resp.status_mut() = StatusCode::from_u16(rej.status).unwrap_or(crate::SERVER_ERROR);
     resp.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     resp.headers_mut()
         .insert(CONTENT_LENGTH, HeaderValue::from(len));
+    set_retry_after(&mut resp, rej.retry_after);
     resp
+}
+
+fn set_retry_after(resp: &mut Resp, secs: Option<u64>) {
+    if let Some(secs) = secs {
+        resp.headers_mut()
+            .insert(http::header::RETRY_AFTER, HeaderValue::from(secs));
+    }
 }
 
 /// See [`crate::put_refusal_verdict`].
@@ -190,10 +216,28 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
         )
         .into());
     };
-    let existed_before = tokio::fs::metadata(&dest).await.is_ok();
+    let before = bunko_store::afs::metadata(&dest).await.ok();
+    let existed_before = before.is_some();
+    // A library store that cannot take a write now (a cloud library without its
+    // lease, §9.2) says so before the client sends the body.
+    let dest2 = dest.clone();
+    super::blocking(move || bunko_store::fs::writable(&dest2))
+        .await?
+        .map_err(|e| Rejection::from_io(&e, "accepting the upload"))?;
     let expected = expected_size(req);
     let digest = upload::parse_content_digest(req.header("content-digest"));
     let mut staging = Staging::create(&dest, expected, digest).await?;
+    // The client's precondition travels with the publish (spec §10 PUT): a remote
+    // store checks it against the provider's version, so a change made in the cloud
+    // since the client's If-Match (or a file created since its If-None-Match: *) is a
+    // 412, not a lost update. A local store's rename ignores it.
+    if req.header("if-none-match").is_some_and(|v| v.trim() == "*") {
+        staging.set_mode(bunko_store::Mode::CreateNew);
+    } else if req.headers.contains_key("if-match") {
+        staging.set_mode(bunko_store::Mode::Replace {
+            base: before.as_ref().and_then(|m| m.version().cloned()),
+        });
+    }
     if existed_before && is_ocr_sidecar(&dest) {
         // A client re-sending an OCR file unchanged (a backup, a re-upload) edits nothing:
         // the file, its provenance and its history stay as they were.
@@ -226,12 +270,13 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
                     reason: "truncated",
                     detail,
                     retry: true,
+                    retry_after: None,
                 }
                 .into());
             }
         }
     }
-    let stored: Stored = staging.commit(&inner.damage).await?;
+    let stored: Stored = staging.commit(&inner.damage, req.username()).await?;
 
     // Committed: the rest reports it and never fails the request.
     let (inner2, req2, dest2) = (inner.clone(), req.clone(), dest.clone());
@@ -241,7 +286,7 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
             .await
             .unwrap_or(None);
 
-    let etag = tokio::fs::metadata(&dest)
+    let etag = bunko_store::afs::metadata(&dest)
         .await
         .map(|m| Stat::from_meta(&m).file_etag())
         .ok();

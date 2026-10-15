@@ -152,6 +152,6 @@ impl AuthBackend for DbAuthBackend {
 
     fn physical_exists(&self, virtual_path: &str, username: Option<&str>) -> bool {
         self.virtual_to_physical(virtual_path, username)
-            .is_some_and(|p| p.exists())
+            .is_some_and(bunko_store::fs::exists)
     }
 }

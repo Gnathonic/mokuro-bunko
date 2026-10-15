@@ -52,6 +52,16 @@ use serde_json::{Map, Value};
 use std::path::Path;
 use std::sync::Arc;
 
+/// Mount the on-disk library at `root` as a [`bunko_store::LocalStore`] (whose `watch`
+/// translates events as [`LibraryWatcher`] does). The library's filesystem calls route
+/// through it while the guard lives; every one is still the std call it was.
+pub fn mount_local(root: &Path) -> bunko_store::MountGuard {
+    let translate: bunko_store::Translate = Arc::new(watcher::translate);
+    bunko_store::mount(Arc::new(bunko_store::LocalStore::with_translator(
+        root, translate,
+    )))
+}
+
 /// Archive arrivals/removals the filesystem WATCHER saw (out-of-band changes: a copy
 /// into the library folder, a sync tool), for the OCR queue. Called on the watcher
 /// thread: keep it cheap and non-blocking. A DAV write is seen here too, after the DAV

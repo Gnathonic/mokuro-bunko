@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use bunko_store::fs;
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::compat::normalize_volume_title_key;
@@ -153,15 +154,19 @@ pub fn write_if_changed(
     data: &[u8],
     locks: &dyn PathWriteLocks,
 ) -> Result<bool, WriteError> {
-    let same_length =
-        std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == data.len() as u64);
-    if same_length && std::fs::read(path).is_ok_and(|current| current == data) {
+    let current = fs::metadata(path).ok();
+    // Publish only over the version compared here (always `None` for a local file).
+    let base = current.as_ref().and_then(|meta| meta.version().cloned());
+    let same_length = current
+        .as_ref()
+        .is_some_and(|meta| meta.is_file() && meta.len() == data.len() as u64);
+    if same_length && fs::read(path).is_ok_and(|current| current == data) {
         return Ok(false);
     }
     let _guard = locks
         .try_lock(path)
         .ok_or_else(|| WriteError::Busy(path.to_path_buf()))?;
-    fsutil::atomic_write_bytes(path, data)?;
+    fsutil::atomic_write_bytes_with(path, data, base)?;
     Ok(true)
 }
 
@@ -278,7 +283,7 @@ impl MetadataService {
     /// Every series folder, or `None` when the library root isn't readable
     /// (a transient mount failure must not read as "the library emptied").
     fn scan_folders(&self) -> Option<Vec<SeriesFolder>> {
-        std::fs::read_dir(&self.library_path).ok()?;
+        fs::read_dir(&self.library_path).ok()?;
         Some(iter_series_folders(&self.library_path))
     }
 

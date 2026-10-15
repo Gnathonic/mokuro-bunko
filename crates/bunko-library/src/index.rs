@@ -185,7 +185,9 @@ pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
     while let Some((dir, name)) = stack.pop() {
         let subdirs = scan_dir(&dir, &name, &mut snapshot);
         for (child, path) in subdirs.into_iter().rev() {
-            if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            if bunko_store::fs::symlink_metadata(&path)
+                .is_ok_and(|meta| meta.file_type().is_symlink())
+            {
                 continue;
             }
             let child_name = if name == "." {

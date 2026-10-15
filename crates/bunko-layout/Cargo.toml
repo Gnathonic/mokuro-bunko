@@ -14,6 +14,9 @@ uuid = { workspace = true, features = ["v5"] }
 # NFKC for line_reconcile's folding. Python 3.12 ships Unicode 15.0; this crate
 # tracks a newer Unicode (see the crate docs, "Known deviations").
 unicode-normalization = "0.1"
+# The D4 seal on installed sidecars (seal.rs).
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

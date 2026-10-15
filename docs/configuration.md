@@ -31,6 +31,7 @@ server:
   trusted_proxies: []  # Reverse proxies on other hosts, e.g. ["172.16.0.0/12"]
   threads: 0       # Async worker threads (0 = min(cores, 4))
   cache_mb: 32     # Memory budget of the in-memory caches
+  serve_readers: true  # Serve the catalog and the reader WebDAV
 ```
 
 | Option | Type | Default | Description |
@@ -40,6 +41,7 @@ server:
 | `trusted_proxies` | list | `[]` | Networks or addresses of reverse proxies whose `X-Real-IP` / `X-Forwarded-For` are believed. Only a loopback peer (such as the Docker image's own nginx) is trusted without an entry. Add one for a proxy on another host or container, or on the host in front of a published Docker port (the server then sees the Docker gateway address); otherwise every client is counted as the proxy and login rate limits are shared. With `MOKURO_NGINX_ACCEL=1` the bundled nginx already takes the client from `X-Forwarded-For` of private-range proxies. Set as `MOKURO_SERVER_TRUSTED_PROXIES=172.16.0.0/12,10.0.0.5`. |
 | `threads` | integer | `0` | Worker threads of the runtime that serves requests, 0-256. `0` means the smaller of the CPU count and 4. Background work (metadata compiles, cache refreshes, thumbnails, OCR control) runs on a separate runtime of two threads and never takes these. Each connected processor costs a socket, not a thread, so this rarely needs raising. Replaces 0.5's `MOKURO_THREADS`. At startup. |
 | `cache_mb` | integer | `32` | Byte budget, in MiB (1-65536), of the in-memory caches: half for WebDAV `Depth: infinity` listings, a quarter for the library index (a soft cap). Raise it for a very large library on a machine with spare RAM, lower it on a tiny host. At startup. |
+| `serve_readers` | boolean | `true` | New in 0.8. `false`: readers do not connect to this server. `/catalog` (page, API and manifest) answers 404, and WebDAV is not served, except that processors can still `GET` archives under `/mokuro-reader/`; everyone else gets 403 there (401 when not signed in). Admin, setup, login, the queue page and `/_processor/*` stay. Use it for a cloud library that readers open directly (see [Library location](#library-location)). Set as `MOKURO_SERVE_READERS`. |
 
 ### Storage
 
@@ -51,6 +53,7 @@ storage:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `base_path` | string | Platform-specific | Base directory for all data storage. |
+| `library` | mapping | local | Where the library lives; see [Library location](#library-location). |
 
 Default paths:
 - **Linux/macOS**: `$XDG_DATA_HOME/mokuro-bunko` (`~/.local/share/mokuro-bunko` when `XDG_DATA_HOME` is unset)
@@ -76,8 +79,90 @@ base_path/
 ├── processors/              # Per-machine OCR profiles (remote processors)
 ├── backends/                # OCR backend pack: libtorch for CUDA / ROCm / CPU (install-ocr; full build)
 ├── models/                  # Downloaded OCR models: compiled libtorch packages, PP-OCR ONNX (full build)
+├── cloud/                   # Cloud library only: index, state, caches, upload spool, credentials
 └── mokuro.db                # SQLite database
 ```
+
+With a cloud library (`storage.library.backend` other than `local`) there is no
+`library/` folder on disk: the library is the cloud folder, and `cloud/` holds
+Bunko's local state for it.
+
+#### Library location
+
+New in 0.8. The library is `base_path/library/` (`local`, the default), or the
+Mokuro Reader folder of a cloud account.
+
+```yaml
+storage:
+  library:
+    backend: local          # local | gdrive | onedrive | mega | webdav
+    folder: mokuro-reader   # the library folder in the cloud account
+    webdav: {url: null, username: null, allow_http: false}
+    cache_mb: 1024
+    spool_gb: 4
+    outbox_hold_mb: 2048
+    outbox_max_gb: 8
+    quiet_s: 120
+    poll: {active_s: null, idle_s: null}
+    drive_background_units_per_min: 20000
+    status_files: true
+    progress_user: null
+    google_project: release # release | beta | custom
+    oauth:
+      google: {client_id: null, client_secret: null, device_client_id: null, device_client_secret: null}
+      microsoft: {client_id: null}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `backend` | string | `local` | `local`, `gdrive` (Google Drive), `onedrive`, `mega` or `webdav`. `MOKURO_LIBRARY_BACKEND`. |
+| `folder` | string | `mokuro-reader` | The library folder in the cloud account (the one Mokuro Reader uses). `MOKURO_LIBRARY_FOLDER`. |
+| `webdav.url` | string | — | The WebDAV server's folder URL; required for `webdav`. `http://` is refused unless `webdav.allow_http` is `true`, except for a server on this machine (`localhost`, `127.0.0.0/8`, `[::1]`). `MOKURO_WEBDAV_URL`. |
+| `webdav.username` | string | — | `MOKURO_WEBDAV_USERNAME`. |
+| `webdav.allow_http` | boolean | `false` | Allow a plain `http://` URL (the password then travels unencrypted). Not needed for a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`). `MOKURO_WEBDAV_ALLOW_HTTP`. |
+| `cache_mb` | integer | `1024` | Local cache of cloud files, in MiB. |
+| `spool_gb` | integer | `4` | Room for archives being OCR'd, in GiB; at least 2 × OCR lanes × the largest archive. |
+| `outbox_hold_mb` | integer | `2048` | New OCR claims wait while this many MiB of results are still uploading. At most `outbox_max_gb`. |
+| `outbox_max_gb` | integer | `8` | Uploads beyond this many GiB in the outbox are refused. |
+| `quiet_s` | integer | `120` | Seconds a removed file counts as recently removed (a reader replacing a file deletes it first). |
+| `poll.active_s`, `poll.idle_s` | integer | provider default | How often the cloud folder is checked for changes, while busy and while idle. |
+| `drive_background_units_per_min` | integer | `20000` | Google Drive API quota units per minute for background work. |
+| `status_files` | boolean | `true` | Write the OCR queue and server status files into the cloud folder for readers. |
+| `progress_user` | string | — | When readers are served too: the Bunko user whose reading progress is the cloud folder's progress files. |
+| `google_project` | string | `release` | Which Mokuro Reader's Google project Bunko signs in with, so it sees that reader's Drive files: `release` (reader.mokuro.app) or `beta`. `MOKURO_GOOGLE_PROJECT`. Becomes `custom` by itself when `oauth.google` is set; `custom` without it is refused. |
+| `oauth.google.*` | string | — | Your own Google OAuth clients, replacing both built-in ones: `client_id` + `client_secret` (Desktop client, browser sign-in on this machine) and `device_client_id` + `device_client_secret` ("TVs and Limited Input" client, sign-in with a code). Either pair may be left out; that sign-in flow is then unavailable. An id without its secret (or the reverse) is refused. |
+| `oauth.microsoft.client_id` | string | — | Your own Microsoft app registration for OneDrive: a public client with the "Mobile and desktop" redirect `http://localhost` (any port is used at sign-in). |
+
+All the numbers must be above 0. Passwords and tokens are never kept in
+`config.yaml`: a WebDAV password comes from the file named by
+`MOKURO_WEBDAV_PASSWORD_FILE` or from the sign-in, which is kept in
+`cloud/credentials.json`; a `webdav.password` key is refused. The other
+`storage.library` keys are set in the file or with
+`mokuro-bunko config set storage.library.<key> <value>`.
+
+#### Signing in to Google Drive or OneDrive
+
+The setup wizard, the admin panel's Storage tab and
+`mokuro-bunko library connect gdrive|onedrive` pick the sign-in by where you are:
+
+- **A browser on the server's computer** (the wizard opened on `localhost`, or
+  `library connect` in a desktop session): the provider's page opens in the
+  browser and comes back to Bunko by itself.
+- **Anywhere else** (Docker, a NAS, SSH, the wizard opened from another device):
+  - Google Drive shows a code to enter at google.com/device on any device.
+  - OneDrive shows the Microsoft sign-in address to open on any device. After
+    you sign in, that browser ends on a page that does not load, at
+    `http://localhost:<port>/bunko?code=…`. Copy that page's whole address and paste
+    it back into the wizard, the Storage tab or the terminal (within 10 minutes).
+    Bunko checks that the address belongs to this sign-in and redeems its code;
+    the address is not logged or kept. A personal Microsoft account cannot sign in
+    with a code, so the code is offered for work or school accounts only ("Use a
+    sign-in code instead", or `--device`).
+
+On the command line, `--browser`, `--device` or `--paste` choose the sign-in
+instead. `--browser` without a desktop prints the address to open on this
+computer; `$BROWSER` is used to open it when set. Pasting needs a terminal: run
+`docker exec -it <container> mokuro-bunko library connect onedrive`.
 
 #### Upload verdicts
 
@@ -104,7 +189,11 @@ inflate to more than 20 times its size (at least 256 MiB, at most 16 GiB).
   far; re-pack it as an ordinary zip), `disk-full` (507), `forbidden`
   (401/403/429), `server-error` (500, retry; any other refused PUT, such as
   409 or 423, also answers `server-error` with its own status, with `retry`
-  only for 5xx, 408 and 423), and `archive-damaged` (422). An archive whose digest matched but
+  only for 5xx, 408 and 423; a cloud library that cannot take the upload right
+  now (an outage, a provider pause, Bunko still claiming the library or another
+  Bunko managing it) answers 503 with `Retry-After`, a file changed in the cloud
+  since the client's `If-Match` 412, and a full cloud account `disk-full` 507), and
+  `archive-damaged` (422). An archive whose digest matched but
   whose CRCs fail is the client's own damaged copy (no retry: re-import it).
   Without a digest the first damage to a path is `retry: true` (it may have
   happened in transit); the same size and damaged members arriving again
@@ -1328,7 +1417,8 @@ Booleans take `true`/`false` (or `1`/`0`, `yes`/`no`). Lists such as
 `MOKURO_SERVER_TRUSTED_PROXIES` are comma-separated. `MOKURO_OCR_GENERATIONS`
 is the JSON text of the whole list. `cors.allowed_origins` has no variable;
 set it in the file or with `mokuro-bunko config cors-add`; `ocr.upgrade.*`,
-`update.public_key` and the `database` section have none either. Bad values
+`update.public_key` and the `database` section have none either;
+`storage.library` has only the short variables listed below. Bad values
 are refused at startup with the variable's name in the message. The CLI's
 config commands never write overrides back into `config.yaml`, but an admin
 panel save or the setup wizard writes the whole running configuration,
@@ -1341,6 +1431,11 @@ Other variables:
 |---|---|---|
 | `MOKURO_CONFIG` | platform default | Config file path (the same as `--config`). |
 | `MOKURO_HOST`, `MOKURO_PORT`, `MOKURO_STORAGE` | — | Short aliases for `server.host`, `server.port`, `storage.base_path`. |
+| `MOKURO_SERVE_READERS` | — | Short alias for `server.serve_readers`. |
+| `MOKURO_LIBRARY_BACKEND`, `MOKURO_LIBRARY_FOLDER` | — | `storage.library.backend` and `folder` (see [Library location](#library-location)). |
+| `MOKURO_WEBDAV_URL`, `MOKURO_WEBDAV_USERNAME`, `MOKURO_WEBDAV_ALLOW_HTTP` | — | `storage.library.webdav.url`, `username`, `allow_http`. |
+| `MOKURO_WEBDAV_PASSWORD_FILE` | — | A file holding the WebDAV library's password (never set in `config.yaml`). |
+| `MOKURO_GOOGLE_PROJECT` | `release` | `storage.library.google_project`: `release` or `beta`. |
 | `MOKURO_LOG` | `info` (`debug` with `-v`) | The log filter (`tracing` syntax), for example `debug` or `info,bunko_server=debug`. |
 | `MOKURO_NGINX_ACCEL` | unset | On the full Docker image, `1` (or `true`/`yes`) starts the bundled nginx in front, which serves library downloads via `X-Accel-Redirect`; the server moves to `127.0.0.1:MOKURO_BACKEND_PORT`. Without nginx (a lite image, or a container not started as root) it is dropped with a warning. Outside Docker, set `1` only when your own nginx serves the `/internal-library/` location. |
 | `MOKURO_INSTALL_KIND` | detected | `self`, `docker` or a package manager's name; decides what the updater does (see [Updates](#updates)). |

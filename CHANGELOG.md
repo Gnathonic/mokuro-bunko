@@ -1,5 +1,107 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Set a library up in Google Drive, OneDrive, MEGA or a WebDAV server.** The setup
+  wizard asks where the library lives, then connects it with one button: a browser on
+  the server signs in directly. Anywhere else (Docker, a NAS, a phone), Google Drive
+  gives a code to enter on any device, shown in the wizard, the admin panel, the tray
+  and the log; OneDrive gives its sign-in page to open on any device, then you paste
+  back the address the browser ends on (`http://localhost:…/bunko?code=…`), since personal
+  Microsoft accounts cannot sign in with a code (a code stays available for work or
+  school accounts, and a code refused for a personal account says to use the browser
+  instead). The
+  Check step counts the volumes Bunko can see; on Google Drive it asks which Mokuro
+  Reader you use and offers the other one when few volumes are visible. Readers can
+  keep reading straight from the cloud (the default for a cloud library), or connect to
+  Bunko as before. The admin panel's new **Storage** tab shows the library's health,
+  first sync, uploads, conflicts, lease and quota, and connects, signs in again,
+  changes the Drive pairing or disconnects (waiting for, exporting or discarding what
+  is not uploaded yet; nothing in the cloud is deleted). An export from the admin panel
+  goes to a new folder under Bunko's storage folder (`exports/`), named in the reply;
+  `library disconnect --export DIR` copies it into a new or empty folder of your own.
+  The same from a terminal or
+  `docker exec`: `mokuro-bunko library connect gdrive|onedrive|mega|webdav` and
+  `library disconnect`. `library connect` opens the sign-in page in the browser in a
+  desktop session, and otherwise prints a code (Google Drive) or the sign-in address
+  and asks for the address the browser ends on (OneDrive; `docker exec -it`);
+  `--browser`, `--device` and `--paste` choose instead; `doctor` checks the pairing, the spool and the credentials
+  file. The tray shows one library line ("Google Drive · synced 1 min ago") and
+  "Sign in again…" when needed.
+- **Folders and volumes whose names differ only in case are joined in a cloud
+  library.** Google Drive, MEGA and many WebDAV servers can hold `Kingdom/` beside
+  `kingdom/`; Bunko now moves the younger spelling's volumes into the oldest one by
+  itself, once neither has changed for a while and no OCR runs on them, and puts the
+  emptied folder in the provider's trash (never a permanent delete). A copy that is
+  byte-for-byte the same goes to the trash; covers, layers and OCR files only the
+  younger folder has move in under the older spelling; its `series.json` is merged into
+  the series first. When both spellings hold different OCR for the same archive, the
+  one matching the primary OCR setting becomes the main file and the other is always
+  kept beside it as `<Volume>.pre-upgrade.mokuro` first, so no OCR or edit is lost.
+  Two different archives (or OCR files Bunko cannot choose between)
+  stay where they are, listed under the Storage tab's conflicts with **Keep this copy**
+  / **Keep that copy**; the tab also lists the **Recent merges**. Upload owners, OCR
+  records and volume ids follow every moved volume. A folder Mokuro Reader keeps
+  recreating is left alone after the fourth merge in a day.
+
+### Changed
+- **A WebDAV library on this computer needs no "Allow http".** A plain `http://` URL
+  whose host is `localhost`, `127.x.x.x` or `[::1]` (a server on the same machine, such
+  as an rclone or Nextcloud container bound to loopback) is accepted without
+  `allow_http` / `--allow-http`, in the wizard, the admin panel, `library connect` and
+  the config file; any other `http://` URL still needs it.
+- **Internal: the library goes through a storage seam.** Every library file access in
+  the server, the WebDAV layer and the metadata compiler now passes through one
+  interface (`bunko-store`), so the library can live somewhere other than the local disk
+  in 0.8. Local libraries behave exactly as before.
+- **Upgrades never skip a main OCR file for being edited; a file Bunko didn't write is
+  kept as a "pre-upgrade" layer first.** With the generation upgrade on, an outdated
+  `<Volume>.mokuro` in a family listed under `ocr.upgrade.replace` is upgraded even if a
+  person or Mokuro Reader changed it. One Bunko can prove it wrote, byte for byte (every
+  OCR file it installs now carries a seal, `ocr_engine.content_sha256`, the sha256 of
+  its exact bytes, so the proof moves with the library to another Bunko), is replaced
+  as before. Any
+  other (stock mokuro output, a file the reader saved corrections into, or one that only
+  carries Bunko's `ocr_engine` stamp, which anyone who can write the file can add) is
+  first copied, byte for byte, to
+  `<Volume>.pre-upgrade.mokuro` (`pre-upgrade-2` and so on if that name holds other
+  bytes), and the new file goes in only once that copy is safely written; if the copy
+  cannot be written, the volume is left alone until the next pass. A file whose recipe
+  cannot be read is still never upgraded. A layer is copied in as the new main file only
+  when Bunko can prove it wrote that layer the same way and its own file carries the
+  matching stamp, and layers without a stamp (a reader's
+  edits, `pre-upgrade` copies) are never used or deleted. The admin page's "skipped
+  (edited)" count, its list of edited volumes and the "Upgrade anyway" button are gone,
+  as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
+
+### Fixed
+- **Uploading through Bunko into a cloud library works.** Every WebDAV PUT into a
+  Google Drive, OneDrive, MEGA or WebDAV library failed with a server error (500, "this
+  store has no local file to open"), so neither Mokuro Reader nor an uploader could add
+  a volume or an OCR file through Bunko. The body is now staged on Bunko's disk,
+  checked (size, `Content-Digest`, the archive's CRCs) and uploaded before the answer,
+  so a 201/204 means the cloud has the file; an uploaded volume is then OCR'd like any
+  other. The client's `If-Match` / `If-None-Match: *` now travel with the upload, so a
+  file changed or created in the cloud meanwhile is a 412 instead of being
+  overwritten. A full cloud account answers 507, and an upload the library cannot take
+  right now (see below) a 503 with `Retry-After`, never a 500.
+- **A failed upload into a cloud library no longer leaves a staging file behind.** Its
+  empty staging file and record survived restarts; a start now also removes any a crash
+  left.
+- **While Bunko is still claiming a cloud library, it says so.** For about 10 minutes
+  after the first connect (on WebDAV; a minute or more elsewhere) Bunko waits to make
+  sure no other Bunko manages the library before it writes. Uploads and other changes
+  through Bunko in that time are refused with 503 and a `Retry-After` of the time left,
+  and the message says this Bunko is still claiming the library and roughly how long is
+  left, instead of "another Bunko manages this library". The admin Storage tab and
+  status show the same.
+- **Failed WebDAV requests are logged.** A request that ends in a server error (5xx),
+  uploads included, is logged with its method, path, user and cause (503s as warnings,
+  other failures as errors); before, a failed upload left no trace in the log.
+- `library connect --create` no longer asks "Create it?" before creating the folder; it
+  prints "Creating mokuro-reader/…".
+
 ## [0.7.3] - 2026-10-12
 
 Background work can no longer make the web server stop answering.

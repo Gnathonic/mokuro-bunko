@@ -12,9 +12,10 @@
 pub mod natsort;
 pub mod zipdir;
 
-use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+
+use bunko_store::fs::{self, File};
 
 use crate::compat;
 use crate::pyunicode;
@@ -267,7 +268,7 @@ fn walk_pages(
         return Ok(());
     }
     // Symlinked directories are followed; a loop back into an ancestor is not.
-    if let Ok(canonical) = dir.canonicalize() {
+    if let Ok(canonical) = fs::canonicalize(dir) {
         if visited.contains(&canonical) {
             return Ok(());
         }
@@ -340,6 +341,7 @@ pub fn reader_image_names(cbz_path: &Path) -> Option<Vec<String>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
 

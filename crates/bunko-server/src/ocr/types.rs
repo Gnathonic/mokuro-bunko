@@ -88,14 +88,17 @@ pub fn rel_of(library: &Path, path: &Path) -> Option<String> {
 pub type Stamp = (u64, i128);
 
 pub fn stamp_of(path: &Path) -> Option<Stamp> {
-    let meta = std::fs::metadata(path).ok()?;
+    let meta = bunko_store::fs::metadata(path).ok()?;
     if !meta.is_file() {
         return None;
     }
     Some((meta.len(), mtime_ns(&meta)))
 }
 
-pub fn mtime_ns(meta: &std::fs::Metadata) -> i128 {
+pub fn mtime_ns(meta: &bunko_store::Meta) -> i128 {
+    if let Some((s, ns)) = meta.unix_mtime() {
+        return s as i128 * 1_000_000_000 + ns as i128;
+    }
     match meta.modified() {
         Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
             Ok(d) => d.as_nanos() as i128,
@@ -138,7 +141,7 @@ impl LibraryFacts for FileFacts {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let meta = std::fs::metadata(&sidecar).ok();
+        let meta = bunko_store::fs::metadata(&sidecar).ok();
         let (entry, _) =
             bunko_library::compiler::compile_volume(&series, cbz, Some(&sidecar), meta.as_ref());
         bunko_library::schema::missing_page_count(entry.page_count, entry.matched_page_count)

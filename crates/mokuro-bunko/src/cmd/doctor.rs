@@ -145,6 +145,7 @@ pub fn run(ctx: &Ctx, processor: bool) -> CmdResult {
             }
         }
         results.push(check_disk(storage));
+        results.extend(storage_checks(config));
         results.push(check_port(&config.server.host, config.server.port));
         results.push(check_failures(storage));
     }
@@ -813,6 +814,27 @@ fn check_failures(storage: &Path) -> Check {
         format!("{count} volume(s) failing OCR (see the Queue page)"),
         Some(format!("Full per-volume logs: {}", logs.display())),
     )
+}
+
+/// Where the library lives (0.8): the store, the Google pairing (D25), the spool and
+/// how the credentials file is protected.
+fn storage_checks(config: &Config) -> Vec<Check> {
+    use bunko_server::storage::doctor::Verdict;
+    bunko_server::storage::doctor::checks(config)
+        .into_iter()
+        .map(|r| match r.verdict {
+            Verdict::Pass => Check::pass(r.label, r.detail),
+            Verdict::Info => Check {
+                status: Status::Info,
+                label: r.label,
+                detail: r.detail,
+                hint: r.hint,
+                needs_you: false,
+            },
+            Verdict::Warn => Check::warn(r.label, r.detail, r.hint),
+            Verdict::Fail => Check::fail(r.label, r.detail, r.hint),
+        })
+        .collect()
 }
 
 /// The doctor's WARN/FAIL rows that matter while an instance runs, as the control

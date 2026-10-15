@@ -20,7 +20,7 @@ mod settle;
 mod status;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,7 +39,7 @@ use serde_json::{Map, Value};
 use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
-use super::owed::OwedIndex;
+use super::owed::{OwedIndex, OwedVolume};
 use super::profiles::Profiles;
 use super::types::{Job, LibraryFacts, PathLocks};
 
@@ -187,6 +187,19 @@ pub enum Msg {
     },
     ArchiveArrived(PathBuf),
     ArchiveRemoved(PathBuf),
+    /// A remote store's arrival, judged on a helper thread (spec §8): what it is owed
+    /// when it had the version `stamp`.
+    ArrivalJudged {
+        rel: String,
+        stamp: Option<super::types::Stamp>,
+        entry: Option<OwedVolume>,
+    },
+    /// A local claim's archive was spooled from a remote store (spec §8, `spooling`).
+    Spooled {
+        sid: String,
+        job: Job,
+        result: Result<SpoolHold, String>,
+    },
     /// A benchmark's sample was packed on a helper thread: `(pages, volumes)`.
     BenchSample {
         machine: String,
@@ -220,6 +233,8 @@ impl std::fmt::Debug for Msg {
             Msg::OwnCopyRead { .. } => "OwnCopyRead",
             Msg::ArchiveArrived(_) => "ArchiveArrived",
             Msg::ArchiveRemoved(_) => "ArchiveRemoved",
+            Msg::ArrivalJudged { .. } => "ArrivalJudged",
+            Msg::Spooled { .. } => "Spooled",
             Msg::BenchSample { .. } => "BenchSample",
             Msg::Apply { .. } => "Apply",
             Msg::Query(_) => "Query",
@@ -255,6 +270,25 @@ pub struct Claimed {
     /// Its result is being installed: a disconnect must not take it back.
     pub settling: bool,
     pub row: Generation,
+    /// A local claim on a remote store: the spooled archive the runner reads, pinned
+    /// until the claim settles or is returned (dropped with the claim).
+    pub spool: Option<SpoolHold>,
+}
+
+/// A pinned local copy of a remote archive ([`bunko_store::LocalPath`]).
+#[derive(Clone)]
+pub struct SpoolHold(pub Arc<bunko_store::LocalPath>);
+
+impl SpoolHold {
+    pub fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl std::fmt::Debug for SpoolHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SpoolHold({})", self.path().display())
+    }
 }
 
 /// Autobench bookkeeping (§14.2).
@@ -321,6 +355,8 @@ pub struct Scheduler {
     /// Ended sessions per processor, for late events: sid → when.
     pub ended_sessions: HashMap<String, f64>,
     pub hold_logged: bool,
+    /// The last [`Scheduler::storage_hold`] the tick saw (logged on change).
+    pub storage_held: Option<&'static str>,
     /// This server's own OCR has come up at least once (`LocalUp`).
     pub local_was_up: bool,
     /// An automatic update is waiting for a quiet moment: no machine gets a new claim
@@ -393,6 +429,7 @@ impl Scheduler {
             results: HashMap::new(),
             ended_sessions: HashMap::new(),
             hold_logged: false,
+            storage_held: None,
             local_was_up: false,
             update_drain: false,
             last_poll_tick: f64::NEG_INFINITY,
@@ -413,6 +450,12 @@ impl Scheduler {
 
     pub fn library(&self) -> PathBuf {
         self.deps.layout.library()
+    }
+
+    /// The library is a remote store (spec §8): the actor never reads archive or
+    /// sidecar bytes inline, and local runners read a spooled copy.
+    pub fn remote_library(&self) -> bool {
+        bunko_store::store_for(&self.library()).is_some_and(|s| s.caps().remote)
     }
 
     pub fn storage(&self) -> PathBuf {
@@ -507,6 +550,18 @@ impl Scheduler {
                 break;
             }
         }
+        self.publish_busy();
+    }
+
+    /// What the case merge must wait for (spec §5.9 "When"): the claims in flight (a
+    /// claim holds its spooled archive, and an upgrade swap settles inside it).
+    fn publish_busy(&self) {
+        if !self.remote_library() {
+            return;
+        }
+        let library = self.library();
+        let claims = self.claims.keys().map(|j| j.path(&library)).collect();
+        super::busy::set_claims(&library, claims);
     }
 
     fn dispatch(&mut self, msg: Msg) {
@@ -544,6 +599,8 @@ impl Scheduler {
             Msg::OwnCopyRead { job, error, then } => self.own_copy_read(job, error, *then),
             Msg::ArchiveArrived(path) => self.archive_arrived(&path),
             Msg::ArchiveRemoved(path) => self.archive_removed(&path),
+            Msg::ArrivalJudged { rel, stamp, entry } => self.arrival_judged(rel, stamp, entry),
+            Msg::Spooled { sid, job, result } => self.spooled(&sid, &job, result),
             Msg::BenchSample {
                 machine,
                 bid,
@@ -568,6 +625,7 @@ impl Scheduler {
             return;
         }
         self.check_sessions();
+        self.check_storage_hold();
         let now = self.mono();
         if now - self.last_poll_tick >= self.settings.poll_interval {
             self.last_poll_tick = now;
@@ -580,6 +638,33 @@ impl Scheduler {
                 lane.idle_at = None;
             }
         }
+    }
+
+    /// A remote store's hold began or ended: log it once; on release, let every lane
+    /// look for work again.
+    fn check_storage_hold(&mut self) {
+        let now = self.storage_hold();
+        if now == self.storage_held {
+            return;
+        }
+        let was = std::mem::replace(&mut self.storage_held, now);
+        match now {
+            Some(reason) => self.log(format!(
+                "OCR holds new work: the library storage is unavailable ({reason})"
+            )),
+            None => {
+                self.log(format!(
+                    "OCR takes new work again (the library storage is back from {})",
+                    was.unwrap_or("a hold")
+                ));
+                for lane in &mut self.lanes {
+                    lane.idle_at = None;
+                }
+                self.maybe_start_scan();
+            }
+        }
+        self.bump();
+        self.bump_page();
     }
 
     /// Start a full walk on a helper thread (single-flight).
@@ -642,6 +727,8 @@ impl Scheduler {
             return;
         }
         self.direct_running = true;
+        let library = self.library();
+        super::busy::set_direct(&library, volumes.iter().map(|v| library.join(v)).collect());
         self.log(format!(
             "Upgrading {} volume(s) from layers already on disk (no OCR needed), one at a time",
             volumes.len()
@@ -658,6 +745,7 @@ impl Scheduler {
 
     fn direct_upgraded(&mut self, done: u64, failed: u64) {
         self.direct_running = false;
+        super::busy::set_direct(&self.library(), Default::default());
         let tail = if failed > 0 {
             format!(", {failed} failed (retried after the next walk)")
         } else {

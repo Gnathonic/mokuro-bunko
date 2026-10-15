@@ -1,5 +1,8 @@
 //! Ported from `tests/unit/test_upload_verdicts.py` and `tests/unit/test_atomic_writes_locks.py`.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::sync::Arc;

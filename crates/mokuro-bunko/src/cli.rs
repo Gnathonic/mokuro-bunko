@@ -22,7 +22,8 @@ pub const USER_STATUSES: [&str; 4] = ["active", "pending", "disabled", "deleted"
 #[derive(Parser, Debug)]
 #[command(
     name = "mokuro-bunko",
-    about = "Mokuro Bunko Server - Manga library with OCR support.",
+    about = "Mokuro Bunko - look after a manga library on this computer or in your Google Drive, OneDrive, MEGA or WebDAV storage: OCR, covers and series info.",
+    long_about = "Mokuro Bunko - look after a manga library on this computer or in your Google Drive, OneDrive, MEGA or WebDAV storage. Bunko OCRs new volumes, here or on other machines, and adds covers and series info. Readers can connect to Bunko, or keep reading straight from your cloud storage.",
     disable_version_flag = true
 )]
 pub struct Cli {
@@ -77,6 +78,9 @@ pub enum Command {
     /// Manage Dynamic DNS settings.
     #[command(subcommand)]
     Dyndns(DyndnsCmd),
+    /// Where the library lives (this disk or a cloud folder) and how its store is doing.
+    #[command(subcommand)]
+    Library(LibraryCmd),
     /// Check for and install new releases.
     #[command(subcommand)]
     Update(UpdateCmd),
@@ -327,6 +331,132 @@ pub enum DyndnsCmd {
     Enable,
     /// Disable DynDNS updates.
     Disable,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LibraryCmd {
+    /// Show the library's storage: backend, folder, store, and (when a server runs on
+    /// this storage, asked through its local control API) its health, sync state and
+    /// caches.
+    Status {
+        /// Print the status as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Keep the library in a cloud folder: Google Drive or OneDrive, MEGA with --email
+    /// and its password (asked on the terminal, never stored), or a WebDAV server with
+    /// its URL, user and app password. A running server restarts onto it.
+    ///
+    /// Google Drive and OneDrive sign in through the browser on a desktop (it opens by
+    /// itself; the address is printed too). Without one (SSH, Docker, a NAS), Google
+    /// Drive prints a sign-in code to enter on any device, and OneDrive prints the
+    /// sign-in address to open on any device: the browser then ends on a page that
+    /// does not load (http://localhost:<port>/bunko?code=…), whose address you paste back
+    /// here (`docker exec -it` for a terminal). Personal Microsoft accounts cannot use
+    /// a sign-in code; --device is for work or school accounts.
+    Connect(LibraryConnectArgs),
+    /// Leave the cloud library: upload what is still owed (or export or discard it),
+    /// write "released" into the folder's marker, delete the credentials and the local
+    /// index. Nothing in the cloud is deleted.
+    Disconnect(LibraryDisconnectArgs),
+}
+
+/// The providers `library connect` signs in to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CloudProvider {
+    Gdrive,
+    Onedrive,
+    Mega,
+    Webdav,
+}
+
+impl CloudProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CloudProvider::Gdrive => "gdrive",
+            CloudProvider::Onedrive => "onedrive",
+            CloudProvider::Mega => "mega",
+            CloudProvider::Webdav => "webdav",
+        }
+    }
+}
+
+/// Which Mokuro Reader a Drive library belongs to (D25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ReaderPairing {
+    /// reader.mokuro.app
+    Release,
+    /// The Mokuro Reader beta
+    Beta,
+}
+
+#[derive(Args, Debug)]
+pub struct LibraryConnectArgs {
+    /// Where the library lives
+    #[arg(value_enum)]
+    pub provider: CloudProvider,
+    /// Google Drive: which Mokuro Reader you use (Bunko sees the Drive files of that
+    /// reader only)  [default: release, or MOKURO_GOOGLE_PROJECT]
+    #[arg(long, value_enum)]
+    pub reader: Option<ReaderPairing>,
+    /// The library folder in the cloud account  [default: mokuro-reader]
+    #[arg(long, value_name = "NAME")]
+    pub folder: Option<String>,
+    /// WebDAV: the server's URL (https, or http for a server on this machine)
+    /// [default: storage.library.webdav.url]
+    #[arg(long)]
+    pub url: Option<String>,
+    /// WebDAV: the user  [default: storage.library.webdav.username]
+    #[arg(long)]
+    pub username: Option<String>,
+    /// WebDAV: a file holding the app password (else MOKURO_WEBDAV_PASSWORD_FILE, else
+    /// it is asked on the terminal)
+    #[arg(long, value_name = "PATH")]
+    pub password_file: Option<PathBuf>,
+    /// WebDAV: allow an http:// URL (the password then travels unencrypted); not
+    /// needed for a server on this machine (localhost, 127.0.0.0/8, [::1])
+    #[arg(long)]
+    pub allow_http: bool,
+    /// MEGA: the account's email (the password and two-factor code are asked on the
+    /// terminal)
+    #[arg(long)]
+    pub email: Option<String>,
+    /// Create the library folder when the account has none (otherwise asked on the
+    /// terminal)
+    #[arg(long)]
+    pub create: bool,
+    /// The account is not the one this Bunko's library belongs to: use this account's
+    /// library instead (the old library is disconnected first)
+    #[arg(long)]
+    pub use_this_account: bool,
+    /// Google Drive / OneDrive: sign in through a browser on this computer (opened
+    /// when there is a desktop; the address is printed either way)
+    #[arg(long, conflicts_with_all = ["device", "paste"])]
+    pub browser: bool,
+    /// Google Drive / OneDrive: sign in with a code entered on any device (OneDrive:
+    /// work or school accounts only)
+    #[arg(long, conflicts_with = "paste")]
+    pub device: bool,
+    /// Google Drive / OneDrive: sign in on any device, then paste the address the
+    /// browser ends on (http://localhost:<port>/bunko?code=…) back here
+    #[arg(long)]
+    pub paste: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct LibraryDisconnectArgs {
+    /// Wait this long for results not yet uploaded to finish uploading
+    #[arg(long, value_name = "SECS", default_value_t = 120)]
+    pub wait: u64,
+    /// Copy the results not yet uploaded into this folder, then disconnect
+    #[arg(long, value_name = "DIR", conflicts_with = "discard")]
+    pub export: Option<PathBuf>,
+    /// Drop the results not yet uploaded, then disconnect
+    #[arg(long)]
+    pub discard: bool,
+    /// Do not ask before disconnecting
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 #[derive(Subcommand, Debug)]

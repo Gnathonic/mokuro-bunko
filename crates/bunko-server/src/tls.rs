@@ -42,6 +42,8 @@ pub fn generate_self_signed(
 }
 
 /// [`generate_self_signed`] with an explicit validity in days (`ssl generate --days`).
+// unmounted: TLS certificate and key files (config), never in the library.
+#[allow(clippy::disallowed_methods)]
 pub fn generate_self_signed_days(
     cert_path: &Path,
     key_path: &Path,
@@ -83,6 +85,8 @@ pub fn generate_self_signed_days(
     Ok(())
 }
 
+// unmounted: TLS certificate and key files (config), never in the library.
+#[allow(clippy::disallowed_methods)]
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -171,6 +175,8 @@ fn build_server_config(
 }
 
 /// The rustls config for the server, generating the auto certificate when needed.
+// unmounted: TLS certificate and key files (config), never in the library.
+#[allow(clippy::disallowed_methods)]
 pub fn server_config(ssl: &SslConfig) -> Result<Option<Arc<rustls::ServerConfig>>, TlsError> {
     if !ssl.enabled {
         return Ok(None);

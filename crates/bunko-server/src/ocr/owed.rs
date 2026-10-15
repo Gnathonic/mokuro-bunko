@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bunko_core::generations::Generation;
+use bunko_store::fs;
 
 use super::types::{LibraryFacts, mtime_ns, rel_of};
 
@@ -50,7 +51,7 @@ pub fn sidecar_paths(cbz: &Path, suffix: &str) -> (std::path::PathBuf, std::path
 /// `needs_sidecar`: neither the row's sidecar nor its `.gz` exists.
 pub fn row_done(cbz: &Path, row: &Generation) -> bool {
     let (plain, gz) = sidecar_paths(cbz, &row.sidecar_suffix());
-    plain.exists() || gz.exists()
+    fs::exists(&plain) || fs::exists(&gz)
 }
 
 /// Decides whether a volume whose primary is done is owed a generation upgrade
@@ -71,7 +72,12 @@ pub fn compute(
     if !bunko_library::sidecar::is_cbz_name(&name) {
         return None;
     }
-    let meta = std::fs::metadata(cbz).ok()?;
+    // A case merge is moving this volume: the census skips it (it is judged again
+    // where the merge puts it).
+    if merge_busy(cbz) {
+        return None;
+    }
+    let meta = fs::metadata(cbz).ok()?;
     if !meta.is_file() {
         return None;
     }
@@ -102,6 +108,8 @@ pub fn compute(
         && primary_done
         && let Some(rel) = rel_of(library, cbz)
     {
+        // While judged, a case merge leaves the volume alone.
+        let _judging = super::busy::judging(cbz);
         wants_upgrade = probe.wants_upgrade(cbz, &rel);
     }
     if owed.is_empty() && skipped.is_empty() && !wants_upgrade {
@@ -129,7 +137,7 @@ pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![library.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+        let Ok(rd) = fs::read_dir(&dir) else {
             continue;
         };
         for entry in rd.flatten() {
@@ -189,12 +197,48 @@ pub fn walk(
 
 /// `_still_owed`: the archive is a file and the row's sidecar is still missing (for an
 /// upgrade job: the bare file still exists, i.e. the swap has not happened yet).
+///
+/// On a remote store (spec §5.4) a volume whose primary or row sidecar vanished within
+/// the quiet period while its archive stayed is not owed now: the reader is replacing
+/// that sidecar (MEGA deletes every copy before it uploads the new one).
 pub fn still_owed(library: &Path, rel: &str, row: &Generation, upgrade: bool) -> bool {
     let cbz = library.join(rel);
-    if !cbz.is_file() {
+    if !fs::is_file(&cbz) {
+        return false;
+    }
+    // Held while a case merge is open on the volume's folder (spec §5.9).
+    if merge_busy(&cbz) {
+        return false;
+    }
+    if sidecar_recently_removed(&cbz, row) {
         return false;
     }
     if upgrade { true } else { !row_done(&cbz, row) }
+}
+
+/// A case merge journal group is open on `cbz` (or its folder) on a remote store
+/// ([`bunko_store::LibraryStore::merge_busy`]). Always false locally.
+pub fn merge_busy(cbz: &Path) -> bool {
+    bunko_store::store_for(cbz).is_some_and(|s| s.merge_busy(cbz))
+}
+
+/// A sidecar of `cbz` (the primary's, or `row`'s) left a remote store within its quiet
+/// period ([`bunko_store::LibraryStore::recently_removed`]). Always false locally.
+pub fn sidecar_recently_removed(cbz: &Path, row: &Generation) -> bool {
+    let Some(store) = bunko_store::store_for(cbz) else {
+        return false;
+    };
+    if !store.caps().remote {
+        return false;
+    }
+    let mut suffixes = vec![row.sidecar_suffix()];
+    if !row.primary {
+        suffixes.push(".mokuro".to_string());
+    }
+    suffixes.iter().any(|s| {
+        let (plain, gz) = sidecar_paths(cbz, s);
+        store.recently_removed(&plain).is_some() || store.recently_removed(&gz).is_some()
+    })
 }
 
 /// `_archive_pages`: image members of the zip that are pages (0 / unreadable: None).
@@ -205,6 +249,7 @@ pub fn archive_pages(cbz: &Path) -> Option<i64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
     use crate::ocr::types::FileFacts;

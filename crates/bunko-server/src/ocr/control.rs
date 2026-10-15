@@ -452,6 +452,8 @@ impl OcrControl {
 
     fn start_local(&self, factory: &dyn LocalProcessorFactory) {
         let results = self.0.storage.join(".processing");
+        // unmounted: the `.processing` spool, beside the library.
+        #[allow(clippy::disallowed_methods)]
         let _ = std::fs::create_dir_all(&results);
         let channels = match factory.start(&results) {
             Ok(c) => c,

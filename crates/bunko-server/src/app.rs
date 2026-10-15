@@ -38,6 +38,8 @@ pub struct ServeOptions {
 /// 0.5.2 `_validate_startup_environment`: directories exist and are writable; TLS
 /// material is present and valid. The message is printed as
 /// `Startup validation failed: <msg>` and the process exits 2.
+// unmounted: the std calls here touch only the TLS certificate and key paths (config).
+#[allow(clippy::disallowed_methods)]
 pub fn validate_startup(config: &Config) -> Result<(), String> {
     let layout = config.storage.layout();
     layout.ensure_directories().map_err(|e| {
@@ -47,7 +49,10 @@ pub fn validate_startup(config: &Config) -> Result<(), String> {
         )
     })?;
     StorageLayout::assert_writable_dir(&layout.base, "storage.base_path")?;
-    StorageLayout::assert_writable_dir(&layout.library(), "storage.library_path")?;
+    // A cloud library's root is a mount point, never a folder on this disk.
+    if !layout.cloud_library() {
+        StorageLayout::assert_writable_dir(&layout.library(), "storage.library_path")?;
+    }
     StorageLayout::assert_writable_dir(&layout.inbox(), "storage.inbox_path")?;
     StorageLayout::assert_writable_dir(&layout.users(), "storage.users_path")?;
     if !config.ssl.enabled {
@@ -106,6 +111,18 @@ pub struct Services {
     /// First-run state: the setup code and its sessions (shared with the accounts
     /// routes; [`announce_setup`] issues the code).
     pub setup: crate::accounts::SetupFlag,
+    /// A cloud library's store (`storage.library.backend` is not `local`): status for
+    /// the admin panel, the first-sync wait; `None` for a library on this disk.
+    pub storage: Option<Arc<crate::storage::StoreHandle>>,
+    /// Connect / Disconnect a cloud library (setup wizard, admin Storage panel, the
+    /// local control API).
+    pub storage_control: Arc<crate::storage::StorageControl>,
+    /// A cloud library: the store's change events drop the PROPFIND listings they
+    /// touch at once (spec §10).
+    _listing_watch: Option<bunko_store::WatchGuard>,
+    /// The library root mounted (a `LocalStore`, or the cloud store) for as long as the
+    /// services live (last, so it is unmounted after everything else has been dropped).
+    _library_mount: bunko_store::MountGuard,
 }
 
 /// Counts the writing requests in flight ([`Services::writes`]).
@@ -204,6 +221,16 @@ impl Services {
         let flavor = opts.flavor;
         let db_options = DbOptions::from(&config.database);
         let layout = config.storage.layout();
+        // Before anything below touches the library: the cloud store (mounted at its
+        // synthetic root, which every `layout.library()` below names), or the disk.
+        let (library_mount, storage, layout) =
+            match crate::storage::open_library_store(&config, &layout)? {
+                Some((store, guard, handle)) => {
+                    let layout = layout.with_library_root(store.root());
+                    (guard, Some(handle), layout)
+                }
+                None => (crate::library::mount_local(&layout.library()), None, layout),
+            };
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
@@ -219,7 +246,8 @@ impl Services {
         };
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
         let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
-        let core = Core::new(config, config_path, backend);
+        let core = Core::with_layout(config, config_path, backend, layout.clone());
+        let storage_control = crate::storage::StorageControl::for_core(&core, storage.clone());
         let late_ocr: Arc<std::sync::OnceLock<crate::ocr::OcrControl>> =
             Arc::new(std::sync::OnceLock::new());
         let library = {
@@ -257,7 +285,31 @@ impl Services {
         };
         let _ = late_ocr.set(ocr.clone());
         dav_hooks.add_listener(Arc::new(ocr.clone()));
+        let listing_watch = storage
+            .as_ref()
+            .and_then(|_| watch_listings(&dav, &layout.library()));
+        if let Some(handle) = &storage {
+            // Changes made directly in the cloud run the hooks a DAV write runs (D20).
+            handle.set_hooks(Arc::new(
+                crate::storage::ServerCloudHooks::new(
+                    layout.library(),
+                    dav_hooks.clone(),
+                    library.clone(),
+                    db.clone(),
+                )
+                .with_thumbnails(thumbs.clone()),
+            ));
+            // Case variants merge into the oldest spelling (§5.9).
+            handle.set_case_merge_policy(Arc::new(crate::storage::ServerCaseMergePolicy::new(
+                layout.library(),
+                core.clone(),
+                db.clone(),
+            )));
+        }
         Ok(Services {
+            storage,
+            storage_control,
+            _listing_watch: listing_watch,
             core,
             db,
             dyndns,
@@ -272,7 +324,29 @@ impl Services {
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writes: WritesInFlight::default(),
             setup: crate::accounts::SetupFlag::default(),
+            _library_mount: library_mount,
         })
+    }
+}
+
+/// Drop the cached PROPFIND listings a store change touches (the path's own, its
+/// ancestors' and its descendants'), as a DAV write does for its own changes; a
+/// `Rescan` drops them all (spec §10).
+fn watch_listings(dav: &bunko_dav::Dav, library: &Path) -> Option<bunko_store::WatchGuard> {
+    let store = bunko_store::store_for(library)?;
+    let (dav, root) = (dav.clone(), library.to_path_buf());
+    let sink: bunko_store::WatchSink = Arc::new(move |ev: bunko_store::WatchEvent| {
+        match ev.path().and_then(|p| crate::ocr::types::rel_of(&root, p)) {
+            Some(rel) => dav.invalidate_listing(&[format!("/{}/{rel}", auth::paths::READER_ROOT)]),
+            None => dav.propfind_cache().invalidate(),
+        }
+    });
+    match store.watch(sink) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            tracing::warn!("[STORAGE] PROPFIND listings refresh on a timer only: {e}");
+            None
+        }
     }
 }
 
@@ -347,6 +421,16 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
             resp
         };
     }
+    // Without readers WebDAV only serves processors' archive fetches (also checked in
+    // `readers_gate`); the rest (`/`, `/inbox`, ...) is not mounted.
+    if !st.core.config.read().server.serve_readers {
+        if !is_reader_path(&path) {
+            return text_status(StatusCode::NOT_FOUND, "Not found");
+        }
+        if let Some(refused) = refuse_reader(req.method(), &path, &ctx.identity) {
+            return refused;
+        }
+    }
     if let Some(lib) = &st.library
         && crate::library::is_series_put(req.method(), &path)
     {
@@ -411,6 +495,89 @@ async fn auth_gate(
     next.run(req).await
 }
 
+/// `/mokuro-reader` and everything under it (percent-decoded).
+fn is_reader_path(path: &str) -> bool {
+    path.strip_prefix('/')
+        .and_then(|p| p.strip_prefix(auth::paths::READER_ROOT))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Without readers, a `/mokuro-reader/` request passes only as a processor's `GET` or
+/// `HEAD` of a library file (the archive fetch, PROTOCOL.md step 5): `None`. Anything
+/// else is refused, 401 anonymous (or the credential's own 401/429), 403 signed in.
+fn refuse_reader(method: &http::Method, path: &str, identity: &auth::Identity) -> Option<Response> {
+    let fetch = matches!(method.as_str(), "GET" | "HEAD")
+        && auth::paths::is_library_path(path)
+        && identity.role() == bunko_core::Role::Processor;
+    if fetch {
+        return None;
+    }
+    if !identity.authenticated() {
+        let message = identity
+            .error
+            .clone()
+            .unwrap_or_else(|| "Authentication required".into());
+        let status = if message.contains("Too many failed attempts") {
+            StatusCode::TOO_MANY_REQUESTS
+        } else {
+            StatusCode::UNAUTHORIZED
+        };
+        return Some(
+            auth::Denied {
+                status,
+                message,
+                bearer: identity.bearer_failed,
+            }
+            .into_response(),
+        );
+    }
+    Some(text_status(
+        StatusCode::FORBIDDEN,
+        "This server does not serve readers (server.serve_readers is off)",
+    ))
+}
+
+fn text_status(status: StatusCode, message: &str) -> Response {
+    auth::Denied {
+        status,
+        message: message.to_string(),
+        bearer: false,
+    }
+    .into_response()
+}
+
+/// `server.serve_readers: false` (read per request): the catalog (`/catalog*`, its
+/// manifest included) answers 404, and `/mokuro-reader/` is limited to processors'
+/// archive fetches ([`refuse_reader`]) before the queue file or WebDAV see it. The rest
+/// of WebDAV is cut off in [`dav_fallback`].
+async fn readers_gate(
+    State(core): State<Core>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if core.config.read().server.serve_readers || req.method() == http::Method::OPTIONS {
+        return next.run(req).await;
+    }
+    let path = percent_encoding::percent_decode_str(req.uri().path())
+        .decode_utf8_lossy()
+        .into_owned();
+    if path == "/catalog" || path.starts_with("/catalog/") {
+        return text_status(StatusCode::NOT_FOUND, "Not found");
+    }
+    if !is_reader_path(&path) {
+        return next.run(req).await;
+    }
+    let (mut parts, body) = req.into_parts();
+    let Ok(ctx) = <RequestCtx as axum::extract::FromRequestParts<Core>>::from_request_parts(
+        &mut parts, &core,
+    )
+    .await;
+    match refuse_reader(&parts.method, &path, &ctx.identity) {
+        Some(refused) => refused,
+        None => next.run(Request::from_parts(parts, body)).await,
+    }
+}
+
 type RefusalHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 /// Where refused processor logins are reported (the registry's admin-panel list).
 static PROCESSOR_REFUSALS: std::sync::OnceLock<RefusalHook> = std::sync::OnceLock::new();
@@ -460,6 +627,10 @@ pub fn build_router_with(
         core.clone(),
         auth_gate,
     )))
+    .layer(axum::middleware::from_fn_with_state(
+        core.clone(),
+        readers_gate,
+    ))
     .layer(axum::middleware::from_fn_with_state(
         core.clone(),
         cors::cors,
@@ -535,23 +706,7 @@ pub async fn serve_router_with(
             });
         }
         services.updates.start(stop.clone());
-        services.library.start();
-        let library_dir = services.core.layout.library();
-        {
-            // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
-            // request path.
-            let (lib, db) = (library_dir.clone(), services.db.clone());
-            tokio::task::spawn_blocking(move || {
-                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db))
-            });
-        }
-        let thumbs = services.thumbs.spawn(
-            services.core.config.clone(),
-            library_dir,
-            stop.child_token(),
-        );
-        services.ocr.start(stop.child_token());
-        thumbs
+        start_library_services(services, stop.clone())
     };
     crate::serve::serve(listener, app, tls, stop, Duration::from_secs(5)).await?;
     // Ordered shutdown (0.5.2 shutdown_app order, plus the new services).
@@ -563,6 +718,131 @@ pub async fn serve_router_with(
     services.updates.stop().await;
     services.tunnel.stop().await;
     Ok(())
+}
+
+/// How long the library services wait for a cloud store's first sync before they start
+/// on what the index holds so far.
+pub const CLOUD_STEADY_WAIT: Duration = Duration::from_secs(15 * 60);
+/// How often that wait logs its progress.
+const CLOUD_STEADY_LOG_EVERY: Duration = Duration::from_secs(30);
+
+/// Start the library runtime (watcher, metadata timers), the cover loop and the OCR
+/// scheduler. The returned task ends with the cover loop (at `stop`).
+///
+/// On a library on this disk they start at once, after 0.5.2's one-shot corrupt-sidecar
+/// sweep. On a cloud library they start once the store's change feed is STEADY (or after
+/// [`CLOUD_STEADY_WAIT`], with a warning), so the first metadata compile and the
+/// scheduler's first census see the whole library; admin, health and setup are served
+/// meanwhile. The sweep is skipped (D13: corrupt sidecars are report-only on remote)
+/// and covers are made as archives arrive, not by a periodic walk.
+pub fn start_library_services(
+    services: &Services,
+    stop: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let config = services.core.config.clone();
+    let library_dir = services.core.layout.library();
+    let Some(storage) = services.storage.clone() else {
+        services.library.start();
+        {
+            // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
+            // request path.
+            let (lib, db) = (library_dir.clone(), services.db.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db))
+            });
+        }
+        let thumbs = services
+            .thumbs
+            .spawn(config, library_dir, stop.child_token());
+        services.ocr.start(stop.child_token());
+        return thumbs;
+    };
+    let (library, thumbs, ocr) = (
+        services.library.clone(),
+        services.thumbs.clone(),
+        services.ocr.clone(),
+    );
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        loop {
+            let h = storage.clone();
+            let wait = tokio::task::spawn_blocking(move || h.wait_steady(CLOUD_STEADY_LOG_EVERY));
+            let steady = tokio::select! {
+                _ = stop.cancelled() => return,
+                r = wait => r.unwrap_or(false),
+            };
+            if steady {
+                if storage.connected() {
+                    info!(
+                        "[STORAGE] The {} library is in sync: starting the library services",
+                        storage.backend.as_str()
+                    );
+                } else {
+                    info!(
+                        "[STORAGE] The {} library is not connected: starting the library services on an empty library",
+                        storage.backend.as_str()
+                    );
+                }
+                break;
+            }
+            if started.elapsed() >= CLOUD_STEADY_WAIT {
+                tracing::warn!(
+                    "[STORAGE] The {} library is still not in sync after {} min ({:?}): starting the library services on what is indexed so far",
+                    storage.backend.as_str(),
+                    CLOUD_STEADY_WAIT.as_secs() / 60,
+                    storage.engine_state()
+                );
+                break;
+            }
+            info!(
+                "[STORAGE] Waiting for the first sync of the {} library: {:?}",
+                storage.backend.as_str(),
+                storage.engine_state()
+            );
+        }
+        library.start();
+        let covers = thumbs.spawn_remote(library_dir, stop.child_token());
+        ocr.start(stop.child_token());
+        publish_cloud_queue(ocr, storage, stop.child_token());
+        let _ = covers.await;
+    })
+}
+
+/// How often the cloud copy of the queue file is offered to the store (which writes it
+/// only on change, at most once per provider floor).
+pub const CLOUD_QUEUE_EVERY: Duration = Duration::from_secs(2);
+
+/// Keep the cloud library's `.mokuro-queue.json` current (§9.1): the scheduler's queue
+/// document, as the reader's WebDAV copy is built, until `stop`.
+fn publish_cloud_queue(
+    ocr: crate::ocr::OcrControl,
+    storage: Arc<crate::storage::StoreHandle>,
+    stop: CancellationToken,
+) {
+    if !storage.connected() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            if let Some(((held, volumes, pending), now)) =
+                ocr.ask(|s| (s.queue_document(), s.now())).await
+            {
+                let doc = serde_json::Value::Object(crate::ocr::queue_file::build_document(
+                    held, volumes, pending, now,
+                ));
+                let st = storage.clone();
+                match tokio::task::spawn_blocking(move || st.publish_queue_doc(doc)).await {
+                    Ok(Err(e)) => tracing::debug!("[STORAGE] queue file not published: {e}"),
+                    Err(e) => tracing::warn!("[STORAGE] queue file task: {e}"),
+                    Ok(Ok(_)) => {}
+                }
+            }
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep(CLOUD_QUEUE_EVERY) => {}
+            }
+        }
+    });
 }
 
 /// Build every module router and the WebDAV fallback for these services. Modules are
@@ -622,6 +902,8 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
     accounts.machine = opts.machine.clone();
     accounts.dyndns = Some(services.dyndns.clone());
     accounts.restart = Some(restart.clone());
+    services.storage_control.set_restart(restart.clone());
+    accounts.storage = Some(services.storage_control.clone());
     let admin = crate::admin::AdminDeps {
         core: services.core.clone(),
         db: services.db.clone(),
@@ -632,6 +914,8 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         drop_processors: Some(drop),
         restart: Some(restart),
         machine: opts.machine.clone(),
+        storage: services.storage.clone(),
+        storage_control: Some(services.storage_control.clone()),
     };
     let mut modules: Vec<Router> = vec![
         crate::accounts::router(accounts.clone()),
@@ -757,6 +1041,8 @@ pub fn setup_banner(
 
 /// Running in a container (Docker's `/.dockerenv`, Podman's `/run/.containerenv`, or
 /// the images' `MOKURO_INSTALL_KIND=docker`).
+// unmounted: container marker files at the filesystem root.
+#[allow(clippy::disallowed_methods)]
 fn in_container() -> bool {
     std::path::Path::new("/.dockerenv").exists()
         || std::path::Path::new("/run/.containerenv").exists()

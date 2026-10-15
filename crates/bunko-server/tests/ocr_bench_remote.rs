@@ -4,6 +4,9 @@
 //! over HTTP, the `bench_*` events over the socket, the result stored in the
 //! processor's profile.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 use std::time::Duration;
 
 use bunko_core::generations::default_generation;

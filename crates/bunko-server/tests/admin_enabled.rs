@@ -1,6 +1,9 @@
 //! `admin.enabled: false` takes the admin panel and API away, as in 0.5.2 (server.py
 //! mounted `AdminAPI` only when enabled): `/_admin…` falls through to WebDAV.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 use axum::body::Body;
 use bunko_core::{Config, Role};
 use bunko_db::UserStatus;

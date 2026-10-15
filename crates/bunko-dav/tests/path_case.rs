@@ -7,6 +7,9 @@
 //! (an upload spelled in another case), and the catalog then showed only the stray folder's
 //! one volume. On NTFS that request lands in `Kingdom/`.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use axum::body::Body;

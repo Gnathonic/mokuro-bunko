@@ -295,7 +295,7 @@ pub fn walk(
     let mut buf = String::with_capacity(64 * 1024);
     let mut ancestors: Vec<PathBuf> = Vec::new();
     match res.phys() {
-        Some(p) => ancestors.extend(std::fs::canonicalize(p).ok()),
+        Some(p) => ancestors.extend(bunko_store::fs::canonicalize(p).ok()),
         // The virtual roots list the library itself.
         None => ancestors.push(roots.library.clone()),
     }

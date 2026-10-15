@@ -315,7 +315,7 @@ impl LibraryRuntime {
         if let Some(path) = self.library_resolved.get() {
             return path.clone();
         }
-        match std::fs::canonicalize(&self.library) {
+        match bunko_store::fs::canonicalize(&self.library) {
             Ok(path) => self.library_resolved.get_or_init(|| path).clone(),
             Err(_) => self.library.clone(),
         }
@@ -740,7 +740,7 @@ impl LibraryRuntime {
             return;
         }
         self.index.invalidate();
-        let is_dir = std::fs::metadata(path)
+        let is_dir = bunko_store::fs::metadata(path)
             .map(|m| m.is_dir())
             .unwrap_or_else(|_| super::watcher::vanished_is_dir(path));
         if bunko_library::paths::is_relevant_change(path, is_dir) {

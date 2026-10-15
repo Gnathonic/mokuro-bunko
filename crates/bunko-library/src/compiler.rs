@@ -7,8 +7,9 @@
 //! regeneration that changes nothing is a stat walk; a miss parses the
 //! sidecar and reads only the archive's central directory.
 
-use std::fs;
 use std::path::{Path, PathBuf};
+
+use bunko_store::Meta;
 
 use crate::archive;
 use crate::compat::{
@@ -78,7 +79,7 @@ pub fn archive_names(folder: &Path) -> Vec<String> {
 }
 
 /// `_stat_key`: `"<sidecar name>:<st_size>:<repr(st_mtime)>"`, `""` for none.
-pub fn sidecar_stat_key(sidecar: Option<&Path>, meta: Option<&fs::Metadata>) -> String {
+pub fn sidecar_stat_key(sidecar: Option<&Path>, meta: Option<&Meta>) -> String {
     match (sidecar, meta) {
         (Some(path), Some(meta)) => {
             let name = path
@@ -122,7 +123,7 @@ pub fn compile_volume(
     series_title: &str,
     cbz_path: &Path,
     sidecar: Option<&Path>,
-    sidecar_meta: Option<&fs::Metadata>,
+    sidecar_meta: Option<&Meta>,
 ) -> (VolumeEntry, bool) {
     let volume_title = cbz_path
         .file_name()
@@ -348,7 +349,7 @@ struct VolumeStats {
     cbz_size: i64,
     cbz_mtime: f64,
     sidecar: Option<PathBuf>,
-    sidecar_meta: Option<fs::Metadata>,
+    sidecar_meta: Option<Meta>,
     sidecar_key: String,
 }
 

@@ -267,6 +267,8 @@ async fn delete_account(
 /// `rmtree(<storage>/users/<username>)`, refusing a name or symlink that leads outside
 /// the users directory (`false`). Removal errors are ignored, as 0.5.2's
 /// `ignore_errors=True`.
+// unmounted: per-user directories live under `users/`, beside the library.
+#[allow(clippy::disallowed_methods)]
 fn remove_user_dir(users_root: &FsPath, username: &str) -> bool {
     if username.is_empty()
         || username == "."
@@ -292,6 +294,7 @@ fn remove_user_dir(users_root: &FsPath, username: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
 mod tests {
     use super::*;
 

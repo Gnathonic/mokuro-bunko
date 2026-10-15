@@ -2,6 +2,9 @@
 //! code that lets another computer (a Docker host's or a NAS's browser) through the
 //! localhost gate.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod accounts_support;
 
 use accounts_support::*;

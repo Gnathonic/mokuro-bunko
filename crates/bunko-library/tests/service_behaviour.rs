@@ -1,6 +1,9 @@
 //! MetadataService behaviour beyond the golden bytes: hooks, busy PUTs,
 //! busy/unwritable paths, stop(), the library index cache.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::path::{Path, PathBuf};

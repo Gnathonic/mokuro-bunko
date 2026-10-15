@@ -6,6 +6,8 @@ use bunko_db::UserStatus;
 use serde_json::{Map, Value, json};
 
 /// `shutil.disk_usage`: (total, used, free); zeros when the path cannot be asked.
+// unmounted: statvfs measures the storage disk, not the library store (a remote
+// store's `capacity()` arrives in M2).
 fn disk_usage(path: &std::path::Path) -> (u64, u64, u64) {
     match fs4::statvfs(path) {
         Ok(st) => {
@@ -20,17 +22,25 @@ fn disk_usage(path: &std::path::Path) -> (u64, u64, u64) {
     }
 }
 
+/// The `library.storage` block: the cloud store's status (or a library on this disk),
+/// with the sign-in in progress.
+pub fn storage_block(storage: &crate::storage::StorageControl) -> Value {
+    storage.status_json()
+}
+
 pub(super) async fn status(s: &AdminState) -> Response {
     let uptime = s.core().started_at.elapsed().as_secs_f64();
-    let (host, port, base, library) = {
+    let (host, port, base) = {
         let c = s.core().config.read();
         (
             c.server.host.clone(),
             c.server.port,
             c.storage.base_path.clone(),
-            c.storage.library_path(),
         )
     };
+    // A cloud library's root is its store's synthetic mount point (0.8).
+    let library = s.core().layout.library();
+    let storage = s.storage_control.clone();
     let db = s.db();
     let result = blocking(move || -> Result<Value, bunko_db::DbError> {
         let users = db.list_users(None)?;
@@ -42,10 +52,10 @@ pub(super) async fn status(s: &AdminState) -> Response {
         let (disk_total, disk_used, disk_free) = disk_usage(&storage_path);
         // Series folders: the immediate directories of the library (0.5.2 counts these
         // as "volumes").
-        let volume_count = std::fs::read_dir(&library)
+        let volume_count = bunko_store::fs::read_dir(&library)
             .map(|it| {
                 it.filter_map(Result::ok)
-                    .filter(|e| e.path().is_dir())
+                    .filter(|e| bunko_store::fs::is_dir(e.path()))
                     .count()
             })
             .unwrap_or(0);
@@ -62,6 +72,8 @@ pub(super) async fn status(s: &AdminState) -> Response {
             "stats": {},
             // 0.7: the running version (the panel's footer).
             "version": bunko_core::VERSION,
+            // 0.8: where the library lives (spec §11, the Storage panel).
+            "library": {"storage": storage_block(&storage)},
         }))
     })
     .await;

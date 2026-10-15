@@ -34,6 +34,7 @@ pub mod reconcile;
 pub mod records;
 pub mod road;
 pub mod script;
+pub mod seal;
 pub mod sidecar;
 
 pub use json::{Separators, Value};

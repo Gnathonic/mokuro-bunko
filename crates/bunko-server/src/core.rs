@@ -40,13 +40,19 @@ impl Core {
         config_path: Option<PathBuf>,
         backend: Arc<dyn AuthBackend>,
     ) -> Self {
-        let (layout, proxies) = {
-            let c = config.read();
-            (
-                c.storage.layout(),
-                TrustedProxies::new(&c.server.trusted_proxies),
-            )
-        };
+        let layout = config.read().storage.layout();
+        Self::with_layout(config, config_path, backend, layout)
+    }
+
+    /// [`Core::new`] over a given layout: a cloud library's carries the root its store
+    /// is mounted at (`StorageLayout::with_library_root`).
+    pub fn with_layout(
+        config: Arc<RwLock<Config>>,
+        config_path: Option<PathBuf>,
+        backend: Arc<dyn AuthBackend>,
+        layout: StorageLayout,
+    ) -> Self {
+        let proxies = TrustedProxies::new(&config.read().server.trusted_proxies);
         Core(Arc::new(CoreInner {
             config,
             config_path,
