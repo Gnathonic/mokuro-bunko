@@ -1514,14 +1514,18 @@ fn path_case_resolves_a_folded_request_to_the_oldest_variant() {
         "Kingdom/Vol 3.cbz"
     );
 
-    // A local library keeps the first in sorted order.
+    // A local library keeps the first in sorted order. On a filesystem that ignores
+    // case (APFS, NTFS) the second mkdir is the first folder, so there is one variant:
+    // its on-disk spelling. The canonicalizer probes the filesystem, as the server's does.
     let dir = TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("kingdom")).unwrap();
     std::fs::create_dir_all(dir.path().join("Kingdom")).unwrap();
+    let both = std::fs::read_dir(dir.path()).unwrap().count() == 2;
     let local = Arc::new(bunko_store::LocalStore::new(dir.path()));
     let _m = bunko_store::mount(local as Arc<dyn LibraryStore>);
-    let pc = bunko_dav::LibraryPathCanonicalizer::new(dir.path(), Some(true));
-    assert_eq!(pc.canonicalize("KINGDOM/x", None), "Kingdom/x");
+    let pc = bunko_dav::LibraryPathCanonicalizer::new(dir.path(), None);
+    let want = if both { "Kingdom/x" } else { "kingdom/x" };
+    assert_eq!(pc.canonicalize("KINGDOM/x", None), want);
 }
 
 #[test]

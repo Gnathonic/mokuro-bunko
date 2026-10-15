@@ -1578,7 +1578,7 @@ pub fn cloud_queue_doc(
         .iter()
         .filter(|e| now.is_none_or(|n| n.saturating_sub(e.at_ms) < window_ms))
         .collect();
-    recent.sort_by(|a, b| b.at_ms.cmp(&a.at_ms));
+    recent.sort_by_key(|a| std::cmp::Reverse(a.at_ms));
     recent.truncate(DONE_LIMIT);
     let mut done: Vec<Value> = recent.into_iter().map(DoneEntry::to_json).collect();
     loop {

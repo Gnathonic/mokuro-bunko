@@ -1682,8 +1682,7 @@ async fn trash_and_permanent_delete() {
         .mock
         .requests()
         .into_iter()
-        .filter(|r| r.method == "DELETE")
-        .next_back()
+        .rfind(|r| r.method == "DELETE")
         .unwrap();
     assert_eq!(del.if_match.as_deref(), Some(cur.cver.as_str()));
     assert_eq!(e.be.trash(&l.v1, None).await, Err(BErr::NotFound));

@@ -1530,7 +1530,7 @@ impl<B: Backend> Core<B> {
             }
             None => e.ocr = Some(path),
         }
-        done.sort_by(|a, b| b.at_ms.cmp(&a.at_ms));
+        done.sort_by_key(|a| std::cmp::Reverse(a.at_ms));
         done.truncate(crate::status::DONE_LIMIT);
         if let Ok(j) = serde_json::to_string(&*done) {
             let _ = self.state.meta_set("queue_done", &j);

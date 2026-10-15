@@ -773,13 +773,16 @@ fn export_to_a_chosen_folder_refuses_non_empty_and_symlinks() {
     assert_eq!(std::fs::read(full.join("mine.txt")).unwrap(), b"keep");
     let target = c.base.join("elsewhere");
     std::fs::create_dir_all(&target).unwrap();
-    let link = c.base.join("link");
-    std::os::unix::fs::symlink(&target, &link).unwrap();
-    let err = c
-        .control
-        .disconnect(&DisconnectMode::ExportTo(link))
-        .unwrap_err();
-    assert!(err.to_string().contains("symlink"), "{err}");
+    #[cfg(unix)]
+    {
+        let link = c.base.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = c
+            .control
+            .disconnect(&DisconnectMode::ExportTo(link))
+            .unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+    }
     assert_eq!(c.creds_ids().len(), 1, "a refused Export changes nothing");
 
     let out = c.base.join("new/export");
