@@ -381,6 +381,17 @@ fn store(fake: FakeBackend, tune: impl FnOnce(&mut RemoteStoreConfig)) -> S {
     let store = RemoteStore::open_shared(cfg, fake.clone()).unwrap();
     let mount = bunko_store::mount(store.clone() as Arc<dyn LibraryStore>);
     assert!(store.wait_steady(Duration::from_secs(20)));
+    // The first adoption runs right after the first sync (health `Syncing` meanwhile):
+    // every test starts from `Online`.
+    let t0 = std::time::Instant::now();
+    while !store.adopted() || store.health() != Health::Online {
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            store.health()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     S {
         _tmp: tmp,
         root,
@@ -462,8 +473,9 @@ fn a_full_provider_keeps_deferred_writes_in_the_outbox_and_recovers() {
         fs::exists(s.abs("S/cover.webp")),
         "still visible while queued"
     );
-    // A Sync write hears 507 at once.
-    let src = s.local("x", b"xx");
+    // A Sync write hears 507: at once while blocked, or from the provider itself when
+    // it lands in a probe's window (it does not fit the quota either way).
+    let src = s.local("x", b"a sync write larger than the quota");
     let sync = WriteIntent::new(
         Mode::Replace { base: None },
         Origin::Dav { user: None },
