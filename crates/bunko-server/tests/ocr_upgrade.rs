@@ -28,11 +28,6 @@ fn enabled() -> UpgradeConfig {
     }
 }
 
-fn sha(bytes: &[u8]) -> String {
-    use sha2::Digest;
-    hex::encode(sha2::Sha256::digest(bytes))
-}
-
 fn json(path: &std::path::Path) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
@@ -59,7 +54,7 @@ fn direct_replace_swaps_a_matching_layer_in() {
     h.at(0.0);
     assert_eq!(
         std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),
-        HAYAI,
+        sealed(HAYAI),
         "the layer's bytes are the new bare file"
     );
     assert_eq!(
@@ -71,21 +66,15 @@ fn direct_replace_swaps_a_matching_layer_in() {
         !h.s.owed.volumes.contains_key("A/V1.cbz"),
         "nothing left to do"
     );
-    let row =
-        h.db.as_ref()
-            .unwrap()
-            .get_ocr_sidecar("A/V1.mokuro")
-            .unwrap();
-    assert_eq!(
-        row.and_then(|r| r.written_sha256),
-        Some(sha(HAYAI.as_bytes())),
+    assert!(
+        bunko_layout::seal::is_sealed(&std::fs::read(lib.join("A/V1.mokuro")).unwrap()),
         "the proof moved with the bytes"
     );
 }
 
-/// An OCR install records the sha256 of exactly the bytes it put in place.
+/// An OCR install seals exactly the bytes it put in place (`ocr_engine.content_sha256`).
 #[test]
-fn an_install_records_the_sha256_of_the_bytes_it_wrote() {
+fn an_install_seals_the_bytes_it_wrote() {
     let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
     h.add("B/V9.cbz", 3);
     let lib = h.library();
@@ -98,20 +87,17 @@ fn an_install_records_the_sha256_of_the_bytes_it_wrote() {
     h.event(&p, started(&sid, &vols[0].1, 3));
     h.done_with(&p, &sid, &vols[0].1, "V9.mokuro", 3, 1.0, HAYAI.as_bytes());
     let installed = std::fs::read(lib.join("B/V9.mokuro")).unwrap();
-    let row =
-        h.db.as_ref()
-            .unwrap()
-            .get_ocr_sidecar("B/V9.mokuro")
-            .unwrap();
-    assert_eq!(
-        row.and_then(|r| r.written_sha256),
-        Some(sha(&installed)),
-        "the normalised bytes on disk, not the processor's"
+    assert!(
+        bunko_layout::seal::is_sealed(&installed),
+        "the normalised bytes on disk are sealed"
+    );
+    assert!(
+        !bunko_layout::seal::is_sealed(HAYAI.as_bytes()),
+        "the processor's bytes were not"
     );
 }
 
-/// The same layer with no proof that Bunko wrote it (no database row recording its
-/// sha256): its stamp alone does not make it the main sidecar, so the volume needs a job.
+/// The same layer with no proof that Bunko wrote it (no seal): its stamp alone does not make it the main sidecar, so the volume needs a job.
 #[test]
 fn a_stamped_layer_without_proof_is_not_swapped_in() {
     let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
@@ -149,7 +135,7 @@ fn a_direct_replace_keeps_a_layer_an_enabled_row_writes() {
     h.at(0.0);
     assert_eq!(
         std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),
-        HAYAI
+        sealed(HAYAI)
     );
     // Removing it would only queue the `nova` row to write it again.
     assert_eq!(

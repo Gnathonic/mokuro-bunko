@@ -29,6 +29,12 @@ pub fn t0() -> f64 {
     (now + 100.0).floor()
 }
 
+/// `content` as Bunko's OCR install leaves it: sealed (`bunko_layout::seal`).
+pub fn sealed(content: &str) -> String {
+    let mut v = bunko_layout::json::Value::parse(content).unwrap();
+    bunko_layout::seal::seal(&mut v).expect("an ocr_engine block to seal")
+}
+
 pub struct H {
     pub t0: f64,
     pub dir: tempfile::TempDir,
@@ -169,12 +175,11 @@ impl H {
         self.dir.path().join("library")
     }
 
-    /// `bytes` written at the library path `rel` as Bunko's OCR install writes them: the
-    /// file, and its provenance row recording their sha256 (the proof D4 asks for).
+    /// `bytes` written at the library path `rel` as Bunko's OCR install writes them:
+    /// sealed (the proof D4 asks for, carried by the file), with the provenance row.
     pub fn bunko_wrote(&self, rel: &str, bytes: &str, generation: &Generation) {
-        use sha2::Digest;
         let path = self.library().join(rel);
-        std::fs::write(&path, bytes).unwrap();
+        std::fs::write(&path, sealed(bytes)).unwrap();
         let volume = format!("{}.cbz", rel.split('.').next().unwrap());
         self.db
             .as_ref()
@@ -186,7 +191,6 @@ impl H {
                 generation_name: generation.name.clone(),
                 machine: "local".into(),
                 engine: Some(generation.engine.clone()),
-                written_sha256: Some(hex::encode(sha2::Sha256::digest(bytes.as_bytes()))),
                 ..Default::default()
             })
             .unwrap();

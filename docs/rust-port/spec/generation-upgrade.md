@@ -145,8 +145,7 @@ For each candidate, in this order:
      `ocr_sidecars` row alone is not enough: `classify` reads the row first,
      and a reader pushing a layer back drops the stamp;
    - **it is proven to be Bunko's own bytes** (the same proof as §5 step 1:
-     its row's `written_sha256` is the sha256 of the file, and on a remote
-     store the version read is one the ledger records as Bunko's). A stamp
+     its seal, `ocr_engine.content_sha256`, checks). A stamp
      alone is not enough: anyone who can write the file can add one, and a
      forged stamp would make a person's file the model output. The bytes
      proven are exactly the bytes installed (read once, pinned to one version
@@ -185,14 +184,16 @@ version); if it changed, the swap skips and the next census judges it again.
 
 1. **Keep the old file, unless it is proven Bunko's own (D4).** A bare file is
    replaced with no copy only on proof that Bunko wrote exactly these bytes:
-   its `ocr_sidecars` row records their sha256 (`written_sha256`, recorded
-   from the installed bytes at every OCR install and moved to the bare file by
-   a direct replace), and on a remote store the version the swap replaces is
-   one the store's ledger records as Bunko's (`own`). A top-level `ocr_engine`
-   stamp proves nothing: anyone who can write the file (a reader's edit, a
-   WebDAV PUT, a cloud upload) can add one, and a re-upload of edited text can
-   keep one. A row an older build wrote has no `written_sha256`, so a file it
-   describes is kept once. Any other is first published as the layer `<Volume>.pre-upgrade.mokuro`
+   their seal checks. Every OCR install seals the normalised result:
+   `ocr_engine.content_sha256` is the sha256 of the file's exact bytes with
+   that value written as 64 zeros (`bunko_layout::seal`); a direct replace
+   installs the layer's bytes, seal included. The proof needs no database or
+   ledger, so it holds on another Bunko (a moved library, a new instance on the
+   same cloud folder). A top-level `ocr_engine` stamp alone proves nothing:
+   anyone who can write the file (a reader's edit, a WebDAV PUT, a cloud upload)
+   can add one, and a re-upload of edited text can keep one; any change to the
+   bytes breaks the seal. A file an older build wrote has no seal, so it is
+   kept once. Any other is first published as the layer `<Volume>.pre-upgrade.mokuro`
    (`CreateNew`, Sync), exactly the bytes the swap replaces (on a remote store
    read pinned to the judged version), with a top-level block
    `"preserved": {"by": "mokuro-bunko", "reason": "generation-upgrade",

@@ -6,9 +6,6 @@
 //! they round-trip untouched. Reproduced: `record_ocr_sidecar` keys by the path as given
 //! (0.5.2 did not strip it there) while the readers/deleters strip `/`; prefix matching
 //! is exact (`substr`), and a folder rename uses `UPDATE OR REPLACE`.
-//!
-//! `written_sha256` (0.8, the only column 0.5.x lacks) is the sha256 of the exact bytes
-//! Bunko installed; a row 0.5.x writes leaves it NULL.
 
 use crate::database::Database;
 use crate::error::Result;
@@ -38,10 +35,6 @@ pub struct OcrSidecar {
     pub archive_mtime_ns: Option<i64>,
     /// `YYYY-MM-DD HH:MM:SS` UTC; set by the database on record (ignored on input).
     pub written_at: String,
-    /// Lowercase hex sha256 of the exact bytes Bunko installed at this path (0.8; `None`
-    /// for a row an older build or a 0.5 rollback wrote). The proof the generation
-    /// upgrade asks for before it treats the file as Bunko's own output.
-    pub written_sha256: Option<String>,
 }
 
 impl OcrSidecar {
@@ -62,14 +55,13 @@ impl OcrSidecar {
             archive_size: r.get(12)?,
             archive_mtime_ns: r.get(13)?,
             written_at: r.get(14)?,
-            written_sha256: r.get(15)?,
         })
     }
 }
 
 const OCR_COLUMNS: &str = "sidecar_path, volume_key, generation_id, generation_name, machine, \
     account, engine, detector, precision, runner_build, pages, failed_pages, archive_size, \
-    archive_mtime_ns, written_at, written_sha256";
+    archive_mtime_ns, written_at";
 
 /// `S/Vol 1` of the archive key `S/Vol 1.cbz` (`.cbz` in any case).
 fn archive_stem(key: &str) -> Option<String> {
@@ -95,8 +87,8 @@ impl Database {
             conn.execute(
                 "INSERT OR REPLACE INTO ocr_sidecars (sidecar_path, volume_key, generation_id, \
                  generation_name, machine, account, engine, detector, precision, runner_build, \
-                 pages, failed_pages, archive_size, archive_mtime_ns, written_sha256, written_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                 pages, failed_pages, archive_size, archive_mtime_ns, written_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
                 params![
                     row.sidecar_path,
                     row.volume_key,
@@ -111,8 +103,7 @@ impl Database {
                     row.pages,
                     row.failed_pages,
                     row.archive_size,
-                    row.archive_mtime_ns,
-                    row.written_sha256
+                    row.archive_mtime_ns
                 ],
             )?;
             Ok(())
@@ -288,9 +279,8 @@ mod tests {
     #[test]
     fn record_get_list_forget() {
         let (_dir, db) = temp_db();
-        let mut first = row("S/V1.mokuro", "S/V1.cbz", "g1");
-        first.written_sha256 = Some("ab".repeat(32));
-        db.record_ocr_sidecar(&first).unwrap();
+        db.record_ocr_sidecar(&row("S/V1.mokuro", "S/V1.cbz", "g1"))
+            .unwrap();
         db.record_ocr_sidecar(&row("S/V1.hayai.mokuro.gz", "S/V1.cbz", "g2"))
             .unwrap();
         db.record_ocr_sidecar(&row("T/V1.mokuro", "T/V1.cbz", "g1"))
@@ -299,7 +289,6 @@ mod tests {
         assert_eq!(got.detector.as_deref(), Some("ctd"));
         assert_eq!(got.archive_mtime_ns, Some(1_700_000_000_123_456_789));
         assert_eq!(got.written_at.len(), 19);
-        assert_eq!(got.written_sha256, Some("ab".repeat(32)));
         assert_eq!(db.list_ocr_sidecars().unwrap().len(), 3);
         assert_eq!(
             db.ocr_sidecar_producers().unwrap()[0],
@@ -314,7 +303,6 @@ mod tests {
         db.record_ocr_sidecar(&again).unwrap();
         let again = db.get_ocr_sidecar("S/V1.mokuro").unwrap().unwrap();
         assert_eq!(again.generation_id, "g9");
-        assert_eq!(again.written_sha256, None, "the row is replaced whole");
         assert_eq!(
             db.list_ocr_sidecars().unwrap().len(),
             3,
@@ -327,9 +315,8 @@ mod tests {
     #[test]
     fn prefixes() {
         let (_dir, db) = temp_db();
-        let mut proven = row("Dr Stone/V1.mokuro", "Dr Stone/V1.cbz", "g");
-        proven.written_sha256 = Some("cd".repeat(32));
-        db.record_ocr_sidecar(&proven).unwrap();
+        db.record_ocr_sidecar(&row("Dr Stone/V1.mokuro", "Dr Stone/V1.cbz", "g"))
+            .unwrap();
         db.record_ocr_sidecar(&row("Dr_Stone/V1.mokuro", "Dr_Stone/V1.cbz", "g"))
             .unwrap();
         db.record_ocr_sidecar(&row("New/V1.mokuro", "New/V1.cbz", "old"))
@@ -342,11 +329,6 @@ mod tests {
         let moved = db.get_ocr_sidecar("New/V1.mokuro").unwrap().unwrap();
         assert_eq!(moved.volume_key, "New/V1.cbz");
         assert_eq!(moved.generation_id, "g", "the colliding row was replaced");
-        assert_eq!(
-            moved.written_sha256,
-            Some("cd".repeat(32)),
-            "its proof moves too"
-        );
         assert_eq!(db.rename_ocr_sidecars_under_prefix("X", "X").unwrap(), 0);
         assert_eq!(db.forget_ocr_sidecars_under_prefix("Dr_Stone").unwrap(), 1);
         assert_eq!(db.forget_ocr_sidecars_under_prefix("").unwrap(), 0);

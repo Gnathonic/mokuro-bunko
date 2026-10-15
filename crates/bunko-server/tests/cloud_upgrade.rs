@@ -52,6 +52,12 @@ fn sha(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
 }
 
+/// `content` as Bunko's OCR install leaves it: sealed (D4's proof, carried by the file).
+fn sealed(content: &str) -> String {
+    let mut v = bunko_layout::json::Value::parse(content).unwrap();
+    bunko_layout::seal::seal(&mut v).expect("an ocr_engine block to seal")
+}
+
 fn no_lease(c: &mut bunko_remote::RemoteStoreConfig) {
     c.lease = false;
     c.retry_base = Duration::from_millis(50);
@@ -174,10 +180,11 @@ impl Cloud {
             .collect()
     }
 
-    /// `bytes` published at `rel` by Bunko itself (the store's ledger records the version
-    /// as its own), with the row an OCR install records: the sha256 of those bytes.
+    /// `bytes` published at `rel` by Bunko itself, sealed as an OCR install seals them
+    /// (D4's proof), with the row an OCR install records.
     async fn bunko_put(&self, rel: &str, bytes: &'static str, engine: &str, detector: &str) {
         let dest = self.lib(rel);
+        let content = sealed(bytes);
         blocking(move || {
             let tmp = dest.with_file_name(format!(
                 ".{}.part",
@@ -189,7 +196,7 @@ impl Cloud {
                 .truncate(true)
                 .open(&tmp)
                 .unwrap();
-            f.write_all(bytes.as_bytes()).unwrap();
+            f.write_all(content.as_bytes()).unwrap();
             drop(f);
             let intent = WriteIntent::new(
                 Mode::CreateNew,
@@ -204,8 +211,9 @@ impl Cloud {
         self.proof(rel, bytes, engine, detector);
     }
 
-    /// The row an OCR install records for `bytes` at `rel` (whoever wrote the file).
-    fn proof(&self, rel: &str, bytes: &str, engine: &str, detector: &str) {
+    /// The row an OCR install records at `rel` (whoever wrote the file). A row is no
+    /// proof: only the file's seal is.
+    fn proof(&self, rel: &str, _bytes: &str, engine: &str, detector: &str) {
         self.services
             .db
             .record_ocr_sidecar(&OcrSidecar {
@@ -216,7 +224,6 @@ impl Cloud {
                 machine: "local".into(),
                 engine: Some(engine.into()),
                 detector: Some(detector.into()),
-                written_sha256: Some(sha(bytes.as_bytes())),
                 ..Default::default()
             })
             .unwrap();
@@ -266,7 +273,7 @@ async fn a_stamp_less_cloud_sidecar_is_kept_then_replaced_and_never_deleted_for_
 
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(HAYAI)
+        Some(sealed(HAYAI).as_str())
     );
     assert_preserves(cloud.cloud_json("Series/Vol 1.pre-upgrade.mokuro"), LEGACY);
     let uploads = fake.upload_log();
@@ -329,7 +336,7 @@ async fn a_failed_layer_upload_skips_the_cloud_volume_until_the_next_census() {
     cloud.upgrade_direct("Series/Vol 1.cbz").await.unwrap();
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(HAYAI)
+        Some(sealed(HAYAI).as_str())
     );
     assert_preserves(cloud.cloud_json("Series/Vol 1.pre-upgrade.mokuro"), LEGACY);
 }
@@ -428,7 +435,7 @@ async fn a_cloud_sidecar_proven_bunkos_own_is_replaced_without_a_copy_and_others
     cloud.upgrade_direct("Series/Vol 1.cbz").await.unwrap();
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
-        Some(HAYAI)
+        Some(sealed(HAYAI).as_str())
     );
     assert!(
         cloud
@@ -465,8 +472,7 @@ async fn a_cloud_sidecar_proven_bunkos_own_is_replaced_without_a_copy_and_others
         "never deleted"
     );
 
-    // Vol 4: the row alone is no proof on a cloud library: the ledger must hold the
-    // version too.
+    // Vol 4: the row alone is no proof: only the file's seal is.
     cloud.proof("Series/Vol 4.mokuro", BUNKO_OLD, "mokuro", "ctd");
     assert_eq!(cloud.judge("Series/Vol 4.cbz").await, Verdict::NeedsOcr);
     cloud

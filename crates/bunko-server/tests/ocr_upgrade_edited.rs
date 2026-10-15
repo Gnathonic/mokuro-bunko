@@ -71,6 +71,16 @@ fn sha(bytes: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(bytes))
 }
 
+/// `content` as Bunko's OCR install leaves it: sealed (D4's proof, carried by the file).
+fn sealed(content: &str) -> String {
+    let mut v = bunko_layout::json::Value::parse(content).unwrap();
+    bunko_layout::seal::seal(&mut v).expect("an ocr_engine block to seal")
+}
+
+fn is_sealed(path: &Path) -> bool {
+    bunko_layout::seal::is_sealed(&std::fs::read(path).unwrap())
+}
+
 fn json_of(path: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
@@ -172,14 +182,11 @@ impl Env {
             .collect()
     }
 
-    /// `content` at `rel` as Bunko's OCR install writes it: the file, and its row with
-    /// the sha256 of those bytes (the proof D4 asks for; a stamp alone proves nothing).
+    /// `content` at `rel` as Bunko's OCR install writes it: sealed (the proof D4 asks
+    /// for; a stamp alone proves nothing), with its provenance row.
     fn bunko_wrote(&self, rel: &str, content: &str, engine: &str, detector: &str) {
-        std::fs::write(self.lib(rel), content).unwrap();
+        std::fs::write(self.lib(rel), sealed(content)).unwrap();
         self.row(rel, engine, detector);
-        let mut row = self.services.db.get_ocr_sidecar(rel).unwrap().unwrap();
-        row.written_sha256 = Some(sha(content.as_bytes()));
-        self.services.db.record_ocr_sidecar(&row).unwrap();
     }
 
     /// A hayai-nova layer Bunko wrote.
@@ -287,7 +294,7 @@ async fn a_stamp_less_main_sidecar_is_upgraded_after_being_kept_as_pre_upgrade()
     env.upgrade_direct("A/V1.cbz").unwrap();
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        HAYAI
+        sealed(HAYAI)
     );
     assert_eq!(
         sidecars(&env.lib("A")),
@@ -411,7 +418,7 @@ async fn the_swap_waits_for_the_kept_layer_and_a_failed_layer_skips_the_volume()
     assert_preserves(&env.lib("A/V1.pre-upgrade.mokuro"), LEGACY);
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        HAYAI
+        sealed(HAYAI)
     );
 }
 
@@ -471,7 +478,7 @@ async fn a_taken_pre_upgrade_id_gives_pre_upgrade_2_and_the_same_bytes_are_kept_
     );
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        HAYAI
+        sealed(HAYAI)
     );
 }
 
@@ -487,16 +494,14 @@ async fn a_main_sidecar_proven_bunkos_own_is_replaced_without_a_copy() {
     assert_eq!(sidecars(&env.lib("A")), ["V1.mokuro"]);
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        HAYAI
+        sealed(HAYAI)
     );
     let audit = &env.upgrade_audits()[0];
     assert_eq!(audit["replaced"], true);
     assert!(audit.get("preserved_as").is_none(), "{audit}");
     assert!(audit.get("kept_as").is_none(), "{audit}");
-    let row = env.services.db.get_ocr_sidecar("A/V1.mokuro").unwrap();
-    assert_eq!(
-        row.and_then(|r| r.written_sha256),
-        Some(sha(HAYAI.as_bytes())),
+    assert!(
+        is_sealed(&env.lib("A/V1.mokuro")),
         "the new main sidecar is proven in turn"
     );
 
@@ -504,6 +509,42 @@ async fn a_main_sidecar_proven_bunkos_own_is_replaced_without_a_copy() {
     env.bunko_wrote("B/V1.mokuro", BUNKO_OLD, "mokuro", "ctd");
     env.upgrade_generated("B/V1.cbz", HAYAI).unwrap();
     assert_eq!(sidecars(&env.lib("B")), ["V1.mokuro"]);
+}
+
+/// The proof travels with the file: a library moved to another Bunko (a new instance,
+/// a new database, no provenance rows) still has its sealed main sidecars replaced with
+/// no copy, while an edit of one, its stamp kept, is still kept first.
+#[tokio::test]
+async fn a_moved_library_keeps_its_proof_without_any_database_row() {
+    let env = Env::new();
+    // A: Bunko's sealed bytes, copied in from another machine (no row here).
+    env.volume_on_disk("A", BUNKO_OLD);
+    std::fs::write(env.lib("A/V1.mokuro"), sealed(BUNKO_OLD)).unwrap();
+    assert!(
+        env.services
+            .db
+            .get_ocr_sidecar("A/V1.mokuro")
+            .unwrap()
+            .is_none()
+    );
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
+    env.upgrade_direct("A/V1.cbz").unwrap();
+    assert_eq!(
+        sidecars(&env.lib("A")),
+        ["V1.mokuro"],
+        "no pre-upgrade copy"
+    );
+    assert!(env.upgrade_audits()[0].get("preserved_as").is_none());
+
+    // B: the same file, its text corrected afterwards with the seal left in.
+    env.volume_on_disk("B", BUNKO_OLD);
+    let edited =
+        sealed(BUNKO_OLD).replacen("\"blocks\":[]", "\"blocks\":[{\"lines\":[\"直した\"]}]", 1);
+    assert_ne!(edited, sealed(BUNKO_OLD), "the fixture has a page to edit");
+    std::fs::write(env.lib("B/V1.mokuro"), &edited).unwrap();
+    env.bunko_layer("B/V1.hayai-nova.mokuro");
+    env.upgrade_direct("B/V1.cbz").unwrap();
+    assert_preserves(&env.lib("B/V1.pre-upgrade.mokuro"), &edited);
 }
 
 /// Bunko's `ocr_engine` stamp in a file anyone could write proves nothing: a reader's
@@ -524,7 +565,7 @@ async fn a_forged_or_kept_stamp_on_an_edited_main_sidecar_is_preserved_then_upgr
     env.upgrade_direct("A/V1.cbz").unwrap();
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        HAYAI
+        sealed(HAYAI)
     );
     assert_preserves(&env.lib("A/V1.pre-upgrade.mokuro"), BUNKO_OLD);
     assert_eq!(
@@ -542,7 +583,7 @@ async fn a_forged_or_kept_stamp_on_an_edited_main_sidecar_is_preserved_then_upgr
     assert_preserves(&env.lib("B/V1.pre-upgrade.mokuro"), BUNKO_OLD_EDITED);
     assert_eq!(
         std::fs::read_to_string(env.lib("B/V1.mokuro")).unwrap(),
-        HAYAI
+        sealed(HAYAI)
     );
 
     // C: a stamped file on disk with no row, upgraded by a job: kept the same way.
@@ -704,7 +745,7 @@ async fn a_put_during_an_upgrade_is_refused_as_locked_or_makes_the_swap_skip() {
     assert_eq!(*refused.lock(), Some(StatusCode::LOCKED));
     assert_eq!(
         std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
-        HAYAI
+        sealed(HAYAI)
     );
     assert_preserves(&env.lib("A/V1.pre-upgrade.mokuro"), LEGACY);
 
@@ -756,7 +797,7 @@ async fn a_put_during_an_upgrade_is_refused_as_locked_or_makes_the_swap_skip() {
     assert_preserves(&env.lib("C/V1.pre-upgrade-2.mokuro"), CORRECTED);
     assert_eq!(
         std::fs::read_to_string(env.lib("C/V1.mokuro")).unwrap(),
-        HAYAI
+        sealed(HAYAI)
     );
 }
 

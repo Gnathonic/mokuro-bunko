@@ -262,11 +262,6 @@ fn strip_bom(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
 }
 
-/// Is `path` on a remote library store?
-fn on_remote(path: &Path) -> bool {
-    bunko_store::store_for(path).is_some_and(|s| s.caps().remote)
-}
-
 /// What a swap installs as the main sidecar.
 enum Install<'a> {
     /// An upgrade job's result, validated and normalised: moved into place.
@@ -528,26 +523,16 @@ impl Upgrade {
         Verdict::NeedsOcr
     }
 
-    /// D4's proof that `bytes`, read from `path`, are exactly what Bunko installed there.
-    /// An `ocr_engine` stamp proves nothing: anyone who can write the file (a reader's
-    /// edit, a WebDAV PUT, a cloud upload) can add one, and a re-upload of edited text
-    /// can keep one. The path's `ocr_sidecars` row must record the sha256 of these bytes
-    /// (`written_sha256`, recorded at install and by a direct swap); on a remote store
-    /// the version they were read at (`own`) must also be one the store's ledger records
-    /// as Bunko's. A file without proof is treated as a person's: kept before any
+    /// D4's proof that `bytes` are exactly what Bunko installed: their seal
+    /// ([`bunko_layout::seal`], `ocr_engine.content_sha256`) checks. An `ocr_engine`
+    /// stamp alone proves nothing: anyone who can write the file (a reader's edit, a
+    /// WebDAV PUT, a cloud upload) can add one, and a re-upload of edited text can keep
+    /// one. The seal covers the bytes themselves, so it travels with the file (another
+    /// Bunko, a moved library, a new instance on the same cloud folder) and any change
+    /// breaks it. A file without proof is treated as a person's: kept before any
     /// replace, never copied in as the main sidecar.
-    fn proven_own(&self, path: &Path, bytes: &[u8], own: bool) -> bool {
-        if on_remote(path) && !own {
-            return false;
-        }
-        let (Some(db), Some(rel)) = (&self.db, rel_of(&self.library, path)) else {
-            return false;
-        };
-        let Ok(Some(row)) = db.get_ocr_sidecar(&rel) else {
-            return false;
-        };
-        row.written_sha256
-            .is_some_and(|w| w.eq_ignore_ascii_case(&sha256_hex(bytes)))
+    fn proven_own(bytes: &[u8]) -> bool {
+        bunko_layout::seal::is_sealed(bytes)
     }
 
     /// A layer that may become the main sidecar: its bytes (on a remote store, one
@@ -576,10 +561,8 @@ impl Upgrade {
             .as_ref()
             .and_then(stamp_id)
             .is_some();
-        (stamped
-            && classify_bytes(&bytes, None).matches(target)
-            && self.proven_own(layer, &bytes, meta.own()))
-        .then_some(bytes)
+        (stamped && classify_bytes(&bytes, None).matches(target) && Self::proven_own(&bytes))
+            .then_some(bytes)
     }
 
     /// `{enabled, replace, direct, families: {family: n}, ready, needs_ocr,
@@ -705,9 +688,8 @@ impl Upgrade {
 
     /// The census entry a swap pins: the bare file as it was judged (judged now when
     /// nothing is cached). An error when the file changed since (it is judged again at
-    /// the next census) or no longer needs an upgrade. With it, whether the store's
-    /// ledger records that version as Bunko's own (always `false` on a local library).
-    fn judged(&self, cbz: &Path, rel: &str, bare: &Path) -> Result<(CensusEntry, bool), String> {
+    /// the next census) or no longer needs an upgrade.
+    fn judged(&self, cbz: &Path, rel: &str, bare: &Path) -> Result<CensusEntry, String> {
         let cached = self.census.lock().get(rel).cloned();
         let entry = match cached {
             Some(e) => e,
@@ -732,7 +714,7 @@ impl Upgrade {
         if !matches!(entry.verdict, Verdict::Ready(_) | Verdict::NeedsOcr) {
             return Err(format!("{} no longer needs an upgrade", bare.display()));
         }
-        Ok((entry, now.own()))
+        Ok(entry)
     }
 
     /// The bytes of the bare file the swap replaces: on a remote store a read pinned to
@@ -902,14 +884,14 @@ impl Upgrade {
             .or_else(|| target.as_ref().map(|t| t.0.clone()))
             .unwrap_or_default();
         let (judged, recipe, preserved) = if fs::exists(bare) {
-            let (entry, own) = self.judged(cbz, rel, bare)?;
+            let entry = self.judged(cbz, rel, bare)?;
             let recipe = classify(bare, row.as_ref());
             let old = Self::read_judged(bare, &entry)?;
             let doc: Value = serde_json::from_slice(strip_bom(&old))
                 .map_err(|e| format!("{} is not readable JSON: {e}", bare.display()))?;
             // Replaced with no copy only on proof that Bunko wrote exactly these bytes;
             // a stamp in them proves nothing (anyone who can write the file can add one).
-            let preserved = if self.proven_own(bare, &old, own) {
+            let preserved = if Self::proven_own(&old) {
                 None
             } else {
                 Some(self.preserve(cbz, doc, &old, &replaced_by)?)
@@ -983,7 +965,6 @@ impl Upgrade {
     /// it again).
     pub fn direct_replace(&self, cbz: &Path, layer: &Path) -> Result<PathBuf, String> {
         let bytes = self.layer_source(layer)?;
-        let written_sha256 = sha256_hex(&bytes);
         let rel = rel_of(&self.library, cbz).unwrap_or_default();
         let bare = self.swap_install(cbz, Install::Direct(bytes))?;
         let layer_rel = rel_of(&self.library, layer).unwrap_or_default();
@@ -997,8 +978,8 @@ impl Upgrade {
                 lr.generation_id = p.id;
                 lr.generation_name = p.name;
             }
-            // The proof moves with the bytes: the new bare file is exactly them.
-            lr.written_sha256 = Some(written_sha256);
+            // The proof moves with the bytes: the new bare file is exactly them, seal
+            // included.
             let _ = db.record_ocr_sidecar(&lr);
         }
         let layer_name = Self::layer_id(layer);
