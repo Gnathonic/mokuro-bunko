@@ -744,8 +744,11 @@ mod tests {
         bunko_store::fs::write(outside.join("keep"), b"x").unwrap();
         bunko_store::fs::write(outside.join(DISCONNECTED_MARK), b"x").unwrap();
         let link = "fedcba9876543210";
-        std::os::unix::fs::symlink(&outside, cloud.join(link)).unwrap();
-        assert!(store_dir_checked(&cloud, link).is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, cloud.join(link)).unwrap();
+            assert!(store_dir_checked(&cloud, link).is_err());
+        }
         // The sweep removes the marked real store directory and nothing else.
         bunko_store::fs::write(cloud.join(id).join(DISCONNECTED_MARK), b"x").unwrap();
         bunko_store::fs::write(cloud.join(id).join("state.sqlite"), b"x").unwrap();
@@ -755,11 +758,13 @@ mod tests {
             bunko_store::fs::is_file(outside.join("keep")),
             "never followed"
         );
+        #[cfg(unix)]
         assert!(bunko_store::fs::is_dir(cloud.join(link)));
         // An id that is not a store id marks nothing.
         assert!(mark_disconnected(&cloud, "../precious").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_chosen_export_folder_must_be_new_or_empty_and_not_a_symlink() {
         let dir = tempfile::tempdir().unwrap();
@@ -783,6 +788,7 @@ mod tests {
         assert!(prepare_export_dir(&file).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn copies_are_created_new_and_never_follow_a_symlink() {
         let dir = tempfile::tempdir().unwrap();

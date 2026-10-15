@@ -377,6 +377,7 @@ async fn reverts_edit_rows_and_newer_files_no_longer_skip_a_volume() {
 
 /// The swap starts only once the layer has committed; a layer that cannot be written
 /// leaves the volume as it was until the next census.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_swap_waits_for_the_kept_layer_and_a_failed_layer_skips_the_volume() {
     let env = Env::new();
