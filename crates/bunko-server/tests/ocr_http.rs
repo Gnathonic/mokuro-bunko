@@ -1841,3 +1841,53 @@ async fn oversized_and_binary_messages_close_the_socket() {
     e.stop.cancel();
     e.ocr.stop().await;
 }
+
+/// Regression: a benchmark asked of this server while its OCR backend was still being
+/// installed answered "this server runs no OCR of its own (ocr.local_processing is
+/// off)". It says the install is under way, and works once it is done.
+#[tokio::test]
+async fn a_benchmark_during_the_install_says_the_ocr_is_still_being_set_up() {
+    use bunko_server::admin::OcrAdmin;
+    use bunko_server::admin::ocr::BenchRequest;
+    let e = install_env(installing(), true);
+    ocr_common::write_cbz(&e.lib.join("A/V1.cbz"), 2);
+    let gens = e.generations().await;
+    let row = &gens["generations"][0];
+    let key = row["id"]
+        .as_str()
+        .or(row["key"].as_str())
+        .unwrap()
+        .to_string();
+    let bench = |e: &InstallEnv| {
+        let (ocr, config, key) = (e.ocr.clone(), e.core.config.read().clone(), key.clone());
+        tokio::task::spawn_blocking(move || {
+            ocr.bench(
+                &config,
+                &key,
+                BenchRequest::Enqueue {
+                    spec: None,
+                    pages: None,
+                    processor: "local".into(),
+                },
+            )
+        })
+    };
+    let err = bench(&e).await.unwrap().unwrap_err();
+    assert_eq!(err.status, 409, "{:?}", err.body);
+    let msg = err.body["error"].as_str().unwrap();
+    assert!(msg.contains("still being set up"), "{msg}");
+    assert!(msg.contains("installing OCR backend: 10%"), "{msg}");
+    assert!(!msg.contains("local_processing"), "{msg}");
+
+    e.install.end("done", true);
+    e.wait_starts(1).await;
+    if let Err(err) = bench(&e).await.unwrap() {
+        let msg = err.body["error"].as_str().unwrap_or_default().to_string();
+        assert!(
+            !msg.contains("still being set up") && !msg.contains("local_processing"),
+            "{msg}"
+        );
+    }
+    e.stop.cancel();
+    e.ocr.stop().await;
+}

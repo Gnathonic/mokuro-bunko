@@ -546,10 +546,16 @@ impl Scheduler {
             .map(|(k, v)| (k.clone(), json!(v)))
             .collect();
         if machine == LOCAL {
-            if !self.settings.local_processing || !self.machines.contains_key(LOCAL) {
+            if !self.settings.local_processing {
                 return Err(bench_error(
                     400,
                     "this server runs no OCR of its own (ocr.local_processing is off); choose a connected processor to benchmark on",
+                ));
+            }
+            if !self.machines.contains_key(LOCAL) {
+                return Err(bench_error(
+                    409,
+                    "this server's OCR has not started yet; benchmark once it is running",
                 ));
             }
             let refused = self

@@ -182,6 +182,29 @@ fn stats(ocr: &OcrControl, config: &Config) -> Value {
     v
 }
 
+impl OcrControl {
+    /// Why this server's own OCR cannot benchmark yet: its backend is still being
+    /// installed, or the install it needs failed (None: nothing in the way).
+    fn local_not_ready(&self) -> Option<String> {
+        let installer = self.installer()?;
+        let view = installer.view();
+        if let Some(v) = view.as_ref().filter(|v| v.running()) {
+            return Some(format!(
+                "This server's OCR is still being set up ({}); benchmark once it finishes",
+                v.summary()
+            ));
+        }
+        if !installer.backend_ready() {
+            let what =
+                view.map_or_else(|| "OCR backend not installed".to_string(), |v| v.summary());
+            return Some(format!(
+                "This server's OCR waits for its backend ({what}); install it from Processors, then benchmark"
+            ));
+        }
+        None
+    }
+}
+
 impl OcrAdmin for OcrControl {
     fn runtime_status(&self, config: &Config) -> Value {
         let local = config.processes_locally(self.has_local());
@@ -528,6 +551,11 @@ impl OcrAdmin for OcrControl {
                 pages,
                 processor,
             } => {
+                if processor == "local"
+                    && let Some(why) = self.local_not_ready()
+                {
+                    return Err(OcrError::new(409, why));
+                }
                 let req = SchedBench {
                     key,
                     spec,
