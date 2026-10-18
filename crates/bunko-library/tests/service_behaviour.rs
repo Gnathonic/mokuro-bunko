@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use bunko_library::index::LibraryIndexCache;
 use bunko_library::service::{
-    DebouncePolicy, MetadataHooks, MetadataService, NoPathLocks, PathWriteLocks, UpdateError,
+    DebouncePolicy, MetadataHooks, MetadataService, NoPathLocks, PathWriteLocks, SeriesUpdate,
+    UpdateError,
 };
 use bunko_library::store::{
     CachedEntryRow, CachedEntryWrite, CatalogSeriesRow, MetadataStore, SeriesFactsRow, StoreResult,
@@ -138,6 +139,51 @@ fn hooks_fire_outside_and_after_the_work() {
     assert!(service.is_stopped());
     assert_eq!(service.recompile_all().unwrap(), 0);
     assert!(!service.apply_series_update("Dr Stone", PUT, None).unwrap());
+}
+
+#[test]
+fn a_cloud_submission_keeps_the_facts_of_a_folder_without_volumes() {
+    let (_temp, root) = fixture_library();
+    // Only sidecars: no archive, so it is no series folder yet.
+    std::fs::create_dir_all(root.join("Sidecars Only")).unwrap();
+    std::fs::write(root.join("Sidecars Only/v1.mokuro"), b"{}").unwrap();
+    let store = Arc::new(SqliteStore::new(&schema()));
+    let service = MetadataService::new(
+        &root,
+        store.clone(),
+        Arc::new(RecordingHooks::default()),
+        Arc::new(NoPathLocks),
+        DebouncePolicy::default(),
+    );
+    // A client PUT there is still refused (contract §6)…
+    assert!(
+        !service
+            .apply_series_update("Sidecars Only", PUT, None)
+            .unwrap()
+    );
+    // …but the reader's file found in the cloud keeps its facts, and nothing is written.
+    assert_eq!(
+        service
+            .ingest_series_submission("Sidecars Only", PUT, Some("cloud"))
+            .unwrap(),
+        SeriesUpdate::Applied
+    );
+    let row = store.series_facts("sidecars only").unwrap().unwrap();
+    assert!(!row.external_ids.is_empty(), "{:?}", row.external_ids);
+    assert!(!root.join("Sidecars Only/series.json").exists());
+    assert_eq!(
+        service
+            .ingest_series_submission("Sidecars Only", b"nope", None)
+            .unwrap(),
+        SeriesUpdate::Invalid
+    );
+    service.stop();
+    assert_eq!(
+        service
+            .ingest_series_submission("Sidecars Only", PUT, None)
+            .unwrap(),
+        SeriesUpdate::Stopped
+    );
 }
 
 #[test]

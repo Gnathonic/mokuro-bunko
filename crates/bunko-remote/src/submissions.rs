@@ -73,7 +73,7 @@ pub(crate) fn is_series_json(rel: &RelPath) -> bool {
     matches!(rel.segments(), [_, name] if fold(name) == SERIES_JSON)
 }
 
-fn is_catalog_json(rel: &RelPath) -> bool {
+pub(crate) fn is_catalog_json(rel: &RelPath) -> bool {
     matches!(rel.segments(), [name] if fold(name) == CATALOG_JSON)
 }
 
@@ -101,6 +101,8 @@ enum Outcome {
     Answered,
     /// Not now (the hooks are not installed, the read failed): the row stays.
     Later,
+    /// The server could not answer yet (busy): the row stays and is offered again.
+    Retry(String),
 }
 
 impl<B: Backend> Core<B> {
@@ -187,6 +189,14 @@ impl<B: Backend> Core<B> {
             match outcome {
                 Ok(Outcome::Answered) => return,
                 Ok(Outcome::Later) => return,
+                Ok(Outcome::Retry(why)) => {
+                    if self.crashed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    tracing::debug!(id, "series.json submission not answered yet: {why}");
+                    // The server already waited for its lock; ask again soon.
+                    tokio::time::sleep(FETCH_RETRY).await;
+                }
                 Err(e) => {
                     if self.crashed.load(Ordering::Acquire) {
                         return;
@@ -225,8 +235,7 @@ impl<B: Backend> Core<B> {
             // Answered once the server installs its hooks.
             return Ok(Outcome::Later);
         }
-        self.apply_submission(&row, &bytes);
-        Ok(Outcome::Answered)
+        Ok(self.apply_submission(&row, &bytes))
     }
 
     /// Read the row's exact version and pin its bytes (`queued`); `None` when the
@@ -274,6 +283,11 @@ impl<B: Backend> Core<B> {
         };
         self.pin_bytes(row.id, &data)
             .map_err(|e| BErr::Transient(format!("keeping the submission: {e}")))?;
+        // The compile that follows reads this version too: from the cache, not Drive.
+        let sha: [u8; 32] = Sha256::digest(&data).into();
+        if let Err(e) = self.blobs.insert(&v.pid, &v.cver, &data, sha) {
+            tracing::warn!("series.json submission: blob cache: {e}");
+        }
         Ok(Some(data))
     }
 
@@ -303,10 +317,10 @@ impl<B: Backend> Core<B> {
 
     /// Hand the bytes to the server's merge (on the events thread) and record the
     /// answer; HELD Compiler ops of the series may go after this.
-    fn apply_submission(&self, row: &SubmissionRow, bytes: &[u8]) {
+    fn apply_submission(&self, row: &SubmissionRow, bytes: &[u8]) -> Outcome {
         let Some(rel) = RelPath::parse(&row.path) else {
             self.refuse(row, "not a series.json path");
-            return;
+            return Outcome::Answered;
         };
         let parent =
             RelPath::from_segments(rel.segments()[..1].iter().cloned()).unwrap_or_default();
@@ -318,7 +332,9 @@ impl<B: Backend> Core<B> {
                 self.wake.notify_one();
             }
             SubmissionResult::Refused(why) => self.refuse(row, &why),
+            SubmissionResult::Later(why) => return Outcome::Retry(why),
         }
+        Outcome::Answered
     }
 
     /// Resume every unanswered submission (startup, hooks installed).

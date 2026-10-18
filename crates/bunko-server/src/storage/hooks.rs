@@ -10,6 +10,7 @@ use bunko_dav::DavHooks;
 use bunko_db::{AuditDetails, Database, NewAuditEvent};
 use bunko_library::compat::normalize_volume_title_key;
 use bunko_library::store::MetadataStore;
+use bunko_library::{SeriesUpdate, UpdateError};
 use bunko_remote::{CloudHooks, SubmissionResult};
 
 use crate::davhooks::ServerDavHooks;
@@ -264,10 +265,21 @@ impl CloudHooks for ServerCloudHooks {
         match self
             .library
             .service()
-            .apply_series_update(&title, bytes, Some("cloud"))
+            .ingest_series_submission(&title, bytes, Some("cloud"))
         {
-            Ok(true) => SubmissionResult::Applied,
-            Ok(false) => SubmissionResult::Refused("the series.json was not accepted".into()),
+            Ok(SeriesUpdate::Applied) => SubmissionResult::Applied,
+            Ok(SeriesUpdate::Invalid) => {
+                SubmissionResult::Refused("the series.json could not be read".into())
+            }
+            // The library root is unreadable right now, or the server is stopping:
+            // the submission waits, nothing is lost.
+            Ok(SeriesUpdate::NoFolder) => {
+                SubmissionResult::Later("the library folder could not be listed".into())
+            }
+            Ok(SeriesUpdate::Stopped) => SubmissionResult::Later("the server is stopping".into()),
+            Err(UpdateError::Busy(_)) => {
+                SubmissionResult::Later("a metadata pass holds the library".into())
+            }
             Err(e) => SubmissionResult::Refused(e.to_string()),
         }
     }

@@ -402,10 +402,13 @@ impl<B: Backend> RemoteStore<B> {
                 _ => return Err(kind_err(io::ErrorKind::AlreadyExists, dest, "exists")),
             }
         }
-        // PREPARED: a Compiler base must be own or a submission (D8).
+        // PREPARED: a Compiler base must be own or a submission (D8). `catalog.json`
+        // is derived: a foreign version is overwritten (§9.3; its facts went in at
+        // first adoption).
         if w.origin == Origin::Compiler
             && let Mode::Replace { base: Some(b) } = &w.mode
             && !b.as_str().starts_with("pending:")
+            && !crate::submissions::is_catalog_json(&rel)
         {
             let pid = existing.as_ref().and_then(|e| e.winner_pid.clone());
             let own = pid.is_some_and(|p| self.core.state.is_own(&p, b.as_str()));

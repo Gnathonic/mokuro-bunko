@@ -443,12 +443,12 @@ impl CloudHooks for HookSlot {
 
     fn series_submission(&self, series_dir: &Path, bytes: &[u8]) -> SubmissionResult {
         let Some(h) = self.hooks() else {
-            return SubmissionResult::Refused("the cloud hooks are not installed yet".into());
+            return SubmissionResult::Later("the cloud hooks are not installed yet".into());
         };
         let (dir, bytes) = (series_dir.to_path_buf(), bytes.to_vec());
         self.events
             .call(move || h.series_submission(&dir, &bytes))
-            .unwrap_or_else(|| SubmissionResult::Refused("the store is shutting down".into()))
+            .unwrap_or_else(|| SubmissionResult::Later("the store is shutting down".into()))
     }
 
     fn ocr_discarded(&self, path: &Path) {

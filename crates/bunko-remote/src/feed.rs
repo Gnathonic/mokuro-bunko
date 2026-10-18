@@ -99,6 +99,9 @@ pub enum SubmissionResult {
     Applied,
     /// Not applied, with the reason (kept as a conflict row).
     Refused(String),
+    /// Not answered now (the server is busy or stopping), with the reason: the
+    /// submission stays unanswered and is offered again.
+    Later(String),
 }
 
 /// The DB hooks the server runs for changes made directly in the cloud (D20). Paths

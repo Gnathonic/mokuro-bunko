@@ -47,6 +47,8 @@ struct Server {
     facts: Mutex<BTreeMap<String, Map<String, Value>>>,
     calls: Mutex<Vec<Call>>,
     refuse: Mutex<HashSet<String>>,
+    /// How many more times a series is answered `Later` (the server is busy).
+    busy: Mutex<BTreeMap<String, usize>>,
     recompile: AtomicBool,
     seq: AtomicUsize,
 }
@@ -100,6 +102,12 @@ impl CloudHooks for Server {
         if self.refuse.lock().contains(&series) {
             return SubmissionResult::Refused("refused by the test server".into());
         }
+        if let Some(left) = self.busy.lock().get_mut(&series)
+            && *left > 0
+        {
+            *left -= 1;
+            return SubmissionResult::Later("a metadata pass holds the library".into());
+        }
         let Some(incoming) = parsed else {
             return SubmissionResult::Refused("unparsable".into());
         };
@@ -147,6 +155,16 @@ impl T {
     /// `before_hooks(store, library root, scratch dir)` runs after the store opened
     /// and before the server installs its hooks.
     fn with(fake: FakeBackend, files: &[(&str, &[u8])], before_hooks: Option<Before<'_>>) -> T {
+        T::build(fake, files, before_hooks, &[])
+    }
+
+    /// `busy`: series the server answers `Later` that many times first.
+    fn build(
+        fake: FakeBackend,
+        files: &[(&str, &[u8])],
+        before_hooks: Option<Before<'_>>,
+        busy: &[(&str, usize)],
+    ) -> T {
         fake.reader_mkdir(FOLDER);
         for (rel, bytes) in files {
             if rel.ends_with('/') {
@@ -165,6 +183,7 @@ impl T {
             facts: Mutex::default(),
             calls: Mutex::default(),
             refuse: Mutex::default(),
+            busy: Mutex::new(busy.iter().map(|(k, n)| (k.to_string(), *n)).collect()),
             recompile: AtomicBool::new(true),
             seq: AtomicUsize::new(0),
         });
@@ -476,4 +495,54 @@ fn compiles_of_a_series_wait_for_its_unanswered_submission() {
     let order = t.fake.upload_log();
     assert_eq!(order.last().map(String::as_str), Some("series.json"));
     assert_eq!(t.remote_json("S/series.json")["tag"], "compiled");
+}
+
+#[test]
+fn a_busy_server_is_asked_again_and_nothing_is_lost() {
+    let body = series("2026-06-01T00:00:00.000Z", json!({"tag": "reader"}));
+    let t = T::build(
+        FakeBackend::drive_like(),
+        &[("S/v.cbz", b"zip"), ("S/series.json", &body)],
+        None,
+        &[("S", 3)],
+    );
+    t.adopted();
+    let calls = t.server.calls();
+    assert_eq!(calls.len(), 4, "asked until it answered: {calls:?}");
+    let rows = t.s().submissions();
+    assert!(rows.iter().all(|r| r.2 == "applied"), "{rows:?}");
+    assert!(t.s().conflicts().is_empty(), "{:?}", t.s().conflicts());
+    assert_eq!(t.remote_json("S/series.json")["tag"], "reader");
+}
+
+#[test]
+fn a_compile_overwrites_a_foreign_catalog_json() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("S/v.cbz", b"zip"),
+            ("catalog.json", b"{\"version\":1,\"series\":[]}"),
+        ],
+    );
+    t.adopted();
+    // The reader rewrites it after the adoption; the compile replaces that version.
+    t.fake.reader_put(
+        &format!("{FOLDER}/catalog.json"),
+        b"{\"version\":1,\"from\":\"reader\"}",
+    );
+    t.sync_feed();
+    let dest = t.abs("catalog.json");
+    let base = fs::metadata(&dest).unwrap().version().cloned();
+    assert!(base.is_some());
+    let tmp = t.tmp.path().join("catalog");
+    std::fs::write(&tmp, b"{\"version\":1,\"from\":\"bunko\"}").unwrap();
+    let w = WriteIntent::new(
+        Mode::Replace { base },
+        Origin::Compiler,
+        Durability::Deferred,
+    );
+    fs::publish(&tmp, &dest, &w).unwrap();
+    t.idle();
+    assert_eq!(t.remote_json("catalog.json")["from"], "bunko");
+    assert!(t.s().conflicts().is_empty(), "{:?}", t.s().conflicts());
 }
