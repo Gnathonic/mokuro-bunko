@@ -19,7 +19,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 
 use crate::backend::{HashKind, Pid, RNode};
 use crate::names::{effective_mtime_ns, fold, is_safe_segment, nfc};
@@ -329,8 +329,13 @@ impl Index {
     /// Start the transaction that [`upsert`](Self::upsert), [`remove`](Self::remove)
     /// and [`sweep_older_than`](Self::sweep_older_than) run in. Other writes made
     /// while it is open ([`meta_set`](Self::meta_set), the cursor) join it.
+    ///
+    /// IMMEDIATE: the store's other connections to this file (the API log, the
+    /// read caches) write between this one's statements, and a transaction that
+    /// read first could not then take the write lock (SQLITE_BUSY at once, without
+    /// the busy timeout).
     pub fn begin(&self) -> rusqlite::Result<Transaction<'_>> {
-        self.conn.unchecked_transaction()
+        Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
     }
 
     /// The current full-sync generation (`node.seen_gen` of everything seen in it).
@@ -942,16 +947,27 @@ impl Index {
         &self,
         f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
     ) -> rusqlite::Result<T> {
-        self.conn.execute_batch("SAVEPOINT bunko_index")?;
+        // Outside a transaction, one of its own, IMMEDIATE (see `begin`).
+        let (open, commit, rollback) = if self.conn.is_autocommit() {
+            ("BEGIN IMMEDIATE", "COMMIT", "ROLLBACK")
+        } else {
+            (
+                "SAVEPOINT bunko_index",
+                "RELEASE bunko_index",
+                "ROLLBACK TO bunko_index; RELEASE bunko_index",
+            )
+        };
+        self.conn.execute_batch(open)?;
         match f(&self.conn) {
             Ok(v) => {
-                self.conn.execute_batch("RELEASE bunko_index")?;
+                if let Err(e) = self.conn.execute_batch(commit) {
+                    let _ = self.conn.execute_batch(rollback);
+                    return Err(e);
+                }
                 Ok(v)
             }
             Err(e) => {
-                let _ = self
-                    .conn
-                    .execute_batch("ROLLBACK TO bunko_index; RELEASE bunko_index");
+                let _ = self.conn.execute_batch(rollback);
                 Err(e)
             }
         }

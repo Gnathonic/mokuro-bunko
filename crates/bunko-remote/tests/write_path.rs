@@ -469,6 +469,48 @@ fn coalescing_keeps_only_the_newest_series_json() {
 }
 
 #[test]
+fn a_replacing_write_never_strands_the_op_the_worker_took() {
+    // The queue file and series.json are rewritten while the worker sends the
+    // previous version, and the gate opens and shuts under them (the lease). The
+    // op being sent must not lose its staged bytes to the newer write.
+    let t = T::new(FakeBackend::drive_like(), &[("S/", b"")]);
+    t.wait_steady();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flapper = {
+        let (open, stop) = (t.open.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut i = 0u32;
+            while !stop.load(Ordering::Acquire) {
+                open.store(!i.is_multiple_of(3), Ordering::Release);
+                i += 1;
+                std::thread::sleep(Duration::from_micros(300));
+            }
+        })
+    };
+    let mut last = Vec::new();
+    for i in 0..1500 {
+        last = format!("{{\"v\":{i}}}").into_bytes();
+        t.publish(
+            "S/series.json",
+            &last,
+            deferred(Origin::Compiler, Mode::Replace { base: None }),
+        );
+    }
+    stop.store(true, Ordering::Release);
+    flapper.join().unwrap();
+    t.gate(true);
+    t.idle();
+    let stranded: Vec<_> = t
+        .s()
+        .outbox()
+        .into_iter()
+        .filter(|o| o.state != "COMMITTED" && o.state != "CONFIRMED")
+        .collect();
+    assert!(stranded.is_empty(), "{stranded:?}");
+    assert_eq!(t.remote_bytes("S/series.json").unwrap(), last);
+}
+
+#[test]
 fn d22_metadata_leaves_after_the_sidecars_it_describes() {
     let t = T::new(FakeBackend::drive_like(), &[("S/v.cbz", b"zip")]);
     t.wait_steady();

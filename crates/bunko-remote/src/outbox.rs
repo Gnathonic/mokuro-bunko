@@ -421,6 +421,15 @@ pub(crate) fn digest_file(p: &Path) -> io::Result<Digests> {
     })
 }
 
+/// The worker's claim on the op it took: cleared when the run ends, however it ends.
+struct Running<'a>(&'a std::sync::atomic::AtomicU64);
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::Release);
+    }
+}
+
 /// The governor class an op's calls run in (§5.11 priorities).
 fn class_of(o: &Origin) -> ApiClass {
     match o {
@@ -486,6 +495,14 @@ impl<B: Backend> Core<B> {
 
     /// Persist `op` (and mirror it in memory).
     pub(crate) fn save_op(&self, op: &Op) -> io::Result<()> {
+        self.persist_op(op)?;
+        self.ops.lock().insert(op.id, op.clone());
+        Ok(())
+    }
+
+    /// Write `op`'s row only (the caller mirrors it, under `ops` when it must not
+    /// race a supersede).
+    fn persist_op(&self, op: &Op) -> io::Result<()> {
         let (mode, base) = match &op.mode {
             Mode::CreateNew => ("create", None),
             Mode::Replace { base } => ("replace", base.as_ref().map(|b| b.as_str().to_string())),
@@ -525,9 +542,7 @@ impl<B: Backend> Core<B> {
                 ],
             )
             .map(|_| ())
-        })?;
-        self.ops.lock().insert(op.id, op.clone());
-        Ok(())
+        })
     }
 
     /// Forget a finished op: its row, its bytes (unless `keep_bytes`).
@@ -843,18 +858,25 @@ impl<B: Backend> Core<B> {
     /// mark the index (read-after-write) and emit the event (D21).
     pub(crate) fn stage_deferred(&self, mut op: Op) -> io::Result<Op> {
         if op.coalesces() {
-            let older: Vec<Op> = self
-                .ops
-                .lock()
-                .values()
-                .filter(|o| {
-                    o.id != op.id
-                        && o.coalesces()
-                        && o.dest == op.dest
-                        && matches!(o.state, OpState::Staged | OpState::Held)
-                })
-                .cloned()
-                .collect();
+            // Taken out of the map under the lock the worker takes an op under: an
+            // op is either superseded here or sent, never both (its bytes go with
+            // it).
+            let older: Vec<Op> = {
+                let mut ops = self.ops.lock();
+                let running = self.running.load(Ordering::Acquire);
+                let ids: Vec<u64> = ops
+                    .values()
+                    .filter(|o| {
+                        o.id != op.id
+                            && o.id != running
+                            && o.coalesces()
+                            && o.dest == op.dest
+                            && matches!(o.state, OpState::Staged | OpState::Held)
+                    })
+                    .map(|o| o.id)
+                    .collect();
+                ids.iter().filter_map(|id| ops.remove(id)).collect()
+            };
             for mut old in older {
                 // A base on the replaced op means the base that op had.
                 if op.base() == Some(&format!("pending:{}", old.id)) {
@@ -1878,8 +1900,8 @@ impl<B: Backend> Core<B> {
         let now = now_ms();
         let gate = self.gate_open();
         let mut hold = Vec::new();
+        let mut ops = self.ops.lock();
         let pick = {
-            let ops = self.ops.lock();
             let mut pick = None;
             for o in ops.values() {
                 // Case-merge steps run in their journal group (merge.rs).
@@ -1898,14 +1920,23 @@ impl<B: Backend> Core<B> {
                         pick = pick.or(Some(o.id));
                     }
                 } else if o.state == OpState::Staged {
-                    hold.push(o.clone());
+                    hold.push(o.id);
                 }
             }
             pick
         };
-        for mut o in hold {
-            o.state = OpState::Held;
-            let _ = self.save_op(&o);
+        // Under the lock: a newer write may supersede (and drop) these ops the
+        // moment it is released, and a HELD row written after that would bring a
+        // dropped op back without its bytes.
+        let held = hold.len();
+        for id in hold {
+            if let Some(o) = ops.get_mut(&id) {
+                o.state = OpState::Held;
+                let _ = self.persist_op(o);
+            }
+        }
+        drop(ops);
+        for _ in 0..held {
             self.fail_at("HELD")?;
         }
         Ok(pick)
@@ -1934,9 +1965,19 @@ impl<B: Backend> Core<B> {
             let class = class_of(&origin);
             self.gov.ready(class, self.gov.limits().costs.upload).await;
             let _g = self.exec.lock().await;
-            let Some(mut op) = self.ops.lock().get(&id).cloned() else {
+            // Taken under the lock a newer write supersedes under (stage_deferred).
+            let claimed = {
+                let ops = self.ops.lock();
+                let op = ops.get(&id).cloned();
+                if op.is_some() {
+                    self.running.store(id, Ordering::Release);
+                }
+                op
+            };
+            let Some(mut op) = claimed else {
                 continue;
             };
+            let running = Running(&self.running);
             if op.state == OpState::SupersedeOld {
                 // Interrupted at SUPERSEDE_OLD: finish it.
                 if let (Some(old), Some(cver)) = (op.superseded_pid.clone(), op.result_cver.clone())
@@ -1965,6 +2006,7 @@ impl<B: Backend> Core<B> {
             match governor::scoped(class, self.drive(&mut op)).await {
                 Err(Crash) => return,
                 Ok(Step::Blocked) => {
+                    drop(running);
                     drop(_g);
                     let notified = self.wake.notified();
                     let _ = tokio::time::timeout(Duration::from_millis(100), notified).await;

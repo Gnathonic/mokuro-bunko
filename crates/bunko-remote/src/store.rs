@@ -493,6 +493,9 @@ pub(crate) struct Core<B: Backend> {
     pub root: PathBuf,
     pub ops: Arc<Mutex<BTreeMap<u64, Op>>>,
     pub seq: AtomicU64,
+    /// The id of the op the worker took (0: none); set and read under `ops`, so a
+    /// newer write never supersedes the op being sent (outbox.rs `stage_deferred`).
+    pub running: AtomicU64,
     /// One op runs at a time: the worker's, or a Sync caller's (the barrier).
     pub exec: tokio::sync::Mutex<()>,
     /// The commit window, shared with the feed ([`Feed::with_commit_gate`]): an op
@@ -930,6 +933,7 @@ impl<B: Backend> RemoteStore<B> {
             root: cfg.root.clone(),
             ops,
             seq: AtomicU64::new(0),
+            running: AtomicU64::new(0),
             exec: tokio::sync::Mutex::new(()),
             commit_gate,
             wake: tokio::sync::Notify::new(),
