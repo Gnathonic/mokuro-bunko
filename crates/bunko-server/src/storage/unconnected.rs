@@ -75,6 +75,7 @@ impl LibraryStore for UnconnectedStore {
             ino: 1,
             cver: None,
             own: false,
+            sha256: None,
         }))
     }
 

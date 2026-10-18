@@ -151,6 +151,8 @@ pub trait CloudStore: Send + Sync {
     fn resolve_conflict(&self, id: i64, choice: bunko_remote::ResolveChoice) -> io::Result<String>;
     /// The latest case merges, newest first.
     fn recent_merges(&self) -> Vec<bunko_remote::MergeRecord>;
+    /// First adoption (§9.4) is done: every `series.json`'s facts were handed over.
+    fn adopted(&self) -> bool;
 }
 
 impl<B: Backend> CloudStore for RemoteStore<B> {
@@ -198,6 +200,9 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     }
     fn take_over(&self, timeout: Duration) -> io::Result<()> {
         RemoteStore::take_over_lease(self, timeout)
+    }
+    fn adopted(&self) -> bool {
+        RemoteStore::adopted(self)
     }
     fn quota(&self, timeout: Duration) -> io::Result<Option<bunko_store::Capacity>> {
         RemoteStore::quota(self, timeout)
@@ -292,6 +297,11 @@ impl StoreHandle {
     /// A store runs (it may still be syncing, offline or need a new sign-in).
     pub fn connected(&self) -> bool {
         self.store.is_some()
+    }
+
+    /// First adoption is done (true without a store: there is nothing to adopt).
+    pub fn adopted(&self) -> bool {
+        self.store.as_ref().is_none_or(|s| s.adopted())
     }
 
     /// Why no store runs, if none does.

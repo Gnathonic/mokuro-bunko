@@ -67,6 +67,8 @@ pub struct RemoteMeta {
     pub cver: Option<Version>,
     /// The bytes are a version Bunko wrote.
     pub own: bool,
+    /// Lowercase hex SHA-256 of the bytes, when the provider's listing gave one.
+    pub sha256: Option<Arc<str>>,
 }
 
 /// `std::fs::Metadata`, or a remote entry's equivalent.
@@ -86,6 +88,15 @@ impl Meta {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Lowercase hex SHA-256 of the bytes, known without reading them (a remote
+    /// entry whose provider listing has one); `None` for a local file.
+    pub fn content_sha256(&self) -> Option<&str> {
+        match self {
+            Meta::Std(_) => None,
+            Meta::Remote(r) => r.sha256.as_deref(),
+        }
     }
 
     pub fn is_file(&self) -> bool {
@@ -235,6 +246,7 @@ mod tests {
             ino: 2,
             cver: Some(Version::new("v1")),
             own: true,
+            sha256: None,
         })
     }
 

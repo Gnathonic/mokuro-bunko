@@ -87,6 +87,7 @@ mod mem {
                 ino: 1,
                 cver: Some(Version::new("c1")),
                 own: false,
+                sha256: None,
             })
         }
     }

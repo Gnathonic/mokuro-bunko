@@ -159,6 +159,8 @@ pub struct Entry {
     pub members: u32,
     /// The oldest member's creation time (the case-winner age, §5.9).
     pub created_ms: i64,
+    /// The winner version's SHA-256 (lowercase hex) when the provider lists one.
+    pub sha256: Option<String>,
 }
 
 /// What became visible at a library path.
@@ -245,7 +247,9 @@ pub struct Index {
 
 const ENTRY_COLS: &str = "e.eid, e.parent_eid, e.name, e.kind, e.size, e.mtime_ns, e.cver, e.own, \
      e.winner_pid, e.pending_op, e.members, \
-     COALESCE((SELECT MIN(n.created_ms) FROM node n WHERE n.eid = e.eid AND n.role IN (0, 1)), 0)";
+     COALESCE((SELECT MIN(n.created_ms) FROM node n WHERE n.eid = e.eid AND n.role IN (0, 1)), 0), \
+     (SELECT n.hash FROM node n WHERE n.pid = e.winner_pid AND n.cver = e.cver \
+      AND n.hash_kind = 'sha256')";
 
 fn entry_from_row(r: &Row<'_>) -> rusqlite::Result<Entry> {
     Ok(Entry {
@@ -261,6 +265,7 @@ fn entry_from_row(r: &Row<'_>) -> rusqlite::Result<Entry> {
         pending_op: r.get(9)?,
         members: r.get::<_, i64>(10)? as u32,
         created_ms: r.get(11)?,
+        sha256: r.get(12)?,
     })
 }
 

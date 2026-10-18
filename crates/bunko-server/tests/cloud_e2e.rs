@@ -319,11 +319,14 @@ async fn a_restart_mid_upload_resumes_with_one_copy_of_each_result() {
     for name in ["Vol 2.mokuro", "Vol 1.webp", "Vol 2.webp"] {
         assert_eq!(copies(&fake, "Series", name).await, 1, "{name}");
     }
+    // The queue file is republished every few seconds: a fresh write of it may be
+    // in flight whenever this looks.
     assert!(
         server
             .store()
             .outbox()
             .iter()
+            .filter(|o| o.origin != "status")
             .all(|o| o.state == "COMMITTED" || o.state == "CONFIRMED"),
         "{:?}",
         server.store().outbox()
@@ -339,5 +342,67 @@ async fn a_restart_mid_upload_resumes_with_one_copy_of_each_result() {
         .await
         .unwrap();
     assert!(!owed);
+    server.stop().await;
+}
+
+/// No metadata pass runs before first adoption (§9.4) ends: while the series.json
+/// submissions cannot be read the library services wait (a pass would compile the
+/// series on top of a version not read yet), then they start, and the compiled
+/// series.json keeps the facts it was adopted with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_metadata_passes_wait_for_first_adoption() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use bunko_remote::BErr;
+    use bunko_remote::fake::FakeOp;
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    let fake = fake_library();
+    fake.reader_put(
+        &format!("{ROOT}/Series/series.json"),
+        br#"{"version":2,"series_title":"Series","updated_at":"2026-01-01T00:00:00.000Z","external_ids":{"anilist":4242},"titles":{"english":"The Series"},"volumes":[]}"#,
+    );
+    // Every content read fails while the gate is shut.
+    let gate = Arc::new(AtomicBool::new(true));
+    {
+        let (gate, weak) = (gate.clone(), Arc::downgrade(&fake));
+        fake.set_call_hook(Some(Arc::new(move |op| {
+            if op == FakeOp::Read
+                && gate.load(Ordering::SeqCst)
+                && let Some(fake) = weak.upgrade()
+            {
+                fake.fail_next(FakeOp::Read, BErr::Transient("gated".into()));
+            }
+        })));
+    }
+    let server = Server::start(&base, &fake, Some(quick), |_| {}).await;
+    let store = server.store();
+    let s = store.clone();
+    let steady = tokio::task::spawn_blocking(move || s.wait_steady(Duration::from_secs(30)))
+        .await
+        .unwrap();
+    assert!(steady);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!store.adopted());
+    assert!(
+        !server.services.library.is_started(),
+        "the library services wait for first adoption"
+    );
+
+    gate.store(false, Ordering::SeqCst);
+    eventually(
+        "first adoption and the library services",
+        Duration::from_secs(60),
+        || store.adopted() && server.services.library.is_started(),
+    )
+    .await;
+    server.services.library.recompile_all_now().await;
+    idle(&store).await;
+    let series = json_at(&fake, "Series/series.json").expect("series.json in the cloud");
+    assert_eq!(series["external_ids"]["anilist"], 4242, "{series}");
+    assert!(series.to_string().contains("Vol 1"), "{series}");
+    assert!(store.conflicts().is_empty(), "{:?}", store.conflicts());
+    fake.set_call_hook(None);
     server.stop().await;
 }

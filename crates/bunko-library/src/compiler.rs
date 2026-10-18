@@ -7,6 +7,7 @@
 //! regeneration that changes nothing is a stat walk; a miss parses the
 //! sidecar and reads only the archive's central directory.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bunko_store::Meta;
@@ -412,6 +413,77 @@ fn put_entry(
     })
 }
 
+/// The sidecar's SHA-256 as the provider lists it, when that is the hash
+/// [`sidecar::load_sidecar`] computes: a plain `.mokuro` (a `.mokuro.gz` is
+/// hashed after gunzip, the listing hashes the stored bytes).
+fn listed_sidecar_sha256(stats: &VolumeStats) -> Option<String> {
+    let name = stats.sidecar.as_deref()?.file_name()?.to_str()?;
+    if !name.ends_with(".mokuro") {
+        return None;
+    }
+    let sha = stats.sidecar_meta.as_ref()?.content_sha256()?;
+    (sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| sha.to_ascii_lowercase())
+}
+
+/// The folder's compiled `series.json` volumes by title (read once per compile;
+/// empty when missing or unreadable).
+fn load_published(series_dir: &Path) -> HashMap<String, JsonObject> {
+    let mut by_title = HashMap::new();
+    let Ok(text) = bunko_store::fs::read_to_string(series_dir.join(crate::paths::SERIES_FILE_NAME))
+    else {
+        return by_title;
+    };
+    let Ok(JsonValue::Object(raw)) = pyjson::parse(&text) else {
+        return by_title;
+    };
+    let Some(JsonValue::Array(volumes)) = raw.get("volumes") else {
+        return by_title;
+    };
+    for volume in volumes {
+        if let Some(object) = volume.as_object()
+            && let Some(JsonValue::Str(title)) = object.get("volume_title")
+        {
+            by_title
+                .entry(title.clone())
+                .or_insert_with(|| object.clone());
+        }
+    }
+    by_title
+}
+
+/// A volume's entry taken from the folder's `series.json` instead of compiled,
+/// when the provider's listing proves the volume is the one that entry was compiled
+/// from: the `.mokuro`'s listed SHA-256 is its `mokuro_sha256` and the archive is
+/// its `archive_size` bytes. On a cloud library this saves reading the archive's
+/// directory and the whole sidecar (two downloads a volume). Local files list no
+/// hash, so they always compile.
+fn published_entry(
+    published: &mut Option<HashMap<String, JsonObject>>,
+    series_dir: &Path,
+    volume_title: &str,
+    stats: &VolumeStats,
+) -> Option<VolumeEntry> {
+    let listed = listed_sidecar_sha256(stats)?;
+    let raw = published
+        .get_or_insert_with(|| load_published(series_dir))
+        .get(volume_title)?;
+    let sha = raw.get("mokuro_sha256").and_then(JsonValue::as_str)?;
+    if !sha.eq_ignore_ascii_case(&listed) || py_int(raw.get("archive_size")?)? != stats.cbz_size {
+        return None;
+    }
+    // The page match against the archive was determined when it was compiled.
+    raw.get("matched_page_count")?;
+    let mut entry = entry_from_object(raw)?;
+    let sidecar_meta = stats.sidecar_meta.as_ref()?;
+    entry.volume_title = volume_title.to_owned();
+    entry.archive_size = Some(JsonNum::Int(stats.cbz_size));
+    entry.mokuro_size = Some(JsonValue::from(size_of(sidecar_meta)));
+    entry.mokuro_modified = Some(JsonValue::from(py_mtime_int(sidecar_meta)));
+    entry.mokuro_sha256 = Some(listed);
+    Some(entry)
+}
+
 /// `compile_series_volumes`: every volume of one series, in natural title
 /// order. `fill_hashes` completes cache rows written before `mokuro_sha256`
 /// existed (background passes only; request paths pass `false`).
@@ -422,6 +494,7 @@ pub fn compile_series_volumes(
 ) -> StoreResult<Vec<VolumeEntry>> {
     let series_key = normalize_volume_title_key(&series.title);
     let mut entries: Vec<VolumeEntry> = Vec::new();
+    let mut published: Option<HashMap<String, JsonObject>> = None;
     for name in archive_names(&series.path) {
         let cbz_path = series.path.join(&name);
         let volume_title = py_stem(&name).to_owned();
@@ -443,6 +516,14 @@ pub fn compile_series_volumes(
                 found.mokuro_sha256 = Some(digest);
                 put_entry(store, &key, &series_key, found, &stats)?;
             }
+        }
+        if entry.is_none()
+            && let Some(store) = store
+            && let Some(found) =
+                published_entry(&mut published, &series.path, &volume_title, &stats)
+        {
+            put_entry(store, &key, &series_key, &found, &stats)?;
+            entry = Some(found);
         }
         let mut entry = match entry {
             Some(entry) => entry,
@@ -567,6 +648,23 @@ pub fn missing_pages_now(
     let Some(stats) = volume_stats(cbz_path) else {
         return Ok(0);
     };
+    let volume_title = cbz_path.file_name().and_then(|n| n.to_str()).map(py_stem);
+    if let (Some(dir), Some(title)) = (cbz_path.parent(), volume_title)
+        && let Some(entry) = published_entry(&mut None, dir, title, &stats)
+    {
+        let key = volume_key_for(series_title, title);
+        put_entry(
+            store,
+            &key,
+            &normalize_volume_title_key(series_title),
+            &entry,
+            &stats,
+        )?;
+        return Ok(missing_page_count(
+            entry.page_count,
+            entry.matched_page_count,
+        ));
+    }
     let sidecar_meta = fsutil::stat(&sidecar);
     let (entry, cacheable) = compile_volume(
         series_title,

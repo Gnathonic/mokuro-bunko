@@ -254,6 +254,7 @@ impl Services {
             let mut deps = crate::library::RuntimeDeps::new(core.clone(), db.clone());
             deps.hooks.archive_events = Some(Arc::new(LateArchiveEvents(late_ocr.clone())));
             deps.locks = Arc::new(DavPathLocks(dav.write_locks().clone()));
+            deps.hold_until_start = storage.is_some();
             let cache = dav.propfind_cache().clone();
             deps.hooks.propfind_refresh = Some(Arc::new(move || {
                 cache.schedule_refresh(Duration::from_secs(5))
@@ -725,6 +726,9 @@ pub async fn serve_router_with(
 pub const CLOUD_STEADY_WAIT: Duration = Duration::from_secs(15 * 60);
 /// How often that wait logs its progress.
 const CLOUD_STEADY_LOG_EVERY: Duration = Duration::from_secs(30);
+/// How long the metadata passes wait for a cloud store's first adoption (§9.4) before
+/// they start anyway.
+pub const CLOUD_ADOPTION_WAIT: Duration = Duration::from_secs(60 * 60);
 
 /// Start the library runtime (watcher, metadata timers), the cover loop and the OCR
 /// scheduler. The returned task ends with the cover loop (at `stop`).
@@ -800,10 +804,37 @@ pub fn start_library_services(
                 storage.engine_state()
             );
         }
-        library.start();
         let covers = thumbs.spawn_remote(library_dir, stop.child_token());
         ocr.start(stop.child_token());
-        publish_cloud_queue(ocr, storage, stop.child_token());
+        publish_cloud_queue(ocr, storage.clone(), stop.child_token());
+        // A metadata pass before first adoption would compile series whose series.json
+        // is not read yet (each waits for its submission and is compiled again when it
+        // is answered): adoption compiles every series it ingests, the startup pass
+        // then the rest.
+        let adopting = std::time::Instant::now();
+        let mut told = false;
+        while !storage.adopted() {
+            if adopting.elapsed() >= CLOUD_ADOPTION_WAIT {
+                tracing::warn!(
+                    "[STORAGE] The {} library's series.json files are still being read after {} min: starting the metadata passes anyway",
+                    storage.backend.as_str(),
+                    CLOUD_ADOPTION_WAIT.as_secs() / 60
+                );
+                break;
+            }
+            if !told {
+                info!(
+                    "[STORAGE] Reading the {} library's series.json files before the first metadata pass",
+                    storage.backend.as_str()
+                );
+                told = true;
+            }
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+        library.start();
         let _ = covers.await;
     })
 }

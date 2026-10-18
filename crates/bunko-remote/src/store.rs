@@ -1356,6 +1356,7 @@ impl<B: Backend> RemoteStore<B> {
                 ino: e.eid as u64,
                 cver: Some(Version::new(format!("pending:{}", op.id))),
                 own: true,
+                sha256: op.sha256.map(|s| hex::encode(s).into()),
             });
         }
         let own = match (&e.winner_pid, &e.cver) {
@@ -1371,6 +1372,7 @@ impl<B: Backend> RemoteStore<B> {
             ino: e.eid as u64,
             cver: e.cver.clone().map(Version::new),
             own,
+            sha256: e.sha256.as_deref().map(Into::into),
         })
     }
 
