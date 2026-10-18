@@ -292,6 +292,39 @@ impl Database {
         self.write(|conn| insert_user(conn, username, &password_hash, role, status, notes))
     }
 
+    /// An account with no password (the admin of a server reachable from this computer
+    /// only, when its owner skipped the password): no password matches it, so it signs
+    /// in only where the server allows that without one.
+    pub fn create_user_without_password(
+        &self,
+        username: &str,
+        role: Role,
+        status: UserStatus,
+        notes: &str,
+    ) -> Result<i64> {
+        let _bump = self.bump_users_version();
+        if pyfmt::strip(username).is_empty() {
+            return Err(DbError::invalid("Username is required"));
+        }
+        validation(validate_username(username))?;
+        self.write(|conn| insert_user(conn, username, "", role, status, notes))
+    }
+
+    /// The active account `username`, when it has no password.
+    pub fn passwordless_user(&self, username: &str) -> Result<Option<User>> {
+        let row = self.read(|conn| {
+            Ok(conn
+                .prepare_cached(&format!(
+                    "SELECT {USER_COLUMNS} FROM users WHERE username = ? AND password_hash = ''"
+                ))?
+                .query_row([username], |r| RawUser::from_row(r, 0))
+                .optional()?)
+        })?;
+        Ok(row
+            .filter(|raw| raw.status == "active")
+            .and_then(RawUser::into_login))
+    }
+
     /// Validate a new account's name and password and hash the password (outside every
     /// lock): the first half of [`create_user`](Self::create_user).
     pub(crate) fn new_account_hash(&self, username: &str, password: &str) -> Result<String> {

@@ -19,6 +19,7 @@
 
 mod account;
 mod home;
+pub mod local;
 mod login;
 mod registration;
 mod setup;

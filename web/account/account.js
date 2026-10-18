@@ -52,6 +52,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     roleBadge.textContent = role;
     updateHeaderNav(session.user);
 
+    // An account with no password yet (a local-only server's admin) sets its first.
+    if (session.user.has_password === false) {
+        document.getElementById('password-title').textContent = 'Set a Password';
+        document.getElementById('current-password-group').hidden = true;
+        document.getElementById('current-password').required = false;
+    }
+
     // Set up connect section
     const serverUrl = window.location.origin;
     document.getElementById('server-url').value = serverUrl;
@@ -155,8 +162,11 @@ async function handlePasswordChange(e, session) {
         await window.mokuroAuth.signIn(session.user.username, newPassword);
         session.auth = window.mokuroAuth.token();
 
-        // Clear form and show success
+        // Clear form and show success (from now on the current password is asked).
         document.getElementById('password-form').reset();
+        document.getElementById('password-title').textContent = 'Change Password';
+        document.getElementById('current-password-group').hidden = false;
+        document.getElementById('current-password').required = true;
         successEl.style.display = 'block';
     } catch (err) {
         errorEl.textContent = err.message;

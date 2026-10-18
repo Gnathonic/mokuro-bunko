@@ -158,12 +158,14 @@ async fn issue_token(
             AuthHeader::None | AuthHeader::Bearer(_) => {}
         }
     }
-    let (Some(username), Some(password)) = (
-        username.as_str().filter(|s| !s.is_empty()),
-        password.as_str().filter(|s| !s.is_empty()),
-    ) else {
+    let Some(username) = username.as_str().filter(|s| !s.is_empty()) else {
         return json_error(400, "Missing credentials");
     };
+    // No password: only an account that has none, from this computer (`local`).
+    let password = password.as_str().unwrap_or("");
+    if password.is_empty() && !super::local::passwordless_sign_in(&d.core, &client, &headers) {
+        return json_error(400, "Missing credentials");
+    }
     let kind_value = data.get("kind").filter(|v| truthy(v));
     let kind = match kind_value {
         None => TokenKind::Web,
@@ -183,7 +185,12 @@ async fn issue_token(
     }
     let (db, u, p) = (d.db.clone(), username.to_string(), password.to_string());
     let issued = blocking(move || -> bunko_db::Result<Option<(User, String, f64)>> {
-        let Some(user) = db.authenticate_user(&u, &p)? else {
+        let user = if p.is_empty() {
+            db.passwordless_user(&u)?
+        } else {
+            db.authenticate_user(&u, &p)?
+        };
+        let Some(user) = user else {
             return Ok(None);
         };
         db.prune_expired_auth_tokens()?;
@@ -206,6 +213,11 @@ async fn issue_token(
         }
         Some((user, token, expires_at)) => {
             d.core.login_limiter.record_success(&key);
+            let mut who = json!({"username": user.username, "role": user.role.as_str()});
+            if password.is_empty() {
+                // The account page then offers to set its first password.
+                who["has_password"] = json!(false);
+            }
             json_response(
                 200,
                 json!({
@@ -213,7 +225,7 @@ async fn issue_token(
                     "token_type": "Bearer",
                     "kind": kind.as_str(),
                     "expires_at": expires_at,
-                    "user": {"username": user.username, "role": user.role.as_str()},
+                    "user": who,
                 }),
             )
         }

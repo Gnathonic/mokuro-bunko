@@ -37,12 +37,65 @@
                     <label class="radio-card"><input type="radio" name="where" value="onedrive"><div class="radio-card__content"><strong>OneDrive</strong><span>The mokuro-reader folder in your OneDrive.</span></div></label>
                     <label class="radio-card"><input type="radio" name="where" value="mega"><div class="radio-card__content"><strong>MEGA</strong><span>The mokuro-reader folder in your MEGA account.</span></div></label>
                     <label class="radio-card"><input type="radio" name="where" value="webdav"><div class="radio-card__content"><strong>A WebDAV server</strong><span>Nextcloud, ownCloud, a NAS, rclone serve… (https).</span></div></label>
+                    <label class="radio-card" id="where-processor-card" hidden><input type="radio" name="where" value="processor"><div class="radio-card__content"><strong>No library here: read OCR for another Bunko</strong><span>This computer becomes a processor: it OCRs the volumes of a library on another machine.</span></div></label>
                 </div>
                 <div id="where-error" class="form-error" role="alert" hidden></div>
                 <div class="setup-actions">
                     <button type="button" class="btn btn--secondary" data-prev>Back</button>
                     <button type="button" class="btn btn--primary" id="where-next">Next</button>
                 </div>
+            </div>
+
+            <!-- This computer reads OCR for another Bunko (full build) -->
+            <div class="setup-step" id="step-pa">
+                <h2 class="setup-step-title">Connect to the library</h2>
+                <p class="setup-lede">Its address as a browser reaches it, and a processor account its admin made for you.</p>
+                <div class="form-group">
+                    <label for="pa-url" class="form-label">Library address</label>
+                    <input type="url" id="pa-url" class="form-input" placeholder="https://library.example or http://192.168.1.10:8080" autocomplete="url">
+                </div>
+                <div class="form-group">
+                    <label for="pa-user" class="form-label">Processor username</label>
+                    <input type="text" id="pa-user" class="form-input" autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="pa-password" class="form-label">Password</label>
+                    <input type="password" id="pa-password" class="form-input" autocomplete="current-password">
+                </div>
+                <fieldset class="form-group">
+                    <legend class="form-label">Check the library's certificate (https)</legend>
+                    <div class="radio-cards">
+                        <label class="radio-card"><input type="radio" name="pa-tls" value="true" checked><div class="radio-card__content"><strong>Yes</strong><span>A normal certificate (Let's Encrypt, a tunnel, …).</span></div></label>
+                        <label class="radio-card"><input type="radio" name="pa-tls" value="cert"><div class="radio-card__content"><strong>Trust this certificate file</strong><span>The library's self-signed certificate.</span></div></label>
+                        <label class="radio-card"><input type="radio" name="pa-tls" value="false"><div class="radio-card__content"><strong>No</strong><span>Only on a network you trust.</span></div></label>
+                    </div>
+                </fieldset>
+                <div class="form-group" id="pa-cert-group" hidden>
+                    <label for="pa-cert" class="form-label">Certificate file on this computer</label>
+                    <input type="text" id="pa-cert" class="form-input" placeholder="/path/to/library.crt">
+                </div>
+                <label class="toggle" id="pa-overwrite-row" hidden><input type="checkbox" role="switch" id="pa-overwrite"><span class="toggle__text"><strong>Replace the processor.yaml already here</strong><span>A processor was set up on this computer before: its settings are overwritten.</span></span></label>
+                <p class="form-hint" id="pa-result" role="status" aria-live="polite" hidden></p>
+                <div id="pa-error" class="form-error" role="alert" hidden></div>
+                <div class="setup-actions">
+                    <button type="button" class="btn btn--secondary" data-prev>Back</button>
+                    <button type="button" class="btn btn--secondary" id="pa-test">Test the connection</button>
+                    <button type="button" class="btn btn--primary" id="pa-finish">Set up the processor</button>
+                </div>
+            </div>
+
+            <div class="setup-step" id="step-pa-done">
+                <div class="setup-logo setup-logo--success">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="48" height="48" aria-hidden="true">
+                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                        <polyline points="22 4 12 14.01 9 11.01"/>
+                    </svg>
+                </div>
+                <h2 class="setup-step-title setup-center">This computer is a processor</h2>
+                <p class="setup-description" id="pa-done-text"></p>
+                <ul class="setup-notes" id="pa-done-notes"></ul>
+                <pre class="done-command" id="pa-done-output" hidden></pre>
+                <p class="form-hint setup-center">This setup page closes: it served a library that is not set up here.</p>
             </div>
 
             <!-- Connect: one button, the flow chosen by the server -->
@@ -152,6 +205,8 @@
                 <div class="form-group">
                     <label for="admin-password" class="form-label">Password</label>
                     <input type="password" id="admin-password" class="form-input" required minlength="8" autocomplete="new-password">
+                    <p class="form-hint" id="admin-password-optional" hidden>Optional: this server is reachable from this computer only.
+                        Without a password, you sign in from this computer by leaving it empty. Set one in Account before you share this server.</p>
                 </div>
                 <div class="form-group">
                     <label for="admin-password-confirm" class="form-label">Password again</label>

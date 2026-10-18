@@ -188,16 +188,25 @@ async fn change_password(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let (Some(current), Some(new)) = (
-        nonempty(&data, "current_password"),
-        nonempty(&data, "new_password"),
-    ) else {
+    let Some(new) = nonempty(&data, "new_password") else {
         return json_error(400, "Missing required fields");
     };
-    match confirm_password(&d, &client, &user.username, current).await {
-        Ok(true) => {}
-        Ok(false) => return json_error(401, "Current password is incorrect"),
+    // An account with no password (a local-only server's admin) sets its first one.
+    let (db, u) = (d.db.clone(), user.username.clone());
+    let passwordless = match blocking(move || db.passwordless_user(&u)).await {
+        Ok(Ok(found)) => found.is_some(),
+        Ok(Err(e)) => return db_failed("password check", &e),
         Err(resp) => return resp,
+    };
+    if !passwordless {
+        let Some(current) = nonempty(&data, "current_password") else {
+            return json_error(400, "Missing required fields");
+        };
+        match confirm_password(&d, &client, &user.username, current).await {
+            Ok(true) => {}
+            Ok(false) => return json_error(401, "Current password is incorrect"),
+            Err(resp) => return resp,
+        }
     }
     if let Some(msg) = validate_password(new) {
         return json_error(400, msg);

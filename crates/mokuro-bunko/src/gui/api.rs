@@ -455,11 +455,21 @@ async fn ocr_request(State(state): S, Json(b): Json<OcrRequestBody>) -> Response
 /// tray running on a desktop, the tray is started (it starts the role). None: no tray
 /// (the lite build, or headless): the caller starts the role itself.
 async fn hand_to_tray(state: &AppState, role: Role) -> Option<String> {
-    let exe = state.exe.clone();
-    let cfg = service_config(state, role);
     let log = paths::server_storage(&state.config_path)
         .join("logs")
         .join("tray-start-console.log");
+    hand_to_tray_at(state.exe.clone(), role, service_config(state, role), log).await
+}
+
+/// Add `role` (run with its config `cfg`) to the tray's managed list and make sure a
+/// tray runs it: a note on what happened, or None when no tray will (headless, lite
+/// build, no tray.json). `log`: where a tray started here writes its console.
+pub(crate) async fn hand_to_tray_at(
+    exe: PathBuf,
+    role: Role,
+    cfg: PathBuf,
+    log: PathBuf,
+) -> Option<String> {
     blocking(move || -> Option<String> {
         let cmd = tray::tray_command(&exe)?;
         let path = tray::config_path(&exe);
@@ -768,82 +778,99 @@ async fn processor_config_set(State(state): S, Json(form): Json<ProcessorForm>) 
 async fn processor_start(State(state): S) -> Response {
     #[cfg(feature = "ocr")]
     {
-        let cfg = state.processor_config.clone();
-        let loaded = match bunko_processor::load_processor_config(&cfg) {
-            Ok(c) => c,
-            Err(e) => return bad(format!("{}: {e}", cfg.display())),
-        };
-        let storage = loaded.processor.storage.clone();
-        let before = bunko_processor::status::read_status(&storage)
-            .get("updated_at")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        let log = spawn::stdout_log(&storage, "processor-console.log");
-        // A running tray takes it over (tray.json); it starts it within seconds.
-        let tray = hand_to_tray(&state, Role::Processor).await;
-        if let Some(note) = &tray {
-            let end = tokio::time::Instant::now() + Duration::from_secs(25);
-            while tokio::time::Instant::now() < end {
-                if let Some(f) = bunko_control::read_control_file(&storage)
-                    && spawn::pid_alive(f.pid)
-                {
-                    let status = bunko_processor::status::read_status(&storage);
-                    return ok(json!({"pid": f.pid, "by_tray": true, "note": note,
-                        "state": status.get("state").and_then(Value::as_str).unwrap_or("starting"),
-                        "status": status, "running": true, "log": log, "output": ""}));
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
+        let log = paths::server_storage(&state.config_path)
+            .join("logs")
+            .join("tray-start-console.log");
+        match start_processor(&state.exe, &state.processor_config, Some(log)).await {
+            Ok(v) => ok(v),
+            Err(e) => bad(e),
         }
-        let args = vec![
-            "processor".to_string(),
-            "serve".to_string(),
-            "--config".to_string(),
-            cfg.display().to_string(),
-        ];
-        let envs: &[(&str, &str)] = if tray.is_some() {
-            &[(bunko_control::MANAGED_ENV, "1")]
-        } else {
-            &[]
-        };
-        let pid = match spawn::spawn_detached_env(&state.exe, &args, &log, envs) {
-            Ok(p) => p,
-            Err(e) => return bad(format!("could not start the processor: {e}")),
-        };
-        let end = tokio::time::Instant::now() + Duration::from_secs(60);
-        let mut status = serde_json::Map::new();
-        while tokio::time::Instant::now() < end {
-            status = bunko_processor::status::read_status(&storage);
-            let fresh = status
-                .get("updated_at")
-                .and_then(Value::as_f64)
-                .is_some_and(|t| t > before);
-            if fresh && status.get("state").and_then(Value::as_str) != Some("stopped") {
-                break;
-            }
-            if !spawn::pid_alive(pid) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        let state_s = status
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or("starting")
-            .to_string();
-        let output = if state_s == "connected" {
-            String::new()
-        } else {
-            spawn::tail_file(&log, 30).unwrap_or_default()
-        };
-        ok(json!({"pid": pid, "state": state_s, "status": status,
-                  "running": spawn::pid_alive(pid), "log": log, "output": output}))
     }
     #[cfg(not(feature = "ocr"))]
     {
         let _ = state;
         lite()
     }
+}
+
+/// Start `processor serve --config <cfg>`: handed to the tray when `tray_log` is set
+/// and a tray takes it (`tray_log`: where a tray started here logs), else detached in
+/// the background. Waits for its first status; `Err` when it cannot start at all.
+#[cfg(feature = "ocr")]
+pub(crate) async fn start_processor(
+    exe: &Path,
+    cfg: &Path,
+    tray_log: Option<PathBuf>,
+) -> Result<Value, String> {
+    let cfg = cfg.to_path_buf();
+    let loaded = bunko_processor::load_processor_config(&cfg)
+        .map_err(|e| format!("{}: {e}", cfg.display()))?;
+    let storage = loaded.processor.storage.clone();
+    let before = bunko_processor::status::read_status(&storage)
+        .get("updated_at")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let log = spawn::stdout_log(&storage, "processor-console.log");
+    // A running tray takes it over (tray.json); it starts it within seconds.
+    let tray = match tray_log {
+        Some(tl) => hand_to_tray_at(exe.to_path_buf(), Role::Processor, cfg.clone(), tl).await,
+        None => None,
+    };
+    if let Some(note) = &tray {
+        let end = tokio::time::Instant::now() + Duration::from_secs(25);
+        while tokio::time::Instant::now() < end {
+            if let Some(f) = bunko_control::read_control_file(&storage)
+                && spawn::pid_alive(f.pid)
+            {
+                let status = bunko_processor::status::read_status(&storage);
+                return Ok(json!({"pid": f.pid, "by_tray": true, "note": note,
+                    "state": status.get("state").and_then(Value::as_str).unwrap_or("starting"),
+                    "status": status, "running": true, "log": log, "output": ""}));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    let args = vec![
+        "processor".to_string(),
+        "serve".to_string(),
+        "--config".to_string(),
+        cfg.display().to_string(),
+    ];
+    let envs: &[(&str, &str)] = if tray.is_some() {
+        &[(bunko_control::MANAGED_ENV, "1")]
+    } else {
+        &[]
+    };
+    let pid = spawn::spawn_detached_env(exe, &args, &log, envs)
+        .map_err(|e| format!("could not start the processor: {e}"))?;
+    let end = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut status = serde_json::Map::new();
+    while tokio::time::Instant::now() < end {
+        status = bunko_processor::status::read_status(&storage);
+        let fresh = status
+            .get("updated_at")
+            .and_then(Value::as_f64)
+            .is_some_and(|t| t > before);
+        if fresh && status.get("state").and_then(Value::as_str) != Some("stopped") {
+            break;
+        }
+        if !spawn::pid_alive(pid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let state_s = status
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("starting")
+        .to_string();
+    let output = if state_s == "connected" {
+        String::new()
+    } else {
+        spawn::tail_file(&log, 30).unwrap_or_default()
+    };
+    Ok(json!({"pid": pid, "state": state_s, "status": status,
+              "running": spawn::pid_alive(pid), "log": log, "output": output}))
 }
 
 async fn processor_status(State(state): S) -> Response {

@@ -29,6 +29,7 @@
     }
 
     function path() {
+        if (where === 'processor') return ['step-welcome', 'step-where', 'step-pa', 'step-pa-done'];
         const p = ['step-welcome', 'step-where'];
         if (isCloud()) p.push('step-connect', 'step-check');
         p.push('step-readers', 'step-admin');
@@ -48,6 +49,7 @@
         const first = $(id).querySelector('input:not([type=radio]):not([type=checkbox]):not([disabled]), select, button.btn--primary');
         if (first && at > 0) first.focus();
         if (id === 'step-readers') enterReaders();
+        if (id === 'step-admin') enterAdmin();
     }
     const next = () => { const p = path(); show(p[Math.min(p.indexOf(current) + 1, p.length - 1)]); };
     const prev = () => { const p = path(); show(p[Math.max(p.indexOf(current) - 1, 0)]); };
@@ -102,6 +104,10 @@
     async function whereNext() {
         where = checked('where') || 'local';
         showError($('where-error'), '');
+        if (where === 'processor') {
+            next();
+            return;
+        }
         if (where === 'local') {
             if (storage && storage.configured && storage.configured.backend !== 'local') {
                 try {
@@ -116,6 +122,80 @@
         }
         setupConnect();
         next();
+    }
+
+    // ---- this computer reads OCR for another Bunko (full build) -------------------------
+
+    function processorForm() {
+        const tls = checked('pa-tls') || 'true';
+        return {
+            url: $('pa-url').value.trim(),
+            username: $('pa-user').value.trim(),
+            password: $('pa-password').value,
+            tls_verify: tls === 'cert' ? $('pa-cert').value.trim() : tls,
+            overwrite: $('pa-overwrite').checked,
+        };
+    }
+
+    function validateProcessor(f) {
+        if (!f.url) return 'Enter the library address';
+        if (!f.username || !f.password) return 'Enter the processor account\'s username and password';
+        if (checked('pa-tls') === 'cert' && !f.tls_verify) return 'Enter the certificate file';
+        return null;
+    }
+
+    async function processorStep(finish, btn) {
+        const f = processorForm();
+        showError($('pa-error'), '');
+        $('pa-result').hidden = true;
+        const bad = validateProcessor(f);
+        if (bad) {
+            showError($('pa-error'), bad);
+            return;
+        }
+        btn.disabled = true;
+        const label = btn.textContent;
+        btn.textContent = finish ? 'Setting up…' : 'Testing…';
+        try {
+            const data = await postJSON(finish ? '/setup/api/processor/setup' : '/setup/api/processor/test', f);
+            if (!finish) {
+                const notes = (data.notes || []).join(' ');
+                $('pa-result').textContent = 'Connected to ' + data.url + ' as ' + data.username
+                    + (data.library_version ? ' (Bunko ' + data.library_version + ')' : '') + '.' + (notes ? ' ' + notes : '');
+                $('pa-result').hidden = false;
+                return;
+            }
+            processorDone(data);
+        } catch (e) {
+            showError($('pa-error'), e.message);
+            // An earlier processor.yaml is replaced only when asked to.
+            if (/already exists/.test(e.message)) $('pa-overwrite-row').hidden = false;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = label;
+        }
+    }
+
+    function processorDone(data) {
+        const start = data.start || {};
+        $('pa-done-text').textContent = 'This computer now reads OCR for ' + data.url
+            + ' as ' + (data.name || data.username) + '.';
+        const notes = [];
+        if (start.by_tray) notes.push('The tray runs the processor (' + (start.note || 'started') + ').');
+        else if (start.running) notes.push('The processor runs in the background (pid ' + start.pid + '); its output goes to ' + start.log + '.');
+        else notes.push('The processor did not stay up: its output is in ' + start.log + '.');
+        if (start.state) notes.push('State: ' + start.state + '.');
+        notes.push('Its settings: ' + data.config + '.');
+        if (data.config_moved_to) notes.push('This server\'s unused config moved to ' + data.config_moved_to + '.');
+        if (data.warning) notes.push(String(data.warning));
+        $('pa-done-notes').replaceChildren(...notes.map((n) => {
+            const li = document.createElement('li');
+            li.textContent = n;
+            return li;
+        }));
+        $('pa-done-output').textContent = start.output || '';
+        $('pa-done-output').hidden = !start.output;
+        show('step-pa-done');
     }
 
     // ---- Connect ---------------------------------------------------------------------
@@ -518,10 +598,22 @@
 
     // ---- admin, remote access ------------------------------------------------------------
 
+    // A server this computer alone reaches, with no readers: the password is optional
+    // (the account then signs in from this computer only).
+    const passwordOptional = () => !!options.local_only && !!options.local && checked('readers') !== 'yes';
+
+    function enterAdmin() {
+        const optional = passwordOptional();
+        $('admin-password-optional').hidden = !optional;
+        $('admin-password').required = !optional;
+        $('admin-password-confirm').required = !optional;
+    }
+
     function validateAdmin() {
         const username = $('admin-username').value.trim();
         const password = $('admin-password').value;
         if (!/^[a-zA-Z0-9_-]{3,32}$/.test(username)) return 'Username: 3–32 letters, digits, _ or -';
+        if (!password && !$('admin-password-confirm').value && passwordOptional()) return null;
         if (password.length < 8) return 'Password: at least 8 characters';
         if (password !== $('admin-password-confirm').value) return 'The passwords differ';
         return null;
@@ -612,6 +704,7 @@
             }
         } catch (_) { /* the login page then */ }
         const notes = (data.notes || []).slice();
+        if (!password) notes.push('The admin account has no password: sign in from this computer by leaving the password empty. Set one in Account before you share this server.');
         if (data.ocr && data.ocr.message && !data.ocr.installing) notes.push(data.ocr.message);
         try { sessionStorage.setItem('mokuro_setup_notes', JSON.stringify(notes)); } catch (_) { /* fine */ }
         $('done-notes').replaceChildren(...notes.map((n) => {
@@ -784,12 +877,19 @@
         setupOcr(options.ocr);
         setupPinned(options.pinned || {});
         setupWhere();
+        // A full build may become a processor for another library instead.
+        $('where-processor-card').hidden = lite();
         show('step-welcome');
 
         $('start-btn').addEventListener('click', next);
         document.querySelectorAll('[data-prev]').forEach((b) => b.addEventListener('click', prev));
         document.querySelectorAll('[data-next]').forEach((b) => b.addEventListener('click', next));
         $('where-next').addEventListener('click', whereNext);
+        $('pa-test').addEventListener('click', () => processorStep(false, $('pa-test')));
+        $('pa-finish').addEventListener('click', () => processorStep(true, $('pa-finish')));
+        document.querySelectorAll('input[name="pa-tls"]').forEach((r) => r.addEventListener('change', () => {
+            $('pa-cert-group').hidden = checked('pa-tls') !== 'cert';
+        }));
         $('connect-btn').addEventListener('click', () => connect(null));
         $('connect-paste-btn').addEventListener('click', pasteAddress);
         $('connect-paste-url').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); pasteAddress(); } });

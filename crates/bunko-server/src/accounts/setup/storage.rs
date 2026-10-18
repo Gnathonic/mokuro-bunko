@@ -51,7 +51,10 @@ async fn allowed(
 }
 
 /// A POST's JSON object body (`{}` when empty), refusing any other content type.
-async fn json_body(parts: &Parts, body: Body) -> Result<serde_json::Map<String, Value>, Response> {
+pub(super) async fn json_body(
+    parts: &Parts,
+    body: Body,
+) -> Result<serde_json::Map<String, Value>, Response> {
     let ct = parts
         .headers
         .get(header::CONTENT_TYPE)

@@ -894,8 +894,10 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         }) as Arc<dyn Fn() + Send + Sync>
     };
     if let Some(m) = &opts.machine {
+        let stop = services.stop.clone();
         m.attach(crate::machine::MachineHooks {
             restart: restart.clone(),
+            stop: Arc::new(move || stop.cancel()),
             ocr: ocr.clone(),
         });
     }

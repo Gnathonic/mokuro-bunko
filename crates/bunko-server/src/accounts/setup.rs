@@ -27,7 +27,6 @@ use super::util::{
     Client, JsonBody, blocking, db_failed, json_error, json_response, read_body,
     serve_page_json_errors,
 };
-use crate::http::client_ip::is_loopback;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -46,6 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
+mod processor;
 mod storage;
 
 /// The header a script may send the setup code in.
@@ -348,14 +348,7 @@ fn session_cookie(headers: &HeaderMap) -> Option<String> {
         })
 }
 
-/// 0.5.2 `_is_local_request`: loopback peer, and a loopback client address if proxy
-/// headers name a different one. An unknown peer (no `ConnectInfo`) is not local.
-fn is_local(client: &Client) -> bool {
-    if !client.peer_known || !client.peer.is_loopback() {
-        return false;
-    }
-    client.ip == client.peer.to_string() || is_loopback(&client.ip)
-}
+use super::local::is_local;
 
 /// May this request run setup: local, a live setup session, or the code in
 /// `X-Setup-Code` (which counts as an attempt).
@@ -417,6 +410,7 @@ async fn gate(deps: &AccountsDeps, client: &Client, parts: &Parts) -> Option<Res
 pub fn routes() -> Router<AccountsDeps> {
     Router::new()
         .merge(storage::routes())
+        .merge(processor::routes())
         .route("/setup/api/status", get(status))
         .route("/setup/api/options", get(options))
         .route("/setup/api/complete", post(complete))
@@ -479,6 +473,9 @@ async fn options(State(d): State<AccountsDeps>, client: Client, parts: Parts) ->
             "ocr": ocr,
             // Certificate files can be named from this machine only.
             "local": is_local(&client),
+            // The server listens on this computer only: with no readers, the admin
+            // password is optional.
+            "local_only": super::local::local_only(&d.core),
             "pinned": {
                 "registration": env_pin("MOKURO_REGISTRATION_MODE").map(|_| registration),
                 "ssl": env_pin("MOKURO_SSL_ENABLED").map(|_| ssl),
@@ -728,12 +725,23 @@ async fn complete(
     if let Some(msg) = validate_username(&username) {
         return json_error(400, msg);
     }
-    if let Some(msg) = validate_password(&password) {
+    // A server only this computer reaches, with no readers, may have an admin with no
+    // password: it signs in from this computer only (`super::local`).
+    let readers = plan
+        .readers
+        .map_or_else(|| d.core.config.read().server.serve_readers, |(r, _)| r);
+    let passwordless =
+        password.is_empty() && !readers && is_local(&client) && super::local::local_only(&d.core);
+    if !passwordless && let Some(msg) = validate_password(&password) {
         return json_error(400, msg);
     }
     let db = d.db.clone();
     match blocking(move || {
-        db.create_user(&username, &password, Role::Admin, UserStatus::Active, "")
+        if passwordless {
+            db.create_user_without_password(&username, Role::Admin, UserStatus::Active, "")
+        } else {
+            db.create_user(&username, &password, Role::Admin, UserStatus::Active, "")
+        }
     })
     .await
     {
