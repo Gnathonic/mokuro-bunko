@@ -56,6 +56,17 @@ async fn me_valid_creds_returns_identity_and_permissions() {
     assert!(text.contains(r#""permissions":{"canWriteProgress":true,"canAddFiles":false,"canModifyDelete":false,"metadata":{"scope":"none"}}"#));
     assert_eq!(r.header("content-type"), Some("application/json"));
     assert!(r.header("www-authenticate").is_none());
+    // The root files this server keeps per account: the reader reads and
+    // writes positions.json only when it is listed here.
+    assert_eq!(
+        b["per_user_files"],
+        json!([
+            "volume-data.json",
+            "profiles.json",
+            "goals.json",
+            "positions.json"
+        ])
+    );
 }
 
 #[tokio::test]
@@ -137,6 +148,7 @@ async fn me_failures_and_anonymous() {
         "authenticated": false,
         "role": "anonymous",
         "permissions": {"canWriteProgress": false, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}},
+        "per_user_files": ["volume-data.json", "profiles.json", "goals.json", "positions.json"],
     });
     let r = me(&env, None).await;
     assert_eq!((r.status, r.json()), (200, anon.clone()));
