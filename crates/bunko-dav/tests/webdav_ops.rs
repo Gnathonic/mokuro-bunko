@@ -1355,3 +1355,61 @@ async fn put_ocr_sidecar_create_overwrite_and_unchanged_resend() {
         Some(serde_json::json!({ "existed_before": true }))
     );
 }
+
+#[tokio::test]
+async fn positions_json_is_per_user() {
+    let env = Env::new();
+    for (user, body) in [
+        ("reader", &b"reader positions"[..]),
+        ("uploader", &b"uploader positions"[..]),
+    ] {
+        let r = env
+            .req(
+                Some(user),
+                "PUT",
+                "/mokuro-reader/positions.json",
+                &[],
+                body,
+            )
+            .await;
+        assert_eq!(r.code(), 201, "{user}");
+    }
+    for (user, body) in [
+        ("reader", &b"reader positions"[..]),
+        ("uploader", &b"uploader positions"[..]),
+    ] {
+        assert_eq!(
+            env.req(Some(user), "GET", "/mokuro-reader/positions.json", &[], b"")
+                .await
+                .body,
+            body,
+            "{user}"
+        );
+        assert_eq!(
+            std::fs::read(env.base.join(format!("users/{user}/positions.json"))).unwrap(),
+            body
+        );
+    }
+    // Never a library file, never shown to anyone else.
+    assert!(!env.lib("positions.json").exists());
+    assert_eq!(
+        env.req(None, "GET", "/mokuro-reader/positions.json", &[], b"")
+            .await
+            .code(),
+        404
+    );
+    let me = env
+        .req(
+            Some("reader"),
+            "PROPFIND",
+            "/mokuro-reader",
+            &[("depth", "1")],
+            b"",
+        )
+        .await;
+    assert!(me.text().contains("positions.json"));
+    let anon = env
+        .req(None, "PROPFIND", "/mokuro-reader", &[("depth", "1")], b"")
+        .await;
+    assert!(!anon.text().contains("positions.json"));
+}

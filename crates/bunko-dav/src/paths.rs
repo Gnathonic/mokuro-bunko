@@ -6,7 +6,7 @@
 //! |---|---|
 //! | `/` | none (virtual, one member `mokuro-reader`) |
 //! | `/mokuro-reader` | none (virtual merged view) |
-//! | `/mokuro-reader/{volume-data,profiles,goals}.json` | `users/<username>/<name>` |
+//! | `/mokuro-reader/{volume-data,profiles,goals,positions}.json` | `users/<username>/<name>` |
 //! | `/mokuro-reader/<rel>` | `library/<rel>` (resolved, must stay inside) |
 //! | anything else (incl. `/inbox`) | nothing |
 
@@ -18,9 +18,16 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_perc
 
 pub const READER_ROOT: &str = "mokuro-reader";
 
-/// Root `.json` files that belong to ONE user (exact, case-sensitive names), in the sorted
-/// order 0.5.2 lists them.
-pub const PER_USER_FILES: [&str; 3] = ["goals.json", "profiles.json", "volume-data.json"];
+/// Root `.json` files that belong to ONE user (exact, case-sensitive names): the sorted
+/// order 0.5.2 lists them, then `positions.json` (the reader's fixed-address position
+/// index, added after 0.5.2). Reported to clients as `per_user_files` by
+/// `/login/api/me`, so a reader only uses a name once the server keeps it per user.
+pub const PER_USER_FILES: [&str; 4] = [
+    "goals.json",
+    "profiles.json",
+    "volume-data.json",
+    "positions.json",
+];
 
 pub fn is_per_user_name(name: &str) -> bool {
     PER_USER_FILES.contains(&name)
@@ -327,6 +334,10 @@ mod tests {
         assert_eq!(
             classify("/mokuro-reader/goals.json"),
             Target::Progress("goals.json")
+        );
+        assert_eq!(
+            classify("/mokuro-reader/positions.json"),
+            Target::Progress("positions.json")
         );
         assert_eq!(
             classify("/mokuro-reader/Goals.json"),
