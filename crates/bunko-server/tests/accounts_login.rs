@@ -512,7 +512,7 @@ async fn nav_config_reads_the_live_config() {
     let r = env.send(empty(req("GET", "/api/nav/config"))).await;
     assert_eq!(
         r.text(),
-        r#"{"home_enabled":true,"catalog_enabled":false,"queue_show_in_nav":false,"queue_public_access":true,"registration_enabled":true}"#
+        r#"{"home_enabled":true,"catalog_enabled":false,"queue_show_in_nav":false,"queue_public_access":true,"registration_enabled":true,"serve_readers":true}"#
     );
     {
         let mut c = env.config();
@@ -520,12 +520,14 @@ async fn nav_config_reads_the_live_config() {
         c.catalog.use_as_homepage = true;
         c.queue.show_in_nav = true;
         c.registration.mode = "disabled".into();
+        c.server.serve_readers = false;
     }
     let b = env.send(empty(req("GET", "/api/nav/config"))).await.json();
     assert_eq!(b["home_enabled"], false);
     assert_eq!(b["catalog_enabled"], true);
     assert_eq!(b["queue_show_in_nav"], true);
     assert_eq!(b["registration_enabled"], false);
+    assert_eq!(b["serve_readers"], false);
 }
 
 #[tokio::test]

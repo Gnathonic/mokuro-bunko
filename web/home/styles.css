@@ -201,6 +201,14 @@ a.action-card {
     line-height: 1.5;
 }
 
+.info-card__desc a {
+    color: var(--accent-primary);
+}
+
+.info-card__desc a:hover {
+    color: var(--accent-primary-hover);
+}
+
 .info-card code {
     background: var(--accent-primary-muted);
     color: var(--accent-primary);
@@ -291,4 +299,9 @@ a.action-card {
     .info-grid {
         grid-template-columns: 1fr;
     }
+}
+
+/* The page hides the sections a server does not offer. */
+[hidden] {
+    display: none !important;
 }

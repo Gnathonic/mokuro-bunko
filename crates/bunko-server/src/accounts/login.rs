@@ -354,6 +354,7 @@ async fn nav_config(State(d): State<AccountsDeps>) -> Response {
         "queue_show_in_nav": c.queue.show_in_nav,
         "queue_public_access": c.queue.public_access,
         "registration_enabled": c.registration.mode != "disabled",
+        "serve_readers": c.server.serve_readers,
     });
     drop(c);
     json_response(200, body)
