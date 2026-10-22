@@ -1265,6 +1265,7 @@ async fn local_ocr_waits_for_the_background_install_then_starts_by_itself() {
 struct InstallEnv {
     _dir: tempfile::TempDir,
     core: Core,
+    db: Arc<Database>,
     lib: std::path::PathBuf,
     ocr: OcrControl,
     install: Arc<FakeInstall>,
@@ -1309,7 +1310,7 @@ fn install_env(view: Option<bunko_proto::OcrInstall>, gpu: bool) -> InstallEnv {
     });
     let ocr = OcrControl::new(OcrDeps {
         core: core.clone(),
-        db: Some(db),
+        db: Some(db.clone()),
         facts: Arc::new(FileFacts),
         locks: Arc::new(DavLocks(bunko_dav::PathWriteLocks::new())),
         local: Some(factory.clone()),
@@ -1320,6 +1321,7 @@ fn install_env(view: Option<bunko_proto::OcrInstall>, gpu: bool) -> InstallEnv {
     InstallEnv {
         _dir: dir,
         core,
+        db,
         lib: layout.library(),
         ocr,
         install,
@@ -1955,4 +1957,72 @@ async fn a_machine_paired_again_under_a_new_account_takes_its_name_back() {
         names,
         vec![("tower".to_string(), Some("new-acct".to_string()))]
     );
+}
+
+/// Regression: while this server's OCR backend (a GPU pack) was still being installed,
+/// the queue page said "Backend: CPU" (what its own machine runs until the pack is
+/// in). It names the pack's backend, as installing.
+#[tokio::test]
+async fn the_queue_names_the_backend_being_installed() {
+    let mut view = installing().unwrap();
+    view.variant = Some("rocm7.1".into());
+    let e = install_env(Some(view), true);
+    e.db.create_user(
+        "boss",
+        "boss-password-1",
+        Role::Admin,
+        UserStatus::Active,
+        "",
+    )
+    .unwrap();
+    let app = bunko_server::ocr::queue_router(e.ocr.clone());
+    let status = || {
+        Request::get("/queue/api/status")
+            .header(header::AUTHORIZATION, basic("boss", "boss-password-1"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (code, _, body) = send(&app, status()).await;
+    assert_eq!(code, 200);
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["backend"], "rocm", "{v}");
+    assert_eq!(v["backend_installing"], true, "{v}");
+    // Done: what runs is reported again, and nothing says installing.
+    e.install.end("done", true);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let (_, _, body) = send(&app, status()).await;
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert!(v.get("backend_installing").is_none(), "{v}");
+    assert_ne!(v["backend"], "rocm", "{v}");
+}
+
+/// Regression: Settings → OCR said "Auto — install state not reported" whatever the
+/// install did: the runtime status never said whether the backend is in place, nor
+/// which one runs.
+#[tokio::test]
+async fn the_ocr_runtime_says_whether_the_backend_is_installed_and_which() {
+    use bunko_server::admin::OcrAdmin;
+    let e = install_env(installing(), true);
+    let runtime = |e: &InstallEnv| {
+        let (ocr, config) = (e.ocr.clone(), e.core.config.read().clone());
+        tokio::task::spawn_blocking(move || ocr.runtime_status(&config))
+    };
+    let r = runtime(&e).await.unwrap();
+    assert_eq!(r["installed"], false, "{r}");
+    assert_eq!(r["install"]["state"], "running", "{r}");
+    assert_eq!(r["installed_backend"], Value::Null, "{r}");
+    e.install.end("done", true);
+    let mut up = false;
+    for _ in 0..50 {
+        if e.local_up().await {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(up, "the local OCR starts once the install is done");
+    let r = runtime(&e).await.unwrap();
+    assert_eq!(r["installed"], true, "{r}");
+    // The fake pipeline runs on the CPU.
+    assert_eq!(r["installed_backend"], "cpu", "{r}");
 }

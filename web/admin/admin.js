@@ -983,6 +983,8 @@ function ocrBackendSentence(runtime, ocrConfig) {
         line = 'off (set to skip) — this server reads no volumes';
     } else if (!knows) {
         line = chosen + ' — install state not reported';
+    } else if (runtime.install && runtime.install.state === 'running') {
+        line = chosen + ' — installing';
     } else if (!runtime.installed) {
         line = chosen + ' — not installed yet';
     } else if (!installedBackend || installedBackend === configured) {

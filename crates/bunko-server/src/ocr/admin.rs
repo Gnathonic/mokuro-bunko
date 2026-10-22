@@ -208,6 +208,19 @@ impl OcrControl {
 impl OcrAdmin for OcrControl {
     fn runtime_status(&self, config: &Config) -> Value {
         let local = config.processes_locally(self.has_local());
+        // What this server's own machine runs now (`rocm`, `cpu`), and whether its
+        // backend is in place: a running install or a failed one with nothing in place
+        // is "not installed yet".
+        let installer = self.installer();
+        let running = installer.as_ref().is_some_and(|i| i.running());
+        let ready = installer.as_ref().is_none_or(|i| i.backend_ready());
+        let installed_backend = ask(self, |s| {
+            s.machines
+                .get(super::types::LOCAL)
+                .map(|m| m.host.backend.clone())
+                .filter(|b| !b.is_empty())
+        })
+        .flatten();
         let engines: Vec<String> =
             bunko_core::generations::enabled_generations(&config.ocr.generations)
                 .map(|g| g.engine.clone())
@@ -216,6 +229,8 @@ impl OcrAdmin for OcrControl {
             "available": self.has_local(),
             "launch_only": true,
             "configured_backend": config.ocr.backend,
+            "installed": ready && !running,
+            "installed_backend": installed_backend,
             "local_processing": local,
             "generations": config.ocr.generations.iter().map(Generation::to_value).collect::<Vec<_>>(),
             "detectors": [bunko_core::engines::DEFAULT_DETECTOR],

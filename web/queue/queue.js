@@ -1311,7 +1311,7 @@
       document.body.dataset.level = level;
     }
     setHidden($backendLine, !data.backend);
-    setText($backend, backendLabel(data.backend));
+    setText($backend, backendLabel(data.backend) + (data.backend_installing ? " (installing)" : ""));
     renderRunOrder(data.generations);
     renderMachines(data);
     renderHeldRows(data.held_rows);
