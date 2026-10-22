@@ -185,6 +185,18 @@
         else if (start.running) notes.push('The processor runs in the background (pid ' + start.pid + '); its output goes to ' + start.log + '.');
         else notes.push('The processor did not stay up: its output is in ' + start.log + '.');
         if (start.state) notes.push('State: ' + start.state + '.');
+        // Not connected (yet): what the library answered, e.g. a name another
+        // processor account holds.
+        const why = start.state !== 'connected' && start.status && start.status.error;
+        $('pa-done-title').textContent = why ? 'Set up, not accepted yet' : 'This computer is a processor';
+        if (why) {
+            $('pa-done-text').textContent = 'This computer is set up to read OCR for ' + data.url
+                + ', but the library has not accepted it yet.';
+            const text = String(why);
+            notes.push(/^the library /i.test(text)
+                ? text.charAt(0).toUpperCase() + text.slice(1)
+                : 'The processor reports: ' + text);
+        }
         notes.push('Its settings: ' + data.config + '.');
         if (data.config_moved_to) notes.push('This server\'s unused config moved to ' + data.config_moved_to + '.');
         if (data.warning) notes.push(String(data.warning));

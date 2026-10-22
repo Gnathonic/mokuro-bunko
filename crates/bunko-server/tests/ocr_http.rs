@@ -1891,3 +1891,68 @@ async fn a_benchmark_during_the_install_says_the_ocr_is_still_being_set_up() {
     e.stop.cancel();
     e.ocr.stop().await;
 }
+
+/// Regression: a machine paired again under a new processor account (the old one
+/// deleted) was refused for good: "the name ... belongs to another processor account".
+/// The name stays with an account only while it is a processor.
+#[tokio::test]
+async fn a_machine_paired_again_under_a_new_account_takes_its_name_back() {
+    let e = env(|_| {});
+    for (user, pass) in [
+        ("old-acct", "processor-pass-1"),
+        ("new-acct", "processor-pass-2"),
+    ] {
+        e.db.create_user(user, pass, Role::Processor, UserStatus::Active, "")
+            .unwrap();
+    }
+    let app = bunko_server::ocr::processor_router(e.ocr.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = reqwest::Client::new();
+    let register = |user: &'static str, pass: &'static str| {
+        let http = http.clone();
+        async move {
+            let r = http
+                .post(format!("http://{addr}/_processor/register"))
+                .header("authorization", basic(user, pass))
+                .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"]}}))
+                .send()
+                .await
+                .unwrap();
+            let status = r.status().as_u16();
+            (status, r.json::<Value>().await.unwrap())
+        }
+    };
+    let (status, first) = register("old-acct", "processor-pass-1").await;
+    assert_eq!(status, 200, "{first}");
+    // While the first account is a processor, the name is its own.
+    let (status, body) = register("new-acct", "processor-pass-2").await;
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("belongs to another processor account"),
+        "{body}"
+    );
+    // Deleted: the machine pairs under the new account, and the old entry is gone.
+    assert!(e.db.delete_user("old-acct").unwrap());
+    let (status, body) = register("new-acct", "processor-pass-2").await;
+    assert_eq!(status, 200, "{body}");
+    let names: Vec<(String, Option<String>)> = e
+        .ocr
+        .ask(|s| {
+            s.machines
+                .values()
+                .filter(|m| !m.local)
+                .map(|m| (m.name.clone(), m.username.clone()))
+                .collect()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        names,
+        vec![("tower".to_string(), Some("new-acct".to_string()))]
+    );
+}
