@@ -342,6 +342,9 @@ async fn dispatch(s: &AdminState, api_path: &str, req: ApiRequest) -> Response {
         ["users", u, "disable"] if post => {
             accounts::disable_user(s, &req, &decode_segment(u)).await
         }
+        ["users", u, "restore"] if post => {
+            accounts::restore_user(s, &req, &decode_segment(u)).await
+        }
 
         ["invites"] if get => accounts::list_invites(s).await,
         ["invites"] if post => accounts::create_invite(s, &req).await,

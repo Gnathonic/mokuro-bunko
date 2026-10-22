@@ -259,6 +259,21 @@ function initForms() {
         }
     });
 
+    // Restore user form
+    document.getElementById('restore-user-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const username = form.username.value;
+        try {
+            await apiPost(`/users/${encodeURIComponent(username)}/restore`, { password: form.password.value });
+            closeModal('restore-user-modal');
+            showToast('User restored', 'success');
+            loadUsers();
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    });
+
     // Edit notes form
     document.getElementById('edit-notes-form').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -421,7 +436,11 @@ function renderUsers() {
                     <button class="btn btn--danger btn--sm" onclick="confirmDeleteUser('${escapeHtml(user.username)}')">
                         Delete
                     </button>
-                ` : ''}
+                ` : `
+                    <button class="btn btn--secondary btn--sm" onclick="showRestoreUser('${escapeHtml(user.username)}')">
+                        Restore
+                    </button>
+                `}
             </td>
         </tr>
     `).join('');
@@ -476,6 +495,13 @@ function showChangeRole(username, currentRole) {
     const known = Array.from(select.options).some((option) => option.value === currentRole);
     select.value = known ? currentRole : select.options[0].value;
     openModal('change-role-modal');
+}
+
+function showRestoreUser(username) {
+    document.getElementById('restore-user-username').value = username;
+    document.getElementById('restore-user-display').textContent = username;
+    document.getElementById('restore-user-password').value = '';
+    openModal('restore-user-modal');
 }
 
 function showEditNotes(username) {
