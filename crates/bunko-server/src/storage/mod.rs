@@ -137,6 +137,8 @@ pub trait CloudStore: Send + Sync {
     fn lease_event(&self) -> Option<bunko_remote::status::LeaseEvent>;
     /// What is left of this Bunko's first-claim settle wait, while it runs (§9.2).
     fn lease_claiming_left(&self) -> Option<Duration>;
+    /// The lease's persisted state (our epoch, when it was last confirmed).
+    fn lease_record(&self) -> Option<bunko_remote::status::LeaseRecord>;
     /// The admin's Take over (blocking).
     fn take_over(&self, timeout: Duration) -> io::Result<()>;
     /// The provider's storage quota (one call).
@@ -197,6 +199,9 @@ impl<B: Backend> CloudStore for RemoteStore<B> {
     }
     fn lease_claiming_left(&self) -> Option<Duration> {
         self.lease().and_then(|l| l.claiming_left())
+    }
+    fn lease_record(&self) -> Option<bunko_remote::status::LeaseRecord> {
+        self.lease().map(|l| l.fence().record())
     }
     fn take_over(&self, timeout: Duration) -> io::Result<()> {
         RemoteStore::take_over_lease(self, timeout)
@@ -428,10 +433,14 @@ impl StoreHandle {
                 .count();
             json!({"total": rows.len(), "waiting": waiting})
         });
-        let lease = self
-            .store
-            .as_ref()
-            .map(|s| lease_json(s.lease_event(), s.lease_claiming_left(), &s.instance_id()));
+        let lease = self.store.as_ref().map(|s| {
+            lease_json(
+                s.lease_event(),
+                s.lease_claiming_left(),
+                s.lease_record(),
+                &s.instance_id(),
+            )
+        });
         let problems = storage_problems(self, &health, conflicts.len());
         json!({
             "backend": self.backend.as_str(),
@@ -532,6 +541,7 @@ fn outbox_json(ops: &[bunko_remote::outbox::OpSummary]) -> Value {
 fn lease_json(
     ev: Option<bunko_remote::status::LeaseEvent>,
     claiming_left: Option<Duration>,
+    record: Option<bunko_remote::status::LeaseRecord>,
     ours: &str,
 ) -> Value {
     use bunko_remote::status::LeaseEvent;
@@ -556,8 +566,13 @@ fn lease_json(
                     bunko_remote::status::about(left))}),
             None => json!({"state": "claiming", "can_take_over": false}),
         },
+        // Held: our own marker's epoch, and when the lease was last confirmed (claim
+        // or heartbeat).
         Some(LeaseEvent::Acquired) => json!({"state": "held", "can_take_over": false,
-            "holder": {"instance_id": ours, "ours": true}}),
+            "holder": {"instance_id": ours, "ours": true,
+                "epoch": record.as_ref().map(|r| r.lease_epoch),
+                "last_seen": record.and_then(|r| r.lease_ok_at)
+                    .map(bunko_remote::status::format_iso_ms)}}),
         Some(LeaseEvent::Standby { holder: m }) => {
             json!({"state": "standby", "can_take_over": true, "holder": holder(&m)})
         }
@@ -1161,6 +1176,30 @@ impl bunko_remote::token_dyn::TokenSourceDyn for DynToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the Storage panel's Lease showed Epoch and Last seen as "-" while
+    /// this Bunko held the lease: they came only from another holder's marker.
+    #[test]
+    fn a_held_lease_shows_our_epoch_and_last_confirmation() {
+        use bunko_remote::status::{LeaseEvent, LeaseRecord, LeaseRecordState};
+        let record = LeaseRecord {
+            lease_epoch: 3,
+            lease_state: LeaseRecordState::Holder,
+            lease_ok_at: Some(1_792_303_136_123),
+            ..LeaseRecord::default()
+        };
+        let v = lease_json(Some(LeaseEvent::Acquired), None, Some(record), "me");
+        assert_eq!(v["state"], "held");
+        assert_eq!(
+            v["holder"],
+            json!({"instance_id": "me", "ours": true, "epoch": 3,
+                "last_seen": "2026-10-18T05:58:56.123Z"})
+        );
+        // No record yet: nothing to show, but the panel's fields are there.
+        let v = lease_json(Some(LeaseEvent::Acquired), None, None, "me");
+        assert_eq!(v["holder"]["epoch"], Value::Null);
+        assert_eq!(v["holder"]["last_seen"], Value::Null);
+    }
 
     #[test]
     fn store_ids_separate_every_field() {

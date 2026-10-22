@@ -1335,6 +1335,11 @@ pub struct Fence {
 }
 
 impl Fence {
+    /// The lease's persisted state as it stands (epoch, `lease_ok_at`, ...).
+    pub fn record(&self) -> LeaseRecord {
+        self.record.lock().clone()
+    }
+
     /// [`Lease::fence_ok`] at `now_ms` (local unix ms).
     pub fn ok_at(&self, now_ms: i64) -> bool {
         fence_open(&self.record.lock(), self.window, now_ms)
