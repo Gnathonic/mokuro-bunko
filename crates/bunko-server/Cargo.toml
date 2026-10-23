@@ -81,8 +81,6 @@ bunko-processor.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
 image.workspace = true
-# differential_053: the shared DAV differential harness (bunko-dav/tests/common/diff.rs).
-quick-xml.workspace = true
 # cloud_readonly: a server whose library is the in-memory FakeBackend.
 bunko-server = { path = ".", features = ["testing"] }
 bunko-remote = { workspace = true, features = ["testing"] }

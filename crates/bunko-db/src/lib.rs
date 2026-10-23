@@ -1,10 +1,10 @@
-//! `mokuro.db`: the SQLite database of mokuro-bunko, a drop-in over 0.5.2 files.
+//! `mokuro.db`: the SQLite database of mokuro-bunko.
 //!
-//! The same file keeps working in both directions: this crate opens any 0.5.2 (or older)
-//! database and upgrades it with 0.5.2's own idempotent steps, and a database it created
-//! or touched opens in Python 0.5.2 (a rollback) with identical schema text, row formats
-//! and JSON spellings. `tests/golden/` holds the Python-made fixtures and the scripts that
-//! check both directions.
+//! This crate opens any database Python 0.5.x (or older) made and upgrades it in place;
+//! `tests/golden/` holds the Python-made fixtures that pin the upgrade. The other direction
+//! is not kept: a database this crate created or touched is not meant to open in Python
+//! 0.5.x again (going back to 0.5.x is not supported), so the schema can change with a
+//! migration of its own.
 //!
 //! Everything is synchronous. [`Database`] is `Send + Sync`; share it as
 //! `Arc<Database>` and call it from `spawn_blocking`. See [`database`] for the connection

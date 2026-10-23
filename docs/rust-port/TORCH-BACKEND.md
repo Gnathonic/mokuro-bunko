@@ -688,8 +688,7 @@ shootout's 0.64 / 0.95; re-measure on a quiet host.
 
 The tests below need model files, sample archives, a backend pack, the 0.5.2 reference or
 the network and are `#[ignore]`d, so a plain `cargo test` never runs them. (Other
-data-dependent tests skip themselves when their data is missing: bunko-db `golden_rust_to_py`,
-bunko-ocr `pages_golden`, bunko-vlm `golden`'s detokenizer cases and `parity`.) On a machine
+data-dependent tests skip themselves when their data is missing: bunko-ocr `pages_golden`, bunko-vlm `golden`'s detokenizer cases and `parity`.) On a machine
 with the data
 (release builds; each file's doc comment lists its variables):
 

@@ -3,9 +3,9 @@
 //! 0.5.3 is 0.5.2 with the materialized catalog keyed by folder (`catalog_folders`, see
 //! `CATALOG_FOLDERS_DDL`) instead of by folded series key (`catalog_series`).
 //!
-//! The DDL strings are 0.5.3's byte for byte, indentation included: SQLite keeps the
-//! statement text in `sqlite_master.sql`, so a database created here is
-//! indistinguishable from one Python created (pinned by the golden schema test).
+//! The DDL strings are 0.5.3's byte for byte, indentation included, as the 0.7 switch
+//! from Python left them; going back to 0.5.x is not supported, so a later change adds its
+//! own migration step here and updates the golden schema baselines with it.
 //!
 //! Every step is idempotent (`IF NOT EXISTS`, `PRAGMA table_info` probes), as in 0.5.2;
 //! nothing is gated on `schema_version`, which is bookkeeping only. Differences:
@@ -122,8 +122,8 @@ const COMMUNITY_DETAILS_DDL: &str = "
 /// One row per series FOLDER (0.5.3). Up to 0.5.2 this was `catalog_series`, keyed by the
 /// folded series key, so `Kingdom/` and `kingdom/` shared one row and whichever the pass
 /// reached last hid the other's volumes from the catalog. That table is no longer created,
-/// read or written: one an older build left behind stays exactly as it was, so a rollback to
-/// 0.5.2 finds it in the shape its own `ON CONFLICT(series_key)` upsert needs.
+/// read or written; one an older build left behind is simply ignored (the startup pass
+/// rebuilds the catalog anyway).
 const CATALOG_FOLDERS_DDL: &str = "
                 CREATE TABLE IF NOT EXISTS catalog_folders (
                     folder_name TEXT PRIMARY KEY,

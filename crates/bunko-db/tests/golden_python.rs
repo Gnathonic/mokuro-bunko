@@ -114,7 +114,7 @@ fn a_fresh_rust_schema_is_byte_identical_to_python() {
 }
 
 /// A 0.5.3 database opens unchanged; a 0.5.2 one gains exactly what 0.5.3 gives it
-/// (`catalog_folders`, nothing else: its `catalog_series` is left as it was).
+/// (`catalog_folders`).
 #[test]
 fn a_python_database_opens_as_python_053_opens_it() {
     for (tag, want) in [
@@ -125,28 +125,14 @@ fn a_python_database_opens_as_python_053_opens_it() {
         ),
     ] {
         let (_dir, path) = copy_fixture(&format!("{tag}.db"));
-        let before = schema_rows(&path);
         drop(open(&path));
         assert_eq!(schema_rows(&path), want, "{tag}");
-        assert_legacy_table_untouched(&before, &schema_rows(&path), tag);
         let version: i64 = rusqlite::Connection::open(&path)
             .unwrap()
             .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, 6);
     }
-}
-
-/// The 0.5.2 `catalog_series` DDL, where a file has one, is byte-identical after an open.
-fn assert_legacy_table_untouched(before: &Value, after: &Value, tag: &str) {
-    let legacy = |rows: &Value| {
-        rows.as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r[1] == "catalog_series")
-            .cloned()
-    };
-    assert_eq!(legacy(before), legacy(after), "{tag}: catalog_series DDL");
 }
 
 fn users_and_passwords(tag: &str) {
@@ -427,42 +413,17 @@ fn series_tables_read_back_and_rewrite_byte_identically(tag: &str) {
     }
 
     // The catalog: 0.5.3 reads `catalog_folders` only. A 0.5.2 file's rows are in
-    // `catalog_series`, which is left exactly as it was (the first pass rebuilds the folder
-    // rows; the listing falls back to the scanning index until then).
-    let (catalog, legacy) = if tag == "py052" {
-        let rows = |v: &Value| -> Value {
-            Value::Array(
-                v.as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|r| {
-                        json!([
-                            r["series_key"],
-                            r["folder_name"],
-                            r["volume_count"],
-                            r["total_pages"]
-                        ])
-                    })
-                    .collect(),
-            )
-        };
-        (
-            manifest("upgrade053.json")["py052"]["catalog"].clone(),
-            rows(&m["catalog_series"]),
-        )
+    // `catalog_series`, which is ignored (the first pass rebuilds the folder rows; the
+    // listing falls back to the scanning index until then).
+    let catalog = if tag == "py052" {
+        manifest("upgrade053.json")["py052"]["catalog"].clone()
     } else {
-        (
-            m["catalog_series"].clone(),
-            m["legacy_catalog_series"].clone(),
-        )
+        m["catalog_series"].clone()
     };
     assert_eq!(
         serde_json::to_value(db.list_catalog_series().unwrap()).unwrap(),
         catalog
     );
-    let legacy_sql = "SELECT series_key, folder_name, volume_count, total_pages \
-                      FROM catalog_series ORDER BY series_key";
-    assert_eq!(query(&conn, legacy_sql), legacy);
     let community = db.list_community_details().unwrap();
     assert_eq!(
         serde_json::to_value(&community).unwrap(),
@@ -507,11 +468,6 @@ fn a_legacy_database_is_migrated_as_python_053_migrates_it() {
     assert_eq!(
         q("SELECT code, role, invited_by, expires_at FROM invites ORDER BY id"),
         c["invites"]
-    );
-    // 0.5.2 gave the legacy table its damage columns; 0.5.3 leaves it as it was.
-    assert_eq!(
-        q("SELECT series_key, folder_name, volume_count FROM catalog_series ORDER BY series_key"),
-        c["catalog_series"]
     );
     assert_eq!(
         q("SELECT series_key, folder_name, volume_count FROM catalog_folders ORDER BY folder_name"),
@@ -598,13 +554,4 @@ fn a_case_merged_library_reads_back_as_python_053_left_it() {
         .map(|r| (r.folder_name, r.volume_count))
         .collect();
     assert_eq!(kingdom, [("Kingdom".to_string(), 13)]);
-    // 0.5.2's table still holds what 0.5.2 last wrote, for a rollback.
-    let conn = rusqlite::Connection::open(&path).unwrap();
-    assert_eq!(
-        query(
-            &conn,
-            "SELECT series_key, folder_name, volume_count, total_pages FROM catalog_series"
-        ),
-        m["legacy_catalog_series"]
-    );
 }

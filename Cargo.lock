@@ -808,7 +808,6 @@ dependencies = [
  "notify",
  "parking_lot",
  "percent-encoding",
- "quick-xml",
  "rand 0.9.5",
  "rcgen",
  "reqwest",
