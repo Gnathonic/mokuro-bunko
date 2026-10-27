@@ -1,0 +1,50 @@
+name: Interop
+
+# The cross-party test rig (docs/design/interop-testing.md). I0: the catalog and series
+# views on a generated 2,000-series library, held to interop/budgets.toml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: interop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  catalog-perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: interop/package-lock.json
+      - name: build the server (lite, release)
+        run: cargo build --release -p mokuro-bunko --no-default-features --locked
+      - name: Playwright and Chromium
+        working-directory: interop
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: catalog-perf
+        run: cargo xtask interop catalog-perf --bin target/release/mokuro-bunko --browser
+      - name: results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-perf
+          path: |
+            target/interop/catalog-perf.json
+            target/interop/work/*/serve.log
+          if-no-files-found: ignore

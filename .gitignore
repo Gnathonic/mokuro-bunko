@@ -45,3 +45,6 @@ start-mokuro-bunko.cmd
 # Rust
 # Cargo build output in any crate or packaging directory.
 target/
+
+# interop rig (cargo xtask interop)
+/interop/node_modules/

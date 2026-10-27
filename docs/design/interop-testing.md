@@ -270,7 +270,7 @@ one is a visible edit in the PR that needs it.
   | `/catalog/api/series` server time, warm / cold | ≤ 5 ms / ≤ 50 ms |
   | catalog page: first cards shown | ≤ 400 ms |
   | small series in a large catalog: rendered | ≤ 150 ms |
-  | requests needed before first cards show | ≤ 8 |
+  | requests needed before first cards show | ≤ 10 (the page, 2 stylesheets, 2 scripts, 5 API calls in parallel; exact) |
 
   None of these may grow with the number of series beyond the list itself: the rig runs
   the series view at 200 and at 2,000 series, and fails if it is more than 20 % slower at

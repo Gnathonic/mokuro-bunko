@@ -1,0 +1,10 @@
+{
+  "name": "mokuro-bunko-interop",
+  "private": true,
+  "description": "Browser scenarios for `cargo xtask interop` (docs/design/interop-testing.md).",
+  "type": "module",
+  "license": "MPL-2.0",
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}
