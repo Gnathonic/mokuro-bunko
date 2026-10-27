@@ -76,6 +76,11 @@
   as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
 
 ### Fixed
+- **The catalog and series pages no longer stall on a large library.** Every 30 seconds,
+  and after every change to the library (which during OCR is often), the next catalog or
+  series request walked the whole library folder before answering, so opening even a
+  small series could take seconds. Requests now answer at once from the last index while
+  one walk refreshes it in the background; only the first request after a start waits.
 - **Uploading through Bunko into a cloud library works.** Every WebDAV PUT into a
   Google Drive, OneDrive, MEGA or WebDAV library failed with a server error (500, "this
   store has no local file to open"), so neither Mokuro Reader nor an uploader could add

@@ -285,13 +285,68 @@ fn library_index_cache_ttl_and_invalidation() {
     let (_, scans) = cache.get_snapshot_counted();
     assert_eq!(scans, 1, "served from cache within the TTL");
     cache.invalidate();
-    // A fast scan is dropped on invalidation: the next read rescans.
-    let (_, scans) = cache.get_snapshot_counted();
-    assert_eq!(scans, 2);
+    // A fast scan is dropped on invalidation: a read that must see the change walks.
+    cache.get_snapshot_fresh();
+    assert_eq!(cache.scans(), 2);
+    cache.get_snapshot_fresh();
+    assert_eq!(cache.scans(), 2, "nothing changed since: no second walk");
     let expired = LibraryIndexCache::new(&root, Duration::ZERO, 1 << 20);
     expired.get_snapshot();
     expired.get_snapshot();
-    assert_eq!(expired.scans(), 2);
+    wait_for_scans(&expired, 2);
+}
+
+/// Wait (up to 5 s) for the cache to reach `scans` scans.
+fn wait_for_scans(cache: &LibraryIndexCache, scans: u64) {
+    for _ in 0..500 {
+        if cache.scans() >= scans {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the cache stayed at {} scans", cache.scans());
+}
+
+/// A request never walks the library once there is a snapshot: a stale or expired index
+/// answers at once with the last one, and one background walk brings it up to date.
+#[test]
+fn a_stale_index_answers_at_once_and_refreshes_in_the_background() {
+    let (_temp, root) = fixture_library();
+    let cache = LibraryIndexCache::new(&root, Duration::from_secs(30), 1 << 20);
+    let (first, scans) = cache.get_snapshot_counted();
+    assert_eq!(scans, 1, "the very first read waits for the first walk");
+    let volumes = |s: &bunko_library::index::LibrarySnapshot| {
+        s.series_by_name("Nested/Inner").unwrap().volumes.len()
+    };
+    let before = volumes(&first);
+
+    std::fs::write(root.join("Nested/Inner/Brand New.cbz"), b"").unwrap();
+    cache.invalidate();
+    let (served, scans) = cache.get_snapshot_counted();
+    assert_eq!(
+        scans, 1,
+        "a changed index answers without walking the library"
+    );
+    assert!(Arc::ptr_eq(&served, &first));
+    wait_for_scans(&cache, 2);
+    let (fresh, scans) = cache.get_snapshot_counted();
+    assert_eq!(scans, 2);
+    assert_eq!(
+        volumes(&fresh),
+        before + 1,
+        "the background walk saw the new volume"
+    );
+
+    // Past the TTL with nothing changed: the same.
+    let expired = LibraryIndexCache::new(&root, Duration::ZERO, 1 << 20);
+    let (old, _) = expired.get_snapshot_counted();
+    let (served, scans) = expired.get_snapshot_counted();
+    assert_eq!(
+        scans, 1,
+        "an expired index answers without walking the library"
+    );
+    assert!(Arc::ptr_eq(&served, &old));
+    wait_for_scans(&expired, 2);
 }
 
 #[test]

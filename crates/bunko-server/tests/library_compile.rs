@@ -157,7 +157,7 @@ async fn watcher_recompiles_a_series_after_a_volume_arrives() {
     );
 
     // The index sees the new volume too (it was invalidated).
-    let snapshot = env.runtime.index().get_snapshot();
+    let snapshot = env.runtime.index().get_snapshot_fresh();
     assert_eq!(snapshot.series_by_name("Aria").unwrap().volumes.len(), 2);
     assert_eq!(env.runtime.counts().total_volumes().unwrap(), 2);
 
