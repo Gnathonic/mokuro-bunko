@@ -80,7 +80,8 @@
   and after every change to the library (which during OCR is often), the next catalog or
   series request walked the whole library folder before answering, so opening even a
   small series could take seconds. Requests now answer at once from the last index while
-  one walk refreshes it in the background; only the first request after a start waits.
+  one walk refreshes it in the background. Right after a start, before the first walk has
+  finished, a series page reads only that series' folder.
 - **Uploading through Bunko into a cloud library works.** Every WebDAV PUT into a
   Google Drive, OneDrive, MEGA or WebDAV library failed with a server error (500, "this
   store has no local file to open"), so neither Mokuro Reader nor an uploader could add

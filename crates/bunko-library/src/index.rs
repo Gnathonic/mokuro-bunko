@@ -202,6 +202,28 @@ pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
     snapshot
 }
 
+/// The series `name` (a relative `/` path) as [`scan_library`] would list it, reading
+/// only its folder: `None` where the walk would not reach it (a hidden or symlinked
+/// folder on the way) or would not list it (no volumes).
+fn scan_one_series(library_path: &Path, name: &str) -> Option<SeriesSnapshot> {
+    let mut dir = library_path.to_path_buf();
+    for part in name.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.starts_with('.') {
+            return None;
+        }
+        dir.push(part);
+        if bunko_store::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return None;
+        }
+    }
+    if !fsutil::is_dir(&dir) {
+        return None;
+    }
+    let mut snapshot = LibrarySnapshot::default();
+    scan_dir(&dir, name, &mut snapshot);
+    snapshot.series.pop()
+}
+
 struct CacheState {
     snapshot: Option<Arc<LibrarySnapshot>>,
     snapshot_time: Instant,
@@ -309,6 +331,19 @@ impl LibraryIndexCache {
             Some((snapshot, _)) => snapshot,
             None => self.0.scan(true).0,
         }
+    }
+
+    /// One series as [`get_snapshot`](Self::get_snapshot) would list it. Before the
+    /// first walk has finished, only that series' folder is listed (and the walk starts
+    /// in the background), so a series view right after startup does not wait for the
+    /// whole library.
+    pub fn series(&self, name: &str) -> Option<SeriesSnapshot> {
+        let walked = self.0.state.lock().last.is_some();
+        if walked {
+            return self.get_snapshot().series_by_name(name).cloned();
+        }
+        self.refresh_in_background();
+        scan_one_series(&self.0.library_path, name)
     }
 
     /// The last snapshot, however old, without ever scanning.

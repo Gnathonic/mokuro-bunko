@@ -349,6 +349,35 @@ fn a_stale_index_answers_at_once_and_refreshes_in_the_background() {
     wait_for_scans(&expired, 2);
 }
 
+/// Before the first walk, one series is read from its own folder, and it matches what
+/// the walk lists; folders the walk would not list are not served either.
+#[test]
+fn a_cold_index_lists_one_series_from_its_folder() {
+    let (_temp, root) = fixture_library();
+    std::fs::create_dir_all(root.join(".hidden")).unwrap();
+    std::fs::write(root.join(".hidden/Vol 1.cbz"), b"").unwrap();
+    std::fs::create_dir_all(root.join("Empty")).unwrap();
+    let walked = bunko_library::index::scan_library(&root);
+    assert!(!walked.series.is_empty());
+    for series in &walked.series {
+        let cold = LibraryIndexCache::new(&root, Duration::from_secs(30), 1 << 20);
+        assert_eq!(
+            cold.series(&series.name).as_ref(),
+            Some(series),
+            "{}",
+            series.name
+        );
+    }
+    let cold = LibraryIndexCache::new(&root, Duration::from_secs(30), 1 << 20);
+    for name in [".hidden", "Empty", "Missing", "../library", "", "Nested/"] {
+        assert_eq!(cold.series(name), None, "{name:?}");
+    }
+    // The first read started the walk; once it is done, reads come from it.
+    wait_for_scans(&cold, 1);
+    let first = &walked.series[0];
+    assert_eq!(cold.series(&first.name).as_ref(), Some(first));
+}
+
 #[test]
 fn shared_types_are_thread_safe() {
     fn assert_send_sync<T: Send + Sync>() {}

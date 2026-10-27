@@ -298,8 +298,7 @@ fn get_series(deps: &LibraryDeps, name: &str) -> Response {
     if !is_within(&series_dir, &base) {
         return json_error(403, "Forbidden");
     }
-    let snapshot = deps.runtime.index().get_snapshot();
-    let Some(series) = snapshot.series_by_name(name) else {
+    let Some(series) = deps.runtime.index().series(name) else {
         return json_error(404, "Series not found");
     };
     let progress = active_progress(deps);
