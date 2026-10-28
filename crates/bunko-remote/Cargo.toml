@@ -70,6 +70,8 @@ bunko-mega = { path = "../bunko-mega", optional = true }
 zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
+# tests/{gdrive,onedrive}_mock.rs: the cloud simulator, in-process.
+bunko-cloudsim = { path = "../bunko-cloudsim" }
 # tests/mega_mock.rs: the in-process MEGA mock.
 bunko-mega = { path = "../bunko-mega", features = ["mock"] }
 # Turns on `testing` for this crate's own integration tests.

@@ -1,0 +1,24 @@
+[package]
+name = "bunko-cloudsim"
+description = "cloudsim: one HTTP server that plays Google Drive v3, Microsoft Graph (OneDrive) and MEGA for tests, with a control API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "signal"] }
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+hex.workspace = true
+md-5 = "0.10"
+sha2.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile.workspace = true

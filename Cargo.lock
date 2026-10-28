@@ -455,6 +455,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bunko-cloudsim"
+version = "0.7.3"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "hex",
+ "md-5",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "time",
+ "tokio",
+]
+
+[[package]]
 name = "bunko-control"
 version = "0.7.3"
 dependencies = [
@@ -728,6 +746,7 @@ version = "0.7.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "bunko-cloudsim",
  "bunko-core",
  "bunko-dav",
  "bunko-library",

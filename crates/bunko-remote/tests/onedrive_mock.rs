@@ -1,8 +1,10 @@
-//! OneDriveBackend against an in-memory mock of the Microsoft Graph v1.0 endpoints it
-//! uses (plus the pre-authenticated download, upload-session and copy-monitor hosts).
+//! OneDriveBackend against cloudsim's Microsoft Graph v1.0 (`bunko_cloudsim`), with the
+//! pre-authenticated download, upload-session and copy-monitor URLs; the simulator the
+//! reader and the interop rig use too. Dropping the simulator fails the test if it saw
+//! a request it could not accept.
 #![cfg(feature = "onedrive")]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -10,11 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use axum::Router;
-use axum::body::Bytes;
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
-use axum::response::{IntoResponse, Response};
+use bunko_cloudsim::onedrive::{ROOT, Req};
+use bunko_cloudsim::{CloudSim, OneDriveHandle};
 use bunko_remote::backend::{
     BErr, Backend, ChangeItem, ChangePage, Cursor, HashKind, OpCtx, RNode, UploadSource,
     UploadTarget, read_to_vec,
@@ -25,872 +24,31 @@ use bunko_remote::onedrive::{
     FRAGMENT_MULTIPLE, OneDriveBackend, OneDriveConfig, StaticToken, TokenSourceDyn,
 };
 use futures_util::StreamExt;
-use parking_lot::Mutex;
-use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-
-// ---------------------------------------------------------------- the mock
-
-const ROOT: &str = "ROOT";
-
-struct MItem {
-    name: String,
-    parent: Option<String>,
-    folder: bool,
-    data: Bytes,
-    created: i64,
-    modified: i64,
-    etag_n: u64,
-    ctag_n: u64,
-    deleted: bool,
-}
-
-enum SessKind {
-    New { parent: String, name: String },
-    Replace(String),
-}
-
-struct Sess {
-    kind: SessKind,
-    size: usize,
-    buf: Vec<u8>,
-}
-
-struct Monitor {
-    polls_left: usize,
-    src: String,
-    parent: String,
-    name: String,
-}
-
-#[derive(Debug, Clone)]
-struct Req {
-    method: String,
-    /// Decoded, without the `/v1.0` prefix.
-    path: String,
-    query: HashMap<String, String>,
-    auth: Option<String>,
-    if_match: Option<String>,
-    content_range: Option<String>,
-    user_agent: Option<String>,
-}
-
-#[derive(Clone)]
-struct Fault {
-    method: Option<&'static str>,
-    path_has: String,
-    status: u16,
-    code: &'static str,
-    retry_after: Option<u64>,
-    times: usize,
-}
-
-struct St {
-    host: String,
-    items: BTreeMap<String, MItem>,
-    seq: u64,
-    clock: i64,
-    log: Vec<String>,
-    /// Delta tokens below this answer 410.
-    lost_below: usize,
-    page_size: usize,
-    sessions: HashMap<String, Sess>,
-    valid_token: String,
-    faults: Vec<Fault>,
-    requests: Vec<Req>,
-    /// Fail this (1-based) fragment PUT after taking half its bytes.
-    interrupt_fragment: Option<usize>,
-    down_after_interrupt: bool,
-    session_down: bool,
-    fragment_puts: usize,
-    monitors: HashMap<String, Monitor>,
-    send_ctag: bool,
-    /// The download's CTag in the storage host's own form, `{id},N,1` (personal
-    /// OneDrive, seen live 2026-10-14), not the JSON `c:{id},N`.
-    storage_ctag: bool,
-    ignore_range: bool,
-    permanent_delete: bool,
-    quota_total: i64,
-    /// A pre-authenticated host (download, upload session, monitor) saw a token.
-    preauth_saw_auth: bool,
-}
-
-#[derive(Clone)]
-struct Mock(Arc<Mutex<St>>);
-
-fn rfc3339(ms: i64) -> String {
-    let t = time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000).unwrap();
-    t.format(&time::format_description::well_known::Rfc3339)
-        .unwrap()
-}
-
-fn err(status: u16, code: &str) -> Response {
-    let body = json!({"error": {"code": code, "message": code, "innerError": {"code": code}}});
-    (StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response()
-}
-
-fn ok_json(v: Value) -> Response {
-    axum::Json(v).into_response()
-}
-
-fn status_json(s: u16, v: Value) -> Response {
-    (StatusCode::from_u16(s).unwrap(), axum::Json(v)).into_response()
-}
-
-fn pct_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            let h = std::str::from_utf8(&b[i + 1..i + 3]).unwrap();
-            out.push(u8::from_str_radix(h, 16).unwrap());
-            i += 3;
-        } else {
-            out.push(b[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).unwrap()
-}
-
-fn bare(t: &str) -> &str {
-    t.trim().trim_matches('"')
-}
-
-impl St {
-    fn base(&self) -> String {
-        format!("{}/v1.0", self.host)
-    }
-
-    fn tick(&mut self) -> i64 {
-        self.clock += 1000;
-        self.clock
-    }
-
-    fn new_id(&mut self, prefix: &str) -> String {
-        self.seq += 1;
-        format!("{prefix}{:05}", self.seq)
-    }
-
-    fn etag(&self, id: &str) -> String {
-        format!("\"{{{id}}},{}\"", self.items[id].etag_n)
-    }
-
-    fn ctag(&self, id: &str) -> String {
-        format!("\"c:{{{id}}},{}\"", self.items[id].ctag_n)
-    }
-
-    fn live(&self, id: &str) -> bool {
-        self.items.get(id).is_some_and(|i| !i.deleted)
-    }
-
-    fn json(&self, id: &str) -> Value {
-        let f = &self.items[id];
-        if f.deleted {
-            // Consumer accounts: no name on a delete.
-            return json!({"id": id, "deleted": {"state": "deleted"},
-                "parentReference": {"id": f.parent, "driveId": "drive1"}});
-        }
-        let mut v = json!({
-            "id": id, "name": f.name, "eTag": self.etag(id), "cTag": self.ctag(id),
-            "createdDateTime": rfc3339(f.created),
-            "lastModifiedDateTime": rfc3339(f.modified),
-            // Client-settable and deliberately different: the driver must not use it.
-            "fileSystemInfo": {"lastModifiedDateTime": rfc3339(f.modified - 31_536_000_000)},
-        });
-        if let Some(p) = &f.parent {
-            v["parentReference"] = json!({"id": p, "driveId": "drive1"});
-        } else {
-            v["root"] = json!({});
-        }
-        if f.folder {
-            v["folder"] = json!({"childCount": self.kids(id).len()});
-            v["size"] = json!(0);
-        } else {
-            v["size"] = json!(f.data.len());
-            v["file"] = json!({"mimeType": "application/octet-stream",
-                "hashes": {"quickXorHash": quickxor_base64(&f.data)}});
-        }
-        v
-    }
-
-    fn kids(&self, id: &str) -> Vec<String> {
-        self.items
-            .iter()
-            .filter(|(_, f)| f.parent.as_deref() == Some(id) && !f.deleted)
-            .map(|(k, _)| k.clone())
-            .collect()
-    }
-
-    /// OneDrive is case-insensitive: the live child of `parent` folding to `name`.
-    fn child(&self, parent: &str, name: &str) -> Option<String> {
-        self.kids(parent)
-            .into_iter()
-            .find(|k| self.items[k].name.to_lowercase() == name.to_lowercase())
-    }
-
-    /// Log a change of `id`; its ancestors show up in delta too.
-    fn touch(&mut self, id: &str) {
-        self.log.push(id.to_string());
-        let mut cur = self.items[id].parent.clone();
-        while let Some(p) = cur {
-            self.log.push(p.clone());
-            cur = self.items[&p].parent.clone();
-        }
-    }
-
-    fn insert(&mut self, parent: &str, name: &str, folder: bool, data: Bytes) -> String {
-        let id = self.new_id(if folder { "D" } else { "F" });
-        let now = self.tick();
-        self.items.insert(
-            id.clone(),
-            MItem {
-                name: name.into(),
-                parent: Some(parent.into()),
-                folder,
-                data,
-                created: now,
-                modified: now,
-                etag_n: 1,
-                ctag_n: 1,
-                deleted: false,
-            },
-        );
-        self.touch(&id);
-        id
-    }
-
-    fn rewrite(&mut self, id: &str, data: Bytes) {
-        let now = self.tick();
-        let f = self.items.get_mut(id).unwrap();
-        f.data = data;
-        f.etag_n += 1;
-        f.ctag_n += 1;
-        f.modified = now;
-        self.touch(id);
-    }
-
-    fn delete(&mut self, id: &str) {
-        for k in self.kids(id) {
-            self.delete(&k);
-        }
-        self.items.get_mut(id).unwrap().deleted = true;
-        self.log.push(id.to_string());
-    }
-
-    /// `If-Match` against the eTag or the cTag.
-    fn matches(&self, id: &str, if_match: Option<&str>) -> bool {
-        if_match.is_none_or(|t| bare(t) == bare(&self.etag(id)) || bare(t) == bare(&self.ctag(id)))
-    }
-}
-
-fn media(data: &Bytes, headers: &HeaderMap, ignore_range: bool) -> Response {
-    let r = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
-    let Some(r) = r.filter(|_| !ignore_range) else {
-        return (StatusCode::OK, data.clone()).into_response();
-    };
-    let spec = r.strip_prefix("bytes=").unwrap();
-    let (a, b) = spec.split_once('-').unwrap();
-    let a: usize = a.parse().unwrap();
-    if a >= data.len() {
-        return err(416, "invalidRange");
-    }
-    let end = if b.is_empty() {
-        data.len()
-    } else {
-        (b.parse::<usize>().unwrap() + 1).min(data.len())
-    };
-    (
-        StatusCode::PARTIAL_CONTENT,
-        [(
-            header::CONTENT_RANGE,
-            format!("bytes {a}-{}/{}", end - 1, data.len()),
-        )],
-        data.slice(a..end),
-    )
-        .into_response()
-}
-
-fn hdr(headers: &HeaderMap, name: header::HeaderName) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-}
-
-async fn handle(
-    State(m): State<Mock>,
-    method: Method,
-    uri: Uri,
-    Query(q): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let mut st = m.0.lock();
-    let raw_path = uri.path().to_string();
-    let graph = raw_path.starts_with("/v1.0/");
-    let segs: Vec<String> = raw_path
-        .trim_start_matches("/v1.0")
-        .trim_start_matches('/')
-        .split('/')
-        .map(pct_decode)
-        .collect();
-    let path = format!("/{}", segs.join("/"));
-    let auth = hdr(&headers, header::AUTHORIZATION);
-    let if_match = hdr(&headers, header::IF_MATCH);
-    st.requests.push(Req {
-        method: method.to_string(),
-        path: path.clone(),
-        query: q.clone(),
-        auth: auth.clone(),
-        if_match: if_match.clone(),
-        content_range: hdr(&headers, header::CONTENT_RANGE),
-        user_agent: hdr(&headers, header::USER_AGENT),
-    });
-    if graph {
-        if auth.as_deref() != Some(&format!("Bearer {}", st.valid_token)) {
-            return err(401, "InvalidAuthenticationToken");
-        }
-    } else if auth.is_some() {
-        st.preauth_saw_auth = true;
-        return err(401, "tokenNotExpected");
-    }
-    if let Some(i) = st
-        .faults
-        .iter()
-        .position(|f| f.method.is_none_or(|mm| mm == method.as_str()) && path.contains(&f.path_has))
-    {
-        let f = st.faults[i].clone();
-        if f.times <= 1 {
-            st.faults.remove(i);
-        } else {
-            st.faults[i].times -= 1;
-        }
-        let mut r = err(f.status, f.code);
-        if let Some(s) = f.retry_after {
-            r.headers_mut()
-                .insert(header::RETRY_AFTER, s.to_string().parse().unwrap());
-        }
-        return r;
-    }
-    let base = st.base();
-    let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
-    if !graph {
-        return match (method.as_str(), segs.as_slice()) {
-            ("GET", ["preauth", id]) => {
-                if !st.live(id) {
-                    return err(404, "itemNotFound");
-                }
-                let mut r = media(&st.items[*id].data.clone(), &headers, st.ignore_range);
-                let etag = st.etag(id);
-                r.headers_mut().insert(header::ETAG, etag.parse().unwrap());
-                if st.send_ctag {
-                    let ctag = if st.storage_ctag {
-                        format!("{{{id}}},{},1", st.items[*id].ctag_n)
-                    } else {
-                        st.ctag(id)
-                    };
-                    r.headers_mut().insert("ctag", ctag.parse().unwrap());
-                }
-                r
-            }
-            ("GET", ["upload", sid]) => match st.sessions.get(*sid) {
-                Some(s) => ok_json(json!({
-                    "expirationDateTime": "2099-01-01T00:00:00Z",
-                    "nextExpectedRanges": [format!("{}-{}", s.buf.len(), s.size - 1)],
-                })),
-                None => err(404, "itemNotFound"),
-            },
-            ("PUT", ["upload", sid]) => upload_fragment(&mut st, sid, &headers, &body),
-            ("GET", ["monitor", mid]) => {
-                let Some(mon) = st.monitors.get_mut(*mid) else {
-                    return err(404, "itemNotFound");
-                };
-                if mon.polls_left > 0 {
-                    mon.polls_left -= 1;
-                    return status_json(
-                        202,
-                        json!({"operation": "itemCopy", "status": "inProgress", "percentageComplete": 50.0}),
-                    );
-                }
-                let mon = st.monitors.remove(*mid).unwrap();
-                if st.child(&mon.parent, &mon.name).is_some() {
-                    return ok_json(
-                        json!({"status": "failed", "error": {"code": "nameAlreadyExists", "message": "exists"}}),
-                    );
-                }
-                let (folder, data) = {
-                    let s = &st.items[&mon.src];
-                    (s.folder, s.data.clone())
-                };
-                let id = st.insert(&mon.parent, &mon.name, folder, data);
-                ok_json(json!({"status": "completed", "resourceId": id}))
-            }
-            _ => panic!("mock: unhandled {method} {raw_path}"),
-        };
-    }
-    match (method.as_str(), segs.as_slice()) {
-        ("GET", ["me", "drive"]) => {
-            let used: usize = st
-                .items
-                .values()
-                .filter(|f| !f.deleted)
-                .map(|f| f.data.len())
-                .sum();
-            ok_json(json!({
-                "id": "drive1", "driveType": "personal",
-                "owner": {"user": {"id": "user-1", "displayName": "Me", "email": "me@example.com"}},
-                "quota": {"total": st.quota_total, "used": used, "remaining": st.quota_total - used as i64, "state": "normal"},
-            }))
-        }
-        ("GET", ["me", "drive", "root:", name]) => match st.child(ROOT, name) {
-            Some(id) => ok_json(st.json(&id)),
-            None => err(404, "itemNotFound"),
-        },
-        ("POST", ["me", "drive", "root", "children"]) => mkdir(&mut st, ROOT, &body),
-        ("GET", ["me", "drive", "root", "delta"]) => {
-            let tok = q.get("token").cloned().unwrap_or_default();
-            if tok == "latest" {
-                return ok_json(json!({"value": [],
-                    "@odata.deltaLink": format!("{base}/me/drive/root/delta?token={}", st.log.len())}));
-            }
-            let at: usize = tok.parse().unwrap();
-            if at < st.lost_below || at > st.log.len() {
-                let mut r = err(410, "resyncRequired");
-                *r.body_mut() = axum::body::Body::from(
-                    json!({"error": {"code": "resyncRequired", "message": "resync",
-                        "innerError": {"code": "resyncChangesApplyDifferences"}}})
-                    .to_string(),
-                );
-                r.headers_mut().insert(
-                    header::LOCATION,
-                    format!("{base}/me/drive/root/delta").parse().unwrap(),
-                );
-                return r;
-            }
-            let end = (at + st.page_size).min(st.log.len());
-            let value: Vec<Value> = st.log[at..end].iter().map(|id| st.json(id)).collect();
-            let mut v = json!({"value": value});
-            let link = format!("{base}/me/drive/root/delta?token={end}");
-            if end < st.log.len() {
-                v["@odata.nextLink"] = json!(link);
-            } else {
-                v["@odata.deltaLink"] = json!(link);
-            }
-            ok_json(v)
-        }
-        // Path addressing: /me/drive/items/{parent}:/{name}[:/action]
-        (m, ["me", "drive", "items", pref, rest @ ..]) if pref.ends_with(':') => {
-            let parent = pref.trim_end_matches(':').to_string();
-            let name = rest[0].trim_end_matches(':').to_string();
-            let action = rest.get(1).copied();
-            if !st.live(&parent) {
-                return err(404, "itemNotFound");
-            }
-            match (m, action) {
-                ("GET", None) => match st.child(&parent, &name) {
-                    Some(id) => ok_json(st.json(&id)),
-                    None => err(404, "itemNotFound"),
-                },
-                ("PUT", Some("content")) => {
-                    assert_eq!(
-                        q.get("@microsoft.graph.conflictBehavior")
-                            .map(String::as_str),
-                        Some("fail")
-                    );
-                    if st.child(&parent, &name).is_some() {
-                        return err(409, "nameAlreadyExists");
-                    }
-                    let id = st.insert(&parent, &name, false, body);
-                    status_json(201, st.json(&id))
-                }
-                ("POST", Some("createUploadSession")) => {
-                    let b: Value = serde_json::from_slice(&body).unwrap();
-                    assert_eq!(b["item"]["@microsoft.graph.conflictBehavior"], "fail");
-                    if st.child(&parent, &name).is_some() {
-                        return err(409, "nameAlreadyExists");
-                    }
-                    new_session(&mut st, SessKind::New { parent, name }, &headers)
-                }
-                _ => panic!("mock: unhandled {method} {raw_path}"),
-            }
-        }
-        ("GET", ["me", "drive", "items", id]) => {
-            if !st.items.contains_key(*id) || st.items[*id].deleted {
-                return err(404, "itemNotFound");
-            }
-            ok_json(st.json(id))
-        }
-        ("PATCH", ["me", "drive", "items", id]) => {
-            let id = id.to_string();
-            if !st.live(&id) {
-                return err(404, "itemNotFound");
-            }
-            if !st.matches(&id, if_match.as_deref()) {
-                return err(412, "preconditionFailed");
-            }
-            let b: Value = serde_json::from_slice(&body).unwrap();
-            let new_parent = b["parentReference"]["id"]
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| st.items[&id].parent.clone().unwrap());
-            let new_name = b["name"]
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| st.items[&id].name.clone());
-            if !st.live(&new_parent) {
-                return err(404, "itemNotFound");
-            }
-            if st.child(&new_parent, &new_name).is_some_and(|c| c != id) {
-                return err(409, "nameAlreadyExists");
-            }
-            let f = st.items.get_mut(&id).unwrap();
-            f.parent = Some(new_parent);
-            f.name = new_name;
-            f.etag_n += 1;
-            st.touch(&id);
-            ok_json(st.json(&id))
-        }
-        ("DELETE", ["me", "drive", "items", id]) => {
-            let id = id.to_string();
-            if !st.live(&id) {
-                return err(404, "itemNotFound");
-            }
-            if !st.matches(&id, if_match.as_deref()) {
-                return err(412, "preconditionFailed");
-            }
-            st.delete(&id);
-            StatusCode::NO_CONTENT.into_response()
-        }
-        ("POST", ["me", "drive", "items", id, "permanentDelete"]) => {
-            if !st.permanent_delete {
-                return err(400, "invalidRequest");
-            }
-            let id = id.to_string();
-            if !st.live(&id) {
-                return err(404, "itemNotFound");
-            }
-            st.delete(&id);
-            StatusCode::NO_CONTENT.into_response()
-        }
-        ("GET", ["me", "drive", "items", id, "children"]) => {
-            let id = id.to_string();
-            if !st.live(&id) {
-                return err(404, "itemNotFound");
-            }
-            assert!(q.contains_key("$top"));
-            let kids = st.kids(&id);
-            let at: usize = q.get("$skiptoken").map_or(0, |s| s.parse().unwrap());
-            let end = (at + st.page_size).min(kids.len());
-            let value: Vec<Value> = kids[at..end].iter().map(|k| st.json(k)).collect();
-            let mut v = json!({"value": value});
-            if end < kids.len() {
-                v["@odata.nextLink"] = json!(format!(
-                    "{base}/me/drive/items/{id}/children?$top=2&$skiptoken={end}"
-                ));
-            }
-            ok_json(v)
-        }
-        ("POST", ["me", "drive", "items", id, "children"]) => {
-            let id = id.to_string();
-            if !st.live(&id) {
-                return err(404, "itemNotFound");
-            }
-            mkdir(&mut st, &id, &body)
-        }
-        ("GET", ["me", "drive", "items", id, "content"]) => {
-            if !st.live(id) || st.items[*id].folder {
-                return err(404, "itemNotFound");
-            }
-            Response::builder()
-                .status(302)
-                .header(header::LOCATION, format!("{}/preauth/{id}", st.host))
-                .body(axum::body::Body::empty())
-                .unwrap()
-        }
-        ("PUT", ["me", "drive", "items", id, "content"]) => {
-            let id = id.to_string();
-            if !st.live(&id) {
-                return err(404, "itemNotFound");
-            }
-            if !st.matches(&id, if_match.as_deref()) {
-                return err(412, "preconditionFailed");
-            }
-            st.rewrite(&id, body);
-            ok_json(st.json(&id))
-        }
-        ("POST", ["me", "drive", "items", id, "createUploadSession"]) => {
-            let id = id.to_string();
-            if !st.live(&id) {
-                return err(404, "itemNotFound");
-            }
-            let b: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(b["item"]["@microsoft.graph.conflictBehavior"], "replace");
-            if !st.matches(&id, if_match.as_deref()) {
-                return err(412, "preconditionFailed");
-            }
-            new_session(&mut st, SessKind::Replace(id), &headers)
-        }
-        ("POST", ["me", "drive", "items", id, "copy"]) => {
-            if !st.live(id) {
-                return err(404, "itemNotFound");
-            }
-            let b: Value = serde_json::from_slice(&body).unwrap();
-            let mid = st.new_id("m");
-            st.monitors.insert(
-                mid.clone(),
-                Monitor {
-                    polls_left: 1,
-                    src: id.to_string(),
-                    parent: b["parentReference"]["id"].as_str().unwrap().into(),
-                    name: b["name"].as_str().unwrap().into(),
-                },
-            );
-            Response::builder()
-                .status(202)
-                .header(header::LOCATION, format!("{}/monitor/{mid}", st.host))
-                .body(axum::body::Body::empty())
-                .unwrap()
-        }
-        _ => panic!("mock: unhandled {method} {raw_path}"),
-    }
-}
-
-fn mkdir(st: &mut St, parent: &str, body: &[u8]) -> Response {
-    let b: Value = serde_json::from_slice(body).unwrap();
-    assert_eq!(b["@microsoft.graph.conflictBehavior"], "fail");
-    assert!(b["folder"].is_object());
-    let name = b["name"].as_str().unwrap();
-    if st.child(parent, name).is_some() {
-        return err(409, "nameAlreadyExists");
-    }
-    let id = st.insert(parent, name, true, Bytes::new());
-    status_json(201, st.json(&id))
-}
-
-fn new_session(st: &mut St, kind: SessKind, _headers: &HeaderMap) -> Response {
-    let sid = st.new_id("s");
-    st.sessions.insert(
-        sid.clone(),
-        Sess {
-            kind,
-            size: 0,
-            buf: Vec::new(),
-        },
-    );
-    ok_json(json!({
-        "uploadUrl": format!("{}/upload/{sid}", st.host),
-        "expirationDateTime": "2099-01-01T00:00:00Z",
-        "nextExpectedRanges": ["0-"],
-    }))
-}
-
-fn upload_fragment(st: &mut St, sid: &str, headers: &HeaderMap, body: &Bytes) -> Response {
-    if st.session_down {
-        return err(503, "serviceNotAvailable");
-    }
-    let cr = hdr(headers, header::CONTENT_RANGE).unwrap();
-    let spec = cr.strip_prefix("bytes ").unwrap();
-    let (range, total) = spec.split_once('/').unwrap();
-    let total: usize = total.parse().unwrap();
-    let (a, b) = range.split_once('-').unwrap();
-    let (a, b): (usize, usize) = (a.parse().unwrap(), b.parse().unwrap());
-    assert_eq!(b + 1 - a, body.len());
-    let Some(sess) = st.sessions.get_mut(sid) else {
-        return err(404, "itemNotFound");
-    };
-    if sess.size == 0 {
-        sess.size = total;
-    }
-    assert_eq!(total, sess.size, "every fragment declares the same total");
-    if b + 1 < total {
-        assert_eq!(
-            body.len() as u64 % FRAGMENT_MULTIPLE,
-            0,
-            "non-final fragments are multiples of 320 KiB"
-        );
-    }
-    if a != sess.buf.len() {
-        return err(416, "invalidRange");
-    }
-    st.fragment_puts += 1;
-    let n = st.fragment_puts;
-    let interrupt = st.interrupt_fragment == Some(n);
-    let sess = st.sessions.get_mut(sid).unwrap();
-    if interrupt {
-        sess.buf.extend_from_slice(&body[..body.len() / 2]);
-        st.session_down = st.down_after_interrupt;
-        return err(503, "serviceNotAvailable");
-    }
-    sess.buf.extend_from_slice(body);
-    if sess.buf.len() < sess.size {
-        let next = sess.buf.len();
-        return status_json(
-            202,
-            json!({"expirationDateTime": "2099-01-01T00:00:00Z", "nextExpectedRanges": [format!("{next}-")]}),
-        );
-    }
-    let sess = st.sessions.remove(sid).unwrap();
-    let data = Bytes::from(sess.buf);
-    let id = match sess.kind {
-        SessKind::Replace(id) => {
-            st.rewrite(&id, data);
-            id
-        }
-        SessKind::New { parent, name } => {
-            if st.child(&parent, &name).is_some() {
-                return err(409, "nameAlreadyExists");
-            }
-            st.insert(&parent, &name, false, data)
-        }
-    };
-    status_json(201, st.json(&id))
-}
-
-impl Mock {
-    async fn start() -> Mock {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let host = format!("http://{}", listener.local_addr().unwrap());
-        let mut items = BTreeMap::new();
-        items.insert(
-            ROOT.to_string(),
-            MItem {
-                name: "root".into(),
-                parent: None,
-                folder: true,
-                data: Bytes::new(),
-                created: 1_700_000_000_000,
-                modified: 1_700_000_000_000,
-                etag_n: 1,
-                ctag_n: 1,
-                deleted: false,
-            },
-        );
-        let m = Mock(Arc::new(Mutex::new(St {
-            host,
-            items,
-            seq: 0,
-            clock: 1_790_000_000_000,
-            log: Vec::new(),
-            lost_below: 0,
-            page_size: 1000,
-            sessions: HashMap::new(),
-            valid_token: "tok".into(),
-            faults: Vec::new(),
-            requests: Vec::new(),
-            interrupt_fragment: None,
-            down_after_interrupt: false,
-            session_down: false,
-            fragment_puts: 0,
-            monitors: HashMap::new(),
-            send_ctag: true,
-            storage_ctag: false,
-            ignore_range: false,
-            permanent_delete: true,
-            quota_total: 1 << 30,
-            preauth_saw_auth: false,
-        })));
-        let app = Router::new().fallback(handle).with_state(m.clone());
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        m
-    }
-
-    fn base(&self) -> String {
-        self.0.lock().base()
-    }
-
-    fn mkdir(&self, parent: &str, name: &str) -> String {
-        self.0.lock().insert(parent, name, true, Bytes::new())
-    }
-
-    fn put(&self, parent: &str, name: &str, data: &[u8]) -> String {
-        self.0
-            .lock()
-            .insert(parent, name, false, Bytes::copy_from_slice(data))
-    }
-
-    fn data(&self, id: &str) -> Vec<u8> {
-        self.0.lock().items[id].data.to_vec()
-    }
-
-    fn rewrite(&self, id: &str, data: &[u8]) {
-        self.0.lock().rewrite(id, Bytes::copy_from_slice(data));
-    }
-
-    fn mv(&self, id: &str, parent: &str) {
-        let mut st = self.0.lock();
-        st.items.get_mut(id).unwrap().parent = Some(parent.into());
-        st.items.get_mut(id).unwrap().etag_n += 1;
-        st.touch(id);
-    }
-
-    fn rename(&self, id: &str, name: &str) {
-        let mut st = self.0.lock();
-        st.items.get_mut(id).unwrap().name = name.into();
-        st.items.get_mut(id).unwrap().etag_n += 1;
-        st.touch(id);
-    }
-
-    fn delete(&self, id: &str) {
-        self.0.lock().delete(id);
-    }
-
-    fn fault(&self, method: Option<&'static str>, path_has: &str, status: u16, code: &'static str) {
-        self.fault_ra(method, path_has, status, code, None);
-    }
-
-    fn fault_ra(
-        &self,
-        method: Option<&'static str>,
-        path_has: &str,
-        status: u16,
-        code: &'static str,
-        retry_after: Option<u64>,
-    ) {
-        self.0.lock().faults.push(Fault {
-            method,
-            path_has: path_has.into(),
-            status,
-            code,
-            retry_after,
-            times: 1,
-        });
-    }
-
-    fn requests(&self) -> Vec<Req> {
-        self.0.lock().requests.clone()
-    }
-
-    fn count(&self, method: &str, path_has: &str) -> usize {
-        self.requests()
-            .iter()
-            .filter(|r| r.method == method && r.path.contains(path_has))
-            .count()
-    }
-}
 
 // ---------------------------------------------------------------- helpers
 
 struct Env {
-    mock: Mock,
+    mock: OneDriveHandle,
     be: OneDriveBackend,
+    sim: CloudSim,
 }
 
-fn cfg_for(mock: &Mock) -> OneDriveConfig {
+fn cfg_for(sim: &CloudSim) -> OneDriveConfig {
     OneDriveConfig {
-        api_base: mock.base(),
+        api_base: sim.graph_api_base(),
         copy_poll: Duration::from_millis(10),
         ..OneDriveConfig::default()
     }
 }
 
 async fn env_with(tune: impl FnOnce(&mut OneDriveConfig)) -> Env {
-    let mock = Mock::start().await;
-    let mut cfg = cfg_for(&mock);
+    let sim = bunko_cloudsim::start().await;
+    let mock = sim.onedrive("default");
+    let mut cfg = cfg_for(&sim);
     tune(&mut cfg);
     let be = OneDriveBackend::new(Arc::new(StaticToken::new("tok")), cfg).unwrap();
-    Env { mock, be }
+    Env { mock, be, sim }
 }
 
 async fn env() -> Env {
@@ -1011,7 +169,7 @@ struct Lib {
     secret: String,
 }
 
-fn library(m: &Mock) -> Lib {
+fn library(m: &OneDriveHandle) -> Lib {
     let root = m.mkdir(ROOT, "mokuro-reader");
     let a = m.mkdir(&root, "A");
     let v1 = m.put(&a, "v1.cbz", &pattern(3000, 1));
@@ -1063,7 +221,7 @@ async fn roots_are_located_and_created() {
 #[tokio::test]
 async fn list_all_walks_children_with_paging() {
     let e = env().await;
-    e.mock.0.lock().page_size = 2;
+    e.mock.lock().page_size = 2;
     let l = library(&e.mock);
     let mut nodes = Vec::new();
     e.be.list_all(std::slice::from_ref(&l.root), &mut |n| nodes.push(n))
@@ -1104,7 +262,7 @@ async fn list_all_walks_children_with_paging() {
     // Field mapping.
     let v1 = nodes.iter().find(|n| n.pid == l.v1).unwrap();
     let (etag, ctag, created, modified, data) = {
-        let st = e.mock.0.lock();
+        let st = e.mock.lock();
         let f = &st.items[&l.v1];
         (
             st.etag(&l.v1),
@@ -1124,7 +282,7 @@ async fn list_all_walks_children_with_paging() {
     assert_eq!(v1.hash, Some((HashKind::QuickXor, quickxor_base64(&data))));
     let a = nodes.iter().find(|n| n.pid == l.a).unwrap();
     assert!(a.is_dir);
-    assert_eq!(a.cver, e.mock.0.lock().etag(&l.a), "folders use the eTag");
+    assert_eq!(a.cver, e.mock.lock().etag(&l.a), "folders use the eTag");
     assert_eq!(a.pin, None);
 
     let mut kids = Vec::new();
@@ -1154,7 +312,7 @@ async fn delta_is_filtered_to_the_subtree() {
         .unwrap();
     let c0 = e.be.start_cursor().await.unwrap();
     assert!(c0.0.contains("token="));
-    e.mock.0.lock().page_size = 3;
+    e.mock.lock().page_size = 3;
 
     let newf = e.mock.put(&l.a, "new.cbz", b"new");
     let private = e.mock.put(&l.docs, "private.txt", b"secret");
@@ -1207,7 +365,7 @@ async fn delta_is_filtered_to_the_subtree() {
     assert!(upserts(&items).contains_key(&inner));
 
     // A restarted backend knows only the roots: unknown parents are fetched once.
-    let be2 = OneDriveBackend::new(Arc::new(StaticToken::new("tok")), cfg_for(&e.mock)).unwrap();
+    let be2 = OneDriveBackend::new(Arc::new(StaticToken::new("tok")), cfg_for(&e.sim)).unwrap();
     be2.locate_roots("mokuro-reader").await.unwrap();
     let deep = e.mock.mkdir(&l.a, "deep");
     let new2 = e.mock.put(&deep, "new2.cbz", b"n2");
@@ -1234,10 +392,10 @@ async fn a_lost_delta_token_is_cursor_lost() {
     e.be.locate_roots("mokuro-reader").await.unwrap();
     let c = e.be.start_cursor().await.unwrap();
     e.mock.put(&l.a, "n.cbz", b"n");
-    e.mock.0.lock().lost_below = usize::MAX;
+    e.mock.lock().lost_below = usize::MAX;
     assert_eq!(e.be.changes(&c).await, Ok(ChangePage::CursorLost));
     // Before locate_roots the feed cannot be filtered: refused, not guessed.
-    let be2 = OneDriveBackend::new(Arc::new(StaticToken::new("tok")), cfg_for(&e.mock)).unwrap();
+    let be2 = OneDriveBackend::new(Arc::new(StaticToken::new("tok")), cfg_for(&e.sim)).unwrap();
     assert!(matches!(be2.changes(&c).await, Err(BErr::Fatal(_))));
     // A cursor pointing anywhere but the API base never gets the token.
     let foreign = Cursor("https://evil.example/v1.0/me/drive/root/delta?token=1".into());
@@ -1264,7 +422,7 @@ async fn downloads_follow_the_redirect_without_the_token() {
         pre.auth, None,
         "the pre-authenticated URL never sees the token"
     );
-    assert!(!e.mock.0.lock().preauth_saw_auth);
+    assert!(!e.mock.lock().preauth_saw_auth);
 
     let mid = read_to_vec(e.be.read(&l.v1, None, Some((10, Some(19)))).await.unwrap())
         .await
@@ -1275,7 +433,7 @@ async fn downloads_follow_the_redirect_without_the_token() {
         .unwrap();
     assert_eq!(tail, data[2990..]);
     // The download host "may" ignore Range and send 200: sliced locally.
-    e.mock.0.lock().ignore_range = true;
+    e.mock.lock().ignore_range = true;
     let mid = read_to_vec(
         e.be.read(&l.v1, None, Some((100, Some(1099))))
             .await
@@ -1310,7 +468,7 @@ async fn pinned_reads_compare_the_ctag() {
     );
 
     // Without a CTag header (the ETag is the eTag): re-stat after the last byte.
-    e.mock.0.lock().send_ctag = false;
+    e.mock.lock().send_ctag = false;
     let cur = e.be.stat(&l.v1).await.unwrap().unwrap();
     let got = read_to_vec(e.be.read(&l.v1, cur.pin.as_deref(), None).await.unwrap())
         .await
@@ -1335,7 +493,7 @@ async fn pinned_reads_compare_the_ctag() {
 async fn pinned_reads_take_the_storage_hosts_ctag_form() {
     let e = env().await;
     let l = library(&e.mock);
-    e.mock.0.lock().storage_ctag = true;
+    e.mock.lock().storage_ctag = true;
     let pin = e.be.stat(&l.v1).await.unwrap().unwrap().pin.unwrap();
     let got = read_to_vec(e.be.read(&l.v1, Some(&pin), None).await.unwrap())
         .await
@@ -1407,7 +565,7 @@ async fn large_uploads_resume_after_an_interrupted_fragment() {
     let e = env_with(|c| c.fragment_size = FRAGMENT_MULTIPLE + 1000).await;
     let l = library(&e.mock);
     let data = pattern((5 << 20) + 12_345, 7);
-    e.mock.0.lock().interrupt_fragment = Some(3);
+    e.mock.lock().interrupt_fragment = Some(3);
     let n = new_file(&e.be, &l.a, "big.cbz", &data).await.unwrap();
     assert_eq!(e.mock.data(&n.pid), data);
     assert_eq!(n.size, data.len() as u64);
@@ -1438,12 +596,12 @@ async fn large_uploads_resume_after_an_interrupted_fragment() {
         })
         .collect();
     assert_eq!(starts[3], 2 * FRAGMENT_MULTIPLE + FRAGMENT_MULTIPLE / 2);
-    assert!(!e.mock.0.lock().preauth_saw_auth);
+    assert!(!e.mock.lock().preauth_saw_auth);
 
     // The service stays down after the interrupt: the call fails with the session kept,
     // and the next call (a restart) resumes it instead of starting over.
     {
-        let mut st = e.mock.0.lock();
+        let mut st = e.mock.lock();
         st.interrupt_fragment = Some(st.fragment_puts + 2);
         st.down_after_interrupt = true;
     }
@@ -1469,7 +627,7 @@ async fn large_uploads_resume_after_an_interrupted_fragment() {
             .is_some_and(|r| r.contains("/upload/"))
     );
     {
-        let mut st = e.mock.0.lock();
+        let mut st = e.mock.lock();
         st.session_down = false;
         st.down_after_interrupt = false;
     }
@@ -1692,7 +850,7 @@ async fn trash_and_permanent_delete() {
     assert_eq!(e.mock.count("POST", "permanentDelete"), 1);
 
     // OneDrive Personal: permanentDelete is refused; fall back to DELETE, and remember.
-    e.mock.0.lock().permanent_delete = false;
+    e.mock.lock().permanent_delete = false;
     let deletes = e.mock.count("DELETE", "/me/drive/items/");
     e.be.delete_permanent(&l.x).await.unwrap();
     e.be.delete_permanent(&l.catalog).await.unwrap();
@@ -1746,20 +904,21 @@ impl TokenSourceDyn for Rotating {
 
 #[tokio::test]
 async fn a_401_refreshes_the_token_once() {
-    let mock = Mock::start().await;
+    let sim = bunko_cloudsim::start().await;
+    let mock = sim.onedrive("default");
     let r = mock.mkdir(ROOT, "mokuro-reader");
-    mock.0.lock().valid_token = "tok-1".into();
+    mock.lock().valid_token = "tok-1".into();
     let tokens = Arc::new(Rotating {
         n: AtomicUsize::new(0),
         invalidated: AtomicUsize::new(0),
     });
-    let be = OneDriveBackend::new(tokens.clone(), cfg_for(&mock)).unwrap();
+    let be = OneDriveBackend::new(tokens.clone(), cfg_for(&sim)).unwrap();
     assert!(be.stat(&r).await.unwrap().is_some());
     assert_eq!(tokens.invalidated.load(Ordering::SeqCst), 1);
     assert!(be.stat(&r).await.unwrap().is_some());
     assert_eq!(tokens.invalidated.load(Ordering::SeqCst), 1);
     assert_eq!(be.units_used(), 3 * units::GET);
-    mock.0.lock().valid_token = "something-else".into();
+    mock.lock().valid_token = "something-else".into();
     assert_eq!(be.stat(&r).await, Err(BErr::AuthExpired));
     assert_eq!(tokens.invalidated.load(Ordering::SeqCst), 2);
 }
