@@ -98,7 +98,7 @@
       "volume_uuid": "00000000-0000-4000-8000-000000000002"
     },
     "headers": {
-      "content-type": "application/json"
+      "content-type": "application/octet-stream"
     },
     "method": "PUT",
     "path": "/mokuro-reader/Contract%20Series/Volume%2002.mokuro"

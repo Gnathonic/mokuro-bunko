@@ -258,6 +258,16 @@ async fn webdav(c: &mut Contract, server: &Server) {
     .await;
     assert_eq!(r.status, 207, "{}", r.text());
     export(c, server, "propfind-root-depth1", listing(&root, "1")).await;
+    // The reader's sign-in: a listing of the server root (its connection test), then
+    // the library folder's `stat` (`exists`).
+    export(c, server, "propfind-server-root-depth1", listing("/", "1")).await;
+    export(
+        c,
+        server,
+        "propfind-library-depth0",
+        listing(&format!("/{ROOT}"), "0"),
+    )
+    .await;
     let series = format!("{}/", dav_path(&["Contract Series"]));
     export(c, server, "propfind-series-depth1", listing(&series, "1")).await;
     export(
@@ -301,7 +311,8 @@ async fn puts(c: &mut Contract, seed: &Seed) {
             &dav_path(&["Contract Series", "Volume 02.mokuro"]),
             "basic:reader",
         )
-        .header("content-type", "application/json")
+        // The reader PUTs every file as an octet stream (`uploadFileWithClient`).
+        .header("content-type", "application/octet-stream")
         .json(mokuro_doc("Contract Series", "Volume 02", 2)),
     )
     .await;
