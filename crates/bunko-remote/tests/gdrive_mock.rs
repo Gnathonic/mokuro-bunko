@@ -43,6 +43,8 @@ struct Env {
 async fn env_with(tune: impl FnOnce(&mut GDriveConfig)) -> Env {
     let sim = bunko_cloudsim::start().await;
     let mock = sim.drive("default");
+    // Every request is checked for what the driver must always send.
+    mock.lock().strict_bunko = true;
     let state = tempfile::tempdir().unwrap();
     let mut cfg = GDriveConfig::new(state.path());
     cfg.api_base = sim.drive_api_base();
@@ -685,15 +687,6 @@ async fn replace_keeps_the_id_and_skips_identical_bytes() {
         1
     );
 
-    // Replaces never pin a revision forever.
-    assert!(
-        e.mock
-            .requests()
-            .iter()
-            .filter(|r| r.method == "PATCH" && r.path.starts_with("/upload/"))
-            .all(|r| r.query.get("keepRevisionForever").map(String::as_str) == Some("false"))
-    );
-
     // Replacing a folder or a missing file is NotFound.
     assert_eq!(
         e.be.upload(
@@ -822,6 +815,7 @@ impl TokenSourceDyn for Rotating {
 async fn a_401_refreshes_the_token_once() {
     let sim = bunko_cloudsim::start().await;
     let mock = sim.drive("default");
+    mock.lock().strict_bunko = true;
     let r = mock.mkdir("root", "mokuro-reader");
     mock.lock().valid_token = "tok-1".into();
     let tokens = Arc::new(Rotating {
@@ -871,6 +865,7 @@ async fn an_expired_token_is_refreshed_through_the_token_endpoint() {
 
     let sim = bunko_cloudsim::start().await;
     let t = sim.token(Provider::Google, "alice");
+    sim.drive("alice").lock().strict_bunko = true;
     let r = sim.drive("alice").mkdir("root", "mokuro-reader");
     let dir = tempfile::tempdir().unwrap();
     let creds = Arc::new(CredentialStore::open_with_key(&dir.path().join("cloud"), None).unwrap());

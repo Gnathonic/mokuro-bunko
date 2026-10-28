@@ -227,8 +227,9 @@ async fn graph_root_paths_replace_sessions_and_listing_without_top() {
         .as_str()
         .unwrap()
         .to_string();
-    // The pre-authenticated URLs are on the other loopback name.
-    assert!(url.starts_with("http://localhost:"), "{url}");
+    // The pre-authenticated URLs are on the second listener: another origin.
+    assert!(url.starts_with(&sim.preauth_base), "{url}");
+    assert_ne!(sim.preauth_base, sim.base);
     let r = c
         .put(&url)
         .header("Content-Range", "bytes 0-4/5")
@@ -248,7 +249,7 @@ async fn graph_root_paths_replace_sessions_and_listing_without_top() {
     let r = get(format!("{g}/me/drive/items/{id}/content")).await;
     assert_eq!(r.status(), 302);
     let loc = r.headers()["location"].to_str().unwrap().to_string();
-    assert!(loc.starts_with("http://localhost:"), "{loc}");
+    assert!(loc.starts_with(&sim.preauth_base), "{loc}");
     assert_eq!(
         c.get(&loc)
             .send()

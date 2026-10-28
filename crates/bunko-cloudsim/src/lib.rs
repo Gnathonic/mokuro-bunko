@@ -6,7 +6,8 @@
 //!
 //! - Drive: `{base}/google` (a driver's `api_base`; uploads under `{base}/google/upload`);
 //! - OneDrive: `{base}/graph/v1.0`, with the pre-authenticated download, upload-session
-//!   and copy-monitor URLs under `{base}/graph/`;
+//!   and copy-monitor URLs under `{preauth}/graph/`, a second listener (another
+//!   origin, as Microsoft's storage hosts are);
 //! - MEGA: the gateway `{base}/mega/` (`cs`, `sc`, wait and transfer URLs), real
 //!   node crypto (the mock lives in `bunko-mega` and is mounted here);
 //! - OAuth refresh: `{base}/oauth/google/token`, `{base}/oauth/microsoft/token`;
@@ -85,6 +86,9 @@ pub(crate) fn rfc3339(ms: i64) -> String {
 
 type Accounts<T> = Mutex<HashMap<String, Arc<Mutex<T>>>>;
 
+/// The account the fixed test token (`valid_token`) belongs to.
+pub const DEFAULT_ACCOUNT: &str = "default";
+
 /// An account state's fixed bearer token (the one the mock tests have always used).
 trait FixedToken {
     fn fixed_token(&self) -> &str;
@@ -105,6 +109,9 @@ impl FixedToken for OneDriveState {
 struct Inner {
     /// `http://host:port`, no trailing slash.
     base: String,
+    /// Where OneDrive's pre-authenticated URLs point: a second listener (another
+    /// origin), or `base` when there is none.
+    preauth: String,
     drive: Accounts<DriveState>,
     onedrive: Accounts<OneDriveState>,
     tokens: Mutex<TokenTable>,
@@ -124,8 +131,17 @@ fn account<T: Default>(map: &Accounts<T>, name: &str) -> Arc<Mutex<T>> {
 impl SimState {
     /// State for a server reachable at `base` (`http://host:port`).
     pub fn new(base: impl Into<String>) -> Self {
+        let base = base.into();
+        SimState::with_preauth(base.clone(), base)
+    }
+
+    /// State for a server reachable at `base`, with a second listener at `preauth`
+    /// (another origin) for OneDrive's pre-authenticated URLs.
+    pub fn with_preauth(base: impl Into<String>, preauth: impl Into<String>) -> Self {
         let base = base.into().trim_end_matches('/').to_string();
+        let preauth = preauth.into().trim_end_matches('/').to_string();
         SimState(Arc::new(Inner {
+            preauth,
             mega: mega::MegaHub::new(format!("{base}{}/", mega::PREFIX)),
             base,
             drive: Mutex::default(),
@@ -140,17 +156,9 @@ impl SimState {
         &self.0.base
     }
 
-    /// The base on the other loopback name (`127.0.0.1` and `localhost` swapped), or
-    /// the base itself on any other host: another origin for the same server.
-    pub fn preauth_base(&self) -> String {
-        let b = &self.0.base;
-        if let Some(rest) = b.strip_prefix("http://127.0.0.1:") {
-            format!("http://localhost:{rest}")
-        } else if let Some(rest) = b.strip_prefix("http://localhost:") {
-            format!("http://127.0.0.1:{rest}")
-        } else {
-            b.clone()
-        }
+    /// Where OneDrive's pre-authenticated URLs point (see [`SimState::with_preauth`]).
+    pub fn preauth_base(&self) -> &str {
+        &self.0.preauth
     }
 
     pub(crate) fn violation(&self, line: String) {
@@ -256,8 +264,8 @@ impl SimState {
     }
 
     /// The account a bearer token opens: an issued token while it is live (an
-    /// expired, revoked or other provider's token opens nothing), else an account
-    /// whose fixed `valid_token` it is.
+    /// expired, revoked or other provider's token opens nothing), else the `default`
+    /// account when it is that account's fixed `valid_token`.
     fn for_token<T: Default + FixedToken>(
         &self,
         p: Provider,
@@ -273,14 +281,9 @@ impl SimState {
             let st = account(map, &name);
             return Some((name, st));
         }
-        let accounts: Vec<_> = map
-            .lock()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        accounts
-            .into_iter()
-            .find(|(_, st)| st.lock().fixed_token() == token)
+        let st = map.lock().get(DEFAULT_ACCOUNT).cloned()?;
+        let fixed = st.lock().fixed_token() == token;
+        fixed.then(|| (DEFAULT_ACCOUNT.to_string(), st))
     }
 
     pub(crate) fn drive_for_token(&self, token: &str) -> Option<(String, Arc<Mutex<DriveState>>)> {
@@ -381,29 +384,41 @@ pub fn router(sim: SimState) -> Router {
         .layer(from_fn(cors))
 }
 
-/// A running simulator on `127.0.0.1:{port}`, served by a task on the current runtime.
+/// A running simulator on `127.0.0.1`, served by tasks on the current runtime: the
+/// main port, and a second one (another origin) that OneDrive's pre-authenticated URLs
+/// point at.
 pub struct CloudSim {
     /// `http://127.0.0.1:PORT`, no trailing slash.
     pub base: String,
+    /// `http://127.0.0.1:PORT2`, the second listener.
+    pub preauth_base: String,
     state: SimState,
-    _task: tokio::task::JoinHandle<()>,
+    _tasks: [tokio::task::JoinHandle<()>; 2],
 }
 
-/// Start a simulator on a free local port.
+/// Start a simulator on two free local ports.
 pub async fn start() -> CloudSim {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind 127.0.0.1:0");
-    let base = format!("http://{}", listener.local_addr().expect("local addr"));
-    let state = SimState::new(base.clone());
-    let app = router(state.clone());
-    let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+    let bind = || async {
+        tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 127.0.0.1:0")
+    };
+    let (main, second) = (bind().await, bind().await);
+    let base = format!("http://{}", main.local_addr().expect("local addr"));
+    let preauth_base = format!("http://{}", second.local_addr().expect("local addr"));
+    let state = SimState::with_preauth(base.clone(), preauth_base.clone());
+    let serve = |l: tokio::net::TcpListener| {
+        let app = router(state.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(l, app).await;
+        })
+    };
+    let tasks = [serve(main), serve(second)];
     CloudSim {
         base,
+        preauth_base,
         state,
-        _task: task,
+        _tasks: tasks,
     }
 }
 

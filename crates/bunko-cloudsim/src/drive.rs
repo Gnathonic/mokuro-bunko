@@ -86,7 +86,8 @@ pub struct DriveState {
     pub keep_revisions: bool,
     pub revisions_forbidden: bool,
     sessions: HashMap<String, Sess>,
-    /// A fixed bearer token this account accepts besides the ones the simulator issues.
+    /// A fixed bearer token besides the ones the simulator issues (honoured for the
+    /// `default` account only).
     pub valid_token: String,
     pub faults: Vec<Fault>,
     pub requests: Vec<Req>,
@@ -97,6 +98,9 @@ pub struct DriveState {
     pub session_down: bool,
     pub chunk_puts: usize,
     pub quota_limit: i64,
+    /// Check, on every request, what Bunko's driver must always send and other clients
+    /// may leave out (bunko-remote's tests turn this on; the reader leaves it off).
+    pub strict_bunko: bool,
 }
 
 fn hex_md5(b: &[u8]) -> String {
@@ -146,6 +150,7 @@ impl Default for DriveState {
             session_down: false,
             chunk_puts: 0,
             quota_limit: 1 << 30,
+            strict_bunko: false,
         }
     }
 }
@@ -969,6 +974,11 @@ fn route(
                 let Some(t) = target.as_deref() else {
                     return Err("an upload PATCH without a file id".into());
                 };
+                if st.strict_bunko
+                    && q.get("keepRevisionForever").map(String::as_str) != Some("false")
+                {
+                    return Err("an upload PATCH without keepRevisionForever=false".into());
+                }
                 if !st.files.contains_key(t) {
                     return Ok(err(404, "notFound"));
                 }

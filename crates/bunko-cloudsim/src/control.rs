@@ -72,8 +72,12 @@ pub fn router() -> Router<SimState> {
         .route("/reset", post(reset))
 }
 
-async fn health() -> Response {
-    Json(json!({"ok": true, "providers": ["google", "microsoft", "mega"]})).into_response()
+async fn health(State(sim): State<SimState>) -> Response {
+    Json(
+        json!({"ok": true, "providers": ["google", "microsoft", "mega"],
+        "preauth": sim.preauth_base()}),
+    )
+    .into_response()
 }
 
 async fn token(State(sim): State<SimState>, b: Body) -> Answer {
@@ -207,6 +211,7 @@ fn drive_knob(st: &mut DriveState, k: &str, v: &Value) -> Result<(), String> {
         "down_after_interrupt" => st.down_after_interrupt = flag(v, k)?,
         "session_down" => st.session_down = flag(v, k)?,
         "quota_limit" => st.quota_limit = signed(v, k)?,
+        "strict_bunko" => st.strict_bunko = flag(v, k)?,
         _ => return Err(format!("no Drive knob {k:?}")),
     }
     Ok(())
@@ -224,6 +229,7 @@ fn onedrive_knob(st: &mut OneDriveState, k: &str, v: &Value) -> Result<(), Strin
         "permanent_delete" => st.permanent_delete = flag(v, k)?,
         "quota_total" => st.quota_total = signed(v, k)?,
         "lost_below" => st.lost_below = count(v, k)?,
+        "strict_bunko" => st.strict_bunko = flag(v, k)?,
         _ => return Err(format!("no OneDrive knob {k:?}")),
     }
     Ok(())

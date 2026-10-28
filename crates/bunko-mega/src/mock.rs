@@ -132,6 +132,11 @@ pub struct MegaTag {
 struct Hub {
     base: String,
     accounts: Mutex<Vec<(String, Arc<Mutex<St>>)>>,
+    /// The next account's index: never reused, a reset included, so a session or a
+    /// transfer URL from before never reaches a newer account.
+    next_idx: std::sync::atomic::AtomicUsize,
+    /// Mixed into every session id, so two hubs never share one.
+    salt: [u8; 8],
     notify: Arc<Notify>,
     violations: Mutex<Vec<String>>,
 }
@@ -445,6 +450,8 @@ impl MegaHub {
         MegaHub(Arc::new(Hub {
             base,
             accounts: Mutex::new(Vec::new()),
+            next_idx: std::sync::atomic::AtomicUsize::new(0),
+            salt: rand::random(),
             notify: Arc::new(Notify::new()),
             violations: Mutex::new(Vec::new()),
         }))
@@ -477,7 +484,11 @@ impl MegaHub {
             match accounts.iter().find(|(n, _)| n == name) {
                 Some((_, st)) => st.clone(),
                 None => {
-                    let st = Arc::new(Mutex::new(St::new(self.0.base.clone(), accounts.len())));
+                    let idx = self
+                        .0
+                        .next_idx
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let st = Arc::new(Mutex::new(St::new(self.0.base.clone(), idx, &self.0.salt)));
                     accounts.push((name.to_string(), st.clone()));
                     st
                 }
@@ -526,7 +537,10 @@ impl MegaHub {
 
     fn by_idx(&self, idx: &str) -> Option<Acct> {
         let i: usize = idx.parse().ok()?;
-        self.accounts().get(i).cloned()
+        self.accounts()
+            .iter()
+            .find(|(_, st)| lock_st(st).idx == i)
+            .cloned()
     }
 
     /// The account a `cs`/`sc` request is for: by session id, else by the email of a
@@ -769,14 +783,18 @@ async fn upload(
 
 impl St {
     /// An empty account (cloud root, inbox, rubbish bin) at index `idx` of a hub.
-    fn new(base: String, idx: usize) -> St {
+    fn new(base: String, idx: usize, salt: &[u8; 8]) -> St {
         let mut sid = [0x41u8; SID_LEN];
         for (i, b) in sid.iter_mut().enumerate().skip(1) {
             *b = (i * 31 % 251) as u8;
         }
-        // Distinct per account; account 0 keeps the session id it always had.
-        sid[SID_LEN - 1] = sid[SID_LEN - 1].wrapping_add(idx as u8);
-        sid[SID_LEN - 2] = sid[SID_LEN - 2].wrapping_add((idx >> 8) as u8);
+        // Distinct per account (indices are never reused) and per hub (the salt).
+        for (b, x) in sid[SID_LEN - 16..]
+            .iter_mut()
+            .zip(salt.iter().copied().chain((idx as u64).to_le_bytes()))
+        {
+            *b ^= x;
+        }
         let mut nodes = BTreeMap::new();
         for (h, kind) in [(ROOT, 2), (INBOX, 3), (RUBBISH, 4)] {
             nodes.insert(

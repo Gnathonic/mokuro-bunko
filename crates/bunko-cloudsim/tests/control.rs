@@ -51,7 +51,8 @@ async fn health_names_the_providers() {
     let sim = bunko_cloudsim::start().await;
     assert_eq!(
         get(&sim.base, "health").await,
-        json!({"ok": true, "providers": ["google", "microsoft", "mega"]})
+        json!({"ok": true, "providers": ["google", "microsoft", "mega"],
+               "preauth": sim.preauth_base})
     );
 }
 
@@ -398,4 +399,53 @@ async fn a_mega_account_logs_in_by_password_and_is_logged() {
     assert_eq!(log[0]["units"], 0);
     let (s, v) = post(&sim.base, "token", json!({"provider": "mega"})).await;
     assert_eq!(s, 400, "{v}");
+}
+
+async fn mega_sid(sim: &bunko_cloudsim::CloudSim, email: &str) -> String {
+    let cfg = bunko_mega::ClientConfig {
+        api_origin: sim.mega_origin(),
+        min_cs_interval: std::time::Duration::ZERO,
+        ..bunko_mega::ClientConfig::default()
+    };
+    let client = bunko_mega::Client::login(cfg, email, "pw", None)
+        .await
+        .unwrap();
+    client.session().unwrap().sid().to_string()
+}
+
+/// A MEGA session saved before a reset opens nothing after it, not whichever account
+/// is created next in the same slot.
+#[tokio::test]
+async fn a_mega_session_from_before_a_reset_is_refused_after_it() {
+    let sim = bunko_cloudsim::start().await;
+    sim.mega_account("m", "m@cloudsim.test", "pw");
+    let old = mega_sid(&sim, "m@cloudsim.test").await;
+    let cs = |sid: String| {
+        let url = format!("{}cs?id=1&sid={sid}", sim.mega_origin());
+        async move {
+            http()
+                .post(url)
+                .body(r#"[{"a":"uq"}]"#)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    assert!(cs(old.clone()).await[0]["mstrg"].is_number());
+    let (s, _) = post(&sim.base, "reset", json!({})).await;
+    assert_eq!(s, 204);
+    // The same account name again, and another one.
+    sim.mega_account("m", "m@cloudsim.test", "pw");
+    sim.mega_account("n", "n@cloudsim.test", "pw");
+    assert_eq!(cs(old.clone()).await, json!([-15]));
+    let new = mega_sid(&sim, "m@cloudsim.test").await;
+    assert_ne!(new, old);
+    assert_ne!(new, mega_sid(&sim, "n@cloudsim.test").await);
+    // A second simulator never hands out the first one's session ids either.
+    let other = bunko_cloudsim::start().await;
+    other.mega_account("m", "m@cloudsim.test", "pw");
+    assert_ne!(mega_sid(&other, "m@cloudsim.test").await, new);
 }

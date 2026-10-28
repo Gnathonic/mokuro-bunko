@@ -245,3 +245,41 @@ async fn two_clients_upload_to_one_account_at_once() {
     assert_eq!(files[1].0, "b.cbz");
     assert_eq!(files[1].1.as_ref(), b.as_slice());
 }
+
+/// The fixed token the mock tests have always used opens the `default` account only,
+/// never another one (which used to depend on HashMap order).
+#[tokio::test]
+async fn the_fixed_token_opens_only_the_default_account() {
+    let sim = bunko_cloudsim::start().await;
+    // Without a `default` account, `tok` opens nothing.
+    sim.drive("alice").put("root", "alice.cbz", b"a");
+    sim.onedrive("alice")
+        .put(bunko_cloudsim::onedrive::ROOT, "alice.cbz", b"a");
+    assert_eq!(list_names(&sim, "tok").await.0, 401);
+    let graph = |t: &'static str| {
+        let url = format!("{}/me/drive/root:/alice.cbz", sim.graph_api_base());
+        async move {
+            http()
+                .get(url)
+                .bearer_auth(t)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(graph("tok").await, 401);
+    // With one (and more accounts around), always `default`.
+    for n in 0..8 {
+        sim.drive(&format!("other{n}")).put("root", "x.cbz", b"x");
+    }
+    sim.drive("default").put("root", "mine.cbz", b"m");
+    for _ in 0..10 {
+        assert_eq!(
+            list_names(&sim, "tok").await,
+            (200, vec!["mine.cbz".into()])
+        );
+    }
+    sim.onedrive("default");
+    assert_eq!(graph("tok").await, 404, "default's drive has no alice.cbz");
+}

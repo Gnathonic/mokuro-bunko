@@ -74,3 +74,56 @@ async fn a_bad_token_is_a_401_not_a_violation() {
     assert_eq!(r.status(), 401);
     assert!(sim.violations().is_empty());
 }
+
+/// `strict_bunko` (bunko-remote's tests turn it on) makes what Bunko's drivers must
+/// always send a check on every request again: `keepRevisionForever=false` on a Drive
+/// upload PATCH and `$top` on a OneDrive children listing. Off (the reader), both are
+/// optional, as they are for the real services.
+#[tokio::test]
+async fn strict_bunko_checks_what_bunko_must_send_on_every_request() {
+    let sim = bunko_cloudsim::start().await;
+    let d = sim.drive("default");
+    let f = d.put("root", "a.json", b"{}");
+    let od = sim.onedrive("default");
+    let folder = od.mkdir(bunko_cloudsim::onedrive::ROOT, "mokuro-reader");
+    let http = reqwest::Client::new();
+    let patch = || {
+        http.patch(format!(
+            "{}/upload/drive/v3/files/{f}",
+            sim.drive_api_base()
+        ))
+        .query(&[("uploadType", "resumable")])
+        .bearer_auth("tok")
+        .json(&serde_json::json!({}))
+        .send()
+    };
+    let children = || {
+        http.get(format!(
+            "{}/me/drive/items/{folder}/children",
+            sim.graph_api_base()
+        ))
+        .bearer_auth("tok")
+        .send()
+    };
+    assert_eq!(patch().await.unwrap().status(), 200);
+    assert_eq!(children().await.unwrap().status(), 200);
+    assert!(sim.violations().is_empty());
+
+    d.lock().strict_bunko = true;
+    od.lock().strict_bunko = true;
+    assert_eq!(patch().await.unwrap().status(), 400);
+    assert_eq!(children().await.unwrap().status(), 400);
+    let v = sim.take_violations();
+    assert_eq!(v.len(), 2, "{v:?}");
+    assert!(v[0].contains("keepRevisionForever=false"), "{}", v[0]);
+    assert!(v[1].contains("$top"), "{}", v[1]);
+    // The knob is on the control API too.
+    let r = http
+        .post(format!("{}/_sim/knobs", sim.base))
+        .json(&serde_json::json!({"provider": "google", "strict_bunko": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(patch().await.unwrap().status(), 200);
+}

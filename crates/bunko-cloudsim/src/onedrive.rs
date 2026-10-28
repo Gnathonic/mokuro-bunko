@@ -2,7 +2,7 @@
 //! provider call, under `{base}/graph/v1.0`, plus the pre-authenticated download,
 //! upload-session and copy-monitor URLs under `{base}/graph/{preauth|upload|monitor}/
 //! {account}/{id}` (they carry no token, so the account is in the URL, hex-encoded).
-//! Those URLs use the other loopback name (`localhost` for `127.0.0.1` and back): a
+//! Those URLs point at the simulator's second listener (`SimState::preauth_base`): a
 //! different origin, as Microsoft's storage hosts are, so a browser or `fetch`
 //! following the download redirect drops the `Authorization` header as it would for
 //! the real thing.
@@ -103,7 +103,8 @@ pub struct OneDriveState {
     pub lost_below: usize,
     pub page_size: usize,
     sessions: HashMap<String, Sess>,
-    /// A fixed bearer token this account accepts besides the ones the simulator issues.
+    /// A fixed bearer token besides the ones the simulator issues (honoured for the
+    /// `default` account only).
     pub valid_token: String,
     pub faults: Vec<Fault>,
     pub requests: Vec<Req>,
@@ -120,6 +121,9 @@ pub struct OneDriveState {
     pub ignore_range: bool,
     pub permanent_delete: bool,
     pub quota_total: i64,
+    /// Check, on every request, what Bunko's driver must always send and other clients
+    /// may leave out (bunko-remote's tests turn this on; the reader leaves it off).
+    pub strict_bunko: bool,
     /// A pre-authenticated host (download, upload session, monitor) saw a token.
     pub preauth_saw_auth: bool,
 }
@@ -215,6 +219,7 @@ impl Default for OneDriveState {
             ignore_range: false,
             permanent_delete: true,
             quota_total: 1 << 30,
+            strict_bunko: false,
             preauth_saw_auth: false,
         }
     }
@@ -604,7 +609,7 @@ fn answer(
 struct Cx<'a> {
     /// `{base}/graph`.
     root: &'a str,
-    /// `{base}/graph` on the other loopback name, for the pre-authenticated URLs.
+    /// `{preauth}/graph`, the second listener, for the pre-authenticated URLs.
     preauth_root: &'a str,
     account_hex: &'a str,
     method: &'a Method,
@@ -929,6 +934,9 @@ fn route_graph(
 /// One page of a folder's live children (`$top` is optional, as in Graph; the page
 /// size is the account's `page_size`).
 fn children(st: &OneDriveState, cx: &Cx, id: &str) -> Result<Response, Bad> {
+    if st.strict_bunko && !cx.q.contains_key("$top") {
+        return Err("children listed without $top".into());
+    }
     let kids = st.kids(id);
     let at: usize = match cx.q.get("$skiptoken") {
         Some(s) => s

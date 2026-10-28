@@ -45,6 +45,8 @@ fn cfg_for(sim: &CloudSim) -> OneDriveConfig {
 async fn env_with(tune: impl FnOnce(&mut OneDriveConfig)) -> Env {
     let sim = bunko_cloudsim::start().await;
     let mock = sim.onedrive("default");
+    // Every request is checked for what the driver must always send.
+    mock.lock().strict_bunko = true;
     let mut cfg = cfg_for(&sim);
     tune(&mut cfg);
     let be = OneDriveBackend::new(Arc::new(StaticToken::new("tok")), cfg).unwrap();
@@ -257,14 +259,6 @@ async fn list_all_walks_children_with_paging() {
             .requests()
             .iter()
             .any(|r| r.query.contains_key("$skiptoken"))
-    );
-    // Every children listing asks for a page size.
-    assert!(
-        e.mock
-            .requests()
-            .iter()
-            .filter(|r| r.method == "GET" && r.path.ends_with("/children"))
-            .all(|r| r.query.contains_key("$top"))
     );
 
     // Field mapping.
@@ -914,6 +908,7 @@ impl TokenSourceDyn for Rotating {
 async fn a_401_refreshes_the_token_once() {
     let sim = bunko_cloudsim::start().await;
     let mock = sim.onedrive("default");
+    mock.lock().strict_bunko = true;
     let r = mock.mkdir(ROOT, "mokuro-reader");
     mock.lock().valid_token = "tok-1".into();
     let tokens = Arc::new(Rotating {
