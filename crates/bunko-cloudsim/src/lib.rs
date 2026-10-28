@@ -7,6 +7,7 @@
 //! - Drive: `{base}/google` (a driver's `api_base`; uploads under `{base}/google/upload`);
 //! - OneDrive: `{base}/graph/v1.0`, with the pre-authenticated download, upload-session
 //!   and copy-monitor URLs under `{base}/graph/`;
+//! - OAuth refresh: `{base}/oauth/google/token`, `{base}/oauth/microsoft/token`.
 //!
 //! State is per (provider, account). The library form ([`start`]) serves on
 //! `127.0.0.1:0` inside a test's runtime; the binary serves the same [`router`].
@@ -15,7 +16,9 @@
 //! line in [`CloudSim::violations`], and dropping a [`CloudSim`] with violations left
 //! fails the test.
 
+pub mod accounts;
 pub mod drive;
+pub mod oauth;
 pub mod onedrive;
 pub mod violations;
 
@@ -26,9 +29,11 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
-use parking_lot::Mutex;
+use axum::routing::{any, post};
+use parking_lot::{Mutex, MutexGuard};
 
+use accounts::TokenTable;
+pub use accounts::{Provider, Tokens};
 pub use drive::{DriveHandle, DriveState};
 pub use onedrive::{OneDriveHandle, OneDriveState};
 use violations::Violations;
@@ -48,11 +53,29 @@ pub(crate) fn rfc3339(ms: i64) -> String {
 
 type Accounts<T> = Mutex<HashMap<String, Arc<Mutex<T>>>>;
 
+/// An account state's fixed bearer token (the one the mock tests have always used).
+trait FixedToken {
+    fn fixed_token(&self) -> &str;
+}
+
+impl FixedToken for DriveState {
+    fn fixed_token(&self) -> &str {
+        &self.valid_token
+    }
+}
+
+impl FixedToken for OneDriveState {
+    fn fixed_token(&self) -> &str {
+        &self.valid_token
+    }
+}
+
 struct Inner {
     /// `http://host:port`, no trailing slash.
     base: String,
     drive: Accounts<DriveState>,
     onedrive: Accounts<OneDriveState>,
+    tokens: Mutex<TokenTable>,
     violations: Violations,
 }
 
@@ -71,6 +94,7 @@ impl SimState {
             base: base.into().trim_end_matches('/').to_string(),
             drive: Mutex::default(),
             onedrive: Mutex::default(),
+            tokens: Mutex::default(),
             violations: Violations::default(),
         }))
     }
@@ -101,33 +125,48 @@ impl SimState {
         OneDriveHandle(account(&self.0.onedrive, name))
     }
 
-    pub(crate) fn drive_for_token(&self, token: &str) -> Option<(String, Arc<Mutex<DriveState>>)> {
-        let accounts: Vec<_> = self
-            .0
-            .drive
+    /// The tokens the simulator issued.
+    pub fn tokens(&self) -> MutexGuard<'_, TokenTable> {
+        self.0.tokens.lock()
+    }
+
+    /// The account a bearer token opens: an issued token while it is live (an
+    /// expired, revoked or other provider's token opens nothing), else an account
+    /// whose fixed `valid_token` it is.
+    fn for_token<T: Default + FixedToken>(
+        &self,
+        p: Provider,
+        map: &Accounts<T>,
+        token: &str,
+    ) -> Option<(String, Arc<Mutex<T>>)> {
+        let issued = {
+            let t = self.0.tokens.lock();
+            t.knows(token).then(|| t.resolve(p, token))
+        };
+        if let Some(name) = issued {
+            let name = name?;
+            let st = account(map, &name);
+            return Some((name, st));
+        }
+        let accounts: Vec<_> = map
             .lock()
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         accounts
             .into_iter()
-            .find(|(_, st)| st.lock().valid_token == token)
+            .find(|(_, st)| st.lock().fixed_token() == token)
+    }
+
+    pub(crate) fn drive_for_token(&self, token: &str) -> Option<(String, Arc<Mutex<DriveState>>)> {
+        self.for_token(Provider::Google, &self.0.drive, token)
     }
 
     pub(crate) fn onedrive_for_token(
         &self,
         token: &str,
     ) -> Option<(String, Arc<Mutex<OneDriveState>>)> {
-        let accounts: Vec<_> = self
-            .0
-            .onedrive
-            .lock()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        accounts
-            .into_iter()
-            .find(|(_, st)| st.lock().valid_token == token)
+        self.for_token(Provider::Microsoft, &self.0.onedrive, token)
     }
 
     pub(crate) fn onedrive_existing(
@@ -156,6 +195,7 @@ pub fn router(sim: SimState) -> Router {
     Router::new()
         .route("/google/{*rest}", any(drive::handle))
         .route("/graph/{*rest}", any(onedrive::handle))
+        .route("/oauth/{provider}/token", post(oauth::token))
         .fallback(unknown)
         .with_state(sim)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
@@ -208,6 +248,31 @@ impl CloudSim {
 
     pub fn onedrive(&self, account: &str) -> OneDriveHandle {
         self.state.onedrive(account)
+    }
+
+    /// A new grant (access and refresh token) for `account`.
+    pub fn token(&self, provider: Provider, account: &str) -> Tokens {
+        self.state.tokens().issue(provider, account)
+    }
+
+    /// Kill the grant behind `token`: API calls 401, refresh answers `invalid_grant`.
+    pub fn revoke(&self, token: &str) -> bool {
+        self.state.tokens().revoke(token)
+    }
+
+    /// Expire an access token: API calls with it 401, its refresh token still works.
+    pub fn expire(&self, token: &str) -> bool {
+        self.state.tokens().expire(token)
+    }
+
+    /// `OAuthClient.token_url` for this simulator.
+    pub fn token_url(&self, provider: Provider) -> String {
+        format!("{}/oauth/{}/token", self.base, provider.as_str())
+    }
+
+    /// Refreshes the token endpoints answered so far.
+    pub fn refreshes(&self) -> usize {
+        self.state.tokens().refreshes()
     }
 
     pub fn violations(&self) -> Vec<String> {

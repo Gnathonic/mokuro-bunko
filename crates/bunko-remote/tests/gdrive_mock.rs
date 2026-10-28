@@ -836,6 +836,82 @@ async fn a_401_refreshes_the_token_once() {
     assert_eq!(tokens.invalidated.load(Ordering::SeqCst), 2);
 }
 
+/// `RefreshingToken` as the drivers' token seam (the server wraps it the same way).
+#[cfg(feature = "oauth")]
+struct Refreshing(bunko_remote::auth::RefreshingToken);
+
+#[cfg(feature = "oauth")]
+impl TokenSourceDyn for Refreshing {
+    fn access_token(&self) -> Pin<Box<dyn Future<Output = Result<String, BErr>> + Send + '_>> {
+        use bunko_remote::auth::TokenSource;
+        Box::pin(self.0.access_token())
+    }
+    fn invalidate(&self) {
+        use bunko_remote::auth::TokenSource;
+        self.0.invalidate()
+    }
+}
+
+/// The real refresh path against cloudsim's token endpoint: the stored access token
+/// has expired on the server, the 401 refreshes it once, and the call succeeds.
+#[cfg(feature = "oauth")]
+#[tokio::test]
+async fn an_expired_token_is_refreshed_through_the_token_endpoint() {
+    use bunko_cloudsim::Provider;
+    use bunko_remote::auth::{CredentialStore, OAuthClient, RefreshingToken, StoredCredential};
+
+    let sim = bunko_cloudsim::start().await;
+    let t = sim.token(Provider::Google, "alice");
+    let r = sim.drive("alice").mkdir("root", "mokuro-reader");
+    let dir = tempfile::tempdir().unwrap();
+    let creds = Arc::new(CredentialStore::open_with_key(&dir.path().join("cloud"), None).unwrap());
+    let later = time::OffsetDateTime::now_utc() + Duration::from_secs(3600);
+    creds
+        .put(
+            "g",
+            StoredCredential {
+                provider: "gdrive".into(),
+                refresh_token: Some(t.refresh_token.clone()),
+                access_token: Some(t.access_token.clone()),
+                expires_at: Some(later),
+                client_id: Some("cid".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut client = OAuthClient::google("cid", "csecret");
+    client.token_url = sim.token_url(Provider::Google);
+    let tokens = Arc::new(Refreshing(RefreshingToken::new(client, "g", creds.clone())));
+    let state = tempfile::tempdir().unwrap();
+    let mut cfg = GDriveConfig::new(state.path());
+    cfg.api_base = sim.drive_api_base();
+    let be = GDriveBackend::new(tokens, cfg).unwrap();
+
+    assert!(be.stat(&r).await.unwrap().is_some());
+    assert_eq!(sim.refreshes(), 0, "a live token needs no refresh");
+    sim.expire(&t.access_token);
+    assert!(be.stat(&r).await.unwrap().is_some());
+    assert_eq!(sim.refreshes(), 1);
+    let stored = creds.get("g").unwrap().unwrap();
+    assert_ne!(
+        stored.access_token.as_deref(),
+        Some(t.access_token.as_str())
+    );
+    assert_eq!(
+        stored.refresh_token.as_deref(),
+        Some(t.refresh_token.as_str())
+    );
+    assert!(be.stat(&r).await.unwrap().is_some());
+    assert_eq!(sim.refreshes(), 1, "the new token is cached");
+
+    // Revoked: the refresh answers invalid_grant and the store needs re-auth.
+    sim.revoke(&t.refresh_token);
+    assert!(matches!(
+        be.stat(&r).await,
+        Err(BErr::AuthRevoked | BErr::AuthExpired)
+    ));
+}
+
 #[tokio::test]
 async fn errors_map_to_backend_errors() {
     let e = env().await;
