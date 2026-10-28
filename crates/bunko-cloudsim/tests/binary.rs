@@ -299,3 +299,42 @@ async fn in_process_downloads_redirect_to_the_second_listener() {
     assert_eq!(r.bytes().await.unwrap().as_ref(), b"volume");
     sim.assert_clean();
 }
+
+/// `--preauth-host` names the second listener by another host name (jsdom, unlike a
+/// browser, keeps the token across a redirect that only changes the port).
+#[tokio::test]
+async fn preauth_host_renames_the_second_listener() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bunko-cloudsim"))
+        .args(["--port", "0", "--preauth-host", "localhost"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let _kill = Kill(child);
+    let mut line = String::new();
+    BufReader::new(stdout).read_line(&mut line).unwrap();
+    let base = line
+        .trim()
+        .strip_prefix("listening on ")
+        .unwrap()
+        .to_string();
+    let health: Value = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("{base}/_sim/health"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let preauth = health["preauth"].as_str().unwrap();
+    assert!(preauth.starts_with("http://localhost:"), "{preauth}");
+    assert_ne!(
+        preauth.rsplit(':').next(),
+        base.rsplit(':').next(),
+        "its own port"
+    );
+}

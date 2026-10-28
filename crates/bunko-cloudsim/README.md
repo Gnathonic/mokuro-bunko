@@ -22,6 +22,7 @@ origin) serves OneDrive's pre-authenticated URLs. It stops on SIGINT or SIGTERM 
 | `--host ADDR` | Listen address (default `127.0.0.1`). |
 | `--base-url URL` | The address clients reach it at, used in the URLs it hands out (default `http://HOST:PORT`). |
 | `--preauth-port N` | The second listener, for OneDrive's pre-authenticated URLs (default `0`: a free port). |
+| `--preauth-host NAME` | Advertise the second listener by this host name (its port stays its own): for clients that keep a token across a redirect that changes only the port, as jsdom's XHR does. The reader's suites start it with `--preauth-host localhost`. |
 | `--preauth-base-url URL` | The address clients reach the second listener at (default: `--base-url` with the second port, else `http://HOST:PORT2`). |
 | `--seed-dir DIR` | Seed every provider's account with DIR's files, and create the MEGA account `NAME@cloudsim.test` with password `cloudsim`. |
 | `--seed-account NAME` | The account `--seed-dir` fills (default `default`). |

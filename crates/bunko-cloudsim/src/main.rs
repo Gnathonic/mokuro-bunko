@@ -13,7 +13,8 @@ use bunko_cloudsim::{Provider, SimState, router};
 
 const USAGE: &str = "\
 usage: bunko-cloudsim [--port N] [--host 127.0.0.1] [--base-url URL]
-                      [--preauth-port N] [--preauth-base-url URL]
+                      [--preauth-port N] [--preauth-host NAME]
+                      [--preauth-base-url URL]
                       [--seed-dir DIR [--seed-account NAME]]
 
   --port N            listen on port N (0, the default, picks a free one)
@@ -22,6 +23,9 @@ usage: bunko-cloudsim [--port N] [--host 127.0.0.1] [--base-url URL]
                       hands out (default http://HOST:PORT)
   --preauth-port N    the second listener, another origin, that OneDrive's
                       pre-authenticated URLs point at (default 0: a free port)
+  --preauth-host NAME the host name to advertise the second listener by (its port
+                      stays its own); for clients that keep a token across a
+                      redirect that changes only the port (jsdom)
   --preauth-base-url URL
                       the address clients reach the second listener at (default
                       --base-url with the second port, else http://HOST:PORT2)
@@ -34,6 +38,7 @@ struct Args {
     host: String,
     base_url: Option<String>,
     preauth_port: u16,
+    preauth_host: Option<String>,
     preauth_base_url: Option<String>,
     seed_dir: Option<PathBuf>,
     seed_account: String,
@@ -45,6 +50,7 @@ fn parse() -> Result<Args, String> {
         host: "127.0.0.1".into(),
         base_url: None,
         preauth_port: 0,
+        preauth_host: None,
         preauth_base_url: None,
         seed_dir: None,
         seed_account: "default".into(),
@@ -64,6 +70,7 @@ fn parse() -> Result<Args, String> {
                     .parse()
                     .map_err(|_| format!("--preauth-port {v:?}: not a port"))?;
             }
+            "--preauth-host" => a.preauth_host = Some(value()?),
             "--preauth-base-url" => {
                 a.preauth_base_url = Some(value()?.trim_end_matches('/').to_string())
             }
@@ -188,10 +195,11 @@ async fn main() -> ExitCode {
         .base_url
         .clone()
         .unwrap_or_else(|| format!("http://{addr}"));
-    let preauth = match (&args.preauth_base_url, &args.base_url) {
-        (Some(u), _) => u.clone(),
-        (None, Some(b)) => with_port(b, addr2.port()),
-        (None, None) => format!("http://{addr2}"),
+    let preauth = match (&args.preauth_base_url, &args.preauth_host, &args.base_url) {
+        (Some(u), _, _) => u.clone(),
+        (None, Some(h), _) => format!("http://{h}:{}", addr2.port()),
+        (None, None, Some(b)) => with_port(b, addr2.port()),
+        (None, None, None) => format!("http://{addr2}"),
     };
     let sim = SimState::with_preauth(base.clone(), preauth.clone());
     if let Some(dir) = &args.seed_dir {
