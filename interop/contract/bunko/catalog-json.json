@@ -1,0 +1,25 @@
+{
+  "body": {
+    "version": 1,
+    "updated_at": "2000-01-01T00:00:00.000Z",
+    "series": [
+      {
+        "series_title": "Contract Series",
+        "external_ids": {},
+        "titles": {},
+        "synonyms": [],
+        "updated_at": "2000-01-01T00:00:00.000Z"
+      },
+      {
+        "series_title": "日本語シリーズ",
+        "external_ids": {},
+        "titles": {},
+        "synonyms": [],
+        "updated_at": "2000-01-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "request": {
+    "file": "catalog.json"
+  }
+}

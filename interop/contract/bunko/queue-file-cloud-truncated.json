@@ -1,0 +1,38 @@
+{
+  "body": {
+    "version": 1,
+    "generated_at": "2000-01-01T00:00:00Z",
+    "instance_id": "<id-1>",
+    "held": {
+      "reason": "no-processor"
+    },
+    "next_check_after": 300,
+    "pending_volumes": 1,
+    "truncated": true,
+    "volumes": [],
+    "done": [
+      {
+        "series": "Contract Series",
+        "volume": "Volume 01",
+        "at": "2000-01-01T00:00:00Z",
+        "ocr": "Contract Series/Volume 01.mokuro",
+        "layers": []
+      },
+      {
+        "series": "日本語シリーズ",
+        "volume": "第1巻",
+        "at": "2000-01-01T00:00:00Z",
+        "ocr": "日本語シリーズ/第1巻.mokuro",
+        "layers": [
+          {
+            "id": "hayai",
+            "path": "日本語シリーズ/第1巻.hayai.mokuro"
+          }
+        ]
+      }
+    ]
+  },
+  "request": {
+    "file": ".mokuro-queue.json"
+  }
+}

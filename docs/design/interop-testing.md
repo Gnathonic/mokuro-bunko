@@ -77,32 +77,77 @@ version) as the plain WebDAV cloud, and Chromium through Playwright.
 
 ## 5. Contract fixtures (layer 1: every PR, both repos, seconds to run)
 
-**Bunko → reader.** A Bunko test (`crates/bunko-server/tests/contract_export.rs`) drives a
-seeded server through every endpoint and file the reader reads, and writes the responses
-to `interop/contract/bunko/`:
+Layout, format, sentinels and bless commands: `interop/contract/README.md`. Both sides
+build on one seed (`interop/contract/seed.json`: an uploader, an account without write
+rights, an admin; one series with and without OCR, a layer sidecar and a cover, one with
+Japanese names).
 
-- `/login/api/{check,token,me}`, `/api/nav/config`, `/api/stats`, `/catalog/api/*`,
-  `/queue/api/status`, the volume manifest;
-- PROPFIND Depth 0 and 1 of the library root, a series and a volume folder;
-- `.mokuro-queue.json` (with `done[]`, `truncated`), `.mokuro-bunko.json` in each lease
-  state (`claiming`, held, `released`), `series.json`, `catalog.json`;
-- error bodies the reader branches on (401 with each `WWW-Authenticate`, 403, 404, 409,
-  412, 423, 429 with `Retry-After`, 503 `storage-lease-claiming`, 507).
+**Bunko → reader.** A Bunko test (`crates/bunko-server/tests/contract_export.rs`) drives a
+seeded full-stack server (`Services` + `assemble`, so the CORS, queue-file and WebDAV
+layers are in) through everything the reader reads, and writes the answers to
+`interop/contract/bunko/`. That is what the reader actually calls (checked against
+`feat/cloud-bunko` on 2026-10-28); the other APIs (`/login/api/check`,
+`/api/nav/config`, `/api/stats`, `/queue/api/status`, the catalog list, series, config
+and OCR-status APIs) are not read by the reader and stay out:
+
+- `GET /login/api/me` (Basic with the UTF-8 password, Bearer, a dead token, anonymous,
+  a wrong password, an account without write rights, the 429 once the limiter is hot); `POST` and `DELETE /login/api/token`
+  (the body `requestBunkoToken` sends; the 429 once the limiter is hot);
+- `GET /catalog/api/manifest?series=&volume=` (with OCR, a layer and a cover; without;
+  Japanese names; an unknown volume);
+- `.mokuro-queue.json`: the HTTP copy and its `If-None-Match` 304, and the cloud copy
+  (`bunko_remote::status::cloud_queue_doc`) with `done[]` and, cut to size,
+  `truncated: true`. `done[]` and `truncated` exist only in the cloud copy;
+- `.mokuro-bunko.json` as `active` and as `released`. The file has only those two
+  states: "claiming" and "held" are both `active`, the difference being whether the
+  settle wait has passed. `released` is written by a disconnect; a shutdown writes
+  nothing;
+- `series.json` and `catalog.json` as compiled;
+- `OPTIONS /mokuro-reader/` as the reader sends it (its write-permission fallback reads
+  `Allow`, its sign-in probe `X-Mokuro-Put`);
+- PROPFIND: the server root (the reader's connection test), the library folder's
+  Depth 0 `stat`, the Depth 0 `current-user-privilege-set` probe `checkWritePermissions`
+  sends, Depth 1 of the library root and a series, Depth infinity of the library root;
+  a conditional GET of a control file (304);
+- PUT: a new volume with `Content-Digest` (`X-Mokuro-Put`, `-Upload`, `-Size`,
+  `-Digest-Verified`, `-Manifest`, `-Recheck-After`), a sidecar, and the failure verdict JSON for a refused account and
+  a stale `If-Match` (412);
+- errors: 401 without credentials (Basic challenge), with a dead token (`Bearer …
+  error="invalid_token"`) and with Latin-1 Basic bytes ("Invalid authorization
+  header"; current readers send UTF-8), 409, 423, 429, 503
+  `storage-lease-claiming` and 507. Only the WebDAV 503s carry `Retry-After`; the 401
+  and 429 credential refusals do not, and the fixtures pin that;
+- CORS has no fixtures of its own: `crates/bunko-server/tests/http_cors.rs` covers the
+  rules (including an origin that is not allowed), and the replay below checks every
+  reader request as a browser on the reader's origin sends it.
 
 The test fails if the output differs from the committed files (the usual golden rule:
 regenerate with `BUNKO_BLESS=1`, and the diff shows in the PR). The reader's unit tests
-replace their hand-written fixtures (`catalog/__fixtures__/mokuro-queue.ts` and friends)
-with these files, read from the pinned Bunko copy (§9).
+parse these files through its real parsers (`src/lib/interop/bunko-contract.test.ts`),
+and its hand-written queue and marker documents start from Bunko's and may only edit
+fields Bunko serves. The fixtures are read from a Bunko checkout (`BUNKO_REPO`, §9). The
+one copy kept in the reader repo is a snapshot of those two documents, used when no
+checkout is there; with one, a test checks both snapshots still equal the fixtures.
+Bunko's key order is kept (the reader writes `series.json` byte for byte as Bunko does),
+and the export is run twice in the test and must give the same bytes.
 
-**Reader → Bunko.** The interop e2e run records every request the reader sends to Bunko
-(method, path, headers that matter, body shape) into `interop/contract/reader/`.
-`crates/bunko-server/tests/contract_replay.rs` replays them against a fresh server and
-checks the status codes and response shapes. Headers covered on purpose: `Authorization`
-(Basic with UTF-8 and Latin-1 bytes, Bearer), `If-Match`, `If-None-Match`, `Depth`,
-`Origin`, and the CORS preflight `OPTIONS`.
+**Reader → Bunko.** The reader's `src/lib/interop/reader-requests.test.ts` records the
+requests its own code sends (method, path, the headers that matter, the body; the
+`Authorization` header as `basic:<user>` or `bearer:<user>`) into
+`interop/contract/reader/`, each with the response fields and headers that code reads.
+`crates/bunko-server/tests/contract_replay.rs` replays them against a fresh seeded server
+and checks the status codes, fields (present, present but nullable, exact values) and
+headers; hand-written records under `reader/legacy/` cover what older readers sent
+(Latin-1 Basic). Every record goes as a browser on the reader's origin sends it: with
+`Origin`, after a preflight when the method or a header is not simple; the preflight must
+allow every header sent, and the answer must expose every header the reader reads.
+Headers covered on purpose: `Authorization` (Basic with UTF-8 and Latin-1 bytes,
+Bearer), `If-None-Match`, `Depth`, `Content-Digest` (which Bunko must report verified),
+`Origin`, and the CORS preflight. The reader sends no `If-Match`, so none is recorded.
 
-Only stable fields are kept (no dates, ETags or ids; these are replaced with typed
-placeholders), so the fixtures change only when the contract does.
+Only stable fields are kept (dates, ETags, tokens and random ids are replaced with
+placeholders of the same type and format), so the fixtures change only when the contract
+does.
 
 ## 6. cloudsim
 
@@ -347,9 +392,11 @@ metric is within budget.
 - On every PR: check out the Bunko repo at `main` for `interop/` and the contract
   fixtures, download the `nightly` Bunko build, and run the same rig against the PR's own
   reader code.
-- The reader's unit tests read `interop/contract/bunko/` from that checkout (the reader's
-  test setup copies them in; they are not committed to the reader repo, so there is one
-  copy).
+- The reader's unit tests read `interop/contract/` from that checkout in place
+  (`BUNKO_REPO=bunko`; nothing is copied or committed to the reader repo, so there is
+  one copy). Since I1 this runs in the reader's existing `ci.yml` test job (a sparse
+  checkout of `interop/contract` at the `BUNKO_REF` repository variable, with
+  `BUNKO_CONTRACT_REQUIRED=1` so a missing checkout fails instead of skipping).
 
 Run time target: the rig under 15 minutes per PR on ubuntu.
 
@@ -358,7 +405,7 @@ Run time target: the rig under 15 minutes per PR on ubuntu.
 | M | Scope | Exit |
 |---|---|---|
 | I0 | The large-catalog scenario on its own (generated library, Rust-side timings plus one Playwright check of the catalog page and a series view), with the §8.3 catalog budgets enforced in CI; then find and fix the live slowness against it | The generated library reproduces the slow catalog and series views; after the fix, they meet their budgets and CI fails if they regress |
-| I1 | Contract fixtures both ways; CORS preflight tests; reader unit tests moved onto them | A deliberate field rename on either side fails the other side's tests |
+| I1 | Contract fixtures both ways (`interop/contract/`, §5); CORS preflight tests; reader unit tests moved onto them | A deliberate field rename on either side fails the other side's tests |
 | I2 | cloudsim (Drive, OneDrive, MEGA) with control API; bunko-remote mock tests moved onto it; reader base-URL override and token injection | Bunko and the reader, each alone, pass their provider suites against cloudsim (built 2026-10-28, §6 "As built") |
 | I3 | Rig runner, rclone, the `dav`, `api`, `bridge`, `direct`, `shared`, `cloud` suites; CI on both repos; nightly build. The browser rig's reader (`--mode interop`) must install the gapi REST shim instead of loading gapi from apis.google.com (§11) | Both repos' PRs run the rig; the M7 checks pass on every provider in cloudsim and on rclone |
 | I4 | netsim, the reader's performance marks, the `perf` suite, budgets | Budgets enforced in CI; the §10 table checked and updated with measured numbers |

@@ -1,0 +1,38 @@
+{
+  "body": {
+    "version": 1,
+    "series": "日本語シリーズ",
+    "volume": "第1巻",
+    "archive": {
+      "url": "/mokuro-reader/%E6%97%A5%E6%9C%AC%E8%AA%9E%E3%82%B7%E3%83%AA%E3%83%BC%E3%82%BA/%E7%AC%AC1%E5%B7%BB.cbz",
+      "size": 116,
+      "modified": "2000-01-01T00:00:00Z"
+    },
+    "ocr": {
+      "url": "/mokuro-reader/%E6%97%A5%E6%9C%AC%E8%AA%9E%E3%82%B7%E3%83%AA%E3%83%BC%E3%82%BA/%E7%AC%AC1%E5%B7%BB.mokuro",
+      "size": 378,
+      "modified": "2000-01-01T00:00:00Z",
+      "sha256": "1603fb7c5f7b74b911beea4d1fcda4aad5a6273c65458d0581c2dccd8e17c94b"
+    },
+    "layers": [],
+    "cover": null,
+    "series_file": {
+      "url": "/mokuro-reader/%E6%97%A5%E6%9C%AC%E8%AA%9E%E3%82%B7%E3%83%AA%E3%83%BC%E3%82%BA/series.json",
+      "size": 460,
+      "modified": "2000-01-01T00:00:00Z"
+    },
+    "pending": [],
+    "recheck_after": null
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {},
+    "method": "GET",
+    "path": "/catalog/api/manifest?series=%E6%97%A5%E6%9C%AC%E8%AA%9E%E3%82%B7%E3%83%AA%E3%83%BC%E3%82%BA&volume=%E7%AC%AC1%E5%B7%BB"
+  },
+  "status": 200
+}

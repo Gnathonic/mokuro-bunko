@@ -1,0 +1,25 @@
+{
+  "body": {
+    "version": 1,
+    "kind": "mokuro-bunko",
+    "instance_id": "<id-1>",
+    "boot_id": "<id-2>",
+    "instance_name": "contract-host",
+    "bunko_version": "0.0.0",
+    "epoch": 1,
+    "claimed_at": "2000-01-01T00:00:00.000Z",
+    "heartbeat_at": "2000-01-01T00:00:00.000Z",
+    "ttl_s": 900,
+    "state": "released",
+    "compiles": [
+      "series.json",
+      "catalog.json"
+    ],
+    "ocr": true,
+    "queue": ".mokuro-queue.json",
+    "took_over_from": null
+  },
+  "request": {
+    "file": ".mokuro-bunko.json"
+  }
+}

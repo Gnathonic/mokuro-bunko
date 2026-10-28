@@ -1,0 +1,16 @@
+{
+  "body_text": "<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n<D:multistatus xmlns:D=\"DAV:\"><D:response><D:href>/mokuro-reader/</D:href><D:propstat><D:prop><D:resourcetype><D:collection /></D:resourcetype><D:creationdate>2000-01-01T00:00:00Z</D:creationdate><D:getlastmodified>Sat, 01 Jan 2000 00:00:00 GMT</D:getlastmodified><D:displayname>mokuro-reader</D:displayname></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat><D:propstat><D:prop><D:getetag /></D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat></D:response></D:multistatus>",
+  "headers": {
+    "content-type": "application/xml; charset=utf-8"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {
+      "accept": "text/plain,application/xml",
+      "depth": "0"
+    },
+    "method": "PROPFIND",
+    "path": "/mokuro-reader"
+  },
+  "status": 207
+}

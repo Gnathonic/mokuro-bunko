@@ -1,0 +1,25 @@
+{
+  "expect": {
+    "body_fields": [
+      "authenticated",
+      "username",
+      "role",
+      "permissions.canWriteProgress",
+      "permissions.canAddFiles",
+      "permissions.canModifyDelete",
+      "permissions.metadata.scope",
+      "permissions.metadata.ownedSeries"
+    ],
+    "status": [
+      200
+    ]
+  },
+  "request": {
+    "auth": "bearer:reader",
+    "headers": {
+      "accept": "application/json"
+    },
+    "method": "GET",
+    "path": "/login/api/me"
+  }
+}

@@ -1,6 +1,9 @@
-//! CORS (0.5.2 `middleware/cors.py`). A preflight is any `OPTIONS` carrying `Origin`; it is
-//! answered here with 204 and never reaches the app. `OPTIONS` without `Origin` is an
-//! ordinary request.
+//! CORS (0.5.2 `middleware/cors.py`). A preflight is an `OPTIONS` carrying `Origin` and
+//! `Access-Control-Request-Method`; it is answered here with 204 and never reaches the app.
+//! Any other `OPTIONS` is an ordinary request, `Origin` or not: 0.5.2 answered every
+//! `OPTIONS` with `Origin` here, so a browser's own `OPTIONS` (the reader's write-permission
+//! check and its `X-Mokuro-Put` probe, sent after their preflight) never saw WebDAV's
+//! `Allow` and `DAV`.
 
 use crate::core::Core;
 use axum::body::Body;
@@ -9,7 +12,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 
-pub const EXPOSE_HEADERS: &str = "Content-Length, Content-Type, DAV, ETag, Last-Modified, Location, Lock-Token, \
+pub const EXPOSE_HEADERS: &str = "Allow, Content-Length, Content-Type, DAV, ETag, Last-Modified, Location, Lock-Token, \
 WWW-Authenticate, X-Mokuro-Manifest, X-Mokuro-Recheck-After, X-Mokuro-Upload, X-Mokuro-Size, X-Mokuro-Put, \
 X-Mokuro-Digest-Verified";
 pub const ALLOW_METHODS: &str =
@@ -38,8 +41,12 @@ pub async fn cors(State(state): State<Core>, req: Request, next: Next) -> Respon
     if !enabled {
         return next.run(req).await;
     }
-    let has_origin = req.headers().contains_key(http::header::ORIGIN);
-    if req.method() == Method::OPTIONS && has_origin {
+    let preflight = req.method() == Method::OPTIONS
+        && req.headers().contains_key(http::header::ORIGIN)
+        && req
+            .headers()
+            .contains_key(http::header::ACCESS_CONTROL_REQUEST_METHOD);
+    if preflight {
         let dav = is_dav_path(req.uri().path());
         let private = req
             .headers()
