@@ -360,3 +360,67 @@ async fn a_server_on_onedrive() {
 async fn a_server_on_mega() {
     run(Provider::Mega).await;
 }
+
+/// The connect probe (`storage::connect::LiveOps`, what the admin's Connect runs)
+/// reaches cloudsim through the same settings: the folder check on each provider, and
+/// MEGA's password login.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_connect_probe_checks_each_provider_on_cloudsim() {
+    use bunko_server::storage::connect::{Auth, LiveOps, ProviderOps};
+    let _turn = TURN.lock().await;
+    let sim = bunko_cloudsim::start().await;
+    for p in [Provider::Google, Provider::Microsoft, Provider::Mega] {
+        seed(&sim, p);
+    }
+    sim.mega_account(ACCOUNT, "bunko@cloudsim.test", "cloudsim");
+    let _vars = Vars::set(&sim);
+    let scratch = tempfile::tempdir().unwrap();
+    let ours = std::collections::HashSet::new();
+    let ops = LiveOps;
+
+    for (p, backend) in [
+        (Provider::Google, LibraryBackend::GDrive),
+        (Provider::Microsoft, LibraryBackend::OneDrive),
+    ] {
+        let auth = Auth::OAuth {
+            access_token: sim.token(p, ACCOUNT).access_token,
+        };
+        let (_, report) = ops
+            .inspect(backend, &auth, ROOT, false, scratch.path(), &ours)
+            .await
+            .unwrap_or_else(|e| panic!("{p:?}: {e}"));
+        assert!(report.found, "{p:?}: {report:?}");
+        assert_eq!(report.volumes, 2, "{p:?}: {report:?}");
+    }
+
+    let blob = ops
+        .mega_login("bunko@cloudsim.test", "cloudsim", None)
+        .await
+        .unwrap();
+    let (account, report) = ops
+        .inspect(
+            LibraryBackend::Mega,
+            &Auth::Mega(blob),
+            ROOT,
+            false,
+            scratch.path(),
+            &ours,
+        )
+        .await
+        .unwrap();
+    assert_eq!(account.label, "bunko@cloudsim.test");
+    assert!(report.found && report.volumes == 2, "{report:?}");
+
+    let log = sim.log();
+    for p in [Provider::Google, Provider::Microsoft, Provider::Mega] {
+        assert!(
+            log.iter().any(|e| e.provider == p && e.account == ACCOUNT),
+            "{p:?} never reached cloudsim"
+        );
+    }
+    assert!(
+        log.iter()
+            .any(|e| e.provider == Provider::Mega && e.class == "auth")
+    );
+    sim.assert_clean();
+}
