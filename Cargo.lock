@@ -798,6 +798,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "bunko-cloudsim",
  "bunko-control",
  "bunko-core",
  "bunko-dav",

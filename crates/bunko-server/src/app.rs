@@ -215,6 +215,8 @@ impl Services {
         config_path: Option<PathBuf>,
         opts: &ServeOptions,
     ) -> anyhow::Result<Self> {
+        // A test-cloud setting in a build without test hooks: refuse rather than ignore.
+        crate::storage::test_cloud::refuse_if_set().map_err(anyhow::Error::msg)?;
         // Everything built here that keeps a runtime handle (the library's timers, the
         // PROPFIND cache's refreshes, the OCR control) belongs to the background runtime.
         let _background = crate::rt::enter();

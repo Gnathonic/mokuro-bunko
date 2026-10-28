@@ -32,6 +32,7 @@ pub mod doctor;
 pub mod hooks;
 mod unconnected;
 
+pub mod test_cloud;
 #[cfg(feature = "testing")]
 pub mod testing;
 
@@ -726,8 +727,11 @@ pub fn open_library_store(
         rc.mount_id = u64::from_str_radix(&id[..id.len().min(15)], 16).unwrap_or(1) | 1;
         rc.instance_name = instance_name();
         rc.bunko_version = bunko_core::VERSION.to_string();
+        #[cfg(feature = "testing")]
+        test_cloud::apply_tune(&layout.base, &mut rc);
         (root, rc)
     };
+    let cloud_test = test_cloud::Overrides::current();
     let unconnected_root = layout
         .clone()
         .with_library_root(
@@ -795,24 +799,24 @@ pub fn open_library_store(
             );
             let mut h = handle_of(id.clone(), root, account);
             let store: Arc<dyn LibraryStore> = match backend {
-                OAuthBackend::GDrive(client) => {
+                OAuthBackend::GDrive(mut client) => {
+                    cloud_test.apply_oauth(&mut client);
                     let token = token_source(client, &id, creds);
-                    let b = bunko_remote::gdrive::GDriveBackend::new(
-                        token,
-                        bunko_remote::gdrive::GDriveConfig::new(rc.dir.clone()),
-                    )
-                    .map_err(bunko_remote::berr_to_io)?;
+                    let mut gc = bunko_remote::gdrive::GDriveConfig::new(rc.dir.clone());
+                    cloud_test.apply_gdrive(&mut gc);
+                    let b = bunko_remote::gdrive::GDriveBackend::new(token, gc)
+                        .map_err(bunko_remote::berr_to_io)?;
                     let s = RemoteStore::open(rc, b)?;
                     h.store = Some(s.clone());
                     s
                 }
-                OAuthBackend::OneDrive(client) => {
+                OAuthBackend::OneDrive(mut client) => {
+                    cloud_test.apply_oauth(&mut client);
                     let token = token_source(client, &id, creds);
-                    let b = bunko_remote::onedrive::OneDriveBackend::new(
-                        token,
-                        bunko_remote::onedrive::OneDriveConfig::default(),
-                    )
-                    .map_err(bunko_remote::berr_to_io)?;
+                    let mut oc = bunko_remote::onedrive::OneDriveConfig::default();
+                    cloud_test.apply_onedrive(&mut oc);
+                    let b = bunko_remote::onedrive::OneDriveBackend::new(token, oc)
+                        .map_err(bunko_remote::berr_to_io)?;
                     let s = RemoteStore::open(rc, b)?;
                     h.store = Some(s.clone());
                     s
@@ -826,7 +830,8 @@ pub fn open_library_store(
             session,
         } => {
             let (root, rc) = open_remote(&id);
-            let mc = bunko_remote::mega::MegaConfig::new(rc.dir.clone());
+            let mut mc = bunko_remote::mega::MegaConfig::new(rc.dir.clone());
+            cloud_test.apply_mega(&mut mc);
             match connect_on_own_runtime(async move {
                 bunko_remote::mega::MegaBackend::resume(&session, mc).await
             }) {

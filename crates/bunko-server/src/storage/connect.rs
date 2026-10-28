@@ -60,7 +60,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use super::store_id;
+use super::{store_id, test_cloud};
 
 /// Device codes that may expire unused before a sign-in stops and waits for a click.
 pub const MAX_UNUSED_CODES: u32 = 5;
@@ -447,29 +447,31 @@ impl ProviderOps for LiveOps {
         Box::pin(async move {
             match (backend, auth) {
                 (LibraryBackend::GDrive, Auth::OAuth { access_token }) => {
+                    let mut cfg = bunko_remote::gdrive::GDriveConfig::new(scratch.to_path_buf());
+                    test_cloud::Overrides::current().apply_gdrive(&mut cfg);
                     let b = bunko_remote::gdrive::GDriveBackend::new(
                         Arc::new(bunko_remote::token_dyn::StaticToken::new(
                             access_token.clone(),
                         )),
-                        bunko_remote::gdrive::GDriveConfig::new(scratch.to_path_buf()),
+                        cfg,
                     )?;
                     check_backend(&b, folder, create, ours).await
                 }
                 (LibraryBackend::OneDrive, Auth::OAuth { access_token }) => {
+                    let mut cfg = bunko_remote::onedrive::OneDriveConfig::default();
+                    test_cloud::Overrides::current().apply_onedrive(&mut cfg);
                     let b = bunko_remote::onedrive::OneDriveBackend::new(
                         Arc::new(bunko_remote::token_dyn::StaticToken::new(
                             access_token.clone(),
                         )),
-                        bunko_remote::onedrive::OneDriveConfig::default(),
+                        cfg,
                     )?;
                     check_backend(&b, folder, create, ours).await
                 }
                 (LibraryBackend::Mega, Auth::Mega(blob)) => {
-                    let b = bunko_remote::mega::MegaBackend::resume(
-                        blob,
-                        bunko_remote::mega::MegaConfig::new(scratch.to_path_buf()),
-                    )
-                    .await?;
+                    let mut cfg = bunko_remote::mega::MegaConfig::new(scratch.to_path_buf());
+                    test_cloud::Overrides::current().apply_mega(&mut cfg);
+                    let b = bunko_remote::mega::MegaBackend::resume(blob, cfg).await?;
                     check_backend(&b, folder, create, ours).await
                 }
                 (
@@ -510,7 +512,9 @@ impl ProviderOps for LiveOps {
         totp: Option<&'a str>,
     ) -> BoxFuture<'a, Result<SessionBlob, LoginError>> {
         Box::pin(async move {
-            bunko_remote::mega::MegaSession::login(email, password, totp.map(str::to_string)).await
+            let mut cfg = bunko_remote::mega::MegaConfig::new(PathBuf::new());
+            test_cloud::Overrides::current().apply_mega(&mut cfg);
+            bunko_remote::mega::MegaSession::login_with(cfg.client, email, password, totp).await
         })
     }
 }

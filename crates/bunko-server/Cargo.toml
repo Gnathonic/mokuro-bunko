@@ -81,6 +81,8 @@ bunko-processor.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
 image.workspace = true
+# cloud_sim: a whole server against the cloud simulator, in-process.
+bunko-cloudsim = { path = "../bunko-cloudsim" }
 # cloud_readonly: a server whose library is the in-memory FakeBackend.
 bunko-server = { path = ".", features = ["testing"] }
 bunko-remote = { workspace = true, features = ["testing"] }
