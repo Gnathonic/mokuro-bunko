@@ -258,6 +258,14 @@ async fn list_all_walks_children_with_paging() {
             .iter()
             .any(|r| r.query.contains_key("$skiptoken"))
     );
+    // Every children listing asks for a page size.
+    assert!(
+        e.mock
+            .requests()
+            .iter()
+            .filter(|r| r.method == "GET" && r.path.ends_with("/children"))
+            .all(|r| r.query.contains_key("$top"))
+    );
 
     // Field mapping.
     let v1 = nodes.iter().find(|n| n.pid == l.v1).unwrap();

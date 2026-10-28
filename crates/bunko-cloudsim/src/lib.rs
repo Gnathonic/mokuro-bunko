@@ -140,6 +140,19 @@ impl SimState {
         &self.0.base
     }
 
+    /// The base on the other loopback name (`127.0.0.1` and `localhost` swapped), or
+    /// the base itself on any other host: another origin for the same server.
+    pub fn preauth_base(&self) -> String {
+        let b = &self.0.base;
+        if let Some(rest) = b.strip_prefix("http://127.0.0.1:") {
+            format!("http://localhost:{rest}")
+        } else if let Some(rest) = b.strip_prefix("http://localhost:") {
+            format!("http://127.0.0.1:{rest}")
+        } else {
+            b.clone()
+        }
+    }
+
     pub(crate) fn violation(&self, line: String) {
         self.0.violations.push(line);
     }
@@ -279,6 +292,11 @@ impl SimState {
         token: &str,
     ) -> Option<(String, Arc<Mutex<OneDriveState>>)> {
         self.for_token(Provider::Microsoft, &self.0.onedrive, token)
+    }
+
+    pub(crate) fn drive_existing(&self, name: &str) -> Option<(String, Arc<Mutex<DriveState>>)> {
+        let st = self.0.drive.lock().get(name).cloned()?;
+        Some((name.to_string(), st))
     }
 
     pub(crate) fn onedrive_existing(

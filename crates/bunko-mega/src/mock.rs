@@ -68,6 +68,9 @@ struct Upload {
     size: u64,
     buf: Vec<u8>,
     token: Option<String>,
+    /// Asked for with `v: 2` (megajs does): the last POST answers the completion
+    /// token as raw bytes, which the client base64s for `p`.
+    binary: bool,
 }
 
 #[derive(Default)]
@@ -307,12 +310,14 @@ impl St {
                 let size = c.get("s").and_then(Value::as_u64).unwrap_or(0);
                 self.next += 1;
                 let id = format!("up{}", self.next);
+                let binary = c.get("v").and_then(Value::as_i64) == Some(2);
                 self.uploads.insert(
                     id.clone(),
                     Upload {
                         size,
                         buf: Vec::new(),
                         token: None,
+                        binary,
                     },
                 );
                 json!({"p": format!("{}ul/{}/{id}", self.base, self.idx)})
@@ -747,6 +752,12 @@ async fn upload(
         }
         if up.buf.len() as u64 == up.size {
             let tok = format!("TOK{next}x{}", up.size);
+            if up.binary {
+                let raw: Vec<u8> = [&[0xffu8, 0x00][..], tok.as_bytes()].concat();
+                up.token = Some(b64(&raw));
+                st.next = next;
+                return raw.into_response();
+            }
             up.token = Some(tok.clone());
             st.next = next;
             return tok.into_response();

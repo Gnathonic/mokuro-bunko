@@ -34,6 +34,7 @@ pub struct MFile {
     pub head_rev: String,
     pub revisions: HashMap<String, Bytes>,
     pub trashed: bool,
+    pub description: Option<String>,
 }
 
 enum SessKind {
@@ -43,7 +44,9 @@ enum SessKind {
 
 struct Sess {
     kind: SessKind,
-    size: usize,
+    /// Declared at the start (`X-Upload-Content-Length`) or by the first PUT that
+    /// names a total.
+    size: Option<usize>,
     buf: Vec<u8>,
     done: Option<String>,
 }
@@ -158,6 +161,13 @@ impl DriveState {
         format!("{prefix}{:05}", self.seq)
     }
 
+    /// Set the metadata a create carries beyond name, parent and type.
+    fn describe(&mut self, id: &str, meta: &Value) {
+        if let (Some(d), Some(f)) = (meta["description"].as_str(), self.files.get_mut(id)) {
+            f.description = Some(d.to_string());
+        }
+    }
+
     /// Trashed itself or under a trashed folder.
     pub fn trashed(&self, id: &str) -> bool {
         let mut cur = id;
@@ -183,6 +193,9 @@ impl DriveState {
             "version": f.version.to_string(), "modifiedTime": rfc3339(f.modified),
             "createdTime": rfc3339(f.created), "trashed": self.trashed(id),
         });
+        if let Some(d) = &f.description {
+            v["description"] = json!(d);
+        }
         if f.mime != FOLDER {
             v["size"] = json!(f.data.len().to_string());
             v["md5Checksum"] = json!(hex_md5(&f.data));
@@ -220,6 +233,7 @@ impl DriveState {
                 head_rev: rev,
                 revisions,
                 trashed: false,
+                description: None,
             },
         );
         self.log.push(id.clone());
@@ -344,25 +358,250 @@ impl DriveState {
     }
 }
 
-fn unquote(s: &str) -> Result<String, Bad> {
-    let s = s.trim();
-    if s.len() < 2 || !s.starts_with('\'') || !s.ends_with('\'') {
-        return Err(format!("expected a quoted string, got {s:?}"));
+/// The `q` of `files.list`: `and`, `or`, `not` and parentheses over `'me' in owners`,
+/// `'<id>' in parents`, `name`, `mimeType` and `trashed` compared with `=` or `!=`.
+/// Anything else is an error naming it, so a client's query the simulator cannot
+/// answer is a violation rather than a wrong listing.
+mod query {
+    use super::DriveState;
+    use crate::violations::Bad;
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Tok {
+        Str(String),
+        Word(String),
+        Eq,
+        Ne,
+        Open,
+        Close,
     }
-    let inner = &s[1..s.len() - 1];
-    let mut out = String::new();
-    let mut esc = false;
-    for c in inner.chars() {
-        if esc {
-            out.push(c);
-            esc = false;
-        } else if c == '\\' {
-            esc = true;
-        } else {
-            out.push(c);
+
+    fn lex(q: &str) -> Result<Vec<Tok>, Bad> {
+        let mut out = Vec::new();
+        let mut it = q.chars().peekable();
+        while let Some(&c) = it.peek() {
+            match c {
+                c if c.is_whitespace() => {
+                    it.next();
+                }
+                '(' => {
+                    it.next();
+                    out.push(Tok::Open);
+                }
+                ')' => {
+                    it.next();
+                    out.push(Tok::Close);
+                }
+                '=' => {
+                    it.next();
+                    out.push(Tok::Eq);
+                }
+                '!' => {
+                    it.next();
+                    if it.next() != Some('=') {
+                        return Err(format!("q {q:?}: `!` not followed by `=`"));
+                    }
+                    out.push(Tok::Ne);
+                }
+                '\'' => {
+                    it.next();
+                    let mut s = String::new();
+                    loop {
+                        match it.next() {
+                            Some('\\') => match it.next() {
+                                Some(e) => s.push(e),
+                                None => return Err(format!("q {q:?}: unterminated string")),
+                            },
+                            Some('\'') => break,
+                            Some(ch) => s.push(ch),
+                            None => return Err(format!("q {q:?}: unterminated string")),
+                        }
+                    }
+                    out.push(Tok::Str(s));
+                }
+                c if c.is_ascii_alphanumeric() || c == '_' => {
+                    let mut w = String::new();
+                    while let Some(&ch) = it.peek() {
+                        if ch.is_ascii_alphanumeric() || ch == '_' {
+                            w.push(ch);
+                            it.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    out.push(Tok::Word(w));
+                }
+                other => return Err(format!("q {q:?}: unexpected {other:?}")),
+            }
+        }
+        Ok(out)
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum Field {
+        Name,
+        MimeType,
+        Trashed,
+    }
+
+    #[derive(Debug)]
+    pub enum Expr {
+        And(Box<Expr>, Box<Expr>),
+        Or(Box<Expr>, Box<Expr>),
+        Not(Box<Expr>),
+        Owned,
+        InParents(String),
+        Cmp {
+            field: Field,
+            ne: bool,
+            value: String,
+        },
+    }
+
+    struct Parser<'a> {
+        q: &'a str,
+        toks: Vec<Tok>,
+        at: usize,
+    }
+
+    impl Parser<'_> {
+        fn peek(&self) -> Option<&Tok> {
+            self.toks.get(self.at)
+        }
+
+        fn next(&mut self) -> Option<Tok> {
+            let t = self.toks.get(self.at).cloned();
+            self.at += 1;
+            t
+        }
+
+        fn word(&self, w: &str) -> bool {
+            matches!(self.peek(), Some(Tok::Word(x)) if x == w)
+        }
+
+        fn bad(&self, what: &str) -> Bad {
+            format!("unsupported q clause in {:?}: {what}", self.q)
+        }
+
+        fn or(&mut self) -> Result<Expr, Bad> {
+            let mut e = self.and()?;
+            while self.word("or") {
+                self.at += 1;
+                e = Expr::Or(Box::new(e), Box::new(self.and()?));
+            }
+            Ok(e)
+        }
+
+        fn and(&mut self) -> Result<Expr, Bad> {
+            let mut e = self.unary()?;
+            while self.word("and") {
+                self.at += 1;
+                e = Expr::And(Box::new(e), Box::new(self.unary()?));
+            }
+            Ok(e)
+        }
+
+        fn unary(&mut self) -> Result<Expr, Bad> {
+            if self.word("not") {
+                self.at += 1;
+                return Ok(Expr::Not(Box::new(self.unary()?)));
+            }
+            if self.peek() == Some(&Tok::Open) {
+                self.at += 1;
+                let e = self.or()?;
+                if self.next() != Some(Tok::Close) {
+                    return Err(self.bad("missing `)`"));
+                }
+                return Ok(e);
+            }
+            self.atom()
+        }
+
+        fn atom(&mut self) -> Result<Expr, Bad> {
+            match self.next() {
+                Some(Tok::Str(s)) => {
+                    if !self.word("in") {
+                        return Err(self.bad(&format!("'{s}' not followed by `in`")));
+                    }
+                    self.at += 1;
+                    match self.next() {
+                        Some(Tok::Word(w)) if w == "owners" && s == "me" => Ok(Expr::Owned),
+                        Some(Tok::Word(w)) if w == "parents" => Ok(Expr::InParents(s)),
+                        other => Err(self.bad(&format!("'{s}' in {other:?}"))),
+                    }
+                }
+                Some(Tok::Word(w)) => {
+                    let field = match w.as_str() {
+                        "name" => Field::Name,
+                        "mimeType" => Field::MimeType,
+                        "trashed" => Field::Trashed,
+                        _ => return Err(self.bad(&format!("field {w:?}"))),
+                    };
+                    let ne = match self.next() {
+                        Some(Tok::Eq) => false,
+                        Some(Tok::Ne) => true,
+                        other => return Err(self.bad(&format!("{w} {other:?}"))),
+                    };
+                    let value = match (field, self.next()) {
+                        (Field::Trashed, Some(Tok::Word(b))) if b == "true" || b == "false" => b,
+                        (Field::Name | Field::MimeType, Some(Tok::Str(v))) => v,
+                        (_, other) => return Err(self.bad(&format!("{w} compared with {other:?}"))),
+                    };
+                    Ok(Expr::Cmp { field, ne, value })
+                }
+                other => Err(self.bad(&format!("{other:?}"))),
+            }
         }
     }
-    Ok(out)
+
+    pub fn parse(q: &str) -> Result<Expr, Bad> {
+        let mut p = Parser {
+            q,
+            toks: lex(q)?,
+            at: 0,
+        };
+        if p.toks.is_empty() {
+            return Err("files.list without q".into());
+        }
+        let e = p.or()?;
+        if p.at != p.toks.len() {
+            return Err(p.bad("trailing tokens"));
+        }
+        Ok(e)
+    }
+
+    impl Expr {
+        /// Narrowed to the user's files, a parent or a name (not the whole corpus).
+        pub fn scoped(&self) -> bool {
+            match self {
+                Expr::And(a, b) => a.scoped() || b.scoped(),
+                Expr::Or(a, b) => a.scoped() && b.scoped(),
+                Expr::Not(_) => false,
+                Expr::Owned | Expr::InParents(_) => true,
+                Expr::Cmp { field, ne, .. } => *field == Field::Name && !ne,
+            }
+        }
+
+        pub fn matches(&self, st: &DriveState, id: &str) -> bool {
+            let f = &st.files[id];
+            match self {
+                Expr::And(a, b) => a.matches(st, id) && b.matches(st, id),
+                Expr::Or(a, b) => a.matches(st, id) || b.matches(st, id),
+                Expr::Not(e) => !e.matches(st, id),
+                Expr::Owned => true,
+                Expr::InParents(p) => f.parents.iter().any(|x| x == p),
+                Expr::Cmp { field, ne, value } => {
+                    let eq = match field {
+                        // Drive's `name =` match is case-insensitive.
+                        Field::Name => value.eq_ignore_ascii_case(&f.name),
+                        Field::MimeType => *value == f.mime,
+                        Field::Trashed => (value == "true") == st.trashed(id),
+                    };
+                    eq != *ne
+                }
+            }
+        }
+    }
 }
 
 fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
@@ -516,7 +755,19 @@ fn answer(
     headers: &HeaderMap,
     body: Bytes,
 ) -> (String, Response) {
-    let Some((account, acct)) = bearer(headers).and_then(|t| sim.drive_for_token(t)) else {
+    let session_put = *method == Method::PUT && path == "/upload/drive/v3/files";
+    let acct = match bearer(headers) {
+        Some(t) => sim.drive_for_token(t),
+        // A resumable session's URL needs no token: its id names the account.
+        None if session_put => q
+            .get("upload_id")
+            .and_then(|u| u.split_once('.'))
+            .and_then(|(a, _)| hex::decode(a).ok())
+            .and_then(|a| String::from_utf8(a).ok())
+            .and_then(|a| sim.drive_existing(&a)),
+        None => None,
+    };
+    let Some((account, acct)) = acct else {
         return (String::new(), err(401, "authError"));
     };
     let res = {
@@ -539,7 +790,7 @@ fn answer(
             return (account, r);
         }
         let api = format!("{}{PREFIX}", sim.base());
-        route(&mut st, &api, method, &path, q, headers, body)
+        route(&mut st, &account, &api, method, &path, q, headers, body)
     };
     let r = res.unwrap_or_else(|bad| {
         sim.violation(format!("google {method} {path}: {bad}"));
@@ -548,8 +799,10 @@ fn answer(
     (account, r)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn route(
     st: &mut DriveState,
+    account: &str,
     api: &str,
     method: &Method,
     path: &str,
@@ -605,41 +858,15 @@ fn route(
         }
         ("GET", ["drive", "v3", "files"]) => {
             let query = q.get("q").cloned().unwrap_or_default();
-            let mut owners = false;
-            let mut no_trash = false;
-            let mut name: Option<String> = None;
-            let mut mime: Option<String> = None;
-            let mut parent: Option<String> = None;
-            for clause in query.split(" and ") {
-                let c = clause.trim();
-                if c == "'me' in owners" {
-                    owners = true;
-                } else if c == "trashed=false" {
-                    no_trash = true;
-                } else if let Some(v) = c.strip_prefix("name=") {
-                    name = Some(unquote(v)?);
-                } else if let Some(v) = c.strip_prefix("mimeType=") {
-                    mime = Some(unquote(v)?);
-                } else if let Some(v) = c.strip_suffix(" in parents") {
-                    parent = Some(unquote(v)?);
-                } else {
-                    return Err(format!("unsupported q clause {c:?} in {query:?}"));
-                }
-            }
-            if !(owners || name.is_some() || parent.is_some()) {
+            let expr = query::parse(&query)?;
+            if !expr.scoped() {
                 return Err(format!("q {query:?} would list the whole drive"));
             }
             let mut ids: Vec<String> = st
                 .files
-                .iter()
-                .filter(|(id, f)| {
-                    (!no_trash || !st.trashed(id))
-                        // Drive's `name =` match is case-insensitive.
-                        && name.as_ref().is_none_or(|n| n.eq_ignore_ascii_case(&f.name))
-                        && mime.as_ref().is_none_or(|mm| *mm == f.mime)
-                        && parent.as_ref().is_none_or(|p| f.parents.contains(p))
-                })
-                .map(|(id, _)| id.clone())
+                .keys()
+                .filter(|id| expr.matches(st, id))
+                .cloned()
                 .collect();
             if st.reverse_listing {
                 ids.reverse();
@@ -667,6 +894,7 @@ fn route(
                 .to_string();
             let name = meta_name(&meta)?;
             let id = st.insert(None, &parent, &name, &mime, Bytes::new());
+            st.describe(&id, &meta);
             ok_json(st.json(&id))
         }
         ("POST", ["drive", "v3", "files", id, "copy"]) => {
@@ -714,6 +942,9 @@ fn route(
             if meta["trashed"].as_bool() == Some(true) {
                 f.trashed = true;
             }
+            if let Some(d) = meta["description"].as_str() {
+                f.description = Some(d.to_string());
+            }
             if let Some(rm) = q.get("removeParents") {
                 let rm: HashSet<&str> = rm.split(',').collect();
                 f.parents.retain(|p| !rm.contains(p.as_str()));
@@ -738,9 +969,6 @@ fn route(
                 let Some(t) = target.as_deref() else {
                     return Err("an upload PATCH without a file id".into());
                 };
-                if q.get("keepRevisionForever").map(String::as_str) != Some("false") {
-                    return Err("an upload PATCH without keepRevisionForever=false".into());
-                }
                 if !st.files.contains_key(t) {
                     return Ok(err(404, "notFound"));
                 }
@@ -764,18 +992,22 @@ fn route(
                                 .unwrap_or("application/octet-stream")
                                 .to_string();
                             let id = st.insert(id, &parent, &name, &mime, data);
+                            st.describe(&id, &meta);
                             ok_json(st.json(&id))
                         }
                     }
                 }
                 Some("resumable") => {
-                    let size: usize = need(
-                        headers
-                            .get("x-upload-content-length")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse().ok()),
-                        "a resumable upload without X-Upload-Content-Length",
-                    )?;
+                    // Optional: without it the size comes with the data.
+                    let size: Option<usize> = match headers.get("x-upload-content-length") {
+                        Some(v) => Some(
+                            v.to_str()
+                                .ok()
+                                .and_then(|v| v.parse().ok())
+                                .ok_or("an unparsable X-Upload-Content-Length")?,
+                        ),
+                        None => None,
+                    };
                     let kind = match target {
                         Some(id) => SessKind::Replace(id),
                         None => {
@@ -785,7 +1017,9 @@ fn route(
                             SessKind::New(meta)
                         }
                     };
-                    let sid = st.new_id("s");
+                    // The session URL is its own credential (Drive's needs no token):
+                    // its id names the account.
+                    let sid = format!("{}.{}", hex::encode(account), st.new_id("s"));
                     st.sessions.insert(
                         sid.clone(),
                         Sess {
@@ -811,26 +1045,34 @@ fn route(
                 return Ok(err(503, "backendError"));
             }
             let sid = need(q.get("upload_id"), "a session PUT without upload_id")?.clone();
-            let cr = need(
-                headers
-                    .get(header::CONTENT_RANGE)
-                    .and_then(|v| v.to_str().ok()),
-                "a session PUT without Content-Range",
-            )?
-            .to_string();
+            // Without Content-Range the PUT is the whole file in one request.
+            let cr = match headers
+                .get(header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+            {
+                Some(cr) => cr.to_string(),
+                None => format!("bytes 0-{}/{}", body.len().saturating_sub(1), body.len()),
+            };
             let bad = || format!("unparsable Content-Range {cr:?}");
             let spec = cr.strip_prefix("bytes ").ok_or_else(bad)?;
             let (range, total) = spec.split_once('/').ok_or_else(bad)?;
-            let total: usize = total.parse().map_err(|_| bad())?;
-            let Some(sess) = st.sessions.get(&sid) else {
+            let total: Option<usize> = match total {
+                "*" => None,
+                t => Some(t.parse().map_err(|_| bad())?),
+            };
+            let Some(sess) = st.sessions.get_mut(&sid) else {
                 return Ok(err(404, "notFound"));
             };
-            if total != sess.size {
-                return Err(format!(
-                    "Content-Range total {total} but the session was opened for {}",
-                    sess.size
-                ));
+            match (total, sess.size) {
+                (Some(t), Some(size)) if t != size => {
+                    return Err(format!(
+                        "Content-Range total {t} but the session was opened for {size}"
+                    ));
+                }
+                (Some(t), None) => sess.size = Some(t),
+                _ => {}
             }
+            let sess = &*sess;
             if let Some(id) = sess.done.clone() {
                 return Ok(ok_json(st.json(&id)));
             }
@@ -852,7 +1094,7 @@ fn route(
                 return Ok(err(503, "backendError"));
             }
             sess.buf.extend_from_slice(&body);
-            if sess.buf.len() < sess.size {
+            if sess.size.is_none_or(|size| sess.buf.len() < size) {
                 return Ok(range_308(sess.buf.len()));
             }
             let data = Bytes::from(std::mem::take(&mut sess.buf));
@@ -867,13 +1109,15 @@ fn route(
                         .as_str()
                         .unwrap_or("application/octet-stream")
                         .to_string();
-                    st.insert(
+                    let id = st.insert(
                         meta["id"].as_str().map(str::to_string),
                         &first_parent(&meta)?,
                         &meta_name(&meta)?,
                         &mime,
                         data,
-                    )
+                    );
+                    st.describe(&id, &meta);
+                    id
                 }
             };
             if let Some(s) = st.sessions.get_mut(&sid) {

@@ -68,7 +68,7 @@ pub fn router() -> Router<SimState> {
         .route("/fault", post(fault))
         .route("/knobs", post(knobs))
         .route("/log", get(log).delete(clear_log))
-        .route("/violations", get(violations))
+        .route("/violations", get(violations).delete(clear_violations))
         .route("/reset", post(reset))
 }
 
@@ -259,6 +259,11 @@ async fn clear_log(State(sim): State<SimState>) -> Response {
 
 async fn violations(State(sim): State<SimState>) -> Response {
     Json(sim.violations()).into_response()
+}
+
+async fn clear_violations(State(sim): State<SimState>) -> Response {
+    sim.take_violations();
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn reset(State(sim): State<SimState>, _b: Bytes) -> Response {

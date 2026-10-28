@@ -2,6 +2,10 @@
 //! provider call, under `{base}/graph/v1.0`, plus the pre-authenticated download,
 //! upload-session and copy-monitor URLs under `{base}/graph/{preauth|upload|monitor}/
 //! {account}/{id}` (they carry no token, so the account is in the URL, hex-encoded).
+//! Those URLs use the other loopback name (`localhost` for `127.0.0.1` and back): a
+//! different origin, as Microsoft's storage hosts are, so a browser or `fetch`
+//! following the download redirect drops the `Authorization` header as it would for
+//! the real thing.
 //! One [`OneDriveState`] per account.
 
 use std::collections::{BTreeMap, HashMap};
@@ -39,7 +43,15 @@ pub struct MItem {
 }
 
 enum SessKind {
-    New { parent: String, name: String },
+    New {
+        parent: String,
+        name: String,
+    },
+    /// A path upload with `conflictBehavior: replace`: creates, or rewrites what is there.
+    Upsert {
+        parent: String,
+        name: String,
+    },
     Replace(String),
 }
 
@@ -566,9 +578,11 @@ fn answer(
             return r;
         }
         let root = format!("{}{PREFIX}", sim.base());
+        let preauth_root = format!("{}{PREFIX}", sim.preauth_base());
         let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
         let cx = Cx {
             root: &root,
+            preauth_root: &preauth_root,
             account_hex: &hex::encode(&account),
             method,
             q,
@@ -590,6 +604,8 @@ fn answer(
 struct Cx<'a> {
     /// `{base}/graph`.
     root: &'a str,
+    /// `{base}/graph` on the other loopback name, for the pre-authenticated URLs.
+    preauth_root: &'a str,
     account_hex: &'a str,
     method: &'a Method,
     q: &'a HashMap<String, String>,
@@ -603,7 +619,7 @@ impl Cx<'_> {
     }
 
     fn preauth(&self, kind: &str, id: &str) -> String {
-        format!("{}/{kind}/{}/{id}", self.root, self.account_hex)
+        format!("{}/{kind}/{}/{id}", self.preauth_root, self.account_hex)
     }
 }
 
@@ -692,10 +708,9 @@ fn route_graph(
                 "quota": {"total": st.quota_total, "used": used, "remaining": st.quota_total - used as i64, "state": "normal"},
             }))
         }
-        ("GET", ["me", "drive", "root:", name]) => match st.child(ROOT, name) {
-            Some(id) => ok_json(st.json(&id)),
-            None => err(404, "itemNotFound"),
-        },
+        (_, ["me", "drive", "root:", rest @ ..]) => route_root_path(st, cx, rest, body)?,
+        ("GET", ["me", "drive", "root"]) => ok_json(st.json(ROOT)),
+        ("GET", ["me", "drive", "root", "children"]) => children(st, cx, ROOT)?,
         ("POST", ["me", "drive", "root", "children"]) => mkdir(st, ROOT, &body)?,
         ("GET", ["me", "drive", "root", "delta"]) => {
             let tok = q.get("token").cloned().unwrap_or_default();
@@ -833,30 +848,10 @@ fn route_graph(
             StatusCode::NO_CONTENT.into_response()
         }
         ("GET", ["me", "drive", "items", id, "children"]) => {
-            let id = id.to_string();
-            if !st.live(&id) {
+            if !st.live(id) {
                 return Ok(err(404, "itemNotFound"));
             }
-            if !q.contains_key("$top") {
-                return Err("children listed without $top".into());
-            }
-            let kids = st.kids(&id);
-            let at: usize = match q.get("$skiptoken") {
-                Some(s) => s
-                    .parse()
-                    .map_err(|_| format!("$skiptoken {s:?} is not one this simulator issued"))?,
-                None => 0,
-            }
-            .min(kids.len());
-            let end = (at + st.page_size).min(kids.len());
-            let value: Vec<Value> = kids[at..end].iter().map(|k| st.json(k)).collect();
-            let mut v = json!({"value": value});
-            if end < kids.len() {
-                v["@odata.nextLink"] = json!(format!(
-                    "{base}/me/drive/items/{id}/children?$top=2&$skiptoken={end}"
-                ));
-            }
-            ok_json(v)
+            children(st, cx, id)?
         }
         ("POST", ["me", "drive", "items", id, "children"]) => {
             let id = id.to_string();
@@ -926,6 +921,119 @@ fn route_graph(
                 .header(header::LOCATION, cx.preauth("monitor", &mid))
                 .body(Body::empty())
                 .unwrap_or_default()
+        }
+        _ => return Err("no such endpoint".into()),
+    })
+}
+
+/// One page of a folder's live children (`$top` is optional, as in Graph; the page
+/// size is the account's `page_size`).
+fn children(st: &OneDriveState, cx: &Cx, id: &str) -> Result<Response, Bad> {
+    let kids = st.kids(id);
+    let at: usize = match cx.q.get("$skiptoken") {
+        Some(s) => s
+            .parse()
+            .map_err(|_| format!("$skiptoken {s:?} is not one this simulator issued"))?,
+        None => 0,
+    }
+    .min(kids.len());
+    let end = (at + st.page_size).min(kids.len());
+    let value: Vec<Value> = kids[at..end].iter().map(|k| st.json(k)).collect();
+    let mut v = json!({"value": value});
+    if end < kids.len() {
+        v["@odata.nextLink"] = json!(format!(
+            "{}/me/drive/items/{id}/children?$top=2&$skiptoken={end}",
+            cx.base()
+        ));
+    }
+    Ok(ok_json(v))
+}
+
+/// The live item at `path` (names fold, as on OneDrive) under the drive root.
+fn at_path(st: &OneDriveState, path: &[&str]) -> Option<String> {
+    let mut cur = ROOT.to_string();
+    for name in path.iter().filter(|n| !n.is_empty()) {
+        cur = st.child(&cur, name)?;
+    }
+    Some(cur)
+}
+
+/// Root-relative path addressing: `/me/drive/root:/a/b/c[:/action]`.
+fn route_root_path(
+    st: &mut OneDriveState,
+    cx: &Cx,
+    rest: &[&str],
+    body: Bytes,
+) -> Result<Response, Bad> {
+    let end = rest.iter().position(|s| s.ends_with(':'));
+    let (path, action): (Vec<&str>, Option<&str>) = match end {
+        Some(i) => (
+            rest[..=i].iter().map(|s| s.trim_end_matches(':')).collect(),
+            rest.get(i + 1).copied(),
+        ),
+        None => (rest.to_vec(), None),
+    };
+    if path.iter().all(|s| s.is_empty()) {
+        return Err("a root path address without a path".into());
+    }
+    let (dirs, name) = path.split_at(path.len() - 1);
+    let name = name[0];
+    let item = at_path(st, &path);
+    Ok(match (cx.method.as_str(), action) {
+        ("GET", None) => match item {
+            Some(id) => ok_json(st.json(&id)),
+            None => err(404, "itemNotFound"),
+        },
+        ("GET", Some("children")) => match item {
+            Some(id) if st.items[&id].folder => children(st, cx, &id)?,
+            _ => err(404, "itemNotFound"),
+        },
+        ("POST", Some("children")) => match item {
+            Some(id) if st.items[&id].folder => mkdir(st, &id, &body)?,
+            _ => err(404, "itemNotFound"),
+        },
+        ("POST", Some("createUploadSession")) => {
+            let Some(parent) = at_path(st, dirs) else {
+                return Ok(err(404, "itemNotFound"));
+            };
+            let b = json_body(&body)?;
+            let kind = match b["item"]["@microsoft.graph.conflictBehavior"].as_str() {
+                Some("fail") => {
+                    if item.is_some() {
+                        return Ok(err(409, "nameAlreadyExists"));
+                    }
+                    SessKind::New {
+                        parent,
+                        name: name.to_string(),
+                    }
+                }
+                Some("replace") | None => SessKind::Upsert {
+                    parent,
+                    name: name.to_string(),
+                },
+                Some(other) => return Err(format!("conflictBehavior {other:?}")),
+            };
+            new_session(st, cx, kind)
+        }
+        ("PUT", Some("content")) => {
+            let Some(parent) = at_path(st, dirs) else {
+                return Ok(err(404, "itemNotFound"));
+            };
+            match (
+                item,
+                cx.q.get("@microsoft.graph.conflictBehavior")
+                    .map(String::as_str),
+            ) {
+                (Some(_), Some("fail")) => err(409, "nameAlreadyExists"),
+                (Some(id), _) => {
+                    st.rewrite(&id, body);
+                    ok_json(st.json(&id))
+                }
+                (None, _) => {
+                    let id = st.insert(&parent, name, false, body);
+                    status_json(201, st.json(&id))
+                }
+            }
         }
         _ => return Err("no such endpoint".into()),
     })
@@ -1040,6 +1148,13 @@ fn upload_fragment(
             }
             st.insert(&parent, &name, false, data)
         }
+        SessKind::Upsert { parent, name } => match st.child(&parent, &name) {
+            Some(id) => {
+                st.rewrite(&id, data);
+                id
+            }
+            None => st.insert(&parent, &name, false, data),
+        },
     };
     Ok(status_json(201, st.json(&id)))
 }

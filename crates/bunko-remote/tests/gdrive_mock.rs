@@ -685,6 +685,15 @@ async fn replace_keeps_the_id_and_skips_identical_bytes() {
         1
     );
 
+    // Replaces never pin a revision forever.
+    assert!(
+        e.mock
+            .requests()
+            .iter()
+            .filter(|r| r.method == "PATCH" && r.path.starts_with("/upload/"))
+            .all(|r| r.query.get("keepRevisionForever").map(String::as_str) == Some("false"))
+    );
+
     // Replacing a folder or a missing file is NotFound.
     assert_eq!(
         e.be.upload(
