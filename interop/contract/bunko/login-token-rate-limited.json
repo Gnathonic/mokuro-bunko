@@ -9,10 +9,10 @@
   "request": {
     "auth": "none",
     "body": {
-      "kind": "reader",
-      "label": "mokuro-reader",
+      "username": "reader",
       "password": "<password:reader>",
-      "username": "reader"
+      "kind": "reader",
+      "label": "mokuro-reader"
     },
     "headers": {
       "accept": "application/json",

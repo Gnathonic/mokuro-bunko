@@ -1,15 +1,15 @@
 {
   "body": {
     "authenticated": false,
+    "role": "anonymous",
     "permissions": {
+      "canWriteProgress": false,
       "canAddFiles": false,
       "canModifyDelete": false,
-      "canWriteProgress": false,
       "metadata": {
         "scope": "none"
       }
-    },
-    "role": "anonymous"
+    }
   },
   "headers": {
     "cache-control": "no-store",

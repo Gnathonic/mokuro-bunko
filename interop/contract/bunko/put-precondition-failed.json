@@ -1,8 +1,8 @@
 {
   "body": {
-    "detail": "The server could not store the upload (412).",
     "ok": false,
     "reason": "server-error",
+    "detail": "The server could not store the upload (412).",
     "retry": false
   },
   "headers": {

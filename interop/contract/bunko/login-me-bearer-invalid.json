@@ -1,0 +1,17 @@
+{
+  "body": {
+    "authenticated": false,
+    "error": "Invalid or expired token"
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "raw:Bearer not-a-real-token",
+    "headers": {},
+    "method": "GET",
+    "path": "/login/api/me"
+  },
+  "status": 401
+}

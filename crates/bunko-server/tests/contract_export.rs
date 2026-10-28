@@ -28,6 +28,7 @@ const PRIVILEGES_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 const LOCK_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner>contract</D:owner></D:lockinfo>"#;
 
+/// The reader's origin: a browser sends it on every request the reader makes.
 const READER_ORIGIN: &str = "https://reader.mokuro.app";
 
 /// The `webdav` library's listing request (`getDirectoryContents`).
@@ -70,7 +71,8 @@ async fn exhaust_dav(server: &Server, user: &str) {
     }
 }
 
-/// Ten wrong passwords for `user` on the login API: the next check is refused.
+/// Wrong passwords for `user` on the login API until the limiter refuses (ten failures,
+/// counting any made before).
 async fn exhaust(server: &Server, user: &str) {
     for _ in 0..10 {
         let r = server
@@ -80,6 +82,9 @@ async fn exhaust(server: &Server, user: &str) {
                     .json(token_body(user, "wrong-password")),
             )
             .await;
+        if r.status == 429 {
+            return;
+        }
         assert_eq!(r.status, 401, "{}", r.text());
     }
 }
@@ -128,6 +133,24 @@ async fn identity(c: &mut Contract, seed: &Seed) {
         Req::new("GET", me, "basic:viewer"),
     )
     .await;
+    let r = export(
+        c,
+        &server,
+        "login-me-bearer-invalid",
+        Req::new("GET", me, "raw:Bearer not-a-real-token"),
+    )
+    .await;
+    assert_eq!(r.status, 401, "{}", r.text());
+    // Last: the limiter stays hot for `reader` on this server.
+    exhaust(&server, "reader").await;
+    let r = export(
+        c,
+        &server,
+        "login-me-rate-limited",
+        Req::new("GET", me, "basic:reader"),
+    )
+    .await;
+    assert_eq!(r.status, 429, "{}", r.text());
     server.stop().await;
 }
 
@@ -277,6 +300,16 @@ async fn webdav(c: &mut Contract, server: &Server) {
         listing(&root, "infinity"),
     )
     .await;
+    // The reader's own OPTIONS on the library (its write-permission fallback reads
+    // `Allow`, its probe `X-Mokuro-Put`), as a browser sends it after the preflight.
+    let r = export(
+        c,
+        server,
+        "options-library",
+        Req::new("OPTIONS", &root, "basic:reader").header("origin", READER_ORIGIN),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.text());
     // The reader's control-file read (`readControlFile`) with the ETag it holds.
     let path = format!("/{ROOT}/.mokuro-queue.json");
     let first = server.send(&Req::new("GET", &path, "basic:reader")).await;
@@ -405,18 +438,6 @@ async fn errors(c: &mut Contract, seed: &Seed) {
     let r = export(
         c,
         &server,
-        "dav-404",
-        Req::new(
-            "GET",
-            &dav_path(&["Contract Series", "Volume 99.cbz"]),
-            "basic:reader",
-        ),
-    )
-    .await;
-    assert_eq!(r.status, 404, "{}", r.text());
-    let r = export(
-        c,
-        &server,
         "dav-409",
         Req::new(
             "PUT",
@@ -459,48 +480,6 @@ async fn errors(c: &mut Contract, seed: &Seed) {
     .await;
     assert_eq!(r.status, 429, "{}", r.text());
     server.stop().await;
-}
-
-async fn cors(c: &mut Contract, server: &Server) {
-    let preflight = |path: &str, origin: &str| {
-        Req::new("OPTIONS", path, "none")
-            .header("origin", origin)
-            .header("access-control-request-method", "PUT")
-            .header(
-                "access-control-request-headers",
-                "authorization, content-type, if-match, depth",
-            )
-    };
-    let dav = dav_path(&["Contract Series", "Volume 01.cbz"]);
-    let r = export(
-        c,
-        server,
-        "cors-preflight-dav",
-        preflight(&dav, READER_ORIGIN),
-    )
-    .await;
-    assert_eq!(r.status, 204);
-    export(
-        c,
-        server,
-        "cors-preflight-api",
-        preflight("/login/api/token", READER_ORIGIN),
-    )
-    .await;
-    export(
-        c,
-        server,
-        "cors-simple-get",
-        Req::new("GET", "/login/api/me", "basic:reader").header("origin", READER_ORIGIN),
-    )
-    .await;
-    export(
-        c,
-        server,
-        "cors-preflight-disallowed",
-        preflight(&dav, "https://evil.example"),
-    )
-    .await;
 }
 
 /// No lease (writes may leave at once).
@@ -619,25 +598,51 @@ async fn cloud_errors(c: &mut Contract, seed: &Seed) {
     server.stop().await;
 }
 
+/// Every fixture, in order.
+async fn export_all(c: &mut Contract, seed: &Seed) {
+    identity(c, seed).await;
+    tokens(c, seed).await;
+    {
+        // Read-only fixtures share one server.
+        let server = Server::local(seed).await;
+        manifests(c, seed, &server).await;
+        queue(c, &server).await;
+        compiled(c, &server).await;
+        webdav(c, &server).await;
+        server.stop().await;
+    }
+    puts(c, seed).await;
+    errors(c, seed).await;
+    markers(c, seed).await;
+    cloud_errors(c, seed).await;
+}
+
+/// The export runs twice, on fresh servers, and must give the same bytes both times
+/// (then it is compared with the committed files).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn export_the_reader_contract() {
     let seed = Seed::load();
     let mut c = Contract::new(contract_dir().join("bunko"));
-    identity(&mut c, &seed).await;
-    tokens(&mut c, &seed).await;
-    {
-        // Read-only fixtures share one server.
-        let server = Server::local(&seed).await;
-        manifests(&mut c, &seed, &server).await;
-        queue(&mut c, &server).await;
-        compiled(&mut c, &server).await;
-        webdav(&mut c, &server).await;
-        cors(&mut c, &server).await;
-        server.stop().await;
+    export_all(&mut c, &seed).await;
+    let mut again = Contract::new(contract_dir().join("bunko"));
+    export_all(&mut again, &seed).await;
+    let names = |c: &Contract| {
+        c.outputs()
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(&c),
+        names(&again),
+        "the two exports made different fixtures"
+    );
+    for ((name, first), (_, second)) in c.outputs().iter().zip(again.outputs()) {
+        assert!(
+            first == second,
+            "{name}.json differs between two exports:\n{}",
+            contract_support::diff(first, second)
+        );
     }
-    puts(&mut c, &seed).await;
-    errors(&mut c, &seed).await;
-    markers(&mut c, &seed).await;
-    cloud_errors(&mut c, &seed).await;
     c.finish();
 }

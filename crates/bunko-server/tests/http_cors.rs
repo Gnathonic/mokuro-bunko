@@ -22,16 +22,48 @@ struct Env {
 const READER: &str = "https://reader.mokuro.app";
 const DEV: &str = "http://localhost:5173";
 
-/// Every `X-Mokuro-*` header the reader reads from a response, and `ETag`.
-const READER_READS: [&str; 7] = [
-    "ETag",
-    "X-Mokuro-Put",
-    "X-Mokuro-Upload",
-    "X-Mokuro-Size",
-    "X-Mokuro-Manifest",
-    "X-Mokuro-Recheck-After",
-    "X-Mokuro-Digest-Verified",
-];
+/// Every response header the reader's recorded requests say its code reads
+/// (`interop/contract/reader/*.json`, `expect.headers`), lower-case: what must be exposed.
+/// The safelisted ones (`Content-Type`, ...) a page reads anyway.
+fn reader_reads() -> Vec<String> {
+    let dir = std::env::var_os("BUNKO_CONTRACT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/contract")
+        })
+        .join("reader");
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(&dir).unwrap().flatten() {
+        if e.path().extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(e.path()).unwrap()).unwrap();
+        for h in v["expect"]["headers"].as_array().into_iter().flatten() {
+            let h = h.as_str().unwrap().to_ascii_lowercase();
+            let safelisted = matches!(
+                h.as_str(),
+                "cache-control"
+                    | "content-language"
+                    | "content-length"
+                    | "content-type"
+                    | "expires"
+                    | "last-modified"
+                    | "pragma"
+            );
+            if !safelisted && !out.contains(&h) {
+                out.push(h);
+            }
+        }
+    }
+    out.sort();
+    assert!(
+        out.contains(&"etag".to_string()),
+        "no reader records in {}",
+        dir.display()
+    );
+    out
+}
 
 fn basic(user: &str) -> String {
     use base64::Engine;
@@ -251,11 +283,8 @@ async fn a_simple_request_names_the_origin_and_exposes_what_the_reader_reads() {
     assert_eq!(header(&h, "access-control-allow-credentials"), "true");
     assert!(vary_has_origin(&h));
     let exposed = list(&h, "access-control-expose-headers");
-    for name in READER_READS {
-        assert!(
-            exposed.contains(&name.to_ascii_lowercase()),
-            "{name} not in {exposed:?}"
-        );
+    for name in reader_reads() {
+        assert!(exposed.contains(&name), "{name} not in {exposed:?}");
     }
 }
 

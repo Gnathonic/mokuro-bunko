@@ -1,23 +1,23 @@
 {
   "body": {
+    "version": 1,
+    "updated_at": "2000-01-01T00:00:00.000Z",
     "series": [
       {
-        "external_ids": {},
         "series_title": "Contract Series",
-        "synonyms": [],
+        "external_ids": {},
         "titles": {},
-        "updated_at": "2000-01-01T00:00:00Z"
+        "synonyms": [],
+        "updated_at": "2000-01-01T00:00:00.000Z"
       },
       {
-        "external_ids": {},
         "series_title": "日本語シリーズ",
-        "synonyms": [],
+        "external_ids": {},
         "titles": {},
-        "updated_at": "2000-01-01T00:00:00Z"
+        "synonyms": [],
+        "updated_at": "2000-01-01T00:00:00.000Z"
       }
-    ],
-    "updated_at": "2000-01-01T00:00:00Z",
-    "version": 1
+    ]
   },
   "request": {
     "file": "catalog.json"

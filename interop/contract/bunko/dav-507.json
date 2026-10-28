@@ -1,8 +1,8 @@
 {
   "body": {
-    "detail": "The library storage is full; the upload was not stored.",
     "ok": false,
     "reason": "disk-full",
+    "detail": "The library storage is full; the upload was not stored.",
     "retry": false
   },
   "headers": {

@@ -1,8 +1,8 @@
 {
   "body": {
-    "detail": "Sign in to upload.",
     "ok": false,
     "reason": "forbidden",
+    "detail": "Sign in to upload.",
     "retry": false
   },
   "headers": {

@@ -2,7 +2,11 @@
 //! recorded (`interop/contract/reader/*.json`, written by its own tests) and the
 //! hand-written legacy ones (`reader/legacy/*.json`) are sent to a freshly seeded
 //! server, and the reader's expectations are checked: the status, the response fields
-//! its code reads, the headers. Every broken record is reported at once.
+//! its code reads (present, or present and possibly null, or with a given value), the
+//! headers. Each request goes as a browser on the reader's origin sends it: with
+//! `Origin`, after a preflight when it is not simple; the preflight must allow every
+//! header it sends and the answer must expose every header it reads. Every broken record
+//! is reported at once.
 
 // Records are read with std::fs on purpose.
 #![allow(clippy::disallowed_methods)]
@@ -97,6 +101,29 @@ fn check(expect: &Value, resp: &Resp) -> Vec<String> {
             )),
         }
     }
+    let nullable: Vec<&str> = expect["nullable_fields"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let values = expect["body_values"].as_object();
+    if !nullable.is_empty() || values.is_some() {
+        match resp.json() {
+            Some(body) => {
+                for f in nullable {
+                    if at(&body, f).is_none() {
+                        bad.push(format!("body field {f} is missing (it may be null)"));
+                    }
+                }
+                for (f, want) in values.into_iter().flatten() {
+                    match at(&body, f) {
+                        Some(got) if got == want => {}
+                        got => bad.push(format!("body field {f} is {got:?}, not {want}")),
+                    }
+                }
+            }
+            None => bad.push("body is not JSON, but the reader reads fields from it".into()),
+        }
+    }
     for h in expect["headers"].as_array().into_iter().flatten() {
         if let Some(h) = h.as_str()
             && resp.header(&h.to_ascii_lowercase()).is_none()
@@ -111,6 +138,125 @@ fn check(expect: &Value, resp: &Resp) -> Vec<String> {
             if !got.starts_with(want) {
                 bad.push(format!("header {h} is {got:?}, not {want}..."));
             }
+        }
+    }
+    bad
+}
+
+/// The reader's origin: a browser sends it with every request the reader makes.
+const READER_ORIGIN: &str = "https://reader.mokuro.app";
+
+/// Request headers a browser sends without a preflight (the Fetch spec's CORS-safelisted
+/// ones; `content-type` only with a form or text value).
+fn safelisted_request_header(name: &str, value: &str) -> bool {
+    match name {
+        "accept" | "accept-language" | "content-language" => true,
+        "content-type" => {
+            let v = value
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            matches!(
+                v.as_str(),
+                "application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain"
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Response headers a page can read without them being exposed.
+fn safelisted_response_header(name: &str) -> bool {
+    matches!(
+        name,
+        "cache-control"
+            | "content-language"
+            | "content-length"
+            | "content-type"
+            | "expires"
+            | "last-modified"
+            | "pragma"
+    )
+}
+
+fn comma_list(resp: &Resp, name: &str) -> Vec<String> {
+    resp.header(name)
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// The headers of `req` a browser would name in a preflight (`Authorization` included
+/// when the record authenticates), lower-case.
+fn preflight_headers(req: &Req) -> Vec<String> {
+    let mut names: Vec<String> = req
+        .headers
+        .iter()
+        .filter(|(k, v)| k != "origin" && !safelisted_request_header(k, v))
+        .map(|(k, _)| k.clone())
+        .collect();
+    if req.auth != "none" {
+        names.push("authorization".into());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// What a browser on the reader's origin does before `req`: a preflight when the method
+/// or a header is not simple. Every way Bunko's answer would block the request.
+async fn check_preflight(server: &Server, req: &Req) -> Vec<String> {
+    let headers = preflight_headers(req);
+    let simple_method = matches!(req.method.as_str(), "GET" | "HEAD" | "POST");
+    if simple_method && headers.is_empty() {
+        return Vec::new();
+    }
+    let mut pre = Req::new("OPTIONS", &req.path, "none")
+        .header("origin", READER_ORIGIN)
+        .header("access-control-request-method", &req.method);
+    if !headers.is_empty() {
+        pre = pre.header("access-control-request-headers", &headers.join(", "));
+    }
+    let resp = server.send(&pre).await;
+    let mut bad = Vec::new();
+    if resp.status != 204 && resp.status != 200 {
+        bad.push(format!("preflight answered {}", resp.status));
+    }
+    if resp.header("access-control-allow-origin") != Some(READER_ORIGIN) {
+        bad.push("preflight does not allow the reader's origin".into());
+    }
+    let methods = comma_list(&resp, "access-control-allow-methods");
+    if !simple_method && !methods.contains(&req.method.to_ascii_lowercase()) {
+        bad.push(format!("preflight does not allow {}", req.method));
+    }
+    let allowed = comma_list(&resp, "access-control-allow-headers");
+    for h in headers {
+        if !allowed.contains(&h) {
+            bad.push(format!("preflight does not allow the {h} header"));
+        }
+    }
+    bad
+}
+
+/// The answer as a page on the reader's origin sees it: allowed, and every header the
+/// reader reads exposed.
+fn check_cors(expect: &Value, resp: &Resp) -> Vec<String> {
+    let mut bad = Vec::new();
+    if resp.header("access-control-allow-origin") != Some(READER_ORIGIN) {
+        bad.push("the answer does not allow the reader's origin".into());
+        return bad;
+    }
+    let exposed = comma_list(resp, "access-control-expose-headers");
+    for h in expect["headers"].as_array().into_iter().flatten() {
+        if let Some(h) = h.as_str().map(str::to_ascii_lowercase)
+            && !safelisted_response_header(&h)
+            && !exposed.contains(&h)
+        {
+            bad.push(format!("header {h} is not exposed to the reader's page"));
         }
     }
     bad
@@ -141,9 +287,15 @@ async fn run_chain(
 ) {
     let r = &records[index];
     ran.push(r.name.clone());
-    let req = with_etag(&r.req, etag.as_deref());
+    let mut req = with_etag(&r.req, etag.as_deref());
+    if !req.headers.iter().any(|(k, _)| k == "origin") {
+        req.headers.push(("origin".into(), READER_ORIGIN.into()));
+    }
+    let mut problems = check_preflight(server, &req).await;
     let resp = server.send(&req).await;
-    for problem in check(&r.expect, &resp) {
+    problems.extend(check(&r.expect, &resp));
+    problems.extend(check_cors(&r.expect, &resp));
+    for problem in problems {
         failures.push(format!("{}: {problem}", r.name));
     }
     let got = resp.header("etag").map(str::to_string);

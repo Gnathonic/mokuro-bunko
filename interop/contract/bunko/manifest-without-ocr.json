@@ -1,29 +1,29 @@
 {
   "body": {
+    "version": 1,
+    "series": "Contract Series",
+    "volume": "Volume 02",
     "archive": {
-      "modified": "2000-01-01T00:00:00Z",
+      "url": "/mokuro-reader/Contract%20Series/Volume%2002.cbz",
       "size": 210,
-      "url": "/mokuro-reader/Contract%20Series/Volume%2002.cbz"
+      "modified": "2000-01-01T00:00:00Z"
     },
-    "cover": null,
-    "layers": [],
     "ocr": null,
+    "layers": [],
+    "cover": null,
+    "series_file": {
+      "url": "/mokuro-reader/Contract%20Series/series.json",
+      "size": 677,
+      "modified": "2000-01-01T00:00:00Z"
+    },
     "pending": [
       {
-        "eta": null,
+        "kind": "ocr",
         "id": "hayai-nova",
-        "kind": "ocr"
+        "eta": null
       }
     ],
-    "recheck_after": 300,
-    "series": "Contract Series",
-    "series_file": {
-      "modified": "2000-01-01T00:00:00Z",
-      "size": 632,
-      "url": "/mokuro-reader/Contract%20Series/series.json"
-    },
-    "version": 1,
-    "volume": "Volume 02"
+    "recheck_after": 300
   },
   "headers": {
     "cache-control": "no-store",

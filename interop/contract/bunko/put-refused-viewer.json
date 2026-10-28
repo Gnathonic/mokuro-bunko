@@ -1,8 +1,8 @@
 {
   "body": {
-    "detail": "This account may not upload this file.",
     "ok": false,
     "reason": "forbidden",
+    "detail": "This account may not upload this file.",
     "retry": false
   },
   "headers": {

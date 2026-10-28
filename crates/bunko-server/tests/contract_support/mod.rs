@@ -43,8 +43,12 @@ pub const ROOT: &str = "mokuro-reader";
 
 // ---- paths --------------------------------------------------------------------------
 
-/// `interop/contract/` in this checkout.
+/// `interop/contract/` in this checkout, or `BUNKO_CONTRACT_DIR` (a scratch copy, for
+/// checking that a mutated contract fails).
 pub fn contract_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("BUNKO_CONTRACT_DIR") {
+        return PathBuf::from(dir);
+    }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/contract")
 }
 
@@ -62,6 +66,10 @@ pub struct SeedVolume {
     pub name: String,
     pub pages: usize,
     pub mokuro: bool,
+    /// Layer sidecars (`<volume>.<id>.mokuro`) by layer id.
+    pub layers: Vec<String>,
+    /// A cover (`<volume>.webp`).
+    pub cover: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +118,13 @@ impl Seed {
                         name: s(vol, "name"),
                         pages: vol["pages"].as_u64().expect("seed pages") as usize,
                         mokuro: vol["mokuro"].as_bool().unwrap_or(false),
+                        layers: vol["layers"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|l| l.as_str().map(str::to_string))
+                            .collect(),
+                        cover: vol["cover"].as_bool().unwrap_or(false),
                     })
                     .collect(),
             })
@@ -140,6 +155,15 @@ impl Seed {
                         mokuro(&s.series, &v.name, v.pages),
                     ));
                 }
+                for id in &v.layers {
+                    out.push((
+                        format!("{}/{}.{id}.mokuro", s.series, v.name),
+                        mokuro(&s.series, &v.name, v.pages),
+                    ));
+                }
+                if v.cover {
+                    out.push((format!("{}/{}.webp", s.series, v.name), cover()));
+                }
             }
         }
         out
@@ -158,6 +182,18 @@ pub fn cbz(pages: usize) -> Vec<u8> {
         z.write_all(b"\xff\xd8\xff\xd9").unwrap();
     }
     z.finish().unwrap().into_inner()
+}
+
+/// A 6×8 lossless WebP cover, byte-identical on every run.
+pub fn cover() -> Vec<u8> {
+    let img = image::RgbImage::from_fn(6, 8, |x, y| {
+        image::Rgb([(x * 40) as u8, (y * 30) as u8, 90])
+    });
+    let mut out = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+        .encode(img.as_raw(), 6, 8, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    out
 }
 
 /// The primary `.mokuro` of a seed volume (fixed uuids, one text block a page).
@@ -267,11 +303,9 @@ impl Req {
         for (k, v) in sorted {
             headers.insert(k, Value::String(v));
         }
+        // Keys in alphabetical order, as the reader's records are written.
         let mut m = Map::new();
-        m.insert("method".into(), json!(self.method));
-        m.insert("path".into(), json!(self.path));
         m.insert("auth".into(), json!(self.auth));
-        m.insert("headers".into(), Value::Object(headers));
         match &self.body {
             ReqBody::None => {}
             ReqBody::Json(v) => {
@@ -284,6 +318,9 @@ impl Req {
                 m.insert("body_cbz".into(), json!({ "pages": pages }));
             }
         }
+        m.insert("headers".into(), Value::Object(headers));
+        m.insert("method".into(), json!(self.method));
+        m.insert("path".into(), json!(self.path));
         Value::Object(m)
     }
 
@@ -641,7 +678,7 @@ fn kept(name: &str) -> bool {
 /// A header value with its volatile part replaced.
 fn normalize_header(name: &str, value: &str) -> String {
     match name {
-        "etag" | "if-none-match" | "if-match" if value != "*" => ETAG_SENTINEL.into(),
+        "etag" | "if-none-match" | "if-match" if value != "*" => etag_sentinel(value),
         "last-modified" | "date" | "if-modified-since" => HTTP_DATE_SENTINEL.into(),
         // A wait counted down from a fixed length: whole minutes, rounded up.
         "retry-after" => match value.parse::<u64>() {
@@ -652,7 +689,7 @@ fn normalize_header(name: &str, value: &str) -> String {
     }
 }
 
-/// The fixture a request and its answer make (normalized, keys sorted).
+/// The fixture a request and its answer make (normalized).
 pub fn fixture(req: &Req, resp: &Resp) -> Value {
     let mut request = req.to_json();
     if let Some(Value::Object(h)) = request.get_mut("headers") {
@@ -681,10 +718,8 @@ pub fn fixture(req: &Req, resp: &Resp) -> Value {
             .join(", ");
         headers.insert(name.to_string(), json!(normalize_header(name, &joined)));
     }
+    // The envelope's keys in alphabetical order; Bunko's body keeps its own order.
     let mut m = Map::new();
-    m.insert("request".into(), request);
-    m.insert("status".into(), json!(resp.status));
-    m.insert("headers".into(), Value::Object(headers));
     if !resp.body.is_empty() {
         let is_json = resp
             .header("content-type")
@@ -701,37 +736,48 @@ pub fn fixture(req: &Req, resp: &Resp) -> Value {
             }
         }
     }
+    m.insert("headers".into(), Value::Object(headers));
+    m.insert("request".into(), request);
+    m.insert("status".into(), json!(resp.status));
     normalize(Value::Object(m))
 }
 
 /// A file Bunko writes into a library, in the fixture shape.
 pub fn file_fixture(path: &str, content: &Value) -> Value {
-    normalize(json!({"request": {"file": path}, "body": content}))
+    normalize(json!({"body": content, "request": {"file": path}}))
 }
 
 // ---- the normalizer -----------------------------------------------------------------
 
-/// Keys whose string values are opaque ids that change from run to run.
-const ID_KEYS: [&str; 4] = ["instance_id", "boot_id", "took_over_from", "lock_token"];
+/// Keys whose string values are ids Bunko makes at random (per install, per run). Every
+/// other id (a `.mokuro`'s uuids, the deterministic uuid of a volume without one) is
+/// contract and stays as it is.
+const ID_KEYS: [&str; 3] = ["instance_id", "boot_id", "took_over_from"];
 /// Keys whose string values are a Bunko version.
 const VERSION_KEYS: [&str; 2] = ["bunko_version", "server_version"];
 /// Keys whose string values name the machine the test ran on.
 const HOST_KEYS: [&str; 1] = ["instance_name"];
 pub const HOST_SENTINEL: &str = "contract-host";
 
+/// Keys whose numbers are times: `*_at`, `*_modified`, `at_ms`, `*_at_ms`. Seconds or
+/// milliseconds by magnitude, only under these keys (a size is never a time).
+fn is_time_key(key: &str) -> bool {
+    key.ends_with("_at") || key.ends_with("_modified") || key == "at_ms" || key.ends_with("_at_ms")
+}
+
 #[derive(Default)]
 struct Normalizer {
-    uuids: HashMap<String, usize>,
     ids: HashMap<String, usize>,
 }
 
-/// Replace volatile values with typed sentinels (see the README), sort object keys.
+/// Replace volatile values with typed sentinels (see the README). Object keys keep the
+/// order Bunko wrote them in (it is part of the contract for the files Bunko writes).
 /// Idempotent: normalizing a normalized value changes nothing.
 pub fn normalize(v: Value) -> Value {
     Normalizer::default().value(v, None)
 }
 
-/// [`normalize`] for text (XML, plain): line endings, times, ETags, UUIDs.
+/// [`normalize`] for text (XML, plain): line endings, times, ETags.
 pub fn normalize_text(s: &str) -> String {
     Normalizer::default().text(&normalize_eol(s))
 }
@@ -740,26 +786,33 @@ pub fn normalize_eol(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
 
+/// An ETag with its value replaced, its weak marker kept.
+fn etag_sentinel(value: &str) -> String {
+    if value.trim_start().starts_with("W/") {
+        format!("W/{ETAG_SENTINEL}")
+    } else {
+        ETAG_SENTINEL.into()
+    }
+}
+
 impl Normalizer {
     fn value(&mut self, v: Value, key: Option<&str>) -> Value {
         match v {
-            Value::Object(m) => {
-                let mut entries: Vec<(String, Value)> = m.into_iter().collect();
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
-                let mut out = Map::new();
-                for (k, v) in entries {
-                    let nv = self.value(v, Some(&k));
-                    out.insert(k, nv);
-                }
-                Value::Object(out)
-            }
+            Value::Object(m) => Value::Object(
+                m.into_iter()
+                    .map(|(k, v)| {
+                        let nv = self.value(v, Some(&k));
+                        (k, nv)
+                    })
+                    .collect(),
+            ),
             Value::Array(a) => Value::Array(a.into_iter().map(|x| self.value(x, key)).collect()),
-            Value::Number(n) => {
+            Value::Number(n) if key.is_some_and(is_time_key) => {
                 let f = n.as_f64().unwrap_or(0.0);
-                if (1e9..1e10).contains(&f) {
-                    json!(EPOCH_S)
-                } else if (1e12..1e13).contains(&f) {
+                if f >= 1e11 {
                     json!(EPOCH_MS)
+                } else if f >= 1e8 {
+                    json!(EPOCH_S)
                 } else {
                     Value::Number(n)
                 }
@@ -772,44 +825,33 @@ impl Normalizer {
     fn string(&mut self, s: &str, key: Option<&str>) -> String {
         match key {
             Some("token") if !s.is_empty() => return TOKEN_SENTINEL.into(),
-            Some("etag") if !s.is_empty() => return ETAG_SENTINEL.into(),
+            Some("etag") if !s.is_empty() => return etag_sentinel(s),
             Some(k) if HOST_KEYS.contains(&k) && !s.is_empty() => return HOST_SENTINEL.into(),
             Some(k) if VERSION_KEYS.contains(&k) && !s.is_empty() => {
                 return VERSION_SENTINEL.into();
             }
-            Some(k) if ID_KEYS.contains(&k) && !s.is_empty() && !is_uuid(s) => {
-                return self.id(s);
-            }
+            Some(k) if ID_KEYS.contains(&k) && !s.is_empty() => return self.id(s),
             _ => {}
         }
         self.text(s)
     }
 
+    /// A random id, numbered by first appearance, in its own shape: a UUID stays a UUID.
     fn id(&mut self, s: &str) -> String {
-        if s.starts_with("<id-") {
+        if s.starts_with("<id-") || s.starts_with("00000000-0000-4000-8000-") {
             return s.to_string();
         }
         let next = self.ids.len() + 1;
         let n = *self.ids.entry(s.to_string()).or_insert(next);
-        format!("<id-{n}>")
-    }
-
-    fn uuid(&mut self, s: &str) -> String {
-        let lower = s.to_ascii_lowercase();
-        if let Some(n) = lower
-            .strip_prefix("00000000-0000-4000-8000-")
-            .and_then(|t| t.parse::<usize>().ok())
-        {
-            // Already a sentinel: keep its number taken.
-            self.uuids.entry(lower.clone()).or_insert(n);
-            return lower;
+        if is_uuid(s) {
+            format!("00000000-0000-4000-8000-{n:012}")
+        } else {
+            format!("<id-{n}>")
         }
-        let next = self.uuids.len() + 1;
-        let n = *self.uuids.entry(lower).or_insert(next);
-        format!("00000000-0000-4000-8000-{n:012}")
     }
 
-    /// Substring replacement over text: ISO times, HTTP dates, UUIDs, `getetag` values.
+    /// Substring replacement over text: times (in their own format), HTTP dates,
+    /// count-downs, `getetag` values.
     fn text(&mut self, s: &str) -> String {
         let b = s.as_bytes();
         let mut out = String::with_capacity(s.len());
@@ -818,18 +860,19 @@ impl Normalizer {
         while i < b.len() {
             let matched: Option<(usize, String)> = if let Some(n) = http_date_at(b, i) {
                 Some((n, HTTP_DATE_SENTINEL.into()))
-            } else if let Some(n) = iso_at(b, i) {
-                Some((n, ISO_SENTINEL.into()))
-            } else if let Some(n) = (i == 0 || !b[i - 1].is_ascii_hexdigit())
-                .then(|| uuid_at(b, i))
-                .flatten()
-            {
-                let u = self.uuid(&s[i..i + n]);
-                Some((n, u))
+            } else if let Some((n, rep)) = iso_at(b, i) {
+                Some((n, rep))
             } else if let Some((n, secs)) = retry_in_at(b, i) {
                 Some((n, format!("Retry in {secs}s")))
+            } else if let Some(n) = minutes_left_at(b, i) {
+                Some((n, MINUTES_LEFT_SENTINEL.into()))
             } else {
-                etag_element_at(b, i).map(|n| (n, format!("getetag>{ETAG_SENTINEL}<")))
+                etag_element_at(b, i).map(|(n, weak)| {
+                    (
+                        n,
+                        format!("getetag>{}{ETAG_SENTINEL}<", if weak { "W/" } else { "" }),
+                    )
+                })
             };
             match matched {
                 Some((n, rep)) => {
@@ -870,12 +913,28 @@ fn retry_in_at(b: &[u8], i: usize) -> Option<(usize, u64)> {
     Some((LEAD.len() + n + 1, rounded))
 }
 
+/// The lease claim's `about <n> min left` (a count-down that a slow run can cross).
+pub const MINUTES_LEFT_SENTINEL: &str = "about <n> min left";
+
+fn minutes_left_at(b: &[u8], i: usize) -> Option<usize> {
+    const LEAD: &[u8] = b"about ";
+    const TAIL: &[u8] = b" min left";
+    if !b[i..].starts_with(LEAD) {
+        return None;
+    }
+    let start = i + LEAD.len();
+    let n = b[start..].iter().take_while(|c| c.is_ascii_digit()).count();
+    (n > 0 && b[start + n..].starts_with(TAIL)).then_some(LEAD.len() + n + TAIL.len())
+}
+
 fn digits(b: &[u8], at: usize, n: usize) -> bool {
     b.len() >= at + n && b[at..at + n].iter().all(u8::is_ascii_digit)
 }
 
-/// `YYYY-MM-DD[T ]HH:MM:SS[.fff][Z|+HH:MM]` at `i`: its length.
-fn iso_at(b: &[u8], i: usize) -> Option<usize> {
+/// `YYYY-MM-DD[T ]HH:MM:SS[.fff][Z|±HH:MM]` at `i`: its length, and the sentinel time
+/// in the same format (separator, number of fraction digits, zone form), so a change of
+/// format shows as a diff.
+fn iso_at(b: &[u8], i: usize) -> Option<(usize, String)> {
     let ok = digits(b, i, 4)
         && b.get(i + 4) == Some(&b'-')
         && digits(b, i + 5, 2)
@@ -890,23 +949,29 @@ fn iso_at(b: &[u8], i: usize) -> Option<usize> {
     if !ok || (i > 0 && b[i - 1].is_ascii_digit()) {
         return None;
     }
+    let mut rep = format!("2000-01-01{}00:00:00", b[i + 10] as char);
     let mut j = i + 19;
     if b.get(j) == Some(&b'.') {
         j += 1;
+        rep.push('.');
         while b.get(j).is_some_and(u8::is_ascii_digit) {
             j += 1;
+            rep.push('0');
         }
     }
     if b.get(j) == Some(&b'Z') {
         j += 1;
+        rep.push('Z');
     } else if matches!(b.get(j), Some(b'+') | Some(b'-'))
         && digits(b, j + 1, 2)
         && b.get(j + 3) == Some(&b':')
         && digits(b, j + 4, 2)
     {
+        rep.push(b[j] as char);
+        rep.push_str("00:00");
         j += 6;
     }
-    Some(j - i)
+    Some((j - i, rep))
 }
 
 /// `Sat, 01 Jan 2000 00:00:00 GMT` at `i`.
@@ -937,33 +1002,18 @@ fn http_date_at(b: &[u8], i: usize) -> Option<usize> {
     ok.then_some(29)
 }
 
-/// A UUID at `i` (`8-4-4-4-12` hex), or a generated id of its shape with a shorter last
-/// group (`8-4-4-4-8`, as Bunko makes for a volume without a `.mokuro`): its length.
-fn uuid_at(b: &[u8], i: usize) -> Option<usize> {
-    if b.len() < i + 32 {
-        return None;
-    }
-    let head = b[i..i + 24].iter().enumerate().all(|(k, c)| match k {
-        8 | 13 | 18 | 23 => *c == b'-',
-        _ => c.is_ascii_hexdigit(),
-    });
-    if !head {
-        return None;
-    }
-    let tail = b[i + 24..]
-        .iter()
-        .take(13)
-        .take_while(|c| c.is_ascii_hexdigit())
-        .count();
-    (8..=12).contains(&tail).then_some(24 + tail)
-}
-
+/// A UUID (`8-4-4-4-12` hex).
 fn is_uuid(s: &str) -> bool {
-    uuid_at(s.as_bytes(), 0) == Some(s.len())
+    s.len() == 36
+        && s.bytes().enumerate().all(|(k, c)| match k {
+            8 | 13 | 18 | 23 => c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
 }
 
-/// `getetag>…<` (any namespace prefix before it): the length through the `<`.
-fn etag_element_at(b: &[u8], i: usize) -> Option<usize> {
+/// `getetag>…<` (any namespace prefix before it): the length through the `<`, and
+/// whether the ETag is weak.
+fn etag_element_at(b: &[u8], i: usize) -> Option<(usize, bool)> {
     const OPEN: &[u8] = b"getetag>";
     if !b[i..].starts_with(OPEN) {
         return None;
@@ -975,7 +1025,7 @@ fn etag_element_at(b: &[u8], i: usize) -> Option<usize> {
     }
     let start = i + OPEN.len();
     let end = b[start..].iter().position(|c| *c == b'<')?;
-    Some(OPEN.len() + end + 1)
+    Some((OPEN.len() + end + 1, b[start..].starts_with(b"W/")))
 }
 
 // ---- golden files -------------------------------------------------------------------
@@ -992,8 +1042,8 @@ pub fn render(v: &Value) -> String {
 pub struct Contract {
     dir: PathBuf,
     bless: bool,
-    seen: Vec<String>,
-    failures: Vec<String>,
+    /// Every fixture exported, in order: its name and its bytes.
+    outputs: Vec<(String, String)>,
 }
 
 pub const BLESS_HINT: &str =
@@ -1001,70 +1051,70 @@ pub const BLESS_HINT: &str =
 
 impl Contract {
     pub fn new(dir: PathBuf) -> Contract {
-        let bless = std::env::var("BUNKO_BLESS").is_ok_and(|v| v == "1");
-        if bless {
-            std::fs::create_dir_all(&dir).unwrap();
-        }
         Contract {
             dir,
-            bless,
-            seen: Vec::new(),
-            failures: Vec::new(),
+            bless: std::env::var("BUNKO_BLESS").is_ok_and(|v| v == "1"),
+            outputs: Vec::new(),
         }
     }
 
     pub fn golden(&mut self, name: &str, fixture: &Value) {
         assert!(
-            !self.seen.iter().any(|n| n == name),
+            !self.outputs.iter().any(|(n, _)| n == name),
             "fixture {name} exported twice"
         );
-        self.seen.push(name.to_string());
-        let path = self.dir.join(format!("{name}.json"));
-        let want = render(fixture);
-        if self.bless {
-            std::fs::write(&path, &want).unwrap();
-            return;
-        }
-        match std::fs::read(&path) {
-            Ok(have) => {
-                let have = normalize_eol(&String::from_utf8_lossy(&have));
-                if have != want {
-                    self.failures
-                        .push(format!("{name}.json differs:\n{}", diff(&have, &want)));
-                }
-            }
-            Err(_) => self
-                .failures
-                .push(format!("{name}.json is missing; it would be:\n{want}")),
-        }
+        self.outputs.push((name.to_string(), render(fixture)));
     }
 
-    /// Fail with every mismatch at once; check no committed fixture went unmade.
-    pub fn finish(mut self) {
-        let mut stale = Vec::new();
+    /// The fixtures exported so far, in order.
+    pub fn outputs(&self) -> &[(String, String)] {
+        &self.outputs
+    }
+
+    /// Compare every fixture with its committed file (or, with `BUNKO_BLESS=1`, write
+    /// them and remove the ones no longer made); fail with every mismatch at once.
+    pub fn finish(self) {
+        if self.bless {
+            std::fs::create_dir_all(&self.dir).unwrap();
+        }
+        let mut failures = Vec::new();
+        for (name, want) in &self.outputs {
+            let path = self.dir.join(format!("{name}.json"));
+            if self.bless {
+                std::fs::write(&path, want).unwrap();
+                continue;
+            }
+            match std::fs::read(&path) {
+                Ok(have) => {
+                    let have = normalize_eol(&String::from_utf8_lossy(&have));
+                    if &have != want {
+                        failures.push(format!("{name}.json differs:\n{}", diff(&have, want)));
+                    }
+                }
+                Err(_) => failures.push(format!("{name}.json is missing; it would be:\n{want}")),
+            }
+        }
         if let Ok(rd) = std::fs::read_dir(&self.dir) {
             for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if let Some(stem) = name.strip_suffix(".json")
-                    && !self.seen.iter().any(|n| n == stem)
-                {
-                    stale.push((e.path(), name));
+                let file = e.file_name().to_string_lossy().into_owned();
+                let Some(stem) = file.strip_suffix(".json") else {
+                    continue;
+                };
+                if self.outputs.iter().any(|(n, _)| n == stem) {
+                    continue;
+                }
+                if self.bless {
+                    std::fs::remove_file(e.path()).unwrap();
+                } else {
+                    failures.push(format!("{file} is committed but no longer exported"));
                 }
             }
         }
-        for (path, name) in stale {
-            if self.bless {
-                std::fs::remove_file(path).unwrap();
-            } else {
-                self.failures
-                    .push(format!("{name} is committed but no longer exported"));
-            }
-        }
-        if !self.failures.is_empty() {
+        if !failures.is_empty() {
             panic!(
                 "{} contract fixture(s) differ:\n\n{}\n\n{BLESS_HINT}",
-                self.failures.len(),
-                self.failures.join("\n\n")
+                failures.len(),
+                failures.join("\n\n")
             );
         }
     }
@@ -1130,52 +1180,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_replaces_each_volatile_kind_and_keeps_types() {
+    fn normalize_replaces_each_volatile_kind_and_keeps_types_and_order() {
         let v = json!({
             "z": 1,
-            "a": {"created_at": "2026-10-28T12:34:56.789Z", "updated": "2026-10-28 12:34:56"},
+            "a": {"created_at": "2026-10-28T12:34:56.789Z", "updated": "2026-10-28 12:34:56",
+                "offset_at": "2026-10-28T12:34:56+09:00", "plain_at": "2026-10-28T12:34:56Z"},
             "expires_at": 1_793_000_000.25,
             "at_ms": 1_793_000_000_123i64,
+            "mokuro_modified": 1_793_000_000,
+            "archive_size": 5_000_000_000i64,
             "size": 1234,
             "token": "abcdef0123",
             "etag": "\"5f-1a2b\"",
+            "weak": {"etag": "W/\"5f-1a2b\""},
             "bunko_version": "0.8.0",
             "instance_id": "inst-8c1f",
-            "ids": ["3f2b8c4e-1d2a-4b7c-9e0f-a1b2c3d4e5f6", "9a9a9a9a-0000-4111-8222-333344445555",
-                "3F2B8C4E-1D2A-4B7C-9E0F-A1B2C3D4E5F6"],
+            "boot_id": "3f2b8c4e-1d2a-4b7c-9e0f-a1b2c3d4e5f6",
+            "volume_uuid": "1a04d289-f618-43eb-ac1c-6162101d",
+            "title_uuid": "9a9a9a9a-0000-4111-8222-333344445555",
             "detail": "Modified Wed, 28 Oct 2026 10:00:00 GMT by x",
             "error": "Too many failed attempts. Retry in 899s",
-            "volume_uuid": "1a04d289-f618-43eb-ac1c-6162101d",
+            "lease": "still claiming the library (about 59 min left); wait",
             "instance_name": "some-desktop",
-            "xml": "<D:getetag>\"abc\"</D:getetag>",
+            "xml": "<D:getetag>\"abc\"</D:getetag><D:getetag>W/\"abc\"</D:getetag>",
             "sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         });
         let n = normalize(v.clone());
         let want = json!({
-            "a": {"created_at": ISO_SENTINEL, "updated": ISO_SENTINEL},
-            "at_ms": EPOCH_MS,
-            "bunko_version": VERSION_SENTINEL,
-            "detail": format!("Modified {HTTP_DATE_SENTINEL} by x"),
-            "error": "Too many failed attempts. Retry in 900s",
-            "volume_uuid": "00000000-0000-4000-8000-000000000003",
-            "instance_name": HOST_SENTINEL,
-            "etag": ETAG_SENTINEL,
+            "z": 1,
+            "a": {"created_at": "2000-01-01T00:00:00.000Z", "updated": "2000-01-01 00:00:00",
+                "offset_at": "2000-01-01T00:00:00+00:00", "plain_at": ISO_SENTINEL},
             "expires_at": EPOCH_S,
-            "ids": ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002",
-                "00000000-0000-4000-8000-000000000001"],
-            "instance_id": "<id-1>",
-            "sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "at_ms": EPOCH_MS,
+            "mokuro_modified": EPOCH_S,
+            // A size is a size, however large: times are known by their key.
+            "archive_size": 5_000_000_000i64,
             "size": 1234,
             "token": TOKEN_SENTINEL,
-            "xml": format!("<D:getetag>{ETAG_SENTINEL}</D:getetag>"),
-            "z": 1,
+            "etag": ETAG_SENTINEL,
+            "weak": {"etag": format!("W/{ETAG_SENTINEL}")},
+            "bunko_version": VERSION_SENTINEL,
+            "instance_id": "<id-1>",
+            "boot_id": "00000000-0000-4000-8000-000000000002",
+            // Ids that are contract (deterministic, or from a .mokuro) stay as they are.
+            "volume_uuid": "1a04d289-f618-43eb-ac1c-6162101d",
+            "title_uuid": "9a9a9a9a-0000-4111-8222-333344445555",
+            "detail": format!("Modified {HTTP_DATE_SENTINEL} by x"),
+            "error": "Too many failed attempts. Retry in 900s",
+            "lease": format!("still claiming the library ({MINUTES_LEFT_SENTINEL}); wait"),
+            "instance_name": HOST_SENTINEL,
+            "xml": format!("<D:getetag>{ETAG_SENTINEL}</D:getetag><D:getetag>W/{ETAG_SENTINEL}</D:getetag>"),
+            "sha": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         });
         assert_eq!(n, want);
-        // Keys come out sorted, whatever order they went in.
+        // Keys keep the order they came in (serde_json compares maps without order).
         let keys: Vec<&String> = n.as_object().unwrap().keys().collect();
-        let mut sorted = keys.clone();
-        sorted.sort();
-        assert_eq!(keys, sorted);
+        let want_keys: Vec<&String> = want.as_object().unwrap().keys().collect();
+        assert_eq!(keys, want_keys);
         // Twice is once.
         assert_eq!(normalize(n.clone()), n);
         assert_eq!(render(&normalize(v)), render(&n));
@@ -1185,20 +1246,28 @@ mod tests {
     fn normalize_text_handles_xml_and_line_endings() {
         let xml = "<a>\r\n<D:creationdate>2026-10-28T01:02:03Z</D:creationdate>\r\n\
 <D:getlastmodified>Wed, 28 Oct 2026 01:02:03 GMT</D:getlastmodified>\r\n\
-<D:getetag>\"x-1\"</D:getetag><D:locktoken>opaquelocktoken:3f2b8c4e-1d2a-4b7c-9e0f-a1b2c3d4e5f6</D:locktoken></a>";
+<D:getetag>\"x-1\"</D:getetag></a>";
         let n = normalize_text(xml);
         assert_eq!(
             n,
             "<a>\n<D:creationdate>2000-01-01T00:00:00Z</D:creationdate>\n\
 <D:getlastmodified>Sat, 01 Jan 2000 00:00:00 GMT</D:getlastmodified>\n\
-<D:getetag>\"etag\"</D:getetag><D:locktoken>opaquelocktoken:00000000-0000-4000-8000-000000000001</D:locktoken></a>"
+<D:getetag>\"etag\"</D:getetag></a>"
         );
         assert_eq!(normalize_text(&n), n);
     }
 
     #[test]
+    fn header_etags_keep_their_weak_marker() {
+        assert_eq!(normalize_header("etag", "W/\"x\""), "W/\"etag\"");
+        assert_eq!(normalize_header("etag", "\"x\""), "\"etag\"");
+        assert_eq!(normalize_header("if-none-match", "*"), "*");
+    }
+
+    #[test]
     fn the_seed_archives_are_byte_identical() {
         assert_eq!(cbz(2), cbz(2));
+        assert_eq!(cover(), cover());
         assert_eq!(encode("第1巻"), "%E7%AC%AC1%E5%B7%BB");
         assert_eq!(encode("Volume 01"), "Volume%2001");
     }

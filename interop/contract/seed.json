@@ -6,7 +6,7 @@
   ],
   "library": [
     {"series": "Contract Series", "volumes": [
-      {"name": "Volume 01", "pages": 2, "mokuro": true},
+      {"name": "Volume 01", "pages": 2, "mokuro": true, "layers": ["hayai-nova"], "cover": true},
       {"name": "Volume 02", "pages": 2, "mokuro": false}]},
     {"series": "日本語シリーズ", "volumes": [{"name": "第1巻", "pages": 1, "mokuro": true}]}
   ]

@@ -1,8 +1,8 @@
 {
   "body": {
-    "detail": "The upload was not stored: storage-lease-claiming: this Bunko is still claiming the library (about 60 min left); changes through Bunko wait until then.",
     "ok": false,
     "reason": "server-error",
+    "detail": "The upload was not stored: storage-lease-claiming: this Bunko is still claiming the library (about <n> min left); changes through Bunko wait until then.",
     "retry": true
   },
   "headers": {
