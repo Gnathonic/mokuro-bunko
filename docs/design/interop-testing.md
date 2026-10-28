@@ -128,9 +128,11 @@ placeholders), so the fixtures change only when the contract does.
 - **One port, one prefix per provider.** Drive v3 at `{base}/google` (a driver's
   `api_base`; uploads under `{base}/google/upload`), Graph v1.0 at `{base}/graph/v1.0`
   with the pre-authenticated download, upload-session and copy-monitor URLs at
-  `{base}/graph/{preauth,upload,monitor}/{account}/{id}` (on the other loopback name, so
-  a client following the download redirect drops its token as it would for Microsoft's
-  storage hosts), MEGA's gateway at `{base}/mega/`, OAuth refresh at
+  `{preauth}/graph/{preauth,upload,monitor}/{account}/{id}`, where `{preauth}` is a
+  second listener (its own port, so its own origin, named in `GET /_sim/health`; the
+  binary's `--preauth-host` renames it for jsdom, which drops a token only when the host
+  name changes), so a client following the download redirect drops its token as it
+  would for Microsoft's storage hosts; MEGA's gateway at `{base}/mega/`, OAuth refresh at
   `{base}/oauth/{google,microsoft}/token` (Google keeps its refresh token, Microsoft
   rotates it), the control API at `{base}/_sim/`. Every response carries permissive CORS.
 - **MEGA stays in `bunko-mega`.** Its `mock` module (real node crypto, which needs the
@@ -149,18 +151,24 @@ placeholders), so the fixtures change only when the contract does.
 - **Violations, not panics.** A request the simulator cannot accept (an unmodelled Drive
   `q`, a malformed body, an unknown endpoint, an unmodelled MEGA command) is a 4xx in the
   provider's shape plus a violation; Rust tests fail on drop if any are left, the
-  reader's suites check after every test. Checks that only Bunko's driver must pass (it
-  sends `$top`, `keepRevisionForever=false`) live in Bunko's tests, not the simulator.
+  reader's suites check after every test. What only Bunko's driver must send (`$top`,
+  `keepRevisionForever=false`) is checked on every request under the per-account
+  `strict_bunko` knob, which bunko-remote's tests turn on and the reader leaves off.
+  The fixed test token `tok` opens the `default` account only; MEGA session ids are
+  never reused, a reset included.
 - **A full server on it.** `MOKURO_TEST_CLOUD_API_BASE_{GDRIVE,ONEDRIVE,MEGA}` and
   `MOKURO_TEST_CLOUD_TOKEN_URL_{GOOGLE,MICROSOFT}` point the stores and the connect
   probe at cloudsim in a build with the `testing` feature (`mokuro-bunko` has one); a
   build without it refuses to start while one is set, naming it.
 - **The reader** runs its real providers against the binary when `CLOUDSIM_URL` is set
   (`src/lib/interop/cloudsim/`, one file at a time; its CI job `interop` builds the
-  simulator from Bunko). Drive's `gapi.client.drive` is replaced by a small REST shim in
+  simulator from Bunko and sets `REQUIRE_CLOUDSIM=1`, so the suites fail rather than
+  skip without one). Worker transfers get the simulator's bases in their credentials (a
+  Web Worker has its own copy of the hooks module). Drive's `gapi.client.drive` is replaced by a small REST shim in
   those tests, so the real gapi transport stays a live-run concern (I5). The base-URL
   overrides and the injected OneDrive token sit behind `CLOUD_TEST_HOOKS`
-  (`MODE === 'test'` or `VITE_CLOUD_TEST_HOOKS=1`), every guarded read written
+  (`MODE === 'test'`, or `MODE === 'interop'` from `vite build --mode interop`; never an
+  environment variable a host could set), every guarded read written
   `CLOUD_TEST_HOOKS ? hook : real` so a production build folds them away;
   `scripts/check-no-test-hooks.mjs` checks the built code (it fails on a hooked build).
 
@@ -352,7 +360,7 @@ Run time target: the rig under 15 minutes per PR on ubuntu.
 | I0 | The large-catalog scenario on its own (generated library, Rust-side timings plus one Playwright check of the catalog page and a series view), with the §8.3 catalog budgets enforced in CI; then find and fix the live slowness against it | The generated library reproduces the slow catalog and series views; after the fix, they meet their budgets and CI fails if they regress |
 | I1 | Contract fixtures both ways; CORS preflight tests; reader unit tests moved onto them | A deliberate field rename on either side fails the other side's tests |
 | I2 | cloudsim (Drive, OneDrive, MEGA) with control API; bunko-remote mock tests moved onto it; reader base-URL override and token injection | Bunko and the reader, each alone, pass their provider suites against cloudsim (built 2026-10-28, §6 "As built") |
-| I3 | Rig runner, rclone, the `dav`, `api`, `bridge`, `direct`, `shared`, `cloud` suites; CI on both repos; nightly build | Both repos' PRs run the rig; the M7 checks pass on every provider in cloudsim and on rclone |
+| I3 | Rig runner, rclone, the `dav`, `api`, `bridge`, `direct`, `shared`, `cloud` suites; CI on both repos; nightly build. The browser rig's reader (`--mode interop`) must install the gapi REST shim instead of loading gapi from apis.google.com (§11) | Both repos' PRs run the rig; the M7 checks pass on every provider in cloudsim and on rclone |
 | I4 | netsim, the reader's performance marks, the `perf` suite, budgets | Budgets enforced in CI; the §10 table checked and updated with measured numbers |
 | I5 | Live runs with sandbox cleanup and token upkeep | A week of green nightly runs (Drive, OneDrive) and two weekly MEGA runs, each leaving the account as it found it |
 
@@ -371,7 +379,11 @@ needs I3 (and takes in I0's scenario); I5 needs I3.
   §8.3 are the guard.
 - **`megajs` gateway override**: confirmed; megajs 1.3.9 takes a `gateway` option, and
   the saved session keeps it (I2).
-- **Reader behaviour the I2 suites pin rather than change** (open for the reader): the
+- **A hooked browser build still loads the real gapi** from apis.google.com: the hooks
+  redirect Drive's REST and upload calls, not `gapi.client`. I3's browser rig must install
+  the REST shim (`src/lib/interop/gapi-rest-shim.ts`) in place of loading gapi.
+- **Reader gaps the I2 suites mark with `it.fails`** (open for the reader): the
   Drive provider retries nothing (a 429 with `Retry-After` fails that call) and has no
   distinct storage-full error (a quota 403 is `UPLOAD_FAILED`); OneDrive's upload core
-  treats a 507 like any 5xx and tries the session five times before failing.
+  treats a 507 like any 5xx and tries the session five times before failing. Each test
+  states the wanted behaviour and flips when the reader is fixed.
