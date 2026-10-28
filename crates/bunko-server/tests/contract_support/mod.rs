@@ -459,9 +459,18 @@ pub async fn build_server(seed: &Seed) -> Server {
 
 impl Server {
     /// A disk library from the seed, compiled (`series.json`, `catalog.json` exist), the
-    /// OCR scheduler running without a processor (Volume 02 waits in the queue).
+    /// OCR scheduler running without a processor (Volume 02 waits in the queue). On unix
+    /// the storage is reached through a symlink, as every temp dir on macOS is (`/var` →
+    /// `/private/var`), so each OS exports the same fixtures.
     pub async fn local(seed: &Seed) -> Server {
         let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let base = {
+            std::fs::create_dir(dir.path().join("real")).unwrap();
+            std::os::unix::fs::symlink("real", dir.path().join("link")).unwrap();
+            dir.path().join("link").join("storage")
+        };
+        #[cfg(not(unix))]
         let base = dir.path().join("storage");
         let library = base.join("library");
         for (rel, bytes) in seed.files() {

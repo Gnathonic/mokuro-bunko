@@ -76,6 +76,10 @@
   as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
 
 ### Fixed
+- **A library reached through a symbolic link gets its OCR follow-ups.** When the path
+  to the library folder went through a symlink, a volume uploaded over WebDAV was not
+  queued for OCR until the next library scan, and neither the upload's answer nor the
+  volume's catalog manifest told Mokuro Reader that OCR was on its way.
 - **Mokuro Reader on another site sees what WebDAV's `OPTIONS` answers.** Bunko took
   every `OPTIONS` request from a browser page on another site for a CORS check and
   answered it itself, so the reader's own `OPTIONS` on the library (sent after the
