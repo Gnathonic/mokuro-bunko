@@ -331,6 +331,9 @@ async fn puts(c: &mut Contract, seed: &Seed) {
             "basic:reader",
         )
         .header("content-type", "application/octet-stream")
+        // As the reader sends it to a server that verifies PUTs (the digest of the
+        // body actually sent replaces the placeholder).
+        .header("content-digest", contract_support::DIGEST_SENTINEL)
         .cbz(2),
     )
     .await;
@@ -346,6 +349,7 @@ async fn puts(c: &mut Contract, seed: &Seed) {
         )
         // The reader PUTs every file as an octet stream (`uploadFileWithClient`).
         .header("content-type", "application/octet-stream")
+        .header("content-digest", contract_support::DIGEST_SENTINEL)
         .json(mokuro_doc("Contract Series", "Volume 02", 2)),
     )
     .await;

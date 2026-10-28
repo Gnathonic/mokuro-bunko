@@ -3,6 +3,7 @@
   "headers": {
     "content-type": "text/html; charset=utf-8",
     "etag": "\"etag\"",
+    "x-mokuro-digest-verified": "sha-256",
     "x-mokuro-manifest": "/catalog/api/manifest?series=Contract%20Series&volume=Volume%2003",
     "x-mokuro-put": "verified",
     "x-mokuro-recheck-after": "300",
@@ -15,6 +16,7 @@
       "pages": 2
     },
     "headers": {
+      "content-digest": "<digest>",
       "content-type": "application/octet-stream"
     },
     "method": "PUT",

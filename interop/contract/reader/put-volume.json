@@ -3,6 +3,7 @@
     "headers": [
       "x-mokuro-upload",
       "x-mokuro-size",
+      "x-mokuro-digest-verified",
       "x-mokuro-put",
       "x-mokuro-manifest",
       "x-mokuro-recheck-after"

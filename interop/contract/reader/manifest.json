@@ -8,9 +8,19 @@
       "archive.size",
       "archive.modified",
       "ocr.url",
+      "ocr.size",
+      "layers.0.id",
+      "layers.0.url",
+      "cover.url",
       "series_file.url",
-      "layers",
+      "series_file.size",
+      "series_file.modified",
       "pending"
+    ],
+    "nullable_fields": [
+      "recheck_after",
+      "cover",
+      "ocr"
     ],
     "status": [
       200

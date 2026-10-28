@@ -79,7 +79,8 @@ version) as the plain WebDAV cloud, and Chromium through Playwright.
 
 Layout, format, sentinels and bless commands: `interop/contract/README.md`. Both sides
 build on one seed (`interop/contract/seed.json`: an uploader, an account without write
-rights, an admin; one series with and without OCR, one with Japanese names).
+rights, an admin; one series with and without OCR, a layer sidecar and a cover, one with
+Japanese names).
 
 **Bunko → reader.** A Bunko test (`crates/bunko-server/tests/contract_export.rs`) drives a
 seeded full-stack server (`Services` + `assemble`, so the CORS, queue-file and WebDAV
@@ -89,11 +90,11 @@ layers are in) through everything the reader reads, and writes the answers to
 `/api/nav/config`, `/api/stats`, `/queue/api/status`, the catalog list, series, config
 and OCR-status APIs) are not read by the reader and stay out:
 
-- `GET /login/api/me` (Basic with the UTF-8 password, Bearer, anonymous, a wrong
-  password, an account without write rights); `POST` and `DELETE /login/api/token`
+- `GET /login/api/me` (Basic with the UTF-8 password, Bearer, a dead token, anonymous,
+  a wrong password, an account without write rights, the 429 once the limiter is hot); `POST` and `DELETE /login/api/token`
   (the body `requestBunkoToken` sends; the 429 once the limiter is hot);
-- `GET /catalog/api/manifest?series=&volume=` (with OCR, without, Japanese names, an
-  unknown volume);
+- `GET /catalog/api/manifest?series=&volume=` (with OCR, a layer and a cover; without;
+  Japanese names; an unknown volume);
 - `.mokuro-queue.json`: the HTTP copy and its `If-None-Match` 304, and the cloud copy
   (`bunko_remote::status::cloud_queue_doc`) with `done[]` and, cut to size,
   `truncated: true`. `done[]` and `truncated` exist only in the cloud copy;
@@ -102,41 +103,51 @@ and OCR-status APIs) are not read by the reader and stay out:
   settle wait has passed. `released` is written by a disconnect; a shutdown writes
   nothing;
 - `series.json` and `catalog.json` as compiled;
+- `OPTIONS /mokuro-reader/` as the reader sends it (its write-permission fallback reads
+  `Allow`, its sign-in probe `X-Mokuro-Put`);
 - PROPFIND: the server root (the reader's connection test), the library folder's
   Depth 0 `stat`, the Depth 0 `current-user-privilege-set` probe `checkWritePermissions`
   sends, Depth 1 of the library root and a series, Depth infinity of the library root;
   a conditional GET of a control file (304);
-- PUT: a new volume (`X-Mokuro-Put`, `-Upload`, `-Size`, `-Manifest`,
-  `-Recheck-After`), a sidecar, and the failure verdict JSON for a refused account and
+- PUT: a new volume with `Content-Digest` (`X-Mokuro-Put`, `-Upload`, `-Size`,
+  `-Digest-Verified`, `-Manifest`, `-Recheck-After`), a sidecar, and the failure verdict JSON for a refused account and
   a stale `If-Match` (412);
 - errors: 401 without credentials (Basic challenge), with a dead token (`Bearer …
   error="invalid_token"`) and with Latin-1 Basic bytes ("Invalid authorization
-  header"; current readers send UTF-8), 404, 409, 423, 429, 503
+  header"; current readers send UTF-8), 409, 423, 429, 503
   `storage-lease-claiming` and 507. Only the WebDAV 503s carry `Retry-After`; the 401
   and 429 credential refusals do not, and the fixtures pin that;
-- CORS: a WebDAV and an API preflight from the reader's origin, a simple GET, and a
-  preflight from an origin that is not allowed (no `Access-Control-Allow-Origin`).
-  `crates/bunko-server/tests/http_cors.rs` covers the rules in full.
+- CORS has no fixtures of its own: `crates/bunko-server/tests/http_cors.rs` covers the
+  rules (including an origin that is not allowed), and the replay below checks every
+  reader request as a browser on the reader's origin sends it.
 
 The test fails if the output differs from the committed files (the usual golden rule:
 regenerate with `BUNKO_BLESS=1`, and the diff shows in the PR). The reader's unit tests
 parse these files through its real parsers (`src/lib/interop/bunko-contract.test.ts`),
 and its hand-written queue and marker documents start from Bunko's and may only edit
-fields Bunko serves. They are read from a Bunko checkout (`BUNKO_REPO`, §9), never
-copied into the reader repo.
+fields Bunko serves. The fixtures are read from a Bunko checkout (`BUNKO_REPO`, §9). The
+one copy kept in the reader repo is a snapshot of those two documents, used when no
+checkout is there; with one, a test checks both snapshots still equal the fixtures.
+Bunko's key order is kept (the reader writes `series.json` byte for byte as Bunko does),
+and the export is run twice in the test and must give the same bytes.
 
 **Reader → Bunko.** The reader's `src/lib/interop/reader-requests.test.ts` records the
 requests its own code sends (method, path, the headers that matter, the body; the
 `Authorization` header as `basic:<user>` or `bearer:<user>`) into
 `interop/contract/reader/`, each with the response fields and headers that code reads.
 `crates/bunko-server/tests/contract_replay.rs` replays them against a fresh seeded server
-and checks the status codes, fields and headers; hand-written records under
-`reader/legacy/` cover what older readers sent (Latin-1 Basic). Headers covered on
-purpose: `Authorization` (Basic with UTF-8 and Latin-1 bytes, Bearer), `If-Match`,
-`If-None-Match`, `Depth`, `Content-Digest`, `Origin`, and the CORS preflight `OPTIONS`.
+and checks the status codes, fields (present, present but nullable, exact values) and
+headers; hand-written records under `reader/legacy/` cover what older readers sent
+(Latin-1 Basic). Every record goes as a browser on the reader's origin sends it: with
+`Origin`, after a preflight when the method or a header is not simple; the preflight must
+allow every header sent, and the answer must expose every header the reader reads.
+Headers covered on purpose: `Authorization` (Basic with UTF-8 and Latin-1 bytes,
+Bearer), `If-None-Match`, `Depth`, `Content-Digest` (which Bunko must report verified),
+`Origin`, and the CORS preflight. The reader sends no `If-Match`, so none is recorded.
 
-Only stable fields are kept (dates, ETags, tokens and ids are replaced with typed
-placeholders), so the fixtures change only when the contract does.
+Only stable fields are kept (dates, ETags, tokens and random ids are replaced with
+placeholders of the same type and format), so the fixtures change only when the contract
+does.
 
 ## 6. cloudsim
 

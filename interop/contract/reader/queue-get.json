@@ -17,6 +17,11 @@
     "headers": [
       "etag"
     ],
+    "nullable_fields": [
+      "held",
+      "volumes.0.jobs.0.eta",
+      "volumes.0.jobs.0.progress"
+    ],
     "status": [
       200
     ]

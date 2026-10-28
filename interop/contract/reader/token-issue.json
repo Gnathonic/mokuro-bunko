@@ -5,6 +5,10 @@
       "token_type",
       "expires_at"
     ],
+    "body_values": {
+      "kind": "reader",
+      "token_type": "Bearer"
+    },
     "status": [
       200
     ]

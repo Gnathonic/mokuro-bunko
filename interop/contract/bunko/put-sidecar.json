@@ -3,6 +3,7 @@
   "headers": {
     "content-type": "text/html; charset=utf-8",
     "etag": "\"etag\"",
+    "x-mokuro-digest-verified": "sha-256",
     "x-mokuro-size": "567",
     "x-mokuro-upload": "stored"
   },
@@ -98,6 +99,7 @@
       ]
     },
     "headers": {
+      "content-digest": "<digest>",
       "content-type": "application/octet-stream"
     },
     "method": "PUT",
