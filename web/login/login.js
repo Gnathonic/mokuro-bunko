@@ -53,7 +53,9 @@ form.addEventListener('submit', async (e) => {
         window.location.href = safeNext();
         
     } catch (err) {
-        errorMsg.textContent = err.message;
+        // An empty password works only for an account with none, from this computer.
+        errorMsg.textContent = !password && err.message === 'Missing credentials'
+            ? 'Enter your password.' : err.message;
         submitBtn.disabled = false;
         submitBtn.textContent = 'Sign In';
     }

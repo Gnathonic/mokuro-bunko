@@ -1,6 +1,9 @@
 //! The Depth:infinity PROPFIND cache (spec §10; `tests/unit/test_propfind_cache.py` for the
 //! timer lifecycle).
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::time::Duration;

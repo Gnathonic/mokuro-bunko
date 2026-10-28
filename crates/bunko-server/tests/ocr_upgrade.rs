@@ -1,6 +1,10 @@
 //! Generation upgrade (spec generation-upgrade.md): census, direct replace, generate then
-//! swap through the scheduler. The upgrade replaces the old file and keeps no layer of it;
+//! swap through the scheduler. The upgrade replaces the old file; stock mokuro output
+//! (no Bunko stamp) is first kept as the `pre-upgrade` layer (D4, `ocr_upgrade_edited.rs`);
 //! layers an earlier beta kept are cleaned up.
+
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
 
 mod ocr_common;
 
@@ -42,7 +46,61 @@ fn sidecars(dir: &std::path::Path) -> Vec<String> {
 
 #[test]
 fn direct_replace_swaps_a_matching_layer_in() {
-    let mut h = harness_full(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    h.add("A/V1.cbz", 3);
+    let lib = h.library();
+    std::fs::write(lib.join("A/V1.mokuro"), LEGACY).unwrap();
+    h.bunko_wrote("A/V1.hayai-nova.mokuro", HAYAI, &layer("g-2", "hayai-nova"));
+    h.at(0.0);
+    assert_eq!(
+        std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),
+        sealed(HAYAI),
+        "the layer's bytes are the new bare file"
+    );
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.mokuro", "V1.pre-upgrade.mokuro"],
+        "the old file is kept as `pre-upgrade`; the layer it came from is not kept twice"
+    );
+    assert!(
+        !h.s.owed.volumes.contains_key("A/V1.cbz"),
+        "nothing left to do"
+    );
+    assert!(
+        bunko_layout::seal::is_sealed(&std::fs::read(lib.join("A/V1.mokuro")).unwrap()),
+        "the proof moved with the bytes"
+    );
+}
+
+/// An OCR install seals exactly the bytes it put in place (`ocr_engine.content_sha256`).
+#[test]
+fn an_install_seals_the_bytes_it_wrote() {
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    h.add("B/V9.cbz", 3);
+    let lib = h.library();
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let vols = volumes(&ops);
+    let sid = opened(&ops)[0].clone();
+    h.event(&p, ready(&sid));
+    h.event(&p, started(&sid, &vols[0].1, 3));
+    h.done_with(&p, &sid, &vols[0].1, "V9.mokuro", 3, 1.0, HAYAI.as_bytes());
+    let installed = std::fs::read(lib.join("B/V9.mokuro")).unwrap();
+    assert!(
+        bunko_layout::seal::is_sealed(&installed),
+        "the normalised bytes on disk are sealed"
+    );
+    assert!(
+        !bunko_layout::seal::is_sealed(HAYAI.as_bytes()),
+        "the processor's bytes were not"
+    );
+}
+
+/// The same layer with no proof that Bunko wrote it (no seal): its stamp alone does not make it the main sidecar, so the volume needs a job.
+#[test]
+fn a_stamped_layer_without_proof_is_not_swapped_in() {
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
     h.add("A/V1.cbz", 3);
     let lib = h.library();
     std::fs::write(lib.join("A/V1.mokuro"), LEGACY).unwrap();
@@ -50,38 +108,40 @@ fn direct_replace_swaps_a_matching_layer_in() {
     h.at(0.0);
     assert_eq!(
         std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),
-        HAYAI,
-        "the layer's bytes are the new bare file"
+        LEGACY
     );
     assert_eq!(
         sidecars(&lib.join("A")),
-        ["V1.mokuro"],
-        "the old file is replaced, not kept; the layer it came from is not kept twice"
+        ["V1.hayai-nova.mokuro", "V1.mokuro"]
     );
     assert!(
-        !h.s.owed.volumes.contains_key("A/V1.cbz"),
-        "nothing left to do"
+        h.s.owed.volumes["A/V1.cbz"].upgrade,
+        "an upgrade job instead"
     );
 }
 
 #[test]
 fn a_direct_replace_keeps_a_layer_an_enabled_row_writes() {
-    let mut h = harness_full(
-        vec![primary(), layer("g-2", "nova")],
+    let nova = layer("g-2", "nova");
+    let mut h = harness_db(
+        vec![primary(), nova.clone()],
         Arc::new(FileFacts),
         Some(enabled()),
     );
     h.add("A/V1.cbz", 3);
     let lib = h.library();
     std::fs::write(lib.join("A/V1.mokuro"), LEGACY).unwrap();
-    std::fs::write(lib.join("A/V1.nova.mokuro"), HAYAI).unwrap();
+    h.bunko_wrote("A/V1.nova.mokuro", HAYAI, &nova);
     h.at(0.0);
     assert_eq!(
         std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),
-        HAYAI
+        sealed(HAYAI)
     );
     // Removing it would only queue the `nova` row to write it again.
-    assert_eq!(sidecars(&lib.join("A")), ["V1.mokuro", "V1.nova.mokuro"]);
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.mokuro", "V1.nova.mokuro", "V1.pre-upgrade.mokuro"]
+    );
 }
 
 #[test]
@@ -116,10 +176,13 @@ fn a_volume_without_a_match_gets_an_upgrade_job_after_ordinary_work() {
     h.event(&p, ready(&sid));
     h.event(&p, started(&sid, &vols[1].1, 3));
     h.done_with(&p, &sid, &vols[1].1, &name, 3, 1.0, HAYAI.as_bytes());
-    // Swapped in, never `_1`-suffixed; the old file replaced, no layer kept.
+    // Swapped in, never `_1`-suffixed; the old file (no Bunko stamp) kept first.
     let bare = json(&lib.join("A/V1.mokuro"));
     assert_eq!(bare["ocr_engine"]["id"], "hayai-nova");
-    assert_eq!(sidecars(&lib.join("A")), ["V1.mokuro"]);
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.mokuro", "V1.pre-upgrade.mokuro"]
+    );
     assert!(h.s.failures.is_empty());
     // The next walk sees the current recipe: nothing more.
     h.at(31.0);
@@ -199,5 +262,8 @@ fn a_layer_an_earlier_beta_kept_goes_once_the_volume_is_upgraded() {
         "hayai-nova"
     );
     h.at(31.0);
-    assert_eq!(sidecars(&lib.join("B")), ["V1.mokuro"]);
+    assert_eq!(
+        sidecars(&lib.join("B")),
+        ["V1.mokuro", "V1.pre-upgrade.mokuro"]
+    );
 }

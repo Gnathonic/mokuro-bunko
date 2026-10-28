@@ -1,6 +1,9 @@
 //! Golden vectors computed by Python 0.5.2 (`tests/golden/gen_vectors.py`):
 //! every pure helper must agree with the reference implementation exactly.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 use std::path::Path;
 
 use bunko_library::archive::natsort::natsorted;

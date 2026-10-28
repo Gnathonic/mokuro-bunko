@@ -137,17 +137,16 @@ impl OcrAdmin for Census {
         method: &Method,
         path: &[&str],
         _q: &str,
-        body: &Value,
+        _body: &Value,
     ) -> Option<Result<(u16, Value), OcrError>> {
         match (method.as_str(), path) {
             ("GET", ["ocr", "upgrade"]) => Some(Ok((
                 200,
                 json!({"enabled": true, "replace": ["mokuro-legacy"], "families": {"mokuro-legacy": 3, "unknown": 1},
-                       "ready": 1, "needs_ocr": 1, "skipped_missing_pages": 0, "skipped_edited": 1,
-                       "edited_volumes": ["a/Vol 1.cbz"]}),
+                       "ready": 1, "needs_ocr": 1, "skipped_missing_pages": 0}),
             ))),
             ("POST", ["ocr", "upgrade", "a", "Vol%201.cbz"]) => {
-                Some(Ok((200, json!({"success": true, "mode": body["force"]}))))
+                Some(Ok((200, json!({"success": true, "mode": "direct"}))))
             }
             _ => None,
         }
@@ -176,20 +175,22 @@ async fn census_through_router_and_live_apply() {
         "ready",
         "needs_ocr",
         "skipped_missing_pages",
-        "skipped_edited",
-        "edited_volumes",
     ] {
         assert!(c.get(k).is_some(), "{k}");
+    }
+    for gone in ["skipped_edited", "edited_volumes"] {
+        assert!(c.get(gone).is_none(), "{gone}");
     }
     let r = h
         .call(
             "POST",
             "/_admin/api/ocr/upgrade/a/Vol%201.cbz",
             Some(&admin),
-            Some(json!({"force": true})),
+            None,
         )
         .await;
-    assert_eq!(r.json(), json!({"success": true, "mode": true}));
+    assert_eq!(r.json()["success"], true);
+    assert_eq!(r.json()["mode"], "direct");
 
     let r = h
         .call(

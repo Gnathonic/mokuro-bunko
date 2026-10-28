@@ -1,6 +1,9 @@
 //! The OCR module over HTTP: the queue page status (levels, ETag/304, viewers), the
 //! reader's queue file, and a whole remote round trip over a real WebSocket.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod ocr_common;
 
 use std::sync::Arc;
@@ -1262,6 +1265,7 @@ async fn local_ocr_waits_for_the_background_install_then_starts_by_itself() {
 struct InstallEnv {
     _dir: tempfile::TempDir,
     core: Core,
+    db: Arc<Database>,
     lib: std::path::PathBuf,
     ocr: OcrControl,
     install: Arc<FakeInstall>,
@@ -1306,7 +1310,7 @@ fn install_env(view: Option<bunko_proto::OcrInstall>, gpu: bool) -> InstallEnv {
     });
     let ocr = OcrControl::new(OcrDeps {
         core: core.clone(),
-        db: Some(db),
+        db: Some(db.clone()),
         facts: Arc::new(FileFacts),
         locks: Arc::new(DavLocks(bunko_dav::PathWriteLocks::new())),
         local: Some(factory.clone()),
@@ -1317,6 +1321,7 @@ fn install_env(view: Option<bunko_proto::OcrInstall>, gpu: bool) -> InstallEnv {
     InstallEnv {
         _dir: dir,
         core,
+        db,
         lib: layout.library(),
         ocr,
         install,
@@ -1837,4 +1842,187 @@ async fn oversized_and_binary_messages_close_the_socket() {
     assert_eq!(closed_by_server(&mut rx).await, Some(1008));
     e.stop.cancel();
     e.ocr.stop().await;
+}
+
+/// Regression: a benchmark asked of this server while its OCR backend was still being
+/// installed answered "this server runs no OCR of its own (ocr.local_processing is
+/// off)". It says the install is under way, and works once it is done.
+#[tokio::test]
+async fn a_benchmark_during_the_install_says_the_ocr_is_still_being_set_up() {
+    use bunko_server::admin::OcrAdmin;
+    use bunko_server::admin::ocr::BenchRequest;
+    let e = install_env(installing(), true);
+    ocr_common::write_cbz(&e.lib.join("A/V1.cbz"), 2);
+    let gens = e.generations().await;
+    let row = &gens["generations"][0];
+    let key = row["id"]
+        .as_str()
+        .or(row["key"].as_str())
+        .unwrap()
+        .to_string();
+    let bench = |e: &InstallEnv| {
+        let (ocr, config, key) = (e.ocr.clone(), e.core.config.read().clone(), key.clone());
+        tokio::task::spawn_blocking(move || {
+            ocr.bench(
+                &config,
+                &key,
+                BenchRequest::Enqueue {
+                    spec: None,
+                    pages: None,
+                    processor: "local".into(),
+                },
+            )
+        })
+    };
+    let err = bench(&e).await.unwrap().unwrap_err();
+    assert_eq!(err.status, 409, "{:?}", err.body);
+    let msg = err.body["error"].as_str().unwrap();
+    assert!(msg.contains("still being set up"), "{msg}");
+    assert!(msg.contains("installing OCR backend: 10%"), "{msg}");
+    assert!(!msg.contains("local_processing"), "{msg}");
+
+    e.install.end("done", true);
+    e.wait_starts(1).await;
+    if let Err(err) = bench(&e).await.unwrap() {
+        let msg = err.body["error"].as_str().unwrap_or_default().to_string();
+        assert!(
+            !msg.contains("still being set up") && !msg.contains("local_processing"),
+            "{msg}"
+        );
+    }
+    e.stop.cancel();
+    e.ocr.stop().await;
+}
+
+/// Regression: a machine paired again under a new processor account (the old one
+/// deleted) was refused for good: "the name ... belongs to another processor account".
+/// The name stays with an account only while it is a processor.
+#[tokio::test]
+async fn a_machine_paired_again_under_a_new_account_takes_its_name_back() {
+    let e = env(|_| {});
+    for (user, pass) in [
+        ("old-acct", "processor-pass-1"),
+        ("new-acct", "processor-pass-2"),
+    ] {
+        e.db.create_user(user, pass, Role::Processor, UserStatus::Active, "")
+            .unwrap();
+    }
+    let app = bunko_server::ocr::processor_router(e.ocr.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = reqwest::Client::new();
+    let register = |user: &'static str, pass: &'static str| {
+        let http = http.clone();
+        async move {
+            let r = http
+                .post(format!("http://{addr}/_processor/register"))
+                .header("authorization", basic(user, pass))
+                .json(&json!({"protocol": 3, "name": "tower", "catalog": {"engines": ["hayai-nova"], "detectors": ["ppocr-manga"]}}))
+                .send()
+                .await
+                .unwrap();
+            let status = r.status().as_u16();
+            (status, r.json::<Value>().await.unwrap())
+        }
+    };
+    let (status, first) = register("old-acct", "processor-pass-1").await;
+    assert_eq!(status, 200, "{first}");
+    // While the first account is a processor, the name is its own.
+    let (status, body) = register("new-acct", "processor-pass-2").await;
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("belongs to another processor account"),
+        "{body}"
+    );
+    // Deleted: the machine pairs under the new account, and the old entry is gone.
+    assert!(e.db.delete_user("old-acct").unwrap());
+    let (status, body) = register("new-acct", "processor-pass-2").await;
+    assert_eq!(status, 200, "{body}");
+    let names: Vec<(String, Option<String>)> = e
+        .ocr
+        .ask(|s| {
+            s.machines
+                .values()
+                .filter(|m| !m.local)
+                .map(|m| (m.name.clone(), m.username.clone()))
+                .collect()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        names,
+        vec![("tower".to_string(), Some("new-acct".to_string()))]
+    );
+}
+
+/// Regression: while this server's OCR backend (a GPU pack) was still being installed,
+/// the queue page said "Backend: CPU" (what its own machine runs until the pack is
+/// in). It names the pack's backend, as installing.
+#[tokio::test]
+async fn the_queue_names_the_backend_being_installed() {
+    let mut view = installing().unwrap();
+    view.variant = Some("rocm7.1".into());
+    let e = install_env(Some(view), true);
+    e.db.create_user(
+        "boss",
+        "boss-password-1",
+        Role::Admin,
+        UserStatus::Active,
+        "",
+    )
+    .unwrap();
+    let app = bunko_server::ocr::queue_router(e.ocr.clone());
+    let status = || {
+        Request::get("/queue/api/status")
+            .header(header::AUTHORIZATION, basic("boss", "boss-password-1"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let (code, _, body) = send(&app, status()).await;
+    assert_eq!(code, 200);
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["backend"], "rocm", "{v}");
+    assert_eq!(v["backend_installing"], true, "{v}");
+    // Done: what runs is reported again, and nothing says installing.
+    e.install.end("done", true);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let (_, _, body) = send(&app, status()).await;
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert!(v.get("backend_installing").is_none(), "{v}");
+    assert_ne!(v["backend"], "rocm", "{v}");
+}
+
+/// Regression: Settings → OCR said "Auto — install state not reported" whatever the
+/// install did: the runtime status never said whether the backend is in place, nor
+/// which one runs.
+#[tokio::test]
+async fn the_ocr_runtime_says_whether_the_backend_is_installed_and_which() {
+    use bunko_server::admin::OcrAdmin;
+    let e = install_env(installing(), true);
+    let runtime = |e: &InstallEnv| {
+        let (ocr, config) = (e.ocr.clone(), e.core.config.read().clone());
+        tokio::task::spawn_blocking(move || ocr.runtime_status(&config))
+    };
+    let r = runtime(&e).await.unwrap();
+    assert_eq!(r["installed"], false, "{r}");
+    assert_eq!(r["install"]["state"], "running", "{r}");
+    assert_eq!(r["installed_backend"], Value::Null, "{r}");
+    e.install.end("done", true);
+    let mut up = false;
+    for _ in 0..50 {
+        if e.local_up().await {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(up, "the local OCR starts once the install is done");
+    let r = runtime(&e).await.unwrap();
+    assert_eq!(r["installed"], true, "{r}");
+    // The fake pipeline runs on the CPU.
+    assert_eq!(r["installed_backend"], "cpu", "{r}");
 }

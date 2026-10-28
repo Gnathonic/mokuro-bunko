@@ -109,8 +109,24 @@ async function logout() {
     window.location.reload();
 }
 
+// What this server offers: no Register card when nobody may join, and no reader
+// steps on a server that serves no readers.
+async function applyServerConfig() {
+    try {
+        const response = await fetch('/api/nav/config');
+        if (!response.ok) return;
+        const config = await response.json();
+        const readers = config.serve_readers !== false;
+        document.getElementById('register-card').hidden = !readers || config.registration_enabled === false;
+        document.getElementById('get-started').hidden = !readers;
+        document.getElementById('how-it-works').hidden = !readers;
+        document.getElementById('no-readers').hidden = readers;
+    } catch (_) { /* the full page stays */ }
+}
+
 // Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     updateNav();
     loadStats();
+    applyServerConfig();
 });

@@ -20,9 +20,175 @@
                     </svg>
                 </div>
                 <h1 class="setup-title">Welcome to Mokuro Bunko</h1>
-                <p class="setup-description">Set up this library server in a few steps.</p>
+                <p class="setup-description">Set up your library in a few steps: where it lives, who reads it, and its OCR.</p>
                 <div class="setup-actions">
                     <button type="button" class="btn btn--primary btn--lg" id="start-btn">Get started</button>
+                </div>
+            </div>
+
+            <!-- Where does your library live? (0.8) -->
+            <div class="setup-step" id="step-where">
+                <h2 class="setup-step-title">Where does your library live?</h2>
+                <p class="setup-lede">Bunko looks after the manga where they already are.</p>
+                <p class="form-hint" id="where-pinned" hidden></p>
+                <div class="radio-cards" id="where-cards">
+                    <label class="radio-card"><input type="radio" name="where" value="local" checked><div class="radio-card__content"><strong>This computer</strong><span id="where-local-folder">The library folder on this machine.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="where" value="gdrive"><div class="radio-card__content"><strong>Google Drive</strong><span>The mokuro-reader folder Mokuro Reader keeps in your Drive.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="where" value="onedrive"><div class="radio-card__content"><strong>OneDrive</strong><span>The mokuro-reader folder in your OneDrive.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="where" value="mega"><div class="radio-card__content"><strong>MEGA</strong><span>The mokuro-reader folder in your MEGA account.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="where" value="webdav"><div class="radio-card__content"><strong>A WebDAV server</strong><span>Nextcloud, ownCloud, a NAS, rclone serve… (https).</span></div></label>
+                    <label class="radio-card" id="where-processor-card" hidden><input type="radio" name="where" value="processor"><div class="radio-card__content"><strong>No library here: read OCR for another Bunko</strong><span>This computer becomes a processor: it OCRs the volumes of a library on another machine.</span></div></label>
+                </div>
+                <div id="where-error" class="form-error" role="alert" hidden></div>
+                <div class="setup-actions">
+                    <button type="button" class="btn btn--secondary" data-prev>Back</button>
+                    <button type="button" class="btn btn--primary" id="where-next">Next</button>
+                </div>
+            </div>
+
+            <!-- This computer reads OCR for another Bunko (full build) -->
+            <div class="setup-step" id="step-pa">
+                <h2 class="setup-step-title">Connect to the library</h2>
+                <p class="setup-lede">Its address as a browser reaches it, and a processor account its admin made for you.</p>
+                <div class="form-group">
+                    <label for="pa-url" class="form-label">Library address</label>
+                    <input type="url" id="pa-url" class="form-input" placeholder="https://library.example or http://192.168.1.10:8080" autocomplete="url">
+                </div>
+                <div class="form-group">
+                    <label for="pa-user" class="form-label">Processor username</label>
+                    <input type="text" id="pa-user" class="form-input" autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label for="pa-password" class="form-label">Password</label>
+                    <input type="password" id="pa-password" class="form-input" autocomplete="current-password">
+                </div>
+                <fieldset class="form-group">
+                    <legend class="form-label">Check the library's certificate (https)</legend>
+                    <div class="radio-cards">
+                        <label class="radio-card"><input type="radio" name="pa-tls" value="true" checked><div class="radio-card__content"><strong>Yes</strong><span>A normal certificate (Let's Encrypt, a tunnel, …).</span></div></label>
+                        <label class="radio-card"><input type="radio" name="pa-tls" value="cert"><div class="radio-card__content"><strong>Trust this certificate file</strong><span>The library's self-signed certificate.</span></div></label>
+                        <label class="radio-card"><input type="radio" name="pa-tls" value="false"><div class="radio-card__content"><strong>No</strong><span>Only on a network you trust.</span></div></label>
+                    </div>
+                </fieldset>
+                <div class="form-group" id="pa-cert-group" hidden>
+                    <label for="pa-cert" class="form-label">Certificate file on this computer</label>
+                    <input type="text" id="pa-cert" class="form-input" placeholder="/path/to/library.crt">
+                </div>
+                <label class="toggle" id="pa-overwrite-row" hidden><input type="checkbox" role="switch" id="pa-overwrite"><span class="toggle__text"><strong>Replace the processor.yaml already here</strong><span>A processor was set up on this computer before: its settings are overwritten.</span></span></label>
+                <p class="form-hint" id="pa-result" role="status" aria-live="polite" hidden></p>
+                <div id="pa-error" class="form-error" role="alert" hidden></div>
+                <div class="setup-actions">
+                    <button type="button" class="btn btn--secondary" data-prev>Back</button>
+                    <button type="button" class="btn btn--secondary" id="pa-test">Test the connection</button>
+                    <button type="button" class="btn btn--primary" id="pa-finish">Set up the processor</button>
+                </div>
+            </div>
+
+            <div class="setup-step" id="step-pa-done">
+                <div class="setup-logo setup-logo--success">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="48" height="48" aria-hidden="true">
+                        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                        <polyline points="22 4 12 14.01 9 11.01"/>
+                    </svg>
+                </div>
+                <h2 class="setup-step-title setup-center" id="pa-done-title">This computer is a processor</h2>
+                <p class="setup-description" id="pa-done-text"></p>
+                <ul class="setup-notes" id="pa-done-notes"></ul>
+                <pre class="done-command" id="pa-done-output" hidden></pre>
+                <p class="form-hint setup-center">This setup page closes: it served a library that is not set up here.</p>
+            </div>
+
+            <!-- Connect: one button, the flow chosen by the server -->
+            <div class="setup-step" id="step-connect">
+                <h2 class="setup-step-title" id="connect-title">Connect</h2>
+                <p class="setup-lede" id="connect-lede"></p>
+                <div id="connect-reader" hidden>
+                    <p class="form-label">Which Mokuro Reader do you use?</p>
+                    <div class="radio-cards">
+                        <label class="radio-card"><input type="radio" name="reader" value="release" checked><div class="radio-card__content"><strong>reader.mokuro.app</strong><span>The Mokuro Reader most people use.</span></div></label>
+                        <label class="radio-card"><input type="radio" name="reader" value="beta"><div class="radio-card__content"><strong>Mokuro Reader beta</strong><span>The beta deployment.</span></div></label>
+                    </div>
+                    <p class="form-hint mt-2">Bunko sees the Drive files of that reader only.</p>
+                </div>
+                <p class="form-hint" id="connect-custom" hidden></p>
+                <div id="connect-mega" hidden>
+                    <div class="form-group">
+                        <label class="form-label" for="mega-email">Email</label>
+                        <input class="form-input" id="mega-email" type="email" autocomplete="username">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="mega-password">Password</label>
+                        <input class="form-input" id="mega-password" type="password" autocomplete="current-password">
+                        <p class="form-hint">Used once to sign in; Bunko keeps the session, never the password.</p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="mega-totp">Two-factor code (if the account has one)</label>
+                        <input class="form-input" id="mega-totp" inputmode="numeric" autocomplete="one-time-code">
+                    </div>
+                </div>
+                <div id="connect-webdav" hidden>
+                    <div class="form-group">
+                        <label class="form-label" for="dav-url">Server address</label>
+                        <input class="form-input" id="dav-url" placeholder="https://cloud.example.com/remote.php/dav/files/me" autocomplete="off">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="dav-user">User</label>
+                        <input class="form-input" id="dav-user" autocomplete="username">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="dav-password">App password</label>
+                        <input class="form-input" id="dav-password" type="password" autocomplete="new-password">
+                    </div>
+                    <label class="toggle"><input type="checkbox" role="switch" id="dav-http"><span class="toggle__text"><strong>Allow http://</strong><span>Only for a server on your own network: the password travels unencrypted. A server on this computer (localhost, 127.0.0.1) needs no tick.</span></span></label>
+                </div>
+                <div class="connect-live mt-3" id="connect-live" role="status" aria-live="polite" hidden></div>
+                <div class="connect-paste mt-3" id="connect-paste" hidden>
+                    <label class="form-label" for="connect-paste-url">The address the browser ended on</label>
+                    <input class="form-input" id="connect-paste-url" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="http://localhost:…/?code=…">
+                    <p class="form-hint">After you sign in, the browser shows a page that does not load. Copy that page's whole address from the address bar and paste it here.</p>
+                    <div id="connect-paste-error" class="form-error" role="alert" hidden></div>
+                    <button type="button" class="btn btn--primary btn--sm" id="connect-paste-btn">Finish signing in</button>
+                </div>
+                <div id="connect-error" class="form-error" role="alert" hidden></div>
+                <div class="setup-actions">
+                    <button type="button" class="btn btn--secondary" id="connect-back">Back</button>
+                    <button type="button" class="btn btn--primary" id="connect-btn">Connect</button>
+                </div>
+                <p class="setup-center mt-2"><a href="#" class="form-hint" id="connect-code-link" hidden>Use a code instead</a></p>
+            </div>
+
+            <!-- Check -->
+            <div class="setup-step" id="step-check">
+                <h2 class="setup-step-title">Check</h2>
+                <p class="setup-lede" id="check-account"></p>
+                <p class="check-summary" id="check-summary"></p>
+                <p class="form-hint" id="check-pairing" hidden></p>
+                <div class="alert alert--warning" id="check-warning" hidden></div>
+                <div class="alert alert--info" id="check-lease" hidden></div>
+                <div class="setup-actions" id="check-offers">
+                    <button type="button" class="btn btn--secondary" id="check-switch" hidden>Try the other pairing</button>
+                    <button type="button" class="btn btn--secondary" id="check-create" hidden>Create it</button>
+                </div>
+                <div id="check-error" class="form-error" role="alert" hidden></div>
+                <div class="setup-actions">
+                    <button type="button" class="btn btn--secondary" id="check-back">Back</button>
+                    <button type="button" class="btn btn--primary" id="check-next">Next</button>
+                </div>
+            </div>
+
+            <!-- Do readers connect to this Bunko? -->
+            <div class="setup-step" id="step-readers">
+                <h2 class="setup-step-title">Do readers connect to this Bunko?</h2>
+                <p class="setup-lede" id="readers-lede">Mokuro Reader can read from this Bunko, with an account for each reader.</p>
+                <p class="form-hint" id="readers-pinned" hidden></p>
+                <div class="radio-cards">
+                    <label class="radio-card"><input type="radio" name="readers" value="no"><div class="radio-card__content"><strong>No</strong><span id="readers-no-text">Mokuro Reader keeps reading from your cloud storage; Bunko adds OCR, covers and series info.</span></div></label>
+                    <label class="radio-card"><input type="radio" name="readers" value="yes"><div class="radio-card__content"><strong>Yes</strong><span>Readers sign in to this Bunko; you choose who may join next.</span></div></label>
+                </div>
+                <label class="toggle mt-3" id="readers-link-row" hidden><input type="checkbox" role="switch" id="readers-link"><span class="toggle__text"><strong>Link my reading progress to the cloud</strong><span>Your admin account reads and writes the progress files Mokuro Reader keeps in the cloud folder.</span></span></label>
+                <div class="setup-actions">
+                    <button type="button" class="btn btn--secondary" data-prev>Back</button>
+                    <button type="button" class="btn btn--primary" id="readers-next">Next</button>
                 </div>
             </div>
 
@@ -39,6 +205,8 @@
                 <div class="form-group">
                     <label for="admin-password" class="form-label">Password</label>
                     <input type="password" id="admin-password" class="form-input" required minlength="8" autocomplete="new-password">
+                    <p class="form-hint" id="admin-password-optional" hidden>Optional: this server is reachable from this computer only.
+                        Without a password, you sign in from this computer by leaving it empty. Set one in Account before you share this server.</p>
                 </div>
                 <div class="form-group">
                     <label for="admin-password-confirm" class="form-label">Password again</label>
@@ -145,6 +313,17 @@
                 </div>
             </div>
 
+            <!-- Lite build: connect a processor -->
+            <div class="setup-step" id="step-processor">
+                <h2 class="setup-step-title">Connect a processor</h2>
+                <p class="setup-lede">This build reads no OCR itself: a processor on another machine (with a GPU, ideally) does.</p>
+                <label class="toggle"><input type="checkbox" role="switch" id="proc-create" checked><span class="toggle__text"><strong>Make a processor account</strong><span>The last page shows the address, user and password to pair the processor with.</span></span></label>
+                <div class="setup-actions">
+                    <button type="button" class="btn btn--secondary" data-prev>Back</button>
+                    <button type="button" class="btn btn--primary" id="proc-finish">Finish</button>
+                </div>
+            </div>
+
             <!-- Done -->
             <div class="setup-step" id="step-done">
                 <div class="setup-logo setup-logo--success">
@@ -156,6 +335,22 @@
                 <h2 class="setup-step-title setup-center">Done</h2>
                 <p class="setup-description" id="done-text">Opening the admin panel…</p>
                 <ul class="setup-notes" id="done-notes"></ul>
+                <div class="done-progress" id="done-progress" role="status" aria-live="polite" hidden>
+                    <p class="done-line" id="done-sync"></p>
+                    <div class="progress-bar" id="done-sync-bar" hidden><div class="progress-bar__fill" id="done-sync-fill"></div></div>
+                    <p class="done-line" id="done-ocr"></p>
+                </div>
+                <div class="done-pairing" id="done-pairing" hidden>
+                    <p class="form-label">Pair the processor</p>
+                    <p class="form-hint">On the processor machine open Mokuro Bunko and choose <strong>Processor</strong>, or run:</p>
+                    <pre class="done-command" id="done-pair-command"></pre>
+                    <dl class="done-kv">
+                        <dt>Address</dt><dd id="done-pair-url"></dd>
+                        <dt>User</dt><dd id="done-pair-user"></dd>
+                        <dt>Password</dt><dd><code id="done-pair-password"></code></dd>
+                    </dl>
+                    <p class="form-hint">The password is shown only here. <span id="done-pair-wait">Waiting for a processor…</span></p>
+                </div>
                 <div class="setup-links">
                     <a href="/_admin#server" class="btn btn--primary btn--lg" id="done-admin">Open the admin panel</a>
                 </div>

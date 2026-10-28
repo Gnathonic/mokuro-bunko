@@ -73,7 +73,10 @@ pub fn stem_of(rel: &str) -> &str {
 
 /// The library-relative posix path of `path`, or None outside the library.
 pub fn rel_of(library: &Path, path: &Path) -> Option<String> {
-    let rel = path.strip_prefix(library).ok()?;
+    let rel = match path.strip_prefix(library) {
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => resolved_rel(library, path)?,
+    };
     let parts: Vec<String> = rel
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
@@ -84,18 +87,32 @@ pub fn rel_of(library: &Path, path: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// [`rel_of`] when one side names the library through a symlink the other has resolved:
+/// the layout keeps the configured path, while WebDAV and the catalog resolve theirs
+/// (on macOS every temp dir is one, `/var` → `/private/var`). Both are resolved here; the
+/// file itself may be gone, so only its folder must exist.
+fn resolved_rel(library: &Path, path: &Path) -> Option<PathBuf> {
+    let library = bunko_store::fs::canonicalize(library).ok()?;
+    let folder = bunko_store::fs::canonicalize(path.parent()?).ok()?;
+    let path = folder.join(path.file_name()?);
+    path.strip_prefix(&library).ok().map(Path::to_path_buf)
+}
+
 /// `(st_size, st_mtime_ns)` of an archive: what a claim pins.
 pub type Stamp = (u64, i128);
 
 pub fn stamp_of(path: &Path) -> Option<Stamp> {
-    let meta = std::fs::metadata(path).ok()?;
+    let meta = bunko_store::fs::metadata(path).ok()?;
     if !meta.is_file() {
         return None;
     }
     Some((meta.len(), mtime_ns(&meta)))
 }
 
-pub fn mtime_ns(meta: &std::fs::Metadata) -> i128 {
+pub fn mtime_ns(meta: &bunko_store::Meta) -> i128 {
+    if let Some((s, ns)) = meta.unix_mtime() {
+        return s as i128 * 1_000_000_000 + ns as i128;
+    }
     match meta.modified() {
         Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
             Ok(d) => d.as_nanos() as i128,
@@ -138,7 +155,7 @@ impl LibraryFacts for FileFacts {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let meta = std::fs::metadata(&sidecar).ok();
+        let meta = bunko_store::fs::metadata(&sidecar).ok();
         let (entry, _) =
             bunko_library::compiler::compile_volume(&series, cbz, Some(&sidecar), meta.as_ref());
         bunko_library::schema::missing_page_count(entry.page_count, entry.matched_page_count)
@@ -218,5 +235,30 @@ mod tests {
         assert_eq!(r.series(), ".");
         assert_eq!(r.volume(), "Loose");
         assert_eq!(stem_of("A/x.y.cbz"), "x.y");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rel_of_sees_through_a_symlinked_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        bunko_store::fs::create_dir_all(real.join("library/S")).unwrap();
+        bunko_store::fs::write(real.join("library/S/v.cbz"), b"zip").unwrap();
+        std::os::unix::fs::symlink("real", dir.path().join("link")).unwrap();
+        let link = dir.path().join("link");
+        // The layout names the library through the link; WebDAV and the catalog resolve it.
+        let rel = rel_of(&link.join("library"), &real.join("library/S/v.cbz"));
+        assert_eq!(rel.as_deref(), Some("S/v.cbz"));
+        let rel = rel_of(&real.join("library"), &link.join("library/S/v.cbz"));
+        assert_eq!(rel.as_deref(), Some("S/v.cbz"));
+        // A file that is gone, in a folder that is still there.
+        let rel = rel_of(&link.join("library"), &real.join("library/S/gone.cbz"));
+        assert_eq!(rel.as_deref(), Some("S/gone.cbz"));
+        // Still nothing outside the library, and nothing for a folder that is gone.
+        assert_eq!(rel_of(&link.join("library"), &real.join("other.cbz")), None);
+        assert_eq!(
+            rel_of(&link.join("library"), &real.join("library/Gone/v.cbz")),
+            None
+        );
     }
 }

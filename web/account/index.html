@@ -91,11 +91,11 @@
 
             <!-- Change Password Card -->
             <div class="card account-card">
-                <h2 class="account-card__title">Change Password</h2>
+                <h2 class="account-card__title" id="password-title">Change Password</h2>
                 <div id="password-success" class="alert alert--success" style="display:none">Password updated successfully.</div>
                 <div id="password-error" class="alert alert--error" style="display:none"></div>
                 <form id="password-form">
-                    <div class="form-group">
+                    <div class="form-group" id="current-password-group">
                         <label for="current-password" class="form-label">Current Password</label>
                         <input type="password" id="current-password" class="form-input" required autocomplete="current-password" placeholder="Enter current password">
                     </div>

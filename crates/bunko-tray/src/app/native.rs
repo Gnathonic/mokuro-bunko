@@ -26,6 +26,7 @@ struct Items {
     /// The optional items, as built ("Open processor", "Set up…"): a change rebuilds.
     processor_up: bool,
     show_setup: bool,
+    sign_in: bool,
     autostart: CheckMenuItem,
     quit: MenuItem,
 }
@@ -81,6 +82,9 @@ fn build_menu(m: &MenuModel, autostart_on: bool) -> anyhow::Result<Items> {
     }
     let library = item(id::LIBRARY, "Open library", m.library_url.is_some());
     menu.append(&library)?;
+    if m.sign_in_url.is_some() {
+        menu.append(&item(id::SIGN_IN, "Sign in again…", true))?;
+    }
     if m.show_setup {
         menu.append(&item(id::SETUP, "Set up…", true))?;
     }
@@ -102,6 +106,7 @@ fn build_menu(m: &MenuModel, autostart_on: bool) -> anyhow::Result<Items> {
         library,
         processor_up: m.processor_up,
         show_setup: m.show_setup,
+        sign_in: m.sign_in_url.is_some(),
         autostart,
         quit,
     })
@@ -114,6 +119,7 @@ impl Items {
             || self.stats.len() != m.stats_lines.len()
             || self.processor_up != m.processor_up
             || self.show_setup != m.show_setup
+            || self.sign_in != m.sign_in_url.is_some()
         {
             return false;
         }

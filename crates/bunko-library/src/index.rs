@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -185,7 +186,9 @@ pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
     while let Some((dir, name)) = stack.pop() {
         let subdirs = scan_dir(&dir, &name, &mut snapshot);
         for (child, path) in subdirs.into_iter().rev() {
-            if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            if bunko_store::fs::symlink_metadata(&path)
+                .is_ok_and(|meta| meta.file_type().is_symlink())
+            {
                 continue;
             }
             let child_name = if name == "." {
@@ -197,6 +200,28 @@ pub fn scan_library(library_path: &Path) -> LibrarySnapshot {
         }
     }
     snapshot
+}
+
+/// The series `name` (a relative `/` path) as [`scan_library`] would list it, reading
+/// only its folder: `None` where the walk would not reach it (a hidden or symlinked
+/// folder on the way) or would not list it (no volumes).
+fn scan_one_series(library_path: &Path, name: &str) -> Option<SeriesSnapshot> {
+    let mut dir = library_path.to_path_buf();
+    for part in name.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.starts_with('.') {
+            return None;
+        }
+        dir.push(part);
+        if bunko_store::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return None;
+        }
+    }
+    if !fsutil::is_dir(&dir) {
+        return None;
+    }
+    let mut snapshot = LibrarySnapshot::default();
+    scan_dir(&dir, name, &mut snapshot);
+    snapshot.series.pop()
 }
 
 struct CacheState {
@@ -214,15 +239,25 @@ struct CacheState {
 }
 
 /// Time-based cached scanner (`LibraryIndexCache`).
-pub struct LibraryIndexCache {
+///
+/// Once there is a snapshot, a read never walks the library: a stale or expired index
+/// answers at once with the last snapshot and starts one background walk. (0.5.2 walked
+/// inside the read, so a catalog or series view took as long as a whole-library scan
+/// whenever the TTL had passed or a file had changed, which under OCR load is often.)
+/// Only the very first read waits. [`get_snapshot_fresh`](Self::get_snapshot_fresh)
+/// still waits, for a caller that must see a change it just made.
+pub struct LibraryIndexCache(Arc<Inner>);
+
+struct Inner {
     library_path: PathBuf,
     ttl: Duration,
     max_bytes: usize,
     state: Mutex<CacheState>,
-    /// One scan at a time: while one runs, other readers of a stale index get the last
-    /// snapshot at once (they wait only when there has never been one) instead of each
-    /// walking the whole library, or waiting for a scan a busy background caller began.
+    /// One scan at a time: a reader that must wait for a walk waits for the one in
+    /// progress instead of starting its own.
     scanning: Mutex<()>,
+    /// A background walk is queued or running (at most one at a time).
+    refreshing: AtomicBool,
 }
 
 impl LibraryIndexCache {
@@ -230,7 +265,7 @@ impl LibraryIndexCache {
     /// is still served (the index cannot work without it) but logged, so an
     /// operator can see the library outgrew the configured cache.
     pub fn new(library_path: impl Into<PathBuf>, ttl: Duration, max_bytes: usize) -> Self {
-        Self {
+        Self(Arc::new(Inner {
             library_path: library_path.into(),
             ttl,
             max_bytes,
@@ -244,17 +279,18 @@ impl LibraryIndexCache {
                 scans: 0,
             }),
             scanning: Mutex::new(()),
-        }
+            refreshing: AtomicBool::new(false),
+        }))
     }
 
     pub fn library_path(&self) -> &Path {
-        &self.library_path
+        &self.0.library_path
     }
 
-    /// The library changed: a cheap scan is redone on the next read; a slow
-    /// one keeps serving until it is `RESCAN_FACTOR` scans old.
+    /// The library changed: a cheap scan is redone (in the background) on the next
+    /// read; a slow one keeps serving until it is `RESCAN_FACTOR` scans old.
     pub fn invalidate(&self) {
-        let mut state = self.state.lock();
+        let mut state = self.0.state.lock();
         state.stale = true;
         state.changes += 1;
         if state.scan_duration < SLOW_SCAN {
@@ -262,29 +298,95 @@ impl LibraryIndexCache {
         }
     }
 
-    /// A recent snapshot, rescanning when stale.
+    /// A recent snapshot; never waits for a walk once there is one.
     pub fn get_snapshot(&self) -> Arc<LibrarySnapshot> {
         self.get_snapshot_counted().0
     }
 
     /// `get_snapshot` and the scan count that produced it, read together.
     pub fn get_snapshot_counted(&self) -> (Arc<LibrarySnapshot>, u64) {
-        if let Some(hit) = self.servable() {
+        if let Some(hit) = self.0.servable() {
             return hit;
         }
-        let _scan = match self.scanning.try_lock() {
-            Some(guard) => guard,
-            None => {
-                let state = self.state.lock();
-                if let Some(last) = &state.last {
-                    return (Arc::clone(last), state.scans);
-                }
-                drop(state);
-                self.scanning.lock()
-            }
+        let last = {
+            let state = self.0.state.lock();
+            state
+                .last
+                .as_ref()
+                .map(|last| (Arc::clone(last), state.scans))
         };
-        // A scan that finished while this one waited serves it too.
-        if let Some(hit) = self.servable() {
+        match last {
+            Some(last) => {
+                self.refresh_in_background();
+                last
+            }
+            None => self.0.scan(false),
+        }
+    }
+
+    /// A snapshot that includes every change [`invalidate`](Self::invalidate)d before
+    /// this call, walking the library (or waiting for the walk in progress) if needed.
+    pub fn get_snapshot_fresh(&self) -> Arc<LibrarySnapshot> {
+        match self.0.fresh() {
+            Some((snapshot, _)) => snapshot,
+            None => self.0.scan(true).0,
+        }
+    }
+
+    /// One series as [`get_snapshot`](Self::get_snapshot) would list it. Before the
+    /// first walk has finished, only that series' folder is listed (and the walk starts
+    /// in the background), so a series view right after startup does not wait for the
+    /// whole library.
+    pub fn series(&self, name: &str) -> Option<SeriesSnapshot> {
+        let walked = self.0.state.lock().last.is_some();
+        if walked {
+            return self.get_snapshot().series_by_name(name).cloned();
+        }
+        self.refresh_in_background();
+        scan_one_series(&self.0.library_path, name)
+    }
+
+    /// The last snapshot, however old, without ever scanning.
+    pub fn cached_snapshot(&self) -> Option<Arc<LibrarySnapshot>> {
+        self.0.state.lock().snapshot.clone()
+    }
+
+    /// How many scans have produced a snapshot.
+    pub fn scans(&self) -> u64 {
+        self.0.state.lock().scans
+    }
+
+    /// Start one background walk, unless one is already queued or running.
+    fn refresh_in_background(&self) {
+        if self.0.refreshing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let inner = Arc::clone(&self.0);
+        let spawned = std::thread::Builder::new()
+            .name("library-index".into())
+            .spawn(move || {
+                inner.scan(false);
+                inner.refreshing.store(false, Ordering::Release);
+            });
+        if let Err(error) = spawned {
+            self.0.refreshing.store(false, Ordering::Release);
+            tracing::warn!(%error, "library index: could not start a background walk");
+        }
+    }
+}
+
+impl Inner {
+    /// Walk the library (one walk at a time) and keep the result. A walk that finished
+    /// while this one waited for the lock serves it instead: one that may be served
+    /// (`fresh_only` false) or one with every change seen (`fresh_only` true).
+    fn scan(&self, fresh_only: bool) -> (Arc<LibrarySnapshot>, u64) {
+        let _scan = self.scanning.lock();
+        let done = if fresh_only {
+            self.fresh()
+        } else {
+            self.servable()
+        };
+        if let Some(hit) = done {
             return hit;
         }
         let changes = self.state.lock().changes;
@@ -322,13 +424,10 @@ impl LibraryIndexCache {
         (fresh || slow_and_recent).then(|| (Arc::clone(snapshot), state.scans))
     }
 
-    /// The last snapshot, however old, without ever scanning.
-    pub fn cached_snapshot(&self) -> Option<Arc<LibrarySnapshot>> {
-        self.state.lock().snapshot.clone()
-    }
-
-    /// How many scans have produced a snapshot.
-    pub fn scans(&self) -> u64 {
-        self.state.lock().scans
+    /// The cached snapshot when no change has landed since it was taken.
+    fn fresh(&self) -> Option<(Arc<LibrarySnapshot>, u64)> {
+        let state = self.state.lock();
+        let snapshot = state.snapshot.as_ref()?;
+        (!state.stale).then(|| (Arc::clone(snapshot), state.scans))
     }
 }

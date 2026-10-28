@@ -1,0 +1,23 @@
+{
+  "body": {
+    "ok": false,
+    "reason": "server-error",
+    "detail": "The server could not store the upload (409).",
+    "retry": false
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json",
+    "x-mokuro-put": "verified"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "body_cbz": {
+      "pages": 1
+    },
+    "headers": {},
+    "method": "PUT",
+    "path": "/mokuro-reader/No%20Such%20Series/Deeper/Volume%2001.cbz"
+  },
+  "status": 409
+}

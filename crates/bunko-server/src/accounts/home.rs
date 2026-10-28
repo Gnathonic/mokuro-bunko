@@ -217,7 +217,8 @@ fn redirect(location: &'static str) -> Response {
 
 /// The answer to `GET /` when it is not WebDAV's, in 0.5.2's order:
 /// 1. setup needed and `Accept` has `text/html` → `302 /setup`;
-/// 2. a browser and `catalog.enabled && catalog.use_as_homepage` → `302 /catalog/`;
+/// 2. a browser and `catalog.enabled && catalog.use_as_homepage` (and readers are
+///    served) → `302 /catalog/`;
 /// 3. a browser → the home page;
 ///
 /// `None` (every other method/path, and non-browser `GET /`) means: hand the request
@@ -250,7 +251,7 @@ pub async fn root_response(
     }
     let catalog_home = {
         let c = deps.core.config.read();
-        c.catalog.enabled && c.catalog.use_as_homepage
+        c.catalog.enabled && c.catalog.use_as_homepage && c.server.serve_readers
     };
     if catalog_home {
         return Some(redirect("/catalog/"));

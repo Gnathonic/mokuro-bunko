@@ -1,8 +1,8 @@
 //! Invites (spec §7) plus 0.5.2's `InviteManager` status helpers.
 //!
 //! Reproduced: 22-char `token_urlsafe(16)` codes never starting with `-`/`_`; only the
-//! four invitable roles; `expires_at` stored as LOCAL naive `isoformat()` text (so a 0.5.2
-//! rollback reads it); `validate_invite` valid at the exact instant; `list_invites`'s
+//! four invitable roles; `expires_at` stored as LOCAL naive `isoformat()` text (the format
+//! of the rows 0.5.x left behind); `validate_invite` valid at the exact instant; `list_invites`'s
 //! non-`include_used` SQL kept verbatim with its lexicographic local-vs-UTC comparison
 //! quirk (`T` > ` `); the `invite_created`/`invite_used` audit rows, with the plaintext
 //! code as `target_path`.

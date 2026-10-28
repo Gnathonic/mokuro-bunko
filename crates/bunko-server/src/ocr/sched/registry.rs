@@ -405,11 +405,23 @@ impl Scheduler {
                 format!("host and catalog take more than {MAX_IDENTITY_BYTES} bytes"),
             );
         }
-        let held_by_another = self
-            .machines
-            .values()
-            .any(|m| !m.local && m.name == name && m.username.as_deref() != Some(&input.username));
-        if held_by_another || !self.profiles.claim(&name, &input.username) {
+        // A name stays with the account that registered it while that account is a
+        // processor (active, processor role); deleted, disabled or demoted, it frees
+        // the name, so a machine can be paired again under a new account.
+        let holds = |account: &str| match &self.deps.db {
+            Some(db) => db
+                .processor_account_stamp(account)
+                .map_or(true, |stamp| stamp.is_some()),
+            None => true,
+        };
+        let held_by_another = self.machines.values().any(|m| {
+            !m.local
+                && m.name == name
+                && m.username
+                    .as_deref()
+                    .is_none_or(|u| u != input.username && holds(u))
+        });
+        if held_by_another || !self.profiles.claim(&name, &input.username, holds) {
             return refuse(
                 409,
                 format!(
@@ -427,7 +439,14 @@ impl Scheduler {
         let now = self.now();
         let mut doomed: Vec<(String, &'static str)> = Vec::new();
         for m in self.machines.values() {
-            if m.local || m.username.as_deref() != Some(&input.username) {
+            if m.local {
+                continue;
+            }
+            if m.username.as_deref() != Some(&input.username) {
+                // The same name under an account that no longer holds it (above).
+                if m.name == name {
+                    doomed.push((m.pid.clone(), "its account is no longer a processor"));
+                }
                 continue;
             }
             if m.name == name {

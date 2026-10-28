@@ -6,7 +6,7 @@
 //! filesystems). Reads never take these locks: they see the old file until the atomic
 //! rename.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -37,10 +37,40 @@ impl Drop for WriteLockGuard {
 }
 
 fn key_of(path: &Path) -> Key {
-    // Callers pass resolved paths (the DAV layer resolves every physical path).
-    path.components()
+    resolved(path)
+        .components()
         .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
         .collect()
+}
+
+/// `path` with its deepest existing ancestor resolved (symlinks, `/var` vs
+/// `/private/var` on macOS, a storage path under a symlinked mount), so every writer's
+/// spelling of one file is one key: the DAV layer resolves its roots, other writers (an
+/// OCR install, an upgrade swap) name the configured path. The last component is kept
+/// as given: a symlink there is the entry a write replaces. A path with no existing
+/// ancestor is kept whole.
+fn resolved(path: &Path) -> PathBuf {
+    let Some(name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    let mut tail = vec![name.to_os_string()];
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        if d.as_os_str().is_empty() {
+            break;
+        }
+        if let Ok(real) = bunko_store::fs::canonicalize(d) {
+            let mut out = real;
+            out.extend(tail.iter().rev());
+            return out;
+        }
+        match d.file_name() {
+            Some(n) => tail.push(n.to_os_string()),
+            None => break,
+        }
+        dir = d.parent();
+    }
+    path.to_path_buf()
 }
 
 fn conflicts(a: &Key, b: &Key) -> bool {
@@ -94,7 +124,6 @@ impl PathWriteLocks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn same_ancestor_descendant_and_case() {
@@ -129,6 +158,36 @@ mod tests {
                 .try_lock_all(&[Path::new("/lib/a"), Path::new("/lib/A/b")])
                 .is_none()
         );
+    }
+
+    #[test]
+    fn two_spellings_through_a_symlinked_folder_are_one_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        bunko_store::fs::create_dir_all(real.join("Series")).unwrap();
+        let link = dir.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(not(unix))]
+        return;
+        let locks = PathWriteLocks::new();
+        let _g = locks
+            .try_lock(&real.join("Series/Vol 1.mokuro"))
+            .expect("free");
+        assert!(
+            locks.try_lock(&link.join("Series/Vol 1.mokuro")).is_none(),
+            "the same file through the symlinked folder"
+        );
+        let _new = locks
+            .try_lock(&real.join("Series/New/Vol 2.mokuro"))
+            .expect("free");
+        assert!(
+            locks
+                .try_lock(&link.join("Series/New/Vol 2.mokuro"))
+                .is_none(),
+            "a path that does not exist yet still resolves its existing ancestor"
+        );
+        assert!(locks.try_lock(&link.join("Other/Vol 1.mokuro")).is_some());
     }
 
     #[test]

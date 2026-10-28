@@ -1,0 +1,25 @@
+{
+  "body": {
+    "error": "Too many failed attempts. Retry in 900s"
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "none",
+    "body": {
+      "username": "reader",
+      "password": "<password:reader>",
+      "kind": "reader",
+      "label": "mokuro-reader"
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/login/api/token"
+  },
+  "status": 429
+}

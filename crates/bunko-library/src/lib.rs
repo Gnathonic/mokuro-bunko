@@ -38,7 +38,8 @@ pub use compiler::SeriesFolder;
 pub use index::{LibraryIndexCache, LibrarySnapshot, SeriesSnapshot, VolumeSnapshot};
 pub use schema::{SeriesFacts, SeriesIndexData, VolumeEntry};
 pub use service::{
-    DebouncePolicy, Debouncer, MetadataHooks, MetadataService, PathWriteLocks, UpdateError,
+    DebouncePolicy, Debouncer, MetadataHooks, MetadataService, PathWriteLocks, SeriesUpdate,
+    UpdateError,
 };
 pub use store::{
     CachedEntryRow, CachedEntryWrite, CatalogSeriesRow, MetadataStore, SeriesFactsRow, StoreError,

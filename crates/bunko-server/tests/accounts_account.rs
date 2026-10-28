@@ -1,5 +1,8 @@
 //! Account page API (spec db-auth-admin §17; 0.5.2 had no direct tests for it).
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod accounts_support;
 
 use accounts_support::*;

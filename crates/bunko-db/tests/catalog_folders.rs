@@ -1,6 +1,6 @@
 //! The materialized catalog table (0.5.3 `tests/unit/test_database_catalog.py`,
 //! `TestCatalogSeries`): one row per series FOLDER in `catalog_folders`; the 0.5.2
-//! series-keyed `catalog_series` is left as it was, for a rollback.
+//! series-keyed `catalog_series` is ignored.
 
 use bunko_db::{CatalogSeries, Database, DbOptions};
 use std::collections::HashSet;
@@ -59,10 +59,9 @@ fn round_trips_every_field() {
 
 /// 0.5.2 materialized into `catalog_series`, keyed by the folded series key. This build
 /// neither reads nor writes it: the startup pass rebuilds every row anyway (the listing
-/// falls back to the scanning index until then), and leaving the table exactly as it was
-/// means a rollback to 0.5.2 finds what its own `ON CONFLICT(series_key)` upsert needs.
+/// falls back to the scanning index until then).
 #[test]
-fn the_0_5_2_series_keyed_table_is_left_for_a_rollback() {
+fn a_0_5_2_series_keyed_table_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.db");
     {
@@ -94,25 +93,6 @@ fn the_0_5_2_series_keyed_table_is_left_for_a_rollback() {
             ..row()
         })
         .unwrap();
-
-    let legacy_rows: Vec<(String, i64)> = {
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        // 0.5.2's own upsert, verbatim in shape, still works on its table.
-        conn.execute(
-            "INSERT INTO catalog_series (series_key, folder_name, volume_count) \
-             VALUES ('dr stone', 'Dr Stone', 4) \
-             ON CONFLICT(series_key) DO UPDATE SET volume_count = excluded.volume_count",
-            [],
-        )
-        .unwrap();
-        conn.prepare("SELECT folder_name, volume_count FROM catalog_series")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap()
-    };
-    assert_eq!(legacy_rows, vec![("Dr Stone".to_string(), 4)]);
     let counts: Vec<i64> = upgraded
         .list_catalog_series()
         .unwrap()
@@ -122,7 +102,7 @@ fn the_0_5_2_series_keyed_table_is_left_for_a_rollback() {
     assert_eq!(counts, [5]);
 }
 
-/// A fresh 0.5.3 database has no `catalog_series` at all (0.5.2 creates it on a rollback).
+/// A fresh database has no `catalog_series` at all.
 #[test]
 fn a_fresh_database_has_only_the_folder_keyed_table() {
     let (dir, db) = db();

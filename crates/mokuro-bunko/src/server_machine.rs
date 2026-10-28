@@ -243,6 +243,67 @@ impl Machine for ServerMachine {
             Err(e) => json!({"path": path, "text": "", "error": e.to_string()}),
         }
     }
+
+    #[cfg(feature = "ocr")]
+    fn processor_test(&self, form: &Value) -> Result<Value, String> {
+        let form = processor_form(form)?;
+        block(crate::gui::setup::test_connection(&form))
+    }
+
+    #[cfg(feature = "ocr")]
+    fn processor_setup(&self, form: &Value) -> Result<Value, String> {
+        full::processor_setup(self, processor_form(form)?)
+    }
+}
+
+/// The setup page's processor answers.
+#[cfg(feature = "ocr")]
+fn processor_form(form: &Value) -> Result<crate::gui::setup::ProcessorForm, String> {
+    serde_json::from_value(form.clone()).map_err(|e| format!("Invalid request: {e}"))
+}
+
+/// Run `fut` to its end from a blocking thread of the server's runtime (the setup's
+/// machine calls come through `spawn_blocking`).
+#[cfg(feature = "ocr")]
+fn block<T>(fut: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Handle::current().block_on(fut)
+}
+
+/// This server's `processor.yaml`: next to its config file (for the default config,
+/// [`crate::machine::default_processor_config`]).
+#[cfg_attr(not(feature = "ocr"), allow(dead_code))]
+fn processor_config_beside(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .map(|d| d.join("processor.yaml"))
+        .unwrap_or_else(|| PathBuf::from("processor.yaml"))
+}
+
+/// `config_path` is this user's default `config.yaml` (the one the tray and a start
+/// without arguments use).
+#[cfg_attr(not(feature = "ocr"), allow(dead_code))]
+fn is_default_config(config_path: &Path) -> bool {
+    let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    abs(config_path) == abs(&bunko_core::storage::default_config_path())
+}
+
+/// Move a setup-only server's config file aside (never deleted):
+/// `config.yaml` -> `config.yaml.before-processor` (`.2`, `.3`... if taken). None
+/// when there is no file (the environment configured the server).
+#[cfg_attr(not(feature = "ocr"), allow(dead_code))]
+fn move_config_aside(config_path: &Path) -> std::io::Result<Option<PathBuf>> {
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    let base = format!("{}.before-processor", config_path.display());
+    let mut to = PathBuf::from(&base);
+    let mut n = 2;
+    while to.exists() {
+        to = PathBuf::from(format!("{base}.{n}"));
+        n += 1;
+    }
+    std::fs::rename(config_path, &to)?;
+    Ok(Some(to))
 }
 
 fn engine_known(e: &str) -> bool {
@@ -280,6 +341,74 @@ fn dir_size(dir: &Path) -> u64 {
 #[cfg(feature = "ocr")]
 mod full {
     use super::*;
+
+    /// The setup's processor finish (see [`Machine::processor_setup`]).
+    pub(super) fn processor_setup(
+        m: &ServerMachine,
+        mut form: crate::gui::setup::ProcessorForm,
+    ) -> Result<Value, String> {
+        let path = processor_config_beside(&m.config_path);
+        let default = is_default_config(&m.config_path);
+        if !default && form.storage.trim().is_empty() {
+            // A server with a config of its own keeps the processor beside it, not in
+            // this user's default processor storage.
+            if let Some(dir) = path.parent() {
+                form.storage = dir.join("processor").display().to_string();
+            }
+        }
+        let written = block(crate::gui::setup::write_processor(&form, &path))?;
+        let loaded = bunko_processor::load_processor_config(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        // The tray runs what the default config names: it takes the processor over and
+        // stops running this server. A server with its own config is not the tray's.
+        let tray_log = default.then(|| m.storage.join("logs").join("tray-start-console.log"));
+        if default {
+            drop_tray_server(&m.exe);
+        }
+        let started = block(crate::gui::api::start_processor(&m.exe, &path, tray_log))?;
+        let moved = move_config_aside(&m.config_path)
+            .map_err(|e| format!("could not move {} aside: {e}", m.config_path.display()))?;
+        stop_soon(m, "this computer now reads OCR for another library");
+        Ok(json!({
+            "url": loaded.library.url,
+            "username": loaded.library.username,
+            "name": loaded.processor.name,
+            "config": path,
+            "connection": written["connection"],
+            "warning": written["warning"],
+            "start": started,
+            "config_moved_to": moved,
+            "stopping": true,
+        }))
+    }
+
+    /// Take the library server off the tray's list (it is no longer set up here).
+    fn drop_tray_server(exe: &Path) {
+        use crate::gui::tray;
+        let path = tray::config_path(exe);
+        let Ok(mut conf) = tray::load(&path) else {
+            return;
+        };
+        if conf.managed.iter().any(|e| e.role == "server") {
+            tray::set_role(&mut conf, "server", None);
+            if let Err(e) = tray::save(&path, &conf) {
+                tracing::warn!("could not take the server off the tray's list: {e}");
+            }
+        }
+    }
+
+    /// Stop this server for good in a moment (after the current answer went out).
+    fn stop_soon(m: &ServerMachine, why: &str) {
+        let Some(h) = m.hooks() else { return };
+        tracing::info!("Stopping the server: {why}");
+        let stop = h.stop.clone();
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                stop();
+            });
+        }
+    }
     use crate::cmd::install_ocr;
     use crate::hwdetect;
     use crate::ocr_install::InstallRequest;
@@ -660,5 +789,40 @@ mod tests {
         assert_eq!(log["text"], "");
         assert!(log["error"].is_string());
         assert!(m.job(1, 0).is_none());
+    }
+
+    #[test]
+    fn a_setup_only_config_moves_aside_and_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        // Configured by the environment only: nothing to move.
+        assert_eq!(move_config_aside(&cfg).unwrap(), None);
+        std::fs::write(&cfg, "server: {}\n").unwrap();
+        let first = move_config_aside(&cfg).unwrap().unwrap();
+        assert_eq!(first, dir.path().join("config.yaml.before-processor"));
+        assert!(!cfg.exists());
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "server: {}\n");
+        std::fs::write(&cfg, "second\n").unwrap();
+        let second = move_config_aside(&cfg).unwrap().unwrap();
+        assert_eq!(second, dir.path().join("config.yaml.before-processor.2"));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "server: {}\n");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "second\n");
+    }
+
+    #[test]
+    fn processor_yaml_goes_beside_the_servers_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("x").join("config.yaml");
+        assert_eq!(
+            processor_config_beside(&cfg),
+            dir.path().join("x").join("processor.yaml")
+        );
+        assert!(!is_default_config(&cfg));
+        let default = bunko_core::storage::default_config_path();
+        assert!(is_default_config(&default));
+        assert_eq!(
+            processor_config_beside(&default),
+            crate::machine::default_processor_config()
+        );
     }
 }

@@ -1,0 +1,19 @@
+{
+  "expect": {
+    "headers": [
+      "content-type"
+    ],
+    "status": [
+      207
+    ]
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {
+      "accept": "text/plain,application/xml",
+      "depth": "infinity"
+    },
+    "method": "PROPFIND",
+    "path": "/mokuro-reader/"
+  }
+}

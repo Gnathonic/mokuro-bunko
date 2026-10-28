@@ -7,6 +7,7 @@ pub mod dyndns;
 pub mod gui;
 pub mod healthcheck;
 pub mod install_ocr;
+pub mod library;
 #[cfg(feature = "ocr")]
 pub mod models;
 #[cfg(feature = "ocr")]

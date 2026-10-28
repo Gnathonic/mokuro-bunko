@@ -97,6 +97,12 @@ function initTabs() {
             } else if ((window.location.hash || '').startsWith('#audit')) {
                 try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (_) { /* ignore */ }
             }
+            if (tabId === 'storage') {
+                loadStorage();
+                startStoragePolling();
+            } else if (typeof stopStoragePolling === 'function') {
+                stopStoragePolling();
+            }
             if (tabId === 'status') {
                 loadStatus();
                 loadUpdate(false);
@@ -247,6 +253,21 @@ function initForms() {
             await apiPut(`/users/${encodeURIComponent(username)}/role`, { role });
             closeModal('change-role-modal');
             showToast('Role updated', 'success');
+            loadUsers();
+        } catch (err) {
+            showToast(err.message, 'error');
+        }
+    });
+
+    // Restore user form
+    document.getElementById('restore-user-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const username = form.username.value;
+        try {
+            await apiPost(`/users/${encodeURIComponent(username)}/restore`, { password: form.password.value });
+            closeModal('restore-user-modal');
+            showToast('User restored', 'success');
             loadUsers();
         } catch (err) {
             showToast(err.message, 'error');
@@ -415,7 +436,11 @@ function renderUsers() {
                     <button class="btn btn--danger btn--sm" onclick="confirmDeleteUser('${escapeHtml(user.username)}')">
                         Delete
                     </button>
-                ` : ''}
+                ` : `
+                    <button class="btn btn--secondary btn--sm" onclick="showRestoreUser('${escapeHtml(user.username)}')">
+                        Restore
+                    </button>
+                `}
             </td>
         </tr>
     `).join('');
@@ -470,6 +495,13 @@ function showChangeRole(username, currentRole) {
     const known = Array.from(select.options).some((option) => option.value === currentRole);
     select.value = known ? currentRole : select.options[0].value;
     openModal('change-role-modal');
+}
+
+function showRestoreUser(username) {
+    document.getElementById('restore-user-username').value = username;
+    document.getElementById('restore-user-display').textContent = username;
+    document.getElementById('restore-user-password').value = '';
+    openModal('restore-user-modal');
 }
 
 function showEditNotes(username) {
@@ -951,6 +983,8 @@ function ocrBackendSentence(runtime, ocrConfig) {
         line = 'off (set to skip) — this server reads no volumes';
     } else if (!knows) {
         line = chosen + ' — install state not reported';
+    } else if (runtime.install && runtime.install.state === 'running') {
+        line = chosen + ' — installing';
     } else if (!runtime.installed) {
         line = chosen + ' — not installed yet';
     } else if (!installedBackend || installedBackend === configured) {
@@ -1198,10 +1232,6 @@ function initGenerations() {
     document.getElementById('gen-revert-btn').addEventListener('click', revertGenerations);
     document.getElementById('gen-save-btn').addEventListener('click', saveGenerations);
     document.getElementById('upgrade-save-btn').addEventListener('click', saveUpgrade);
-    document.getElementById('upgrade-edited').addEventListener('click', (e) => {
-        const b = e.target.closest('[data-upgrade]');
-        if (b) upgradeVolume(b.dataset.volume);
-    });
 }
 
 // ---- Upgrade old OCR: census + settings (hidden when the endpoint is 404).
@@ -1236,14 +1266,8 @@ function renderUpgrade() {
             ' (never upgraded)</span>' : '');
     document.getElementById('upgrade-counts').textContent = c.enabled
         ? 'Ready to replace ' + c.ready + ' · needs OCR ' + c.needs_ocr +
-          ' · skipped (missing pages) ' + c.skipped_missing_pages + ' · skipped (edited) ' + c.skipped_edited
+          ' · skipped (missing pages) ' + c.skipped_missing_pages
         : 'Counts appear once upgrading is enabled and saved.';
-    const list = document.getElementById('upgrade-edited');
-    const edited = c.edited_volumes || [];
-    list.hidden = !edited.length;
-    list.innerHTML = edited.map((v) => '<li><span class="upgrade-edited__name">' + escapeHtml(v) + '</span>' +
-        '<button type="button" class="btn btn--secondary btn--sm" data-upgrade="force" data-volume="' + escapeHtml(v) +
-        '">Upgrade anyway</button></li>').join('');
 }
 
 async function saveUpgrade() {
@@ -1258,18 +1282,6 @@ async function saveUpgrade() {
     } catch (err) {
         showToast(err.message, 'error');
     }
-}
-
-async function upgradeVolume(volume) {
-    const path = '/ocr/upgrade/' + volume.split('/').map(encodeURIComponent).join('/');
-    try {
-        const r = await apiPost(path, { force: true });
-        const done = { direct: 'Replaced ', generated: 'Queued for OCR, then replaced: ', current: 'Already current: ' };
-        showToast((done[r.mode] || 'Upgrade: ') + volume, 'success');
-    } catch (err) {
-        showToast(err.message, 'error');
-    }
-    loadUpgrade();
 }
 
 async function loadGenerations() {

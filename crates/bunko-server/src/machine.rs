@@ -19,9 +19,15 @@ use std::sync::Arc;
 pub struct MachineHooks {
     /// Restart the server gracefully (re-exec after shutdown).
     pub restart: Arc<dyn Fn() + Send + Sync>,
+    /// Stop the server gracefully, for good (no re-exec): the setup made this machine
+    /// a processor instead.
+    pub stop: Arc<dyn Fn() + Send + Sync>,
     /// This server's OCR (restart its local processor, apply settings).
     pub ocr: OcrControl,
 }
+
+/// What the setup's processor step answers on a build that runs no processor.
+pub const NO_PROCESSOR: &str = "This build cannot read OCR for another library (lite build)";
 
 /// The machine-side half of the admin panel and the setup (see the module docs).
 pub trait Machine: Send + Sync {
@@ -59,4 +65,19 @@ pub trait Machine: Send + Sync {
 
     /// The last `lines` lines of the server log.
     fn logs(&self, lines: usize) -> Value;
+
+    /// The setup's "this computer reads OCR for another Bunko": check the processor
+    /// account in `form` (`url`, `username`, `password`, `tls_verify`) against that
+    /// library; registers nothing. The library's answer, or why not.
+    fn processor_test(&self, _form: &Value) -> Result<Value, String> {
+        Err(NO_PROCESSOR.into())
+    }
+
+    /// The same step's finish: check the account again, write this machine's
+    /// `processor.yaml`, start the processor, and retire this setup-only server (its
+    /// config file moves aside; it stops once this answer went out). Nothing is
+    /// written when the library refuses.
+    fn processor_setup(&self, _form: &Value) -> Result<Value, String> {
+        Err(NO_PROCESSOR.into())
+    }
 }

@@ -1,0 +1,89 @@
+[package]
+name = "bunko-remote"
+description = "Remote library storage for mokuro-bunko: the provider Backend trait, the index and RemoteStore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["webdav", "gdrive", "onedrive", "mega", "oauth"]
+# The Google Drive driver (`gdrive::GDriveBackend`).
+gdrive = ["dep:reqwest", "dep:time", "dep:httpdate"]
+# The OneDrive (Microsoft Graph v1.0) driver (`onedrive::OneDriveBackend`).
+onedrive = ["dep:reqwest", "dep:time", "dep:httpdate", "dep:base64"]
+# The MEGA driver (`mega::MegaBackend`) on the vendored `bunko-mega` client.
+mega = ["dep:bunko-mega", "dep:zeroize"]
+# The in-memory FakeBackend (tests here and in dependent crates).
+testing = []
+# The WebDAV driver (`webdav::WebDavBackend`).
+webdav = [
+    "dep:reqwest",
+    "dep:quick-xml",
+    "dep:percent-encoding",
+    "dep:httpdate",
+    "dep:base64",
+    "dep:time",
+    "dep:tokio-util",
+]
+# OAuth sign-in (loopback + PKCE, device flow), the embedded clients, the
+# credential store and refreshing access tokens (§7).
+oauth = [
+    "dep:bunko-core",
+    "dep:reqwest",
+    "dep:base64",
+    "dep:rand",
+    "dep:chacha20poly1305",
+    "dep:time",
+    "tokio/net",
+    "tokio/io-util",
+]
+
+[dependencies]
+bunko-store.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+futures-util.workspace = true
+bytes.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+unicode-normalization = "0.1"
+reqwest = { workspace = true, optional = true }
+quick-xml = { workspace = true, optional = true, features = ["async-tokio"] }
+percent-encoding = { workspace = true, optional = true }
+httpdate = { version = "1", optional = true }
+base64 = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+bunko-core = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+# MIT/Apache-2.0; seals credentials.json when MOKURO_SECRETS_KEY is set (D12).
+chacha20poly1305 = { version = "0.10", optional = true }
+# Verifies provider md5 hashes of downloads (§5.5, §5.6).
+md-5 = "0.10"
+bunko-mega = { path = "../bunko-mega", optional = true }
+zeroize = { version = "1", optional = true }
+
+[dev-dependencies]
+# tests/{gdrive,onedrive}_mock.rs: the cloud simulator, in-process.
+bunko-cloudsim = { path = "../bunko-cloudsim" }
+# tests/mega_mock.rs: the in-process MEGA mock.
+bunko-mega = { path = "../bunko-mega", features = ["mock"] }
+# Turns on `testing` for this crate's own integration tests.
+bunko-remote = { path = ".", features = ["testing"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
+# tests/webdav.rs: a real WebDAV server in-process.
+bunko-dav.workspace = true
+bunko-core.workspace = true
+axum.workspace = true
+http.workspace = true
+time.workspace = true
+# tests/read_path.rs: real zips, parsed by the library's own reader.
+zip.workspace = true
+bunko-library.workspace = true

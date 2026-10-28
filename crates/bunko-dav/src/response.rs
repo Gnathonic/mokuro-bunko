@@ -15,6 +15,8 @@ pub struct DavError {
     pub context: String,
     /// A DAV precondition body (`no-conflicting-lock` with the conflicting hrefs).
     pub lock_conflict: Option<Vec<String>>,
+    /// `Retry-After` seconds (a 503 from the library storage).
+    pub retry_after: Option<u64>,
 }
 
 impl DavError {
@@ -23,6 +25,7 @@ impl DavError {
             status,
             context: context.into(),
             lock_conflict: None,
+            retry_after: None,
         }
     }
 
@@ -35,6 +38,7 @@ impl DavError {
             status: StatusCode::LOCKED,
             context: String::new(),
             lock_conflict: Some(hrefs),
+            retry_after: None,
         }
     }
 
@@ -54,19 +58,99 @@ impl DavError {
                 body.into_bytes(),
             );
         }
-        status_page(self.status, &self.context)
+        let mut resp = status_page(self.status, &self.context);
+        if let Some(secs) = self.retry_after {
+            resp.headers_mut()
+                .insert(http::header::RETRY_AFTER, HeaderValue::from(secs));
+        }
+        resp
     }
 }
 
 pub type DavResult<T> = Result<T, DavError>;
 
+/// `Retry-After` of a 503 whose cause named none.
+pub const DEFAULT_RETRY_AFTER: u64 = 30;
+/// `Retry-After` while the store waits for a new sign-in.
+pub const NEEDS_AUTH_RETRY_AFTER: u64 = 300;
+
 impl From<std::io::Error> for DavError {
     fn from(e: std::io::Error) -> Self {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            DavError::new(StatusCode::FORBIDDEN, e.to_string())
-        } else {
-            DavError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        DavError::from_io(&e)
+    }
+}
+
+impl DavError {
+    /// A store's errors by class (spec §3.5): a precondition 412, an outage, a quota,
+    /// the lease or a lapsed sign-in 503 with `Retry-After` (never 401: the reader would
+    /// blame its own login), a full store 507, a refused name 400.
+    pub fn from_io(e: &std::io::Error) -> Self {
+        use bunko_store::ErrorClass;
+        // The store's own message (without its `unavailable:` class prefix, which
+        // `what` already says).
+        let unavailable = |what: &str, after: Option<std::time::Duration>| DavError {
+            retry_after: Some(after.map_or(DEFAULT_RETRY_AFTER, |d| d.as_secs().max(1))),
+            ..DavError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("{what}: {}", bunko_store::error_message(e)),
+            )
+        };
+        match bunko_store::classify(e) {
+            ErrorClass::Conflict => DavError::new(StatusCode::PRECONDITION_FAILED, e.to_string()),
+            ErrorClass::Unavailable { retry_after } => {
+                unavailable("the library storage is unavailable", retry_after)
+            }
+            ErrorClass::TransferQuota { retry_after } => unavailable(
+                "the library storage's transfer quota is used up",
+                retry_after,
+            ),
+            ErrorClass::NeedsAuth => DavError {
+                retry_after: Some(NEEDS_AUTH_RETRY_AFTER),
+                ..DavError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the library storage needs a new sign-in on the server",
+                )
+            },
+            // The store's message says which Bunko and why (`storage-lease: another
+            // Bunko manages this library`, or this one still claiming it, §9.2).
+            ErrorClass::LeaseHeld => DavError {
+                retry_after: Some(
+                    bunko_store::retry_after(e).map_or(DEFAULT_RETRY_AFTER, |d| d.as_secs().max(1)),
+                ),
+                ..DavError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    lease_message(e, "storage-lease: another Bunko manages this library"),
+                )
+            },
+            ErrorClass::LeaseClaiming { retry_after } => DavError {
+                retry_after: Some(retry_after.map_or(DEFAULT_RETRY_AFTER, |d| d.as_secs().max(1))),
+                ..DavError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    lease_message(
+                        e,
+                        "storage-lease-claiming: this Bunko is still claiming the library",
+                    ),
+                )
+            },
+            ErrorClass::StorageFull => {
+                DavError::new(StatusCode::INSUFFICIENT_STORAGE, e.to_string())
+            }
+            ErrorClass::InvalidName => DavError::new(StatusCode::BAD_REQUEST, e.to_string()),
+            _ if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                DavError::new(StatusCode::FORBIDDEN, e.to_string())
+            }
+            _ => DavError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         }
+    }
+}
+
+/// A lease refusal's own message when it carries the tag, else `fallback (message)`.
+fn lease_message(e: &std::io::Error, fallback: &str) -> String {
+    let msg = bunko_store::error_message(e);
+    if msg.starts_with("storage-lease") {
+        msg
+    } else {
+        format!("{fallback} ({msg})")
     }
 }
 

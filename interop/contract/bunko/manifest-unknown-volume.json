@@ -1,0 +1,16 @@
+{
+  "body": {
+    "error": "Volume not found"
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {},
+    "method": "GET",
+    "path": "/catalog/api/manifest?series=Contract%20Series&volume=Volume%2099"
+  },
+  "status": 404
+}

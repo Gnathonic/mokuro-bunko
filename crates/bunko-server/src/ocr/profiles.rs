@@ -210,6 +210,8 @@ impl Profiles {
         self.dir.join(profile_filename(name))
     }
 
+    // unmounted: processor profiles are config under the storage dir, not the library.
+    #[allow(clippy::disallowed_methods)]
     fn read(path: &Path) -> Map<String, Value> {
         std::fs::read_to_string(path)
             .ok()
@@ -320,6 +322,8 @@ impl Profiles {
     }
 
     /// Every processor with a profile, by the name inside the file.
+    // unmounted: processor profiles are config under the storage dir, not the library.
+    #[allow(clippy::disallowed_methods)]
     pub fn names(&self) -> Vec<String> {
         let Ok(rd) = std::fs::read_dir(&self.dir) else {
             return Vec::new();
@@ -343,6 +347,8 @@ impl Profiles {
         out
     }
 
+    // unmounted: processor profiles are config under the storage dir, not the library.
+    #[allow(clippy::disallowed_methods)]
     fn update(&self, name: &str, create: bool, edit: impl FnOnce(&mut Map<String, Value>)) {
         let _guard = WRITE_LOCK.lock();
         let path = self.path(name);
@@ -395,11 +401,15 @@ impl Profiles {
         entry
     }
 
-    /// `claim(name, account)`: the first account to register a name owns it.
-    pub fn claim(&self, name: &str, account: &str) -> bool {
+    /// `claim(name, account, holds)`: the first account to register a name owns it,
+    /// for as long as `holds(owner)` (the account is still a processor): then the name
+    /// passes to `account`.
+    pub fn claim(&self, name: &str, account: &str, holds: impl FnOnce(&str) -> bool) -> bool {
         let mut taken = false;
         self.update(name, true, |p| match p.get("account") {
-            Some(Value::String(owner)) if !owner.is_empty() && owner != account => taken = true,
+            Some(Value::String(owner)) if !owner.is_empty() && owner != account && holds(owner) => {
+                taken = true
+            }
             _ => {
                 p.insert("account".into(), Value::String(account.to_string()));
             }
@@ -714,9 +724,14 @@ mod tests {
     fn claim_and_runs() {
         let dir = tempfile::tempdir().unwrap();
         let p = Profiles::new(dir.path());
-        assert!(p.claim("tower", "alice"));
-        assert!(p.claim("tower", "alice"));
-        assert!(!p.claim("tower", "bob"));
+        let held = |_: &str| true;
+        assert!(p.claim("tower", "alice", held));
+        assert!(p.claim("tower", "alice", held));
+        assert!(!p.claim("tower", "bob", held));
+        // alice is no processor any more: the name passes to bob, and stays his.
+        assert!(p.claim("tower", "bob", |owner| owner != "alice"));
+        assert_eq!(p.owner("tower").as_deref(), Some("bob"));
+        assert!(!p.claim("tower", "alice", held));
         let recipe = (
             "hayai-nova".to_string(),
             "ppocr-manga".to_string(),

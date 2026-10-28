@@ -1,6 +1,9 @@
 //! MetadataService behaviour beyond the golden bytes: hooks, busy PUTs,
 //! busy/unwritable paths, stop(), the library index cache.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod common;
 
 use std::path::{Path, PathBuf};
@@ -10,7 +13,8 @@ use std::time::Duration;
 
 use bunko_library::index::LibraryIndexCache;
 use bunko_library::service::{
-    DebouncePolicy, MetadataHooks, MetadataService, NoPathLocks, PathWriteLocks, UpdateError,
+    DebouncePolicy, MetadataHooks, MetadataService, NoPathLocks, PathWriteLocks, SeriesUpdate,
+    UpdateError,
 };
 use bunko_library::store::{
     CachedEntryRow, CachedEntryWrite, CatalogSeriesRow, MetadataStore, SeriesFactsRow, StoreResult,
@@ -138,6 +142,51 @@ fn hooks_fire_outside_and_after_the_work() {
 }
 
 #[test]
+fn a_cloud_submission_keeps_the_facts_of_a_folder_without_volumes() {
+    let (_temp, root) = fixture_library();
+    // Only sidecars: no archive, so it is no series folder yet.
+    std::fs::create_dir_all(root.join("Sidecars Only")).unwrap();
+    std::fs::write(root.join("Sidecars Only/v1.mokuro"), b"{}").unwrap();
+    let store = Arc::new(SqliteStore::new(&schema()));
+    let service = MetadataService::new(
+        &root,
+        store.clone(),
+        Arc::new(RecordingHooks::default()),
+        Arc::new(NoPathLocks),
+        DebouncePolicy::default(),
+    );
+    // A client PUT there is still refused (contract §6)…
+    assert!(
+        !service
+            .apply_series_update("Sidecars Only", PUT, None)
+            .unwrap()
+    );
+    // …but the reader's file found in the cloud keeps its facts, and nothing is written.
+    assert_eq!(
+        service
+            .ingest_series_submission("Sidecars Only", PUT, Some("cloud"))
+            .unwrap(),
+        SeriesUpdate::Applied
+    );
+    let row = store.series_facts("sidecars only").unwrap().unwrap();
+    assert!(!row.external_ids.is_empty(), "{:?}", row.external_ids);
+    assert!(!root.join("Sidecars Only/series.json").exists());
+    assert_eq!(
+        service
+            .ingest_series_submission("Sidecars Only", b"nope", None)
+            .unwrap(),
+        SeriesUpdate::Invalid
+    );
+    service.stop();
+    assert_eq!(
+        service
+            .ingest_series_submission("Sidecars Only", PUT, None)
+            .unwrap(),
+        SeriesUpdate::Stopped
+    );
+}
+
+#[test]
 fn a_put_waiting_too_long_for_the_pass_lock_is_busy() {
     let (_temp, root) = fixture_library();
     let store = Arc::new(SlowStore {
@@ -236,13 +285,97 @@ fn library_index_cache_ttl_and_invalidation() {
     let (_, scans) = cache.get_snapshot_counted();
     assert_eq!(scans, 1, "served from cache within the TTL");
     cache.invalidate();
-    // A fast scan is dropped on invalidation: the next read rescans.
-    let (_, scans) = cache.get_snapshot_counted();
-    assert_eq!(scans, 2);
+    // A fast scan is dropped on invalidation: a read that must see the change walks.
+    cache.get_snapshot_fresh();
+    assert_eq!(cache.scans(), 2);
+    cache.get_snapshot_fresh();
+    assert_eq!(cache.scans(), 2, "nothing changed since: no second walk");
     let expired = LibraryIndexCache::new(&root, Duration::ZERO, 1 << 20);
     expired.get_snapshot();
     expired.get_snapshot();
-    assert_eq!(expired.scans(), 2);
+    wait_for_scans(&expired, 2);
+}
+
+/// Wait (up to 5 s) for the cache to reach `scans` scans.
+fn wait_for_scans(cache: &LibraryIndexCache, scans: u64) {
+    for _ in 0..500 {
+        if cache.scans() >= scans {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the cache stayed at {} scans", cache.scans());
+}
+
+/// A request never walks the library once there is a snapshot: a stale or expired index
+/// answers at once with the last one, and one background walk brings it up to date.
+#[test]
+fn a_stale_index_answers_at_once_and_refreshes_in_the_background() {
+    let (_temp, root) = fixture_library();
+    let cache = LibraryIndexCache::new(&root, Duration::from_secs(30), 1 << 20);
+    let (first, scans) = cache.get_snapshot_counted();
+    assert_eq!(scans, 1, "the very first read waits for the first walk");
+    let volumes = |s: &bunko_library::index::LibrarySnapshot| {
+        s.series_by_name("Nested/Inner").unwrap().volumes.len()
+    };
+    let before = volumes(&first);
+
+    std::fs::write(root.join("Nested/Inner/Brand New.cbz"), b"").unwrap();
+    cache.invalidate();
+    let (served, scans) = cache.get_snapshot_counted();
+    assert_eq!(
+        scans, 1,
+        "a changed index answers without walking the library"
+    );
+    assert!(Arc::ptr_eq(&served, &first));
+    wait_for_scans(&cache, 2);
+    let (fresh, scans) = cache.get_snapshot_counted();
+    assert_eq!(scans, 2);
+    assert_eq!(
+        volumes(&fresh),
+        before + 1,
+        "the background walk saw the new volume"
+    );
+
+    // Past the TTL with nothing changed: the same.
+    let expired = LibraryIndexCache::new(&root, Duration::ZERO, 1 << 20);
+    let (old, _) = expired.get_snapshot_counted();
+    let (served, scans) = expired.get_snapshot_counted();
+    assert_eq!(
+        scans, 1,
+        "an expired index answers without walking the library"
+    );
+    assert!(Arc::ptr_eq(&served, &old));
+    wait_for_scans(&expired, 2);
+}
+
+/// Before the first walk, one series is read from its own folder, and it matches what
+/// the walk lists; folders the walk would not list are not served either.
+#[test]
+fn a_cold_index_lists_one_series_from_its_folder() {
+    let (_temp, root) = fixture_library();
+    std::fs::create_dir_all(root.join(".hidden")).unwrap();
+    std::fs::write(root.join(".hidden/Vol 1.cbz"), b"").unwrap();
+    std::fs::create_dir_all(root.join("Empty")).unwrap();
+    let walked = bunko_library::index::scan_library(&root);
+    assert!(!walked.series.is_empty());
+    for series in &walked.series {
+        let cold = LibraryIndexCache::new(&root, Duration::from_secs(30), 1 << 20);
+        assert_eq!(
+            cold.series(&series.name).as_ref(),
+            Some(series),
+            "{}",
+            series.name
+        );
+    }
+    let cold = LibraryIndexCache::new(&root, Duration::from_secs(30), 1 << 20);
+    for name in [".hidden", "Empty", "Missing", "../library", "", "Nested/"] {
+        assert_eq!(cold.series(name), None, "{name:?}");
+    }
+    // The first read started the walk; once it is done, reads come from it.
+    wait_for_scans(&cold, 1);
+    let first = &walked.series[0];
+    assert_eq!(cold.series(&first.name).as_ref(), Some(first));
 }
 
 #[test]

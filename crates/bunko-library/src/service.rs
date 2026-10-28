@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use bunko_store::fs;
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::compat::normalize_volume_title_key;
@@ -153,16 +154,33 @@ pub fn write_if_changed(
     data: &[u8],
     locks: &dyn PathWriteLocks,
 ) -> Result<bool, WriteError> {
-    let same_length =
-        std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == data.len() as u64);
-    if same_length && std::fs::read(path).is_ok_and(|current| current == data) {
+    let current = fs::metadata(path).ok();
+    // Publish only over the version compared here (always `None` for a local file).
+    let base = current.as_ref().and_then(|meta| meta.version().cloned());
+    let same_length = current
+        .as_ref()
+        .is_some_and(|meta| meta.is_file() && meta.len() == data.len() as u64);
+    if same_length && fs::read(path).is_ok_and(|current| current == data) {
         return Ok(false);
     }
     let _guard = locks
         .try_lock(path)
         .ok_or_else(|| WriteError::Busy(path.to_path_buf()))?;
-    fsutil::atomic_write_bytes(path, data)?;
+    fsutil::atomic_write_bytes_with(path, data, base)?;
     Ok(true)
+}
+
+/// What became of a `series.json` update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeriesUpdate {
+    /// Merged (also when nothing changed).
+    Applied,
+    /// Unparseable, or a folder name that is no series key.
+    Invalid,
+    /// No folder of that title holds a volume right now.
+    NoFolder,
+    /// The service is stopping.
+    Stopped,
 }
 
 /// Why a client update could not be applied.
@@ -278,7 +296,7 @@ impl MetadataService {
     /// Every series folder, or `None` when the library root isn't readable
     /// (a transient mount failure must not read as "the library emptied").
     fn scan_folders(&self) -> Option<Vec<SeriesFolder>> {
-        std::fs::read_dir(&self.library_path).ok()?;
+        fs::read_dir(&self.library_path).ok()?;
         Some(iter_series_folders(&self.library_path))
     }
 
@@ -586,15 +604,39 @@ impl MetadataService {
         payload: &[u8],
         actor: Option<&str>,
     ) -> Result<bool, UpdateError> {
+        self.update_series(series_title, payload, actor, false)
+            .map(|outcome| outcome == SeriesUpdate::Applied)
+    }
+
+    /// A `series.json` found in a cloud library (a submission, D18): merged as a
+    /// client PUT is, except that a folder holding no volume keeps the facts row
+    /// (nothing is compiled there until a volume arrives, which then uses them).
+    /// `Err(Busy)`: the pass lock stayed taken; ask again.
+    pub fn ingest_series_submission(
+        &self,
+        series_title: &str,
+        payload: &[u8],
+        actor: Option<&str>,
+    ) -> Result<SeriesUpdate, UpdateError> {
+        self.update_series(series_title, payload, actor, true)
+    }
+
+    fn update_series(
+        &self,
+        series_title: &str,
+        payload: &[u8],
+        actor: Option<&str>,
+        keep_without_folder: bool,
+    ) -> Result<SeriesUpdate, UpdateError> {
         if self.is_stopped() {
-            return Ok(false);
+            return Ok(SeriesUpdate::Stopped);
         }
         let series_key = normalize_volume_title_key(series_title);
         if series_key.is_empty() {
-            return Ok(false);
+            return Ok(SeriesUpdate::Invalid);
         }
         let Some(update) = parse_series_update(payload, (self.clock)()) else {
-            return Ok(false);
+            return Ok(SeriesUpdate::Invalid);
         };
         let Some(guard) = self.pass_lock.try_lock_for(self.policy.update_lock_timeout) else {
             return Err(UpdateError::Busy(self.policy.update_lock_timeout));
@@ -604,14 +646,17 @@ impl MetadataService {
         {
             let _guard = guard;
             let Some(folders) = self.scan_folders() else {
-                return Ok(false);
+                return Ok(SeriesUpdate::NoFolder);
             };
-            let Some(resolved_title) = folders
+            let found = folders
                 .iter()
                 .find(|folder| normalize_volume_title_key(&folder.title) == series_key)
-                .map(|folder| folder.title.clone())
+                .map(|folder| folder.title.clone());
+            let compile = found.is_some();
+            let Some(resolved_title) =
+                found.or_else(|| keep_without_folder.then(|| series_title.to_owned()))
             else {
-                return Ok(false);
+                return Ok(SeriesUpdate::NoFolder);
             };
             let stored = self
                 .store
@@ -644,12 +689,14 @@ impl MetadataService {
                     })
                     .map_err(UpdateError::Store)?;
             }
-            match self.recompile_series_locked(series_title, false) {
-                Ok(count) => changed = count,
-                Err(error) => {
-                    // The facts are durable; the PUT is still accepted.
-                    tracing::warn!(%error, "[METADATA] republish failed after an accepted update");
-                    self.retry_later();
+            if compile {
+                match self.recompile_series_locked(series_title, false) {
+                    Ok(count) => changed = count,
+                    Err(error) => {
+                        // The facts are durable; the PUT is still accepted.
+                        tracing::warn!(%error, "[METADATA] republish failed after an accepted update");
+                        self.retry_later();
+                    }
                 }
             }
         }
@@ -657,7 +704,7 @@ impl MetadataService {
             self.hooks.on_external_ids_changed(&series_key);
         }
         self.published(changed);
-        Ok(true)
+        Ok(SeriesUpdate::Applied)
     }
 }
 

@@ -143,7 +143,7 @@ fn compute_stats(ocr: &OcrControl, rows: &[Generation]) -> Value {
             let rel = super::types::rel_of(&library, cbz).unwrap_or_default();
             // The row's own files: a row retired from primary left bare ones.
             let (plain, gz) = super::owed::sidecar_paths(cbz, &row.files_suffix());
-            if plain.exists() || gz.exists() {
+            if bunko_store::fs::exists(&plain) || bunko_store::fs::exists(&gz) {
                 done += 1;
                 present.insert(rel.clone());
             } else if !row.primary && skipped.get(&rel).is_some_and(|g| g.contains(&row.id)) {
@@ -182,9 +182,45 @@ fn stats(ocr: &OcrControl, config: &Config) -> Value {
     v
 }
 
+impl OcrControl {
+    /// Why this server's own OCR cannot benchmark yet: its backend is still being
+    /// installed, or the install it needs failed (None: nothing in the way).
+    fn local_not_ready(&self) -> Option<String> {
+        let installer = self.installer()?;
+        let view = installer.view();
+        if let Some(v) = view.as_ref().filter(|v| v.running()) {
+            return Some(format!(
+                "This server's OCR is still being set up ({}); benchmark once it finishes",
+                v.summary()
+            ));
+        }
+        if !installer.backend_ready() {
+            let what =
+                view.map_or_else(|| "OCR backend not installed".to_string(), |v| v.summary());
+            return Some(format!(
+                "This server's OCR waits for its backend ({what}); install it from Processors, then benchmark"
+            ));
+        }
+        None
+    }
+}
+
 impl OcrAdmin for OcrControl {
     fn runtime_status(&self, config: &Config) -> Value {
         let local = config.processes_locally(self.has_local());
+        // What this server's own machine runs now (`rocm`, `cpu`), and whether its
+        // backend is in place: a running install or a failed one with nothing in place
+        // is "not installed yet".
+        let installer = self.installer();
+        let running = installer.as_ref().is_some_and(|i| i.running());
+        let ready = installer.as_ref().is_none_or(|i| i.backend_ready());
+        let installed_backend = ask(self, |s| {
+            s.machines
+                .get(super::types::LOCAL)
+                .map(|m| m.host.backend.clone())
+                .filter(|b| !b.is_empty())
+        })
+        .flatten();
         let engines: Vec<String> =
             bunko_core::generations::enabled_generations(&config.ocr.generations)
                 .map(|g| g.engine.clone())
@@ -193,6 +229,8 @@ impl OcrAdmin for OcrControl {
             "available": self.has_local(),
             "launch_only": true,
             "configured_backend": config.ocr.backend,
+            "installed": ready && !running,
+            "installed_backend": installed_backend,
             "local_processing": local,
             "generations": config.ocr.generations.iter().map(Generation::to_value).collect::<Vec<_>>(),
             "detectors": [bunko_core::engines::DEFAULT_DETECTOR],
@@ -528,6 +566,11 @@ impl OcrAdmin for OcrControl {
                 pages,
                 processor,
             } => {
+                if processor == "local"
+                    && let Some(why) = self.local_not_ready()
+                {
+                    return Err(OcrError::new(409, why));
+                }
                 let req = SchedBench {
                     key,
                     spec,
@@ -568,15 +611,15 @@ impl OcrAdmin for OcrControl {
         let _ = ask(self, |s| s.bump_page_pub());
     }
 
-    /// `/api/ocr/upgrade` (GET census), `/api/ocr/upgrade/<volume>` (POST, `force`).
-    /// `/api/ocr/upgrade/<volume>/revert` is gone (410): an upgrade replaces the old file.
+    /// `/api/ocr/upgrade` (GET census), `/api/ocr/upgrade/<volume>` (POST: upgrade that
+    /// volume now). `/api/ocr/upgrade/<volume>/revert` is gone (410).
     fn other(
         &self,
         _config: &Config,
         method: &Method,
         path: &[&str],
         _query: &str,
-        body: &Value,
+        _body: &Value,
     ) -> Option<Result<(u16, Value), OcrError>> {
         // 0.7: `GET /api/ocr/install` (where this server's background OCR backend
         // install stands) and `POST /api/ocr/install` (start it, or retry a failed one).
@@ -609,7 +652,7 @@ impl OcrAdmin for OcrControl {
         if path.last() == Some(&"revert") {
             return Some(Err(OcrError::new(
                 410,
-                "an upgrade replaces the old OCR file, so there is nothing to revert to",
+                "there is no revert: an upgrade keeps an OCR file Bunko did not write as the volume's pre-upgrade layer",
             )));
         }
         let rel: String = path[2..]
@@ -636,11 +679,8 @@ impl OcrAdmin for OcrControl {
             return Some(Err(OcrError::new(400, "not a volume of the library")));
         }
         let cbz = self.core().layout.library().join(&rel);
-        if !cbz.is_file() {
+        if !bunko_store::fs::is_file(&cbz) {
             return Some(Err(OcrError::new(404, "no such volume")));
-        }
-        if bunko_sched::py::truthy(body.get("force")) {
-            up.force(&rel);
         }
         let verdict = up.judge(&cbz, &rel).1;
         let answer = match verdict {
@@ -656,12 +696,6 @@ impl OcrAdmin for OcrControl {
                 return Some(Err(OcrError::new(
                     409,
                     "the archive is missing pages its sidecar names; replace it with a whole volume first",
-                )));
-            }
-            super::upgrade::Verdict::SkippedEdited => {
-                return Some(Err(OcrError::new(
-                    409,
-                    "its sidecar was edited by a person; send force to upgrade it anyway",
                 )));
             }
             super::upgrade::Verdict::Current => json!({"success": true, "mode": "current"}),

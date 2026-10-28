@@ -71,10 +71,10 @@
         </section>
 
         <!-- Get Started Section -->
-        <section class="section">
+        <section class="section" id="get-started">
             <h2 class="section__title">Get Started</h2>
             <div class="actions-grid">
-                <a href="/register" class="action-card">
+                <a href="/register" class="action-card" id="register-card">
                     <div class="action-card__icon">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
@@ -112,7 +112,7 @@
         </section>
 
         <!-- How It Works Section -->
-        <section class="section">
+        <section class="section" id="how-it-works">
             <h2 class="section__title">How It Works</h2>
             <div class="info-grid">
                 <div class="info-card">
@@ -129,6 +129,20 @@
                     <span class="info-card__number">3</span>
                     <h3 class="info-card__title">Read &amp; Sync</h3>
                     <p class="info-card__desc">Read manga with selectable text overlay. Your progress syncs automatically across all your devices.</p>
+                </div>
+            </div>
+        </section>
+        <!-- A server that serves no readers (server.serve_readers off) -->
+        <section class="section" id="no-readers" hidden>
+            <h2 class="section__title">This Bunko</h2>
+            <div class="info-grid">
+                <div class="info-card">
+                    <h3 class="info-card__title">Looks after the library</h3>
+                    <p class="info-card__desc">It reads the text of each volume (OCR) and keeps the library's covers and series info up to date.</p>
+                </div>
+                <div class="info-card">
+                    <h3 class="info-card__title">Readers read elsewhere</h3>
+                    <p class="info-card__desc">This server does not serve readers. <a href="https://reader.mokuro.app" target="_blank" rel="noopener">Mokuro Reader</a> reads the library where it lives.</p>
                 </div>
             </div>
         </section>

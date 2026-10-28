@@ -27,7 +27,10 @@ pub fn spawn_detached_env(
         .open(log)?;
     let err = out.try_clone()?;
     let mut cmd = Command::new(exe);
+    // Its output goes to a file that a page may show, never to a terminal: no colour
+    // codes (the console log honours NO_COLOR).
     cmd.args(args)
+        .env("NO_COLOR", "1")
         .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::from(out))
@@ -178,6 +181,31 @@ mod tests {
         let pid = child.id();
         assert_eq!(child.wait().unwrap().code(), Some(3));
         assert!(!pid_alive(pid));
+    }
+
+    /// Regression: a processor started from the setup page logged with colour codes,
+    /// and the page showed its log tail with them.
+    #[cfg(unix)]
+    #[test]
+    fn a_detached_child_logs_without_colour() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("child.log");
+        let args = [
+            "-c".to_string(),
+            "printf 'NO_COLOR=%s.' \"$NO_COLOR\"".to_string(),
+        ];
+        spawn_detached(Path::new("sh"), &args, &log).unwrap();
+        // Wait for its whole line (a loaded machine may start it late).
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut out = String::new();
+        while std::time::Instant::now() < deadline {
+            out = std::fs::read_to_string(&log).unwrap_or_default();
+            if out.ends_with('.') {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(out, "NO_COLOR=1.");
     }
 
     #[test]

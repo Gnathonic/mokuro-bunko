@@ -52,6 +52,7 @@ pub struct Options {
     pub locks: Option<Arc<dyn bunko_library::PathWriteLocks>>,
     pub hooks: library::LibraryHooks,
     pub community: Option<library::CommunitySettings>,
+    pub hold_until_start: bool,
 }
 
 impl Default for Options {
@@ -62,6 +63,7 @@ impl Default for Options {
             locks: None,
             hooks: Default::default(),
             community: None,
+            hold_until_start: false,
         }
     }
 }
@@ -100,6 +102,7 @@ impl Env {
         rdeps.watch = options.watch;
         rdeps.policy = options.policy;
         rdeps.hooks = options.hooks;
+        rdeps.hold_until_start = options.hold_until_start;
         if let Some(community) = options.community {
             rdeps.community = community;
         }

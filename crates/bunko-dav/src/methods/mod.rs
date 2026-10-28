@@ -98,14 +98,56 @@ pub(crate) async fn dispatch(inner: Arc<Inner>, req: Request<Body>, ctx: DavCont
             return resp;
         }
     };
-    result.unwrap_or_else(DavError::into_response)
+    match result {
+        Ok(resp) => {
+            if resp.status().is_server_error() {
+                log_server_error(&r, resp.status().as_u16(), "");
+            }
+            resp
+        }
+        Err(e) => {
+            if e.status.is_server_error() {
+                log_server_error(&r, e.status.as_u16(), &e.context);
+            }
+            e.into_response()
+        }
+    }
+}
+
+/// A 5xx answer is the server's (or the library storage's) failure, so it is logged:
+/// the method, the path and the cause (store and provider errors carry no
+/// credentials; the request's own headers are never logged). A 503 is a wait the
+/// client is told to sit out (WARN); anything else is a fault (ERROR).
+pub(crate) fn log_server_error(req: &Req, status: u16, cause: &str) {
+    let user = req.username().unwrap_or("-");
+    let cause = if cause.is_empty() {
+        "(no detail)"
+    } else {
+        cause
+    };
+    if status == 503 {
+        tracing::warn!(
+            "[WEBDAV] {} {} answered {status} (user {user}): {cause}",
+            req.method,
+            req.path
+        );
+    } else {
+        tracing::error!(
+            "[WEBDAV] {} {} failed with {status} (user {user}): {cause}",
+            req.method,
+            req.path
+        );
+    }
 }
 
 /// Run filesystem work off the async workers.
+/// WebDAV work on the blocking pool. It answers a client, so a remote store treats it
+/// as interactive: a provider pause fails fast with a retry-after error (503) instead
+/// of holding the request (spec §3.1).
 pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> DavResult<T> {
-    tokio::task::spawn_blocking(f)
+    tokio::task::spawn_blocking(move || bunko_store::interactive(f))
         .await
         .map_err(|_| DavError::new(crate::SERVER_ERROR, "internal error"))
 }
@@ -265,7 +307,7 @@ pub(crate) fn primary_leaving(inner: &Inner, req: &Req, phys: &Path) {
     let Some(stem) = crate::sidecars::primary_sidecar_stem(&name) else {
         return;
     };
-    if phys.with_file_name(format!("{stem}.cbz")).is_file() {
+    if bunko_store::fs::is_file(phys.with_file_name(format!("{stem}.cbz"))) {
         req.ctx.hooks.primary_sidecar_leaving(&rel, phys);
     }
 }

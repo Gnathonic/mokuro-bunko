@@ -1,0 +1,23 @@
+{
+  "body": {
+    "ok": false,
+    "reason": "disk-full",
+    "detail": "The library storage is full; the upload was not stored.",
+    "retry": false
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json",
+    "x-mokuro-put": "verified"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "body_cbz": {
+      "pages": 2
+    },
+    "headers": {},
+    "method": "PUT",
+    "path": "/mokuro-reader/Contract%20Series/Volume%2003.cbz"
+  },
+  "status": 507
+}

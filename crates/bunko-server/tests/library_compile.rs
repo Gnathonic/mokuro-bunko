@@ -1,6 +1,9 @@
 //! The metadata runtime: startup compile, watcher-triggered recompiles, the store over
 //! bunko-db, and shutdown.
 
+// Fixtures are set up and checked with std::fs on purpose.
+#![allow(clippy::disallowed_methods)]
+
 mod library_support;
 
 use bunko_library::MetadataStore;
@@ -154,7 +157,7 @@ async fn watcher_recompiles_a_series_after_a_volume_arrives() {
     );
 
     // The index sees the new volume too (it was invalidated).
-    let snapshot = env.runtime.index().get_snapshot();
+    let snapshot = env.runtime.index().get_snapshot_fresh();
     assert_eq!(snapshot.series_by_name("Aria").unwrap().volumes.len(), 2);
     assert_eq!(env.runtime.counts().total_volumes().unwrap(), 2);
 
@@ -444,5 +447,32 @@ async fn case_variant_folders_each_keep_their_own_catalog_row() {
     env.runtime.recompile_all_now().await;
     let names: Vec<String> = rows(&env).into_iter().map(|r| r.0).collect();
     assert_eq!(names, ["Kingdom"]);
+    env.runtime.stop().await;
+}
+
+/// A cloud library's first sync reports every file before the library services start:
+/// held, the runtime arms no pass for them (the startup pass covers them all).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_runtime_arms_no_pass_before_it_starts() {
+    let env = Env::with(
+        |_| {},
+        Options {
+            hold_until_start: true,
+            ..Options::default()
+        },
+    );
+    let dir = env.series_dir("Held");
+    write_cbz(&dir.join("Held 01.cbz"), 1);
+    bunko_dav::DavHooks::library_changed(env.runtime.as_ref(), &[dir.join("Held 01.cbz")]);
+    env.runtime
+        .schedule_series_regeneration("Held", Some(Duration::from_millis(1)));
+    assert!(!env.runtime.has_pending_pass());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!dir.join("series.json").exists(), "no pass before start");
+    env.runtime.start();
+    assert!(
+        wait_for(Duration::from_secs(5), || dir.join("series.json").is_file()).await,
+        "the startup pass compiles what arrived before"
+    );
     env.runtime.stop().await;
 }

@@ -7,9 +7,14 @@ license.workspace = true
 
 [features]
 default = []
+# The in-memory `FakeBackend` as a library store (`storage::testing`), for tests of a
+# cloud library without a provider.
+testing = ["bunko-remote/testing"]
 
 [dependencies]
 bunko-core.workspace = true
+# storage module: a library in a cloud folder (RemoteStore and the provider drivers).
+bunko-remote.workspace = true
 bunko-proto.workspace = true
 bunko-db.workspace = true
 anyhow.workspace = true
@@ -61,6 +66,7 @@ flate2 = "1"
 zip.workspace = true
 # library module (catalog + metadata runtime): the filesystem watcher
 notify.workspace = true
+bunko-store = { workspace = true, features = ["watch", "tokio"] }
 # thumbs module: cover thumbnails (Pillow-exact contain + Lanczos, lossy WebP; no ONNX
 # Runtime)
 bunko-thumb = { path = "../bunko-thumb" }
@@ -75,5 +81,8 @@ bunko-processor.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
 image.workspace = true
-# differential_053: the shared DAV differential harness (bunko-dav/tests/common/diff.rs).
-quick-xml.workspace = true
+# cloud_sim: a whole server against the cloud simulator, in-process.
+bunko-cloudsim = { path = "../bunko-cloudsim" }
+# cloud_readonly: a server whose library is the in-memory FakeBackend.
+bunko-server = { path = ".", features = ["testing"] }
+bunko-remote = { workspace = true, features = ["testing"] }

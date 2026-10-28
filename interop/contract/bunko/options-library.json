@@ -1,0 +1,21 @@
+{
+  "headers": {
+    "access-control-allow-credentials": "true",
+    "access-control-allow-origin": "https://reader.mokuro.app",
+    "access-control-expose-headers": "Allow, Content-Length, Content-Type, DAV, ETag, Last-Modified, Location, Lock-Token, WWW-Authenticate, X-Mokuro-Manifest, X-Mokuro-Recheck-After, X-Mokuro-Upload, X-Mokuro-Size, X-Mokuro-Put, X-Mokuro-Digest-Verified",
+    "allow": "OPTIONS, HEAD, GET, PROPFIND, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK",
+    "content-type": "text/html; charset=utf-8",
+    "dav": "1,2",
+    "vary": "Origin",
+    "x-mokuro-put": "verified"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {
+      "origin": "https://reader.mokuro.app"
+    },
+    "method": "OPTIONS",
+    "path": "/mokuro-reader/"
+  },
+  "status": 200
+}

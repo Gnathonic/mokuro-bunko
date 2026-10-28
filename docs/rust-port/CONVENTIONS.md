@@ -8,10 +8,12 @@ the reference is 0.5.3 (`4016476`, at `../ref-0.5.3`).
 
 ## Ground rules
 
-- **Drop-in compatibility** with 0.5.2 storage: the same SQLite file, `config.yaml`,
-  library tree, sidecars, and the same HTTP paths, JSON field names, status codes and
-  error strings the web UIs and Mokuro Reader depend on. When 0.5.2 has a quirk the spec
-  marks "fix", fix it; otherwise reproduce it.
+- **Upgrades from 0.5.x** keep working: the Rust server opens a 0.5.x SQLite file,
+  `config.yaml`, library tree and sidecars and upgrades them in place, and keeps the
+  HTTP paths, JSON field names, status codes and error strings the web UIs and Mokuro
+  Reader depend on. Only that direction: going back to 0.5.x is not supported, so what
+  the Rust server writes (the database schema included) may change with a migration and
+  need not stay readable by 0.5.x.
 - **Removed:** mokuro/manga-ocr, ctd, animetext, rtdetr, Python venvs, Python PyTorch
   and the Python OCR installer, `EngineProcess`/multiprocessing. Never reintroduce GPL
   code or models. libtorch remains, but only in the `bunko-torch` backend pack
@@ -66,15 +68,14 @@ reviews and commits.
   Rust; compile series.json with Python and compare bytes). Put generator scripts in
   `crates/<crate>/tests/golden/` with the fixtures they produce, so they can be
   regenerated.
-- The reference is 0.5.3 (NTFS-style case-insensitive library paths, the catalog keyed
-  by folder), and 0.7 is held to it: a Python 0.5.3 reference environment exists at
-  `~/.cache/mokuro-bunko-demo/ref053` (a uv venv with `mokuro_bunko` installed editable
-  from the scratch worktree `../ref-0.5.3`, a detached checkout of commit `4016476`;
-  never check it out in a main worktree). Recreate it with `git worktree add --detach
+- For library paths and the folder-keyed catalog the reference is 0.5.3: a Python 0.5.3
+  environment at `~/.cache/mokuro-bunko-demo/ref053` (a uv venv with `mokuro_bunko`
+  installed editable from the scratch worktree `../ref-0.5.3`, a detached checkout of
+  commit `4016476`; never check it out in a main worktree) regenerates the 0.5.3 golden
+  DB (`bunko-db/tests/golden/py053.*`). Recreate it with `git worktree add --detach
   ../ref-0.5.3 4016476` and `uv venv --python 3.12 ~/.cache/mokuro-bunko-demo/ref053`
   then `VIRTUAL_ENV=~/.cache/mokuro-bunko-demo/ref053 uv pip install -e ../ref-0.5.3
-  pytest httpx`. It drives `bunko-server/tests/differential_053.rs` and the 0.5.3
-  golden DB (`bunko-db/tests/golden/py053.*`).
+  pytest httpx`. No test runs the Python code; the fixtures are checked in.
 - Keep `/tmp` usage small (it is a RAM disk); put large scratch data under
   `~/.cache/mokuro-bunko-demo/tmp`.
 - Real manga samples with shipped `.mokuro` files are in `~/Downloads` (read-only; never

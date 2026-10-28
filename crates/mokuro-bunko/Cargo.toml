@@ -29,6 +29,10 @@ cuda = ["ocr", "bunko-engines/cuda"]
 webgpu = ["ocr", "bunko-engines/webgpu"]
 directml = ["ocr", "bunko-engines/directml"]
 coreml = ["ocr", "bunko-engines/coreml"]
+# Test hooks for the interop rig: the `MOKURO_TEST_CLOUD_*` settings that point the
+# cloud drivers at cloudsim (bunko-server's storage::test_cloud). A build without it
+# refuses to start while one is set.
+testing = ["bunko-server/testing"]
 
 [dependencies]
 bunko-core.workspace = true

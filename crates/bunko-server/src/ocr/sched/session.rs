@@ -35,6 +35,9 @@ pub struct Session {
     pub completed: u32,
     /// Claims in submit order.
     pub order: Vec<String>,
+    /// Claims whose archive is being spooled from a remote store before they are
+    /// submitted (spec §8 `spooling`; the queue shows them as queued).
+    pub spooling: Vec<Job>,
     pub jobs: HashMap<String, SessionJob>,
     pub closing: bool,
     pub closing_since: f64,
@@ -98,6 +101,7 @@ impl Scheduler {
             last_event: self.mono(),
             completed: 0,
             order: Vec::new(),
+            spooling: Vec::new(),
             jobs: HashMap::new(),
             closing: false,
             closing_since: 0.0,
@@ -157,10 +161,20 @@ impl Scheduler {
             .row(&job.gid)
             .cloned()
             .unwrap_or_else(|| session.row.clone());
-        self.claim_seq += 1;
-        let claim = format!("v{}", self.claim_seq);
         let library = self.library();
         let cbz = job.path(&library);
+        // A local runner opens the archive as a file: on a remote store it reads a
+        // spooled copy, fetched first on a helper thread (spec §8).
+        let spool = if local && self.remote_library() {
+            match self.claims.get(job).and_then(|c| c.spool.clone()) {
+                Some(hold) => Some(hold),
+                None => return self.start_spooling(sid, job, &cbz),
+            }
+        } else {
+            None
+        };
+        self.claim_seq += 1;
+        let claim = format!("v{}", self.claim_seq);
         let stamp = crate::ocr::types::stamp_of(&cbz);
         let series_name =
             bunko_layout::sidecar::derive_series_name(&cbz, &library, &self.deps.layout.inbox());
@@ -173,7 +187,9 @@ impl Scheduler {
         let op = VolumeOp {
             sid: sid.to_string(),
             claim: claim.clone(),
-            archive: if local {
+            archive: if let Some(hold) = &spool {
+                hold.path().to_string_lossy().into_owned()
+            } else if local {
                 cbz.to_string_lossy().into_owned()
             } else {
                 format!("{}{}", bunko_proto::ARCHIVES_ROOT, job.rel)
@@ -228,6 +244,81 @@ impl Scheduler {
         let lane = self.claims.get(job).map(|c| c.lane).unwrap_or_default();
         self.begin_card(job, &row, &machine, lane, ready, local, started_at);
         true
+    }
+
+    /// The `spooling` step of a local claim on a remote store (spec §8): fetch the
+    /// archive into the store's spool on a helper thread ([`Msg::Spooled`] submits it).
+    /// The session counts it as in flight meanwhile.
+    fn start_spooling(&mut self, sid: &str, job: &Job, cbz: &std::path::Path) -> bool {
+        let Some(store) = bunko_store::store_for(cbz) else {
+            self.release(job, "the library store is not mounted", false);
+            return false;
+        };
+        if let Some(s) = self.sessions.get_mut(sid) {
+            s.spooling.push(job.clone());
+        }
+        self.log(format!(
+            "Fetching {} from the cloud for local OCR",
+            job.file_name()
+        ));
+        let (sid, job, cbz) = (sid.to_string(), job.clone(), cbz.to_path_buf());
+        self.run_background(Box::new(move || {
+            let result = store
+                .local_path(&cbz, None)
+                .map(|lp| super::SpoolHold(std::sync::Arc::new(lp)))
+                .map_err(|e| e.to_string());
+            super::Msg::Spooled { sid, job, result }
+        }));
+        true
+    }
+
+    /// A spooled archive arrived: submit its claim, unless the claim, its session or
+    /// the archive's version moved on meanwhile (then the claim goes back).
+    pub fn spooled(&mut self, sid: &str, job: &Job, result: Result<super::SpoolHold, String>) {
+        let was_spooling = self.sessions.get_mut(sid).is_some_and(|s| {
+            let before = s.spooling.len();
+            s.spooling.retain(|j| j != job);
+            s.spooling.len() != before
+        });
+        if !self.claims.contains_key(job) {
+            // Returned meanwhile; the pin goes with `result`.
+        } else {
+            match result {
+                Err(e) => self.release(
+                    job,
+                    &format!("could not fetch the archive from the cloud: {e}"),
+                    false,
+                ),
+                Ok(hold) => {
+                    let alive = was_spooling
+                        && self
+                            .sessions
+                            .get(sid)
+                            .is_some_and(|s| !s.closing && s.draining.is_none());
+                    let claimed = self.claims.get(job).and_then(|c| c.stamp);
+                    let now = crate::ocr::types::stamp_of(&job.path(&self.library()));
+                    if !alive {
+                        self.release(job, "its session ended while the archive was fetched", true);
+                    } else if claimed != now {
+                        self.release(
+                            job,
+                            "the archive differs from the one claimed (a new version arrived)",
+                            true,
+                        );
+                    } else {
+                        if let Some(c) = self.claims.get_mut(job) {
+                            c.spool = Some(hold);
+                        }
+                        if !self.submit(sid, job)
+                            && let Some(s) = self.sessions.get_mut(sid)
+                        {
+                            s.draining = Some("the runner stopped accepting volumes".into());
+                        }
+                    }
+                }
+            }
+        }
+        // `pump` (after every message) tops the session up or closes it.
     }
 
     /// `begin_ocr_job`: the running card.
@@ -345,9 +436,11 @@ impl Scheduler {
                 return;
             };
             let now = self.mono();
+            // Claims being spooled count as in flight.
+            let held = s.order.len() + s.spooling.len();
             if s.draining.is_some()
-                || s.order.len() >= SESSION_LOOKAHEAD
-                || (!s.order.is_empty() && now < s.next_claim_at)
+                || held >= SESSION_LOOKAHEAD
+                || (held > 0 && now < s.next_claim_at)
             {
                 break;
             }
@@ -378,7 +471,11 @@ impl Scheduler {
                 break;
             }
         }
-        if self.sessions.get(&sid).is_some_and(|s| s.order.is_empty()) {
+        if self
+            .sessions
+            .get(&sid)
+            .is_some_and(|s| s.order.is_empty() && s.spooling.is_empty())
+        {
             self.close_session(&sid);
         }
     }
@@ -718,6 +815,8 @@ impl Scheduler {
         Some(entry)
     }
 
+    // unmounted: removes a result's `.processing` spool directory.
+    #[allow(clippy::disallowed_methods)]
     pub(super) fn drop_result(&mut self, sid: &str, claim: &str) {
         if let Some((path, _)) = self.results.remove(&(sid.to_string(), claim.to_string()))
             && let Some(dir) = path.parent()

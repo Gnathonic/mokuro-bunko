@@ -1,0 +1,35 @@
+{
+  "expect": {
+    "body_fields": [
+      "version",
+      "generated_at",
+      "held.reason",
+      "next_check_after",
+      "pending_volumes",
+      "volumes.0.series",
+      "volumes.0.volume",
+      "volumes.0.path",
+      "volumes.0.manifest",
+      "volumes.0.jobs.0.kind",
+      "volumes.0.jobs.0.id",
+      "volumes.0.jobs.0.state"
+    ],
+    "headers": [
+      "etag"
+    ],
+    "nullable_fields": [
+      "held",
+      "volumes.0.jobs.0.eta",
+      "volumes.0.jobs.0.progress"
+    ],
+    "status": [
+      200
+    ]
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {},
+    "method": "GET",
+    "path": "/mokuro-reader/.mokuro-queue.json"
+  }
+}

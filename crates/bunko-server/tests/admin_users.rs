@@ -551,3 +551,66 @@ async fn users_list_newest_first_with_a_stable_order_for_same_second_accounts() 
         assert_eq!(list().await, first);
     }
 }
+
+/// A deleted account comes back from the admin page (its name cannot be taken anew):
+/// active, with a new password and its old role.
+#[tokio::test]
+async fn a_deleted_account_is_restored_from_the_admin_page() {
+    let h = Harness::new();
+    let admin = h.admin();
+    h.login("gpu-box", Role::Processor);
+    let r = h
+        .call("DELETE", "/_admin/api/users/gpu-box", Some(&admin), None)
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    // Creating the name again points at Restore.
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users",
+            Some(&admin),
+            Some(json!({"username": "gpu-box", "password": "new-pass-123", "role": "processor"})),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.text());
+    assert_eq!(
+        r.json()["error"],
+        "Username 'gpu-box' belongs to a deleted account: bring it back with Restore on its row"
+    );
+    // Restore needs a password.
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users/gpu-box/restore",
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(r.status, 400, "{}", r.text());
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users/gpu-box/restore",
+            Some(&admin),
+            Some(json!({"password": "new-pass-123"})),
+        )
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json()["user"]["status"], "active");
+    assert_eq!(r.json()["user"]["role"], "processor");
+    assert!(
+        h.db.authenticate_user("gpu-box", "new-pass-123")
+            .unwrap()
+            .is_some()
+    );
+    // Only a deleted account is restored.
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users/gpu-box/restore",
+            Some(&admin),
+            Some(json!({"password": "new-pass-123"})),
+        )
+        .await;
+    assert_eq!(r.status, 404, "{}", r.text());
+}
