@@ -1,0 +1,24 @@
+{
+  "body": {
+    "detail": "Sign in to upload.",
+    "ok": false,
+    "reason": "forbidden",
+    "retry": false
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json",
+    "www-authenticate": "Basic realm=\"mokuro-bunko\", charset=\"UTF-8\"",
+    "x-mokuro-put": "verified"
+  },
+  "request": {
+    "auth": "none",
+    "body_cbz": {
+      "pages": 1
+    },
+    "headers": {},
+    "method": "PUT",
+    "path": "/mokuro-reader/Contract%20Series/Volume%2005.cbz"
+  },
+  "status": 401
+}

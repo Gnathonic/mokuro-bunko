@@ -1,0 +1,24 @@
+{
+  "body": {
+    "detail": "The upload was not stored: storage-lease-claiming: this Bunko is still claiming the library (about 60 min left); changes through Bunko wait until then.",
+    "ok": false,
+    "reason": "server-error",
+    "retry": true
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json",
+    "retry-after": "3600",
+    "x-mokuro-put": "verified"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "body_cbz": {
+      "pages": 2
+    },
+    "headers": {},
+    "method": "PUT",
+    "path": "/mokuro-reader/Contract%20Series/Volume%2003.cbz"
+  },
+  "status": 503
+}

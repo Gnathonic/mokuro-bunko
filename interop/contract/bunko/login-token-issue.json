@@ -1,0 +1,32 @@
+{
+  "body": {
+    "expires_at": 946684800,
+    "kind": "reader",
+    "token": "<token>",
+    "token_type": "Bearer",
+    "user": {
+      "role": "uploader",
+      "username": "reader"
+    }
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "none",
+    "body": {
+      "kind": "reader",
+      "label": "mokuro-reader",
+      "password": "<password:reader>",
+      "username": "reader"
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/login/api/token"
+  },
+  "status": 200
+}

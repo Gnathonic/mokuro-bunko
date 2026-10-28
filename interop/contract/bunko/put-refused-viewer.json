@@ -1,0 +1,25 @@
+{
+  "body": {
+    "detail": "This account may not upload this file.",
+    "ok": false,
+    "reason": "forbidden",
+    "retry": false
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json",
+    "x-mokuro-put": "verified"
+  },
+  "request": {
+    "auth": "basic:viewer",
+    "body_cbz": {
+      "pages": 1
+    },
+    "headers": {
+      "content-type": "application/octet-stream"
+    },
+    "method": "PUT",
+    "path": "/mokuro-reader/Contract%20Series/Volume%2004.cbz"
+  },
+  "status": 403
+}

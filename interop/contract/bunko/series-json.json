@@ -1,0 +1,36 @@
+{
+  "body": {
+    "external_ids": {},
+    "series_title": "Contract Series",
+    "synonyms": [],
+    "titles": {},
+    "updated_at": "2000-01-01T00:00:00Z",
+    "version": 2,
+    "volumes": [
+      {
+        "archive_size": 210,
+        "character_count": 10,
+        "matched_page_count": 2,
+        "mokuro_modified": 946684800,
+        "mokuro_sha256": "4601c9b18328ff990fdcd8763d400a19adadf64e8352d86665a669f2bd1f8d77",
+        "mokuro_size": 567,
+        "mokuro_version": "0.2.2",
+        "page_count": 2,
+        "volume_title": "Volume 01",
+        "volume_uuid": "00000000-0000-4000-8000-000000000001"
+      },
+      {
+        "archive_size": 210,
+        "character_count": 0,
+        "matched_page_count": 2,
+        "mokuro_version": "",
+        "page_count": 2,
+        "volume_title": "Volume 02",
+        "volume_uuid": "00000000-0000-4000-8000-000000000002"
+      }
+    ]
+  },
+  "request": {
+    "file": "Contract Series/series.json"
+  }
+}

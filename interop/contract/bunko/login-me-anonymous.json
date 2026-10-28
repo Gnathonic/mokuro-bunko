@@ -1,0 +1,25 @@
+{
+  "body": {
+    "authenticated": false,
+    "permissions": {
+      "canAddFiles": false,
+      "canModifyDelete": false,
+      "canWriteProgress": false,
+      "metadata": {
+        "scope": "none"
+      }
+    },
+    "role": "anonymous"
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "none",
+    "headers": {},
+    "method": "GET",
+    "path": "/login/api/me"
+  },
+  "status": 200
+}

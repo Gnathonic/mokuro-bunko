@@ -1,0 +1,16 @@
+{
+  "body": {
+    "revoked": true
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "bearer:reader",
+    "headers": {},
+    "method": "DELETE",
+    "path": "/login/api/token"
+  },
+  "status": 200
+}

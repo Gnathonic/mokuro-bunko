@@ -1,0 +1,28 @@
+{
+  "body": {
+    "authenticated": true,
+    "created_at": "2000-01-01T00:00:00Z",
+    "permissions": {
+      "canAddFiles": true,
+      "canModifyDelete": false,
+      "canWriteProgress": true,
+      "metadata": {
+        "ownedSeries": [],
+        "scope": "owned"
+      }
+    },
+    "role": "uploader",
+    "username": "reader"
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json"
+  },
+  "request": {
+    "auth": "bearer:reader",
+    "headers": {},
+    "method": "GET",
+    "path": "/login/api/me"
+  },
+  "status": 200
+}
