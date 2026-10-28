@@ -404,16 +404,14 @@ fn a_refused_submission_is_a_conflict_and_the_compile_proceeds() {
     t.fake
         .reader_put(&format!("{FOLDER}/S/series.json"), b"not json at all");
     t.sync_feed();
-    wait_until("the refusal", || {
+    // The submission is marked refused, then its conflict row is added: wait for both.
+    wait_until("the refusal and its conflict", || {
         t.s().submissions().iter().any(|r| r.2 == "refused")
+            && t.s()
+                .conflicts()
+                .iter()
+                .any(|c| c.0 == "lost-write" && c.1 == "S/series.json")
     });
-    let conflicts = t.s().conflicts();
-    assert!(
-        conflicts
-            .iter()
-            .any(|c| c.0 == "lost-write" && c.1 == "S/series.json"),
-        "{conflicts:?}"
-    );
     // The compile overwrites the refused version (provider history keeps it).
     t.server.facts.lock().insert(
         "S".into(),
