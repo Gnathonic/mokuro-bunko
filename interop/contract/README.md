@@ -40,8 +40,11 @@ to the contract shows up as a fixture diff in the pull request that makes it.
   `series.json`, `catalog.json`) use the same shape with `"request": {"file": "<path>"}`.
 - Reader records carry `expect` instead of a response: `status` (a list), `body_fields`
   (dot paths that must exist and be non-null, e.g. `permissions.canWriteProgress`),
-  `headers` (names that must be present), and optionally `after` (the record whose
-  answer's ETag replaces the `"etag"` sentinel in this one's request).
+  `headers` (names that must be present) and `header_prefixes` (`{name: prefix}`, used
+  by the legacy records). A top-level `after` names the record whose answer's ETag
+  replaces the `"etag"` sentinel in this one's request; the two run on one server. A
+  `Content-Digest` is recorded as `<digest>`, and the replay sends the digest of the
+  body it sends.
 
 ## Sentinels
 
@@ -53,6 +56,7 @@ Anything that changes from run to run is replaced by a value of the same JSON ty
 | HTTP date | `"Sat, 01 Jan 2000 00:00:00 GMT"` |
 | epoch seconds / milliseconds | `946684800` / `946684800000` |
 | ETag (header, XML `getetag`, `If-Match`, `If-None-Match`) | `"\"etag\""` |
+| `Content-Digest` (reader records) | `"<digest>"` |
 | token | `"<token>"` |
 | UUID-shaped id | `00000000-0000-4000-8000-00000000000N`, numbered by first appearance in the file |
 | other ids (`instance_id`, `boot_id`, ...) | `"<id-N>"` |

@@ -1,0 +1,25 @@
+{
+  "expect": {
+    "body_fields": [
+      "version",
+      "series",
+      "volume",
+      "archive.url",
+      "archive.size",
+      "archive.modified",
+      "ocr.url",
+      "series_file.url",
+      "layers",
+      "pending"
+    ],
+    "status": [
+      200
+    ]
+  },
+  "request": {
+    "auth": "basic:reader",
+    "headers": {},
+    "method": "GET",
+    "path": "/catalog/api/manifest?series=Contract%20Series&volume=Volume%2001"
+  }
+}

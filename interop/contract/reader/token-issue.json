@@ -1,0 +1,27 @@
+{
+  "expect": {
+    "body_fields": [
+      "token",
+      "token_type",
+      "expires_at"
+    ],
+    "status": [
+      200
+    ]
+  },
+  "request": {
+    "auth": "none",
+    "body": {
+      "kind": "reader",
+      "label": "mokuro-reader",
+      "password": "<password:reader>",
+      "username": "reader"
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "path": "/login/api/token"
+  }
+}

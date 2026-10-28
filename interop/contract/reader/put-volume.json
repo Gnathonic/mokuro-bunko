@@ -1,0 +1,27 @@
+{
+  "expect": {
+    "headers": [
+      "x-mokuro-upload",
+      "x-mokuro-size",
+      "x-mokuro-put",
+      "x-mokuro-manifest",
+      "x-mokuro-recheck-after"
+    ],
+    "status": [
+      201,
+      204
+    ]
+  },
+  "request": {
+    "auth": "basic:reader",
+    "body_cbz": {
+      "pages": 2
+    },
+    "headers": {
+      "content-digest": "<digest>",
+      "content-type": "application/octet-stream"
+    },
+    "method": "PUT",
+    "path": "/mokuro-reader/Contract%20Series/Volume%2003.cbz"
+  }
+}

@@ -35,6 +35,8 @@ pub const EPOCH_MS: i64 = 946_684_800_000;
 pub const ETAG_SENTINEL: &str = "\"etag\"";
 pub const TOKEN_SENTINEL: &str = "<token>";
 pub const VERSION_SENTINEL: &str = "0.0.0";
+/// A recorded `Content-Digest` (of a body the replay does not send byte for byte).
+pub const DIGEST_SENTINEL: &str = "<digest>";
 
 /// The library's root folder as WebDAV serves it.
 pub const ROOT: &str = "mokuro-reader";
@@ -362,6 +364,15 @@ fn with_passwords(v: &Value, seed: &Seed) -> Value {
     }
 }
 
+/// `Content-Digest` (RFC 9530) of `bytes`: `sha-256=:<base64>:`, as the reader sends it.
+pub fn content_digest(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    format!(
+        "sha-256=:{}:",
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(bytes))
+    )
+}
+
 pub fn basic_value(user: &str, password: &str) -> String {
     format!(
         "Basic {}",
@@ -559,15 +570,20 @@ impl Server {
         if let Some(a) = auth {
             b = b.header("authorization", a);
         }
-        for (k, v) in &req.headers {
-            b = b.header(k.as_str(), v.as_str());
-        }
         let bytes = match &req.body {
             ReqBody::None => Vec::new(),
             ReqBody::Json(v) => serde_json::to_vec(&with_passwords(v, &self.seed)).unwrap(),
             ReqBody::Text(t) => t.clone().into_bytes(),
             ReqBody::Cbz(pages) => cbz(*pages),
         };
+        for (k, v) in &req.headers {
+            if v == DIGEST_SENTINEL {
+                // A recorded digest was of the recording's body: send this one's.
+                b = b.header(k.as_str(), content_digest(&bytes));
+            } else {
+                b = b.header(k.as_str(), v.as_str());
+            }
+        }
         if !bytes.is_empty() {
             b = b.header("content-length", bytes.len().to_string());
         }
