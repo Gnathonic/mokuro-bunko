@@ -14,6 +14,7 @@ use serde_json::json;
 
 use crate::SimState;
 use crate::accounts::{EXPIRES_IN, Provider};
+use crate::log::LogTag;
 
 fn oauth_err(error: &str, description: &str) -> Response {
     (
@@ -28,12 +29,28 @@ pub async fn token(
     Path(provider): Path<String>,
     form: Result<Form<HashMap<String, String>>, FormRejection>,
 ) -> Response {
+    let p = Provider::parse(&provider).unwrap_or(Provider::Google);
+    let (account, mut r) = answer(&sim, &provider, form);
+    r.extensions_mut().insert(LogTag {
+        provider: p,
+        account,
+        class: "auth",
+        bytes_in: 0,
+    });
+    r
+}
+
+fn answer(
+    sim: &SimState,
+    provider: &str,
+    form: Result<Form<HashMap<String, String>>, FormRejection>,
+) -> (String, Response) {
     let path = format!("/oauth/{provider}/token");
     let bad = |what: String| {
         sim.violation(format!("auth POST {path}: {what}"));
-        oauth_err("invalid_request", &what)
+        (String::new(), oauth_err("invalid_request", &what))
     };
-    let p = match Provider::parse(&provider) {
+    let p = match Provider::parse(provider) {
         Some(p @ (Provider::Google | Provider::Microsoft)) => p,
         _ => return bad(format!("no OAuth endpoint for {provider:?}")),
     };
@@ -58,6 +75,7 @@ pub async fn token(
     let res = sim.tokens().refresh(p, rt);
     match res {
         Ok((access_token, rotated)) => {
+            let account = sim.tokens().resolve(p, &access_token).unwrap_or_default();
             let mut v = json!({
                 "access_token": access_token,
                 "token_type": "Bearer",
@@ -67,8 +85,11 @@ pub async fn token(
             if let Some(r) = rotated {
                 v["refresh_token"] = json!(r);
             }
-            axum::Json(v).into_response()
+            (account, axum::Json(v).into_response())
         }
-        Err(_) => oauth_err("invalid_grant", "Token has been expired or revoked."),
+        Err(_) => (
+            String::new(),
+            oauth_err("invalid_grant", "Token has been expired or revoked."),
+        ),
     }
 }

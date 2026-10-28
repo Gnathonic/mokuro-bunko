@@ -460,6 +460,7 @@ version = "0.7.3"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "bunko-mega",
  "hex",
  "md-5",
  "parking_lot",

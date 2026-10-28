@@ -1,11 +1,14 @@
-//! MegaBackend against the in-process MEGA mock (`bunko_mega::mock`): real node and
-//! file crypto, the `cs` commands, `sc` with a wait URL, transfer URLs.
+//! MegaBackend against cloudsim's MEGA (the `bunko_mega::mock` hub mounted under
+//! `/mega/`): real node and file crypto, the `cs` commands, `sc` with a wait URL,
+//! transfer URLs. Dropping the simulator fails the test if it saw a request it could
+//! not accept.
 #![cfg(feature = "mega")]
 
 use std::time::Duration;
 
 use bunko_mega::ClientConfig;
-use bunko_mega::mock::{MockMega, ROOT, RUBBISH};
+use bunko_cloudsim::CloudSim;
+use bunko_cloudsim::mega::{MegaHandle, ROOT, RUBBISH};
 use bunko_remote::backend::{
     BErr, Backend, ChangeItem, ChangePage, Cursor, OpCtx, RNode, UploadSource, UploadTarget,
     read_to_vec,
@@ -14,7 +17,8 @@ use bunko_remote::mega::{MegaBackend, MegaConfig, SessionBlob};
 use sha2::{Digest, Sha256};
 
 struct Env {
-    mock: MockMega,
+    mock: MegaHandle,
+    _sim: CloudSim,
     be: MegaBackend,
     tmp: tempfile::TempDir,
     root: String,
@@ -29,7 +33,7 @@ fn pattern(n: usize) -> Vec<u8> {
     (0..n).map(|i| (i * 13 % 251) as u8).collect()
 }
 
-fn cfg(mock: &MockMega, dir: &std::path::Path) -> MegaConfig {
+fn cfg(mock: &MegaHandle, dir: &std::path::Path) -> MegaConfig {
     let mut c = MegaConfig::new(dir);
     c.client = ClientConfig {
         api_origin: mock.base.clone(),
@@ -44,7 +48,8 @@ fn cfg(mock: &MockMega, dir: &std::path::Path) -> MegaConfig {
 }
 
 async fn env() -> Env {
-    let mock = MockMega::start().await;
+    let sim = bunko_cloudsim::start().await;
+    let mock = sim.mega("default");
     let root = mock.mkdir(ROOT, "mokuro-reader");
     let series = mock.mkdir(&root, "Series A");
     let vol = mock.put(&series, "Vol 1.cbz", &pattern(300_007));
@@ -64,6 +69,7 @@ async fn env() -> Env {
     .unwrap();
     Env {
         mock,
+        _sim: sim,
         be,
         tmp,
         root,
@@ -602,7 +608,8 @@ async fn killed_session_needs_reauth() {
 
 #[tokio::test]
 async fn login_helper_produces_a_resumable_blob() {
-    let mock = MockMega::start().await;
+    let sim = bunko_cloudsim::start().await;
+    let mock = sim.mega("default");
     mock.set_account("me@example.com", "pw-pw-pw", Some("654321"));
     let tmp = tempfile::tempdir().unwrap();
     let c = cfg(&mock, tmp.path());

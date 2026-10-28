@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+# The MEGA mock (real node crypto) is bunko-mega's own; cloudsim mounts it.
+bunko-mega = { path = "../bunko-mega", features = ["mock"] }
 axum.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "signal"] }
 parking_lot.workspace = true

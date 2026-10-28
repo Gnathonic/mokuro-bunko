@@ -3,6 +3,12 @@
 //! node crypto done for real so the client's decryption is exercised. Knobs inject
 //! hashcash challenges, EAGAIN, over-quota answers, dropped upload chunks and lost
 //! cursors; `reader_*`-style helpers act as another client would.
+//!
+//! One [`MegaHub`] serves any number of accounts behind one gateway (the cloud
+//! simulator, `bunko-cloudsim`, mounts its [`MegaHub::router`] under `/mega/`): `cs`
+//! and `sc` pick the account by `sid`, or by the email of a login; the transfer and
+//! wait URLs it hands out carry the account's index. [`MockMega::start`] is a hub with
+//! one account on its own port.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -78,6 +84,8 @@ struct Faults {
 
 struct St {
     base: String,
+    /// This account's index in the hub (in the transfer and wait URLs).
+    idx: usize,
     master: [u8; 16],
     sek: [u8; 16],
     sid: String,
@@ -92,23 +100,44 @@ struct St {
     uploads: HashMap<String, Upload>,
     faults: Faults,
     calls: Vec<String>,
+    /// Commands this mock does not model (answered `-2`).
+    unknown: Vec<String>,
     posts: Vec<(u64, usize)>,
     downloads: Vec<String>,
 }
 
-/// The running mock.
+/// One account of a hub: its state, knobs and "another client" helpers.
 pub struct MockMega {
+    /// The gateway (`api_origin`), with a trailing slash.
     pub base: String,
     st: Arc<Mutex<St>>,
     notify: Arc<Notify>,
-    _task: tokio::task::JoinHandle<()>,
+    _task: Option<tokio::task::JoinHandle<()>>,
 }
 
-#[derive(Clone)]
-struct App {
-    st: Arc<Mutex<St>>,
-    notify: Arc<Notify>,
+/// What a hub request was, for a caller's request log (a response extension).
+#[derive(Debug, Clone)]
+pub struct MegaTag {
+    /// The account's name in the hub ("" when no account matched).
+    pub account: String,
+    /// `list`, `metadata`, `download`, `upload`, `write`, `delete`, `changes` or `auth`.
+    pub class: &'static str,
+    /// Request body bytes.
+    pub bytes_in: u64,
 }
+
+struct Hub {
+    base: String,
+    accounts: Mutex<Vec<(String, Arc<Mutex<St>>)>>,
+    notify: Arc<Notify>,
+    violations: Mutex<Vec<String>>,
+}
+
+/// Any number of mock accounts behind one gateway.
+#[derive(Clone)]
+pub struct MegaHub(Arc<Hub>);
+
+type App = MegaHub;
 
 fn hexb(s: &str) -> Vec<u8> {
     (0..s.len())
@@ -270,7 +299,7 @@ impl St {
                     if self.faults.overquota_g {
                         return json!({"e": -17, "tl": 600, "s": n.size});
                     }
-                    json!({"g": format!("{}dl/{}", self.base, s("n")), "s": n.size, "at": n.attr})
+                    json!({"g": format!("{}dl/{}/{}", self.base, self.idx, s("n")), "s": n.size, "at": n.attr})
                 }
                 _ => json!(-9),
             },
@@ -286,7 +315,7 @@ impl St {
                         token: None,
                     },
                 );
-                json!({"p": format!("{}ul/{id}", self.base)})
+                json!({"p": format!("{}ul/{}/{id}", self.base, self.idx)})
             }
             "p" => {
                 let t = s("t");
@@ -340,7 +369,10 @@ impl St {
             }
             "m" => self.do_move(&s("n"), &s("t"), Some(&s("i"))),
             "d" => self.do_delete(&s("n"), Some(&s("i"))),
-            _ => json!(-2),
+            _ => {
+                self.unknown.push(a.clone());
+                json!(-2)
+            }
         }
     }
 
@@ -391,14 +423,178 @@ impl St {
     }
 }
 
+fn lock_st(st: &Mutex<St>) -> std::sync::MutexGuard<'_, St> {
+    st.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+type Acct = (String, Arc<Mutex<St>>);
+
+impl MegaHub {
+    /// An empty hub whose transfer URLs start with `base` (the gateway, with a
+    /// trailing slash), e.g. `http://127.0.0.1:PORT/mega/`.
+    pub fn new(base: impl Into<String>) -> MegaHub {
+        let mut base = base.into();
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        MegaHub(Arc::new(Hub {
+            base,
+            accounts: Mutex::new(Vec::new()),
+            notify: Arc::new(Notify::new()),
+            violations: Mutex::new(Vec::new()),
+        }))
+    }
+
+    pub fn base(&self) -> &str {
+        &self.0.base
+    }
+
+    /// The routes, relative to the gateway: `/cs`, `/sc`, `/wait/..`, `/dl/..`, `/ul/..`.
+    pub fn router(&self) -> Router {
+        Router::new()
+            .route("/cs", post(cs))
+            .route("/sc", post(sc).get(sc))
+            .route("/wait/{a}/{sn}", post(wait).get(wait))
+            .route("/dl/{a}/{h}/{range}", get(download))
+            .route("/ul/{a}/{id}/{offset}", post(upload))
+            .with_state(self.clone())
+    }
+
+    fn accounts(&self) -> std::sync::MutexGuard<'_, Vec<Acct>> {
+        self.0.accounts.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The account `name` (an empty drive, no password login yet), created on first
+    /// use.
+    pub fn account(&self, name: &str) -> MockMega {
+        let st = {
+            let mut accounts = self.accounts();
+            match accounts.iter().find(|(n, _)| n == name) {
+                Some((_, st)) => st.clone(),
+                None => {
+                    let st = Arc::new(Mutex::new(St::new(self.0.base.clone(), accounts.len())));
+                    accounts.push((name.to_string(), st.clone()));
+                    st
+                }
+            }
+        };
+        MockMega {
+            base: self.0.base.clone(),
+            st,
+            notify: self.0.notify.clone(),
+            _task: None,
+        }
+    }
+
+    /// The account names, oldest first.
+    pub fn names(&self) -> Vec<String> {
+        self.accounts().iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// Drop every account.
+    pub fn reset(&self) {
+        self.accounts().clear();
+        self.take_violations();
+        self.0.notify.notify_waiters();
+    }
+
+    /// Requests this mock could not answer (unknown commands, unknown accounts in a
+    /// URL), as `mega <what>` lines; cleared.
+    pub fn take_violations(&self) -> Vec<String> {
+        let mut out =
+            std::mem::take(&mut *self.0.violations.lock().unwrap_or_else(|e| e.into_inner()));
+        for (name, st) in self.accounts().iter() {
+            for a in std::mem::take(&mut lock_st(st).unknown) {
+                out.push(format!("mega POST /cs ({name}): unmodelled command {a:?}"));
+            }
+        }
+        out
+    }
+
+    fn violation(&self, line: String) {
+        self.0
+            .violations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(line);
+    }
+
+    fn by_idx(&self, idx: &str) -> Option<Acct> {
+        let i: usize = idx.parse().ok()?;
+        self.accounts().get(i).cloned()
+    }
+
+    /// The account a `cs`/`sc` request is for: by session id, else by the email of a
+    /// login command, else the first account (whose answers then refuse it).
+    fn resolve(&self, sid: Option<&str>, cmds: &[Value]) -> Option<Acct> {
+        let accounts = self.accounts().clone();
+        if let Some(sid) = sid
+            && let Some(a) = accounts.iter().find(|(_, st)| lock_st(st).sid == sid)
+        {
+            return Some(a.clone());
+        }
+        let email = cmds
+            .iter()
+            .find_map(|c| c.get("user").and_then(Value::as_str))
+            .map(str::to_lowercase);
+        if let Some(email) = email
+            && let Some(a) = accounts.iter().find(|(_, st)| {
+                lock_st(st)
+                    .account
+                    .as_ref()
+                    .is_some_and(|acc| acc.email == email)
+            })
+        {
+            return Some(a.clone());
+        }
+        accounts.first().cloned()
+    }
+}
+
+fn tagged(r: impl IntoResponse, account: &str, class: &'static str, bytes_in: usize) -> Response {
+    let mut r = r.into_response();
+    r.extensions_mut().insert(MegaTag {
+        account: account.to_string(),
+        class,
+        bytes_in: bytes_in as u64,
+    });
+    r
+}
+
+/// The class of a `cs` batch, by its first command.
+fn cs_class(cmds: &[Value]) -> &'static str {
+    match cmds
+        .first()
+        .and_then(|c| c.get("a"))
+        .and_then(Value::as_str)
+    {
+        Some("us0" | "us" | "sml") => "auth",
+        Some("f") => "list",
+        Some("p" | "a" | "m") => "write",
+        Some("d") => "delete",
+        Some("u") => "upload",
+        _ => "metadata",
+    }
+}
+
 async fn cs(
     State(app): State<App>,
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let n = body.len();
+    let cmds = match serde_json::from_slice::<Value>(&body) {
+        Ok(Value::Array(cmds)) => Some(cmds),
+        _ => None,
+    };
+    let class = cmds.as_deref().map_or("metadata", cs_class);
+    let sid = q.get("sid").map(String::as_str);
+    let Some((name, st)) = app.resolve(sid, cmds.as_deref().unwrap_or_default()) else {
+        return tagged("-15", "", class, n);
+    };
     let out = {
-        let mut st = app.st.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = lock_st(&st);
         if let Some(e) = st.faults.hashcash {
             let challenge = format!("1:{e}:1700000000:{}", b64(&[7u8; 48]));
             let answered = headers
@@ -409,133 +605,167 @@ async fn cs(
                 st.faults.hashcash = None;
                 st.faults.hashcash_answered += 1;
             } else {
-                return (
-                    StatusCode::PAYMENT_REQUIRED,
-                    [("X-Hashcash", challenge)],
-                    "-3",
-                )
-                    .into_response();
+                return tagged(
+                    (
+                        StatusCode::PAYMENT_REQUIRED,
+                        [("X-Hashcash", challenge)],
+                        "-3",
+                    ),
+                    &name,
+                    class,
+                    n,
+                );
             }
         }
         if st.faults.eagain > 0 {
             st.faults.eagain -= 1;
-            return "-3".into_response();
+            return tagged("-3", &name, class, n);
         }
-        let Ok(Value::Array(cmds)) = serde_json::from_slice::<Value>(&body) else {
-            return "-2".into_response();
+        let Some(cmds) = cmds else {
+            drop(st);
+            app.violation(format!("mega POST /cs ({name}): body is not a JSON array"));
+            return tagged("-2", &name, class, n);
         };
-        let sid = q.get("sid").map(String::as_str);
         let out: Vec<Value> = cmds.iter().map(|c| st.command(c, sid)).collect();
         out
     };
-    app.notify.notify_waiters();
-    axum::Json(out).into_response()
+    app.0.notify.notify_waiters();
+    tagged(axum::Json(out), &name, class, n)
 }
 
 async fn sc(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Response {
-    let st = app.st.lock().unwrap_or_else(|e| e.into_inner());
-    if q.get("sid").map(String::as_str) != Some(st.sid.as_str()) || st.killed {
-        return "-15".into_response();
-    }
-    let Some(sn) = q.get("sn").and_then(|s| s.parse::<usize>().ok()) else {
-        return "-6".into_response();
+    let sid = q.get("sid").map(String::as_str);
+    let Some((name, st)) = app.resolve(sid, &[]) else {
+        return tagged("-15", "", "changes", 0);
     };
-    if sn < st.floor || sn > st.log.len() {
-        return "-6".into_response();
-    }
-    if sn == st.log.len() {
-        return axum::Json(json!({"w": format!("{}wait/{sn}", st.base)})).into_response();
-    }
-    let end = (sn + 50).min(st.log.len());
-    axum::Json(json!({"a": st.log[sn..end], "sn": end.to_string()})).into_response()
+    let st = lock_st(&st);
+    let r = (|| {
+        if sid != Some(st.sid.as_str()) || st.killed {
+            return "-15".into_response();
+        }
+        let Some(sn) = q.get("sn").and_then(|s| s.parse::<usize>().ok()) else {
+            return "-6".into_response();
+        };
+        if sn < st.floor || sn > st.log.len() {
+            return "-6".into_response();
+        }
+        if sn == st.log.len() {
+            return axum::Json(json!({"w": format!("{}wait/{}/{sn}", st.base, st.idx)}))
+                .into_response();
+        }
+        let end = (sn + 50).min(st.log.len());
+        axum::Json(json!({"a": st.log[sn..end], "sn": end.to_string()})).into_response()
+    })();
+    tagged(r, &name, "changes", 0)
 }
 
-async fn wait(State(app): State<App>, Path(sn): Path<usize>) -> Response {
+async fn wait(State(app): State<App>, Path((a, sn)): Path<(String, usize)>) -> Response {
+    let Some((name, st)) = app.by_idx(&a) else {
+        app.violation(format!("mega wait/{a}/{sn}: no such account"));
+        return tagged(StatusCode::NOT_FOUND, "", "changes", 0);
+    };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
-        let notified = app.notify.notified();
+        let notified = app.0.notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if app.st.lock().unwrap_or_else(|e| e.into_inner()).log.len() > sn {
+        if lock_st(&st).log.len() > sn {
             break;
         }
         if tokio::time::timeout_at(deadline, notified).await.is_err() {
             break;
         }
     }
-    "0".into_response()
+    tagged("0", &name, "changes", 0)
 }
 
-async fn download(State(app): State<App>, Path((h, range)): Path<(String, String)>) -> Response {
-    let mut st = app.st.lock().unwrap_or_else(|e| e.into_inner());
+async fn download(
+    State(app): State<App>,
+    Path((a, h, range)): Path<(String, String, String)>,
+) -> Response {
+    let Some((name, st)) = app.by_idx(&a) else {
+        app.violation(format!("mega dl/{a}/{h}: no such account"));
+        return tagged(StatusCode::NOT_FOUND, "", "download", 0);
+    };
+    let mut st = lock_st(&st);
     st.downloads.push(range.clone());
-    if st.faults.bandwidth_509 {
-        return StatusCode::from_u16(509).expect("509").into_response();
-    }
-    if st.faults.garbage_download {
-        return "-17".into_response();
-    }
-    let Some(n) = st.nodes.get(&h) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let Some((a, b)) = range.split_once('-') else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) else {
-        return StatusCode::BAD_REQUEST.into_response();
-    };
-    let end = (b + 1).min(n.data.len());
-    if a > end {
-        return StatusCode::RANGE_NOT_SATISFIABLE.into_response();
-    }
-    n.data[a..end].to_vec().into_response()
+    let r = (|| {
+        if st.faults.bandwidth_509 {
+            return StatusCode::from_u16(509).expect("509").into_response();
+        }
+        if st.faults.garbage_download {
+            return "-17".into_response();
+        }
+        let Some(n) = st.nodes.get(&h) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let Some((a, b)) = range.split_once('-') else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let end = (b + 1).min(n.data.len());
+        if a > end {
+            return StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+        }
+        n.data[a..end].to_vec().into_response()
+    })();
+    tagged(r, &name, "download", 0)
 }
 
 async fn upload(
     State(app): State<App>,
-    Path((id, offset)): Path<(String, u64)>,
+    Path((a, id, offset)): Path<(String, String, u64)>,
     body: Bytes,
 ) -> Response {
-    let mut st = app.st.lock().unwrap_or_else(|e| e.into_inner());
-    st.posts.push((offset, body.len()));
-    if st.faults.drop_upload_at.is_some_and(|at| offset >= at) {
-        st.faults.drop_upload_at = None;
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    let next = st.next + 1;
-    let Some(up) = st.uploads.get_mut(&id) else {
-        return "-8".into_response();
+    let n = body.len();
+    let Some((name, st)) = app.by_idx(&a) else {
+        app.violation(format!("mega ul/{a}/{id}: no such account"));
+        return tagged(StatusCode::NOT_FOUND, "", "upload", n);
     };
-    if offset != up.buf.len() as u64 {
-        // A re-sent chunk the mock already has is accepted again (MEGA does).
-        if offset + body.len() as u64 <= up.buf.len() as u64 {
-            up.buf[offset as usize..offset as usize + body.len()].copy_from_slice(&body);
-        } else {
-            return "-7".into_response();
+    let mut st = lock_st(&st);
+    let r = (|| {
+        st.posts.push((offset, body.len()));
+        if st.faults.drop_upload_at.is_some_and(|at| offset >= at) {
+            st.faults.drop_upload_at = None;
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
-    } else {
-        up.buf.extend_from_slice(&body);
-    }
-    if up.buf.len() as u64 == up.size {
-        let tok = format!("TOK{next}x{}", up.size);
-        up.token = Some(tok.clone());
-        st.next = next;
-        return tok.into_response();
-    }
-    StatusCode::OK.into_response()
+        let next = st.next + 1;
+        let Some(up) = st.uploads.get_mut(&id) else {
+            return "-8".into_response();
+        };
+        if offset != up.buf.len() as u64 {
+            // A re-sent chunk the mock already has is accepted again (MEGA does).
+            if offset + body.len() as u64 <= up.buf.len() as u64 {
+                up.buf[offset as usize..offset as usize + body.len()].copy_from_slice(&body);
+            } else {
+                return "-7".into_response();
+            }
+        } else {
+            up.buf.extend_from_slice(&body);
+        }
+        if up.buf.len() as u64 == up.size {
+            let tok = format!("TOK{next}x{}", up.size);
+            up.token = Some(tok.clone());
+            st.next = next;
+            return tok.into_response();
+        }
+        StatusCode::OK.into_response()
+    })();
+    tagged(r, &name, "upload", n)
 }
 
-impl MockMega {
-    /// Start a mock with an empty account (cloud root, inbox, rubbish bin).
-    pub async fn start() -> MockMega {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let base = format!("http://{}/", listener.local_addr().expect("addr"));
+impl St {
+    /// An empty account (cloud root, inbox, rubbish bin) at index `idx` of a hub.
+    fn new(base: String, idx: usize) -> St {
         let mut sid = [0x41u8; SID_LEN];
         for (i, b) in sid.iter_mut().enumerate().skip(1) {
             *b = (i * 31 % 251) as u8;
         }
+        // Distinct per account; account 0 keeps the session id it always had.
+        sid[SID_LEN - 1] = sid[SID_LEN - 1].wrapping_add(idx as u8);
+        sid[SID_LEN - 2] = sid[SID_LEN - 2].wrapping_add((idx >> 8) as u8);
         let mut nodes = BTreeMap::new();
         for (h, kind) in [(ROOT, 2), (INBOX, 3), (RUBBISH, 4)] {
             nodes.insert(
@@ -551,8 +781,9 @@ impl MockMega {
                 },
             );
         }
-        let st = Arc::new(Mutex::new(St {
-            base: base.clone(),
+        St {
+            base,
+            idx,
             master: [0x5a; 16],
             sek: [0x3c; 16],
             sid: b64(&sid),
@@ -566,30 +797,28 @@ impl MockMega {
             uploads: HashMap::new(),
             faults: Faults::default(),
             calls: Vec::new(),
+            unknown: Vec::new(),
             posts: Vec::new(),
             downloads: Vec::new(),
-        }));
-        let notify = Arc::new(Notify::new());
-        let app = App {
-            st: st.clone(),
-            notify: notify.clone(),
-        };
-        let router = Router::new()
-            .route("/cs", post(cs))
-            .route("/sc", post(sc).get(sc))
-            .route("/wait/{sn}", post(wait))
-            .route("/dl/{h}/{range}", get(download))
-            .route("/ul/{id}/{offset}", post(upload))
-            .with_state(app);
+        }
+    }
+}
+
+impl MockMega {
+    /// Start a mock with an empty account (cloud root, inbox, rubbish bin).
+    pub async fn start() -> MockMega {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}/", listener.local_addr().expect("addr"));
+        let hub = MegaHub::new(base);
+        let mut mock = hub.account("default");
+        let router = hub.router();
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
-        MockMega {
-            base,
-            st,
-            notify,
-            _task: task,
-        }
+        mock._task = Some(task);
+        mock
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, St> {
@@ -728,6 +957,26 @@ impl MockMega {
         self.changed();
     }
 
+    /// Create the folders along `path` under the cloud root and put `plain` at its
+    /// end, replacing a file already there.
+    pub fn seed(&self, path: &str, plain: &[u8]) -> String {
+        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut parent = ROOT.to_string();
+        for dir in &parts[..parts.len().saturating_sub(1)] {
+            parent = match self.find(&parent, dir).into_iter().next() {
+                Some(h) => h,
+                None => self.mkdir(&parent, dir),
+            };
+        }
+        let Some(name) = parts.last() else {
+            return parent;
+        };
+        for old in self.find(&parent, name) {
+            self.delete(&old);
+        }
+        self.put(&parent, name, plain)
+    }
+
     // ---- inspection ---------------------------------------------------------------
 
     pub fn node(&self, h: &str) -> Option<MNode> {
@@ -770,6 +1019,37 @@ impl MockMega {
         hs.into_iter()
             .filter(|h| self.name_of(h).is_some_and(|(n, _)| n == name))
             .collect()
+    }
+
+    /// Every file under the cloud root: (path, plaintext), sorted by path.
+    pub fn files(&self) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![(ROOT.to_string(), String::new())];
+        while let Some((h, prefix)) = stack.pop() {
+            let kids: Vec<(String, i64)> = {
+                let st = self.lock();
+                st.nodes
+                    .iter()
+                    .filter(|(_, n)| n.parent == h)
+                    .map(|(k, n)| (k.clone(), n.kind))
+                    .collect()
+            };
+            for (k, kind) in kids {
+                let Some((name, _)) = self.name_of(&k) else {
+                    continue;
+                };
+                let path = format!("{prefix}{name}");
+                if kind == 0 {
+                    if let Some((plain, _)) = self.content(&k) {
+                        out.push((path, plain));
+                    }
+                } else {
+                    stack.push((k, format!("{path}/")));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// `cs` command names received, in order.

@@ -14,7 +14,9 @@ use axum::response::{IntoResponse, Response};
 use parking_lot::{Mutex, MutexGuard};
 use serde_json::{Value, json};
 
+use crate::accounts::Provider;
 use crate::drive::bearer;
+use crate::log::LogTag;
 use crate::violations::{Bad, need};
 use crate::{SimState, rfc3339};
 
@@ -461,6 +463,27 @@ pub(crate) fn preauth_account(hexed: &str) -> Option<String> {
     String::from_utf8(hex::decode(hexed).ok()?).ok()
 }
 
+/// The log class of a OneDrive request (`segs` without the prefixes).
+fn class(method: &str, graph: bool, segs: &[String]) -> &'static str {
+    let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
+    if !graph {
+        return match segs.first() {
+            Some(&"preauth") => "download",
+            Some(&"upload") => "upload",
+            _ => "metadata",
+        };
+    }
+    match (method, segs.as_slice()) {
+        (_, [.., "createUploadSession"]) | ("PUT", [.., "content"]) => "upload",
+        ("GET", [.., "content"]) => "download",
+        ("GET", [.., "delta"]) => "changes",
+        ("GET", [.., "children"]) => "list",
+        ("DELETE", _) | (_, [.., "permanentDelete"]) => "delete",
+        ("POST" | "PATCH" | "PUT", _) => "write",
+        _ => "metadata",
+    }
+}
+
 pub async fn handle(
     State(sim): State<SimState>,
     method: Method,
@@ -468,6 +491,26 @@ pub async fn handle(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Bytes,
+) -> Response {
+    let mut tag = LogTag {
+        provider: Provider::Microsoft,
+        account: String::new(),
+        class: "metadata",
+        bytes_in: body.len() as u64,
+    };
+    let mut r = answer(&sim, &method, &uri, &q, &headers, body, &mut tag);
+    r.extensions_mut().insert(tag);
+    r
+}
+
+fn answer(
+    sim: &SimState,
+    method: &Method,
+    uri: &Uri,
+    q: &HashMap<String, String>,
+    headers: &HeaderMap,
+    body: Bytes,
+    tag: &mut LogTag,
 ) -> Response {
     let raw_path = uri
         .path()
@@ -482,9 +525,10 @@ pub async fn handle(
         .map(pct_decode)
         .collect();
     let path = format!("/{}", segs.join("/"));
-    let auth = hdr(&headers, header::AUTHORIZATION);
+    tag.class = class(method.as_str(), graph, &segs);
+    let auth = hdr(headers, header::AUTHORIZATION);
     let acct = if graph {
-        bearer(&headers).and_then(|t| sim.onedrive_for_token(t))
+        bearer(headers).and_then(|t| sim.onedrive_for_token(t))
     } else {
         segs.get(1)
             .and_then(|a| preauth_account(a))
@@ -496,7 +540,8 @@ pub async fn handle(
         }
         return err(404, "itemNotFound");
     };
-    let if_match = hdr(&headers, header::IF_MATCH);
+    tag.account = account.clone();
+    let if_match = hdr(headers, header::IF_MATCH);
     let res = {
         let mut st = acct.lock();
         st.requests.push(Req {
@@ -505,8 +550,8 @@ pub async fn handle(
             query: q.clone(),
             auth: auth.clone(),
             if_match: if_match.clone(),
-            content_range: hdr(&headers, header::CONTENT_RANGE),
-            user_agent: hdr(&headers, header::USER_AGENT),
+            content_range: hdr(headers, header::CONTENT_RANGE),
+            user_agent: hdr(headers, header::USER_AGENT),
         });
         if !graph && auth.is_some() {
             st.preauth_saw_auth = true;
@@ -525,9 +570,9 @@ pub async fn handle(
         let cx = Cx {
             root: &root,
             account_hex: &hex::encode(&account),
-            method: &method,
-            q: &q,
-            headers: &headers,
+            method,
+            q,
+            headers,
             if_match: if_match.as_deref(),
         };
         if graph {

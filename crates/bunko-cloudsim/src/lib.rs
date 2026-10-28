@@ -7,7 +7,12 @@
 //! - Drive: `{base}/google` (a driver's `api_base`; uploads under `{base}/google/upload`);
 //! - OneDrive: `{base}/graph/v1.0`, with the pre-authenticated download, upload-session
 //!   and copy-monitor URLs under `{base}/graph/`;
-//! - OAuth refresh: `{base}/oauth/google/token`, `{base}/oauth/microsoft/token`.
+//! - MEGA: the gateway `{base}/mega/` (`cs`, `sc`, wait and transfer URLs), real
+//!   node crypto (the mock lives in `bunko-mega` and is mounted here);
+//! - OAuth refresh: `{base}/oauth/google/token`, `{base}/oauth/microsoft/token`;
+//! - the control API: `{base}/_sim/` ([`control`]).
+//!
+//! Every response carries permissive CORS, so a browser (or jsdom) can call it.
 //!
 //! State is per (provider, account). The library form ([`start`]) serves on
 //! `127.0.0.1:0` inside a test's runtime; the binary serves the same [`router`].
@@ -17,7 +22,10 @@
 //! fails the test.
 
 pub mod accounts;
+pub mod control;
 pub mod drive;
+pub mod log;
+pub mod mega;
 pub mod oauth;
 pub mod onedrive;
 pub mod violations;
@@ -26,17 +34,41 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Request};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, post};
 use parking_lot::{Mutex, MutexGuard};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use accounts::TokenTable;
 pub use accounts::{Provider, Tokens};
 pub use drive::{DriveHandle, DriveState};
+pub use log::LogEntry;
+pub use mega::MegaHandle;
 pub use onedrive::{OneDriveHandle, OneDriveState};
 use violations::Violations;
+
+/// A stored file, as `GET /_sim/files` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileInfo {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+impl FileInfo {
+    fn of(path: String, data: &[u8]) -> FileInfo {
+        FileInfo {
+            path,
+            size: data.len() as u64,
+            sha256: hex::encode(Sha256::digest(data)),
+        }
+    }
+}
 
 /// Uploads in one request can be large (a whole volume in a simple upload).
 const BODY_LIMIT: usize = 1 << 30;
@@ -76,6 +108,8 @@ struct Inner {
     drive: Accounts<DriveState>,
     onedrive: Accounts<OneDriveState>,
     tokens: Mutex<TokenTable>,
+    mega: mega::MegaHub,
+    log: log::Log,
     violations: Violations,
 }
 
@@ -90,11 +124,14 @@ fn account<T: Default>(map: &Accounts<T>, name: &str) -> Arc<Mutex<T>> {
 impl SimState {
     /// State for a server reachable at `base` (`http://host:port`).
     pub fn new(base: impl Into<String>) -> Self {
+        let base = base.into().trim_end_matches('/').to_string();
         SimState(Arc::new(Inner {
-            base: base.into().trim_end_matches('/').to_string(),
+            mega: mega::MegaHub::new(format!("{base}{}/", mega::PREFIX)),
+            base,
             drive: Mutex::default(),
             onedrive: Mutex::default(),
             tokens: Mutex::default(),
+            log: log::Log::default(),
             violations: Violations::default(),
         }))
     }
@@ -107,12 +144,87 @@ impl SimState {
         self.0.violations.push(line);
     }
 
+    /// Pull MEGA's violations into the shared list.
+    fn gather(&self) {
+        for v in self.0.mega.take_violations() {
+            self.0.violations.push(v);
+        }
+    }
+
     pub fn violations(&self) -> Vec<String> {
+        self.gather();
         self.0.violations.list()
     }
 
     pub fn take_violations(&self) -> Vec<String> {
+        self.gather();
         self.0.violations.take()
+    }
+
+    pub fn log(&self) -> &log::Log {
+        &self.0.log
+    }
+
+    /// The MEGA account `name`, created empty (no password login) on first use.
+    pub fn mega(&self, name: &str) -> MegaHandle {
+        self.0.mega.account(name)
+    }
+
+    /// Create the folders along each path and put the bytes at its end.
+    pub fn seed(&self, p: Provider, account: &str, files: &[(String, Vec<u8>)]) {
+        for (path, data) in files {
+            match p {
+                Provider::Google => {
+                    self.drive(account)
+                        .lock()
+                        .seed(path, Bytes::copy_from_slice(data));
+                }
+                Provider::Microsoft => {
+                    self.onedrive(account)
+                        .lock()
+                        .seed(path, Bytes::copy_from_slice(data));
+                }
+                Provider::Mega => {
+                    self.mega(account).seed(path, data);
+                }
+            }
+        }
+    }
+
+    /// Every live file of the account, by path.
+    pub fn files(&self, p: Provider, account: &str) -> Vec<FileInfo> {
+        match p {
+            Provider::Google => self
+                .drive(account)
+                .lock()
+                .files()
+                .into_iter()
+                .map(|(path, d)| FileInfo::of(path, &d))
+                .collect(),
+            Provider::Microsoft => self
+                .onedrive(account)
+                .lock()
+                .files()
+                .into_iter()
+                .map(|(path, d)| FileInfo::of(path, &d))
+                .collect(),
+            Provider::Mega => self
+                .mega(account)
+                .files()
+                .into_iter()
+                .map(|(path, d)| FileInfo::of(path, &d))
+                .collect(),
+        }
+    }
+
+    /// Forget every account, token, log entry and violation.
+    pub fn reset(&self) {
+        self.0.drive.lock().clear();
+        self.0.onedrive.lock().clear();
+        *self.0.tokens.lock() = TokenTable::default();
+        self.0.mega.reset();
+        self.0.log.clear();
+        self.0.violations.take();
     }
 
     /// The Drive account `name`, created empty on first use.
@@ -190,15 +302,65 @@ async fn unknown(
     (StatusCode::NOT_FOUND, "cloudsim: no such endpoint").into_response()
 }
 
+const EXPOSE: &str =
+    "Location, ETag, Range, Content-Range, Retry-After, X-Hashcash, Content-Length";
+
+/// Permissive CORS: the request's `Origin` (or `*`) is allowed every method and header
+/// it asks for; preflights are answered here.
+async fn cors(req: Request, next: Next) -> Response {
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .cloned()
+        .unwrap_or(HeaderValue::from_static("*"));
+    if req.method() == Method::OPTIONS
+        && let Some(m) = req
+            .headers()
+            .get(header::ACCESS_CONTROL_REQUEST_METHOD)
+            .cloned()
+    {
+        let hdrs = req
+            .headers()
+            .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+            .cloned()
+            .unwrap_or(HeaderValue::from_static("*"));
+        let mut r = StatusCode::NO_CONTENT.into_response();
+        let h = r.headers_mut();
+        h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, m);
+        h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, hdrs);
+        h.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("600"),
+        );
+        h.insert(header::VARY, HeaderValue::from_static("Origin"));
+        return r;
+    }
+    let mut r = next.run(req).await;
+    let h = r.headers_mut();
+    h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    h.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderValue::from_static(EXPOSE),
+    );
+    h.append(header::VARY, HeaderValue::from_static("Origin"));
+    r
+}
+
 /// Every provider and the control API on one router.
 pub fn router(sim: SimState) -> Router {
+    let mega = sim.0.mega.router();
     Router::new()
         .route("/google/{*rest}", any(drive::handle))
         .route("/graph/{*rest}", any(onedrive::handle))
         .route("/oauth/{provider}/token", post(oauth::token))
+        .nest_service(mega::PREFIX, mega)
+        .nest("/_sim", control::router())
         .fallback(unknown)
+        .layer(from_fn_with_state(sim.clone(), log::record))
         .with_state(sim)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
+        .layer(from_fn(cors))
 }
 
 /// A running simulator on `127.0.0.1:{port}`, served by a task on the current runtime.
@@ -268,6 +430,37 @@ impl CloudSim {
     /// `OAuthClient.token_url` for this simulator.
     pub fn token_url(&self, provider: Provider) -> String {
         format!("{}/oauth/{}/token", self.base, provider.as_str())
+    }
+
+    /// `ClientConfig.api_origin` (megajs `gateway`) for this simulator.
+    pub fn mega_origin(&self) -> String {
+        format!("{}{}/", self.base, mega::PREFIX)
+    }
+
+    /// The MEGA account `account`, created empty on first use.
+    pub fn mega(&self, account: &str) -> MegaHandle {
+        self.state.mega(account)
+    }
+
+    /// Enable password login for the MEGA account `account`.
+    pub fn mega_account(&self, account: &str, email: &str, password: &str) {
+        self.state.mega(account).set_account(email, password, None);
+    }
+
+    pub fn seed(&self, provider: Provider, account: &str, files: &[(String, Vec<u8>)]) {
+        self.state.seed(provider, account, files);
+    }
+
+    pub fn files(&self, provider: Provider, account: &str) -> Vec<FileInfo> {
+        self.state.files(provider, account)
+    }
+
+    pub fn log(&self) -> Vec<LogEntry> {
+        self.state.log().list()
+    }
+
+    pub fn reset(&self) {
+        self.state.reset();
     }
 
     /// Refreshes the token endpoints answered so far.

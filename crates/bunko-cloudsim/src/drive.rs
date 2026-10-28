@@ -14,6 +14,8 @@ use parking_lot::{Mutex, MutexGuard};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::accounts::Provider;
+use crate::log::LogTag;
 use crate::violations::{Bad, need};
 use crate::{SimState, rfc3339};
 
@@ -466,6 +468,22 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
 }
 
+/// The log class of a Drive request.
+fn class(method: &str, path: &str, q: &HashMap<String, String>) -> &'static str {
+    let segs: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let media = q.get("alt").map(String::as_str) == Some("media");
+    match (method, segs.as_slice()) {
+        (_, ["upload", ..]) => "upload",
+        ("GET", ["drive", "v3", "changes", ..]) => "changes",
+        ("GET", ["drive", "v3", "files"]) => "list",
+        ("GET", ["drive", "v3", "files", _, "revisions", _]) => "download",
+        ("GET", ["drive", "v3", "files", _]) if media => "download",
+        ("DELETE", _) => "delete",
+        ("POST" | "PATCH" | "PUT", _) => "write",
+        _ => "metadata",
+    }
+}
+
 pub async fn handle(
     State(sim): State<SimState>,
     method: Method,
@@ -479,8 +497,27 @@ pub async fn handle(
         .strip_prefix(PREFIX)
         .unwrap_or(uri.path())
         .to_string();
-    let Some((_account, acct)) = bearer(&headers).and_then(|t| sim.drive_for_token(t)) else {
-        return err(401, "authError");
+    let tag = LogTag {
+        provider: Provider::Google,
+        account: String::new(),
+        class: class(method.as_str(), &path, &q),
+        bytes_in: body.len() as u64,
+    };
+    let (account, mut r) = answer(&sim, &method, path, &q, &headers, body);
+    r.extensions_mut().insert(LogTag { account, ..tag });
+    r
+}
+
+fn answer(
+    sim: &SimState,
+    method: &Method,
+    path: String,
+    q: &HashMap<String, String>,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> (String, Response) {
+    let Some((account, acct)) = bearer(headers).and_then(|t| sim.drive_for_token(t)) else {
+        return (String::new(), err(401, "authError"));
     };
     let res = {
         let mut st = acct.lock();
@@ -499,15 +536,16 @@ pub async fn handle(
                 r.headers_mut()
                     .insert(header::RETRY_AFTER, s.to_string().parse().expect("digits"));
             }
-            return r;
+            return (account, r);
         }
         let api = format!("{}{PREFIX}", sim.base());
-        route(&mut st, &api, &method, &path, &q, &headers, body)
+        route(&mut st, &api, method, &path, q, headers, body)
     };
-    res.unwrap_or_else(|bad| {
+    let r = res.unwrap_or_else(|bad| {
         sim.violation(format!("google {method} {path}: {bad}"));
         err_msg(400, "badRequest", &bad)
-    })
+    });
+    (account, r)
 }
 
 fn route(
