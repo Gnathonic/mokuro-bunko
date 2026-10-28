@@ -123,6 +123,47 @@ placeholders), so the fixtures change only when the contract does.
 - The existing `bunko-remote` mock tests move onto cloudsim's library form, so there is
   one mock per provider, not two.
 
+**As built (I2, crate `bunko-cloudsim`, library and binary):**
+
+- **One port, one prefix per provider.** Drive v3 at `{base}/google` (a driver's
+  `api_base`; uploads under `{base}/google/upload`), Graph v1.0 at `{base}/graph/v1.0`
+  with the pre-authenticated download, upload-session and copy-monitor URLs at
+  `{base}/graph/{preauth,upload,monitor}/{account}/{id}` (on the other loopback name, so
+  a client following the download redirect drops its token as it would for Microsoft's
+  storage hosts), MEGA's gateway at `{base}/mega/`, OAuth refresh at
+  `{base}/oauth/{google,microsoft}/token` (Google keeps its refresh token, Microsoft
+  rotates it), the control API at `{base}/_sim/`. Every response carries permissive CORS.
+- **MEGA stays in `bunko-mega`.** Its `mock` module (real node crypto, which needs the
+  crate's internals) became a hub of accounts behind one gateway, picked by session id
+  or login email; cloudsim mounts it. `MockMega::start()` still serves the crate's own
+  tests.
+- **Control API** (JSON): `GET health`; `POST token {provider, account}`,
+  `token/revoke {token}`, `token/expire {token}`; `POST mega/account {account, email,
+  password}`; `POST seed {provider, account, files: [{path, content_base64}]}`,
+  `GET files?provider=&account=` (`[{path, size, sha256}]`); `POST fault {provider,
+  account, method?, path_has, status, reason, retry_after?, times?}` (Drive and Graph;
+  MEGA's error codes are knobs); `POST knobs {provider, account, <knob>: value}`;
+  `GET`/`DELETE log` (`[{seq, provider, account, method, path, class, units, bytes_in,
+  bytes_out, status}]`, `units` 1 per Drive request); `GET`/`DELETE violations`;
+  `POST reset`. The crate's README has the knob list and a curl session.
+- **Violations, not panics.** A request the simulator cannot accept (an unmodelled Drive
+  `q`, a malformed body, an unknown endpoint, an unmodelled MEGA command) is a 4xx in the
+  provider's shape plus a violation; Rust tests fail on drop if any are left, the
+  reader's suites check after every test. Checks that only Bunko's driver must pass (it
+  sends `$top`, `keepRevisionForever=false`) live in Bunko's tests, not the simulator.
+- **A full server on it.** `MOKURO_TEST_CLOUD_API_BASE_{GDRIVE,ONEDRIVE,MEGA}` and
+  `MOKURO_TEST_CLOUD_TOKEN_URL_{GOOGLE,MICROSOFT}` point the stores and the connect
+  probe at cloudsim in a build with the `testing` feature (`mokuro-bunko` has one); a
+  build without it refuses to start while one is set, naming it.
+- **The reader** runs its real providers against the binary when `CLOUDSIM_URL` is set
+  (`src/lib/interop/cloudsim/`, one file at a time; its CI job `interop` builds the
+  simulator from Bunko). Drive's `gapi.client.drive` is replaced by a small REST shim in
+  those tests, so the real gapi transport stays a live-run concern (I5). The base-URL
+  overrides and the injected OneDrive token sit behind `CLOUD_TEST_HOOKS`
+  (`MODE === 'test'` or `VITE_CLOUD_TEST_HOOKS=1`), every guarded read written
+  `CLOUD_TEST_HOOKS ? hook : real` so a production build folds them away;
+  `scripts/check-no-test-hooks.mjs` checks the built code (it fails on a hooked build).
+
 **Reader changes (in the reader repo, part of this work):**
 
 - One base-URL constant per provider (Drive API, Drive upload, Graph, MEGA gateway)
@@ -310,7 +351,7 @@ Run time target: the rig under 15 minutes per PR on ubuntu.
 |---|---|---|
 | I0 | The large-catalog scenario on its own (generated library, Rust-side timings plus one Playwright check of the catalog page and a series view), with the §8.3 catalog budgets enforced in CI; then find and fix the live slowness against it | The generated library reproduces the slow catalog and series views; after the fix, they meet their budgets and CI fails if they regress |
 | I1 | Contract fixtures both ways; CORS preflight tests; reader unit tests moved onto them | A deliberate field rename on either side fails the other side's tests |
-| I2 | cloudsim (Drive, OneDrive, MEGA) with control API; bunko-remote mock tests moved onto it; reader base-URL override and token injection | Bunko and the reader, each alone, pass their provider suites against cloudsim |
+| I2 | cloudsim (Drive, OneDrive, MEGA) with control API; bunko-remote mock tests moved onto it; reader base-URL override and token injection | Bunko and the reader, each alone, pass their provider suites against cloudsim (built 2026-10-28, §6 "As built") |
 | I3 | Rig runner, rclone, the `dav`, `api`, `bridge`, `direct`, `shared`, `cloud` suites; CI on both repos; nightly build | Both repos' PRs run the rig; the M7 checks pass on every provider in cloudsim and on rclone |
 | I4 | netsim, the reader's performance marks, the `perf` suite, budgets | Budgets enforced in CI; the §10 table checked and updated with measured numbers |
 | I5 | Live runs with sandbox cleanup and token upkeep | A week of green nightly runs (Drive, OneDrive) and two weekly MEGA runs, each leaving the account as it found it |
@@ -328,4 +369,9 @@ needs I3 (and takes in I0's scenario); I5 needs I3.
 - **Google refresh-token lifetime** for the live Drive run (§7.2).
 - **CI time and flakiness** of browser runs; the 15-minute target and the retry rule in
   §8.3 are the guard.
-- **`megajs` gateway override**: to confirm in planning.
+- **`megajs` gateway override**: confirmed; megajs 1.3.9 takes a `gateway` option, and
+  the saved session keeps it (I2).
+- **Reader behaviour the I2 suites pin rather than change** (open for the reader): the
+  Drive provider retries nothing (a 429 with `Retry-After` fails that call) and has no
+  distinct storage-full error (a quota 403 is `UPLOAD_FAILED`); OneDrive's upload core
+  treats a 507 like any 5xx and tries the session five times before failing.
