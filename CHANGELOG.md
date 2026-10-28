@@ -76,6 +76,12 @@
   as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
 
 ### Fixed
+- **Mokuro Reader on another site sees what WebDAV's `OPTIONS` answers.** Bunko took
+  every `OPTIONS` request from a browser page on another site for a CORS check and
+  answered it itself, so the reader's own `OPTIONS` on the library (sent after the
+  browser's check) never got WebDAV's `Allow` and `DAV` headers, and could not have
+  read `Allow` anyway. Only a request that asks a CORS question is answered that way
+  now; the reader's request reaches WebDAV, and `Allow` is readable from the page.
 - **The catalog and series pages no longer stall on a large library.** Every 30 seconds,
   and after every change to the library (which during OCR is often), the next catalog or
   series request walked the whole library folder before answering, so opening even a

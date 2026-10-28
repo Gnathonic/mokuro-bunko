@@ -17,7 +17,7 @@
   "headers": {
     "access-control-allow-credentials": "true",
     "access-control-allow-origin": "https://reader.mokuro.app",
-    "access-control-expose-headers": "Content-Length, Content-Type, DAV, ETag, Last-Modified, Location, Lock-Token, WWW-Authenticate, X-Mokuro-Manifest, X-Mokuro-Recheck-After, X-Mokuro-Upload, X-Mokuro-Size, X-Mokuro-Put, X-Mokuro-Digest-Verified",
+    "access-control-expose-headers": "Allow, Content-Length, Content-Type, DAV, ETag, Last-Modified, Location, Lock-Token, WWW-Authenticate, X-Mokuro-Manifest, X-Mokuro-Recheck-After, X-Mokuro-Upload, X-Mokuro-Size, X-Mokuro-Put, X-Mokuro-Digest-Verified",
     "cache-control": "no-store",
     "content-type": "application/json",
     "vary": "Origin"

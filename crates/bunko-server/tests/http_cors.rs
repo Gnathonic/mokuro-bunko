@@ -302,3 +302,32 @@ async fn cors_off_sends_no_cors_headers() {
     assert_ne!(pre_status, StatusCode::NO_CONTENT, "{pre:?}");
     assert!(pre.get("dav").is_some(), "{pre:?}");
 }
+
+/// The reader's own `OPTIONS` on the library (its write-permission fallback and its
+/// `X-Mokuro-Put` probe) is not a preflight: a browser preflights it (OPTIONS with
+/// `Access-Control-Request-Method`) and then sends it with `Origin`. That second request
+/// must reach WebDAV, and its `Allow`, `DAV` and `X-Mokuro-Put` must be readable.
+#[tokio::test]
+async fn an_options_request_that_is_not_a_preflight_reaches_webdav() {
+    let env = Env::new(true);
+    let auth = basic("reader");
+    let (status, h) = env
+        .send(
+            "OPTIONS",
+            "/mokuro-reader/",
+            &[("origin", READER), ("authorization", &auth)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{h:?}");
+    assert!(h.get("allow").is_some(), "{h:?}");
+    assert!(h.get("dav").is_some(), "{h:?}");
+    assert_eq!(header(&h, "x-mokuro-put"), "verified");
+    assert_eq!(header(&h, "access-control-allow-origin"), READER);
+    let exposed = list(&h, "access-control-expose-headers");
+    for name in ["allow", "dav", "x-mokuro-put"] {
+        assert!(
+            exposed.contains(&name.to_string()),
+            "{name} not in {exposed:?}"
+        );
+    }
+}
