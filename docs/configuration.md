@@ -1360,6 +1360,16 @@ Both are regenerated when the library changes and whenever a client submits an
 update, and are rewritten only when their content actually changed, so clients can
 cache them on size/mtime.
 
+A series folder that loses its last `.cbz` loses its `series.json` too (the folder
+itself stays), so readers stop showing a series that is gone. The series' facts stay
+in the database, and the next upload into the folder compiles the file again with
+them. A `series.json` placed there by hand, carrying facts Bunko has no record of,
+is left alone. In a cloud library the file goes to the provider's trash (a version
+Bunko wrote itself is deleted), and only while the library is online and in step:
+not during a full sync, not while it waits for removals to be confirmed, not while
+another Bunko holds the library. A pass held back that way looks again a minute
+later, and keeps doing so until the library is back in step.
+
 Each volume entry may also carry `mokuro_size`/`mokuro_modified` and
 `cover_size`/`cover_modified`: the byte size and integer epoch-second mtime of the
 `.mokuro` sidecar and the cover `.webp`, taken from a plain filesystem stat when the
@@ -1389,7 +1399,8 @@ an update *request*: the facts are validated and merged (newest stamp wins), and
 both files are regenerated. The server compiles the volume list itself; of each
 listed volume it reads only `volume_uuid` and `offset`, the shelf offset (a listed
 volume without `offset` has its offset cleared, an unlisted one keeps it), and a
-top-level `spine_offset` replaces the stored one. Offsets apply whatever the
+top-level `spine_offset` replaces the stored one (`0` or `null` clears it; a body
+without the key keeps it). Offsets apply whatever the
 `updated_at` stamp, so a client sends back the offsets it read, or no volume list.
 A body carrying only facts, with no volume list at
 all, is an equally valid update. Writing `catalog.json`, or deleting/moving either
@@ -1510,6 +1521,50 @@ ocr:
   backend: "cuda"   # the cu130 pack's NVIDIA GPUs; "auto" picks them as well
   poll_interval: 60
 ```
+
+### Under a sub-path (`https://example.com/bunko/`)
+
+The web pages (home, catalog, login, registration, account, queue, admin, setup) work
+under a sub-path. The proxy strips the prefix, so Bunko sees `/catalog/` for
+`https://example.com/bunko/catalog/`. Bunko never needs to know the prefix:
+
+- every page gets a `<base href>` that leads from its own path back to the mount root
+  (`./` at `/catalog`, `../` at `/catalog/`)
+- every URL the pages and scripts use is relative to it
+- redirects are relative too (`/` answers `302 setup` or `302 catalog/`)
+
+The catalog's "open in reader" links are absolute URLs under the mount root.
+
+Redirect the bare prefix to the prefix with a slash, so the pages' relative URLs
+resolve under the mount:
+
+```nginx
+location = /bunko {
+    return 301 /bunko/;
+}
+
+location /bunko/ {
+    # The trailing slash on proxy_pass strips /bunko.
+    proxy_pass http://127.0.0.1:8080/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    client_max_body_size 0;
+    proxy_request_buffering off;
+}
+```
+
+Add the proxy to `server.trusted_proxies` when it runs on another host. In Mokuro
+Reader, enter the server as `https://example.com/bunko`: the reader looks for
+`<mount>/login/api/me` first.
+
+Not prefix-aware:
+
+- WebDAV `PROPFIND` answers name their hrefs from the server root
+  (`/mokuro-reader/...`).
+- A remote OCR processor's registration hands out root paths (`/_processor/...`), so
+  processors need a server at the root of its host.
 
 ### Lite library server with a remote GPU processor
 

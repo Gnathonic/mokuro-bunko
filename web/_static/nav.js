@@ -34,7 +34,7 @@
     // Check the password once and keep the token it buys. Throws with the
     // server's message on failure.
     signIn: async function (username, password) {
-      const response = await fetch('/login/api/token', {
+      const response = await fetch('login/api/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username, password: password, kind: 'web', label: 'web page' }),
@@ -60,7 +60,7 @@
       mokuroAuth.clear();
       if (headers.Authorization) {
         try {
-          await fetch('/login/api/token', { method: 'DELETE', headers: headers });
+          await fetch('login/api/token', { method: 'DELETE', headers: headers });
         } catch (_) { /* signed out here either way */ }
       }
     },
@@ -74,7 +74,7 @@
 
   async function fetchNavConfig() {
     try {
-      const response = await fetch('/api/nav/config');
+      const response = await fetch('api/nav/config');
       if (!response.ok) throw new Error('bad status');
       return await response.json();
     } catch (_) {
@@ -102,22 +102,22 @@
     const showQueue = !!config.queue_show_in_nav && (!!config.queue_public_access || isAuthed);
 
     const parts = [];
-    if (showHome) parts.push(link('Home', '/', currentKey, 'home'));
-    if (showCatalog) parts.push(link('Catalog', '/catalog', currentKey, 'catalog'));
-    if (showQueue) parts.push(link('Queue', '/queue', currentKey, 'queue'));
+    if (showHome) parts.push(link('Home', './', currentKey, 'home'));
+    if (showCatalog) parts.push(link('Catalog', 'catalog', currentKey, 'catalog'));
+    if (showQueue) parts.push(link('Queue', 'queue', currentKey, 'queue'));
 
     if (isAuthed) {
       if (user.role === 'admin') {
-        parts.push(link('Admin', '/_admin', currentKey, 'admin'));
+        parts.push(link('Admin', '_admin', currentKey, 'admin'));
       } else if (user.role === 'inviter') {
-        parts.push(link('Invites', '/_admin', currentKey, 'admin'));
+        parts.push(link('Invites', '_admin', currentKey, 'admin'));
       }
-      parts.push(link('Account', '/account', currentKey, 'account'));
+      parts.push(link('Account', 'account', currentKey, 'account'));
       parts.push('<button onclick="logout()" class="btn btn--secondary btn--sm">Logout</button>');
     } else {
-      parts.push(link('Login', '/login', currentKey, 'login'));
+      parts.push(link('Login', 'login', currentKey, 'login'));
       if (config.registration_enabled) {
-        parts.push(link('Register', '/register', currentKey, 'register'));
+        parts.push(link('Register', 'register', currentKey, 'register'));
       }
     }
 

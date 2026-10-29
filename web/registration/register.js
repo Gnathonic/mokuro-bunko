@@ -1,7 +1,7 @@
 // Registration Page JavaScript
 
-const API_URL = '/api/register';
-const CONFIG_URL = '/api/register/config';
+const API_URL = 'api/register';
+const CONFIG_URL = 'api/register/config';
 
 // DOM Elements
 const form = document.getElementById('register-form');
@@ -45,7 +45,7 @@ async function updateNav() {
 
 async function logout() {
     await window.mokuroAuth.signOut();
-    window.location.href = '/';
+    window.location.href = './';
 }
 
 // Initialize

@@ -4,7 +4,7 @@
 use crate::auth::{self};
 use crate::backend::DbAuthBackend;
 use crate::core::{Core, RequestCtx};
-use crate::http::{cors, headers, static_files};
+use crate::http::{base_href, cors, headers, static_files};
 use crate::ops::dyndns::DynDnsService;
 use crate::ops::tunnel::TunnelService;
 use axum::Router;
@@ -650,6 +650,8 @@ pub fn build_router_with(
         core.clone(),
         readers_gate,
     ))
+    // Outside the `/` gate (the home page) and every module's pages.
+    .layer(axum::middleware::from_fn(base_href::inject))
     .layer(axum::middleware::from_fn_with_state(
         core.clone(),
         cors::cors,

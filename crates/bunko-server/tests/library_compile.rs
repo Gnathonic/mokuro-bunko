@@ -556,3 +556,63 @@ async fn a_held_runtime_arms_no_pass_before_it_starts() {
     );
     env.runtime.stop().await;
 }
+
+/// A series that lost its last archive over WebDAV keeps no `series.json` (the reader
+/// would keep showing it) and leaves `catalog.json`; its facts stay, so the next upload
+/// publishes them again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_the_last_volume_retires_the_series_file() {
+    let env = Env::new(|_| {});
+    env.user("editor", bunko_core::Role::Editor);
+    let gone = env.series_dir("Gone");
+    let kept = env.series_dir("Kept");
+    write_cbz(&gone.join("Gone 01.cbz"), 1);
+    write_cbz(&kept.join("Kept 01.cbz"), 1);
+    assert!(env.runtime.recompile_all_now().await > 0);
+    const FACTS: &str = r#"{"version":2,"updated_at":"2026-08-18T19:36:24.324Z","external_ids":{"anilist":98416},"spine_offset":-40}"#;
+    let r = env
+        .send(
+            req("PUT", "/mokuro-reader/Gone/series.json")
+                .header("authorization", basic("editor"))
+                .header("content-length", FACTS.len().to_string())
+                .body(axum::body::Body::from(FACTS))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(r.status, 204, "{}", r.text());
+    let series_file = gone.join("series.json");
+    assert!(series_file.is_file());
+    let kept_before = std::fs::read(kept.join("series.json")).unwrap();
+
+    // What bunko-dav reports after a DELETE of the last archive commits.
+    std::fs::remove_file(gone.join("Gone 01.cbz")).unwrap();
+    bunko_dav::DavHooks::library_changed(env.runtime.as_ref(), &[gone.join("Gone 01.cbz")]);
+    assert!(
+        wait_for(Duration::from_secs(5), || !series_file.exists()).await,
+        "series.json of the emptied folder stays"
+    );
+    let runtime = env.runtime.clone();
+    assert!(
+        tokio::task::spawn_blocking(move || runtime.wait_idle(Duration::from_secs(5)))
+            .await
+            .unwrap()
+    );
+    let catalog = std::fs::read_to_string(env.library.join("catalog.json")).unwrap();
+    assert!(!catalog.contains(r#""series_title":"Gone""#), "{catalog}");
+    assert!(catalog.contains(r#""series_title":"Kept""#), "{catalog}");
+    assert_eq!(
+        std::fs::read(kept.join("series.json")).unwrap(),
+        kept_before
+    );
+    assert!(gone.is_dir(), "the folder stays");
+    assert!(env.db.get_series_facts("gone").unwrap().is_some());
+
+    // A re-upload publishes the stored facts again.
+    write_cbz(&gone.join("Gone 02.cbz"), 1);
+    bunko_dav::DavHooks::library_changed(env.runtime.as_ref(), &[gone.join("Gone 02.cbz")]);
+    assert!(wait_for(Duration::from_secs(5), || series_file.is_file()).await);
+    let back = std::fs::read_to_string(&series_file).unwrap();
+    assert!(back.contains(r#""anilist":98416"#), "{back}");
+    assert!(back.contains(r#""spine_offset":-40"#), "{back}");
+    env.runtime.stop().await;
+}

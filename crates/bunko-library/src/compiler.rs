@@ -19,6 +19,7 @@ use crate::compat::{
     normalize_volume_title_key,
 };
 use crate::fsutil::{self, py_mtime, py_mtime_int, size_of};
+use crate::paths::SERIES_FILE_NAME;
 use crate::pyjson::{self, DumpOptions, JsonNum, JsonObject, JsonValue};
 use crate::pyunicode;
 use crate::schema::{VolumeEntry, missing_page_count};
@@ -70,6 +71,43 @@ fn has_archive(folder: &Path) -> bool {
                 .any(|(name, path)| is_cbz_name(name) && fsutil::is_file(path))
         })
         .unwrap_or(false)
+}
+
+/// Top-level, non-hidden directories that hold a `series.json` but no `.cbz`
+/// any more, as `(folder title, series.json path)`, sorted by name. A folder
+/// whose listing fails is skipped: an unreadable folder is not an empty one.
+pub fn iter_orphan_series_files(library_path: &Path) -> Vec<(String, PathBuf)> {
+    orphan_series_files_where(library_path, |_| true)
+}
+
+/// [`iter_orphan_series_files`] over the folders whose series key passes
+/// `wanted`; the others are never listed.
+pub fn orphan_series_files_where(
+    library_path: &Path,
+    wanted: impl Fn(&str) -> bool,
+) -> Vec<(String, PathBuf)> {
+    let Ok(mut entries) = fsutil::list_dir(library_path) else {
+        return Vec::new();
+    };
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .into_iter()
+        .filter(|(name, path)| {
+            !name.starts_with('.')
+                && wanted(&normalize_volume_title_key(name))
+                && fsutil::is_dir(path)
+        })
+        .filter_map(|(title, path)| {
+            let children = fsutil::list_dir(&path).ok()?;
+            let archive = children
+                .iter()
+                .any(|(name, child)| is_cbz_name(name) && fsutil::is_file(child));
+            let series_file = children
+                .into_iter()
+                .find(|(name, child)| name == SERIES_FILE_NAME && fsutil::is_file(child))?;
+            (!archive).then_some((title, series_file.1))
+        })
+        .collect()
 }
 
 /// The `.cbz` file names directly in `folder`, sorted.

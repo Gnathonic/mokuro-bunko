@@ -16,8 +16,10 @@
 //! computer answers a page asking for it; `POST /setup/code` checks it (constant time;
 //! [`ATTEMPTS_PER_IP`] tries per client address, one more every [`REFILL`]; after
 //! [`ROTATE_AFTER`] wrong codes from everyone within a minute the code is replaced and
-//! the new one logged, so nobody can lock the owner out) and answers a random setup-session cookie ([`SESSION_COOKIE`], `Path=/setup`,
-//! `HttpOnly; SameSite=Strict`, one hour), which the unchanged wizard page and its
+//! the new one logged, so nobody can lock the owner out) and answers a random
+//! setup-session cookie ([`SESSION_COOKIE`]; no `Path`, as the browser's default,
+//! `<mount>/setup`, also holds under a sub-path mount; `HttpOnly; SameSite=Strict`,
+//! one hour), which the unchanged wizard page and its
 //! `/setup/api/*` calls carry. A script may send the code as `X-Setup-Code` instead
 //! (same limits). The code and every session die as soon as an admin exists (the wizard,
 //! `admin add-user`). The code is never written to a response.
@@ -537,8 +539,11 @@ async fn code(State(d): State<AccountsDeps>, client: Client, body: Body) -> Resp
     let to_setup = || {
         let mut r = Response::new(Body::empty());
         *r.status_mut() = StatusCode::SEE_OTHER;
-        r.headers_mut()
-            .insert(header::LOCATION, HeaderValue::from_static("/setup"));
+        // Relative to `/setup/code`: stays under a sub-path mount.
+        let to = crate::http::base_href::relative_to_root("/setup/code", "setup");
+        if let Ok(v) = HeaderValue::from_str(&to) {
+            r.headers_mut().insert(header::LOCATION, v);
+        }
         r
     };
     match needs_setup(&d).await {
@@ -571,7 +576,7 @@ async fn code(State(d): State<AccountsDeps>, client: Client, body: Body) -> Resp
                 ""
             };
             let cookie = format!(
-                "{SESSION_COOKIE}={id}; Path=/setup; Max-Age={}; HttpOnly; SameSite=Strict{secure}",
+                "{SESSION_COOKIE}={id}; Max-Age={}; HttpOnly; SameSite=Strict{secure}",
                 SESSION_TTL.as_secs()
             );
             let mut r = to_setup();
@@ -627,8 +632,8 @@ fn code_page(status: StatusCode, message: Option<String>, has_code: bool) -> Res
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Setup code - Mokuro Bunko</title>
-    <link rel="stylesheet" href="/_static/shared.css">
-    <link rel="stylesheet" href="/setup/setup.css">
+    <link rel="stylesheet" href="_static/shared.css">
+    <link rel="stylesheet" href="setup/setup.css">
 </head>
 <body>
     <div class="setup-container">
@@ -637,7 +642,7 @@ fn code_page(status: StatusCode, message: Option<String>, has_code: bool) -> Res
             <p class="setup-description">To create the admin account from another computer, enter the one-time setup code.
             It is in the server log, printed at startup in a line beginning <code>First run:</code>
             (for Docker: <code>docker logs &lt;container&gt;</code>; on Unraid: the container's log).</p>
-            <form method="post" action="/setup/code" autocomplete="off">
+            <form method="post" action="setup/code" autocomplete="off">
                 <div class="form-group">
                     <label for="setup-code" class="form-label">Setup code</label>
                     <input type="text" id="setup-code" name="code" class="form-input" required autofocus
