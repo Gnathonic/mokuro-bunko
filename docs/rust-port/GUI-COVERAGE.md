@@ -20,7 +20,9 @@ clap tree and fails when:
   because");
 - a row links an `/app/` page or a settings section that does not exist, an admin panel
   tab (`/_admin#tab`) the panel does not have, or a tray item the menu does not have;
-- a row names something the CLI no longer has (checked in the full build).
+- a row names something the CLI no longer has (checked in the full build; the
+  `processor-fake` rows only in a full build with the `testing` feature, which alone
+  has that command).
 
 Hidden flags and subcommands (internal ones such as `update prefetch` and
 `install-ocr --probe`, and the 0.5 spellings) are walked like any other, so each has a
@@ -219,6 +221,19 @@ front (`--config`).
 | `processor service` | CLI-only because a background service is for headless machines, set up from their terminal; on a desktop the tray runs the processor and `Tray → "Start at login"` starts it |
 | `processor service --config` | CLI-only because `processor service` is |
 | `processor service --install` | CLI-only because `processor service` is |
+| `processor-fake` | CLI-only because it is internal (hidden) and only in the `testing` build: the interop rig's remote processor with no models |
+| `processor-fake --url` | CLI-only because `processor-fake` is |
+| `processor-fake --username` | CLI-only because `processor-fake` is |
+| `processor-fake --password` | CLI-only because `processor-fake` is |
+| `processor-fake --name` | CLI-only because `processor-fake` is |
+| `processor-fake --storage` | CLI-only because `processor-fake` is |
+| `processor-fake --engine` | CLI-only because `processor-fake` is |
+| `processor-fake --hold-file` | CLI-only because `processor-fake` is |
+| `processor-fake --engine-revision` | CLI-only because `processor-fake` is |
+| `processor-fake --page-delay-ms` | CLI-only because `processor-fake` is |
+| `processor-fake --load-delay-ms` | CLI-only because `processor-fake` is |
+| `processor-fake --max-sessions` | CLI-only because `processor-fake` is |
+| `processor-fake --verbose` | CLI-only because `processor-fake` is |
 
 ## The desktop app itself
 
