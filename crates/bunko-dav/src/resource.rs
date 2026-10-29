@@ -4,6 +4,10 @@ use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use std::fs;
+
+use bunko_core::reader_tree::{self, Caller, PerUser};
+
 use crate::paths::{self, READER_ROOT, Target};
 
 /// A stat snapshot: everything the properties and validators need.
@@ -133,10 +137,11 @@ pub fn content_type(name: &str) -> &'static str {
     }
 }
 
-/// Which side of the tree a file lives on.
+/// Which side of the tree a file or folder lives on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
     Library,
+    /// The caller's own tree (root files, `history/**`).
     Progress,
 }
 
@@ -148,6 +153,7 @@ pub enum Resource {
         path: String,
         phys: PathBuf,
         stat: Stat,
+        kind: FileKind,
     },
     File {
         path: String,
@@ -174,6 +180,13 @@ impl Resource {
         match self {
             Resource::Virtual { .. } => None,
             Resource::Folder { phys, .. } | Resource::File { phys, .. } => Some(phys),
+        }
+    }
+
+    pub fn kind(&self) -> Option<FileKind> {
+        match self {
+            Resource::Virtual { .. } => None,
+            Resource::Folder { kind, .. } | Resource::File { kind, .. } => Some(*kind),
         }
     }
 
@@ -220,55 +233,100 @@ impl Resource {
 pub struct Roots {
     pub library: PathBuf,
     pub users: PathBuf,
+    pub history: crate::HistoryLimits,
 }
 
 impl Roots {
-    /// `users/<username>/<name>`, or `None` for a username that cannot be a directory.
-    pub fn user_file(&self, username: &str, name: &str) -> Option<PathBuf> {
-        paths::safe_username(username).then(|| self.users.join(username).join(name))
+    /// Where `caller`'s per-user tree lives: `users/<username>`, or the library root
+    /// for the cloud-root owner. `None` for a username that cannot be a directory.
+    pub fn user_base(&self, caller: Caller<'_>) -> Option<PathBuf> {
+        reader_tree::user_base(&self.library, &self.users, caller)
     }
 
-    /// Library-relative `/`-path of a physical path, or `None` when outside the library.
+    /// The physical path of the per-user `rel` (`goals.json`, `history/dev/x`) for
+    /// `caller`, existing or not. A root file is its name under the base; anything in
+    /// `history` must resolve (symlinks followed) inside the base's `history`.
+    pub fn user_path(&self, caller: Caller<'_>, rel: &str) -> Option<PathBuf> {
+        let base = self.user_base(caller)?;
+        match reader_tree::per_user(rel)? {
+            PerUser::File(name) => Some(base.join(name)),
+            PerUser::Dir(dir) | PerUser::InDir { dir, .. } => {
+                let resolved = paths::resolve_under(&base, rel.trim_matches('/'))?;
+                resolved.starts_with(base.join(dir)).then_some(resolved)
+            }
+        }
+    }
+
+    /// Library-relative `/`-path of a physical path, or `None` when outside the library
+    /// or one of the per-user names at its root (the cloud-root owner's own files): no
+    /// library hook (uploads, OCR, uuids, audit 'library', nginx) ever sees those.
     pub fn library_rel(&self, phys: &Path) -> Option<String> {
-        paths::relative_posix(phys, &self.library)
+        let rel = paths::relative_posix(phys, &self.library)?;
+        let first = rel.split('/').next().unwrap_or("");
+        (!reader_tree::is_per_user_root_name(first)).then_some(rel)
     }
 
     /// Resolve an existing resource (0.5.2 `get_resource_inst`). Blocking.
-    pub fn lookup(&self, path: &str, username: Option<&str>) -> Option<Resource> {
+    pub fn lookup(&self, path: &str, caller: Option<Caller<'_>>) -> Option<Resource> {
         let norm = paths::normalize(path);
         match paths::classify(&norm) {
             Target::Root | Target::ReaderRoot => Some(Resource::Virtual { path: norm }),
-            Target::Progress(name) => {
-                let phys = self.user_file(username?, name)?;
-                let meta = std::fs::metadata(&phys).ok()?;
-                Some(Resource::File {
-                    path: norm,
+            Target::Progress(rel) => {
+                let phys = self.user_path(caller?, &rel)?;
+                let meta = fs::metadata(&phys).ok()?;
+                Some(Self::resource(
+                    norm,
                     phys,
-                    stat: Stat::from_meta(&meta),
-                    kind: FileKind::Progress,
-                })
+                    Stat::from_meta(&meta),
+                    FileKind::Progress,
+                ))
             }
             Target::Library(rel) => {
-                let phys = paths::resolve_under(&self.library, &rel)?;
-                let meta = std::fs::metadata(&phys).ok()?;
-                let stat = Stat::from_meta(&meta);
-                if stat.is_dir {
-                    Some(Resource::Folder {
-                        path: norm,
-                        phys,
-                        stat,
-                    })
-                } else {
-                    Some(Resource::File {
-                        path: norm,
-                        phys,
-                        stat,
-                        kind: FileKind::Library,
-                    })
-                }
+                let phys = self.library_member(&self.library, &rel)?;
+                let meta = fs::metadata(&phys).ok()?;
+                Some(Self::resource(
+                    norm,
+                    phys,
+                    Stat::from_meta(&meta),
+                    FileKind::Library,
+                ))
             }
             Target::Inbox | Target::Other => None,
         }
+    }
+
+    /// `rel` resolved under the library folder `dir`, where it must stay, and never at
+    /// one of the per-user names of the root (`S/../goals.json`, or a symlink to
+    /// `history`, would otherwise reach the cloud-root owner's own files).
+    pub(crate) fn library_member(&self, dir: &Path, rel: &str) -> Option<PathBuf> {
+        let resolved = paths::resolve_under(dir, rel)?;
+        (resolved.starts_with(&self.library) && self.library_rel(&resolved).is_some())
+            .then_some(resolved)
+    }
+
+    fn resource(path: String, phys: PathBuf, stat: Stat, kind: FileKind) -> Resource {
+        if stat.is_dir {
+            Resource::Folder {
+                path,
+                phys,
+                stat,
+                kind,
+            }
+        } else {
+            Resource::File {
+                path,
+                phys,
+                stat,
+                kind,
+            }
+        }
+    }
+
+    /// Is `phys` inside `caller`'s history tree (where a Progress folder's members must
+    /// stay)?
+    fn in_user_history(&self, caller: Caller<'_>, phys: &Path) -> bool {
+        self.user_base(caller)
+            .is_some_and(|base| phys.starts_with(base.join(reader_tree::HISTORY_DIR)))
     }
 
     /// The physical path a member `name` of the collection `parent` would have (0.5.2
@@ -278,26 +336,29 @@ impl Roots {
         &self,
         parent: &Resource,
         name: &str,
-        username: Option<&str>,
+        caller: Option<Caller<'_>>,
     ) -> Option<(PathBuf, FileKind)> {
         match parent {
             Resource::Virtual { path } if paths::normalize(path) == format!("/{READER_ROOT}") => {
-                if paths::is_per_user_name(name) {
-                    Some((self.user_file(username?, name)?, FileKind::Progress))
+                if reader_tree::is_per_user_root_name(name) {
+                    Some((self.user_path(caller?, name)?, FileKind::Progress))
                 } else {
-                    Some((
-                        paths::resolve_under(&self.library, name)?,
-                        FileKind::Library,
-                    ))
+                    Some((self.library_member(&self.library, name)?, FileKind::Library))
                 }
             }
-            Resource::Folder { phys, .. } => {
+            Resource::Folder {
+                phys,
+                kind: FileKind::Progress,
+                ..
+            } => {
                 let resolved = paths::resolve_under(phys, name)?;
-                // The folder is inside the library; its member must stay there too.
-                resolved
-                    .starts_with(&self.library)
-                    .then_some((resolved, FileKind::Library))
+                self.in_user_history(caller?, &resolved)
+                    .then_some((resolved, FileKind::Progress))
             }
+            // The folder is inside the library; its member must stay there too.
+            Resource::Folder { phys, .. } => self
+                .library_member(phys, name)
+                .map(|p| (p, FileKind::Library)),
             _ => None,
         }
     }
@@ -308,19 +369,27 @@ impl Roots {
     /// resolving `Kingdom` can hand back the source's own `kingdom`, turning a rename that
     /// fixes the case into a rename onto itself. Where the literal path LEADS must still be
     /// inside the library (a COPY writes through a symlink sitting at the destination).
+    /// Nothing moves into or inside the history tree.
     pub fn destination_path(
         &self,
         parent: &Resource,
         name: &str,
-        username: Option<&str>,
+        caller: Option<Caller<'_>>,
     ) -> Option<(PathBuf, FileKind)> {
         let dir = match parent {
             Resource::Virtual { path } if paths::normalize(path) == format!("/{READER_ROOT}") => {
                 if paths::is_per_user_name(name) {
-                    return self.member_path(parent, name, username);
+                    return self.member_path(parent, name, caller);
+                }
+                if reader_tree::is_per_user_root_name(name) {
+                    return None;
                 }
                 self.library.as_path()
             }
+            Resource::Folder {
+                kind: FileKind::Progress,
+                ..
+            } => return None,
             Resource::Folder { phys, .. } => phys.as_path(),
             _ => return None,
         };
@@ -333,13 +402,13 @@ impl Roots {
         }
         let candidate = dir.join(name);
         let rel = self.library_rel(&candidate)?;
-        paths::resolve_under(&self.library, &rel)?;
+        self.library_member(&self.library, &rel)?;
         Some((candidate, FileKind::Library))
     }
 
     /// Members of a collection: `(virtual path, resource)`, in listing order (spec §8.2).
     /// Blocking.
-    pub fn members(&self, res: &Resource, username: Option<&str>) -> Vec<Resource> {
+    pub fn members(&self, res: &Resource, caller: Option<Caller<'_>>) -> Vec<Resource> {
         match res {
             Resource::Virtual { path } => {
                 let norm = paths::normalize(path);
@@ -349,38 +418,54 @@ impl Roots {
                     }];
                 }
                 let mut out = Vec::new();
-                if let Some(user) = username {
-                    for name in paths::PER_USER_FILES {
-                        if let Some(phys) = self.user_file(user, name)
-                            && let Ok(meta) = std::fs::metadata(&phys)
+                if let Some(caller) = caller {
+                    let names = reader_tree::PER_USER_FILES
+                        .iter()
+                        .chain(reader_tree::PER_USER_DIRS.iter());
+                    for name in names {
+                        if let Some(phys) = self.user_path(caller, name)
+                            && let Ok(meta) = fs::metadata(&phys)
                         {
-                            out.push(Resource::File {
-                                path: format!("/{READER_ROOT}/{name}"),
+                            out.push(Self::resource(
+                                format!("/{READER_ROOT}/{name}"),
                                 phys,
-                                stat: Stat::from_meta(&meta),
-                                kind: FileKind::Progress,
-                            });
+                                Stat::from_meta(&meta),
+                                FileKind::Progress,
+                            ));
                         }
                     }
                 }
-                out.extend(self.list_dir(&self.library, &format!("/{READER_ROOT}"), true));
+                out.extend(self.list_dir(
+                    &self.library,
+                    &format!("/{READER_ROOT}"),
+                    true,
+                    FileKind::Library,
+                ));
                 out
             }
-            Resource::Folder { path, phys, .. } => {
-                self.list_dir(phys, &paths::normalize(path), false)
-            }
+            Resource::Folder {
+                path, phys, kind, ..
+            } => self.list_dir(phys, &paths::normalize(path), false, *kind),
             Resource::File { .. } => Vec::new(),
         }
     }
 
-    fn list_dir(&self, dir: &Path, vpath: &str, reader_root: bool) -> Vec<Resource> {
-        let Ok(entries) = std::fs::read_dir(dir) else {
+    fn list_dir(
+        &self,
+        dir: &Path,
+        vpath: &str,
+        reader_root: bool,
+        kind: FileKind,
+    ) -> Vec<Resource> {
+        let Ok(entries) = fs::read_dir(dir) else {
             return Vec::new();
         };
         let mut out: Vec<Resource> = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if reader_root && paths::is_per_user_name(&name) {
+            // The per-user names at the library root are never the library's: a stray
+            // copy, or the cloud-root owner's own files, which no one else may see.
+            if reader_root && reader_tree::is_per_user_root_name(&name) {
                 continue;
             }
             if paths::is_staging_name(&name) {
@@ -392,38 +477,60 @@ impl Roots {
             let Ok(meta) = std::fs::metadata(&phys) else {
                 continue;
             };
-            let stat = Stat::from_meta(&meta);
             let child = paths::join_uri(vpath, &name);
-            if stat.is_dir {
-                out.push(Resource::Folder {
-                    path: child,
-                    phys,
-                    stat,
-                });
-            } else {
-                out.push(Resource::File {
-                    path: child,
-                    phys,
-                    stat,
-                    kind: FileKind::Library,
-                });
-            }
+            out.push(Self::resource(child, phys, Stat::from_meta(&meta), kind));
         }
         out.sort_by(|a, b| a.path().cmp(b.path()));
         out
     }
 
     /// Whether a listed sub-folder may be descended into for `Depth: infinity`: a symlink
-    /// leading out of the library (or into a loop) is listed but not walked.
-    pub fn walkable(&self, folder: &Resource, ancestors: &[PathBuf]) -> Option<PathBuf> {
+    /// leading out of its tree (the library, or the caller's history) or into a loop is
+    /// listed but not walked.
+    pub fn walkable(
+        &self,
+        folder: &Resource,
+        ancestors: &[PathBuf],
+        caller: Option<Caller<'_>>,
+    ) -> Option<PathBuf> {
         let phys = folder.phys()?;
-        let canon = std::fs::canonicalize(phys).ok()?;
-        // Outside the library, or the folder (or an ancestor of it) is already being
+        let canon = fs::canonicalize(phys).ok()?;
+        let inside = match folder.kind() {
+            Some(FileKind::Progress) => {
+                let base = self.user_base(caller?)?.join(reader_tree::HISTORY_DIR);
+                fs::canonicalize(base).is_ok_and(|b| canon.starts_with(b))
+            }
+            _ => canon.starts_with(&self.library) && self.library_rel(&canon).is_some(),
+        };
+        // Outside its tree, or the folder (or an ancestor of it) is already being
         // walked: a symlink loop.
-        if !canon.starts_with(&self.library) || ancestors.iter().any(|a| a.starts_with(&canon)) {
+        if !inside || ancestors.iter().any(|a| a.starts_with(&canon)) {
             return None;
         }
         Some(canon)
+    }
+
+    /// Bytes stored in `caller`'s history tree (small: one account's event logs).
+    /// Blocking.
+    pub fn history_bytes(&self, caller: Caller<'_>) -> u64 {
+        fn walk(dir: &Path) -> u64 {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return 0;
+            };
+            let mut total = 0;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                match fs::symlink_metadata(&path) {
+                    Ok(m) if m.is_dir() => total += walk(&path),
+                    Ok(m) => total += m.len(),
+                    Err(_) => {}
+                }
+            }
+            total
+        }
+        self.user_base(caller)
+            .map(|base| walk(&base.join(reader_tree::HISTORY_DIR)))
+            .unwrap_or(0)
     }
 }
 
@@ -444,6 +551,62 @@ mod tests {
         assert_eq!(s.folder_etag(), "1790878208.881310");
         assert_eq!(http_date(1790878208), "Thu, 01 Oct 2026 18:10:08 GMT");
         assert_eq!(rfc3339(1790878208), "2026-10-01T18:10:08Z");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
+    fn per_user_paths_resolve_for_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        for d in ["library", "users/alice", "elsewhere"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        let roots = Roots {
+            library: base.join("library"),
+            users: base.join("users"),
+            history: Default::default(),
+        };
+        let alice = Caller {
+            username: "alice",
+            owns_cloud_root: false,
+        };
+        let owner = Caller {
+            owns_cloud_root: true,
+            ..alice
+        };
+        assert_eq!(roots.user_base(alice), Some(base.join("users/alice")));
+        assert_eq!(roots.user_base(owner), Some(base.join("library")));
+        assert_eq!(
+            roots.user_path(alice, "goals.json"),
+            Some(base.join("users/alice/goals.json"))
+        );
+        assert_eq!(
+            roots.user_path(owner, "history/d/x.events"),
+            Some(base.join("library/history/d/x.events"))
+        );
+        assert_eq!(roots.user_path(alice, "history/../goals.json"), None);
+        assert_eq!(roots.user_path(alice, "S/v.cbz"), None);
+        // The owner's own files at the library root are no library path.
+        assert_eq!(roots.library_rel(&base.join("library/history/d/x")), None);
+        assert_eq!(roots.library_rel(&base.join("library/goals.json")), None);
+        assert_eq!(
+            roots
+                .library_rel(&base.join("library/History/v.cbz"))
+                .as_deref(),
+            Some("History/v.cbz")
+        );
+        // A history that leads out of the account's tree is not the account's history.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("elsewhere"), base.join("users/alice/history"))
+                .unwrap();
+            assert_eq!(roots.user_path(alice, "history/d/x"), None);
+            assert!(
+                roots
+                    .lookup("/mokuro-reader/history", Some(alice))
+                    .is_none()
+            );
+        }
     }
 
     #[test]

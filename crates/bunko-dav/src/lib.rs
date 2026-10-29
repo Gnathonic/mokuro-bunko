@@ -33,9 +33,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
+use bunko_core::reader_tree;
 use bunko_core::{Role, StorageLayout};
 use http::{HeaderMap, Request, Response, StatusCode};
 
+pub use bunko_core::reader_tree::Caller;
 pub use cache::{CacheConfig, PropfindCache};
 pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
 pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
@@ -50,6 +52,25 @@ use crate::resource::Roots;
 #[derive(Debug, Clone, Default)]
 pub struct DavConfig {
     pub propfind_cache: CacheConfig,
+    pub history: HistoryLimits,
+}
+
+/// Size limits of an account's reading-history tree (`/mokuro-reader/history`).
+#[derive(Debug, Clone, Copy)]
+pub struct HistoryLimits {
+    /// One file (413 beyond).
+    pub max_file_bytes: u64,
+    /// The account's whole tree (507 beyond).
+    pub max_total_bytes: u64,
+}
+
+impl Default for HistoryLimits {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: reader_tree::HISTORY_MAX_FILE_BYTES,
+            max_total_bytes: reader_tree::HISTORY_MAX_TOTAL_BYTES,
+        }
+    }
 }
 
 /// Who is asking, as the server's auth layer decided (spec §2.3).
@@ -59,6 +80,9 @@ pub struct DavContext {
     /// `users/<username>/`.
     pub username: Option<String>,
     pub role: Role,
+    /// The account owns a cloud library's root: its per-user files are the root's own
+    /// (spec 0.8 §10). Never true for anonymous.
+    pub owns_cloud_root: bool,
     /// `MOKURO_NGINX_ACCEL=1`: answer library GET/HEAD with `X-Accel-Redirect` (§8.10).
     pub nginx_accel: bool,
     /// The resolved client IP (logging only).
@@ -71,6 +95,7 @@ impl DavContext {
         Self {
             username: None,
             role: Role::Anonymous,
+            owns_cloud_root: false,
             nginx_accel: false,
             client_ip: None,
             hooks,
@@ -81,6 +106,7 @@ impl DavContext {
         Self {
             username: Some(username.into()),
             role,
+            owns_cloud_root: false,
             nginx_accel: false,
             client_ip: None,
             hooks,
@@ -89,6 +115,14 @@ impl DavContext {
 
     pub(crate) fn principal(&self) -> &str {
         self.username.as_deref().unwrap_or("")
+    }
+
+    /// Who per-user paths resolve for (`None`: anonymous, who has no per-user tree).
+    pub fn caller(&self) -> Option<Caller<'_>> {
+        self.username.as_deref().map(|username| Caller {
+            username,
+            owns_cloud_root: self.owns_cloud_root,
+        })
     }
 }
 
@@ -123,6 +157,7 @@ impl Dav {
         let roots = Roots {
             library: std::fs::canonicalize(layout.library())?,
             users: std::fs::canonicalize(layout.users())?,
+            history: config.history,
         };
         let cache = PropfindCache::new(config.propfind_cache, roots.clone());
         let path_case = PathCase::new(LibraryPathCanonicalizer::new(roots.library.clone(), None));
@@ -156,13 +191,16 @@ impl Dav {
         &self.inner.write_locks
     }
 
-    /// The physical file a virtual path names for `username` (existing or not), or
+    /// The physical file a virtual path names for `caller` (existing or not), or
     /// `None` for virtual/unmapped paths and traversal. For the auth layer's "does this PUT
     /// replace an existing file" check (spec §4.4). Blocking (resolves symlinks).
-    pub fn physical_path(&self, virtual_path: &str, username: Option<&str>) -> Option<PathBuf> {
+    pub fn physical_path(&self, virtual_path: &str, caller: Option<Caller<'_>>) -> Option<PathBuf> {
         match paths::classify(virtual_path) {
-            paths::Target::Progress(name) => self.inner.roots.user_file(username?, name),
-            paths::Target::Library(rel) => paths::resolve_under(&self.inner.roots.library, &rel),
+            paths::Target::Progress(rel) => self.inner.roots.user_path(caller?, &rel),
+            paths::Target::Library(rel) => {
+                let roots = &self.inner.roots;
+                roots.library_member(&roots.library, &rel)
+            }
             _ => None,
         }
     }

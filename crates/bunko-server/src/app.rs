@@ -216,6 +216,7 @@ impl Services {
                 budget_bytes: cache_mb * 1024 * 1024 / 2,
                 ..Default::default()
             },
+            ..Default::default()
         };
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
         let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
@@ -368,6 +369,7 @@ pub fn dav_handler(
             let dctx = bunko_dav::DavContext {
                 username: ctx.identity.username().map(str::to_string),
                 role: ctx.identity.role(),
+                owns_cloud_root: ctx.identity.owns_cloud_root,
                 nginx_accel,
                 client_ip: Some(ctx.client_ip.clone()),
                 hooks,

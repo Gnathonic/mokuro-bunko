@@ -21,6 +21,7 @@ use crate::resource::{Resource, Stat};
 use crate::response::{self, DavError, Resp};
 use crate::upload::{self, Rejection, Staging, Stored};
 use crate::{Inner, paths};
+use bunko_core::reader_tree::{self, HistoryShape};
 
 enum PutError {
     /// The writer's own verdict (truncated, corrupted-in-transit, archive-*, disk-full,
@@ -121,15 +122,23 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
         )
         .into());
     }
+    // In the caller's history only `history/<device>/<file>` takes a file.
+    let history = match paths::classify(&req.path) {
+        paths::Target::Progress(rel) => reader_tree::history_shape_of_rel(&rel),
+        _ => None,
+    };
+    if history.is_some_and(|shape| shape != HistoryShape::File) {
+        return Err(Rejection::new(403, "forbidden", "Not a reading-history path.", false).into());
+    }
     let user = req.username();
-    let res = lookup(inner, &req.path, user).await?;
+    let res = lookup(inner, &req.path, req).await?;
     if res.as_ref().is_some_and(Resource::is_collection) {
         return Err(
             DavError::new(StatusCode::METHOD_NOT_ALLOWED, "Cannot PUT to a collection").into(),
         );
     }
     let parent = match paths::uri_parent(&req.path) {
-        Some(p) => lookup(inner, &p, user).await?,
+        Some(p) => lookup(inner, &p, req).await?,
         None => None,
     };
     let Some(parent) = parent.filter(Resource::is_collection) else {
@@ -157,12 +166,11 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
             check_dav_locks(inner, req, &resource_key(&parent, user), false)?;
             let name = paths::uri_name(&req.path).to_string();
             let inner2 = inner.clone();
-            let (parent2, user2) = (parent.clone(), user.map(str::to_string));
-            let (phys, kind) = super::blocking(move || {
-                inner2.roots.member_path(&parent2, &name, user2.as_deref())
-            })
-            .await?
-            .ok_or_else(|| DavError::new(StatusCode::FORBIDDEN, "Forbidden"))?;
+            let (parent2, ctx2) = (parent.clone(), req.ctx.clone());
+            let (phys, kind) =
+                super::blocking(move || inner2.roots.member_path(&parent2, &name, ctx2.caller()))
+                    .await?
+                    .ok_or_else(|| DavError::new(StatusCode::FORBIDDEN, "Forbidden"))?;
             // A lock-null resource (LOCK before the first PUT) is locked by its own URL.
             let pseudo = Resource::File {
                 path: paths::normalize(&req.path),
@@ -190,8 +198,17 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
         )
         .into());
     };
-    let existed_before = tokio::fs::metadata(&dest).await.is_ok();
+    let before = tokio::fs::metadata(&dest).await.ok();
+    let existed_before = before.is_some();
     let expected = expected_size(req);
+    // A history file's cap, and the room the account's history tree has left for it.
+    let caps = match history {
+        Some(_) => {
+            let replaced = before.as_ref().map_or(0, |m| m.len());
+            Some(history_caps(inner, req, expected, replaced).await?)
+        }
+        None => None,
+    };
     let digest = upload::parse_content_digest(req.header("content-digest"));
     let mut staging = Staging::create(&dest, expected, digest).await?;
     if existed_before && is_ocr_sidecar(&dest) {
@@ -212,6 +229,9 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
             Some(Ok(frame)) => {
                 if let Ok(data) = frame.into_data() {
                     staging.write(&data).await?;
+                    if let Some(caps) = &caps {
+                        caps.check(staging.written())?;
+                    }
                 }
             }
             Some(Err(_)) => {
@@ -269,6 +289,68 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
         );
     }
     Ok(resp)
+}
+
+/// The limits a reading-history PUT is held to: the file cap, and the room left in the
+/// account's tree (its total minus the file being replaced).
+struct HistoryCaps {
+    max_file: u64,
+    room: u64,
+    max_total: u64,
+}
+
+impl HistoryCaps {
+    fn check(&self, size: u64) -> Result<(), Rejection> {
+        if size > self.max_file {
+            return Err(Rejection::new(
+                413,
+                "too-large",
+                format!(
+                    "A reading-history file is limited to {} bytes.",
+                    self.max_file
+                ),
+                false,
+            ));
+        }
+        if size > self.room {
+            return Err(Rejection::new(
+                507,
+                "quota-exceeded",
+                format!(
+                    "This account's reading history is limited to {} bytes.",
+                    self.max_total
+                ),
+                false,
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Measure the caller's history tree and refuse a declared size over a limit before
+/// any of the body is read.
+async fn history_caps(
+    inner: &Arc<Inner>,
+    req: &Req,
+    expected: Option<u64>,
+    replaced: u64,
+) -> Result<HistoryCaps, PutError> {
+    let limits = inner.roots.history;
+    let (inner2, ctx) = (inner.clone(), req.ctx.clone());
+    let stored = super::blocking(move || {
+        ctx.caller()
+            .map_or(0, |caller| inner2.roots.history_bytes(caller))
+    })
+    .await?;
+    let caps = HistoryCaps {
+        max_file: limits.max_file_bytes,
+        room: limits
+            .max_total_bytes
+            .saturating_sub(stored.saturating_sub(replaced)),
+        max_total: limits.max_total_bytes,
+    };
+    caps.check(expected.unwrap_or(0))?;
+    Ok(caps)
 }
 
 /// A `.mokuro` / `.mokuro.gz` OCR file.
