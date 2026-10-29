@@ -42,7 +42,7 @@ pub use cache::{CacheConfig, PropfindCache};
 pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
 pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};
-pub use write_locks::{PathWriteLocks, WriteLockGuard};
+pub use write_locks::{AccountWriteGuard, AccountWriteLocks, PathWriteLocks, WriteLockGuard};
 
 use crate::locks::LockManager;
 use crate::propfind::DeadProps;
@@ -129,6 +129,7 @@ impl DavContext {
 pub(crate) struct Inner {
     pub roots: Roots,
     pub write_locks: PathWriteLocks,
+    pub history_writers: AccountWriteLocks,
     pub locks: LockManager,
     pub dead: DeadProps,
     pub damage: DamageMemory,
@@ -165,6 +166,7 @@ impl Dav {
             inner: Arc::new(Inner {
                 roots,
                 write_locks: PathWriteLocks::new(),
+                history_writers: AccountWriteLocks::default(),
                 locks: LockManager::new(),
                 dead: DeadProps::default(),
                 damage: DamageMemory::default(),

@@ -198,6 +198,15 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
         )
         .into());
     };
+    // One history writer per account from the measure to the publish, so the room
+    // left is never handed to two files at once.
+    let history_base = history
+        .and_then(|_| req.ctx.caller())
+        .and_then(|caller| inner.roots.user_base(caller));
+    let _history_writer = match history_base {
+        Some(base) => Some(inner.history_writers.lock(base).await),
+        None => None,
+    };
     let before = tokio::fs::metadata(&dest).await.ok();
     let existed_before = before.is_some();
     let expected = expected_size(req);
