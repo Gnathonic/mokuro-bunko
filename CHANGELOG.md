@@ -49,6 +49,13 @@
   per account instead of into the shared library. `/login/api/me` lists these files as
   `per_user_files`, signed in or not, and a reader uses a per-account file only once the
   server lists it.
+- **Reading history is kept per account.** Mokuro Reader's history files
+  (`/mokuro-reader/history/<device>/<file>`) are each account's own, stored under
+  `users/<name>/history/` and never shown to anyone else. Any account that can save
+  progress, `registered` included, creates its `history` and device folders and writes
+  its files there; a file is limited to 16 MiB and an account's history to 256 MiB.
+  History files are never moved, copied or locked, and saving progress or history no
+  longer drops the cached library listing.
 
 ### Changed
 - **Bunko and Mokuro Reader agree on what a `.mokuro` beside a volume is.** One rule
