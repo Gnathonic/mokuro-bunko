@@ -9,6 +9,7 @@ pub mod paths;
 use crate::http::limiter::AuthLimiter;
 use base64::Engine as _;
 use bunko_core::Role;
+use bunko_core::reader_tree::Caller;
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 
 /// Capabilities derived from a role.
@@ -53,6 +54,10 @@ pub struct Identity {
     pub attempted_username: Option<String>,
     /// The refused credential was a bearer token.
     pub bearer_failed: bool,
+    /// The account owns a cloud library's root (its progress user), so its per-user
+    /// files are the cloud root's own. Decided per request from the live config, after
+    /// authentication; never true for anonymous.
+    pub owns_cloud_root: bool,
 }
 
 impl Identity {
@@ -67,6 +72,13 @@ impl Identity {
     }
     pub fn authenticated(&self) -> bool {
         self.user.is_some()
+    }
+    /// Who per-user paths resolve for (`None`: anonymous).
+    pub fn caller(&self) -> Option<Caller<'_>> {
+        self.username().map(|username| Caller {
+            username,
+            owns_cloud_root: self.owns_cloud_root,
+        })
     }
 }
 
@@ -86,7 +98,7 @@ pub trait AuthBackend: Send + Sync {
     /// Uploader owns every tracked volume of the series.
     fn can_user_edit_series(&self, username: &str, series_title: &str) -> bool;
     /// Does the virtual path map to an existing physical file?
-    fn physical_exists(&self, virtual_path: &str, username: Option<&str>) -> bool;
+    fn physical_exists(&self, virtual_path: &str, caller: Option<Caller<'_>>) -> bool;
 }
 
 /// A `Basic` header that is present but unusable (bad base64, not UTF-8, no colon).
@@ -438,7 +450,7 @@ fn authorize_put(path: &str, id: &Identity, backend: &dyn AuthBackend) -> Result
         need(id, Perm::AddFiles, "Permission denied: cannot add files")?;
         if !has_perm(id.role(), Perm::ModifyDelete) {
             let user = id.username();
-            if backend.physical_exists(path, user)
+            if backend.physical_exists(path, id.caller())
                 && !user.is_some_and(|u| backend.can_user_delete_library_path(u, path))
             {
                 return Err(Denied::new(
@@ -481,7 +493,7 @@ mod tests {
         fn can_user_edit_series(&self, _: &str, s: &str) -> bool {
             s == "Mine"
         }
-        fn physical_exists(&self, p: &str, _: Option<&str>) -> bool {
+        fn physical_exists(&self, p: &str, _: Option<Caller<'_>>) -> bool {
             p.ends_with(".cbz")
         }
     }
@@ -523,7 +535,7 @@ mod tests {
         fn can_user_edit_series(&self, _: &str, _: &str) -> bool {
             false
         }
-        fn physical_exists(&self, _: &str, _: Option<&str>) -> bool {
+        fn physical_exists(&self, _: &str, _: Option<Caller<'_>>) -> bool {
             false
         }
     }

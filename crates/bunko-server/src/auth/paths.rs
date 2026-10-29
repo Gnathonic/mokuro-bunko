@@ -1,13 +1,7 @@
 //! Path predicates the authorisation table is written in (0.5.2 `middleware/auth.py`,
 //! `metadata/paths.py`). Paths are percent-decoded UTF-8.
 
-pub const READER_ROOT: &str = "mokuro-reader";
-pub const PER_USER_FILES: &[&str] = &[
-    "volume-data.json",
-    "profiles.json",
-    "goals.json",
-    "positions.json",
-];
+pub use bunko_core::reader_tree::{PER_USER_FILES, READER_ROOT};
 
 fn normalized(path: &str) -> String {
     format!("/{}", path.trim_matches('/'))
@@ -60,7 +54,7 @@ pub fn posix_normpath(path: &str) -> String {
 fn library_relative_normalized(path: &str) -> Option<String> {
     let n = posix_normpath(&format!("/{}", path.trim_matches('/')));
     let rel = n.strip_prefix("/mokuro-reader/")?;
-    if rel.is_empty() || PER_USER_FILES.contains(&rel) {
+    if rel.is_empty() || bunko_core::reader_tree::is_per_user_rel(rel) {
         return None;
     }
     Some(rel.to_string())
@@ -139,6 +133,9 @@ mod tests {
         );
         assert!(series_title_from_series_file_path("/mokuro-reader/a/b/series.json").is_none());
         assert!(series_title_from_series_file_path("/mokuro-reader/ /series.json").is_none());
+        // The reading-history tree is the account's own, never compiled metadata.
+        assert!(!is_series_file_path("/mokuro-reader/history/series.json"));
+        assert!(is_series_file_path("/mokuro-reader/History/series.json"));
     }
 
     #[test]
