@@ -409,3 +409,198 @@ async fn a_folder_lists_the_callers_corrections_beside_their_archive() {
     assert_eq!(depth0.code(), 207);
     assert!(depth0.text().contains(&layer("alice").len().to_string()));
 }
+
+impl Env {
+    async fn mv(&self, user: &str, from: &str, to: &str) -> u16 {
+        self.req(
+            Some(user),
+            "MOVE",
+            from,
+            &[("destination", &format!("http://localhost:8080{to}"))],
+            b"",
+        )
+        .await
+        .code()
+    }
+
+    async fn put_correction(&self, user: &str, path: &str, text: &str) {
+        let r = self.req(Some(user), "PUT", path, &[], &layer(text)).await;
+        assert!(matches!(r.code(), 201 | 204), "{user} {path}: {}", r.text());
+    }
+}
+
+/// Corrections follow their archive (B3.4): a rename of the `.cbz` takes every
+/// account's along, whatever order the reader moves its files in.
+#[tokio::test]
+async fn corrections_follow_an_archive_rename() {
+    let env = Env::new();
+    for user in ["alice", "bob"] {
+        env.put_correction(user, EDIT, user).await;
+    }
+    env.put_correction("alice", "/mokuro-reader/series/vol1.edit-3.mokuro", "a3")
+        .await;
+    // Another volume's, and a dotted volume's own sidecar, stay where they are.
+    std::fs::write(env.lib("series/vol1.5.cbz"), b"x").unwrap();
+    env.put_correction("alice", "/mokuro-reader/series/vol1.5.edit.mokuro", "a15")
+        .await;
+    assert_eq!(
+        env.mv(
+            "editor",
+            "/mokuro-reader/series/vol1.cbz",
+            "/mokuro-reader/series/vol9.cbz"
+        )
+        .await,
+        204
+    );
+    for (user, name, body) in [
+        ("alice", "vol9.edit.mokuro", "alice"),
+        ("alice", "vol9.edit-3.mokuro", "a3"),
+        ("bob", "vol9.edit.mokuro", "bob"),
+        ("alice", "vol1.5.edit.mokuro", "a15"),
+    ] {
+        let path = env.overlay(user, &format!("series/{name}"));
+        assert_eq!(std::fs::read(&path).unwrap(), layer(body), "{user} {name}");
+    }
+    assert!(!env.overlay("alice", "series/vol1.edit.mokuro").exists());
+    assert!(!env.overlay("bob", "series/vol1.edit.mokuro").exists());
+    // The reader's own MOVE of the old name finds the source gone (404) and the
+    // destination already there: it converges.
+    assert_eq!(
+        env.mv("alice", EDIT, "/mokuro-reader/series/vol9.edit.mokuro")
+            .await,
+        404
+    );
+    let got = env
+        .req(
+            Some("alice"),
+            "GET",
+            "/mokuro-reader/series/vol9.edit.mokuro",
+            &[],
+            b"",
+        )
+        .await;
+    assert_eq!((got.code(), got.body), (200, layer("alice")));
+}
+
+/// A correction already at the destination is kept; the moving one lands under the
+/// next free `edit-<n>`, so nothing is lost.
+#[tokio::test]
+async fn a_colliding_correction_moves_in_as_the_next_free_edit() {
+    let env = Env::new();
+    env.put_correction("alice", EDIT, "moving").await;
+    // An orphan the account left at the new name earlier (no archive there yet).
+    std::fs::write(
+        env.overlay("alice", "series/vol9.edit.mokuro"),
+        layer("kept"),
+    )
+    .unwrap();
+    std::fs::write(
+        env.overlay("alice", "series/vol9.edit-2.mokuro"),
+        layer("kept 2"),
+    )
+    .unwrap();
+    assert_eq!(
+        env.mv(
+            "editor",
+            "/mokuro-reader/series/vol1.cbz",
+            "/mokuro-reader/series/vol9.cbz"
+        )
+        .await,
+        204
+    );
+    for (name, body) in [
+        ("vol9.edit.mokuro", "kept"),
+        ("vol9.edit-2.mokuro", "kept 2"),
+        ("vol9.edit-3.mokuro", "moving"),
+    ] {
+        let path = env.overlay("alice", &format!("series/{name}"));
+        assert_eq!(std::fs::read(&path).unwrap(), layer(body), "{name}");
+    }
+}
+
+/// A folder MOVE carries every overlay below it, merging into a folder the account
+/// already has corrections in.
+#[tokio::test]
+async fn corrections_follow_a_folder_move() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("series/inner")).unwrap();
+    std::fs::write(env.lib("series/inner/v.cbz"), b"x").unwrap();
+    for user in ["alice", "bob"] {
+        env.put_correction(user, EDIT, user).await;
+    }
+    env.put_correction("bob", "/mokuro-reader/series/inner/v.edit.mokuro", "inner")
+        .await;
+    // Bob already has a correction where the folder is going (an earlier volume).
+    std::fs::create_dir_all(env.overlay("bob", "renamed")).unwrap();
+    std::fs::write(env.overlay("bob", "renamed/vol1.edit.mokuro"), layer("old")).unwrap();
+    assert_eq!(
+        env.mv(
+            "editor",
+            "/mokuro-reader/series/",
+            "/mokuro-reader/renamed/"
+        )
+        .await,
+        201
+    );
+    for (user, rel, body) in [
+        ("alice", "renamed/vol1.edit.mokuro", "alice"),
+        ("bob", "renamed/vol1.edit.mokuro", "old"),
+        ("bob", "renamed/vol1.edit-2.mokuro", "bob"),
+        ("bob", "renamed/inner/v.edit.mokuro", "inner"),
+    ] {
+        assert_eq!(
+            std::fs::read(env.overlay(user, rel)).unwrap(),
+            layer(body),
+            "{user} {rel}"
+        );
+    }
+    assert!(!env.overlay("alice", "series").exists());
+    assert!(!env.overlay("bob", "series").exists());
+    let got = env
+        .req(
+            Some("bob"),
+            "GET",
+            "/mokuro-reader/renamed/inner/v.edit.mokuro",
+            &[],
+            b"",
+        )
+        .await;
+    assert_eq!((got.code(), got.body), (200, layer("inner")));
+}
+
+/// A deleted archive or folder takes every account's corrections of it along; those
+/// of another volume (rule 6: an exact stem wins over a folded one) stay.
+#[tokio::test]
+async fn corrections_go_with_their_volume() {
+    let env = Env::new();
+    std::fs::write(env.lib("series/VOL1.cbz"), b"x").unwrap();
+    std::fs::write(env.lib("series/vol2.cbz"), b"x").unwrap();
+    for user in ["alice", "bob"] {
+        env.put_correction(user, EDIT, user).await;
+    }
+    env.put_correction("alice", "/mokuro-reader/series/VOL1.edit.mokuro", "upper")
+        .await;
+    env.put_correction("alice", "/mokuro-reader/series/vol2.edit.mokuro", "two")
+        .await;
+    let r = env
+        .req(
+            Some("editor"),
+            "DELETE",
+            "/mokuro-reader/series/vol1.cbz",
+            &[],
+            b"",
+        )
+        .await;
+    assert_eq!(r.code(), 204);
+    assert!(!env.overlay("alice", "series/vol1.edit.mokuro").exists());
+    assert!(!env.overlay("bob", "series/vol1.edit.mokuro").exists());
+    assert!(env.overlay("alice", "series/VOL1.edit.mokuro").exists());
+    assert!(env.overlay("alice", "series/vol2.edit.mokuro").exists());
+
+    let r = env
+        .req(Some("editor"), "DELETE", "/mokuro-reader/series/", &[], b"")
+        .await;
+    assert_eq!(r.code(), 204);
+    assert!(!env.overlay("alice", "series").exists());
+    assert!(env.base.join("users/alice/edits").exists());
+}

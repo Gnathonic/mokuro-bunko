@@ -5,6 +5,10 @@
 //! is the physical file beside the archive (a cloud-direct reader shares it), any other
 //! account's is its overlay `users/<u>/edits/<library rel>`. Nobody sees another
 //! account's copy, anonymous sees none. A listing shows one only beside its `.cbz`.
+//!
+//! Overlays follow their volume ([`PersonalOverlays`]): an archive or folder that moves
+//! or merges takes every account's overlays along, a collision moving in as the next
+//! free `edit-<n>`; a deleted archive or folder takes them with it.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -14,6 +18,7 @@ use bunko_core::sidecar_names::{self, LayerClass, SidecarClass};
 use bunko_store::fs;
 
 use crate::paths;
+use crate::write_locks::PathWriteLocks;
 
 /// Below `users/<u>/`: the account's overlays, laid out like the library.
 pub const EDITS_DIR: &str = "edits";
@@ -155,6 +160,255 @@ pub(crate) fn is_layer_body(bytes: &[u8]) -> bool {
     }
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     serde_json::from_slice::<Probe>(bytes).is_ok_and(|p| p.pages && !p.engine)
+}
+
+/// Every account's overlays, kept with the volumes they correct. Blocking.
+#[derive(Debug, Clone)]
+pub struct PersonalOverlays {
+    library: PathBuf,
+    users: PathBuf,
+    locks: PathWriteLocks,
+}
+
+impl PersonalOverlays {
+    pub(crate) fn new(library: PathBuf, users: PathBuf, locks: PathWriteLocks) -> Self {
+        Self {
+            library,
+            users,
+            locks,
+        }
+    }
+
+    /// Each account's `edits` directory.
+    fn bases(&self) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(&self.users) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .map(|e| e.path().join(EDITS_DIR))
+            .filter(|p| fs::is_dir(p))
+            .collect()
+    }
+
+    /// `folder/stem` of an archive's library rel (`None`: no `.cbz`).
+    fn split_archive(rel: &str) -> Option<(&str, &str)> {
+        let rel = rel.trim_matches('/');
+        let (folder, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+        Some((folder, sidecar_names::cbz_stem(name)?))
+    }
+
+    /// The overlays in `dir` that belong to the archive `cbz_name` of the library
+    /// folder `folder_rel`, as rule v1 sweeps them: an exact stem, or a folded one when
+    /// no other archive there has that spelling.
+    fn owned(&self, dir: &Path, folder_rel: &str, cbz_name: &str) -> Vec<(String, String)> {
+        let overlays: Vec<String> = names_in(dir)
+            .into_iter()
+            .filter(|n| personal_name(n).is_some())
+            .collect();
+        if overlays.is_empty() {
+            return Vec::new();
+        }
+        let folder = self.library.join(folder_rel);
+        let mut names: Vec<String> = names_in(&folder)
+            .into_iter()
+            .filter(|n| {
+                sidecar_names::ARCHIVE_EXTENSIONS
+                    .iter()
+                    .any(|e| sidecar_names::strip_suffix_ci(n, e).is_some())
+            })
+            .collect();
+        // The archive itself may already have gone (a delete) or moved (a rename).
+        if !names.iter().any(|n| n == cbz_name) {
+            names.push(cbz_name.to_string());
+        }
+        names.extend(overlays.iter().cloned());
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let listing = sidecar_names::Folder::new(&refs);
+        listing
+            .volume_files(cbz_name)
+            .into_iter()
+            .filter_map(|(name, file)| match file {
+                sidecar_names::VolumeFile::Layer { id, .. }
+                    if overlays.iter().any(|o| o == name) =>
+                {
+                    Some((name.to_string(), id.to_string()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Move one overlay into `to_dir` as `<stem>.<id>.mokuro`, or the next free
+    /// `edit-<n>` when that is taken (merge.rs `free_layer`: nothing is lost).
+    fn move_one(&self, from: &Path, to_dir: &Path, stem: &str, id: &str) {
+        if fs::create_dir_all(to_dir).is_err() {
+            return;
+        }
+        for n in 1u32.. {
+            let id = match n {
+                1 => id.to_string(),
+                n => format!("edit-{n}"),
+            };
+            let dest = to_dir.join(format!("{stem}.{id}.mokuro"));
+            // Free, or the source itself spelled differently (a case-insensitive disk).
+            let free = |dest: &Path| !fs::exists(dest) || crate::path_case::same_file(from, dest);
+            if !free(&dest) {
+                continue;
+            }
+            let Some(_guard) = self.locks.try_lock_all(&[from, &dest]) else {
+                tracing::warn!(
+                    "[DAV] a correction is being written: {} stays where it is",
+                    from.display()
+                );
+                return;
+            };
+            // Taken meanwhile (a PUT that held its lock): the next one.
+            if !free(&dest) {
+                continue;
+            }
+            if let Err(e) = fs::rename(from, &dest) {
+                tracing::warn!("[DAV] moving the correction {}: {e}", from.display());
+            }
+            return;
+        }
+    }
+
+    /// The archive `old` (library rel) is now `new`: each account's overlays of it move
+    /// along (renamed to the new stem).
+    pub fn rename_volume(&self, old: &str, new: &str) {
+        if old == new {
+            return;
+        }
+        let (Some((old_folder, _)), Some((new_folder, new_stem))) =
+            (Self::split_archive(old), Self::split_archive(new))
+        else {
+            return;
+        };
+        let old_name = paths::uri_name(old).to_string();
+        for base in self.bases() {
+            let dir = base.join(old_folder);
+            let owned = self.owned(&dir, old_folder, &old_name);
+            for (name, id) in &owned {
+                self.move_one(&dir.join(name), &base.join(new_folder), new_stem, id);
+            }
+            if !owned.is_empty() && !old_folder.is_empty() {
+                self.drop_if_empty(&dir);
+            }
+        }
+    }
+
+    /// Remove an overlay folder left empty (under its lock: a PUT into it holds its
+    /// file's lock before it creates the folder).
+    fn drop_if_empty(&self, dir: &Path) {
+        if let Some(_guard) = self.locks.try_lock(dir) {
+            let _ = fs::remove_dir(dir);
+        }
+    }
+
+    /// The archive `rel` is gone: so are each account's overlays of it.
+    pub fn forget_volume(&self, rel: &str) {
+        let Some((folder, _)) = Self::split_archive(rel) else {
+            return;
+        };
+        let name = paths::uri_name(rel).to_string();
+        for base in self.bases() {
+            let dir = base.join(folder);
+            let owned = self.owned(&dir, folder, &name);
+            for (file, _) in &owned {
+                let path = dir.join(file);
+                match self.locks.try_lock(&path) {
+                    Some(_guard) => {
+                        let _ = fs::remove_file(&path);
+                    }
+                    None => tracing::warn!(
+                        "[DAV] a correction is being written: {} is kept",
+                        path.display()
+                    ),
+                }
+            }
+            if !owned.is_empty() && !folder.is_empty() {
+                self.drop_if_empty(&dir);
+            }
+        }
+    }
+
+    /// The folder `old` (library rel) is now `new`: each account's overlays below it
+    /// move along, merging into what is already there.
+    pub fn rename_prefix(&self, old: &str, new: &str) {
+        let (old, new) = (old.trim_matches('/'), new.trim_matches('/'));
+        if old == new || old.is_empty() || new.is_empty() {
+            return;
+        }
+        for base in self.bases() {
+            let (from, to) = (base.join(old), base.join(new));
+            if !fs::is_dir(&from) {
+                continue;
+            }
+            // Free, or the same directory spelled differently (a case-insensitive disk):
+            // one rename.
+            if !fs::exists(&to) || crate::path_case::same_file(&from, &to) {
+                let Some(_guard) = self.locks.try_lock_all(&[&from, &to]) else {
+                    tracing::warn!(
+                        "[DAV] corrections are being written under {}",
+                        from.display()
+                    );
+                    continue;
+                };
+                if let Some(parent) = to.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Err(e) = fs::rename(&from, &to) {
+                    tracing::warn!("[DAV] moving the corrections of {}: {e}", from.display());
+                }
+                continue;
+            }
+            self.merge_dir(&from, &to);
+        }
+    }
+
+    /// Move every overlay below `from` into the same place below `to`, then drop the
+    /// emptied folders.
+    fn merge_dir(&self, from: &Path, to: &Path) {
+        let Ok(entries) = fs::read_dir(from) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let (path, name) = (
+                entry.path(),
+                entry.file_name().to_string_lossy().into_owned(),
+            );
+            if fs::is_dir(&path) {
+                self.merge_dir(&path, &to.join(&name));
+            } else if let Some((stem, id, _)) = personal_name(&name) {
+                self.move_one(&path, to, stem, id);
+            }
+        }
+        let _ = fs::remove_dir(from);
+    }
+
+    /// The folder `rel` is gone: so is every account's overlay below it.
+    pub fn forget_prefix(&self, rel: &str) {
+        let rel = rel.trim_matches('/');
+        if rel.is_empty() {
+            return;
+        }
+        for base in self.bases() {
+            let dir = base.join(rel);
+            if !fs::is_dir(&dir) {
+                continue;
+            }
+            match self.locks.try_lock(&dir) {
+                Some(_guard) => {
+                    let _ = fs::remove_dir_all(&dir);
+                }
+                None => tracing::warn!(
+                    "[DAV] corrections are being written: {} is kept",
+                    dir.display()
+                ),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

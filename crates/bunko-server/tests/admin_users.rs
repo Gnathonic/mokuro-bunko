@@ -559,10 +559,16 @@ async fn a_deleted_account_is_restored_from_the_admin_page() {
     let h = Harness::new();
     let admin = h.admin();
     h.login("gpu-box", Role::Processor);
+    // An admin delete is a soft delete: the account's files, its corrections (D27)
+    // included, wait for a restore.
+    let edits = h.core.layout.users().join("gpu-box/edits/S");
+    bunko_store::fs::create_dir_all(&edits).unwrap();
+    bunko_store::fs::write(edits.join("V.edit.mokuro"), b"{}").unwrap();
     let r = h
         .call("DELETE", "/_admin/api/users/gpu-box", Some(&admin), None)
         .await;
     assert_eq!(r.status, 200, "{}", r.text());
+    assert!(bunko_store::fs::exists(edits.join("V.edit.mokuro")));
     // Creating the name again points at Restore.
     let r = h
         .call(
@@ -598,6 +604,7 @@ async fn a_deleted_account_is_restored_from_the_admin_page() {
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.json()["user"]["status"], "active");
     assert_eq!(r.json()["user"]["role"], "processor");
+    assert!(bunko_store::fs::exists(edits.join("V.edit.mokuro")));
     assert!(
         h.db.authenticate_user("gpu-box", "new-pass-123")
             .unwrap()

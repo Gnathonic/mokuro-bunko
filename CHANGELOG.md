@@ -77,7 +77,10 @@
   not `.gz`); they are never listed in the volume manifest or counted as the volume's
   layers. Each account gets its own copy at the same address, kept under
   `users/<name>/edits/` (a cloud library's progress user's is the cloud file itself, so
-  a reader reading the cloud directly shares it); nobody sees another's. A correction
+  a reader reading the cloud directly shares it); nobody sees another's. They follow
+  their volume when it is renamed, moved or merged (in Bunko or in the cloud folder; a
+  name already taken there moves in as the next free `edit-<n>`) and go when it is
+  deleted. A correction
   or curated upload needs its volume's `.cbz` beside it (409 otherwise) and a JSON body
   with `pages` and no `ocr_engine` (422), at most 32 MiB. `<Volume>.curated.mokuro` holds corrections shared with everyone: editors,
   inviters and admins publish it on any volume, an uploader on the volumes it

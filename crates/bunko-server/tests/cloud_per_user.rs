@@ -62,6 +62,14 @@ fn basic(user: &str) -> String {
 }
 
 async fn env(backend: LibraryBackend, fake: Option<Arc<FakeBackend>>) -> Env {
+    env_tuned(backend, fake, tune).await
+}
+
+async fn env_tuned(
+    backend: LibraryBackend,
+    fake: Option<Arc<FakeBackend>>,
+    tune: bunko_server::storage::testing::Tune,
+) -> Env {
     let dir = tempfile::tempdir().unwrap();
     let storage = dir.path().join("storage");
     if let Some(fake) = &fake {
@@ -621,4 +629,116 @@ async fn corrections_are_the_owners_cloud_file_and_everyone_elses_overlay() {
             .all(|a| a.action == "upload" && a.target_type.as_deref() == Some("personal")),
         "{mine:?}"
     );
+}
+
+/// Another account's corrections follow changes made directly in the cloud folder (a
+/// cloud-direct reader renaming or deleting): an archive rename, a folder rename, an
+/// archive delete and a folder delete each carry or drop them (B3.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrections_follow_changes_made_in_the_cloud() {
+    let fake = library_fake();
+    fake.reader_put(&format!("{ROOT}/Series/Vol 3.cbz"), b"three");
+    // A removal in the cloud is applied once its tombstone grace is over.
+    fn quick(c: &mut bunko_remote::RemoteStoreConfig) {
+        tune(c);
+        c.quiet = Duration::from_millis(300);
+        c.poll_active = Duration::from_millis(100);
+        c.poll_idle = Duration::from_millis(100);
+    }
+    let e = env_tuned(LibraryBackend::GDrive, Some(fake.clone()), quick).await;
+    let store = e
+        .services
+        .storage
+        .as_ref()
+        .unwrap()
+        .fake_store()
+        .unwrap()
+        .clone();
+    for vol in ["Vol%201", "Vol%203"] {
+        let path = format!("/mokuro-reader/Series/{vol}.edit.mokuro");
+        let (status, _) = e
+            .req(Some("other"), "PUT", &path, &[], &correction(vol))
+            .await;
+        assert_eq!(status, 201, "{path}");
+    }
+    let overlay = |rel: &str| e.users(&format!("other/edits/{rel}"));
+
+    fake.reader_rename(
+        &format!("{ROOT}/Series/Vol 1.cbz"),
+        &format!("{ROOT}/Series/Vol 2.cbz"),
+    );
+    store.feed().poll_now();
+    eventually("the correction follows the archive", || {
+        overlay("Series/Vol 2.edit.mokuro").exists()
+    })
+    .await;
+    assert!(!overlay("Series/Vol 1.edit.mokuro").exists());
+    assert_eq!(
+        std::fs::read(overlay("Series/Vol 2.edit.mokuro")).unwrap(),
+        correction("Vol%201")
+    );
+
+    fake.reader_rename(&format!("{ROOT}/Series"), &format!("{ROOT}/Renamed"));
+    store.feed().poll_now();
+    eventually("the corrections follow the folder", || {
+        overlay("Renamed/Vol 2.edit.mokuro").exists()
+            && overlay("Renamed/Vol 3.edit.mokuro").exists()
+    })
+    .await;
+    assert!(!overlay("Series").exists());
+    let (status, body) = e
+        .get("other", "/mokuro-reader/Renamed/Vol%202.edit.mokuro")
+        .await;
+    assert_eq!((status, body), (200, correction("Vol%201")));
+
+    fake.reader_delete(&format!("{ROOT}/Renamed/Vol 2.cbz"));
+    store.feed().poll_now();
+    eventually("the correction goes with its archive", || {
+        !overlay("Renamed/Vol 2.edit.mokuro").exists()
+    })
+    .await;
+    assert!(overlay("Renamed/Vol 3.edit.mokuro").exists());
+
+    fake.reader_delete(&format!("{ROOT}/Renamed"));
+    store.feed().poll_now();
+    eventually("the corrections go with their folder", || {
+        !overlay("Renamed").exists()
+    })
+    .await;
+}
+
+/// Bunko's own merge of two same-named folders (dedup) moves the younger one's
+/// volumes into the canonical folder under the same path: every account's
+/// corrections of them stay valid, and are served and listed beside them after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrections_survive_a_duplicate_folder_merge() {
+    let fake = library_fake();
+    let root = fake.node_at(ROOT).unwrap().pid;
+    let twin = fake.reader_mkdir_in(&root, "Series");
+    fake.reader_put_in(&twin.pid, "Vol 3.cbz", b"three");
+    fn quick(c: &mut bunko_remote::RemoteStoreConfig) {
+        tune(c);
+        c.quiet = Duration::from_millis(300);
+        c.merge_interval = Duration::from_millis(50);
+    }
+    let e = env_tuned(LibraryBackend::GDrive, Some(fake.clone()), quick).await;
+    let overlay = e.users("other/edits/Series");
+    std::fs::create_dir_all(&overlay).unwrap();
+    for vol in ["Vol 1", "Vol 3"] {
+        std::fs::write(overlay.join(format!("{vol}.edit.mokuro")), correction(vol)).unwrap();
+    }
+    let f2 = fake.clone();
+    eventually("the emptied twin goes to the trash", || {
+        f2.trashed_log().contains(&twin.pid)
+    })
+    .await;
+    let list = e.propfind("other", "/mokuro-reader/Series/", "1").await;
+    for vol in ["Vol%201", "Vol%203"] {
+        assert!(list.contains(&format!("{vol}.edit.mokuro")), "{list}");
+        let (status, body) = e
+            .get("other", &format!("/mokuro-reader/Series/{vol}.edit.mokuro"))
+            .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, correction(&vol.replace("%20", " ")));
+    }
 }

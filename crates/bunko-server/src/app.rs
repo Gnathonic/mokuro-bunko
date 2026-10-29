@@ -308,7 +308,8 @@ impl Services {
                     library.clone(),
                     db.clone(),
                 )
-                .with_thumbnails(thumbs.clone()),
+                .with_thumbnails(thumbs.clone())
+                .with_overlays(dav.overlays()),
             ));
             // Case variants merge into the oldest spelling (§5.9).
             handle.set_case_merge_policy(Arc::new(crate::storage::ServerCaseMergePolicy::new(

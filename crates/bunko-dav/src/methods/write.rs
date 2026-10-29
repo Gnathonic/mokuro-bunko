@@ -96,6 +96,7 @@ fn delete_resource(
                 req.ctx.hooks.forget_volume_uploads_under_prefix(&rel);
                 req.ctx.hooks.forget_ocr_sidecars_under_prefix(&rel);
                 req.ctx.hooks.forget_volume_uuids_under_prefix(&rel);
+                inner.overlays().forget_prefix(&rel);
             }
             effects.note_removed(inner, phys);
             effects.touch(path, Some(phys));
@@ -138,6 +139,9 @@ fn delete_file(
         if let Some(rel) = rel.as_deref() {
             req.ctx.hooks.forget_volume_upload(rel);
             req.ctx.hooks.forget_volume_uuid(rel);
+            // Every account's corrections of the volume go with it (the owner's
+            // physical one went with the sidecars).
+            inner.overlays().forget_volume(rel);
         }
     }
     forget_ocr_records(req, rel.as_deref(), true);
@@ -620,6 +624,11 @@ fn move_file(
     effects.note_arrived(inner, dest);
     if let (Some(old), Some(new)) = (old_rel.as_deref(), new_rel.as_deref()) {
         req.ctx.hooks.rename_volume_upload(old, new);
+        // Every account's corrections follow the archive. The reader's own MOVE of
+        // its `<Old>.edit.mokuro` then finds it already there.
+        if is_cbz(src) {
+            inner.overlays().rename_volume(old, new);
+        }
     }
     forget_ocr_records(req, old_rel.as_deref(), true);
     forget_ocr_records(req, new_rel.as_deref(), false);
@@ -765,10 +774,12 @@ fn move_folder(
             req.ctx
                 .hooks
                 .rename_volume_uuids_under_prefix(old_prefix, new_prefix);
+            inner.overlays().rename_prefix(old_prefix, new_prefix);
         }
         (Some(old_prefix), None) => {
             req.ctx.hooks.forget_ocr_sidecars_under_prefix(old_prefix);
             req.ctx.hooks.forget_volume_uuids_under_prefix(old_prefix);
+            inner.overlays().forget_prefix(old_prefix);
         }
         _ => {}
     }

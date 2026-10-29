@@ -42,7 +42,7 @@ pub use bunko_core::reader_tree::Caller;
 pub use cache::{CacheConfig, PropfindCache};
 pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
 pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
-pub use personal::{EDITS_DIR, MAX_LAYER_BYTES};
+pub use personal::{EDITS_DIR, MAX_LAYER_BYTES, PersonalOverlays};
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};
 pub use write_locks::{AccountWriteGuard, AccountWriteLocks, PathWriteLocks, WriteLockGuard};
 
@@ -139,6 +139,17 @@ pub(crate) struct Inner {
     pub path_case: PathCase,
 }
 
+impl Inner {
+    /// Every account's correction overlays (they follow their volume).
+    pub(crate) fn overlays(&self) -> PersonalOverlays {
+        PersonalOverlays::new(
+            self.roots.library.clone(),
+            self.roots.users.clone(),
+            self.write_locks.clone(),
+        )
+    }
+}
+
 /// The WebDAV handler. Cheap to clone; build one per server.
 #[derive(Clone)]
 pub struct Dav {
@@ -187,6 +198,12 @@ impl Dav {
     /// publisher, `warm` at start-up, `stop` at shutdown).
     pub fn propfind_cache(&self) -> &Arc<PropfindCache> {
         &self.inner.cache
+    }
+
+    /// Every account's correction overlays, for the hooks of changes made outside DAV
+    /// (a rename, merge or delete in the cloud folder): they follow their volume.
+    pub fn overlays(&self) -> PersonalOverlays {
+        self.inner.overlays()
     }
 
     /// The per-path write-lock registry shared with non-DAV writers (the metadata compiler
