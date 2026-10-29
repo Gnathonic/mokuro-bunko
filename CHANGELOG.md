@@ -58,10 +58,12 @@
 - **Upgrades never skip a main OCR file for being edited; a file Bunko didn't write is
   kept as a "pre-upgrade" layer first.** With the generation upgrade on, an outdated
   `<Volume>.mokuro` in a family listed under `ocr.upgrade.replace` is upgraded even if a
-  person or Mokuro Reader changed it. One Bunko can prove it wrote, byte for byte (every
-  OCR file it installs now carries a seal, `ocr_engine.content_sha256`, the sha256 of
-  its exact bytes, so the proof moves with the library to another Bunko), is replaced
-  as before. Any
+  person or Mokuro Reader changed it. One Bunko can prove it wrote is replaced as before:
+  every OCR file it installs now carries a seal, `ocr_engine.seal`, a hash of its pages
+  and its `ocr_engine` block (RFC 8785 canonical JSON, so Mokuro Reader and other tools
+  can check it too; test vectors in `interop/contract/seal/`). Renaming the volume or
+  series, re-saving the file with other formatting, or moving the library to another
+  Bunko keeps the seal; changing any OCR text breaks it. Any
   other (stock mokuro output, a file the reader saved corrections into, or one that only
   carries Bunko's `ocr_engine` stamp, which anyone who can write the file can add) is
   first copied, byte for byte, to

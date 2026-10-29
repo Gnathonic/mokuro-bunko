@@ -144,8 +144,8 @@ For each candidate, in this order:
      `id` (with its detector and budget) is the target recipe. Its
      `ocr_sidecars` row alone is not enough: `classify` reads the row first,
      and a reader pushing a layer back drops the stamp;
-   - **it is proven to be Bunko's own bytes** (the same proof as §5 step 1:
-     its seal, `ocr_engine.content_sha256`, checks). A stamp
+   - **it is proven to be Bunko's own output** (the same proof as §5 step 1:
+     its seal, `ocr_engine.seal`, checks). A stamp
      alone is not enough: anyone who can write the file can add one, and a
      forged stamp would make a person's file the model output. The bytes
      proven are exactly the bytes installed (read once, pinned to one version
@@ -183,16 +183,21 @@ version the census judged (its stat, and on a remote store its content
 version); if it changed, the swap skips and the next census judges it again.
 
 1. **Keep the old file, unless it is proven Bunko's own (D4).** A bare file is
-   replaced with no copy only on proof that Bunko wrote exactly these bytes:
-   their seal checks. Every OCR install seals the normalised result:
-   `ocr_engine.content_sha256` is the sha256 of the file's exact bytes with
-   that value written as 64 zeros (`bunko_layout::seal`); a direct replace
-   installs the layer's bytes, seal included. The proof needs no database or
-   ledger, so it holds on another Bunko (a moved library, a new instance on the
-   same cloud folder). A top-level `ocr_engine` stamp alone proves nothing:
-   anyone who can write the file (a reader's edit, a WebDAV PUT, a cloud upload)
-   can add one, and a re-upload of edited text can keep one; any change to the
-   bytes breaks the seal. A file an older build wrote has no seal, so it is
+   replaced with no copy only on proof that it holds the OCR Bunko wrote: its
+   seal checks. Every OCR install seals the normalised result (after
+   normalisation stamps a layer's `generation`): `ocr_engine.seal` is `"v1:"` +
+   the sha256 of the RFC 8785 canonical JSON of `{"ocr_engine": <the block
+   without seal and content_sha256>, "pages": <pages>}` (`bunko_layout::seal`,
+   vectors in `interop/contract/seal/`); a direct replace installs the layer's
+   bytes, seal included, and the seal still checks on the main sidecar. The
+   proof needs no database or ledger, so it holds on another Bunko (a moved
+   library, a new instance on the same cloud folder), and names, uuids, key
+   order and spacing are outside it, so a rename or a re-serialisation keeps it.
+   A top-level `ocr_engine` stamp alone proves nothing: anyone who can write
+   the file (a reader's edit, a WebDAV PUT, a cloud upload) can add one, and a
+   re-upload of edited text can keep one; any change to the pages or the block
+   breaks the seal. The unshipped byte seal `ocr_engine.content_sha256` is not a
+   seal, and sealing removes it. A file an older build wrote has no seal, so it is
    kept once. Any other is first published as the layer `<Volume>.pre-upgrade.mokuro`
    (`CreateNew`, Sync), exactly the bytes the swap replaces (on a remote store
    read pinned to the judged version), with a top-level block

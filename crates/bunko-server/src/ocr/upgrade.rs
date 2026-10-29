@@ -523,14 +523,14 @@ impl Upgrade {
         Verdict::NeedsOcr
     }
 
-    /// D4's proof that `bytes` are exactly what Bunko installed: their seal
-    /// ([`bunko_layout::seal`], `ocr_engine.content_sha256`) checks. An `ocr_engine`
-    /// stamp alone proves nothing: anyone who can write the file (a reader's edit, a
-    /// WebDAV PUT, a cloud upload) can add one, and a re-upload of edited text can keep
-    /// one. The seal covers the bytes themselves, so it travels with the file (another
-    /// Bunko, a moved library, a new instance on the same cloud folder) and any change
-    /// breaks it. A file without proof is treated as a person's: kept before any
-    /// replace, never copied in as the main sidecar.
+    /// D4's proof that `bytes` hold the OCR Bunko installed: their content seal
+    /// ([`bunko_layout::seal`], `ocr_engine.seal`) checks. An `ocr_engine` stamp alone
+    /// proves nothing: anyone who can write the file (a reader's edit, a WebDAV PUT, a
+    /// cloud upload) can add one, and a re-upload of edited text can keep one. The seal
+    /// covers the pages and the block themselves, so it travels with the file (another
+    /// Bunko, a moved library, a new instance on the same cloud folder, a rename) and an
+    /// edit of either breaks it. A file without proof is treated as a person's: kept
+    /// before any replace, never copied in as the main sidecar.
     fn proven_own(bytes: &[u8]) -> bool {
         bunko_layout::seal::is_sealed(bytes)
     }
@@ -889,8 +889,8 @@ impl Upgrade {
             let old = Self::read_judged(bare, &entry)?;
             let doc: Value = serde_json::from_slice(strip_bom(&old))
                 .map_err(|e| format!("{} is not readable JSON: {e}", bare.display()))?;
-            // Replaced with no copy only on proof that Bunko wrote exactly these bytes;
-            // a stamp in them proves nothing (anyone who can write the file can add one).
+            // Replaced with no copy only on proof that this is the OCR Bunko wrote (its
+            // seal); a stamp alone proves nothing (anyone who can write the file can add one).
             let preserved = if Self::proven_own(&old) {
                 None
             } else {
@@ -979,7 +979,8 @@ impl Upgrade {
                 lr.generation_name = p.name;
             }
             // The proof moves with the bytes: the new bare file is exactly them, seal
-            // included.
+            // included (it covers the block and pages, which a promotion leaves as they
+            // are, so it still checks on the main sidecar).
             let _ = db.record_ocr_sidecar(&lr);
         }
         let layer_name = Self::layer_id(layer);

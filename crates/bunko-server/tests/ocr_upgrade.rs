@@ -72,7 +72,7 @@ fn direct_replace_swaps_a_matching_layer_in() {
     );
 }
 
-/// An OCR install seals exactly the bytes it put in place (`ocr_engine.content_sha256`).
+/// An OCR install seals what it put in place (`ocr_engine.seal`).
 #[test]
 fn an_install_seals_the_bytes_it_wrote() {
     let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
@@ -94,6 +94,68 @@ fn an_install_seals_the_bytes_it_wrote() {
     assert!(
         !bunko_layout::seal::is_sealed(HAYAI.as_bytes()),
         "the processor's bytes were not"
+    );
+}
+
+/// Critique C11: a layer's seal is taken after normalisation stamps `generation` into
+/// its block, and it still checks once that layer is promoted to the main sidecar.
+#[test]
+fn a_layer_is_sealed_after_its_stamp_and_stays_sealed_as_the_main_sidecar() {
+    let nova = layer("g-2", "nova");
+    // A layer row's install: the processor's bytes, normalised, stamped, sealed.
+    let mut h = harness_db(vec![primary(), nova.clone()], Arc::new(FileFacts), None);
+    h.add("A/V1.cbz", 3);
+    std::fs::write(h.library().join("A/V1.mokuro"), LEGACY).unwrap();
+    h.at(0.0);
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let vols = volumes(&ops);
+    let sid = opened(&ops)[0].clone();
+    h.event(&p, ready(&sid));
+    h.event(&p, started(&sid, &vols[0].1, 3));
+    h.done_with(
+        &p,
+        &sid,
+        &vols[0].1,
+        "V1.nova.mokuro",
+        3,
+        1.0,
+        HAYAI.as_bytes(),
+    );
+    let installed = std::fs::read_to_string(h.library().join("A/V1.nova.mokuro")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&installed).unwrap();
+    assert_eq!(v["ocr_engine"]["generation"], "nova");
+    assert!(bunko_layout::seal::is_sealed(installed.as_bytes()));
+    let unstamped: serde_json::Value = serde_json::from_str(&sealed(HAYAI)).unwrap();
+    assert_ne!(
+        v["ocr_engine"]["seal"], unstamped["ocr_engine"]["seal"],
+        "the seal covers the stamped block, not the processor's"
+    );
+
+    // The same file on a library whose primary it now matches: promoted as it is.
+    let mut h = harness_db(
+        vec![primary(), nova.clone()],
+        Arc::new(FileFacts),
+        Some(enabled()),
+    );
+    h.add("A/V1.cbz", 3);
+    let lib = h.library();
+    std::fs::write(lib.join("A/V1.mokuro"), LEGACY).unwrap();
+    h.bunko_wrote("A/V1.nova.mokuro", &installed, &nova);
+    assert_eq!(
+        std::fs::read_to_string(lib.join("A/V1.nova.mokuro")).unwrap(),
+        installed,
+        "sealing a sealed file again changes nothing"
+    );
+    h.at(0.0);
+    let main = std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap();
+    assert_eq!(
+        main, installed,
+        "the layer's bytes are the new main sidecar"
+    );
+    assert!(
+        bunko_layout::seal::is_sealed(main.as_bytes()),
+        "the promoted main is sealed"
     );
 }
 

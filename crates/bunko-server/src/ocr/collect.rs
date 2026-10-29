@@ -352,9 +352,11 @@ fn install(req: &CollectRequest) -> Outcome {
             row.name
         ));
     }
-    // D4's proof that the file is Bunko's own output: the seal on the normalised bytes
-    // (`ocr_engine.content_sha256`), set before they leave the spool. It travels with the
-    // file, so any Bunko can check it; any later change to the bytes breaks it.
+    // D4's proof that the file is Bunko's own output: the content seal
+    // (`ocr_engine.seal`), set before it leaves the spool. Taken AFTER normalisation,
+    // which stamps `generation` into a layer's block (the block is inside the seal). It
+    // travels with the file, so any Bunko or reader can check it; an edit of the pages
+    // or the block breaks it, a rename or a re-serialisation does not.
     if let Err(e) = bunko_layout::seal::seal_sidecar_file(&req.result) {
         return Outcome::Failed(format!("the {} sidecar could not be sealed: {e}", row.name));
     }
