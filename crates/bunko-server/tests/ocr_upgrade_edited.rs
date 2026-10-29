@@ -453,12 +453,11 @@ async fn a_taken_pre_upgrade_id_gives_pre_upgrade_2_and_the_same_bytes_are_kept_
 
     // The same old bytes again (a retried swap, a restored file): not kept twice.
     let kept = std::fs::read(env.lib("A/V1.pre-upgrade-2.mokuro")).unwrap();
-    // (Put back the way a reader does: the PUT forgets the new file's row.)
-    assert_eq!(
-        env.put("/mokuro-reader/A/V1.mokuro", LEGACY.as_bytes())
-            .await,
-        204
-    );
+    // (Restored on disk, its row gone. Not by PUT: these fixtures' pages equal the
+    // sealed main's, so a PUT would get its block back, critique C5 in
+    // `provenance_put.rs`.)
+    std::fs::write(env.lib("A/V1.mokuro"), LEGACY).unwrap();
+    env.services.db.forget_ocr_sidecar("A/V1.mokuro").unwrap();
     env.bunko_layer("A/V1.hayai-nova.mokuro");
     env.upgrade_direct("A/V1.cbz").unwrap();
     assert_eq!(

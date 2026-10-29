@@ -701,3 +701,34 @@ async fn a_put_while_another_bunko_holds_the_lease_is_a_503() {
     server.assert_no_staging_leak().await;
     server.stop().await;
 }
+
+/// Critique C5 on a cloud library: a 1.10.0 reader's rename uploads the regenerated main
+/// (new title, no `ocr_engine` block) beside the sealed main of the same volume; the
+/// staged body gets the block back and is sealed before it leaves for the cloud.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_renamed_main_keeps_its_sealed_block_in_the_cloud() {
+    let fake = Arc::new(FakeBackend::webdav_cas());
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), &cbz(2, 1));
+    let mut main: Value = serde_json::from_slice(&mokuro("Vol 1", 2, "first")).unwrap();
+    main["ocr_engine"] = serde_json::json!({"id": "hayai-nova", "revision": 1});
+    let mut sealed = bunko_layout::json::Value::parse(&main.to_string()).unwrap();
+    let sealed = bunko_layout::seal::seal(&mut sealed).unwrap();
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.mokuro"), sealed.as_bytes());
+    let server = Server::start(&fake, no_lease).await;
+
+    let mut renamed: Value = serde_json::from_slice(&mokuro("Vol 1", 2, "first")).unwrap();
+    renamed["volume"] = "Vol 1 (new)".into();
+    let body = serde_json::to_vec_pretty(&renamed).unwrap();
+    let r = server
+        .put("/mokuro-reader/Series/Vol%201%20(new).mokuro", &body, &[])
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    server.idle().await;
+    let got = cloud(&fake, "Series/Vol 1 (new).mokuro").expect("uploaded");
+    assert!(bunko_layout::seal::is_sealed(&got));
+    let got: Value = serde_json::from_slice(&got).unwrap();
+    assert_eq!(got["ocr_engine"]["id"], "hayai-nova");
+    assert_eq!(got["volume"], "Vol 1 (new)", "the reader's names are kept");
+    server.assert_no_staging_leak().await;
+    server.stop().await;
+}

@@ -127,6 +127,8 @@ pub enum Msg {
         done: u64,
         failed: u64,
     },
+    /// The paced sweep of numbered `_n` sidecars finished ([`crate::ocr::orphans::sweep`]).
+    OrphansSwept(crate::ocr::orphans::SweepReport),
     /// A frame from a processor (remote socket or local channel).
     Event {
         pid: String,
@@ -220,6 +222,7 @@ impl std::fmt::Debug for Msg {
             Msg::Tick => "Tick",
             Msg::Walked { .. } => "Walked",
             Msg::DirectUpgraded { .. } => "DirectUpgraded",
+            Msg::OrphansSwept(_) => "OrphansSwept",
             Msg::Event { .. } => "Event",
             Msg::Seen { .. } => "Seen",
             Msg::Register { .. } => "Register",
@@ -316,6 +319,10 @@ pub struct Scheduler {
     pub walking: bool,
     /// The paced direct-replace job is running.
     pub direct_running: bool,
+    /// The paced `_n` sweep is running.
+    pub orphan_sweeping: bool,
+    /// Numbered `_n` sidecars the last sweep left: not provably Bunko's.
+    pub orphans_unproven: u64,
     pub last_walk_at: Option<f64>,
     pub machines: IndexMap<String, Machine>,
     pub lanes: Vec<Lane>,
@@ -394,6 +401,8 @@ impl Scheduler {
             walk_epoch: 0,
             walking: false,
             direct_running: false,
+            orphan_sweeping: false,
+            orphans_unproven: 0,
             last_walk_at: None,
             machines: IndexMap::new(),
             lanes: Vec::new(),
@@ -569,6 +578,7 @@ impl Scheduler {
             Msg::Tick => self.tick(),
             Msg::Walked { epoch, index } => self.walked(epoch, index),
             Msg::DirectUpgraded { done, failed } => self.direct_upgraded(done, failed),
+            Msg::OrphansSwept(report) => self.orphans_swept(report),
             Msg::Event { pid, event } => self.on_event(&pid, event),
             Msg::Seen { pid } => self.seen(&pid),
             Msg::Register { input, reply } => {
@@ -711,6 +721,62 @@ impl Scheduler {
         self.bump_page();
         self.maybe_start_scan();
         self.maybe_start_direct();
+        self.maybe_start_orphan_sweep();
+    }
+
+    /// Sweep the numbered `_n` sidecars the walk found ([`crate::ocr::orphans`]), on a
+    /// helper thread and paced like the direct replaces. Upgrades on or off: no 0.8
+    /// collector writes one, and a reader never matches one.
+    fn maybe_start_orphan_sweep(&mut self) {
+        if self.orphan_sweeping || self.stopping || self.storage_hold().is_some() {
+            return;
+        }
+        if self.owed.orphans.is_empty() {
+            if std::mem::take(&mut self.orphans_unproven) > 0 {
+                self.bump();
+            }
+            return;
+        }
+        self.orphan_sweeping = true;
+        let (library, db, locks) = (
+            self.library(),
+            self.deps.db.clone(),
+            self.deps.locks.clone(),
+        );
+        let orphans = self.owed.orphans.clone();
+        let pace = match self.deps.exec {
+            Exec::Inline => Duration::ZERO,
+            Exec::Threads(_) => DIRECT_PACE,
+        };
+        self.run_background(Box::new(move || {
+            Msg::OrphansSwept(crate::ocr::orphans::sweep(
+                &library,
+                db.as_deref(),
+                &locks,
+                &orphans,
+                pace,
+            ))
+        }));
+    }
+
+    fn orphans_swept(&mut self, report: crate::ocr::orphans::SweepReport) {
+        self.orphan_sweeping = false;
+        if report.moved + report.removed > 0 {
+            self.log(format!(
+                "Swept {} numbered OCR file(s) an older Bunko wrote: {} renamed to the name readers match, {} removed as a second copy",
+                report.moved + report.removed,
+                report.moved,
+                report.removed
+            ));
+        }
+        if report.unproven > 0 {
+            self.log(format!(
+                "Left {} numbered OCR file(s) (<volume>_<n>.mokuro) in place: nothing proves Bunko wrote them",
+                report.unproven
+            ));
+        }
+        self.orphans_unproven = report.unproven;
+        self.bump();
     }
 
     /// Swap in the layers the walk's census found ready, on a helper thread and paced, so

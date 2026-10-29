@@ -72,7 +72,7 @@ pub const SUPERSEDED: &str = "a sidecar was already at the destination; the resu
 
 /// What is at a result's destination: nothing, a file that stays, or Bunko's own older
 /// output that the result replaces (on a remote store, exactly the version read).
-enum Existing {
+pub(crate) enum Existing {
     Absent,
     Keep,
     Replace(Option<Version>),
@@ -83,7 +83,11 @@ enum Existing {
 /// output of the same engine at a lower revision is replaced
 /// ([`super::upgrade::superseded_own_output`]); anything else is kept, and so is a
 /// `.gz` alone (the result would sit beside it as a second copy).
-fn reconcile_existing(plain: &Path, gz: &Path, result: Option<&(String, u32)>) -> Existing {
+pub(crate) fn reconcile_existing(
+    plain: &Path,
+    gz: &Path,
+    result: Option<&(String, u32)>,
+) -> Existing {
     let Some(meta) = fs::metadata(plain).ok() else {
         return if fs::exists(gz) {
             Existing::Keep
@@ -394,9 +398,15 @@ fn install(req: &CollectRequest) -> Outcome {
         return Outcome::Failed(format!("the {} sidecar could not be sealed: {e}", row.name));
     }
     // 5. Into place, under the DAV write lock.
+    let mut mode = None;
     let destination = if req.job.upgrade {
         match super::upgrade::swap_in_generated(req, &cbz) {
-            Ok(path) => path,
+            Ok((path, swapped)) => {
+                if swapped == super::upgrade::Swapped::EditedMainLayer {
+                    mode = Some("edited-main-layer");
+                }
+                path
+            }
             Err(outcome) => return outcome,
         }
     } else {
@@ -449,6 +459,7 @@ fn install(req: &CollectRequest) -> Outcome {
             detector,
             precision,
             facts_pages,
+            mode,
         },
     );
     req.facts.sidecar_installed(&cbz);
@@ -460,6 +471,8 @@ struct Written {
     detector: Option<String>,
     precision: Option<String>,
     facts_pages: Option<i64>,
+    /// `edited-main-layer` for an EDITED main's new OCR written beside it.
+    mode: Option<&'static str>,
 }
 
 fn record_written(req: &CollectRequest, cbz: &Path, sidecar: &Path, written: Written) {
@@ -467,6 +480,7 @@ fn record_written(req: &CollectRequest, cbz: &Path, sidecar: &Path, written: Wri
         detector,
         precision,
         facts_pages,
+        mode,
     } = written;
     let Some(db) = &req.db else { return };
     let (Some(sidecar_rel), Some(volume_key)) = (
@@ -517,6 +531,10 @@ fn record_written(req: &CollectRequest, cbz: &Path, sidecar: &Path, written: Wri
             "runner_build",
             req.runner_build.clone().map_or(Value::Null, Value::String),
         );
+    let details = match mode {
+        Some(mode) => details.with("mode", mode),
+        None => details,
+    };
     let event = NewAuditEvent::new("ocr_sidecar_written")
         .actor(req.account.as_deref())
         .target_type("sidecar")

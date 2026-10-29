@@ -396,6 +396,19 @@ pub struct Normalization {
     pub created: Option<String>,
 }
 
+/// Stamp a layer's `ocr_engine` block (`_stamp_ocr_engine`): the engine and generator
+/// unless the runner named them, the generation always. A file without a block gets one.
+pub fn stamp_layer(data: &mut Value, stamp: &LayerStamp) {
+    let mut stamped = match data.get("ocr_engine") {
+        Some(block @ Value::Object(_)) => block.clone(),
+        _ => Value::object(),
+    };
+    stamped.set_default("id", Value::Str(stamp.engine.clone()));
+    stamped.set_default("generator", Value::Str(stamp.generator.clone()));
+    stamped.set("generation", Value::Str(stamp.generation.clone()));
+    data.set("ocr_engine", stamped);
+}
+
 /// `_normalize_mokuro_metadata` on a parsed sidecar, in place. A non-object
 /// root is left alone (the server skips it) and `false` returned.
 pub fn normalize_sidecar(data: &mut Value, norm: &Normalization) -> bool {
@@ -407,14 +420,7 @@ pub fn normalize_sidecar(data: &mut Value, norm: &Normalization) -> bool {
     data.set("title_uuid", Value::Str(title_uuid(&norm.series_name)));
     data.set("volume_uuid", Value::Str(norm.volume_uuid.clone()));
     if let Some(stamp) = &norm.stamp {
-        let mut stamped = match data.get("ocr_engine") {
-            Some(block @ Value::Object(_)) => block.clone(),
-            _ => Value::object(),
-        };
-        stamped.set_default("id", Value::Str(stamp.engine.clone()));
-        stamped.set_default("generator", Value::Str(stamp.generator.clone()));
-        stamped.set("generation", Value::Str(stamp.generation.clone()));
-        data.set("ocr_engine", stamped);
+        stamp_layer(data, stamp);
     }
     // Only a block is dated: an upstream-shaped primary stays in upstream shape. A
     // runner's own revision stands; one that wrote none ran revision 1 (the scheduler

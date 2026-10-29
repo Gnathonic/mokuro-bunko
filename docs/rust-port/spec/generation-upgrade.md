@@ -128,7 +128,16 @@ A volume is an **upgrade candidate** when all of the following hold:
    whatever its stamp or seal. Provenance precedence: `edited`, then
    `preserved`, then an `ocr_engine` with a string id, then a top-level
    `version`. A layer with an `edited` block is never a direct-replace
-   source either.
+   source either. When the recipe beneath the edit is outdated (the rule of
+   1.), the volume still gets an upgrade job; its result is written beside
+   the main as the layer `<Volume>.<primary name>.mokuro`
+   (`ocr_engine.generation` = the primary's name, sealed again; audited
+   `ocr_sidecar_written`, `mode: edited-main-layer`) while that name is free
+   or holds Bunko's own sealed older revision. A file of anyone else's there
+   owes nothing (its result could only be discarded). The swap judges the main
+   again under its lock; the main is never touched. Once its `edited` block is
+   gone, the ordinary census swaps that layer in. Schema:
+   `docs/design/sidecar-provenance.md`.
 
 **Generation layers (0.8, critique C10).** With upgrades on, a non-primary
 row's layer that is Bunko's own output of the row's engine (sealed, no

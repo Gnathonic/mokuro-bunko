@@ -107,13 +107,27 @@
   sealed file is replaced with no copy), and so is a generation layer Bunko wrote at
   an older revision, in place. A file Mokuro Reader marked edited (an `edited` block)
   is never replaced or preserved, whatever stamp or seal it carries, and never used as
-  the new main file; the admin page counts these. A `pre-upgrade` keepsake is never
-  read as a recipe.
+  the new main file; the admin page counts these. When its OCR is outdated, the new OCR
+  is written beside it as `<Volume>.<primary generation>.mokuro` (for example
+  `Vol 1.hayai-nova.mokuro`), sealed, and becomes the main file only if the edit mark
+  is removed. A `pre-upgrade` keepsake is never read as a recipe. The format is in
+  `docs/design/sidecar-provenance.md`.
 - **OCR never writes `<Volume>_1.mokuro` beside a file already there.** When a
   `.mokuro` arrives at the destination while its OCR runs (a reader renaming a volume,
   a person's upload), that file stays and the result is discarded (audited, not a
   failure, and the volume is not queued again); only Bunko's own sealed output of the
-  same engine at an older revision is replaced in place.
+  same engine at an older revision is replaced in place. Numbered files an earlier
+  version left (`Vol 1_1.mokuro`, `Vol 1.fast_1.mokuro`) are cleaned up after each OCR
+  pass when Bunko can tell it wrote them (sealed, or in its OCR records): renamed to
+  the name readers match when that is free, removed when it is taken (to the
+  provider's trash on a cloud library). Others are left alone and counted in the admin
+  OCR status (`orphans_unproven`).
+- **Renaming a volume in Mokuro Reader 1.10.0 keeps its OCR seal.** That reader
+  rewrites the main OCR file without its `ocr_engine` block when it renames a volume.
+  When such an upload over WebDAV has exactly the pages of Bunko's sealed file (the one
+  it replaces, or the one of the same volume in that folder), Bunko puts the block back
+  and seals it again, so the upgrade still knows Bunko wrote it. Corrections that reader
+  saves into the main file still land there; an upgrade keeps them as `pre-upgrade`.
 
 ### Fixed
 - **A `.mokuro` or `series.json` saved with a byte-order mark is read.** Mokuro Reader

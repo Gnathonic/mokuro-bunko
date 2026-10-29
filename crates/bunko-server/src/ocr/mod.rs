@@ -7,7 +7,9 @@
 //! * [`sched`] — the scheduler: all state, one message at a time ([`actor`] runs it).
 //! * [`owed`] — what the library is owed; [`collect`] — installing a result;
 //!   [`upgrade`] — generation upgrades; [`profiles`] — `processors/*.json`;
-//!   [`busy`] — the volumes OCR work touches now (the case merge waits for them).
+//!   [`busy`] — the volumes OCR work touches now (the case merge waits for them);
+//!   [`orphans`] — sweeping the `<stem>_<n>.mokuro` files older collectors wrote;
+//!   [`provenance`] — keeping a sealed block through an older reader's rewrite.
 //! * [`api`] — `/_processor/*` (protocol v3); [`queue_api`] + [`shape`] — `/queue`;
 //!   [`queue_file`] — `/mokuro-reader/.mokuro-queue.json`; [`admin`] — `OcrAdmin`.
 
@@ -17,8 +19,10 @@ pub mod api;
 pub mod busy;
 pub mod collect;
 pub mod control;
+pub mod orphans;
 pub mod owed;
 pub mod profiles;
+pub mod provenance;
 pub mod pyjson;
 pub mod queue_api;
 pub mod queue_file;

@@ -40,6 +40,9 @@ pub struct OwedVolume {
 #[derive(Clone, Debug, Default)]
 pub struct OwedIndex {
     pub volumes: BTreeMap<String, OwedVolume>,
+    /// `<stem>_<n>.mokuro` files an older collector numbered, library-relative
+    /// ([`super::orphans`]); swept after the walk.
+    pub orphans: Vec<String>,
 }
 
 /// `(plain, plain + ".gz")` sidecar paths of `cbz` for a row suffix.
@@ -228,6 +231,13 @@ pub fn walk(
         let listed = sidecar::list_names(directory).unwrap_or_default();
         let names: Vec<&str> = listed.iter().map(String::as_str).collect();
         let folder = Folder::new(&names);
+        let stems = super::orphans::OrphanStems::new(&names);
+        index.orphans.extend(
+            names
+                .iter()
+                .filter(|n| super::orphans::orphan_target(n, &stems).is_some())
+                .filter_map(|n| rel_of(library, &directory.join(n))),
+        );
         for cbz in archives {
             let Some(rel) = rel_of(library, cbz) else {
                 continue;

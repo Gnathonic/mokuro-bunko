@@ -510,3 +510,135 @@ fn a_stale_generation_layer_is_run_again_and_replaced_in_place() {
     h.at(t + 31.0);
     assert!(!h.s.owed.volumes.contains_key("A/V1.cbz"), "current now");
 }
+
+/// An old recipe Bunko itself wrote (0.5's served mokuro carries its stamp).
+const BUNKO_OLD: &str = r#"{"version":"0.2.1","title":"A","volume":"V1","ocr_engine":{"id":"mokuro","generator":"mokuro-bunko 0.5.3"},"pages":[{"img_path":"001.jpg","blocks":[]},{"img_path":"002.jpg","blocks":[]},{"img_path":"003.jpg","blocks":[]}]}"#;
+
+/// `content` sealed, then marked EDITED by a reader (the `edited` block is outside the
+/// seal).
+fn sealed_then_edited(content: &str) -> String {
+    let mut v: serde_json::Value = serde_json::from_str(&sealed(content)).unwrap();
+    v["edited"] = serde_json::json!({"by": "mokuro-reader", "at": "2026-10-29T00:00:00Z",
+                                     "base_sha256": null, "base_seal": null});
+    v.to_string()
+}
+
+/// Critique C4-B6: an EDITED main whose recipe is outdated gets one job; its result
+/// lands as the layer `<Vol>.<primary>.mokuro`, stamped and sealed, and the main keeps
+/// its bytes. Once the edit mark is gone, that layer is what the census swaps in.
+#[test]
+fn an_edited_main_gets_its_new_ocr_as_the_primary_layer_and_is_never_touched() {
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    h.add("A/V1.cbz", 3);
+    let lib = h.library();
+    let main = sealed_then_edited(BUNKO_OLD);
+    std::fs::write(lib.join("A/V1.mokuro"), &main).unwrap();
+    h.at(0.0);
+    assert!(h.s.owed.volumes["A/V1.cbz"].upgrade, "one upgrade job");
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let vols = volumes(&ops);
+    assert_eq!(vols.len(), 1);
+    assert!(h.s.claims.contains_key(&Job::upgrade("A/V1.cbz", "g-1")));
+    let sid = opened(&ops)[0].clone();
+    h.event(&p, ready(&sid));
+    h.event(&p, started(&sid, &vols[0].1, 3));
+    h.done_with(&p, &sid, &vols[0].1, "V1.mokuro", 3, 1.0, HAYAI.as_bytes());
+    assert!(h.s.failures.is_empty(), "{:?}", h.s.failures);
+
+    assert_eq!(
+        std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),
+        main,
+        "the edited main keeps its bytes"
+    );
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.hayai-nova.mokuro", "V1.mokuro"],
+        "nothing preserved, nothing numbered"
+    );
+    let layer = lib.join("A/V1.hayai-nova.mokuro");
+    let block = json(&layer)["ocr_engine"].clone();
+    assert_eq!(block["id"], "hayai-nova");
+    assert_eq!(block["generation"], "hayai-nova");
+    assert!(bunko_layout::seal::is_sealed(
+        &std::fs::read(&layer).unwrap()
+    ));
+    let db = h.db.clone().unwrap();
+    let row = db
+        .get_ocr_sidecar("A/V1.hayai-nova.mokuro")
+        .unwrap()
+        .expect("a provenance row at the layer");
+    assert_eq!(row.generation_id, "g-1");
+    let written: Vec<serde_json::Value> = db
+        .list_audit_events(50, None)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.action == "ocr_sidecar_written")
+        .map(|e| serde_json::from_str(e.details.as_deref().unwrap()).unwrap())
+        .collect();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0]["mode"], "edited-main-layer");
+
+    // The next walk owes nothing.
+    h.at(31.0);
+    assert!(h.s.owed.volumes.get("A/V1.cbz").is_none_or(|v| !v.upgrade));
+
+    // The edit mark gone (Bunko's own old file again): the layer is swapped in.
+    std::fs::write(lib.join("A/V1.mokuro"), sealed(BUNKO_OLD)).unwrap();
+    h.at(62.0);
+    assert_eq!(
+        json(&lib.join("A/V1.mokuro"))["ocr_engine"]["id"],
+        "hayai-nova"
+    );
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.mokuro"],
+        "the layer copied in is not kept twice"
+    );
+}
+
+/// No job for an EDITED main with upgrades off, with a current recipe beneath the edit,
+/// with none at all, or when a file it is not Bunko's own holds the layer's name (its
+/// result could only be discarded, every walk).
+#[test]
+fn an_edited_main_gets_no_job_unless_its_recipe_is_outdated_and_the_layer_free() {
+    let mut off = harness_db(
+        vec![primary()],
+        Arc::new(FileFacts),
+        Some(UpgradeConfig::default()),
+    );
+    off.add("A/V1.cbz", 3);
+    std::fs::write(
+        off.library().join("A/V1.mokuro"),
+        sealed_then_edited(BUNKO_OLD),
+    )
+    .unwrap();
+    off.at(0.0);
+    assert!(!off.s.owed.volumes.contains_key("A/V1.cbz"), "upgrades off");
+
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    let lib = h.library();
+    for v in ["A", "B", "C", "D"] {
+        h.add(&format!("{v}/V1.cbz"), 3);
+    }
+    std::fs::write(lib.join("A/V1.mokuro"), sealed_then_edited(HAYAI)).unwrap();
+    let mut no_recipe: serde_json::Value = serde_json::from_str(LEGACY).unwrap();
+    no_recipe.as_object_mut().unwrap().shift_remove("version");
+    no_recipe["edited"] = serde_json::json!({"by": "mokuro-reader"});
+    std::fs::write(lib.join("B/V1.mokuro"), no_recipe.to_string()).unwrap();
+    std::fs::write(lib.join("C/V1.mokuro"), sealed_then_edited(BUNKO_OLD)).unwrap();
+    std::fs::write(lib.join("C/V1.hayai-nova.mokuro"), HAYAI).unwrap();
+    std::fs::write(lib.join("D/V1.mokuro"), sealed_then_edited(BUNKO_OLD)).unwrap();
+    std::fs::write(lib.join("D/v1.hayai-nova.mokuro.gz"), b"\x1f\x8b").unwrap();
+    h.at(0.0);
+    for v in ["A", "B", "C", "D"] {
+        assert!(
+            h.s.owed
+                .volumes
+                .get(&format!("{v}/V1.cbz"))
+                .is_none_or(|o| !o.upgrade),
+            "{v}: no job"
+        );
+    }
+    assert_eq!(h.s.deps.upgrade.clone().unwrap().census()["edited"], 4);
+}
