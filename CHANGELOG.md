@@ -44,6 +44,11 @@
   / **Keep that copy**; the tab also lists the **Recent merges**. Upload owners, OCR
   records and volume ids follow every moved volume. A folder Mokuro Reader keeps
   recreating is left alone after the fourth merge in a day.
+- **positions.json is kept per account.** Mokuro Reader's position index (the newest
+  page per volume) joins volume-data.json, profiles.json and goals.json, so it syncs
+  per account instead of into the shared library. `/login/api/me` lists these files as
+  `per_user_files`, signed in or not, and a reader uses a per-account file only once the
+  server lists it.
 
 ### Changed
 - **A WebDAV library on this computer needs no "Allow http".** A plain `http://` URL

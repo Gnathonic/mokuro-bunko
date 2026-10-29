@@ -285,6 +285,7 @@ fn identity_body(db: &bunko_db::Database, user: &User) -> bunko_db::Result<Value
         "role": user.role.as_str(),
         "created_at": user.created_at,
         "permissions": permissions(user.role, owned),
+        "per_user_files": crate::auth::paths::PER_USER_FILES,
     }))
 }
 
@@ -315,7 +316,14 @@ async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -
         AuthHeader::Malformed => unauthenticated(401, "Invalid credentials"),
         AuthHeader::None => json_response(
             200,
-            json!({"authenticated": false, "role": "anonymous", "permissions": permissions(Role::Anonymous, None)}),
+            json!({
+                "authenticated": false,
+                "role": "anonymous",
+                "permissions": permissions(Role::Anonymous, None),
+                // Which root files this server keeps per account: a reader uses a name
+                // (e.g. positions.json) only once the server lists it here.
+                "per_user_files": crate::auth::paths::PER_USER_FILES,
+            }),
         ),
         AuthHeader::Basic(username, password) => {
             let key = client.limiter_key(&username);
