@@ -192,6 +192,7 @@ async fn every_page_gets_a_base_leading_to_the_mount_root() {
         ("/", "./"),
         ("/catalog", "./"),
         ("/catalog/", "../"),
+        ("/catalog//", "../../"),
         ("/queue/", "../"),
         ("/_admin", "./"),
         ("/_admin/", "../"),

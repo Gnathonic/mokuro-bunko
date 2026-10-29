@@ -15,13 +15,14 @@ const MAX_PAGE: usize = 8 << 20;
 
 /// The way from `path` (a request path, as sent) back to the mount root: `./` from a
 /// file at the root, one `../` per folder of the path's directory (the path itself when
-/// it ends with `/`, else its parent).
+/// it ends with `/`, else its parent). Empty folders count: a browser resolving `../`
+/// against `/catalog//` only drops the empty one.
 pub fn relative_root(path: &str) -> String {
     let dir = match path.rfind('/') {
         Some(i) => &path[..=i],
         None => "/",
     };
-    let depth = dir.split('/').filter(|s| !s.is_empty()).count();
+    let depth = dir.matches('/').count().saturating_sub(1);
     if depth == 0 {
         "./".to_string()
     } else {
@@ -114,6 +115,10 @@ mod tests {
         assert_eq!(relative_root("/_admin/a/b"), "../../");
         assert_eq!(relative_root("/app/settings/logs"), "../../");
         assert_eq!(relative_root("/setup/code"), "../");
+        // A browser counts empty segments too: `../` from `/catalog//` is `/catalog/`.
+        assert_eq!(relative_root("/catalog//"), "../../");
+        assert_eq!(relative_root("//catalog/"), "../../");
+        assert_eq!(relative_root("//"), "../");
     }
 
     #[test]
