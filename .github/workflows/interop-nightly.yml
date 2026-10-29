@@ -1,0 +1,120 @@
+name: Interop nightly
+
+# The Bunko build the reader's CI runs its interop rig against
+# (docs/design/interop-testing.md §9): a testing-feature server and cloudsim for Linux
+# x86_64, published as the pre-release `nightly` (from main) or `nightly-0.8` (from
+# 0.8/remote-storage), replaced on every run. Test builds only: the `testing` feature
+# turns on hooks a release build refuses (MOKURO_TEST_CLOUD_*, processor-fake). Never
+# installed: the updater only takes releases whose tag is a version and that carry a
+# signed release.json, and these have neither (crates/bunko-update,
+# prerelease_lookup_skips_the_nightly_test_builds).
+
+on:
+  push:
+    branches: [main, 0.8/remote-storage]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # A schedule runs on the default branch: it refreshes both tags. A push or a
+        # manual run builds the branch it is for.
+        ref: >-
+          ${{ github.event_name == 'schedule'
+            && fromJSON('["main", "0.8/remote-storage"]')
+            || fromJSON(format('["{0}"]', github.ref_name)) }}
+    concurrency:
+      group: interop-nightly-${{ matrix.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: the tag for this branch
+        id: tag
+        env:
+          REF: ${{ matrix.ref }}
+        run: |
+          case "$REF" in
+            main) tag=nightly ;;
+            0.8/remote-storage) tag=nightly-0.8 ;;
+            *) echo "::error::no nightly tag for branch $REF (main or 0.8/remote-storage)"; exit 1 ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: interop-nightly
+      - name: build the testing server and cloudsim
+        run: |
+          cargo build --release -p mokuro-bunko --no-default-features --features testing --locked
+          cargo build --release -p bunko-cloudsim --locked
+      # The testing feature is on (a release build has no processor-fake and refuses
+      # to start with a MOKURO_TEST_CLOUD_* variable set), and both binaries run.
+      - name: check the binaries
+        run: |
+          set -eux
+          MOKURO_TEST_CLOUD_API_BASE_GDRIVE=http://127.0.0.1:9/google \
+            target/release/mokuro-bunko processor-fake --help
+          target/release/mokuro-bunko --version
+          target/release/bunko-cloudsim --help
+      - name: assets
+        env:
+          REF: ${{ matrix.ref }}
+        run: |
+          set -eux
+          mkdir dist
+          cp target/release/mokuro-bunko dist/mokuro-bunko-testing-x86_64-linux
+          cp target/release/bunko-cloudsim dist/bunko-cloudsim-x86_64-linux
+          version=$(cargo metadata --no-deps --format-version 1 --locked |
+            jq -r '.packages[] | select(.name == "mokuro-bunko") | .version')
+          jq -n --arg sha "$(git rev-parse HEAD)" --arg branch "$REF" --arg version "$version" \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{bunko_sha: $sha, branch: $branch, version: $version, built_at: $built_at}' \
+            > dist/nightly.json
+          cat dist/nightly.json
+      - name: publish the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          REF: ${{ matrix.ref }}
+        run: |
+          set -eux
+          sha=$(git rev-parse HEAD)
+          cat > notes.md <<EOF
+          **Test build for the interop rig. Never install it, and never point it at a real library.**
+
+          Built from \`$REF\` at $sha. The \`testing\` feature is on: this server accepts the
+          test hooks a release build refuses (\`MOKURO_TEST_CLOUD_*\` sends its cloud
+          stores to a simulator; \`processor-fake\` OCRs without models). The Mokuro Reader's
+          CI downloads it to run the rig against its own code. Replaced on every run; the
+          updater never offers it.
+
+          - \`mokuro-bunko-testing-x86_64-linux\`: the server (lite, testing)
+          - \`bunko-cloudsim-x86_64-linux\`: the cloud simulator
+          - \`nightly.json\`: the commit, branch and version this is
+          EOF
+          files=(dist/mokuro-bunko-testing-x86_64-linux dist/bunko-cloudsim-x86_64-linux dist/nightly.json)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Move the tag to this commit, then replace the assets in place: the
+            # release never disappears under a reader run that is downloading it.
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" -f sha="$sha" -F force=true
+            gh release upload "$TAG" --clobber "${files[@]}"
+            gh release edit "$TAG" --prerelease --latest=false --notes-file notes.md
+          else
+            gh release create "$TAG" --target "$sha" --prerelease --latest=false \
+              --title "Interop test build ($REF)" --notes-file notes.md "${files[@]}"
+          fi
