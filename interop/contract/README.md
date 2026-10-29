@@ -80,7 +80,10 @@ checks (a lease marker, a queue file) behave as they would on a live server.
 `{"ocr_engine": <the block without "seal" and "content_sha256">, "pages": <pages>}`:
 keys sorted by UTF-16 code units, numbers as JavaScript's `String(n)`, strings as
 `JSON.stringify`, no whitespace. So `JSON.stringify` over key-sorted objects matches it.
-No `ocr_engine` object, no `pages` array, or a NaN/Infinity in either: no seal. A
+No `ocr_engine` object, no `pages` array, or a NaN/Infinity in either: no seal. That
+includes a number past the double range (`1e400`, a 400-digit integer): `JSON.parse`
+reads it as Infinity and `JSON.stringify` would write it as `null`, so a reader checks
+for non-finite numbers after parsing and gives no seal (the `overflow` vector). A
 document is sealed when its block's `seal` matches `^v1:[0-9a-f]{64}$` and equals the
 seal its content gives (a leading UTF-8 BOM is ignored).
 

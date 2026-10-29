@@ -154,6 +154,14 @@ fn vectors() -> Vec<(&'static str, &'static str, String)> {
             runner.replace("31.5", "NaN"),
         ),
         (
+            "overflow",
+            "Numbers past the double range (1e400, a 400-digit integer) read as Infinity: no seal, though JSON.stringify would write them as null.",
+            runner.replace("31.5", "1e400").replace(
+                "\"blocks\": []",
+                &format!("\"blocks\": [], \"n\": 1{}", "0".repeat(400)),
+            ),
+        ),
+        (
             "no-engine",
             "No ocr_engine block: nothing to seal.",
             r#"{"version": "0.2.5", "title": "T", "volume": "V", "pages": []}"#.to_string(),
@@ -271,7 +279,7 @@ fn every_committed_vector_checks() {
         );
         n += 1;
     }
-    assert!(n >= 14, "only {n} vectors under {}", dir.display());
+    assert!(n >= 15, "only {n} vectors under {}", dir.display());
 }
 
 /// The vectors say what they claim to.
@@ -302,6 +310,7 @@ fn the_vectors_cover_what_they_name() {
         "legacy-byte-seal",
         "uppercase-seal",
         "non-finite",
+        "overflow",
         "no-engine",
     ] {
         assert!(!is_sealed(by_name(broken).as_bytes()), "{broken}");
@@ -314,6 +323,14 @@ fn the_vectors_cover_what_they_name() {
     assert!(seal("edited-line").is_some());
     assert_ne!(seal("edited-line"), seal("runner-output"));
     assert_eq!(seal("non-finite"), None);
+    assert_eq!(seal("overflow"), None);
+    // Each overflow alone already refuses the seal, not only the pair together.
+    let one = |from: &str, to: &str| {
+        let text = by_name("runner-output").replace(from, to);
+        seal_of(&Value::parse(&text).unwrap())
+    };
+    assert_eq!(one("31.5", "1e400"), None);
+    assert_eq!(one("31.5", &format!("1{}", "0".repeat(400))), None);
     assert_eq!(seal("no-engine"), None);
 }
 
