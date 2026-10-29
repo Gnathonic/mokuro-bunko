@@ -1357,6 +1357,15 @@ Both are regenerated when the library changes and whenever a client submits an
 update, and are rewritten only when their content actually changed, so clients can
 cache them on size/mtime.
 
+A series folder that loses its last `.cbz` loses its `series.json` too (the folder
+itself stays), so readers stop showing a series that is gone. The series' facts stay
+in the database, and the next upload into the folder compiles the file again with
+them. A `series.json` placed there by hand, carrying facts Bunko has no record of,
+is left alone. In a cloud library the file goes to the provider's trash (a version
+Bunko wrote itself is deleted), and only while the library is online and in step:
+not during a full sync, not while it waits for removals to be confirmed, not while
+another Bunko holds the library.
+
 Each volume entry may also carry `mokuro_size`/`mokuro_modified` and
 `cover_size`/`cover_modified`: the byte size and integer epoch-second mtime of the
 `.mokuro` sidecar and the cover `.webp`, taken from a plain filesystem stat when the

@@ -15,11 +15,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use bunko_store::fs;
+use bunko_store::{Health, fs};
 use parking_lot::{Mutex, MutexGuard};
 
 use crate::compat::normalize_volume_title_key;
-use crate::compiler::{SeriesFolder, compile_series_volumes, iter_series_folders, volume_key_for};
+use crate::compiler::{
+    SeriesFolder, compile_series_volumes, iter_series_folders, orphan_series_files_where,
+    volume_key_for,
+};
 use crate::fsutil;
 use crate::paths::{CATALOG_FILE_NAME, SERIES_FILE_NAME};
 use crate::schema::{
@@ -422,6 +425,82 @@ impl MetadataService {
         })
     }
 
+    /// May an orphan `series.json` go now (X16)? Always on a local library; on a
+    /// remote one only while it is `Online`: the feed STEADY, not Suspect, no other
+    /// Bunko holding the lease, no pause. Mid full sync, or while removals wait to be
+    /// confirmed, a folder may only look empty.
+    fn may_retire(&self) -> bool {
+        bunko_store::store_for(&self.library_path)
+            .is_none_or(|store| !store.caps().remote || store.health() == Health::Online)
+    }
+
+    /// Would a re-upload compile this `series.json` again? Yes when its facts are
+    /// stored, or when it carries nothing a facts row would hold (what Bunko compiles
+    /// for a series nobody gave facts to). A hand-placed file with facts of its own,
+    /// or one that does not parse, is not ours to drop.
+    fn regenerable(&self, series_key: &str, path: &Path) -> Result<bool, StoreError> {
+        if self.store.series_facts(series_key)?.is_some() {
+            return Ok(true);
+        }
+        let Ok(bytes) = fs::read(path) else {
+            return Ok(false);
+        };
+        Ok(
+            parse_series_update(&bytes, (self.clock)()).is_some_and(|file| {
+                !file.facts.has_facts()
+                    && file.spine_offset.is_none()
+                    && file.volume_offsets.is_empty()
+            }),
+        )
+    }
+
+    /// Retire the `series.json` of top-level folders that lost their last archive
+    /// (only those whose series key is in `only`, when given): a reader would keep
+    /// showing a series that is gone. Only a [regenerable](Self::regenerable) file
+    /// goes: a re-upload compiles it again, from the facts row, which is never
+    /// deleted. Locally an unlink; in
+    /// the cloud the provider trash, or a permanent delete of a version Bunko wrote
+    /// itself. Returns the number retired.
+    fn retire_orphan_series_files(
+        &self,
+        only: Option<&HashSet<String>>,
+    ) -> Result<usize, StoreError> {
+        let orphans = orphan_series_files_where(&self.library_path, |key| {
+            only.is_none_or(|only| only.contains(key))
+        });
+        if orphans.is_empty() {
+            return Ok(0);
+        }
+        if !self.may_retire() {
+            // The next pass looks again; retrying now would only spin while it lasts.
+            tracing::debug!("[METADATA] library not steady, empty folders keep series.json");
+            return Ok(0);
+        }
+        let mut retired = 0;
+        for (title, path) in orphans {
+            if !self.regenerable(&normalize_volume_title_key(&title), &path)? {
+                continue;
+            }
+            let Some(_guard) = self.locks.try_lock(&path) else {
+                tracing::info!(series = %title, "[METADATA] skipped busy series folder");
+                self.retry_later();
+                continue;
+            };
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    tracing::info!(series = %title, "[METADATA] retired series.json of empty folder");
+                    retired += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(series = %title, %error, "[METADATA] could not retire series.json of empty folder");
+                    self.retry_later();
+                }
+            }
+        }
+        Ok(retired)
+    }
+
     fn published(&self, changed: usize) {
         if changed > 0 {
             self.hooks.on_published();
@@ -494,6 +573,7 @@ impl MetadataService {
                 let folder_names: HashSet<String> =
                     folders.iter().map(|folder| folder.title.clone()).collect();
                 self.store.prune_catalog_series(&folder_names)?;
+                changed += self.retire_orphan_series_files(None)?;
                 changed += self.publish_catalog_logged(&catalog_entries);
             }
         }
@@ -559,6 +639,8 @@ impl MetadataService {
             }
             if !self.is_stopped() {
                 let _guard = self.pass_lock.lock();
+                // The DELETE/MOVE hooks drive this path for a series that lost a volume.
+                changed += self.retire_orphan_series_files(Some(&keys))?;
                 changed += self.publish_catalog_logged(&catalog_entries);
             }
         }
@@ -590,6 +672,7 @@ impl MetadataService {
             self.materialize_catalog_row(folder, &volumes)?;
             changed += self.publish_series_logged(folder, &facts, &index, &volumes);
         }
+        changed += self.retire_orphan_series_files(Some(&HashSet::from([key])))?;
         changed += self.publish_catalog_logged(&catalog_entries);
         Ok(changed)
     }

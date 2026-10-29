@@ -406,3 +406,130 @@ async fn the_metadata_passes_wait_for_first_adoption() {
     fake.set_call_hook(None);
     server.stop().await;
 }
+
+/// No lease; D19 trips on a handful of removals so a test can make the store Suspect.
+fn touchy(c: &mut bunko_remote::RemoteStoreConfig) {
+    quick(c);
+    c.suspect_min_removals = 3;
+}
+
+/// A cloud folder that lost its last archive loses its `series.json` too, but only
+/// while the store is `Online` (X16): mid full sync, or while removals wait to be
+/// confirmed (Suspect), a folder may only look empty. Bunko's own version goes for
+/// good; a version someone else wrote goes to the provider trash, never deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_emptied_cloud_folder_retires_its_series_file_only_while_online() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use bunko_store::{Health, LibraryStore as _};
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    let fake = fake_library();
+    fake.reader_put(&format!("{ROOT}/Gone/Gone 1.cbz"), &cbz(1));
+    // A reader's series.json in a folder with no volume: its facts are kept (D18).
+    fake.reader_put(
+        &format!("{ROOT}/Foreign/series.json"),
+        br#"{"version":2,"series_title":"Foreign","updated_at":"2026-01-01T00:00:00.000Z","external_ids":{"anilist":7},"volumes":[]}"#,
+    );
+    for i in 0..10 {
+        fake.reader_put(&format!("{ROOT}/Other/f{i}.jpg"), b"x");
+    }
+    // Lets the test hold a full sync open: every listed node waits while set.
+    let hold = Arc::new(AtomicBool::new(false));
+    {
+        let hold = hold.clone();
+        fake.set_list_hook(Some(Arc::new(move |_| {
+            while hold.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })));
+    }
+    let server = Server::start(&base, &fake, Some(touchy), |_| {}).await;
+    let store = server.store();
+    eventually(
+        "first adoption and the library services",
+        Duration::from_secs(60),
+        || store.adopted() && server.services.library.is_started(),
+    )
+    .await;
+    // The Foreign file is foreign: Bunko never wrote a version of it, so it is
+    // compiled nowhere and an Online pass trashes it at once.
+    let foreign = node(&fake, "Foreign/series.json").unwrap().pid;
+    server.services.library.recompile_all_now().await;
+    idle(&store).await;
+    let own = node(&fake, "Gone/series.json")
+        .expect("Gone/series.json compiled")
+        .pid;
+    eventually(
+        "the foreign orphan is trashed",
+        Duration::from_secs(10),
+        || node(&fake, "Foreign/series.json").is_none(),
+    )
+    .await;
+    assert!(
+        fake.trashed_log().contains(&foreign),
+        "{:?}",
+        fake.trashed_log()
+    );
+    assert!(!fake.deleted_log().contains(&foreign));
+
+    // Gone loses its last archive, then the store turns Suspect.
+    fake.reader_delete(&format!("{ROOT}/Gone/Gone 1.cbz"));
+    store.feed().poll_now();
+    eventually("the index sees the delete", Duration::from_secs(10), || {
+        node(&fake, "Gone/Gone 1.cbz").is_none()
+            && !bunko_store::fs::exists(base.join("library/Gone/Gone 1.cbz"))
+    })
+    .await;
+    for i in 0..10 {
+        fake.reader_delete(&format!("{ROOT}/Other/f{i}.jpg"));
+    }
+    store.feed().poll_now();
+    eventually("suspect", Duration::from_secs(10), || {
+        store.health() == Health::Suspect
+    })
+    .await;
+    server.services.library.recompile_all_now().await;
+    assert!(
+        node(&fake, "Gone/series.json").is_some(),
+        "retired while Suspect"
+    );
+
+    // Confirmed; then a full sync, held open.
+    store.feed().confirm_suspect();
+    eventually("online", Duration::from_secs(20), || {
+        store.health() == Health::Online
+    })
+    .await;
+    hold.store(true, Ordering::SeqCst);
+    fake.lose_cursor();
+    store.feed().poll_now();
+    eventually("a full sync", Duration::from_secs(20), || {
+        matches!(store.health(), Health::Syncing { .. })
+    })
+    .await;
+    server.services.library.recompile_all_now().await;
+    assert!(
+        node(&fake, "Gone/series.json").is_some(),
+        "retired mid full sync"
+    );
+    hold.store(false, Ordering::SeqCst);
+    eventually("online again", Duration::from_secs(20), || {
+        store.health() == Health::Online
+    })
+    .await;
+
+    server.services.library.recompile_all_now().await;
+    idle(&store).await;
+    assert!(node(&fake, "Gone/series.json").is_none());
+    assert!(node(&fake, "Gone").is_some(), "the folder stays");
+    // Bunko's own version may go for good; anything else only to the trash.
+    let gone = fake.deleted_log().contains(&own) || fake.trashed_log().contains(&own);
+    assert!(gone, "{:?} {:?}", fake.deleted_log(), fake.trashed_log());
+    let catalog = json_at(&fake, "catalog.json").unwrap();
+    assert!(!catalog.to_string().contains("\"Gone\""), "{catalog}");
+    assert!(store.conflicts().is_empty(), "{:?}", store.conflicts());
+    fake.set_list_hook(None);
+    server.stop().await;
+}
