@@ -69,8 +69,9 @@ pub const MAX_UNUSED_CODES: u32 = 5;
 /// offer: M0's wrong pairing listed at most 10 files (§7).
 pub const PAIRING_OFFER_MAX_VOLUMES: u64 = 10;
 
-/// Archive extensions the Check counts as volumes.
-const VOLUME_EXTS: &[&str] = bunko_library::sidecar::VOLUME_ARCHIVE_EXTENSIONS;
+/// Archive extensions the Check counts as volumes: every one, not only the `.cbz` that
+/// anchors sidecars (rule v1) — the Check counts what the folder holds.
+const VOLUME_EXTS: &[&str] = &bunko_core::sidecar_names::ARCHIVE_EXTENSIONS;
 
 /// The name a provider is shown by.
 pub fn provider_name(b: LibraryBackend) -> &'static str {

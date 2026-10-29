@@ -11,7 +11,12 @@ pub const CATALOG_FILE_NAME: &str = "catalog.json";
 /// The WebDAV reader root (`PathMapper.READER_ROOT`).
 pub const READER_ROOT: &str = "mokuro-reader";
 /// Per-user files mapped into a user's private directory: never metadata.
-pub const PER_USER_FILES: &[&str] = &["volume-data.json", "profiles.json", "goals.json"];
+pub const PER_USER_FILES: &[&str] = &[
+    "volume-data.json",
+    "profiles.json",
+    "goals.json",
+    "positions.json",
+];
 
 /// `posixpath.normpath("/" + path.strip("/"))`: lexical, no filesystem access.
 pub fn normalize_virtual_path(path: &str) -> String {
@@ -128,6 +133,7 @@ mod tests {
         assert!(!is_series_file_path("/mokuro-reader/series.json"));
         assert!(!is_catalog_file_path("/mokuro-reader/A/catalog.json"));
         assert_eq!(library_relative("/mokuro-reader/volume-data.json"), None);
+        assert_eq!(library_relative("/mokuro-reader/positions.json"), None);
         assert_eq!(
             library_relative("/../mokuro-reader/x"),
             Some("x".to_owned())

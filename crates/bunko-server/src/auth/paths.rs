@@ -2,7 +2,12 @@
 //! `metadata/paths.py`). Paths are percent-decoded UTF-8.
 
 pub const READER_ROOT: &str = "mokuro-reader";
-pub const PER_USER_FILES: &[&str] = &["volume-data.json", "profiles.json", "goals.json"];
+pub const PER_USER_FILES: &[&str] = &[
+    "volume-data.json",
+    "profiles.json",
+    "goals.json",
+    "positions.json",
+];
 
 fn normalized(path: &str) -> String {
     format!("/{}", path.trim_matches('/'))
@@ -113,6 +118,9 @@ mod tests {
         assert!(is_library_path("/mokuro-reader/Volume-Data.json"));
         assert!(!is_library_path("/mokuro-reader/"));
         assert!(!is_library_path("/mokuro-reader/profiles.json"));
+        // The reader's position index is the user's own, like their progress.
+        assert!(is_progress_file("/mokuro-reader/positions.json"));
+        assert!(!is_library_path("/mokuro-reader/positions.json"));
     }
 
     #[test]

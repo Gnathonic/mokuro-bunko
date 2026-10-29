@@ -9,7 +9,13 @@
       "metadata": {
         "scope": "none"
       }
-    }
+    },
+    "per_user_files": [
+      "volume-data.json",
+      "profiles.json",
+      "goals.json",
+      "positions.json"
+    ]
   },
   "headers": {
     "cache-control": "no-store",

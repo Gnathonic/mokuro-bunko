@@ -11,6 +11,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bunko_core::generations::Generation;
+use bunko_core::sidecar_names::Folder;
+use bunko_library::sidecar;
 use bunko_store::fs;
 
 use super::types::{LibraryFacts, mtime_ns, rel_of};
@@ -48,10 +50,32 @@ pub fn sidecar_paths(cbz: &Path, suffix: &str) -> (std::path::PathBuf, std::path
     (plain, gz.into())
 }
 
-/// `needs_sidecar`: neither the row's sidecar nor its `.gz` exists.
-pub fn row_done(cbz: &Path, row: &Generation) -> bool {
+/// `needs_sidecar`, the other way round: the row's sidecar or its `.gz` exists, in any
+/// spelling of the volume's stem (sidecar names rule v1: `V.MOKURO`, `v.fast.mokuro`
+/// on a case-sensitive disk; generating it again would put a second copy beside it).
+/// `folder`: the archive's folder when a walk has listed it; else it is listed here,
+/// and only when the exact names are missing.
+pub fn row_done(cbz: &Path, row: &Generation, folder: Option<&Folder>) -> bool {
     let (plain, gz) = sidecar_paths(cbz, &row.sidecar_suffix());
-    fs::exists(&plain) || fs::exists(&gz)
+    if fs::exists(&plain) || fs::exists(&gz) {
+        return true;
+    }
+    let listed_in = |folder: &Folder| {
+        if row.primary {
+            sidecar::primary_sidecar_in(cbz, folder).is_some()
+        } else {
+            sidecar::layer_sidecar_in(cbz, &row.name, folder).is_some()
+        }
+    };
+    match folder {
+        Some(folder) => listed_in(folder),
+        None => {
+            let listed = sidecar::list_names(cbz.parent().unwrap_or_else(|| Path::new("")))
+                .unwrap_or_default();
+            let names: Vec<&str> = listed.iter().map(String::as_str).collect();
+            listed_in(&Folder::new(&names))
+        }
+    }
 }
 
 /// Decides whether a volume whose primary is done is owed a generation upgrade
@@ -67,6 +91,18 @@ pub fn compute(
     rows: &[Generation],
     facts: &dyn LibraryFacts,
     upgrade: Option<&dyn UpgradeProbe>,
+) -> Option<OwedVolume> {
+    compute_in(library, cbz, rows, facts, upgrade, None)
+}
+
+/// [`compute`] with the archive's folder already listed (the walk lists each once).
+fn compute_in(
+    library: &Path,
+    cbz: &Path,
+    rows: &[Generation],
+    facts: &dyn LibraryFacts,
+    upgrade: Option<&dyn UpgradeProbe>,
+    folder: Option<&Folder>,
 ) -> Option<OwedVolume> {
     let name = cbz.file_name()?.to_string_lossy().into_owned();
     if !bunko_library::sidecar::is_cbz_name(&name) {
@@ -85,7 +121,7 @@ pub fn compute(
     let mut owed: Vec<&Generation> = enabled
         .iter()
         .copied()
-        .filter(|r| !row_done(cbz, r))
+        .filter(|r| !row_done(cbz, r, folder))
         .collect();
     let primary_done = enabled
         .iter()
@@ -176,18 +212,31 @@ pub fn walk(
     known: &KnownPages,
 ) -> OwedIndex {
     let mut index = OwedIndex::default();
-    for cbz in list_archives(library) {
-        let Some(rel) = rel_of(library, &cbz) else {
-            continue;
-        };
-        if let Some(mut v) = compute(library, &cbz, rows, facts, upgrade) {
+    // Each folder is listed once for all of its archives.
+    let mut by_folder: BTreeMap<&Path, Vec<&Path>> = BTreeMap::new();
+    let archives = list_archives(library);
+    for cbz in &archives {
+        let directory = cbz.parent().unwrap_or_else(|| Path::new(""));
+        by_folder.entry(directory).or_default().push(cbz);
+    }
+    for (directory, archives) in by_folder {
+        let listed = sidecar::list_names(directory).unwrap_or_default();
+        let names: Vec<&str> = listed.iter().map(String::as_str).collect();
+        let folder = Folder::new(&names);
+        for cbz in archives {
+            let Some(rel) = rel_of(library, cbz) else {
+                continue;
+            };
+            let Some(mut v) = compute_in(library, cbz, rows, facts, upgrade, Some(&folder)) else {
+                continue;
+            };
             v.pages = match known.get(&rel) {
                 Some((size, mtime, pages))
                     if *size == v.size && *mtime == v.mtime_ns && pages.is_some() =>
                 {
                     *pages
                 }
-                _ => pages_of(&cbz, facts),
+                _ => pages_of(cbz, facts),
             };
             index.volumes.insert(rel, v);
         }
@@ -213,7 +262,11 @@ pub fn still_owed(library: &Path, rel: &str, row: &Generation, upgrade: bool) ->
     if sidecar_recently_removed(&cbz, row) {
         return false;
     }
-    if upgrade { true } else { !row_done(&cbz, row) }
+    if upgrade {
+        true
+    } else {
+        !row_done(&cbz, row, None)
+    }
 }
 
 /// A case merge journal group is open on `cbz` (or its folder) on a remote store
@@ -309,5 +362,49 @@ mod tests {
             ]
         );
         assert!(still_owed(lib, "S/V1.CBZ", &rows()[0], false));
+    }
+
+    /// Sidecar names rule v1: a sidecar in another spelling of the volume's stem
+    /// (`V.MOKURO`, `v.fast.mokuro` on a case-sensitive disk) is the volume's, so the
+    /// walk does not OCR it again and write a second primary beside it.
+    #[test]
+    fn a_sidecar_in_another_spelling_is_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        std::fs::create_dir_all(lib.join("S")).unwrap();
+        for name in [
+            "V1.cbz",
+            "V1.MOKURO",
+            "V2.cbz",
+            "V2.mokuro",
+            "v2.fast.mokuro.gz",
+        ] {
+            std::fs::write(lib.join("S").join(name), b"{}").unwrap();
+        }
+        // Two archives fold alike: a folded-only sidecar is neither's.
+        for name in [
+            "W.cbz", "w.cbz", "W.mokuro", "w.mokuro", "x.cbz", "X.cbz", "x.MOKURO",
+        ] {
+            std::fs::write(lib.join("S").join(name), b"{}").unwrap();
+        }
+        let index = walk(lib, &rows(), &FileFacts, None, &KnownPages::new());
+        let owed: Vec<(&str, Vec<String>)> = index
+            .volumes
+            .iter()
+            .map(|(rel, v)| (rel.as_str(), v.rows.iter().map(|r| r.to_string()).collect()))
+            .collect();
+        assert_eq!(
+            owed,
+            [
+                ("S/V1.cbz", vec!["g-2".to_string()]),
+                ("S/W.cbz", vec!["g-2".to_string()]),
+                ("S/X.cbz", vec!["g-1".to_string(), "g-2".to_string()]),
+                ("S/w.cbz", vec!["g-2".to_string()]),
+                ("S/x.cbz", vec!["g-2".to_string()]),
+            ]
+        );
+        assert!(!still_owed(lib, "S/V1.cbz", &rows()[0], false));
+        assert!(!still_owed(lib, "S/V2.cbz", &rows()[1], false));
+        assert!(still_owed(lib, "S/X.cbz", &rows()[0], false));
     }
 }

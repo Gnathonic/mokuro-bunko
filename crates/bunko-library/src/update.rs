@@ -91,7 +91,7 @@ fn facts_from(raw: &JsonObject, updated_at: String) -> SeriesFacts {
 
 /// `parse_series_update(payload, now=now)`: `None` means "reject" (400).
 pub fn parse_series_update(payload: &[u8], now: f64) -> Option<SeriesUpdate> {
-    let text = std::str::from_utf8(payload).ok()?;
+    let text = pyjson::strip_bom(std::str::from_utf8(payload).ok()?);
     let JsonValue::Object(decoded) = pyjson::parse_with(
         text,
         ParseOptions {
@@ -255,6 +255,15 @@ mod tests {
         assert!(update.spine_offset_present);
         assert_eq!(update.listed_uuids, vec!["u".to_owned()]);
         assert!(update.volume_offsets.is_empty());
+    }
+
+    /// Rule v1: a BOM a Windows editor left in front of the PUT body is not a reason
+    /// to refuse it.
+    #[test]
+    fn a_bom_prefixed_body_parses() {
+        let body = "\u{feff}{\"version\":2,\"updated_at\":\"2026-01-01T00:00:00Z\",\"tag\":\"HD\"}";
+        let update = parse_series_update(body.as_bytes(), NOW).unwrap();
+        assert_eq!(update.facts.tag.as_deref(), Some("HD"));
     }
 
     #[test]

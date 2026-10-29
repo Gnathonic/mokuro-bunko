@@ -60,25 +60,18 @@ pub fn normalize_volume_key(path: &str) -> Option<String> {
 }
 
 /// `S/Vol 1.cbz` for the OCR layer file `S/Vol 1.hayai-nova.mokuro[.gz]`, else `None`.
-/// The layer id has 1-32 of `[a-z0-9-]` with at least one letter, so a decimal volume
-/// number (`Vol 01.5.mokuro`) is not a layer.
+///
+/// A heuristic: with no folder listing it cannot apply sidecar names rule v1
+/// (`bunko_core::sidecar_names::classify`), so on top of the rule's grammar (suffixes in
+/// any ASCII case, the id exact) the id needs a letter. A decimal volume number
+/// (`Vol 01.5.mokuro`) is then never a layer here, while a listing may read it as layer
+/// `5`; readers never mint an all-digit id.
 pub fn layer_sidecar_volume_path(path: &str) -> Option<String> {
-    let name = path.strip_suffix(".gz").unwrap_or(path);
-    let middle = name.strip_suffix(".mokuro")?;
-    let cut = middle.rfind('.')?;
-    if cut == 0 {
+    let (stem, layer, _) = bunko_core::sidecar_names::split_layer(path)?;
+    if !layer.bytes().any(|b| b.is_ascii_lowercase()) {
         return None;
     }
-    let layer = &middle[cut + 1..];
-    let ok = (1..=32).contains(&layer.len())
-        && layer
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && layer.bytes().any(|b| b.is_ascii_lowercase());
-    if !ok || middle[cut..].contains('/') {
-        return None;
-    }
-    Some(format!("{}.cbz", &middle[..cut]))
+    Some(format!("{stem}.cbz"))
 }
 
 /// The series-identity fold (`_fold_series_title_key` = the reader's
@@ -354,6 +347,16 @@ mod tests {
         assert_eq!(layer_sidecar_volume_path("S/Vol 1.Hayai.mokuro"), None);
         assert_eq!(layer_sidecar_volume_path(".x.mokuro"), None);
         assert_eq!(layer_sidecar_volume_path("a.b/c.mokuro"), None);
+        // Rule v1's suffixes match in any ASCII case; the id stays exact.
+        assert_eq!(
+            layer_sidecar_volume_path("S/Vol 1.gcv.MOKURO").as_deref(),
+            Some("S/Vol 1.cbz")
+        );
+        assert_eq!(
+            layer_sidecar_volume_path("S/Vol 1.gcv.Mokuro.GZ").as_deref(),
+            Some("S/Vol 1.cbz")
+        );
+        assert_eq!(layer_sidecar_volume_path("S/Vol 1.2024.mokuro"), None);
     }
 
     #[test]
