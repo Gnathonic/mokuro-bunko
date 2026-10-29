@@ -139,7 +139,8 @@ pub struct ProcessorFakeArgs {
     /// Each volume, once started, waits until this file exists
     #[arg(long, value_name = "PATH")]
     pub hold_file: Option<PathBuf>,
-    /// The `revision` its sidecars' `ocr_engine` block carries  [default: none]
+    /// The `revision` it announces for its engines and its sidecars' `ocr_engine` block
+    /// carries  [default: this build's revision of each engine]
     #[arg(long, value_name = "N")]
     pub engine_revision: Option<u32>,
     /// Time per page, in milliseconds

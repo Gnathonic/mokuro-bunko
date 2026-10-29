@@ -665,9 +665,10 @@ async fn a_hold_file_holds_each_volume_until_it_appears() {
     link.shutdown().await;
 }
 
-/// Without `engine_revision` the block has no revision (an absent one counts as 1).
+/// Without `engine_revision` the block carries this build's revision of its engine: a
+/// processor always says which revision made its output (provenance, B4.2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_fake_names_no_revision_unless_given_one() {
+async fn the_fake_names_this_builds_revision_unless_given_one() {
     let dir = tempfile::tempdir().unwrap();
     let results = dir.path().join("results");
     let a = write_volume(dir.path(), "a.cbz", 1);
@@ -681,6 +682,12 @@ async fn the_fake_names_no_revision_unless_given_one() {
         &std::fs::read(results.join("s1").join("v1").join(bunko_proto::RESULT_FILE)).unwrap(),
     )
     .unwrap();
-    assert!(sidecar["ocr_engine"].get("revision").is_none(), "{sidecar}");
+    let block = &sidecar["ocr_engine"];
+    let engine = block["id"].as_str().unwrap();
+    assert_eq!(
+        block["revision"],
+        bunko_layout::sidecar::engine_revision(engine),
+        "{sidecar}"
+    );
     link.shutdown().await;
 }

@@ -232,8 +232,10 @@ does.
   (repeatable; default every engine the build knows), `--page-delay-ms`,
   `--load-delay-ms` and `--max-sessions` shape it; `--hold-file PATH` holds each
   volume after it starts until the file exists (a rename during OCR, deterministic);
-  `--engine-revision N` writes `revision: N` into its sidecars' `ocr_engine` block,
-  right after the id (upgrade scenarios). A build without `testing` has no such command.
+  `--engine-revision N` announces revision N for its engines and writes `revision: N`
+  into its sidecars' `ocr_engine` block, right after the id (upgrade scenarios; without
+  it, the build's own revision of each engine, as a real processor does). A build
+  without `testing` has no such command.
 - **The reader** runs its real providers against the binary when `CLOUDSIM_URL` is set
   (`src/lib/interop/cloudsim/`, one file at a time; its CI job `interop` builds the
   simulator from Bunko and sets `REQUIRE_CLOUDSIM=1`, so the suites fail rather than
