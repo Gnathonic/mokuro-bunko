@@ -541,9 +541,10 @@ fn open_cloud() -> Cloud {
         .unwrap();
     assert!(handle.wait_steady(Duration::from_secs(20)));
     // STEADY comes before first adoption (INGEST_FACTS) ends; health is `syncing`
-    // until it does.
+    // while it runs. It is a task of its own that starts once STEADY is seen, so health
+    // can read `online` for a moment before it begins: wait for it to be done too.
     let t0 = std::time::Instant::now();
-    while handle.health() != bunko_store::Health::Online {
+    while !handle.adopted() || handle.health() != bunko_store::Health::Online {
         assert!(
             t0.elapsed() < Duration::from_secs(20),
             "{:?}",
