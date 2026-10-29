@@ -16,19 +16,9 @@ use std::path::{Component, Path, PathBuf};
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
-pub const READER_ROOT: &str = "mokuro-reader";
+pub use bunko_core::reader_tree::{PER_USER_FILES, READER_ROOT};
 
-/// Root `.json` files that belong to ONE user (exact, case-sensitive names): the sorted
-/// order 0.5.2 lists them, then `positions.json` (the reader's fixed-address position
-/// index, added after 0.5.2). Reported to clients as `per_user_files` by
-/// `/login/api/me`, so a reader only uses a name once the server keeps it per user.
-pub const PER_USER_FILES: [&str; 4] = [
-    "goals.json",
-    "profiles.json",
-    "volume-data.json",
-    "positions.json",
-];
-
+/// One of the account's root files (`goals.json`, ...), exactly as written.
 pub fn is_per_user_name(name: &str) -> bool {
     PER_USER_FILES.contains(&name)
 }
@@ -291,7 +281,7 @@ pub fn is_compiled_metadata_path(path: &str) -> bool {
     let Some(rel) = norm.strip_prefix(&format!("/{READER_ROOT}/")) else {
         return false;
     };
-    if rel.is_empty() || is_per_user_name(rel) {
+    if rel.is_empty() || bunko_core::reader_tree::is_per_user_rel(rel) {
         return false;
     }
     if rel.eq_ignore_ascii_case("catalog.json") {
@@ -388,6 +378,9 @@ mod tests {
         assert!(!is_compiled_metadata_path("/mokuro-reader/S/catalog.json"));
         assert!(!is_compiled_metadata_path(
             "/mokuro-reader/volume-data.json"
+        ));
+        assert!(!is_compiled_metadata_path(
+            "/mokuro-reader/history/series.json"
         ));
     }
 
