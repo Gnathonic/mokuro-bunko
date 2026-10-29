@@ -349,6 +349,7 @@ fn caps_from(p: &Probe, disable_cas: bool) -> BackendCaps {
         simple_upload_max: u64::MAX,
         chunk_multiple: 1,
         path_ids: true,
+        duplicate_names: false,
     }
 }
 

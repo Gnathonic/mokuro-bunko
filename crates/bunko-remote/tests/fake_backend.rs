@@ -503,6 +503,37 @@ fn described(items: &[ChangeItem]) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn duplicate_names_cap_follows_the_profile() {
+    assert!(FakeBackend::drive_like().caps().duplicate_names);
+    assert!(FakeBackend::mega_like().caps().duplicate_names);
+    assert!(!FakeBackend::onedrive_like().caps().duplicate_names);
+    assert!(!FakeBackend::webdav_cas().caps().duplicate_names);
+    assert!(!FakeBackend::webdav_plain().caps().duplicate_names);
+}
+
+#[tokio::test(start_paused = true)]
+async fn locate_roots_is_canonical_top_level_first() {
+    let b = FakeBackend::drive_like();
+    let backup = b.reader_mkdir("Backup");
+    let nested = b.reader_mkdir_in(&backup.pid, "mokuro-reader");
+    let top = b.account_root();
+    let x = b.reader_mkdir_in(&top, "mokuro-reader");
+    let y = b.reader_mkdir_in(&top, "mokuro-reader");
+    b.set_times(&nested.pid, 1, 1);
+    b.set_times(&x.pid, 5, 5);
+    b.set_times(&y.pid, 5, 5);
+    let pids: Vec<_> = b
+        .locate_roots("mokuro-reader")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.pid)
+        .collect();
+    let (first, second) = if x.pid < y.pid { (x, y) } else { (y, x) };
+    assert_eq!(pids, [first.pid, second.pid, nested.pid]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn pid_helpers_make_duplicates_and_log_like_the_provider() {
     for b in [FakeBackend::drive_like(), FakeBackend::mega_like()] {

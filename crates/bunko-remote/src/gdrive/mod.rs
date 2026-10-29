@@ -36,6 +36,7 @@ use crate::backend::{
     AccountInfo, BErr, Backend, BackendCaps, ChangeItem, ChangePage, Cursor, HashKind, OpCtx, Pid,
     RNode, RemoteBody, ServerTime, UploadSource, UploadTarget,
 };
+use crate::names::sort_roots_canonical;
 use api::{ApiError, ChangeList, DFile, FILE_FIELDS, FOLDER_MIME, FileList, PAGE_SIZE, units};
 
 /// Drive's public API host.
@@ -100,6 +101,9 @@ struct Inner {
     /// Roots seen by `locate_roots`/`create_root`/`list_all`: the parent of choice for
     /// a (legacy) file with several parents.
     roots: Mutex<HashSet<Pid>>,
+    /// The My Drive folder's id (`files/root`): a root directly in it is top-level,
+    /// the reader's first choice. Asked once per session.
+    my_drive_root: tokio::sync::OnceCell<Pid>,
 }
 
 impl GDriveBackend {
@@ -132,6 +136,7 @@ impl GDriveBackend {
             streak: AtomicU32::new(0),
             revisions_forbidden: AtomicBool::new(false),
             roots: Mutex::new(HashSet::new()),
+            my_drive_root: tokio::sync::OnceCell::new(),
         })))
     }
 
@@ -1120,6 +1125,7 @@ impl Backend for GDriveBackend {
             simple_upload_max: SIMPLE_UPLOAD_MAX,
             chunk_multiple: CHUNK_MULTIPLE,
             path_ids: false,
+            duplicate_names: true,
         }
     }
 
@@ -1140,7 +1146,8 @@ impl Backend for GDriveBackend {
     }
 
     /// Every visible, non-trashed folder named exactly `name`, under any parent
-    /// (`drive.file` lists only what this app may see), oldest first.
+    /// (`drive.file` lists only what this app may see), canonical first: those
+    /// directly in My Drive, then oldest, then smallest id.
     async fn locate_roots(&self, name: &str) -> Result<Vec<RNode>, BErr> {
         let q = format!(
             "name={} and mimeType='{FOLDER_MIME}' and trashed=false",
@@ -1160,7 +1167,17 @@ impl Backend for GDriveBackend {
             .iter()
             .map(|f| f.to_rnode(f.parents.first().cloned()))
             .collect();
-        nodes.sort_by(|a, b| (a.created_ms, &a.pid).cmp(&(b.created_ms, &b.pid)));
+        let top = self
+            .0
+            .my_drive_root
+            .get_or_try_init(|| async {
+                let c = Call::new(Method::GET, self.0.url("/drive/v3/files/root"), units::GET)
+                    .q("fields", "id");
+                let f: DFile = self.0.json(c).await?;
+                Ok::<_, BErr>(f.id)
+            })
+            .await?;
+        sort_roots_canonical(&mut nodes, Some(top));
         self.0
             .roots
             .lock()

@@ -166,6 +166,7 @@ fn base_caps() -> BackendCaps {
         simple_upload_max: u64::MAX,
         chunk_multiple: 1,
         path_ids: false,
+        duplicate_names: false,
     }
 }
 
@@ -180,6 +181,7 @@ impl FakeBackend {
                 mtime_granularity_ns: 1_000_000,
                 simple_upload_max: 5 << 20,
                 chunk_multiple: 256 << 10,
+                duplicate_names: true,
                 ..base_caps()
             },
             ids: Ids::Opaque,
@@ -251,6 +253,7 @@ impl FakeBackend {
                 atomic_replace: false,
                 server_copy: false,
                 push: true,
+                duplicate_names: true,
                 ..base_caps()
             },
             ids: Ids::Opaque,
@@ -1245,7 +1248,7 @@ impl Backend for FakeBackend {
         self.enter(FakeOp::LocateRoots).await?;
         let st = self.state.lock();
         let top = account_root(self.profile.ids);
-        let mut found: Vec<&FNode> = st
+        let found: Vec<&FNode> = st
             .nodes
             .values()
             .filter(|n| {
@@ -1255,11 +1258,12 @@ impl Backend for FakeBackend {
                     && (self.profile.roots_anywhere || n.parent.as_deref() == Some(top.as_str()))
             })
             .collect();
-        found.sort_by_key(|n| (n.created_ms, n.pid.clone()));
-        Ok(found
+        let mut out: Vec<RNode> = found
             .iter()
             .map(|n| st.rnode(&self.profile, &n.pid))
-            .collect())
+            .collect();
+        crate::names::sort_roots_canonical(&mut out, Some(&top));
+        Ok(out)
     }
 
     async fn create_root(&self, name: &str) -> Result<RNode, BErr> {
