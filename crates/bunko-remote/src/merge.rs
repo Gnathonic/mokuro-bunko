@@ -54,6 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+use bunko_core::sidecar_names::{self, SidecarClass, strip_suffix_ci as strip_ci};
 use bunko_store::{Durability, Health, LibraryStore, Mode, Origin, WatchEvent};
 use parking_lot::{Condvar, Mutex};
 use rusqlite::{OptionalExtension, params};
@@ -559,25 +560,10 @@ struct Named {
     key: String,
 }
 
-fn strip_ci<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
-    let cut = name.len().checked_sub(suffix.len())?;
-    (name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(suffix)).then(|| &name[..cut])
-}
-
-fn is_layer_id(id: &str) -> bool {
-    (1..=32).contains(&id.len())
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && id.bytes().any(|b| b.is_ascii_lowercase())
-}
-
-/// The folded stems of the archives among `names`.
+/// The folded stems of the `.cbz` archives among `names`: only they anchor sidecars
+/// (rule v1). A `.zip` is still an [`Part::Archive`] for grouping moves.
 fn archive_stems<'a>(names: impl Iterator<Item = &'a str>) -> HashSet<String> {
-    names
-        .filter_map(|n| strip_ci(n, ".cbz").or_else(|| strip_ci(n, ".zip")))
-        .map(fold)
-        .collect()
+    sidecar_names::volume_stems(names)
 }
 
 /// `(stem, suffix, part)` of a file name, given the folder's archive stems.
@@ -585,16 +571,12 @@ fn split_name(name: &str, stems: &HashSet<String>) -> (String, String, Part) {
     if let Some(s) = strip_ci(name, ".cbz").or_else(|| strip_ci(name, ".zip")) {
         return (s.to_string(), name[s.len()..].to_string(), Part::Archive);
     }
-    let base = strip_ci(name, ".mokuro.gz").or_else(|| strip_ci(name, ".mokuro"));
-    if let Some(base) = base {
-        if !stems.contains(&fold(base))
-            && let Some((b, id)) = base.rsplit_once('.')
-            && stems.contains(&fold(b))
-            && is_layer_id(id)
-        {
+    if let Some((base, _)) = sidecar_names::split_mokuro(name) {
+        // The listing is at hand, so rule v1 decides: all-digit ids are layers.
+        if let SidecarClass::Layer { stem, id, .. } = sidecar_names::classify(name, stems) {
             return (
-                b.to_string(),
-                name[b.len()..].to_string(),
+                stem.to_string(),
+                name[stem.len()..].to_string(),
                 Part::Layer(id.to_string()),
             );
         }

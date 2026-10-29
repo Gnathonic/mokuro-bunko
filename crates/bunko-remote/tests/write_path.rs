@@ -1172,6 +1172,46 @@ fn a_cloned_state_folder_goes_standby_while_the_original_runs() {
     assert_eq!(now[0].1.boot_id, original[0].1.boot_id);
 }
 
+/// Sidecar names rule v1 in `done[]`: a decimal volume's primary is its own (rule 4),
+/// a layer's suffix matches in any case, and an all-digit id is a layer.
+#[test]
+fn done_entries_name_volumes_by_rule_v1() {
+    let t = T::with(
+        FakeBackend::drive_like(),
+        &[("S/Vol 1.cbz", b"zip"), ("S/Vol 1.5.cbz", b"zip")],
+        |_| {},
+    );
+    t.wait_steady();
+    for name in [
+        "S/Vol 1.5.mokuro",
+        "S/Vol 1.gcv.MOKURO",
+        "S/Vol 1.2024.mokuro",
+    ] {
+        t.publish(name, b"{}", deferred(ocr(), Mode::CreateNew));
+        t.idle();
+    }
+    let doc = serde_json::json!({"version": 1, "generated_at": "2026-10-12T10:00:01Z",
+        "pending_volumes": 0, "volumes": []});
+    assert!(t.s().publish_queue_doc(doc).unwrap());
+    t.idle();
+    let v: serde_json::Value =
+        serde_json::from_slice(&t.remote_bytes(".mokuro-queue.json").unwrap()).unwrap();
+    let done = v["done"].as_array().unwrap();
+    let entry = |volume: &str| {
+        done.iter()
+            .find(|d| d["volume"] == volume)
+            .unwrap_or_else(|| panic!("no done entry for {volume}: {done:?}"))
+    };
+    assert_eq!(entry("Vol 1.5")["ocr"], "S/Vol 1.5.mokuro");
+    let layers: Vec<&str> = entry("Vol 1")["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(layers, ["gcv", "2024"]);
+}
+
 #[test]
 fn the_queue_file_is_written_on_change_within_its_floor_with_done_entries() {
     fn tune(c: &mut RemoteStoreConfig) {

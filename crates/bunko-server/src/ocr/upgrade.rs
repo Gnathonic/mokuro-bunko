@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use bunko_core::config::UpgradeConfig;
 use bunko_core::generations::Generation;
+use bunko_core::sidecar_names::{self, VolumeFile};
 use bunko_db::{AuditDetails, Database, NewAuditEvent};
 use bunko_store::{Durability, Mode, Origin, Version, WriteIntent, fs};
 use parking_lot::Mutex;
@@ -87,7 +88,7 @@ pub fn classify(path: &Path, row: Option<&bunko_db::OcrSidecar>) -> Recipe {
 fn classify_bytes(bytes: &[u8], row: Option<&bunko_db::OcrSidecar>) -> Recipe {
     let parsed = std::str::from_utf8(bytes)
         .ok()
-        .and_then(|text| bunko_library::pyjson::parse(text).ok());
+        .and_then(|text| bunko_library::pyjson::parse(bunko_library::pyjson::strip_bom(text)).ok());
     match parsed {
         Some(bunko_library::pyjson::JsonValue::Object(data)) => classify_data(&data, row),
         _ => Recipe::unknown(),
@@ -223,7 +224,7 @@ fn stamp_id(data: &Value) -> Option<String> {
 /// The `ocr_engine.id` the file at `path` carries (read capped), if any.
 fn file_stamp_id(path: &Path) -> Option<String> {
     let bytes = read_sidecar(path).ok()?;
-    stamp_id(&serde_json::from_slice::<Value>(&bytes).ok()?)
+    stamp_id(&serde_json::from_slice::<Value>(strip_bom(&bytes)).ok()?)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -362,41 +363,38 @@ impl Upgrade {
         format!("{}.mokuro", &rel[..rel.len() - 4])
     }
 
-    /// The volume's layer sidecars (plain `.mokuro`), sorted, as the directory lists them.
+    /// The volume's layer sidecars (plain `.mokuro`), sorted, as the directory lists them
+    /// and rule v1 sweeps them ([`sidecar_names::volume_files`]).
     fn layer_files(cbz: &Path) -> Vec<PathBuf> {
         let Some(dir) = cbz.parent() else {
             return Vec::new();
         };
-        let stem = cbz
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let Some(name) = cbz.file_name().and_then(|n| n.to_str()) else {
+            return Vec::new();
+        };
         let Ok(rd) = fs::read_dir(dir) else {
             return Vec::new();
         };
         let names: Vec<String> = rd
             .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter_map(|e| e.file_name().into_string().ok())
             .collect();
-        let others = bunko_library::sidecar::volume_stems(names.iter().map(String::as_str));
-        let mut out: Vec<PathBuf> = names
-            .iter()
-            .filter(|n| {
-                !n.ends_with(".gz")
-                    && bunko_library::sidecar::layer_id_of_sidecar(n, &stem, &others).is_some()
-            })
-            .map(|n| dir.join(n))
+        let listed: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut out: Vec<PathBuf> = sidecar_names::volume_files(name, &listed)
+            .into_iter()
+            .filter(|(_, file)| matches!(file, VolumeFile::Layer { gz: false, .. }))
+            .map(|(n, _)| dir.join(n))
             .collect();
         out.sort();
         out
     }
 
-    /// A layer file's id (`<stem>.<id>.mokuro`).
+    /// A layer file's id (`<stem>.<id>.mokuro`, the suffix in any case).
     fn layer_id(layer: &Path) -> Option<String> {
         layer
             .file_name()
             .and_then(|f| f.to_str())
-            .and_then(|f| f.strip_suffix(".mokuro"))
+            .and_then(|f| sidecar_names::strip_suffix_ci(f, ".mokuro"))
             .and_then(|s| s.rsplit_once('.'))
             .map(|(_, g)| g.to_string())
     }
@@ -766,7 +764,7 @@ impl Upgrade {
         for (_, layer) in &existing {
             let same = read_sidecar(layer)
                 .ok()
-                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .and_then(|b| serde_json::from_slice::<Value>(strip_bom(&b)).ok())
                 .and_then(|v| {
                     v.get("preserved")?
                         .get("sha256")?
@@ -1213,5 +1211,47 @@ mod tests {
         let junk = dir.path().join("c.mokuro");
         std::fs::write(&junk, b"nope").unwrap();
         assert_eq!(classify(&junk, None).family, UNKNOWN);
+        // A leading BOM (rule v1) hides neither the stamp nor the recipe.
+        let bom = dir.path().join("d.mokuro");
+        let stamped = r#"{"ocr_engine":{"id":"hayai-nova","detector":"ppocr-manga","patch_budget":512},"pages":[]}"#;
+        std::fs::write(&bom, format!("\u{feff}{stamped}")).unwrap();
+        assert!(classify(&bom, None).matches(&(
+            "hayai-nova".into(),
+            "ppocr-manga".into(),
+            Some(512)
+        )));
+        let bytes = std::fs::read(&bom).unwrap();
+        assert!(classify_bytes(&bytes, None).matches(&(
+            "hayai-nova".into(),
+            "ppocr-manga".into(),
+            Some(512)
+        )));
+        assert_eq!(file_stamp_id(&bom).as_deref(), Some("hayai-nova"));
+    }
+
+    /// Rule v1: suffixes in any case, folded stems, all-digit ids; a file another
+    /// archive (any extension) owns is never this volume's layer.
+    #[test]
+    fn layer_files_follow_rule_v1() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for n in [
+            "Vol 1.cbz",
+            "Vol 1.5.zip",
+            "Vol 1.5.mokuro",
+            "Vol 1.2024.mokuro",
+            "vol 1.gcv.MOKURO",
+            "Vol 1.hayai.mokuro.gz",
+            "Vol 1.Upper.mokuro",
+        ] {
+            std::fs::write(d.join(n), b"{}").unwrap();
+        }
+        let layers = Upgrade::layer_files(&d.join("Vol 1.cbz"));
+        assert_eq!(
+            layers,
+            [d.join("Vol 1.2024.mokuro"), d.join("vol 1.gcv.MOKURO")]
+        );
+        let ids: Vec<Option<String>> = layers.iter().map(|l| Upgrade::layer_id(l)).collect();
+        assert_eq!(ids, [Some("2024".into()), Some("gcv".into())]);
     }
 }

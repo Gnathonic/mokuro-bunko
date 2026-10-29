@@ -51,6 +51,17 @@
   server lists it.
 
 ### Changed
+- **Bunko and Mokuro Reader agree on what a `.mokuro` beside a volume is.** One rule
+  now decides it everywhere Bunko looks (deleting a volume, the OCR upgrade, cloud case
+  merges, the cloud queue file, upload ownership), the same rule the reader uses, with
+  shared test cases in `interop/contract/sidecar-names.json`: `.mokuro`, `.mokuro.gz`
+  and `.cbz` match in any case (`Vol 1.MOKURO`), a volume's name matches in any case or
+  Unicode form (`vol 1.mokuro` beside `Vol 1.cbz`), only a `.cbz` makes a name a volume,
+  and a layer's id is matched exactly as written (`Vol 1.Upper.mokuro` is no layer),
+  digits-only ids included (`Vol 1.5.mokuro` is layer `5` of `Vol 1` unless
+  `Vol 1.5.cbz` exists). Deleting a volume still never takes a file whose name belongs
+  to another archive, of any extension, and on a disk that can hold `Vol 1.cbz` and
+  `vol 1.cbz` side by side each keeps the files spelled exactly like it.
 - **A WebDAV library on this computer needs no "Allow http".** A plain `http://` URL
   whose host is `localhost`, `127.x.x.x` or `[::1]` (a server on the same machine, such
   as an rclone or Nextcloud container bound to loopback) is accepted without
@@ -81,6 +92,14 @@
   as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
 
 ### Fixed
+- **A `.mokuro` or `series.json` saved with a byte-order mark is read.** Mokuro Reader
+  accepts OCR files that start with a UTF-8 byte-order mark (some Windows editors add
+  one); Bunko took them for unreadable, so it left their pages and characters out of
+  `series.json` and could OCR the volume again. They now read like any other, and
+  `mokuro_sha256` still covers the bytes as stored. A `series.json` sent with one is
+  accepted too.
+- **The cloud queue file names a decimal volume's OCR as its own.** A finished
+  `Vol 1.5.mokuro` beside `Vol 1.5.cbz` was listed as layer `5` of `Vol 1`.
 - **A library reached through a symbolic link gets its OCR follow-ups.** When the path
   to the library folder went through a symlink, a volume uploaded over WebDAV was not
   queued for OCR until the next library scan, and neither the upload's answer nor the

@@ -59,10 +59,8 @@ pub fn is_windows_device_name(name: &str) -> bool {
 }
 
 /// The spelling-insensitive form two names collide under: NFC, then a full Unicode
-/// lowercase (the same rule as bunko-dav's `fold_name`).
-pub fn fold(name: &str) -> String {
-    name.nfc().collect::<String>().to_lowercase()
-}
+/// lowercase (the same rule as bunko-dav's `fold_name` and sidecar names rule v1).
+pub use bunko_core::sidecar_names::fold;
 
 /// `H(pid‖cver)`: the first 8 bytes (big-endian) of `sha256(pid ‖ 0x00 ‖ cver)`.
 pub fn version_salt(pid: &str, cver: &str) -> u64 {

@@ -29,7 +29,6 @@ webdav = [
 # OAuth sign-in (loopback + PKCE, device flow), the embedded clients, the
 # credential store and refreshing access tokens (§7).
 oauth = [
-    "dep:bunko-core",
     "dep:reqwest",
     "dep:base64",
     "dep:rand",
@@ -40,6 +39,9 @@ oauth = [
 ]
 
 [dependencies]
+# Sidecar names rule v1 (`merge.rs`, the queue file's `done[]`) and the configuration
+# OAuth reads.
+bunko-core.workspace = true
 bunko-store.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 futures-util.workspace = true
@@ -60,7 +62,6 @@ httpdate = { version = "1", optional = true }
 base64 = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
-bunko-core = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 # MIT/Apache-2.0; seals credentials.json when MOKURO_SECRETS_KEY is set (D12).
 chacha20poly1305 = { version = "0.10", optional = true }
@@ -80,7 +81,6 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
 # tests/webdav.rs: a real WebDAV server in-process.
 bunko-dav.workspace = true
-bunko-core.workspace = true
 axum.workspace = true
 http.workspace = true
 time.workspace = true

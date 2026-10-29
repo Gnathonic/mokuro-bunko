@@ -506,6 +506,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -785,6 +786,7 @@ dependencies = [
 name = "bunko-sched"
 version = "0.7.3"
 dependencies = [
+ "bunko-core",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",

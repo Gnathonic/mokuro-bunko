@@ -17,7 +17,9 @@ use crate::pyjson::{dumps_indent2, read_object, write_atomic};
 pub const FAILURES_FILE: &str = ".ocr-failures.json";
 /// The longest a failed volume waits before its next try.
 pub const MAX_RETRY_DELAY_SECONDS: f64 = 3600.0;
-/// Archive extensions a record's volume may still exist under.
+/// Archive extensions a record's volume may still exist under. The same list as
+/// `bunko_core::sidecar_names::ARCHIVE_EXTENSIONS` (a test holds them equal); this
+/// crate stays free of bunko-core.
 pub const ARCHIVE_EXTENSIONS: [&str; 4] = [".cbz", ".cbr", ".zip", ".rar"];
 
 /// `failure_key(rel_cbz, row)`: the primary row keeps the bare relative
@@ -379,6 +381,14 @@ pub fn failure_log_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_extensions_match_the_shared_list() {
+        assert_eq!(
+            ARCHIVE_EXTENSIONS,
+            bunko_core::sidecar_names::ARCHIVE_EXTENSIONS
+        );
+    }
 
     #[test]
     fn backoff_schedule() {

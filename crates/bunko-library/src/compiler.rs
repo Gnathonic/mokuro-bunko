@@ -687,3 +687,27 @@ pub fn missing_pages_now(
         entry.matched_page_count,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    /// A BOM sidecar the reader accepted counts like any other: its pages and
+    /// characters reach `series.json`, and it is not taken for unreadable.
+    #[test]
+    fn a_bom_sidecar_contributes_its_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("V.mokuro");
+        let raw = "\u{feff}{\"version\":\"0.2.1\",\"pages\":[{\"blocks\":[{\"lines\":[\"あいう\"]}]},{\"blocks\":[]}]}";
+        bunko_store::fs::write(&sidecar, raw).unwrap();
+        let (entry, _) = compile_volume("S", &dir.path().join("V.cbz"), Some(&sidecar), None);
+        assert_eq!(entry.page_count, 2);
+        assert!(entry.character_count.py_eq(&JsonNum::Int(3)));
+        assert_eq!(entry.mokuro_version, "0.2.1");
+        assert_eq!(
+            entry.mokuro_sha256,
+            Some(hex::encode(Sha256::digest(raw.as_bytes())))
+        );
+    }
+}

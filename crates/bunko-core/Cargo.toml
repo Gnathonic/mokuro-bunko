@@ -12,6 +12,7 @@ serde_yaml_ng.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 ipnet = "2"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true

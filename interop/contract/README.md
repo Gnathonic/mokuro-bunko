@@ -20,6 +20,11 @@ to the contract shows up as a fixture diff in the pull request that makes it.
   seeded server and checks them.
 - `reader/legacy/*.json`: hand-written records for requests older readers sent.
 
+- `sidecar-names.json`: sidecar names rule v1, what a `.mokuro` listed beside volume
+  archives is. Written by hand (it is a rule, not a recording); Bunko's
+  `bunko_core::sidecar_names` tests and the reader's `classifyMokuroSidecar` run it.
+  See below.
+
 ## Fixture format
 
 ```json
@@ -87,3 +92,26 @@ A change to a request the reader sends lands in two steps: first the re-blessed
 reader change, whose CI reads this repository at `BUNKO_REF` and would otherwise compare
 against the old records. `BUNKO_CONTRACT_DIR=<copy of this folder>` points Bunko's
 contract tests at a scratch copy (to check that a deliberate change fails).
+
+## Sidecar names (`sidecar-names.json`)
+
+Rule v1: the suffixes `.cbz`, `.mokuro` and `.mokuro.gz` match in any ASCII case; only
+`.cbz` archives define volume stems; stems compare folded (NFC, then Unicode lowercase);
+a primary wins over a layer reading of the same name; a layer id matches
+`^[a-z0-9-]{1,32}$` exactly as written, all-digit ids included; when sweeping, an
+exact-case stem wins over a folded one; a leading UTF-8 BOM is tolerated on read, never
+written, and hashes cover the raw bytes. New reader ids always contain a letter.
+
+- `rule`: the rule version, `1`.
+- `classify`: `{name, folder, expect, why}`. `folder` is every name listed beside it;
+  `expect` is `{"kind": "primary", "stem", "gz"}`, `{"kind": "layer", "stem", "layer",
+  "gz"}` or `{"kind": "orphan"}`. `stem` is spelled as in `name` (compare it folded if
+  your stems are folded).
+- `layer_class`: `{id, class}`, exact-case: `personal` (`edit`, `edit-<n>`), `curated`
+  (`curated`), `server-keepsake` (`pre-upgrade`, `pre-upgrade-<n>`), `reserved` (no
+  client writes it on Bunko: `curated-<n>`, the rest of the `pre-upgrade` family,
+  `previous-ocr*`), `other` (everything else).
+- `sweep`: `{archive, folder, expect, why}`: the names that go when `archive` is deleted
+  (sorted; compare as a set). Besides rule v1, a sweep never takes a name whose base is
+  the stem of any archive of `.cbz`, `.cbr`, `.zip` or `.rar`, so it can leave a file
+  `classify` calls a layer.
