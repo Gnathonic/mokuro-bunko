@@ -585,6 +585,26 @@ async fn mkdir_rename_move_trash_delete() {
 }
 
 #[tokio::test]
+async fn locate_roots_orders_cloud_drive_children_first_then_age_then_handle() {
+    let e = env().await;
+    let backup = e.mock.mkdir(ROOT, "Backup");
+    let nested = e.mock.mkdir(&backup, "mokuro-reader");
+    let second = e.mock.mkdir(ROOT, "mokuro-reader");
+    // The nested root is the oldest; the env's root and `second` share an age.
+    e.mock.set_ts(&nested, 1_000);
+    e.mock.set_ts(&e.root, 2_000);
+    e.mock.set_ts(&second, 2_000);
+    let roots = e.be.locate_roots("mokuro-reader").await.unwrap();
+    let pids: Vec<_> = roots.iter().map(|r| r.pid.clone()).collect();
+    let (a, b) = if e.root < second {
+        (e.root.clone(), second.clone())
+    } else {
+        (second.clone(), e.root.clone())
+    };
+    assert_eq!(pids, [a, b, nested]);
+}
+
+#[tokio::test]
 async fn killed_session_needs_reauth() {
     let e = env().await;
     e.be.locate_roots("mokuro-reader").await.unwrap();

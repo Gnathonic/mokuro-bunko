@@ -157,7 +157,7 @@ lists the order inside-out; this is the verified request-order:
 | 2 | `SecurityHeadersMiddleware` (`security_headers.py`) | adds headers to EVERY response (section 6) | |
 | 3 | `CorsMiddleware` iff `config.cors.enabled` (`server.py:409-410`) | preflight answers + CORS headers (section 5) | |
 | 4 | `StaticMiddleware` (`static/__init__.py`) | `/_static/*`, `/robots.txt` (section 7) | |
-| 5 | `SetupWizardAPI` | `/setup*`, `GET /` -> 302 `/setup` while no admin exists | other spec |
+| 5 | `SetupWizardAPI` | `/setup*`, `GET /` -> 302 `/setup` (0.8: `setup`) while no admin exists | other spec |
 | 6 | `HomePageAPI` | `/api/health`, `/api/stats`, `/_home/*`, `GET /` (browser) | other spec |
 | 7 | `AccountAPI` | `/account*`, `/api/account/*` | other spec |
 | 8 | `LoginAPI` | `/login*`, `/login/api/{check,token,me}`, `/api/nav/config` | other spec |
@@ -249,8 +249,8 @@ owns the payload shapes.
 |---|---|---|
 | `GET /robots.txt` | Static (7.2) | none |
 | `GET /_static/<file>` | Static (7.1) | none |
-| `GET /setup/api/status`, `POST /setup/api/complete`, `GET /setup`, `/setup/`, `/setup/<file>`; `GET /` -> `302 /setup` when setup needed and `Accept` has `text/html` | SetupWizardAPI | local-only while no admin (`setup/api.py:67-115`) |
-| `GET\|OPTIONS /api/health`, `GET\|OPTIONS /api/stats` (other methods 405 JSON `{"error":"Method not allowed"}`), `GET /_home/<file>`, `GET /` (browser) -> `302 /catalog/` if `catalog.enabled && catalog.use_as_homepage`, else `index.html` | HomePageAPI (`home/api.py:101-141`) | none |
+| `GET /setup/api/status`, `POST /setup/api/complete`, `GET /setup`, `/setup/`, `/setup/<file>`; `GET /` -> `302 /setup` (0.8: `setup`) when setup needed and `Accept` has `text/html` | SetupWizardAPI | local-only while no admin (`setup/api.py:67-115`) |
+| `GET\|OPTIONS /api/health`, `GET\|OPTIONS /api/stats` (other methods 405 JSON `{"error":"Method not allowed"}`), `GET /_home/<file>`, `GET /` (browser) -> `302 /catalog/` (0.8: `catalog/`) if `catalog.enabled && catalog.use_as_homepage`, else `index.html` | HomePageAPI (`home/api.py:101-141`) | none |
 | `GET /account`, `/account/`, `/account/<file>`, `GET /api/account/stats`, `POST /api/account/password`, `POST /api/account/delete`, `OPTIONS /api/account/*` | AccountAPI | own (bearer/basic) |
 | `POST /login/api/check`, `POST\|DELETE /login/api/token`, `GET /login/api/me`, `GET /api/nav/config`, `GET /login`, `/login/`, `/login/<file>` | LoginAPI | own |
 | `/api/register` (POST/GET/OPTIONS), `/api/register/config` (GET/OPTIONS), `/register`, `/register/`, `/register/<file>` | RegistrationAPI | none |
@@ -365,6 +365,12 @@ Predicates (`auth.py:114-165`), all on the path with `"/" + path.strip("/")` nor
   `volume-data.json`, `profiles.json`, `goals.json` (case-sensitive; `Volume-Data.json` is a shared
   library file).
 * `is_library_path(p)`: starts with `/mokuro-reader/`, remainder non-empty and not a per-user file name.
+* **0.8 (Rust, `bunko_core::reader_tree`):** the per-user names are `volume-data.json`,
+  `profiles.json`, `goals.json`, `positions.json` and the `history` tree (`history`,
+  `history/<device>`, `history/<device>/<file>`, each segment `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`),
+  still exact and case-sensitive (`History/` is a library series). `is_progress_path` covers all of
+  them: PUT, MKCOL and DELETE there need `WRITE_PROGRESS` (so `registered` keeps its own history);
+  MOVE, COPY, LOCK, UNLOCK and PROPPATCH on or into `history` are refused (403, 401 anonymous).
 * `is_inbox_path`, `is_admin_path` (`startswith("/_admin")`), `is_processor_path`
   (`== "/_processor"` or `startswith("/_processor/")`).
 * Compiled-metadata predicates (`metadata/paths.py:62-112`): lexically normalise the FULL path
@@ -631,6 +637,7 @@ Physical layout: `<base>/library/` (shared), `<base>/inbox/` (never exposed), `<
 | `/` | virtual collection, displayname `mokuro-bunko`, only member `mokuro-reader` | none |
 | `/mokuro-reader` | virtual **merged** collection | none |
 | `/mokuro-reader/volume-data.json`, `.../profiles.json`, `.../goals.json` | file; **only visible to an authenticated user**; maps to that user's own file | `users/<username>/<name>` |
+| 0.8: `/mokuro-reader/positions.json`, `/mokuro-reader/history/**` | the same per-user rule: `positions.json` a file, `history` and `history/<device>` collections the reader creates (MKCOL 201; 405 when it exists; 409 without its parent), `history/<device>/<file>` files (PUT ≤ 16 MiB, 413; ≤ 256 MiB an account, 507). Depth 1 on `/mokuro-reader` lists `history/` to its owner only; Depth infinity on `/` and `/mokuro-reader` adds the caller's own tree and nobody else's | `users/<username>/…`; for a cloud library's `progress_user`, the cloud root itself (0.8 design §10) |
 | `/mokuro-reader/<anything else>` | shared library file/collection | `library/<rel>` via `safe_resolve_under` |
 | `/inbox`, `/inbox/*` | **nothing**: `get_resource_inst` returns `None` => GET/PROPFIND/DELETE 404 (PathMapper maps it but the provider never serves it) | |
 | every other path | `None` => 404 | |

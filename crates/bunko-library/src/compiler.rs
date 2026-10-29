@@ -19,6 +19,7 @@ use crate::compat::{
     normalize_volume_title_key,
 };
 use crate::fsutil::{self, py_mtime, py_mtime_int, size_of};
+use crate::paths::SERIES_FILE_NAME;
 use crate::pyjson::{self, DumpOptions, JsonNum, JsonObject, JsonValue};
 use crate::pyunicode;
 use crate::schema::{VolumeEntry, missing_page_count};
@@ -43,7 +44,8 @@ fn is_cbz_name(name: &str) -> bool {
 
 /// `iter_series_folders`: top-level, non-hidden directories (symlinks
 /// followed) directly holding at least one `.cbz` file, sorted by name. A
-/// missing/unreadable library is empty.
+/// missing/unreadable library is empty. The per-user `history/` (0.8, a cloud
+/// root's reading history) is never a series, whatever it holds.
 pub fn iter_series_folders(library_path: &Path) -> Vec<SeriesFolder> {
     let Ok(mut entries) = fsutil::list_dir(library_path) else {
         return Vec::new();
@@ -51,7 +53,12 @@ pub fn iter_series_folders(library_path: &Path) -> Vec<SeriesFolder> {
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries
         .into_iter()
-        .filter(|(name, path)| !name.starts_with('.') && fsutil::is_dir(path) && has_archive(path))
+        .filter(|(name, path)| {
+            !name.starts_with('.')
+                && !bunko_core::reader_tree::is_per_user_root_name(name)
+                && fsutil::is_dir(path)
+                && has_archive(path)
+        })
         .map(|(title, path)| SeriesFolder { title, path })
         .collect()
 }
@@ -64,6 +71,45 @@ fn has_archive(folder: &Path) -> bool {
                 .any(|(name, path)| is_cbz_name(name) && fsutil::is_file(path))
         })
         .unwrap_or(false)
+}
+
+/// Top-level, non-hidden directories that hold a `series.json` but no `.cbz`
+/// any more, as `(folder title, series.json path)`, sorted by name. A folder
+/// whose listing fails is skipped: an unreadable folder is not an empty one.
+/// The per-user `history/` is never a series, so never one of these either.
+pub fn iter_orphan_series_files(library_path: &Path) -> Vec<(String, PathBuf)> {
+    orphan_series_files_where(library_path, |_| true)
+}
+
+/// [`iter_orphan_series_files`] over the folders whose series key passes
+/// `wanted`; the others are never listed.
+pub fn orphan_series_files_where(
+    library_path: &Path,
+    wanted: impl Fn(&str) -> bool,
+) -> Vec<(String, PathBuf)> {
+    let Ok(mut entries) = fsutil::list_dir(library_path) else {
+        return Vec::new();
+    };
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .into_iter()
+        .filter(|(name, path)| {
+            !name.starts_with('.')
+                && !bunko_core::reader_tree::is_per_user_root_name(name)
+                && wanted(&normalize_volume_title_key(name))
+                && fsutil::is_dir(path)
+        })
+        .filter_map(|(title, path)| {
+            let children = fsutil::list_dir(&path).ok()?;
+            let archive = children
+                .iter()
+                .any(|(name, child)| is_cbz_name(name) && fsutil::is_file(child));
+            let series_file = children
+                .into_iter()
+                .find(|(name, child)| name == SERIES_FILE_NAME && fsutil::is_file(child))?;
+            (!archive).then_some((title, series_file.1))
+        })
+        .collect()
 }
 
 /// The `.cbz` file names directly in `folder`, sorted.
@@ -734,6 +780,40 @@ mod tests {
             Some(hex::encode(Sha256::digest(raw.as_bytes())))
         );
     }
+    /// `history/` at the library root is the cloud-root owner's reading history
+    /// (0.8), never a series, even with an archive in it; `History/` is a series.
+    #[test]
+    fn the_reading_history_folder_is_not_a_series() {
+        let dir = tempfile::tempdir().unwrap();
+        for folder in ["history", "History", "S"] {
+            let path = dir.path().join(folder);
+            bunko_store::fs::create_dir(&path).unwrap();
+            bunko_store::fs::write(path.join("V.cbz"), "x").unwrap();
+        }
+        let titles: Vec<String> = iter_series_folders(dir.path())
+            .into_iter()
+            .map(|f| f.title)
+            .collect();
+        assert_eq!(titles, ["History", "S"]);
+    }
+
+    /// Nor is a `series.json` in that `history/` an orphan to retire: the tree is its
+    /// owner's, whatever it holds. A `History/` series that lost its archives is one.
+    #[test]
+    fn the_reading_history_folder_has_no_orphan_series_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for folder in ["history", "History"] {
+            let path = dir.path().join(folder);
+            bunko_store::fs::create_dir(&path).unwrap();
+            bunko_store::fs::write(path.join(SERIES_FILE_NAME), "{}").unwrap();
+        }
+        let titles: Vec<String> = iter_orphan_series_files(dir.path())
+            .into_iter()
+            .map(|(title, _)| title)
+            .collect();
+        assert_eq!(titles, ["History"]);
+    }
+
     /// A series pass lists its folder once and still finds a primary spelled
     /// another way (`V2.MOKURO` on a case-sensitive disk).
     #[test]

@@ -19,6 +19,9 @@ pub struct Recorder {
     pub calls: Mutex<Vec<String>>,
     pub audits: Mutex<Vec<AuditEvent>>,
     pub follow_up: Mutex<Option<PutFollowUp>>,
+    /// `ocr_sidecar_staged` calls, as `<parent>/<name>` of the destination (kept apart
+    /// from `calls`, whose exact lists other tests compare).
+    pub staged: Mutex<Vec<String>>,
 }
 
 impl Recorder {
@@ -103,6 +106,12 @@ impl DavHooks for Recorder {
     fn library_changed(&self, _paths: &[PathBuf]) {
         self.push("library_changed".to_string());
     }
+    fn ocr_sidecar_staged(&self, dest: &Path, _staged: &Path) {
+        let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        self.staged
+            .lock()
+            .push(format!("{}/{}", name(dest.parent().unwrap()), name(dest)));
+    }
 }
 
 pub struct Env {
@@ -134,7 +143,11 @@ impl Env {
     }
 
     pub fn with_base(dir: tempfile::TempDir, base: PathBuf) -> Env {
-        let dav = Dav::new(&StorageLayout::new(&base), DavConfig::default()).unwrap();
+        Self::with_config(dir, base, DavConfig::default())
+    }
+
+    pub fn with_config(dir: tempfile::TempDir, base: PathBuf, config: DavConfig) -> Env {
+        let dav = Dav::new(&StorageLayout::new(&base), config).unwrap();
         Env {
             dir,
             base,

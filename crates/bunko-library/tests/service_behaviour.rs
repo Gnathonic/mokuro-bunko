@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bunko_library::index::LibraryIndexCache;
+use bunko_library::pyjson::JsonObject;
 use bunko_library::service::{
     DebouncePolicy, MetadataHooks, MetadataService, NoPathLocks, PathWriteLocks, SeriesUpdate,
     UpdateError,
@@ -385,4 +386,337 @@ fn shared_types_are_thread_safe() {
     assert_send_sync::<LibraryIndexCache>();
     fn assert_send<T: Send>() {}
     assert_send::<bunko_library::Volume>();
+}
+
+/// A present `spine_offset` of `0` is a deliberate reset: the compiled file
+/// drops the key, and the same reset again writes nothing.
+#[test]
+fn a_zero_spine_offset_put_clears_the_published_one() {
+    let (_temp, root) = fixture_library();
+    let hooks = Arc::new(RecordingHooks::default());
+    let service = MetadataService::new(
+        &root,
+        Arc::new(SqliteStore::new(&schema())),
+        hooks.clone(),
+        Arc::new(NoPathLocks),
+        DebouncePolicy::default(),
+    );
+    service.recompile_all().unwrap();
+    let series_file = root.join("Dr Stone/series.json");
+    let set = br#"{"version":2,"updated_at":"2026-08-18T19:36:24.324Z","spine_offset":-40}"#;
+    assert!(service.apply_series_update("Dr Stone", set, None).unwrap());
+    let published = std::fs::read_to_string(&series_file).unwrap();
+    assert!(published.contains(r#""spine_offset":-40"#), "{published}");
+
+    let reset = br#"{"version":2,"updated_at":"2026-08-18T19:36:24.324Z","spine_offset":0}"#;
+    let before = hooks.published.load(Ordering::SeqCst);
+    assert!(
+        service
+            .apply_series_update("Dr Stone", reset, None)
+            .unwrap()
+    );
+    let cleared = std::fs::read_to_string(&series_file).unwrap();
+    assert!(!cleared.contains("spine_offset"), "{cleared}");
+    assert_eq!(hooks.published.load(Ordering::SeqCst), before + 1);
+
+    let modified = std::fs::metadata(&series_file).unwrap().modified().unwrap();
+    assert!(
+        service
+            .apply_series_update("Dr Stone", reset, None)
+            .unwrap()
+    );
+    assert_eq!(
+        hooks.published.load(Ordering::SeqCst),
+        before + 1,
+        "a second identical reset writes nothing"
+    );
+    assert_eq!(
+        std::fs::metadata(&series_file).unwrap().modified().unwrap(),
+        modified
+    );
+    // An absent key keeps whatever is stored.
+    assert!(service.apply_series_update("Dr Stone", set, None).unwrap());
+    assert!(service.apply_series_update("Dr Stone", PUT, None).unwrap());
+    let kept = std::fs::read_to_string(&series_file).unwrap();
+    assert!(kept.contains(r#""spine_offset":-40"#), "{kept}");
+}
+
+// ---- orphan series.json ---------------------------------------------------------
+
+const FACTS: &[u8] = br#"{"version":2,"updated_at":"2026-08-18T19:36:24.324Z","external_ids":{"anilist":98416},"spine_offset":-40}"#;
+
+fn facts_row(key: &str, title: &str) -> SeriesFactsRow {
+    SeriesFactsRow {
+        series_key: key.to_owned(),
+        series_title: title.to_owned(),
+        external_ids: JsonObject::new(),
+        titles: JsonObject::new(),
+        synonyms: Vec::new(),
+        tag: Some("kept".to_owned()),
+        unit: None,
+        facts_updated_at: "2026-08-18T19:36:24.324Z".to_owned(),
+        spine_offset: None,
+        volume_offsets: JsonObject::new(),
+        updated_by: None,
+    }
+}
+
+/// A folder that lost its last archive keeps no `series.json` (a reader would keep
+/// showing the series), but keeps the folder and the facts row.
+#[test]
+fn a_folder_without_archives_loses_its_series_file() {
+    let (_temp, root) = fixture_library();
+    std::fs::create_dir(root.join("Gone")).unwrap();
+    std::fs::write(root.join("Gone/series.json"), b"{}").unwrap();
+    std::fs::write(root.join("Gone/Gone 1.mokuro"), b"{}").unwrap();
+    // Hand-placed: facts of its own and no row, or not a series file at all.
+    std::fs::create_dir(root.join("Hand Made")).unwrap();
+    std::fs::write(
+        root.join("Hand Made/series.json"),
+        br#"{"version":2,"updated_at":"2026-01-01T00:00:00Z","tag":"mine"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir(root.join("Not Json")).unwrap();
+    std::fs::write(root.join("Not Json/series.json"), b"{}").unwrap();
+    // What Bunko compiles for a series nobody gave facts to: regenerable without a row.
+    std::fs::create_dir(root.join("Factless")).unwrap();
+    std::fs::write(
+        root.join("Factless/series.json"),
+        br#"{"version":2,"series_title":"Factless","external_ids":{},"titles":{},"synonyms":[],"updated_at":"1970-01-01T00:00:00.000Z","volumes":[{"volume_uuid":"u1","volume_title":"Factless 1","page_count":1,"character_count":0,"mokuro_version":""}]}"#,
+    )
+    .unwrap();
+    let store = Arc::new(SqliteStore::new(&schema()));
+    store.put_series_facts(&facts_row("gone", "Gone")).unwrap();
+    let hooks = Arc::new(RecordingHooks::default());
+    let service = MetadataService::new(
+        &root,
+        store.clone(),
+        hooks.clone(),
+        Arc::new(NoPathLocks),
+        DebouncePolicy::default(),
+    );
+    assert!(service.recompile_all().unwrap() >= 1);
+    assert!(!root.join("Gone/series.json").exists());
+    assert!(
+        root.join("Gone/Gone 1.mokuro").is_file(),
+        "the folder stays"
+    );
+    assert!(
+        store.series_facts("gone").unwrap().is_some(),
+        "the facts stay"
+    );
+    assert!(!root.join("Factless/series.json").exists());
+    assert!(
+        root.join("Hand Made/series.json").is_file(),
+        "facts of its own and no row: not ours to drop"
+    );
+    assert!(root.join("Not Json/series.json").is_file());
+    assert!(root.join("Dr Stone/series.json").is_file());
+    assert!(hooks.scheduled.lock().is_empty());
+    assert_eq!(
+        service.recompile_all().unwrap(),
+        0,
+        "a second pass is a no-op"
+    );
+}
+
+/// The path the DELETE/MOVE hooks drive: one series lost its last volume.
+#[test]
+fn a_series_batch_retires_the_series_that_emptied_and_a_reupload_brings_it_back() {
+    let (_temp, root) = fixture_library();
+    let service = MetadataService::new(
+        &root,
+        Arc::new(SqliteStore::new(&schema())),
+        Arc::new(RecordingHooks::default()),
+        Arc::new(NoPathLocks),
+        DebouncePolicy::default(),
+    );
+    service.recompile_all().unwrap();
+    let series = "Odd.Name. With.Dots";
+    assert!(service.apply_series_update(series, FACTS, None).unwrap());
+    let folder = root.join(series);
+    let other = root.join("Dr Stone/series.json");
+    let other_before = std::fs::read(&other).unwrap();
+    let other_modified = std::fs::metadata(&other).unwrap().modified().unwrap();
+    let saved = std::fs::read(folder.join("v.1.cbz")).unwrap();
+    std::fs::remove_file(folder.join("v.1.cbz")).unwrap();
+    std::fs::remove_file(folder.join("v.2.cbz")).unwrap();
+
+    assert!(
+        service
+            .recompile_series_batch(&[series.to_owned()])
+            .unwrap()
+            >= 1
+    );
+    assert!(!folder.join("series.json").exists());
+    assert_eq!(std::fs::read(&other).unwrap(), other_before);
+    assert_eq!(
+        std::fs::metadata(&other).unwrap().modified().unwrap(),
+        other_modified
+    );
+    let catalog = std::fs::read_to_string(root.join("catalog.json")).unwrap();
+    assert!(!catalog.contains(series), "{catalog}");
+
+    std::fs::write(folder.join("v.1.cbz"), saved).unwrap();
+    assert!(service.recompile_series(series).unwrap());
+    let back = std::fs::read_to_string(folder.join("series.json")).unwrap();
+    assert!(back.contains(r#""anilist":98416"#), "{back}");
+    assert!(back.contains(r#""spine_offset":-40"#), "{back}");
+}
+
+#[test]
+fn a_busy_orphan_series_file_is_kept_and_retried() {
+    let (_temp, root) = fixture_library();
+    std::fs::create_dir(root.join("Gone")).unwrap();
+    std::fs::write(root.join("Gone/series.json"), b"{}").unwrap();
+    let store = Arc::new(SqliteStore::new(&schema()));
+    store.put_series_facts(&facts_row("gone", "Gone")).unwrap();
+    let hooks = Arc::new(RecordingHooks::default());
+    let service = MetadataService::new(
+        &root,
+        store,
+        hooks.clone(),
+        Arc::new(BusyLocks(root.join("Gone/series.json"))),
+        DebouncePolicy::default(),
+    );
+    service.recompile_all().unwrap();
+    assert!(root.join("Gone/series.json").is_file());
+    assert_eq!(*hooks.scheduled.lock(), vec![Some(Duration::from_secs(5))]);
+}
+
+/// The library root as a "remote" store whose health the test sets; files are local.
+struct GatedStore {
+    inner: bunko_store::LocalStore,
+    health: Mutex<bunko_store::Health>,
+}
+
+mod gated {
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    use bunko_store::{
+        Caps, File, Health, LibraryStore, LocalPath, Meta, OpenOptions, Published, ReadDir,
+        Version, WatchGuard, WatchSink, WriteIntent,
+    };
+
+    impl LibraryStore for super::GatedStore {
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+        fn caps(&self) -> Caps {
+            Caps {
+                remote: true,
+                ..self.inner.caps()
+            }
+        }
+        fn health(&self) -> Health {
+            self.health.lock().clone()
+        }
+        fn metadata(&self, p: &Path) -> io::Result<Meta> {
+            self.inner.metadata(p)
+        }
+        fn symlink_metadata(&self, p: &Path) -> io::Result<Meta> {
+            self.inner.symlink_metadata(p)
+        }
+        fn read_dir(&self, p: &Path) -> io::Result<ReadDir> {
+            self.inner.read_dir(p)
+        }
+        fn canonicalize(&self, p: &Path) -> io::Result<PathBuf> {
+            self.inner.canonicalize(p)
+        }
+        fn read_link(&self, p: &Path) -> io::Result<PathBuf> {
+            self.inner.read_link(p)
+        }
+        fn open(&self, p: &Path) -> io::Result<File> {
+            self.inner.open(p)
+        }
+        fn local_path(&self, p: &Path, expect: Option<&Version>) -> io::Result<LocalPath> {
+            self.inner.local_path(p, expect)
+        }
+        fn open_with(&self, p: &Path, o: &OpenOptions) -> io::Result<File> {
+            self.inner.open_with(p, o)
+        }
+        fn publish(&self, staged: &Path, dest: &Path, w: &WriteIntent) -> io::Result<Published> {
+            self.inner.publish(staged, dest, w)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+            self.inner.copy(from, to)
+        }
+        fn remove_file(&self, p: &Path) -> io::Result<()> {
+            self.inner.remove_file(p)
+        }
+        fn remove_dir(&self, p: &Path) -> io::Result<()> {
+            self.inner.remove_dir(p)
+        }
+        fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+            self.inner.remove_dir_all(p)
+        }
+        fn create_dir(&self, p: &Path) -> io::Result<()> {
+            self.inner.create_dir(p)
+        }
+        fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+            self.inner.create_dir_all(p)
+        }
+        fn watch(&self, sink: WatchSink) -> io::Result<WatchGuard> {
+            self.inner.watch(sink)
+        }
+    }
+}
+
+/// X16: on a remote library a folder may only look empty mid full sync, while
+/// removals wait to be confirmed (Suspect), or while another Bunko holds the lease.
+/// Its `series.json` goes only once the store is `Online` again.
+#[test]
+fn a_remote_library_retires_only_while_online() {
+    use bunko_store::Health;
+
+    let (_temp, root) = fixture_library();
+    std::fs::create_dir(root.join("Gone")).unwrap();
+    std::fs::write(root.join("Gone/series.json"), b"{}").unwrap();
+    let store = Arc::new(SqliteStore::new(&schema()));
+    store.put_series_facts(&facts_row("gone", "Gone")).unwrap();
+    let gated = Arc::new(GatedStore {
+        inner: bunko_store::LocalStore::new(&root),
+        health: Mutex::new(Health::Syncing { done: 3, total: 0 }),
+    });
+    let _mount = bunko_store::mount(gated.clone());
+    let hooks = Arc::new(RecordingHooks::default());
+    let service = MetadataService::new(
+        &root,
+        store,
+        hooks.clone(),
+        Arc::new(NoPathLocks),
+        DebouncePolicy::default(),
+    );
+    for health in [
+        Health::Syncing { done: 3, total: 0 },
+        Health::Suspect,
+        Health::LeaseHeld { by: "nas".into() },
+        Health::Offline,
+    ] {
+        *gated.health.lock() = health.clone();
+        service.recompile_all().unwrap();
+        service
+            .recompile_series_batch(&["Gone".to_owned()])
+            .unwrap();
+        assert!(root.join("Gone/series.json").is_file(), "{health:?}");
+        // Nothing else would look again before the 6 h rescan (no hook fires when
+        // the store comes back, and the watcher ignores .json): one slow retry per
+        // pass, not the 5 s one that would spin while it lasts.
+        assert_eq!(
+            std::mem::take(&mut *hooks.scheduled.lock()),
+            vec![Some(DebouncePolicy::default().max_debounce); 2],
+            "{health:?}"
+        );
+    }
+    *gated.health.lock() = Health::Online;
+    service.recompile_all().unwrap();
+    assert!(!root.join("Gone/series.json").exists());
+    assert!(
+        hooks.scheduled.lock().is_empty(),
+        "retired, nothing to retry"
+    );
 }

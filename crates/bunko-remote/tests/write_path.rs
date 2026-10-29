@@ -624,6 +624,65 @@ fn a_compiler_conflict_on_series_json_becomes_a_submission() {
 
 // ---- deletes, moves, folders ---------------------------------------------------------
 
+/// Two copies of `S/V.cbz` on a Drive-like provider: `older` written first.
+fn duplicate_volume() -> (FakeBackend, String, String) {
+    let fake = FakeBackend::drive_like();
+    let s = fake.reader_mkdir(&format!("{FOLDER}/S"));
+    let older = fake.reader_put(&format!("{FOLDER}/S/V.cbz"), b"older").pid;
+    let newer = fake.reader_put_in(&s.pid, "V.cbz", b"newer").pid;
+    (fake, older, newer)
+}
+
+fn removed_at(ev: &[WatchEvent], p: &Path) -> bool {
+    ev.iter()
+        .any(|e| matches!(e, WatchEvent::Removed { path, .. } if path == p))
+}
+
+#[test]
+fn trashing_one_copy_of_a_duplicate_never_announces_the_path_gone() {
+    let (fake, _older, newer) = duplicate_volume();
+    let t = T::new(fake, &[]);
+    t.wait_steady();
+    assert_eq!(fs::read(t.abs("S/V.cbz")).unwrap(), b"newer");
+    t.events();
+    // Bunko deletes what the path shows; the other copy takes its place.
+    fs::remove_file(t.abs("S/V.cbz")).unwrap();
+    assert_eq!(t.fake.trashed_log(), vec![newer]);
+    let ev = t.events();
+    assert!(!removed_at(&ev, &t.abs("S/V.cbz")), "{ev:?}");
+    assert_eq!(ev, vec![added(t.abs("S/V.cbz"))], "a content change");
+    assert_eq!(fs::read(t.abs("S/V.cbz")).unwrap(), b"older");
+    t.sync_feed();
+    assert!(!removed_at(&t.events(), &t.abs("S/V.cbz")));
+    assert_eq!(fs::read(t.abs("S/V.cbz")).unwrap(), b"older");
+}
+
+#[test]
+fn trashing_a_shadowed_duplicate_announces_nothing() {
+    let (fake, _older, newer) = duplicate_volume();
+    let mut t = T::new(fake, &[]);
+    t.wait_steady();
+    // The trash reaches the provider, then the store stops before its COMMITTED.
+    t.s()
+        .set_failpoint(Some(Arc::new(|at: &str| at == "uploaded")));
+    assert!(fs::remove_file(t.abs("S/V.cbz")).is_err());
+    assert_eq!(t.fake.trashed_log(), vec![newer.clone()]);
+    t.stop();
+    // Meanwhile the reader writes the other copy: it is the newest write, so the
+    // trashed node is only a shadowed duplicate when the commit replays.
+    t.fake
+        .reader_put(&format!("{FOLDER}/S/V.cbz"), b"older, edited");
+    t.events();
+    t.start();
+    t.wait_steady();
+    t.idle();
+    t.sync_feed();
+    let ev = t.events();
+    assert!(!removed_at(&ev, &t.abs("S/V.cbz")), "{ev:?}");
+    assert_eq!(fs::read(t.abs("S/V.cbz")).unwrap(), b"older, edited");
+    assert!(t.s().outbox().is_empty(), "{:?}", t.s().outbox());
+}
+
 #[test]
 fn delete_trashes_foreign_files_and_deletes_own_ones() {
     let t = T::new(

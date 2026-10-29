@@ -40,6 +40,9 @@ pub struct OwedVolume {
 #[derive(Clone, Debug, Default)]
 pub struct OwedIndex {
     pub volumes: BTreeMap<String, OwedVolume>,
+    /// `<stem>_<n>.mokuro` files an older collector numbered, library-relative
+    /// ([`super::orphans`]); swept after the walk.
+    pub orphans: Vec<String>,
 }
 
 /// `(plain, plain + ".gz")` sidecar paths of `cbz` for a row suffix.
@@ -82,6 +85,11 @@ pub fn row_done(cbz: &Path, row: &Generation, folder: Option<&Folder>) -> bool {
 /// (see `upgrade.rs`); the walk asks it only for volumes with a bare `.mokuro`.
 pub trait UpgradeProbe: Send + Sync {
     fn wants_upgrade(&self, cbz: &Path, rel: &str) -> bool;
+    /// A generation layer `row` wrote, now outdated by its engine's revision: owed again
+    /// although its file exists (critique C10).
+    fn layer_outdated(&self, _cbz: &Path, _row: &Generation) -> bool {
+        false
+    }
 }
 
 /// `missing_generations(cbz)` with the missing-pages rule. None when nothing is owed.
@@ -121,7 +129,7 @@ fn compute_in(
     let mut owed: Vec<&Generation> = enabled
         .iter()
         .copied()
-        .filter(|r| !row_done(cbz, r, folder))
+        .filter(|r| !row_done(cbz, r, folder) || upgrade.is_some_and(|p| p.layer_outdated(cbz, r)))
         .collect();
     let primary_done = enabled
         .iter()
@@ -169,6 +177,7 @@ fn compute_in(
 }
 
 /// Every `library/**/*.cbz` (a case-sensitive `.cbz` suffix, as 0.5.2's glob), sorted.
+/// The per-user names at the root (a cloud progress user's `history/`) are not walked.
 pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![library.to_path_buf()];
@@ -176,7 +185,16 @@ pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
         let Ok(rd) = fs::read_dir(&dir) else {
             continue;
         };
+        let top = dir.as_path() == library;
         for entry in rd.flatten() {
+            if top
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(bunko_core::reader_tree::is_per_user_root_name)
+            {
+                continue;
+            }
             let Ok(ft) = entry.file_type() else { continue };
             let path = entry.path();
             if ft.is_dir() {
@@ -223,6 +241,13 @@ pub fn walk(
         let listed = sidecar::list_names(directory).unwrap_or_default();
         let names: Vec<&str> = listed.iter().map(String::as_str).collect();
         let folder = Folder::new(&names);
+        let stems = super::orphans::OrphanStems::new(&names);
+        index.orphans.extend(
+            names
+                .iter()
+                .filter(|n| super::orphans::orphan_target(n, &stems).is_some())
+                .filter_map(|n| rel_of(library, &directory.join(n))),
+        );
         for cbz in archives {
             let Some(rel) = rel_of(library, cbz) else {
                 continue;
@@ -251,6 +276,18 @@ pub fn walk(
 /// the quiet period while its archive stayed is not owed now: the reader is replacing
 /// that sidecar (MEGA deletes every copy before it uploads the new one).
 pub fn still_owed(library: &Path, rel: &str, row: &Generation, upgrade: bool) -> bool {
+    still_owed_with(library, rel, row, upgrade, None)
+}
+
+/// [`still_owed`], where a layer `probe` finds outdated is owed again although its file
+/// exists ([`UpgradeProbe::layer_outdated`]; `probe` is the census when upgrades are on).
+pub fn still_owed_with(
+    library: &Path,
+    rel: &str,
+    row: &Generation,
+    upgrade: bool,
+    probe: Option<&dyn UpgradeProbe>,
+) -> bool {
     let cbz = library.join(rel);
     if !fs::is_file(&cbz) {
         return false;
@@ -265,7 +302,7 @@ pub fn still_owed(library: &Path, rel: &str, row: &Generation, upgrade: bool) ->
     if upgrade {
         true
     } else {
-        !row_done(&cbz, row, None)
+        !row_done(&cbz, row, None) || probe.is_some_and(|p| p.layer_outdated(&cbz, row))
     }
 }
 
@@ -307,6 +344,27 @@ mod tests {
     use super::*;
     use crate::ocr::types::FileFacts;
     use bunko_core::generations::default_generation;
+
+    /// The per-user tree at the root (a cloud progress user's `history/`, whose names
+    /// may end in `.cbz`) is never walked; a series' own `history/` folder is.
+    #[test]
+    fn list_archives_skips_the_per_user_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        for rel in [
+            "history/dev-1/x.cbz",
+            "Series/history/v.cbz",
+            "Series/v.cbz",
+        ] {
+            let path = lib.join(rel);
+            bunko_store::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            bunko_store::fs::write(&path, b"zip").unwrap();
+        }
+        assert_eq!(
+            list_archives(&lib),
+            vec![lib.join("Series/history/v.cbz"), lib.join("Series/v.cbz")]
+        );
+    }
 
     fn rows() -> Vec<Generation> {
         let mut layer = default_generation("g-2");

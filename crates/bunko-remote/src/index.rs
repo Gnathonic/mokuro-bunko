@@ -5,10 +5,13 @@
 //! segments under the merged root, [`ROOT_EID`]). Several nodes can share an entry
 //! (§5.9): NFC-equal folders merge (the oldest-created member is the winner, the
 //! others are role 1, children are the union); NFC-equal files shadow each other (the
-//! newest-created wins, the rest are role 2 and reported as `dup-file`); a folder beats
-//! a file of the same name (`file-vs-dir`). Case variants are distinct entries. Every
-//! root candidate named exactly like the root is a member of the root entry; one
-//! found inside the tree is an ordinary folder and a `nested-root` conflict.
+//! newest write wins, then the copy in the canonical parent, then the smallest pid —
+//! the copy a duplicate merge keeps; the rest are role 2 and reported as `dup-file`); a
+//! folder beats a file of the same name (`file-vs-dir`). Case variants are distinct
+//! entries. Every root candidate named exactly like the root is a member of the root
+//! entry, in the canonical order the backend found them (the first is the winner and
+//! the write root); one found inside the tree is an ordinary folder and a
+//! `nested-root` conflict.
 //!
 //! Writes run inside the caller's transaction ([`Index::begin`]) so a feed batch and
 //! its cursor commit together; they report what became visible as [`IndexChange`]s.
@@ -22,7 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 
 use crate::backend::{HashKind, Pid, RNode};
-use crate::names::{effective_mtime_ns, fold, is_safe_segment, nfc};
+use crate::names::{CONTROL_FILES, effective_mtime_ns, fold, is_safe_segment, nfc};
 
 /// The merged root's entry id.
 pub const ROOT_EID: i64 = 1;
@@ -35,6 +38,12 @@ const ROLE_SHADOWED: i64 = 2;
 const DEFAULT_GRANULARITY_NS: i64 = 1_000_000_000;
 /// A folder's mtime moves at least this much on a child change (1 µs).
 const DIR_BUMP_NS: i64 = 1_000;
+/// The winner rules the stored roles follow (meta `winner_rule`). 2: files by newest
+/// known write (the copy a duplicate merge keeps), roots in canonical order. An index
+/// from an older rule is recomputed at open.
+const WINNER_RULE: &str = "2";
+/// Subtrees larger than this are not walked for [`Index::subtree_loss`].
+const LOSS_CAP: i64 = 20_000;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL);
@@ -218,6 +227,18 @@ pub struct IndexConflict {
     pub detail: Option<String>,
 }
 
+/// Same-named folders under one parent: what a duplicate merge folds together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DupGroup {
+    pub eid: i64,
+    pub parent_pid: Option<Pid>,
+    /// Segments in the entry's path (0 for the root members).
+    pub depth: usize,
+    /// Canonical first: [`Index::roots`] order for the roots, else oldest created,
+    /// then smallest pid.
+    pub members: Vec<RNode>,
+}
+
 /// What an entry looked like, for change reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Snap {
@@ -323,6 +344,27 @@ impl Index {
         {
             idx.granularity_ns.set(g);
         }
+        if idx.meta_get("winner_rule").as_deref() != Some(WINNER_RULE) {
+            // The index is disposable: re-derive every shared entry under the rules
+            // in force, once.
+            idx.savepoint(|c| {
+                let eids: Vec<i64> = c
+                    .prepare(
+                        "SELECT eid FROM node WHERE eid IS NOT NULL GROUP BY eid HAVING COUNT(*) > 1",
+                    )?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                for eid in eids {
+                    idx.recompute(c, eid)?;
+                }
+                c.execute(
+                    "INSERT INTO meta(k, v) VALUES('winner_rule', ?1) \
+                     ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                    [WINNER_RULE],
+                )?;
+                Ok(())
+            })?;
+        }
         Ok(idx)
     }
 
@@ -371,8 +413,9 @@ impl Index {
         Ok(())
     }
 
-    /// The merged root's member pids, oldest first (the first is the target for new
-    /// top-level folders and control files).
+    /// The merged root's member pids, canonical first (top-level, then oldest, then
+    /// smallest pid; the first is the target for new top-level folders and control
+    /// files).
     pub fn roots(&self) -> Vec<Pid> {
         self.pid_list("roots_json")
     }
@@ -397,16 +440,16 @@ impl Index {
         Ok(())
     }
 
-    /// Make `roots` (every folder `locate_roots` found) the merged root (D5): the
-    /// oldest-created is the winner; a candidate inside another root, or already in
-    /// the tree, is a `nested-root` instead. Former roots not listed are dropped
+    /// Make `roots` (every folder `locate_roots` found, canonical first) the merged
+    /// root (D5): the first is the winner; a candidate inside another root, or already
+    /// in the tree, is a `nested-root` instead. Former roots not listed are dropped
     /// with their subtrees.
     pub fn set_roots(&self, roots: &[RNode]) -> rusqlite::Result<Vec<IndexChange>> {
         self.savepoint(|c| {
             let mut out = Vec::new();
-            let mut cands: Vec<&RNode> = roots.iter().collect();
-            cands.sort_by(|a, b| (a.created_ms, &a.pid).cmp(&(b.created_ms, &b.pid)));
-            cands.dedup_by(|a, b| a.pid == b.pid);
+            // The order is the backend's canonical one (`sort_roots_canonical`).
+            let mut seen = HashSet::new();
+            let mut cands: Vec<&RNode> = roots.iter().filter(|r| seen.insert(&r.pid)).collect();
             // A candidate whose name could not be a path segment is no root at all.
             cands.retain(|r| is_safe_segment(&nfc(&r.name_raw)));
             let pids: HashSet<&str> = cands.iter().map(|r| r.pid.as_str()).collect();
@@ -442,11 +485,12 @@ impl Index {
                     params![ROOT_EID, r.pid],
                 )?;
             }
+            // The root winner is ranked by this list.
+            self.set_pid_list(c, "roots_json", &keep_pids)?;
             self.recompute(c, ROOT_EID)?;
             for r in &keep {
                 self.place_children(c, &r.pid, &mut out)?;
             }
-            self.set_pid_list(c, "roots_json", &keep_pids)?;
             self.set_pid_list(c, "nested_roots_json", &nested)?;
             Ok(out)
         })
@@ -488,9 +532,14 @@ impl Index {
                 }
             }
             Some(eid) => {
-                let same_place = old.parent_pid == n.parent
-                    && old.is_dir == n.is_dir
-                    && nfc(&old.name_raw) == nfc(&n.name_raw);
+                let same_place = old.is_dir == n.is_dir
+                    && nfc(&old.name_raw) == nfc(&n.name_raw)
+                    && (old.parent_pid == n.parent || {
+                        // Moved between members of one merged folder (a duplicate
+                        // merge): its path does not change.
+                        let np = self.parent_eid_of(c, n.parent.as_deref())?;
+                        np.is_some() && np == self.entry_parent(c, eid)?
+                    });
                 if same_place {
                     let before = self.snap(c, eid)?;
                     self.write_node(c, n, generation)?;
@@ -619,9 +668,9 @@ impl Index {
 
     /// The provider nodes an entry is (its winner and the members of a merged
     /// folder; shadowed duplicates are left out), oldest created first. The merged
-    /// root's are its roots.
+    /// root's are its roots, in [`Index::roots`] order.
     pub fn members(&self, eid: i64) -> Vec<RNode> {
-        soft(
+        let mut v = soft(
             self.conn
                 .prepare_cached(
                     "SELECT pid, parent_pid, name_raw, kind, size, base_mtime_ms, created_ms, version, \
@@ -633,6 +682,174 @@ impl Index {
                         .collect::<rusqlite::Result<Vec<_>>>()
                 }),
             "members",
+        )
+        .unwrap_or_default();
+        if eid == ROOT_EID {
+            let roots = self.roots();
+            v.sort_by_key(|n| roots.iter().position(|r| *r == n.pid).unwrap_or(usize::MAX));
+        }
+        v
+    }
+
+    /// Same-named folders that share a parent node, shallowest first: the groups a
+    /// duplicate merge folds, level by level. Roots with different parents never
+    /// form a group (a `Backup/mokuro-reader` stays where it is). Same-named is the
+    /// exact spelling, as the reader groups them: NFC-equal spellings stay one entry
+    /// (the union) but split into one group each, and a lone spelling is no group.
+    pub fn dup_member_groups(&self) -> Vec<DupGroup> {
+        let keys: Vec<(i64, Option<Pid>)> = soft(
+            self.conn
+                .prepare_cached(
+                    "SELECT n.eid, n.parent_pid FROM node n JOIN entry e ON e.eid = n.eid \
+                     WHERE e.kind = 1 AND n.role IN (0, 1) GROUP BY n.eid, n.parent_pid \
+                     HAVING COUNT(*) > 1",
+                )
+                .and_then(|mut s| {
+                    s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }),
+            "dup_member_groups",
+        )
+        .unwrap_or_default();
+        let mut out: Vec<DupGroup> = Vec::new();
+        for (eid, parent_pid) in keys {
+            let depth = self.path_of(eid).map_or(0, |p| p.segments().len());
+            // By spelling, in the order each first appears (canonical first).
+            let mut by_name: Vec<(Vec<u8>, Vec<RNode>)> = Vec::new();
+            for n in self.members(eid) {
+                if n.parent != parent_pid {
+                    continue;
+                }
+                match by_name.iter_mut().find(|(k, _)| *k == n.name_raw) {
+                    Some((_, v)) => v.push(n),
+                    None => by_name.push((n.name_raw.clone(), vec![n])),
+                }
+            }
+            out.extend(
+                by_name
+                    .into_iter()
+                    .filter(|(_, v)| v.len() > 1)
+                    .map(|(_, members)| DupGroup {
+                        eid,
+                        parent_pid: parent_pid.clone(),
+                        depth,
+                        members,
+                    }),
+            );
+        }
+        out.sort_by(|a, b| (a.depth, a.eid, &a.parent_pid).cmp(&(b.depth, b.eid, &b.parent_pid)));
+        out
+    }
+
+    /// What removing `pid` (with everything in `removing`) would take out of sight:
+    /// the nodes of its subtree whose entry keeps no node outside `removing` and the
+    /// subtree. A shadowed copy or an emptied duplicate folder counts 0.
+    pub fn subtree_loss(&self, pid: &str, removing: &HashSet<Pid>) -> u64 {
+        let rows: Vec<(Pid, i64)> = soft(
+            self.conn
+                .prepare_cached(
+                    "WITH RECURSIVE t(pid) AS (SELECT pid FROM node WHERE pid = ?1 \
+                     UNION SELECT n.pid FROM node n JOIN t ON n.parent_pid = t.pid LIMIT ?2) \
+                     SELECT n.pid, n.eid FROM node n JOIN t ON t.pid = n.pid WHERE n.eid IS NOT NULL",
+                )
+                .and_then(|mut s| {
+                    s.query_map(params![pid, LOSS_CAP], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }),
+            "subtree_loss",
+        )
+        .unwrap_or_default();
+        let gone: HashSet<&str> = removing
+            .iter()
+            .map(String::as_str)
+            .chain(rows.iter().map(|(p, _)| p.as_str()))
+            .collect();
+        let mut kept: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
+        rows.iter()
+            .filter(|(_, eid)| {
+                !*kept.entry(*eid).or_insert_with(|| {
+                    self.entry_pids(*eid)
+                        .iter()
+                        .any(|p| !gone.contains(p.as_str()))
+                })
+            })
+            .count() as u64
+    }
+
+    /// Root member `pid` holds nothing of its own once `removing` goes: at least one
+    /// other root stays, and every node still parented there is being removed with
+    /// nothing lost (an emptied duplicate, a copy another node supersedes). Bunko's
+    /// own status files do not count: it rewrites them into `roots()[0]`.
+    pub fn root_vacated(&self, pid: &str, removing: &HashSet<Pid>) -> bool {
+        let roots = self.roots();
+        if !roots.iter().any(|r| r == pid)
+            || !roots.iter().any(|r| r != pid && !removing.contains(r))
+        {
+            return false;
+        }
+        let kids: Vec<(Pid, Vec<u8>, i64)> = soft(
+            self.conn
+                .prepare_cached("SELECT pid, name_raw, kind FROM node WHERE parent_pid = ?1")
+                .and_then(|mut s| {
+                    s.query_map([pid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }),
+            "root_vacated",
+        )
+        .unwrap_or_default();
+        kids.iter().all(|(kid, name, kind)| {
+            (*kind == KIND_FILE && CONTROL_FILES.contains(&nfc(name).as_str()))
+                || (removing.contains(kid)
+                    && self
+                        .node_row(&self.conn, kid)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|n| n.eid.is_some())
+                    && self.subtree_loss(kid, removing) == 0)
+        })
+    }
+
+    /// How many of `removing` are placed nodes whose entry keeps no node outside
+    /// `removing`: the library paths that removal would make disappear.
+    pub fn visible_loss(&self, removing: &HashSet<Pid>) -> u64 {
+        let mut kept: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
+        removing
+            .iter()
+            .filter_map(|p| self.node_row(&self.conn, p).ok().flatten()?.eid)
+            .filter(|eid| {
+                !*kept
+                    .entry(*eid)
+                    .or_insert_with(|| self.entry_pids(*eid).iter().any(|p| !removing.contains(p)))
+            })
+            .count() as u64
+    }
+
+    /// The nodes whose provider parent is `pid`, placed or not.
+    pub fn nodes_under(&self, pid: &str) -> Vec<RNode> {
+        soft(
+            self.conn
+                .prepare_cached(
+                    "SELECT pid, parent_pid, name_raw, kind, size, base_mtime_ms, created_ms, version, \
+                     cver, pin, hash_kind, hash FROM node WHERE parent_pid = ?1 ORDER BY pid",
+                )
+                .and_then(|mut s| {
+                    s.query_map([pid], node_from_row)?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }),
+            "nodes_under",
+        )
+        .unwrap_or_default()
+    }
+
+    fn entry_pids(&self, eid: i64) -> Vec<Pid> {
+        soft(
+            self.conn
+                .prepare_cached("SELECT pid FROM node WHERE eid = ?1")
+                .and_then(|mut s| {
+                    s.query_map([eid], |r| r.get(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }),
+            "entry_pids",
         )
         .unwrap_or_default()
     }
@@ -1081,6 +1298,7 @@ impl Index {
     fn recompute(&self, c: &Connection, eid: i64) -> rusqlite::Result<Option<Snap>> {
         struct M {
             pid: String,
+            parent: Option<String>,
             is_dir: bool,
             created: i64,
             size: i64,
@@ -1089,11 +1307,12 @@ impl Index {
         }
         let mut nodes: Vec<M> = c
             .prepare_cached(
-                "SELECT pid, kind, created_ms, size, base_mtime_ms, cver FROM node WHERE eid = ?1",
+                "SELECT pid, kind, created_ms, size, base_mtime_ms, cver, parent_pid FROM node WHERE eid = ?1",
             )?
             .query_map([eid], |r| {
                 Ok(M {
                     pid: r.get(0)?,
+                    parent: r.get(6)?,
                     is_dir: r.get::<_, i64>(1)? == KIND_DIR,
                     created: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
                     size: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
@@ -1125,16 +1344,56 @@ impl Index {
             return Ok(None);
         }
         let has_dir = nodes.iter().any(|m| m.is_dir);
-        if has_dir {
+        let roots = self.roots();
+        let root_rank = |pid: &str| roots.iter().position(|r| r == pid).unwrap_or(usize::MAX);
+        if eid == ROOT_EID {
+            // The canonical order `set_roots` stored: the first is the write root.
+            nodes.sort_by(|a, b| {
+                (root_rank(&a.pid), a.created, &a.pid).cmp(&(root_rank(&b.pid), b.created, &b.pid))
+            });
+        } else if has_dir {
             // Folders first, oldest (then smallest pid) first; files after.
             nodes.sort_by(|a, b| {
                 (!a.is_dir, a.created, &a.pid).cmp(&(!b.is_dir, b.created, &b.pid))
             });
         } else {
-            // Newest created (then smallest pid) first.
+            // The copy a duplicate merge keeps: it walks the parents canonical first
+            // (the roots' order, else the oldest member), then the smallest pid, and
+            // takes a copy only when its write is strictly newer and both times are
+            // known. Not a sort key: an unknown time (0) ties with every other.
+            let mut parent_rank: std::collections::HashMap<Option<String>, (usize, i64, String)> =
+                std::collections::HashMap::new();
+            for m in &nodes {
+                if parent_rank.contains_key(&m.parent) {
+                    continue;
+                }
+                let rank = match m.parent.as_deref() {
+                    Some(p) if root_rank(p) != usize::MAX => {
+                        (0, root_rank(p) as i64, String::new())
+                    }
+                    Some(p) => c
+                        .prepare_cached("SELECT created_ms FROM node WHERE pid = ?1")?
+                        .query_row([p], |r| r.get::<_, Option<i64>>(0))
+                        .optional()?
+                        .map_or((2, 0, p.to_string()), |cr| {
+                            (1, cr.unwrap_or(0), p.to_string())
+                        }),
+                    None => (2, 0, String::new()),
+                };
+                parent_rank.insert(m.parent.clone(), rank);
+            }
             nodes.sort_by(|a, b| {
-                (std::cmp::Reverse(a.created), &a.pid).cmp(&(std::cmp::Reverse(b.created), &b.pid))
+                (&parent_rank[&a.parent], &a.pid).cmp(&(&parent_rank[&b.parent], &b.pid))
             });
+            let mut keep = 0;
+            for (i, m) in nodes.iter().enumerate().skip(1) {
+                let k = &nodes[keep];
+                if m.base > 0 && k.base > 0 && m.base > k.base {
+                    keep = i;
+                }
+            }
+            let w = nodes.remove(keep);
+            nodes.insert(0, w);
         }
         for (i, m) in nodes.iter().enumerate() {
             let role = match (i, m.is_dir) {

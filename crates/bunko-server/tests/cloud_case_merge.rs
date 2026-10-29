@@ -309,3 +309,83 @@ async fn the_main_sidecar_matching_the_primary_recipe_is_kept() {
     assert_eq!(kept["x"], 1);
     assert_eq!(kept["preserved"]["by"], "mokuro-bunko");
 }
+
+/// The cloud root's `history/` is its owner's reading history (0.8), not a spelling of
+/// a library series: a `History/` series beside it is neither merged with it nor
+/// blocked against it, while a real pair beside them merges as usual.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_history_series_is_never_merged_with_the_reading_history() {
+    let fake = Arc::new(FakeBackend::drive_like());
+    fake.reader_put(&format!("{ROOT}/History/Vol 1.cbz"), b"series");
+    fake.reader_put(&format!("{ROOT}/history/dev-1/2026-10.events"), b"events");
+    fake.reader_put(&format!("{ROOT}/Kingdom/Vol 1.cbz"), b"one");
+    fake.reader_put(&format!("{ROOT}/kingdom/Vol 2.cbz"), b"two");
+    let e = env(fake.clone()).await;
+    let f2 = fake.clone();
+    eventually("the Kingdom merge", || {
+        f2.node_at(&format!("{ROOT}/kingdom")).is_none()
+    })
+    .await;
+    // A few more passes, with both history spellings long quiet.
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    assert!(fake.node_at(&format!("{ROOT}/History/Vol 1.cbz")).is_some());
+    let events = fake
+        .node_at(&format!("{ROOT}/history/dev-1/2026-10.events"))
+        .expect("the history stays where it is");
+    assert_eq!(fake.content(&events.pid).unwrap(), b"events");
+    assert!(
+        fake.node_at(&format!("{ROOT}/History/dev-1")).is_none()
+            && fake.node_at(&format!("{ROOT}/history/Vol 1.cbz")).is_none()
+    );
+    let (_, st) = e.call("GET", "/_admin/api/storage", None).await;
+    let merges = st["recent_merges"].as_array().unwrap();
+    assert_eq!(merges.len(), 1, "{st}");
+    assert_eq!(merges[0]["winner"], "Kingdom");
+    assert!(
+        st["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["kind"] != "case-merge-blocked"),
+        "{st}"
+    );
+}
+
+/// Two main sidecars of the primary's own recipe: the current revision wins over an
+/// older one (every engine is at revision 1 today, so the loser says 0), which is kept
+/// as the winner's `pre-upgrade` layer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lower_revision_main_sidecar_loses_a_case_merge() {
+    let primary = bunko_core::generations::default_generation("g-1");
+    let (engine, detector, budget) = primary.output_affecting();
+    let at = |revision: u32| {
+        serde_json::to_vec(&serde_json::json!({
+            "version": "0.2.1", "pages": [],
+            "ocr_engine": {"id": engine, "revision": revision, "detector": detector, "patch_budget": budget},
+        }))
+        .unwrap()
+    };
+    let (current, older) = (at(1), at(0));
+    let fake = Arc::new(FakeBackend::drive_like());
+    fake.reader_put(&format!("{ROOT}/Kingdom/Vol 1.cbz"), b"same");
+    fake.reader_put(&format!("{ROOT}/Kingdom/Vol 1.mokuro"), &older);
+    fake.reader_put(&format!("{ROOT}/kingdom/Vol 1.cbz"), b"same");
+    fake.reader_put(&format!("{ROOT}/kingdom/Vol 1.mokuro"), &current);
+    let _e = env_with(fake.clone(), move |c| {
+        c.ocr.upgrade.enabled = true;
+        c.ocr.generations = vec![primary];
+    })
+    .await;
+    let f2 = fake.clone();
+    eventually("the merge", || {
+        f2.node_at(&format!("{ROOT}/kingdom")).is_none()
+    })
+    .await;
+    let bytes = |rel: &str| {
+        let n = fake.node_at(&format!("{ROOT}/{rel}")).unwrap();
+        fake.content(&n.pid).unwrap()
+    };
+    assert_eq!(bytes("Kingdom/Vol 1.mokuro"), current);
+    let kept: Value = serde_json::from_slice(&bytes("Kingdom/Vol 1.pre-upgrade.mokuro")).unwrap();
+    assert_eq!(kept["preserved"]["by"], "mokuro-bunko");
+}

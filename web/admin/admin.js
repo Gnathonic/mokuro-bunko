@@ -1,6 +1,6 @@
 // Admin Panel JavaScript
 
-const API_BASE = '/_admin/api';
+const API_BASE = '_admin/api';
 
 // State
 let users = [];
@@ -21,7 +21,7 @@ function getAuthHeaders() {
 
 async function logout() {
     await window.mokuroAuth.signOut();
-    window.location.href = '/';
+    window.location.href = './';
 }
 
 function getSessionRole() {
@@ -46,7 +46,7 @@ function trimToInvitesOnly() {
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     if (!window.mokuroAuth.token()) {
-        window.location.href = '/login?next=' + encodeURIComponent('/_admin' + window.location.hash);
+        window.location.href = 'login?next=' + encodeURIComponent('_admin' + window.location.hash);
         return;
     }
     const isInviter = getSessionRole() === 'inviter';
@@ -323,7 +323,7 @@ function apiError(response, data) {
         // The tab's token expired or was revoked (a password change signs
         // every session out): sign in again rather than show errors.
         window.mokuroAuth.clear();
-        window.location.href = '/login';
+        window.location.href = 'login';
     }
     const error = new Error((data && data.error) || 'Request failed');
     error.status = response.status;
@@ -1258,7 +1258,8 @@ function renderUpgrade() {
     const families = Object.assign({}, c.families || {});
     replace.forEach((f) => { if (!(f in families)) families[f] = 0; });
     document.getElementById('upgrade-families').innerHTML = Object.keys(families)
-        .filter((f) => f !== 'unknown')
+        // Neither is a recipe to choose: unknown files and EDITED ones are never replaced.
+        .filter((f) => f !== 'unknown' && f !== 'edited')
         .map((f) => '<label class="check"><input type="checkbox" data-family="' + escapeHtml(f) + '"' +
             (replace.includes(f) ? ' checked' : '') + '> ' + escapeHtml(f) + ' <span class="upgrade-n">' +
             families[f].toLocaleString() + '</span></label>').join('') +
@@ -1266,7 +1267,8 @@ function renderUpgrade() {
             ' (never upgraded)</span>' : '');
     document.getElementById('upgrade-counts').textContent = c.enabled
         ? 'Ready to replace ' + c.ready + ' · needs OCR ' + c.needs_ocr +
-          ' · skipped (missing pages) ' + c.skipped_missing_pages
+          ' · skipped (missing pages) ' + c.skipped_missing_pages +
+          ' · edited (never replaced) ' + (c.edited || 0)
         : 'Counts appear once upgrading is enabled and saved.';
 }
 

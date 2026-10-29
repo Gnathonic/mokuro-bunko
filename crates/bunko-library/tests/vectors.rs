@@ -269,6 +269,16 @@ fn facts_json(facts: &SeriesFacts) -> String {
     compact(&JsonValue::Object(object))
 }
 
+fn spine_offset_key_is_number_or_null(payload: &str) -> bool {
+    match pyjson::parse(payload) {
+        Ok(JsonValue::Object(object)) => matches!(
+            object.get("spine_offset"),
+            Some(JsonValue::Null | JsonValue::Num(_))
+        ),
+        _ => false,
+    }
+}
+
 #[test]
 fn update_validation_matches_python() {
     let v = vectors();
@@ -290,9 +300,15 @@ fn update_validation_matches_python() {
                     compact(get(expected, "spine_offset")),
                     "{payload}"
                 );
+                // Deliberate divergence (0.8): 0.5.2 read a present `0`, `null`
+                // or unusable number as absence, so an offset could never be
+                // reset. Now any number or null is presence, the value stays.
+                let python_present =
+                    matches!(get(expected, "spine_offset_present"), JsonValue::Bool(true));
                 assert_eq!(
                     update.spine_offset_present,
-                    matches!(get(expected, "spine_offset_present"), JsonValue::Bool(true))
+                    python_present || spine_offset_key_is_number_or_null(payload),
+                    "{payload}"
                 );
                 assert_eq!(
                     compact(&JsonValue::Object(update.volume_offsets.clone())),

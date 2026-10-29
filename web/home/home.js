@@ -54,7 +54,7 @@ async function loadStats() {
     });
 
     try {
-        const response = await fetch('/api/stats');
+        const response = await fetch('api/stats');
         if (!response.ok) {
             throw new Error('Failed to fetch stats');
         }
@@ -113,7 +113,7 @@ async function logout() {
 // steps on a server that serves no readers.
 async function applyServerConfig() {
     try {
-        const response = await fetch('/api/nav/config');
+        const response = await fetch('api/nav/config');
         if (!response.ok) return;
         const config = await response.json();
         const readers = config.serve_readers !== false;

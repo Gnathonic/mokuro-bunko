@@ -209,7 +209,7 @@ async fn root_redirects_browsers_to_setup_until_an_admin_exists() {
     let r = env
         .send(empty(req("GET", "/").header("accept", "text/html")))
         .await;
-    assert_eq!((r.status, r.header("location")), (302, Some("/setup")));
+    assert_eq!((r.status, r.header("location")), (302, Some("setup")));
     assert!(r.body.is_empty());
     // Non-HTML clients are not redirected: the home page heuristics apply.
     let r = env
@@ -240,7 +240,7 @@ async fn a_remote_request_without_a_code_gets_the_code_page() {
     assert_eq!(r.status, 200);
     let page = r.text();
     assert!(
-        page.contains(r#"<form method="post" action="/setup/code""#),
+        page.contains(r#"<form method="post" action="setup/code""#),
         "{page}"
     );
     assert!(page.contains("server log"), "{page}");
@@ -344,7 +344,7 @@ async fn the_right_code_opens_the_wizard_once() {
     // Typed loosely: lower case, spaces instead of the dash.
     let typed = code.to_lowercase().replace('-', " ");
     let r = env.send(code_form(DOCKER, &typed)).await;
-    assert_eq!((r.status, r.header("location")), (303, Some("/setup")));
+    assert_eq!((r.status, r.header("location")), (303, Some("../setup")));
     let cookie = r
         .header("set-cookie")
         .expect("a session cookie")
@@ -353,9 +353,12 @@ async fn the_right_code_opens_the_wizard_once() {
         cookie.starts_with(&format!("{SESSION_COOKIE}=")),
         "{cookie}"
     );
-    for attr in ["Path=/setup", "HttpOnly", "SameSite=Strict", "Max-Age=3600"] {
+    for attr in ["HttpOnly", "SameSite=Strict", "Max-Age=3600"] {
         assert!(cookie.contains(attr), "{cookie}");
     }
+    // No Path: the browser's default for `<mount>/setup/code` is `<mount>/setup`, which
+    // `Path=/setup` would miss under a sub-path mount.
+    assert!(!cookie.contains("Path="), "{cookie}");
     assert!(!cookie.contains("Secure"), "plain http");
     assert!(
         !cookie.contains(&normalize_code(&code)) && !cookie.contains(&code),
@@ -417,7 +420,7 @@ async fn the_right_code_opens_the_wizard_once() {
     let r = env.send(code_form(DOCKER, &code)).await;
     assert_eq!(
         (r.status, r.header("location"), r.header("set-cookie")),
-        (303, Some("/setup"), None),
+        (303, Some("../setup"), None),
         "setup is done: the (inert) page, no session"
     );
 }

@@ -16,19 +16,10 @@ use std::path::{Component, Path, PathBuf};
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
-pub const READER_ROOT: &str = "mokuro-reader";
+use bunko_core::reader_tree;
+pub use bunko_core::reader_tree::{PER_USER_FILES, READER_ROOT};
 
-/// Root `.json` files that belong to ONE user (exact, case-sensitive names): the sorted
-/// order 0.5.2 lists them, then `positions.json` (the reader's fixed-address position
-/// index, added after 0.5.2). Reported to clients as `per_user_files` by
-/// `/login/api/me`, so a reader only uses a name once the server keeps it per user.
-pub const PER_USER_FILES: [&str; 4] = [
-    "goals.json",
-    "profiles.json",
-    "volume-data.json",
-    "positions.json",
-];
-
+/// One of the account's root files (`goals.json`, ...), exactly as written.
 pub fn is_per_user_name(name: &str) -> bool {
     PER_USER_FILES.contains(&name)
 }
@@ -57,8 +48,9 @@ pub fn normalize(path: &str) -> String {
 pub enum Target {
     Root,
     ReaderRoot,
-    /// `/mokuro-reader/<per-user name>`
-    Progress(&'static str),
+    /// `/mokuro-reader/<rel>` of the caller's own tree (`reader_tree::per_user`): a root
+    /// file, `history` or below it. Carries the rel, trailing `/` trimmed.
+    Progress(String),
     /// `/mokuro-reader/<rel>` (rel non-empty, not a per-user name)
     Library(String),
     /// `/inbox` and below: mapped by 0.5.2 but never served.
@@ -87,8 +79,8 @@ pub fn classify(path: &str) -> Target {
         return Target::ReaderRoot;
     }
     if let Some(rel) = norm.strip_prefix(&format!("{reader}/")) {
-        if let Some(name) = PER_USER_FILES.iter().find(|n| **n == rel) {
-            return Target::Progress(name);
+        if reader_tree::is_per_user_rel(rel) {
+            return Target::Progress(rel.trim_matches('/').to_string());
         }
         return Target::Library(rel.to_string());
     }
@@ -96,6 +88,12 @@ pub fn classify(path: &str) -> Target {
         return Target::Inbox;
     }
     Target::Other
+}
+
+/// `/mokuro-reader/history` or anything below it: the account's reading history, which
+/// is never moved, copied, locked or PROPPATCHed.
+pub fn is_history_path(path: &str) -> bool {
+    matches!(classify(path), Target::Progress(rel) if reader_tree::is_history_rel(&rel))
 }
 
 pub fn class_of(path: &str) -> PathClass {
@@ -278,12 +276,6 @@ pub fn relative_posix(path: &Path, base: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// A username that can be a single directory name under `users/` (0.5.2 additionally
-/// resolves and checks containment; usernames are `^[a-zA-Z0-9_-]{3,32}$` anyway).
-pub fn safe_username(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
-}
-
 /// 0.5.2 compiled-metadata predicate (`metadata/paths.py`): `catalog.json` at the library
 /// root or `<one folder>/series.json`, after lexical normalisation.
 pub fn is_compiled_metadata_path(path: &str) -> bool {
@@ -291,7 +283,7 @@ pub fn is_compiled_metadata_path(path: &str) -> bool {
     let Some(rel) = norm.strip_prefix(&format!("/{READER_ROOT}/")) else {
         return false;
     };
-    if rel.is_empty() || is_per_user_name(rel) {
+    if rel.is_empty() || reader_tree::is_per_user_rel(rel) {
         return false;
     }
     if rel.eq_ignore_ascii_case("catalog.json") {
@@ -334,12 +326,28 @@ mod tests {
         assert_eq!(classify("/mokuro-reader/"), Target::ReaderRoot);
         assert_eq!(
             classify("/mokuro-reader/goals.json"),
-            Target::Progress("goals.json")
+            Target::Progress("goals.json".into())
         );
         assert_eq!(
             classify("/mokuro-reader/positions.json"),
-            Target::Progress("positions.json")
+            Target::Progress("positions.json".into())
         );
+        assert_eq!(
+            classify("/mokuro-reader/history/"),
+            Target::Progress("history".into())
+        );
+        assert_eq!(
+            classify("/mokuro-reader/history/dev/x.events"),
+            Target::Progress("history/dev/x.events".into())
+        );
+        assert_eq!(
+            classify("/mokuro-reader/History/v.cbz"),
+            Target::Library("History/v.cbz".into())
+        );
+        assert!(is_history_path("/mokuro-reader/history"));
+        assert!(is_history_path("/mokuro-reader/history/d/x"));
+        assert!(!is_history_path("/mokuro-reader/goals.json"));
+        assert!(!is_history_path("/mokuro-reader/History/x"));
         assert_eq!(
             classify("/mokuro-reader/Goals.json"),
             Target::Library("Goals.json".into())
@@ -388,6 +396,9 @@ mod tests {
         assert!(!is_compiled_metadata_path("/mokuro-reader/S/catalog.json"));
         assert!(!is_compiled_metadata_path(
             "/mokuro-reader/volume-data.json"
+        ));
+        assert!(!is_compiled_metadata_path(
+            "/mokuro-reader/history/series.json"
         ));
     }
 

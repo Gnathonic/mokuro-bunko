@@ -35,6 +35,11 @@ pub struct FakeConfig {
     pub overlap: usize,
     /// Engines the catalog lists (default `["fake"]`).
     pub engines: Vec<String>,
+    /// The output revision announced for every listed engine and written into its
+    /// sidecars' `ocr_engine.revision`, right after the id (default: this build's
+    /// [`bunko_layout::sidecar::engine_revision`]), to stand in for an older or newer
+    /// processor (`processor-fake --engine-revision`, the rig's upgrade scenarios).
+    pub engine_revision: Option<u32>,
     /// Adds a `gpu:0` device computing in these formats; the engine runs there unless
     /// the row pins it to the CPU.
     pub gpu_formats: Option<Vec<String>>,
@@ -58,10 +63,6 @@ pub struct FakeConfig {
     /// test in another process holds a volume mid-OCR, as `processor-fake --hold-file`
     /// does for the interop rig's "rename during OCR".
     pub hold_file: Option<PathBuf>,
-    /// The `revision` the sidecar's `ocr_engine` block carries (none: no key, which
-    /// counts as revision 1), for upgrade scenarios: the same engine at a higher
-    /// revision replaces older output.
-    pub engine_revision: Option<u32>,
 }
 
 /// The fake engine. Cheap to clone (clones share their counters).
@@ -75,6 +76,13 @@ struct Inner {
     config: FakeConfig,
     opened: AtomicU64,
     ran: Mutex<Vec<String>>,
+}
+
+impl FakeConfig {
+    fn revision_of(&self, engine: &str) -> u32 {
+        self.engine_revision
+            .unwrap_or_else(|| bunko_layout::sidecar::engine_revision(engine))
+    }
 }
 
 impl FakePipeline {
@@ -169,6 +177,10 @@ impl PagePipeline for FakePipeline {
                     .map(|n| n.get() as u32),
             },
             catalog: Catalog {
+                engine_revisions: engines
+                    .iter()
+                    .map(|e| (e.clone(), config.revision_of(e)))
+                    .collect(),
                 engines,
                 detectors: vec!["ppocr-manga".into()],
                 devices: {
@@ -416,19 +428,13 @@ impl VolumeRunner for FakeRunner {
             *self.behind.lock() += pacer.behind();
             return Err(RunError::Volume("every page failed".to_string()));
         }
-        let mut engine = json!({"id": self.engine});
-        if let Some(revision) = config.engine_revision {
-            engine["revision"] = json!(revision);
-        }
-        engine["generator"] = json!("mokuro-bunko");
-        engine["precision"] = json!(self.precision);
         let sidecar = json!({
             "version": "0.2.5",
             "title": meta.title,
             "title_uuid": meta.title_uuid,
             "volume": meta.volume,
             "volume_uuid": meta.volume_uuid,
-            "ocr_engine": engine,
+            "ocr_engine": {"id": self.engine, "revision": config.revision_of(&self.engine), "generator": "mokuro-bunko", "precision": self.precision},
             "pages": out_pages,
         });
         let tmp = out.with_file_name(format!(

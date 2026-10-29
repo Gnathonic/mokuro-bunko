@@ -16,8 +16,10 @@
       "volume-data.json",
       "profiles.json",
       "goals.json",
-      "positions.json"
-    ]
+      "positions.json",
+      "history/"
+    ],
+    "version": "0.0.0"
   },
   "headers": {
     "cache-control": "no-store",

@@ -192,13 +192,82 @@ async fn locate_roots_finds_every_exact_visible_folder_oldest_first() {
     assert_eq!(roots[0].parent.as_deref(), Some("root"));
     assert!(roots[0].created_ms < roots[1].created_ms);
     // Paged: 3 live folder candidates (the mock's `name =` ignores case), 2 per page.
-    let lists = e.mock.count("GET", "/drive/v3/files", None);
+    let lists = e.mock.count_path("GET", "/drive/v3/files", None);
     assert_eq!(lists, 2);
-    assert_eq!(e.be.units_used(), 2 * units::LIST);
+    // Plus the My Drive root's id, asked once (`files/root`).
+    assert_eq!(e.be.units_used(), 2 * units::LIST + units::GET);
 
     let made = e.be.create_root("mokuro-reader").await.unwrap();
     assert_eq!(made.parent.as_deref(), Some("root"));
     assert_eq!(e.be.locate_roots("mokuro-reader").await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn locate_roots_puts_a_top_level_root_before_an_older_nested_one() {
+    let e = env().await;
+    let other = e.mock.mkdir("root", "Backup");
+    let nested = e.mock.mkdir(&other, "mokuro-reader");
+    let top_b = e.mock.mkdir("root", "mokuro-reader");
+    let top_a = e.mock.mkdir("root", "mokuro-reader");
+    {
+        // Two top-level roots of one age: the smaller id first.
+        let mut m = e.mock.lock();
+        let t = m.files[&top_b].created;
+        m.files.get_mut(&top_a).unwrap().created = t;
+    }
+    let (first, second) = if top_a < top_b {
+        (top_a.clone(), top_b.clone())
+    } else {
+        (top_b.clone(), top_a.clone())
+    };
+    for _ in 0..2 {
+        let roots = e.be.locate_roots("mokuro-reader").await.unwrap();
+        let pids: Vec<_> = roots.iter().map(|r| r.pid.clone()).collect();
+        assert_eq!(pids, [first.clone(), second.clone(), nested.clone()]);
+    }
+    assert_eq!(
+        e.mock.count_path("GET", "/drive/v3/files/root", None),
+        1,
+        "the My Drive root id is asked once per session"
+    );
+}
+
+#[tokio::test]
+async fn locate_roots_falls_back_to_age_order_when_my_drive_cannot_be_asked() {
+    let e = env().await;
+    let other = e.mock.mkdir("root", "Backup");
+    let nested = e.mock.mkdir(&other, "mokuro-reader");
+    let top = e.mock.mkdir("root", "mokuro-reader");
+    // A refusal (404, or a file this grant may not see) is no reason to stay offline:
+    // the roots are still found, oldest first.
+    for (status, reason) in [(404, "notFound"), (403, "appNotAuthorizedToFile")] {
+        e.mock
+            .fault(Some("GET"), "/drive/v3/files/root", status, reason);
+        let roots = e.be.locate_roots("mokuro-reader").await.unwrap();
+        let pids: Vec<_> = roots.iter().map(|r| r.pid.clone()).collect();
+        assert_eq!(pids, [nested.clone(), top.clone()], "{status} {reason}");
+    }
+    // A passing failure is not remembered: the next locate asks again.
+    let roots = e.be.locate_roots("mokuro-reader").await.unwrap();
+    let pids: Vec<_> = roots.iter().map(|r| r.pid.clone()).collect();
+    assert_eq!(pids, [top.clone(), nested.clone()]);
+    assert_eq!(e.mock.count_path("GET", "/drive/v3/files/root", None), 3);
+}
+
+#[tokio::test]
+async fn locate_roots_still_fails_on_an_expired_grant_asking_for_my_drive() {
+    let e = env().await;
+    e.mock.mkdir("root", "mokuro-reader");
+    e.mock.fault_n(
+        Some("GET"),
+        "/drive/v3/files/root",
+        401,
+        "authError",
+        None,
+        10,
+    );
+    let err = e.be.locate_roots("mokuro-reader").await.unwrap_err();
+    assert!(matches!(err, BErr::AuthExpired), "{err:?}");
 }
 
 #[tokio::test]

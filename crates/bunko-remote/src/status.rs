@@ -96,7 +96,9 @@ fn default_active() -> MarkerState {
 /// ```json
 /// {"version":1,"kind":"mokuro-bunko","instance_id":"6f1c…","boot_id":"a93e…","instance_name":"nas",
 ///  "bunko_version":"0.8.0","epoch":3,"claimed_at":"…","heartbeat_at":"…","ttl_s":900,"state":"active",
-///  "compiles":["series.json","catalog.json"],"ocr":true,"queue":".mokuro-queue.json","took_over_from":null}
+///  "compiles":["series.json","catalog.json"],"ocr":true,"queue":".mokuro-queue.json","dedup":true,
+///  "took_over_from":null,
+///  "per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"]}
 /// ```
 ///
 /// Reading is lenient (a newer Bunko's marker must still be respected): only `kind`,
@@ -140,9 +142,18 @@ pub struct Marker {
     /// The queue file the holder publishes (§9.1), if any.
     #[serde(default)]
     pub queue: Option<String>,
+    /// Whether the holder merges duplicate folders itself (D5 rev.): a reader that
+    /// sees it on a fresh holder leaves them to Bunko.
+    #[serde(default)]
+    pub dedup: bool,
     /// The `instance_id` this marker took the lease over from.
     #[serde(default)]
     pub took_over_from: Option<String>,
+    /// The names under `/mokuro-reader` the holder keeps per account, as
+    /// `/login/api/me` lists them (`history/` is a directory tree). A cloud-direct
+    /// reader turns per-account features on from it; absent (before 0.8): none.
+    #[serde(default)]
+    pub per_user_files: Vec<String>,
 }
 
 impl Marker {
@@ -258,6 +269,10 @@ pub struct LeaseConfig {
     pub ocr: bool,
     /// The marker's `queue`.
     pub queue: Option<String>,
+    /// The marker's `dedup`.
+    pub dedup: bool,
+    /// The marker's `per_user_files`.
+    pub per_user_files: Vec<String>,
     /// A heartbeat writes a new node and then permanently deletes the previous own
     /// node (MEGA, where an update is a new node), instead of replacing in place.
     pub heartbeat_new_node: bool,
@@ -285,6 +300,8 @@ impl LeaseConfig {
             compiles: vec!["series.json".into(), "catalog.json".into()],
             ocr: true,
             queue: Some(".mokuro-queue.json".into()),
+            dedup: false,
+            per_user_files: Vec::new(),
             heartbeat_new_node: false,
         }
     }
@@ -626,11 +643,18 @@ enum Target {
     Replace { pid: Pid, if_cver: Option<String> },
 }
 
+/// The merged root's members, canonical first ([`crate::index::Index::roots`]).
+pub type Roots = Arc<dyn Fn() -> Vec<Pid> + Send + Sync>;
+
 /// The marker lease for one store (spec §9.2). Drive it with [`Lease::claim`] and
 /// [`Lease::heartbeat`], or [`Lease::spawn`] it as a background task.
 pub struct Lease<B: Backend> {
     backend: Arc<B>,
-    root: Pid,
+    /// Where markers are read (every member) and written (the first): the merged
+    /// root as it stands, so the marker follows a new canonical root.
+    roots: Roots,
+    /// The last non-empty answer of `roots` (the index has none mid-LOCATE).
+    last_roots: Vec<Pid>,
     cfg: LeaseConfig,
     cas: bool,
     store: Arc<dyn LeaseStore>,
@@ -649,8 +673,9 @@ pub struct Lease<B: Backend> {
 static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 impl<B: Backend> Lease<B> {
-    /// A lease on the marker in `root` (the merged root's first member). Marker bytes
-    /// are staged under `scratch` before upload. The state is loaded from `store`.
+    /// A lease on the marker in `root` (the merged root's first member; see
+    /// [`Lease::following`]). Marker bytes are staged under `scratch` before upload.
+    /// The state is loaded from `store`.
     pub fn new(
         backend: Arc<B>,
         root: impl Into<Pid>,
@@ -678,9 +703,14 @@ impl<B: Backend> Lease<B> {
         if cfg.home.is_some() {
             rec.home = cfg.home.clone();
         }
+        let root: Pid = root.into();
         Lease {
             backend,
-            root: root.into(),
+            roots: {
+                let r = root.clone();
+                Arc::new(move || vec![r.clone()])
+            },
+            last_roots: vec![root],
             cfg,
             cas,
             store,
@@ -691,6 +721,23 @@ impl<B: Backend> Lease<B> {
             cache: HashMap::new(),
             settle_until: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Read markers from every member `roots` answers and write ours into the first
+    /// (§9.2): a heartbeat moves our marker into a new canonical root (MEGA writes
+    /// its new node there), where readers look.
+    pub fn following(mut self, roots: Roots) -> Self {
+        self.roots = roots;
+        self
+    }
+
+    /// The merged root's members now, canonical first.
+    fn roots(&mut self) -> Vec<Pid> {
+        let r = (self.roots)();
+        if !r.is_empty() {
+            self.last_roots = r;
+        }
+        self.last_roots.clone()
     }
 
     /// Use `clock` for `claimed_at`, `heartbeat_at` and `lease_ok_at`.
@@ -729,10 +776,17 @@ impl<B: Backend> Lease<B> {
         }
     }
 
-    /// The marker set by a direct `find_named` listing.
+    /// The marker set by direct `find_named` listings of every root member.
     pub async fn marker_set(&mut self) -> Result<MarkerSet, LeaseError> {
+        let roots = self.roots();
         'list: for _ in 0..LIST_ATTEMPTS {
-            let (nodes, server_now) = self.backend.find_named(&self.root, MARKER_NAME).await?;
+            let mut nodes = Vec::new();
+            let mut server_now = ServerTime(i64::MIN);
+            for r in &roots {
+                let (found, now) = self.backend.find_named(r, MARKER_NAME).await?;
+                nodes.extend(found);
+                server_now = server_now.max(now);
+            }
             let mut set = MarkerSet {
                 nodes: Vec::new(),
                 others: Vec::new(),
@@ -740,7 +794,7 @@ impl<B: Backend> Lease<B> {
             };
             let mut seen: HashMap<Pid, (String, Option<Marker>)> = HashMap::new();
             for n in nodes {
-                if n.is_dir || n.trashed {
+                if n.is_dir || n.trashed || seen.contains_key(&n.pid) {
                     continue;
                 }
                 let parsed = match self.cache.get(&n.pid) {
@@ -819,7 +873,9 @@ impl<B: Backend> Lease<B> {
             compiles: self.cfg.compiles.clone(),
             ocr: self.cfg.ocr,
             queue: self.cfg.queue.clone(),
+            dedup: self.cfg.dedup,
             took_over_from,
+            per_user_files: self.cfg.per_user_files.clone(),
         }
     }
 
@@ -847,6 +903,8 @@ impl<B: Backend> Lease<B> {
                     m.compiles = self.cfg.compiles.clone();
                     m.ocr = self.cfg.ocr;
                     m.queue = self.cfg.queue.clone();
+                    m.dedup = self.cfg.dedup;
+                    m.per_user_files = self.cfg.per_user_files.clone();
                     let ok_at = self.clock.now_ms();
                     let Some(node) = self.write_marker(&m, &set, WriteMode::Claim).await? else {
                         continue;
@@ -1096,7 +1154,28 @@ impl<B: Backend> Lease<B> {
         set: &MarkerSet,
         mode: WriteMode,
     ) -> Result<Option<RNode>, LeaseError> {
-        let own = self.own_node(set).map(|n| n.node.clone());
+        let mut own = self.own_node(set).map(|n| n.node.clone());
+        // Our node outside the canonical root moves there first (a new node there,
+        // where a heartbeat writes one anyway).
+        let root0 = self.roots().first().cloned();
+        if let (Some(o), Some(root0)) = (&own, &root0)
+            && o.parent.as_deref() != Some(root0.as_str())
+            && mode != WriteMode::Release
+            && !(mode == WriteMode::Heartbeat && self.cfg.heartbeat_new_node)
+        {
+            match self.backend.update(&o.pid, Some(root0), None, None).await {
+                Ok(n) => {
+                    tracing::info!(pid = %n.pid, "lease: our marker moved into the canonical root");
+                    let parsed = self.cache.remove(&o.pid).and_then(|(_, m)| m);
+                    self.cache.insert(n.pid.clone(), (n.cver.clone(), parsed));
+                    self.store.marker_written(&n);
+                    own = Some(n);
+                }
+                Err(BErr::NotFound | BErr::PreconditionFailed) => return Ok(None),
+                // Kept where it is (a unique-name provider with a node there): still read.
+                Err(e) => tracing::info!(error = %e, "lease: our marker stays where it is"),
+            }
+        }
         let written = match (&own, mode) {
             (Some(o), WriteMode::Heartbeat) if self.cfg.heartbeat_new_node => {
                 match self.put(m, Target::New).await {
@@ -1200,9 +1279,10 @@ impl<B: Backend> Lease<B> {
             op_id: format!("lease-{tag}-{seq}"),
             resume: None,
         };
+        let root0 = self.roots().first().cloned().unwrap_or_default();
         let to = match &target {
             Target::New => UploadTarget::New {
-                parent: &self.root,
+                parent: &root0,
                 name: MARKER_NAME,
             },
             Target::Replace { pid, if_cver } => UploadTarget::Replace {
@@ -1803,6 +1883,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.state, MarkerState::Unknown);
+        // A marker from before 0.8 keeps no per-user files.
+        assert!(m.per_user_files.is_empty());
         assert!(Marker::parse(br#"{"kind":"other","instance_id":"x","epoch":4}"#).is_none());
         assert!(Marker::parse(b"{}").is_none());
     }

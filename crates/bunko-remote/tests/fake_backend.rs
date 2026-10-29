@@ -89,6 +89,16 @@ async fn list_dir(b: &FakeBackend, dir: &str) -> Vec<RNode> {
     out
 }
 
+async fn names_in(b: &FakeBackend, dir: &str) -> Vec<String> {
+    let mut v: Vec<String> = list_dir(b, dir)
+        .await
+        .iter()
+        .map(|n| String::from_utf8_lossy(&n.name_raw).into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
 #[tokio::test(start_paused = true)]
 async fn create_list_changes_round_trip() {
     for b in [
@@ -477,6 +487,163 @@ async fn push_profile_wakes_wait_change() {
         d.wait_change(&c, Duration::from_secs(1)).await,
         Err(BErr::Unsupported)
     ));
+}
+
+/// What a page of change items says, in order: `+name`, `+name (trashed)` or `-pid`.
+fn described(items: &[ChangeItem]) -> Vec<String> {
+    items
+        .iter()
+        .map(|i| match i {
+            ChangeItem::Upsert(n) if n.trashed => {
+                format!("+{} (trashed)", String::from_utf8_lossy(&n.name_raw))
+            }
+            ChangeItem::Upsert(n) => format!("+{}", String::from_utf8_lossy(&n.name_raw)),
+            ChangeItem::Removed { pid } => format!("-{pid}"),
+        })
+        .collect()
+}
+
+#[test]
+fn duplicate_names_cap_follows_the_profile() {
+    assert!(FakeBackend::drive_like().caps().duplicate_names);
+    assert!(FakeBackend::mega_like().caps().duplicate_names);
+    assert!(!FakeBackend::onedrive_like().caps().duplicate_names);
+    assert!(!FakeBackend::webdav_cas().caps().duplicate_names);
+    assert!(!FakeBackend::webdav_plain().caps().duplicate_names);
+}
+
+#[tokio::test(start_paused = true)]
+async fn locate_roots_is_canonical_top_level_first() {
+    let b = FakeBackend::drive_like();
+    let backup = b.reader_mkdir("Backup");
+    let nested = b.reader_mkdir_in(&backup.pid, "mokuro-reader");
+    let top = b.account_root();
+    let x = b.reader_mkdir_in(&top, "mokuro-reader");
+    let y = b.reader_mkdir_in(&top, "mokuro-reader");
+    b.set_times(&nested.pid, 1, 1);
+    b.set_times(&x.pid, 5, 5);
+    b.set_times(&y.pid, 5, 5);
+    let pids: Vec<_> = b
+        .locate_roots("mokuro-reader")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.pid)
+        .collect();
+    let (first, second) = if x.pid < y.pid { (x, y) } else { (y, x) };
+    assert_eq!(pids, [first.pid, second.pid, nested.pid]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pid_helpers_make_duplicates_and_log_like_the_provider() {
+    for b in [FakeBackend::drive_like(), FakeBackend::mega_like()] {
+        let mega = !b.caps().atomic_replace;
+        let root = b.reader_mkdir("mokuro-reader");
+        let c = b.start_cursor().await.unwrap();
+        let s1 = b.reader_mkdir_in(&root.pid, "S");
+        let s2 = b.reader_mkdir_in(&root.pid, "S");
+        assert_ne!(s1.pid, s2.pid, "a second folder of the same name");
+        let v1 = b.reader_put_in(&s1.pid, "V.cbz", b"one");
+        let v2 = b.reader_put_in(&s2.pid, "V.cbz", b"two");
+        let moved = b.reader_move(&v2.pid, &s1.pid);
+        assert_eq!(
+            (moved.pid.as_str(), moved.parent.as_deref()),
+            (v2.pid.as_str(), Some(s1.pid.as_str()))
+        );
+        assert_eq!(list_dir(&b, &s1.pid).await.len(), 2, "the name twice");
+        let timed = b.set_times(&s2.pid, 5, 6);
+        assert_eq!((timed.created_ms, timed.base_mtime_ms), (5, 6));
+        b.reader_trash_pid(&v1.pid);
+        b.reader_delete_pid(&s2.pid);
+        let (items, _) = drain(&b, c).await;
+        let trash = if mega {
+            format!("-{}", v1.pid)
+        } else {
+            "+V.cbz (trashed)".to_string()
+        };
+        assert_eq!(
+            described(&items),
+            [
+                "+S".to_string(),
+                "+S".into(),
+                "+V.cbz".into(),
+                "+V.cbz".into(),
+                "+V.cbz".into(),
+                "+S".into(),
+                trash,
+                format!("-{}", s2.pid),
+            ]
+        );
+        assert!(
+            b.stat(&s2.pid).await.unwrap().is_none(),
+            "a permanent delete"
+        );
+        // The reader's calls are not Bunko's.
+        assert!(b.trashed_log().is_empty() && b.deleted_log().is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn reader_dedup_merges_like_the_reader() {
+    for b in [FakeBackend::drive_like(), FakeBackend::mega_like()] {
+        let top = b.account_root();
+        let a = b.reader_mkdir_in(&top, "mokuro-reader");
+        let bb = b.reader_mkdir_in(&top, "mokuro-reader");
+        let backup = b.reader_mkdir_in(&top, "Backup");
+        let nested = b.reader_mkdir_in(&backup.pid, "mokuro-reader");
+        let kept = b.reader_put_in(&nested.pid, "keep.cbz", b"k");
+        let sa = b.reader_mkdir_in(&a.pid, "S");
+        let sb = b.reader_mkdir_in(&bb.pid, "S");
+        b.reader_put_in(&sa.pid, "V1.cbz", b"old");
+        let newer = b.reader_put_in(&sb.pid, "V1.cbz", b"new");
+        b.reader_put_in(&sb.pid, "V2.cbz", b"two");
+        let tie_a = b.reader_put_in(&sa.pid, "tie.json", b"a");
+        let tie_b = b.reader_put_in(&sb.pid, "tie.json", b"b");
+        b.set_times(&tie_b.pid, tie_b.created_ms, tie_a.base_mtime_ms);
+        b.reader_put_in(&a.pid, "volume-data.json", b"{1}");
+        b.reader_put_in(&bb.pid, "Volume-Data.json", b"{2}");
+        b.reader_put_in(&bb.pid, "volume-data.json", b"{3}");
+        b.reader_put_in(&bb.pid, ".mokuro-bunko.json", b"{}");
+        b.reader_put_in(&a.pid, ".mokuro-bunko.json", b"{}");
+        let merged = b.run_reader_dedup();
+        assert_eq!(merged, 2, "the roots, then S");
+
+        let roots = b.locate_roots("mokuro-reader").await.unwrap();
+        let mut pids: Vec<_> = roots.iter().map(|r| r.pid.clone()).collect();
+        pids.sort();
+        let mut want = vec![a.pid.clone(), nested.pid.clone()];
+        want.sort();
+        assert_eq!(pids, want, "B is gone, the nested root is untouched");
+        assert_eq!(
+            b.node_at("Backup/mokuro-reader/keep.cbz").unwrap().pid,
+            kept.pid
+        );
+        assert_eq!(
+            names_in(&b, &a.pid).await,
+            [
+                ".mokuro-bunko.json",
+                ".mokuro-bunko.json",
+                "S",
+                "Volume-Data.json",
+                "volume-data.json",
+                "volume-data.json"
+            ]
+        );
+        assert_eq!(
+            names_in(&b, &sa.pid).await,
+            ["V1.cbz", "V2.cbz", "tie.json"]
+        );
+        let s = b.node_at("mokuro-reader/S").unwrap();
+        assert_eq!(s.pid, sa.pid, "the oldest S is canonical");
+        assert_eq!(b.node_at("mokuro-reader/S/V1.cbz").unwrap().pid, newer.pid);
+        assert_eq!(
+            b.node_at("mokuro-reader/S/tie.json").unwrap().pid,
+            tie_a.pid
+        );
+        assert!(b.stat(&sb.pid).await.unwrap().is_none_or(|n| n.trashed));
+        assert!(b.stat(&bb.pid).await.unwrap().is_none_or(|n| n.trashed));
+        assert_eq!(b.run_reader_dedup(), 0, "converged");
+    }
 }
 
 #[tokio::test(start_paused = true)]

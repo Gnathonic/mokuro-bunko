@@ -503,6 +503,7 @@ impl Scheduler {
             Value::Array(self.connected_machines()),
         );
         raw.insert("speed".into(), Value::Array(self.speed(&plan.running)));
+        raw.insert("orphans_unproven".into(), json!(self.orphans_unproven));
         raw
     }
 

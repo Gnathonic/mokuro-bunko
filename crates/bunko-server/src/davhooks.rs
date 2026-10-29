@@ -66,6 +66,10 @@ impl DavHooks for ServerDavHooks {
         Self::log("audit", self.db.log_audit_event(&ev));
     }
 
+    fn ocr_sidecar_staged(&self, dest: &Path, staged: &Path) {
+        crate::ocr::provenance::reattach_on_put(dest, staged);
+    }
+
     fn record_volume_upload(&self, rel: &str, actor: &str, _existed_before: bool) {
         Self::log(
             "record_volume_upload",

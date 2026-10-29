@@ -734,7 +734,15 @@ pub fn fixture(req: &Req, resp: &Resp) -> Value {
             .header("content-type")
             .is_some_and(|c| c.contains("json"));
         match (is_json, resp.json()) {
-            (true, Some(v)) => {
+            (true, Some(mut v)) => {
+                // `/login/api/me` reports the running version (0.8); only there is a
+                // top-level `version` Bunko's own, not in VERSION_KEYS: it means a
+                // file format everywhere else.
+                if req.path.split('?').next() == Some("/login/api/me")
+                    && let Some(version) = v.get_mut("version").filter(|s| s.is_string())
+                {
+                    *version = json!(VERSION_SENTINEL);
+                }
                 m.insert("body".into(), v);
             }
             _ => {
@@ -1187,6 +1195,34 @@ pub fn diff(old: &str, new: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/login/api/me`'s top-level `version` is the running Bunko's: the sentinel. A
+    /// `version` anywhere else (a `.mokuro`, the queue file, the marker) is contract.
+    #[test]
+    fn the_me_version_is_scoped_to_the_me_body() {
+        let resp = |body: Value| {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-type", "application/json".parse().unwrap());
+            Resp {
+                status: 200,
+                headers,
+                body: serde_json::to_vec(&body).unwrap(),
+            }
+        };
+        let body = json!({"authenticated": false, "version": "0.8.0-beta.1",
+            "nested": {"version": "0.8.0-beta.1"}});
+        let me = fixture(
+            &Req::new("GET", "/login/api/me", "none"),
+            &resp(body.clone()),
+        );
+        assert_eq!(me["body"]["version"], VERSION_SENTINEL);
+        assert_eq!(me["body"]["nested"]["version"], "0.8.0-beta.1");
+        let other = fixture(
+            &Req::new("GET", "/mokuro-reader/S/V.mokuro", "none"),
+            &resp(body),
+        );
+        assert_eq!(other["body"]["version"], "0.8.0-beta.1");
+    }
 
     #[test]
     fn normalize_replaces_each_volatile_kind_and_keeps_types_and_order() {

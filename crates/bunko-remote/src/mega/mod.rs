@@ -44,6 +44,7 @@ use crate::backend::{
     AccountInfo, BErr, Backend, BackendCaps, ChangeItem, ChangePage, Cursor, OpCtx, Pid, RNode,
     RemoteBody, ServerTime, UploadSource, UploadTarget,
 };
+use crate::names::sort_roots_canonical;
 
 /// How long one fetched tree serves `locate_roots`/`start_cursor`/`list_all`.
 pub const DEFAULT_SNAPSHOT_TTL: Duration = Duration::from_secs(120);
@@ -1080,6 +1081,7 @@ impl Backend for MegaBackend {
             simple_upload_max: self.0.cfg.upload_post_max,
             chunk_multiple: CHUNK,
             path_ids: false,
+            duplicate_names: true,
         }
     }
 
@@ -1092,17 +1094,21 @@ impl Backend for MegaBackend {
     }
 
     /// Every folder named exactly `name` outside the rubbish bin (the reader's rule,
-    /// not case-folded), oldest first. Always a fresh tree.
+    /// not case-folded), Cloud Drive children first, then oldest, then smallest
+    /// handle. Always a fresh tree.
     async fn locate_roots(&self, name: &str) -> Result<Vec<RNode>, BErr> {
         let mut m = self.0.mirror.lock().await;
         m.root_name = Some(name.to_string());
         m.tracked.clear();
         self.0.rebuild(&mut m, &[]).await?;
-        Ok(m.candidates
+        let mut found: Vec<RNode> = m
+            .candidates
             .iter()
             .filter(|h| m.attached(**h))
             .filter_map(|h| m.rnode(*h))
-            .collect())
+            .collect();
+        sort_roots_canonical(&mut found, m.root.map(|r| hstr(&r)).as_deref());
+        Ok(found)
     }
 
     async fn create_root(&self, name: &str) -> Result<RNode, BErr> {

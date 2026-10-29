@@ -373,11 +373,15 @@ pub fn thumbnail_candidates(library: &Path) -> Vec<PathBuf> {
 }
 
 /// [`thumbnail_candidates`] under `dir`, with a cloud library's `.nocover` records.
+/// Never an archive in the per-user tree (a cloud progress user's `history/`): that
+/// account's file, no volume, and no cover is written beside it.
 pub fn thumbnail_candidates_with(dir: &Path, nocover: Option<&NoCoverSet>) -> Vec<PathBuf> {
+    let library = nocover.map_or(dir, |n| n.library.as_path());
     let mut out = Vec::new();
     walk(dir, &mut |p| {
         if p.extension()
             .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("cbz"))
+            && !crate::ocr::types::is_per_user_path(library, p)
             && needs_thumbnail_with(p, nocover)
         {
             out.push(p.to_path_buf());
@@ -530,10 +534,15 @@ impl Thumbnails {
             tokio::sync::Notify::new(),
         ));
         let guard = {
-            let q = queue.clone();
+            let (q, root) = (queue.clone(), library.clone());
             let sink: bunko_store::WatchSink = Arc::new(move |ev: WatchEvent| {
                 let mut a = q.0.lock();
                 match ev {
+                    WatchEvent::Added { path, .. }
+                        if crate::ocr::types::is_per_user_path(&root, &path) =>
+                    {
+                        return;
+                    }
                     WatchEvent::Added { path, is_dir } => {
                         let cbz = path
                             .extension()
@@ -812,6 +821,28 @@ mod tests {
         cbz(&series.join("Vol 4.cbz"), &[("p.png", &png(300, 200))]);
         assert_eq!(thumbs.scan_once(&lib, &CancellationToken::new()), 1);
         assert!(!series.join("Vol 4.webp.tmp").exists());
+    }
+
+    /// The per-user tree at the root (a cloud progress user's `history/`) is no volume:
+    /// no cover is written into it. A series folder's own `history/` still is one.
+    #[test]
+    fn the_per_user_tree_gets_no_covers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        std::fs::create_dir_all(lib.join("history/dev-1")).unwrap();
+        std::fs::create_dir_all(lib.join("Series/history")).unwrap();
+        cbz(&lib.join("history/dev-1/x.cbz"), &[("p.png", &png(20, 30))]);
+        cbz(
+            &lib.join("Series/history/v.cbz"),
+            &[("p.png", &png(20, 30))],
+        );
+        assert_eq!(
+            thumbnail_candidates(&lib),
+            vec![lib.join("Series/history/v.cbz")]
+        );
+        // A cloud library's walk of an arrived folder knows the library from its records.
+        let nocover = NoCoverSet::load(tmp.path().join("nocover.json"), lib.clone());
+        assert!(thumbnail_candidates_with(&lib.join("history"), Some(&nocover)).is_empty());
     }
 
     /// Regression (upgrade test): neither 0.5.3 nor 0.7 made a cover for `Vol.CBZ`: the

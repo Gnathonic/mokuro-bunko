@@ -1105,6 +1105,7 @@ impl Backend for OneDriveBackend {
             simple_upload_max: SIMPLE_UPLOAD_MAX,
             chunk_multiple: FRAGMENT_MULTIPLE,
             path_ids: false,
+            duplicate_names: false,
         }
     }
 

@@ -109,6 +109,9 @@ pub fn catalog_can_run(
     if !catalog.engines.contains(&row.engine) {
         return Some(format!("{} is not installed on this processor", row.engine));
     }
+    if let Some(why) = engine_revision_refusal(catalog, &row.engine) {
+        return Some(why);
+    }
     let detector = row.effective_detector();
     if !detector.is_empty() && !catalog.detectors.iter().any(|d| d == detector) {
         return Some(format!(
@@ -127,6 +130,19 @@ pub fn catalog_can_run(
         }
     }
     precision_refusal(row, catalog, stage_device)
+}
+
+/// A processor whose build of `engine` writes an older revision than this library's
+/// ([`bunko_layout::sidecar::engine_revision`]): what it made would be outdated at once
+/// and queued again by the upgrade, round after round.
+pub fn engine_revision_refusal(catalog: &bunko_proto::Catalog, engine: &str) -> Option<String> {
+    let has = catalog.engine_revision(engine);
+    let wanted = bunko_layout::sidecar::engine_revision(engine);
+    (has < wanted).then(|| {
+        format!(
+            "its {engine} is revision {has}, older than this library's revision {wanted}; update the processor"
+        )
+    })
 }
 
 /// `model_device(row, None)`: where the row's model sits under its own placement.
@@ -813,7 +829,11 @@ impl Scheduler {
             if offered.get(&*job.gid) != Some(&true) {
                 continue;
             }
-            if !crate::ocr::owed::still_owed(&library, &job.rel, &row, job.upgrade) {
+            let probe = self.upgrade_probe();
+            let probe = probe
+                .as_deref()
+                .map(|u| u as &dyn crate::ocr::owed::UpgradeProbe);
+            if !crate::ocr::owed::still_owed_with(&library, &job.rel, &row, job.upgrade, probe) {
                 self.forget_candidate(&job);
                 continue;
             }

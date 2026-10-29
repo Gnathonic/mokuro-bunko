@@ -1029,6 +1029,16 @@ impl MockMega {
         self.changed();
     }
 
+    /// Back- or forward-date a node (`ts`, unix s), as if made then. Seen at the next
+    /// tree fetch.
+    pub fn set_ts(&self, h: &str, ts: i64) {
+        self.lock()
+            .nodes
+            .get_mut(h)
+            .expect("set_ts: unknown handle")
+            .ts = ts;
+    }
+
     /// Append a raw action packet (an unmodelled one, say).
     pub fn push_packet(&self, p: Value) {
         self.lock().log.push(p);

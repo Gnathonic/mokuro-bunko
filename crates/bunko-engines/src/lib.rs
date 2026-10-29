@@ -1563,6 +1563,10 @@ impl PagePipeline for EnginePipeline {
         MachineInfo {
             host: runtime::host_info(&devices, torch.as_deref(), cpu.as_deref()),
             catalog: Catalog {
+                engine_revisions: engines
+                    .iter()
+                    .map(|e| (e.clone(), bunko_layout::sidecar::engine_revision(e)))
+                    .collect(),
                 engines,
                 detectors,
                 devices,

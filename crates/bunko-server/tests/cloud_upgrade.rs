@@ -524,3 +524,145 @@ async fn a_cloud_sidecar_proven_bunkos_own_is_replaced_without_a_copy_and_others
     assert_eq!(cloud.judge("Series/Vol 2.cbz").await, Verdict::Current);
     assert_eq!(fake.trashed_log().len(), trashed, "nothing trashed");
 }
+
+/// An OCR result for `cbz` installed as the collector installs it, as `row`.
+async fn collect(
+    cloud: &Cloud,
+    cbz: &str,
+    row: bunko_core::generations::Generation,
+    result: String,
+) -> bunko_server::ocr::collect::Outcome {
+    let dir = cloud
+        .dir
+        .path()
+        .join(format!("spool-{}", sha(cbz.as_bytes())));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("result.mokuro");
+    std::fs::write(&out, result).unwrap();
+    let layout = cloud.services.core.layout.clone();
+    let req = bunko_server::ocr::collect::CollectRequest {
+        job: bunko_server::ocr::types::Job::new(cbz, &row.id),
+        rows: vec![
+            bunko_core::generations::default_generation("g-1"),
+            row.clone(),
+        ],
+        row,
+        library: layout.library(),
+        inbox: layout.inbox(),
+        result: out,
+        expected_sha256: None,
+        stamp: None,
+        machine: "local".into(),
+        account: None,
+        runner_build: None,
+        pages: Some(3),
+        failed_pages: Some(0),
+        generator: "mokuro-bunko test".into(),
+        db: Some(cloud.services.db.clone()),
+        facts: Arc::new(bunko_server::ocr::types::FileFacts),
+        locks: Arc::new(bunko_library::service::NoPathLocks),
+        sid: "s-1".into(),
+        claim: "c-1".into(),
+        congestion: None,
+        upgrade: None,
+    };
+    blocking(move || bunko_server::ocr::collect::run(req).outcome).await
+}
+
+/// The rename race on a cloud library (critique S6): what a reader moved to the
+/// destination while the job ran stays, the result is discarded and no `_1` file is
+/// written; Bunko's own sealed layer of an older revision is replaced in place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cloud_destination_is_reconciled_never_numbered() {
+    use bunko_server::ocr::collect::{Outcome, SUPERSEDED};
+    let fake = Arc::new(FakeBackend::drive_like());
+    library(&fake, HAYAI_UNSTAMPED);
+    let cloud = Cloud::start(fake.clone()).await;
+    let primary = bunko_core::generations::default_generation("g-1");
+    let result = |revision: u32| {
+        HAYAI.replace(
+            r#""id":"hayai-nova","#,
+            &format!(r#""id":"hayai-nova","revision":{revision},"#),
+        )
+    };
+    let outcome = collect(&cloud, "Series/Vol 1.cbz", primary, result(1)).await;
+    assert_eq!(outcome, Outcome::Superseded(SUPERSEDED.into()));
+    assert_eq!(
+        cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
+        Some(HAYAI_UNSTAMPED)
+    );
+    assert!(cloud.cloud_bytes("Series/Vol 1_1.mokuro").is_none());
+
+    // A layer Bunko wrote at revision 1, its row now at revision 2.
+    let mut fast = bunko_core::generations::default_generation("g-2");
+    fast.name = "fast".into();
+    fast.primary = false;
+    let old = sealed(&result(1));
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.fast.mokuro"), old.as_bytes());
+    cloud.sync().await;
+    let outcome = collect(&cloud, "Series/Vol 1.cbz", fast.clone(), result(2)).await;
+    assert!(matches!(outcome, Outcome::Installed(_)), "{outcome:?}");
+    let now = cloud.cloud_json("Series/Vol 1.fast.mokuro").unwrap();
+    assert_eq!(now["ocr_engine"]["revision"], 2);
+    assert!(cloud.cloud_bytes("Series/Vol 1.fast_1.mokuro").is_none());
+    // The same revision again: kept.
+    let outcome = collect(&cloud, "Series/Vol 1.cbz", fast, result(2)).await;
+    assert_eq!(outcome, Outcome::Superseded(SUPERSEDED.into()));
+    assert!(cloud.cloud_bytes("Series/Vol 1.fast_1.mokuro").is_none());
+}
+
+/// The `_n` sweep on a cloud library (critique C4-B5): an orphan a reader's version holds
+/// (not in the store's ledger) goes to the provider's trash, never deleted for good; one
+/// whose canonical name is free is published there first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cloud_orphan_goes_to_the_trash_after_its_canonical_name_is_settled() {
+    let fake = Arc::new(FakeBackend::drive_like());
+    library(&fake, LEGACY);
+    fake.reader_put(&format!("{ROOT}/Series/Vol 2.cbz"), &cbz(3));
+    let taken = sealed(HAYAI);
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1_1.mokuro"), taken.as_bytes());
+    // The collector wrote the archive's stem into `volume`.
+    let free = sealed(&HAYAI.replace(r#""volume":"Vol 1""#, r#""volume":"Vol 2""#));
+    fake.reader_put(&format!("{ROOT}/Series/Vol 2_1.mokuro"), free.as_bytes());
+    let cloud = Cloud::start(fake.clone()).await;
+    let (trashed, deleted) = (fake.trashed_log().len(), fake.deleted_log().len());
+    let (library, db) = (
+        cloud.services.core.layout.library(),
+        cloud.services.db.clone(),
+    );
+    let report = blocking(move || {
+        bunko_server::ocr::orphans::sweep(
+            &library,
+            Some(&db),
+            &(Arc::new(bunko_library::service::NoPathLocks) as _),
+            &[
+                "Series/Vol 1_1.mokuro".into(),
+                "Series/Vol 2_1.mokuro".into(),
+            ],
+            Duration::ZERO,
+        )
+    })
+    .await;
+    assert_eq!((report.moved, report.removed, report.failed), (1, 1, 0));
+    assert_eq!(
+        cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
+        Some(LEGACY),
+        "the file at the name stays"
+    );
+    assert_eq!(
+        cloud.cloud_bytes("Series/Vol 2.mokuro").as_deref(),
+        Some(free.as_str())
+    );
+    assert!(cloud.cloud_bytes("Series/Vol 1_1.mokuro").is_none());
+    assert!(cloud.cloud_bytes("Series/Vol 2_1.mokuro").is_none());
+    assert_eq!(
+        fake.trashed_log().len(),
+        trashed + 2,
+        "both orphans trashed"
+    );
+    assert_eq!(
+        fake.deleted_log().len(),
+        deleted,
+        "nothing deleted for good"
+    );
+}

@@ -935,6 +935,15 @@ submit**, so a rename only affects later submits.
      `<stem>_<n><suffix>` with `Path.stem/suffix`, i.e. `Vol.mokuro` →
      `Vol_1.mokuro`, `Vol.x.mokuro` → `Vol.x_1.mokuro`, `Vol.mokuro.gz` →
      `Vol.mokuro_1.gz`) — move failure → "could not move …".
+     **0.8 (no `_n` files):** a taken destination is reconciled instead
+     (`collect.rs` `reconcile_existing`). Bunko's own sealed output of the
+     same engine at a lower revision than the result's is replaced in place
+     (`Mode::Replace` on the version read, `Durability::Sync`); anything else
+     at the plain name (a reader's rename, a person's file, an `edited` file,
+     another engine's, an unsealed or same/newer revision), or a `.gz` alone,
+     is kept: `Outcome::Superseded` ("a sidecar was already at the
+     destination; the result was discarded"), audited as a rejection, the
+     job released with retry this scan, and the next walk finds the row done.
    - an exception inside install releases `_settling` and re-raises.
 4. error → audit rejection; success → provenance `written(...)`, congestion
    record (local, not contended) = `build_record(summarize_event_stats(ev.stats),

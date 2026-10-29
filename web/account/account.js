@@ -14,7 +14,7 @@ function getAuth() {
 
 async function logout() {
     await window.mokuroAuth.signOut();
-    window.location.href = '/';
+    window.location.href = './';
 }
 
 async function updateHeaderNav(user) {
@@ -38,7 +38,7 @@ function formatNumber(num) {
 document.addEventListener('DOMContentLoaded', async () => {
     const session = getAuth();
     if (!session) {
-        window.location.href = '/login';
+        window.location.href = 'login';
         return;
     }
 
@@ -60,7 +60,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // Set up connect section
-    const serverUrl = window.location.origin;
+    // The mount root (the origin, unless the server sits under a sub-path).
+    const serverUrl = new URL('.', document.baseURI).href.replace(/\/$/, '');
     document.getElementById('server-url').value = serverUrl;
     const readerLink = 'https://reader.mokuro.app/#/cloud?server=' + encodeURIComponent(serverUrl) + '&username=' + encodeURIComponent(session.user.username);
     const deepLinkEl = document.getElementById('deep-link');
@@ -70,7 +71,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Fetch user info for created_at
     try {
-        const meResp = await fetch('/login/api/me', {
+        const meResp = await fetch('login/api/me', {
             headers: { 'Authorization': 'Bearer ' + session.auth }
         });
         if (meResp.ok) {
@@ -95,7 +96,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 async function loadStats(auth) {
     try {
-        const response = await fetch('/api/account/stats', {
+        const response = await fetch('api/account/stats', {
             headers: { 'Authorization': 'Bearer ' + auth }
         });
         if (!response.ok) throw new Error('Failed to fetch stats');
@@ -139,7 +140,7 @@ async function handlePasswordChange(e, session) {
     btn.textContent = 'Updating...';
 
     try {
-        const response = await fetch('/api/account/password', {
+        const response = await fetch('api/account/password', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -215,7 +216,7 @@ async function deleteAccount() {
     btn.textContent = 'Deleting...';
 
     try {
-        const response = await fetch('/api/account/delete', {
+        const response = await fetch('api/account/delete', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -231,7 +232,7 @@ async function deleteAccount() {
         }
 
         window.mokuroAuth.clear();
-        window.location.href = '/';
+        window.location.href = './';
     } catch (err) {
         errorEl.textContent = err.message;
         errorEl.style.display = 'block';

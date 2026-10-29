@@ -79,6 +79,19 @@ impl Core {
         }
     }
 
+    /// Does `username` own the cloud root's per-user files (0.8 §10): the library this
+    /// server mounted is in the cloud, and the live `storage.library.progress_user`
+    /// names the account. Read per request, so the admin's change (`PUT
+    /// /api/storage/readers`) applies to the next one. The mount, not the configured
+    /// backend, decides "cloud": a connect or disconnect waiting for its restart must
+    /// not move anyone's files onto (or off) a library that is not the mounted one.
+    pub fn owns_cloud_root(&self, username: Option<&str>) -> bool {
+        self.layout.cloud_library()
+            && username.is_some_and(|u| {
+                self.config.read().storage.library.progress_user.as_deref() == Some(u)
+            })
+    }
+
     /// Persist the live config (admin edits).
     pub fn save_config(&self) -> Result<(), bunko_core::ConfigError> {
         let snapshot = self.config.read().clone();
@@ -108,7 +121,8 @@ impl RequestCtx {
     /// [`resolve`](Self::resolve) when the identity needs no I/O
     /// ([`auth::authenticate_without_io`]); `None` otherwise.
     pub fn resolve_without_io(core: &Core, parts: &Parts) -> Option<Self> {
-        let identity = auth::authenticate_without_io(&parts.headers, core.backend.as_ref())?;
+        let mut identity = auth::authenticate_without_io(&parts.headers, core.backend.as_ref())?;
+        identity.owns_cloud_root = core.owns_cloud_root(identity.username());
         let peer = Self::peer_of(parts);
         let client_ip = core.proxies.read().client_ip_text(peer, &parts.headers);
         Some(RequestCtx {
@@ -121,12 +135,13 @@ impl RequestCtx {
     pub fn resolve(core: &Core, parts: &Parts) -> Self {
         let peer = Self::peer_of(parts);
         let client_ip = core.proxies.read().client_ip_text(peer, &parts.headers);
-        let identity = auth::authenticate(
+        let mut identity = auth::authenticate(
             &parts.headers,
             &client_ip,
             core.backend.as_ref(),
             &core.dav_limiter,
         );
+        identity.owns_cloud_root = core.owns_cloud_root(identity.username());
         RequestCtx {
             peer,
             client_ip,

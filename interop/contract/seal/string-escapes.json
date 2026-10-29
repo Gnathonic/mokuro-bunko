@@ -1,0 +1,7 @@
+{
+  "description": "Strings canonicalise like JSON.stringify: C0 controls escaped, U+2028, U+007F, '/' and non-ASCII literal.",
+  "document": "{\"ocr_engine\": {\"id\": \"hayai-nova\", \"seal\": \"v1:525a0cf532aa8261abc8d786a60147b94c7c3295ded4700fa098d0dadd2bd8d3\"}, \"pages\": [{\"blocks\": [{\"lines\": [\"\\u001f\\u2028\\u007f/\\\"\\\\\\b\\f\\n\\r\\t\\u0000\", \"\\u3042い😀\", \"「橋」…\"]}]}]}",
+  "seal_input": "{\"ocr_engine\":{\"id\":\"hayai-nova\"},\"pages\":[{\"blocks\":[{\"lines\":[\"\\u001f\u2028\u007f/\\\"\\\\\\b\\f\\n\\r\\t\\u0000\",\"あい😀\",\"「橋」…\"]}]}]}",
+  "seal": "v1:525a0cf532aa8261abc8d786a60147b94c7c3295ded4700fa098d0dadd2bd8d3",
+  "is_sealed": true
+}

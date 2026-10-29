@@ -95,11 +95,11 @@ application/json`, `.png/.jpg/.webp/.ico/.svg/.woff/.woff2` standard. Content-Le
 
 `/` handling (HomePageAPI, then SetupWizard in front of it):
 1. SetupWizard: `GET /` with `Accept` containing `text/html` and `needs_setup` (no admin user
-   exists) -> `302 Location: /setup`.
+   exists) -> `302 Location: /setup` (0.8: `Location: setup`, relative, see §3).
 2. HomePage: `GET /` "browser request" (Accept contains `text/html`, OR no WebDAV-ish
    User-Agent [davfs, cadaver, cyberduck, webdav, gvfs, nautilus, finder, microsoft-webdav,
    litmus] and no `Depth` header) AND `catalog.enabled && catalog.use_as_homepage` ->
-   `302 Location: /catalog/`; else serve home `index.html`. Non-browser `/` falls through to
+   `302 Location: /catalog/` (0.8: `catalog/`); else serve home `index.html`. Non-browser `/` falls through to
    WebDAV.
 3. `OPTIONS /api/health|/api/stats` -> 204 `Allow: GET, OPTIONS`; other methods -> 405
    `{"error":"Method not allowed"}`.
@@ -109,12 +109,19 @@ would serve `/_static/__init__.py`. Serve ONLY an explicit allow-list (`shared.c
 
 `/_admin` base path: Python reads it from `admin.path` config (default `/_admin`), but
 `admin/web/index.html` hard-codes `/_admin/styles.css`, `/_admin/admin.js`, and `admin.js`
-hard-codes `API_BASE = '/_admin/api'`, and nav.js links `/_admin`. The Rust server must keep
+hard-codes `API_BASE = '/_admin/api'`, and nav.js links `/_admin` (0.8: all relative to the
+injected `<base href>`, still the fixed path `_admin`). The Rust server must keep
 the path `/_admin` (a non-default `admin.path` breaks the frontend today).
 
 ---------------------------------------------------------------------------------------------
 
 ## 3. Server-side template substitution
+
+**0.8: one.** For sub-path mounts, every HTML page the server answers (not WebDAV's, not
+an API's) gets `<base href="{relative root}">` right after `<head>`: `./` at `/catalog`,
+`../` at `/catalog/` (`http/base_href.rs`). Every page and script URL is relative to it
+(`tests/web_assets.rs` refuses a root-absolute one), redirects are relative, and the setup
+session cookie has no `Path`. The rest of this section describes 0.5.2.
 
 **None.** No Python code does `.replace()`, `format`, Jinja, nonce injection, or any rewriting
 of any HTML/JS/CSS. All pages are pure static files; every dynamic value is fetched by JS from

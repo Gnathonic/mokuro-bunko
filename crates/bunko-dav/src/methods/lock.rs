@@ -36,6 +36,18 @@ fn key_for_unmapped(req: &Req) -> (String, String) {
     }
 }
 
+/// LOCK, UNLOCK and PROPPATCH have no business in the reading history (the reader
+/// writes it file by file, last write wins).
+fn refuse_history(req: &Req) -> DavResult<()> {
+    if paths::is_history_path(&req.path) {
+        return Err(DavError::new(
+            StatusCode::FORBIDDEN,
+            "Not supported for reading history.",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult<Resp> {
     if is_virtual_root(&req.path) {
         return Err(DavError::new(
@@ -43,6 +55,7 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
             "The library root cannot be locked.",
         ));
     }
+    refuse_history(req)?;
     let infinite = match req.header("depth") {
         None | Some("infinity") => true,
         Some("0") => false,
@@ -54,7 +67,7 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
         }
     };
     let user = req.username();
-    let res = lookup(inner, &req.path, user).await?;
+    let res = lookup(inner, &req.path, req).await?;
     if let Some(r) = &res {
         eval_if(inner, req, r)?;
     }
@@ -141,7 +154,7 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
             // Lock-null: the parent must be a collection the name can live in; nothing is
             // created on disk (the first PUT creates the file).
             let parent = match paths::uri_parent(&req.path) {
-                Some(p) => lookup(inner, &p, user).await?,
+                Some(p) => lookup(inner, &p, req).await?,
                 None => None,
             };
             let Some(parent) = parent.filter(Resource::is_collection) else {
@@ -152,8 +165,8 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
             };
             let name = paths::uri_name(&req.path).to_string();
             let inner2 = inner.clone();
-            let user2 = user.map(str::to_string);
-            if blocking(move || inner2.roots.member_path(&parent, &name, user2.as_deref()))
+            let ctx2 = req.ctx.clone();
+            if blocking(move || inner2.roots.member_path(&parent, &name, ctx2.caller()))
                 .await?
                 .is_none()
             {
@@ -202,6 +215,7 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
 }
 
 pub(crate) async fn unlock(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
+    refuse_history(req)?;
     if req.content_length() != 0 {
         return Err(DavError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -209,7 +223,7 @@ pub(crate) async fn unlock(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
         ));
     }
     let user = req.username();
-    let res = lookup(inner, &req.path, user).await?;
+    let res = lookup(inner, &req.path, req).await?;
     let key = match &res {
         Some(r) => resource_key(r, user),
         None => key_for_unmapped(req).0,
@@ -261,11 +275,12 @@ pub(crate) async fn proppatch(inner: &Arc<Inner>, req: &Req, body: Body) -> DavR
             "The library root's properties cannot be changed.",
         ));
     }
+    refuse_history(req)?;
     if req.header("depth").is_some_and(|d| d != "0") {
         return Err(DavError::new(StatusCode::BAD_REQUEST, "Depth must be '0'."));
     }
     let user = req.username();
-    let res = lookup(inner, &req.path, user)
+    let res = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
     eval_if(inner, req, &res)?;

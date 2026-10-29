@@ -727,6 +727,8 @@ pub fn open_library_store(
         rc.mount_id = u64::from_str_radix(&id[..id.len().min(15)], 16).unwrap_or(1) | 1;
         rc.instance_name = instance_name();
         rc.bunko_version = bunko_core::VERSION.to_string();
+        rc.per_user_files = bunko_core::reader_tree::advertised();
+        rc.dedup = lib.dedup;
         test_cloud::StoreTune::current().apply(&mut rc);
         #[cfg(feature = "testing")]
         test_cloud::apply_tune(&layout.base, &mut rc);

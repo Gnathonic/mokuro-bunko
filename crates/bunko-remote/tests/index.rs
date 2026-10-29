@@ -5,6 +5,7 @@ use bunko_remote::backend::{Backend, ChangeItem, ChangePage, OpCtx, RNode};
 use bunko_remote::fake::FakeBackend;
 use bunko_remote::index::{ConflictKind, Index, IndexChange, ROOT_EID, RelPath};
 use bunko_remote::names::{effective_mtime_ns, fold, nfc};
+use std::collections::HashSet;
 
 const G_S: i64 = 1_000_000_000;
 const G_MS: i64 = 1_000_000;
@@ -157,15 +158,17 @@ fn duplicate_folders_are_one_entry_with_the_union_of_children() {
 }
 
 #[test]
-fn duplicate_files_newest_created_wins_and_the_loser_is_reported() {
+fn duplicate_files_newest_write_time_wins_and_the_loser_is_reported() {
     let f = fx();
-    let mut old = file("f-old", "root-1", "a.cbz", 100);
+    let mut old = file("f-old", "root-1", "a.cbz", 200);
     old.size = 1;
-    let mut new = file("f-new", "root-1", "a.cbz", 200);
+    old.base_mtime_ms -= 10;
+    // Created first, written last: the write time decides, not the age.
+    let mut new = file("f-new", "root-1", "a.cbz", 100);
     new.size = 2;
     f.up(&new);
     let ch = f.up(&old);
-    assert!(ch.is_empty(), "an older duplicate changes nothing: {ch:?}");
+    assert!(ch.is_empty(), "an older write changes nothing: {ch:?}");
     let e = f.idx.lookup(&rel("a.cbz")).unwrap();
     assert_eq!(e.winner_pid.as_deref(), Some("f-new"));
     assert_eq!(e.size, 2);
@@ -183,6 +186,346 @@ fn duplicate_files_newest_created_wins_and_the_loser_is_reported() {
     let e = f.idx.lookup(&rel("a.cbz")).unwrap();
     assert_eq!((e.winner_pid.as_deref(), e.size), (Some("f-old"), 1));
     assert!(f.idx.conflicts().is_empty());
+
+    // A newer write to the shadowed copy makes it the winner.
+    f.up(&new);
+    old.base_mtime_ms += 20;
+    old.cver = "c-f-old-2".into();
+    assert_eq!(
+        f.up(&old),
+        [IndexChange::ContentChanged { rel: rel("a.cbz") }]
+    );
+    let e = f.idx.lookup(&rel("a.cbz")).unwrap();
+    assert_eq!(e.winner_pid.as_deref(), Some("f-old"));
+}
+
+#[test]
+fn equal_write_times_go_to_the_canonical_parent_then_the_smallest_pid() {
+    let d = tempfile::tempdir().unwrap();
+    let idx = Index::open(&d.path().join("index.sqlite")).unwrap();
+    // Canonical order as the backend hands it: "r-b" first despite its pid.
+    idx.set_roots(&[
+        dir("r-b", "top", "mokuro-reader", 10),
+        dir("r-a", "top", "mokuro-reader", 20),
+    ])
+    .unwrap();
+    let tx = idx.begin().unwrap();
+    for n in [
+        file("x-a", "r-a", "volume-data.json", 1),
+        file("x-b", "r-b", "volume-data.json", 2),
+        // Folder members: "s-z" is the older, so the canonical member.
+        dir("s-a", "r-a", "S", 6),
+        dir("s-z", "r-b", "S", 5),
+        file("v-a", "s-a", "Vol 1.cbz", 7),
+        file("v-z", "s-z", "Vol 1.cbz", 8),
+        // One parent: the smallest pid.
+        file("w-2", "s-z", "Vol 2.cbz", 9),
+        file("w-1", "s-z", "Vol 2.cbz", 10),
+    ] {
+        idx.upsert(&tx, &n, 0, G_S).unwrap();
+    }
+    tx.commit().unwrap();
+    let winner = |p: &str| idx.lookup(&rel(p)).unwrap().winner_pid.unwrap();
+    assert_eq!(
+        winner("volume-data.json"),
+        "x-b",
+        "roots()[0] holds the winner"
+    );
+    assert_eq!(winner("S"), "s-z");
+    assert_eq!(winner("S/Vol 1.cbz"), "v-z", "the canonical member's copy");
+    assert_eq!(winner("S/Vol 2.cbz"), "w-1");
+}
+
+#[test]
+fn an_unknown_write_time_keeps_the_copy_a_duplicate_merge_keeps() {
+    // The merge walks the members canonical first and replaces its copy only with a
+    // strictly newer KNOWN write: the index shows that same copy.
+    let d = tempfile::tempdir().unwrap();
+    let idx = Index::open(&d.path().join("index.sqlite")).unwrap();
+    idx.set_roots(&[
+        dir("r-b", "top", "mokuro-reader", 10),
+        dir("r-a", "top", "mokuro-reader", 20),
+    ])
+    .unwrap();
+    let at = |mut n: RNode, ms: i64| {
+        n.base_mtime_ms = ms;
+        n
+    };
+    let tx = idx.begin().unwrap();
+    for n in [
+        // The canonical copy's time is unknown: a known time elsewhere never beats it.
+        at(file("u-b", "r-b", "u.cbz", 1), 0),
+        at(file("u-a", "r-a", "u.cbz", 2), 5),
+        // Three members, oldest first: s1, s2, s3.
+        dir("s1", "r-b", "S", 5),
+        dir("s2", "r-a", "S", 6),
+        dir("s3", "r-b", "S", 7),
+        // Canonical unknown, then two known: the canonical copy stays.
+        at(file("a1", "s1", "a.cbz", 1), 0),
+        at(file("a2", "s2", "a.cbz", 2), 5),
+        at(file("a3", "s3", "a.cbz", 3), 3),
+        // Canonical known, an unknown one between, then a newer one: the newest.
+        at(file("b1", "s1", "b.cbz", 1), 5),
+        at(file("b2", "s2", "b.cbz", 2), 0),
+        at(file("b3", "s3", "b.cbz", 3), 7),
+        // No copy in the canonical member: the first member's copy starts the walk.
+        at(file("c2", "s2", "c.cbz", 2), 0),
+        at(file("c3", "s3", "c.cbz", 3), 9),
+    ] {
+        idx.upsert(&tx, &n, 0, G_S).unwrap();
+    }
+    tx.commit().unwrap();
+    let winner = |p: &str| idx.lookup(&rel(p)).unwrap().winner_pid.unwrap();
+    assert_eq!(winner("u.cbz"), "u-b");
+    assert_eq!(winner("S/a.cbz"), "a1");
+    assert_eq!(winner("S/b.cbz"), "b3");
+    assert_eq!(winner("S/c.cbz"), "c2");
+}
+
+#[test]
+fn set_roots_keeps_the_given_order_and_the_first_is_the_root_winner() {
+    let d = tempfile::tempdir().unwrap();
+    let idx = Index::open(&d.path().join("index.sqlite")).unwrap();
+    // A newer top-level root, then an older one nested in an ordinary folder
+    // (`Backup/mokuro-reader`): both are read, the top-level one is written.
+    let top = dir("r-top", "top", "mokuro-reader", 50);
+    let nested = dir("r-backup", "backup", "mokuro-reader", 10);
+    idx.set_roots(&[top.clone(), nested.clone(), top.clone()])
+        .unwrap();
+    assert_eq!(idx.roots(), ["r-top", "r-backup"]);
+    let root = idx.entry(ROOT_EID).unwrap();
+    assert_eq!(root.winner_pid.as_deref(), Some("r-top"));
+    assert_eq!(idx.winner_node(ROOT_EID).unwrap().pid, "r-top");
+    let members: Vec<_> = idx.members(ROOT_EID).into_iter().map(|n| n.pid).collect();
+    assert_eq!(members, ["r-top", "r-backup"]);
+    // A root's own upsert keeps the order.
+    let tx = idx.begin().unwrap();
+    idx.upsert(&tx, &nested, 0, G_S).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        idx.entry(ROOT_EID).unwrap().winner_pid.as_deref(),
+        Some("r-top")
+    );
+    // The canonical root goes: the next one takes over.
+    let tx = idx.begin().unwrap();
+    idx.remove(&tx, "r-top").unwrap();
+    tx.commit().unwrap();
+    assert_eq!(idx.roots(), ["r-backup"]);
+    assert_eq!(
+        idx.entry(ROOT_EID).unwrap().winner_pid.as_deref(),
+        Some("r-backup")
+    );
+}
+
+#[test]
+fn dup_member_groups_are_same_name_same_parent_canonical_first() {
+    let d = tempfile::tempdir().unwrap();
+    let idx = Index::open(&d.path().join("index.sqlite")).unwrap();
+    idx.set_roots(&[
+        dir("r-1", "top", "mokuro-reader", 10),
+        dir("r-2", "top", "mokuro-reader", 20),
+        dir("r-3", "backup", "mokuro-reader", 5),
+    ])
+    .unwrap();
+    let tx = idx.begin().unwrap();
+    for n in [
+        // One entry, two parents: no group (different parents never merge).
+        dir("a-1", "r-1", "A", 3),
+        dir("a-2", "r-2", "A", 2),
+        // Same parent: a group, oldest first.
+        dir("b-new", "r-1", "B", 9),
+        dir("b-old", "r-1", "B", 8),
+        dir("c-1", "b-old", "C", 1),
+        dir("c-2", "b-old", "C", 1),
+        // Same-name files are not groups.
+        file("f-1", "r-1", "x.cbz", 1),
+        file("f-2", "r-1", "x.cbz", 2),
+    ] {
+        idx.upsert(&tx, &n, 0, G_S).unwrap();
+    }
+    tx.commit().unwrap();
+    let groups = idx.dup_member_groups();
+    let got: Vec<(Option<String>, usize, Vec<String>)> = groups
+        .iter()
+        .map(|g| {
+            (
+                g.parent_pid.clone(),
+                g.depth,
+                g.members.iter().map(|n| n.pid.clone()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Some("top".into()), 0, vec!["r-1".into(), "r-2".into()]),
+            (Some("r-1".into()), 1, vec!["b-old".into(), "b-new".into()]),
+            (Some("b-old".into()), 2, vec!["c-1".into(), "c-2".into()]),
+        ]
+    );
+    assert_eq!(groups[0].eid, ROOT_EID);
+    assert_eq!(groups[1].eid, idx.lookup(&rel("B")).unwrap().eid);
+}
+
+#[test]
+fn dup_member_groups_split_nfc_equal_names_by_exact_spelling() {
+    // The reader groups by the exact name: an NFC and an NFD spelling are one index
+    // entry (the union) but never one duplicate group.
+    let f = fx();
+    let nfd = "\u{30AB}\u{3099}";
+    let spelled = |pid: &str, name: &str, created: i64| {
+        let mut n = dir(pid, "root-1", name, created);
+        n.name_raw = name.as_bytes().to_vec();
+        n
+    };
+    f.up(&spelled("c-1", "ガ", 1));
+    f.up(&spelled("d-1", nfd, 2));
+    assert!(f.idx.dup_member_groups().is_empty(), "one of each spelling");
+    f.up(&spelled("c-2", "ガ", 3));
+    f.up(&spelled("d-2", nfd, 4));
+    let got: Vec<Vec<String>> = f
+        .idx
+        .dup_member_groups()
+        .iter()
+        .map(|g| g.members.iter().map(|n| n.pid.clone()).collect())
+        .collect();
+    assert_eq!(got, [vec!["c-1", "c-2"], vec!["d-1", "d-2"]]);
+}
+
+#[test]
+fn a_move_between_merged_members_keeps_the_path() {
+    let d = tempfile::tempdir().unwrap();
+    let idx = Index::open(&d.path().join("index.sqlite")).unwrap();
+    idx.set_roots(&[
+        dir("r-a", "top", "mokuro-reader", 10),
+        dir("r-b", "top", "mokuro-reader", 20),
+    ])
+    .unwrap();
+    let up = |n: &RNode| {
+        let tx = idx.begin().unwrap();
+        let ch = idx.upsert(&tx, n, 0, G_S).unwrap();
+        tx.commit().unwrap();
+        ch
+    };
+    up(&dir("s-a", "r-a", "S", 1));
+    up(&dir("t", "r-b", "T", 2));
+    up(&file("v", "t", "v.cbz", 3));
+    up(&dir("s-b", "r-b", "S", 4));
+    up(&file("w", "s-b", "w.cbz", 5));
+    // The reader merges B into A: T and B's S move over, then B's file into A's S.
+    let eid_t = idx.lookup(&rel("T")).unwrap().eid;
+    assert_eq!(up(&dir("t", "r-a", "T", 2)), []);
+    assert_eq!(up(&dir("s-b", "r-a", "S", 4)), []);
+    assert_eq!(up(&file("w", "s-a", "w.cbz", 5)), []);
+    assert_eq!(idx.lookup(&rel("T")).unwrap().eid, eid_t, "the same entry");
+    assert!(idx.lookup(&rel("T/v.cbz")).is_some());
+    assert_eq!(idx.lookup(&rel("S")).unwrap().members, 2);
+    assert_eq!(idx.node("w").unwrap().parent.as_deref(), Some("s-a"));
+    // Into another folder it is still a move.
+    assert_eq!(
+        up(&file("w", "t", "w.cbz", 5)),
+        [IndexChange::Moved {
+            from: rel("S/w.cbz"),
+            to: rel("T/w.cbz"),
+            is_dir: false
+        }]
+    );
+}
+
+#[test]
+fn subtree_loss_counts_only_what_no_other_node_keeps_visible() {
+    let f = fx();
+    f.up(&dir("s-1", "root-1", "S", 1));
+    f.up(&dir("s-2", "root-1", "S", 2));
+    f.up(&file("v1-1", "s-1", "Vol 1.cbz", 3));
+    f.up(&file("v1-2", "s-2", "Vol 1.cbz", 4));
+    f.up(&file("v2", "s-2", "Vol 2.cbz", 5));
+    f.up(&file("v3", "s-2", "Vol 3.cbz", 6));
+    let none = HashSet::new();
+    assert_eq!(f.idx.subtree_loss("v1-2", &none), 0, "a shadowed copy");
+    assert_eq!(f.idx.subtree_loss("v1-1", &none), 0, "its twin stays");
+    // s-2 keeps two unique files; s-2 itself is a member of S, which s-1 keeps.
+    assert_eq!(f.idx.subtree_loss("s-2", &none), 2);
+    assert_eq!(f.idx.subtree_size("s-2"), 4);
+    // Both copies going in one batch is a loss.
+    let both: HashSet<String> = ["v1-1".to_string()].into();
+    assert_eq!(f.idx.subtree_loss("v1-2", &both), 1);
+    assert_eq!(f.idx.subtree_loss("nope", &none), 0);
+}
+
+#[test]
+fn root_vacated_only_when_every_child_moved_or_is_superseded() {
+    let d = tempfile::tempdir().unwrap();
+    let idx = Index::open(&d.path().join("index.sqlite")).unwrap();
+    idx.set_roots(&[
+        dir("r-a", "top", "mokuro-reader", 10),
+        dir("r-b", "top", "mokuro-reader", 20),
+    ])
+    .unwrap();
+    let up = |n: &RNode| {
+        let tx = idx.begin().unwrap();
+        idx.upsert(&tx, n, 0, G_S).unwrap();
+        tx.commit().unwrap();
+    };
+    up(&file("x-a", "r-a", "x.cbz", 1));
+    up(&file("x-b", "r-b", "x.cbz", 2));
+    up(&file("u", "r-b", "unique.cbz", 3));
+    up(&file("m-b", "r-b", ".mokuro-bunko.json", 4));
+    let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<HashSet<String>>();
+
+    // A unique child still parented there.
+    assert!(!idx.root_vacated("r-b", &set(&["r-b", "x-b"])));
+    // Removed with the root, with no other copy: a loss.
+    assert!(!idx.root_vacated("r-b", &set(&["r-b", "x-b", "u"])));
+    // The unique child moved to the canonical root; the duplicate goes with B; the
+    // marker is Bunko's own status file (rewritten into roots()[0]).
+    up(&file("u", "r-a", "unique.cbz", 3));
+    assert!(!idx.root_vacated("r-b", &set(&["r-b"])), "x-b still there");
+    assert!(idx.root_vacated("r-b", &set(&["r-b", "x-b", "m-b"])));
+    // Both copies of x go: B's is no longer superseded.
+    assert!(!idx.root_vacated("r-b", &set(&["r-b", "x-b", "x-a", "m-b"])));
+    // Not a root, or the last root standing.
+    assert!(!idx.root_vacated("x-a", &set(&["x-a"])));
+    assert!(!idx.root_vacated("r-b", &set(&["r-a", "r-b", "x-b", "m-b"])));
+    let tx = idx.begin().unwrap();
+    idx.remove(&tx, "x-b").unwrap();
+    idx.remove(&tx, "m-b").unwrap();
+    idx.remove(&tx, "r-a").unwrap();
+    tx.commit().unwrap();
+    assert!(!idx.root_vacated("r-b", &set(&["r-b"])), "the last root");
+}
+
+#[test]
+fn an_index_from_the_old_winner_rule_is_recomputed_once() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("index.sqlite");
+    {
+        let idx = Index::open(&path).unwrap();
+        idx.set_roots(&[dir("root-1", "top", "mokuro-reader", 10)])
+            .unwrap();
+        let mut older_write = file("f-new", "root-1", "a.cbz", 200);
+        older_write.base_mtime_ms -= 1000;
+        let tx = idx.begin().unwrap();
+        idx.upsert(&tx, &file("f-old", "root-1", "a.cbz", 100), 0, G_S)
+            .unwrap();
+        idx.upsert(&tx, &older_write, 0, G_S).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(idx.meta_get("winner_rule").as_deref(), Some("2"));
+    }
+    // What an index built by the old rule (newest created wins) looks like.
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute_batch(
+        "UPDATE node SET role = 2 WHERE pid = 'f-old'; UPDATE node SET role = 0 WHERE pid = 'f-new'; \
+         UPDATE entry SET winner_pid = 'f-new' WHERE name = 'a.cbz'; \
+         DELETE FROM meta WHERE k = 'winner_rule';",
+    )
+    .unwrap();
+    drop(c);
+    let idx = Index::open(&path).unwrap();
+    let e = idx.lookup(&rel("a.cbz")).unwrap();
+    assert_eq!(e.winner_pid.as_deref(), Some("f-old"), "newest write wins");
+    assert_eq!(idx.meta_get("winner_rule").as_deref(), Some("2"));
+    assert_eq!(idx.conflicts()[0].pid, "f-new");
 }
 
 #[test]
@@ -437,7 +780,9 @@ fn merged_roots_and_nested_roots() {
     let newer = dir("r-new", "top", "mokuro-reader", 50);
     let older = dir("r-old", "top", "mokuro-reader", 40);
     let nested = dir("r-nested", "r-new", "mokuro-reader", 60);
-    idx.set_roots(&[newer, older, nested.clone()]).unwrap();
+    // Callers pass canonical order (top-level, oldest, pid); a candidate inside
+    // another is nested whatever its place.
+    idx.set_roots(&[older, newer, nested.clone()]).unwrap();
     assert_eq!(idx.roots(), ["r-old", "r-new"], "oldest root first");
     let root = idx.lookup(&rel("")).unwrap();
     assert_eq!(root.eid, ROOT_EID);

@@ -157,7 +157,9 @@ async function loadStorage() {
         stEl('so-merges').replaceChildren(...merges.map((m) => {
             const li = document.createElement('li');
             const when = stAgo((m.finished_at || m.created_at) / 1000);
-            const what = m.origin === 'admin' ? 'Kept one copy in ' + m.winner : (m.losers || []).join(', ') + ' → ' + m.winner;
+            const what = m.origin === 'admin' ? 'Kept one copy in ' + m.winner
+                : m.origin === 'dedup' ? 'Merged duplicate folders: ' + (m.winner || 'library root')
+                : (m.losers || []).join(', ') + ' → ' + m.winner;
             const counts = m.moved + ' moved, ' + m.trashed + ' to the trash' + (m.blocked ? ', ' + m.blocked + ' left (see Conflicts)' : '');
             li.textContent = what + ': ' + (m.state === 'done' ? counts : 'in progress (' + counts + ')') + (when ? ' · ' + when : '');
             return li;

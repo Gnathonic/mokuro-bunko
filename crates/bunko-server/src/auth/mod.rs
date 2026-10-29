@@ -9,6 +9,7 @@ pub mod paths;
 use crate::http::limiter::AuthLimiter;
 use base64::Engine as _;
 use bunko_core::Role;
+use bunko_core::reader_tree::Caller;
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 
 /// Capabilities derived from a role.
@@ -53,6 +54,10 @@ pub struct Identity {
     pub attempted_username: Option<String>,
     /// The refused credential was a bearer token.
     pub bearer_failed: bool,
+    /// The account owns a cloud library's root (its progress user), so its per-user
+    /// files are the cloud root's own. Decided per request from the live config, after
+    /// authentication; never true for anonymous.
+    pub owns_cloud_root: bool,
 }
 
 impl Identity {
@@ -67,6 +72,13 @@ impl Identity {
     }
     pub fn authenticated(&self) -> bool {
         self.user.is_some()
+    }
+    /// Who per-user paths resolve for (`None`: anonymous).
+    pub fn caller(&self) -> Option<Caller<'_>> {
+        self.username().map(|username| Caller {
+            username,
+            owns_cloud_root: self.owns_cloud_root,
+        })
     }
 }
 
@@ -86,7 +98,7 @@ pub trait AuthBackend: Send + Sync {
     /// Uploader owns every tracked volume of the series.
     fn can_user_edit_series(&self, username: &str, series_title: &str) -> bool;
     /// Does the virtual path map to an existing physical file?
-    fn physical_exists(&self, virtual_path: &str, username: Option<&str>) -> bool;
+    fn physical_exists(&self, virtual_path: &str, caller: Option<Caller<'_>>) -> bool;
 }
 
 /// A `Basic` header that is present but unusable (bad base64, not UTF-8, no colon).
@@ -335,6 +347,21 @@ pub fn authorize(
     {
         return Err(compiled_denied(id));
     }
+    // The reading history is written file by file and never rearranged, whoever asks.
+    if matches!(m, "MOVE" | "COPY" | "LOCK" | "UNLOCK" | "PROPPATCH")
+        && (is_history_path(path)
+            || destination
+                .and_then(destination_path)
+                .is_some_and(|d| is_history_path(&d)))
+    {
+        if !id.authenticated() {
+            return Err(Denied::new(401, "Authentication required"));
+        }
+        return Err(Denied::new(
+            403,
+            "Permission denied: not supported for reading history",
+        ));
+    }
     match m {
         "GET" | "HEAD" | "PROPFIND" => {
             if id.authenticated() {
@@ -355,6 +382,10 @@ pub fn authorize(
         }
         "PUT" => authorize_put(path, id, backend),
         "MKCOL" => {
+            // The reader creates its own history collections; DAV decides which.
+            if is_progress_path(path) {
+                return progress_write(id);
+            }
             if is_library_path(path) {
                 need(
                     id,
@@ -369,7 +400,7 @@ pub fn authorize(
             }
         }
         "DELETE" => {
-            if is_progress_file(path) {
+            if is_progress_path(path) {
                 return progress_write(id);
             }
             if id.role() == Role::Uploader
@@ -387,7 +418,7 @@ pub fn authorize(
             )
         }
         "MOVE" | "COPY" => {
-            if is_progress_file(path) {
+            if is_progress_path(path) {
                 return progress_write(id);
             }
             need(
@@ -397,7 +428,7 @@ pub fn authorize(
             )
         }
         "LOCK" | "UNLOCK" => {
-            if is_progress_file(path) {
+            if is_progress_path(path) {
                 return progress_write(id);
             }
             need(id, Perm::ModifyDelete, "Permission denied")
@@ -409,7 +440,7 @@ pub fn authorize(
 
 fn authorize_put(path: &str, id: &Identity, backend: &dyn AuthBackend) -> Result<(), Denied> {
     use paths::*;
-    if is_progress_file(path) {
+    if is_progress_path(path) {
         return progress_write(id);
     }
     if let Some(series) = series_title_from_series_file_path(path) {
@@ -438,7 +469,7 @@ fn authorize_put(path: &str, id: &Identity, backend: &dyn AuthBackend) -> Result
         need(id, Perm::AddFiles, "Permission denied: cannot add files")?;
         if !has_perm(id.role(), Perm::ModifyDelete) {
             let user = id.username();
-            if backend.physical_exists(path, user)
+            if backend.physical_exists(path, id.caller())
                 && !user.is_some_and(|u| backend.can_user_delete_library_path(u, path))
             {
                 return Err(Denied::new(
@@ -481,7 +512,7 @@ mod tests {
         fn can_user_edit_series(&self, _: &str, s: &str) -> bool {
             s == "Mine"
         }
-        fn physical_exists(&self, p: &str, _: Option<&str>) -> bool {
+        fn physical_exists(&self, p: &str, _: Option<Caller<'_>>) -> bool {
             p.ends_with(".cbz")
         }
     }
@@ -523,7 +554,7 @@ mod tests {
         fn can_user_edit_series(&self, _: &str, _: &str) -> bool {
             false
         }
-        fn physical_exists(&self, _: &str, _: Option<&str>) -> bool {
+        fn physical_exists(&self, _: &str, _: Option<Caller<'_>>) -> bool {
             false
         }
     }
@@ -825,5 +856,115 @@ mod tests {
             401
         );
         assert!(authorize(&Method::OPTIONS, "/x", None, &failed, OPEN, &B).is_ok());
+    }
+
+    /// The reading-history tree (0.8) is the account's own: any account that may save
+    /// progress writes it, and the methods that would rearrange it are refused.
+    #[test]
+    fn history_needs_write_progress() {
+        let m = |name: &str| Method::from_bytes(name.as_bytes()).unwrap();
+        let file = "/mokuro-reader/history/d/2026-10.events";
+        let dir = "/mokuro-reader/history";
+        for (method, path) in [
+            ("PUT", file),
+            ("MKCOL", dir),
+            ("MKCOL", "/mokuro-reader/history/d"),
+            ("DELETE", file),
+            ("DELETE", dir),
+        ] {
+            assert!(
+                authorize(
+                    &m(method),
+                    path,
+                    None,
+                    &id(Some(Role::Registered)),
+                    OPEN,
+                    &B
+                )
+                .is_ok(),
+                "{method} {path}"
+            );
+            let refused = authorize(&m(method), path, None, &id(Some(Role::Processor)), OPEN, &B);
+            assert_eq!(
+                refused.unwrap_err().status,
+                403,
+                "processor {method} {path}"
+            );
+            let refused = authorize(&m(method), path, None, &id(None), OPEN, &B);
+            assert_eq!(
+                refused.unwrap_err().status,
+                401,
+                "anonymous {method} {path}"
+            );
+        }
+        for method in ["MOVE", "COPY", "LOCK", "UNLOCK", "PROPPATCH"] {
+            for path in [file, dir] {
+                let d = authorize(
+                    &m(method),
+                    path,
+                    Some("http://h/mokuro-reader/history/d/x"),
+                    &id(Some(Role::Uploader)),
+                    OPEN,
+                    &B,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    (d.status.as_u16(), d.message.as_str()),
+                    (403, "Permission denied: not supported for reading history"),
+                    "{method} {path}"
+                );
+            }
+        }
+        let anon = authorize(&m("MOVE"), file, None, &id(None), OPEN, &B).unwrap_err();
+        assert_eq!(anon.status, 401);
+        // Into the history from a top-level per-user file: refused the same way.
+        let d = authorize(
+            &m("COPY"),
+            "/mokuro-reader/goals.json",
+            Some("http://h/mokuro-reader/history/d/x"),
+            &id(Some(Role::Registered)),
+            OPEN,
+            &B,
+        )
+        .unwrap_err();
+        assert_eq!(d.status, 403);
+        // A top-level per-user file keeps its 0.5.2 rules.
+        assert!(
+            authorize(
+                &m("LOCK"),
+                "/mokuro-reader/goals.json",
+                None,
+                &id(Some(Role::Registered)),
+                OPEN,
+                &B
+            )
+            .is_ok()
+        );
+        // history/series.json is the account's, not compiled metadata; a library
+        // `History/` series is still the library's.
+        assert!(
+            authorize(
+                &m("PUT"),
+                "/mokuro-reader/history/series.json",
+                None,
+                &id(Some(Role::Registered)),
+                OPEN,
+                &B
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            authorize(
+                &m("PUT"),
+                "/mokuro-reader/History/v.cbz",
+                None,
+                &id(Some(Role::Registered)),
+                OPEN,
+                &B
+            )
+            .unwrap_err()
+            .message,
+            "Permission denied: cannot add files"
+        );
     }
 }
