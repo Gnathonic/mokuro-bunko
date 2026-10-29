@@ -71,6 +71,76 @@ impl FileInfo {
     }
 }
 
+/// A node of an account, as `GET /_sim/tree` lists it: folders and files, trashed ones
+/// included on request (`include_trashed`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodeInfo {
+    pub id: String,
+    /// The provider's root id (Drive `root`, OneDrive `ROOT`, MEGA's cloud root or rubbish
+    /// bin handle) for a top-level node.
+    pub parent_id: String,
+    pub name: String,
+    pub folder: bool,
+    /// 0 for a folder.
+    pub size: u64,
+    /// `None` for a folder.
+    pub sha256: Option<String>,
+    /// RFC 3339.
+    pub created: String,
+    pub modified: String,
+    /// In the trash, or under a trashed folder (OneDrive: deleted).
+    pub trashed: bool,
+}
+
+impl NodeInfo {
+    fn sorted(mut rows: Vec<NodeInfo>, include_trashed: bool) -> Vec<NodeInfo> {
+        rows.retain(|r| include_trashed || !r.trashed);
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        rows
+    }
+}
+
+/// Where `POST /_sim/node` puts a node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Parent {
+    Root,
+    /// An existing folder (MEGA: also its cloud root or rubbish bin).
+    Id(String),
+    /// Folders by name from the root, created where missing (the first of same-named
+    /// ones where there are several).
+    Path(String),
+}
+
+/// A node `POST /_sim/node` creates: always a new one, beside any of the same name
+/// (but Graph's refusal of a duplicate name stands).
+#[derive(Debug, Clone)]
+pub struct NewNode {
+    pub parent: Parent,
+    pub name: String,
+    pub folder: bool,
+    pub data: Vec<u8>,
+    /// Unix milliseconds; either one alone stands for both, neither is the sim's clock.
+    pub created: Option<i64>,
+    pub modified: Option<i64>,
+}
+
+impl NewNode {
+    /// `(created, modified)` when either is given.
+    pub(crate) fn times(&self) -> Option<(i64, i64)> {
+        let created = self.created.or(self.modified)?;
+        Some((created, self.modified.unwrap_or(created)))
+    }
+}
+
+/// Why a node was not created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NodeError {
+    /// The request's mistake (a missing parent, say).
+    Bad(String),
+    /// OneDrive: the parent already has a child of that (case-folded) name.
+    NameExists,
+}
+
 /// Uploads in one request can be large (a whole volume in a simple upload).
 const BODY_LIMIT: usize = 1 << 30;
 
@@ -236,6 +306,31 @@ impl SimState {
                 .map(|(path, d)| FileInfo::of(path, &d))
                 .collect(),
         }
+    }
+
+    /// Create one node (see [`NewNode`]); its id.
+    pub fn create_node(
+        &self,
+        p: Provider,
+        account: &str,
+        node: &NewNode,
+    ) -> Result<String, NodeError> {
+        match p {
+            Provider::Google => self.drive(account).lock().create_node(node),
+            Provider::Microsoft => self.onedrive(account).lock().create_node(node),
+            Provider::Mega => mega::create_node(&self.mega(account), node),
+        }
+    }
+
+    /// Every node of the account but the provider's roots, by id; trashed ones only
+    /// when asked for.
+    pub fn tree(&self, p: Provider, account: &str, include_trashed: bool) -> Vec<NodeInfo> {
+        let rows = match p {
+            Provider::Google => self.drive(account).lock().tree(),
+            Provider::Microsoft => self.onedrive(account).lock().tree(),
+            Provider::Mega => mega::tree(&self.mega(account)),
+        };
+        NodeInfo::sorted(rows, include_trashed)
     }
 
     /// Forget every account, token, log entry and violation.
@@ -486,6 +581,19 @@ impl CloudSim {
 
     pub fn files(&self, provider: Provider, account: &str) -> Vec<FileInfo> {
         self.state.files(provider, account)
+    }
+
+    pub fn create_node(
+        &self,
+        provider: Provider,
+        account: &str,
+        node: &NewNode,
+    ) -> Result<String, NodeError> {
+        self.state.create_node(provider, account, node)
+    }
+
+    pub fn tree(&self, provider: Provider, account: &str, include_trashed: bool) -> Vec<NodeInfo> {
+        self.state.tree(provider, account, include_trashed)
     }
 
     pub fn log(&self) -> Vec<LogEntry> {

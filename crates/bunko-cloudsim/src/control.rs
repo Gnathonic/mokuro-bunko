@@ -17,7 +17,9 @@ use base64::Engine;
 use serde_json::{Value, json};
 
 use crate::accounts::Provider;
-use crate::{DriveState, OneDriveState, SimState, drive, mega, onedrive};
+use crate::{
+    DriveState, NewNode, NodeError, OneDriveState, Parent, SimState, drive, mega, onedrive,
+};
 
 type Body = Result<Json<Value>, JsonRejection>;
 
@@ -65,6 +67,8 @@ pub fn router() -> Router<SimState> {
         .route("/mega/account", post(mega_account))
         .route("/seed", post(seed))
         .route("/files", get(files))
+        .route("/node", post(node))
+        .route("/tree", get(tree))
         .route("/fault", post(fault))
         .route("/knobs", post(knobs))
         .route("/log", get(log).delete(clear_log))
@@ -134,6 +138,73 @@ async fn files(State(sim): State<SimState>, Query(q): Query<HashMap<String, Stri
     };
     let account = q.get("account").map(String::as_str).unwrap_or("default");
     Json(sim.files(p, account)).into_response()
+}
+
+/// An optional RFC 3339 time as unix milliseconds.
+fn time_ms(v: &Value, k: &str) -> Result<Option<i64>, Ctl> {
+    let Some(t) = v.get(k).filter(|t| !t.is_null()) else {
+        return Ok(None);
+    };
+    let at = t
+        .as_str()
+        .and_then(|t| {
+            time::OffsetDateTime::parse(t, &time::format_description::well_known::Rfc3339).ok()
+        })
+        .ok_or_else(|| ctl_err(format!("{k}: {t} is not an RFC 3339 time")))?;
+    Ok(Some((at.unix_timestamp_nanos() / 1_000_000) as i64))
+}
+
+/// One file or folder, created as given (same-named siblings, past times, MEGA's trash
+/// as a parent), which path seeding cannot express.
+async fn node(State(sim): State<SimState>, b: Body) -> Answer {
+    let v = body(b)?;
+    let p = provider(&v)?;
+    let parent = match (v["parent_id"].as_str(), v["parent_path"].as_str()) {
+        (Some(_), Some(_)) => return Err(ctl_err("give parent_id or parent_path, not both")),
+        (Some(id), None) => Parent::Id(id.to_string()),
+        (None, Some(path)) => Parent::Path(path.to_string()),
+        (None, None) => Parent::Root,
+    };
+    let name = string(&v, "name")?;
+    let folder = v["folder"].as_bool().unwrap_or(false);
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(v["content_base64"].as_str().unwrap_or_default())
+        .map_err(|e| ctl_err(format!("{name}: content_base64: {e}")))?;
+    if folder && !data.is_empty() {
+        return Err(ctl_err(format!("{name}: a folder has no content")));
+    }
+    let node = NewNode {
+        parent,
+        name,
+        folder,
+        data,
+        created: time_ms(&v, "created")?,
+        modified: time_ms(&v, "modified")?,
+    };
+    match sim.create_node(p, &account(&v), &node) {
+        Ok(id) => Ok(Json(json!({"id": id})).into_response()),
+        Err(NodeError::Bad(msg)) => Err(ctl_err(msg)),
+        // Graph's own answer to a duplicate name.
+        Err(NodeError::NameExists) => Ok((
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"code": "nameAlreadyExists",
+                "message": format!("an item named {:?} already exists", node.name)}})),
+        )
+            .into_response()),
+    }
+}
+
+async fn tree(State(sim): State<SimState>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let p = q.get("provider").map(String::as_str).unwrap_or_default();
+    let Some(p) = Provider::parse(p) else {
+        return ctl_err(format!("provider {p:?}: google, microsoft or mega")).into_response();
+    };
+    let account = q.get("account").map(String::as_str).unwrap_or("default");
+    let trashed = matches!(
+        q.get("include_trashed").map(String::as_str),
+        Some("1" | "true")
+    );
+    Json(sim.tree(p, account, trashed)).into_response()
 }
 
 async fn fault(State(sim): State<SimState>, b: Body) -> Answer {

@@ -17,12 +17,13 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use parking_lot::{Mutex, MutexGuard};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::accounts::Provider;
 use crate::drive::bearer;
 use crate::log::LogTag;
 use crate::violations::{Bad, need};
-use crate::{SimState, rfc3339};
+use crate::{NewNode, NodeError, NodeInfo, Parent, SimState, rfc3339};
 
 pub const ROOT: &str = "ROOT";
 /// The path prefix every OneDrive URL lives under.
@@ -396,6 +397,84 @@ impl OneDriveState {
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+
+    /// The folder at `path`, creating what is missing.
+    fn folder_at(&mut self, path: &str) -> String {
+        let mut parent = ROOT.to_string();
+        for dir in path.split('/').filter(|s| !s.is_empty()) {
+            parent = match self.child(&parent, dir) {
+                Some(id) => id,
+                None => self.insert(&parent, dir, true, Bytes::new()),
+            };
+        }
+        parent
+    }
+
+    /// `POST /_sim/node`: a new file or folder; a name the parent already has (case
+    /// folded) is refused, as Graph does.
+    pub fn create_node(&mut self, node: &NewNode) -> Result<String, NodeError> {
+        let parent = match &node.parent {
+            Parent::Root => ROOT.to_string(),
+            Parent::Path(path) => self.folder_at(path),
+            Parent::Id(id) => match self.items.get(id) {
+                Some(f) if f.deleted => {
+                    return Err(NodeError::Bad(format!("parent {id} is deleted")));
+                }
+                None => return Err(NodeError::Bad(format!("parent {id}: no such node"))),
+                Some(f) if !f.folder => {
+                    return Err(NodeError::Bad(format!("parent {id} is not a folder")));
+                }
+                Some(_) => id.clone(),
+            },
+        };
+        if self.child(&parent, &node.name).is_some() {
+            return Err(NodeError::NameExists);
+        }
+        let data = Bytes::copy_from_slice(&node.data);
+        let id = self.insert(&parent, &node.name, node.folder, data);
+        if let Some((created, modified)) = node.times() {
+            let f = self.items.get_mut(&id).expect("just inserted");
+            f.created = created;
+            f.modified = modified;
+            // Later writes stay later than the given times.
+            self.clock = self.clock.max(modified);
+        }
+        Ok(id)
+    }
+
+    /// Every item but the root, deleted ones included (as trashed).
+    pub fn tree(&self) -> Vec<NodeInfo> {
+        self.items
+            .iter()
+            .filter(|(id, _)| id.as_str() != ROOT)
+            .map(|(id, f)| NodeInfo {
+                id: id.clone(),
+                parent_id: f.parent.clone().unwrap_or_default(),
+                name: f.name.clone(),
+                folder: f.folder,
+                size: if f.folder { 0 } else { f.data.len() as u64 },
+                sha256: (!f.folder).then(|| hex::encode(Sha256::digest(&f.data))),
+                created: rfc3339(f.created),
+                modified: rfc3339(f.modified),
+                trashed: self.under_deleted(id),
+            })
+            .collect()
+    }
+
+    /// Deleted itself or under a deleted folder.
+    fn under_deleted(&self, id: &str) -> bool {
+        let mut cur = Some(id.to_string());
+        for _ in 0..64 {
+            let Some(f) = cur.as_deref().and_then(|c| self.items.get(c)) else {
+                return false;
+            };
+            if f.deleted {
+                return true;
+            }
+            cur = f.parent.clone();
+        }
+        false
     }
 
     fn take_fault(&mut self, method: &str, path: &str) -> Option<Fault> {

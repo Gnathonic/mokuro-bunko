@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::accounts::Provider;
 use crate::log::LogTag;
 use crate::violations::{Bad, need};
-use crate::{SimState, rfc3339};
+use crate::{NewNode, NodeError, NodeInfo, Parent, SimState, rfc3339};
 
 pub const FOLDER: &str = "application/vnd.google-apps.folder";
 /// The path prefix every Drive URL lives under.
@@ -343,6 +343,70 @@ impl DriveState {
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+
+    /// The folder at `path` under My Drive, creating what is missing.
+    fn folder_at(&mut self, path: &str) -> String {
+        let mut parent = "root".to_string();
+        for dir in path.split('/').filter(|s| !s.is_empty()) {
+            parent = match self.child(&parent, dir) {
+                Some(id) => id,
+                None => self.insert(None, &parent, dir, FOLDER, Bytes::new()),
+            };
+        }
+        parent
+    }
+
+    /// `POST /_sim/node`: a new file or folder, beside any of the same name.
+    pub fn create_node(&mut self, node: &NewNode) -> Result<String, NodeError> {
+        let parent = match &node.parent {
+            Parent::Root => "root".to_string(),
+            Parent::Path(path) => self.folder_at(path),
+            Parent::Id(id) if id == "root" => id.clone(),
+            Parent::Id(id) => match self.files.get(id) {
+                None => return Err(NodeError::Bad(format!("parent {id}: no such node"))),
+                Some(f) if f.mime != FOLDER => {
+                    return Err(NodeError::Bad(format!("parent {id} is not a folder")));
+                }
+                Some(_) => id.clone(),
+            },
+        };
+        let mime = if node.folder {
+            FOLDER
+        } else {
+            "application/octet-stream"
+        };
+        let data = Bytes::copy_from_slice(&node.data);
+        let id = self.insert(None, &parent, &node.name, mime, data);
+        if let Some((created, modified)) = node.times() {
+            let f = self.files.get_mut(&id).expect("just inserted");
+            f.created = created;
+            f.modified = modified;
+            // Later writes stay later than the given times.
+            self.clock = self.clock.max(modified);
+        }
+        Ok(id)
+    }
+
+    /// Every file and folder, trashed ones included.
+    pub fn tree(&self) -> Vec<NodeInfo> {
+        self.files
+            .iter()
+            .map(|(id, f)| {
+                let folder = f.mime == FOLDER;
+                NodeInfo {
+                    id: id.clone(),
+                    parent_id: f.parents.first().cloned().unwrap_or_default(),
+                    name: f.name.clone(),
+                    folder,
+                    size: if folder { 0 } else { f.data.len() as u64 },
+                    sha256: (!folder).then(|| hex_sha256(&f.data)),
+                    created: rfc3339(f.created),
+                    modified: rfc3339(f.modified),
+                    trashed: self.trashed(id),
+                }
+            })
+            .collect()
     }
 
     /// The first fault matching this request, used up by one.

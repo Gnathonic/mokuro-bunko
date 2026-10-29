@@ -187,7 +187,15 @@ does.
 - **Control API** (JSON): `GET health`; `POST token {provider, account}`,
   `token/revoke {token}`, `token/expire {token}`; `POST mega/account {account, email,
   password}`; `POST seed {provider, account, files: [{path, content_base64}]}`,
-  `GET files?provider=&account=` (`[{path, size, sha256}]`); `POST fault {provider,
+  `GET files?provider=&account=` (`[{path, size, sha256}]`); `POST node {provider,
+  account, parent_id?|parent_path?, name, folder?, content_base64?, created?,
+  modified?}` (`{id}`: a new node beside any of the same name, at the given RFC 3339
+  times, so a scenario can stage the duplicate folders and old files path seeding
+  cannot; OneDrive answers a duplicate name 409 `nameAlreadyExists` as Graph does;
+  MEGA's one `ts` takes the modified time) and `GET tree?provider=&account=
+  &include_trashed=1` (`[{id, parent_id, name, folder, size, sha256, created, modified,
+  trashed}]`, trashed meaning in the trash or under a trashed folder, listed only on
+  request), neither in the request log; `POST fault {provider,
   account, method?, path_has, status, reason, retry_after?, times?}` (Drive and Graph;
   MEGA's error codes are knobs); `POST knobs {provider, account, <knob>: value}`;
   `GET`/`DELETE log` (`[{seq, provider, account, method, path, class, units, bytes_in,

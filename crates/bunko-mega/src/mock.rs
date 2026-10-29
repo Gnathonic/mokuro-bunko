@@ -186,6 +186,17 @@ impl St {
         self.clock
     }
 
+    /// `ts` when given (the clock moves past it, so later nodes stay later), else a tick.
+    fn stamp(&mut self, ts: Option<i64>) -> i64 {
+        match ts {
+            Some(t) => {
+                self.clock = self.clock.max(t);
+                t
+            }
+            None => self.tick(),
+        }
+    }
+
     fn handle(&mut self) -> String {
         self.next += 1;
         format!("N{:07}", self.next)
@@ -882,6 +893,12 @@ impl MockMega {
     // ---- another client ("the reader") --------------------------------------------
 
     pub fn mkdir(&self, parent: &str, name: &str) -> String {
+        self.mkdir_at(parent, name, None)
+    }
+
+    /// [`MockMega::mkdir`] with the node's `ts` (unix seconds) given, as a folder made
+    /// at that time by another client.
+    pub fn mkdir_at(&self, parent: &str, name: &str, ts: Option<i64>) -> String {
         let h = {
             let mut st = self.lock();
             let key = NodeKey::Folder {
@@ -897,7 +914,7 @@ impl MockMega {
                 kind: 1,
                 attr,
                 key: st.wrap(&key),
-                ts: st.tick(),
+                ts: st.stamp(ts),
                 size: 0,
                 data: Vec::new(),
             };
@@ -910,6 +927,12 @@ impl MockMega {
     }
 
     pub fn put(&self, parent: &str, name: &str, plain: &[u8]) -> String {
+        self.put_at(parent, name, plain, None)
+    }
+
+    /// [`MockMega::put`] with the node's `ts` (unix seconds) given, which the
+    /// fingerprint's modification time then carries too.
+    pub fn put_at(&self, parent: &str, name: &str, plain: &[u8], ts: Option<i64>) -> String {
         let h = {
             let mut st = self.lock();
             let aes: [u8; 16] = rand::random();
@@ -931,7 +954,7 @@ impl MockMega {
                 fingerprint: Some(
                     Fingerprint {
                         checksum,
-                        modified_at: 1_650_000_000,
+                        modified_at: ts.unwrap_or(1_650_000_000),
                     }
                     .serialize(),
                 ),
@@ -942,7 +965,7 @@ impl MockMega {
                 kind: 0,
                 attr: b64(&attrs.encrypt(key.aes()).expect("attrs")),
                 key: st.wrap(&key),
-                ts: st.tick(),
+                ts: st.stamp(ts),
                 size: plain.len() as u64,
                 data,
             };
@@ -1010,6 +1033,15 @@ impl MockMega {
 
     pub fn node(&self, h: &str) -> Option<MNode> {
         self.lock().nodes.get(h).cloned()
+    }
+
+    /// Every node, the cloud root, inbox and rubbish bin included, by handle.
+    pub fn nodes(&self) -> Vec<(String, MNode)> {
+        let st = self.lock();
+        st.nodes
+            .iter()
+            .map(|(h, n)| (h.clone(), n.clone()))
+            .collect()
     }
 
     /// The decrypted name and parent of `h`.
