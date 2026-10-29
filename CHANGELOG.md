@@ -74,7 +74,10 @@
   reading history now, so a series folder named exactly `history` in a library on this
   disk can no longer be reached; `doctor` warns about it (and the server logs it at
   startup) with the rename to make. A cloud folder's `history/` is never compiled,
-  counted or case-merged as a series (`History/` stays an ordinary series).
+  counted or case-merged as a series (`History/` stays an ordinary series), never
+  OCR'd and never given covers, whatever its files are named, and its changes keep the
+  cached library listing. The server logs a cloud folder's `history/` series with the
+  rename to make once the folder is in sync.
 - **Bunko and Mokuro Reader agree on what a `.mokuro` beside a volume is.** One rule
   now decides it everywhere Bunko looks (deleting a volume, the OCR upgrade, cloud case
   merges, the cloud queue file, upload ownership, the OCR queue, the catalog's "OCR

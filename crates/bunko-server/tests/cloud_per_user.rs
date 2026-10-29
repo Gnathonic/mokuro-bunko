@@ -26,7 +26,12 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 const ROOT: &str = "mokuro-reader";
-const EVENTS: &str = "/mokuro-reader/history/dev-1/2026-10.events";
+
+/// Each account's events file, under a device folder named for it: a listing or a read
+/// served from the wrong account's tree shows the other name.
+fn events(user: &str) -> String {
+    format!("/mokuro-reader/history/dev-{user}/2026-10.events")
+}
 
 fn tune(c: &mut bunko_remote::RemoteStoreConfig) {
     c.lease = false;
@@ -166,14 +171,15 @@ impl Env {
         )
     }
 
-    /// MKCOL history and history/dev-1 (either may exist), PUT the events file and
-    /// positions.json.
-    async fn write_tree(&self, user: &str, events: &[u8], positions: &[u8]) {
-        for path in ["/mokuro-reader/history", "/mokuro-reader/history/dev-1"] {
+    /// MKCOL history and history/dev-<user> (either may exist), PUT the events file
+    /// and positions.json.
+    async fn write_tree(&self, user: &str, body: &[u8], positions: &[u8]) {
+        let device = format!("/mokuro-reader/history/dev-{user}");
+        for path in ["/mokuro-reader/history", device.as_str()] {
             let (status, _) = self.req(Some(user), "MKCOL", path, &[], b"").await;
             assert!(matches!(status, 201 | 405), "{user} MKCOL {path}: {status}");
         }
-        let (status, body) = self.req(Some(user), "PUT", EVENTS, &[], events).await;
+        let (status, body) = self.req(Some(user), "PUT", &events(user), &[], body).await;
         assert!(
             matches!(status, 201 | 204),
             "{user} PUT history: {status} {}",
@@ -224,6 +230,25 @@ async fn eventually(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+/// A `.cbz` of `pages` small PNG pages (real images: the cover loop decodes them).
+fn cbz(pages: usize) -> Vec<u8> {
+    use std::io::Write as _;
+    let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let opts =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for i in 0..pages {
+        let img = image::RgbImage::from_fn(24, 32, |x, y| {
+            image::Rgb([(x * 9) as u8, (y * 7) as u8, (i * 40) as u8])
+        });
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        z.start_file(format!("{:03}.png", i + 1), opts).unwrap();
+        z.write_all(&png).unwrap();
+    }
+    z.finish().unwrap().into_inner()
+}
+
 fn library_fake() -> Arc<FakeBackend> {
     let fake = Arc::new(FakeBackend::drive_like());
     fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), b"volume");
@@ -253,7 +278,7 @@ async fn the_progress_user_owns_the_cloud_roots_files() {
 
     // The owner's files are the cloud root's own; the other account's stay here.
     eventually("the owner's files reach the cloud", || {
-        cloud_bytes(&fake, "history/dev-1/2026-10.events").as_deref()
+        cloud_bytes(&fake, "history/dev-owner/2026-10.events").as_deref()
             == Some(b"owner events".as_slice())
             && cloud_bytes(&fake, "positions.json").as_deref()
                 == Some(b"owner positions".as_slice())
@@ -261,44 +286,60 @@ async fn the_progress_user_owns_the_cloud_roots_files() {
     .await;
     assert!(!e.users("owner").exists());
     assert_eq!(
-        std::fs::read(e.users("other/history/dev-1/2026-10.events")).unwrap(),
+        std::fs::read(e.users("other/history/dev-other/2026-10.events")).unwrap(),
         b"other events"
     );
+    assert!(fake.node_at(&format!("{ROOT}/history/dev-other")).is_none());
     assert_eq!(
         std::fs::read(e.users("other/positions.json")).unwrap(),
         b"other positions"
     );
-    for (user, events, positions) in [
-        ("owner", "owner events", "owner positions"),
-        ("other", "other events", "other positions"),
+    for (user, other, body, positions) in [
+        ("owner", "other", "owner events", "owner positions"),
+        ("other", "owner", "other events", "other positions"),
     ] {
-        assert_eq!(e.get(user, EVENTS).await, (200, events.as_bytes().to_vec()));
+        let got = e.get(user, &events(user)).await;
+        assert_eq!(got, (200, body.as_bytes().to_vec()));
+        assert_eq!(e.get(user, &events(other)).await.0, 404, "{user}");
         let got = e.get(user, "/mokuro-reader/positions.json").await;
         assert_eq!(got, (200, positions.as_bytes().to_vec()));
     }
 
     // Listings: each account sees its own tree only, at every depth.
     for depth in ["1", "infinity"] {
-        let other = e.propfind("other", "/mokuro-reader/", depth).await;
-        assert!(other.contains("/mokuro-reader/history/"), "{other}");
-        let other_events = e
-            .propfind("other", "/mokuro-reader/history/dev-1/", depth)
-            .await;
-        assert!(other_events.contains("2026-10.events"), "{other_events}");
-        let owner = e.propfind("owner", "/mokuro-reader/", depth).await;
-        assert!(owner.contains("/mokuro-reader/history/"), "{owner}");
-        assert!(owner.contains("/mokuro-reader/Series/"), "{owner}");
+        for (user, other) in [("owner", "other"), ("other", "owner")] {
+            let own = format!("/mokuro-reader/history/dev-{user}/");
+            let foreign = format!("dev-{other}");
+            let root = e.propfind(user, "/mokuro-reader/", depth).await;
+            assert!(root.contains("/mokuro-reader/history/"), "{root}");
+            assert!(root.contains("/mokuro-reader/Series/"), "{root}");
+            assert!(!root.contains(&foreign), "{user} sees {foreign}: {root}");
+            if depth == "infinity" {
+                assert!(root.contains(&own), "{root}");
+            }
+            let history = e.propfind(user, "/mokuro-reader/history/", depth).await;
+            assert!(history.contains(&own), "{history}");
+            assert!(
+                !history.contains(&foreign),
+                "{user} sees {foreign}: {history}"
+            );
+            let device = e.propfind(user, &own, depth).await;
+            assert!(device.contains("2026-10.events"), "{device}");
+        }
     }
     let boss = e.propfind("boss", "/mokuro-reader/", "infinity").await;
     assert!(!boss.contains("history"), "{boss}");
     assert!(!boss.contains("positions.json"), "{boss}");
-    let (status, _) = e.get("boss", EVENTS).await;
-    assert_eq!(status, 404);
+    for user in ["owner", "other"] {
+        let (status, _) = e.get("boss", &events(user)).await;
+        assert_eq!(status, 404);
+    }
 
     // Not library content: no upload record, no series, no metadata pass.
     let db = e.services.db.clone();
     assert_eq!(
-        db.get_volume_owner("history/dev-1/2026-10.events").unwrap(),
+        db.get_volume_owner("history/dev-owner/2026-10.events")
+            .unwrap(),
         None
     );
     assert_eq!(db.get_volume_owner("positions.json").unwrap(), None);
@@ -373,7 +414,7 @@ async fn a_local_library_ignores_the_progress_user() {
     e.write_tree("owner", b"owner events", b"owner positions")
         .await;
     assert_eq!(
-        std::fs::read(e.users("owner/history/dev-1/2026-10.events")).unwrap(),
+        std::fs::read(e.users("owner/history/dev-owner/2026-10.events")).unwrap(),
         b"owner events"
     );
     assert_eq!(
@@ -383,4 +424,104 @@ async fn a_local_library_ignores_the_progress_user() {
     let library = e.storage.join("library");
     assert!(!library.join("history").exists());
     assert!(!library.join("positions.json").exists());
+}
+
+/// The history rule allows any name, `.cbz` included, and the owner's history sits
+/// beside the series: an archive there is still that account's history. The watcher's
+/// event for it owes no OCR, writes no cover into it, and drops no shared listing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_archive_in_the_owners_history_is_no_volume() {
+    let fake = Arc::new(FakeBackend::drive_like());
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), &cbz(2));
+    let e = env(LibraryBackend::GDrive, Some(fake.clone())).await;
+    let node = |rel: &str| fake.node_at(&format!("{ROOT}/{rel}"));
+    eventually("the cover loop covers Vol 1", || {
+        node("Series/Vol 1.webp").is_some()
+    })
+    .await;
+
+    // The shared whole-library listing, cached.
+    e.propfind("boss", "/mokuro-reader/", "infinity").await;
+    let cache = e.services.dav.propfind_cache().clone();
+    let cached = cache.usage().0;
+    assert!(cached >= 1);
+
+    let archive = cbz(2);
+    for path in ["/mokuro-reader/history", "/mokuro-reader/history/dev-owner"] {
+        let (status, _) = e.req(Some("owner"), "MKCOL", path, &[], b"").await;
+        assert_eq!(status, 201, "MKCOL {path}");
+    }
+    let (status, body) = e
+        .req(
+            Some("owner"),
+            "PUT",
+            "/mokuro-reader/history/dev-owner/x.cbz",
+            &[],
+            &archive,
+        )
+        .await;
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+    eventually("the owner's archive reaches the cloud", || {
+        cloud_bytes(&fake, "history/dev-owner/x.cbz").as_deref() == Some(archive.as_slice())
+    })
+    .await;
+    let until = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < until {
+        assert_eq!(
+            cache.usage().0,
+            cached,
+            "a history write dropped the shared listing"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // A library volume after it: once its cover is written and its OCR is owed, the
+    // archive announced before it has been looked at too.
+    let (status, _) = e
+        .req(
+            Some("boss"),
+            "PUT",
+            "/mokuro-reader/Series/Vol%202.cbz",
+            &[],
+            &cbz(2),
+        )
+        .await;
+    assert_eq!(status, 201);
+    let library = e.services.core.layout.library();
+    let ocr = e.services.ocr.clone();
+    let vol2 = library.join("Series/Vol 2.cbz");
+    let until = Instant::now() + Duration::from_secs(60);
+    loop {
+        let owed = ocr
+            .volume_outlook(&vol2)
+            .await
+            .is_some_and(|(pending, _)| !pending.is_empty());
+        if owed && node("Series/Vol 2.webp").is_some() {
+            break;
+        }
+        assert!(Instant::now() < until, "Vol 2 is covered and owes OCR");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let history = library.join("history/dev-owner/x.cbz");
+    let until = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < until {
+        let (pending, _) = ocr.volume_outlook(&history).await.unwrap();
+        assert!(pending.is_empty(), "OCR owed for the history: {pending:?}");
+        assert!(
+            node("history/dev-owner/x.webp").is_none(),
+            "a cover in the history"
+        );
+        assert!(node("history/dev-owner/x.nocover").is_none());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (status, stats) = e
+        .admin("GET", "/_admin/api/ocr/generations/stats", Value::Null)
+        .await;
+    assert_eq!(status, 200, "{stats}");
+    for (id, row) in stats["generations"].as_object().unwrap() {
+        assert!(
+            row["volumes_total"].as_u64().is_none_or(|n| n <= 2),
+            "{id}: {row}"
+        );
+    }
 }

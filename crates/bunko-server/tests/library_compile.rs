@@ -176,13 +176,93 @@ async fn watcher_recompiles_a_series_after_a_volume_arrives() {
 }
 
 #[derive(Default)]
-struct Archives(parking_lot::Mutex<Vec<String>>);
+struct Archives(parking_lot::Mutex<Vec<String>>, AtomicUsize);
 
 impl bunko_server::library::ArchiveEvents for Archives {
     fn archive_added(&self, cbz: &std::path::Path) {
         self.0.lock().push(cbz.display().to_string());
     }
     fn archive_removed(&self, _cbz: &std::path::Path) {}
+    fn rescan(&self) {
+        self.1.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A cloud progress user's `history/` sits at the library root and may hold names
+/// ending in `.cbz`: the watcher's events there tell OCR nothing, refresh no listing
+/// and schedule no pass. A series beside it still does all three.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_events_in_the_per_user_tree_are_not_library_changes() {
+    use bunko_store::WatchEvent;
+    let archives = Arc::new(Archives::default());
+    let refreshed = Arc::new(AtomicUsize::new(0));
+    let hooks = bunko_server::library::LibraryHooks {
+        propfind_refresh: Some({
+            let r = refreshed.clone();
+            Arc::new(move || {
+                r.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+        archive_events: Some(archives.clone()),
+        ..Default::default()
+    };
+    let env = Env::with(
+        |_| {},
+        Options {
+            hooks,
+            ..Options::default()
+        },
+    );
+    let dir = env.series_dir("Aria");
+    write_cbz(&dir.join("Aria 01.cbz"), 2);
+    env.runtime.start();
+    assert!(wait_for(Duration::from_secs(5), || dir.join("series.json").is_file()).await);
+    assert!(env.runtime.wait_idle(Duration::from_secs(5)));
+    let refreshes = refreshed.load(Ordering::SeqCst);
+    let rescans = archives.1.load(Ordering::SeqCst);
+
+    let history = env.library.join("history/dev-1");
+    std::fs::create_dir_all(&history).unwrap();
+    write_cbz(&history.join("x.cbz"), 1);
+    for event in [
+        WatchEvent::Added {
+            path: env.library.join("history"),
+            is_dir: true,
+        },
+        WatchEvent::Added {
+            path: history.clone(),
+            is_dir: true,
+        },
+        WatchEvent::Added {
+            path: history.join("x.cbz"),
+            is_dir: false,
+        },
+        WatchEvent::Removed {
+            path: history.join("x.cbz"),
+            is_dir: false,
+        },
+        WatchEvent::Added {
+            path: env.library.join("goals.json"),
+            is_dir: false,
+        },
+    ] {
+        env.runtime.on_watch_event(event);
+    }
+    assert!(archives.0.lock().is_empty(), "{:?}", archives.0.lock());
+    assert_eq!(archives.1.load(Ordering::SeqCst), rescans);
+    assert_eq!(refreshed.load(Ordering::SeqCst), refreshes);
+    assert!(!env.runtime.has_pending_pass());
+
+    // The control: the same event for a series volume reaches all of them.
+    write_cbz(&dir.join("Aria 02.cbz"), 1);
+    env.runtime.on_watch_event(WatchEvent::Added {
+        path: dir.join("Aria 02.cbz"),
+        is_dir: false,
+    });
+    assert!(archives.0.lock().iter().any(|p| p.ends_with("Aria 02.cbz")));
+    assert!(refreshed.load(Ordering::SeqCst) > refreshes);
+    assert!(env.runtime.has_pending_pass());
+    env.runtime.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

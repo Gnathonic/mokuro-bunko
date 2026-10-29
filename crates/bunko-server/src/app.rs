@@ -232,7 +232,9 @@ impl Services {
                     (guard, Some(handle), layout)
                 }
                 None => {
-                    if let Some(r) = crate::storage::doctor::history_series_row(&layout.library()) {
+                    if let Some(r) =
+                        crate::storage::doctor::history_series_row(&layout.library(), None)
+                    {
                         tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
                     }
                     (crate::library::mount_local(&layout.library()), None, layout)
@@ -340,12 +342,15 @@ impl Services {
 
 /// Drop the cached PROPFIND listings a store change touches (the path's own, its
 /// ancestors' and its descendants'), as a DAV write does for its own changes; a
-/// `Rescan` drops them all (spec §10).
+/// `Rescan` drops them all (spec §10). The progress user's per-user tree is in no
+/// shared listing (each caller's own is appended per request), so its changes drop
+/// nothing, as its DAV writes do not.
 fn watch_listings(dav: &bunko_dav::Dav, library: &Path) -> Option<bunko_store::WatchGuard> {
     let store = bunko_store::store_for(library)?;
     let (dav, root) = (dav.clone(), library.to_path_buf());
     let sink: bunko_store::WatchSink = Arc::new(move |ev: bunko_store::WatchEvent| {
         match ev.path().and_then(|p| crate::ocr::types::rel_of(&root, p)) {
+            Some(rel) if bunko_core::reader_tree::is_per_user_rel(&rel) => {}
             Some(rel) => dav.invalidate_listing(&[format!("/{}/{rel}", auth::paths::READER_ROOT)]),
             None => dav.propfind_cache().invalidate(),
         }
@@ -816,6 +821,15 @@ pub fn start_library_services(
                 storage.backend.as_str(),
                 storage.engine_state()
             );
+        }
+        {
+            // doctor cannot see the cloud folder: the reserved-name finding is logged here.
+            let (lib, folder) = (library_dir.clone(), storage.folder.clone());
+            tokio::task::spawn_blocking(move || {
+                if let Some(r) = crate::storage::doctor::history_series_row(&lib, Some(&folder)) {
+                    tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
+                }
+            });
         }
         let covers = thumbs.spawn_remote(library_dir, stop.child_token());
         ocr.start(stop.child_token());
