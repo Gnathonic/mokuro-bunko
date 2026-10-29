@@ -74,10 +74,17 @@ fn library_relative_normalized(path: &str) -> Option<String> {
 /// the name alone cannot tell a layer from a dotted volume's primary, which
 /// `AuthBackend::is_volume_primary` asks the folder about.
 pub fn layer_class_of_path(path: &str) -> Option<LayerClass> {
+    layer_id_of_path(path).map(|id| sidecar_names::layer_class(&id))
+}
+
+/// The layer id a library file's name carries (`pre-upgrade-2` for
+/// `S/V.pre-upgrade-2.mokuro`), listing-free and exact-case like
+/// [`layer_class_of_path`].
+pub fn layer_id_of_path(path: &str) -> Option<String> {
     let rel = library_relative_normalized(path)?;
     let name = rel.rsplit('/').next()?;
     let (_, id, _) = sidecar_names::split_layer(name)?;
-    Some(sidecar_names::layer_class(id))
+    Some(id.to_string())
 }
 
 /// The ROOT `catalog.json` only (ASCII case-insensitive).

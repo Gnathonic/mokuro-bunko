@@ -482,6 +482,83 @@ async fn corrections_follow_an_archive_rename() {
     assert_eq!((got.code(), got.body), (200, layer("alice")));
 }
 
+/// The cloud-root owner's correction is the physical file beside the archive, which
+/// nobody else sees: it follows an archive rename someone else makes too (sidecars
+/// stay pinned, and the renamer's reader cannot move a file it is not shown).
+#[tokio::test]
+async fn the_owners_physical_correction_follows_an_archive_rename() {
+    let env = Env::new();
+    let r = env.as_owner("alice", "PUT", EDIT, &layer("owner")).await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    std::fs::write(env.lib("series/vol1.mokuro"), b"{}").unwrap();
+    // An orphan already at the new name, and another volume's correction.
+    std::fs::write(env.lib("series/vol9.edit.mokuro"), layer("kept")).unwrap();
+    std::fs::write(env.lib("series/vol1.5.cbz"), b"x").unwrap();
+    std::fs::write(env.lib("series/vol1.5.edit.mokuro"), layer("a15")).unwrap();
+    assert_eq!(
+        env.mv(
+            "editor",
+            "/mokuro-reader/series/vol1.cbz",
+            "/mokuro-reader/series/vol9.cbz"
+        )
+        .await,
+        204
+    );
+    for (name, body) in [
+        ("vol9.edit.mokuro", "kept"),
+        ("vol9.edit-2.mokuro", "owner"),
+        ("vol1.5.edit.mokuro", "a15"),
+    ] {
+        assert_eq!(
+            std::fs::read(env.lib(&format!("series/{name}"))).unwrap(),
+            layer(body),
+            "{name}"
+        );
+    }
+    assert!(!env.lib("series/vol1.edit.mokuro").exists());
+    // The shared sidecars stay pinned: the reader moves those itself.
+    assert!(env.lib("series/vol1.mokuro").exists());
+    let got = env
+        .as_owner(
+            "alice",
+            "GET",
+            "/mokuro-reader/series/vol9.edit-2.mokuro",
+            b"",
+        )
+        .await;
+    assert_eq!((got.code(), got.body), (200, layer("owner")));
+}
+
+/// A correction is stored under one spelling, a plain `.mokuro` (plan §1, critique
+/// C18): a MOVE or COPY cannot make the name a PUT would refuse.
+#[tokio::test]
+async fn a_correction_moves_only_to_a_plain_mokuro_name() {
+    let env = Env::new();
+    env.put_correction("alice", EDIT, "alice").await;
+    for method in ["MOVE", "COPY"] {
+        for (to, code) in [
+            ("/mokuro-reader/series/vol1.edit-2.mokuro.gz", 403),
+            ("/mokuro-reader/series/vol1.edit-2.MOKURO", 409),
+        ] {
+            let r = env
+                .req(
+                    Some("alice"),
+                    method,
+                    EDIT,
+                    &[("destination", &format!("http://localhost:8080{to}"))],
+                    b"",
+                )
+                .await;
+            assert_eq!(r.code(), code, "{method} {to}: {}", r.text());
+        }
+    }
+    let names: Vec<String> = std::fs::read_dir(env.overlay("alice", "series"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["vol1.edit.mokuro"]);
+}
+
 /// A correction already at the destination is kept; the moving one lands under the
 /// next free `edit-<n>`, so nothing is lost.
 #[tokio::test]

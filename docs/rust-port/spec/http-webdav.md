@@ -434,10 +434,10 @@ table above:
 
 | Class (ids) | Decision |
 |---|---|
-| personal (`edit`, `edit-<n>`) | `_authorize_progress_write` (every `WRITE_PROGRESS` account writes its own copy, `registered` included). A MOVE/COPY to any other name: 403 `Permission denied: corrections can only move between correction files`, and so is one INTO a personal name from any other. A `.gz` PUT: 403 `Permission denied: corrections are saved as plain .mokuro`. |
+| personal (`edit`, `edit-<n>`) | `_authorize_progress_write` (every `WRITE_PROGRESS` account writes its own copy, `registered` included). A MOVE/COPY to any other name: 403 `Permission denied: corrections can only move between correction files`, and so is one INTO a personal name from any other. A `.gz` PUT: 403 `Permission denied: corrections are saved as plain .mokuro`. DAV then refuses a MOVE/COPY to a `.gz` name (403) or to one not ending in exactly `.mokuro` (409), as it does a PUT. |
 | curated (`curated`) | PUT: `MODIFY_DELETE` on any volume, or `uploader` where `can_user_delete_library_path` (the volume it uploaded), the first create included; else 401 / 403 `Permission denied: cannot publish shared corrections for this volume`. DELETE/MOVE/COPY keep steps 10-13. |
-| server keepsake (`pre-upgrade`, `pre-upgrade-<n>`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this file is written by the server` |
-| reserved (`curated-<n>`, the rest of `pre-upgrade*`, `previous-ocr*`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this layer name is reserved` |
+| server keepsake (`pre-upgrade`, `pre-upgrade-<n>`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this file is written by the server`. A MOVE from a keepsake to the same id (a volume rename: the reader moves every listed layer) keeps steps 10-13. |
+| reserved (`curated-<n>`, the rest of `pre-upgrade*`, `previous-ocr*`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this layer name is reserved`. A MOVE that keeps the id keeps steps 10-13, as for a keepsake. |
 
 `original`, `gcv`, `updated-ocr`, `tr-*` and hand-made ids keep the table above (shared files).
 

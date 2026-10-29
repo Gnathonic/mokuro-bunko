@@ -21,6 +21,7 @@ use crate::resource::{FileKind, Resource};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::{Inner, sidecars};
 use bunko_core::reader_tree::{self, HistoryShape};
+use bunko_core::sidecar_names;
 
 pub(crate) async fn delete(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     if is_virtual_root(&req.path) {
@@ -447,6 +448,21 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
                 "Corrections can only move between correction files.",
             ));
         }
+        // Stored under the one spelling a PUT takes: a plain `.mokuro` (critique C18).
+        if dest_kind == FileKind::Personal {
+            if sidecar_names::strip_suffix_ci(&dest_name, ".gz").is_some() {
+                return Err(DavError::new(
+                    StatusCode::FORBIDDEN,
+                    "Corrections are saved as plain .mokuro files.",
+                ));
+            }
+            if !dest_name.ends_with(".mokuro") {
+                return Err(DavError::new(
+                    StatusCode::CONFLICT,
+                    "A correction's name must end in .mokuro.",
+                ));
+            }
+        }
         // The virtual paths differed; the files may not (`a//x`, `a/./x`, a symlink, a
         // case-insensitive filesystem). Overwriting the source with itself deletes it. A
         // rename that only changes the case is the source on a case-insensitive filesystem
@@ -624,10 +640,13 @@ fn move_file(
     effects.note_arrived(inner, dest);
     if let (Some(old), Some(new)) = (old_rel.as_deref(), new_rel.as_deref()) {
         req.ctx.hooks.rename_volume_upload(old, new);
-        // Every account's corrections follow the archive. The reader's own MOVE of
-        // its `<Old>.edit.mokuro` then finds it already there.
+        // Every account's corrections follow the archive, the cloud-root owner's
+        // physical one included. The reader's own MOVE of its `<Old>.edit.mokuro`
+        // then finds it already there.
         if is_cbz(src) {
-            inner.overlays().rename_volume(old, new);
+            let overlays = inner.overlays();
+            overlays.rename_volume(old, new);
+            overlays.rename_physical(old, new);
         }
     }
     forget_ocr_records(req, old_rel.as_deref(), true);

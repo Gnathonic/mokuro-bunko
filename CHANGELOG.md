@@ -90,7 +90,8 @@
   with `pages` and no `ocr_engine` (422), at most 32 MiB. `<Volume>.curated.mokuro` holds corrections shared with everyone: editors,
   inviters and admins publish it on any volume, an uploader on the volumes it
   uploaded, a first upload included. `pre-upgrade` files are Bunko's own and no client
-  writes one; `curated-<n>` and names starting `previous-ocr` are refused too. An OCR
+  writes one; `curated-<n>` and names starting `previous-ocr` are refused too (a volume
+  rename still moves them along under the same name). An OCR
   generation can no longer be named `edit`, `curated`, `edit-<n>`, `curated-<n>`, or
   start with `pre-upgrade` or `previous-ocr`: a config that already names one fails to
   load, with an error naming that row, until it is renamed. A library on this disk

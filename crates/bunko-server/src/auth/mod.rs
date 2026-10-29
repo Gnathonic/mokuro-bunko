@@ -483,13 +483,12 @@ fn authorize_layer(
     const RESERVED: &str = "Permission denied: this layer name is reserved";
     let moving = matches!(m, "MOVE" | "COPY");
     let source = reserved_layer_at(path, backend);
-    let dest = if moving {
-        destination
-            .and_then(paths::destination_path)
-            .and_then(|d| reserved_layer_at(&d, backend))
-    } else {
-        None
-    };
+    let dest_path = destination
+        .filter(|_| moving)
+        .and_then(paths::destination_path);
+    let dest = dest_path
+        .as_deref()
+        .and_then(|d| reserved_layer_at(d, backend));
     if source == Some(LayerClass::Personal) {
         return Some(progress_write(id).and_then(|()| {
             if moving && dest != Some(LayerClass::Personal) {
@@ -504,7 +503,15 @@ fn authorize_layer(
             }
         }));
     }
-    let written = if moving {
+    // A MOVE that keeps the layer id is a volume rename carrying its layer (the reader
+    // moves every listed one): nothing new is written, so the 0.7 rule decides.
+    let renamed = m == "MOVE"
+        && source.is_some()
+        && source == dest
+        && dest_path.as_deref().and_then(paths::layer_id_of_path) == paths::layer_id_of_path(path);
+    let written = if renamed {
+        None
+    } else if moving {
         dest
     } else if m == "PUT" {
         source
@@ -1237,6 +1244,41 @@ mod tests {
             );
             assert_eq!(ask("PUT", path, None, None).unwrap_err().0, 401);
         }
+        // A volume rename carries its keepsakes and reserved layers under the same id:
+        // the 0.7 MOVE rule decides. Anything else into those names stays refused.
+        let edited = Some(Role::Editor);
+        for id in ["pre-upgrade", "pre-upgrade-2", "curated-2", "previous-ocr"] {
+            let from = format!("/mokuro-reader/Mine/V.{id}.mokuro");
+            let to = format!("http://h/mokuro-reader/Mine/W.{id}.mokuro");
+            assert_eq!(ask("MOVE", &from, Some(&to), edited), Ok(()), "{id}");
+            assert_eq!(
+                ask("MOVE", &from, Some(&to), reg),
+                Err((
+                    403,
+                    "Permission denied: cannot modify or delete files".into()
+                )),
+                "{id}"
+            );
+            assert!(ask("COPY", &from, Some(&to), edited).is_err(), "{id}");
+        }
+        assert_eq!(
+            ask(
+                "MOVE",
+                "/mokuro-reader/Mine/V.pre-upgrade.mokuro",
+                Some("http://h/mokuro-reader/Mine/W.pre-upgrade-2.mokuro"),
+                edited
+            ),
+            Err((403, server.into()))
+        );
+        assert_eq!(
+            ask(
+                "MOVE",
+                "/mokuro-reader/Mine/V.curated-2.mokuro",
+                Some("http://h/mokuro-reader/Mine/W.curated-3.mokuro"),
+                edited
+            ),
+            Err((403, reserved.into()))
+        );
         // The reader's own reserved ids that Bunko stores as before.
         for path in [
             "/mokuro-reader/Mine/V.original.mokuro",

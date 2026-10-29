@@ -8,7 +8,8 @@
 //!
 //! Overlays follow their volume ([`PersonalOverlays`]): an archive or folder that moves
 //! or merges takes every account's overlays along, a collision moving in as the next
-//! free `edit-<n>`; a deleted archive or folder takes them with it.
+//! free `edit-<n>`; a deleted archive or folder takes them with it. An archive renamed
+//! over DAV also takes the cloud-root owner's physical correction along.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -295,9 +296,14 @@ impl PersonalOverlays {
                 } else {
                     format!("{rel}/{name}")
                 };
-                if fs::is_dir(self.library.join(&child)) {
-                    // The cloud-root owner's own tree holds no volume.
-                    if !reader_tree::is_per_user_rel(&child) {
+                let path = self.library.join(&child);
+                if fs::is_dir(&path) {
+                    // The cloud-root owner's own tree holds no volume, and a symlinked
+                    // folder is not walked (the index's scan does not either; a link up
+                    // the tree would loop).
+                    let linked =
+                        fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+                    if !linked && !reader_tree::is_per_user_rel(&child) {
                         todo.push(child);
                     }
                 } else if personal_name(name).is_some()
@@ -359,6 +365,31 @@ impl PersonalOverlays {
             if !owned.is_empty() && !old_folder.is_empty() {
                 self.drop_if_empty(&dir);
             }
+        }
+    }
+
+    /// The archive `old` (library rel) was renamed to `new` over DAV: the cloud-root
+    /// owner's corrections of it, the physical files beside it, move along like the
+    /// overlays do. Nobody else is shown them, so the renamer's reader cannot move them,
+    /// and sidecars stay pinned. Not for a rename made in the cloud itself: a
+    /// cloud-direct owner's reader moves its own files there.
+    pub fn rename_physical(&self, old: &str, new: &str) {
+        if old == new {
+            return;
+        }
+        let (Some((old_folder, _)), Some((new_folder, new_stem))) =
+            (Self::split_archive(old), Self::split_archive(new))
+        else {
+            return;
+        };
+        let dir = self.library.join(old_folder);
+        for (name, id) in self.owned(&dir, old_folder, paths::uri_name(old)) {
+            self.move_one(
+                &dir.join(&name),
+                &self.library.join(new_folder),
+                new_stem,
+                &id,
+            );
         }
     }
 
@@ -495,6 +526,23 @@ mod tests {
         ] {
             assert!(!is_layer_body(bad), "{}", String::from_utf8_lossy(bad));
         }
+    }
+
+    /// The startup walk never descends a symlinked folder (like the index's scan): a
+    /// link back up the tree would otherwise loop until the path is too long.
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn the_correction_walk_skips_symlinked_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let (library, users) = (dir.path().join("library"), dir.path().join("users"));
+        std::fs::create_dir_all(library.join("S")).unwrap();
+        std::fs::create_dir_all(&users).unwrap();
+        std::fs::write(library.join("S/V.cbz"), b"x").unwrap();
+        std::fs::write(library.join("S/V.edit.mokuro"), b"{}").unwrap();
+        std::os::unix::fs::symlink("..", library.join("S/all")).unwrap();
+        let overlays = PersonalOverlays::new(library, users, PathWriteLocks::new());
+        assert_eq!(overlays.physical_corrections(), ["S/V.edit.mokuro"]);
     }
 
     #[test]
