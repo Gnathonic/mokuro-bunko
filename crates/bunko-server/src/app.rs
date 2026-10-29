@@ -204,6 +204,9 @@ impl Services {
         let flavor = opts.flavor;
         let db_options = DbOptions::from(&config.database);
         let layout = config.storage.layout();
+        // `/mokuro-reader/history` is each account's reading history, so a series folder
+        // of that name at the library root is out of every reader's reach until renamed.
+        warn_history_series(&layout.library());
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
@@ -780,4 +783,29 @@ pub fn not_found_json() -> Response {
         http::HeaderValue::from_static("application/json"),
     );
     r
+}
+
+/// Log once at startup when the library root holds a `history/` series folder: that path
+/// is each account's reading history now, so the series is hidden from every reader.
+fn warn_history_series(library: &std::path::Path) {
+    let dir = library.join(bunko_core::reader_tree::HISTORY_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let archives = entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .to_lowercase()
+                .ends_with(".cbz")
+        })
+        .count();
+    if archives > 0 {
+        tracing::warn!(
+            "[STORAGE] the series folder history/ ({archives} volume{}) is hidden: /mokuro-reader/history is reserved for each account's reading history. Stop Bunko and rename the series folder {} (e.g. to \"History (series)\").",
+            if archives == 1 { "" } else { "s" },
+            dir.display()
+        );
+    }
 }

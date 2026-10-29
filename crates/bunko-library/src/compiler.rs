@@ -40,7 +40,8 @@ fn is_cbz_name(name: &str) -> bool {
 
 /// `iter_series_folders`: top-level, non-hidden directories (symlinks
 /// followed) directly holding at least one `.cbz` file, sorted by name. A
-/// missing/unreadable library is empty.
+/// missing/unreadable library is empty. The per-user `history/` (0.8, a cloud
+/// root's reading history) is never a series, whatever it holds.
 pub fn iter_series_folders(library_path: &Path) -> Vec<SeriesFolder> {
     let Ok(mut entries) = fsutil::list_dir(library_path) else {
         return Vec::new();
@@ -48,7 +49,12 @@ pub fn iter_series_folders(library_path: &Path) -> Vec<SeriesFolder> {
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries
         .into_iter()
-        .filter(|(name, path)| !name.starts_with('.') && fsutil::is_dir(path) && has_archive(path))
+        .filter(|(name, path)| {
+            !name.starts_with('.')
+                && !bunko_core::reader_tree::is_per_user_root_name(name)
+                && fsutil::is_dir(path)
+                && has_archive(path)
+        })
         .map(|(title, path)| SeriesFolder { title, path })
         .collect()
 }
@@ -587,4 +593,27 @@ pub fn missing_pages_now(
         entry.page_count,
         entry.matched_page_count,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `history/` at the library root is each account's reading history now
+    /// (`/mokuro-reader/history`), never a series, even with an archive in it;
+    /// `History/` is a series.
+    #[test]
+    fn the_reading_history_folder_is_not_a_series() {
+        let dir = tempfile::tempdir().unwrap();
+        for folder in ["history", "History", "S"] {
+            let path = dir.path().join(folder);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join("V.cbz"), "x").unwrap();
+        }
+        let titles: Vec<String> = iter_series_folders(dir.path())
+            .into_iter()
+            .map(|f| f.title)
+            .collect();
+        assert_eq!(titles, ["History", "S"]);
+    }
 }
