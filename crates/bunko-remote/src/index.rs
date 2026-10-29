@@ -39,7 +39,8 @@ const DEFAULT_GRANULARITY_NS: i64 = 1_000_000_000;
 /// A folder's mtime moves at least this much on a child change (1 µs).
 const DIR_BUMP_NS: i64 = 1_000;
 /// The winner rules the stored roles follow (meta `winner_rule`). 2: files by newest
-/// write, roots in canonical order. An index from an older rule is recomputed at open.
+/// known write (the copy a duplicate merge keeps), roots in canonical order. An index
+/// from an older rule is recomputed at open.
 const WINNER_RULE: &str = "2";
 /// Subtrees larger than this are not walked for [`Index::subtree_loss`].
 const LOSS_CAP: i64 = 20_000;
@@ -692,7 +693,9 @@ impl Index {
 
     /// Same-named folders that share a parent node, shallowest first: the groups a
     /// duplicate merge folds, level by level. Roots with different parents never
-    /// form a group (a `Backup/mokuro-reader` stays where it is).
+    /// form a group (a `Backup/mokuro-reader` stays where it is). Same-named is the
+    /// exact spelling, as the reader groups them: NFC-equal spellings stay one entry
+    /// (the union) but split into one group each, and a lone spelling is no group.
     pub fn dup_member_groups(&self) -> Vec<DupGroup> {
         let keys: Vec<(i64, Option<Pid>)> = soft(
             self.conn
@@ -708,23 +711,32 @@ impl Index {
             "dup_member_groups",
         )
         .unwrap_or_default();
-        let mut out: Vec<DupGroup> = keys
-            .into_iter()
-            .map(|(eid, parent_pid)| {
-                let members = self
-                    .members(eid)
-                    .into_iter()
-                    .filter(|n| n.parent == parent_pid)
-                    .collect();
-                let depth = self.path_of(eid).map_or(0, |p| p.segments().len());
-                DupGroup {
-                    eid,
-                    parent_pid,
-                    depth,
-                    members,
+        let mut out: Vec<DupGroup> = Vec::new();
+        for (eid, parent_pid) in keys {
+            let depth = self.path_of(eid).map_or(0, |p| p.segments().len());
+            // By spelling, in the order each first appears (canonical first).
+            let mut by_name: Vec<(Vec<u8>, Vec<RNode>)> = Vec::new();
+            for n in self.members(eid) {
+                if n.parent != parent_pid {
+                    continue;
                 }
-            })
-            .collect();
+                match by_name.iter_mut().find(|(k, _)| *k == n.name_raw) {
+                    Some((_, v)) => v.push(n),
+                    None => by_name.push((n.name_raw.clone(), vec![n])),
+                }
+            }
+            out.extend(
+                by_name
+                    .into_iter()
+                    .filter(|(_, v)| v.len() > 1)
+                    .map(|(_, members)| DupGroup {
+                        eid,
+                        parent_pid: parent_pid.clone(),
+                        depth,
+                        members,
+                    }),
+            );
+        }
         out.sort_by(|a, b| (a.depth, a.eid, &a.parent_pid).cmp(&(b.depth, b.eid, &b.parent_pid)));
         out
     }
@@ -1345,9 +1357,10 @@ impl Index {
                 (!a.is_dir, a.created, &a.pid).cmp(&(!b.is_dir, b.created, &b.pid))
             });
         } else {
-            // Newest write first: the copy a duplicate merge keeps. A tie goes to the
-            // copy in the canonical parent (the roots' order, else the oldest
-            // member), then the smallest pid.
+            // The copy a duplicate merge keeps: it walks the parents canonical first
+            // (the roots' order, else the oldest member), then the smallest pid, and
+            // takes a copy only when its write is strictly newer and both times are
+            // known. Not a sort key: an unknown time (0) ties with every other.
             let mut parent_rank: std::collections::HashMap<Option<String>, (usize, i64, String)> =
                 std::collections::HashMap::new();
             for m in &nodes {
@@ -1370,12 +1383,17 @@ impl Index {
                 parent_rank.insert(m.parent.clone(), rank);
             }
             nodes.sort_by(|a, b| {
-                (std::cmp::Reverse(a.base), &parent_rank[&a.parent], &a.pid).cmp(&(
-                    std::cmp::Reverse(b.base),
-                    &parent_rank[&b.parent],
-                    &b.pid,
-                ))
+                (&parent_rank[&a.parent], &a.pid).cmp(&(&parent_rank[&b.parent], &b.pid))
             });
+            let mut keep = 0;
+            for (i, m) in nodes.iter().enumerate().skip(1) {
+                let k = &nodes[keep];
+                if m.base > 0 && k.base > 0 && m.base > k.base {
+                    keep = i;
+                }
+            }
+            let w = nodes.remove(keep);
+            nodes.insert(0, w);
         }
         for (i, m) in nodes.iter().enumerate() {
             let role = match (i, m.is_dir) {

@@ -54,9 +54,11 @@
 - **Bunko merges duplicate folders in Google Drive and MEGA libraries, and merges
   never pause it.** Google Drive and MEGA can hold two `mokuro-reader` folders, or two
   copies of a series folder, side by side. Bunko now merges them itself, the way
-  Mokuro Reader does, once neither has changed for a while: everything moves into the
-  oldest copy, a file found in both keeps its most recently written copy and puts the
-  other in the provider's trash (a `series.json` is merged into the series first),
+  Mokuro Reader does, once neither has changed for a while: everything moves into one
+  copy (the oldest; for the `mokuro-reader` folders, one directly in My Drive or the
+  Cloud Drive first), a file found in both keeps its most recently written copy and
+  puts the other in the provider's trash (a `series.json` is merged into the series
+  first),
   `volume-data.json`, `goals.json` and `positions.json` keep both copies, and each
   emptied folder goes to the trash (never a permanent delete). The Storage tab lists
   them under **Recent merges**; `storage.library.dedup: false` turns this off. Its

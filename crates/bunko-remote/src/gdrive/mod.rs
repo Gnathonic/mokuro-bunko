@@ -1176,8 +1176,21 @@ impl Backend for GDriveBackend {
                 let f: DFile = self.0.json(c).await?;
                 Ok::<_, BErr>(f.id)
             })
-            .await?;
-        sort_roots_canonical(&mut nodes, Some(top));
+            .await;
+        // A refused `files/root` (a grant that may not see My Drive) only costs the
+        // top-level-first rule: the roots are still found, oldest first, and the next
+        // locate asks again. Throttling, outages and auth failures still fail here.
+        let top = match top {
+            Ok(t) => Some(t.as_str()),
+            Err(e @ (BErr::NotFound | BErr::Fatal(_) | BErr::Unsupported)) => {
+                tracing::warn!(
+                    "drive: cannot ask for My Drive's id ({e}); roots ordered by age only"
+                );
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        sort_roots_canonical(&mut nodes, top);
         self.0
             .roots
             .lock()

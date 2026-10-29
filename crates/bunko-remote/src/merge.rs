@@ -51,7 +51,8 @@
 //! (#308) on the same journal, so whichever of the two gets there first, the cloud
 //! ends the same ([`crate::index::Index::dup_member_groups`]):
 //!
-//! - **Groups:** same-named folder nodes under one parent node; the canonical member
+//! - **Groups:** folder nodes of one exact spelling (as the reader compares names, so
+//!   NFC-equal spellings never merge) under one parent node; the canonical member
 //!   is the oldest, then the smallest pid (the root's: [`Index::roots`] order, top-level
 //!   first). Roots under different parents never merge. Groups merge pass by pass, the
 //!   shallowest level first.
@@ -62,8 +63,8 @@
 //! - **Plan:** per other member, fresh listings of it and the canonical one. An item
 //!   with no counterpart moves in; a folder, or a keep-both file
 //!   ([`crate::names::dedup_keeps_both`]), moves in beside its name; of two files the
-//!   strictly newer write stays and the other goes to the trash (a tie: the canonical
-//!   copy), a losing `series.json` submitted first (D18). A member is trashed only once
+//!   strictly newer write stays and the other goes to the trash (a tie or an unknown
+//!   time: the canonical copy), a losing `series.json` submitted first (D18). A member is trashed only once
 //!   a listing shows it empty.
 //! - **Paths never change:** every node stays at its library path, so no step runs a DB
 //!   hook or announces a removal, and D19 never counts one.
@@ -773,7 +774,8 @@ struct DupSet {
     members: Vec<RNode>,
 }
 
-/// `a` was written strictly later than `b`; an unknown time is never newer.
+/// `a` was written strictly later than `b`; an unknown time is never newer. The index
+/// picks a duplicate file's winner by this same walk (`Index::recompute`).
 fn newer(a: &RNode, b: &RNode) -> bool {
     a.base_mtime_ms > 0 && b.base_mtime_ms > 0 && a.base_mtime_ms > b.base_mtime_ms
 }

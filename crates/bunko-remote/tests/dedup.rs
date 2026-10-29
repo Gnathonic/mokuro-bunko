@@ -428,6 +428,32 @@ fn series_folders_merge_level_by_level() {
 }
 
 #[test]
+fn nfc_and_nfd_spellings_are_not_duplicates() {
+    // The reader groups by the exact name, so it never merges these: neither does Bunko.
+    let f = FakeBackend::drive_like();
+    let a = top_root(&f);
+    let nfd = "\u{30AB}\u{3099}";
+    let c = mkdir(&f, &a, "ガ");
+    put(&f, &c, "a.cbz", b"a");
+    let d = mkdir(&f, &a, nfd);
+    put(&f, &d, "b.cbz", b"b");
+    let t = T::new(f);
+    t.steady();
+    t.policy();
+    std::thread::sleep(QUIET * 4);
+    assert!(t.s().recent_merges().is_empty());
+    assert_eq!(t.names(&c), ["a.cbz"]);
+    assert_eq!(t.names(&d), ["b.cbz"]);
+    // Still one library folder, the union.
+    let mut names: Vec<_> = fs::read_dir(t.abs("ガ"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a.cbz", "b.cbz"]);
+}
+
+#[test]
 fn a_same_named_file_keeps_the_newer_write_and_a_tie_keeps_the_canonical_copy() {
     let f = FakeBackend::drive_like();
     let a = top_root(&f);
@@ -455,6 +481,34 @@ fn a_same_named_file_keeps_the_newer_write_and_a_tie_keeps_the_canonical_copy() 
     assert!(!trashed.contains(&new) && !trashed.contains(&keep));
     assert_eq!(fs::read(t.abs("S/v.cbz")).unwrap(), b"new!");
     assert_eq!(fs::read(t.abs("S/t.cbz")).unwrap(), b"canon");
+    t.sync_feed();
+    t.never_suspect();
+}
+
+#[test]
+fn an_unknown_write_time_keeps_the_canonical_copy_the_index_already_shows() {
+    let f = FakeBackend::drive_like();
+    let a = top_root(&f);
+    let b = top_root(&f);
+    let sa = mkdir(&f, &a, "S");
+    let sb = mkdir(&f, &b, "S");
+    let keep = put(&f, &sa, "u.cbz", b"canon");
+    let lose = put(&f, &sb, "u.cbz", b"known");
+    let at = f.now_ms();
+    f.set_times(&keep, at - 10_000, 0);
+    f.set_times(&lose, at - 5_000, at);
+    let t = T::new(f);
+    t.steady();
+    // Before any merge, the path serves the copy the merge will keep.
+    assert_eq!(fs::read(t.abs("S/u.cbz")).unwrap(), b"canon");
+    t.policy();
+    wait_until("merged", || {
+        t.top_roots().len() == 1 && t.kids(&a).len() == 1 && t.kids(&sa).len() == 1
+    });
+    assert_eq!(t.bytes_in(&sa, "u.cbz"), [b"canon".to_vec()]);
+    let trashed = t.fake.trashed_log();
+    assert!(trashed.contains(&lose) && !trashed.contains(&keep));
+    assert_eq!(fs::read(t.abs("S/u.cbz")).unwrap(), b"canon");
     t.sync_feed();
     t.never_suspect();
 }
@@ -687,19 +741,20 @@ fn no_merge_while_an_ocr_claim_runs_in_a_moving_folder() {
 
 #[test]
 fn providers_without_duplicate_names_never_dedup() {
-    for make in [
-        FakeBackend::webdav_plain as fn() -> FakeBackend,
-        FakeBackend::onedrive_like,
-    ] {
-        let f = make();
-        f.reader_mkdir(&format!("{FOLDER}/S"));
-        f.reader_put(&format!("{FOLDER}/S/v.cbz"), b"v");
+    // Real duplicates, on a provider whose caps say it has none: the caps gate alone
+    // keeps the merge off.
+    for (name, make) in dup_profiles() {
+        let f = make().without_duplicate_names();
+        let (a, _) = two_roots(&f);
         let t = T::new(f);
         t.steady();
         t.policy();
-        std::thread::sleep(QUIET * 3);
-        assert!(t.s().recent_merges().is_empty());
-        assert_eq!(t.fake.calls(FakeOp::Update), 0);
+        std::thread::sleep(QUIET * 4);
+        assert!(t.s().recent_merges().is_empty(), "{name}");
+        assert_eq!(t.fake.calls(FakeOp::Update), 0, "{name}");
+        assert_eq!(t.top_roots().len(), 2, "{name}");
+        assert!(t.names(&a).is_empty(), "{name}");
+        assert!(t.fake.trashed_log().is_empty(), "{name}");
     }
 }
 

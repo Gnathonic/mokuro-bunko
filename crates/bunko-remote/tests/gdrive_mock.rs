@@ -233,6 +233,44 @@ async fn locate_roots_puts_a_top_level_root_before_an_older_nested_one() {
 }
 
 #[tokio::test]
+async fn locate_roots_falls_back_to_age_order_when_my_drive_cannot_be_asked() {
+    let e = env().await;
+    let other = e.mock.mkdir("root", "Backup");
+    let nested = e.mock.mkdir(&other, "mokuro-reader");
+    let top = e.mock.mkdir("root", "mokuro-reader");
+    // A refusal (404, or a file this grant may not see) is no reason to stay offline:
+    // the roots are still found, oldest first.
+    for (status, reason) in [(404, "notFound"), (403, "appNotAuthorizedToFile")] {
+        e.mock
+            .fault(Some("GET"), "/drive/v3/files/root", status, reason);
+        let roots = e.be.locate_roots("mokuro-reader").await.unwrap();
+        let pids: Vec<_> = roots.iter().map(|r| r.pid.clone()).collect();
+        assert_eq!(pids, [nested.clone(), top.clone()], "{status} {reason}");
+    }
+    // A passing failure is not remembered: the next locate asks again.
+    let roots = e.be.locate_roots("mokuro-reader").await.unwrap();
+    let pids: Vec<_> = roots.iter().map(|r| r.pid.clone()).collect();
+    assert_eq!(pids, [top.clone(), nested.clone()]);
+    assert_eq!(e.mock.count_path("GET", "/drive/v3/files/root", None), 3);
+}
+
+#[tokio::test]
+async fn locate_roots_still_fails_on_an_expired_grant_asking_for_my_drive() {
+    let e = env().await;
+    e.mock.mkdir("root", "mokuro-reader");
+    e.mock.fault_n(
+        Some("GET"),
+        "/drive/v3/files/root",
+        401,
+        "authError",
+        None,
+        10,
+    );
+    let err = e.be.locate_roots("mokuro-reader").await.unwrap_err();
+    assert!(matches!(err, BErr::AuthExpired), "{err:?}");
+}
+
+#[tokio::test]
 async fn list_all_keeps_descendants_only_buffering_orphans_across_pages() {
     let e = env().await;
     let lib = library(&e.mock);

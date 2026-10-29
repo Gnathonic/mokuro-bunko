@@ -237,6 +237,52 @@ fn equal_write_times_go_to_the_canonical_parent_then_the_smallest_pid() {
 }
 
 #[test]
+fn an_unknown_write_time_keeps_the_copy_a_duplicate_merge_keeps() {
+    // The merge walks the members canonical first and replaces its copy only with a
+    // strictly newer KNOWN write: the index shows that same copy.
+    let d = tempfile::tempdir().unwrap();
+    let idx = Index::open(&d.path().join("index.sqlite")).unwrap();
+    idx.set_roots(&[
+        dir("r-b", "top", "mokuro-reader", 10),
+        dir("r-a", "top", "mokuro-reader", 20),
+    ])
+    .unwrap();
+    let at = |mut n: RNode, ms: i64| {
+        n.base_mtime_ms = ms;
+        n
+    };
+    let tx = idx.begin().unwrap();
+    for n in [
+        // The canonical copy's time is unknown: a known time elsewhere never beats it.
+        at(file("u-b", "r-b", "u.cbz", 1), 0),
+        at(file("u-a", "r-a", "u.cbz", 2), 5),
+        // Three members, oldest first: s1, s2, s3.
+        dir("s1", "r-b", "S", 5),
+        dir("s2", "r-a", "S", 6),
+        dir("s3", "r-b", "S", 7),
+        // Canonical unknown, then two known: the canonical copy stays.
+        at(file("a1", "s1", "a.cbz", 1), 0),
+        at(file("a2", "s2", "a.cbz", 2), 5),
+        at(file("a3", "s3", "a.cbz", 3), 3),
+        // Canonical known, an unknown one between, then a newer one: the newest.
+        at(file("b1", "s1", "b.cbz", 1), 5),
+        at(file("b2", "s2", "b.cbz", 2), 0),
+        at(file("b3", "s3", "b.cbz", 3), 7),
+        // No copy in the canonical member: the first member's copy starts the walk.
+        at(file("c2", "s2", "c.cbz", 2), 0),
+        at(file("c3", "s3", "c.cbz", 3), 9),
+    ] {
+        idx.upsert(&tx, &n, 0, G_S).unwrap();
+    }
+    tx.commit().unwrap();
+    let winner = |p: &str| idx.lookup(&rel(p)).unwrap().winner_pid.unwrap();
+    assert_eq!(winner("u.cbz"), "u-b");
+    assert_eq!(winner("S/a.cbz"), "a1");
+    assert_eq!(winner("S/b.cbz"), "b3");
+    assert_eq!(winner("S/c.cbz"), "c2");
+}
+
+#[test]
 fn set_roots_keeps_the_given_order_and_the_first_is_the_root_winner() {
     let d = tempfile::tempdir().unwrap();
     let idx = Index::open(&d.path().join("index.sqlite")).unwrap();
@@ -319,6 +365,31 @@ fn dup_member_groups_are_same_name_same_parent_canonical_first() {
     );
     assert_eq!(groups[0].eid, ROOT_EID);
     assert_eq!(groups[1].eid, idx.lookup(&rel("B")).unwrap().eid);
+}
+
+#[test]
+fn dup_member_groups_split_nfc_equal_names_by_exact_spelling() {
+    // The reader groups by the exact name: an NFC and an NFD spelling are one index
+    // entry (the union) but never one duplicate group.
+    let f = fx();
+    let nfd = "\u{30AB}\u{3099}";
+    let spelled = |pid: &str, name: &str, created: i64| {
+        let mut n = dir(pid, "root-1", name, created);
+        n.name_raw = name.as_bytes().to_vec();
+        n
+    };
+    f.up(&spelled("c-1", "ガ", 1));
+    f.up(&spelled("d-1", nfd, 2));
+    assert!(f.idx.dup_member_groups().is_empty(), "one of each spelling");
+    f.up(&spelled("c-2", "ガ", 3));
+    f.up(&spelled("d-2", nfd, 4));
+    let got: Vec<Vec<String>> = f
+        .idx
+        .dup_member_groups()
+        .iter()
+        .map(|g| g.members.iter().map(|n| n.pid.clone()).collect())
+        .collect();
+    assert_eq!(got, [vec!["c-1", "c-2"], vec!["d-1", "d-2"]]);
 }
 
 #[test]

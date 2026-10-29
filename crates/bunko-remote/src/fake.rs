@@ -265,6 +265,13 @@ impl FakeBackend {
         })
     }
 
+    /// The same provider, claiming it cannot hold two nodes of one name: a gate that
+    /// reads `caps.duplicate_names`, tested on duplicates that are really there.
+    pub fn without_duplicate_names(mut self) -> Self {
+        self.profile.caps.duplicate_names = false;
+        self
+    }
+
     fn new(profile: Profile) -> Self {
         let root = account_root(profile.ids);
         let mut st = State {
