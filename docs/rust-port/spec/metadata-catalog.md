@@ -343,7 +343,7 @@ query ($ids: [Int]) {
 1. `/api/health`: GET => health; OPTIONS => `204` with `Allow: GET, OPTIONS`; other => 405 `{"error":"Method not allowed"}`.
 2. `/api/stats`: same method handling.
 3. `GET /_home/<file>` => static from `home/web/` (home.js, index.html, styles.css): `..` or leading `/` => 404 `{"error":"File not found"}`; escapes => 403 `{"error":"Forbidden"}`; missing => 404; `Cache-Control: no-cache`; MIME table (html, js, css, json, png, ico, svg, woff2, woff; else `mimetypes`, else octet-stream).
-4. `GET /` browser request with catalog enabled AND `use_as_homepage` => `302 Found` `Location: /catalog/`.
+4. `GET /` browser request with catalog enabled AND `use_as_homepage` => `302 Found` `Location: /catalog/` (0.8: `catalog/`, relative, for sub-path mounts).
 5. `GET /` browser request => `index.html` from home static.
 6. else pass through.
 `is_browser_request`: `Accept` contains `text/html` => true; else if User-Agent (lowercased) contains any of `davfs cadaver cyberduck webdav gvfs nautilus finder microsoft-webdav litmus` => false; else if the `Depth` header value contains the substring "Depth" (effectively never; source quirk: it tests `"Depth" in environ["HTTP_DEPTH"]`) => false; else true.

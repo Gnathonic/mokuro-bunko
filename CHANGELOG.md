@@ -103,6 +103,13 @@
   `"spine_offset": 0` (or `null`) now clears the stored offset, and the compiled
   `series.json` drops it; before, `0` read as "no opinion" and the old offset stayed
   forever. An update without the key still keeps it.
+- **The web pages work under a sub-path.** Behind a proxy that serves Bunko at
+  `https://example.com/bunko/` (prefix stripped), the home, catalog, login,
+  registration, account, queue, admin and setup pages loaded their styles, scripts and
+  APIs from the site root and broke. Every page now gets a `<base href>` back to the
+  mount root, and its URLs and redirects are relative. The setup session cookie no
+  longer names `Path=/setup`. See
+  [configuration](docs/configuration.md#under-a-sub-path-httpsexamplecombunko).
 - **A `.mokuro` or `series.json` saved with a byte-order mark is read.** Mokuro Reader
   accepts OCR files that start with a UTF-8 byte-order mark (some Windows editors add
   one); Bunko took them for unreadable, so it left their pages and characters out of

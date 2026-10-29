@@ -1518,6 +1518,48 @@ ocr:
   poll_interval: 60
 ```
 
+### Under a sub-path (`https://example.com/bunko/`)
+
+The web pages (home, catalog, login, registration, account, queue, admin, setup) work
+under a sub-path. The proxy strips the prefix, so Bunko sees `/catalog/` for
+`https://example.com/bunko/catalog/`. Bunko never needs to know the prefix:
+
+- every page gets a `<base href>` that leads from its own path back to the mount root
+  (`./` at `/catalog`, `../` at `/catalog/`)
+- every URL the pages and scripts use is relative to it
+- redirects are relative too (`/` answers `302 setup` or `302 catalog/`)
+
+Redirect the bare prefix to the prefix with a slash, so the pages' relative URLs
+resolve under the mount:
+
+```nginx
+location = /bunko {
+    return 301 /bunko/;
+}
+
+location /bunko/ {
+    # The trailing slash on proxy_pass strips /bunko.
+    proxy_pass http://127.0.0.1:8080/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    client_max_body_size 0;
+    proxy_request_buffering off;
+}
+```
+
+Add the proxy to `server.trusted_proxies` when it runs on another host. In Mokuro
+Reader, enter the server as `https://example.com/bunko`: the reader looks for
+`<mount>/login/api/me` first.
+
+Not prefix-aware:
+
+- WebDAV `PROPFIND` answers name their hrefs from the server root
+  (`/mokuro-reader/...`).
+- A remote OCR processor's registration hands out root paths (`/_processor/...`), so
+  processors need a server at the root of its host.
+
 ### Lite library server with a remote GPU processor
 
 ```yaml

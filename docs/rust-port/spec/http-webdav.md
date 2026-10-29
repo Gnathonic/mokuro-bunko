@@ -157,7 +157,7 @@ lists the order inside-out; this is the verified request-order:
 | 2 | `SecurityHeadersMiddleware` (`security_headers.py`) | adds headers to EVERY response (section 6) | |
 | 3 | `CorsMiddleware` iff `config.cors.enabled` (`server.py:409-410`) | preflight answers + CORS headers (section 5) | |
 | 4 | `StaticMiddleware` (`static/__init__.py`) | `/_static/*`, `/robots.txt` (section 7) | |
-| 5 | `SetupWizardAPI` | `/setup*`, `GET /` -> 302 `/setup` while no admin exists | other spec |
+| 5 | `SetupWizardAPI` | `/setup*`, `GET /` -> 302 `/setup` (0.8: `setup`) while no admin exists | other spec |
 | 6 | `HomePageAPI` | `/api/health`, `/api/stats`, `/_home/*`, `GET /` (browser) | other spec |
 | 7 | `AccountAPI` | `/account*`, `/api/account/*` | other spec |
 | 8 | `LoginAPI` | `/login*`, `/login/api/{check,token,me}`, `/api/nav/config` | other spec |
@@ -249,8 +249,8 @@ owns the payload shapes.
 |---|---|---|
 | `GET /robots.txt` | Static (7.2) | none |
 | `GET /_static/<file>` | Static (7.1) | none |
-| `GET /setup/api/status`, `POST /setup/api/complete`, `GET /setup`, `/setup/`, `/setup/<file>`; `GET /` -> `302 /setup` when setup needed and `Accept` has `text/html` | SetupWizardAPI | local-only while no admin (`setup/api.py:67-115`) |
-| `GET\|OPTIONS /api/health`, `GET\|OPTIONS /api/stats` (other methods 405 JSON `{"error":"Method not allowed"}`), `GET /_home/<file>`, `GET /` (browser) -> `302 /catalog/` if `catalog.enabled && catalog.use_as_homepage`, else `index.html` | HomePageAPI (`home/api.py:101-141`) | none |
+| `GET /setup/api/status`, `POST /setup/api/complete`, `GET /setup`, `/setup/`, `/setup/<file>`; `GET /` -> `302 /setup` (0.8: `setup`) when setup needed and `Accept` has `text/html` | SetupWizardAPI | local-only while no admin (`setup/api.py:67-115`) |
+| `GET\|OPTIONS /api/health`, `GET\|OPTIONS /api/stats` (other methods 405 JSON `{"error":"Method not allowed"}`), `GET /_home/<file>`, `GET /` (browser) -> `302 /catalog/` (0.8: `catalog/`) if `catalog.enabled && catalog.use_as_homepage`, else `index.html` | HomePageAPI (`home/api.py:101-141`) | none |
 | `GET /account`, `/account/`, `/account/<file>`, `GET /api/account/stats`, `POST /api/account/password`, `POST /api/account/delete`, `OPTIONS /api/account/*` | AccountAPI | own (bearer/basic) |
 | `POST /login/api/check`, `POST\|DELETE /login/api/token`, `GET /login/api/me`, `GET /api/nav/config`, `GET /login`, `/login/`, `/login/<file>` | LoginAPI | own |
 | `/api/register` (POST/GET/OPTIONS), `/api/register/config` (GET/OPTIONS), `/register`, `/register/`, `/register/<file>` | RegistrationAPI | none |

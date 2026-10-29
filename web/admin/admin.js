@@ -1,6 +1,6 @@
 // Admin Panel JavaScript
 
-const API_BASE = '/_admin/api';
+const API_BASE = '_admin/api';
 
 // State
 let users = [];
@@ -21,7 +21,7 @@ function getAuthHeaders() {
 
 async function logout() {
     await window.mokuroAuth.signOut();
-    window.location.href = '/';
+    window.location.href = './';
 }
 
 function getSessionRole() {
@@ -46,7 +46,7 @@ function trimToInvitesOnly() {
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     if (!window.mokuroAuth.token()) {
-        window.location.href = '/login?next=' + encodeURIComponent('/_admin' + window.location.hash);
+        window.location.href = 'login?next=' + encodeURIComponent('_admin' + window.location.hash);
         return;
     }
     const isInviter = getSessionRole() === 'inviter';
@@ -323,7 +323,7 @@ function apiError(response, data) {
         // The tab's token expired or was revoked (a password change signs
         // every session out): sign in again rather than show errors.
         window.mokuroAuth.clear();
-        window.location.href = '/login';
+        window.location.href = 'login';
     }
     const error = new Error((data && data.error) || 'Request failed');
     error.status = response.status;

@@ -111,7 +111,7 @@
         if (where === 'local') {
             if (storage && storage.configured && storage.configured.backend !== 'local') {
                 try {
-                    await postJSON('/setup/api/storage/local', {});
+                    await postJSON('setup/api/storage/local', {});
                 } catch (e) {
                     showError($('where-error'), e.message);
                     return;
@@ -157,7 +157,7 @@
         const label = btn.textContent;
         btn.textContent = finish ? 'Setting up…' : 'Testing…';
         try {
-            const data = await postJSON(finish ? '/setup/api/processor/setup' : '/setup/api/processor/test', f);
+            const data = await postJSON(finish ? 'setup/api/processor/setup' : 'setup/api/processor/test', f);
             if (!finish) {
                 const notes = (data.notes || []).join(' ');
                 $('pa-result').textContent = 'Connected to ' + data.url + ' as ' + data.username
@@ -297,7 +297,7 @@
         $('connect-paste-url').value = '';
         showError($('connect-paste-error'), '');
         try {
-            await postJSON('/setup/api/storage/connect', connectBody(flow));
+            await postJSON('setup/api/storage/connect', connectBody(flow));
         } catch (e) {
             if (tab) tab.close();
             $('connect-btn').disabled = false;
@@ -320,7 +320,7 @@
         const tick = async () => {
             let s;
             try {
-                s = await getJSON('/setup/api/storage/connect');
+                s = await getJSON('setup/api/storage/connect');
             } catch (e) {
                 showError($('connect-error'), e.message);
                 $('connect-btn').disabled = false;
@@ -408,7 +408,7 @@
                 use.textContent = 'Use this account\'s library instead';
                 use.onclick = async () => {
                     try {
-                        await postJSON('/setup/api/storage/connect/account', { use_this_account: true });
+                        await postJSON('setup/api/storage/connect/account', { use_this_account: true });
                         pollConnect(null);
                     } catch (e) { showError($('connect-error'), e.message); }
                 };
@@ -416,7 +416,7 @@
                 no.className = 'btn btn--secondary btn--sm';
                 no.textContent = 'Cancel';
                 no.onclick = async () => {
-                    await postJSON('/setup/api/storage/connect/account', { use_this_account: false }).catch(() => {});
+                    await postJSON('setup/api/storage/connect/account', { use_this_account: false }).catch(() => {});
                     live.hidden = true;
                 };
                 row.append(use, no);
@@ -483,8 +483,8 @@
     async function createFolder() {
         $('check-create').disabled = true;
         try {
-            const r = await postJSON('/setup/api/storage/connect/create', {});
-            const s = await getJSON('/setup/api/storage/connect');
+            const r = await postJSON('setup/api/storage/connect/create', {});
+            const s = await getJSON('setup/api/storage/connect');
             s.check = r.check;
             renderCheck(s);
         } catch (e) {
@@ -507,7 +507,7 @@
         if (!url) { showError($('connect-paste-error'), 'Paste the address the browser ended on'); return; }
         $('connect-paste-btn').disabled = true;
         try {
-            await postJSON('/setup/api/storage/connect/paste', { url });
+            await postJSON('setup/api/storage/connect/paste', { url });
             $('connect-paste-url').value = '';
             showError($('connect-paste-error'), '');
             $('connect-paste').hidden = true;
@@ -677,7 +677,7 @@
         let data = {};
         let ok = false;
         try {
-            const resp = await fetch('/setup/api/complete', {
+            const resp = await fetch('setup/api/complete', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload),
@@ -703,7 +703,7 @@
         // /_static/nav.js does; it is not kept).
         let token = null;
         try {
-            const t = await fetch('/login/api/token', {
+            const t = await fetch('login/api/token', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username, password, kind: 'web', label: 'web page' }),
@@ -728,18 +728,19 @@
         const pairing = data.processor && data.processor.username ? data.processor : null;
         if (pairing) showPairing(pairing, token);
         if (data.restarting && data.https) {
-            const url = 'https://' + location.host + '/_admin#server';
-            $('done-admin').href = url;
+            const root = new URL('.', document.baseURI);
+            root.protocol = 'https:';
+            $('done-admin').href = new URL('_admin#server', root).href;
             $('done-text').textContent = 'Restarting with HTTPS…';
-            await waitFor(url.replace('/_admin#server', '/api/health'), 30);
+            await waitFor(new URL('api/health', root).href, 30);
             $('done-text').textContent = 'Sign in at the HTTPS address.';
             return;
         }
         if (isCloud()) {
-            $('done-admin').href = '/_admin#storage';
+            $('done-admin').href = '_admin#storage';
             if (data.restarting) {
                 $('done-text').textContent = 'Opening the library: the server restarts…';
-                await waitFor('/api/health', 60);
+                await waitFor('api/health', 60);
             }
             followFirstSync(token);
             return;
@@ -748,11 +749,12 @@
             $('done-text').textContent = 'Pair a processor to start the OCR.';
             return;
         }
-        window.location.href = '/_admin#server';
+        window.location.href = '_admin#server';
     }
 
     function showPairing(p, token) {
-        const url = location.origin;
+        // The mount root (the origin, unless the server sits under a sub-path).
+        const url = new URL('.', document.baseURI).href.replace(/\/$/, '');
         $('done-pairing').hidden = false;
         $('done-pair-url').textContent = url;
         $('done-pair-user').textContent = p.username;
@@ -761,7 +763,7 @@
         if (!token) return;
         const tick = async () => {
             try {
-                const r = await getJSON('/_admin/api/processors', token);
+                const r = await getJSON('_admin/api/processors', token);
                 const list = (r.processors || []).filter((x) => x && (x.connected !== false));
                 if (list.length) {
                     const n = list[0];
@@ -789,7 +791,7 @@
         let idle = 0; // polls with nothing to OCR and nothing owed
         const tick = async () => {
             let st = null;
-            try { st = await getJSON('/_admin/api/storage', token); } catch (_) { /* restarting */ }
+            try { st = await getJSON('_admin/api/storage', token); } catch (_) { /* restarting */ }
             if (st && !synced) {
                 const h = st.health || {};
                 if (h.state === 'syncing') {
@@ -811,7 +813,7 @@
             }
             if (synced) {
                 let q = null;
-                try { q = await getJSON('/queue/api/status', token); } catch (_) { /* OCR starting */ }
+                try { q = await getJSON('queue/api/status', token); } catch (_) { /* OCR starting */ }
                 // An OCR result the store still owes the cloud (the setup is accepted
                 // once it has gone up).
                 const owed = ((st && st.outbox && st.outbox.owed_ops) || []).filter((o) => /^ocr/.test(o.origin || '') && /\.mokuro$/.test(o.path || ''));
@@ -867,19 +869,19 @@
 
     document.addEventListener('DOMContentLoaded', async () => {
         try {
-            const resp = await fetch('/setup/api/status');
+            const resp = await fetch('setup/api/status');
             const data = await resp.json();
             if (!data.needs_setup) {
-                window.location.href = '/';
+                window.location.href = './';
                 return;
             }
         } catch (_) { /* go on */ }
         try {
-            const r = await fetch('/setup/api/options');
+            const r = await fetch('setup/api/options');
             if (r.ok) options = await r.json();
         } catch (_) { /* the defaults */ }
         try {
-            storage = await getJSON('/setup/api/storage');
+            storage = await getJSON('setup/api/storage');
         } catch (_) { storage = null; }
         if (!options.local) {
             // Files on the server can be named on the server itself only.

@@ -324,7 +324,7 @@ Routes (setup/api.py:61-117):
 | `POST /setup/api/complete` | non-local -> same 403 (even after setup); not needed -> `400 {"error":"Setup already completed"}`; else the handler below |
 | `GET /setup`, `GET /setup/` | needed && non-local -> 403 JSON; else serves `web/index.html` |
 | `GET /setup/<file>` (not starting `api/`) | same gate; serves `setup/web/<file>` (assets: index.html, setup.css, setup.js; Rust: embed these) |
-| `GET /` with `Accept` containing `text/html` and setup needed | `302 Location: /setup` (empty body) |
+| `GET /` with `Accept` containing `text/html` and setup needed | `302 Location: /setup` (empty body; 0.8: `setup`) |
 | anything else | passed to the wrapped app |
 "Local" (`_is_local_request`, setup/api.py:172-183): `REMOTE_ADDR` must be a loopback IP; and the effective client IP (`get_client_ip`, 3.1), if different from `REMOTE_ADDR`, must also be loopback. A localhost reverse proxy forwarding a public client's `X-Real-IP` is therefore rejected; Docker bridge networking (non-loopback peer) makes setup unreachable from the host browser unless using localhost inside the container.
 

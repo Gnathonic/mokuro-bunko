@@ -550,7 +550,7 @@ async fn login_pages() {
         assert_eq!(r.status, 200);
         assert_eq!(r.header("content-type"), Some("text/html; charset=utf-8"));
         assert_eq!(r.header("cache-control"), Some("no-cache"));
-        assert!(r.text().contains("/login/login.js"));
+        assert!(r.text().contains(r#"src="login/login.js""#));
     }
     let r = env.send(empty(req("GET", "/login/login.js"))).await;
     assert_eq!(r.status, 200);
