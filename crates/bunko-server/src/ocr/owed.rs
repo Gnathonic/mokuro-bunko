@@ -169,6 +169,7 @@ fn compute_in(
 }
 
 /// Every `library/**/*.cbz` (a case-sensitive `.cbz` suffix, as 0.5.2's glob), sorted.
+/// The per-user names at the root (a cloud progress user's `history/`) are not walked.
 pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![library.to_path_buf()];
@@ -176,7 +177,16 @@ pub fn list_archives(library: &Path) -> Vec<std::path::PathBuf> {
         let Ok(rd) = fs::read_dir(&dir) else {
             continue;
         };
+        let top = dir.as_path() == library;
         for entry in rd.flatten() {
+            if top
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(bunko_core::reader_tree::is_per_user_root_name)
+            {
+                continue;
+            }
             let Ok(ft) = entry.file_type() else { continue };
             let path = entry.path();
             if ft.is_dir() {
@@ -307,6 +317,27 @@ mod tests {
     use super::*;
     use crate::ocr::types::FileFacts;
     use bunko_core::generations::default_generation;
+
+    /// The per-user tree at the root (a cloud progress user's `history/`, whose names
+    /// may end in `.cbz`) is never walked; a series' own `history/` folder is.
+    #[test]
+    fn list_archives_skips_the_per_user_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("library");
+        for rel in [
+            "history/dev-1/x.cbz",
+            "Series/history/v.cbz",
+            "Series/v.cbz",
+        ] {
+            let path = lib.join(rel);
+            bunko_store::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            bunko_store::fs::write(&path, b"zip").unwrap();
+        }
+        assert_eq!(
+            list_archives(&lib),
+            vec![lib.join("Series/history/v.cbz"), lib.join("Series/v.cbz")]
+        );
+    }
 
     fn rows() -> Vec<Generation> {
         let mut layer = default_generation("g-2");

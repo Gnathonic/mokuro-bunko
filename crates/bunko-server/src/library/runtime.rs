@@ -737,8 +737,15 @@ impl LibraryRuntime {
     }
 
     /// One watcher event (also what [`on_library_write`](Self::on_library_write) feeds).
+    /// The per-user tree at the root (a cloud progress user's `history/`, whose names
+    /// may end in `.cbz`) is no library content: it reaches neither OCR nor the index,
+    /// and refreshes no shared listing.
     pub fn on_watch_event(&self, event: WatchEvent) {
-        if self.is_stopped() {
+        if self.is_stopped()
+            || event
+                .path()
+                .is_some_and(|p| crate::ocr::types::is_per_user_path(&self.library, p))
+        {
             return;
         }
         self.archive_event(&event);

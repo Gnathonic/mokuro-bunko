@@ -74,7 +74,8 @@ base_path/
 │   └── catalog.json                     # compiled by the server
 ├── inbox/                   # Legacy 0.5 directory: created and must be writable, but unused
 ├── users/                   # Per-user reading progress
-│   └── alice/volume-data.json, profiles.json, goals.json, positions.json
+│   └── alice/volume-data.json, profiles.json, goals.json, positions.json,
+│       history/<device>/…   # reading history (≤ 16 MiB a file, 256 MiB an account)
 ├── logs/                    # server.log (rotated to .1–.5), *-console.log from the desktop app/tray
 ├── processors/              # Per-machine OCR profiles (remote processors)
 ├── backends/                # OCR backend pack: libtorch for CUDA / ROCm / CPU (install-ocr; full build)

@@ -96,7 +96,8 @@ fn default_active() -> MarkerState {
 /// ```json
 /// {"version":1,"kind":"mokuro-bunko","instance_id":"6f1c…","boot_id":"a93e…","instance_name":"nas",
 ///  "bunko_version":"0.8.0","epoch":3,"claimed_at":"…","heartbeat_at":"…","ttl_s":900,"state":"active",
-///  "compiles":["series.json","catalog.json"],"ocr":true,"queue":".mokuro-queue.json","took_over_from":null}
+///  "compiles":["series.json","catalog.json"],"ocr":true,"queue":".mokuro-queue.json","took_over_from":null,
+///  "per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"]}
 /// ```
 ///
 /// Reading is lenient (a newer Bunko's marker must still be respected): only `kind`,
@@ -143,6 +144,11 @@ pub struct Marker {
     /// The `instance_id` this marker took the lease over from.
     #[serde(default)]
     pub took_over_from: Option<String>,
+    /// The names under `/mokuro-reader` the holder keeps per account, as
+    /// `/login/api/me` lists them (`history/` is a directory tree). A cloud-direct
+    /// reader turns per-account features on from it; absent (before 0.8): none.
+    #[serde(default)]
+    pub per_user_files: Vec<String>,
 }
 
 impl Marker {
@@ -258,6 +264,8 @@ pub struct LeaseConfig {
     pub ocr: bool,
     /// The marker's `queue`.
     pub queue: Option<String>,
+    /// The marker's `per_user_files`.
+    pub per_user_files: Vec<String>,
     /// A heartbeat writes a new node and then permanently deletes the previous own
     /// node (MEGA, where an update is a new node), instead of replacing in place.
     pub heartbeat_new_node: bool,
@@ -285,6 +293,7 @@ impl LeaseConfig {
             compiles: vec!["series.json".into(), "catalog.json".into()],
             ocr: true,
             queue: Some(".mokuro-queue.json".into()),
+            per_user_files: Vec::new(),
             heartbeat_new_node: false,
         }
     }
@@ -820,6 +829,7 @@ impl<B: Backend> Lease<B> {
             ocr: self.cfg.ocr,
             queue: self.cfg.queue.clone(),
             took_over_from,
+            per_user_files: self.cfg.per_user_files.clone(),
         }
     }
 
@@ -847,6 +857,7 @@ impl<B: Backend> Lease<B> {
                     m.compiles = self.cfg.compiles.clone();
                     m.ocr = self.cfg.ocr;
                     m.queue = self.cfg.queue.clone();
+                    m.per_user_files = self.cfg.per_user_files.clone();
                     let ok_at = self.clock.now_ms();
                     let Some(node) = self.write_marker(&m, &set, WriteMode::Claim).await? else {
                         continue;
@@ -1803,6 +1814,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.state, MarkerState::Unknown);
+        // A marker from before 0.8 keeps no per-user files.
+        assert!(m.per_user_files.is_empty());
         assert!(Marker::parse(br#"{"kind":"other","instance_id":"x","epoch":4}"#).is_none());
         assert!(Marker::parse(b"{}").is_none());
     }

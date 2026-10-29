@@ -231,7 +231,14 @@ impl Services {
                     let layout = layout.with_library_root(store.root());
                     (guard, Some(handle), layout)
                 }
-                None => (crate::library::mount_local(&layout.library()), None, layout),
+                None => {
+                    if let Some(r) =
+                        crate::storage::doctor::history_series_row(&layout.library(), None)
+                    {
+                        tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
+                    }
+                    (crate::library::mount_local(&layout.library()), None, layout)
+                }
             };
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
         let dyndns = DynDnsService::new(config.dyndns.clone());
@@ -245,6 +252,7 @@ impl Services {
                 budget_bytes: cache_mb * 1024 * 1024 / 2,
                 ..Default::default()
             },
+            ..Default::default()
         };
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
         let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
@@ -334,12 +342,15 @@ impl Services {
 
 /// Drop the cached PROPFIND listings a store change touches (the path's own, its
 /// ancestors' and its descendants'), as a DAV write does for its own changes; a
-/// `Rescan` drops them all (spec §10).
+/// `Rescan` drops them all (spec §10). The progress user's per-user tree is in no
+/// shared listing (each caller's own is appended per request), so its changes drop
+/// nothing, as its DAV writes do not.
 fn watch_listings(dav: &bunko_dav::Dav, library: &Path) -> Option<bunko_store::WatchGuard> {
     let store = bunko_store::store_for(library)?;
     let (dav, root) = (dav.clone(), library.to_path_buf());
     let sink: bunko_store::WatchSink = Arc::new(move |ev: bunko_store::WatchEvent| {
         match ev.path().and_then(|p| crate::ocr::types::rel_of(&root, p)) {
+            Some(rel) if bunko_core::reader_tree::is_per_user_rel(&rel) => {}
             Some(rel) => dav.invalidate_listing(&[format!("/{}/{rel}", auth::paths::READER_ROOT)]),
             None => dav.propfind_cache().invalidate(),
         }
@@ -442,19 +453,24 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
     (st.dav)(req, ctx).await
 }
 
-/// The WebDAV handler over `bunko-dav`, with the server's hooks.
+/// The WebDAV handler over `bunko-dav`, with the server's hooks. `core` carries the
+/// live config: who owns the cloud root's per-user files is decided from it on every
+/// request ([`Core::owns_cloud_root`]), so an admin's change needs no restart.
 pub fn dav_handler(
     dav: bunko_dav::Dav,
     hooks: Arc<crate::davhooks::ServerDavHooks>,
+    core: Core,
 ) -> DavFallback {
     let nginx_accel = std::env::var("MOKURO_NGINX_ACCEL").is_ok_and(|v| v.trim() == "1");
     Arc::new(move |req, ctx| {
         let dav = dav.clone();
         let hooks: Arc<dyn bunko_dav::DavHooks> = hooks.clone();
+        let owns_cloud_root = core.owns_cloud_root(ctx.identity.username());
         Box::pin(async move {
             let dctx = bunko_dav::DavContext {
                 username: ctx.identity.username().map(str::to_string),
                 role: ctx.identity.role(),
+                owns_cloud_root,
                 nginx_accel,
                 client_ip: Some(ctx.client_ip.clone()),
                 hooks,
@@ -806,6 +822,15 @@ pub fn start_library_services(
                 storage.engine_state()
             );
         }
+        {
+            // doctor cannot see the cloud folder: the reserved-name finding is logged here.
+            let (lib, folder) = (library_dir.clone(), storage.folder.clone());
+            tokio::task::spawn_blocking(move || {
+                if let Some(r) = crate::storage::doctor::history_series_row(&lib, Some(&folder)) {
+                    tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
+                }
+            });
+        }
         let covers = thumbs.spawn_remote(library_dir, stop.child_token());
         ocr.start(stop.child_token());
         publish_cloud_queue(ocr, storage.clone(), stop.child_token());
@@ -967,7 +992,11 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         core: services.core.clone(),
         ocr: Some(ocr.clone()),
     };
-    let dav = dav_handler(services.dav.clone(), services.dav_hooks.clone());
+    let dav = dav_handler(
+        services.dav.clone(),
+        services.dav_hooks.clone(),
+        services.core.clone(),
+    );
     let catalog = library.clone();
     let writes = services.writes.clone();
     let path_case = services.dav.path_case().clone();

@@ -18,6 +18,7 @@ use crate::resource::{FileKind, Resource, Stat, content_type};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::xml::{MULTISTATUS_CLOSE, MULTISTATUS_OPEN};
 use crate::{Inner, paths};
+use bunko_core::reader_tree;
 
 const ALLOW_COLLECTION: &str =
     "OPTIONS, HEAD, GET, PROPFIND, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
@@ -52,7 +53,7 @@ pub(crate) async fn options(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     if req.path == "*" {
         return Ok(resp);
     }
-    let res = lookup(inner, &req.path, req.username()).await?;
+    let res = lookup(inner, &req.path, req).await?;
     match &res {
         Some(r) if r.is_collection() => response::set_header(&mut resp, "allow", ALLOW_COLLECTION),
         Some(r) => {
@@ -63,7 +64,7 @@ pub(crate) async fn options(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
         }
         None => {
             let parent = match paths::uri_parent(&req.path) {
-                Some(p) => lookup(inner, &p, req.username()).await?,
+                Some(p) => lookup(inner, &p, req).await?,
                 None => None,
             };
             if parent.is_some_and(|p| p.is_collection()) {
@@ -92,7 +93,7 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
             ));
         }
     };
-    let res = lookup(inner, &req.path, req.username())
+    let res = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
     eval_if(inner, req, &res)?;
@@ -121,7 +122,7 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
     let mode =
         propfind::parse_mode(&body).ok_or_else(|| DavError::status(StatusCode::BAD_REQUEST))?;
     let inner2 = inner.clone();
-    let user = req.username().map(str::to_string);
+    let dctx = req.ctx.clone();
     if depth == Some(1) && res.is_collection() {
         // A folder's members: generated compressed in one of the cache's bounded
         // generation slots and streamed out, so a 30k-member folder costs its compressed
@@ -130,7 +131,7 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
             .cache
             .live(move |feed| {
                 let ctx = PropCtx {
-                    username: user.as_deref(),
+                    caller: dctx.caller(),
                     locks: Some(&inner2.locks),
                     dead: Some(&inner2.dead),
                 };
@@ -142,7 +143,7 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
     }
     let xml = blocking(move || {
         let ctx = PropCtx {
-            username: user.as_deref(),
+            caller: dctx.caller(),
             locks: Some(&inner2.locks),
             dead: Some(&inner2.dead),
         };
@@ -161,12 +162,13 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
     ))
 }
 
-/// The caller's own progress files, appended to a shared `/` or `/mokuro-reader` listing
-/// (spec §10.1 item 4).
+/// The caller's own tree, appended to a shared `/` or `/mokuro-reader` listing (spec
+/// §10.1 item 4): its root files, then its whole `history/` (a Depth-infinity listing is
+/// allprop at every level). The cached shared body itself stays anonymous.
 async fn injected_progress(inner: &Arc<Inner>, req: &Req, norm: &str) -> DavResult<String> {
-    let Some(user) = req.username().map(str::to_string) else {
+    if req.caller().is_none() {
         return Ok(String::new());
-    };
+    }
     if !matches!(
         paths::classify(norm),
         paths::Target::Root | paths::Target::ReaderRoot
@@ -174,20 +176,34 @@ async fn injected_progress(inner: &Arc<Inner>, req: &Req, norm: &str) -> DavResu
         return Ok(String::new());
     }
     let inner = inner.clone();
+    let dctx = req.ctx.clone();
     blocking(move || {
         let mut out = String::new();
         let ctx = PropCtx {
-            username: Some(&user),
+            caller: dctx.caller(),
             locks: None,
             dead: None,
         };
         for name in paths::PER_USER_FILES {
             if let Some(res) = inner
                 .roots
-                .lookup(&format!("/{}/{name}", paths::READER_ROOT), Some(&user))
+                .lookup(&format!("/{}/{name}", paths::READER_ROOT), ctx.caller)
             {
                 propfind::write_response(&mut out, &res, &Mode::AllProp, &ctx);
             }
+        }
+        let history = format!("/{}/{}", paths::READER_ROOT, reader_tree::HISTORY_DIR);
+        if let Some(res) = inner.roots.lookup(&history, ctx.caller)
+            && res.is_collection()
+        {
+            propfind::walk(
+                &inner.roots,
+                &res,
+                None,
+                &Mode::AllProp,
+                &ctx,
+                &mut |chunk| out.push_str(chunk),
+            );
         }
         out
     })
@@ -208,7 +224,7 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
             "Only Depth: 0 supported.",
         ));
     }
-    let res = lookup(inner, &req.path, req.username())
+    let res = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
     let Resource::File { phys, .. } = &res else {

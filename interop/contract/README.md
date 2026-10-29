@@ -9,7 +9,8 @@ to the contract shows up as a fixture diff in the pull request that makes it.
 - `seed.json`: the users and the library every fixture is made from. The passwords are
   test values for a throwaway in-process server. `reader` is an uploader (may write
   progress and add files), `viewer` a processor account (the only signed-in role with
-  neither right), `admin` an admin. Volume 01 has OCR, a layer sidecar and a cover;
+  neither right), `admin` an admin, `progress` a `registered` account (progress and
+  reading history only; the `history-*` fixtures are its). Volume 01 has OCR, a layer sidecar and a cover;
   Volume 02 has no OCR; one series and its volume have Japanese names.
 - `bunko/<name>.json`: what Bunko answers, written by
   `crates/bunko-server/tests/contract_export.rs` from a seeded full-stack server. The
@@ -67,9 +68,14 @@ Anything that changes from run to run is replaced by a value of the same JSON ty
 | `Content-Digest` (reader records) | `"<digest>"` |
 | token | `"<token>"` |
 | random ids (`instance_id`, `boot_id`, `took_over_from`) | `00000000-0000-4000-8000-00000000000N` for a UUID, else `"<id-N>"`, numbered by first appearance |
-| Bunko version / machine name | `"0.0.0"` / `"contract-host"` |
+| Bunko version (`bunko_version`, `server_version`, and the top-level `version` of a `/login/api/me` body only) / machine name | `"0.0.0"` / `"contract-host"` |
 | a wait counted down (`Retry-After`, `Retry in Ns`) | rounded up to whole minutes |
 | the lease claim's `about N min left` | `about <n> min left` |
+
+`version` is replaced in `/login/api/me` bodies alone: everywhere else (a `.mokuro`, the
+queue file, the marker) it names a file format and is contract. The sentinel is below
+0.8.0, so a reader test that derives its history gate from a recorded identity sees it
+off: such a test sets the gate itself.
 
 Every other id (a `.mokuro`'s uuids, the uuid Bunko derives for a volume without one) is
 contract and stays as written, and objects keep Bunko's key order. Archives and the cover

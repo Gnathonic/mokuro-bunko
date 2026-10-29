@@ -17,7 +17,14 @@
     ],
     "ocr": true,
     "queue": ".mokuro-queue.json",
-    "took_over_from": null
+    "took_over_from": null,
+    "per_user_files": [
+      "volume-data.json",
+      "profiles.json",
+      "goals.json",
+      "positions.json",
+      "history/"
+    ]
   },
   "request": {
     "file": ".mokuro-bunko.json"

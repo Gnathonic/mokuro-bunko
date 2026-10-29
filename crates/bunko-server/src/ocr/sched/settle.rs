@@ -611,7 +611,10 @@ impl Scheduler {
         let Some(rel) = rel_of(&library, path) else {
             return;
         };
-        if !bunko_library::sidecar::is_cbz_name(&rel) {
+        // An archive in the per-user tree (the history rule allows the name) is no volume.
+        if !bunko_library::sidecar::is_cbz_name(&rel)
+            || bunko_core::reader_tree::is_per_user_rel(&rel)
+        {
             return;
         }
         self.cancel_stale_jobs(|r| r == rel);

@@ -131,6 +131,12 @@ pub trait CaseMergePolicy: Send + Sync {
     fn is_unstamped_layer(&self, id: &str) -> bool {
         is_unstamped_layer_id(id)
     }
+    /// A variant set the merge leaves alone: `dir` is its parent folder as spelled
+    /// (store segments), `key` the folded name the variants share. The server keeps
+    /// its per-user tree (a cloud root owner's `history/`) out of case merges.
+    fn excluded(&self, _dir: &[String], _key: &str) -> bool {
+        false
+    }
     /// An OCR claim is running or spooling, or an upgrade is being judged or
     /// swapped, for the volume at `path` or any volume under it.
     fn busy(&self, _path: &Path) -> bool {
@@ -951,6 +957,9 @@ impl<B: Backend> RemoteStore<B> {
     /// Check one variant set's conditions; plan and run it when they hold.
     fn try_set(&self, set: &VariantSet, policy: &dyn CaseMergePolicy) -> Result<(), Crash> {
         let scope = &set.scope;
+        if policy.excluded(set.parent.segments(), &scope.key) {
+            return Ok(());
+        }
         if self.merge.busy.lock().iter().any(|(_, s)| s == scope) {
             return Ok(());
         }

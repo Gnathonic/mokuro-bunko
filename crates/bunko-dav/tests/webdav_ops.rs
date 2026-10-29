@@ -1191,6 +1191,14 @@ async fn physical_path_mapping() {
     let lib = std::fs::canonicalize(env.base.join("library")).unwrap();
     let users = std::fs::canonicalize(env.base.join("users")).unwrap();
     let dav = &env.dav;
+    let alice = Some(bunko_dav::Caller {
+        username: "alice",
+        owns_cloud_root: false,
+    });
+    let owner = Some(bunko_dav::Caller {
+        username: "alice",
+        owns_cloud_root: true,
+    });
     assert_eq!(dav.physical_path("/", None), None);
     assert_eq!(dav.physical_path("/mokuro-reader", None), None);
     assert_eq!(
@@ -1202,16 +1210,36 @@ async fn physical_path_mapping() {
         Some(lib.join("series/new.cbz"))
     );
     assert_eq!(
-        dav.physical_path("/mokuro-reader/volume-data.json", Some("alice")),
+        dav.physical_path("/mokuro-reader/volume-data.json", alice),
         Some(users.join("alice/volume-data.json"))
+    );
+    assert_eq!(
+        dav.physical_path("/mokuro-reader/history/d/x.events", alice),
+        Some(users.join("alice/history/d/x.events"))
+    );
+    assert_eq!(
+        dav.physical_path("/mokuro-reader/history/d/x.events", owner),
+        Some(lib.join("history/d/x.events"))
+    );
+    assert_eq!(
+        dav.physical_path("/mokuro-reader/goals.json", owner),
+        Some(lib.join("goals.json"))
+    );
+    assert_eq!(
+        dav.physical_path("/mokuro-reader/history/../../x", alice),
+        None
     );
     assert_eq!(
         dav.physical_path("/mokuro-reader/volume-data.json", None),
         None
     );
     assert_eq!(dav.physical_path("/mokuro-reader/../escape", None), None);
-    assert_eq!(dav.physical_path("/inbox/x.cbz", Some("alice")), None);
-    assert_eq!(dav.physical_path("/foo", Some("alice")), None);
+    assert_eq!(
+        dav.physical_path("/mokuro-reader/series/../goals.json", owner),
+        None
+    );
+    assert_eq!(dav.physical_path("/inbox/x.cbz", alice), None);
+    assert_eq!(dav.physical_path("/foo", alice), None);
 }
 
 #[tokio::test]
@@ -1415,4 +1443,497 @@ async fn positions_json_is_per_user() {
         .req(None, "PROPFIND", "/mokuro-reader", &[("depth", "1")], b"")
         .await;
     assert!(!anon.text().contains("positions.json"));
+}
+
+// --- The per-account reading-history tree (0.8) ---------------------------------------
+
+const EVENTS: &str = "/mokuro-reader/history/dev-1/2026-10.events";
+
+/// MKCOL `history` and `history/dev-1` as `user`, then PUT one events file.
+async fn put_history(env: &Env, user: &str, body: &[u8]) {
+    for path in ["/mokuro-reader/history", "/mokuro-reader/history/dev-1"] {
+        let r = env.req(Some(user), "MKCOL", path, &[], b"").await;
+        assert!(
+            matches!(r.code(), 201 | 405),
+            "{user} MKCOL {path}: {}",
+            r.code()
+        );
+    }
+    let r = env.req(Some(user), "PUT", EVENTS, &[], body).await;
+    assert!(matches!(r.code(), 201 | 204), "{user} PUT: {}", r.code());
+}
+
+#[tokio::test]
+async fn history_is_per_user() {
+    let env = Env::new();
+    put_history(&env, "reader", b"reader events").await;
+    put_history(&env, "uploader", b"uploader events").await;
+    for (user, body) in [("reader", "reader events"), ("uploader", "uploader events")] {
+        let r = env.req(Some(user), "GET", EVENTS, &[], b"").await;
+        assert_eq!((r.code(), r.text().as_str()), (200, body), "{user}");
+        assert_eq!(
+            std::fs::read_to_string(
+                env.base
+                    .join(format!("users/{user}/history/dev-1/2026-10.events"))
+            )
+            .unwrap(),
+            body
+        );
+    }
+    assert!(!env.lib("history").exists());
+    assert_eq!(env.req(None, "GET", EVENTS, &[], b"").await.code(), 404);
+    assert_eq!(
+        env.req(Some("admin"), "GET", EVENTS, &[], b"").await.code(),
+        404
+    );
+}
+
+#[tokio::test]
+async fn history_listing() {
+    let env = Env::new();
+    put_history(&env, "reader", b"reader events").await;
+    let depth1 = |user| env.req(user, "PROPFIND", "/mokuro-reader", &[("depth", "1")], b"");
+    assert!(
+        depth1(Some("reader"))
+            .await
+            .text()
+            .contains("<D:href>/mokuro-reader/history/</D:href>")
+    );
+    for user in [None, Some("uploader")] {
+        assert!(!depth1(user).await.text().contains("history"), "{user:?}");
+    }
+    for path in ["/mokuro-reader", "/mokuro-reader/history", "/"] {
+        let r = env
+            .req(
+                Some("reader"),
+                "PROPFIND",
+                path,
+                &[("depth", "infinity")],
+                b"",
+            )
+            .await;
+        assert_eq!(r.code(), 207, "{path}");
+        let t = r.text();
+        let at = t
+            .find("<D:href>/mokuro-reader/history/dev-1/2026-10.events</D:href>")
+            .unwrap_or_else(|| panic!("{path}: {t}"));
+        let entry = &t[at..at + t[at..].find("</D:response>").unwrap()];
+        assert!(
+            entry.contains("<D:getcontentlength>13</D:getcontentlength>"),
+            "{path}"
+        );
+        assert!(entry.contains("<D:getlastmodified>"), "{path}");
+        assert!(entry.contains("<D:getetag>"), "{path}");
+        assert!(
+            t.contains("<D:href>/mokuro-reader/history/dev-1/</D:href>"),
+            "{path}"
+        );
+        assert!(t.ends_with("</D:response></D:multistatus>"), "{path}");
+    }
+    // Another account sees none of it, whatever the depth.
+    for user in [None, Some("uploader")] {
+        let r = env
+            .req(
+                user,
+                "PROPFIND",
+                "/mokuro-reader",
+                &[("depth", "infinity")],
+                b"",
+            )
+            .await;
+        assert!(!r.text().contains("history"), "{user:?}");
+    }
+    assert_eq!(
+        env.req(
+            Some("uploader"),
+            "PROPFIND",
+            "/mokuro-reader/history",
+            &[("depth", "infinity")],
+            b""
+        )
+        .await
+        .code(),
+        404
+    );
+}
+
+#[tokio::test]
+async fn stray_history_in_library_is_not_listed() {
+    let env = Env::new();
+    std::fs::create_dir_all(env.lib("history/dev")).unwrap();
+    std::fs::write(env.lib("history/dev/x.events"), b"stray").unwrap();
+    for user in [None, Some("reader")] {
+        for depth in ["1", "infinity"] {
+            let r = env
+                .req(user, "PROPFIND", "/mokuro-reader", &[("depth", depth)], b"")
+                .await;
+            assert_eq!(r.code(), 207);
+            assert!(r.text().contains("manga1.cbz"));
+            assert!(!r.text().contains("history"), "{user:?} {depth}");
+        }
+        assert_eq!(
+            env.req(user, "GET", "/mokuro-reader/history/dev/x.events", &[], b"")
+                .await
+                .code(),
+            404
+        );
+    }
+}
+
+#[tokio::test]
+async fn depth_infinity_cache_survives_history_put() {
+    let env = Env::new();
+    let warm = env
+        .req(
+            None,
+            "PROPFIND",
+            "/mokuro-reader",
+            &[("depth", "infinity")],
+            b"",
+        )
+        .await;
+    assert_eq!(warm.code(), 207);
+    assert_eq!(env.dav.propfind_cache().usage().0, 1);
+    put_history(&env, "reader", b"events").await;
+    let r = env
+        .req(
+            Some("reader"),
+            "PUT",
+            "/mokuro-reader/goals.json",
+            &[],
+            b"{}",
+        )
+        .await;
+    assert_eq!(r.code(), 201);
+    // The shared listing holds no per-user resource: nothing to evict.
+    assert_eq!(env.dav.propfind_cache().usage().0, 1);
+}
+
+#[tokio::test]
+async fn history_mkcol() {
+    let env = Env::new();
+    let mk = |path: &'static str| env.req(Some("reader"), "MKCOL", path, &[], b"");
+    // history/a/b with history missing: the parent is not there yet.
+    assert_eq!(mk("/mokuro-reader/history/a/b").await.code(), 409);
+    assert_eq!(mk("/mokuro-reader/history").await.code(), 201);
+    assert!(env.base.join("users/reader/history").is_dir());
+    assert_eq!(mk("/mokuro-reader/history").await.code(), 405);
+    assert_eq!(mk("/mokuro-reader/history/dev").await.code(), 201);
+    assert_eq!(mk("/mokuro-reader/history/dev/sub").await.code(), 403);
+    assert_eq!(mk("/mokuro-reader/history/.dev").await.code(), 403);
+    assert_eq!(mk("/mokuro-reader/goals.json").await.code(), 403);
+    assert!(!env.lib("history").exists());
+    // A first MKCOL creates the account's directory too.
+    std::fs::remove_dir_all(env.base.join("users/uploader")).unwrap();
+    assert_eq!(
+        env.req(
+            Some("uploader"),
+            "MKCOL",
+            "/mokuro-reader/history",
+            &[],
+            b""
+        )
+        .await
+        .code(),
+        201
+    );
+    assert!(env.base.join("users/uploader/history").is_dir());
+    // Anonymous has no tree to create it in.
+    assert_eq!(
+        env.req(None, "MKCOL", "/mokuro-reader/history", &[], b"")
+            .await
+            .code(),
+        403
+    );
+}
+
+#[tokio::test]
+async fn history_put_shape_and_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("storage");
+    std::fs::create_dir_all(base.join("users/reader/history/dev")).unwrap();
+    std::fs::create_dir_all(base.join("library")).unwrap();
+    let env = Env::with_config(
+        dir,
+        base,
+        bunko_dav::DavConfig {
+            history: bunko_dav::HistoryLimits {
+                max_file_bytes: 100,
+                max_total_bytes: 250,
+            },
+            ..Default::default()
+        },
+    );
+    let env = &env;
+    let put = |path: &'static str, body: Vec<u8>| async move {
+        env.req(Some("reader"), "PUT", path, &[], &body).await
+    };
+    for path in [
+        "/mokuro-reader/history/x.events",
+        "/mokuro-reader/history/dev/a/b",
+        "/mokuro-reader/history/.dev/x",
+        "/mokuro-reader/history/dev/.x",
+    ] {
+        let r = put(path, b"x".to_vec()).await;
+        assert_eq!(r.code(), 403, "{path}");
+        assert_eq!(r.json()["ok"], false, "{path}");
+    }
+    let r = put("/mokuro-reader/history/dev/big", vec![b'x'; 101]).await;
+    assert_eq!(r.code(), 413);
+    assert_eq!(r.json()["ok"], false);
+    assert!(!env.base.join("users/reader/history/dev/big").exists());
+    // A body with no Content-Length is cut at the cap.
+    let r = env
+        .req(
+            Some("reader"),
+            "PUT",
+            "/mokuro-reader/history/dev/chunked",
+            &[("content-length", "")],
+            &[b'x'; 101],
+        )
+        .await;
+    assert_eq!(r.code(), 413);
+    assert!(!env.base.join("users/reader/history/dev/chunked").exists());
+    // Nothing is left behind, staging files included.
+    let left = std::fs::read_dir(env.base.join("users/reader/history/dev")).unwrap();
+    assert_eq!(left.count(), 0);
+    for name in ["a", "b"] {
+        let path = format!("/mokuro-reader/history/dev/{name}");
+        let r = env
+            .req(Some("reader"), "PUT", &path, &[], &[b'x'; 100])
+            .await;
+        assert_eq!(r.code(), 201, "{name}");
+    }
+    // 200 stored: 60 more is over 250.
+    let r = put("/mokuro-reader/history/dev/c", vec![b'x'; 60]).await;
+    assert_eq!(r.code(), 507);
+    assert_eq!(r.json()["ok"], false);
+    // Replacing a file counts its new size, not both.
+    let r = put("/mokuro-reader/history/dev/a", vec![b'y'; 100]).await;
+    assert_eq!(r.code(), 204);
+    let r = put("/mokuro-reader/history/dev/c", vec![b'x'; 50]).await;
+    assert_eq!(r.code(), 201);
+}
+
+#[tokio::test]
+async fn history_move_copy_lock_refused() {
+    let env = Env::new();
+    put_history(&env, "reader", b"events").await;
+    let dest = "http://localhost:8080/mokuro-reader/history/dev-1/moved.events";
+    for (method, path, headers) in [
+        ("MOVE", EVENTS, vec![("destination", dest)]),
+        ("COPY", EVENTS, vec![("destination", dest)]),
+        (
+            "MOVE",
+            "/mokuro-reader/history/dev-1",
+            vec![(
+                "destination",
+                "http://localhost:8080/mokuro-reader/history/dev-2",
+            )],
+        ),
+        (
+            "COPY",
+            "/mokuro-reader/volume-data.json",
+            vec![("destination", "http://localhost:8080/mokuro-reader/history")],
+        ),
+    ] {
+        let r = env.req(Some("reader"), method, path, &headers, b"").await;
+        assert_eq!(r.code(), 403, "{method} {path}");
+    }
+    let lockinfo = br#"<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>"#;
+    let r = env.req(Some("reader"), "LOCK", EVENTS, &[], lockinfo).await;
+    assert_eq!(r.code(), 403);
+    let r = env
+        .req(
+            Some("reader"),
+            "UNLOCK",
+            EVENTS,
+            &[("lock-token", "<opaquelocktoken:x>")],
+            b"",
+        )
+        .await;
+    assert_eq!(r.code(), 403);
+    let patch = br#"<D:propertyupdate xmlns:D="DAV:"><D:set><D:prop><x:a xmlns:x="urn:x">1</x:a></D:prop></D:set></D:propertyupdate>"#;
+    let r = env
+        .req(Some("reader"), "PROPPATCH", EVENTS, &[], patch)
+        .await;
+    assert_eq!(r.code(), 403);
+    assert!(
+        env.base
+            .join("users/reader/history/dev-1/2026-10.events")
+            .is_file()
+    );
+}
+
+#[tokio::test]
+async fn history_delete() {
+    let env = Env::new();
+    put_history(&env, "reader", b"reader events").await;
+    put_history(&env, "uploader", b"uploader events").await;
+    let r = env
+        .req(
+            Some("reader"),
+            "DELETE",
+            "/mokuro-reader/history/dev-1",
+            &[],
+            b"",
+        )
+        .await;
+    assert_eq!(r.code(), 204);
+    assert!(!env.base.join("users/reader/history/dev-1").exists());
+    assert!(env.base.join("users/reader/history").is_dir());
+    assert!(
+        env.base
+            .join("users/uploader/history/dev-1/2026-10.events")
+            .is_file()
+    );
+    let r = env.req(Some("uploader"), "DELETE", EVENTS, &[], b"").await;
+    assert_eq!(r.code(), 204);
+    assert!(
+        !env.base
+            .join("users/uploader/history/dev-1/2026-10.events")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn history_writes_fire_no_library_hooks() {
+    let env = Env::new();
+    put_history(&env, "uploader", b"events").await;
+    let r = env
+        .req(
+            Some("uploader"),
+            "DELETE",
+            "/mokuro-reader/history",
+            &[],
+            b"",
+        )
+        .await;
+    assert_eq!(r.code(), 204);
+    let calls = env.hooks.calls();
+    assert!(
+        calls.iter().all(|c| c.starts_with("audit ")),
+        "library hooks fired: {calls:?}"
+    );
+    let audits = env.hooks.audits();
+    assert_eq!(audits.len(), 4, "{audits:?}");
+    for a in &audits {
+        assert_eq!(a.target_type, "progress", "{a:?}");
+    }
+    assert_eq!(
+        audits.iter().map(|a| a.action).collect::<Vec<_>>(),
+        ["mkdir", "mkdir", "upload", "delete"]
+    );
+    assert_eq!(audits[2].target_path, EVENTS);
+}
+
+/// The account that owns a cloud library's root keeps its per-user files there.
+#[tokio::test]
+async fn cloud_root_owner_uses_the_library_root() {
+    let env = Env::new();
+    let owner = || {
+        let mut ctx = env.ctx(Some("uploader"));
+        ctx.owns_cloud_root = true;
+        ctx
+    };
+    for path in ["/mokuro-reader/history", "/mokuro-reader/history/dev-1"] {
+        let r = env
+            .send_ctx(owner(), request("MKCOL", path, &[], b""))
+            .await;
+        assert_eq!(r.code(), 201, "{path}");
+    }
+    let r = env
+        .send_ctx(owner(), request("PUT", EVENTS, &[], b"owner events"))
+        .await;
+    assert_eq!(r.code(), 201);
+    let r = env
+        .send_ctx(
+            owner(),
+            request("PUT", "/mokuro-reader/goals.json", &[], b"{}"),
+        )
+        .await;
+    assert_eq!(r.code(), 201);
+    assert!(env.lib("history/dev-1/2026-10.events").is_file());
+    assert!(env.lib("goals.json").is_file());
+    assert!(!env.base.join("users/uploader/history").exists());
+    // No library hook for them, and no one else sees them.
+    assert!(
+        env.hooks.calls().iter().all(|c| c.starts_with("audit ")),
+        "{:?}",
+        env.hooks.calls()
+    );
+    let r = env
+        .send_ctx(
+            owner(),
+            request("PROPFIND", "/mokuro-reader", &[("depth", "infinity")], b""),
+        )
+        .await;
+    assert!(
+        r.text()
+            .contains("/mokuro-reader/history/dev-1/2026-10.events")
+    );
+    assert!(r.text().contains("/mokuro-reader/goals.json"));
+    for user in [None, Some("uploader"), Some("reader")] {
+        let r = env
+            .req(
+                user,
+                "PROPFIND",
+                "/mokuro-reader",
+                &[("depth", "infinity")],
+                b"",
+            )
+            .await;
+        assert!(!r.text().contains("history"), "{user:?}");
+        assert!(!r.text().contains("goals.json"), "{user:?}");
+        assert_eq!(env.req(user, "GET", EVENTS, &[], b"").await.code(), 404);
+        // Not through a library path that walks back up into them either.
+        for path in [
+            "/mokuro-reader/series/../history/dev-1/2026-10.events",
+            "/mokuro-reader/series/../goals.json",
+        ] {
+            assert_eq!(
+                env.req(user, "GET", path, &[], b"").await.code(),
+                404,
+                "{path}"
+            );
+        }
+    }
+    // A library symlink into them is listed (it is a library entry) but never walked.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(env.lib("history"), env.lib("link")).unwrap();
+        env.dav.propfind_cache().invalidate();
+        let r = env
+            .req(
+                None,
+                "PROPFIND",
+                "/mokuro-reader",
+                &[("depth", "infinity")],
+                b"",
+            )
+            .await;
+        assert!(r.text().contains("/mokuro-reader/link/"));
+        assert!(!r.text().contains("2026-10.events"));
+        let r = env
+            .req(
+                None,
+                "GET",
+                "/mokuro-reader/link/dev-1/2026-10.events",
+                &[],
+                b"",
+            )
+            .await;
+        assert_eq!(r.code(), 404);
+    }
+    let r = env
+        .req(
+            Some("admin"),
+            "PUT",
+            "/mokuro-reader/series/../goals.json",
+            &[],
+            b"overwritten",
+        )
+        .await;
+    assert_eq!(r.code(), 403);
+    assert_eq!(std::fs::read(env.lib("goals.json")).unwrap(), b"{}");
 }

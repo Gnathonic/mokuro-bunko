@@ -1,7 +1,8 @@
 //! [`ServerCaseMergePolicy`]: what the automatic case merge (spec §5.9) asks the
 //! server. Which of two differing main sidecars matches the primary row's recipe
 //! (the upgrade's `classify` + `Recipe::matches`, never `Verdict::Current`), whether
-//! OCR work touches a variant (`ocr::busy`), and the audit record of a finished merge.
+//! OCR work touches a variant (`ocr::busy`), which sets are the reader's own (the
+//! per-user tree, never merged), and the audit record of a finished merge.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -49,6 +50,16 @@ impl CaseMergePolicy for ServerCaseMergePolicy {
             (true, false) => MergeChoice::A,
             (false, true) => MergeChoice::B,
             _ => MergeChoice::Block,
+        }
+    }
+
+    /// The cloud root's per-user names (its owner's `history/`, root files) and
+    /// everything inside `history/` are the reader's, not library spellings: a
+    /// `History/` series is never merged with, or blocked against, them.
+    fn excluded(&self, dir: &[String], key: &str) -> bool {
+        match dir.first() {
+            None => bunko_core::reader_tree::folds_to_per_user_root_name(key),
+            Some(top) => top == bunko_core::reader_tree::HISTORY_DIR,
         }
     }
 

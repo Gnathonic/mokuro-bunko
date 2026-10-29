@@ -134,7 +134,11 @@ impl Env {
     }
 
     pub fn with_base(dir: tempfile::TempDir, base: PathBuf) -> Env {
-        let dav = Dav::new(&StorageLayout::new(&base), DavConfig::default()).unwrap();
+        Self::with_config(dir, base, DavConfig::default())
+    }
+
+    pub fn with_config(dir: tempfile::TempDir, base: PathBuf, config: DavConfig) -> Env {
+        let dav = Dav::new(&StorageLayout::new(&base), config).unwrap();
         Env {
             dir,
             base,

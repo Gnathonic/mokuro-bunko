@@ -87,6 +87,14 @@ pub fn rel_of(library: &Path, path: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// Is `path` in the per-user tree at the library root (a cloud library's progress user
+/// keeps `history/`, `goals.json`, … beside the series)? It is that account's, never
+/// library content: no OCR, cover, metadata or shared-listing work for it, whatever its
+/// names end in. A local library's top-level `history/` is hidden the same way.
+pub fn is_per_user_path(library: &Path, path: &Path) -> bool {
+    rel_of(library, path).is_some_and(|rel| bunko_core::reader_tree::is_per_user_rel(&rel))
+}
+
 /// [`rel_of`] when one side names the library through a symlink the other has resolved:
 /// the layout keeps the configured path, while WebDAV and the catalog resolve theirs
 /// (on macOS every temp dir is one, `/var` → `/private/var`). Both are resolved here; the

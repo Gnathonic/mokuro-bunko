@@ -2,6 +2,7 @@
 
 use crate::auth::{AuthBackend, AuthUser, paths};
 use bunko_core::StorageLayout;
+use bunko_core::reader_tree::{self, Caller};
 use bunko_db::Database;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -71,20 +72,34 @@ impl DbAuthBackend {
     pub fn virtual_to_physical(
         &self,
         virtual_path: &str,
-        username: Option<&str>,
+        caller: Option<Caller<'_>>,
     ) -> Option<PathBuf> {
-        let rel = virtual_path
-            .trim_start_matches('/')
-            .strip_prefix(paths::READER_ROOT)?;
-        let rel = rel.trim_start_matches('/');
-        if paths::PER_USER_FILES.contains(&rel) {
-            return Some(self.layout.users().join(username?).join(rel));
-        }
-        if rel.split('/').any(|s| s == "..") {
-            return None;
-        }
-        Some(self.layout.library().join(rel))
+        virtual_to_physical(&self.layout, virtual_path, caller)
     }
+}
+
+/// See [`DbAuthBackend::virtual_to_physical`]. A per-user path maps into `caller`'s own
+/// tree ([`reader_tree::user_base`]); anonymous has none.
+fn virtual_to_physical(
+    layout: &StorageLayout,
+    virtual_path: &str,
+    caller: Option<Caller<'_>>,
+) -> Option<PathBuf> {
+    let rel = virtual_path
+        .trim_start_matches('/')
+        .strip_prefix(paths::READER_ROOT)?;
+    if !(rel.is_empty() || rel.starts_with('/')) {
+        return None;
+    }
+    let rel = rel.trim_matches('/');
+    if rel.split('/').any(|s| s == "..") {
+        return None;
+    }
+    if reader_tree::is_per_user_rel(rel) {
+        let base = reader_tree::user_base(&layout.library(), &layout.users(), caller?)?;
+        return Some(base.join(rel));
+    }
+    Some(layout.library().join(rel))
 }
 
 impl AuthBackend for DbAuthBackend {
@@ -150,8 +165,52 @@ impl AuthBackend for DbAuthBackend {
             .unwrap_or(false)
     }
 
-    fn physical_exists(&self, virtual_path: &str, username: Option<&str>) -> bool {
-        self.virtual_to_physical(virtual_path, username)
+    fn physical_exists(&self, virtual_path: &str, caller: Option<Caller<'_>>) -> bool {
+        self.virtual_to_physical(virtual_path, caller)
             .is_some_and(bunko_store::fs::exists)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_user_paths_map_into_the_callers_tree() {
+        let layout = StorageLayout::new("/s");
+        let alice = Caller {
+            username: "alice",
+            owns_cloud_root: false,
+        };
+        let owner = Caller {
+            owns_cloud_root: true,
+            ..alice
+        };
+        let map = |p: &str, c| virtual_to_physical(&layout, p, c);
+        assert_eq!(
+            map("/mokuro-reader/S/v.cbz", None),
+            Some(layout.library().join("S/v.cbz"))
+        );
+        assert_eq!(
+            map("/mokuro-reader/goals.json", Some(alice)),
+            Some(layout.users().join("alice/goals.json"))
+        );
+        assert_eq!(
+            map("/mokuro-reader/history/d/2026-10.events", Some(alice)),
+            Some(layout.users().join("alice/history/d/2026-10.events"))
+        );
+        assert_eq!(
+            map("/mokuro-reader/history/d/2026-10.events", Some(owner)),
+            Some(layout.library().join("history/d/2026-10.events"))
+        );
+        assert_eq!(map("/mokuro-reader/goals.json", None), None);
+        assert_eq!(map("/mokuro-reader/history", None), None);
+        // Case-sensitive: a series that only folds to a per-user name is the library's.
+        assert_eq!(
+            map("/mokuro-reader/History/v.cbz", Some(alice)),
+            Some(layout.library().join("History/v.cbz"))
+        );
+        assert_eq!(map("/mokuro-reader/../x", Some(alice)), None);
+        assert_eq!(map("/mokuro-readerx/y", Some(alice)), None);
     }
 }

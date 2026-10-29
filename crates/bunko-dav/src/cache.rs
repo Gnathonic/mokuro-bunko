@@ -221,7 +221,7 @@ impl PropfindCache {
     fn generate(roots: &Roots, key: &str) -> Option<Entry> {
         let res = roots.lookup(key, None)?;
         let ctx = PropCtx {
-            username: None,
+            caller: None,
             locks: None,
             dead: None,
         };

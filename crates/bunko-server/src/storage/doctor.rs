@@ -1,6 +1,7 @@
 //! `doctor`'s library storage rows (0.8 §7, §11, D25): where the library lives, the
 //! Google pairing (and a pairing change waiting for its Disconnect), whether the spool
-//! can hold what OCR spools at once, and how the credentials file is protected.
+//! can hold what OCR spools at once, how the credentials file is protected, and a
+//! local series named like the reader's reading history (0.8).
 //! Offline: no provider is asked.
 
 use std::path::Path;
@@ -58,6 +59,7 @@ pub fn checks(config: &Config) -> Vec<Row> {
             ),
             None,
         )];
+        out.extend(history_series_row(&config.storage.layout().library(), None));
         out.extend(credentials_row(&config.storage.layout().cloud_dir()));
         return out;
     }
@@ -117,6 +119,50 @@ pub fn checks(config: &Config) -> Vec<Row> {
     ));
     out.extend(credentials_row(&cloud));
     out
+}
+
+/// A library whose top-level `history/` holds archives: 0.8 serves
+/// `/mokuro-reader/history` as each account's reading history, so that series is out of
+/// every reader's reach until it is renamed. A cloud folder (`cloud_folder`) can have
+/// one too, uploaded under 0.7 or by a reader writing to the cloud directly; there it is
+/// also the progress user's reading history, which that account may delete from. Only
+/// the running server can look (doctor is offline): it logs this once the cloud
+/// library is in sync.
+pub fn history_series_row(library: &Path, cloud_folder: Option<&str>) -> Option<Row> {
+    let dir = library.join(bunko_core::reader_tree::HISTORY_DIR);
+    let archives = bunko_store::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            bunko_library::pyunicode::lower(&e.file_name().to_string_lossy()).ends_with(".cbz")
+        })
+        .count();
+    (archives > 0).then(|| {
+        let volumes = format!("{archives} volume{}", if archives == 1 { "" } else { "s" });
+        match cloud_folder {
+            None => row(
+                Verdict::Warn,
+                "Reserved series name",
+                format!(
+                    "the series folder history/ ({volumes}) is hidden: 0.8 reserves /mokuro-reader/history for each account's reading history"
+                ),
+                Some(format!(
+                    "Stop Bunko and rename the series folder {} (e.g. to \"History (series)\").",
+                    dir.display()
+                )),
+            ),
+            Some(folder) => row(
+                Verdict::Warn,
+                "Reserved series name",
+                format!(
+                    "the cloud series folder history/ ({volumes}) is hidden: 0.8 reserves /mokuro-reader/history for each account's reading history, and in a cloud folder it is the progress user's"
+                ),
+                Some(format!(
+                    "Rename {folder}/history/ in the cloud (e.g. to \"History (series)\") before the progress user's reader syncs its reading history there."
+                )),
+            ),
+        }
+    })
 }
 
 /// `storage.library.spool_gb` against 2 × lanes × the largest archive (the biggest one
@@ -341,6 +387,48 @@ mod tests {
         );
         let all = format!("{rows:?}");
         assert!(!all.contains("rt-secret"), "{all}");
+    }
+
+    /// 0.8 serves `/mokuro-reader/history` as each account's reading history, so a
+    /// library series of that exact name can no longer be reached: named, with the fix.
+    #[test]
+    fn a_local_series_named_history_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Config::default();
+        c.storage.base_path = dir.path().to_path_buf();
+        let library = c.storage.layout().library();
+        bunko_store::fs::create_dir_all(library.join("History")).unwrap();
+        bunko_store::fs::write(library.join("History/v.cbz"), "x").unwrap();
+        assert!(checks(&c).iter().all(|r| r.verdict == Verdict::Pass));
+        bunko_store::fs::create_dir_all(library.join("history")).unwrap();
+        assert!(checks(&c).iter().all(|r| r.verdict == Verdict::Pass));
+        bunko_store::fs::write(library.join("history/Vol 1.CBZ"), "x").unwrap();
+        let rows = checks(&c);
+        let r = rows
+            .iter()
+            .find(|r| r.label == "Reserved series name")
+            .expect("reported");
+        assert_eq!(r.verdict, Verdict::Warn);
+        assert!(r.detail.contains("/mokuro-reader/history"), "{}", r.detail);
+        assert!(r.hint.as_deref().unwrap().contains("rename"), "{r:?}");
+    }
+
+    /// A cloud folder can hold a `history/` series too (uploaded under 0.7, or by a
+    /// reader writing to the cloud directly). Hidden the same way, and worse: it is the
+    /// progress user's reading history now, which that account may delete from. Named
+    /// with the folder to rename it in.
+    #[test]
+    fn a_cloud_series_named_history_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library");
+        bunko_store::fs::create_dir_all(library.join("history")).unwrap();
+        bunko_store::fs::write(library.join("history/Vol 1.cbz"), "x").unwrap();
+        let r = history_series_row(&library, Some("mokuro-reader")).expect("reported");
+        assert_eq!(r.verdict, Verdict::Warn);
+        assert!(r.detail.contains("progress user"), "{}", r.detail);
+        let hint = r.hint.unwrap();
+        assert!(hint.contains("mokuro-reader/history/"), "{hint}");
+        assert!(!hint.contains(&*library.to_string_lossy()), "{hint}");
     }
 
     // A sparse fixture file is made with std::fs on purpose.
