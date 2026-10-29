@@ -20,6 +20,7 @@ mod locks;
 mod methods;
 mod path_case;
 mod paths;
+mod personal;
 mod propfind;
 mod resource;
 mod response;
@@ -41,6 +42,7 @@ pub use bunko_core::reader_tree::Caller;
 pub use cache::{CacheConfig, PropfindCache};
 pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
 pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
+pub use personal::{EDITS_DIR, MAX_LAYER_BYTES};
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};
 pub use write_locks::{AccountWriteGuard, AccountWriteLocks, PathWriteLocks, WriteLockGuard};
 
@@ -201,7 +203,10 @@ impl Dav {
             paths::Target::Progress(rel) => self.inner.roots.user_path(caller?, &rel),
             paths::Target::Library(rel) => {
                 let roots = &self.inner.roots;
-                roots.library_member(&roots.library, &rel)
+                match roots.personal(&rel) {
+                    Some(file) => roots.personal_path(&file.rel, caller?),
+                    None => roots.library_member(&roots.library, &rel),
+                }
             }
             _ => None,
         }

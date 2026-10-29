@@ -525,3 +525,83 @@ async fn an_archive_in_the_owners_history_is_no_volume() {
         );
     }
 }
+
+/// A correction layer, `text` on its one block.
+fn correction(text: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "pages": [{"img_path": "001.png", "blocks": [{"lines": [text]}]}],
+    }))
+    .unwrap()
+}
+
+/// Personal corrections (D27) in a cloud library: the progress user's is the cloud
+/// folder's own `Vol 1.edit.mokuro` (a cloud-direct reader shares it), every other
+/// account's stays on this disk. Neither is library content: no upload record, no OCR
+/// row of the volume forgotten, no provenance rewrite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrections_are_the_owners_cloud_file_and_everyone_elses_overlay() {
+    let fake = library_fake();
+    let primary = br#"{"pages": [], "volume": "Vol 1"}"#;
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.mokuro"), primary);
+    let e = env(LibraryBackend::GDrive, Some(fake.clone())).await;
+    let db = e.services.db.clone();
+    db.record_ocr_sidecar(&bunko_db::OcrSidecar {
+        sidecar_path: "Series/Vol 1.mokuro".into(),
+        volume_key: "Series/Vol 1.cbz".into(),
+        generation_id: "g-1".into(),
+        generation_name: "Primary".into(),
+        machine: "local".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let edit = "/mokuro-reader/Series/Vol%201.edit.mokuro";
+
+    let (status, body) = e
+        .req(Some("other"), "PUT", edit, &[], &correction("other"))
+        .await;
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+    let (status, body) = e
+        .req(Some("owner"), "PUT", edit, &[], &correction("owner"))
+        .await;
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&body));
+    // The owner's goes out like any sidecar; the other account's never reaches the
+    // store (it was written first, so it would be there by now).
+    eventually("the owner's correction reaches the cloud", || {
+        cloud_bytes(&fake, "Series/Vol 1.edit.mokuro").is_some()
+    })
+    .await;
+    assert_eq!(
+        cloud_bytes(&fake, "Series/Vol 1.edit.mokuro").unwrap(),
+        correction("owner")
+    );
+    assert_eq!(
+        std::fs::read(e.users("other/edits/Series/Vol 1.edit.mokuro")).unwrap(),
+        correction("other")
+    );
+    assert!(!e.users("owner").exists());
+    for (user, body) in [("owner", "owner"), ("other", "other")] {
+        assert_eq!(e.get(user, edit).await, (200, correction(body)), "{user}");
+    }
+    assert_eq!(e.get("boss", edit).await.0, 404);
+    assert_eq!(e.req(None, "GET", edit, &[], b"").await.0, 404);
+
+    // The volume's records are untouched.
+    let row = db.get_ocr_sidecar("Series/Vol 1.mokuro").unwrap();
+    assert_eq!(row.map(|r| r.generation_id).as_deref(), Some("g-1"));
+    assert_eq!(cloud_bytes(&fake, "Series/Vol 1.mokuro").unwrap(), primary);
+    let audits = db.list_audit_events(100, None).unwrap();
+    let mine: Vec<_> = audits
+        .iter()
+        .filter(|a| {
+            a.target_path
+                .as_deref()
+                .is_some_and(|p| p.ends_with("Vol 1.edit.mokuro"))
+        })
+        .collect();
+    assert_eq!(mine.len(), 2, "{audits:?}");
+    assert!(
+        mine.iter()
+            .all(|a| a.action == "upload" && a.target_type.as_deref() == Some("personal")),
+        "{mine:?}"
+    );
+}

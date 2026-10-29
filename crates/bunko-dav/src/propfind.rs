@@ -128,15 +128,10 @@ impl DeadProps {
 /// a per-user file or folder (so two users' copies at the same URL are distinct).
 pub fn resource_key(res: &Resource, username: Option<&str>) -> String {
     let path = crate::paths::normalize(res.path());
-    match res {
-        Resource::File {
-            kind: FileKind::Progress,
-            ..
+    match res.kind() {
+        Some(FileKind::Progress | FileKind::Personal) => {
+            format!("{path}\0{}", username.unwrap_or(""))
         }
-        | Resource::Folder {
-            kind: FileKind::Progress,
-            ..
-        } => format!("{path}\0{}", username.unwrap_or("")),
         _ => path,
     }
 }

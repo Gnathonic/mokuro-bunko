@@ -6,8 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bunko_store::{Meta, fs};
 
 use bunko_core::reader_tree::{self, Caller, PerUser};
+use bunko_core::sidecar_names::{self, SidecarClass};
 
 use crate::paths::{self, READER_ROOT, Target};
+use crate::personal::{self, PersonalFile};
 
 /// A stat snapshot: everything the properties and validators need.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -138,6 +140,9 @@ pub enum FileKind {
     Library,
     /// The caller's own tree (root files, `history/**`).
     Progress,
+    /// The caller's own correction layer at a library path (D27, [`crate::personal`]):
+    /// an overlay under `users/<u>/edits`, or the cloud-root owner's physical file.
+    Personal,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +180,29 @@ impl Resource {
         match self {
             Resource::Virtual { .. } => None,
             Resource::Folder { phys, .. } | Resource::File { phys, .. } => Some(phys),
+        }
+    }
+
+    /// The same resource as another [`FileKind`].
+    pub fn with_kind(self, kind: FileKind) -> Resource {
+        match self {
+            Resource::Folder {
+                path, phys, stat, ..
+            } => Resource::Folder {
+                path,
+                phys,
+                stat,
+                kind,
+            },
+            Resource::File {
+                path, phys, stat, ..
+            } => Resource::File {
+                path,
+                phys,
+                stat,
+                kind,
+            },
+            other => other,
         }
     }
 
@@ -277,6 +305,16 @@ impl Roots {
                 ))
             }
             Target::Library(rel) => {
+                if let Some(file) = self.personal(&rel) {
+                    let phys = self.personal_path(&file.rel, caller?)?;
+                    let meta = fs::metadata(&phys).ok().filter(|m| !m.is_dir())?;
+                    return Some(Self::resource(
+                        norm,
+                        phys,
+                        Stat::from_meta(&meta),
+                        FileKind::Personal,
+                    ));
+                }
                 let phys = self.library_member(&self.library, &rel)?;
                 let meta = fs::metadata(&phys).ok()?;
                 Some(Self::resource(
@@ -287,6 +325,57 @@ impl Roots {
                 ))
             }
             Target::Inbox | Target::Other => None,
+        }
+    }
+
+    /// The library path `rel` as a personal correction (D27): its name reads as an
+    /// `edit`/`edit-<n>` layer and is no listed archive's primary (rule 4). Such a path
+    /// is never the shared library file, whoever asks. `None` for any other path, and
+    /// for one whose folder is not in the library. Blocking (lists the folder, only
+    /// for such names).
+    pub(crate) fn personal(&self, rel: &str) -> Option<PersonalFile> {
+        let rel = rel.trim_matches('/');
+        let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+        personal::personal_name(name)?;
+        let folder = self.library_member(&self.library, parent)?;
+        self.personal_in(&folder, name, &personal::names_in(&folder))
+    }
+
+    /// The checks a PUT to the library path `rel` owes as a correction or curated
+    /// layer (D27), `None` for any other file. Blocking (lists the folder, only for
+    /// such names).
+    pub(crate) fn layer_put_rule(&self, rel: &str) -> Option<Result<(), personal::LayerRefusal>> {
+        let rel = rel.trim_matches('/');
+        let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+        sidecar_names::split_layer(name)?;
+        let folder = self.library_member(&self.library, parent)?;
+        personal::layer_put_rule(name, &personal::names_in(&folder))
+    }
+
+    /// [`Roots::personal`] for `name` in the library folder `folder` listing `names`.
+    fn personal_in(&self, folder: &Path, name: &str, names: &[String]) -> Option<PersonalFile> {
+        personal::personal_name(name)?;
+        if let SidecarClass::Primary { .. } =
+            sidecar_names::classify(name, &personal::stems_of(names))
+        {
+            return None;
+        }
+        let folder_rel = self.library_rel(folder)?;
+        let rel = if folder_rel.is_empty() {
+            name.to_string()
+        } else {
+            format!("{folder_rel}/{name}")
+        };
+        Some(PersonalFile { rel })
+    }
+
+    /// Where `caller`'s copy of the personal library file `rel` is: the physical file
+    /// for the cloud-root owner, else the account's overlay.
+    pub(crate) fn personal_path(&self, rel: &str, caller: Caller<'_>) -> Option<PathBuf> {
+        if caller.owns_cloud_root {
+            self.library_member(&self.library, rel)
+        } else {
+            personal::overlay_path(&self.users, caller.username, rel)
         }
     }
 
@@ -337,6 +426,8 @@ impl Roots {
             Resource::Virtual { path } if paths::normalize(path) == format!("/{READER_ROOT}") => {
                 if reader_tree::is_per_user_root_name(name) {
                     Some((self.user_path(caller?, name)?, FileKind::Progress))
+                } else if let Some(file) = self.personal_member(&self.library, name) {
+                    Some((self.personal_path(&file.rel, caller?)?, FileKind::Personal))
                 } else {
                     Some((self.library_member(&self.library, name)?, FileKind::Library))
                 }
@@ -351,11 +442,23 @@ impl Roots {
                     .then_some((resolved, FileKind::Progress))
             }
             // The folder is inside the library; its member must stay there too.
-            Resource::Folder { phys, .. } => self
-                .library_member(phys, name)
-                .map(|p| (p, FileKind::Library)),
+            Resource::Folder { phys, .. } => match self.personal_member(phys, name) {
+                Some(file) => Some((self.personal_path(&file.rel, caller?)?, FileKind::Personal)),
+                None => self
+                    .library_member(phys, name)
+                    .map(|p| (p, FileKind::Library)),
+            },
             _ => None,
         }
+    }
+
+    /// The member `name` of the library folder `folder` as a personal correction.
+    fn personal_member(&self, folder: &Path, name: &str) -> Option<PersonalFile> {
+        personal::personal_name(name)?;
+        if name.contains(['/', '\\', '\0']) || matches!(name, "" | "." | "..") {
+            return None;
+        }
+        self.personal_in(folder, name, &personal::names_in(folder))
     }
 
     /// Where a MOVE/COPY puts the member `name` of the collection `parent` (0.5.3
@@ -395,6 +498,11 @@ impl Roots {
         if name.contains('\\') {
             return None;
         }
+        // A correction moves to the caller's copy, archive or not (X10: the reader
+        // moves layers before the archive).
+        if let Some(file) = self.personal_member(dir, name) {
+            return Some((self.personal_path(&file.rel, caller?)?, FileKind::Personal));
+        }
         let candidate = dir.join(name);
         let rel = self.library_rel(&candidate)?;
         self.library_member(&self.library, &rel)?;
@@ -404,6 +512,17 @@ impl Roots {
     /// Members of a collection: `(virtual path, resource)`, in listing order (spec §8.2).
     /// Blocking.
     pub fn members(&self, res: &Resource, caller: Option<Caller<'_>>) -> Vec<Resource> {
+        self.members_hiding(res, caller, None)
+    }
+
+    /// [`Roots::members`]; the physical personal files `caller` may not see go into
+    /// `hidden` (the shared listing keeps them for the cloud-root owner).
+    pub fn members_hiding(
+        &self,
+        res: &Resource,
+        caller: Option<Caller<'_>>,
+        hidden: Option<&mut Vec<Resource>>,
+    ) -> Vec<Resource> {
         match res {
             Resource::Virtual { path } => {
                 let norm = paths::normalize(path);
@@ -430,19 +549,114 @@ impl Roots {
                         }
                     }
                 }
-                out.extend(self.list_dir(
+                out.extend(self.library_dir(
                     &self.library,
                     &format!("/{READER_ROOT}"),
                     true,
-                    FileKind::Library,
+                    caller,
+                    hidden,
                 ));
                 out
             }
+            Resource::Folder {
+                path,
+                phys,
+                kind: FileKind::Library,
+                ..
+            } => self.library_dir(phys, &paths::normalize(path), false, caller, hidden),
             Resource::Folder {
                 path, phys, kind, ..
             } => self.list_dir(phys, &paths::normalize(path), false, *kind),
             Resource::File { .. } => Vec::new(),
         }
+    }
+
+    /// A library folder's members as `caller` sees them: a correction beside its
+    /// archive is the owner's physical file or, for anyone else, their overlay.
+    fn library_dir(
+        &self,
+        dir: &Path,
+        vpath: &str,
+        reader_root: bool,
+        caller: Option<Caller<'_>>,
+        mut hidden: Option<&mut Vec<Resource>>,
+    ) -> Vec<Resource> {
+        let listed = self.list_dir(dir, vpath, reader_root, FileKind::Library);
+        let names: Vec<String> = listed
+            .iter()
+            .map(|r| paths::uri_name(r.path()).to_string())
+            .collect();
+        let stems = personal::stems_of(&names);
+        let owner = caller.is_some_and(|c| c.owns_cloud_root);
+        let mut out = Vec::with_capacity(listed.len());
+        for res in listed {
+            let name = paths::uri_name(res.path());
+            if res.is_collection() || personal::personal_name(name).is_none() {
+                out.push(res);
+                continue;
+            }
+            match sidecar_names::classify(name, &stems) {
+                SidecarClass::Primary { .. } => out.push(res),
+                SidecarClass::Layer { .. } => {
+                    let res = res.with_kind(FileKind::Personal);
+                    if owner {
+                        out.push(res);
+                    } else if let Some(h) = hidden.as_deref_mut() {
+                        h.push(res);
+                    }
+                }
+                // Beside no archive: nobody's to see.
+                SidecarClass::Orphan => {}
+            }
+        }
+        if let Some(caller) = caller.filter(|c| !c.owns_cloud_root)
+            && let Some(folder_rel) = self.library_rel(dir)
+        {
+            out.extend(self.overlays_in(caller, &folder_rel, vpath, &stems));
+            out.sort_by(|a, b| a.path().cmp(b.path()));
+        }
+        out
+    }
+
+    /// `caller`'s overlays of the library folder `folder_rel` (virtual folder `vpath`)
+    /// whose archive is among `stems`.
+    fn overlays_in(
+        &self,
+        caller: Caller<'_>,
+        folder_rel: &str,
+        vpath: &str,
+        stems: &std::collections::HashSet<String>,
+    ) -> Vec<Resource> {
+        let Some(dir) = personal::overlay_path(&self.users, caller.username, folder_rel) else {
+            return Vec::new();
+        };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if personal::personal_name(&name).is_none()
+                || !matches!(
+                    sidecar_names::classify(&name, stems),
+                    SidecarClass::Layer { .. }
+                )
+            {
+                continue;
+            }
+            let phys = entry.path();
+            if let Ok(meta) = fs::metadata(&phys)
+                && !meta.is_dir()
+            {
+                out.push(Self::resource(
+                    paths::join_uri(vpath, &name),
+                    phys,
+                    Stat::from_meta(&meta),
+                    FileKind::Personal,
+                ));
+            }
+        }
+        out
     }
 
     fn list_dir(
@@ -602,6 +816,68 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    /// D27 with X1: a correction is `edit`/`edit-<n>` exactly as written, and a dotted
+    /// volume's own primary is never one (rule 4).
+    #[test]
+    #[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
+    fn personal_names_resolve_per_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("library/S")).unwrap();
+        std::fs::create_dir_all(base.join("users")).unwrap();
+        for n in ["Vol.cbz", "D.edit.cbz"] {
+            std::fs::write(base.join("library/S").join(n), b"x").unwrap();
+        }
+        let roots = Roots {
+            library: base.join("library"),
+            users: base.join("users"),
+            history: Default::default(),
+        };
+        let rel = |p: &str| roots.personal(p).map(|f| f.rel);
+        assert_eq!(
+            rel("S/Vol.edit.mokuro").as_deref(),
+            Some("S/Vol.edit.mokuro")
+        );
+        assert_eq!(
+            rel("S/Vol.edit-2.mokuro").as_deref(),
+            Some("S/Vol.edit-2.mokuro")
+        );
+        // No archive, or no folder: still the caller's (never the shared file), only
+        // unlisted.
+        assert_eq!(
+            rel("S/Nope.edit.mokuro").as_deref(),
+            Some("S/Nope.edit.mokuro")
+        );
+        assert_eq!(rel("S/Vol.EDIT.mokuro"), None);
+        assert_eq!(rel("S/Vol.edited.mokuro"), None);
+        assert_eq!(rel("S/D.edit.mokuro"), None);
+        assert_eq!(
+            rel("Missing/Vol.edit.mokuro").as_deref(),
+            Some("Missing/Vol.edit.mokuro")
+        );
+        let alice = Caller {
+            username: "alice",
+            owns_cloud_root: false,
+        };
+        let owner = Caller {
+            owns_cloud_root: true,
+            ..alice
+        };
+        assert_eq!(
+            roots.personal_path("S/Vol.edit.mokuro", alice),
+            Some(base.join("users/alice/edits/S/Vol.edit.mokuro"))
+        );
+        assert_eq!(
+            roots.personal_path("S/Vol.edit.mokuro", owner),
+            Some(base.join("library/S/Vol.edit.mokuro"))
+        );
+        let nobody = Caller {
+            username: "..",
+            owns_cloud_root: false,
+        };
+        assert_eq!(roots.personal_path("S/Vol.edit.mokuro", nobody), None);
     }
 
     #[test]

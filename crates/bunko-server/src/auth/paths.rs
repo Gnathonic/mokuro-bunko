@@ -3,6 +3,7 @@
 
 use bunko_core::reader_tree;
 pub use bunko_core::reader_tree::READER_ROOT;
+use bunko_core::sidecar_names::{self, LayerClass};
 
 fn normalized(path: &str) -> String {
     format!("/{}", path.trim_matches('/'))
@@ -66,6 +67,17 @@ fn library_relative_normalized(path: &str) -> Option<String> {
         return None;
     }
     Some(rel.to_string())
+}
+
+/// The [`LayerClass`] of the layer id a library file's name carries
+/// (`S/V.edit.mokuro` → Personal), the id exact as written (rule v1). Listing-free:
+/// the name alone cannot tell a layer from a dotted volume's primary, which
+/// `AuthBackend::is_volume_primary` asks the folder about.
+pub fn layer_class_of_path(path: &str) -> Option<LayerClass> {
+    let rel = library_relative_normalized(path)?;
+    let name = rel.rsplit('/').next()?;
+    let (_, id, _) = sidecar_names::split_layer(name)?;
+    Some(sidecar_names::layer_class(id))
 }
 
 /// The ROOT `catalog.json` only (ASCII case-insensitive).
@@ -146,6 +158,46 @@ mod tests {
         assert!(!is_compiled_metadata_path(
             "/mokuro-reader/history/series.json"
         ));
+    }
+
+    #[test]
+    fn layer_classes() {
+        let class = layer_class_of_path;
+        assert_eq!(
+            class("/mokuro-reader/S/Vol 1.5.edit.mokuro.gz"),
+            Some(LayerClass::Personal)
+        );
+        assert_eq!(
+            class("/mokuro-reader/S/V.edit-12.MOKURO"),
+            Some(LayerClass::Personal)
+        );
+        assert_eq!(
+            class("/mokuro-reader/S/V.curated.mokuro"),
+            Some(LayerClass::Curated)
+        );
+        assert_eq!(
+            class("/mokuro-reader/V.pre-upgrade-2.mokuro"),
+            Some(LayerClass::ServerKeepsake)
+        );
+        assert_eq!(
+            class("/mokuro-reader/S/V.curated-2.mokuro"),
+            Some(LayerClass::Reserved)
+        );
+        assert_eq!(
+            class("/mokuro-reader/S/V.hayai.mokuro"),
+            Some(LayerClass::Other)
+        );
+        // Exact ids: `EDIT` is no layer id.
+        assert_eq!(class("/mokuro-reader/S/V.EDIT.mokuro"), None);
+        for p in [
+            "/mokuro-reader/S/V.mokuro",
+            "/mokuro-reader/S/V.edit.cbz",
+            "/mokuro-reader/history/V.edit.mokuro",
+            "/mokuro-reader/volume-data.json",
+            "/elsewhere/V.edit.mokuro",
+        ] {
+            assert_eq!(class(p), None, "{p}");
+        }
     }
 
     #[test]

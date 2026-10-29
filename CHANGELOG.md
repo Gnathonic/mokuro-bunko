@@ -70,6 +70,24 @@
   account.
 
 ### Changed
+- **OCR corrections have their own layer names.** Edits never touch a volume's main
+  OCR file. `<Volume>.edit.mokuro` (and `edit-2`, `edit-3`, …) are an account's own
+  corrections: any account that can save progress, `registered` included, writes,
+  deletes and renames its own, and only to another correction name (plain `.mokuro`,
+  not `.gz`); they are never listed in the volume manifest or counted as the volume's
+  layers. Each account gets its own copy at the same address, kept under
+  `users/<name>/edits/` (a cloud library's progress user's is the cloud file itself, so
+  a reader reading the cloud directly shares it); nobody sees another's. A correction
+  or curated upload needs its volume's `.cbz` beside it (409 otherwise) and a JSON body
+  with `pages` and no `ocr_engine` (422), at most 32 MiB. `<Volume>.curated.mokuro` holds corrections shared with everyone: editors,
+  inviters and admins publish it on any volume, an uploader on the volumes it
+  uploaded, a first upload included. `pre-upgrade` files are Bunko's own and no client
+  writes one; `curated-<n>` and names starting `previous-ocr` are refused too. An OCR
+  generation can no longer be named `edit`, `curated`, `edit-<n>`, `curated-<n>`, or
+  start with `pre-upgrade` or `previous-ocr`. Layer names are matched exactly as
+  written: `Vol.EDIT.mokuro` is an ordinary shared file. When a cloud folder's two
+  spellings both have a different `curated` file, the younger one moves in as
+  `curated-2`, as `edit` already did.
 - **`history` is a reserved series name.** `/mokuro-reader/history` is each account's
   reading history now, so a series folder named exactly `history` in a library on this
   disk can no longer be reached; `doctor` warns about it (and the server logs it at

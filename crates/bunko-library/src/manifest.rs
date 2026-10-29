@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use bunko_core::sidecar_names::{LayerClass, layer_class};
 use bunko_store::{Meta, fs};
 
 use crate::fsutil::{self, py_mtime, size_of};
@@ -125,7 +126,8 @@ pub fn build_volume_manifest(
                 let Some((owner, layer_id)) = split_layer_sidecar(name) else {
                     continue;
                 };
-                if owner != volume {
+                // Anonymous-capable: never anyone's personal corrections (D27).
+                if owner != volume || layer_class(layer_id) == LayerClass::Personal {
                     continue;
                 }
                 if !layers.contains_key(layer_id) || name.ends_with(".mokuro") {
