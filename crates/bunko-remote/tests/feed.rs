@@ -1040,3 +1040,423 @@ async fn full_sync_10k_nodes_streams() {
         assert!(events + 512 >= k, "at {k}: {events} events");
     }
 }
+
+// ---- duplicate merges are not catastrophes (D19) ------------------------------------
+
+/// Two top-level roots: `A` (canonical) holds `S/V1.cbz`, `catalog.json` and
+/// `volume-data.json`; `B` holds `T/V2.cbz`, `S/V3.cbz`, an older `catalog.json` and
+/// its own `volume-data.json`.
+struct Twins {
+    a: String,
+    b: String,
+    t: String,
+    s_a: String,
+    s_b: String,
+    v3: String,
+    cat_b: String,
+    vd_b: String,
+}
+
+fn twins(f: &FakeBackend) -> Twins {
+    let top = f.account_root();
+    let a = f.reader_mkdir_in(&top, "mokuro-reader").pid;
+    let s_a = f.reader_mkdir_in(&a, "S").pid;
+    f.reader_put_in(&s_a, "V1.cbz", b"v1");
+    let cat_a = f.reader_put_in(&a, "catalog.json", b"{}");
+    f.reader_put_in(&a, "volume-data.json", b"{\"a\":1}");
+    let b = f.reader_mkdir_in(&top, "mokuro-reader").pid;
+    let t = f.reader_mkdir_in(&b, "T").pid;
+    f.reader_put_in(&t, "V2.cbz", b"v2");
+    let s_b = f.reader_mkdir_in(&b, "S").pid;
+    let v3 = f.reader_put_in(&s_b, "V3.cbz", b"v3").pid;
+    let cat_b = f.reader_put_in(&b, "catalog.json", b"{}");
+    f.set_times(&cat_b.pid, cat_b.created_ms, cat_a.base_mtime_ms - 1000);
+    let vd_b = f.reader_put_in(&b, "volume-data.json", b"{\"b\":1}").pid;
+    Twins {
+        a,
+        b,
+        t,
+        s_a,
+        s_b,
+        v3,
+        cat_b: cat_b.pid,
+        vd_b,
+    }
+}
+
+const SURVIVORS: [&str; 7] = [
+    "T",
+    "T/V2.cbz",
+    "S",
+    "S/V1.cbz",
+    "S/V3.cbz",
+    "catalog.json",
+    "volume-data.json",
+];
+
+impl Rig {
+    /// Let the feed take one more page (or several) and apply it.
+    async fn settle(&self) {
+        self.feed.poll_now();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    /// Every state the engine publishes from now on.
+    fn record_states(&self) -> Arc<Mutex<Vec<EngineState>>> {
+        let states = Arc::new(Mutex::new(Vec::new()));
+        let mut rx = self.feed.subscribe();
+        let st = states.clone();
+        tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                st.lock().push(rx.borrow().clone());
+            }
+        });
+        states
+    }
+}
+
+fn never_suspect(states: &Mutex<Vec<EngineState>>) {
+    let s = states.lock();
+    assert!(
+        !s.iter().any(|s| matches!(s, EngineState::Suspect { .. })),
+        "{s:?}"
+    );
+}
+
+fn removed_any(evs: &[WatchEvent], paths: &[&str]) -> Vec<WatchEvent> {
+    evs.iter()
+        .filter(|e| {
+            paths
+                .iter()
+                .any(|p| **e == removed(p, false) || **e == removed(p, true))
+        })
+        .cloned()
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reader_merge_of_duplicate_roots_never_holds() {
+    for make in [FakeBackend::drive_like, FakeBackend::mega_like] {
+        for paged in [false, true] {
+            let f = make();
+            let w = twins(&f);
+            let mut r = rig(f);
+            r.ready().await;
+            assert_eq!(r.index.lock().roots(), [w.a.clone(), w.b.clone()]);
+            let states = r.record_states();
+            // As the reader merges: every child of B moves into A (a folder or a
+            // keep-both file beside its same-named twin), B's S is emptied into A's,
+            // the older copy of a file is trashed, then B goes (MEGA: deleted).
+            r.fake.reader_move(&w.t, &w.a);
+            r.fake.reader_move(&w.s_b, &w.a);
+            r.fake.reader_move(&w.vd_b, &w.a);
+            if paged {
+                r.settle().await;
+            }
+            r.fake.reader_move(&w.v3, &w.s_a);
+            r.fake.reader_trash_pid(&w.cat_b);
+            if paged {
+                r.settle().await;
+            }
+            r.fake.reader_trash_pid(&w.s_b);
+            r.fake.reader_trash_pid(&w.b);
+            r.settle().await;
+            let label = format!("{} paged={paged}", r.fake.account().await.unwrap().label);
+            assert_eq!(r.feed.state(), EngineState::Steady, "{label}");
+            never_suspect(&states);
+            assert_eq!(
+                r.index.lock().roots(),
+                std::slice::from_ref(&w.a),
+                "{label}"
+            );
+            for p in SURVIVORS {
+                assert!(r.has(p), "{label}: {p}");
+            }
+            let evs = r.drain();
+            assert_eq!(removed_any(&evs, &SURVIVORS), [], "{label}: {evs:?}");
+            tokio::time::sleep(Duration::from_secs(1200)).await;
+            assert_eq!(r.hooks_now(), [], "{label}");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_root_removed_with_a_unique_child_still_holds() {
+    for make in [FakeBackend::drive_like, FakeBackend::mega_like] {
+        let f = make();
+        let w = twins(&f);
+        let mut r = rig(f);
+        r.ready().await;
+        // T only exists in B.
+        r.fake.reader_trash_pid(&w.b);
+        let s = r
+            .feed
+            .wait_for(|s| matches!(s, EngineState::Suspect { .. }), LONG)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                s,
+                EngineState::Suspect {
+                    root_changed: true,
+                    ..
+                }
+            ),
+            "{s:?}"
+        );
+        assert!(r.has("T/V2.cbz"), "nothing applied");
+        assert!(r.drain().is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_last_root_removed_still_holds() {
+    let f = FakeBackend::drive_like();
+    seed(&f, &["A/v1.cbz"]);
+    let root = f.node_at("mokuro-reader").unwrap().pid;
+    let mut r = rig(f);
+    r.ready().await;
+    r.fake.reader_trash_pid(&root);
+    let s = r
+        .feed
+        .wait_for(|s| matches!(s, EngineState::Suspect { .. }), LONG)
+        .await
+        .unwrap();
+    assert_eq!(
+        s,
+        EngineState::Suspect {
+            pending_removals: 0,
+            root_changed: true
+        }
+    );
+    assert!(r.has("A/v1.cbz"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merge_while_stopped_drops_the_vacated_root_at_restart() {
+    for make in [FakeBackend::drive_like, FakeBackend::mega_like] {
+        let f = Arc::new(make());
+        let w = twins(&f);
+        let r = rig_with(f.clone(), config(), None);
+        r.steady().await;
+        let Rig { dir, feed, .. } = r;
+        feed.shutdown().await;
+        assert_eq!(f.run_reader_dedup(), 2);
+
+        let mut r = rig_with(f.clone(), config(), Some(dir));
+        let states = r.record_states();
+        r.steady().await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        never_suspect(&states);
+        assert_eq!(r.index.lock().roots(), std::slice::from_ref(&w.a));
+        for p in SURVIVORS {
+            assert!(r.has(p), "{p}");
+        }
+        // The moved pids are indexed under A.
+        assert_eq!(r.index.lock().node(&w.t).unwrap().parent, Some(w.a.clone()));
+        assert_eq!(
+            r.index.lock().node(&w.v3).unwrap().parent,
+            Some(w.s_a.clone())
+        );
+        let evs = r.drain();
+        assert_eq!(removed_any(&evs, &SURVIVORS), [], "{evs:?}");
+        tokio::time::sleep(Duration::from_secs(1200)).await;
+        assert_eq!(r.hooks_now(), []);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_root_trashed_while_stopped_with_a_unique_child_holds_at_restart() {
+    let f = Arc::new(FakeBackend::drive_like());
+    let w = twins(&f);
+    let r = rig_with(f.clone(), config(), None);
+    r.steady().await;
+    let Rig { dir, feed, .. } = r;
+    feed.shutdown().await;
+    // T is neither in A by pid nor by name.
+    f.reader_trash_pid(&w.b);
+    let r = rig_with(f.clone(), config(), Some(dir));
+    let s = r
+        .feed
+        .wait_for(|s| matches!(s, EngineState::Suspect { .. }), LONG)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            s,
+            EngineState::Suspect {
+                root_changed: true,
+                ..
+            }
+        ),
+        "{s:?}"
+    );
+    assert!(r.has("T/V2.cbz"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn merging_two_full_library_copies_never_trips_d19() {
+    let f = FakeBackend::drive_like();
+    let top = f.account_root();
+    let mut copies = Vec::new();
+    for _ in 0..2 {
+        let root = f.reader_mkdir_in(&top, "mokuro-reader").pid;
+        for i in 0..50 {
+            let s = f.reader_mkdir_in(&root, &format!("S{i}")).pid;
+            for j in 0..10 {
+                f.reader_put_in(&s, &format!("v{j}.cbz"), b"zip");
+            }
+        }
+        copies.push(root);
+    }
+    let cfg = FeedConfig {
+        suspect_min_removals: FeedConfig::new(ROOT, "mokuro-reader").suspect_min_removals,
+        ..config()
+    };
+    let mut r = rig_with(Arc::new(f), cfg, None);
+    r.ready().await;
+    let states = r.record_states();
+    // 500 superseded copies trashed, 50 emptied folders and a root removed.
+    assert_eq!(r.fake.run_reader_dedup(), 51);
+    for _ in 0..4 {
+        r.settle().await;
+    }
+    assert_eq!(r.feed.state(), EngineState::Steady);
+    never_suspect(&states);
+    assert_eq!(r.index.lock().roots(), [copies[0].clone()]);
+    assert_eq!(r.index.lock().node_count(), 550);
+    let evs = r.drain();
+    assert!(
+        !evs.iter().any(|e| matches!(e, WatchEvent::Removed { .. })),
+        "{evs:?}"
+    );
+
+    // Control: 300 unique volumes trashed is still a catastrophe.
+    for k in 0..300 {
+        let n = r
+            .fake
+            .node_at(&format!("mokuro-reader/S{}/v{}.cbz", k / 10, k % 10))
+            .unwrap();
+        r.fake.reader_trash_pid(&n.pid);
+    }
+    let s = r
+        .feed
+        .wait_for(|s| matches!(s, EngineState::Suspect { .. }), LONG)
+        .await
+        .unwrap();
+    assert_eq!(
+        s,
+        EngineState::Suspect {
+            pending_removals: 300,
+            root_changed: false
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hard_deleted_root_member_and_its_marker_do_not_hold() {
+    use bunko_remote::status::{Lease, LeaseConfig, LeaseState, MARKER_NAME, MemoryLeaseStore};
+    // Mokuro Reader 1.10 on Drive deletes for good: B, its copies and the marker in it.
+    let f = FakeBackend::drive_like();
+    let top = f.account_root();
+    let a = f.reader_mkdir_in(&top, "mokuro-reader").pid;
+    let s_a = f.reader_mkdir_in(&a, "S").pid;
+    f.reader_put_in(&s_a, "V1.cbz", b"v1");
+    let b = f.reader_mkdir_in(&top, "mokuro-reader").pid;
+    let s_b = f.reader_mkdir_in(&b, "S").pid;
+    f.reader_put_in(&s_b, "V1.cbz", b"v1");
+    let t = f.reader_mkdir_in(&b, "T").pid;
+    f.reader_put_in(&t, "V2.cbz", b"v2");
+    f.reader_put_in(&b, MARKER_NAME, b"{}");
+    let mut r = rig(f);
+    r.ready().await;
+    let states = r.record_states();
+    r.fake.reader_move(&t, &a);
+    r.fake.reader_delete_pid(&b);
+    r.settle().await;
+    assert_eq!(r.feed.state(), EngineState::Steady);
+    never_suspect(&states);
+    assert_eq!(r.index.lock().roots(), std::slice::from_ref(&a));
+    assert!(r.has("S/V1.cbz") && r.has("T/V2.cbz"));
+    assert!(!r.has(MARKER_NAME));
+    let evs = r.drain();
+    assert_eq!(
+        removed_any(&evs, &["S", "S/V1.cbz", "T", "T/V2.cbz"]),
+        [],
+        "{evs:?}"
+    );
+
+    // Bunko's lease writes its marker into roots()[0], as the store starts it.
+    let root = r.index.lock().roots()[0].clone();
+    let mut lc = LeaseConfig::new("inst", "boot", "host", "0.8.0");
+    lc.claim_settle = Some(Duration::ZERO);
+    let lease_dir = r.dir.path().join("lease");
+    let mut lease = Lease::new(
+        r.fake.clone(),
+        root,
+        lc,
+        Arc::new(MemoryLeaseStore::new()),
+        lease_dir,
+    );
+    assert_eq!(lease.claim().await.unwrap(), LeaseState::Holder);
+    r.settle().await;
+    let marker = r.index.lock().lookup(&rel(MARKER_NAME)).unwrap();
+    let node = r.index.lock().winner_node(marker.eid).unwrap();
+    assert_eq!(node.parent, Some(a));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_same_named_folder_does_not_hide_what_only_the_vanished_root_held() {
+    let f = Arc::new(FakeBackend::drive_like());
+    let w = twins(&f);
+    // B's S holds V9 that A's S does not have; T moves over, then B is trashed whole.
+    f.reader_put_in(&w.s_b, "V9.cbz", b"v9");
+    let r = rig_with(f.clone(), config(), None);
+    r.steady().await;
+    let Rig { dir, feed, .. } = r;
+    feed.shutdown().await;
+    f.reader_move(&w.t, &w.a);
+    f.reader_move(&w.vd_b, &w.a);
+    f.reader_trash_pid(&w.cat_b);
+    f.reader_trash_pid(&w.b);
+    let r = rig_with(f.clone(), config(), Some(dir));
+    let s = r
+        .feed
+        .wait_for(|s| matches!(s, EngineState::Suspect { .. }), LONG)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            s,
+            EngineState::Suspect {
+                root_changed: true,
+                ..
+            }
+        ),
+        "{s:?}"
+    );
+    assert!(r.has("S/V9.cbz"));
+
+    // Without V9, B's S holds only what A's has: dropped.
+    let Rig { dir, feed, .. } = r;
+    feed.shutdown().await;
+    let f = Arc::new(FakeBackend::drive_like());
+    let w = twins(&f);
+    f.reader_put_in(&w.s_a, "V3.cbz", b"v3");
+    let r = rig_with(f.clone(), config(), None);
+    r.steady().await;
+    let Rig { dir: d2, feed, .. } = r;
+    feed.shutdown().await;
+    drop(dir);
+    f.reader_move(&w.t, &w.a);
+    f.reader_move(&w.vd_b, &w.a);
+    f.reader_trash_pid(&w.cat_b);
+    f.reader_trash_pid(&w.b);
+    let r = rig_with(f.clone(), config(), Some(d2));
+    let states = r.record_states();
+    r.steady().await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    never_suspect(&states);
+    assert_eq!(r.index.lock().roots(), std::slice::from_ref(&w.a));
+    assert!(r.has("S/V3.cbz") && r.has("T/V2.cbz"));
+}

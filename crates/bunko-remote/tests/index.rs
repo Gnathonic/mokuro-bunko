@@ -322,6 +322,46 @@ fn dup_member_groups_are_same_name_same_parent_canonical_first() {
 }
 
 #[test]
+fn a_move_between_merged_members_keeps_the_path() {
+    let d = tempfile::tempdir().unwrap();
+    let idx = Index::open(&d.path().join("index.sqlite")).unwrap();
+    idx.set_roots(&[
+        dir("r-a", "top", "mokuro-reader", 10),
+        dir("r-b", "top", "mokuro-reader", 20),
+    ])
+    .unwrap();
+    let up = |n: &RNode| {
+        let tx = idx.begin().unwrap();
+        let ch = idx.upsert(&tx, n, 0, G_S).unwrap();
+        tx.commit().unwrap();
+        ch
+    };
+    up(&dir("s-a", "r-a", "S", 1));
+    up(&dir("t", "r-b", "T", 2));
+    up(&file("v", "t", "v.cbz", 3));
+    up(&dir("s-b", "r-b", "S", 4));
+    up(&file("w", "s-b", "w.cbz", 5));
+    // The reader merges B into A: T and B's S move over, then B's file into A's S.
+    let eid_t = idx.lookup(&rel("T")).unwrap().eid;
+    assert_eq!(up(&dir("t", "r-a", "T", 2)), []);
+    assert_eq!(up(&dir("s-b", "r-a", "S", 4)), []);
+    assert_eq!(up(&file("w", "s-a", "w.cbz", 5)), []);
+    assert_eq!(idx.lookup(&rel("T")).unwrap().eid, eid_t, "the same entry");
+    assert!(idx.lookup(&rel("T/v.cbz")).is_some());
+    assert_eq!(idx.lookup(&rel("S")).unwrap().members, 2);
+    assert_eq!(idx.node("w").unwrap().parent.as_deref(), Some("s-a"));
+    // Into another folder it is still a move.
+    assert_eq!(
+        up(&file("w", "t", "w.cbz", 5)),
+        [IndexChange::Moved {
+            from: rel("S/w.cbz"),
+            to: rel("T/w.cbz"),
+            is_dir: false
+        }]
+    );
+}
+
+#[test]
 fn subtree_loss_counts_only_what_no_other_node_keeps_visible() {
     let f = fx();
     f.up(&dir("s-1", "root-1", "S", 1));

@@ -51,6 +51,18 @@
   server lists it.
 
 ### Changed
+- **Duplicate folders in Google Drive and MEGA libraries: Bunko follows the reader's
+  merge.** When the reader merges two `mokuro-reader` folders (or two copies of a
+  series folder), Bunko no longer stops the library as if it had been wiped: the
+  emptied copy is dropped quietly, whether the merge happens while Bunko runs or while
+  it is stopped, as long as everything it held is still in the other copy. A folder
+  removed with volumes found nowhere else still pauses the library for the admin, as
+  before. Bunko now writes into the same `mokuro-reader` folder the reader does (one
+  directly in My Drive or the Cloud Drive first, then the oldest; a
+  `Backup/mokuro-reader` is still read), and where one file exists twice it shows
+  the most recently written copy, the one the reader's merge keeps. Deleting one copy
+  of such a file through Bunko no longer makes the volume disappear from the
+  catalog while the other copy remains.
 - **Bunko and Mokuro Reader agree on what a `.mokuro` beside a volume is.** One rule
   now decides it everywhere Bunko looks (deleting a volume, the OCR upgrade, cloud case
   merges, the cloud queue file, upload ownership, the OCR queue, the catalog's "OCR

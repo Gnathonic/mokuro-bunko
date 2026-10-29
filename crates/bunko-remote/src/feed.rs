@@ -35,6 +35,13 @@
 //! STEADY, or a root removed, renamed or moved, put the engine in
 //! [`EngineState::Suspect`]. The removals are stashed, not applied, until
 //! [`FeedHandle::confirm_suspect`] or two consecutive full re-lists agree on them.
+//! A duplicate merge, by the reader or anyone, is never a catastrophe: only removals
+//! that make a library path disappear count (a trashed shadowed copy, an emptied
+//! duplicate folder count 0), and a root member that is vacated (every node in it
+//! moved out or superseded by a copy elsewhere, [`Index::root_vacated`]) is dropped
+//! silently while another root stays. At LOCATE_ROOTS a root that vanished while
+//! Bunko was stopped is dropped the same way when a direct listing of the remaining
+//! roots shows every child it held, by pid or by name.
 //!
 //! **Hook delivery**: hooks and foreign-JSON notifications are queued in
 //! `index.sqlite` in the same transaction as the change that causes them and are
@@ -68,7 +75,7 @@ use tokio::time::Instant;
 
 use crate::backend::{BErr, Backend, BackendCaps, ChangeItem, ChangePage, Cursor, Pid, RNode};
 use crate::index::{Index, IndexChange, ROOT_EID, RelPath};
-use crate::names::nfc;
+use crate::names::{CONTROL_FILES, nfc};
 
 /// Consecutive failures before the engine reports [`EngineState::Offline`].
 const OFFLINE_AFTER: u32 = 3;
@@ -80,6 +87,8 @@ const THROTTLE_DEFAULT: Duration = Duration::from_secs(30);
 const MIN_WAIT: Duration = Duration::from_secs(1);
 /// Subtrees larger than this are never compared for a path-id move.
 const SIG_CAP: usize = 20_000;
+/// Direct listings a restart may spend proving a vanished root was merged away.
+const VACATED_MAX_LISTINGS: usize = 200;
 
 const HOOK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS feed_hook(id INTEGER PRIMARY KEY, \
     kind TEXT NOT NULL, a TEXT NOT NULL, b TEXT NOT NULL DEFAULT '', c TEXT NOT NULL DEFAULT '', \
@@ -180,13 +189,16 @@ pub struct FeedConfig {
     pub poll_idle: Duration,
     /// `quiet_s` (§5.4): the recently-removed window and the tombstone grace floor.
     pub quiet: Duration,
-    /// D19: the share of indexed nodes whose removal makes the engine suspect.
+    /// D19: the share of indexed nodes whose removal makes the engine suspect. Only
+    /// removals that make a library path disappear count: a duplicate's other copy
+    /// keeps its path.
     pub suspect_ratio: f64,
     /// D19: the STEADY window removals are summed over.
     pub suspect_window: Duration,
     /// Fewer removed provider files than this never trip D19: deleting a whole series
     /// from a small library is routine, and the valve is for catastrophes (a wiped
-    /// listing, a moved root — which trips it regardless).
+    /// listing, a moved root or one removed with what it held — which trip it
+    /// regardless).
     pub suspect_min_removals: u64,
     /// While suspect, how often the tree is listed again.
     pub suspect_relist: Duration,
@@ -649,6 +661,7 @@ impl<B: Backend> Core<B> {
         batch: &[IndexChange],
         match_moves: bool,
     ) -> Vec<Del> {
+        let removing: HashSet<Pid> = pids.iter().cloned().collect();
         let mut dels: Vec<Del> = Vec::new();
         let mut at: HashMap<Pid, usize> = HashMap::new();
         for pid in pids {
@@ -684,7 +697,9 @@ impl<B: Backend> Core<B> {
             if d.top != i {
                 continue;
             }
-            d.size = idx.subtree_size(&d.pid);
+            // What disappears from the library: a superseded copy or an emptied
+            // duplicate folder costs nothing.
+            d.size = idx.subtree_loss(&d.pid, &removing);
             if match_moves
                 && !d.echo
                 && let Some(p) = &d.path
@@ -1076,6 +1091,7 @@ impl<B: Backend> Feed<B> {
             reauth: false,
             stop: false,
             sync_done: 0,
+            deferred: Vec::new(),
         };
         FeedHandle {
             join: Some(handle.spawn(engine.run())),
@@ -1263,6 +1279,9 @@ struct Engine<B: Backend> {
     reauth: bool,
     stop: bool,
     sync_done: u64,
+    /// What dropping a vacated root reported, announced after the FULL_SYNC that
+    /// re-places its moved children (only what is then still gone).
+    deferred: Vec<IndexChange>,
 }
 
 impl<B: Backend> Engine<B> {
@@ -1456,19 +1475,35 @@ impl<B: Backend> Engine<B> {
         let folder = self.core.cfg.folder.clone();
         let mut found = self.core.backend.locate_roots(&folder).await?;
         self.ok();
-        let (known, nested, changed) = {
+        let (known, nested, moved, missing, survivors) = {
             let idx = self.core.index.lock();
             let known = idx.roots();
-            let changed = known.iter().any(|k| {
+            let (mut moved, mut missing, mut survivors) = (Vec::new(), Vec::new(), Vec::new());
+            for k in &known {
                 let was = idx.node(k).and_then(|n| n.parent);
-                found
-                    .iter()
-                    .find(|f| &f.pid == k)
-                    .is_none_or(|f| f.parent != was)
-            });
-            (known, idx.nested_roots(), changed)
+                match found.iter().find(|f| &f.pid == k) {
+                    None => missing.push(k.clone()),
+                    Some(f) if f.parent != was => moved.push(k.clone()),
+                    Some(_) => survivors.push(k.clone()),
+                }
+            }
+            (known, idx.nested_roots(), moved, missing, survivors)
         };
-        if changed && !self.confirmed {
+        // A root gone while Bunko was stopped may be a duplicate the reader merged
+        // away: then the others hold everything it did, and it is not a root change.
+        let vacated = moved.is_empty()
+            && !missing.is_empty()
+            && !survivors.is_empty()
+            && !self.confirmed
+            && match self.vacated_by_listing(&missing, &survivors).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::info!("feed: checking the remaining roots: {e}");
+                    false
+                }
+            };
+        let changed = !moved.is_empty() || !missing.is_empty();
+        if changed && !vacated && !self.confirmed {
             // A root removed, renamed or moved (D19): wait for the admin, or for
             // the root to be back where it was.
             if !self.root_suspect {
@@ -1509,7 +1544,16 @@ impl<B: Backend> Engine<B> {
             .any(|f| !known.contains(&f.pid) && !nested.contains(&f.pid));
         if changed || extra {
             let changes = self.core.index.lock().set_roots(&found)?;
-            self.core.emit(&changes);
+            if vacated {
+                // Its moved children come back under the others in the FULL_SYNC.
+                tracing::info!(
+                    roots = missing.len(),
+                    "feed: a duplicate library root was merged away"
+                );
+                self.deferred.extend(changes);
+            } else {
+                self.core.emit(&changes);
+            }
         }
         let pending = self
             .core
@@ -1525,6 +1569,63 @@ impl<B: Backend> Engine<B> {
             self.phase = Phase::FullSync;
         }
         Ok(())
+    }
+
+    /// Every indexed direct child of each `missing` root is in a `survivors` listing,
+    /// by pid (moved there) or by NFC name (a superseded copy; a folder of that name
+    /// is checked the same way one level down, so a same-named folder never hides
+    /// what only the vanished one held). Bunko's status files do not count: it
+    /// rewrites them into `roots()[0]`. Past [`VACATED_MAX_LISTINGS`] it answers no.
+    async fn vacated_by_listing(&self, missing: &[Pid], survivors: &[Pid]) -> Result<bool, BErr> {
+        let kids = |pids: &[Pid]| -> Vec<RNode> {
+            let idx = self.core.index.lock();
+            pids.iter().flat_map(|m| idx.nodes_under(m)).collect()
+        };
+        let mut work: Vec<(Vec<RNode>, Vec<Pid>)> = vec![(kids(missing), survivors.to_vec())];
+        let mut listings = 0usize;
+        while let Some((gone, holders)) = work.pop() {
+            let mut pids: HashSet<Pid> = HashSet::new();
+            let mut dirs: HashMap<String, Vec<Pid>> = HashMap::new();
+            let mut files: HashSet<String> = HashSet::new();
+            for h in &holders {
+                listings += 1;
+                if listings > VACATED_MAX_LISTINGS {
+                    return Ok(false);
+                }
+                self.core
+                    .backend
+                    .list_dir(h, &mut |n| {
+                        if n.trashed {
+                            return;
+                        }
+                        if n.is_dir {
+                            dirs.entry(nfc(&n.name_raw))
+                                .or_default()
+                                .push(n.pid.clone());
+                        } else {
+                            files.insert(nfc(&n.name_raw));
+                        }
+                        pids.insert(n.pid);
+                    })
+                    .await?;
+            }
+            for k in gone {
+                let name = nfc(&k.name_raw);
+                if pids.contains(&k.pid) || (!k.is_dir && CONTROL_FILES.contains(&name.as_str())) {
+                    continue;
+                }
+                if !k.is_dir && files.contains(&name) {
+                    continue;
+                }
+                match dirs.get(&name) {
+                    Some(same) if k.is_dir => {
+                        work.push((kids(std::slice::from_ref(&k.pid)), same.clone()))
+                    }
+                    _ => return Ok(false),
+                }
+            }
+        }
+        Ok(true)
     }
 
     // ---- FULL_SYNC --------------------------------------------------------------
@@ -1599,11 +1700,9 @@ impl<B: Backend> Engine<B> {
                 .into_iter()
                 .filter(|p| !fstate.keep_on_sweep(p))
                 .collect();
-            // Unplaced leftovers (children of a removed folder) leave silently.
-            let visible = stale
-                .iter()
-                .filter(|p| idx.entry_by_pid(p).is_some())
-                .count() as u64;
+            // Unplaced leftovers (children of a removed folder) leave silently, and so
+            // does a stale copy whose path another node keeps.
+            let visible = idx.visible_loss(&stale.iter().cloned().collect());
             (stale, visible, idx.node_count())
         };
         let set: BTreeSet<Pid> = stale.iter().cloned().collect();
@@ -1629,6 +1728,20 @@ impl<B: Backend> Engine<B> {
             tx.commit()?;
         }
         self.core.emit(&out);
+        let deferred = std::mem::take(&mut self.deferred);
+        if !deferred.is_empty() {
+            let gone: Vec<IndexChange> = {
+                let idx = self.core.index.lock();
+                deferred
+                    .into_iter()
+                    .filter(|c| match c {
+                        IndexChange::Removed { rel, .. } => idx.lookup(rel).is_none(),
+                        _ => true,
+                    })
+                    .collect()
+            };
+            self.core.emit(&gone);
+        }
         self.core.drain_hooks();
         if apply {
             self.stash.clear();
@@ -1814,6 +1927,9 @@ impl<B: Backend> Engine<B> {
             let generation = idx.generation();
             let tx = idx.begin()?;
             let mut deletes: Vec<Pid> = Vec::new();
+            // Root members removed (or trashed) in this page, judged once the page's
+            // moves are in.
+            let mut root_removed: Vec<Pid> = Vec::new();
             for (i, it) in items.iter().enumerate() {
                 let pid = pid_of(it);
                 if last.get(&pid) != Some(&i) {
@@ -1828,6 +1944,8 @@ impl<B: Backend> Engine<B> {
                         {
                             idx.upsert(&tx, n, generation, core.caps.mtime_granularity_ns)?;
                         }
+                        ChangeItem::Removed { .. } => root_removed.push(pid),
+                        ChangeItem::Upsert(n) if n.trashed => root_removed.push(pid),
                         _ => root_changed = true,
                     }
                     continue;
@@ -1838,6 +1956,22 @@ impl<B: Backend> Engine<B> {
                     ChangeItem::Upsert(n) => {
                         self.stash.remove(&n.pid);
                         core.apply_upsert(&idx, &tx, n, generation, &mut out)?;
+                    }
+                }
+            }
+            if !root_removed.is_empty() {
+                // A merge empties a duplicate root, then removes it: our own trash,
+                // or a member left holding nothing of its own, goes quietly while
+                // another root stays. Anything else is a root change (D19).
+                let removing: HashSet<Pid> = deletes.iter().chain(&root_removed).cloned().collect();
+                for r in root_removed {
+                    let own = idx
+                        .node(&r)
+                        .is_some_and(|n| core.fstate.is_own_delete(&r, &n.cver));
+                    if own || idx.root_vacated(&r, &removing) {
+                        deletes.push(r);
+                    } else {
+                        root_changed = true;
                     }
                 }
             }

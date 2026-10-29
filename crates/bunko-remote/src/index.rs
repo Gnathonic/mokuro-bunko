@@ -531,9 +531,14 @@ impl Index {
                 }
             }
             Some(eid) => {
-                let same_place = old.parent_pid == n.parent
-                    && old.is_dir == n.is_dir
-                    && nfc(&old.name_raw) == nfc(&n.name_raw);
+                let same_place = old.is_dir == n.is_dir
+                    && nfc(&old.name_raw) == nfc(&n.name_raw)
+                    && (old.parent_pid == n.parent || {
+                        // Moved between members of one merged folder (a duplicate
+                        // merge): its path does not change.
+                        let np = self.parent_eid_of(c, n.parent.as_deref())?;
+                        np.is_some() && np == self.entry_parent(c, eid)?
+                    });
                 if same_place {
                     let before = self.snap(c, eid)?;
                     self.write_node(c, n, generation)?;
@@ -790,6 +795,38 @@ impl Index {
                         .is_some_and(|n| n.eid.is_some())
                     && self.subtree_loss(kid, removing) == 0)
         })
+    }
+
+    /// How many of `removing` are placed nodes whose entry keeps no node outside
+    /// `removing`: the library paths that removal would make disappear.
+    pub fn visible_loss(&self, removing: &HashSet<Pid>) -> u64 {
+        let mut kept: std::collections::HashMap<i64, bool> = std::collections::HashMap::new();
+        removing
+            .iter()
+            .filter_map(|p| self.node_row(&self.conn, p).ok().flatten()?.eid)
+            .filter(|eid| {
+                !*kept
+                    .entry(*eid)
+                    .or_insert_with(|| self.entry_pids(*eid).iter().any(|p| !removing.contains(p)))
+            })
+            .count() as u64
+    }
+
+    /// The nodes whose provider parent is `pid`, placed or not.
+    pub fn nodes_under(&self, pid: &str) -> Vec<RNode> {
+        soft(
+            self.conn
+                .prepare_cached(
+                    "SELECT pid, parent_pid, name_raw, kind, size, base_mtime_ms, created_ms, version, \
+                     cver, pin, hash_kind, hash FROM node WHERE parent_pid = ?1 ORDER BY pid",
+                )
+                .and_then(|mut s| {
+                    s.query_map([pid], node_from_row)?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                }),
+            "nodes_under",
+        )
+        .unwrap_or_default()
     }
 
     fn entry_pids(&self, eid: i64) -> Vec<Pid> {
