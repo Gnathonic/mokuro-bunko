@@ -1386,7 +1386,8 @@ an update *request*: the facts are validated and merged (newest stamp wins), and
 both files are regenerated. The server compiles the volume list itself; of each
 listed volume it reads only `volume_uuid` and `offset`, the shelf offset (a listed
 volume without `offset` has its offset cleared, an unlisted one keeps it), and a
-top-level `spine_offset` replaces the stored one. Offsets apply whatever the
+top-level `spine_offset` replaces the stored one (`0` or `null` clears it; a body
+without the key keeps it). Offsets apply whatever the
 `updated_at` stamp, so a client sends back the offsets it read, or no volume list.
 A body carrying only facts, with no volume list at
 all, is an equally valid update. Writing `catalog.json`, or deleting/moving either

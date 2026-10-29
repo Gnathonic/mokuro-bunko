@@ -94,6 +94,10 @@
   as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
 
 ### Fixed
+- **A series' shelf alignment can be reset.** A `series.json` update with
+  `"spine_offset": 0` (or `null`) now clears the stored offset, and the compiled
+  `series.json` drops it; before, `0` read as "no opinion" and the old offset stayed
+  forever. An update without the key still keeps it.
 - **A `.mokuro` or `series.json` saved with a byte-order mark is read.** Mokuro Reader
   accepts OCR files that start with a UTF-8 byte-order mark (some Windows editors add
   one); Bunko took them for unreadable, so it left their pages and characters out of

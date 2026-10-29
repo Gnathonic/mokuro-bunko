@@ -386,3 +386,56 @@ fn shared_types_are_thread_safe() {
     fn assert_send<T: Send>() {}
     assert_send::<bunko_library::Volume>();
 }
+
+/// A present `spine_offset` of `0` is a deliberate reset: the compiled file
+/// drops the key, and the same reset again writes nothing.
+#[test]
+fn a_zero_spine_offset_put_clears_the_published_one() {
+    let (_temp, root) = fixture_library();
+    let hooks = Arc::new(RecordingHooks::default());
+    let service = MetadataService::new(
+        &root,
+        Arc::new(SqliteStore::new(&schema())),
+        hooks.clone(),
+        Arc::new(NoPathLocks),
+        DebouncePolicy::default(),
+    );
+    service.recompile_all().unwrap();
+    let series_file = root.join("Dr Stone/series.json");
+    let set = br#"{"version":2,"updated_at":"2026-08-18T19:36:24.324Z","spine_offset":-40}"#;
+    assert!(service.apply_series_update("Dr Stone", set, None).unwrap());
+    let published = std::fs::read_to_string(&series_file).unwrap();
+    assert!(published.contains(r#""spine_offset":-40"#), "{published}");
+
+    let reset = br#"{"version":2,"updated_at":"2026-08-18T19:36:24.324Z","spine_offset":0}"#;
+    let before = hooks.published.load(Ordering::SeqCst);
+    assert!(
+        service
+            .apply_series_update("Dr Stone", reset, None)
+            .unwrap()
+    );
+    let cleared = std::fs::read_to_string(&series_file).unwrap();
+    assert!(!cleared.contains("spine_offset"), "{cleared}");
+    assert_eq!(hooks.published.load(Ordering::SeqCst), before + 1);
+
+    let modified = std::fs::metadata(&series_file).unwrap().modified().unwrap();
+    assert!(
+        service
+            .apply_series_update("Dr Stone", reset, None)
+            .unwrap()
+    );
+    assert_eq!(
+        hooks.published.load(Ordering::SeqCst),
+        before + 1,
+        "a second identical reset writes nothing"
+    );
+    assert_eq!(
+        std::fs::metadata(&series_file).unwrap().modified().unwrap(),
+        modified
+    );
+    // An absent key keeps whatever is stored.
+    assert!(service.apply_series_update("Dr Stone", set, None).unwrap());
+    assert!(service.apply_series_update("Dr Stone", PUT, None).unwrap());
+    let kept = std::fs::read_to_string(&series_file).unwrap();
+    assert!(kept.contains(r#""spine_offset":-40"#), "{kept}");
+}
