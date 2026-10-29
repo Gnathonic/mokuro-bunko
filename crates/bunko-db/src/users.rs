@@ -782,6 +782,18 @@ mod tests {
         assert!(db.delete_user("bob").unwrap());
         assert!(!db.delete_user("bob").unwrap());
         assert!(!db.delete_user("nobody").unwrap());
+        // A deleted account's name never passes to a new account, so whatever names it
+        // (storage.library.progress_user: the cloud root's own files) stays with it.
+        assert!(matches!(
+            db.create_user(
+                "bob",
+                "password123",
+                Role::Registered,
+                UserStatus::Active,
+                ""
+            ),
+            Err(DbError::Invalid(_))
+        ));
         assert_eq!(
             db.get_user("bob").unwrap().unwrap().status,
             UserStatus::Deleted
