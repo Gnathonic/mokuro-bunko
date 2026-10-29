@@ -1848,20 +1848,30 @@ impl<B: Backend> Core<B> {
         } else {
             let _ = self.state.ledger_trash(pid);
         }
-        {
+        let (changes, standing) = {
             let idx = self.index.lock();
             let r = idx.begin().and_then(|tx| {
-                idx.remove(&tx, pid)?;
-                tx.commit()
+                let ch = idx.remove(&tx, pid)?;
+                tx.commit()?;
+                Ok(ch)
             });
-            if let Err(e) = r {
+            let changes = r.unwrap_or_else(|e| {
                 tracing::warn!("outbox trash commit: index: {e}");
-            }
+                Vec::new()
+            });
+            (changes, idx.lookup(&op.dest).is_some())
+        };
+        if standing {
+            // A duplicate (§5.9): the path stays. Announce only what its readers now
+            // see: another copy's bytes, a merged folder's lost children, or (a
+            // shadowed copy, or the feed got there first) nothing.
+            self.emit_changes(&changes);
+        } else {
+            (self.emit)(WatchEvent::Removed {
+                path: self.abs(&op.dest),
+                is_dir,
+            });
         }
-        (self.emit)(WatchEvent::Removed {
-            path: self.abs(&op.dest),
-            is_dir,
-        });
         op.state = OpState::Committed;
         self.drop_op(op, true);
         self.fail_at("COMMITTED")?;
