@@ -97,8 +97,9 @@
 - **A series whose last volume was deleted disappears from readers.** Its folder kept
   a `series.json` listing the deleted volumes, so Mokuro Reader kept showing them.
   Bunko now removes that file (its facts are kept for a later upload; in a cloud
-  library it goes to the trash, and only while the library is in step). A
-  `series.json` placed by hand with facts of its own stays.
+  library it goes to the trash, and only while the library is in step: otherwise
+  Bunko looks again every minute until it is). A `series.json` placed by hand with
+  facts of its own stays.
 - **A series' shelf alignment can be reset.** A `series.json` update with
   `"spine_offset": 0` (or `null`) now clears the stored offset, and the compiled
   `series.json` drops it; before, `0` read as "no opinion" and the old offset stayed

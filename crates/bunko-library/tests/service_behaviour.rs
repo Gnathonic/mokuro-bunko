@@ -703,12 +703,20 @@ fn a_remote_library_retires_only_while_online() {
             .recompile_series_batch(&["Gone".to_owned()])
             .unwrap();
         assert!(root.join("Gone/series.json").is_file(), "{health:?}");
+        // Nothing else would look again before the 6 h rescan (no hook fires when
+        // the store comes back, and the watcher ignores .json): one slow retry per
+        // pass, not the 5 s one that would spin while it lasts.
+        assert_eq!(
+            std::mem::take(&mut *hooks.scheduled.lock()),
+            vec![Some(DebouncePolicy::default().max_debounce); 2],
+            "{health:?}"
+        );
     }
-    assert!(
-        hooks.scheduled.lock().is_empty(),
-        "no retry loop while waiting"
-    );
     *gated.health.lock() = Health::Online;
     service.recompile_all().unwrap();
     assert!(!root.join("Gone/series.json").exists());
+    assert!(
+        hooks.scheduled.lock().is_empty(),
+        "retired, nothing to retry"
+    );
 }

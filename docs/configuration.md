@@ -1364,7 +1364,8 @@ them. A `series.json` placed there by hand, carrying facts Bunko has no record o
 is left alone. In a cloud library the file goes to the provider's trash (a version
 Bunko wrote itself is deleted), and only while the library is online and in step:
 not during a full sync, not while it waits for removals to be confirmed, not while
-another Bunko holds the library.
+another Bunko holds the library. A pass held back that way looks again a minute
+later, and keeps doing so until the library is back in step.
 
 Each volume entry may also carry `mokuro_size`/`mokuro_modified` and
 `cover_size`/`cover_modified`: the byte size and integer epoch-second mtime of the

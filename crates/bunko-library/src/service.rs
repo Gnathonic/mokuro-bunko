@@ -472,8 +472,14 @@ impl MetadataService {
             return Ok(0);
         }
         if !self.may_retire() {
-            // The next pass looks again; retrying now would only spin while it lasts.
+            // Nothing else looks again before the periodic rescan: the watcher ignores
+            // .json and no hook fires when the store comes back. A slow retry (the
+            // longest the debounce allows), not the 5 s one, which would spin while
+            // a Suspect or Offline store lasts. Checked before `regenerable`, which
+            // may have to read the file from a store that is not in step.
             tracing::debug!("[METADATA] library not steady, empty folders keep series.json");
+            self.hooks
+                .schedule_regeneration(Some(self.policy.max_debounce));
             return Ok(0);
         }
         let mut retired = 0;

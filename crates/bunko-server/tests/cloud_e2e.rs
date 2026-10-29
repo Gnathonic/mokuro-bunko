@@ -496,15 +496,13 @@ async fn an_emptied_cloud_folder_retires_its_series_file_only_while_online() {
         "retired while Suspect"
     );
 
-    // Confirmed; then a full sync, held open.
-    store.feed().confirm_suspect();
-    eventually("online", Duration::from_secs(20), || {
-        store.health() == Health::Online
-    })
-    .await;
+    // Confirmed straight into a full sync, held open. The cursor is lost first, so
+    // the feed's next call after applying the removals falls into the full sync: no
+    // Online window in which a background pass (the Gone batch, the startup pass)
+    // could retire the file before the gate is checked.
     hold.store(true, Ordering::SeqCst);
     fake.lose_cursor();
-    store.feed().poll_now();
+    store.feed().confirm_suspect();
     eventually("a full sync", Duration::from_secs(20), || {
         matches!(store.health(), Health::Syncing { .. })
     })
