@@ -322,18 +322,18 @@ fn a_warm_python_cache_is_read_back_without_recompiling() {
     }
     let service = service(&root, Arc::clone(&store));
     service.recompile_all().unwrap();
-    // Only the legacy row was written back (hash filled); everything else hit.
-    assert_eq!(store.cache_writes.load(Ordering::SeqCst), 1);
-    // Python's cached entries are read back as they are, the BOM volume's included.
+    // Written back: the legacy row (hash filled) and the BOM volume, which Python cached
+    // as having no OCR (recompiled once, [`DEPARTURES`]); everything else hit.
+    assert_eq!(store.cache_writes.load(Ordering::SeqCst), 2);
     assert_files(
         &root,
-        &python_files(steps.last().unwrap()),
+        &expected_files(steps.last().unwrap()),
         "warm full pass",
     );
     for (table, key, columns) in TABLES {
         assert_eq!(
             dump_table(&store, table, key, columns),
-            expected_table(&db, table),
+            departed_table(table, expected_table(&db, table)),
             "table {table}"
         );
     }

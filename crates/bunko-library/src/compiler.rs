@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use bunko_core::sidecar_names::Folder;
 use bunko_store::Meta;
 
 use crate::archive;
@@ -354,8 +355,12 @@ struct VolumeStats {
     sidecar_key: String,
 }
 
-fn volume_stats(cbz_path: &Path) -> Option<VolumeStats> {
-    let sidecar = sidecar::primary_sidecar(cbz_path);
+/// `folder`: the archive's folder, listed once by a pass over the whole series.
+fn volume_stats(cbz_path: &Path, folder: Option<&Folder>) -> Option<VolumeStats> {
+    let sidecar = match folder {
+        Some(folder) => sidecar::primary_sidecar_in(cbz_path, folder),
+        None => sidecar::primary_sidecar(cbz_path),
+    };
     let sidecar_meta = sidecar.as_deref().and_then(fsutil::stat);
     let sidecar_key = sidecar_stat_key(sidecar.as_deref(), sidecar_meta.as_ref());
     let cbz_meta = fsutil::stat(cbz_path)?;
@@ -386,7 +391,23 @@ fn cached_object(
         return Ok(None);
     }
     let object = pyjson::load_json_object(Some(&row.entry_json));
-    Ok((!object.is_empty()).then_some(object))
+    if object.is_empty() || compiled_before_bom_tolerance(&object, stats) {
+        return Ok(None);
+    }
+    Ok(Some(object))
+}
+
+/// The row recorded a BOM sidecar as unreadable (no version, no hash), as every
+/// compile before sidecar names rule v1 did: compiled again once, so the sidecar's
+/// pages count without its stamp having to change.
+fn compiled_before_bom_tolerance(object: &JsonObject, stats: &VolumeStats) -> bool {
+    let unread = matches!(object.get("mokuro_version"), Some(JsonValue::Str(v)) if v.is_empty())
+        && matches!(object.get("mokuro_sha256"), None | Some(JsonValue::Null));
+    unread
+        && stats
+            .sidecar
+            .as_deref()
+            .is_some_and(sidecar::starts_with_bom)
 }
 
 fn put_entry(
@@ -495,10 +516,13 @@ pub fn compile_series_volumes(
     let series_key = normalize_volume_title_key(&series.title);
     let mut entries: Vec<VolumeEntry> = Vec::new();
     let mut published: Option<HashMap<String, JsonObject>> = None;
+    let listed = sidecar::list_names(&series.path).unwrap_or_default();
+    let listed: Vec<&str> = listed.iter().map(String::as_str).collect();
+    let folder = Folder::new(&listed);
     for name in archive_names(&series.path) {
         let cbz_path = series.path.join(&name);
         let volume_title = py_stem(&name).to_owned();
-        let Some(stats) = volume_stats(&cbz_path) else {
+        let Some(stats) = volume_stats(&cbz_path, Some(&folder)) else {
             continue;
         };
         let key = volume_key_for(&series.title, &volume_title);
@@ -579,7 +603,7 @@ fn cached_entry(
     let Some(volume_title) = cbz_path.file_name().and_then(|n| n.to_str()).map(py_stem) else {
         return Ok(None);
     };
-    let Some(stats) = volume_stats(cbz_path) else {
+    let Some(stats) = volume_stats(cbz_path, None) else {
         return Ok(None);
     };
     Ok(
@@ -645,7 +669,7 @@ pub fn missing_pages_now(
     let Some(series_title) = parts[0].as_os_str().to_str() else {
         return Ok(0);
     };
-    let Some(stats) = volume_stats(cbz_path) else {
+    let Some(stats) = volume_stats(cbz_path, None) else {
         return Ok(0);
     };
     let volume_title = cbz_path.file_name().and_then(|n| n.to_str()).map(py_stem);
@@ -708,6 +732,41 @@ mod tests {
         assert_eq!(
             entry.mokuro_sha256,
             Some(hex::encode(Sha256::digest(raw.as_bytes())))
+        );
+    }
+    /// A series pass lists its folder once and still finds a primary spelled
+    /// another way (`V2.MOKURO` on a case-sensitive disk).
+    #[test]
+    fn a_series_pass_finds_a_primary_in_any_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = dir.path().join("S");
+        bunko_store::fs::create_dir(&series).unwrap();
+        let sidecar = "{\"version\":\"0.2.1\",\"pages\":[{\"blocks\":[{\"lines\":[\"あ\"]}]}]}";
+        for (name, text) in [
+            ("V1.cbz", "x"),
+            ("V1.mokuro", sidecar),
+            ("V2.cbz", "x"),
+            ("V2.MOKURO", sidecar),
+            ("V3.cbz", "x"),
+        ] {
+            bunko_store::fs::write(series.join(name), text).unwrap();
+        }
+        let folder = SeriesFolder {
+            title: "S".into(),
+            path: series,
+        };
+        let versions: Vec<_> = compile_series_volumes(&folder, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.volume_title, e.mokuro_version))
+            .collect();
+        assert_eq!(
+            versions,
+            [
+                ("V1".to_owned(), "0.2.1".to_owned()),
+                ("V2".to_owned(), "0.2.1".to_owned()),
+                ("V3".to_owned(), String::new()),
+            ]
         );
     }
 }

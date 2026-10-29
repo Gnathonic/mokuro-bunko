@@ -2,12 +2,13 @@
 //! series/volumes exist, their covers and OCR layers, what still needs OCR or
 //! a thumbnail. Feeds the catalog, home/health counts and the OCR queue.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use bunko_core::sidecar_names::{self, Folder};
 use parking_lot::Mutex;
 
 use crate::fsutil;
@@ -125,19 +126,33 @@ fn scan_dir(
         layers_by_stem.entry(stem).or_default().insert(layer);
     }
 
-    // Stems with an archive, its extension in any case (`Vol 1.CBZ`).
-    let archive_stems: HashSet<&str> = filenames
+    // Stems with an archive, its extension in any case (`Vol 1.CBZ`), to its name.
+    let archive_stems: HashMap<&str, &str> = filenames
         .iter()
         .filter(|name| crate::sidecar::is_cbz_name(name))
-        .map(|name| &name[..name.len() - 4])
+        .map(|name| (&name[..name.len() - 4], name.as_str()))
         .collect();
+    let listed: Vec<&str> = sorted_names.iter().map(|name| name.as_str()).collect();
+    let folder = Folder::new(&listed);
     let mut volumes = Vec::new();
     let mut series_cover = None;
     for volume_name in &volume_names {
         let has = |suffix: &str| filenames.contains(&format!("{volume_name}{suffix}"));
-        let has_cbz = archive_stems.contains(volume_name.as_str());
-        let has_mokuro = has(".mokuro");
-        let has_mokuro_gz = has(".mokuro.gz");
+        let archive = archive_stems.get(volume_name.as_str());
+        let has_cbz = archive.is_some();
+        let mut has_mokuro = has(".mokuro");
+        let mut has_mokuro_gz = has(".mokuro.gz");
+        // Rule v1: the primary in another spelling of the stem (`V.MOKURO` on a
+        // case-sensitive disk) is the volume's too; the OCR walk agrees.
+        if !has_mokuro
+            && !has_mokuro_gz
+            && let Some(primary) = archive.and_then(|name| folder.primary_of(name))
+        {
+            match sidecar_names::split_mokuro(primary) {
+                Some((_, true)) => has_mokuro_gz = true,
+                _ => has_mokuro = true,
+            }
+        }
         let has_webp = has(".webp");
         let cover = has_webp.then(|| format!("{series_name}/{volume_name}.webp"));
         if series_cover.is_none() {
@@ -429,5 +444,50 @@ impl Inner {
         let state = self.state.lock();
         let snapshot = state.snapshot.as_ref()?;
         (!state.stale).then(|| (Arc::clone(snapshot), state.scans))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sidecar names rule v1: a primary in another spelling of the stem (`V.MOKURO`,
+    /// `v.mokuro.gz` on a case-sensitive disk) means the volume is not pending OCR.
+    #[test]
+    fn a_primary_in_any_spelling_is_not_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = dir.path().join("S");
+        bunko_store::fs::create_dir(&series).unwrap();
+        for name in [
+            "A.cbz",
+            "A.MOKURO",
+            "B.cbz",
+            "b.mokuro.gz",
+            "C.cbz",
+            "D.cbz",
+            "D.mokuro",
+            "Ee.cbz",
+            "eE.cbz",
+            "ee.Mokuro",
+        ] {
+            bunko_store::fs::write(series.join(name), b"{}").unwrap();
+        }
+        let snapshot = scan_library(dir.path());
+        let pending: Vec<&str> = snapshot
+            .pending_ocr
+            .iter()
+            .map(|(_, v)| v.as_str())
+            .collect();
+        // `ee.Mokuro` could be `Ee`'s or `eE`'s: it is neither's.
+        assert_eq!(pending, ["C", "Ee", "eE"]);
+        let volumes = &snapshot.series[0].volumes;
+        let flags = |name: &str| {
+            let v = volumes.iter().find(|v| v.name == name).unwrap();
+            (v.has_mokuro, v.has_mokuro_gz)
+        };
+        assert_eq!(flags("A"), (true, false));
+        assert_eq!(flags("B"), (false, true));
+        assert_eq!(flags("C"), (false, false));
+        assert_eq!(flags("D"), (true, false));
     }
 }

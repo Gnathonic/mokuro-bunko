@@ -53,7 +53,8 @@
 ### Changed
 - **Bunko and Mokuro Reader agree on what a `.mokuro` beside a volume is.** One rule
   now decides it everywhere Bunko looks (deleting a volume, the OCR upgrade, cloud case
-  merges, the cloud queue file, upload ownership), the same rule the reader uses, with
+  merges, the cloud queue file, upload ownership, the OCR queue, the catalog's "OCR
+  pending"), the same rule the reader uses, with
   shared test cases in `interop/contract/sidecar-names.json`: `.mokuro`, `.mokuro.gz`
   and `.cbz` match in any case (`Vol 1.MOKURO`), a volume's name matches in any case or
   Unicode form (`vol 1.mokuro` beside `Vol 1.cbz`), only a `.cbz` makes a name a volume,
@@ -61,7 +62,8 @@
   digits-only ids included (`Vol 1.5.mokuro` is layer `5` of `Vol 1` unless
   `Vol 1.5.cbz` exists). Deleting a volume still never takes a file whose name belongs
   to another archive, of any extension, and on a disk that can hold `Vol 1.cbz` and
-  `vol 1.cbz` side by side each keeps the files spelled exactly like it.
+  `vol 1.cbz` side by side each keeps the files spelled exactly like it; a file spelled
+  like neither (`VOL 1.mokuro`) belongs to neither and is never deleted with one.
 - **A WebDAV library on this computer needs no "Allow http".** A plain `http://` URL
   whose host is `localhost`, `127.x.x.x` or `[::1]` (a server on the same machine, such
   as an rclone or Nextcloud container bound to loopback) is accepted without
@@ -96,8 +98,8 @@
   accepts OCR files that start with a UTF-8 byte-order mark (some Windows editors add
   one); Bunko took them for unreadable, so it left their pages and characters out of
   `series.json` and could OCR the volume again. They now read like any other, and
-  `mokuro_sha256` still covers the bytes as stored. A `series.json` sent with one is
-  accepted too.
+  `mokuro_sha256` still covers the bytes as stored, and a library compiled by an earlier
+  version counts them at its next scan. A `series.json` sent with one is accepted too.
 - **The cloud queue file names a decimal volume's OCR as its own.** A finished
   `Vol 1.5.mokuro` beside `Vol 1.5.cbz` was listed as layer `5` of `Vol 1`.
 - **A library reached through a symbolic link gets its OCR follow-ups.** When the path

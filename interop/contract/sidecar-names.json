@@ -566,10 +566,41 @@
       "folder": [
         "Vol 01.cbz",
         "Vol 01.5.cbr",
-        "Vol 01.5.hayai.mokuro"
+        "Vol 01.5.mokuro.gz"
       ],
       "expect": [],
-      "why": "or its layers"
+      "why": "or its gzip primary (classify says layer 5)"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "vol 01.5.rar",
+        "Vol 01.5.mokuro"
+      ],
+      "expect": [],
+      "why": "an archive's stem protects in any spelling (classify says layer 5)"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "VOL 01.cbz",
+        "vol 01.mokuro",
+        "vol 01.gcv.mokuro"
+      ],
+      "expect": [],
+      "why": "a folded-only match two archives could claim stays"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "VOL 01.zip",
+        "vol 01.mokuro"
+      ],
+      "expect": [],
+      "why": "even when the other archive is no .cbz"
     },
     {
       "archive": "V\u00f3l 1.cbz",

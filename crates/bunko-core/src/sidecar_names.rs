@@ -8,7 +8,8 @@
 //!    (`Vol 1.5.mokuro` is volume 1.5's when `Vol 1.5.cbz` is listed).
 //! 5. A layer id is matched exactly as written against `^[a-z0-9-]{1,32}$`
 //!    ([`generations::is_layer_id`]); all-digit ids are layers.
-//! 6. When sweeping, an exact-case stem wins over a folded one.
+//! 6. When sweeping, an exact-case stem wins over a folded one, and a folded-only
+//!    match belongs to no archive when two archives' stems fold alike.
 //! 7. A leading UTF-8 BOM is tolerated on read and never written; hashes cover
 //!    the raw bytes (`bunko_library::pyjson::strip_bom`).
 //!
@@ -16,7 +17,8 @@
 //! decision here takes the folder listing. Both sides run the vectors in
 //! `interop/contract/sidecar-names.json`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use unicode_normalization::UnicodeNormalization;
 
@@ -161,55 +163,149 @@ pub enum VolumeFile<'a> {
     Layer { id: &'a str, gz: bool },
 }
 
-/// The listed files that belong to the archive `cbz_name`: its primary, cover,
-/// no-cover marker and layers, in listing order.
-///
-/// Stricter than [`classify`], because what it returns may be deleted:
-/// * a stem matches exactly, or folded only when no archive here has that exact
-///   stem (rule 6: `vol 01.mokuro` is `vol 01.cbz`'s when both spellings are listed);
-/// * a name whose base is any archive's stem, of any of the
-///   [`ARCHIVE_EXTENSIONS`], is that archive's and is never a layer here
-///   (`Vol 01.5.mokuro` beside `Vol 01.5.zip` classifies as layer `5`, but a sweep
-///   leaves it).
-pub fn volume_files<'a>(cbz_name: &str, names: &[&'a str]) -> Vec<(&'a str, VolumeFile<'a>)> {
-    let Some(anchor) = cbz_stem(cbz_name) else {
-        return Vec::new();
-    };
-    let mut exact: HashSet<&str> = HashSet::new();
-    let mut folded: HashSet<String> = HashSet::new();
-    for name in names {
-        if let Some(stem) = ARCHIVE_EXTENSIONS
-            .iter()
-            .find_map(|ext| strip_suffix_ci(name, ext))
-        {
-            exact.insert(stem);
-            folded.insert(fold(stem));
+/// A folder listing prepared once for every archive in it (a compile pass, the OCR
+/// walk and the catalog index ask about each volume of a folder): the archive stems,
+/// and the folded stems its `.mokuro` names could belong to, so an archive none of them
+/// folds to is answered without folding the listing again.
+pub struct Folder<'a> {
+    names: Vec<&'a str>,
+    /// Stems of every archive of [`ARCHIVE_EXTENSIONS`], as written.
+    archive_stems: Vec<&'a str>,
+    /// Folded bases of the `.mokuro[.gz]` names, and of their layer readings' stems.
+    sidecar_folds: HashSet<String>,
+    /// The archive stems as a set, and folded with how many spellings fold to each:
+    /// made on first use, so a folder without sidecars folds no archive name.
+    stems: OnceLock<(HashSet<&'a str>, HashMap<String, usize>)>,
+}
+
+impl<'a> Folder<'a> {
+    pub fn new(names: &[&'a str]) -> Self {
+        let mut archive_stems = Vec::new();
+        let mut sidecar_folds = HashSet::new();
+        for &name in names {
+            if let Some(stem) = ARCHIVE_EXTENSIONS
+                .iter()
+                .find_map(|ext| strip_suffix_ci(name, ext))
+            {
+                archive_stems.push(stem);
+            } else if let Some((base, _)) = split_mokuro(name) {
+                sidecar_folds.insert(fold(base));
+                if let Some((stem, _, _)) = split_layer(name) {
+                    sidecar_folds.insert(fold(stem));
+                }
+            }
+        }
+        Folder {
+            names: names.to_vec(),
+            archive_stems,
+            sidecar_folds,
+            stems: OnceLock::new(),
         }
     }
-    let anchor_fold = fold(anchor);
-    let owns = |stem: &str| stem == anchor || (!exact.contains(stem) && fold(stem) == anchor_fold);
-    let mut out = Vec::new();
-    for &name in names {
-        let (base, file) = if let Some((base, gz)) = split_mokuro(name) {
-            (base, VolumeFile::Primary { gz })
-        } else if let Some(base) = strip_suffix_ci(name, ".webp") {
-            (base, VolumeFile::Cover)
-        } else if let Some(base) = strip_suffix_ci(name, ".nocover") {
-            (base, VolumeFile::NoCover)
-        } else {
-            continue;
+
+    fn stems(&self) -> &(HashSet<&'a str>, HashMap<String, usize>) {
+        self.stems.get_or_init(|| {
+            let exact: HashSet<&str> = self.archive_stems.iter().copied().collect();
+            let mut folded: HashMap<String, usize> = HashMap::new();
+            for stem in &exact {
+                *folded.entry(fold(stem)).or_default() += 1;
+            }
+            (exact, folded)
+        })
+    }
+
+    /// The listed files that belong to the archive `cbz_name`: its primary, cover,
+    /// no-cover marker and layers, in listing order.
+    ///
+    /// Stricter than [`classify`], because what it returns may be deleted:
+    /// * a stem matches exactly, or folded only when it is the one archive here of that
+    ///   folded stem (rule 6: `vol 01.mokuro` is `vol 01.cbz`'s when both spellings are
+    ///   listed; beside `Vol 01.cbz` and `VOL 01.cbz` it is neither's);
+    /// * a name whose base is any archive's stem, of any of the
+    ///   [`ARCHIVE_EXTENSIONS`], is that archive's and is never a layer here
+    ///   (`Vol 01.5.mokuro` beside `Vol 01.5.zip` classifies as layer `5`, but a sweep
+    ///   leaves it).
+    pub fn volume_files(&self, cbz_name: &str) -> Vec<(&'a str, VolumeFile<'a>)> {
+        let Some(anchor) = cbz_stem(cbz_name) else {
+            return Vec::new();
         };
-        if owns(base) {
-            out.push((name, file));
-        } else if matches!(file, VolumeFile::Primary { .. })
-            && !folded.contains(&fold(base))
-            && let Some((stem, id, gz)) = split_layer(name)
-            && owns(stem)
-        {
-            out.push((name, VolumeFile::Layer { id, gz }));
+        let (exact, folded) = self.stems();
+        let anchor_fold = fold(anchor);
+        let alone = folded.get(&anchor_fold).is_none_or(|&n| n <= 1);
+        let owns = |stem: &str| {
+            stem == anchor || (alone && !exact.contains(stem) && fold(stem) == anchor_fold)
+        };
+        let mut out = Vec::new();
+        for &name in &self.names {
+            let (base, file) = if let Some((base, gz)) = split_mokuro(name) {
+                (base, VolumeFile::Primary { gz })
+            } else if let Some(base) = strip_suffix_ci(name, ".webp") {
+                (base, VolumeFile::Cover)
+            } else if let Some(base) = strip_suffix_ci(name, ".nocover") {
+                (base, VolumeFile::NoCover)
+            } else {
+                continue;
+            };
+            if owns(base) {
+                out.push((name, file));
+            } else if matches!(file, VolumeFile::Primary { .. })
+                && !folded.contains_key(&fold(base))
+                && let Some((stem, id, gz)) = split_layer(name)
+                && owns(stem)
+            {
+                out.push((name, VolumeFile::Layer { id, gz }));
+            }
         }
+        out
     }
-    out
+
+    /// No `.mokuro` here can be `cbz_name`'s, in any spelling: checked without walking
+    /// the listing.
+    fn no_sidecars_for(&self, cbz_name: &str) -> bool {
+        cbz_stem(cbz_name).is_none_or(|anchor| !self.sidecar_folds.contains(&fold(anchor)))
+    }
+
+    /// The primary sidecar of `cbz_name`: an exact stem before a folded one,
+    /// `.mokuro` before `.mokuro.gz`.
+    pub fn primary_of(&self, cbz_name: &str) -> Option<&'a str> {
+        if self.no_sidecars_for(cbz_name) {
+            return None;
+        }
+        let anchor = cbz_stem(cbz_name)?;
+        let rank = |name: &str, gz: bool| {
+            let exact = split_mokuro(name).is_some_and(|(base, _)| base == anchor);
+            (!exact, gz)
+        };
+        self.volume_files(cbz_name)
+            .into_iter()
+            .filter_map(|(name, file)| match file {
+                VolumeFile::Primary { gz } => Some((rank(name, gz), name)),
+                _ => None,
+            })
+            .min()
+            .map(|(_, name)| name)
+    }
+
+    /// `cbz_name`'s layer `id` (exact, rule 5) in any spelling of its stem, `.mokuro`
+    /// before `.mokuro.gz`.
+    pub fn layer_of(&self, cbz_name: &str, id: &str) -> Option<&'a str> {
+        if self.no_sidecars_for(cbz_name) {
+            return None;
+        }
+        self.volume_files(cbz_name)
+            .into_iter()
+            .filter_map(|(name, file)| match file {
+                VolumeFile::Layer { id: found, gz } if found == id => Some((gz, name)),
+                _ => None,
+            })
+            .min()
+            .map(|(_, name)| name)
+    }
+}
+
+/// [`Folder::volume_files`] for a single archive.
+pub fn volume_files<'a>(cbz_name: &str, names: &[&'a str]) -> Vec<(&'a str, VolumeFile<'a>)> {
+    Folder::new(names).volume_files(cbz_name)
 }
 
 /// The names [`volume_files`] finds: everything that goes when `cbz_name` goes.
@@ -220,23 +316,9 @@ pub fn sweep_set(cbz_name: &str, names: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// The primary sidecar of `cbz_name` among `names`: an exact stem before a folded
-/// one, `.mokuro` before `.mokuro.gz`.
+/// [`Folder::primary_of`] for a single archive.
 pub fn primary_of<'a>(cbz_name: &str, names: &[&'a str]) -> Option<&'a str> {
-    let anchor = cbz_stem(cbz_name)?;
-    let files = volume_files(cbz_name, names);
-    let rank = |name: &str, gz: bool| {
-        let exact = split_mokuro(name).is_some_and(|(base, _)| base == anchor);
-        (!exact, gz)
-    };
-    files
-        .into_iter()
-        .filter_map(|(name, file)| match file {
-            VolumeFile::Primary { gz } => Some((rank(name, gz), name)),
-            _ => None,
-        })
-        .min()
-        .map(|(_, name)| name)
+    Folder::new(names).primary_of(cbz_name)
 }
 
 #[cfg(test)]
@@ -347,6 +429,30 @@ mod tests {
         );
         assert_eq!(primary_of("V.cbz", &["V.cbz", "v.cbz", "v.mokuro"]), None);
         assert_eq!(primary_of("V.cbr", &["V.cbr", "V.mokuro"]), None);
+    }
+
+    #[test]
+    fn two_archives_of_one_folded_stem_claim_no_folded_sidecar() {
+        let names = ["Vol 01.cbz", "VOL 01.cbz", "vol 01.mokuro"];
+        assert_eq!(primary_of("Vol 01.cbz", &names), None);
+        assert_eq!(primary_of("VOL 01.cbz", &names), None);
+        // An exact stem is still its own.
+        let names = ["Vol 01.cbz", "VOL 01.cbz", "VOL 01.mokuro"];
+        assert_eq!(primary_of("VOL 01.cbz", &names), Some("VOL 01.mokuro"));
+        assert_eq!(primary_of("Vol 01.cbz", &names), None);
+    }
+
+    #[test]
+    fn a_layer_in_any_spelling_of_the_stem() {
+        let folder = Folder::new(&["V.cbz", "v.gcv.mokuro.gz", "V.gcv.MOKURO", "V.5.cbz"]);
+        assert_eq!(folder.layer_of("V.cbz", "gcv"), Some("V.gcv.MOKURO"));
+        assert_eq!(folder.layer_of("V.cbz", "hayai"), None);
+        assert_eq!(folder.layer_of("W.cbz", "gcv"), None);
+        assert_eq!(
+            Folder::new(&["V.cbz", "v.gcv.mokuro.gz"]).layer_of("V.cbz", "gcv"),
+            Some("v.gcv.mokuro.gz")
+        );
+        assert_eq!(folder.primary_of("V.cbz"), None);
     }
 
     #[test]

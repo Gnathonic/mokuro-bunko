@@ -99,7 +99,8 @@ Rule v1: the suffixes `.cbz`, `.mokuro` and `.mokuro.gz` match in any ASCII case
 `.cbz` archives define volume stems; stems compare folded (NFC, then Unicode lowercase);
 a primary wins over a layer reading of the same name; a layer id matches
 `^[a-z0-9-]{1,32}$` exactly as written, all-digit ids included; when sweeping, an
-exact-case stem wins over a folded one; a leading UTF-8 BOM is tolerated on read, never
+exact-case stem wins over a folded one, and a folded-only match is no archive's when two
+archives' stems fold alike; a leading UTF-8 BOM is tolerated on read, never
 written, and hashes cover the raw bytes. New reader ids always contain a letter.
 
 - `rule`: the rule version, `1`.
