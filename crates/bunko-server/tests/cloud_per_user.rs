@@ -584,6 +584,23 @@ async fn corrections_are_the_owners_cloud_file_and_everyone_elses_overlay() {
     }
     assert_eq!(e.get("boss", edit).await.0, 404);
     assert_eq!(e.req(None, "GET", edit, &[], b"").await.0, 404);
+    // Each account lists its own, at every depth; the shared listing holds neither.
+    for depth in ["1", "infinity"] {
+        for user in ["owner", "other"] {
+            let list = e.propfind(user, "/mokuro-reader/Series/", depth).await;
+            assert_eq!(
+                list.matches("Vol%201.edit.mokuro").count(),
+                1,
+                "{user}: {list}"
+            );
+        }
+        let list = e.propfind("boss", "/mokuro-reader/Series/", depth).await;
+        assert!(!list.contains(".edit."), "{list}");
+    }
+    let list = e.propfind("owner", "/mokuro-reader/", "infinity").await;
+    assert_eq!(list.matches("Vol%201.edit.mokuro").count(), 1, "{list}");
+    let list = e.propfind("boss", "/mokuro-reader/", "infinity").await;
+    assert!(!list.contains(".edit."), "{list}");
 
     // The volume's records are untouched.
     let row = db.get_ocr_sidecar("Series/Vol 1.mokuro").unwrap();

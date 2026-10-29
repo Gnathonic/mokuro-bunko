@@ -113,7 +113,8 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
         && !matches!(paths::classify(&norm), paths::Target::Progress(_))
     {
         if let Some(hit) = inner.cache.get(&norm).await {
-            let tail = injected_progress(inner, req, &norm).await?;
+            let mut tail = injected_progress(inner, req, &norm).await?;
+            tail.push_str(&injected_personal(inner, req, &res, &hit).await?);
             return Ok(crate::cache::respond(hit, &tail, gzip));
         }
         return Err(DavError::new(StatusCode::NOT_FOUND, &req.path));
@@ -134,6 +135,7 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
                     caller: dctx.caller(),
                     locks: Some(&inner2.locks),
                     dead: Some(&inner2.dead),
+                    hidden_personal: None,
                 };
                 propfind::walk(&inner2.roots, &res, depth, &mode, &ctx, feed);
             })
@@ -146,6 +148,7 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
             caller: dctx.caller(),
             locks: Some(&inner2.locks),
             dead: Some(&inner2.dead),
+            hidden_personal: None,
         };
         let mut out = String::from(MULTISTATUS_OPEN);
         propfind::walk(&inner2.roots, &res, depth, &mode, &ctx, &mut |chunk| {
@@ -183,6 +186,7 @@ async fn injected_progress(inner: &Arc<Inner>, req: &Req, norm: &str) -> DavResu
             caller: dctx.caller(),
             locks: None,
             dead: None,
+            hidden_personal: None,
         };
         for name in paths::PER_USER_FILES {
             if let Some(res) = inner
@@ -204,6 +208,49 @@ async fn injected_progress(inner: &Arc<Inner>, req: &Req, norm: &str) -> DavResu
                 &ctx,
                 &mut |chunk| out.push_str(chunk),
             );
+        }
+        out
+    })
+    .await
+}
+
+/// The caller's own corrections (D27) below a cached collection, appended to its
+/// shared listing: the cloud-root owner's physical ones the cache set aside, or anyone
+/// else's overlays, each beside its archive. Anonymous has none.
+async fn injected_personal(
+    inner: &Arc<Inner>,
+    req: &Req,
+    res: &Resource,
+    hit: &crate::cache::Hit,
+) -> DavResult<String> {
+    let Some(caller) = req.caller() else {
+        return Ok(String::new());
+    };
+    if caller.owns_cloud_root {
+        return Ok(hit.owner_tail().to_string());
+    }
+    let folder_rel = match res.phys() {
+        Some(phys) => match inner.roots.library_rel(phys) {
+            Some(rel) => rel,
+            None => return Ok(String::new()),
+        },
+        // `/` and `/mokuro-reader` list the whole library.
+        None => String::new(),
+    };
+    let inner = inner.clone();
+    let dctx = req.ctx.clone();
+    blocking(move || {
+        let ctx = PropCtx {
+            caller: dctx.caller(),
+            locks: None,
+            dead: None,
+            hidden_personal: None,
+        };
+        let mut out = String::new();
+        if let Some(caller) = ctx.caller {
+            for res in inner.roots.overlays_under(caller, &folder_rel) {
+                propfind::write_response(&mut out, &res, &Mode::AllProp, &ctx);
+            }
         }
         out
     })

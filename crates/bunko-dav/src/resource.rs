@@ -659,6 +659,51 @@ impl Roots {
         out
     }
 
+    /// Every overlay of `caller` below the library folder `folder_rel` (`""`: the
+    /// whole library) that a listing shows: each beside its archive, in path order.
+    /// For a `Depth: infinity` answer, whose shared part is the anonymous cache.
+    /// Blocking.
+    pub fn overlays_under(&self, caller: Caller<'_>, folder_rel: &str) -> Vec<Resource> {
+        let mut out = Vec::new();
+        let mut stack = vec![folder_rel.trim_matches('/').to_string()];
+        while let Some(rel) = stack.pop() {
+            let Some(dir) = personal::overlay_path(&self.users, caller.username, &rel) else {
+                continue;
+            };
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut has_files = false;
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => stack.push(if rel.is_empty() {
+                        name
+                    } else {
+                        format!("{rel}/{name}")
+                    }),
+                    Ok(_) => has_files |= personal::personal_name(&name).is_some(),
+                    Err(_) => {}
+                }
+            }
+            if !has_files {
+                continue;
+            }
+            let Some(folder) = self.library_member(&self.library, &rel) else {
+                continue;
+            };
+            let stems = personal::stems_of(&personal::names_in(&folder));
+            let vpath = if rel.is_empty() {
+                format!("/{READER_ROOT}")
+            } else {
+                format!("/{READER_ROOT}/{rel}")
+            };
+            out.extend(self.overlays_in(caller, &rel, &vpath, &stems));
+        }
+        out.sort_by(|a, b| a.path().cmp(b.path()));
+        out
+    }
+
     fn list_dir(
         &self,
         dir: &Path,

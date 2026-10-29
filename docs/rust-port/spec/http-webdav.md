@@ -1279,6 +1279,11 @@ port may implement them without a cache (Q6).
    untouched; otherwise the XML is re-serialised with declaration `<?xml version='1.0' encoding='utf-8'?>`. Other
    paths get no injection. Pinned by `test_propfind_mokuro_reader_depth_infinity_authenticated_injects_progress`,
    `..._root_depth_infinity_authenticated_injects_progress`, `test_utf8_user_gets_propfind_cache_injection`.
+   **0.8 (D27, personal corrections):** every cached collection at or under `/mokuro-reader` (and `/`) also
+   gets the caller's own `<Vol>.edit[-n].mokuro` files below it appended, each only beside its `.cbz`: the overlays
+   under `users/<u>/edits/<prefix>`, or for a cloud library's `progress_user` the physical files the anonymous walk hid,
+   which the entry keeps rendered beside the shared part (`owner_tail`). Anonymous gets none. An overlay write
+   invalidates nothing (no shared listing holds it); a write of the owner's physical file drops the entries above it.
 5. Response: status `207`; stored headers minus `Content-Length`/`Content-Encoding`/`Transfer-Encoding`, plus
    `Vary: Accept-Encoding`, plus `Content-Encoding: gzip` (level 6) iff `"gzip"` appears anywhere in `Accept-Encoding`
    (no q-value parsing), plus `Content-Length`. The stored `Date` header is the generation time (stale on hits; QUIRK).
