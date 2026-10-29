@@ -35,6 +35,11 @@ pub struct FakeConfig {
     pub overlap: usize,
     /// Engines the catalog lists (default `["fake"]`).
     pub engines: Vec<String>,
+    /// The output revision announced for every listed engine and written into its
+    /// sidecars' `ocr_engine.revision` (default: this build's
+    /// [`bunko_layout::sidecar::engine_revision`]), to stand in for an older or newer
+    /// processor.
+    pub engine_revision: Option<u32>,
     /// Adds a `gpu:0` device computing in these formats; the engine runs there unless
     /// the row pins it to the CPU.
     pub gpu_formats: Option<Vec<String>>,
@@ -67,6 +72,13 @@ struct Inner {
     config: FakeConfig,
     opened: AtomicU64,
     ran: Mutex<Vec<String>>,
+}
+
+impl FakeConfig {
+    fn revision_of(&self, engine: &str) -> u32 {
+        self.engine_revision
+            .unwrap_or_else(|| bunko_layout::sidecar::engine_revision(engine))
+    }
 }
 
 impl FakePipeline {
@@ -161,6 +173,10 @@ impl PagePipeline for FakePipeline {
                     .map(|n| n.get() as u32),
             },
             catalog: Catalog {
+                engine_revisions: engines
+                    .iter()
+                    .map(|e| (e.clone(), config.revision_of(e)))
+                    .collect(),
                 engines,
                 detectors: vec!["ppocr-manga".into()],
                 devices: {
@@ -404,7 +420,7 @@ impl VolumeRunner for FakeRunner {
             "title_uuid": meta.title_uuid,
             "volume": meta.volume,
             "volume_uuid": meta.volume_uuid,
-            "ocr_engine": {"id": self.engine, "generator": "mokuro-bunko", "precision": self.precision},
+            "ocr_engine": {"id": self.engine, "revision": config.revision_of(&self.engine), "generator": "mokuro-bunko", "precision": self.precision},
             "pages": out_pages,
         });
         let tmp = out.with_file_name(format!(

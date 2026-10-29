@@ -352,6 +352,7 @@ mod tests {
                 generator: "mokuro-bunko 0.8.0".into(),
                 generation: "nova".into(),
             }),
+            created: Some("2026-10-29T00:00:00Z".into()),
         };
         // Sealed first, normalised after: the stamp lands inside the sealed block.
         let mut early = doc();
@@ -364,13 +365,16 @@ mod tests {
         let text = seal(&mut v).unwrap();
         assert!(is_sealed(text.as_bytes()));
         assert!(text.contains("\"generation\":\"nova\""));
-        // A primary install (no stamp) only rewrites names, which the seal leaves out.
+        assert!(text.contains("\"created\":\"2026-10-29T00:00:00Z\""));
+        // Re-normalising without a stamp or a date only rewrites names, which the seal
+        // leaves out.
         let mut primary = doc();
         seal(&mut primary).unwrap();
         assert!(normalize_sidecar(
             &mut primary,
             &Normalization {
                 stamp: None,
+                created: None,
                 ..norm
             }
         ));

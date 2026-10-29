@@ -345,6 +345,13 @@ fn install(req: &CollectRequest) -> Outcome {
         volume: req.job.volume().to_string(),
         volume_uuid,
         stamp,
+        // `ocr_engine.created`: when this library installed the file (inside the seal).
+        created: Some(bunko_sched::py::iso_utc(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+        )),
     };
     if let Err(e) = bunko_layout::sidecar::normalize_sidecar_file(&req.result, &norm) {
         return Outcome::Failed(format!(

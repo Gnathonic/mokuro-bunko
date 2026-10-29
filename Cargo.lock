@@ -698,6 +698,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bunko-control",
+ "bunko-layout",
  "bunko-proto",
  "bunko-sched",
  "bunko-update",

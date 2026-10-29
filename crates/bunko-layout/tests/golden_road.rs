@@ -15,6 +15,21 @@ use bunko_layout::sidecar::{
 };
 use common::*;
 
+/// `text` (a sidecar) without the `ocr_engine.revision` 0.8 adds, which the recorded
+/// Python bytes predate; the revision itself must be 1 (every engine's first). Dumped
+/// with `sep`, so the rest is compared byte for byte.
+fn without_revision(text: &str, sep: Separators) -> Result<String, String> {
+    let mut v = Value::parse(text).map_err(|e| e.to_string())?;
+    if let Some(Value::Object(block)) = v.get_mut("ocr_engine") {
+        let at = block.iter().position(|(k, _)| k == "revision");
+        match at.map(|i| block.remove(i).1) {
+            Some(Value::Int(1)) => {}
+            other => return Err(format!("ocr_engine.revision is {other:?}, not 1")),
+        }
+    }
+    Ok(v.dumps(sep))
+}
+
 struct RoadInput {
     width: i64,
     height: i64,
@@ -253,7 +268,11 @@ fn volume_sidecars_and_normalization_match_python() {
         let volume = build_volume(&header, &chosen);
         let path = tmp.path().join(format!("{name}.mokuro"));
         write_sidecar(&path, &volume).expect("write");
-        let runner_bytes = std::fs::read_to_string(&path).expect("read");
+        let runner_bytes = without_revision(
+            &std::fs::read_to_string(&path).expect("read"),
+            Separators::Default,
+        )
+        .unwrap_or_else(|e| format!("{name}: {e}"));
         if !b(get(case, "runner_modified")) && runner_bytes != s(get(case, "runner_bytes")) {
             errs.push(format!(
                 "{name}: runner bytes\n got {}\nwant {}",
@@ -294,9 +313,14 @@ fn volume_sidecars_and_normalization_match_python() {
                 generator: s(get(n, "generator")).to_string(),
                 generation: s(get(n, "generation")).to_string(),
             }),
+            created: None,
         };
         assert!(normalize_sidecar_file(&path, &norm).expect("normalize"));
-        let normalized = std::fs::read_to_string(&path).expect("read");
+        let normalized = without_revision(
+            &std::fs::read_to_string(&path).expect("read"),
+            Separators::Compact,
+        )
+        .unwrap_or_else(|e| format!("{name}: {e}"));
         if normalized != s(get(case, "normalized_bytes")) {
             errs.push(format!(
                 "{name}: normalized\n got {normalized}\nwant {}",

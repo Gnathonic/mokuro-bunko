@@ -94,6 +94,13 @@
   edits, `pre-upgrade` copies) are never used or deleted. The admin page's "skipped
   (edited)" count, its list of edited volumes and the "Upgrade anyway" button are gone,
   as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
+- **OCR files say which revision of their engine made them, and when.** Every file Bunko
+  installs carries `ocr_engine.revision` (an engine's output revision, raised only when
+  its output changes; a file without one, such as every 0.7 file, is revision 1) and
+  `ocr_engine.created`, both inside the seal. Processors announce the revision of each
+  engine they run, and one with an older revision than the library's is offered none of
+  that engine's work (the log and the queue say so) until it is updated; processors from
+  0.7 count as revision 1.
 
 ### Fixed
 - **A `.mokuro` or `series.json` saved with a byte-order mark is read.** Mokuro Reader
