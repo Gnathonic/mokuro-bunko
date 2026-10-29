@@ -17,6 +17,7 @@
     ],
     "ocr": true,
     "queue": ".mokuro-queue.json",
+    "dedup": true,
     "took_over_from": null
   },
   "request": {

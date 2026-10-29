@@ -1254,6 +1254,7 @@ async fn the_check_reports_another_bunkos_lease() {
         compiles: vec![],
         ocr: true,
         queue: None,
+        dedup: false,
         took_over_from: None,
     };
     fake.reader_put(

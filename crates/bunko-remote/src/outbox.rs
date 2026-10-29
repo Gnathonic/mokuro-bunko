@@ -1728,19 +1728,22 @@ impl<B: Backend> Core<B> {
                 .state
                 .ledger_move(old_pid, &node.pid, cver, node.parent.as_deref(), &name);
         }
-        {
+        let changes = {
             let idx = self.index.lock();
             let r = idx.begin().and_then(|tx| {
                 if rebased {
                     idx.rebase_pids(&tx, old_pid, &node.pid)?;
                 }
-                idx.upsert(&tx, &node, idx.generation(), self.caps.mtime_granularity_ns)?;
-                tx.commit()
+                let ch =
+                    idx.upsert(&tx, &node, idx.generation(), self.caps.mtime_granularity_ns)?;
+                tx.commit()?;
+                Ok(ch)
             });
-            if let Err(e) = r {
+            r.unwrap_or_else(|e| {
                 tracing::warn!("outbox move commit: index: {e}");
-            }
-        }
+                Vec::new()
+            })
+        };
         // Pending ops follow the moved path (and, on path-id providers, the pids).
         let dest = op.dest.clone();
         let follow: Vec<Op> = self
@@ -1768,14 +1771,20 @@ impl<B: Backend> Core<B> {
                 let _ = self.save_op(&o);
             }
         }
-        (self.emit)(WatchEvent::Removed {
-            path: self.abs(src),
-            is_dir: node.is_dir,
-        });
-        (self.emit)(WatchEvent::Added {
-            path: self.abs(&dest),
-            is_dir: node.is_dir,
-        });
+        if *src == dest {
+            // Between members of one merged folder (a duplicate merge): the path stays,
+            // so announce only what its readers now see (usually nothing).
+            self.emit_changes(&changes);
+        } else {
+            (self.emit)(WatchEvent::Removed {
+                path: self.abs(src),
+                is_dir: node.is_dir,
+            });
+            (self.emit)(WatchEvent::Added {
+                path: self.abs(&dest),
+                is_dir: node.is_dir,
+            });
+        }
         op.state = OpState::Committed;
         self.drop_op(op, true);
         self.fail_at("COMMITTED")?;

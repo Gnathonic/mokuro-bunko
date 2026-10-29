@@ -44,6 +44,32 @@
 //!   its row turns `done` and its paths stop being busy at once. Whoever sees a merge
 //!   finished, by either, finds its audit record.
 //!
+//! ## Duplicates (D5 rev.)
+//!
+//! Drive and MEGA also hold two folders of one exact name in one parent (two
+//! `mokuro-reader` roots, two copies of a series). Bunko runs Mokuro Reader's own merge
+//! (#308) on the same journal, so whichever of the two gets there first, the cloud
+//! ends the same ([`crate::index::Index::dup_member_groups`]):
+//!
+//! - **Groups:** same-named folder nodes under one parent node; the canonical member
+//!   is the oldest, then the smallest pid (the root's: [`Index::roots`] order, top-level
+//!   first). Roots under different parents never merge. Groups merge pass by pass, the
+//!   shallowest level first.
+//! - **When:** the case merge's conditions (lease, `Online`, adoption, `quiet_s` on the
+//!   folder's direct children, no OCR on what moves), with `storage.library.dedup` on
+//!   and a provider that allows duplicate names. A folder merged
+//!   [`DEDUP_RECREATE_LIMIT`] times in a day is left alone (`dup-recreated`).
+//! - **Plan:** per other member, fresh listings of it and the canonical one. An item
+//!   with no counterpart moves in; a folder, or a keep-both file
+//!   ([`crate::names::dedup_keeps_both`]), moves in beside its name; of two files the
+//!   strictly newer write stays and the other goes to the trash (a tie: the canonical
+//!   copy), a losing `series.json` submitted first (D18). A member is trashed only once
+//!   a listing shows it empty.
+//! - **Paths never change:** every node stays at its library path, so no step runs a DB
+//!   hook or announces a removal, and D19 never counts one.
+//!
+//! [`Index::roots`]: crate::index::Index::roots
+//!
 //! One std thread (`bunko-store-merge`) runs the passes: planning reads file bytes
 //! through the store's blocking content methods, which never run on the store runtime.
 
@@ -66,7 +92,7 @@ use crate::backend::{BErr, Backend, OpCtx, Pid, RNode, UploadSource, UploadTarge
 use crate::cache::{SMALL_MAX, now_ms};
 use crate::governor::{self, ApiClass};
 use crate::index::{ROOT_EID, RelPath};
-use crate::names::{fold, nfc};
+use crate::names::{CONTROL_FILES, dedup_keeps_both, fold, nfc};
 use crate::outbox::{Crash, Op, OpKind, OpState, Proof};
 use crate::state::{ConflictRow, random_id};
 use crate::store::{RemoteStore, Ver};
@@ -82,6 +108,11 @@ const EVENT_RETAIN: Duration = Duration::from_secs(3600);
 const EVENT_CAP: usize = 100_000;
 /// The detail of the recreate-loop guard's conflict.
 pub const RECREATING: &str = "Mokuro Reader keeps recreating this folder";
+/// After this many finished duplicate merges of one folder within [`RECREATE_WINDOW`],
+/// its duplicates are left alone (a `dup-recreated` conflict says so).
+pub const DEDUP_RECREATE_LIMIT: u64 = 10;
+/// The detail of the duplicate merge's recreate-loop conflict.
+pub const DUP_RECREATING: &str = "duplicate folders keep reappearing";
 
 // ---- the server's side ------------------------------------------------------------
 
@@ -182,16 +213,40 @@ pub struct MergeRecord {
 // ---- scopes, events ---------------------------------------------------------------
 
 /// The paths one variant set covers, folded: a folder's subtree, or (same-folder file
-/// variants) the files of one folded stem.
+/// variants) the files of one folded stem, or (a duplicate set, `shallow`) the direct
+/// children of one folder, whose nodes are all a duplicate merge moves.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct Scope {
     dir: Vec<String>,
     key: String,
     stem: bool,
+    #[serde(default)]
+    shallow: bool,
 }
 
 impl Scope {
+    /// A duplicate set's scope: the direct children of the folder at `path` (the
+    /// root: `dir` and `key` empty).
+    fn dup(path: &RelPath) -> Scope {
+        Scope {
+            dir: folded(&parent_of(path)),
+            key: path.segments().last().map(|s| fold(s)).unwrap_or_default(),
+            stem: false,
+            shallow: true,
+        }
+    }
+
     fn covers(&self, segs: &[String]) -> bool {
+        if self.shallow {
+            if self.key.is_empty() {
+                // Bunko's own status files are written into the canonical root, never
+                // moved by a merge: their writes leave the root's set quiet.
+                return segs.len() == 1 && !CONTROL_FILES.contains(&segs[0].as_str());
+            }
+            return segs.len() == self.dir.len() + 2
+                && segs[..self.dir.len()] == self.dir[..]
+                && segs[self.dir.len()] == self.key;
+        }
         if segs.len() <= self.dir.len() || segs[..self.dir.len()] != self.dir[..] {
             return false;
         }
@@ -427,6 +482,10 @@ struct Extra {
     /// `Submit`: the winner's `series.json` path the submission is for.
     #[serde(default)]
     series: Option<String>,
+    /// A duplicate merge's move beside a node of the same name (a folder, a keep-both
+    /// file): the name is meant to be there twice afterwards.
+    #[serde(default)]
+    expect_dup: bool,
 }
 
 fn extra_of(op: &Op) -> Option<Extra> {
@@ -449,6 +508,7 @@ struct Planned {
     hooks: bool,
     bytes: Option<Vec<u8>>,
     series: Option<RelPath>,
+    expect_dup: bool,
 }
 
 impl Planned {
@@ -465,6 +525,7 @@ impl Planned {
             hooks: true,
             bytes: None,
             series: None,
+            expect_dup: false,
         }
     }
 
@@ -481,6 +542,7 @@ impl Planned {
             hooks: true,
             bytes: None,
             series: None,
+            expect_dup: false,
         }
     }
 }
@@ -494,12 +556,15 @@ struct Block {
 }
 
 /// A merge's steps, in the order they run: every layer is committed before
-/// anything is trashed; moves and in-place replaces next; loser files are trashed
-/// only after every move (a duplicate a move meets stops all trashing); emptied
-/// folders last, deepest first.
+/// anything is trashed; then the older copies a duplicate merge replaces; moves and
+/// in-place replaces next; loser files are trashed only after every move (a
+/// duplicate a move meets stops all trashing); emptied folders last, deepest first.
 #[derive(Default)]
 struct Plan {
     layers: Vec<Planned>,
+    /// Duplicate merge: the canonical folder's copy a newer one replaces, trashed
+    /// before that one moves in.
+    pre_trash: Vec<Planned>,
     steps: Vec<Planned>,
     submits: Vec<Planned>,
     l_trash: Vec<Planned>,
@@ -514,6 +579,7 @@ struct Plan {
 impl Plan {
     fn work(&self) -> bool {
         !(self.layers.is_empty()
+            && self.pre_trash.is_empty()
             && self.steps.is_empty()
             && self.submits.is_empty()
             && self.l_trash.is_empty()
@@ -523,6 +589,7 @@ impl Plan {
     fn ordered(&self) -> impl Iterator<Item = &Planned> {
         self.layers
             .iter()
+            .chain(&self.pre_trash)
             .chain(&self.steps)
             .chain(&self.submits)
             .chain(&self.l_trash)
@@ -697,6 +764,29 @@ struct VariantSet {
     group: String,
 }
 
+/// A duplicate set the index shows: same-named folders under one parent node.
+struct DupSet {
+    /// The library path they all are.
+    path: RelPath,
+    scope: Scope,
+    /// Canonical first ([`crate::index::DupGroup::members`]).
+    members: Vec<RNode>,
+}
+
+/// `a` was written strictly later than `b`; an unknown time is never newer.
+fn newer(a: &RNode, b: &RNode) -> bool {
+    a.base_mtime_ms > 0 && b.base_mtime_ms > 0 && a.base_mtime_ms > b.base_mtime_ms
+}
+
+/// A folder's path for the log: the library root by name.
+fn shown(path: &RelPath) -> String {
+    if path.is_root() {
+        "the library root".into()
+    } else {
+        path.to_string()
+    }
+}
+
 impl<B: Backend> RemoteStore<B> {
     /// Install the server's [`CaseMergePolicy`]: merges may run from now on.
     pub fn set_case_merge_policy(&self, p: Arc<dyn CaseMergePolicy>) {
@@ -822,6 +912,7 @@ impl<B: Backend> RemoteStore<B> {
             dir: folded(&parent),
             key,
             stem,
+            shallow: false,
         };
         let winner = row.that.first().cloned().unwrap_or_default();
         let gid = self.persist_group(
@@ -868,7 +959,14 @@ impl<B: Backend> RemoteStore<B> {
             && LibraryStore::health(self) == Health::Online
     }
 
-    /// One pass: resume open groups, then merge the variant sets that are ready.
+    /// Duplicate merges run here: the store's setting, on a provider that allows two
+    /// nodes of one name.
+    pub(crate) fn dedup_on(&self) -> bool {
+        self.cfg.dedup && self.core.caps.duplicate_names
+    }
+
+    /// One pass: resume open groups, then merge the duplicate sets and the variant
+    /// sets that are ready.
     pub(crate) fn merge_pass(&self) {
         let Some(policy) = self.merge.policy() else {
             return;
@@ -885,6 +983,19 @@ impl<B: Backend> RemoteStore<B> {
                 Ok(GroupEnd::Done) => {}
                 Ok(GroupEnd::Paused) | Err(Crash) => return,
             }
+        }
+        if self.dedup_on() {
+            for set in self.dup_sets() {
+                if !self.can_run() {
+                    return;
+                }
+                if let Err(Crash) = self.try_dup(&set, policy.as_ref()) {
+                    return;
+                }
+            }
+        }
+        if !self.cfg.case_merge {
+            return;
         }
         for set in self.variant_sets() {
             if !self.can_run() {
@@ -939,6 +1050,7 @@ impl<B: Backend> RemoteStore<B> {
                     dir: folded(&parent),
                     key,
                     stem,
+                    shallow: false,
                 },
                 group,
                 parent,
@@ -958,18 +1070,14 @@ impl<B: Backend> RemoteStore<B> {
         if !self.merge.quiet_now(scope) || self.pending_in(scope) {
             return Ok(());
         }
-        // Planned before with nothing to do, and nothing changed since.
-        if let Some(at) = self.merge.memo.lock().get(scope).copied()
-            && self.merge.last_event(scope).is_none_or(|t| t <= at)
-            && at.elapsed() < EVENT_RETAIN
-        {
+        if self.memoized(scope) {
             return Ok(());
         }
         let (winner, losers) = self.set_paths(set);
         if losers.is_empty() {
             return Ok(());
         }
-        if !scope.stem && self.recreations(scope) >= RECREATE_LIMIT {
+        if !scope.stem && self.recreations(scope, "auto") >= RECREATE_LIMIT {
             self.block_recreated(&winner, &losers);
             self.merge.memo.lock().insert(scope.clone(), Instant::now());
             return Ok(());
@@ -1017,6 +1125,218 @@ impl<B: Backend> RemoteStore<B> {
             winner
         );
         self.run_group(&gid, policy).map(|_| ())
+    }
+
+    /// Planned before with nothing to do (or guarded), and nothing changed since.
+    fn memoized(&self, scope: &Scope) -> bool {
+        self.merge
+            .memo
+            .lock()
+            .get(scope)
+            .copied()
+            .is_some_and(|at| {
+                self.merge.last_event(scope).is_none_or(|t| t <= at) && at.elapsed() < EVENT_RETAIN
+            })
+    }
+
+    // ---- duplicates (D5 rev.) -------------------------------------------------------
+
+    /// The duplicate sets ready for this pass: same-named folders under one parent
+    /// node (Mokuro Reader's `parentId:name` groups), the shallowest level first and
+    /// alone, so a merge moves whole folders before the level below merges what met
+    /// (the reader converges the same way, pass by pass). A memoized set does not
+    /// hold the levels below it.
+    fn dup_sets(&self) -> Vec<DupSet> {
+        let mut sets: Vec<(usize, DupSet)> = {
+            let idx = self.core.index.lock();
+            idx.dup_member_groups()
+                .into_iter()
+                .filter(|g| g.members.len() > 1)
+                .filter_map(|g| {
+                    let path = idx.path_of(g.eid)?;
+                    Some((
+                        g.depth,
+                        DupSet {
+                            scope: Scope::dup(&path),
+                            path,
+                            members: g.members,
+                        },
+                    ))
+                })
+                .collect()
+        };
+        sets.retain(|(_, s)| !self.memoized(&s.scope));
+        let Some(top) = sets.iter().map(|(d, _)| *d).min() else {
+            return Vec::new();
+        };
+        sets.into_iter()
+            .filter(|(d, _)| *d == top)
+            .map(|(_, s)| s)
+            .collect()
+    }
+
+    /// Check one duplicate set's conditions (those of [`Self::try_set`]); plan and
+    /// run it when they hold.
+    fn try_dup(&self, set: &DupSet, policy: &dyn CaseMergePolicy) -> Result<(), Crash> {
+        let scope = &set.scope;
+        if self.merge.busy.lock().iter().any(|(_, s)| s == scope) {
+            return Ok(());
+        }
+        if !self.merge.quiet_now(scope) || self.pending_in(scope) {
+            return Ok(());
+        }
+        if self.recreations(scope, "dedup") >= DEDUP_RECREATE_LIMIT {
+            tracing::warn!(path = %set.path, "duplicate merge: {DUP_RECREATING}; left alone");
+            self.core.state.conflict_once(
+                ConflictRow::DupRecreated,
+                &set.path.to_string(),
+                Some(&set.members[0].pid),
+                DUP_RECREATING,
+            );
+            self.merge.memo.lock().insert(scope.clone(), Instant::now());
+            return Ok(());
+        }
+        // Busy first, then the policy's check: a claim cannot slip in between.
+        self.merge.mark(None, scope.clone());
+        if self.dup_busy_paths(set).iter().any(|p| policy.busy(p)) {
+            self.merge.unmark_probe(scope);
+            return Ok(());
+        }
+        let plan = match self.plan_dup(set) {
+            Ok(p) => p,
+            Err(why) => {
+                tracing::info!(path = %set.path, "duplicate merge deferred: {why}");
+                self.merge.unmark_probe(scope);
+                return Ok(());
+            }
+        };
+        if !plan.work() {
+            self.merge.memo.lock().insert(scope.clone(), Instant::now());
+            self.merge.unmark_probe(scope);
+            return Ok(());
+        }
+        let path = set.path.to_string();
+        let gid = match self.persist_group(
+            scope,
+            &parent_of(&set.path),
+            &path,
+            std::slice::from_ref(&path),
+            "dedup",
+            &plan,
+        ) {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!("duplicate merge: could not journal the merge: {e}");
+                self.merge.unmark_probe(scope);
+                return Ok(());
+            }
+        };
+        tracing::info!(
+            "[STORAGE] Merging {} duplicate folders of {}",
+            set.members.len(),
+            shown(&set.path)
+        );
+        self.run_group(&gid, policy).map(|_| ())
+    }
+
+    /// What a duplicate merge moves: every node directly in a non-canonical member,
+    /// as the library path it shows at (the same path afterwards).
+    fn dup_busy_paths(&self, set: &DupSet) -> Vec<PathBuf> {
+        let idx = self.core.index.lock();
+        set.members[1..]
+            .iter()
+            .flat_map(|m| idx.nodes_under(&m.pid))
+            .filter_map(|n| set.path.join(nfc(&n.name_raw)))
+            .map(|r| self.core.abs(&r))
+            .collect()
+    }
+
+    /// Mokuro Reader's merge of one duplicate set (#308 `mergeGroup`), as journal
+    /// steps: every other member's items move into the canonical one (`members[0]`),
+    /// each against a fresh listing of both. A folder, or a keep-both file
+    /// ([`dedup_keeps_both`]), moves in beside the same name; of two files the
+    /// strictly newer write stays and the other goes to the trash (a tie or an unknown
+    /// time keeps the canonical copy; a `series.json` is submitted first). Every path
+    /// survives, so no step runs a DB hook. Each emptied member is trashed only once a
+    /// direct listing shows it empty.
+    fn plan_dup(&self, set: &DupSet) -> Result<Plan, Defer> {
+        let mut plan = Plan::default();
+        let canon = &set.members[0];
+        let series_dir = set.path.segments().len() == 1;
+        let trash = |vg: &str, n: &RNode, rel: RelPath| {
+            let mut p = Planned::trash(vg, n, rel.clone());
+            p.hooks = false;
+            if series_dir && !n.is_dir && nfc(&n.name_raw).eq_ignore_ascii_case("series.json") {
+                p.kind = StepKind::Submit;
+                p.series = Some(rel);
+            }
+            p
+        };
+        // What the canonical folder holds once the planned moves ran, by NFC name.
+        let mut planned: HashMap<String, RNode> = HashMap::new();
+        for d in &set.members[1..] {
+            let mut have: HashMap<String, RNode> = HashMap::new();
+            for n in self.list(&canon.pid).map_err(defer)? {
+                have.entry(nfc(&n.name_raw)).or_insert(n);
+            }
+            have.extend(planned.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let items = self.list(&d.pid).map_err(defer)?;
+            plan.empty_loser |= items.is_empty();
+            for item in items {
+                let name = nfc(&item.name_raw);
+                // A name that is no library path stays (and so does its folder).
+                let Some(rel) = set.path.join(name.clone()) else {
+                    continue;
+                };
+                let vg = rel.to_string();
+                let mv = |expect_dup: bool| {
+                    let mut p = Planned::mv(&vg, &item, rel.clone(), rel.clone(), &canon.pid);
+                    p.hooks = false;
+                    p.expect_dup = expect_dup;
+                    p
+                };
+                // A folder or a keep-both file may meet its name in the canonical
+                // folder by the time it moves (the reader merging too): never a race.
+                let twice = item.is_dir || dedup_keeps_both(&name);
+                match have.get(&name) {
+                    None => {
+                        plan.steps.push(mv(twice));
+                        planned.insert(name, item.clone());
+                    }
+                    Some(ex) if ex.is_dir || twice => {
+                        plan.steps.push(mv(true));
+                    }
+                    Some(ex) if newer(&item, ex) => {
+                        // The older copy may itself be a move planned from an earlier
+                        // member: it is trashed where it is instead.
+                        let ex = ex.clone();
+                        plan.steps.retain(|p| p.pid != ex.pid);
+                        plan.pre_trash.push(trash(&vg, &ex, rel.clone()));
+                        plan.steps.push(mv(false));
+                        planned.insert(name.clone(), item.clone());
+                        have.insert(name, item.clone());
+                    }
+                    Some(_) => plan.l_trash.push(trash(&vg, &item, rel.clone())),
+                }
+            }
+            plan.finishes.push(Planned {
+                kind: StepKind::Finish,
+                vg: format!("{}/", set.path),
+                pid: d.pid.clone(),
+                cver: None,
+                // Nothing queued follows: the path stays, and writes go to the
+                // entry's winner, never to a member that is not canonical.
+                src: None,
+                dest: set.path.clone(),
+                parent_pid: None,
+                is_dir: true,
+                hooks: false,
+                bytes: None,
+                series: None,
+                expect_dup: false,
+            });
+        }
+        Ok(plan)
     }
 
     /// The winner and losers of a set (library paths of the variant entries).
@@ -1084,16 +1404,16 @@ impl<B: Backend> RemoteStore<B> {
             .any(|o| o.group.is_none() && o.state.live() && scope.covers(&folded(&o.dest)))
     }
 
-    /// Finished automatic merges of this scope in the last 24 h.
-    fn recreations(&self, scope: &Scope) -> u64 {
+    /// Finished merges of this scope by `origin` (`auto`, `dedup`) in the last 24 h.
+    fn recreations(&self, scope: &Scope, origin: &str) -> u64 {
         let since = now_ms() - RECREATE_WINDOW.as_millis() as i64;
         self.core
             .state
             .with("recreations", |c| {
                 c.query_row(
-                    "SELECT COUNT(*) FROM merge_group WHERE scope = ?1 AND origin = 'auto' \
+                    "SELECT COUNT(*) FROM merge_group WHERE scope = ?1 AND origin = ?3 \
                      AND state = 'done' AND created_at >= ?2 AND moved + trashed > 0",
-                    params![scope.json(), since],
+                    params![scope.json(), since, origin],
                     |r| r.get::<_, i64>(0),
                 )
             })
@@ -1449,6 +1769,7 @@ impl<B: Backend> RemoteStore<B> {
                 hooks: false,
                 bytes: None,
                 series: None,
+                expect_dup: false,
             });
         }
         Ok(())
@@ -1531,6 +1852,7 @@ impl<B: Backend> RemoteStore<B> {
                     hooks: true,
                     bytes: None,
                     series: Some(series),
+                    expect_dup: false,
                 });
                 continue;
             }
@@ -1625,6 +1947,7 @@ impl<B: Backend> RemoteStore<B> {
                             hooks: false,
                             bytes: Some(bytes),
                             series: None,
+                            expect_dup: false,
                         });
                     }
                     if choice == MergeChoice::B {
@@ -1645,6 +1968,7 @@ impl<B: Backend> RemoteStore<B> {
                             hooks: true,
                             bytes: Some(new_bytes),
                             series: None,
+                            expect_dup: false,
                         });
                     }
                     l_trash.push(Planned::trash(&vg, &lf.node, lrel));
@@ -1732,6 +2056,7 @@ impl<B: Backend> RemoteStore<B> {
                 cver: p.cver.clone(),
                 hooks: p.hooks,
                 series: p.series.as_ref().map(ToString::to_string),
+                expect_dup: p.expect_dup,
             })
             .ok();
             if let Some(bytes) = &p.bytes {
@@ -1841,13 +2166,23 @@ impl<B: Backend> RemoteStore<B> {
             });
         });
         if let Some(rec) = rec {
-            tracing::info!(
-                "[STORAGE] Case merge into {} done: {} moved, {} trashed, {} blocked",
-                rec.winner,
-                rec.moved,
-                rec.trashed,
-                rec.blocked
-            );
+            if rec.origin == "dedup" {
+                tracing::info!(
+                    "[STORAGE] Duplicate merge of {} done: {} moved, {} trashed, {} blocked",
+                    RelPath::parse(&rec.winner).map_or_else(|| rec.winner.clone(), |p| shown(&p)),
+                    rec.moved,
+                    rec.trashed,
+                    rec.blocked
+                );
+            } else {
+                tracing::info!(
+                    "[STORAGE] Case merge into {} done: {} moved, {} trashed, {} blocked",
+                    rec.winner,
+                    rec.moved,
+                    rec.trashed,
+                    rec.blocked
+                );
+            }
         }
     }
 
@@ -1856,11 +2191,22 @@ impl<B: Backend> RemoteStore<B> {
         let vg = extra_of(op).map(|e| e.vg).unwrap_or_default();
         let this: Vec<RelPath> = op.src.clone().into_iter().collect();
         let that = vec![op.dest.clone()];
-        self.record_blocks(&[Block {
-            this: if this.is_empty() { that.clone() } else { this },
-            that,
-            detail,
-        }]);
+        if this == that {
+            // A duplicate merge's step: both copies are at one path, so there is no
+            // copy to keep (a `case-merge-blocked` row would offer to trash the path).
+            self.core.state.conflict_once(
+                ConflictRow::FailedOp,
+                &op.dest.to_string(),
+                op.target_pid.as_deref(),
+                &detail,
+            );
+        } else {
+            self.record_blocks(&[Block {
+                this: if this.is_empty() { that.clone() } else { this },
+                that,
+                detail,
+            }]);
+        }
         self.group_bump(gid, "blocked");
         let rest: Vec<Op> = self
             .core
@@ -2025,7 +2371,7 @@ impl<B: Backend> RemoteStore<B> {
                 is_dir,
             ));
         }
-        if !self.core.caps.path_ids {
+        if !self.core.caps.path_ids && !ex.expect_dup {
             match self.list(&parent) {
                 Ok(kids) => {
                     let same = kids.iter().filter(|k| nfc(&k.name_raw) == name).count();

@@ -115,6 +115,8 @@ pub enum ConflictRow {
     CaseMergeBlocked,
     /// A name that has duplicates after a case-merge move (a reader upload raced it).
     DupFile,
+    /// Duplicate folders a duplicate merge keeps meeting again: left alone (§5.9).
+    DupRecreated,
 }
 
 impl ConflictRow {
@@ -126,6 +128,7 @@ impl ConflictRow {
             ConflictRow::Corrupt => "corrupt",
             ConflictRow::CaseMergeBlocked => "case-merge-blocked",
             ConflictRow::DupFile => "dup-file",
+            ConflictRow::DupRecreated => "dup-recreated",
         }
     }
 }

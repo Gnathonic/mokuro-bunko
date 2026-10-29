@@ -160,6 +160,10 @@ pub struct RemoteStoreConfig {
     pub case_merge: bool,
     /// How often the case merge looks for variant sets (default 30 s).
     pub merge_interval: Duration,
+    /// Merge same-named folders on providers that allow them (D5 rev., §5.9
+    /// "Duplicates"; default on), as Mokuro Reader does. Merges run only once a
+    /// [`crate::merge::CaseMergePolicy`] is installed; the marker says so (`dedup`).
+    pub dedup: bool,
 }
 
 impl RemoteStoreConfig {
@@ -210,6 +214,7 @@ impl RemoteStoreConfig {
             outbox_max_bytes: 8 << 30,
             case_merge: true,
             merge_interval: Duration::from_secs(30),
+            dedup: true,
         }
     }
 
@@ -977,7 +982,8 @@ impl<B: Backend> RemoteStore<B> {
         if cfg.lease {
             handle.spawn(start_lease(core.clone(), cfg.clone(), lease.clone()));
         }
-        let case_merge = cfg.case_merge;
+        // The merge thread also runs duplicate merges where the provider has them.
+        let merges = cfg.case_merge || (cfg.dedup && core.caps.duplicate_names);
         let store = Arc::new_cyclic(|me| RemoteStore {
             me: me.clone(),
             cfg,
@@ -992,7 +998,7 @@ impl<B: Backend> RemoteStore<B> {
         });
         // Groups a crash left open are busy at once; they resume after the lease.
         store.load_open_groups();
-        if case_merge {
+        if merges {
             crate::merge::spawn(Arc::downgrade(&store), merge);
         }
         Ok(store)
@@ -1524,7 +1530,11 @@ async fn start_lease<B: Backend>(
         .unwrap_or(if mega { MEGA_TTL } else { DEFAULT_TTL });
     lc.feed_interval = cfg.poll_idle;
     lc.heartbeat_new_node = mega;
-    let lease = Lease::new(core.backend.clone(), root, lc, store, cfg.dir.join("lease"));
+    lc.dedup = cfg.dedup && core.caps.duplicate_names;
+    // The marker follows the canonical root: readers look in `roots()[0]`.
+    let index = core.index.clone();
+    let lease = Lease::new(core.backend.clone(), root, lc, store, cfg.dir.join("lease"))
+        .following(Arc::new(move || index.lock().roots()));
     let _ = core.fence.set(lease.fence());
     let handle = lease.spawn();
     let mut events = handle.subscribe();
