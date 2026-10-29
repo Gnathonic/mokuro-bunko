@@ -558,6 +558,125 @@ impl FakeBackend {
         out
     }
 
+    // ---- the reader, by pid (duplicate names) ------------------------------------
+
+    /// The reader creates a new folder `name` in `parent`: always a new node (a
+    /// second one of the same name where the provider allows duplicates).
+    pub fn reader_mkdir_in(&self, parent: &str, name: &str) -> RNode {
+        self.reader_create_in(parent, name, true, b"")
+    }
+
+    /// The reader uploads a new file `name` into `parent`: always a new node.
+    pub fn reader_put_in(&self, parent: &str, name: &str, bytes: &[u8]) -> RNode {
+        self.reader_create_in(parent, name, false, bytes)
+    }
+
+    fn reader_create_in(&self, parent: &str, name: &str, is_dir: bool, bytes: &[u8]) -> RNode {
+        let now = self.now_ms();
+        let out = {
+            let mut st = self.state.lock();
+            st.live_dir(parent)
+                .unwrap_or_else(|_| panic!("reader_*_in: no folder {parent}"));
+            if let Some(p) = st.name_taken(&self.profile, parent, name, None) {
+                panic!("reader_*_in: {name} collides with {p}");
+            }
+            let data = Bytes::copy_from_slice(bytes);
+            let pid = st.insert(&self.profile, parent, name, is_dir, data, now);
+            st.log_upsert(&self.profile, &pid);
+            st.rnode(&self.profile, &pid)
+        };
+        self.notify.notify_waiters();
+        out
+    }
+
+    /// The reader moves `pid` into `new_parent`, keeping its name (twice, where the
+    /// provider allows it).
+    pub fn reader_move(&self, pid: &str, new_parent: &str) -> RNode {
+        let out = {
+            let mut st = self.state.lock();
+            st.live(pid)
+                .unwrap_or_else(|| panic!("reader_move: no {pid}"));
+            st.live_dir(new_parent)
+                .unwrap_or_else(|_| panic!("reader_move: no folder {new_parent}"));
+            let name = String::from_utf8_lossy(&st.nodes[pid].name).into_owned();
+            if let Some(p) = st.name_taken(&self.profile, new_parent, &name, Some(pid)) {
+                panic!("reader_move: {name} collides with {p}");
+            }
+            let pid = st.move_node(&self.profile, pid, new_parent, &name);
+            st.rnode(&self.profile, &pid)
+        };
+        self.notify.notify_waiters();
+        out
+    }
+
+    /// The reader removes `pid` the way it deletes on this provider (the trash, or a
+    /// permanent delete on MEGA).
+    pub fn reader_trash_pid(&self, pid: &str) {
+        {
+            let mut st = self.state.lock();
+            st.live(pid)
+                .unwrap_or_else(|| panic!("reader_trash_pid: no {pid}"));
+            st.trash(&self.profile, pid);
+        }
+        self.notify.notify_waiters();
+    }
+
+    /// The reader deletes `pid` and its subtree permanently (Mokuro Reader 1.10 on
+    /// Drive): every node is logged as `Removed`.
+    pub fn reader_delete_pid(&self, pid: &str) {
+        {
+            let mut st = self.state.lock();
+            assert!(st.nodes.contains_key(pid), "reader_delete_pid: no {pid}");
+            st.remove_subtree(pid);
+        }
+        self.notify.notify_waiters();
+    }
+
+    /// Set a node's server creation and modification times (a new metadata version).
+    pub fn set_times(&self, pid: &str, created_ms: i64, mtime_ms: i64) -> RNode {
+        let out = {
+            let mut st = self.state.lock();
+            let v = st.next_ver();
+            let n = st.nodes.get_mut(pid).expect("set_times: unknown pid");
+            n.created_ms = created_ms;
+            n.mtime_ms = mtime_ms;
+            n.version = v;
+            st.log_upsert(&self.profile, pid);
+            st.rnode(&self.profile, pid)
+        };
+        self.notify.notify_waiters();
+        out
+    }
+
+    /// Mokuro Reader's folder dedup (its `mergeGroup`, #308), run to convergence on
+    /// the `mokuro-reader` folders and everything under them. Pass by pass: folders
+    /// named alike under one parent are a group; the oldest (then smallest pid) is
+    /// canonical and every other member's items move into it. A same-name collision
+    /// keeps both when either is a folder or the name is a keep-both file
+    /// ([`crate::names::dedup_keeps_both`]); otherwise the strictly newer write
+    /// stays and the other copy goes (trash; MEGA deletes). A member found empty
+    /// afterwards goes the same way; one that is not waits for the next pass. Returns
+    /// the groups merged.
+    pub fn run_reader_dedup(&self) -> usize {
+        const MAX_PASSES: usize = 20;
+        let mut merged = 0;
+        {
+            let mut st = self.state.lock();
+            for _ in 0..MAX_PASSES {
+                let groups = st.dup_groups(&self.profile, b"mokuro-reader");
+                if groups.is_empty() {
+                    break;
+                }
+                for group in groups {
+                    st.merge_group(&self.profile, &group);
+                    merged += 1;
+                }
+            }
+        }
+        self.notify.notify_waiters();
+        merged
+    }
+
     // ---- plumbing ---------------------------------------------------------------
 
     /// Count the call, apply latency, throttling and injected failures.
@@ -938,6 +1057,106 @@ impl State {
             self.log_upsert(prof, &map[p]);
         }
         new_top
+    }
+
+    /// The library's duplicate folder groups (same name, same parent), each oldest
+    /// first, then smallest pid: what the reader's pass lists.
+    fn dup_groups(&self, prof: &Profile, root_name: &[u8]) -> Vec<Vec<Pid>> {
+        let top = account_root(prof.ids);
+        let mut stack: Vec<Pid> = self
+            .nodes
+            .values()
+            .filter(|n| {
+                n.is_dir
+                    && !n.trashed
+                    && n.name == root_name
+                    && (prof.roots_anywhere || n.parent.as_deref() == Some(top.as_str()))
+                    && self.live_ancestry(&n.pid)
+            })
+            .map(|n| n.pid.clone())
+            .collect();
+        let mut seen: BTreeSet<Pid> = BTreeSet::new();
+        while let Some(p) = stack.pop() {
+            if seen.insert(p.clone()) {
+                stack.extend(
+                    self.live_children(&p)
+                        .into_iter()
+                        .filter(|c| self.nodes[c].is_dir),
+                );
+            }
+        }
+        let mut by_key: HashMap<(Option<Pid>, Vec<u8>), Vec<Pid>> = HashMap::new();
+        for p in seen {
+            let n = &self.nodes[&p];
+            by_key
+                .entry((n.parent.clone(), n.name.clone()))
+                .or_default()
+                .push(p);
+        }
+        let mut groups: Vec<Vec<Pid>> = by_key.into_values().filter(|g| g.len() > 1).collect();
+        for g in &mut groups {
+            g.sort_by_key(|p| (self.nodes[p].created_ms, p.clone()));
+        }
+        groups.sort();
+        groups
+    }
+
+    /// `pid` and every folder above it are live (a trashed folder hides its subtree).
+    fn live_ancestry<'a>(&'a self, mut pid: &'a str) -> bool {
+        loop {
+            match self.live(pid) {
+                Some(n) => match n.parent.as_deref() {
+                    Some(p) => pid = p,
+                    None => return true,
+                },
+                None => return false,
+            }
+        }
+    }
+
+    /// The reader's `mergeGroup`: everything of the later members into the first.
+    fn merge_group(&mut self, prof: &Profile, group: &[Pid]) {
+        let canonical = &group[0];
+        for dup in &group[1..] {
+            if self.live(dup).is_none() {
+                continue;
+            }
+            let mut have: HashMap<Vec<u8>, Pid> = self
+                .live_children(canonical)
+                .into_iter()
+                .map(|c| (self.nodes[&c].name.clone(), c))
+                .collect();
+            for item in self.live_children(dup) {
+                let (name, is_dir, mtime) = {
+                    let n = &self.nodes[&item];
+                    (n.name.clone(), n.is_dir, n.mtime_ms)
+                };
+                let label = String::from_utf8_lossy(&name).into_owned();
+                match have.get(&name).cloned() {
+                    None => {
+                        let moved = self.move_node(prof, &item, canonical, &label);
+                        have.insert(name, moved);
+                    }
+                    Some(ex)
+                        if is_dir
+                            || self.nodes[&ex].is_dir
+                            || crate::names::dedup_keeps_both(&label) =>
+                    {
+                        self.move_node(prof, &item, canonical, &label);
+                    }
+                    Some(ex) if mtime > self.nodes[&ex].mtime_ms => {
+                        self.trash(prof, &ex);
+                        let moved = self.move_node(prof, &item, canonical, &label);
+                        have.insert(name, moved);
+                    }
+                    Some(_) => self.trash(prof, &item),
+                }
+            }
+            // Removed only once a fresh listing shows it empty.
+            if self.live_children(dup).is_empty() {
+                self.trash(prof, dup);
+            }
+        }
     }
 
     fn preorder(&self, pid: &str, out: &mut Vec<Pid>) {
