@@ -63,14 +63,37 @@ jobs:
           cargo build --release -p mokuro-bunko --no-default-features --features testing --locked
           cargo build --release -p bunko-cloudsim --locked
       # The testing feature is on (a release build has no processor-fake and refuses
-      # to start with a MOKURO_TEST_CLOUD_* variable set), and both binaries run.
+      # to start with a MOKURO_TEST_CLOUD_* variable set), and both binaries run. The
+      # server has to really start: `--help` exits before the variable is checked.
       - name: check the binaries
         run: |
           set -eux
-          MOKURO_TEST_CLOUD_API_BASE_GDRIVE=http://127.0.0.1:9/google \
-            target/release/mokuro-bunko processor-fake --help
-          target/release/mokuro-bunko --version
+          bin=target/release/mokuro-bunko
+          $bin processor-fake --help
+          $bin --version
           target/release/bunko-cloudsim --help
+          dir=$(mktemp -d)
+          port=18765
+          printf 'storage:\n  base_path: %s/storage\nserver:\n  host: "127.0.0.1"\n  port: %s\nocr:\n  local_processing: false\n  autobench: false\nregistration:\n  mode: disabled\n' \
+            "$dir" "$port" > "$dir/config.yaml"
+          HOME="$dir" XDG_DATA_HOME="$dir/data" XDG_CONFIG_HOME="$dir/config" \
+            MOKURO_CONFIG="$dir/config.yaml" \
+            MOKURO_TEST_CLOUD_API_BASE_GDRIVE=http://127.0.0.1:9/google \
+            $bin serve > "$dir/serve.log" 2>&1 &
+          pid=$!
+          up=
+          for _ in $(seq 120); do
+            if curl -fsS "http://127.0.0.1:$port/api/health"; then up=1; break; fi
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+          done
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" || true
+          if [ -z "$up" ]; then
+            cat "$dir/serve.log"
+            echo "::error::the testing server did not start with MOKURO_TEST_CLOUD_API_BASE_GDRIVE set"
+            exit 1
+          fi
       - name: assets
         env:
           REF: ${{ matrix.ref }}

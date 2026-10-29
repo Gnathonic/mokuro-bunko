@@ -127,6 +127,10 @@ pub struct MegaTag {
     pub class: &'static str,
     /// Request body bytes.
     pub bytes_in: u64,
+    /// The error code a `cs` batch answered: the batch's own (`-3` for EAGAIN), else
+    /// its first command's. MEGA answers errors in a 200 body, so the HTTP status
+    /// alone cannot show a fault firing.
+    pub error: Option<i64>,
 }
 
 struct Hub {
@@ -182,7 +186,8 @@ fn node_json(h: &str, n: &MNode) -> Value {
 
 impl St {
     /// The next node's `ts`: the wall clock (the client ages the lease marker by the
-    /// `Date` header), a second past the last stamp at least.
+    /// `Date` header), a second past the last stamp at least. `ts` is in seconds, so
+    /// more than one write a second runs ahead of `Date` until the writes slow down.
     fn tick(&mut self) -> i64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -191,15 +196,10 @@ impl St {
         self.clock
     }
 
-    /// `ts` when given (the clock moves past it, so later nodes stay later), else a tick.
+    /// `ts` when given, else a tick. A given time leaves the write clock alone: a
+    /// future one would carry every later `ts` ahead of `Date`.
     fn stamp(&mut self, ts: Option<i64>) -> i64 {
-        match ts {
-            Some(t) => {
-                self.clock = self.clock.max(t);
-                t
-            }
-            None => self.tick(),
-        }
+        ts.unwrap_or_else(|| self.tick())
     }
 
     fn handle(&mut self) -> String {
@@ -592,7 +592,23 @@ fn tagged(r: impl IntoResponse, account: &str, class: &'static str, bytes_in: us
         account: account.to_string(),
         class,
         bytes_in: bytes_in as u64,
+        error: None,
     });
+    r
+}
+
+/// [`tagged`], recording the error code the batch answered.
+fn tagged_error(
+    r: impl IntoResponse,
+    code: i64,
+    account: &str,
+    class: &'static str,
+    bytes_in: usize,
+) -> Response {
+    let mut r = tagged(r, account, class, bytes_in);
+    if let Some(t) = r.extensions_mut().get_mut::<MegaTag>() {
+        t.error = Some(code);
+    }
     r
 }
 
@@ -626,7 +642,7 @@ async fn cs(
     let class = cmds.as_deref().map_or("metadata", cs_class);
     let sid = q.get("sid").map(String::as_str);
     let Some((name, st)) = app.resolve(sid, cmds.as_deref().unwrap_or_default()) else {
-        return tagged("-15", "", class, n);
+        return tagged_error("-15", -15, "", class, n);
     };
     let out = {
         let mut st = lock_st(&st);
@@ -640,12 +656,13 @@ async fn cs(
                 st.faults.hashcash = None;
                 st.faults.hashcash_answered += 1;
             } else {
-                return tagged(
+                return tagged_error(
                     (
                         StatusCode::PAYMENT_REQUIRED,
                         [("X-Hashcash", challenge)],
                         "-3",
                     ),
+                    -3,
                     &name,
                     class,
                     n,
@@ -654,18 +671,22 @@ async fn cs(
         }
         if st.faults.eagain > 0 {
             st.faults.eagain -= 1;
-            return tagged("-3", &name, class, n);
+            return tagged_error("-3", -3, &name, class, n);
         }
         let Some(cmds) = cmds else {
             drop(st);
             app.violation(format!("mega POST /cs ({name}): body is not a JSON array"));
-            return tagged("-2", &name, class, n);
+            return tagged_error("-2", -2, &name, class, n);
         };
         let out: Vec<Value> = cmds.iter().map(|c| st.command(c, sid)).collect();
         out
     };
     app.0.notify.notify_waiters();
-    tagged(axum::Json(out), &name, class, n)
+    let error = out.iter().find_map(|v| v.as_i64().filter(|c| *c < 0));
+    match error {
+        Some(code) => tagged_error(axum::Json(out), code, &name, class, n),
+        None => tagged(axum::Json(out), &name, class, n),
+    }
 }
 
 async fn sc(State(app): State<App>, Query(q): Query<HashMap<String, String>>) -> Response {

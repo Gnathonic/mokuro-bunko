@@ -934,3 +934,157 @@ async fn writes_are_stamped_on_the_clock_the_date_header_shows() {
         "Date {date}, now {now}"
     );
 }
+
+fn epoch_ms(rfc3339: &str) -> i64 {
+    (time::OffsetDateTime::parse(rfc3339, &time::format_description::well_known::Rfc3339)
+        .unwrap()
+        .unix_timestamp_nanos()
+        / 1_000_000) as i64
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+/// A burst of writes, or a node given a future time, must not push later stamps
+/// ahead of the `Date` header: a marker stamped D ahead stays fresh for ttl + D, so
+/// a lease handover would wait out the drift. Drive and Graph carry milliseconds, so
+/// a millisecond keeps stamps distinct; MEGA's `ts` is in seconds.
+#[tokio::test]
+async fn bursts_and_future_nodes_keep_writes_on_the_wall_clock() {
+    let sim = bunko_cloudsim::start().await;
+    sim.mega_account("default", "d@cloudsim.test", "pw");
+    let files: Vec<Value> = (0..20)
+        .map(|i| json!({"path": format!("lib/{i:02}.txt"), "content_base64": b64(b"a")}))
+        .collect();
+    for p in ["google", "microsoft"] {
+        let before = now_ms();
+        let (s, v) = post(
+            &sim.base,
+            "seed",
+            json!({"provider": p, "account": "default", "files": files}),
+        )
+        .await;
+        assert_eq!(s, 200, "{p}: {v}");
+        let after = now_ms();
+        let tree = get(&sim.base, &format!("tree?provider={p}&account=default")).await;
+        let mut stamps: Vec<i64> = tree
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["name"].as_str().unwrap().ends_with(".txt"))
+            .map(|r| epoch_ms(r["modified"].as_str().unwrap()))
+            .collect();
+        assert_eq!(stamps.len(), 20, "{p}");
+        for at in &stamps {
+            assert!(
+                (before..=after + 100).contains(at),
+                "{p}: stamped {at}, wall {before}..{after}"
+            );
+        }
+        stamps.sort();
+        stamps.dedup();
+        assert_eq!(stamps.len(), 20, "{p}: stamps stay distinct");
+    }
+    let future = "2036-01-01T00:00:00Z";
+    for p in ["google", "microsoft", "mega"] {
+        node_id(
+            &sim.base,
+            json!({"provider": p, "name": "ahead.cbz", "content_base64": b64(b"x"),
+                   "modified": future}),
+        )
+        .await;
+        let before = now_ms();
+        let (s, v) = post(
+            &sim.base,
+            "seed",
+            json!({"provider": p, "account": "default",
+                   "files": [{"path": "later.txt", "content_base64": b64(b"b")}]}),
+        )
+        .await;
+        assert_eq!(s, 200, "{p}: {v}");
+        let tree = get(&sim.base, &format!("tree?provider={p}&account=default")).await;
+        let later = tree
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "later.txt")
+            .unwrap();
+        let at = epoch_ms(later["modified"].as_str().unwrap());
+        assert!(
+            (before - 1000..=now_ms() + 2000).contains(&at),
+            "{p}: a write after a future node stamped {at}, wall {before}"
+        );
+    }
+}
+
+/// MEGA answers its errors in a 200 body, so the log names the code: a rig that sets
+/// `eagain` can see its faults fire, as it counts 503s on Drive and Graph.
+#[tokio::test]
+async fn the_log_names_the_error_code_mega_answered() {
+    let sim = bunko_cloudsim::start().await;
+    sim.mega_account("m", "m@cloudsim.test", "pw");
+    let sid = mega_sid(&sim, "m@cloudsim.test").await;
+    let (s, v) = post(
+        &sim.base,
+        "knobs",
+        json!({"provider": "mega", "account": "m", "eagain": 2}),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let r = http()
+        .delete(format!("{}/_sim/log", sim.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 204);
+    let url = format!("{}cs?id=1&sid={sid}", sim.mega_origin());
+    for want in ["-3", "-3"] {
+        let body = http()
+            .post(&url)
+            .body("[{\"a\":\"ug\"}]")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, want);
+    }
+    // A command's own error is the batch's, when the batch itself succeeded.
+    let body = http()
+        .post(&url)
+        .body("[{\"a\":\"d\",\"n\":\"NOSUCHNO\"}]")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let code = serde_json::from_str::<Value>(&body).unwrap()[0].as_i64();
+    assert!(code.is_some_and(|c| c < 0), "{body}");
+    let ok = http()
+        .post(&url)
+        .body("[{\"a\":\"ug\"}]")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+
+    let log = get(&sim.base, "log").await;
+    let errors: Vec<Value> = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.get("error").cloned().unwrap_or(Value::Null))
+        .collect();
+    assert_eq!(
+        errors,
+        [json!(-3), json!(-3), json!(code), Value::Null],
+        "{log}"
+    );
+    assert!(log.as_array().unwrap().iter().all(|e| e["status"] == 200));
+}

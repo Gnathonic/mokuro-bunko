@@ -181,7 +181,10 @@ does.
   `{base}/oauth/{google,microsoft}/token` (Google keeps its refresh token, Microsoft
   rotates it), the control API at `{base}/_sim/`. Every response carries permissive CORS.
   Writes are stamped on the wall clock the `Date` header shows (I3: Bunko's lease ages
-  its marker by it; a clock of the simulator's own made every marker look stale).
+  its marker by it; a clock of the simulator's own made every marker look stale). Stamps
+  step a millisecond (MEGA: a second) past the previous one, and a `/_sim/node` time
+  never moves the clock, so a burst or a future-dated node cannot stamp later markers
+  ahead of `Date`.
 - **MEGA stays in `bunko-mega`.** Its `mock` module (real node crypto, which needs the
   crate's internals) became a hub of accounts behind one gateway, picked by session id
   or login email; cloudsim mounts it. `MockMega::start()` still serves the crate's own
@@ -201,7 +204,8 @@ does.
   account, method?, path_has, status, reason, retry_after?, times?}` (Drive and Graph;
   MEGA's error codes are knobs); `POST knobs {provider, account, <knob>: value}`;
   `GET`/`DELETE log` (`[{seq, provider, account, method, path, class, units, bytes_in,
-  bytes_out, status}]`, `units` 1 per Drive request); `GET`/`DELETE violations`;
+  bytes_out, status}]`, `units` 1 per Drive request; MEGA entries add `error`, the code
+  answered in the 200 body); `GET`/`DELETE violations`;
   `POST reset`. The crate's README has the knob list and a curl session.
 - **Violations, not panics.** A request the simulator cannot accept (an unmodelled Drive
   `q`, a malformed body, an unknown endpoint, an unmodelled MEGA command) is a 4xx in the
@@ -293,17 +297,23 @@ The `cloud` suite (`rig/cloud.rs`) runs one library of four volumes and a reader
 `series.json` through two server processes, in order, on each provider: **cold-start**
 (the catalog lists the series, the bridge serves an archive whole and ranged, byte for
 byte), **adoption** (the `series.json` tag is in the catalog, the lease marker is in
-the folder), **outbox-faults** (two 503s on uploads, MEGA two `-3`s: a bridge PUT still
-lands), **ocr-results** (`processor-fake` OCRs the volumes without a sidecar; the
-result reaches the cloud through two failed uploads), **lease-handover** (a second
+the folder), **outbox-faults** (two 503s on uploads, creates only on Drive so a lease heartbeat
+cannot spend them; MEGA two `-3`s: a bridge PUT still lands, and cloudsim's log shows
+both faults fired, MEGA's by the `error` it records), **ocr-results** (`processor-fake`
+OCRs the volumes without a sidecar; the result reaches the cloud past the same two
+faults, both seen to fire, and its bytes hash as the cloud's copy does),
+**lease-handover** (a second
 server stands by and answers writes 503 `storage-lease`; once the first stops, it
 takes the library over and its PUT lands) and **quota-pause** (a full provider: a
 PUT answers 507, the next one 507 without reaching the provider, health blocked by
 `StorageFull`). The hold lifts at the first storage probe, five minutes on; the suite
 does not wait for it. On rclone, outbox-faults and quota-pause are skipped (no fault
-knobs). Measured locally (wall time, setup included): google 30–38 s, microsoft 34 s,
-mega 90–100 s (one MEGA command a second, and a 30 s lease ttl so a heartbeat keeps
-writes open). rclone is not yet run anywhere.
+knobs). Measured locally (wall time, setup included): google 25–38 s, microsoft 22–34 s,
+mega 87–100 s (one MEGA command a second, and a 30 s lease ttl so a heartbeat keeps
+writes open). On rclone the suite first checks the CORS preflight a browser would send
+from an allowed origin (`OPTIONS` asking for PROPFIND with `Authorization`): it must
+answer 2xx without credentials, echo the origin and name `Authorization`, which a `*`
+does not cover. rclone is not yet run anywhere.
 
 ### 7.2 Live runs (layer 3: scheduled, real clouds)
 
@@ -459,7 +469,10 @@ Run time target: the rig under 15 minutes per PR on ubuntu.
 lite server and cloudsim on every push to `main` and `0.8/remote-storage`, nightly for
 both, and on demand, and publishes them as the pre-release `nightly` (from `main`) or
 `nightly-0.8`: `mokuro-bunko-testing-x86_64-linux`, `bunko-cloudsim-x86_64-linux` and
-`nightly.json` (`{bunko_sha, branch, version, built_at}`). The tag moves to the new
+`nightly.json` (`{bunko_sha, branch, version, built_at}`). Before publishing it starts
+the server with `MOKURO_TEST_CLOUD_API_BASE_GDRIVE` set and waits for `/api/health`
+(a build without `testing` refuses to start; `--help` alone exits before that check).
+The tag moves to the new
 commit and the assets are replaced in place, so a reader run downloading them never
 finds the release gone. The updater never offers them: their tags are not versions and
 they carry no signed `release.json` (`bunko-update`'s

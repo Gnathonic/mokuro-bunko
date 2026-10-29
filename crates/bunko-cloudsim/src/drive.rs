@@ -157,10 +157,11 @@ impl Default for DriveState {
 
 impl DriveState {
     /// The next write's stamp: the wall clock (Bunko's lease ages a marker by the
-    /// `Date` header), and always at least a second past the last one so stamps stay
-    /// distinct.
+    /// `Date` header), a millisecond past the last one at least so stamps stay
+    /// distinct. A bigger step would carry a burst of writes ahead of `Date`, and a
+    /// marker stamped ahead stays fresh for longer than its ttl.
     fn tick(&mut self) -> i64 {
-        self.clock = (self.clock + 1000).max(crate::wall_ms());
+        self.clock = (self.clock + 1).max(crate::wall_ms());
         self.clock
     }
 
@@ -385,8 +386,8 @@ impl DriveState {
             let f = self.files.get_mut(&id).expect("just inserted");
             f.created = created;
             f.modified = modified;
-            // Later writes stay later than the given times.
-            self.clock = self.clock.max(modified);
+            // The write clock stays on the wall: a future time given here would
+            // otherwise carry every later stamp ahead of `Date`.
         }
         Ok(id)
     }

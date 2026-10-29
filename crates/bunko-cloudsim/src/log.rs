@@ -38,6 +38,10 @@ pub struct LogEntry {
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub status: u16,
+    /// MEGA's error code, which it answers in a 200 body (`-3` for an EAGAIN fault):
+    /// the batch's own, else its first command's. Absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<i64>,
 }
 
 #[derive(Default)]
@@ -74,6 +78,7 @@ pub async fn record(State(sim): State<SimState>, req: Request, next: Next) -> Re
             bytes_in: m.bytes_in,
         })
     });
+    let error = resp.extensions().get::<MegaTag>().and_then(|m| m.error);
     if let Some(t) = tag {
         let hint = resp.body().size_hint();
         sim.log().push(LogEntry {
@@ -87,6 +92,7 @@ pub async fn record(State(sim): State<SimState>, req: Request, next: Next) -> Re
             bytes_in: t.bytes_in,
             bytes_out: hint.exact().unwrap_or(hint.lower()),
             status: resp.status().as_u16(),
+            error,
         });
     }
     resp

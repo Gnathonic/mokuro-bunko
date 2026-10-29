@@ -47,9 +47,11 @@ State is per (provider, account). A bearer token picks the account; MEGA picks i
 session id, or by the email of a login. Every response carries permissive CORS.
 
 Writes are stamped on the wall clock, the one every response's `Date` header shows (and
-at least a second after the account's previous stamp, so stamps stay distinct). Bunko's
-lease ages its marker as `Date` minus the marker's modified time; a clock of the
-simulator's own made every marker look old.
+at least a millisecond after the account's previous stamp, so stamps stay distinct; a
+second on MEGA, whose `ts` is in seconds). Bunko's lease ages its marker as `Date` minus
+the marker's modified time; a clock of the simulator's own made every marker look old,
+and one running ahead keeps a marker fresh past its ttl. So a `/_sim/node` time, past or
+future, is that node's alone and never moves the write clock.
 
 ## Control API
 
@@ -69,7 +71,7 @@ JSON in and out. `account` defaults to `default`; `provider` is `google`, `micro
 | `GET /_sim/tree?provider=&account=&include_trashed=1` | `[{id, parent_id, name, folder, size, sha256, created, modified, trashed}]`, every node but the roots, by id; `trashed` is true in the trash or under a trashed folder (OneDrive: deleted), and such nodes are listed only with `include_trashed=1`. Folders have `size` 0 and `sha256` null |
 | `POST /_sim/fault {provider, account, method?, path_has, status, reason, retry_after?, times?}` | The next `times` (default 1) matching Drive or Graph requests get `status` with the provider's error body for `reason` |
 | `POST /_sim/knobs {provider, account, <knob>: value, ...}` | Drive and OneDrive: `strict_bunko` (check on every request what Bunko's driver must always send: `keepRevisionForever=false`, `$top`). Drive: `page_size`, `reverse_listing`, `sha256`, `keep_revisions`, `revisions_forbidden`, `interrupt_chunk`, `down_after_interrupt`, `session_down`, `quota_limit`. OneDrive: `page_size`, `interrupt_fragment`, `down_after_interrupt`, `session_down`, `send_ctag`, `storage_ctag`, `ignore_range`, `permanent_delete`, `quota_total`, `lost_below`. MEGA: `eagain`, `overquota`, `bandwidth_509`, `garbage_download`, `require_hashcash`, `drop_upload_at`, `lose_cursor`, `kill_session`, `fail_command {command, code}` |
-| `GET /_sim/log`, `DELETE /_sim/log` | `[{seq, provider, account, method, path, class, units, bytes_in, bytes_out, status}]`; `class` is `list`, `metadata`, `download`, `upload`, `write`, `delete`, `changes` or `auth`; `units` is 1 per Drive request. Provider requests only: no control call is logged |
+| `GET /_sim/log`, `DELETE /_sim/log` | `[{seq, provider, account, method, path, class, units, bytes_in, bytes_out, status}]`; `class` is `list`, `metadata`, `download`, `upload`, `write`, `delete`, `changes` or `auth`; `units` is 1 per Drive request; MEGA entries add `error`, the code MEGA answered in its 200 body (the batch's, else its first command's: `-3` when `eagain` fires). Provider requests only: no control call is logged |
 | `GET /_sim/violations`, `DELETE /_sim/violations` | Requests the simulator could not accept (it answered them 4xx); `DELETE` clears them |
 | `POST /_sim/reset` | Forget every account, token, log entry and violation |
 

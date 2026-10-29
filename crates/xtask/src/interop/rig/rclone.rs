@@ -193,6 +193,25 @@ impl Rclone {
         format!("http://{}", self.addr)
     }
 
+    /// The CORS preflight a browser sends before the reader's first PROPFIND, from
+    /// `origin` (the one `start` allowed): it must pass without credentials, since a
+    /// preflight never carries them.
+    pub fn preflight(&self, origin: &str) -> Result<()> {
+        let r = crate::interop::http::request(
+            self.addr,
+            "OPTIONS",
+            "/",
+            &[
+                ("Origin", origin),
+                ("Access-Control-Request-Method", "PROPFIND"),
+                ("Access-Control-Request-Headers", "authorization,depth"),
+            ],
+            &[],
+        )?;
+        check_preflight(r.status, &r.headers, origin)
+            .with_context(|| format!("rclone's CORS preflight from {origin}"))
+    }
+
     /// Write `(path, bytes)` straight into the served folder (rclone serves the disk).
     pub fn seed(&self, files: &[(String, Vec<u8>)]) -> Result<()> {
         for (path, data) in files {
@@ -213,9 +232,106 @@ impl Drop for Rclone {
     }
 }
 
+/// Whether a preflight answer lets `origin` send a PROPFIND carrying `Authorization`.
+/// `*` stands for any header except `Authorization`, which must be named.
+pub fn check_preflight(status: u16, headers: &[(String, String)], origin: &str) -> Result<()> {
+    let get = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    };
+    let list = |name: &str| -> Vec<String> {
+        get(name)
+            .unwrap_or_default()
+            .split(',')
+            .map(|t| t.trim().to_ascii_lowercase())
+            .collect()
+    };
+    if !(200..300).contains(&status) {
+        bail!("the preflight answered {status}");
+    }
+    match get("Access-Control-Allow-Origin") {
+        Some(o) if o == origin || o == "*" => {}
+        o => bail!("Access-Control-Allow-Origin is {o:?}, want {origin}"),
+    }
+    let methods = list("Access-Control-Allow-Methods");
+    if !methods.iter().any(|m| m == "propfind" || m == "*") {
+        bail!("Access-Control-Allow-Methods {methods:?} leaves out PROPFIND");
+    }
+    let allowed = list("Access-Control-Allow-Headers");
+    if !allowed.iter().any(|h| h == "authorization") {
+        bail!("Access-Control-Allow-Headers {allowed:?} leaves out Authorization");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The reader's WebDAV client sends `Authorization` itself, so a preflight must
+    /// name it: `Access-Control-Allow-Headers: *` does not cover it.
+    #[test]
+    fn a_preflight_must_allow_the_origin_propfind_and_authorization() {
+        const O: &str = "http://127.0.0.1:4173";
+        let good = h(&[
+            ("Access-Control-Allow-Origin", O),
+            (
+                "access-control-allow-methods",
+                "GET, PUT, PROPFIND, OPTIONS",
+            ),
+            (
+                "Access-Control-Allow-Headers",
+                "Depth, authorization, Content-Type",
+            ),
+        ]);
+        check_preflight(200, &good, O).unwrap();
+        check_preflight(204, &good, O).unwrap();
+        for (status, headers, why) in [
+            (401, good.clone(), "401"),
+            (200, h(&[]), "Access-Control-Allow-Origin"),
+            (
+                200,
+                h(&[
+                    ("Access-Control-Allow-Origin", "http://elsewhere"),
+                    ("Access-Control-Allow-Methods", "PROPFIND"),
+                    ("Access-Control-Allow-Headers", "Authorization"),
+                ]),
+                "Access-Control-Allow-Origin",
+            ),
+            (
+                200,
+                h(&[
+                    ("Access-Control-Allow-Origin", O),
+                    ("Access-Control-Allow-Methods", "GET, PUT"),
+                    ("Access-Control-Allow-Headers", "Authorization"),
+                ]),
+                "PROPFIND",
+            ),
+            (
+                200,
+                h(&[
+                    ("Access-Control-Allow-Origin", O),
+                    ("Access-Control-Allow-Methods", "PROPFIND"),
+                    ("Access-Control-Allow-Headers", "*"),
+                ]),
+                "Authorization",
+            ),
+        ] {
+            let err = check_preflight(status, &headers, O)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(why), "{why}: {err}");
+        }
+    }
 
     #[test]
     fn every_ci_platform_has_a_pin() {

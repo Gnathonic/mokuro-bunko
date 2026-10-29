@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 /// The cloud account every party uses.
 const ACCOUNT: &str = "bunko";
 const SERIES: &str = "Series";
+/// The origin rclone allows for the CORS preflight check: any one serves, no browser
+/// runs in this suite.
+const PREFLIGHT_ORIGIN: &str = "http://127.0.0.1:4173";
+
 /// Short lease timing (`MOKURO_TEST_CLOUD_TUNE`): a handover takes about ttl + ttl/3
 /// instead of 15 minutes (an hour on MEGA). A heartbeat keeps writes open for ttl/2,
 /// so MEGA, at one API command a second, gets a longer ttl than a 4 s heartbeat.
@@ -205,10 +209,18 @@ impl Rig<'_> {
     fn upload_fault(&self, status: u16, reason: &str, times: u64, replace: bool) -> Result<()> {
         let sim = self.sim().context("no fault knobs on rclone")?;
         match self.p {
+            // A create is a POST; a lease heartbeat replaces the marker with a PATCH,
+            // so a create-only fault cannot be spent on one.
             Provider::Google => sim.fault(
                 self.p,
                 ACCOUNT,
-                json!({"path_has": "/upload/", "status": status, "reason": reason, "times": times}),
+                if replace {
+                    json!({"path_has": "/upload/", "status": status, "reason": reason,
+                           "times": times})
+                } else {
+                    json!({"method": "POST", "path_has": "/upload/", "status": status,
+                           "reason": reason, "times": times})
+                },
             ),
             Provider::Microsoft => {
                 sim.fault(
@@ -230,6 +242,20 @@ impl Rig<'_> {
             _ => bail!("no upload fault on {}", self.p.name()),
         }
     }
+}
+
+/// The upload faults ([`Rig::upload_fault`] at `status`, or MEGA's `eagain`) that fired
+/// since the log was last cleared: a 503 on Drive and Graph, a `-3` MEGA answered in its
+/// 200 body.
+fn faults_fired(sim: &Cloudsim, p: Provider, status: u16) -> Result<usize> {
+    Ok(sim
+        .log()?
+        .into_iter()
+        .filter(|e| match p {
+            Provider::Mega => e["error"] == -3,
+            _ => e["status"] == status,
+        })
+        .count())
 }
 
 type Step = fn(&mut Rig) -> Result<Option<String>>;
@@ -325,7 +351,15 @@ fn setup<'a>(paths: &'a Paths, p: Provider, work: &Path) -> Result<Rig<'a>> {
     ));
     let cloud = if p == Provider::Rclone {
         let bin = rclone::install(&paths.tools)?;
-        let r = Rclone::start(&bin, &work.join("rclone-root"), &work.join("rclone"), None)?;
+        // Bunko sends no Origin; the allowed one is for the preflight check, which the
+        // browser suites rely on (the reader's own WebDAV client sends Authorization).
+        let r = Rclone::start(
+            &bin,
+            &work.join("rclone-root"),
+            &work.join("rclone"),
+            Some(PREFLIGHT_ORIGIN),
+        )?;
+        r.preflight(PREFLIGHT_ORIGIN)?;
         r.seed(&files)?;
         CloudSide::Rclone(r)
     } else {
@@ -414,8 +448,9 @@ fn adoption(rig: &mut Rig) -> Result<Option<String>> {
     Ok(None)
 }
 
-/// Upload requests fail twice with 503 (MEGA: `-3` twice); a PUT through the bridge
-/// still lands, after retries the simulator's log shows.
+/// Upload requests fail twice with 503 (Drive: creates only; MEGA: the next two `cs`
+/// batches answer `-3`); a PUT through the bridge still lands, and the simulator's log
+/// shows both faults fired.
 fn outbox_faults(rig: &mut Rig) -> Result<Option<String>> {
     let Some(sim) = rig.sim() else {
         return Ok(Some("rclone has no fault knobs".into()));
@@ -432,15 +467,9 @@ fn outbox_faults(rig: &mut Rig) -> Result<Option<String>> {
         bail!("PUT {rel} answered {status}: {text}");
     }
     rig.wait_cloud(&rel, &body, Duration::from_secs(60))?;
-    if rig.p != Provider::Mega {
-        let failed = sim
-            .log()?
-            .into_iter()
-            .filter(|e| e["status"] == 503)
-            .count();
-        if failed < 2 {
-            bail!("the faults never fired ({failed} 503s in cloudsim's log)");
-        }
+    let fired = faults_fired(sim, rig.p, 503)?;
+    if fired < 2 {
+        bail!("the faults never fired ({fired} of 2 in cloudsim's log)");
     }
     Ok(None)
 }
@@ -505,8 +534,13 @@ fn quota_pause(rig: &mut Rig) -> Result<Option<String>> {
 }
 
 /// The fake processor OCRs the volume without a sidecar; its result leaves through the
-/// outbox (through two failed uploads on Drive and OneDrive) and lands in the cloud.
+/// outbox past two faults (as [`outbox_faults`]; the log shows both fired) and lands in
+/// the cloud. The bytes are read back through the server, checked against the cloud's
+/// own hash.
 fn ocr_results(rig: &mut Rig) -> Result<Option<String>> {
+    if let Some(sim) = rig.sim() {
+        sim.clear_log()?;
+    }
     match rig.p {
         Provider::Google | Provider::Microsoft => {
             rig.upload_fault(503, "backendError", 2, false)?
@@ -532,12 +566,20 @@ fn ocr_results(rig: &mut Rig) -> Result<Option<String>> {
         &format!("{rel} never reached the cloud"),
         || {
             fake.check_alive()?;
-            if rig.cloud_sha(&rel)?.is_none() {
+            let Some(sha) = rig.cloud_sha(&rel)? else {
                 return Ok(None);
-            }
-            rig.cloud_bytes(&rel)
+            };
+            // cloudsim lists hashes, not bytes: the server's copy stands for the
+            // cloud's only when they hash the same.
+            Ok(rig.cloud_bytes(&rel)?.filter(|b| sha256_hex(b) == sha))
         },
     )?;
+    if let Some(sim) = rig.sim() {
+        let fired = faults_fired(sim, rig.p, 503)?;
+        if fired < 2 {
+            bail!("the faults never fired ({fired} of 2 in cloudsim's log)");
+        }
+    }
     let v: Value = serde_json::from_slice(&bytes).context("the OCR result is not JSON")?;
     let pages = v["pages"].as_array().map_or(0, Vec::len);
     if pages != genlib::pages_per_volume() || v["ocr_engine"].is_null() {

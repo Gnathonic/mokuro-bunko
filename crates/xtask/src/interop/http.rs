@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 pub struct Reply {
     pub status: u16,
+    /// `(name, value)` as sent.
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub elapsed: Duration,
 }
@@ -47,9 +49,10 @@ pub fn request(
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw)?;
     let elapsed = start.elapsed();
-    let (status, body) = parse(&raw)?;
+    let (status, headers, body) = parse(&raw)?;
     Ok(Reply {
         status,
+        headers,
         body,
         elapsed,
     })
@@ -59,7 +62,9 @@ pub fn get(addr: SocketAddr, path: &str) -> Result<Reply> {
     request(addr, "GET", path, &[], &[])
 }
 
-fn parse(raw: &[u8]) -> Result<(u16, Vec<u8>)> {
+type Headers = Vec<(String, String)>;
+
+fn parse(raw: &[u8]) -> Result<(u16, Headers, Vec<u8>)> {
     let split = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -71,13 +76,17 @@ fn parse(raw: &[u8]) -> Result<(u16, Vec<u8>)> {
         .and_then(|l| l.split(' ').nth(1))
         .and_then(|s| s.parse().ok())
         .context("bad status line")?;
-    let chunked = lines.any(|l| {
-        let l = l.to_ascii_lowercase();
-        l.starts_with("transfer-encoding:") && l.contains("chunked")
+    let headers: Headers = lines
+        .filter_map(|l| l.split_once(':'))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect();
+    let chunked = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")
     });
     let body = &raw[split + 4..];
     Ok((
         status,
+        headers,
         if chunked {
             dechunk(body)?
         } else {
