@@ -247,6 +247,9 @@ pub struct Stored {
     pub unchanged: bool,
 }
 
+/// What [`Staging::before_publish`] runs on the staged file.
+pub type BeforePublish = Box<dyn FnOnce(&Path) + Send>;
+
 /// One body being staged at `<dest dir>/.<name>.upload-<random>.tmp`. Dropping it before
 /// [`Staging::commit`] discards the staged bytes (an aborted or rejected upload never
 /// touches the destination).
@@ -261,6 +264,8 @@ pub struct Staging {
     finished: bool,
     keep_identical: bool,
     mode: Mode,
+    /// Run on the staged file once it is checked, before anything else looks at it.
+    before_publish: Option<BeforePublish>,
 }
 
 impl Drop for Staging {
@@ -314,6 +319,7 @@ impl Staging {
                         finished: false,
                         keep_identical: false,
                         mode: Mode::Replace { base: None },
+                        before_publish: None,
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -332,6 +338,12 @@ impl Staging {
     /// (a re-sent, unchanged file keeps its mtime and its history).
     pub fn keep_if_identical(&mut self) {
         self.keep_identical = true;
+    }
+
+    /// At commit, once the body is checked: `f` may rewrite the staged file before it is
+    /// compared ([`Self::keep_if_identical`]) and published.
+    pub fn before_publish(&mut self, f: BeforePublish) {
+        self.before_publish = Some(f);
     }
 
     /// The publish's precondition (default: replace whatever is there).
@@ -430,6 +442,10 @@ impl Staging {
                     )
                 })?;
             judge_archive(result, size, digest_verified, &self.dest, damage)?;
+        }
+        if let Some(f) = self.before_publish.take() {
+            let temp = self.temp.clone();
+            let _ = tokio::task::spawn_blocking(move || f(&temp)).await;
         }
         if self.keep_identical {
             let (temp, dest) = (self.temp.clone(), self.dest.clone());

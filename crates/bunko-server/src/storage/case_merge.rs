@@ -1,8 +1,9 @@
 //! [`ServerCaseMergePolicy`]: what the automatic case merge (spec §5.9) asks the
-//! server. Which of two differing main sidecars matches the primary row's recipe
-//! (the upgrade's `classify` + `Recipe::matches`, never `Verdict::Current`), whether
-//! OCR work touches a variant (`ocr::busy`), which sets are the reader's own (the
-//! per-user tree, never merged), and the audit record of a finished merge.
+//! server. Which of two differing main sidecars matches the primary row's recipe at
+//! its current revision (the upgrade's `classify` + `Recipe::is_current`, never
+//! `Verdict::Current`), whether OCR work touches a variant (`ocr::busy`), which sets
+//! are the reader's own (the per-user tree, never merged), and the audit record of a
+//! finished merge.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,8 +45,12 @@ impl CaseMergePolicy for ServerCaseMergePolicy {
             return MergeChoice::Block;
         };
         let target = primary.output_affecting();
-        let matches =
-            |p: &Path| crate::ocr::upgrade::classify(p, self.row_of(p).as_ref()).matches(&target);
+        let target_rev = bunko_layout::sidecar::engine_revision(&primary.engine);
+        // The primary's recipe at its current revision: an older revision loses.
+        let matches = |p: &Path| {
+            crate::ocr::upgrade::classify(p, self.row_of(p).as_ref())
+                .is_current(&target, target_rev)
+        };
         match (matches(a), matches(b)) {
             (true, false) => MergeChoice::A,
             (false, true) => MergeChoice::B,

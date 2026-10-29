@@ -312,6 +312,16 @@ pub fn lenient_catalog(value: &Value) -> Catalog {
         engines: strings("engines"),
         detectors: strings("detectors"),
         devices,
+        // A malformed entry is dropped: that engine then counts as revision 1.
+        engine_revisions: value
+            .get("engine_revisions")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(e, r)| Some((e.clone(), u32::try_from(r.as_u64()?).ok()?)))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
@@ -500,8 +510,20 @@ impl Scheduler {
             .set_identity(&name, &host_value, &catalog_value);
         self.machines.insert(pid.clone(), machine);
         let pause = self.machines.get(&pid).and_then(|m| m.pause.clone());
+        // Said once here; the queue plan shows the same refusal per row.
+        let stale: Vec<String> = self
+            .machines
+            .get(&pid)
+            .map(|m| {
+                m.catalog
+                    .engines
+                    .iter()
+                    .filter_map(|e| super::claim::engine_revision_refusal(&m.catalog, e))
+                    .collect()
+            })
+            .unwrap_or_default();
         self.log(format!(
-            "Processor {name} registered ({pid}){}{}",
+            "Processor {name} registered ({pid}){}{}{}",
             match &pause {
                 Some(a) if a.is_installing() => {
                     "; it is still installing its OCR backend (no work until that is done)"
@@ -519,7 +541,11 @@ impl Scheduler {
                     v.processor_version, v.library_version
                 ),
                 None => String::new(),
-            }
+            },
+            stale
+                .iter()
+                .map(|why| format!("; {why} (none of its work is offered)"))
+                .collect::<String>()
         ));
         RegisterOutcome::Ok(RegisterReply {
             protocol: PROTOCOL_VERSION,

@@ -40,6 +40,9 @@ pub struct OwedVolume {
 #[derive(Clone, Debug, Default)]
 pub struct OwedIndex {
     pub volumes: BTreeMap<String, OwedVolume>,
+    /// `<stem>_<n>.mokuro` files an older collector numbered, library-relative
+    /// ([`super::orphans`]); swept after the walk.
+    pub orphans: Vec<String>,
 }
 
 /// `(plain, plain + ".gz")` sidecar paths of `cbz` for a row suffix.
@@ -82,6 +85,11 @@ pub fn row_done(cbz: &Path, row: &Generation, folder: Option<&Folder>) -> bool {
 /// (see `upgrade.rs`); the walk asks it only for volumes with a bare `.mokuro`.
 pub trait UpgradeProbe: Send + Sync {
     fn wants_upgrade(&self, cbz: &Path, rel: &str) -> bool;
+    /// A generation layer `row` wrote, now outdated by its engine's revision: owed again
+    /// although its file exists (critique C10).
+    fn layer_outdated(&self, _cbz: &Path, _row: &Generation) -> bool {
+        false
+    }
 }
 
 /// `missing_generations(cbz)` with the missing-pages rule. None when nothing is owed.
@@ -121,7 +129,7 @@ fn compute_in(
     let mut owed: Vec<&Generation> = enabled
         .iter()
         .copied()
-        .filter(|r| !row_done(cbz, r, folder))
+        .filter(|r| !row_done(cbz, r, folder) || upgrade.is_some_and(|p| p.layer_outdated(cbz, r)))
         .collect();
     let primary_done = enabled
         .iter()
@@ -233,6 +241,13 @@ pub fn walk(
         let listed = sidecar::list_names(directory).unwrap_or_default();
         let names: Vec<&str> = listed.iter().map(String::as_str).collect();
         let folder = Folder::new(&names);
+        let stems = super::orphans::OrphanStems::new(&names);
+        index.orphans.extend(
+            names
+                .iter()
+                .filter(|n| super::orphans::orphan_target(n, &stems).is_some())
+                .filter_map(|n| rel_of(library, &directory.join(n))),
+        );
         for cbz in archives {
             let Some(rel) = rel_of(library, cbz) else {
                 continue;
@@ -261,6 +276,18 @@ pub fn walk(
 /// the quiet period while its archive stayed is not owed now: the reader is replacing
 /// that sidecar (MEGA deletes every copy before it uploads the new one).
 pub fn still_owed(library: &Path, rel: &str, row: &Generation, upgrade: bool) -> bool {
+    still_owed_with(library, rel, row, upgrade, None)
+}
+
+/// [`still_owed`], where a layer `probe` finds outdated is owed again although its file
+/// exists ([`UpgradeProbe::layer_outdated`]; `probe` is the census when upgrades are on).
+pub fn still_owed_with(
+    library: &Path,
+    rel: &str,
+    row: &Generation,
+    upgrade: bool,
+    probe: Option<&dyn UpgradeProbe>,
+) -> bool {
     let cbz = library.join(rel);
     if !fs::is_file(&cbz) {
         return false;
@@ -275,7 +302,7 @@ pub fn still_owed(library: &Path, rel: &str, row: &Generation, upgrade: bool) ->
     if upgrade {
         true
     } else {
-        !row_done(&cbz, row, None)
+        !row_done(&cbz, row, None) || probe.is_some_and(|p| p.layer_outdated(&cbz, row))
     }
 }
 

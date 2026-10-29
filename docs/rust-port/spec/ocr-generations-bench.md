@@ -273,6 +273,7 @@ Top-level mokuro keys written for every sidecar (`build_volume` `engine_runner.p
 ```json
 "ocr_engine": {
   "id": "hayai-nova",
+  "revision": 1,
   "recognizer": "JustANormalTinkerer/hayai-ocr-v2.5-nova",
   "detector": "ppocr-manga",
   "generator": "mokuro-bunko 0.5.2",
@@ -283,9 +284,13 @@ Top-level mokuro keys written for every sidecar (`build_volume` `engine_runner.p
     "Kellenok/PP-OCRv6_manga": "ba1d479e8a61a20e8318c9758c73fbbbd290b98d"
   },
   "precision": "bf16",
-  "generation": "hayai-nova-ppocr-manga"
+  "generation": "hayai-nova-ppocr-manga",
+  "created": "2026-10-29T12:00:00Z",
+  "seal": "v1:<64 hex>"
 }
 ```
+
+- 0.8: `revision` = `ENGINE_REVISIONS[id]` (`bunko-layout` `sidecar.rs`; 1 for an engine not listed), the engine's output revision, bumped only when its output changes (new weights or export, a layout change). An absent `revision` reads as 1, so every 0.7 file is revision 1. The server's normalisation `setdefault`s `revision: 1` into any block the runner wrote without one and sets `created` (the install time, ISO UTC) on every block; a file with no block stays in upstream shape. `seal` is taken after that (`seal.rs`, content seal v1), so both are inside it.
 
 - `id` = engine id; `recognizer` = `RECOGNIZER_REPOS[engine]` (`hayai-nova`, `paddle-manga`, `ppocr-manga` repos, table in section 2); `detector` = the pipeline's detector id (`ppocr-manga` for all three after DROPs); `generator` = `config.generator or "mokuro-bunko"` (the server passes `mokuro-bunko <__version__>`; 0.5.0 appears in docs, use the version string of the Rust build); `patch_budget` **only** for `PATCH_BUDGET_ENGINES` (`hayai-nova`) - never claim a resolution the recognizer did not read at; `weights` only if non-empty; `precision` only if the recognizer resolved one (`pipe.precision()`, which is None for ppocr-manga and while loading).
 - `weights`: repo -> resolved commit **for every model this run actually loaded** (collected from loaded objects, never a static table: `OpenPipeline.weights` `engine_runner.py:7228`). hayai-nova -> `{recognizer repo, HAYAI_VISION_REPO}` pinned; paddle-manga -> `{PADDLE_BASE_REPO, LoRA repo}` pinned (`:1566`, `1836`); ppocr detector/engine -> `{Kellenok/PP-OCRv6_manga: REPO_REVISION}` **only when every file came from the pinned download** - models found in a `MOKURO_PPOCR_MODELS` directory are *not* claimed (`pinned=False`, `ppocr.py:360-378`, `engine_runner.py:4655-4665`). A reconciled read names both recognizer and detector repos. The mokuro served-engine form (`{"id","precision"}` only, no weights) is **DROP**.

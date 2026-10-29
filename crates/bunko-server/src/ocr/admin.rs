@@ -698,6 +698,12 @@ impl OcrAdmin for OcrControl {
                     "the archive is missing pages its sidecar names; replace it with a whole volume first",
                 )));
             }
+            super::upgrade::Verdict::Edited => {
+                return Some(Err(OcrError::new(
+                    409,
+                    "a reader marked this OCR file edited; Bunko never replaces it",
+                )));
+            }
             super::upgrade::Verdict::Current => json!({"success": true, "mode": "current"}),
         };
         Some(Ok((200, answer)))

@@ -254,6 +254,12 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
             base: before.as_ref().and_then(|m| m.version().cloned()),
         });
     }
+    if paths::file_name(&dest).to_lowercase().ends_with(".mokuro") {
+        let (hooks, dest) = (req.ctx.hooks.clone(), dest.clone());
+        staging.before_publish(Box::new(move |staged| {
+            hooks.ocr_sidecar_staged(&dest, staged)
+        }));
+    }
     if existed_before && is_ocr_sidecar(&dest) {
         // A client re-sending an OCR file unchanged (a backup, a re-upload) edits nothing:
         // the file, its provenance and its history stay as they were.

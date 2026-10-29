@@ -350,3 +350,42 @@ async fn a_history_series_is_never_merged_with_the_reading_history() {
         "{st}"
     );
 }
+
+/// Two main sidecars of the primary's own recipe: the current revision wins over an
+/// older one (every engine is at revision 1 today, so the loser says 0), which is kept
+/// as the winner's `pre-upgrade` layer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lower_revision_main_sidecar_loses_a_case_merge() {
+    let primary = bunko_core::generations::default_generation("g-1");
+    let (engine, detector, budget) = primary.output_affecting();
+    let at = |revision: u32| {
+        serde_json::to_vec(&serde_json::json!({
+            "version": "0.2.1", "pages": [],
+            "ocr_engine": {"id": engine, "revision": revision, "detector": detector, "patch_budget": budget},
+        }))
+        .unwrap()
+    };
+    let (current, older) = (at(1), at(0));
+    let fake = Arc::new(FakeBackend::drive_like());
+    fake.reader_put(&format!("{ROOT}/Kingdom/Vol 1.cbz"), b"same");
+    fake.reader_put(&format!("{ROOT}/Kingdom/Vol 1.mokuro"), &older);
+    fake.reader_put(&format!("{ROOT}/kingdom/Vol 1.cbz"), b"same");
+    fake.reader_put(&format!("{ROOT}/kingdom/Vol 1.mokuro"), &current);
+    let _e = env_with(fake.clone(), move |c| {
+        c.ocr.upgrade.enabled = true;
+        c.ocr.generations = vec![primary];
+    })
+    .await;
+    let f2 = fake.clone();
+    eventually("the merge", || {
+        f2.node_at(&format!("{ROOT}/kingdom")).is_none()
+    })
+    .await;
+    let bytes = |rel: &str| {
+        let n = fake.node_at(&format!("{ROOT}/{rel}")).unwrap();
+        fake.content(&n.pid).unwrap()
+    };
+    assert_eq!(bytes("Kingdom/Vol 1.mokuro"), current);
+    let kept: Value = serde_json::from_slice(&bytes("Kingdom/Vol 1.pre-upgrade.mokuro")).unwrap();
+    assert_eq!(kept["preserved"]["by"], "mokuro-bunko");
+}

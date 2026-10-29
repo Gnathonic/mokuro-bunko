@@ -27,6 +27,10 @@ today; Bunko never has to be reachable from the internet, or running while you r
 Hosting a Bunko server stays fully supported: remote storage is an additional way to use it,
 not a replacement.
 
+OCR files also say where their text came from: which engine, and which revision of it, made
+them, sealed so Bunko and Mokuro Reader can tell model output from a person's corrections,
+which Bunko never replaces ([OCR sidecar provenance](docs/design/sidecar-provenance.md)).
+
 ## 0.9 — Streaming
 
 Volumes can be stored as a folder of page images instead of a CBZ archive. For those

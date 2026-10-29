@@ -217,6 +217,10 @@ fn ppocr_volume_with_bad_pages() {
     );
     assert_eq!(v["volume_uuid"].as_str().unwrap().len(), 36);
     assert_eq!(v["ocr_engine"]["id"], "ppocr-manga");
+    assert_eq!(
+        v["ocr_engine"]["revision"],
+        bunko_layout::sidecar::engine_revision("ppocr-manga")
+    );
     assert!(v["ocr_engine"].get("precision").is_none());
     let pages = v["pages"].as_array().unwrap();
     assert_eq!(pages.len(), 4);

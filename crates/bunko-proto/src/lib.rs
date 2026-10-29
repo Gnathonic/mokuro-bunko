@@ -116,6 +116,18 @@ pub struct Catalog {
     pub detectors: Vec<String>,
     #[serde(default)]
     pub devices: Vec<Device>,
+    /// Engine -> the output revision this processor's build of it writes
+    /// (`ocr_engine.revision`; 0.8 addition). An engine not listed, as from every older
+    /// processor, counts as revision 1 ([`Catalog::engine_revision`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub engine_revisions: BTreeMap<String, u32>,
+}
+
+impl Catalog {
+    /// The revision this processor announces for `engine` (1 when it announces none).
+    pub fn engine_revision(&self, engine: &str) -> u32 {
+        self.engine_revisions.get(engine).copied().unwrap_or(1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -821,5 +833,27 @@ mod tests {
             "{text}"
         );
         assert_eq!(serde_json::from_str::<RegisterReply>(&text).unwrap(), reply);
+    }
+    /// A processor older than engine revisions announces none: each engine it lists
+    /// counts as revision 1. A newer one's map round-trips; an empty map is not sent.
+    #[test]
+    fn catalog_engine_revisions() {
+        let old: Catalog =
+            serde_json::from_str(r#"{"engines":["hayai-nova"],"detectors":[]}"#).unwrap();
+        assert!(old.engine_revisions.is_empty());
+        assert_eq!(old.engine_revision("hayai-nova"), 1);
+        let new: Catalog = serde_json::from_str(
+            r#"{"engines":["hayai-nova","ppocr-manga"],"engine_revisions":{"hayai-nova":0,"ppocr-manga":2}}"#,
+        )
+        .unwrap();
+        assert_eq!(new.engine_revision("hayai-nova"), 0);
+        assert_eq!(new.engine_revision("ppocr-manga"), 2);
+        let text = serde_json::to_string(&new).unwrap();
+        assert!(text.contains(r#""engine_revisions":{"hayai-nova":0,"ppocr-manga":2}"#));
+        assert!(
+            !serde_json::to_string(&old)
+                .unwrap()
+                .contains("engine_revisions")
+        );
     }
 }

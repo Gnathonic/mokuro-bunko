@@ -302,27 +302,8 @@ pub fn float_repr(x: f64) -> String {
             "0.0".to_string()
         };
     }
-    // Rust's `{:e}` gives the SHORTEST round-trip length, but when several
-    // strings of that length round-trip it may not pick the one dtoa mode 0
-    // picks (the closest to the exact value). So take the length from it and
-    // the digits from the exact, correctly rounded formatting at that length,
-    // keeping the shortest form only if that one does not round-trip.
-    let shortest = format!("{:e}", x.abs());
-    let n_digits = shortest
-        .split_once('e')
-        .map(|(m, _)| m.chars().filter(char::is_ascii_digit).count())
-        .unwrap_or(1);
-    let exact = format!("{:.*e}", n_digits.saturating_sub(1), x.abs());
-    let sci = if exact.parse::<f64>().ok() == Some(x.abs()) {
-        exact
-    } else {
-        shortest
-    };
-    let (mant, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
-    let exp: i32 = exp.parse().unwrap_or(0);
-    let digits: String = mant.chars().filter(|c| *c != '.').collect();
+    let (digits, decpt) = shortest_digits(x.abs());
     let n = digits.len() as i32;
-    let decpt = exp + 1;
     let mut out = String::new();
     if x < 0.0 {
         out.push('-');
@@ -357,6 +338,79 @@ pub fn float_repr(x: f64) -> String {
     out
 }
 
+/// ECMAScript `Number::toString(x)` (ECMA-262 §6.1.6.1.20), which RFC 8785 (JCS)
+/// writes numbers with: the same shortest digits as [`float_repr`], laid out the
+/// JavaScript way (`1e+21`, `1e-7`, `0.000001`, `4.5`, `1`, `-0` as `0`). `None`
+/// for NaN and the infinities, which JSON cannot carry.
+pub fn es_number(x: f64) -> Option<String> {
+    if !x.is_finite() {
+        return None;
+    }
+    if x == 0.0 {
+        return Some("0".to_string());
+    }
+    let (digits, n) = shortest_digits(x.abs());
+    let k = digits.len() as i32;
+    let mut out = String::new();
+    if x < 0.0 {
+        out.push('-');
+    }
+    if k <= n && n <= 21 {
+        out.push_str(&digits);
+        for _ in 0..(n - k) {
+            out.push('0');
+        }
+    } else if 0 < n && n <= 21 {
+        out.push_str(&digits[..n as usize]);
+        out.push('.');
+        out.push_str(&digits[n as usize..]);
+    } else if -6 < n && n <= 0 {
+        out.push_str("0.");
+        for _ in 0..(-n) {
+            out.push('0');
+        }
+        out.push_str(&digits);
+    } else {
+        out.push_str(&digits[..1]);
+        if k > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        let e = n - 1;
+        out.push('e');
+        out.push(if e < 0 { '-' } else { '+' });
+        out.push_str(&e.abs().to_string());
+    }
+    Some(out)
+}
+
+/// The shortest round-trip digits of a finite `x > 0` and the position of the
+/// decimal point (`x = 0.d1d2…dk × 10^decpt`): dtoa mode 0, which both Python's
+/// `repr` and ECMAScript's `Number::toString` use (of the shortest strings, the one
+/// closest to `x`).
+fn shortest_digits(x: f64) -> (String, i32) {
+    // Rust's `{:e}` gives the SHORTEST round-trip length, but when several
+    // strings of that length round-trip it may not pick the one dtoa mode 0
+    // picks (the closest to the exact value). So take the length from it and
+    // the digits from the exact, correctly rounded formatting at that length,
+    // keeping the shortest form only if that one does not round-trip.
+    let shortest = format!("{:e}", x);
+    let n_digits = shortest
+        .split_once('e')
+        .map(|(m, _)| m.chars().filter(char::is_ascii_digit).count())
+        .unwrap_or(1);
+    let exact = format!("{:.*e}", n_digits.saturating_sub(1), x);
+    let sci = if exact.parse::<f64>().ok() == Some(x) {
+        exact
+    } else {
+        shortest
+    };
+    let (mant, exp) = sci.split_once('e').unwrap_or((sci.as_str(), "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let digits: String = mant.chars().filter(|c| *c != '.').collect();
+    (digits, exp + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +441,76 @@ mod tests {
         assert_eq!(float_repr(123.456), "123.456");
         assert_eq!(float_repr(1e22), "1e+22");
         assert_eq!(float_repr(5e-324), "5e-324");
+    }
+
+    /// RFC 8785 Appendix B, plus the shapes Python writes, against JavaScript's
+    /// `String(x)` (checked in Node) and, for the same doubles, Python's `repr`.
+    #[test]
+    fn es_number_matches_ecmascript() {
+        let cases: &[(u64, &str)] = &[
+            (0x0000000000000000, "0"),
+            (0x8000000000000000, "0"),
+            (0x0000000000000001, "5e-324"),
+            (0x8000000000000001, "-5e-324"),
+            (0x7fefffffffffffff, "1.7976931348623157e+308"),
+            (0x4340000000000000, "9007199254740992"),
+            (0xc340000000000000, "-9007199254740992"),
+            (0x4430000000000000, "295147905179352830000"),
+            (0x44b52d02c7e14af5, "9.999999999999997e+22"),
+            (0x44b52d02c7e14af6, "1e+23"),
+            (0x44b52d02c7e14af7, "1.0000000000000001e+23"),
+            (0x444b1ae4d6e2ef4e, "999999999999999700000"),
+            (0x444b1ae4d6e2ef4f, "999999999999999900000"),
+            (0x444b1ae4d6e2ef50, "1e+21"),
+            (0x3eb0c6f7a0b5ed8c, "9.999999999999997e-7"),
+            (0x3eb0c6f7a0b5ed8d, "0.000001"),
+            (0x41b3de4355555553, "333333333.3333332"),
+            (0x41b3de4355555554, "333333333.33333325"),
+            (0x41b3de4355555555, "333333333.3333333"),
+            (0x41b3de4355555556, "333333333.3333334"),
+            (0x41b3de4355555557, "333333333.33333343"),
+            (0xbecbf647612f3696, "-0.0000033333333333333333"),
+            (0x43143ff3c1cb0959, "1424953923781206.2"),
+        ];
+        for (bits, want) in cases {
+            let x = f64::from_bits(*bits);
+            assert_eq!(es_number(x).as_deref(), Some(*want), "{bits:#018x}");
+        }
+        assert_eq!(es_number(f64::NAN), None);
+        assert_eq!(es_number(f64::INFINITY), None);
+        assert_eq!(es_number(f64::NEG_INFINITY), None);
+    }
+
+    /// The same digits as `repr`, laid out the other way.
+    #[test]
+    fn es_number_and_float_repr_share_their_digits() {
+        let cases: &[(f64, &str, &str)] = &[
+            (1.0, "1.0", "1"),
+            (4.5, "4.5", "4.5"),
+            (-0.0, "-0.0", "0"),
+            (0.1, "0.1", "0.1"),
+            (0.1 + 0.2, "0.30000000000000004", "0.30000000000000004"),
+            (1e-5, "1e-05", "0.00001"),
+            (1e-7, "1e-07", "1e-7"),
+            (0.0001, "0.0001", "0.0001"),
+            (1e16, "1e+16", "10000000000000000"),
+            (1.5e16, "1.5e+16", "15000000000000000"),
+            (
+                123456789012345680.0,
+                "1.2345678901234568e+17",
+                "123456789012345680",
+            ),
+            (1e20, "1e+20", "100000000000000000000"),
+            (1e21, "1e+21", "1e+21"),
+            (1e22, "1e+22", "1e+22"),
+            (5e-324, "5e-324", "5e-324"),
+            (-2.5, "-2.5", "-2.5"),
+            (1571.35, "1571.35", "1571.35"),
+        ];
+        for (x, py, es) in cases {
+            assert_eq!(float_repr(*x), *py, "repr({x})");
+            assert_eq!(es_number(*x).as_deref(), Some(*es), "String({x})");
+        }
     }
 
     #[test]

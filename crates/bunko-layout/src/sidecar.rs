@@ -25,6 +25,22 @@ pub const RECOGNIZER_REPOS: [(&str, &str); 3] = [
     ("ppocr-manga", "Kellenok/PP-OCRv6_manga"),
 ];
 
+/// Each composed engine's output revision, written as `ocr_engine.revision`. Bump an
+/// engine's number only when its output changes (new weights or export, a layout
+/// change): with upgrades on, every older sealed file of that engine is OCR'd again,
+/// and processors announcing an older revision are offered none of its work.
+pub const ENGINE_REVISIONS: [(&str, u32); 3] =
+    [("hayai-nova", 1), ("paddle-manga", 1), ("ppocr-manga", 1)];
+
+/// `engine`'s current output revision; 1 for an engine not in [`ENGINE_REVISIONS`]
+/// (and an absent `ocr_engine.revision` reads as 1, so 0.7 files are current).
+pub fn engine_revision(engine: &str) -> u32 {
+    ENGINE_REVISIONS
+        .iter()
+        .find(|(e, _)| *e == engine)
+        .map_or(1, |(_, r)| *r)
+}
+
 /// `REPO_REVISIONS`: the pinned commit of every VLM repo the runner resolves.
 pub const REPO_REVISIONS: [(&str, &str); 4] = [
     (
@@ -215,6 +231,8 @@ pub fn finish_page(
 #[derive(Debug, Clone, PartialEq)]
 pub struct OcrEngine {
     pub id: String,
+    /// [`engine_revision`] of `id`: written right after it.
+    pub revision: u32,
     pub recognizer: String,
     pub detector: String,
     /// `--generator` (the server passes `"mokuro-bunko <version>"`), else
@@ -233,6 +251,7 @@ impl OcrEngine {
     pub fn new(engine: &str, generator: Option<&str>, patches: i64) -> OcrEngine {
         OcrEngine {
             id: engine.to_string(),
+            revision: engine_revision(engine),
             recognizer: RECOGNIZER_REPOS
                 .iter()
                 .find(|(e, _)| *e == engine)
@@ -252,6 +271,7 @@ impl OcrEngine {
     pub fn to_value(&self) -> Value {
         let mut items = vec![
             ("id".to_string(), Value::Str(self.id.clone())),
+            ("revision".to_string(), Value::Int(i64::from(self.revision))),
             (
                 "recognizer".to_string(),
                 Value::Str(self.recognizer.clone()),
@@ -371,6 +391,22 @@ pub struct Normalization {
     pub volume_uuid: String,
     /// `Some` for non-primary rows only.
     pub stamp: Option<LayerStamp>,
+    /// The install time (ISO UTC) written as `ocr_engine.created` into a file that has
+    /// a block; `None` writes none.
+    pub created: Option<String>,
+}
+
+/// Stamp a layer's `ocr_engine` block (`_stamp_ocr_engine`): the engine and generator
+/// unless the runner named them, the generation always. A file without a block gets one.
+pub fn stamp_layer(data: &mut Value, stamp: &LayerStamp) {
+    let mut stamped = match data.get("ocr_engine") {
+        Some(block @ Value::Object(_)) => block.clone(),
+        _ => Value::object(),
+    };
+    stamped.set_default("id", Value::Str(stamp.engine.clone()));
+    stamped.set_default("generator", Value::Str(stamp.generator.clone()));
+    stamped.set("generation", Value::Str(stamp.generation.clone()));
+    data.set("ocr_engine", stamped);
 }
 
 /// `_normalize_mokuro_metadata` on a parsed sidecar, in place. A non-object
@@ -384,14 +420,16 @@ pub fn normalize_sidecar(data: &mut Value, norm: &Normalization) -> bool {
     data.set("title_uuid", Value::Str(title_uuid(&norm.series_name)));
     data.set("volume_uuid", Value::Str(norm.volume_uuid.clone()));
     if let Some(stamp) = &norm.stamp {
-        let mut stamped = match data.get("ocr_engine") {
-            Some(block @ Value::Object(_)) => block.clone(),
-            _ => Value::object(),
-        };
-        stamped.set_default("id", Value::Str(stamp.engine.clone()));
-        stamped.set_default("generator", Value::Str(stamp.generator.clone()));
-        stamped.set("generation", Value::Str(stamp.generation.clone()));
-        data.set("ocr_engine", stamped);
+        stamp_layer(data, stamp);
+    }
+    // Only a block is dated: an upstream-shaped primary stays in upstream shape. A
+    // runner's own revision stands; one that wrote none ran revision 1 (the scheduler
+    // offers no work to a processor older than this library's revision).
+    if let Some(block @ Value::Object(_)) = data.get_mut("ocr_engine") {
+        block.set_default("revision", Value::Int(1));
+        if let Some(created) = &norm.created {
+            block.set("created", Value::Str(created.clone()));
+        }
     }
     true
 }
@@ -485,6 +523,65 @@ mod tests {
             title_uuid("python.org"),
             "886313e1-3b8a-5372-9b90-0c9aee199e5d"
         );
+    }
+
+    #[test]
+    fn engine_block_carries_its_revision_after_the_id() {
+        let block = OcrEngine::new("hayai-nova", None, 512).to_value();
+        let Value::Object(items) = &block else {
+            panic!("an object");
+        };
+        let keys: Vec<&str> = items.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(&keys[..3], ["id", "revision", "recognizer"]);
+        assert_eq!(block.get("revision"), Some(&Value::Int(1)));
+        assert_eq!(engine_revision("hayai-nova"), 1);
+        assert_eq!(
+            engine_revision("no-such-engine"),
+            1,
+            "unknown engines are 1"
+        );
+    }
+
+    #[test]
+    fn normalisation_dates_blocks_and_keeps_their_revision() {
+        let norm = |stamp: Option<LayerStamp>| Normalization {
+            series_name: "S".into(),
+            volume: "V".into(),
+            volume_uuid: "u".into(),
+            stamp,
+            created: Some("2026-10-29T00:00:00Z".into()),
+        };
+        // Upstream mokuro shape (no block): stays without one.
+        let mut plain = Value::parse(r#"{"version":"0.2.5","pages":[]}"#).unwrap();
+        assert!(normalize_sidecar(&mut plain, &norm(None)));
+        assert!(plain.get("ocr_engine").is_none());
+        // A block without a revision reads as 1 and says so; the install time is set.
+        let mut bare = Value::parse(r#"{"ocr_engine":{"id":"x"},"pages":[]}"#).unwrap();
+        assert!(normalize_sidecar(&mut bare, &norm(None)));
+        let block = bare.get("ocr_engine").unwrap();
+        assert_eq!(block.get("revision"), Some(&Value::Int(1)));
+        assert_eq!(
+            block.get("created").and_then(Value::as_str),
+            Some("2026-10-29T00:00:00Z")
+        );
+        // A revision the runner wrote is never overwritten, on a stamped layer too.
+        let mut layer =
+            Value::parse(r#"{"ocr_engine":{"id":"x","revision":3},"pages":[]}"#).unwrap();
+        let stamp = LayerStamp {
+            engine: "x".into(),
+            generator: "mokuro-bunko".into(),
+            generation: "fast".into(),
+        };
+        assert!(normalize_sidecar(&mut layer, &norm(Some(stamp))));
+        let block = layer.get("ocr_engine").unwrap();
+        assert_eq!(block.get("revision"), Some(&Value::Int(3)));
+        assert!(block.get("created").is_some());
+        // No install time given: nothing dated.
+        let mut undated = Value::parse(r#"{"ocr_engine":{"id":"x"},"pages":[]}"#).unwrap();
+        let mut n = norm(None);
+        n.created = None;
+        assert!(normalize_sidecar(&mut undated, &n));
+        assert!(undated.get("ocr_engine").unwrap().get("created").is_none());
     }
 
     #[test]

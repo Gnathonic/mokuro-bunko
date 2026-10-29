@@ -62,6 +62,12 @@ pub trait DavHooks: Send + Sync + 'static {
     /// A library folder was moved inside the library (its sidecars moved with it).
     fn rename_ocr_sidecars_under_prefix(&self, _old_prefix: &str, _new_prefix: &str) {}
     fn rename_volume_uuids_under_prefix(&self, _old_prefix: &str, _new_prefix: &str) {}
+    /// A PUT of a plain `.mokuro` has staged its body at `staged` and checked it (size,
+    /// digest), and is about to publish it as `dest`. The one hook that runs BEFORE the
+    /// write: the server may rewrite the staged file (critique C5: it puts Bunko's
+    /// `ocr_engine` block back on a main an older reader regenerated without it). Called
+    /// under `dest`'s write lock; blocking; it must leave a readable file at `staged`.
+    fn ocr_sidecar_staged(&self, _dest: &Path, _staged: &Path) {}
     /// A volume's primary sidecar (`<stem>.mokuro[.gz]` with `<stem>.cbz` beside it) is
     /// about to be deleted or moved away (0.5.2 `_remember_primary_uuid`). Called BEFORE
     /// the file goes, so the server can read the volume id out of it.
