@@ -254,7 +254,8 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
             base: before.as_ref().and_then(|m| m.version().cloned()),
         });
     }
-    if paths::file_name(&dest).to_lowercase().ends_with(".mokuro") {
+    // A history file is the account's own bytes, never a library OCR file to re-seal.
+    if history.is_none() && paths::file_name(&dest).to_lowercase().ends_with(".mokuro") {
         let (hooks, dest) = (req.ctx.hooks.clone(), dest.clone());
         staging.before_publish(Box::new(move |staged| {
             hooks.ocr_sidecar_staged(&dest, staged)

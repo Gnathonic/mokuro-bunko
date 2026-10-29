@@ -1463,6 +1463,21 @@ async fn put_history(env: &Env, user: &str, body: &[u8]) {
     assert!(matches!(r.code(), 201 | 204), "{user} PUT: {}", r.code());
 }
 
+/// A history file is the account's own bytes, stored as sent: one named `.mokuro` never
+/// reaches the hook that may rewrite a library OCR file before it lands (critique C5),
+/// while a library `.mokuro` still does.
+#[tokio::test]
+async fn a_history_file_never_reaches_the_ocr_sidecar_hook() {
+    let env = Env::new();
+    put_history(&env, "reader", b"events").await;
+    let put = |user, path| env.req(Some(user), "PUT", path, &[], b"{}");
+    let r = put("reader", "/mokuro-reader/history/dev-1/x.mokuro").await;
+    assert_eq!(r.code(), 201);
+    let r = put("uploader", "/mokuro-reader/series/vol1.mokuro").await;
+    assert_eq!(r.code(), 201);
+    assert_eq!(*env.hooks.staged.lock(), ["series/vol1.mokuro"]);
+}
+
 #[tokio::test]
 async fn history_is_per_user() {
     let env = Env::new();
