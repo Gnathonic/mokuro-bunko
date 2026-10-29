@@ -2,7 +2,8 @@
   "users": [
     {"username": "reader", "password": "contract-pässwörd-✓", "role": "uploader"},
     {"username": "viewer", "password": "contract-viewer-1", "role": "processor"},
-    {"username": "admin", "password": "contract-admin-1", "role": "admin"}
+    {"username": "admin", "password": "contract-admin-1", "role": "admin"},
+    {"username": "progress", "password": "contract-progress-1", "role": "registered"}
   ],
   "library": [
     {"series": "Contract Series", "volumes": [

@@ -9,7 +9,8 @@ to the contract shows up as a fixture diff in the pull request that makes it.
 - `seed.json`: the users and the library every fixture is made from. The passwords are
   test values for a throwaway in-process server. `reader` is an uploader (may write
   progress and add files), `viewer` a processor account (the only signed-in role with
-  neither right), `admin` an admin. Volume 01 has OCR, a layer sidecar and a cover;
+  neither right), `admin` an admin, `progress` a `registered` account (progress and
+  reading history only; the `history-*` fixtures are its). Volume 01 has OCR, a layer sidecar and a cover;
   Volume 02 has no OCR; one series and its volume have Japanese names.
 - `bunko/<name>.json`: what Bunko answers, written by
   `crates/bunko-server/tests/contract_export.rs` from a seeded full-stack server. The

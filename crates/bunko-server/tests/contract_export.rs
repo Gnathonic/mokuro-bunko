@@ -33,7 +33,11 @@ const READER_ORIGIN: &str = "https://reader.mokuro.app";
 
 /// The `webdav` library's listing request (`getDirectoryContents`).
 fn listing(path: &str, depth: &str) -> Req {
-    Req::new("PROPFIND", path, "basic:reader")
+    listing_as(path, depth, "basic:reader")
+}
+
+fn listing_as(path: &str, depth: &str, auth: &str) -> Req {
+    Req::new("PROPFIND", path, auth)
         .header("accept", "text/plain,application/xml")
         .header("depth", depth)
 }
@@ -133,6 +137,15 @@ async fn identity(c: &mut Contract, seed: &Seed) {
         Req::new("GET", me, "basic:viewer"),
     )
     .await;
+    // `registered`: progress and reading history only.
+    let r = export(
+        c,
+        &server,
+        "login-me-registered",
+        Req::new("GET", me, "basic:progress"),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.text());
     let r = export(
         c,
         &server,
@@ -396,6 +409,71 @@ async fn puts(c: &mut Contract, seed: &Seed) {
     server.stop().await;
 }
 
+/// Reading history (0.8): `registered` keeps its own `history/<device>/<file>` tree
+/// under the reader root, and nobody else lists it.
+async fn history(c: &mut Contract, seed: &Seed) {
+    let server = Server::local(seed).await;
+    let history = format!("/{ROOT}/history");
+    let device = format!("{history}/0f6c-dev");
+    let r = export(
+        c,
+        &server,
+        "history-mkcol",
+        Req::new("MKCOL", &history, "basic:progress"),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = export(
+        c,
+        &server,
+        "history-mkcol-exists",
+        Req::new("MKCOL", &history, "basic:progress"),
+    )
+    .await;
+    assert_eq!(r.status, 405, "{}", r.text());
+    let r = server
+        .send(&Req::new("MKCOL", &device, "basic:progress"))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = export(
+        c,
+        &server,
+        "history-put",
+        // As the reader sends every file to a server that verifies PUTs.
+        Req::new("PUT", &format!("{device}/2026-10.events"), "basic:progress")
+            .header("content-type", "application/octet-stream")
+            .header("content-digest", contract_support::DIGEST_SENTINEL)
+            .text("contract reading history\n"),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    export(
+        c,
+        &server,
+        "history-propfind-depth1",
+        listing_as(&format!("{device}/"), "1", "basic:progress"),
+    )
+    .await;
+    let root = format!("/{ROOT}/");
+    let r = export(
+        c,
+        &server,
+        "history-propfind-reader-root-infinity",
+        listing_as(&root, "infinity", "basic:progress"),
+    )
+    .await;
+    assert!(r.text().contains("2026-10.events"), "{}", r.text());
+    let r = export(
+        c,
+        &server,
+        "history-propfind-other-user",
+        listing(&root, "infinity"),
+    )
+    .await;
+    assert!(!r.text().contains("history"), "{}", r.text());
+    server.stop().await;
+}
+
 async fn errors(c: &mut Contract, seed: &Seed) {
     let server = Server::local(seed).await;
     let root = format!("/{ROOT}/");
@@ -616,6 +694,7 @@ async fn export_all(c: &mut Contract, seed: &Seed) {
         server.stop().await;
     }
     puts(c, seed).await;
+    history(c, seed).await;
     errors(c, seed).await;
     markers(c, seed).await;
     cloud_errors(c, seed).await;

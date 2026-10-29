@@ -1,0 +1,13 @@
+{
+  "body_text": "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"http://www.w3.org/TR/html4/strict.dtd\">\n<html><head>\n  <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">\n  <title>201 Created</title>\n</head><body>\n  <h1>201 Created</h1>\n  <p>201 Created</p>\n<hr/>\n<p>mokuro-bunko</p>\n</body></html>",
+  "headers": {
+    "content-type": "text/html; charset=utf-8"
+  },
+  "request": {
+    "auth": "basic:progress",
+    "headers": {},
+    "method": "MKCOL",
+    "path": "/mokuro-reader/history"
+  },
+  "status": 201
+}
