@@ -524,3 +524,89 @@ async fn a_cloud_sidecar_proven_bunkos_own_is_replaced_without_a_copy_and_others
     assert_eq!(cloud.judge("Series/Vol 2.cbz").await, Verdict::Current);
     assert_eq!(fake.trashed_log().len(), trashed, "nothing trashed");
 }
+
+/// An OCR result for `cbz` installed as the collector installs it, as `row`.
+async fn collect(
+    cloud: &Cloud,
+    cbz: &str,
+    row: bunko_core::generations::Generation,
+    result: String,
+) -> bunko_server::ocr::collect::Outcome {
+    let dir = cloud
+        .dir
+        .path()
+        .join(format!("spool-{}", sha(cbz.as_bytes())));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("result.mokuro");
+    std::fs::write(&out, result).unwrap();
+    let layout = cloud.services.core.layout.clone();
+    let req = bunko_server::ocr::collect::CollectRequest {
+        job: bunko_server::ocr::types::Job::new(cbz, &row.id),
+        rows: vec![
+            bunko_core::generations::default_generation("g-1"),
+            row.clone(),
+        ],
+        row,
+        library: layout.library(),
+        inbox: layout.inbox(),
+        result: out,
+        expected_sha256: None,
+        stamp: None,
+        machine: "local".into(),
+        account: None,
+        runner_build: None,
+        pages: Some(3),
+        failed_pages: Some(0),
+        generator: "mokuro-bunko test".into(),
+        db: Some(cloud.services.db.clone()),
+        facts: Arc::new(bunko_server::ocr::types::FileFacts),
+        locks: Arc::new(bunko_library::service::NoPathLocks),
+        sid: "s-1".into(),
+        claim: "c-1".into(),
+        congestion: None,
+        upgrade: None,
+    };
+    blocking(move || bunko_server::ocr::collect::run(req).outcome).await
+}
+
+/// The rename race on a cloud library (critique S6): what a reader moved to the
+/// destination while the job ran stays, the result is discarded and no `_1` file is
+/// written; Bunko's own sealed layer of an older revision is replaced in place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cloud_destination_is_reconciled_never_numbered() {
+    use bunko_server::ocr::collect::{Outcome, SUPERSEDED};
+    let fake = Arc::new(FakeBackend::drive_like());
+    library(&fake, HAYAI_UNSTAMPED);
+    let cloud = Cloud::start(fake.clone()).await;
+    let primary = bunko_core::generations::default_generation("g-1");
+    let result = |revision: u32| {
+        HAYAI.replace(
+            r#""id":"hayai-nova","#,
+            &format!(r#""id":"hayai-nova","revision":{revision},"#),
+        )
+    };
+    let outcome = collect(&cloud, "Series/Vol 1.cbz", primary, result(1)).await;
+    assert_eq!(outcome, Outcome::Superseded(SUPERSEDED.into()));
+    assert_eq!(
+        cloud.cloud_bytes("Series/Vol 1.mokuro").as_deref(),
+        Some(HAYAI_UNSTAMPED)
+    );
+    assert!(cloud.cloud_bytes("Series/Vol 1_1.mokuro").is_none());
+
+    // A layer Bunko wrote at revision 1, its row now at revision 2.
+    let mut fast = bunko_core::generations::default_generation("g-2");
+    fast.name = "fast".into();
+    fast.primary = false;
+    let old = sealed(&result(1));
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.fast.mokuro"), old.as_bytes());
+    cloud.sync().await;
+    let outcome = collect(&cloud, "Series/Vol 1.cbz", fast.clone(), result(2)).await;
+    assert!(matches!(outcome, Outcome::Installed(_)), "{outcome:?}");
+    let now = cloud.cloud_json("Series/Vol 1.fast.mokuro").unwrap();
+    assert_eq!(now["ocr_engine"]["revision"], 2);
+    assert!(cloud.cloud_bytes("Series/Vol 1.fast_1.mokuro").is_none());
+    // The same revision again: kept.
+    let outcome = collect(&cloud, "Series/Vol 1.cbz", fast, result(2)).await;
+    assert_eq!(outcome, Outcome::Superseded(SUPERSEDED.into()));
+    assert!(cloud.cloud_bytes("Series/Vol 1.fast_1.mokuro").is_none());
+}

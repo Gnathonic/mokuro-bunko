@@ -101,6 +101,11 @@
   engine they run, and one with an older revision than the library's is offered none of
   that engine's work (the log and the queue say so) until it is updated; processors from
   0.7 count as revision 1.
+- **OCR never writes `<Volume>_1.mokuro` beside a file already there.** When a
+  `.mokuro` arrives at the destination while its OCR runs (a reader renaming a volume,
+  a person's upload), that file stays and the result is discarded (audited, not a
+  failure, and the volume is not queued again); only Bunko's own sealed output of the
+  same engine at an older revision is replaced in place.
 
 ### Fixed
 - **A `.mokuro` or `series.json` saved with a byte-order mark is read.** Mokuro Reader

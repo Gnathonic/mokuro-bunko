@@ -221,6 +221,35 @@ fn stamp_id(data: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// `ocr_engine.revision` of a block: a non-negative integer, else 1 (absent in every 0.7
+/// file; [`bunko_layout::sidecar::engine_revision`]).
+pub fn block_revision(block: &serde_json::Map<String, Value>) -> u32 {
+    block
+        .get("revision")
+        .and_then(Value::as_u64)
+        .and_then(|r| u32::try_from(r).ok())
+        .unwrap_or(1)
+}
+
+/// `(ocr_engine.id, revision)` of a parsed sidecar, when it carries a block with an id.
+pub fn engine_of(data: &Value) -> Option<(String, u32)> {
+    let block = data.get("ocr_engine")?.as_object()?;
+    Some((stamp_id(data)?, block_revision(block)))
+}
+
+/// Bunko's own output of `engine` (sealed, no `edited` block) at a revision below
+/// `revision`: the one file an install of `engine` at `revision` replaces in place.
+/// Anything else at its destination (a person's file, an edit, another engine's, an
+/// unsealed or a same or newer revision) is kept.
+pub fn superseded_own_output(bytes: &[u8], engine: &str, revision: u32) -> bool {
+    let Ok(data) = serde_json::from_slice::<Value>(strip_bom(bytes)) else {
+        return false;
+    };
+    data.get("edited").is_none()
+        && engine_of(&data).is_some_and(|(id, r)| id == engine && r < revision)
+        && bunko_layout::seal::is_sealed(bytes)
+}
+
 /// The `ocr_engine.id` the file at `path` carries (read capped), if any.
 fn file_stamp_id(path: &Path) -> Option<String> {
     let bytes = read_sidecar(path).ok()?;

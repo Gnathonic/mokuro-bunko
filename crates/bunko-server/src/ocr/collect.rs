@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bunko_core::generations::Generation;
 use bunko_db::{AuditDetails, Database, NewAuditEvent, OcrSidecar};
-use bunko_store::{Durability, Mode, Origin, WriteIntent, fs};
+use bunko_store::{Durability, Mode, Origin, Version, WriteIntent, fs};
 use serde_json::{Map, Value};
 use sha2::Digest;
 
@@ -61,6 +61,55 @@ pub enum Outcome {
     /// it cannot do yet): not a failure of the volume; the job goes back to the queue
     /// and is tried again next scan (spec §3.5: the queue holds, nothing is recorded).
     Held(String),
+    /// A sidecar arrived at the destination while the job ran (a reader's rename, a
+    /// person's upload) and stays: the result is discarded, nothing is recorded, and
+    /// the next walk finds the row done.
+    Superseded(String),
+}
+
+/// Why a result was discarded for a file already at its destination.
+pub const SUPERSEDED: &str = "a sidecar was already at the destination; the result was discarded";
+
+/// What is at a result's destination: nothing, a file that stays, or Bunko's own older
+/// output that the result replaces (on a remote store, exactly the version read).
+enum Existing {
+    Absent,
+    Keep,
+    Replace(Option<Version>),
+}
+
+/// Never `<stem>_<n>.mokuro` beside a file already there (a reader's rename moved a
+/// volume's sidecars in during the job, a person uploaded one): only Bunko's own sealed
+/// output of the same engine at a lower revision is replaced
+/// ([`super::upgrade::superseded_own_output`]); anything else is kept, and so is a
+/// `.gz` alone (the result would sit beside it as a second copy).
+fn reconcile_existing(plain: &Path, gz: &Path, result: Option<&(String, u32)>) -> Existing {
+    let Some(meta) = fs::metadata(plain).ok() else {
+        return if fs::exists(gz) {
+            Existing::Keep
+        } else {
+            Existing::Absent
+        };
+    };
+    let Some((engine, revision)) = result else {
+        return Existing::Keep;
+    };
+    let remote = bunko_store::store_for(plain).filter(|s| s.caps().remote);
+    let max = bunko_library::sidecar::MAX_SIDECAR_BYTES;
+    let bytes = match (remote, meta.version()) {
+        (Some(store), Some(version)) => store
+            .local_path(plain, Some(version))
+            .ok()
+            .and_then(|pinned| bunko_library::sidecar::read_capped(pinned.path(), max).ok()),
+        (Some(_), None) => None,
+        (None, _) => bunko_library::sidecar::read_capped(plain, max).ok(),
+    };
+    match bytes {
+        Some(b) if super::upgrade::superseded_own_output(&b, engine, *revision) => {
+            Existing::Replace(meta.version().cloned())
+        }
+        _ => Existing::Keep,
+    }
 }
 
 #[derive(Debug)]
@@ -184,30 +233,6 @@ pub fn volume_uuid_for(
     bunko_layout::sidecar::deterministic_uuid(&format!("{series}/{stem}"))
 }
 
-/// `_get_unique_path`: `<stem>_<n><suffix>` (Python `Path.stem` / `Path.suffix`).
-pub fn unique_path(path: &Path) -> PathBuf {
-    if !fs::exists(path) {
-        return path.to_path_buf();
-    }
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let (stem, suffix) = match name.rfind('.') {
-        Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
-        _ => (name.clone(), String::new()),
-    };
-    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let mut n = 1;
-    loop {
-        let candidate = parent.join(format!("{stem}_{n}{suffix}"));
-        if !fs::exists(&candidate) {
-            return candidate;
-        }
-        n += 1;
-    }
-}
-
 /// Move `from` to `to`: a publish (a rename on a local library), or a copy into a temp
 /// file beside `to` then a publish when they are on different filesystems (the
 /// rename's `CrossesDevices`). `intent` is what the store is told about the write.
@@ -248,9 +273,10 @@ pub fn run(req: CollectRequest) -> CollectDone {
     match &outcome {
         Outcome::Installed(_) => {}
         Outcome::Discarded => audit_rejected(&req, super::sched::DISCARDED),
-        Outcome::Failed(reason) | Outcome::Busy(reason) | Outcome::Held(reason) => {
-            audit_rejected(&req, reason)
-        }
+        Outcome::Failed(reason)
+        | Outcome::Busy(reason)
+        | Outcome::Held(reason)
+        | Outcome::Superseded(reason) => audit_rejected(&req, reason),
     }
     if !matches!(outcome, Outcome::Installed(_)) {
         let _ = std::fs::remove_file(&req.result);
@@ -378,17 +404,26 @@ fn install(req: &CollectRequest) -> Outcome {
         let Some(_guard) = lock_with_patience(&req.locks, &plain) else {
             return Outcome::Busy(format!("{} is locked by a WebDAV write", plain.display()));
         };
-        let dest = if fs::exists(&plain) || fs::exists(&gz) {
-            unique_path(&plain)
-        } else {
-            plain
+        let result_facts = bunko_library::sidecar::read_capped(
+            &req.result,
+            bunko_library::sidecar::MAX_SIDECAR_BYTES,
+        )
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .as_ref()
+        .and_then(super::upgrade::engine_of);
+        let (mode, durability) = match reconcile_existing(&plain, &gz, result_facts.as_ref()) {
+            Existing::Absent => (Mode::CreateNew, Durability::Deferred),
+            Existing::Keep => return Outcome::Superseded(SUPERSEDED.into()),
+            Existing::Replace(base) => (Mode::Replace { base }, Durability::Sync),
         };
+        let dest = plain;
         let intent = WriteIntent::new(
-            Mode::CreateNew,
+            mode,
             Origin::Ocr {
                 claim: req.claim.clone(),
             },
-            Durability::Deferred,
+            durability,
         );
         if let Err(e) = move_into_place(&req.result, &dest, &intent) {
             if bunko_store::store_for(&dest).is_some_and(|s| s.caps().remote) {
@@ -489,23 +524,5 @@ fn record_written(req: &CollectRequest, cbz: &Path, sidecar: &Path, written: Wri
         .details(details);
     if let Err(e) = db.log_audit_event(&event) {
         tracing::warn!("could not audit {}: {e}", sidecar.display());
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)] // fixtures are written with std::fs
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unique_names() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("Vol.mokuro");
-        assert_eq!(unique_path(&p), p);
-        std::fs::write(&p, b"x").unwrap();
-        assert_eq!(unique_path(&p), dir.path().join("Vol_1.mokuro"));
-        let layer = dir.path().join("Vol.fast.mokuro");
-        std::fs::write(&layer, b"x").unwrap();
-        assert_eq!(unique_path(&layer), dir.path().join("Vol.fast_1.mokuro"));
     }
 }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use bunko_proto::{Event, Op};
 use bunko_server::ocr::sched::Msg;
-use bunko_server::ocr::types::{Job, LibraryFacts};
+use bunko_server::ocr::types::{FileFacts, Job, LibraryFacts};
 use ocr_common::*;
 
 fn names(v: &[(String, String, String)]) -> Vec<String> {
@@ -1442,4 +1442,189 @@ fn an_installed_sidecar_is_dated_revisioned_and_sealed() {
     assert!(created.ends_with('Z') && created.len() >= 20, "{created}");
     assert!(block["seal"].as_str().unwrap().starts_with("v1:"));
     assert!(bunko_layout::seal::is_sealed(&bytes));
+}
+
+/// A processor's first job: `(processor, sid, claim, sidecar name)`, the volume started.
+fn first_job(h: &mut H, pages: u32) -> (Proc, String, String, String) {
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let (_, claim, _) = volumes(&ops)[0].clone();
+    let name = ops
+        .iter()
+        .find_map(|o| match o {
+            Op::Volume(v) => Some(v.sidecar_name.clone()),
+            _ => None,
+        })
+        .expect("a volume op");
+    h.event(&p, ready(&sid));
+    h.event(&p, started(&sid, &claim, pages));
+    (p, sid, claim, name)
+}
+
+/// The `ocr_sidecar_rejected` audit reasons.
+fn rejected_reasons(h: &H) -> Vec<String> {
+    h.db.as_ref()
+        .unwrap()
+        .list_audit_events(200, None)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.action == "ocr_sidecar_rejected")
+        .filter_map(|e| {
+            let d: serde_json::Value = serde_json::from_str(e.details.as_deref()?).ok()?;
+            d["reason"].as_str().map(str::to_string)
+        })
+        .collect()
+}
+
+/// Every file name in `dir`, sorted.
+fn listing(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+const SUPERSEDED: &str = "a sidecar was already at the destination; the result was discarded";
+
+/// A result in the shape a hayai-nova runner writes, at `revision`.
+fn hayai_result(revision: u32) -> Vec<u8> {
+    format!(
+        r#"{{"version":"0.2.5","title":"x","volume":"y","ocr_engine":{{"id":"hayai-nova","revision":{revision},"detector":"ppocr-manga","generator":"mokuro-bunko"}},"pages":[]}}"#
+    )
+    .into_bytes()
+}
+
+/// The rename race (critique S6): a reader renamed a volume and PUT its main sidecar
+/// while the OCR of the new name ran. The person's file stays, the result is
+/// discarded (no `Vol_1.mokuro` beside it, ever), the job is not failed, and the next
+/// walk owes nothing.
+#[test]
+fn a_main_sidecar_that_arrived_during_the_job_is_kept_and_the_result_discarded() {
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), None);
+    h.add("A/V1.cbz", 2);
+    h.at(0.0);
+    let (p, sid, claim, name) = first_job(&mut h, 2);
+    let reader = r#"{"version":"0.2.5","title":"A","volume":"V1","pages":[]}"#;
+    std::fs::write(h.library().join("A/V1.mokuro"), reader).unwrap();
+    h.done_with(&p, &sid, &claim, &name, 2, 1.0, &hayai_result(1));
+    assert_eq!(
+        std::fs::read_to_string(h.library().join("A/V1.mokuro")).unwrap(),
+        reader
+    );
+    assert_eq!(listing(&h.library().join("A")), ["V1.cbz", "V1.mokuro"]);
+    assert_eq!(rejected_reasons(&h), [SUPERSEDED]);
+    assert!(h.s.failures.is_empty(), "not a failure of the volume");
+    assert!(h.s.claims.is_empty());
+    h.at(31.0);
+    assert!(h.s.claims.is_empty(), "owed nothing on the next walk");
+    assert!(h.s.pending_jobs().is_empty());
+}
+
+/// A layer a reader rename moved in while the row ran (sealed, the same revision): kept
+/// as it is, no `Vol.fast_1.mokuro`. A person's file at the row's name, Bunko's output a
+/// person corrected and another engine's are kept even against a newer revision.
+#[test]
+fn a_layer_already_at_the_destination_is_kept() {
+    let edited = {
+        let mut v: serde_json::Value = serde_json::from_str(&sealed(
+            r#"{"ocr_engine":{"id":"hayai-nova","revision":1},"pages":[]}"#,
+        ))
+        .unwrap();
+        v["edited"] = serde_json::json!({"by": "mokuro-reader", "at": "2026-10-29T00:00:00Z"});
+        v.to_string()
+    };
+    for (existing, result_revision) in [
+        (
+            sealed(
+                r#"{"volume":"V1","ocr_engine":{"id":"hayai-nova","revision":1,"generation":"fast"},"pages":[]}"#,
+            ),
+            1,
+        ),
+        (
+            r#"{"version":"0.2.5","pages":[{"img_path":"a.jpg","blocks":[]}]}"#.to_string(),
+            2,
+        ),
+        (edited, 2),
+        (
+            sealed(r#"{"ocr_engine":{"id":"paddle-manga","revision":1},"pages":[]}"#),
+            2,
+        ),
+        // Unsealed: only a stamp, which anyone can write.
+        (
+            r#"{"ocr_engine":{"id":"hayai-nova","revision":1},"pages":[]}"#.to_string(),
+            2,
+        ),
+    ] {
+        let mut h = harness_db(
+            vec![primary(), layer("g-2", "fast")],
+            Arc::new(FileFacts),
+            None,
+        );
+        h.add("A/V1.cbz", 2);
+        std::fs::write(
+            h.library().join("A/V1.mokuro"),
+            r#"{"version":"0.2.5","pages":[]}"#,
+        )
+        .unwrap();
+        h.at(0.0);
+        let (p, sid, claim, name) = first_job(&mut h, 2);
+        assert_eq!(name, "V1.fast.mokuro");
+        std::fs::write(h.library().join("A/V1.fast.mokuro"), &existing).unwrap();
+        h.done_with(
+            &p,
+            &sid,
+            &claim,
+            &name,
+            2,
+            1.0,
+            &hayai_result(result_revision),
+        );
+        assert_eq!(
+            std::fs::read_to_string(h.library().join("A/V1.fast.mokuro")).unwrap(),
+            existing
+        );
+        assert_eq!(
+            listing(&h.library().join("A")),
+            ["V1.cbz", "V1.fast.mokuro", "V1.mokuro"]
+        );
+        assert_eq!(rejected_reasons(&h), [SUPERSEDED]);
+        assert!(h.s.failures.is_empty());
+    }
+}
+
+/// Bunko's own sealed output of the same engine at a lower revision is replaced in
+/// place by the newer result; nothing is kept beside it.
+#[test]
+fn bunkos_own_older_revision_at_the_destination_is_replaced_in_place() {
+    let mut h = harness_db(
+        vec![primary(), layer("g-2", "fast")],
+        Arc::new(FileFacts),
+        None,
+    );
+    h.add("A/V1.cbz", 2);
+    std::fs::write(
+        h.library().join("A/V1.mokuro"),
+        r#"{"version":"0.2.5","pages":[]}"#,
+    )
+    .unwrap();
+    h.at(0.0);
+    let (p, sid, claim, name) = first_job(&mut h, 2);
+    std::fs::write(
+        h.library().join("A/V1.fast.mokuro"),
+        sealed(r#"{"ocr_engine":{"id":"hayai-nova","revision":1,"generation":"fast"},"pages":[]}"#),
+    )
+    .unwrap();
+    h.done_with(&p, &sid, &claim, &name, 2, 1.0, &hayai_result(2));
+    let bytes = std::fs::read(h.library().join("A/V1.fast.mokuro")).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["ocr_engine"]["revision"], 2);
+    assert!(bunko_layout::seal::is_sealed(&bytes));
+    assert_eq!(
+        listing(&h.library().join("A")),
+        ["V1.cbz", "V1.fast.mokuro", "V1.mokuro"]
+    );
+    assert!(rejected_reasons(&h).is_empty());
 }

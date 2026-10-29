@@ -285,6 +285,8 @@ impl Scheduler {
             Outcome::Failed(error) => self.finish(&done.job, false, Some(error), None),
             Outcome::Discarded => self.release(&done.job, super::DISCARDED, true),
             Outcome::Busy(reason) => self.release(&done.job, &reason, true),
+            // The file at the destination stays; the next walk finds the row done.
+            Outcome::Superseded(reason) => self.release(&done.job, &reason, true),
             // Not this scan: a store that refused once would refuse a retry at once.
             Outcome::Held(reason) => self.release(&done.job, &reason, false),
         }
