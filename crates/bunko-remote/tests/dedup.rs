@@ -513,6 +513,52 @@ fn an_unknown_write_time_keeps_the_canonical_copy_the_index_already_shows() {
     t.never_suspect();
 }
 
+/// Accepted limit (spec §5.9 "Duplicates"): an OCR file is a file here like any other.
+/// An EDITED main or an `edit` layer that loses to a newer write goes to the provider
+/// trash, where the case merge would keep it (`pre-upgrade`, `edit-2`): the reader's
+/// merge (#308) does the same, and the cloud must end the same whoever merges.
+#[test]
+fn an_edited_main_and_an_edit_layer_keep_the_newer_write_as_the_reader_does() {
+    let f = FakeBackend::drive_like();
+    let a = top_root(&f);
+    let b = top_root(&f);
+    let sa = mkdir(&f, &a, "S");
+    let sb = mkdir(&f, &b, "S");
+    put(&f, &sa, "v.cbz", b"v");
+    let edited = put(
+        &f,
+        &sa,
+        "v.mokuro",
+        br#"{"volume_uuid":"u","edited":{"by":"reader"},"pages":[]}"#,
+    );
+    let old_layer = put(&f, &sa, "v.edit.mokuro", br#"{"pages":["mine"]}"#);
+    let generated: &[u8] = br#"{"volume_uuid":"u","ocr_engine":{"id":"mokuro"},"pages":[]}"#;
+    put(&f, &sb, "v.mokuro", generated);
+    put(&f, &sb, "v.edit.mokuro", br#"{"pages":["theirs"]}"#);
+    let t = T::new(f);
+    t.steady();
+    t.policy();
+    wait_until("merged", || {
+        t.top_roots().len() == 1 && t.kids(&a).len() == 1 && t.kids(&sa).len() == 3
+    });
+    assert_eq!(t.bytes_in(&sa, "v.mokuro"), [generated.to_vec()]);
+    assert_eq!(
+        t.bytes_in(&sa, "v.edit.mokuro"),
+        [br#"{"pages":["theirs"]}"#.to_vec()]
+    );
+    let names: Vec<String> = t.kids(&sa).into_iter().map(|(n, _, _)| n).collect();
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("pre-upgrade") || n.contains("edit-2")),
+        "no keepsake layer: {names:?}"
+    );
+    let trashed = t.fake.trashed_log();
+    assert!(trashed.contains(&edited) && trashed.contains(&old_layer));
+    t.sync_feed();
+    t.never_suspect();
+}
+
 #[test]
 fn keep_both_files_all_move_into_the_canonical_root() {
     const KEEP: [&str; 5] = [

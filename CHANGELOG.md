@@ -84,8 +84,8 @@
   Mokuro Reader does, once neither has changed for a while: everything moves into one
   copy (the oldest; for the `mokuro-reader` folders, one directly in My Drive or the
   Cloud Drive first), a file found in both keeps its most recently written copy and
-  puts the other in the provider's trash (a `series.json` is merged into the series
-  first),
+  puts the other in the provider's trash (an edited `.mokuro` too; a `series.json` is
+  merged into the series first),
   `volume-data.json`, `goals.json` and `positions.json` keep both copies, and each
   emptied folder goes to the trash (never a permanent delete). The Storage tab lists
   them under **Recent merges**; `storage.library.dedup: false` turns this off. Its
