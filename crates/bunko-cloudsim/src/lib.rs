@@ -53,6 +53,13 @@ pub use mega::MegaHandle;
 pub use onedrive::{OneDriveHandle, OneDriveState};
 use violations::Violations;
 
+/// Now, in unix milliseconds: what the simulated providers stamp writes with.
+pub(crate) fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
 /// A stored file, as `GET /_sim/files` lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileInfo {

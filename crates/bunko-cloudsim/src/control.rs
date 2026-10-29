@@ -108,9 +108,11 @@ async fn expire(State(sim): State<SimState>, b: Body) -> Answer {
 async fn mega_account(State(sim): State<SimState>, b: Body) -> Answer {
     let v = body(b)?;
     let (email, password) = (string(&v, "email")?, string(&v, "password")?);
-    sim.mega(&account(&v))
-        .set_account(&email, &password, v["mfa"].as_str());
-    Ok(Json(json!({"ok": true})).into_response())
+    let mega = sim.mega(&account(&v));
+    mega.set_account(&email, &password, v["mfa"].as_str());
+    // The account's saved session, as a connected server's credentials hold one: a
+    // server the rig spawns starts signed in.
+    Ok(Json(json!({"ok": true, "session": mega.session_blob()})).into_response())
 }
 
 async fn seed(State(sim): State<SimState>, b: Body) -> Answer {

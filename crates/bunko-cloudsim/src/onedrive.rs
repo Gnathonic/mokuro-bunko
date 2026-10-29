@@ -227,8 +227,9 @@ impl Default for OneDriveState {
 }
 
 impl OneDriveState {
+    /// As Drive's: the wall clock, a second past the last stamp at least.
     fn tick(&mut self) -> i64 {
-        self.clock += 1000;
+        self.clock = (self.clock + 1000).max(crate::wall_ms());
         self.clock
     }
 

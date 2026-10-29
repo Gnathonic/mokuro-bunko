@@ -46,6 +46,11 @@ state and knobs. Dropping the `CloudSim` fails the test if it recorded a violati
 State is per (provider, account). A bearer token picks the account; MEGA picks it by
 session id, or by the email of a login. Every response carries permissive CORS.
 
+Writes are stamped on the wall clock, the one every response's `Date` header shows (and
+at least a second after the account's previous stamp, so stamps stay distinct). Bunko's
+lease ages its marker as `Date` minus the marker's modified time; a clock of the
+simulator's own made every marker look old.
+
 ## Control API
 
 JSON in and out. `account` defaults to `default`; `provider` is `google`, `microsoft` or
@@ -57,7 +62,7 @@ JSON in and out. `account` defaults to `default`; `provider` is `google`, `micro
 | `POST /_sim/token {provider, account}` | A new grant: `{access_token, refresh_token, expires_in}` (Google and Microsoft) |
 | `POST /_sim/token/revoke {token}` | Kill the grant: API calls 401, refresh answers `invalid_grant` |
 | `POST /_sim/token/expire {token}` | The access token 401s; its refresh token still works |
-| `POST /_sim/mega/account {account, email, password}` | Enable password login for a MEGA account |
+| `POST /_sim/mega/account {account, email, password}` | Enable password login for a MEGA account; answers `{ok, session}`, the account's saved session (what a connected server keeps in its credentials) |
 | `POST /_sim/seed {provider, account, files: [{path, content_base64}]}` | Create folders along each path and put the file (replacing one already there) |
 | `GET /_sim/files?provider=&account=` | `[{path, size, sha256}]` of every live file |
 | `POST /_sim/node {provider, account, parent_id? \| parent_path?, name, folder?, content_base64?, created?, modified?}` | One new file or folder, `{id}`: always a new node, beside any of the same name (two `mokuro-reader` folders, say), which `seed` cannot make. The parent is a folder id (MEGA: also `ROOT0000` or the rubbish bin `RUBBISH0`), else the folders of `parent_path` from the root (created where missing; the first where names repeat), else the root. `created` and `modified` are RFC 3339; either alone stands for both, neither is the simulator's clock. MEGA keeps one time (`ts`): the modified one. OneDrive answers a name the parent has (case folded) with Graph's `409 nameAlreadyExists` |

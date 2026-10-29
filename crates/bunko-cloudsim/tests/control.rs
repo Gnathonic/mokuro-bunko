@@ -401,6 +401,32 @@ async fn a_mega_account_logs_in_by_password_and_is_logged() {
     assert_eq!(s, 400, "{v}");
 }
 
+/// The reply carries a saved session, so a server spawned by the rig can be signed in
+/// without a password login of its own (as a connected server's credentials hold one).
+#[tokio::test]
+async fn a_mega_account_hands_out_a_session_the_client_resumes() {
+    let sim = bunko_cloudsim::start().await;
+    let (s, v) = post(
+        &sim.base,
+        "mega/account",
+        json!({"account": "m", "email": "m@cloudsim.test", "password": "pw"}),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let blob = v["session"].as_str().expect("a session").to_string();
+    let cfg = bunko_mega::ClientConfig {
+        api_origin: sim.mega_origin(),
+        min_cs_interval: std::time::Duration::ZERO,
+        ..bunko_mega::ClientConfig::default()
+    };
+    let client = bunko_mega::Client::resume(cfg, &blob).await.unwrap();
+    // It is that account's session: a login by password names the same one.
+    assert_eq!(
+        client.session().unwrap().sid(),
+        mega_sid(&sim, "m@cloudsim.test").await
+    );
+}
+
 async fn mega_sid(sim: &bunko_cloudsim::CloudSim, email: &str) -> String {
     let cfg = bunko_mega::ClientConfig {
         api_origin: sim.mega_origin(),
@@ -859,4 +885,52 @@ async fn node_mistakes_are_refused_and_nothing_is_logged() {
     assert_eq!(r.status(), 400);
     assert_eq!(get(&sim.base, "log").await, json!([]));
     assert_eq!(get(&sim.base, "violations").await, json!([]));
+}
+
+/// A write is stamped on the wall clock that every response's `Date` header shows, as
+/// a provider stamps it: Bunko's lease judges a marker's age as `Date` minus its
+/// modified time (Drive, OneDrive; MEGA's client keeps the `Date` it last saw), so a
+/// clock of its own made every marker look weeks old and no lease was ever held.
+#[tokio::test]
+async fn writes_are_stamped_on_the_clock_the_date_header_shows() {
+    let sim = bunko_cloudsim::start().await;
+    sim.mega_account("default", "d@cloudsim.test", "pw");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    for p in ["google", "microsoft", "mega"] {
+        let (s, v) = post(
+            &sim.base,
+            "seed",
+            json!({"provider": p, "account": "default",
+                   "files": [{"path": "lib/a.txt", "content_base64": b64(b"a")}]}),
+        )
+        .await;
+        assert_eq!(s, 200, "{p}: {v}");
+        let tree = get(&sim.base, &format!("tree?provider={p}&account=default")).await;
+        for r in tree.as_array().unwrap() {
+            let at = epoch(r["modified"].as_str().unwrap());
+            // Ahead by at most a second a write (stamps stay distinct), never behind.
+            assert!(
+                (now - 2..=now + 30).contains(&at),
+                "{p}: {} stamped {at}, now is {now}",
+                r["name"]
+            );
+        }
+    }
+    let r = http()
+        .get(format!("{}/drive/v3/about", sim.drive_api_base()))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap();
+    let date = r.headers()["date"].to_str().unwrap().to_string();
+    let date = time::OffsetDateTime::parse(&date, &time::format_description::well_known::Rfc2822)
+        .unwrap()
+        .unix_timestamp();
+    assert!(
+        (now - 2..=now + 5).contains(&date),
+        "Date {date}, now {now}"
+    );
 }

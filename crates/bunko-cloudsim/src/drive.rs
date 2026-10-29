@@ -156,8 +156,11 @@ impl Default for DriveState {
 }
 
 impl DriveState {
+    /// The next write's stamp: the wall clock (Bunko's lease ages a marker by the
+    /// `Date` header), and always at least a second past the last one so stamps stay
+    /// distinct.
     fn tick(&mut self) -> i64 {
-        self.clock += 1000;
+        self.clock = (self.clock + 1000).max(crate::wall_ms());
         self.clock
     }
 

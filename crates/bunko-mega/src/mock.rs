@@ -181,8 +181,13 @@ fn node_json(h: &str, n: &MNode) -> Value {
 }
 
 impl St {
+    /// The next node's `ts`: the wall clock (the client ages the lease marker by the
+    /// `Date` header), a second past the last stamp at least.
     fn tick(&mut self) -> i64 {
-        self.clock += 1;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        self.clock = (self.clock + 1).max(now);
         self.clock
     }
 
