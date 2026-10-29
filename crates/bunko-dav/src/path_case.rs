@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bunko_core::reader_tree;
 use bunko_store::fs;
 use http::{Uri, request::Parts};
 use unicode_normalization::UnicodeNormalization;
@@ -115,7 +116,11 @@ impl LibraryPathCanonicalizer {
     /// ([`bunko_store::LibraryStore::case_winner`]: on a remote store the oldest
     /// spelling, the one a case merge keeps), else the first in sorted order, so the
     /// choice is stable.
-    fn on_disk_name(&self, parent: &Path, name: &str) -> Option<String> {
+    ///
+    /// At the library root (`top`) a per-user name (`history`, `goals.json`: the
+    /// cloud-root owner's own files) is never a variant: a request for a library
+    /// `HISTORY/` must not be rewritten into another account's tree.
+    fn on_disk_name(&self, parent: &Path, name: &str, top: bool) -> Option<String> {
         if self.case_sensitive && fs::symlink_metadata(parent.join(name)).is_ok() {
             return Some(name.to_string());
         }
@@ -129,6 +134,9 @@ impl LibraryPathCanonicalizer {
             };
             if entry_name == name {
                 return Some(name.to_string());
+            }
+            if top && reader_tree::is_per_user_root_name(entry_name) {
+                continue;
             }
             if fold_name(entry_name) == target {
                 variants.push(entry_name.to_string());
@@ -164,7 +172,7 @@ impl LibraryPathCanonicalizer {
         let mut resolved: Vec<String> = Vec::new();
         for (position, &index) in named.iter().enumerate() {
             let part = parts[index].clone();
-            let Some(on_disk) = self.on_disk_name(&parent, &part) else {
+            let Some(on_disk) = self.on_disk_name(&parent, &part, position == 0) else {
                 break;
             };
             let is_last = position + 1 == named.len();
@@ -192,11 +200,11 @@ impl LibraryPathCanonicalizer {
 const LIBRARY_PREFIX: &str = "/mokuro-reader/";
 
 /// The library-relative part of a decoded request path, or `None` for anything that is
-/// not a library path (the roots, the per-user files, other trees).
+/// not a library path (the roots, the caller's own tree, other trees).
 fn library_relative(path: &str) -> Option<&str> {
     debug_assert_eq!(LIBRARY_PREFIX, format!("/{READER_ROOT}/"));
     let relative = path.strip_prefix(LIBRARY_PREFIX)?;
-    if relative.trim_matches('/').is_empty() || paths::is_per_user_name(relative) {
+    if relative.trim_matches('/').is_empty() || reader_tree::is_per_user_rel(relative) {
         return None;
     }
     Some(relative)
