@@ -1,0 +1,619 @@
+{
+  "rule": 1,
+  "classify": [
+    {
+      "name": "Vol 1.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "Vol 1",
+        "gz": false
+      },
+      "why": "the primary"
+    },
+    {
+      "name": "Vol 1.MOKURO",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "Vol 1",
+        "gz": false
+      },
+      "why": "rule 1: suffix in any ASCII case"
+    },
+    {
+      "name": "Vol 1.mokuro.gz",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "Vol 1",
+        "gz": true
+      },
+      "why": "gzip primary"
+    },
+    {
+      "name": "Vol 1.MOKURO.GZ",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "Vol 1",
+        "gz": true
+      },
+      "why": "rule 1"
+    },
+    {
+      "name": "Vol 1.mokuro",
+      "folder": [
+        "Vol 1.CBZ"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "Vol 1",
+        "gz": false
+      },
+      "why": "rule 1: the archive suffix too"
+    },
+    {
+      "name": "vol 1.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "vol 1",
+        "gz": false
+      },
+      "why": "rule 3: stems fold; the stem is reported as written"
+    },
+    {
+      "name": "VOL 1.gcv.mokuro",
+      "folder": [
+        "vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "VOL 1",
+        "layer": "gcv",
+        "gz": false
+      },
+      "why": "rule 3 for a layer's stem"
+    },
+    {
+      "name": "Vol 1.Upper.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "rule 5: an id is never folded"
+    },
+    {
+      "name": "Vol 1.EDIT.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "rule 5: not the edit layer"
+    },
+    {
+      "name": "Vol 1.edit.MOKURO",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "Vol 1",
+        "layer": "edit",
+        "gz": false
+      },
+      "why": "rules 1 + 5"
+    },
+    {
+      "name": "vol 1.gcv.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "vol 1",
+        "layer": "gcv",
+        "gz": false
+      },
+      "why": "rule 3"
+    },
+    {
+      "name": "Vol 1.gcv.mokuro.gz",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "Vol 1",
+        "layer": "gcv",
+        "gz": true
+      },
+      "why": "gzip layer"
+    },
+    {
+      "name": "Vol 1.hayai-nova.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "Vol 1",
+        "layer": "hayai-nova",
+        "gz": false
+      },
+      "why": "hyphenated id"
+    },
+    {
+      "name": "Vol 1.hayai_nova.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "rule 5: underscore is outside the grammar"
+    },
+    {
+      "name": "Vol 1.5.mokuro",
+      "folder": [
+        "Vol 1.cbz",
+        "Vol 1.5.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "Vol 1.5",
+        "gz": false
+      },
+      "why": "rule 4: a primary beats a layer reading"
+    },
+    {
+      "name": "Vol 1.5.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "Vol 1",
+        "layer": "5",
+        "gz": false
+      },
+      "why": "rule 5: all-digit ids are layers"
+    },
+    {
+      "name": "Vol 01.5.mokuro",
+      "folder": [
+        "Vol 01.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "Vol 01",
+        "layer": "5",
+        "gz": false
+      },
+      "why": "rule 5"
+    },
+    {
+      "name": "Vol 1.5.mokuro",
+      "folder": [
+        "Vol 1.cbz",
+        "Vol 1.5.zip"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "Vol 1",
+        "layer": "5",
+        "gz": false
+      },
+      "why": "rule 2: a .zip defines no stem"
+    },
+    {
+      "name": "Vol 1.mokuro",
+      "folder": [
+        "Vol 1.cbr"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "rule 2: a .cbr defines no stem"
+    },
+    {
+      "name": "Vol 1.2024.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "Vol 1",
+        "layer": "2024",
+        "gz": false
+      },
+      "why": "rule 5"
+    },
+    {
+      "name": "Vol 1.gcv.mokuro",
+      "folder": [
+        "Vol 1.cbz",
+        "Vol 1.gcv.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "Vol 1.gcv",
+        "gz": false
+      },
+      "why": "rule 4"
+    },
+    {
+      "name": "Vo\u0301l 1.mokuro",
+      "folder": [
+        "V\u00f3l 1.cbz"
+      ],
+      "expect": {
+        "kind": "primary",
+        "stem": "Vo\u0301l 1",
+        "gz": false
+      },
+      "why": "rule 3: NFD stem, NFC archive"
+    },
+    {
+      "name": "V\u00f3l 1.gcv.mokuro",
+      "folder": [
+        "Vo\u0301l 1.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "V\u00f3l 1",
+        "layer": "gcv",
+        "gz": false
+      },
+      "why": "rule 3: NFC stem, NFD archive"
+    },
+    {
+      "name": "Vol 1.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "Vol 1",
+        "layer": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "gz": false
+      },
+      "why": "rule 5: 32 characters"
+    },
+    {
+      "name": "Vol 1.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "rule 5: 33 characters"
+    },
+    {
+      "name": "Vol 1..mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "empty id"
+    },
+    {
+      "name": "Vol 1.backup.v1.mokuro",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "split on the LAST dot: stem 'Vol 1.backup' has no archive"
+    },
+    {
+      "name": "Vol 1.backup.v1.mokuro",
+      "folder": [
+        "Vol 1.backup.cbz"
+      ],
+      "expect": {
+        "kind": "layer",
+        "stem": "Vol 1.backup",
+        "layer": "v1",
+        "gz": false
+      },
+      "why": "split on the last dot"
+    },
+    {
+      "name": "Vol 1.mokuro",
+      "folder": [],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "no archive"
+    },
+    {
+      "name": "Vol 1.mokuro.gz.gz",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "not a sidecar"
+    },
+    {
+      "name": "Vol 1.cbz",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "not a sidecar"
+    },
+    {
+      "name": "Vol 1.webp",
+      "folder": [
+        "Vol 1.cbz"
+      ],
+      "expect": {
+        "kind": "orphan"
+      },
+      "why": "covers are not OCR sidecars"
+    }
+  ],
+  "layer_class": [
+    {
+      "id": "edit",
+      "class": "personal"
+    },
+    {
+      "id": "edit-2",
+      "class": "personal"
+    },
+    {
+      "id": "edit-10",
+      "class": "personal"
+    },
+    {
+      "id": "edit-02",
+      "class": "personal"
+    },
+    {
+      "id": "EDIT",
+      "class": "other"
+    },
+    {
+      "id": "edit-",
+      "class": "other"
+    },
+    {
+      "id": "edit-x",
+      "class": "other"
+    },
+    {
+      "id": "editor",
+      "class": "other"
+    },
+    {
+      "id": "curated",
+      "class": "curated"
+    },
+    {
+      "id": "curated-2",
+      "class": "reserved"
+    },
+    {
+      "id": "curated-x",
+      "class": "other"
+    },
+    {
+      "id": "pre-upgrade",
+      "class": "server-keepsake"
+    },
+    {
+      "id": "pre-upgrade-3",
+      "class": "server-keepsake"
+    },
+    {
+      "id": "pre-upgrade-x",
+      "class": "reserved"
+    },
+    {
+      "id": "pre-upgradex",
+      "class": "reserved"
+    },
+    {
+      "id": "previous-ocr",
+      "class": "reserved"
+    },
+    {
+      "id": "previous-ocr-2",
+      "class": "reserved"
+    },
+    {
+      "id": "original",
+      "class": "other"
+    },
+    {
+      "id": "gcv",
+      "class": "other"
+    },
+    {
+      "id": "updated-ocr",
+      "class": "other"
+    },
+    {
+      "id": "tr-en",
+      "class": "other"
+    },
+    {
+      "id": "hayai-nova",
+      "class": "other"
+    },
+    {
+      "id": "5",
+      "class": "other"
+    }
+  ],
+  "sweep": [
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "Vol 01.5.cbz",
+        "Vol 01.mokuro",
+        "Vol 01.5.mokuro",
+        "Vol 01.hayai-nova.mokuro.gz",
+        "Vol 01.backup.2024.mokuro",
+        "Vol 01.Upper.mokuro",
+        "Vol 02.hayai.mokuro",
+        "Vol 01.webp",
+        "Vol 01.nocover",
+        "Vol 01.5.gcv.mokuro"
+      ],
+      "expect": [
+        "Vol 01.hayai-nova.mokuro.gz",
+        "Vol 01.mokuro",
+        "Vol 01.nocover",
+        "Vol 01.webp"
+      ],
+      "why": "a decimal volume's primary and layers, other stems' layers and orphans stay"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "vol 01.cbz",
+        "Vol 01.mokuro",
+        "vol 01.mokuro",
+        "vol 01.hayai.mokuro",
+        "Vol 01.gcv.mokuro"
+      ],
+      "expect": [
+        "Vol 01.gcv.mokuro",
+        "Vol 01.mokuro"
+      ],
+      "why": "rule 6: the exact stem wins over a folded one"
+    },
+    {
+      "archive": "vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "vol 01.cbz",
+        "Vol 01.mokuro",
+        "vol 01.mokuro",
+        "vol 01.hayai.mokuro",
+        "Vol 01.gcv.mokuro"
+      ],
+      "expect": [
+        "vol 01.hayai.mokuro",
+        "vol 01.mokuro"
+      ],
+      "why": "rule 6, the other spelling"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "vol 01.hayai.mokuro",
+        "VOL 01.MOKURO"
+      ],
+      "expect": [
+        "VOL 01.MOKURO",
+        "vol 01.hayai.mokuro"
+      ],
+      "why": "a folded match when no archive has that exact stem"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "Vol 01.5.mokuro"
+      ],
+      "expect": [
+        "Vol 01.5.mokuro"
+      ],
+      "why": "layer 5"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "Vol 01.5.zip",
+        "Vol 01.5.mokuro"
+      ],
+      "expect": [],
+      "why": "every archive extension still protects its primary from a sweep (classify says layer 5)"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "Vol 01.5.cbr",
+        "Vol 01.5.mokuro.gz"
+      ],
+      "expect": [],
+      "why": "or its gzip primary (classify says layer 5)"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "vol 01.5.rar",
+        "Vol 01.5.mokuro"
+      ],
+      "expect": [],
+      "why": "an archive's stem protects in any spelling (classify says layer 5)"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "VOL 01.cbz",
+        "vol 01.mokuro",
+        "vol 01.gcv.mokuro"
+      ],
+      "expect": [],
+      "why": "a folded-only match two archives could claim stays"
+    },
+    {
+      "archive": "Vol 01.cbz",
+      "folder": [
+        "Vol 01.cbz",
+        "VOL 01.zip",
+        "vol 01.mokuro"
+      ],
+      "expect": [],
+      "why": "even when the other archive is no .cbz"
+    },
+    {
+      "archive": "V\u00f3l 1.cbz",
+      "folder": [
+        "V\u00f3l 1.cbz",
+        "Vo\u0301l 1.mokuro",
+        "Vo\u0301l 1.gcv.mokuro"
+      ],
+      "expect": [
+        "Vo\u0301l 1.gcv.mokuro",
+        "Vo\u0301l 1.mokuro"
+      ],
+      "why": "rule 3"
+    }
+  ]
+}

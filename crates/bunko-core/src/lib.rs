@@ -7,6 +7,7 @@ pub mod config;
 pub mod engines;
 pub mod generations;
 pub mod roles;
+pub mod sidecar_names;
 pub mod storage;
 
 pub use config::{Config, ConfigError, LibraryBackend};

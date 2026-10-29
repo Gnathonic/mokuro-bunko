@@ -296,6 +296,13 @@ impl Default for ParseOptions {
 /// Nesting beyond this is refused (Python raises `RecursionError` near 1000).
 const MAX_DEPTH: usize = 512;
 
+/// `text` without one leading UTF-8 BOM. [`parse`] stays as strict as `json.loads`;
+/// whatever reads a file another program wrote (a sidecar, a `series.json` PUT) strips
+/// it first, as the reader's UTF-8 decoder does (sidecar names rule v1).
+pub fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// `json.loads(text)` with Python's default leniency.
 pub fn parse(text: &str) -> Result<JsonValue, JsonError> {
     parse_with(text, ParseOptions::default())
@@ -876,6 +883,10 @@ mod tests {
         );
         assert!(parse("[1,]").is_err());
         assert!(parse("\u{feff}{}").is_err());
+        // Callers that read exchanged files strip it first (rule v1); only the first.
+        assert!(parse(strip_bom("\u{feff}{}")).is_ok());
+        assert_eq!(strip_bom("\u{feff}\u{feff}{}"), "\u{feff}{}");
+        assert_eq!(strip_bom("{}"), "{}");
         assert!(parse("\"a\nb\"").is_err());
         assert_eq!(
             parse(&format!(r#""{0}d83d{0}de00""#, "\\u"))

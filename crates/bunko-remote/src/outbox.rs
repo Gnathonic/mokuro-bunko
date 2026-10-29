@@ -50,6 +50,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use bunko_core::sidecar_names;
 use bunko_store::{
     Durability, Mode, Origin, Published, Version, WatchEvent, conflict, unavailable,
     unavailable_for,
@@ -1512,14 +1513,14 @@ impl<B: Backend> Core<B> {
     fn record_done(&self, rel: &RelPath) {
         let segs = rel.segments();
         let Some(file) = segs.last() else { return };
-        let stem = file
-            .strip_suffix(".mokuro.gz")
-            .or_else(|| file.strip_suffix(".mokuro"));
-        let Some(stem) = stem else { return };
+        let Some((stem, _)) = sidecar_names::split_mokuro(file) else {
+            return;
+        };
         let series = segs[..segs.len() - 1].join("/");
-        // `<Vol>.<layer>.mokuro` when `<Vol>` is a sibling archive's name.
-        let (volume, layer) = match stem.rsplit_once('.') {
-            Some((vol, layer)) if self.has_archive(rel, vol) => {
+        // Rule v1: the primary of `<stem>.cbz` when there is one (`Vol 1.5.mokuro`
+        // beside `Vol 1.5.cbz`), else `<Vol>.<layer>.mokuro` of a sibling archive.
+        let (volume, layer) = match sidecar_names::split_layer(file) {
+            Some((vol, layer, _)) if !self.has_archive(rel, stem) && self.has_archive(rel, vol) => {
                 (vol.to_string(), Some(layer.to_string()))
             }
             _ => (stem.to_string(), None),
@@ -1559,13 +1560,11 @@ impl<B: Backend> Core<B> {
         }
     }
 
+    /// `<vol>.cbz` is listed beside `rel` (only `.cbz` anchors sidecars, rule v1).
     fn has_archive(&self, rel: &RelPath, vol: &str) -> bool {
-        let dir = parent_of(rel);
-        let idx = self.index.lock();
-        [".cbz", ".zip"].iter().any(|ext| {
-            dir.join(format!("{vol}{ext}"))
-                .is_some_and(|p| idx.lookup(&p).is_some())
-        })
+        parent_of(rel)
+            .join(format!("{vol}.cbz"))
+            .is_some_and(|p| self.index.lock().lookup(&p).is_some())
     }
 
     // ---- Mkdir --------------------------------------------------------------------

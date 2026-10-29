@@ -1059,6 +1059,25 @@ fn identical_archives_move_a_loser_only_layer_in_under_the_winners_stem() {
     )));
 }
 
+/// Rule v1: with no `vol 1.5.cbz` listed, `vol 1.5.mokuro` is layer `5` of `vol 1`
+/// (all-digit ids are layers when the listing says so), and moves in with it.
+#[test]
+fn a_digit_only_layer_id_groups_as_a_layer() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("Kingdom/Vol 1.cbz", b"same"),
+            ("kingdom/vol 1.cbz", b"same"),
+            ("kingdom/vol 1.5.mokuro", &mokuro("five")),
+        ],
+    );
+    t.steady();
+    t.policy();
+    t.wait_merges(1);
+    assert_eq!(t.names("Kingdom"), ["Vol 1.5.mokuro", "Vol 1.cbz"]);
+    assert!(t.at("kingdom").is_none());
+}
+
 #[test]
 fn an_unstamped_layer_whose_id_the_winner_uses_moves_in_as_the_next_free_id() {
     let t = T::new(
