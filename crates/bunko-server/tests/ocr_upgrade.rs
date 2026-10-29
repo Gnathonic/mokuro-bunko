@@ -642,3 +642,62 @@ fn an_edited_main_gets_no_job_unless_its_recipe_is_outdated_and_the_layer_free()
     }
     assert_eq!(h.s.deps.upgrade.clone().unwrap().census()["edited"], 4);
 }
+
+/// An EDITED main as Mokuro Reader writes it (interop §1): mokuro's `version`, an
+/// `edited` block, and no `ocr_engine` (a file never carries both). Nothing in it names
+/// the recipe beneath the edit, whatever the base was (the edit's PUT also forgot the
+/// row), so it reads as `mokuro-legacy`: listed in the default `replace`, it is owed ONE
+/// run of the primary, written beside it as `<Vol>.<primary>.mokuro`. Not listed, it is
+/// owed none.
+#[test]
+fn a_reader_shaped_edited_main_is_owed_one_primary_layer_under_the_default_replace_list() {
+    let mut reader_edited: serde_json::Value = serde_json::from_str(LEGACY).unwrap();
+    reader_edited["edited"] = serde_json::json!({"by": "mokuro-reader",
+        "at": "2026-10-29T00:00:00Z", "base_sha256": "ab", "base_seal": null});
+    let main = reader_edited.to_string();
+
+    let mut unlisted = harness_db(
+        vec![primary()],
+        Arc::new(FileFacts),
+        Some(UpgradeConfig {
+            enabled: true,
+            replace: vec![],
+        }),
+    );
+    unlisted.add("A/V1.cbz", 3);
+    std::fs::write(unlisted.library().join("A/V1.mokuro"), &main).unwrap();
+    unlisted.at(0.0);
+    assert!(
+        !unlisted.s.owed.volumes.contains_key("A/V1.cbz"),
+        "mokuro-legacy not listed"
+    );
+
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    h.add("A/V1.cbz", 3);
+    let lib = h.library();
+    std::fs::write(lib.join("A/V1.mokuro"), &main).unwrap();
+    h.at(0.0);
+    assert!(h.s.owed.volumes["A/V1.cbz"].upgrade, "one upgrade job");
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let vols = volumes(&ops);
+    assert_eq!(vols.len(), 1);
+    let sid = opened(&ops)[0].clone();
+    h.event(&p, ready(&sid));
+    h.event(&p, started(&sid, &vols[0].1, 3));
+    h.done_with(&p, &sid, &vols[0].1, "V1.mokuro", 3, 1.0, HAYAI.as_bytes());
+    assert!(h.s.failures.is_empty(), "{:?}", h.s.failures);
+    assert_eq!(
+        std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),
+        main
+    );
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.hayai-nova.mokuro", "V1.mokuro"]
+    );
+    // Once: the layer is there, Bunko's and current.
+    h.at(31.0);
+    assert!(h.s.owed.volumes.get("A/V1.cbz").is_none_or(|v| !v.upgrade));
+    h.at(62.0);
+    assert!(h.s.owed.volumes.get("A/V1.cbz").is_none_or(|v| !v.upgrade));
+}

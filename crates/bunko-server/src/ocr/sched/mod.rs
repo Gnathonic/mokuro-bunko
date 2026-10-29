@@ -323,6 +323,8 @@ pub struct Scheduler {
     pub orphan_sweeping: bool,
     /// Numbered `_n` sidecars the last sweep left: not provably Bunko's.
     pub orphans_unproven: u64,
+    /// Those, with the stat they were judged at: not read again while unchanged.
+    pub orphans_seen: Arc<crate::ocr::orphans::Unproven>,
     pub last_walk_at: Option<f64>,
     pub machines: IndexMap<String, Machine>,
     pub lanes: Vec<Lane>,
@@ -403,6 +405,7 @@ impl Scheduler {
             direct_running: false,
             orphan_sweeping: false,
             orphans_unproven: 0,
+            orphans_seen: Arc::default(),
             last_walk_at: None,
             machines: IndexMap::new(),
             lanes: Vec::new(),
@@ -726,9 +729,10 @@ impl Scheduler {
 
     /// Sweep the numbered `_n` sidecars the walk found ([`crate::ocr::orphans`]), on a
     /// helper thread and paced like the direct replaces. Upgrades on or off: no 0.8
-    /// collector writes one, and a reader never matches one.
+    /// collector writes one, and a reader never matches one. On a remote store only
+    /// while its index is settled ([`index_settled`]).
     fn maybe_start_orphan_sweep(&mut self) {
-        if self.orphan_sweeping || self.stopping || self.storage_hold().is_some() {
+        if self.orphan_sweeping || self.stopping || !self.store_settled() {
             return;
         }
         if self.owed.orphans.is_empty() {
@@ -744,19 +748,29 @@ impl Scheduler {
             self.deps.locks.clone(),
         );
         let orphans = self.owed.orphans.clone();
+        let seen = self.orphans_seen.clone();
         let pace = match self.deps.exec {
             Exec::Inline => Duration::ZERO,
             Exec::Threads(_) => DIRECT_PACE,
         };
         self.run_background(Box::new(move || {
-            Msg::OrphansSwept(crate::ocr::orphans::sweep(
+            Msg::OrphansSwept(crate::ocr::orphans::sweep_with(
                 &library,
                 db.as_deref(),
                 &locks,
                 &orphans,
                 pace,
+                &seen,
             ))
         }));
+    }
+
+    /// The library's store is local, or a remote one whose index is settled.
+    fn store_settled(&self) -> bool {
+        match bunko_store::store_for(&self.library()) {
+            Some(store) => index_settled(store.caps().remote, &store.health()),
+            None => true,
+        }
     }
 
     fn orphans_swept(&mut self, report: crate::ocr::orphans::SweepReport) {
@@ -769,7 +783,8 @@ impl Scheduler {
                 report.removed
             ));
         }
-        if report.unproven > 0 {
+        // Said once per change: the sweep runs after every walk while one is left.
+        if report.unproven > 0 && report.unproven != self.orphans_unproven {
             self.log(format!(
                 "Left {} numbered OCR file(s) (<volume>_<n>.mokuro) in place: nothing proves Bunko wrote them",
                 report.unproven
@@ -1079,5 +1094,36 @@ mod log_safe_tests {
             "x\\nINFO forged line\\r\\u{1b}[31m"
         );
         assert_eq!(log_safe("日本語 ok"), "日本語 ok");
+    }
+}
+
+/// Whether a store's index can be trusted for what is NOT there (plan X16): always on a
+/// local store; on a remote one only when steady (not a full sync, not Suspect, not held
+/// or offline). A sweep that publishes `CreateNew` at a name the index has not caught
+/// up on would re-key a row onto a file it never wrote.
+fn index_settled(remote: bool, health: &bunko_store::Health) -> bool {
+    !remote || *health == bunko_store::Health::Online
+}
+
+#[cfg(test)]
+mod orphan_gate_tests {
+    use super::index_settled;
+    use bunko_store::{Blocked, Health};
+
+    /// The `_n` sweep moves and removes files by what the store's index says is there
+    /// (plan X16): on a remote store only once it is steady.
+    #[test]
+    fn the_orphan_sweep_waits_for_a_settled_remote_index() {
+        assert!(index_settled(false, &Health::Syncing { done: 0, total: 0 }));
+        assert!(index_settled(true, &Health::Online));
+        for h in [
+            Health::Syncing { done: 3, total: 9 },
+            Health::Suspect,
+            Health::Offline,
+            Health::Blocked(Blocked::StorageFull),
+            Health::LeaseHeld { by: "x".into() },
+        ] {
+            assert!(!index_settled(true, &h), "{h:?}");
+        }
     }
 }

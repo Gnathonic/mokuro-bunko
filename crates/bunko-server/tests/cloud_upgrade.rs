@@ -621,7 +621,9 @@ async fn a_cloud_orphan_goes_to_the_trash_after_its_canonical_name_is_settled() 
     fake.reader_put(&format!("{ROOT}/Series/Vol 2.cbz"), &cbz(3));
     let taken = sealed(HAYAI);
     fake.reader_put(&format!("{ROOT}/Series/Vol 1_1.mokuro"), taken.as_bytes());
-    fake.reader_put(&format!("{ROOT}/Series/Vol 2_1.mokuro"), taken.as_bytes());
+    // The collector wrote the archive's stem into `volume`.
+    let free = sealed(&HAYAI.replace(r#""volume":"Vol 1""#, r#""volume":"Vol 2""#));
+    fake.reader_put(&format!("{ROOT}/Series/Vol 2_1.mokuro"), free.as_bytes());
     let cloud = Cloud::start(fake.clone()).await;
     let (trashed, deleted) = (fake.trashed_log().len(), fake.deleted_log().len());
     let (library, db) = (
@@ -649,7 +651,7 @@ async fn a_cloud_orphan_goes_to_the_trash_after_its_canonical_name_is_settled() 
     );
     assert_eq!(
         cloud.cloud_bytes("Series/Vol 2.mokuro").as_deref(),
-        Some(taken.as_str())
+        Some(free.as_str())
     );
     assert!(cloud.cloud_bytes("Series/Vol 1_1.mokuro").is_none());
     assert!(cloud.cloud_bytes("Series/Vol 2_1.mokuro").is_none());

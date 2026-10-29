@@ -118,7 +118,10 @@ All of this applies only with `ocr.upgrade.enabled` (default off), except the `_
   sealed), while that name is free or holds Bunko's own sealed output of an older
   revision; a file of anyone else's at that name stays and nothing is owed. Once the
   `edited` block is gone, the ordinary census applies, and that layer is what it
-  swaps in.
+  swaps in. A reader's EDITED file carries no `ocr_engine` (see above) and its PUT
+  forgets the provenance row, so the recipe beneath reads as LEGACY from its `version`
+  (UNKNOWN without one), whatever the edit started from: under the default `replace`
+  list every EDITED main is owed one run of the primary, once.
 - **Layers.** A layer is swapped in as the main only when it is sealed, has no `edited`
   block and its own block names the current recipe. A generation layer Bunko wrote at
   an older revision is OCR'd again and replaced in place.
@@ -126,10 +129,14 @@ All of this applies only with `ocr.upgrade.enabled` (default off), except the `_
   at a result's destination stays and the result is discarded, unless it is Bunko's own
   sealed output of the same engine at an older revision, which is replaced. Numbered
   files an older Bunko wrote are swept after each OCR walk when they are sealed or
-  recorded as Bunko's: renamed to the canonical name when it is free, removed when it is
-  taken (on a cloud library, to the provider's trash unless the store's ledger proves
-  the version Bunko's). Any other numbered file stays and is counted
-  (`orphans_unproven` in the admin's OCR status).
+  recorded as Bunko's AND belong to that volume: their `volume` is the archive's stem
+  (the collector wrote it; a reader renaming a volume to `Vol_2` uploads a main naming
+  `Vol_2`, sealed again, before it moves the archive), and their row, if any, is keyed
+  by that archive. They are renamed to the canonical name when it is free, removed when
+  it is taken (on a cloud library, to the provider's trash unless the store's ledger
+  proves the version Bunko's, and only while the remote index is steady). Any other
+  numbered file stays, is counted (`orphans_unproven` in the admin's OCR status), and
+  is not read again until its stat changes.
 - **An older reader's rewrite.** A WebDAV PUT of a main sidecar with no `ocr_engine`
   and no `edited` whose pages (as JCS) equal a sealed main's — the one at that path, or
   the main of the same `volume_uuid` in the folder — gets that main's block back and is

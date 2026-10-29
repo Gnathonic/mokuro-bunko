@@ -63,7 +63,10 @@ pub struct Recipe {
     /// The file carries an `edited` block.
     pub edited: bool,
     /// An EDITED file's recipe beneath the edit (what the model made before the reader
-    /// changed it): whether newer OCR is owed beside it (critique C4-B6).
+    /// changed it): whether newer OCR is owed beside it (critique C4-B6). A reader's
+    /// file names none (no `ocr_engine` beside `edited`, and its PUT forgot the row), so
+    /// this is `mokuro-legacy` by its `version`, or `unknown`: one primary-layer run is
+    /// owed under the default `replace`, whatever the base was.
     pub under: Option<Box<Recipe>>,
 }
 
@@ -358,7 +361,7 @@ pub(crate) fn stage_and_publish(
 }
 
 /// The bytes without a leading UTF-8 BOM.
-fn strip_bom(bytes: &[u8]) -> &[u8] {
+pub(super) fn strip_bom(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
 }
 
@@ -528,9 +531,9 @@ impl Upgrade {
         Some(layer)
     }
 
-    /// An EDITED main over an outdated recipe is owed newer OCR beside it, as the layer
-    /// [`Self::edited_main_layer`], while that layer is missing in every spelling or is
-    /// Bunko's own output at an older revision. A file of anyone else's at that name
+    /// An EDITED main over an outdated recipe ([`Recipe::under`]) is owed newer OCR
+    /// beside it, as the layer [`Self::edited_main_layer`], while that layer is missing in
+    /// every spelling or is Bunko's own output at an older revision. A file of anyone else's at that name
     /// stays, and owes nothing: the result could only be discarded, every walk.
     fn edited_owes_layer(&self, cbz: &Path, rel: &str) -> bool {
         let outdated = self

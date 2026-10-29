@@ -110,7 +110,9 @@
   the new main file; the admin page counts these. When its OCR is outdated, the new OCR
   is written beside it as `<Volume>.<primary generation>.mokuro` (for example
   `Vol 1.hayai-nova.mokuro`), sealed, and becomes the main file only if the edit mark
-  is removed. A `pre-upgrade` keepsake is never read as a recipe. The format is in
+  is removed. A reader's edited file does not say which OCR it started from, so with
+  `mokuro-legacy` listed (the default) each edited volume gets this once. A
+  `pre-upgrade` keepsake is never read as a recipe. The format is in
   `docs/design/sidecar-provenance.md`.
 - **OCR never writes `<Volume>_1.mokuro` beside a file already there.** When a
   `.mokuro` arrives at the destination while its OCR runs (a reader renaming a volume,
@@ -118,10 +120,12 @@
   failure, and the volume is not queued again); only Bunko's own sealed output of the
   same engine at an older revision is replaced in place. Numbered files an earlier
   version left (`Vol 1_1.mokuro`, `Vol 1.fast_1.mokuro`) are cleaned up after each OCR
-  pass when Bunko can tell it wrote them (sealed, or in its OCR records): renamed to
-  the name readers match when that is free, removed when it is taken (to the
-  provider's trash on a cloud library). Others are left alone and counted in the admin
-  OCR status (`orphans_unproven`).
+  pass when Bunko can tell it wrote them for that volume (sealed, or in its OCR
+  records, and naming the volume it belongs to, so a volume a reader is renaming to
+  `Vol 1_2` is never taken for one): renamed to the name readers match when that is
+  free, removed when it is taken (to the provider's trash on a cloud library, and only
+  once the cloud listing is settled). Others are left alone, counted in the admin OCR
+  status (`orphans_unproven`), and not read again until they change.
 - **Renaming a volume in Mokuro Reader 1.10.0 keeps its OCR seal.** That reader
   rewrites the main OCR file without its `ocr_engine` block when it renames a volume.
   When such an upload over WebDAV has exactly the pages of Bunko's sealed file (the one

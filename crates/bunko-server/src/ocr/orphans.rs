@@ -3,7 +3,8 @@
 //! ever matches. 0.8 never writes one (`collect::reconcile_existing`); this sweeps the
 //! ones a library already has, when they are provably Bunko's: sealed
 //! ([`bunko_layout::seal`]), or recorded in `ocr_sidecars` at their own path (the 0.7
-//! files, written before the seal). An orphan takes the canonical name when that is
+//! files, written before the seal), and of the volume they are numbered after (their
+//! `volume` names it; a row, if any, is keyed by it). An orphan takes the canonical name when that is
 //! free; when it is taken the orphan is a stale second copy and goes. Anything else
 //! that looks numbered stays where it is, counted.
 //!
@@ -11,16 +12,17 @@
 //! numbered name that is itself any archive's stem (`Vol_1.cbz`) is a volume, never an
 //! orphan.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
 use bunko_core::sidecar_names::{self, Folder};
 use bunko_db::Database;
 use bunko_library::sidecar;
-use bunko_store::{Durability, Mode, Origin, WriteIntent, fs};
+use bunko_store::{Durability, Mode, Origin, Version, WriteIntent, fs};
+use parking_lot::Mutex;
 
-use super::types::{PathLocks, rel_of};
+use super::types::{PathLocks, mtime_ns, rel_of};
 
 /// A folder's archive stems, as [`orphan_target`] needs them.
 pub struct OrphanStems<'a> {
@@ -55,6 +57,11 @@ impl<'a> OrphanStems<'a> {
 /// `Vol.mokuro` beside `Vol.cbz` (a primary), `Vol.paddle-manga_2.mokuro` ->
 /// `Vol.paddle-manga.mokuro` (a layer). `None` for anything else.
 pub fn orphan_target(name: &str, stems: &OrphanStems<'_>) -> Option<String> {
+    orphan_of(name, stems).map(|(canonical, _)| canonical)
+}
+
+/// [`orphan_target`] with the stem of the `.cbz` it belongs to.
+fn orphan_of<'n>(name: &'n str, stems: &OrphanStems<'_>) -> Option<(String, &'n str)> {
     let (numbered, _) = sidecar_names::split_mokuro(name)?;
     let (base, n) = numbered.rsplit_once('_')?;
     // `unique_path` counted from 1, never with a leading zero.
@@ -64,10 +71,11 @@ pub fn orphan_target(name: &str, stems: &OrphanStems<'_>) -> Option<String> {
     }
     let canonical = format!("{base}{}", &name[numbered.len()..]);
     if stems.cbz.contains(base) {
-        return Some(canonical);
+        return Some((canonical, base));
     }
     let (stem, id) = base.rsplit_once('.')?;
-    (bunko_core::generations::is_layer_id(id) && stems.cbz.contains(stem)).then_some(canonical)
+    (bunko_core::generations::is_layer_id(id) && stems.cbz.contains(stem))
+        .then_some((canonical, stem))
 }
 
 /// Is `canonical` (a name [`orphan_target`] gave) taken in `names`, in any spelling rule
@@ -105,9 +113,19 @@ pub struct SweepReport {
     pub removed: u64,
     /// Left in place: not provably Bunko's.
     pub unproven: u64,
+    /// Of `unproven`: unchanged since judged, so not read again ([`Unproven`]).
+    pub remembered: u64,
     /// Locked, or a write failed: tried again after the next walk.
     pub failed: u64,
 }
+
+/// The orphans judged unproven, by library path, with the stat they had then: the sweep
+/// runs after every walk while one is left, and need not read (on a cloud library,
+/// download) an unchanged file again.
+#[derive(Default)]
+pub struct Unproven(pub Mutex<HashMap<String, Stamp>>);
+
+type Stamp = (u64, i128, Option<Version>);
 
 enum Swept {
     Moved,
@@ -127,12 +145,43 @@ pub fn sweep(
     orphans: &[String],
     pace: Duration,
 ) -> SweepReport {
+    sweep_with(library, db, locks, orphans, pace, &Unproven::default())
+}
+
+/// [`sweep`], skipping the orphans `seen` judged unproven while they are unchanged.
+pub fn sweep_with(
+    library: &Path,
+    db: Option<&Database>,
+    locks: &PathLocks,
+    orphans: &[String],
+    pace: Duration,
+    seen: &Unproven,
+) -> SweepReport {
+    seen.0.lock().retain(|rel, _| orphans.contains(rel));
     let mut report = SweepReport::default();
-    for (i, rel) in orphans.iter().enumerate() {
-        if i > 0 && !pace.is_zero() {
+    let mut paced = false;
+    for rel in orphans {
+        let stamp = fs::metadata(library.join(rel))
+            .ok()
+            .map(|m| (m.len(), mtime_ns(&m), m.version().cloned()));
+        if stamp.is_some() && seen.0.lock().get(rel) == stamp.as_ref() {
+            report.unproven += 1;
+            report.remembered += 1;
+            continue;
+        }
+        if std::mem::replace(&mut paced, true) && !pace.is_zero() {
             std::thread::sleep(pace);
         }
-        match sweep_one(library, db, locks, rel) {
+        let swept = sweep_one(library, db, locks, rel);
+        match (&swept, stamp) {
+            (Ok(Swept::Unproven), Some(stamp)) => {
+                seen.0.lock().insert(rel.clone(), stamp);
+            }
+            _ => {
+                seen.0.lock().remove(rel);
+            }
+        }
+        match swept {
             Ok(Swept::Moved) => report.moved += 1,
             Ok(Swept::Removed) => report.removed += 1,
             Ok(Swept::Unproven) => report.unproven += 1,
@@ -161,14 +210,31 @@ fn sweep_one(
     }
     let listed = sidecar::list_names(dir).unwrap_or_default();
     let names: Vec<&str> = listed.iter().map(String::as_str).collect();
-    let Some(canonical) = orphan_target(name, &OrphanStems::new(&names)) else {
+    let Some((canonical, anchor)) = orphan_of(name, &OrphanStems::new(&names)) else {
         return Ok(Swept::Gone);
     };
-    // Bunko's own: the content seal, or (0.7, before the seal) its provenance row.
+    // Bunko's own: the content seal, or (0.7, before the seal) its provenance row. And
+    // the collector's numbering of THIS volume: a numbered name alone is not, since a
+    // reader renaming `Vol (2)` to `Vol_2` uploads the new main (sealed again, C5) before
+    // it moves the archive. The collector wrote the archive's stem into `volume` (a
+    // reader writes the title it renames to) and keyed the row by that archive.
     let row = db.and_then(|db| db.get_ocr_sidecar(rel).ok().flatten());
-    let sealed =
-        sidecar::read_sidecar_bytes(&path).is_ok_and(|bytes| bunko_layout::seal::is_sealed(&bytes));
-    if !sealed && row.is_none() {
+    let bytes = sidecar::read_sidecar_bytes(&path).ok();
+    let sealed = bytes.as_deref().is_some_and(bunko_layout::seal::is_sealed);
+    let names_anchor = bytes
+        .as_deref()
+        .and_then(|b| {
+            serde_json::from_slice::<serde_json::Value>(super::upgrade::strip_bom(b)).ok()
+        })
+        .is_some_and(|d| d.get("volume").and_then(|v| v.as_str()) == Some(anchor));
+    let anchor_rel = names
+        .iter()
+        .find(|n| sidecar_names::cbz_stem(n) == Some(anchor))
+        .and_then(|cbz| rel_of(library, &dir.join(cbz)));
+    let row_ours = row
+        .as_ref()
+        .is_none_or(|r| Some(&r.volume_key) == anchor_rel.as_ref());
+    if !names_anchor || !row_ours || (!sealed && row.is_none()) {
         return Ok(Swept::Unproven);
     }
     let target = dir.join(&canonical);
@@ -263,6 +329,45 @@ mod tests {
         assert_eq!(target("vol_1.mokuro", &["Vol.cbz"]), None);
         // A layer id the rule does not allow.
         assert_eq!(target("Vol.Fast_1.mokuro", &["Vol.cbz"]), None);
+    }
+
+    /// An orphan judged unproven is not read again until it changes: the sweep runs
+    /// after every walk while one is left.
+    #[test]
+    fn an_unproven_orphan_is_read_again_only_once_it_changes() {
+        // unmounted: a plain temp library.
+        #![allow(clippy::disallowed_methods)]
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path();
+        std::fs::create_dir(lib.join("A")).unwrap();
+        std::fs::write(lib.join("A/V1.cbz"), b"PK").unwrap();
+        let unsealed = r#"{"volume":"V1","ocr_engine":{"id":"hayai-nova"},"pages":[]}"#;
+        std::fs::write(lib.join("A/V1_1.mokuro"), unsealed).unwrap();
+        let locks: PathLocks = std::sync::Arc::new(bunko_library::service::NoPathLocks);
+        let seen = Unproven::default();
+        let orphans = ["A/V1_1.mokuro".to_string()];
+        let run = || sweep_with(lib, None, &locks, &orphans, Duration::ZERO, &seen);
+
+        let first = run();
+        assert_eq!((first.unproven, first.remembered), (1, 0));
+        let second = run();
+        assert_eq!(
+            (second.unproven, second.remembered),
+            (1, 1),
+            "not read again"
+        );
+
+        // Changed (now sealed): judged again, and taken to its canonical name.
+        let mut v = bunko_layout::json::Value::parse(unsealed).unwrap();
+        let sealed = bunko_layout::seal::seal(&mut v).unwrap();
+        std::fs::write(lib.join("A/V1_1.mokuro"), &sealed).unwrap();
+        let third = run();
+        assert_eq!((third.moved, third.unproven, third.remembered), (1, 0, 0));
+        assert_eq!(
+            std::fs::read_to_string(lib.join("A/V1.mokuro")).unwrap(),
+            sealed
+        );
+        assert!(seen.0.lock().is_empty(), "forgotten once swept");
     }
 
     #[test]

@@ -38,8 +38,21 @@ fn provably_bunkos_orphans_are_renamed_or_removed_and_others_stay_counted() {
     for v in ["A", "B", "C", "D", "E"] {
         h.add(&format!("{v}/V1.cbz"), 3);
     }
-    // A: sealed, with its row; the canonical name is free -> renamed, row re-keyed.
-    h.bunko_wrote("A/V1_1.mokuro", HAYAI, &primary());
+    // A: sealed, with its row (keyed by the archive the collector ran for); the
+    // canonical name is free -> renamed, row re-keyed.
+    std::fs::write(lib.join("A/V1_1.mokuro"), sealed(HAYAI)).unwrap();
+    h.db.as_ref()
+        .unwrap()
+        .record_ocr_sidecar(&bunko_db::OcrSidecar {
+            sidecar_path: "A/V1_1.mokuro".into(),
+            volume_key: "A/V1.cbz".into(),
+            generation_id: "g-1".into(),
+            generation_name: "hayai-nova".into(),
+            machine: "local".into(),
+            engine: Some("hayai-nova".into()),
+            ..Default::default()
+        })
+        .unwrap();
     // B: a sealed layer orphan; the layer is there -> removed.
     std::fs::write(lib.join("B/V1.mokuro"), LEGACY).unwrap();
     std::fs::write(lib.join("B/V1.fast.mokuro"), LEGACY).unwrap();
@@ -123,4 +136,67 @@ fn provably_bunkos_orphans_are_renamed_or_removed_and_others_stay_counted() {
     h.at(62.0);
     assert!(h.s.owed.orphans.is_empty());
     assert_eq!(h.s.orphans_unproven, 0);
+}
+
+/// A numbered name is not proof the collector numbered it: a reader renaming `V1 (2)` to
+/// `V1_2` uploads the new main (sealed again: C5, or the 0.8 reader's carried block)
+/// before it moves the archive, and a walk can land in between. Only a file whose
+/// content names the canonical volume (the collector wrote the archive's stem into
+/// `volume`), and whose row (if any) is that volume's, is the collector's orphan.
+#[test]
+fn a_numbered_name_of_another_volume_is_never_swept() {
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), None);
+    let lib = h.library();
+    for v in ["A", "B", "C"] {
+        h.add(&format!("{v}/V1.cbz"), 3);
+        h.add(&format!("{v}/V1 (2).cbz"), 3);
+    }
+    let renamed = sealed(&HAYAI.replace(r#""volume":"V1""#, r#""volume":"V1_2""#));
+    // A: the canonical name is taken: it would have been removed as a second copy.
+    std::fs::write(lib.join("A/V1.mokuro"), sealed(HAYAI)).unwrap();
+    std::fs::write(lib.join("A/V1_2.mokuro"), &renamed).unwrap();
+    // B: the canonical name is free: V1 would have been given V1_2's text.
+    std::fs::write(lib.join("B/V1_2.mokuro"), &renamed).unwrap();
+    // C: a row, but another volume's (Bunko once OCR'd a real `V1_2.cbz` there).
+    std::fs::write(lib.join("C/V1_2.mokuro"), LEGACY).unwrap();
+    h.db.as_ref()
+        .unwrap()
+        .record_ocr_sidecar(&bunko_db::OcrSidecar {
+            sidecar_path: "C/V1_2.mokuro".into(),
+            volume_key: "C/V1_2.cbz".into(),
+            generation_id: "g-1".into(),
+            generation_name: "hayai-nova".into(),
+            machine: "local".into(),
+            engine: Some("hayai-nova".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    h.at(0.0);
+
+    assert_eq!(
+        listing(&lib.join("A")),
+        ["V1 (2).cbz", "V1.cbz", "V1.mokuro", "V1_2.mokuro"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(lib.join("A/V1_2.mokuro")).unwrap(),
+        renamed
+    );
+    assert_eq!(
+        listing(&lib.join("B")),
+        ["V1 (2).cbz", "V1.cbz", "V1_2.mokuro"],
+        "V1 is not given another volume's OCR"
+    );
+    assert_eq!(
+        listing(&lib.join("C")),
+        ["V1 (2).cbz", "V1.cbz", "V1_2.mokuro"]
+    );
+    assert!(
+        h.db.as_ref()
+            .unwrap()
+            .get_ocr_sidecar("C/V1_2.mokuro")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(h.s.orphans_unproven, 3);
 }
