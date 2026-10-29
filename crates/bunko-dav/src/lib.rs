@@ -281,7 +281,7 @@ pub enum LibraryChange {
     Library,
     /// Inside the series folder of this name.
     Series(String),
-    /// Under `thumbnails/`.
+    /// Under `thumbnails/`, or the cloud-root owner's per-user tree.
     Ignore,
 }
 
@@ -293,6 +293,13 @@ pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
         .components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
+    // The cloud-root owner's per-user tree (0.8) is never a series or a library change.
+    if parts
+        .first()
+        .is_some_and(|n| reader_tree::is_per_user_root_name(n))
+    {
+        return LibraryChange::Ignore;
+    }
     if parts.len() < 2 {
         return LibraryChange::Library;
     }
@@ -347,6 +354,18 @@ mod tests {
         assert_eq!(
             classify_change(root, Path::new("/elsewhere/S/v.cbz")),
             LibraryChange::Library
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/history/dev/x.events")),
+            LibraryChange::Ignore
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/history")),
+            LibraryChange::Ignore
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/History/v.cbz")),
+            LibraryChange::Series("History".into())
         );
         assert!(is_relevant_change(Path::new("/lib/S/v.mokuro.gz"), false));
         assert!(is_relevant_change(Path::new("/lib/S/v.webp"), false));

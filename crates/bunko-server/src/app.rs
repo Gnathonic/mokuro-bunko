@@ -231,7 +231,12 @@ impl Services {
                     let layout = layout.with_library_root(store.root());
                     (guard, Some(handle), layout)
                 }
-                None => (crate::library::mount_local(&layout.library()), None, layout),
+                None => {
+                    if let Some(r) = crate::storage::doctor::history_series_row(&layout.library()) {
+                        tracing::warn!("[STORAGE] {}. {}", r.detail, r.hint.unwrap_or_default());
+                    }
+                    (crate::library::mount_local(&layout.library()), None, layout)
+                }
             };
         let db = Arc::new(Database::open_with(layout.database(), &db_options)?);
         let dyndns = DynDnsService::new(config.dyndns.clone());

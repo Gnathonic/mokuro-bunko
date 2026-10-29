@@ -51,11 +51,15 @@ pub(super) async fn status(s: &AdminState) -> Response {
         let storage_path = std::path::absolute(&base).unwrap_or(base);
         let (disk_total, disk_used, disk_free) = disk_usage(&storage_path);
         // Series folders: the immediate directories of the library (0.5.2 counts these
-        // as "volumes").
+        // as "volumes"), not a cloud root owner's reading history.
         let volume_count = bunko_store::fs::read_dir(&library)
             .map(|it| {
                 it.filter_map(Result::ok)
-                    .filter(|e| bunko_store::fs::is_dir(e.path()))
+                    .filter(|e| {
+                        !bunko_core::reader_tree::is_per_user_root_name(
+                            &e.file_name().to_string_lossy(),
+                        ) && bunko_store::fs::is_dir(e.path())
+                    })
                     .count()
             })
             .unwrap_or(0);

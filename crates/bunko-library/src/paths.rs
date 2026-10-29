@@ -79,12 +79,21 @@ pub enum LibraryChange {
     Ignore,
 }
 
-/// `classify_change(library_root, path)`.
+/// `classify_change(library_root, path)`, plus 0.8's per-user names at the root.
 pub fn classify_change(library_root: &Path, path: &Path) -> LibraryChange {
     let Ok(relative) = path.strip_prefix(library_root) else {
         return LibraryChange::Library;
     };
     let parts: Vec<Component<'_>> = relative.components().collect();
+    // The cloud-root owner's reading history (and root files) live beside the series:
+    // never a series, and their MKCOLs are not top-level library changes either.
+    if parts
+        .first()
+        .and_then(|p| p.as_os_str().to_str())
+        .is_some_and(bunko_core::reader_tree::is_per_user_root_name)
+    {
+        return LibraryChange::Ignore;
+    }
     if parts.len() < 2 {
         return LibraryChange::Library;
     }
@@ -159,6 +168,20 @@ mod tests {
         assert_eq!(
             classify_change(root, Path::new("/elsewhere/x")),
             LibraryChange::Library
+        );
+        // The cloud-root owner's reading history is not a series (0.8): neither a file
+        // in it nor the MKCOL of the folder itself feeds the compiler.
+        assert_eq!(
+            classify_change(root, Path::new("/lib/history/dev/x.events")),
+            LibraryChange::Ignore
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/history")),
+            LibraryChange::Ignore
+        );
+        assert_eq!(
+            classify_change(root, Path::new("/lib/History/v.cbz")),
+            LibraryChange::Series("History".into())
         );
     }
 }
