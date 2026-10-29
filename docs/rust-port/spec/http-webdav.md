@@ -427,6 +427,20 @@ Evaluated in this exact order for `method` = request method, `path` = `re_encode
 13. `PROPPATCH`: `MODIFY_DELETE` (401 / 403 `Permission denied`).
 14. Any other method (`POST`, `TRACE`, ...): allow here (WsgiDAV then answers 405).
 
+**0.8 (D27): layer files.** Before step 8, a write (`PUT DELETE MOVE COPY LOCK UNLOCK PROPPATCH`) whose
+library file name reads as one of these layer classes (`sidecar_names::layer_class`, the id exactly as
+written, and not a listed `.cbz`'s own primary) is decided here; every other name falls through to the
+table above:
+
+| Class (ids) | Decision |
+|---|---|
+| personal (`edit`, `edit-<n>`) | `_authorize_progress_write` (every `WRITE_PROGRESS` account writes its own copy, `registered` included). A MOVE/COPY to any other name: 403 `Permission denied: corrections can only move between correction files`, and so is one INTO a personal name from any other. A `.gz` PUT: 403 `Permission denied: corrections are saved as plain .mokuro`. |
+| curated (`curated`) | PUT: `MODIFY_DELETE` on any volume, or `uploader` where `can_user_delete_library_path` (the volume it uploaded), the first create included; else 401 / 403 `Permission denied: cannot publish shared corrections for this volume`. DELETE/MOVE/COPY keep steps 10-13. |
+| server keepsake (`pre-upgrade`, `pre-upgrade-<n>`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this file is written by the server` |
+| reserved (`curated-<n>`, the rest of `pre-upgrade*`, `previous-ocr*`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this layer name is reserved` |
+
+`original`, `gcv`, `updated-ocr`, `tr-*` and hand-made ids keep the table above (shared files).
+
 `_authorize_progress_write` (`auth.py:889-921`): unauthenticated -> 401 `Authentication required to save progress`;
 role lacks `WRITE_PROGRESS` (anonymous/processor) -> 403 `Permission denied: cannot save progress`;
 username present -> allow (the file is always the caller's own; the path maps to

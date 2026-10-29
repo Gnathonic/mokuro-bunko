@@ -68,6 +68,11 @@
 - **`/login/api/me` reports the server version** (`version`), signed in or not. A reader
   turns reading-history sync on from 0.8.0, the first version that keeps history per
   account.
+- **`/login/api/me` says where a reader's OCR corrections go.** It lists
+  `per_user_layers: ["edit"]` (each account keeps its own `edit` layer, so a reader
+  may push it) and `permissions.curated.scope`: `all` (editors, inviters, admins),
+  `owned` (an uploader, on the volumes it uploaded) or `none`, for publishing the
+  shared `curated` layer. A cloud folder's `.mokuro-bunko.json` says `curated: true`.
 
 ### Changed
 - **OCR corrections have their own layer names.** Edits never touch a volume's main
@@ -87,7 +92,13 @@
   uploaded, a first upload included. `pre-upgrade` files are Bunko's own and no client
   writes one; `curated-<n>` and names starting `previous-ocr` are refused too. An OCR
   generation can no longer be named `edit`, `curated`, `edit-<n>`, `curated-<n>`, or
-  start with `pre-upgrade` or `previous-ocr`. Layer names are matched exactly as
+  start with `pre-upgrade` or `previous-ocr`: a config that already names one fails to
+  load, with an error naming that row, until it is renamed. A library on this disk
+  that already holds `<Volume>.edit.mokuro` files gives each, at start, to the account
+  the audit log shows wrote it last; the Storage tab counts the ones with no such
+  account ("N correction files have no owner"), which nobody sees. In a cloud library
+  they are the readers' progress account's, and are counted while none is chosen.
+  Layer names are matched exactly as
   written: `Vol.EDIT.mokuro` is an ordinary shared file. When a cloud folder's two
   spellings both have a different `curated` file, the younger one moves in as
   `curated-2`, as `edit` already did.
