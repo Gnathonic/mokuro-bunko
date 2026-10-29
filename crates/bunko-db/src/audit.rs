@@ -22,7 +22,7 @@ use crate::pyfmt::{self, JsonStyle};
 use crate::pytime::fromisoformat;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rusqlite::{Connection, Row, ToSql, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Row, ToSql, params_from_iter};
 use serde::Serialize;
 use serde_json::Value;
 use std::time::{Duration, Instant};
@@ -343,6 +343,23 @@ impl Database {
             *self.last_audit_prune.lock() = Some(now);
         }
         Ok(id)
+    }
+
+    /// The account whose `upload` or `edit` of the shared file `target_path` is the
+    /// newest on record. A write to an account's own copy (`personal`) is no claim on
+    /// the shared file.
+    pub fn last_library_writer(&self, target_path: &str) -> Result<Option<String>> {
+        self.read(|conn| {
+            Ok(conn
+                .prepare_cached(
+                    "SELECT actor_username FROM audit_logs WHERE target_path = ? \
+                     AND action IN ('upload', 'edit') AND actor_username IS NOT NULL \
+                     AND (target_type IS NULL OR target_type <> 'personal') \
+                     ORDER BY created_at DESC, id DESC LIMIT 1",
+                )?
+                .query_row([target_path], |row| row.get(0))
+                .optional()?)
+        })
     }
 
     /// Legacy reader: newest first, optionally one actor's; `limit` clamped to 1..=1000.

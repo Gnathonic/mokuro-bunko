@@ -31,6 +31,7 @@
 //! // shutdown: runtime.stop().await, before the PROPFIND cache stops
 //! ```
 
+mod adopt;
 mod catalog;
 mod community;
 mod runtime;
@@ -39,6 +40,7 @@ mod store;
 mod util;
 mod watcher;
 
+pub use adopt::{CorrectionSweep, adopt_unowned_corrections};
 pub use catalog::{catalog_middleware, router};
 pub use community::{CommunityFetcher, CommunitySettings, normalize_anilist, normalize_jikan};
 pub use runtime::{LibraryHooks, LibraryRuntime, RuntimeDeps};

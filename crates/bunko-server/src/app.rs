@@ -770,10 +770,13 @@ pub fn start_library_services(
         services.library.start();
         {
             // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
-            // request path.
+            // request path. Then corrections written into the shared folder before 0.8
+            // go to their writers (after: the two sweeps would race for the same files).
             let (lib, db) = (library_dir.clone(), services.db.clone());
+            let corrections = CorrectionSweeper::of(services);
             tokio::task::spawn_blocking(move || {
-                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db))
+                crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db));
+                corrections.run(true);
             });
         }
         let thumbs = services
@@ -787,6 +790,7 @@ pub fn start_library_services(
         services.thumbs.clone(),
         services.ocr.clone(),
     );
+    let corrections = CorrectionSweeper::of(services);
     tokio::spawn(async move {
         let started = std::time::Instant::now();
         loop {
@@ -824,6 +828,18 @@ pub fn start_library_services(
                 storage.backend.as_str(),
                 storage.engine_state()
             );
+        }
+        // The cloud folder's corrections are the progress user's: with none chosen they
+        // are only counted, never moved out of the folder.
+        let owned = config
+            .read()
+            .storage
+            .library
+            .progress_user
+            .as_deref()
+            .is_some_and(|u| !u.is_empty());
+        if !owned {
+            tokio::task::spawn_blocking(move || corrections.run(false));
         }
         {
             // doctor cannot see the cloud folder: the reserved-name finding is logged here.
@@ -867,6 +883,31 @@ pub fn start_library_services(
         library.start();
         let _ = covers.await;
     })
+}
+
+/// The startup sweep of physical correction files (D27): `adopt` gives each to its
+/// last writer (a library on this disk), else they are only counted. Off the request
+/// path; the count goes to the storage status.
+struct CorrectionSweeper {
+    db: Arc<Database>,
+    overlays: bunko_dav::PersonalOverlays,
+    control: Arc<crate::storage::StorageControl>,
+}
+
+impl CorrectionSweeper {
+    fn of(services: &Services) -> Self {
+        Self {
+            db: services.db.clone(),
+            overlays: services.dav.overlays(),
+            control: services.storage_control.clone(),
+        }
+    }
+
+    /// Blocking.
+    fn run(&self, adopt: bool) {
+        let sweep = crate::library::adopt_unowned_corrections(&self.db, &self.overlays, adopt);
+        self.control.set_unowned_corrections(sweep.unowned);
+    }
 }
 
 /// How often the cloud copy of the queue file is offered to the store (which writes it

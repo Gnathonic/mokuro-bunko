@@ -240,10 +240,11 @@ impl PersonalOverlays {
     }
 
     /// Move one overlay into `to_dir` as `<stem>.<id>.mokuro`, or the next free
-    /// `edit-<n>` when that is taken (merge.rs `free_layer`: nothing is lost).
-    fn move_one(&self, from: &Path, to_dir: &Path, stem: &str, id: &str) {
+    /// `edit-<n>` when that is taken (merge.rs `free_layer`: nothing is lost). The
+    /// destination when it moved.
+    fn move_one(&self, from: &Path, to_dir: &Path, stem: &str, id: &str) -> Option<PathBuf> {
         if fs::create_dir_all(to_dir).is_err() {
-            return;
+            return None;
         }
         for n in 1u32.. {
             let id = match n {
@@ -261,17 +262,80 @@ impl PersonalOverlays {
                     "[DAV] a correction is being written: {} stays where it is",
                     from.display()
                 );
-                return;
+                return None;
             };
             // Taken meanwhile (a PUT that held its lock): the next one.
             if !free(&dest) {
                 continue;
             }
-            if let Err(e) = fs::rename(from, &dest) {
-                tracing::warn!("[DAV] moving the correction {}: {e}", from.display());
-            }
-            return;
+            return match fs::rename(from, &dest) {
+                Ok(()) => Some(dest),
+                Err(e) => {
+                    tracing::warn!("[DAV] moving the correction {}: {e}", from.display());
+                    None
+                }
+            };
         }
+        None
+    }
+
+    /// The library rels of the physical correction files: names that read as a personal
+    /// layer and are no listed archive's primary (rule 4). On a library on this disk,
+    /// and in a cloud library with no progress user, nobody sees them. Blocking (an
+    /// index walk on a cloud library).
+    pub fn physical_corrections(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut todo = vec![String::new()];
+        while let Some(rel) = todo.pop() {
+            let names = names_in(&self.library.join(&rel));
+            let stems = stems_of(&names);
+            for name in &names {
+                let child = if rel.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{rel}/{name}")
+                };
+                if fs::is_dir(self.library.join(&child)) {
+                    // The cloud-root owner's own tree holds no volume.
+                    if !reader_tree::is_per_user_rel(&child) {
+                        todo.push(child);
+                    }
+                } else if personal_name(name).is_some()
+                    && !matches!(
+                        sidecar_names::classify(name, &stems),
+                        SidecarClass::Primary { .. }
+                    )
+                {
+                    out.push(child);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Give the physical correction `rel` to `username`: it moves to the same place in
+    /// that account's overlays, as the next free `edit-<n>` when the account already
+    /// has one there. False when it stayed (a write in progress, a bad name).
+    pub fn adopt(&self, rel: &str, username: &str) -> bool {
+        let rel = rel.trim_matches('/');
+        let (folder, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let Some((stem, id, false)) = personal_name(name) else {
+            return false;
+        };
+        let Some(base) = edits_base(&self.users, username) else {
+            return false;
+        };
+        let to_dir = if folder.is_empty() {
+            base
+        } else {
+            match overlay_path(&self.users, username, folder) {
+                Some(dir) => dir,
+                None => return false,
+            }
+        };
+        self.move_one(&self.library.join(rel), &to_dir, stem, id)
+            .is_some()
     }
 
     /// The archive `old` (library rel) is now `new`: each account's overlays of it move
