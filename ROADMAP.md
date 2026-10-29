@@ -9,6 +9,8 @@ details will change as each release is built. Released work is in [CHANGELOG.md]
 | **0.9** | Streaming | Read volumes without downloading and installing them first. |
 | **1.0** | Books | EPUB, PDF and other book formats, with OCR for text in images. |
 
+Ideas without a version yet are under [Later](#later--wishlist).
+
 ## 0.8 — Remote storage
 
 Bunko learns to work on a library that lives in your cloud storage instead of on its own disk:
@@ -47,3 +49,15 @@ Support for books and book formats: **EPUB**, **PDF**, and more to follow.
 Images in a book are OCR'd for burned-in text (scanned pages, illustrations with text), and
 the text is stored together with its formatting, so the reader can reproduce the book
 faithfully rather than as plain text.
+
+## Later — wishlist
+
+Not scheduled; listed so they are not lost.
+
+- **Version history and undo for admins.** Bunko keeps earlier versions of library files, so
+  an admin can bring back a deleted volume, sidecar or `series.json`, or put an OCR edit back
+  the way it was, from the admin panel. In a cloud library it can use the provider's own
+  history instead of keeping copies itself: Google Drive revisions, MEGA file versions and
+  its Rubbish Bin, OneDrive versions; on its own disk and on WebDAV it keeps them in a
+  versions area of its own. (Tracked in
+  [Version history and admin undo](https://github.com/Gnathonic/mokuro-bunko/issues?q=is%3Aissue+%22Version+history+and+admin+undo%22).)
