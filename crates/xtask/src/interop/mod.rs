@@ -1,11 +1,13 @@
 //! `cargo xtask interop`: the cross-party test rig (docs/design/interop-testing.md).
-//! I0 has one suite, `catalog-perf`: the catalog and series views on a large library,
-//! checked against `interop/budgets.toml`.
+//! `catalog-perf` (I0): the catalog and series views on a large library, checked
+//! against `interop/budgets.toml`. `rig` (I3): every party as its own process, one
+//! suite per provider.
 
 mod budgets;
 mod catalog;
 mod genlib;
 mod http;
+mod rig;
 mod server;
 
 use crate::util;
@@ -26,6 +28,8 @@ pub struct InteropArgs {
 enum Suite {
     /// Time the catalog and series views on a generated 2,000-series library.
     CatalogPerf(CatalogPerfArgs),
+    /// Run interop suites against real processes: a testing server, cloudsim, rclone.
+    Rig(rig::RigArgs),
 }
 
 #[derive(clap::Args)]
@@ -50,6 +54,7 @@ struct CatalogPerfArgs {
 pub fn run(args: &InteropArgs) -> Result<()> {
     match &args.suite {
         Suite::CatalogPerf(a) => catalog_perf(a),
+        Suite::Rig(a) => rig::run(a),
     }
 }
 

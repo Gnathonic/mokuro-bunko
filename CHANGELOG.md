@@ -49,6 +49,21 @@
   per account instead of into the shared library. `/login/api/me` lists these files as
   `per_user_files`, signed in or not, and a reader uses a per-account file only once the
   server lists it.
+- **Internal: an interop rig that runs every party as its own process.**
+  `cargo xtask interop rig cloud --provider google|microsoft|mega|rclone|all` starts a
+  testing build of the server on cloudsim (or on rclone's WebDAV server, a pinned
+  release checked against its sha256) and checks a cold start, the first adoption of a
+  reader's `series.json`, uploads through provider faults, OCR results from the fake
+  processor, the lease handed to a second server, and the hold on a full provider; the
+  results and every party's log go to `target/interop/rig/`. A testing build reads its
+  store's lease and retry timing from `MOKURO_TEST_CLOUD_TUNE` (refused, like the other
+  test variables, by a build without the hooks). cloudsim now stamps writes on the wall
+  clock its `Date` header shows (a lease marker never looked fresh before), and
+  `/_sim/mega/account` answers the account's saved session.
+- **Internal: nightly test builds for Mokuro Reader's CI.** Every push to `main` or
+  `0.8/remote-storage`, and every night, publishes a testing server and cloudsim for
+  Linux x86_64 as the pre-release `nightly` or `nightly-0.8`, replaced each time. They
+  are test builds, never offered as an update.
 
 ### Changed
 - **Bunko and Mokuro Reader agree on what a `.mokuro` beside a volume is.** One rule

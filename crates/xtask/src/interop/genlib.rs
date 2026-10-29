@@ -81,6 +81,24 @@ fn write_cbz(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// One archive in memory, as [`generate`] writes them; `tag` goes into the zip comment
+/// so every volume of a rig library has its own bytes (and its own sha256).
+pub fn cbz_bytes(tag: &str) -> Result<Vec<u8>> {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for p in 0..PAGES_PER_VOLUME {
+        zip.start_file(format!("{p:03}.jpg"), options)?;
+        zip.write_all(PAGE)?;
+    }
+    zip.set_comment(tag.to_string());
+    Ok(zip.finish()?.into_inner())
+}
+
+/// Pages in every generated volume.
+pub const fn pages_per_volume() -> usize {
+    PAGES_PER_VOLUME
+}
+
 /// The OCR sidecar as the reader and Bunko read it: one line of text per page.
 pub fn mokuro_doc(series: &str, title: &str, n: usize) -> Vec<u8> {
     let pages: Vec<serde_json::Value> = (0..PAGES_PER_VOLUME)

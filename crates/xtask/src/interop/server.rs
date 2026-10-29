@@ -1,9 +1,12 @@
 //! One throwaway Bunko server for a scenario: an isolated config and data dir, setup
-//! completed over the API, catalog on, nothing reaching the network.
+//! completed over the API, catalog on, nothing reaching the network. A rig server can
+//! also keep its library in a cloud account (cloudsim, or rclone's WebDAV), signed in
+//! the way a connected server is: its credentials file and `storage.library`.
 
 use super::http;
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
+use sha2::{Digest as _, Sha256};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -11,46 +14,269 @@ use std::time::{Duration, Instant};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// The password of every [`SeedUser`] the rig creates.
+pub const SEED_PASSWORD: &str = "rig-password-1";
+
 pub struct Server {
     bin: PathBuf,
     dir: PathBuf,
+    env: Vec<(String, String)>,
     pub addr: SocketAddr,
     /// `Basic …` for the admin account (WebDAV writes).
     pub auth: String,
     child: Option<Child>,
 }
 
+/// Where a rig server keeps its library.
+#[derive(Debug, Clone, Default)]
+pub enum Backend {
+    /// `<dir>/library` on this disk.
+    #[default]
+    Local,
+    /// A cloud folder the server is already signed in to.
+    Cloud(CloudLogin),
+}
+
+/// A cloud sign-in as a connected server keeps it: the `storage.library` backend and
+/// one entry of `<base>/cloud/credentials.json`.
+#[derive(Debug, Clone)]
+pub struct CloudLogin {
+    /// `storage.library.backend`: `gdrive`, `onedrive`, `mega` or `webdav`.
+    pub backend: &'static str,
+    /// The account id the store id is made from (WebDAV: `user@url`).
+    pub account_id: String,
+    /// The credentials entry, `provider` and `account_id` filled in on write.
+    pub credential: serde_json::Value,
+    /// WebDAV: the server's URL and user (`storage.library.webdav`).
+    pub webdav: Option<(String, String)>,
+}
+
+/// An account the rig creates through the admin API after setup.
+#[derive(Debug, Clone)]
+pub struct SeedUser {
+    pub username: String,
+    /// `registered`, `uploader`, `editor`, `inviter`, `admin` or `processor`.
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ServerOptions {
+    pub backend: Backend,
+    /// `server.serve_readers` (the reader's WebDAV and bridge).
+    pub readers: bool,
+    /// Created with [`SEED_PASSWORD`].
+    pub users: Vec<SeedUser>,
+    /// Remote OCR processors may connect (`ocr.sessions`), polled every second.
+    pub ocr_remote: bool,
+    /// Extra environment of the server process (cloudsim's addresses, the store tune).
+    pub env: Vec<(String, String)>,
+}
+
 fn free_port() -> Result<u16> {
     Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
-fn yaml_str(path: &Path) -> String {
-    serde_json::to_string(&path.to_string_lossy()).expect("a string")
+fn yaml_str(text: &str) -> String {
+    serde_json::to_string(text).expect("a string")
+}
+
+/// The server's `storage::store_id`, which names a store's credentials entry and data
+/// folder. Copied, not shared (xtask links no server crate): a mismatch shows as a
+/// library that never connects, which [`Server::wait_storage`] reports.
+pub fn store_id(provider: &str, pairing: &str, account_id: &str, folder: &str) -> String {
+    let mut h = Sha256::new();
+    for (i, part) in [provider, pairing, account_id, folder].iter().enumerate() {
+        if i > 0 {
+            h.update([0u8]);
+        }
+        h.update(part.as_bytes());
+    }
+    hex::encode(h.finalize())[..16].to_string()
+}
+
+/// The library folder in every cloud account the rig uses.
+pub const CLOUD_FOLDER: &str = "mokuro-reader";
+
+fn config_yaml(dir: &Path, port: u16, o: &ServerOptions) -> String {
+    let mut y = format!(
+        "server:\n  host: \"127.0.0.1\"\n  port: {port}\n\
+         storage:\n  base_path: {base}\n",
+        base = yaml_str(&dir.to_string_lossy()),
+    );
+    if let Backend::Cloud(login) = &o.backend {
+        // Short quiet and poll periods: the rig waits on what the feed sees.
+        y.push_str(&format!(
+            "  library:\n    backend: {}\n    folder: {CLOUD_FOLDER}\n    quiet_s: 1\n\
+             \x20   poll:\n      active_s: 2\n      idle_s: 2\n",
+            login.backend
+        ));
+        if let Some((url, user)) = &login.webdav {
+            y.push_str(&format!(
+                "    webdav:\n      url: {}\n      username: {}\n",
+                yaml_str(url),
+                yaml_str(user)
+            ));
+        }
+    }
+    y.push_str(&format!(
+        "catalog:\n  enabled: true\n  enrich_community: false\n\
+         ocr:\n  local_processing: false\n  autobench: false\n  sessions: {}\n{}\
+         update:\n  check: false\n\
+         registration:\n  mode: disabled\n",
+        o.ocr_remote,
+        if o.ocr_remote {
+            "  poll_interval: 1\n"
+        } else {
+            ""
+        },
+    ));
+    y
+}
+
+/// Write the credentials file a connected server keeps (plain, unsealed: the rig sets
+/// no secrets key).
+fn write_credentials(dir: &Path, login: &CloudLogin) -> Result<()> {
+    let cloud = dir.join("cloud");
+    std::fs::create_dir_all(&cloud)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&cloud, std::fs::Permissions::from_mode(0o700))?;
+    }
+    // Only Drive has a pairing part; the rig's servers use the release pairing.
+    let pairing = if login.backend == "gdrive" {
+        "release"
+    } else {
+        ""
+    };
+    let id = store_id(login.backend, pairing, &login.account_id, CLOUD_FOLDER);
+    let mut cred = login.credential.clone();
+    cred["provider"] = login.backend.into();
+    cred["account_id"] = login.account_id.clone().into();
+    let doc = serde_json::json!({"version": 1, "stores": {id: cred}});
+    let path = cloud.join("credentials.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&doc)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 impl Server {
     /// Start a server whose storage base is `dir` (the library is `dir/library`).
     pub fn start(bin: &Path, dir: &Path) -> Result<Server> {
+        Server::start_with(
+            bin,
+            dir,
+            ServerOptions {
+                readers: true,
+                ..ServerOptions::default()
+            },
+        )
+    }
+
+    /// Start a server as `o` describes, setup completed and its users created.
+    pub fn start_with(bin: &Path, dir: &Path, o: ServerOptions) -> Result<Server> {
+        std::fs::create_dir_all(dir)?;
         let port = free_port()?;
-        let config = format!(
-            "server:\n  host: \"127.0.0.1\"\n  port: {port}\n\
-             storage:\n  base_path: {base}\n\
-             catalog:\n  enabled: true\n  enrich_community: false\n\
-             ocr:\n  local_processing: false\n  autobench: false\n\
-             registration:\n  mode: disabled\n",
-            base = yaml_str(dir),
-        );
-        std::fs::write(dir.join("config.yaml"), config)?;
+        std::fs::write(dir.join("config.yaml"), config_yaml(dir, port, &o))?;
+        if let Backend::Cloud(login) = &o.backend {
+            write_credentials(dir, login)?;
+        }
         let mut server = Server {
             bin: bin.to_path_buf(),
             dir: dir.to_path_buf(),
+            env: o.env.clone(),
             addr: SocketAddr::from(([127, 0, 0, 1], port)),
             auth: String::new(),
             child: None,
         };
         server.spawn()?;
-        server.complete_setup()?;
+        server.complete_setup(o.readers)?;
+        for u in &o.users {
+            server.create_user(u)?;
+        }
         Ok(server)
+    }
+
+    pub fn base_url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// `Basic …` for a [`SeedUser`].
+    pub fn basic(user: &str) -> String {
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{SEED_PASSWORD}"))
+        )
+    }
+
+    fn create_user(&self, u: &SeedUser) -> Result<()> {
+        let body = serde_json::json!({
+            "username": u.username, "password": SEED_PASSWORD, "role": u.role,
+        });
+        let reply = http::request(
+            self.addr,
+            "POST",
+            "/_admin/api/users",
+            &[
+                ("Authorization", &self.auth),
+                ("Content-Type", "application/json"),
+            ],
+            &serde_json::to_vec(&body)?,
+        )?;
+        if !(200..300).contains(&reply.status) {
+            bail!(
+                "creating {} answered {}: {}",
+                u.username,
+                reply.status,
+                String::from_utf8_lossy(&reply.body)
+            );
+        }
+        Ok(())
+    }
+
+    /// The admin Storage panel's document (`GET /_admin/api/storage`).
+    pub fn storage(&self) -> Result<serde_json::Value> {
+        let reply = http::request(
+            self.addr,
+            "GET",
+            "/_admin/api/storage",
+            &[("Authorization", &self.auth)],
+            &[],
+        )?;
+        if reply.status != 200 {
+            bail!("the storage panel answered {}", reply.status);
+        }
+        reply.json()
+    }
+
+    /// Wait until the cloud library is connected and its lease is in `state` (`held`,
+    /// `standby`, …). Returns the panel's document.
+    pub fn wait_storage(&mut self, state: &str, timeout: Duration) -> Result<serde_json::Value> {
+        let start = Instant::now();
+        let mut last = serde_json::Value::Null;
+        while start.elapsed() < timeout {
+            self.check_alive()?;
+            if let Ok(v) = self.storage() {
+                if v["connected"] == true && v["lease"]["state"] == state {
+                    return Ok(v);
+                }
+                last = v;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        bail!(
+            "the library did not reach lease state {state:?} in {} s; last: connected={} \
+             problem={} lease={}\n{}",
+            timeout.as_secs(),
+            last["connected"],
+            last["problem"],
+            last["lease"],
+            self.log_tail()
+        )
     }
 
     fn spawn(&mut self) -> Result<()> {
@@ -68,6 +294,7 @@ impl Server {
             .arg("-c")
             .arg(self.dir.join("config.yaml"))
             .arg("serve")
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
             .env("XDG_CONFIG_HOME", xdg.join("config"))
             .env("XDG_DATA_HOME", xdg.join("data"))
             .env("XDG_CACHE_HOME", xdg.join("cache"))
@@ -90,7 +317,7 @@ impl Server {
         bail!("the server did not answer in 60 s\n{}", self.log_tail())
     }
 
-    fn check_alive(&mut self) -> Result<()> {
+    pub fn check_alive(&mut self) -> Result<()> {
         if let Some(child) = &mut self.child
             && let Some(status) = child.try_wait()?
         {
@@ -99,7 +326,7 @@ impl Server {
         Ok(())
     }
 
-    fn complete_setup(&mut self) -> Result<()> {
+    fn complete_setup(&mut self, readers: bool) -> Result<()> {
         use rand::RngCore as _;
         let mut bytes = [0u8; 18];
         rand::rng().fill_bytes(&mut bytes);
@@ -114,7 +341,7 @@ impl Server {
         let body = serde_json::json!({
             "admin": {"username": "admin", "password": password},
             "registration": {"mode": "disabled"},
-            "library": {"serve_readers": true, "link_progress": false},
+            "library": {"serve_readers": readers, "link_progress": false},
             "ocr": {"on": false},
         });
         let reply = http::request(
@@ -136,7 +363,7 @@ impl Server {
             base64::engine::general_purpose::STANDARD.encode(format!("admin:{password}"))
         );
         let config = http::get(self.addr, "/catalog/api/config")?;
-        if config.status != 200 {
+        if readers && config.status != 200 {
             bail!("the catalog is off after setup ({})", config.status);
         }
         Ok(())

@@ -180,6 +180,8 @@ does.
   would for Microsoft's storage hosts; MEGA's gateway at `{base}/mega/`, OAuth refresh at
   `{base}/oauth/{google,microsoft}/token` (Google keeps its refresh token, Microsoft
   rotates it), the control API at `{base}/_sim/`. Every response carries permissive CORS.
+  Writes are stamped on the wall clock the `Date` header shows (I3: Bunko's lease ages
+  its marker by it; a clock of the simulator's own made every marker look stale).
 - **MEGA stays in `bunko-mega`.** Its `mock` module (real node crypto, which needs the
   crate's internals) became a hub of accounts behind one gateway, picked by session id
   or login email; cloudsim mounts it. `MockMega::start()` still serves the crate's own
@@ -213,6 +215,11 @@ does.
   `MOKURO_TEST_CLOUD_TOKEN_URL_{GOOGLE,MICROSOFT}` point the stores and the connect
   probe at cloudsim in a build with the `testing` feature (`mokuro-bunko` has one); a
   build without it refuses to start while one is set, naming it.
+  `MOKURO_TEST_CLOUD_TUNE` (`lease=on|off,lease_ttl_s=N,lease_settle_ms=N,
+  retry_base_ms=N,queue_floor_ms=N`) sets a spawned server's store timing, so the rig's
+  lease handover takes seconds, not a 60 s settle and a 15 min ttl; a tune the server
+  cannot read stops it starting. `POST /_sim/mega/account` answers the account's saved
+  session, which a rig server keeps in its credentials as a connected server does.
 - **A processor with no models.** The same `testing` build has a hidden
   `mokuro-bunko processor-fake --url URL --username U --password P --storage DIR`
   (password also from `MOKURO_FAKE_PROCESSOR_PASSWORD`): it logs in, registers and
@@ -267,6 +274,36 @@ shaped profiles (§8.2).
 | `shared` | reader and Bunko on one cloudsim folder (each provider) and rclone | the M7 exit checks: Bunko progress for a volume the reader uploaded; sidecar pulled on `done[]`; reader stops writing `series.json`/`catalog.json` while the marker is fresh and resumes 2 × ttl after Bunko stops or at once on `released`; edits go up as `<Vol>.edit.mokuro` and never as the main sidecar; a Bunko case merge shows as a rename with progress kept |
 | `cloud` | Bunko ↔ cloudsim and rclone (no reader) | the Rust-side Bunko ↔ cloud scenarios at process level: cold start, adoption, outbox under faults, lease handover, quota pauses |
 | `perf` | all of the above, shaped | §8 |
+
+**As built (I3, runner core):** `cargo xtask interop rig <suites> [--provider P,…]
+[--bin B] [--cloudsim-bin C] [--reader-dir D | --reader-ref SHA] [--grep G] [--headed]
+[--keep]`. Suites and providers expand to the pairs that apply (`dav` and `api` on
+`local`, the others on `google`, `microsoft`, `mega` and `rclone`; `all` for either).
+`--bin` must be a testing build (checked through `processor-fake --help`). Each pair
+writes `target/interop/rig/<suite>-<provider>.json` (scenarios with outcome, time and
+the reason for a failure or skip) and copies every party's log to
+`target/interop/rig/logs/<suite>-<provider>/`; its work folder is kept on failure or
+with `--keep`. cloudsim's violations are read after every scenario and fail it.
+rclone is `v1.75.2`, downloaded into `target/interop/tools` and checked against its
+pinned sha256 and size per OS before use (`rig/rclone.rs`); it serves with
+`--allow-origin <reader origin>` for the browser suites. The browser suites stop with
+an error until the reader harness lands (C6-B8).
+
+The `cloud` suite (`rig/cloud.rs`) runs one library of four volumes and a reader's
+`series.json` through two server processes, in order, on each provider: **cold-start**
+(the catalog lists the series, the bridge serves an archive whole and ranged, byte for
+byte), **adoption** (the `series.json` tag is in the catalog, the lease marker is in
+the folder), **outbox-faults** (two 503s on uploads, MEGA two `-3`s: a bridge PUT still
+lands), **ocr-results** (`processor-fake` OCRs the volumes without a sidecar; the
+result reaches the cloud through two failed uploads), **lease-handover** (a second
+server stands by and answers writes 503 `storage-lease`; once the first stops, it
+takes the library over and its PUT lands) and **quota-pause** (a full provider: a
+PUT answers 507, the next one 507 without reaching the provider, health blocked by
+`StorageFull`). The hold lifts at the first storage probe, five minutes on; the suite
+does not wait for it. On rclone, outbox-faults and quota-pause are skipped (no fault
+knobs). Measured locally (wall time, setup included): google 30–38 s, microsoft 34 s,
+mega 90–100 s (one MEGA command a second, and a 30 s lease ttl so a heartbeat keeps
+writes open). rclone is not yet run anywhere.
 
 ### 7.2 Live runs (layer 3: scheduled, real clouds)
 
@@ -417,6 +454,17 @@ metric is within budget.
   `BUNKO_CONTRACT_REQUIRED=1` so a missing checkout fails instead of skipping).
 
 Run time target: the rig under 15 minutes per PR on ubuntu.
+
+**As built (I3, nightly):** `.github/workflows/interop-nightly.yml` builds the testing
+lite server and cloudsim on every push to `main` and `0.8/remote-storage`, nightly for
+both, and on demand, and publishes them as the pre-release `nightly` (from `main`) or
+`nightly-0.8`: `mokuro-bunko-testing-x86_64-linux`, `bunko-cloudsim-x86_64-linux` and
+`nightly.json` (`{bunko_sha, branch, version, built_at}`). The tag moves to the new
+commit and the assets are replaced in place, so a reader run downloading them never
+finds the release gone. The updater never offers them: their tags are not versions and
+they carry no signed `release.json` (`bunko-update`'s
+`prerelease_lookup_skips_the_nightly_test_builds`). The reader's repository variable
+`BUNKO_REF` picks the tag: `0.8/remote-storage` → `nightly-0.8`, `main` → `nightly`.
 
 ## 10. Milestones
 
