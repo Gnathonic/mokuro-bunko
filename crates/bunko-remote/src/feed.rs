@@ -1542,6 +1542,19 @@ impl<B: Backend> Engine<B> {
         let extra = found
             .iter()
             .any(|f| !known.contains(&f.pid) && !nested.contains(&f.pid));
+        // The same roots in another order (an index from before the canonical
+        // order): the write root moves, nothing else does.
+        let reordered = !changed
+            && !extra
+            && found
+                .iter()
+                .map(|f| &f.pid)
+                .filter(|p| known.contains(p))
+                .ne(known.iter());
+        if reordered {
+            let changes = self.core.index.lock().set_roots(&found)?;
+            self.core.emit(&changes);
+        }
         if changed || extra {
             let changes = self.core.index.lock().set_roots(&found)?;
             if vacated {

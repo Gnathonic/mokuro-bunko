@@ -1460,3 +1460,35 @@ async fn a_same_named_folder_does_not_hide_what_only_the_vanished_root_held() {
     assert_eq!(r.index.lock().roots(), std::slice::from_ref(&w.a));
     assert!(r.has("S/V3.cbz") && r.has("T/V2.cbz"));
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_index_in_the_old_root_order_takes_the_canonical_one() {
+    let f = Arc::new(FakeBackend::drive_like());
+    let backup = f.reader_mkdir("Backup");
+    let nested = f.reader_mkdir_in(&backup.pid, "mokuro-reader");
+    let top = f.reader_mkdir_in(&f.account_root(), "mokuro-reader");
+    f.reader_put_in(&top.pid, "a.cbz", b"a");
+    let r = rig_with(f.clone(), config(), None);
+    r.steady().await;
+    assert_eq!(
+        r.index.lock().roots(),
+        [top.pid.clone(), nested.pid.clone()]
+    );
+    let Rig { dir, feed, .. } = r;
+    feed.shutdown().await;
+    // What an index from before the canonical order holds: oldest first.
+    {
+        let idx = Index::open(&dir.path().join("index.sqlite")).unwrap();
+        idx.set_roots(&[nested.clone(), top.clone()]).unwrap();
+        assert_eq!(idx.roots()[0], nested.pid);
+    }
+    let r = rig_with(f.clone(), config(), Some(dir));
+    r.steady().await;
+    assert_eq!(
+        r.index.lock().roots(),
+        [top.pid.clone(), nested.pid.clone()]
+    );
+    let root = r.index.lock().entry(bunko_remote::index::ROOT_EID).unwrap();
+    assert_eq!(root.winner_pid, Some(top.pid));
+    assert!(r.has("a.cbz"));
+}
