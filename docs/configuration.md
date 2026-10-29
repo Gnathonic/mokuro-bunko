@@ -107,6 +107,7 @@ storage:
     poll: {active_s: null, idle_s: null}
     drive_background_units_per_min: 20000
     status_files: true
+    dedup: true
     progress_user: null
     google_project: release # release | beta | custom
     oauth:
@@ -129,6 +130,7 @@ storage:
 | `poll.active_s`, `poll.idle_s` | integer | provider default | How often the cloud folder is checked for changes, while busy and while idle. |
 | `drive_background_units_per_min` | integer | `20000` | Google Drive API quota units per minute for background work. |
 | `status_files` | boolean | `true` | Write the OCR queue and server status files into the cloud folder for readers. |
+| `dedup` | boolean | `true` | Google Drive and MEGA: merge folders that have the same name in the same place (two `mokuro-reader` folders, two copies of a series folder) the way Mokuro Reader does, and tell readers so they leave it to Bunko. |
 | `progress_user` | string | — | When readers are served too: the Bunko user whose reading progress is the cloud folder's progress files. |
 | `google_project` | string | `release` | Which Mokuro Reader's Google project Bunko signs in with, so it sees that reader's Drive files: `release` (reader.mokuro.app) or `beta`. `MOKURO_GOOGLE_PROJECT`. Becomes `custom` by itself when `oauth.google` is set; `custom` without it is refused. |
 | `oauth.google.*` | string | — | Your own Google OAuth clients, replacing both built-in ones: `client_id` + `client_secret` (Desktop client, browser sign-in on this machine) and `device_client_id` + `device_client_secret` ("TVs and Limited Input" client, sign-in with a code). Either pair may be left out; that sign-in flow is then unavailable. An id without its secret (or the reverse) is refused. |

@@ -13,7 +13,8 @@
 //! goes through the [`governor`] (budgets, priorities, pauses, hard stops, the api
 //! log). Foreign `series.json` versions become [`submissions`], and the first
 //! adoption ingests the library's facts there. [`merge`] merges case variants into
-//! the oldest spelling (§5.9). [`status`]
+//! the oldest spelling, and same-named duplicate folders as Mokuro Reader does (§5.9).
+//! [`status`]
 //! holds the marker lease (`.mokuro-bunko.json`) and the cloud queue document. Default
 //! features add the providers' drivers (`webdav::WebDavBackend`,
 //! `gdrive::GDriveBackend`, `onedrive::OneDriveBackend`, `mega::MegaBackend`) and

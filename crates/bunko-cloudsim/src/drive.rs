@@ -857,6 +857,8 @@ fn route(
             }
             ok_json(v)
         }
+        // My Drive itself: its id is the `parents` entry of every top-level item.
+        ("GET", ["drive", "v3", "files", "root"]) => ok_json(json!({"id": "root"})),
         ("GET", ["drive", "v3", "files", "generateIds"]) => {
             let id = st.new_id("g");
             ok_json(json!({"ids": [id], "space": "drive", "kind": "drive#generatedIds"}))

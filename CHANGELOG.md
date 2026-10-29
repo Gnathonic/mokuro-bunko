@@ -78,6 +78,30 @@
   OCR'd and never given covers, whatever its files are named, and its changes keep the
   cached library listing. The server logs a cloud folder's `history/` series with the
   rename to make once the folder is in sync.
+- **Bunko merges duplicate folders in Google Drive and MEGA libraries, and merges
+  never pause it.** Google Drive and MEGA can hold two `mokuro-reader` folders, or two
+  copies of a series folder, side by side. Bunko now merges them itself, the way
+  Mokuro Reader does, once neither has changed for a while: everything moves into one
+  copy (the oldest; for the `mokuro-reader` folders, one directly in My Drive or the
+  Cloud Drive first), a file found in both keeps its most recently written copy and
+  puts the other in the provider's trash (a `series.json` is merged into the series
+  first),
+  `volume-data.json`, `goals.json` and `positions.json` keep both copies, and each
+  emptied folder goes to the trash (never a permanent delete). The Storage tab lists
+  them under **Recent merges**; `storage.library.dedup: false` turns this off. Its
+  `.mokuro-bunko.json` says `"dedup": true`, so a reader can leave the merging to
+  Bunko. When the reader merges them instead, or both do at once, Bunko no longer stops
+  the library as if it had been wiped: the emptied copy is dropped quietly, whether
+  the merge happens while Bunko runs or while it is stopped, as long as everything it
+  held is still in the other copy. A folder
+  removed with volumes found nowhere else still pauses the library for the admin, as
+  before. Bunko now writes into the same `mokuro-reader` folder the reader does (one
+  directly in My Drive or the Cloud Drive first, then the oldest; a
+  `Backup/mokuro-reader` is still read and never merged), and follows it there when
+  another one becomes that folder; where one file exists twice it shows the most
+  recently written copy, the one either merge keeps. Deleting one copy
+  of such a file through Bunko no longer makes the volume disappear from the
+  catalog while the other copy remains.
 - **Bunko and Mokuro Reader agree on what a `.mokuro` beside a volume is.** One rule
   now decides it everywhere Bunko looks (deleting a volume, the OCR upgrade, cloud case
   merges, the cloud queue file, upload ownership, the OCR queue, the catalog's "OCR

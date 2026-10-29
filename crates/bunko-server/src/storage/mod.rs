@@ -728,6 +728,7 @@ pub fn open_library_store(
         rc.instance_name = instance_name();
         rc.bunko_version = bunko_core::VERSION.to_string();
         rc.per_user_files = bunko_core::reader_tree::advertised();
+        rc.dedup = lib.dedup;
         #[cfg(feature = "testing")]
         test_cloud::apply_tune(&layout.base, &mut rc);
         (root, rc)

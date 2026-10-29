@@ -556,6 +556,8 @@ pub struct LibraryConfig {
     pub poll: PollConfig,
     pub drive_background_units_per_min: u32,
     pub status_files: bool,
+    /// Merge same-named folders on Google Drive and MEGA, as Mokuro Reader does.
+    pub dedup: bool,
     /// Bridge mode: the Bunko user whose progress files are the cloud root's.
     pub progress_user: Option<String>,
     pub google_project: GoogleProject,
@@ -576,6 +578,7 @@ impl Default for LibraryConfig {
             poll: PollConfig::default(),
             drive_background_units_per_min: 20000,
             status_files: true,
+            dedup: true,
             progress_user: None,
             google_project: GoogleProject::Release,
             oauth: OAuthOverrides::default(),
@@ -639,6 +642,7 @@ impl LibraryConfig {
             d.drive_background_units_per_min,
         )?;
         l.status_files = get_bool(&m, SEC, "status_files", true)?;
+        l.dedup = get_bool(&m, SEC, "dedup", true)?;
         l.progress_user = get_opt_str(&m, "progress_user");
         if let Some(raw) = m.get("google_project").filter(|v| !v.is_null()) {
             l.google_project = parse_google_project(&value_text(raw))?;
@@ -670,6 +674,7 @@ impl LibraryConfig {
                 "poll",
                 "drive_background_units_per_min",
                 "status_files",
+                "dedup",
                 "progress_user",
                 "google_project",
                 "oauth",
@@ -796,6 +801,7 @@ impl LibraryConfig {
             "poll": {"active_s": self.poll.active_s, "idle_s": self.poll.idle_s},
             "drive_background_units_per_min": self.drive_background_units_per_min,
             "status_files": self.status_files,
+            "dedup": self.dedup,
             "progress_user": self.progress_user,
             "google_project": self.google_project.as_str(),
             "oauth": {
@@ -848,6 +854,7 @@ impl LibraryConfig {
             "poll.idle_s" => self.poll.idle_s = opt_pos()?,
             "drive_background_units_per_min" => self.drive_background_units_per_min = pos()?,
             "status_files" => self.status_files = b()?,
+            "dedup" => self.dedup = b()?,
             "progress_user" => self.progress_user = opt(),
             "google_project" => self.google_project = parse_google_project(value)?,
             "oauth.google.client_id" => self.oauth.google.client_id = opt(),
@@ -880,6 +887,7 @@ impl LibraryConfig {
         "poll.idle_s",
         "drive_background_units_per_min",
         "status_files",
+        "dedup",
         "progress_user",
         "google_project",
         "oauth.google.client_id",
@@ -2204,6 +2212,7 @@ mod tests {
         assert_eq!(l.poll, PollConfig::default());
         assert_eq!(l.drive_background_units_per_min, 20000);
         assert!(l.status_files);
+        assert!(l.dedup);
         assert_eq!(l.progress_user, None);
         assert_eq!(l.google_project, GoogleProject::Release);
         assert_eq!(c.google_flows(), (true, true));
@@ -2218,7 +2227,7 @@ mod tests {
     #[test]
     fn library_block_parses_and_roundtrips() {
         let c = Config::from_value(&yaml(
-            "storage:\n  library:\n    backend: webdav\n    folder: manga\n    webdav: {url: 'https://dav.example/remote.php/dav', username: alice}\n    cache_mb: 512\n    spool_gb: 6\n    outbox_hold_mb: 1024\n    outbox_max_gb: 4\n    quiet_s: 60\n    poll: {active_s: 15, idle_s: null}\n    drive_background_units_per_min: 5000\n    status_files: false\n    progress_user: alice\n    future_knob: 1\n    webdav_future: {x: 2}\nserver: {serve_readers: false}\n",
+            "storage:\n  library:\n    backend: webdav\n    folder: manga\n    webdav: {url: 'https://dav.example/remote.php/dav', username: alice}\n    cache_mb: 512\n    spool_gb: 6\n    outbox_hold_mb: 1024\n    outbox_max_gb: 4\n    quiet_s: 60\n    poll: {active_s: 15, idle_s: null}\n    drive_background_units_per_min: 5000\n    status_files: false\n    dedup: false\n    progress_user: alice\n    future_knob: 1\n    webdav_future: {x: 2}\nserver: {serve_readers: false}\n",
         ))
         .unwrap();
         assert_eq!(c.library_backend(), LibraryBackend::WebDav);
@@ -2235,6 +2244,7 @@ mod tests {
         assert_eq!(l.poll.idle_s, None);
         assert_eq!((l.cache_mb, l.spool_gb, l.quiet_s), (512, 6, 60));
         assert!(!l.status_files);
+        assert!(!l.dedup);
         assert_eq!(l.progress_user.as_deref(), Some("alice"));
         let v = c.to_value();
         assert_eq!(v["storage"]["library"]["backend"], "webdav");

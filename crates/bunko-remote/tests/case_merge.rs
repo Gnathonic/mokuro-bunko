@@ -1287,7 +1287,12 @@ fn every_member_of_a_multi_member_losing_entry_is_emptied_and_trashed() {
         .unwrap();
         losers.push(dir.pid);
     }
-    let t = T::new(fake, &[]);
+    // The case merge's own handling of a multi-member loser (the duplicate merge
+    // would fold the two `kingdom` folders first).
+    fn no_dedup(c: &mut RemoteStoreConfig) {
+        c.dedup = false;
+    }
+    let t = T::with(fake, &[], no_dedup);
     t.steady();
     t.policy();
     t.wait_merges(1);

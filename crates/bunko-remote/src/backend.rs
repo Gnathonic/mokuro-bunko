@@ -134,6 +134,9 @@ pub struct BackendCaps {
     pub chunk_multiple: u64,
     /// WebDAV: pid == path, so a move changes the pid.
     pub path_ids: bool,
+    /// One folder can hold two items of one name (Drive, MEGA): duplicate folders
+    /// and files exist, and the reader's dedup merges them.
+    pub duplicate_names: bool,
 }
 
 /// Where an upload goes.
@@ -245,7 +248,9 @@ pub trait Backend: Send + Sync + 'static {
         crate::governor::Limits::unlimited()
     }
     fn account(&self) -> impl Future<Output = Result<AccountInfo, BErr>> + Send;
-    /// Every folder named exactly `name` that the reader would use as its root.
+    /// Every folder named exactly `name` that the reader would use as its root,
+    /// ordered canonical first: top-level, then oldest created, then smallest pid
+    /// ([`crate::names::sort_roots_canonical`]). The first is the write root.
     fn locate_roots(&self, name: &str) -> impl Future<Output = Result<Vec<RNode>, BErr>> + Send;
     fn create_root(&self, name: &str) -> impl Future<Output = Result<RNode, BErr>> + Send;
     /// A cursor at the current head of the change feed.

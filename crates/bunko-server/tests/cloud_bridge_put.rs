@@ -672,6 +672,7 @@ async fn a_put_while_another_bunko_holds_the_lease_is_a_503() {
         compiles: vec![],
         ocr: true,
         queue: None,
+        dedup: false,
         took_over_from: None,
         per_user_files: vec![],
     };

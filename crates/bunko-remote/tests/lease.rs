@@ -101,13 +101,18 @@ impl Env {
 
     /// Upload a foreign marker as a new node (a duplicate name on Drive and MEGA).
     async fn inject(&self, m: &Marker) -> RNode {
+        self.inject_in(&self.root, m).await
+    }
+
+    /// [`Env::inject`] into the folder `parent`.
+    async fn inject_in(&self, parent: &str, m: &Marker) -> RNode {
         let bytes = serde_json::to_vec(m).unwrap();
         let p = self.scratch.path().join(format!("inject-{}.json", m.epoch));
         std::fs::write(&p, &bytes).unwrap();
         self.fake
             .upload(
                 UploadTarget::New {
-                    parent: &self.root,
+                    parent,
                     name: MARKER_NAME,
                 },
                 UploadSource::File {
@@ -138,6 +143,7 @@ fn foreign(id: &str, epoch: u64, now_ms: i64) -> Marker {
         compiles: vec![],
         ocr: true,
         queue: None,
+        dedup: false,
         took_over_from: None,
         per_user_files: vec![],
     }
@@ -623,4 +629,107 @@ async fn the_marker_advertises_the_per_user_files() {
     let after = env.markers().await;
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].1.per_user_files, ["volume-data.json", "history/"]);
+}
+
+// ---- the merged root (duplicate `mokuro-reader` folders) ---------------------------
+
+/// Another top-level `mokuro-reader` beside the env's (Drive and MEGA allow it).
+fn second_root(env: &Env) -> Pid {
+    env.fake
+        .reader_mkdir_in(&env.fake.account_root(), "mokuro-reader")
+        .pid
+}
+
+/// Our markers per folder: `(parent, pid)`.
+async fn ours_in(env: &Env, roots: &[Pid], id: &str) -> Vec<(Pid, Pid)> {
+    let mut out = Vec::new();
+    for r in roots {
+        let (nodes, _) = env.fake.find_named(r, MARKER_NAME).await.unwrap();
+        for n in nodes {
+            let m = Marker::parse(&env.fake.content(&n.pid).unwrap()).unwrap();
+            if m.instance_id == id {
+                out.push((r.clone(), n.pid));
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test(start_paused = true)]
+async fn markers_in_every_root_member_are_read() {
+    for make in [
+        FakeBackend::drive_like as fn() -> FakeBackend,
+        FakeBackend::mega_like,
+    ] {
+        let env = Env::new(make()).await;
+        let other = second_root(&env);
+        // A fresh holder in the second root member.
+        env.inject_in(&other, &foreign("zzzz", 5, env.fake.now_ms()))
+            .await;
+        let roots = vec![env.root.clone(), other.clone()];
+        let mut a = env
+            .lease_mem(cfg("aaaa", "a-boot"), 0)
+            .following(Arc::new(move || roots.clone()));
+        let s = a.claim().await.unwrap();
+        assert_eq!(holder_of(&s).unwrap().instance_id, "zzzz");
+        assert!(
+            ours_in(&env, &[env.root.clone(), other], "aaaa")
+                .await
+                .is_empty(),
+            "standby writes nothing"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_marker_follows_the_canonical_root() {
+    for (name, make) in [
+        ("drive_like", FakeBackend::drive_like as fn() -> FakeBackend),
+        ("mega_like", FakeBackend::mega_like),
+    ] {
+        let env = Env::new(make()).await;
+        let roots = Arc::new(Mutex::new(vec![env.root.clone()]));
+        let r2 = roots.clone();
+        let mut c = cfg("aaaa", "a-boot");
+        c.heartbeat_new_node = name == "mega_like";
+        let mut a = env
+            .lease_mem(c, 0)
+            .following(Arc::new(move || r2.lock().clone()));
+        assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
+        let old = ours_in(&env, std::slice::from_ref(&env.root), "aaaa").await;
+        assert_eq!(old.len(), 1, "{name}");
+        // Another root becomes canonical (a top-level one, found first).
+        let canon = second_root(&env);
+        *roots.lock() = vec![canon.clone(), env.root.clone()];
+        assert_eq!(a.heartbeat().await.unwrap(), Heartbeat::Held, "{name}");
+        let now = ours_in(&env, &[canon.clone(), env.root.clone()], "aaaa").await;
+        assert_eq!(now.len(), 1, "{name}: {now:?}");
+        assert_eq!(now[0].0, canon, "{name}: in the canonical root");
+        if name == "drive_like" {
+            assert_eq!(now[0].1, old[0].1, "moved, the same node");
+            assert!(env.fake.deleted_log().is_empty());
+        } else {
+            assert_eq!(env.fake.deleted_log(), [old[0].1.clone()], "a new node");
+        }
+        assert_eq!(a.record().marker_pid.as_deref(), Some(now[0].1.as_str()));
+        // And stays there.
+        assert_eq!(a.heartbeat().await.unwrap(), Heartbeat::Held, "{name}");
+        let again = ours_in(&env, &[canon.clone(), env.root.clone()], "aaaa").await;
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].0, canon);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_marker_carries_dedup() {
+    let env = Env::new(FakeBackend::drive_like()).await;
+    let mut c = cfg("aaaa", "a-boot");
+    c.dedup = true;
+    let mut a = env.lease_mem(c, 0);
+    assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
+    let m = env.markers().await;
+    assert!(m[0].1.dedup);
+    // A marker without the key (an older Bunko's) reads as false.
+    let v = serde_json::json!({"kind": "mokuro-bunko", "instance_id": "x", "epoch": 1});
+    assert!(!Marker::parse(v.to_string().as_bytes()).unwrap().dedup);
 }
