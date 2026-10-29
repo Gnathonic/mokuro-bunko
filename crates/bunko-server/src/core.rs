@@ -85,6 +85,9 @@ impl Core {
     /// /api/storage/readers`) applies to the next one. The mount, not the configured
     /// backend, decides "cloud": a connect or disconnect waiting for its restart must
     /// not move anyone's files onto (or off) a library that is not the mounted one.
+    /// Bound to the name, which is safe because a name is never reused: a deleted
+    /// account is only marked deleted and its name refused to a new one (bunko-db
+    /// `insert_user`), and usernames cannot be renamed.
     pub fn owns_cloud_root(&self, username: Option<&str>) -> bool {
         self.layout.cloud_library()
             && username.is_some_and(|u| {
