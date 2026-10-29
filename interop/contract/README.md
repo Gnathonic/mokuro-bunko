@@ -67,9 +67,14 @@ Anything that changes from run to run is replaced by a value of the same JSON ty
 | `Content-Digest` (reader records) | `"<digest>"` |
 | token | `"<token>"` |
 | random ids (`instance_id`, `boot_id`, `took_over_from`) | `00000000-0000-4000-8000-00000000000N` for a UUID, else `"<id-N>"`, numbered by first appearance |
-| Bunko version / machine name | `"0.0.0"` / `"contract-host"` |
+| Bunko version (`bunko_version`, `server_version`, and the top-level `version` of a `/login/api/me` body only) / machine name | `"0.0.0"` / `"contract-host"` |
 | a wait counted down (`Retry-After`, `Retry in Ns`) | rounded up to whole minutes |
 | the lease claim's `about N min left` | `about <n> min left` |
+
+`version` is replaced in `/login/api/me` bodies alone: everywhere else (a `.mokuro`, the
+queue file, the marker) it names a file format and is contract. The sentinel is below
+0.8.0, so a reader test that derives its history gate from a recorded identity sees it
+off: such a test sets the gate itself.
 
 Every other id (a `.mokuro`'s uuids, the uuid Bunko derives for a volume without one) is
 contract and stays as written, and objects keep Bunko's key order. Archives and the cover

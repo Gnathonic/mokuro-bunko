@@ -55,9 +55,26 @@
   progress, `registered` included, creates its `history` and device folders and writes
   its files there; a file is limited to 16 MiB and an account's history to 256 MiB.
   History files are never moved, copied or locked, and saving progress or history no
-  longer drops the cached library listing.
+  longer drops the cached library listing. `/login/api/me` lists `history/` among the
+  `per_user_files`.
+- **Per-account files on a cloud library's folder.** The account named as the readers'
+  progress account (Storage tab) now really shares its files with a reader that reads
+  the cloud folder directly: its volume-data, profiles, goals, positions and reading
+  history are the cloud folder's own, as the 0.8 design intended; every other account
+  keeps its own files on this server. A change of that account in the admin panel
+  applies at once. The cloud folder's `.mokuro-bunko.json` lists the per-account files
+  (`per_user_files`), so a reader reading the cloud directly can sync its reading
+  history there too.
+- **`/login/api/me` reports the server version** (`version`), signed in or not. A reader
+  turns reading-history sync on from 0.8.0, the first version that keeps history per
+  account.
 
 ### Changed
+- **`history` is a reserved series name.** `/mokuro-reader/history` is each account's
+  reading history now, so a series folder named exactly `history` in a library on this
+  disk can no longer be reached; `doctor` warns about it (and the server logs it at
+  startup) with the rename to make. A cloud folder's `history/` is never compiled,
+  counted or case-merged as a series (`History/` stays an ordinary series).
 - **Bunko and Mokuro Reader agree on what a `.mokuro` beside a volume is.** One rule
   now decides it everywhere Bunko looks (deleting a volume, the OCR upgrade, cloud case
   merges, the cloud queue file, upload ownership, the OCR queue, the catalog's "OCR
