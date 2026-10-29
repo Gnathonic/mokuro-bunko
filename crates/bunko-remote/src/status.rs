@@ -97,7 +97,7 @@ fn default_active() -> MarkerState {
 /// {"version":1,"kind":"mokuro-bunko","instance_id":"6f1c…","boot_id":"a93e…","instance_name":"nas",
 ///  "bunko_version":"0.8.0","epoch":3,"claimed_at":"…","heartbeat_at":"…","ttl_s":900,"state":"active",
 ///  "compiles":["series.json","catalog.json"],"ocr":true,"queue":".mokuro-queue.json","dedup":true,
-///  "took_over_from":null,
+///  "curated":true,"took_over_from":null,
 ///  "per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"]}
 /// ```
 ///
@@ -146,6 +146,10 @@ pub struct Marker {
     /// sees it on a fresh holder leaves them to Bunko.
     #[serde(default)]
     pub dedup: bool,
+    /// Whether the holder keeps a shared `curated` layer beside each volume (D27, 0.8):
+    /// a cloud-direct reader may publish to it. Absent (before 0.8): no.
+    #[serde(default)]
+    pub curated: bool,
     /// The `instance_id` this marker took the lease over from.
     #[serde(default)]
     pub took_over_from: Option<String>,
@@ -271,6 +275,8 @@ pub struct LeaseConfig {
     pub queue: Option<String>,
     /// The marker's `dedup`.
     pub dedup: bool,
+    /// The marker's `curated`.
+    pub curated: bool,
     /// The marker's `per_user_files`.
     pub per_user_files: Vec<String>,
     /// A heartbeat writes a new node and then permanently deletes the previous own
@@ -280,7 +286,8 @@ pub struct LeaseConfig {
 
 impl LeaseConfig {
     /// The defaults: TTL 900 s, feed interval 300 s, compiles `series.json` and
-    /// `catalog.json`, OCR on, queue `.mokuro-queue.json`, heartbeats replace in place.
+    /// `catalog.json`, OCR on, queue `.mokuro-queue.json`, the curated layer kept,
+    /// heartbeats replace in place.
     pub fn new(
         instance_id: impl Into<String>,
         boot_id: impl Into<String>,
@@ -301,6 +308,9 @@ impl LeaseConfig {
             ocr: true,
             queue: Some(".mokuro-queue.json".into()),
             dedup: false,
+            // Every 0.8 Bunko that compiles also keeps the curated layer (auth decides
+            // who writes it).
+            curated: true,
             per_user_files: Vec::new(),
             heartbeat_new_node: false,
         }
@@ -874,6 +884,7 @@ impl<B: Backend> Lease<B> {
             ocr: self.cfg.ocr,
             queue: self.cfg.queue.clone(),
             dedup: self.cfg.dedup,
+            curated: self.cfg.curated,
             took_over_from,
             per_user_files: self.cfg.per_user_files.clone(),
         }
@@ -904,6 +915,7 @@ impl<B: Backend> Lease<B> {
                     m.ocr = self.cfg.ocr;
                     m.queue = self.cfg.queue.clone();
                     m.dedup = self.cfg.dedup;
+                    m.curated = self.cfg.curated;
                     m.per_user_files = self.cfg.per_user_files.clone();
                     let ok_at = self.clock.now_ms();
                     let Some(node) = self.write_marker(&m, &set, WriteMode::Claim).await? else {
@@ -1883,8 +1895,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.state, MarkerState::Unknown);
-        // A marker from before 0.8 keeps no per-user files.
+        // A marker from before 0.8 keeps no per-user files, and no curated layer.
         assert!(m.per_user_files.is_empty());
+        assert!(!m.curated);
         assert!(Marker::parse(br#"{"kind":"other","instance_id":"x","epoch":4}"#).is_none());
         assert!(Marker::parse(b"{}").is_none());
     }

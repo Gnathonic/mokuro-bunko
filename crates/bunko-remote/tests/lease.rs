@@ -144,6 +144,7 @@ fn foreign(id: &str, epoch: u64, now_ms: i64) -> Marker {
         ocr: true,
         queue: None,
         dedup: false,
+        curated: false,
         took_over_from: None,
         per_user_files: vec![],
     }
@@ -629,6 +630,35 @@ async fn the_marker_advertises_the_per_user_files() {
     let after = env.markers().await;
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].1.per_user_files, ["volume-data.json", "history/"]);
+}
+
+/// The marker says this Bunko keeps a shared `curated` layer (D27): a cloud-direct
+/// reader publishes to it. A resume writes it onto a marker from before 0.8.
+#[tokio::test(start_paused = true)]
+async fn the_marker_says_bunko_keeps_the_curated_layer() {
+    let env = Env::new(FakeBackend::drive_like()).await;
+    let store: Arc<dyn LeaseStore> = Arc::new(MemoryLeaseStore::new());
+    let mut c = cfg("aaaa", "boot-1");
+    c.curated = false;
+    let mut a = env.lease(c, 0, store.clone());
+    assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
+    let (node, m) = env.markers().await.remove(0);
+    assert!(!m.curated);
+    let raw: serde_json::Value =
+        serde_json::from_slice(&env.fake.content(&node.pid).unwrap()).unwrap();
+    assert_eq!(raw["curated"], false, "{raw}");
+    drop(a);
+
+    let mut c = cfg("aaaa", "boot-2");
+    c.last_boot_id = Some("boot-1".into());
+    assert!(c.curated, "on by default");
+    let mut a2 = env.lease(c, 0, store);
+    assert_eq!(a2.claim().await.unwrap(), LeaseState::Holder);
+    let (node, m) = env.markers().await.remove(0);
+    assert!(m.curated);
+    let raw: serde_json::Value =
+        serde_json::from_slice(&env.fake.content(&node.pid).unwrap()).unwrap();
+    assert_eq!(raw["curated"], true, "{raw}");
 }
 
 // ---- the merged root (duplicate `mokuro-reader` folders) ---------------------------

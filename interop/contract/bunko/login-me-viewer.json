@@ -10,6 +10,9 @@
       "canModifyDelete": false,
       "metadata": {
         "scope": "none"
+      },
+      "curated": {
+        "scope": "none"
       }
     },
     "per_user_files": [
@@ -18,6 +21,9 @@
       "goals.json",
       "positions.json",
       "history/"
+    ],
+    "per_user_layers": [
+      "edit"
     ],
     "version": "0.0.0"
   },
