@@ -829,7 +829,11 @@ impl Scheduler {
             if offered.get(&*job.gid) != Some(&true) {
                 continue;
             }
-            if !crate::ocr::owed::still_owed(&library, &job.rel, &row, job.upgrade) {
+            let probe = self.upgrade_probe();
+            let probe = probe
+                .as_deref()
+                .map(|u| u as &dyn crate::ocr::owed::UpgradeProbe);
+            if !crate::ocr::owed::still_owed_with(&library, &job.rel, &row, job.upgrade, probe) {
                 self.forget_candidate(&job);
                 continue;
             }

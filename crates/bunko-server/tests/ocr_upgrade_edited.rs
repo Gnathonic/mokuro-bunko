@@ -859,3 +859,47 @@ async fn layers_beta3_kept_are_removed_at_startup_and_nothing_else() {
     assert_eq!(sidecars(&env.lib("C")), ["V1.mokuro", "V1.mokuro.mokuro"]);
     assert_eq!(env.up().sweep_kept_from_audit(), 0, "idempotent");
 }
+
+/// `content` sealed, then marked EDITED by a reader (the `edited` block is outside the
+/// seal, so the seal still checks).
+fn sealed_then_edited(content: &str) -> String {
+    let mut v: Value = serde_json::from_str(&sealed(content)).unwrap();
+    v["edited"] = serde_json::json!({"by": "mokuro-reader", "at": "2026-10-29T00:00:00Z",
+                                     "base_sha256": null, "base_seal": null});
+    v.to_string()
+}
+
+/// An EDITED main sidecar (an `edited` block, plus a stamp and a seal that check) is
+/// never swapped and never preserved, whatever its family; the census counts it. An
+/// EDITED layer that carries the primary's stamp is never swapped in.
+#[tokio::test]
+async fn an_edited_main_sidecar_is_never_replaced_and_an_edited_layer_never_swapped_in() {
+    let env = Env::new();
+    let main = sealed_then_edited(BUNKO_OLD);
+    assert!(bunko_layout::seal::is_sealed(main.as_bytes()));
+    env.volume_on_disk("A", &main);
+    env.bunko_layer("A/V1.hayai-nova.mokuro");
+    assert_eq!(env.judge("A/V1.cbz"), Verdict::Edited);
+    assert_eq!(env.up().census()["edited"], 1);
+    let err = env.upgrade_generated("A/V1.cbz", HAYAI).unwrap_err();
+    assert!(err.contains("no longer needs an upgrade"), "{err}");
+    let err = env
+        .up()
+        .direct_replace(&env.lib("A/V1.cbz"), &env.lib("A/V1.hayai-nova.mokuro"))
+        .unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(env.lib("A/V1.mokuro")).unwrap(),
+        main
+    );
+    assert_eq!(
+        sidecars(&env.lib("A")),
+        ["V1.hayai-nova.mokuro", "V1.mokuro"],
+        "nothing preserved"
+    );
+
+    env.volume_on_disk("B", LEGACY);
+    std::fs::write(env.lib("B/V1.hayai-nova.mokuro"), sealed_then_edited(HAYAI)).unwrap();
+    env.row("B/V1.hayai-nova.mokuro", "hayai-nova", "ppocr-manga");
+    assert_eq!(env.judge("B/V1.cbz"), Verdict::NeedsOcr);
+}

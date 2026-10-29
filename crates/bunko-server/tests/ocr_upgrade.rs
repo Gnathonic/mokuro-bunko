@@ -329,3 +329,184 @@ fn a_layer_an_earlier_beta_kept_goes_once_the_volume_is_upgraded() {
         ["V1.mokuro", "V1.pre-upgrade.mokuro"]
     );
 }
+
+/// The harness's upgrade census, configured like the scheduler's.
+fn upgrade_of(h: &H) -> Arc<bunko_server::ocr::upgrade::Upgrade> {
+    h.s.deps.upgrade.clone().expect("an upgrade census")
+}
+
+fn judge(h: &H, rel: &str) -> bunko_server::ocr::upgrade::Verdict {
+    upgrade_of(h).judge(&h.library().join(rel), rel).1
+}
+
+/// HAYAI at `revision`.
+fn hayai_at(revision: u32) -> String {
+    HAYAI.replace(
+        r#""id":"hayai-nova","#,
+        &format!(r#""id":"hayai-nova","revision":{revision},"#),
+    )
+}
+
+/// A revision bump outdates the primary engine's own output even when its family is not
+/// listed under `replace`: Bunko's sealed main is queued and replaced with no copy.
+/// Off, nothing is outdated.
+#[test]
+fn a_revision_bump_upgrades_bunkos_sealed_main_with_no_copy() {
+    use bunko_server::ocr::upgrade::Verdict;
+    let on = UpgradeConfig {
+        enabled: true,
+        replace: vec![],
+    };
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(on.clone()));
+    h.add("A/V1.cbz", 3);
+    h.bunko_wrote("A/V1.mokuro", HAYAI, &primary());
+    let up = upgrade_of(&h);
+    assert_eq!(judge(&h, "A/V1.cbz"), Verdict::Current);
+    up.set_engine_revision("hayai-nova", 2);
+    assert_eq!(judge(&h, "A/V1.cbz"), Verdict::NeedsOcr);
+    let off = UpgradeConfig {
+        enabled: false,
+        ..on.clone()
+    };
+    up.configure(&off, &[primary()]);
+    assert_eq!(judge(&h, "A/V1.cbz"), Verdict::Current);
+    up.configure(&on, &[primary()]);
+    h.at(0.0);
+    assert!(h.s.owed.volumes["A/V1.cbz"].upgrade);
+    let out = h.dir.path().join("result.mokuro");
+    std::fs::write(&out, sealed(&hayai_at(2))).unwrap();
+    let lib = h.library();
+    up.swap(&lib.join("A/V1.cbz"), &out, "generated").unwrap();
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.mokuro"],
+        "no pre-upgrade copy"
+    );
+    assert_eq!(json(&lib.join("A/V1.mokuro"))["ocr_engine"]["revision"], 2);
+    assert_eq!(judge(&h, "A/V1.cbz"), Verdict::Current);
+}
+
+/// 0.7.3's main sidecars carry a block with no revision and no seal: revision 1, current
+/// against today's registry, so upgrading to 0.8 re-runs nothing.
+#[test]
+fn a_0_7_main_without_revision_or_seal_is_current() {
+    use bunko_server::ocr::upgrade::Verdict;
+    let mut h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    h.add("A/V1.cbz", 3);
+    std::fs::write(h.library().join("A/V1.mokuro"), HAYAI).unwrap();
+    assert_eq!(judge(&h, "A/V1.cbz"), Verdict::Current);
+    h.at(0.0);
+    assert!(!h.s.owed.volumes.contains_key("A/V1.cbz"));
+}
+
+/// A reader renamed the volume: new title, volume and chars, pretty-printed, the block
+/// carried verbatim. Still current and still sealed, so a later revision bump replaces
+/// it with no copy.
+#[test]
+fn a_reader_renamed_main_keeps_its_seal_and_recipe() {
+    use bunko_server::ocr::upgrade::Verdict;
+    let h = harness_db(vec![primary()], Arc::new(FileFacts), Some(enabled()));
+    h.add("B/V2.cbz", 3);
+    let mut v: serde_json::Value = serde_json::from_str(&sealed(HAYAI)).unwrap();
+    v["title"] = "B".into();
+    v["volume"] = "V2".into();
+    v["chars"] = 1234.into();
+    let renamed = serde_json::to_string_pretty(&v).unwrap();
+    std::fs::write(h.library().join("B/V2.mokuro"), &renamed).unwrap();
+    assert!(bunko_layout::seal::is_sealed(renamed.as_bytes()));
+    assert_eq!(judge(&h, "B/V2.cbz"), Verdict::Current);
+    upgrade_of(&h).set_engine_revision("hayai-nova", 2);
+    assert_eq!(judge(&h, "B/V2.cbz"), Verdict::NeedsOcr);
+    let out = h.dir.path().join("result.mokuro");
+    std::fs::write(&out, sealed(&hayai_at(2))).unwrap();
+    let lib = h.library();
+    upgrade_of(&h)
+        .swap(&lib.join("B/V2.cbz"), &out, "generated")
+        .unwrap();
+    assert_eq!(
+        sidecars(&lib.join("B")),
+        ["V2.mokuro"],
+        "no pre-upgrade copy"
+    );
+}
+
+/// Critique C10: with upgrades on, a generation layer Bunko wrote (sealed, its row's
+/// engine) at a lower revision than the engine's is owed again, and the new result
+/// replaces it in place. A layer that is not Bunko's own (unsealed, edited) is never
+/// owed: the result could only be discarded, round after round. Off: nothing is owed.
+#[test]
+fn a_stale_generation_layer_is_run_again_and_replaced_in_place() {
+    let main = sealed(&hayai_at(2));
+    let stale = sealed(&hayai_at(1).replace(
+        r#""patch_budget":512"#,
+        r#""patch_budget":512,"generation":"fast""#,
+    ));
+    let on = UpgradeConfig {
+        enabled: true,
+        replace: vec![],
+    };
+    let rows = vec![primary(), layer("g-2", "fast")];
+    // Off: the layer is done.
+    let mut off = harness_db(rows.clone(), Arc::new(FileFacts), None);
+    off.add("A/V1.cbz", 3);
+    std::fs::write(off.library().join("A/V1.mokuro"), &main).unwrap();
+    std::fs::write(off.library().join("A/V1.fast.mokuro"), &stale).unwrap();
+    off.at(0.0);
+    assert!(!off.s.owed.volumes.contains_key("A/V1.cbz"));
+
+    let mut h = harness_db(rows.clone(), Arc::new(FileFacts), Some(on));
+    h.add("A/V1.cbz", 3);
+    let lib = h.library();
+    std::fs::write(lib.join("A/V1.mokuro"), &main).unwrap();
+    // Not Bunko's own: never owed. Each check is a fresh walk (one per poll interval).
+    let mut t = 0.0;
+    for theirs in [
+        hayai_at(1),
+        serde_json::to_string(&{
+            let mut v: serde_json::Value = serde_json::from_str(&stale).unwrap();
+            v["edited"] = serde_json::json!({"by": "mokuro-reader"});
+            v
+        })
+        .unwrap(),
+    ] {
+        std::fs::write(lib.join("A/V1.fast.mokuro"), &theirs).unwrap();
+        upgrade_of(&h).set_engine_revision("hayai-nova", 2);
+        h.at(t);
+        t += 31.0;
+        assert!(!h.s.owed.volumes.contains_key("A/V1.cbz"), "{theirs}");
+    }
+    std::fs::write(lib.join("A/V1.fast.mokuro"), &stale).unwrap();
+    h.at(t);
+    assert_eq!(
+        h.s.owed.volumes["A/V1.cbz"].rows,
+        [Arc::<str>::from("g-2")],
+        "the stale layer is owed, not the main"
+    );
+    let mut p = h.connect("box", 1);
+    let ops = p.drain();
+    let sid = opened(&ops)[0].clone();
+    let (_, claim, _) = volumes(&ops)[0].clone();
+    let name = ops
+        .iter()
+        .find_map(|o| match o {
+            Op::Volume(v) => Some(v.sidecar_name.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(name, "V1.fast.mokuro");
+    h.event(&p, ready(&sid));
+    h.event(&p, started(&sid, &claim, 3));
+    h.done_with(&p, &sid, &claim, &name, 3, 1.0, hayai_at(2).as_bytes());
+    assert_eq!(
+        sidecars(&lib.join("A")),
+        ["V1.fast.mokuro", "V1.mokuro"],
+        "replaced in place, no _1"
+    );
+    assert_eq!(
+        json(&lib.join("A/V1.fast.mokuro"))["ocr_engine"]["revision"],
+        2
+    );
+    assert!(h.s.failures.is_empty());
+    h.at(t + 31.0);
+    assert!(!h.s.owed.volumes.contains_key("A/V1.cbz"), "current now");
+}

@@ -101,6 +101,14 @@
   engine they run, and one with an older revision than the library's is offered none of
   that engine's work (the log and the queue say so) until it is updated; processors from
   0.7 count as revision 1.
+- **A raised engine revision upgrades that engine's OCR; an EDITED file is never
+  replaced.** With the generation upgrade on, a main OCR file of the primary's own
+  recipe at an older revision is upgraded even if its family is not listed (Bunko's
+  sealed file is replaced with no copy), and so is a generation layer Bunko wrote at
+  an older revision, in place. A file Mokuro Reader marked edited (an `edited` block)
+  is never replaced or preserved, whatever stamp or seal it carries, and never used as
+  the new main file; the admin page counts these. A `pre-upgrade` keepsake is never
+  read as a recipe.
 - **OCR never writes `<Volume>_1.mokuro` beside a file already there.** When a
   `.mokuro` arrives at the destination while its OCR runs (a reader renaming a volume,
   a person's upload), that file stays and the result is discarded (audited, not a

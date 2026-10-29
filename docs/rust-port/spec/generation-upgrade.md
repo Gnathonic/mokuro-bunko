@@ -96,11 +96,15 @@ pins).
 
 A volume is an **upgrade candidate** when all of the following hold:
 
-1. **Policy.** `ocr.upgrade.enabled` is true, and the bare file's recipe
-   *family* is in `ocr.upgrade.replace`. The family is the engine id, or
-   `mokuro-legacy`. Listing the primary's own engine means "re-run when the
+1. **Policy.** `ocr.upgrade.enabled` is true, and either the bare file's
+   recipe *family* is in `ocr.upgrade.replace`, or (0.8) the file carries the
+   primary's own recipe at a lower `ocr_engine.revision` than the engine's
+   current one (`bunko_layout::sidecar::ENGINE_REVISIONS`; an absent revision
+   reads as 1, so no 0.7 file is outdated by it). The family is the engine id,
+   or `mokuro-legacy`. Listing the primary's own engine means "re-run when the
    pins change".
-2. **Different recipe.** The bare file's recipe differs from the target.
+2. **Different recipe.** The bare file's recipe differs from the target, or
+   matches it at a lower revision.
 3. **Whole archive.** `pages_short(cbz) == 0`. This is the existing
    missing-pages cross-check, so the old file names no page the archive lacks.
    Regenerating from a short archive would lose OCR for those pages, so such
@@ -116,8 +120,22 @@ A volume is an **upgrade candidate** when all of the following hold:
    proven to be Bunko's own bytes is kept as a `pre-upgrade` layer before it is
    replaced.
 
-   A file whose recipe is **unknown** (neither `ocr_engine` nor `version`) is
-   never upgraded, whatever the policy.
+   A file whose recipe is **unknown** (neither `ocr_engine` nor `version`, or a
+   `preserved` keepsake) is never upgraded, whatever the policy.
+5. **EDITED is never replaced (0.8).** A bare file with an `edited` block (a
+   reader's mark: `{by, at, base_sha256, base_seal}`) is family `edited`,
+   verdict `Edited`: never swapped, never preserved, counted by the census,
+   whatever its stamp or seal. Provenance precedence: `edited`, then
+   `preserved`, then an `ocr_engine` with a string id, then a top-level
+   `version`. A layer with an `edited` block is never a direct-replace
+   source either.
+
+**Generation layers (0.8, critique C10).** With upgrades on, a non-primary
+row's layer that is Bunko's own output of the row's engine (sealed, no
+`edited`) at a lower revision than the engine's is owed again although the
+file exists; its result replaces the file in place (the collector's
+reconcile). A layer that is not Bunko's own is never owed this way: its
+result would only be discarded.
 
 ```yaml
 ocr:
@@ -273,7 +291,8 @@ section showing:
 - counts for:
   - **ready to replace** — direct replace available;
   - **needs OCR**;
-  - **skipped (missing pages)**.
+  - **skipped (missing pages)**;
+  - **edited** (0.8: never replaced; `edited` is not a family to check).
 
 The census is computed on the watcher's scan and cached against each bare
 file's stat, so it does not re-read unchanged files.

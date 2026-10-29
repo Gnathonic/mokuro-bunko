@@ -1258,7 +1258,8 @@ function renderUpgrade() {
     const families = Object.assign({}, c.families || {});
     replace.forEach((f) => { if (!(f in families)) families[f] = 0; });
     document.getElementById('upgrade-families').innerHTML = Object.keys(families)
-        .filter((f) => f !== 'unknown')
+        // Neither is a recipe to choose: unknown files and EDITED ones are never replaced.
+        .filter((f) => f !== 'unknown' && f !== 'edited')
         .map((f) => '<label class="check"><input type="checkbox" data-family="' + escapeHtml(f) + '"' +
             (replace.includes(f) ? ' checked' : '') + '> ' + escapeHtml(f) + ' <span class="upgrade-n">' +
             families[f].toLocaleString() + '</span></label>').join('') +
@@ -1266,7 +1267,8 @@ function renderUpgrade() {
             ' (never upgraded)</span>' : '');
     document.getElementById('upgrade-counts').textContent = c.enabled
         ? 'Ready to replace ' + c.ready + ' · needs OCR ' + c.needs_ocr +
-          ' · skipped (missing pages) ' + c.skipped_missing_pages
+          ' · skipped (missing pages) ' + c.skipped_missing_pages +
+          ' · edited (never replaced) ' + (c.edited || 0)
         : 'Counts appear once upgrading is enabled and saved.';
 }
 
