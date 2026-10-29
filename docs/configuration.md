@@ -1529,6 +1529,8 @@ under a sub-path. The proxy strips the prefix, so Bunko sees `/catalog/` for
 - every URL the pages and scripts use is relative to it
 - redirects are relative too (`/` answers `302 setup` or `302 catalog/`)
 
+The catalog's "open in reader" links are absolute URLs under the mount root.
+
 Redirect the bare prefix to the prefix with a slash, so the pages' relative URLs
 resolve under the mount:
 

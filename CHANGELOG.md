@@ -110,6 +110,10 @@
   mount root, and its URLs and redirects are relative. The setup session cookie no
   longer names `Path=/setup`. See
   [configuration](docs/configuration.md#under-a-sub-path-httpsexamplecombunko).
+- **Catalog links open the volume with its cover.** "Open in reader" passed the cover
+  as a bare library path, which the reader fetched from its own site. The cover, the
+  archive and the manifest are now absolute URLs under the server's mount, a sub-path
+  included.
 - **A `.mokuro` or `series.json` saved with a byte-order mark is read.** Mokuro Reader
   accepts OCR files that start with a UTF-8 byte-order mark (some Windows editors add
   one); Bunko took them for unreadable, so it left their pages and characters out of
