@@ -26,7 +26,7 @@ pub const PER_USER_FILES: [&str; 4] = [
     "positions.json",
 ];
 
-/// The reading-history tree (0.8): one sub-folder per device, files inside it.
+/// The reading-history tree (0.7.8): one sub-folder per device, files inside it.
 pub const HISTORY_DIR: &str = "history";
 pub const PER_USER_DIRS: [&str; 1] = [HISTORY_DIR];
 

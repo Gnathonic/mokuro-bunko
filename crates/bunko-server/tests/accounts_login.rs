@@ -56,16 +56,26 @@ async fn me_valid_creds_returns_identity_and_permissions() {
     assert!(text.contains(r#""permissions":{"canWriteProgress":true,"canAddFiles":false,"canModifyDelete":false,"metadata":{"scope":"none"}}"#));
     assert_eq!(r.header("content-type"), Some("application/json"));
     assert!(r.header("www-authenticate").is_none());
-    // The root files this server keeps per account: the reader reads and
-    // writes positions.json only when it is listed here.
+    // What this server keeps per account: the reader reads and writes
+    // positions.json, and its history/ tree, only when they are listed here.
     assert_eq!(
         b["per_user_files"],
         json!([
             "volume-data.json",
             "profiles.json",
             "goals.json",
-            "positions.json"
+            "positions.json",
+            "history/"
         ])
+    );
+    // The running version, last: reading history is per account from 0.7.8 on.
+    assert_eq!(b["version"], bunko_core::VERSION);
+    assert!(
+        text.ends_with(&format!(
+            r#""per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"],"version":"{}"}}"#,
+            bunko_core::VERSION
+        )),
+        "{text}"
     );
 }
 
@@ -148,10 +158,19 @@ async fn me_failures_and_anonymous() {
         "authenticated": false,
         "role": "anonymous",
         "permissions": {"canWriteProgress": false, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}},
-        "per_user_files": ["volume-data.json", "profiles.json", "goals.json", "positions.json"],
+        "per_user_files": ["volume-data.json", "profiles.json", "goals.json", "positions.json", "history/"],
+        "version": bunko_core::VERSION,
     });
     let r = me(&env, None).await;
     assert_eq!((r.status, r.json()), (200, anon.clone()));
+    assert!(
+        r.text().ends_with(&format!(
+            r#""history/"],"version":"{}"}}"#,
+            bunko_core::VERSION
+        )),
+        "{}",
+        r.text()
+    );
     let r = me(&env, Some("Negotiate xyz")).await;
     assert_eq!((r.status, r.json()), (200, anon));
     let r = me(&env, Some("Bearer xyz")).await;
