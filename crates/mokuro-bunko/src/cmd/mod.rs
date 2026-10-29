@@ -12,6 +12,8 @@ pub mod library;
 pub mod models;
 #[cfg(feature = "ocr")]
 pub mod processor;
+#[cfg(feature = "testing")]
+pub mod processor_fake;
 pub mod serve;
 pub mod setup;
 pub mod ssl;

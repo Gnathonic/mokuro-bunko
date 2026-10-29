@@ -213,6 +213,16 @@ does.
   `MOKURO_TEST_CLOUD_TOKEN_URL_{GOOGLE,MICROSOFT}` point the stores and the connect
   probe at cloudsim in a build with the `testing` feature (`mokuro-bunko` has one); a
   build without it refuses to start while one is set, naming it.
+- **A processor with no models.** The same `testing` build has a hidden
+  `mokuro-bunko processor-fake --url URL --username U --password P --storage DIR`
+  (password also from `MOKURO_FAKE_PROCESSOR_PASSWORD`): it logs in, registers and
+  holds its socket as `processor serve` does, over `bunko-processor`'s `FakePipeline`
+  (one blank page per image), so the lite build the rig runs can OCR. `--engine ID`
+  (repeatable; default every engine the build knows), `--page-delay-ms`,
+  `--load-delay-ms` and `--max-sessions` shape it; `--hold-file PATH` holds each
+  volume after it starts until the file exists (a rename during OCR, deterministic);
+  `--engine-revision N` writes `revision: N` into its sidecars' `ocr_engine` block,
+  right after the id (upgrade scenarios). A build without `testing` has no such command.
 - **The reader** runs its real providers against the binary when `CLOUDSIM_URL` is set
   (`src/lib/interop/cloudsim/`, one file at a time; its CI job `interop` builds the
   simulator from Bunko and sets `REQUIRE_CLOUDSIM=1`, so the suites fail rather than

@@ -3019,6 +3019,7 @@ dependencies = [
  "windows",
  "windows-sys 0.60.2",
  "x509-parser",
+ "zip 2.4.2",
 ]
 
 [[package]]

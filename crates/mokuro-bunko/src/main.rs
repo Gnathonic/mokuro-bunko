@@ -138,6 +138,8 @@ fn run(cli: Cli) -> out::CmdResult {
         Command::Gui(args) => cmd::gui::run(&ctx, args),
         #[cfg(feature = "tray")]
         Command::Tray(args) => cmd::tray::run(&ctx, args),
+        #[cfg(feature = "testing")]
+        Command::ProcessorFake(args) => cmd::processor_fake::run(&ctx, args),
     }
 }
 

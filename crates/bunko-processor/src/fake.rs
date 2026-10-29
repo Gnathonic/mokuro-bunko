@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -54,6 +54,14 @@ pub struct FakeConfig {
     /// While set, a volume waits before its last page (until cleared or cancelled): a
     /// test can act on a volume that is certainly still running, however slow the host.
     pub hold: Option<Arc<AtomicBool>>,
+    /// Each volume, once started, waits until this file exists (or it is cancelled): a
+    /// test in another process holds a volume mid-OCR, as `processor-fake --hold-file`
+    /// does for the interop rig's "rename during OCR".
+    pub hold_file: Option<PathBuf>,
+    /// The `revision` the sidecar's `ocr_engine` block carries (none: no key, which
+    /// counts as revision 1), for upgrade scenarios: the same engine at a higher
+    /// revision replaces older output.
+    pub engine_revision: Option<u32>,
 }
 
 /// The fake engine. Cheap to clone (clones share their counters).
@@ -364,6 +372,16 @@ impl VolumeRunner for FakeRunner {
                 meta.stem
             )));
         }
+        if let Some(file) = &config.hold_file {
+            while !file.exists() {
+                if cancel.is_cancelled() {
+                    return Err(RunError::Cancelled);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // The page schedule starts after the wait, not before it.
+            pacer = Pacer::start(Duration::ZERO);
+        }
         let total = names.len() as u32;
         let mut out_pages = Vec::new();
         for (i, name) in names.iter().enumerate() {
@@ -398,13 +416,19 @@ impl VolumeRunner for FakeRunner {
             *self.behind.lock() += pacer.behind();
             return Err(RunError::Volume("every page failed".to_string()));
         }
+        let mut engine = json!({"id": self.engine});
+        if let Some(revision) = config.engine_revision {
+            engine["revision"] = json!(revision);
+        }
+        engine["generator"] = json!("mokuro-bunko");
+        engine["precision"] = json!(self.precision);
         let sidecar = json!({
             "version": "0.2.5",
             "title": meta.title,
             "title_uuid": meta.title_uuid,
             "volume": meta.volume,
             "volume_uuid": meta.volume_uuid,
-            "ocr_engine": {"id": self.engine, "generator": "mokuro-bunko", "precision": self.precision},
+            "ocr_engine": engine,
             "pages": out_pages,
         });
         let tmp = out.with_file_name(format!(

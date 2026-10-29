@@ -108,6 +108,52 @@ pub enum Command {
     /// desktop.)
     #[cfg(feature = "tray")]
     Tray(TrayArgs),
+    /// Testing build: a remote OCR processor with no models, for the interop rig.
+    #[cfg(feature = "testing")]
+    #[command(name = "processor-fake", hide = true)]
+    ProcessorFake(ProcessorFakeArgs),
+}
+
+/// `processor-fake` options: the library and account, then what the fake does.
+#[cfg(feature = "testing")]
+#[derive(Args, Debug)]
+pub struct ProcessorFakeArgs {
+    /// The library's address
+    #[arg(long)]
+    pub url: String,
+    /// A processor account on that library
+    #[arg(long)]
+    pub username: String,
+    /// The account's password
+    #[arg(long, env = "MOKURO_FAKE_PROCESSOR_PASSWORD")]
+    pub password: String,
+    /// How the library shows this processor
+    #[arg(long, default_value = "processor-fake")]
+    pub name: String,
+    /// The processor's storage (its lock, spool, workspaces and status file)
+    #[arg(long, value_name = "DIR")]
+    pub storage: PathBuf,
+    /// An engine it claims to run (repeatable)  [default: every engine this build knows]
+    #[arg(long = "engine", value_name = "ID")]
+    pub engines: Vec<String>,
+    /// Each volume, once started, waits until this file exists
+    #[arg(long, value_name = "PATH")]
+    pub hold_file: Option<PathBuf>,
+    /// The `revision` its sidecars' `ocr_engine` block carries  [default: none]
+    #[arg(long, value_name = "N")]
+    pub engine_revision: Option<u32>,
+    /// Time per page, in milliseconds
+    #[arg(long, default_value_t = 0, value_name = "MS")]
+    pub page_delay_ms: u64,
+    /// Model "load" time, in milliseconds
+    #[arg(long, default_value_t = 0, value_name = "MS")]
+    pub load_delay_ms: u64,
+    /// Sessions it takes at once
+    #[arg(long, default_value_t = 1)]
+    pub max_sessions: u32,
+    /// Log every op and event
+    #[arg(short = 'v', long)]
+    pub verbose: bool,
 }
 
 /// `tray` options.
