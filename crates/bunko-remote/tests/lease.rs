@@ -139,6 +139,7 @@ fn foreign(id: &str, epoch: u64, now_ms: i64) -> Marker {
         ocr: true,
         queue: None,
         took_over_from: None,
+        per_user_files: vec![],
     }
 }
 
@@ -590,4 +591,36 @@ async fn a_twin_that_resumed_our_marker_makes_us_step_down() {
     let fresh = env.fresh().await;
     assert_eq!(fresh.len(), 1, "{fresh:?}");
     assert_eq!(fresh[0].boot_id, "boot-twin");
+}
+
+/// The marker names the files this Bunko keeps per account (0.8: the reader's history
+/// gate), last in the file; a resume after an upgrade writes the new list.
+#[tokio::test(start_paused = true)]
+async fn the_marker_advertises_the_per_user_files() {
+    let env = Env::new(FakeBackend::drive_like()).await;
+    let store: Arc<dyn LeaseStore> = Arc::new(MemoryLeaseStore::new());
+    let mut c = cfg("aaaa", "boot-1");
+    c.per_user_files = vec!["volume-data.json".into()];
+    let mut a = env.lease(c, 0, store.clone());
+    assert_eq!(a.claim().await.unwrap(), LeaseState::Holder);
+    let (node, m) = env.markers().await.remove(0);
+    assert_eq!(m.per_user_files, ["volume-data.json"]);
+    let raw: serde_json::Value =
+        serde_json::from_slice(&env.fake.content(&node.pid).unwrap()).unwrap();
+    let keys: Vec<&String> = raw.as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys.last().map(|k| k.as_str()),
+        Some("per_user_files"),
+        "{raw}"
+    );
+    drop(a);
+
+    let mut c = cfg("aaaa", "boot-2");
+    c.last_boot_id = Some("boot-1".into());
+    c.per_user_files = vec!["volume-data.json".into(), "history/".into()];
+    let mut a2 = env.lease(c, 0, store);
+    assert_eq!(a2.claim().await.unwrap(), LeaseState::Holder);
+    let after = env.markers().await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].1.per_user_files, ["volume-data.json", "history/"]);
 }

@@ -126,6 +126,8 @@ pub struct RemoteStoreConfig {
     pub instance_name: String,
     /// `bunko_version` of the marker.
     pub bunko_version: String,
+    /// `per_user_files` of the marker (the server's `reader_tree::advertised()`).
+    pub per_user_files: Vec<String>,
     /// `ttl_s` of the marker; `None`: 900 s, 3600 s on MEGA-like providers.
     pub lease_ttl: Option<Duration>,
     /// CLAIM_LEASE's settle wait; `None`: `max(60 s, 2 × poll_idle)` (tests shorten it).
@@ -199,6 +201,7 @@ impl RemoteStoreConfig {
             lease: true,
             instance_name: "bunko".into(),
             bunko_version: env!("CARGO_PKG_VERSION").into(),
+            per_user_files: Vec::new(),
             lease_ttl: None,
             lease_settle: None,
             retry_base: Duration::from_secs(1),
@@ -1518,6 +1521,7 @@ async fn start_lease<B: Backend>(
     let home = std::fs::canonicalize(&cfg.dir).unwrap_or_else(|_| cfg.dir.clone());
     lc.home = Some(home.to_string_lossy().into_owned());
     lc.claim_settle = cfg.lease_settle;
+    lc.per_user_files = cfg.per_user_files.clone();
     let mega = core.caps.push && !core.caps.atomic_replace;
     lc.ttl = cfg
         .lease_ttl

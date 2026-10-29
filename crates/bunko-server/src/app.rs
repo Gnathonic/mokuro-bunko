@@ -448,20 +448,24 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
     (st.dav)(req, ctx).await
 }
 
-/// The WebDAV handler over `bunko-dav`, with the server's hooks.
+/// The WebDAV handler over `bunko-dav`, with the server's hooks. `core` carries the
+/// live config: who owns the cloud root's per-user files is decided from it on every
+/// request ([`Core::owns_cloud_root`]), so an admin's change needs no restart.
 pub fn dav_handler(
     dav: bunko_dav::Dav,
     hooks: Arc<crate::davhooks::ServerDavHooks>,
+    core: Core,
 ) -> DavFallback {
     let nginx_accel = std::env::var("MOKURO_NGINX_ACCEL").is_ok_and(|v| v.trim() == "1");
     Arc::new(move |req, ctx| {
         let dav = dav.clone();
         let hooks: Arc<dyn bunko_dav::DavHooks> = hooks.clone();
+        let owns_cloud_root = core.owns_cloud_root(ctx.identity.username());
         Box::pin(async move {
             let dctx = bunko_dav::DavContext {
                 username: ctx.identity.username().map(str::to_string),
                 role: ctx.identity.role(),
-                owns_cloud_root: ctx.identity.owns_cloud_root,
+                owns_cloud_root,
                 nginx_accel,
                 client_ip: Some(ctx.client_ip.clone()),
                 hooks,
@@ -974,7 +978,11 @@ pub fn assemble(services: &Services, opts: &ServeOptions) -> Router {
         core: services.core.clone(),
         ocr: Some(ocr.clone()),
     };
-    let dav = dav_handler(services.dav.clone(), services.dav_hooks.clone());
+    let dav = dav_handler(
+        services.dav.clone(),
+        services.dav_hooks.clone(),
+        services.core.clone(),
+    );
     let catalog = library.clone();
     let writes = services.writes.clone();
     let path_case = services.dav.path_case().clone();

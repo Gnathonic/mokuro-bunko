@@ -1255,6 +1255,7 @@ async fn the_check_reports_another_bunkos_lease() {
         ocr: true,
         queue: None,
         took_over_from: None,
+        per_user_files: vec![],
     };
     fake.reader_put(
         &format!("mokuro-reader/{MARKER_NAME}"),
