@@ -89,6 +89,28 @@ test.describe('a request off this machine', () => {
         expect(refusedHosts).toEqual(['example.invalid']);
         expect(stubbedUrls).toEqual(['https://apis.google.com/js/api.js', 'https://accounts.google.com/gsi/client']);
     });
+
+    // A second device in the same spec (its own browser context) is held to the same
+    // rule, and what it was refused counts against the spec.
+    test('from another device is refused and recorded on the spec, its config set first', async ({
+        anotherDevice,
+        refusedHosts,
+    }) => {
+        const other = await anotherDevice();
+        expect(await other.apiVersion()).toBe(1);
+        expect(await other.page.evaluate(() => globalThis.__mokuroInteropConfig)).toMatchObject({
+            v: 1,
+            gapiShim: true,
+        });
+        const answer = await other.page.evaluate(() =>
+            fetch('https://example.invalid/other').then(
+                () => 'answered',
+                () => 'refused',
+            ),
+        );
+        expect(answer).toBe('refused');
+        expect(refusedHosts).toEqual(['example.invalid']);
+    });
 });
 
 // A route sees requests only: a WebSocket, a preconnect or a DNS prefetch never asks

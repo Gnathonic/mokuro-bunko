@@ -117,6 +117,41 @@ export async function openReader(page, { readerUrl, needs, pendingCapsFile }) {
     );
 }
 
+/**
+ * Every request of `context` through the rule (egress.mjs), and `readerStub` (when set)
+ * served at `readerUrl`.
+ */
+async function routeContext(context, { readerUrl, readerStub, refusedHosts, stubbedUrls }) {
+    await context.route('**/*', (route) => {
+        const href = route.request().url();
+        const url = new URL(href);
+        switch (routeFor(href)) {
+            case 'continue':
+                return route.continue();
+            case 'stub':
+                stubbedUrls.push(`${url.origin}${url.pathname}`);
+                return route.fulfill({ status: 200, contentType: 'text/javascript', body: '' });
+            default:
+                refusedHosts.push(url.host);
+                return route.abort('blockedbyclient');
+        }
+    });
+    if (readerStub !== null) {
+        // Registered last, so it wins over the catch-all above.
+        await context.route(`${readerUrl}**`, (route) =>
+            route.fulfill({ status: 200, contentType: 'text/html', body: readerStub }),
+        );
+    }
+}
+
+/** `__mokuroInteropConfig` set in `context` before any page script runs. */
+async function configure(context, rig) {
+    const config = await interopConfig(rig);
+    await context.addInitScript((c) => {
+        globalThis.__mokuroInteropConfig = c;
+    }, config);
+}
+
 export const test = base.extend({
     /** Capabilities the spec needs from the reader: `test.use({ needs: [...] })`. */
     needs: [[], { option: true }],
@@ -196,31 +231,9 @@ export const test = base.extend({
                 }
             });
         } else {
-            await context.route('**/*', (route) => {
-                const href = route.request().url();
-                const url = new URL(href);
-                switch (routeFor(href)) {
-                    case 'continue':
-                        return route.continue();
-                    case 'stub':
-                        stubbedUrls.push(`${url.origin}${url.pathname}`);
-                        return route.fulfill({ status: 200, contentType: 'text/javascript', body: '' });
-                    default:
-                        refusedHosts.push(url.host);
-                        return route.abort('blockedbyclient');
-                }
-            });
+            await routeContext(context, { readerUrl, readerStub, refusedHosts, stubbedUrls });
         }
-        if (readerStub !== null) {
-            // Registered last, so it wins over the catch-all above.
-            await context.route(`${readerUrl}**`, (route) =>
-                route.fulfill({ status: 200, contentType: 'text/html', body: readerStub }),
-            );
-        }
-        const config = await interopConfig(rig);
-        await context.addInitScript((c) => {
-            globalThis.__mokuroInteropConfig = c;
-        }, config);
+        await configure(context, rig);
         await use(context);
         const errors = [];
         // A request cloudsim could not accept is a defect of whoever sent it. One
@@ -255,6 +268,48 @@ export const test = base.extend({
             });
         }
         await use(page);
+    },
+
+    /**
+     * `await anotherDevice()`: the reader on one more device in the same spec, a browser
+     * context of its own under the same rule (a host it is refused fails the spec), with
+     * its own interop config (its own Drive or OneDrive token) and signed in to nothing.
+     * Routed, so never with `preflightsReachServers`.
+     */
+    anotherDevice: async (
+        {
+            browser,
+            context,
+            rig,
+            readerUrl,
+            readerStub,
+            refusedHosts,
+            stubbedUrls,
+            needs,
+            pendingCapsFile,
+            preflightsReachServers,
+        },
+        use,
+        testInfo,
+    ) => {
+        // Set up after `context`, so torn down before it: its check sees what these were refused.
+        void context;
+        const made = [];
+        await use(async () => {
+            if (preflightsReachServers) {
+                throw new Error('anotherDevice routes its requests; preflightsReachServers has no route');
+            }
+            const { serviceWorkers, viewport } = testInfo.project.use;
+            const other = await browser.newContext({ serviceWorkers, viewport });
+            made.push(other);
+            await routeContext(other, { readerUrl, readerStub, refusedHosts, stubbedUrls });
+            await configure(other, rig);
+            const opened = await openReader(await other.newPage(), { readerUrl, needs, pendingCapsFile });
+            // The spec's own reader was gated first: it ran, so this one has the same.
+            if (opened.skip) throw new Error(`another device lacks ${opened.skip.join(', ')}`);
+            return opened.driver;
+        });
+        for (const other of made) await other.close();
     },
 
     /** The reader, loaded, its capabilities checked against `needs`. */
