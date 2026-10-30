@@ -1,7 +1,7 @@
 // The fixtures' own checks, against a stub page instead of a reader (no build, no
-// parties): `npx playwright test --config e2e/rig/playwright.config.mjs` with
-// RIG_SUITE=selftest, in interop/.
-import { test, expect } from '../fixtures.mjs';
+// parties): `npm run selftest` in interop/ (selftest/run.mjs).
+import { test, expect, openReader } from '../fixtures.mjs';
+import { createServer } from 'node:net';
 
 const STUB = `<!doctype html><title>stub</title><script>
 globalThis.__mokuroInterop = { apiVersion: 1, capabilities: ['history'] };
@@ -22,14 +22,28 @@ test.describe('a capability the reader has', () => {
     });
 });
 
-test.describe('a missing capability the pending list lacks', () => {
-    test.use({ needs: ['rig-selftest-unlisted'] });
-    // Expected to fail: the reader fixture throws before the body runs.
-    test.fail('fails the spec', async ({ reader }) => {
-        void reader;
-    });
+// openReader is what the `reader` fixture runs, called here so the test sees its
+// answer: a `test.fail` around the fixture would pass on any error at all, and on a
+// skip.
+test('a missing capability the pending list lacks fails the spec, naming it', async ({
+    page,
+    readerUrl,
+    pendingCapsFile,
+}) => {
+    const opening = openReader(page, { readerUrl, needs: ['history', 'rig-selftest-unlisted'], pendingCapsFile });
+    await expect(opening).rejects.toThrow(/^the reader lacks capability rig-selftest-unlisted \(it has: history\)/);
 });
 
+test('a missing capability the pending list names skips the spec, naming it', async ({
+    page,
+    readerUrl,
+    pendingCapsFile,
+}) => {
+    const opened = await openReader(page, { readerUrl, needs: ['history', 'rig-selftest-pending'], pendingCapsFile });
+    expect(opened).toEqual({ skip: ['rig-selftest-pending'] });
+});
+
+// The fixture's own skip; run.mjs checks it is this suite's only skipped test.
 test.describe('a missing capability the pending list names', () => {
     test.use({ needs: ['history', 'rig-selftest-pending'] });
     test('is skipped, with the capability reported', async ({ reader }) => {
@@ -67,6 +81,47 @@ test('a request off this machine is refused and recorded; the Google scripts loa
         expect(loaded, src).toBe(true);
     }
     expect(refusedHosts).toEqual(['example.invalid']);
+});
+
+// A route sees requests only: a WebSocket, a preconnect or a DNS prefetch never asks
+// it, so the browser itself must not resolve or reach any host off this machine
+// (playwright.config.mjs). `offbox.localhost` and 127.0.0.2 stand for such hosts: on
+// this machine both reach the listener below, so a connection that escapes lands where
+// the test sees it. (Preconnects need no case: this Chromium makes none, even to
+// 127.0.0.1.)
+test('a host off the loopback gets no connection, not even a WebSocket', async ({ reader, page }) => {
+    void reader;
+    const listen = (host) =>
+        new Promise((resolve, reject) => {
+            const hits = [];
+            const server = createServer((socket) => {
+                hits.push(socket.remoteAddress);
+                socket.destroy();
+            });
+            server.once('error', reject);
+            server.listen(0, host, () => resolve({ server, hits, port: server.address().port }));
+        });
+    const named = await listen('127.0.0.1');
+    const literal = await listen('127.0.0.2');
+    try {
+        for (const url of [`ws://offbox.localhost:${named.port}/`, `ws://127.0.0.2:${literal.port}/`]) {
+            const outcome = await page.evaluate(
+                (u) =>
+                    new Promise((resolve) => {
+                        const sock = new WebSocket(u);
+                        sock.onopen = () => resolve('open');
+                        sock.onclose = () => resolve('closed');
+                    }),
+                url,
+            );
+            expect(outcome, url).toBe('closed');
+        }
+        expect(named.hits).toEqual([]);
+        expect(literal.hits).toEqual([]);
+    } finally {
+        named.server.close();
+        literal.server.close();
+    }
 });
 
 test.describe('a stale pending entry', () => {

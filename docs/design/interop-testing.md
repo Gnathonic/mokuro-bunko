@@ -209,7 +209,8 @@ does.
   MEGA's error codes are knobs); `POST knobs {provider, account, <knob>: value}`;
   `GET`/`DELETE log` (`[{seq, provider, account, method, path, class, units, bytes_in,
   bytes_out, status}]`, `units` 1 per Drive request; MEGA entries add `error`, the code
-  answered in the 200 body); `GET`/`DELETE violations`;
+  answered in the 200 body); `GET`/`DELETE violations` (`DELETE` answers the ones it
+  cleared, so taking them is one call);
   `POST reset`. The crate's README has the knob list and a curl session.
 - **Violations, not panics.** A request the simulator cannot accept (an unmodelled Drive
   `q`, a malformed body, an unknown endpoint, an unmodelled MEGA command) is a 4xx in the
@@ -289,11 +290,13 @@ shaped profiles (§8.2).
 [--bin B] [--cloudsim-bin C] [--reader-dir D | --reader-ref SHA] [--grep G] [--headed]
 [--keep]`. Suites and providers expand to the pairs that apply (`dav` and `api` on
 `local`, the others on `google`, `microsoft`, `mega` and `rclone`; `all` for either).
-`--bin` must be a testing build (checked through `processor-fake --help`). Each pair
+`--bin` must be a testing build (checked through `processor-fake --help`). `--grep`
+keeps the scenarios and specs whose name contains G, as plain case-sensitive text in
+every suite (Playwright gets it escaped, inside `/…/`, with `--pass-with-no-tests`). Each pair
 writes `target/interop/rig/<suite>-<provider>.json` (scenarios with outcome, time and
 the reason for a failure or skip) and copies every party's log to
 `target/interop/rig/logs/<suite>-<provider>/`; its work folder is kept on failure or
-with `--keep`. cloudsim's violations are read after every scenario and fail it.
+with `--keep`. cloudsim's violations are taken after every scenario and fail it.
 rclone is `v1.75.2`, downloaded into `target/interop/tools` and checked against its
 pinned sha256 and size per OS before use (`rig/rclone.rs`); it serves with
 `--allow-origin <reader origin>` for the browser suites; `--rclone-bin` takes an
@@ -308,8 +311,10 @@ With neither a `reader.ref` nor `--reader-dir`, the rig stops, naming both. It r
 `npx vite build --mode interop`, cached by the commit, a hash of a `--reader-dir`'s
 uncommitted changes and the `package-lock.json` hash; the cache's stamp also records the
 build output's file list, so another build in the same checkout forces a rebuild. It is
-served once per run by `npx vite preview --mode interop --host 127.0.0.1 --port P
---strictPort`, P picked by the rig before rclone starts (rclone's CORS origin names it).
+served once per run by `vite preview --mode interop --host 127.0.0.1 --port P
+--strictPort`, P picked by the rig before rclone starts (rclone's CORS origin names it);
+`node` runs the checkout's own vite directly, in the rig's process group, so Ctrl-C stops
+it with every other party.
 Each suite and provider then gets its own parties: `dav` and `api` a server on a local
 library; `bridge` and `shared` a server on the cloud (cloudsim or rclone) holding its
 lease; `direct` the cloud alone. Every server has the accounts `alice` (editor), `bob`
@@ -322,15 +327,19 @@ them (unset when the suite has no such party), plus `RIG_CONTEXT` (JSON: the sha
 cloud account, its MEGA or WebDAV sign-in, the seeded library). The fixtures
 (`interop/e2e/rig/fixtures.mjs`) refuse every request off this machine except
 `apis.google.com/js/api.js` and `accounts.google.com/gsi/client`, which load as empty
-scripts, and record the refused hosts (`refused_hosts` in the results); block service
-workers, whose fetches would bypass the route; set `__mokuroInteropConfig` v1 (cloudsim's
+scripts, and record the refused hosts (`refused_hosts` in the results); start Chromium
+resolving no host but `127.0.0.1`, `localhost` and `::1` (IP literals included), so what
+the route never sees — a WebSocket, a preconnect, a DNS prefetch — cannot leave either;
+block service workers, whose fetches would bypass the route; set `__mokuroInteropConfig` v1 (cloudsim's
 bases, a Drive or OneDrive token from `/_sim/token`, `gapiShim: true`) before any page
-script; wait for `__mokuroInterop.apiVersion === 1`; fail a spec on cloudsim violations
-it caused; and gate capabilities: a spec declares `test.use({ needs: [...] })`, and a
+script; wait for `__mokuroInterop.apiVersion === 1`; fail a spec on the cloudsim violations
+recorded while it ran (those recorded before it started fail on their own, as
+`cloudsim violations before <spec>`); and gate capabilities: a spec declares `test.use({ needs: [...] })`, and a
 capability the driver does not list FAILS the spec unless `interop/pending-reader-caps.txt`
 lists it (one per line, `#` comments), in which case the spec is skipped and reported
-with that capability. `npm run selftest` in `interop/` checks the gate and the route
-against a stub page, no reader needed. Results: `target/interop/rig/<suite>-<provider>.json`
+with that capability. `npm run selftest` in `interop/` checks the gate, the route and the
+resolver against a stub page, no reader needed, and fails if any spec but the one meant
+to skip is skipped. Results: `target/interop/rig/<suite>-<provider>.json`
 carries `suite`, `provider`, `bunko_sha`, `reader_sha` (`-dirty` for a changed
 `--reader-dir`), `passed`, `failed`, `skipped: [{spec, capability}]`, `duration_ms`
 and `pending_caps`, with Playwright's JUnit XML beside it and the parties' logs (the

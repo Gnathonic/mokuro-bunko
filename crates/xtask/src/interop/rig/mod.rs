@@ -43,7 +43,9 @@ pub struct RigArgs {
     /// The browser suites: the reader commit to fetch (default: interop/reader.ref).
     #[arg(long)]
     reader_ref: Option<String>,
-    /// Only the scenarios (and specs) whose name contains this.
+    /// Only the scenarios (and specs) whose name contains this, as plain text and
+    /// case-sensitive (a spec's name, to Playwright, is its file and titles joined by
+    /// spaces). A suite with no match passes with no scenarios.
     #[arg(long)]
     grep: Option<String>,
     /// The browser suites: show the browser.

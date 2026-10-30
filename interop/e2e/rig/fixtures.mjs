@@ -17,6 +17,7 @@ import { test as base, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { gateCapabilities, parsePendingCaps } from './caps.mjs';
 import { driver } from './driver.mjs';
+import { takeViolations } from './violations.mjs';
 
 export { expect };
 
@@ -90,6 +91,36 @@ async function interopConfig(rig) {
     return config;
 }
 
+/**
+ * What the `reader` fixture does, apart so the self-test sees its answer: load the
+ * reader, wait for its v1 driver, and gate `needs` (caps.mjs). `{ driver }` when the
+ * spec runs, `{ skip: [caps] }` when every missing capability is pending; throws when
+ * one is missing that the pending list lacks.
+ */
+export async function openReader(page, { readerUrl, needs, pendingCapsFile }) {
+    if (!readerUrl) throw new Error('READER_URL is not set: run the suite through `cargo xtask interop rig`');
+    // Read first: a broken pending list fails every spec, never skips one.
+    const pending = parsePendingCaps(readFileSync(pendingCapsFile, 'utf8'));
+    await page.goto(readerUrl);
+    try {
+        await page.waitForFunction(() => globalThis.__mokuroInterop !== undefined, null, { timeout: 60_000 });
+    } catch {
+        throw new Error(
+            `no __mokuroInterop at ${readerUrl}: the reader must be a \`vite build --mode interop\` build with the rig driver`,
+        );
+    }
+    const api = await page.evaluate(() => globalThis.__mokuroInterop.apiVersion);
+    if (api !== 1) throw new Error(`the reader's rig driver speaks API v${api}; this rig speaks v1`);
+    const have = await page.evaluate(() => [...globalThis.__mokuroInterop.capabilities]);
+    const gate = gateCapabilities(needs, have, pending);
+    if (gate.action === 'run') return { driver: driver(page) };
+    if (gate.action === 'skip') return { skip: gate.missing };
+    throw new Error(
+        `the reader lacks capability ${gate.unlisted.join(', ')} (it has: ${have.join(', ') || 'none'}); ` +
+            'list it in interop/pending-reader-caps.txt only while interop/reader.ref predates it',
+    );
+}
+
 export const test = base.extend({
     /** Capabilities the spec needs from the reader: `test.use({ needs: [...] })`. */
     needs: [[], { option: true }],
@@ -112,7 +143,17 @@ export const test = base.extend({
     },
 
     // Playwright's context is already one per test; this one refuses the network.
-    context: async ({ context, rig, readerUrl, readerStub, refusedHosts }, use) => {
+    context: async ({ context, rig, readerUrl, readerStub, refusedHosts }, use, testInfo) => {
+        const sim = (method, path) => rig.sim(method, path);
+        // What cloudsim recorded since the last spec ended (the server's startup, its
+        // polling in between) is no spec's doing: the results fail it on its own
+        // ("cloudsim violations before <spec>", playwright.rs).
+        if (rig.cloudsimUrl) {
+            const before = await takeViolations(sim);
+            if (before.length) {
+                testInfo.annotations.push({ type: 'cloudsim-violations-between', description: JSON.stringify(before) });
+            }
+        }
         await context.route('**/*', (route) => {
             const url = new URL(route.request().url());
             if (LOCAL_HOSTS.has(url.hostname)) return route.continue();
@@ -133,44 +174,23 @@ export const test = base.extend({
             globalThis.__mokuroInteropConfig = c;
         }, config);
         await use(context);
-        // A request cloudsim could not accept is a defect of whoever sent it: it fails
-        // the spec that caused it, and only that one.
+        // A request cloudsim could not accept is a defect of whoever sent it. One
+        // recorded while the spec ran fails it, the reader's or the server's alike: the
+        // server polls cloudsim all along, so the window, not the sender, is what is
+        // known.
         if (rig.cloudsimUrl) {
-            const violations = await rig.sim('GET', 'violations');
-            if (violations?.length) {
-                await rig.sim('DELETE', 'violations');
-                throw new Error(`cloudsim violations: ${JSON.stringify(violations)}`);
-            }
+            const during = await takeViolations(sim);
+            if (during.length) throw new Error(`cloudsim violations while the spec ran: ${JSON.stringify(during)}`);
         }
     },
 
     /** The reader, loaded, its capabilities checked against `needs`. */
     reader: async ({ page, readerUrl, needs, pendingCapsFile }, use, testInfo) => {
-        if (!readerUrl) throw new Error('READER_URL is not set: run the suite through `cargo xtask interop rig`');
-        // Read first: a broken pending list fails every spec, never skips one.
-        const pending = parsePendingCaps(readFileSync(pendingCapsFile, 'utf8'));
-        await page.goto(readerUrl);
-        try {
-            await page.waitForFunction(() => globalThis.__mokuroInterop !== undefined, null, { timeout: 60_000 });
-        } catch {
-            throw new Error(
-                `no __mokuroInterop at ${readerUrl}: the reader must be a \`vite build --mode interop\` build with the rig driver`,
-            );
+        const opened = await openReader(page, { readerUrl, needs, pendingCapsFile });
+        if (opened.skip) {
+            for (const cap of opened.skip) testInfo.annotations.push({ type: 'pending-reader-cap', description: cap });
+            testInfo.skip(true, `pending reader capability: ${opened.skip.join(', ')}`);
         }
-        const api = await page.evaluate(() => globalThis.__mokuroInterop.apiVersion);
-        if (api !== 1) throw new Error(`the reader's rig driver speaks API v${api}; this rig speaks v1`);
-        const have = await page.evaluate(() => [...globalThis.__mokuroInterop.capabilities]);
-        const gate = gateCapabilities(needs, have, pending);
-        if (gate.action === 'fail') {
-            throw new Error(
-                `the reader lacks capability ${gate.unlisted.join(', ')} (it has: ${have.join(', ') || 'none'}); ` +
-                    'list it in interop/pending-reader-caps.txt only while interop/reader.ref predates it',
-            );
-        }
-        if (gate.action === 'skip') {
-            for (const cap of gate.missing) testInfo.annotations.push({ type: 'pending-reader-cap', description: cap });
-            testInfo.skip(true, `pending reader capability: ${gate.missing.join(', ')}`);
-        }
-        await use(driver(page));
+        await use(opened.driver);
     },
 });

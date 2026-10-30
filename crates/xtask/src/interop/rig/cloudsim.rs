@@ -171,8 +171,16 @@ impl Cloudsim {
             .unwrap_or_default())
     }
 
-    pub fn clear_violations(&self) -> Result<()> {
-        self.call("DELETE", "violations", None).map(|_| ())
+    /// The violations so far, cleared in the same call: a GET then a DELETE would wipe,
+    /// unseen, one recorded between them (the server polls cloudsim all along).
+    pub fn take_violations(&self) -> Result<Vec<Value>> {
+        match self.call("DELETE", "violations", None)? {
+            Value::Array(v) => Ok(v),
+            // A cloudsim older than this rig clears them and answers nothing.
+            other => bail!(
+                "cloudsim's DELETE /_sim/violations answered {other}, not the list it cleared"
+            ),
+        }
     }
 
     /// The process environment that points a testing server's stores at cloudsim

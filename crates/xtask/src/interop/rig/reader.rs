@@ -295,7 +295,6 @@ pub fn build(co: &Checkout, stamps: &Path, log: &Path) -> Result<bool> {
 /// the port the rig picked (rclone's CORS origin names it before the reader starts).
 pub fn serve_args(port: u16) -> Vec<String> {
     [
-        "vite",
         "preview",
         "--mode",
         "interop",
@@ -310,6 +309,25 @@ pub fn serve_args(port: u16) -> Vec<String> {
     .collect()
 }
 
+/// The checkout's own vite script (its package's `bin`), for `node` to run directly.
+pub fn vite_bin(dir: &Path) -> Result<PathBuf> {
+    let pkg = dir.join("node_modules/vite");
+    let manifest = pkg.join("package.json");
+    let v: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&manifest)
+            .with_context(|| format!("{} (is the reader installed?)", manifest.display()))?,
+    )
+    .with_context(|| manifest.display().to_string())?;
+    let bin = match &v["bin"] {
+        serde_json::Value::String(s) => Some(s.as_str()),
+        b => b["vite"].as_str(),
+    };
+    let Some(bin) = bin else {
+        bail!("{} names no vite bin", manifest.display());
+    };
+    Ok(pkg.join(bin))
+}
+
 /// The built reader, served.
 pub struct Preview {
     child: Child,
@@ -319,19 +337,18 @@ pub struct Preview {
 impl Preview {
     pub fn start(dir: &Path, port: u16, log: &Path) -> Result<Preview> {
         let file = std::fs::File::create(log)?;
-        let mut cmd = Command::new("npx");
-        cmd.args(serve_args(port))
+        // node runs vite itself, in the rig's process group: Ctrl-C reaches it as it
+        // reaches every other party, and the rig (which installs no signal handler)
+        // never leaves it serving. Through npx it would be a grandchild, which only a
+        // group of its own let the rig stop, and that group is what Ctrl-C missed.
+        let mut cmd = Command::new("node");
+        cmd.arg(vite_bin(dir)?)
+            .args(serve_args(port))
             .current_dir(dir)
             .stdin(Stdio::null())
             .stdout(file.try_clone()?)
             .stderr(file);
-        // npx runs vite as a child: a group of its own lets the rig stop both.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt as _;
-            cmd.process_group(0);
-        }
-        let child = cmd.spawn().context("starting npx vite preview")?;
+        let child = cmd.spawn().context("starting vite preview")?;
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let mut p = Preview {
             child,
@@ -360,27 +377,22 @@ impl Preview {
         )
     }
 
+    /// TERM, then KILL after 5 s. vite's own child (esbuild's service) exits when its
+    /// stdin, a pipe from vite, closes.
     fn stop(&mut self) {
         #[cfg(unix)]
         {
-            let group = format!("-{}", self.child.id());
-            let kill = |sig: &str| {
-                let _ = Command::new("kill")
-                    .args([sig, "--", &group])
-                    .stderr(Stdio::null())
-                    .status();
-            };
-            kill("-TERM");
+            let _ = Command::new("kill")
+                .args(["-TERM", &self.child.id().to_string()])
+                .stderr(Stdio::null())
+                .status();
             let start = Instant::now();
             while start.elapsed() < Duration::from_secs(5) {
                 if let Ok(Some(_)) = self.child.try_wait() {
-                    // npx is gone; whatever of its group is left goes too.
-                    kill("-KILL");
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            kill("-KILL");
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -562,12 +574,78 @@ mod tests {
         assert_ne!(a, stamp_path(stamps, Path::new("/r/b")));
     }
 
+    /// A checkout whose `vite` only serves 200 on `--port`.
+    fn fake_vite() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let pkg = d.path().join("node_modules/vite");
+        std::fs::create_dir_all(pkg.join("bin")).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name": "vite", "bin": {"vite": "bin/vite.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pkg.join("bin/vite.js"),
+            "const port = Number(process.argv[process.argv.indexOf('--port') + 1]);\n\
+             require('node:http').createServer((q, s) => s.end('ok')).listen(port, '127.0.0.1');\n",
+        )
+        .unwrap();
+        d
+    }
+
+    #[test]
+    fn vite_is_the_checkouts_own_bin() {
+        let d = fake_vite();
+        assert_eq!(
+            vite_bin(d.path()).unwrap(),
+            d.path().join("node_modules/vite/bin/vite.js")
+        );
+        let none = tempfile::tempdir().unwrap();
+        let err = vite_bin(none.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is the reader installed"),
+            "{err:#}"
+        );
+    }
+
+    /// The process group in a `/proc/<pid>/stat` line (the field after the state).
+    #[cfg(target_os = "linux")]
+    fn pgrp(pid: &str) -> i32 {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let rest = &stat[stat.rfind(')').unwrap() + 2..];
+        rest.split(' ').nth(2).unwrap().parse().unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_preview_stays_in_the_rigs_process_group_and_stops_with_it() {
+        let d = fake_vite();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let p = Preview::start(d.path(), port, &d.path().join("preview.log")).unwrap();
+        let pid = p.child.id().to_string();
+        // Ctrl-C signals the terminal's foreground group, and the rig has no handler to
+        // unwind with: a preview in a group of its own would keep serving after it.
+        assert_eq!(pgrp(&pid), pgrp("self"));
+        drop(p);
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "vite outlived the rig"
+        );
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+            "port {port} still served"
+        );
+    }
+
     #[test]
     fn preview_serves_the_interop_build_on_exactly_the_chosen_port() {
         assert_eq!(
             serve_args(4321),
             [
-                "vite",
                 "preview",
                 "--mode",
                 "interop",

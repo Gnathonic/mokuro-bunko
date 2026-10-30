@@ -302,10 +302,9 @@ pub fn run(paths: &Paths, p: Provider, work: &Path, grep: Option<&str>, report: 
         let mut r = step(&mut rig);
         // Whatever the step saw, a request cloudsim could not accept fails it.
         if let Some(sim) = rig.sim() {
-            match sim.violations() {
+            match sim.take_violations() {
                 Ok(v) if v.is_empty() => {}
                 Ok(v) => {
-                    let _ = sim.clear_violations();
                     let msg = format!("cloudsim violations: {}", Value::Array(v));
                     r = match r {
                         Err(e) => Err(e.context(msg)),

@@ -162,8 +162,20 @@ fn walk(suite: &Value, file: &str, titles: &[String], p: &mut Parsed) {
         path.push(spec["title"].as_str().unwrap_or_default().to_string());
         let name = format!("{file} › {}", path.join(" › "));
         for test in spec["tests"].as_array().into_iter().flatten() {
+            let mut between = Vec::new();
             p.scenarios
-                .push(scenario(&name, test, &mut p.refused_hosts));
+                .push(scenario(&name, test, &mut p.refused_hosts, &mut between));
+            // cloudsim violations recorded before the spec started are nobody's spec's:
+            // they fail on their own, named after the spec that found them.
+            for v in between {
+                p.scenarios.push(Scenario {
+                    name: format!("cloudsim violations before {name}"),
+                    outcome: Outcome::Failed,
+                    ms: 0,
+                    detail: Some(v),
+                    capability: None,
+                });
+            }
         }
     }
     for child in suite["suites"].as_array().into_iter().flatten() {
@@ -173,7 +185,12 @@ fn walk(suite: &Value, file: &str, titles: &[String], p: &mut Parsed) {
     }
 }
 
-fn scenario(name: &str, test: &Value, refused: &mut Vec<String>) -> Scenario {
+fn scenario(
+    name: &str,
+    test: &Value,
+    refused: &mut Vec<String>,
+    between: &mut Vec<String>,
+) -> Scenario {
     let results: Vec<&Value> = test["results"].as_array().into_iter().flatten().collect();
     // Annotations pushed while a test runs (the fixtures') are on its results.
     let annotations: Vec<&Value> = test["annotations"]
@@ -201,6 +218,7 @@ fn scenario(name: &str, test: &Value, refused: &mut Vec<String>) -> Scenario {
     for hosts in notes("refused-hosts") {
         refused.extend(hosts.split_whitespace().map(str::to_string));
     }
+    between.extend(notes("cloudsim-violations-between"));
     let ms = results.iter().filter_map(|r| r["duration"].as_u64()).sum();
     let error = || {
         let messages: Vec<&str> = results
@@ -269,6 +287,22 @@ pub struct Run<'a> {
     pub headed: bool,
 }
 
+/// `--grep` as the cloud suite means it: a case-sensitive substring of the spec's
+/// name. Playwright reads a bare value as a case-insensitive regex and `/…/` as one with
+/// no flags, so the value goes inside slashes, escaped. A suite it matches nothing in
+/// has no scenarios; Playwright would fail it ("No tests found").
+pub fn grep_args(grep: &str) -> [String; 3] {
+    let mut re = String::from("/");
+    for c in grep.chars() {
+        if "\\^$.|?*+()[]{}/".contains(c) {
+            re.push('\\');
+        }
+        re.push(c);
+    }
+    re.push('/');
+    ["--grep".into(), re, "--pass-with-no-tests".into()]
+}
+
 /// Run the suite's specs; the scenarios come from Playwright's JSON report. A run that
 /// exits non-zero without a failed spec in its report still fails.
 pub fn run(r: &Run) -> Result<Parsed> {
@@ -283,7 +317,7 @@ pub fn run(r: &Run) -> Result<Parsed> {
     ])
     .current_dir(r.interop);
     if let Some(g) = r.grep {
-        cmd.args(["--grep", g]);
+        cmd.args(grep_args(g));
     }
     for name in VARS {
         cmd.env_remove(name);
@@ -391,6 +425,58 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("No tests found")
+        );
+    }
+
+    #[test]
+    fn violations_recorded_between_specs_fail_on_their_own() {
+        // The fixtures take what cloudsim recorded before a spec started (the server's
+        // startup, its polling since the last spec) and annotate that spec with it.
+        let v = serde_json::json!({"suites": [{"title": "a.spec.mjs", "file": "a.spec.mjs",
+            "specs": [{"title": "t", "tests": [{"status": "expected", "annotations": [],
+                "results": [{"status": "passed", "duration": 5, "errors": [],
+                    "annotations": [{"type": "cloudsim-violations-between",
+                                     "description": "[\"drive GET /files: bad q\"]"}]}]}]}]}],
+            "errors": []});
+        let p = parse_report(&v);
+        let got: Vec<(&str, Outcome)> = p
+            .scenarios
+            .iter()
+            .map(|s| (s.name.as_str(), s.outcome))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a.spec.mjs › t", Outcome::Passed),
+                ("cloudsim violations before a.spec.mjs › t", Outcome::Failed),
+            ]
+        );
+        assert_eq!(
+            p.scenarios[1].detail.as_deref(),
+            Some("[\"drive GET /files: bad q\"]")
+        );
+    }
+
+    #[test]
+    fn grep_is_a_substring_and_a_miss_is_no_failure() {
+        // As in the cloud suite: a plain, case-sensitive substring (Playwright reads a
+        // bare --grep as a case-insensitive regex), and a suite it matches nothing in
+        // passes with no scenarios instead of failing on "No tests found".
+        assert_eq!(
+            grep_args("Vol 1 (ocr)"),
+            ["--grep", r"/Vol 1 \(ocr\)/", "--pass-with-no-tests"]
+        );
+        assert_eq!(
+            grep_args(r"/a.b\c/"),
+            ["--grep", r"/\/a\.b\\c\//", "--pass-with-no-tests"]
+        );
+        assert_eq!(
+            grep_args("^[x]{1}|y*+?$"),
+            [
+                "--grep",
+                r"/\^\[x\]\{1\}\|y\*\+\?\$/",
+                "--pass-with-no-tests"
+            ]
         );
     }
 
