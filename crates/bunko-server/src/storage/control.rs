@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bunko_core::Config;
@@ -50,6 +50,8 @@ pub struct StorageControl {
     restart_pending: AtomicBool,
     /// One Disconnect at a time.
     busy: Mutex<()>,
+    /// Physical correction files nobody owns, from the startup sweep (D27).
+    unowned_corrections: AtomicUsize,
 }
 
 impl std::fmt::Debug for StorageControl {
@@ -90,6 +92,7 @@ impl StorageControl {
             restart: Mutex::new(None),
             restart_pending: AtomicBool::new(false),
             busy: Mutex::new(()),
+            unowned_corrections: AtomicUsize::new(0),
         });
         // "Use this account's library instead": the old store's Disconnect, drained.
         let weak = Arc::downgrade(&control);
@@ -187,12 +190,43 @@ impl StorageControl {
             }),
         };
         let lib = &config.storage.library;
+        if let Some(p) = self.unowned_problem(lib)
+            && let Some(problems) = v["problems"].as_array_mut()
+        {
+            problems.push(p);
+        }
         v["connect"] = self.connector.status().as_json();
         v["restart_pending"] = json!(self.restart_pending());
         v["configured"] = configured_json(lib);
         v["serve_readers"] = json!(config.server.serve_readers);
         v["progress_user"] = json!(lib.progress_user);
         v
+    }
+
+    /// The startup sweep's count of physical correction files nobody owns (D27).
+    pub fn set_unowned_corrections(&self, n: usize) {
+        self.unowned_corrections.store(n, Ordering::SeqCst);
+    }
+
+    /// The `unowned-corrections` problem: physical correction files nobody sees. In a
+    /// cloud library they are the progress user's once one is chosen (live).
+    fn unowned_problem(&self, lib: &LibraryConfig) -> Option<Value> {
+        let n = self.unowned_corrections.load(Ordering::SeqCst);
+        let cloud = self.handle.is_some();
+        let owned = cloud && lib.progress_user.as_deref().is_some_and(|u| !u.is_empty());
+        if n == 0 || owned {
+            return None;
+        }
+        let text = match n {
+            1 => "1 correction file has no owner".to_string(),
+            n => format!("{n} correction files have no owner"),
+        };
+        let hint = if cloud {
+            "Readers that read the cloud folder directly wrote them. Pick their account in Readers, \"Reading progress linked to the cloud\": the cloud folder's progress, reading history and OCR corrections are that account's."
+        } else {
+            "They are <volume>.edit.mokuro files in the library that no account wrote through this Bunko, so nobody sees them. To give one to an account, move it to users/<account>/edits/<the same library path>. This count is taken at start."
+        };
+        Some(json!({"kind": "unowned-corrections", "severity": "warn", "text": text, "hint": hint}))
     }
 
     /// Start a sign-in. `restart_after`: restart the server once it connected (admin,

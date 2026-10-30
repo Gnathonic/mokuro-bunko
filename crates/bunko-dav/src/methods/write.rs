@@ -12,8 +12,8 @@ use serde_json::json;
 
 use super::{
     Effects, Req, audit, blocking, check_dav_locks, eval_if, file_audit_target,
-    folder_audit_target, forget_ocr_records, is_cbz, is_virtual_root, lookup, primary_leaving,
-    write_lock_conflict,
+    folder_audit_target, forget_ocr_records, is_cbz, is_virtual_root, lookup,
+    personal_audit_target, primary_leaving, write_lock_conflict,
 };
 use crate::paths::{self, PathClass};
 use crate::propfind::resource_key;
@@ -21,6 +21,7 @@ use crate::resource::{FileKind, Resource};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::{Inner, sidecars};
 use bunko_core::reader_tree::{self, HistoryShape};
+use bunko_core::sidecar_names;
 
 pub(crate) async fn delete(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     if is_virtual_root(&req.path) {
@@ -76,6 +77,12 @@ fn delete_resource(
 ) -> DavResult<()> {
     match res {
         Resource::Virtual { .. } => Ok(()),
+        Resource::File {
+            path,
+            phys,
+            kind: FileKind::Personal,
+            ..
+        } => delete_personal(inner, req, path, phys, effects),
         Resource::File { path, phys, .. } => delete_file(inner, req, path, phys, effects),
         Resource::Folder { path, phys, .. } => {
             if !fs::exists(phys) {
@@ -90,6 +97,7 @@ fn delete_resource(
                 req.ctx.hooks.forget_volume_uploads_under_prefix(&rel);
                 req.ctx.hooks.forget_ocr_sidecars_under_prefix(&rel);
                 req.ctx.hooks.forget_volume_uuids_under_prefix(&rel);
+                inner.overlays().forget_prefix(&rel);
             }
             effects.note_removed(inner, phys);
             effects.touch(path, Some(phys));
@@ -132,10 +140,35 @@ fn delete_file(
         if let Some(rel) = rel.as_deref() {
             req.ctx.hooks.forget_volume_upload(rel);
             req.ctx.hooks.forget_volume_uuid(rel);
+            // Every account's corrections of the volume go with it (the owner's
+            // physical one went with the sidecars).
+            inner.overlays().forget_volume(rel);
         }
     }
     forget_ocr_records(req, rel.as_deref(), true);
     effects.touch(vpath, Some(phys));
+    audit(req, "delete", target, None);
+    Ok(())
+}
+
+/// Delete the caller's own correction (D27): nothing else changes.
+fn delete_personal(
+    inner: &Inner,
+    req: &Req,
+    vpath: &str,
+    phys: &Path,
+    effects: &mut Effects,
+) -> DavResult<()> {
+    let target = personal_audit_target(vpath);
+    let Some(_guard) = inner.write_locks.try_lock(phys) else {
+        return Err(write_lock_conflict(req, target, "delete", None));
+    };
+    match fs::remove_file(phys) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    effects.touch_personal(inner, vpath, phys);
     audit(req, "delete", target, None);
     Ok(())
 }
@@ -177,7 +210,11 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     }
     let (inner2, req2) = (inner.clone(), req.clone());
     blocking(move || {
-        let Some((dir, kind)) = inner2.roots.member_path(&parent, &name, req2.caller()) else {
+        let Some((dir, kind)) = inner2
+            .roots
+            .member_path(&parent, &name, req2.caller())
+            .filter(|(_, kind)| *kind != FileKind::Personal)
+        else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
         // Also creates `users/<u>/` on an account's first use; a concurrent MKCOL of the
@@ -186,7 +223,9 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
         let member = paths::join_uri(parent.path(), &name);
         let target = match kind {
             FileKind::Progress => ("progress", paths::normalize(&member)),
-            FileKind::Library => folder_audit_target(&inner2, parent.path(), parent.phys()),
+            FileKind::Library | FileKind::Personal => {
+                folder_audit_target(&inner2, parent.path(), parent.phys())
+            }
         };
         audit(&req2, "mkdir", target, Some(json!({ "path": member })));
         let mut effects = Effects::default();
@@ -394,13 +433,36 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
     let (inner2, req2) = (inner.clone(), req.clone());
     let dest_exists = dest.is_some();
     let status = blocking(move || -> DavResult<StatusCode> {
-        let Some((dest_phys, _)) =
+        let Some((dest_phys, dest_kind)) =
             inner2
                 .roots
                 .destination_path(&dest_parent, &dest_name, req2.caller())
         else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
+        // A correction is the caller's own (D27): it moves or copies to another
+        // correction name only, and nothing else becomes one.
+        if (src.kind() == Some(FileKind::Personal)) != (dest_kind == FileKind::Personal) {
+            return Err(DavError::new(
+                StatusCode::FORBIDDEN,
+                "Corrections can only move between correction files.",
+            ));
+        }
+        // Stored under the one spelling a PUT takes: a plain `.mokuro` (critique C18).
+        if dest_kind == FileKind::Personal {
+            if sidecar_names::strip_suffix_ci(&dest_name, ".gz").is_some() {
+                return Err(DavError::new(
+                    StatusCode::FORBIDDEN,
+                    "Corrections are saved as plain .mokuro files.",
+                ));
+            }
+            if !dest_name.ends_with(".mokuro") {
+                return Err(DavError::new(
+                    StatusCode::CONFLICT,
+                    "A correction's name must end in .mokuro.",
+                ));
+            }
+        }
         // The virtual paths differed; the files may not (`a//x`, `a/./x`, a symlink, a
         // case-insensitive filesystem). Overwriting the source with itself deletes it. A
         // rename that only changes the case is the source on a case-insensitive filesystem
@@ -423,6 +485,30 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         }
         let mut effects = Effects::default();
         let status = match &src {
+            Resource::File {
+                path,
+                phys,
+                kind: FileKind::Personal,
+                ..
+            } => {
+                if let Some(d) = &dest {
+                    delete_resource(&inner2, &req2, d, &mut effects)?;
+                }
+                move_personal(
+                    &inner2,
+                    &req2,
+                    (path, phys),
+                    (&dest_norm, &dest_phys),
+                    is_move,
+                    &mut effects,
+                )?;
+                // A file MOVE answers 204 like the library's (WsgiDAV `handle_move`).
+                if is_move || dest_exists {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::CREATED
+                }
+            }
             Resource::File { path, phys, .. } => {
                 if is_move {
                     move_file(
@@ -554,12 +640,54 @@ fn move_file(
     effects.note_arrived(inner, dest);
     if let (Some(old), Some(new)) = (old_rel.as_deref(), new_rel.as_deref()) {
         req.ctx.hooks.rename_volume_upload(old, new);
+        // Every account's corrections follow the archive, the cloud-root owner's
+        // physical one included. The reader's own MOVE of its `<Old>.edit.mokuro`
+        // then finds it already there.
+        if is_cbz(src) {
+            let overlays = inner.overlays();
+            overlays.rename_volume(old, new);
+            overlays.rename_physical(old, new);
+        }
     }
     forget_ocr_records(req, old_rel.as_deref(), true);
     forget_ocr_records(req, new_rel.as_deref(), false);
     effects.touch(src_v, Some(src));
     effects.touch(dest_v, Some(dest));
     audit(req, "move", target, Some(json!({ "destination": dest_v })));
+    Ok(())
+}
+
+/// MOVE or COPY of the caller's own correction to another of its correction names
+/// (D27): the file only, no record of any kind.
+fn move_personal(
+    inner: &Inner,
+    req: &Req,
+    (src_v, src): (&str, &Path),
+    (dest_v, dest): (&str, &Path),
+    is_move: bool,
+    effects: &mut Effects,
+) -> DavResult<()> {
+    let target = personal_audit_target(src_v);
+    let operation = if is_move { "move" } else { "copy" };
+    let Some(_guard) = inner.write_locks.try_lock_all(&[src, dest]) else {
+        return Err(write_lock_conflict(req, target, operation, Some(dest_v)));
+    };
+    if is_move {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(src, dest)?;
+        effects.touch_personal(inner, src_v, src);
+    } else {
+        copy_one(src, dest)?;
+    }
+    effects.touch_personal(inner, dest_v, dest);
+    audit(
+        req,
+        operation,
+        target,
+        Some(json!({ "destination": dest_v })),
+    );
     Ok(())
 }
 
@@ -665,10 +793,12 @@ fn move_folder(
             req.ctx
                 .hooks
                 .rename_volume_uuids_under_prefix(old_prefix, new_prefix);
+            inner.overlays().rename_prefix(old_prefix, new_prefix);
         }
         (Some(old_prefix), None) => {
             req.ctx.hooks.forget_ocr_sidecars_under_prefix(old_prefix);
             req.ctx.hooks.forget_volume_uuids_under_prefix(old_prefix);
+            inner.overlays().forget_prefix(old_prefix);
         }
         _ => {}
     }

@@ -134,6 +134,10 @@ async fn a_case_merge_carries_the_db_rows_per_volume_and_holds_the_queue() {
         ..Default::default()
     })
     .unwrap();
+    // A bridge account's correction of the loser's volume (B3.4).
+    let overlays = e.services.core.layout.users().join("alice/edits");
+    bunko_store::fs::create_dir_all(overlays.join("kingdom")).unwrap();
+    bunko_store::fs::write(overlays.join("kingdom/Vol 2.edit.mokuro"), b"{}").unwrap();
     // While the merge moves things, the scheduler's claim check says "not now" for
     // the volume under either spelling.
     let held: Arc<Mutex<Vec<bool>>> = Arc::default();
@@ -180,6 +184,13 @@ async fn a_case_merge_carries_the_db_rows_per_volume_and_holds_the_queue() {
     for n in ["Vol 1.cbz", "Vol 2.cbz", "Vol 2.mokuro"] {
         assert!(kingdom.contains(&n.to_string()), "{kingdom:?}");
     }
+    // The account's correction follows its volume into the winning spelling.
+    assert!(bunko_store::fs::exists(
+        overlays.join("Kingdom/Vol 2.edit.mokuro")
+    ));
+    assert!(!bunko_store::fs::exists(
+        overlays.join("kingdom/Vol 2.edit.mokuro")
+    ));
     // Per volume: the owner, the OCR row and the volume id follow the archive.
     assert_eq!(
         db.get_volume_owner("Kingdom/Vol 2.cbz").unwrap().as_deref(),
@@ -388,4 +399,30 @@ async fn a_lower_revision_main_sidecar_loses_a_case_merge() {
     assert_eq!(bytes("Kingdom/Vol 1.mokuro"), current);
     let kept: Value = serde_json::from_slice(&bytes("Kingdom/Vol 1.pre-upgrade.mokuro")).unwrap();
     assert_eq!(kept["preserved"]["by"], "mokuro-bunko");
+}
+
+/// A byte-identical copy of an archive in the younger spelling goes to the trash; the
+/// volume lives on in the older one, and so do an account's corrections of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrections_of_a_trashed_identical_copy_move_to_the_kept_one() {
+    let fake = Arc::new(FakeBackend::drive_like());
+    fake.reader_put(&format!("{ROOT}/Kingdom/Vol 1.cbz"), b"same");
+    fake.reader_put(&format!("{ROOT}/kingdom/Vol 1.cbz"), b"same");
+    let e = env(fake.clone()).await;
+    let overlays = e.services.core.layout.users().join("alice/edits");
+    bunko_store::fs::create_dir_all(overlays.join("kingdom")).unwrap();
+    bunko_store::fs::write(
+        overlays.join("kingdom/Vol 1.edit.mokuro"),
+        b"{\"pages\":[]}",
+    )
+    .unwrap();
+    let f2 = fake.clone();
+    eventually("the younger spelling goes", || {
+        f2.node_at(&format!("{ROOT}/kingdom")).is_none()
+    })
+    .await;
+    assert!(bunko_store::fs::exists(
+        overlays.join("Kingdom/Vol 1.edit.mokuro")
+    ));
+    assert!(!bunko_store::fs::exists(overlays.join("kingdom")));
 }

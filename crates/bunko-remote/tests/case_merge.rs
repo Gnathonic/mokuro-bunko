@@ -1113,6 +1113,54 @@ fn an_unstamped_layer_whose_id_the_winner_uses_moves_in_as_the_next_free_id() {
 }
 
 #[test]
+fn a_differing_curated_layer_moves_in_as_curated_2() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("Kingdom/Vol 1.cbz", b"same"),
+            ("Kingdom/Vol 1.curated.mokuro", &mokuro("ours")),
+            ("kingdom/Vol 1.cbz", b"same"),
+            ("kingdom/Vol 1.curated.mokuro", &mokuro("theirs")),
+        ],
+    );
+    t.steady();
+    t.policy();
+    t.wait_merges(1);
+    assert_eq!(
+        t.names("Kingdom"),
+        [
+            "Vol 1.cbz",
+            "Vol 1.curated-2.mokuro",
+            "Vol 1.curated.mokuro"
+        ]
+    );
+    assert_eq!(
+        t.bytes("Kingdom/Vol 1.curated-2.mokuro").unwrap(),
+        mokuro("theirs")
+    );
+    assert!(t.at("kingdom").is_none());
+}
+
+#[test]
+fn unstamped_layer_ids_are_exact() {
+    use bunko_remote::merge::is_unstamped_layer_id;
+    for id in [
+        "edit",
+        "edit-2",
+        "curated",
+        "curated-3",
+        "pre-upgrade",
+        "pre-upgrade-2",
+    ] {
+        assert!(is_unstamped_layer_id(id), "{id}");
+    }
+    // Ids match as written (rule v1): `EDIT` is no layer at all.
+    for id in ["EDIT", "Curated", "hayai-nova", "editor", "previous-ocr"] {
+        assert!(!is_unstamped_layer_id(id), "{id}");
+    }
+}
+
+#[test]
 fn the_losers_series_json_is_folded_in_as_a_submission_then_trashed() {
     let t = T::new(
         FakeBackend::drive_like(),

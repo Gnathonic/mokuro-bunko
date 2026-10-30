@@ -1710,7 +1710,7 @@ function genDefaultName(row) {
     return stem;
 }
 
-// Mirrors the server's rules exactly: grammar, reserved names, the tr- prefix,
+// Mirrors the server's rules exactly: grammar, reserved names and prefixes,
 // and uniqueness across ALL rows whether enabled or not.
 function genRowError(row) {
     const name = row.name.trim();
@@ -1721,12 +1721,13 @@ function genRowError(row) {
             message: 'Use 1–' + GEN_NAME_MAX + ' characters: lowercase letters, digits and dashes, starting with a letter or digit. No dots, spaces, capitals or underscores.',
         };
     }
-    if (genCatalog.reserved_names.indexOf(name) !== -1) {
-        return { field: 'name', message: '"' + name + '" is reserved by the reader for another kind of layer. Pick another name.' };
+    // edit-<n> and curated-<n> are numbered copies of reserved names.
+    if (genCatalog.reserved_names.indexOf(name) !== -1 || /^(edit|curated)-[0-9]+$/.test(name)) {
+        return { field: 'name', message: '"' + name + '" is reserved for another kind of layer. Pick another name.' };
     }
     const prefix = genCatalog.reserved_prefixes.find((p) => name.indexOf(p) === 0);
     if (prefix) {
-        return { field: 'name', message: 'Names starting with "' + prefix + '" are reserved by the reader for translations. Pick another name.' };
+        return { field: 'name', message: 'Names starting with "' + prefix + '" are reserved for another kind of layer. Pick another name.' };
     }
     const clash = genRows.findIndex((other) => other !== row && other.name.trim() === name);
     if (clash !== -1) {

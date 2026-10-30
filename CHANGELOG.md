@@ -68,6 +68,11 @@
 - **`/login/api/me` reports the server version** (`version`), signed in or not. A reader
   turns reading-history sync on from 0.8.0, the first version that keeps history per
   account.
+- **`/login/api/me` says where a reader's OCR corrections go.** It lists
+  `per_user_layers: ["edit"]` (each account keeps its own `edit` layer, so a reader
+  may push it) and `permissions.curated.scope`: `all` (editors, inviters, admins),
+  `owned` (an uploader, on the volumes it uploaded) or `none`, for publishing the
+  shared `curated` layer. A cloud folder's `.mokuro-bunko.json` says `curated: true`.
 - **Internal: an interop rig that runs every party as its own process.**
   `cargo xtask interop rig cloud --provider google|microsoft|mega|rclone|all` starts a
   testing build of the server on cloudsim (or on rclone's WebDAV server, a pinned
@@ -85,6 +90,34 @@
   are test builds, never offered as an update.
 
 ### Changed
+- **OCR corrections have their own layer names.** Edits never touch a volume's main
+  OCR file. `<Volume>.edit.mokuro` (and `edit-2`, `edit-3`, …) are an account's own
+  corrections: any account that can save progress, `registered` included, writes,
+  deletes and renames its own, and only to another correction name (plain `.mokuro`,
+  not `.gz`); they are never listed in the volume manifest or counted as the volume's
+  layers. Each account gets its own copy at the same address, kept under
+  `users/<name>/edits/` (a cloud library's progress user's is the cloud file itself, so
+  a reader reading the cloud directly shares it); nobody sees another's. They follow
+  their volume when it is renamed, moved or merged (in Bunko or in the cloud folder; a
+  name already taken there moves in as the next free `edit-<n>`) and go when it is
+  deleted. A correction
+  or curated upload needs its volume's `.cbz` beside it (409 otherwise) and a JSON body
+  with `pages` and no `ocr_engine` (422), at most 32 MiB. `<Volume>.curated.mokuro` holds corrections shared with everyone: editors,
+  inviters and admins publish it on any volume, an uploader on the volumes it
+  uploaded, a first upload included. `pre-upgrade` files are Bunko's own and no client
+  writes one; `curated-<n>` and names starting `previous-ocr` are refused too (a volume
+  rename still moves them along under the same name). An OCR
+  generation can no longer be named `edit`, `curated`, `edit-<n>`, `curated-<n>`, or
+  start with `pre-upgrade` or `previous-ocr`: a config that already names one fails to
+  load, with an error naming that row, until it is renamed. A library on this disk
+  that already holds `<Volume>.edit.mokuro` files gives each, at start, to the account
+  the audit log shows wrote it last; the Storage tab counts the ones with no such
+  account ("N correction files have no owner"), which nobody sees. In a cloud library
+  they are the readers' progress account's, and are counted while none is chosen.
+  Layer names are matched exactly as
+  written: `Vol.EDIT.mokuro` is an ordinary shared file. When a cloud folder's two
+  spellings both have a different `curated` file, the younger one moves in as
+  `curated-2`, as `edit` already did.
 - **`history` is a reserved series name.** `/mokuro-reader/history` is each account's
   reading history now, so a series folder named exactly `history` in a library on this
   disk can no longer be reached; `doctor` warns about it (and the server logs it at
@@ -239,6 +272,14 @@
   browser's check) never got WebDAV's `Allow` and `DAV` headers, and could not have
   read `Allow` anyway. Only a request that asks a CORS question is answered that way
   now; the reader's request reaches WebDAV, and `Allow` is readable from the page.
+- **A folder's `Allow` lists `PUT` and `MKCOL` for an account that may write there.**
+  `OPTIONS` on a folder never listed them, so a client that judges a server by `Allow`
+  (Mokuro Reader's check for WebDAV servers other than Bunko) took every account for
+  read-only. Accounts that may add files now see `PUT, MKCOL` on every folder of the
+  library; `registered` accounts see them on `/mokuro-reader` and their `history`
+  folders, and `PUT` alone in series folders (their own corrections). Anonymous and
+  processor accounts, files and missing paths answer as before. `Allow` is a hint: what
+  a request may actually do is unchanged.
 - **The catalog and series pages no longer stall on a large library.** Every 30 seconds,
   and after every change to the library (which during OCR is often), the next catalog or
   series request walked the whole library folder before answering, so opening even a

@@ -257,6 +257,9 @@ async fn delete_account(
                 .target_username(&username),
         )?;
         db.delete_user(&username)?;
+        // `users/<u>/` holds everything that is only this account's: progress, its
+        // reading history, its correction layers (`edits/`, D27). An admin delete
+        // is a soft delete and keeps it all for a restore.
         Ok(remove_user_dir(&users_root, &username))
     })
     .await;

@@ -1,5 +1,6 @@
 //! PROPFIND: property values and the multistatus writer (spec §8.2, §8.3.2).
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use parking_lot::Mutex;
@@ -128,15 +129,10 @@ impl DeadProps {
 /// a per-user file or folder (so two users' copies at the same URL are distinct).
 pub fn resource_key(res: &Resource, username: Option<&str>) -> String {
     let path = crate::paths::normalize(res.path());
-    match res {
-        Resource::File {
-            kind: FileKind::Progress,
-            ..
+    match res.kind() {
+        Some(FileKind::Progress | FileKind::Personal) => {
+            format!("{path}\0{}", username.unwrap_or(""))
         }
-        | Resource::Folder {
-            kind: FileKind::Progress,
-            ..
-        } => format!("{path}\0{}", username.unwrap_or("")),
         _ => path,
     }
 }
@@ -147,6 +143,9 @@ pub struct PropCtx<'a> {
     pub caller: Option<Caller<'a>>,
     pub locks: Option<&'a LockManager>,
     pub dead: Option<&'a DeadProps>,
+    /// Where a walk renders the physical personal files it hides from `caller` (the
+    /// shared cache keeps them for the cloud-root owner, D27).
+    pub hidden_personal: Option<&'a RefCell<String>>,
 }
 
 impl PropCtx<'_> {
@@ -338,7 +337,19 @@ fn walk_inner(
         return;
     }
     let child_depth = depth.map(|d| d.saturating_sub(1));
-    for child in roots.members(res, ctx.caller) {
+    let members = match ctx.hidden_personal {
+        Some(tail) => {
+            let mut hidden = Vec::new();
+            let members = roots.members_hiding(res, ctx.caller, Some(&mut hidden));
+            let mut tail = tail.borrow_mut();
+            for res in &hidden {
+                write_response(&mut tail, res, mode, ctx);
+            }
+            members
+        }
+        None => roots.members(res, ctx.caller),
+    };
+    for child in members {
         if !child.is_collection() || child_depth == Some(0) {
             write_response(buf, &child, mode, ctx);
             if buf.len() >= 64 * 1024 {

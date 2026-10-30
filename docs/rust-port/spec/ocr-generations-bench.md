@@ -528,8 +528,8 @@ Declared stage costs (seconds/page, used by width derivation; `engine_runner.py:
   "patch_budgets": [256,384,512],
   "precision_modes": [{"id","label"}], "precision_default": "auto-accuracy",
   "name_pattern": "^[a-z0-9][a-z0-9-]{0,31}$",
-  "reserved_names": ["original","gcv","updated-ocr"],
-  "reserved_prefixes": ["tr-"]
+  "reserved_names": ["original","gcv","updated-ocr","edit","curated"],
+  "reserved_prefixes": ["tr-","pre-upgrade","previous-ocr"]
 }
 ```
 (`monolithic`/`served`/`own_environment` fields: after the DROPs always false; **keep emitting** them as false or coordinate removal with the frontend - OQ-10.) `devices:["cpu"]` for engines/detectors with `cpu_only_reason` (and onnxruntime-GPU-less hosts for ORT detectors: DROP). `catalog.devices` is the merged catalog of every machine (`_settable_devices`), not just this server.

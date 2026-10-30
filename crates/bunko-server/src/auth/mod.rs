@@ -10,32 +10,10 @@ use crate::http::limiter::AuthLimiter;
 use base64::Engine as _;
 use bunko_core::Role;
 use bunko_core::reader_tree::Caller;
+use bunko_core::sidecar_names::{self, LayerClass};
+// Moved to bunko-core so bunko-dav can ask what an account may write (its Allow header).
+pub use bunko_core::{Perm, has_perm};
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
-
-/// Capabilities derived from a role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Perm {
-    Read,
-    WriteProgress,
-    AddFiles,
-    ModifyDelete,
-    ManageInvites,
-    Admin,
-    Process,
-}
-
-pub fn has_perm(role: Role, perm: Perm) -> bool {
-    use Role::*;
-    match perm {
-        Perm::Read => true,
-        Perm::WriteProgress => matches!(role, Registered | Uploader | Inviter | Editor | Admin),
-        Perm::AddFiles => matches!(role, Uploader | Inviter | Editor | Admin),
-        Perm::ModifyDelete => matches!(role, Inviter | Editor | Admin),
-        Perm::ManageInvites => matches!(role, Inviter | Admin),
-        Perm::Admin => role == Admin,
-        Perm::Process => role == Processor,
-    }
-}
 
 /// The authenticated user as the request sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +77,12 @@ pub trait AuthBackend: Send + Sync {
     fn can_user_edit_series(&self, username: &str, series_title: &str) -> bool;
     /// Does the virtual path map to an existing physical file?
     fn physical_exists(&self, virtual_path: &str, caller: Option<Caller<'_>>) -> bool;
+    /// Is this library file the primary sidecar of an archive listed beside it
+    /// (sidecar names rule 4: `V.edit.mokuro` is volume `V.edit`'s when `V.edit.cbz`
+    /// is listed), and so no layer at all?
+    fn is_volume_primary(&self, _virtual_path: &str) -> bool {
+        false
+    }
 }
 
 /// A `Basic` header that is present but unusable (bad base64, not UTF-8, no colon).
@@ -362,6 +346,13 @@ pub fn authorize(
             "Permission denied: not supported for reading history",
         ));
     }
+    if matches!(
+        m,
+        "PUT" | "DELETE" | "MOVE" | "COPY" | "LOCK" | "UNLOCK" | "PROPPATCH"
+    ) && let Some(decision) = authorize_layer(m, path, destination, id, backend)
+    {
+        return decision;
+    }
     match m {
         "GET" | "HEAD" | "PROPFIND" => {
             if id.authenticated() {
@@ -436,6 +427,102 @@ pub fn authorize(
         "PROPPATCH" => need(id, Perm::ModifyDelete, "Permission denied"),
         _ => Ok(()),
     }
+}
+
+/// The class of a library file named as a layer with a reserved id (D27); `None` for
+/// any other file, an `Other` layer included, which the table decides as before.
+fn reserved_layer_at(path: &str, backend: &dyn AuthBackend) -> Option<LayerClass> {
+    let class = paths::layer_class_of_path(path).filter(|c| *c != LayerClass::Other)?;
+    (!backend.is_volume_primary(path)).then_some(class)
+}
+
+fn denied_unless_signed_in(id: &Identity, message: &str) -> Denied {
+    if id.authenticated() {
+        Denied::new(403, message)
+    } else {
+        Denied::new(401, "Authentication required")
+    }
+}
+
+/// Writes of correction, curated and reserved layer files (D27), or `None` when the
+/// rest of the table decides. A personal file is every progress writer's own (DAV
+/// resolves it per account), so it moves only between personal names; nothing a
+/// client sends lands in a server keepsake or a reserved id no client writes here.
+fn authorize_layer(
+    m: &str,
+    path: &str,
+    destination: Option<&str>,
+    id: &Identity,
+    backend: &dyn AuthBackend,
+) -> Option<Result<(), Denied>> {
+    const BETWEEN: &str = "Permission denied: corrections can only move between correction files";
+    const SERVER: &str = "Permission denied: this file is written by the server";
+    const RESERVED: &str = "Permission denied: this layer name is reserved";
+    let moving = matches!(m, "MOVE" | "COPY");
+    let source = reserved_layer_at(path, backend);
+    let dest_path = destination
+        .filter(|_| moving)
+        .and_then(paths::destination_path);
+    let dest = dest_path
+        .as_deref()
+        .and_then(|d| reserved_layer_at(d, backend));
+    if source == Some(LayerClass::Personal) {
+        return Some(progress_write(id).and_then(|()| {
+            if moving && dest != Some(LayerClass::Personal) {
+                Err(Denied::new(403, BETWEEN))
+            } else if m == "PUT" && sidecar_names::strip_suffix_ci(path, ".gz").is_some() {
+                Err(Denied::new(
+                    403,
+                    "Permission denied: corrections are saved as plain .mokuro",
+                ))
+            } else {
+                Ok(())
+            }
+        }));
+    }
+    // A MOVE that keeps the layer id is a volume rename carrying its layer (the reader
+    // moves every listed one): nothing new is written, so the 0.7 rule decides.
+    let renamed = m == "MOVE"
+        && source.is_some()
+        && source == dest
+        && dest_path.as_deref().and_then(paths::layer_id_of_path) == paths::layer_id_of_path(path);
+    let written = if renamed {
+        None
+    } else if moving {
+        dest
+    } else if m == "PUT" {
+        source
+    } else {
+        None
+    };
+    match (dest, written) {
+        (Some(LayerClass::Personal), _) => Some(Err(denied_unless_signed_in(id, BETWEEN))),
+        (_, Some(LayerClass::ServerKeepsake)) => Some(Err(denied_unless_signed_in(id, SERVER))),
+        (_, Some(LayerClass::Reserved)) => Some(Err(denied_unless_signed_in(id, RESERVED))),
+        (_, Some(LayerClass::Curated)) if !moving => Some(authorize_curated(path, id, backend)),
+        // Deleting or moving a curated or keepsake file keeps the 0.7 rules.
+        _ => None,
+    }
+}
+
+/// Publishing the shared `curated` layer: ModifyDelete roles on any volume, an
+/// uploader on the volumes it uploaded, the first create included.
+fn authorize_curated(path: &str, id: &Identity, backend: &dyn AuthBackend) -> Result<(), Denied> {
+    if !id.authenticated() {
+        return Err(Denied::new(401, "Authentication required"));
+    }
+    if has_perm(id.role(), Perm::ModifyDelete)
+        || (id.role() == Role::Uploader
+            && id
+                .username()
+                .is_some_and(|u| backend.can_user_delete_library_path(u, path)))
+    {
+        return Ok(());
+    }
+    Err(Denied::new(
+        403,
+        "Permission denied: cannot publish shared corrections for this volume",
+    ))
 }
 
 fn authorize_put(path: &str, id: &Identity, backend: &dyn AuthBackend) -> Result<(), Denied> {
@@ -966,5 +1053,216 @@ mod tests {
             .message,
             "Permission denied: cannot add files"
         );
+    }
+
+    /// Owns `Mine/`'s volumes; `S/V.edit.cbz` is a listed archive.
+    struct Layers;
+    impl AuthBackend for Layers {
+        fn resolve_token(&self, _: &str) -> Option<AuthUser> {
+            None
+        }
+        fn check_password(&self, _: &str, _: &str) -> Option<AuthUser> {
+            None
+        }
+        fn can_user_delete_library_path(&self, u: &str, p: &str) -> bool {
+            u == "u" && p.starts_with("/mokuro-reader/Mine/")
+        }
+        fn can_user_edit_series(&self, _: &str, _: &str) -> bool {
+            false
+        }
+        fn physical_exists(&self, p: &str, _: Option<Caller<'_>>) -> bool {
+            p.ends_with(".curated.mokuro") && p.contains("/Theirs/")
+        }
+        fn is_volume_primary(&self, p: &str) -> bool {
+            p == "/mokuro-reader/S/V.edit.mokuro"
+        }
+    }
+
+    /// D27: personal corrections are any progress writer's own; the curated layer is
+    /// published by ModifyDelete roles and an uploader on its own volumes; the server's
+    /// keepsakes and the other reserved ids take no client write.
+    #[test]
+    fn correction_layers() {
+        let m = |name: &str| Method::from_bytes(name.as_bytes()).unwrap();
+        let ask = |method: &str, path: &str, dest: Option<&str>, role: Option<Role>| {
+            authorize(&m(method), path, dest, &id(role), OPEN, &Layers)
+                .map_err(|d| (d.status.as_u16(), d.message))
+        };
+        let reg = Some(Role::Registered);
+        let up = Some(Role::Uploader);
+        let edit = "/mokuro-reader/S/W.edit.mokuro";
+
+        for method in ["PUT", "DELETE", "LOCK", "UNLOCK", "PROPPATCH"] {
+            for path in [edit, "/mokuro-reader/S/W.edit-2.mokuro"] {
+                assert_eq!(ask(method, path, None, reg), Ok(()), "{method} {path}");
+                assert_eq!(ask(method, path, None, None).unwrap_err().0, 401);
+                assert_eq!(
+                    ask(method, path, None, Some(Role::Processor))
+                        .unwrap_err()
+                        .0,
+                    403
+                );
+            }
+        }
+        // Reads are the resolver's business.
+        assert_eq!(ask("GET", edit, None, None), Ok(()));
+        // Plain `.mokuro` only.
+        assert_eq!(
+            ask("PUT", "/mokuro-reader/S/W.edit.mokuro.gz", None, reg),
+            Err((
+                403,
+                "Permission denied: corrections are saved as plain .mokuro".into()
+            ))
+        );
+        // Exact-case ids (rule v1): `EDIT` is a shared library file, as before.
+        assert_eq!(
+            ask("PUT", "/mokuro-reader/S/W.EDIT.mokuro", None, reg),
+            Err((403, "Permission denied: cannot add files".into()))
+        );
+        // `V.edit.mokuro` beside `V.edit.cbz` is that volume's primary (rule 4).
+        assert_eq!(
+            ask("PUT", "/mokuro-reader/S/V.edit.mokuro", None, reg),
+            Err((403, "Permission denied: cannot add files".into()))
+        );
+
+        let between = "Permission denied: corrections can only move between correction files";
+        for method in ["MOVE", "COPY"] {
+            assert_eq!(
+                ask(
+                    method,
+                    edit,
+                    Some("http://h/mokuro-reader/T/X.edit.mokuro"),
+                    reg
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                ask(
+                    method,
+                    edit,
+                    Some("http://h/mokuro-reader/T/X.foo.mokuro"),
+                    reg
+                ),
+                Err((403, between.into()))
+            );
+            assert_eq!(
+                ask(
+                    method,
+                    "/mokuro-reader/T/X.foo.mokuro",
+                    Some("http://h/mokuro-reader/S/W.edit.mokuro"),
+                    Some(Role::Admin)
+                ),
+                Err((403, between.into()))
+            );
+            assert_eq!(
+                ask(
+                    method,
+                    edit,
+                    Some("http://h/mokuro-reader/T/X.edit.mokuro"),
+                    None
+                )
+                .unwrap_err()
+                .0,
+                401
+            );
+        }
+
+        let curated = "Permission denied: cannot publish shared corrections for this volume";
+        assert_eq!(
+            ask("PUT", "/mokuro-reader/Mine/V.curated.mokuro", None, up),
+            Ok(())
+        );
+        // Another account's volume, whether its curated file exists yet or not.
+        for path in [
+            "/mokuro-reader/Theirs/V.curated.mokuro",
+            "/mokuro-reader/Other/V.curated.mokuro",
+        ] {
+            assert_eq!(
+                ask("PUT", path, None, up),
+                Err((403, curated.into())),
+                "{path}"
+            );
+            assert_eq!(ask("PUT", path, None, Some(Role::Editor)), Ok(()));
+            assert_eq!(ask("PUT", path, None, reg), Err((403, curated.into())));
+            assert_eq!(ask("PUT", path, None, None).unwrap_err().0, 401);
+        }
+
+        let server = "Permission denied: this file is written by the server";
+        for path in [
+            "/mokuro-reader/Mine/V.pre-upgrade.mokuro",
+            "/mokuro-reader/Mine/V.pre-upgrade-2.mokuro",
+        ] {
+            assert_eq!(
+                ask("PUT", path, None, Some(Role::Admin)),
+                Err((403, server.into()))
+            );
+            assert_eq!(
+                ask(
+                    "MOVE",
+                    "/mokuro-reader/Mine/V.hayai.mokuro",
+                    Some(&format!("http://h{path}")),
+                    Some(Role::Admin)
+                ),
+                Err((403, server.into()))
+            );
+            // Deleting one keeps its 0.7 rule.
+            assert_eq!(ask("DELETE", path, None, up), Ok(()));
+        }
+        let reserved = "Permission denied: this layer name is reserved";
+        for path in [
+            "/mokuro-reader/Mine/V.curated-2.mokuro",
+            "/mokuro-reader/Mine/V.previous-ocr.mokuro",
+            "/mokuro-reader/Mine/V.pre-upgraded.mokuro",
+        ] {
+            assert_eq!(
+                ask("PUT", path, None, Some(Role::Admin)),
+                Err((403, reserved.into())),
+                "{path}"
+            );
+            assert_eq!(ask("PUT", path, None, None).unwrap_err().0, 401);
+        }
+        // A volume rename carries its keepsakes and reserved layers under the same id:
+        // the 0.7 MOVE rule decides. Anything else into those names stays refused.
+        let edited = Some(Role::Editor);
+        for id in ["pre-upgrade", "pre-upgrade-2", "curated-2", "previous-ocr"] {
+            let from = format!("/mokuro-reader/Mine/V.{id}.mokuro");
+            let to = format!("http://h/mokuro-reader/Mine/W.{id}.mokuro");
+            assert_eq!(ask("MOVE", &from, Some(&to), edited), Ok(()), "{id}");
+            assert_eq!(
+                ask("MOVE", &from, Some(&to), reg),
+                Err((
+                    403,
+                    "Permission denied: cannot modify or delete files".into()
+                )),
+                "{id}"
+            );
+            assert!(ask("COPY", &from, Some(&to), edited).is_err(), "{id}");
+        }
+        assert_eq!(
+            ask(
+                "MOVE",
+                "/mokuro-reader/Mine/V.pre-upgrade.mokuro",
+                Some("http://h/mokuro-reader/Mine/W.pre-upgrade-2.mokuro"),
+                edited
+            ),
+            Err((403, server.into()))
+        );
+        assert_eq!(
+            ask(
+                "MOVE",
+                "/mokuro-reader/Mine/V.curated-2.mokuro",
+                Some("http://h/mokuro-reader/Mine/W.curated-3.mokuro"),
+                edited
+            ),
+            Err((403, reserved.into()))
+        );
+        // The reader's own reserved ids that Bunko stores as before.
+        for path in [
+            "/mokuro-reader/Mine/V.original.mokuro",
+            "/mokuro-reader/Mine/V.updated-ocr.mokuro",
+            "/mokuro-reader/Mine/V.my-fix.mokuro",
+        ] {
+            assert_eq!(ask("PUT", path, None, up), Ok(()), "{path}");
+        }
     }
 }

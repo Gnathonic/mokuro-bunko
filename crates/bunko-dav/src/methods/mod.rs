@@ -16,7 +16,7 @@ use http_body_util::{BodyExt, Limited};
 use crate::conditional::{self, IfHeader};
 use crate::hooks::AuditEvent;
 use crate::propfind::resource_key;
-use crate::resource::Resource;
+use crate::resource::{FileKind, Resource};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::{Caller, DavContext, Inner, paths};
 
@@ -243,6 +243,25 @@ pub(crate) fn file_audit_target(inner: &Inner, vpath: &str, phys: &Path) -> (&'s
     (ty, norm)
 }
 
+/// The audit target of a personal correction (D27): the account's own file, at the
+/// path it asked for, whether it is an overlay or the cloud-root owner's physical file.
+pub(crate) fn personal_audit_target(vpath: &str) -> (&'static str, String) {
+    ("personal", paths::normalize(vpath))
+}
+
+/// The audit target of a file of `kind`.
+pub(crate) fn audit_target_of(
+    inner: &Inner,
+    kind: Option<FileKind>,
+    vpath: &str,
+    phys: &Path,
+) -> (&'static str, String) {
+    match kind {
+        Some(FileKind::Personal) => personal_audit_target(vpath),
+        _ => file_audit_target(inner, vpath, phys),
+    }
+}
+
 /// A path of the caller's own tree (root files, `history/**`).
 pub(crate) fn is_progress_path(vpath: &str) -> bool {
     matches!(paths::classify(vpath), paths::Target::Progress(_))
@@ -363,6 +382,15 @@ impl Effects {
         self.listings.push(paths::normalize(vpath));
         if let Some(p) = phys {
             self.changed.push(p.to_path_buf());
+        }
+    }
+
+    /// A personal correction changed. An overlay is in no shared listing; the cloud-root
+    /// owner's physical file is, hidden, in the owner's part of the cached listings
+    /// (which therefore go). Neither is a library change.
+    pub fn touch_personal(&mut self, inner: &Inner, vpath: &str, phys: &Path) {
+        if inner.roots.library_rel(phys).is_some() {
+            self.listings.push(paths::normalize(vpath));
         }
     }
 

@@ -13,15 +13,20 @@ use tokio_util::io::ReaderStream;
 
 use super::{Req, XML_BODY_LIMIT, blocking, eval_if, lookup, read_body};
 use crate::conditional::{self, RangeOutcome};
+use crate::paths::Target;
 use crate::propfind::{self, Mode, PropCtx};
 use crate::resource::{FileKind, Resource, Stat, content_type};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::xml::{MULTISTATUS_CLOSE, MULTISTATUS_OPEN};
 use crate::{Inner, paths};
-use bunko_core::reader_tree;
+use bunko_core::{Perm, Role, has_perm, reader_tree};
 
 const ALLOW_COLLECTION: &str =
     "OPTIONS, HEAD, GET, PROPFIND, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
+const ALLOW_COLLECTION_WRITE: &str =
+    "OPTIONS, HEAD, GET, PROPFIND, PUT, MKCOL, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
+const ALLOW_COLLECTION_PUT: &str =
+    "OPTIONS, HEAD, GET, PROPFIND, PUT, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
 const ALLOW_FILE: &str =
     "OPTIONS, HEAD, GET, PROPFIND, PUT, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
 const ALLOW_UNMAPPED: &str = "OPTIONS, PUT, MKCOL";
@@ -45,6 +50,26 @@ fn accel_path(inner: &Inner, req: &Req, res: &Resource) -> Option<String> {
     }
 }
 
+/// The Allow of a collection for this account (plan X9). Advisory only: `authorize()`
+/// still decides every request. It exists so a client that reads Allow (the reader's
+/// generic WebDAV check) does not take a writable account for a read-only one.
+/// - AddFiles: `PUT, MKCOL` on every collection at or under `/mokuro-reader`.
+/// - WriteProgress alone: `PUT, MKCOL` on the reader root and its own `history/**`;
+///   `PUT` on library collections, where its personal corrections go (D27).
+/// - Anyone else, and `/`, `/inbox`: the base list.
+fn collection_allow(path: &str, role: Role) -> &'static str {
+    let adds_files = has_perm(role, Perm::AddFiles);
+    let writes_own = has_perm(role, Perm::WriteProgress);
+    match paths::classify(path) {
+        Target::ReaderRoot | Target::Progress(_) | Target::Library(_) if adds_files => {
+            ALLOW_COLLECTION_WRITE
+        }
+        Target::ReaderRoot | Target::Progress(_) if writes_own => ALLOW_COLLECTION_WRITE,
+        Target::Library(_) if writes_own => ALLOW_COLLECTION_PUT,
+        _ => ALLOW_COLLECTION,
+    }
+}
+
 pub(crate) async fn options(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     let mut resp = response::empty(StatusCode::OK);
     response::set_header(&mut resp, "content-type", "text/html; charset=utf-8");
@@ -55,7 +80,10 @@ pub(crate) async fn options(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     }
     let res = lookup(inner, &req.path, req).await?;
     match &res {
-        Some(r) if r.is_collection() => response::set_header(&mut resp, "allow", ALLOW_COLLECTION),
+        Some(r) if r.is_collection() => {
+            let allow = collection_allow(&req.path, req.ctx.role);
+            response::set_header(&mut resp, "allow", allow);
+        }
         Some(r) => {
             response::set_header(&mut resp, "allow", ALLOW_FILE);
             if accel_path(inner, req, r).is_none() {
@@ -113,7 +141,8 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
         && !matches!(paths::classify(&norm), paths::Target::Progress(_))
     {
         if let Some(hit) = inner.cache.get(&norm).await {
-            let tail = injected_progress(inner, req, &norm).await?;
+            let mut tail = injected_progress(inner, req, &norm).await?;
+            tail.push_str(&injected_personal(inner, req, &res, &hit).await?);
             return Ok(crate::cache::respond(hit, &tail, gzip));
         }
         return Err(DavError::new(StatusCode::NOT_FOUND, &req.path));
@@ -134,6 +163,7 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
                     caller: dctx.caller(),
                     locks: Some(&inner2.locks),
                     dead: Some(&inner2.dead),
+                    hidden_personal: None,
                 };
                 propfind::walk(&inner2.roots, &res, depth, &mode, &ctx, feed);
             })
@@ -146,6 +176,7 @@ pub(crate) async fn propfind(inner: &Arc<Inner>, req: &Req, body: Body) -> DavRe
             caller: dctx.caller(),
             locks: Some(&inner2.locks),
             dead: Some(&inner2.dead),
+            hidden_personal: None,
         };
         let mut out = String::from(MULTISTATUS_OPEN);
         propfind::walk(&inner2.roots, &res, depth, &mode, &ctx, &mut |chunk| {
@@ -183,6 +214,7 @@ async fn injected_progress(inner: &Arc<Inner>, req: &Req, norm: &str) -> DavResu
             caller: dctx.caller(),
             locks: None,
             dead: None,
+            hidden_personal: None,
         };
         for name in paths::PER_USER_FILES {
             if let Some(res) = inner
@@ -204,6 +236,49 @@ async fn injected_progress(inner: &Arc<Inner>, req: &Req, norm: &str) -> DavResu
                 &ctx,
                 &mut |chunk| out.push_str(chunk),
             );
+        }
+        out
+    })
+    .await
+}
+
+/// The caller's own corrections (D27) below a cached collection, appended to its
+/// shared listing: the cloud-root owner's physical ones the cache set aside, or anyone
+/// else's overlays, each beside its archive. Anonymous has none.
+async fn injected_personal(
+    inner: &Arc<Inner>,
+    req: &Req,
+    res: &Resource,
+    hit: &crate::cache::Hit,
+) -> DavResult<String> {
+    let Some(caller) = req.caller() else {
+        return Ok(String::new());
+    };
+    if caller.owns_cloud_root {
+        return Ok(hit.owner_tail().to_string());
+    }
+    let folder_rel = match res.phys() {
+        Some(phys) => match inner.roots.library_rel(phys) {
+            Some(rel) => rel,
+            None => return Ok(String::new()),
+        },
+        // `/` and `/mokuro-reader` list the whole library.
+        None => String::new(),
+    };
+    let inner = inner.clone();
+    let dctx = req.ctx.clone();
+    blocking(move || {
+        let ctx = PropCtx {
+            caller: dctx.caller(),
+            locks: None,
+            dead: None,
+            hidden_personal: None,
+        };
+        let mut out = String::new();
+        if let Some(caller) = ctx.caller {
+            for res in inner.roots.overlays_under(caller, &folder_rel) {
+                propfind::write_response(&mut out, &res, &Mode::AllProp, &ctx);
+            }
         }
         out
     })

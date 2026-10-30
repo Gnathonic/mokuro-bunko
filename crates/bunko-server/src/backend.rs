@@ -3,6 +3,7 @@
 use crate::auth::{AuthBackend, AuthUser, paths};
 use bunko_core::StorageLayout;
 use bunko_core::reader_tree::{self, Caller};
+use bunko_core::sidecar_names;
 use bunko_db::Database;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -169,6 +170,28 @@ impl AuthBackend for DbAuthBackend {
         self.virtual_to_physical(virtual_path, caller)
             .is_some_and(bunko_store::fs::exists)
     }
+
+    fn is_volume_primary(&self, virtual_path: &str) -> bool {
+        is_volume_primary(&self.layout, virtual_path)
+    }
+}
+
+/// See [`AuthBackend::is_volume_primary`]: rule v1 against the library folder's listing.
+fn is_volume_primary(layout: &StorageLayout, virtual_path: &str) -> bool {
+    let Some(file) = virtual_to_physical(layout, virtual_path, None) else {
+        return false;
+    };
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) else {
+        return false;
+    };
+    let Some(names) = bunko_library::sidecar::list_names(dir) else {
+        return false;
+    };
+    let stems = sidecar_names::volume_stems(names.iter().map(String::as_str));
+    matches!(
+        sidecar_names::classify(name, &stems),
+        sidecar_names::SidecarClass::Primary { .. }
+    )
 }
 
 #[cfg(test)]
@@ -212,5 +235,22 @@ mod tests {
         );
         assert_eq!(map("/mokuro-reader/../x", Some(alice)), None);
         assert_eq!(map("/mokuro-readerx/y", Some(alice)), None);
+    }
+
+    #[test]
+    fn a_dotted_volumes_primary_is_no_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        let series = layout.library().join("S");
+        bunko_store::fs::create_dir_all(&series).unwrap();
+        for name in ["V.edit.CBZ", "W.cbz"] {
+            bunko_store::fs::write(series.join(name), b"x").unwrap();
+        }
+        let primary = |p: &str| is_volume_primary(&layout, p);
+        assert!(primary("/mokuro-reader/S/V.edit.mokuro"));
+        assert!(primary("/mokuro-reader/S/v.EDIT.mokuro.gz"));
+        assert!(!primary("/mokuro-reader/S/W.edit.mokuro"));
+        assert!(!primary("/mokuro-reader/T/V.edit.mokuro"));
+        assert!(!primary("/mokuro-reader/goals.json"));
     }
 }

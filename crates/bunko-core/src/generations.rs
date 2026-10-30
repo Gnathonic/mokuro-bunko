@@ -22,6 +22,7 @@
 //! Every migration is reported in [`ParsedGenerations::warnings`].
 
 use crate::engines::{self, Road};
+use crate::sidecar_names::{self, LayerClass};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -30,8 +31,9 @@ pub const MAX_GENERATION_NAME: usize = 32;
 /// The key a retired row that was the primary keeps in `config.yaml` (its `primary` is
 /// saved as false): its files are the bare `<Volume>.mokuro` ones. 0.5 ignores it.
 pub const RETIRED_FROM_PRIMARY: &str = "retired_from_primary";
-pub const RESERVED_NAMES: &[&str] = &["original", "gcv", "updated-ocr"];
-pub const RESERVED_PREFIXES: &[&str] = &["tr-"];
+pub const RESERVED_NAMES: &[&str] = &["original", "gcv", "updated-ocr", "edit", "curated"];
+/// Also reserved: `edit-<n>` and `curated-<n>` ([`sidecar_names::layer_class`]).
+pub const RESERVED_PREFIXES: &[&str] = &["tr-", "pre-upgrade", "previous-ocr"];
 pub const MAX_STAGE_WORKERS: u32 = 64;
 pub const MAX_QUEUE_CAPACITY: u32 = 256;
 pub const POOL_KEYS: &[&str] = &[
@@ -283,6 +285,22 @@ pub fn name_rejection(name: &str) -> Option<String> {
              {MAX_GENERATION_NAME} characters at most, starting with a letter or a digit (a name outside this \
              is invisible to every reader)"
         ));
+    }
+    // The correction and keepsake families (D27), any `-<n>` included.
+    let family = match sidecar_names::layer_class(name) {
+        LayerClass::Other => None,
+        LayerClass::ServerKeepsake => Some("Bunko keeps replaced sidecars under it"),
+        LayerClass::Reserved if name.starts_with("pre-upgrade") => {
+            Some("Bunko keeps replaced sidecars under it")
+        }
+        LayerClass::Reserved if name.starts_with("previous-ocr") => {
+            Some("the reader keeps its local copy of a replaced OCR under it")
+        }
+        // `edit`, `edit-<n>`, `curated`, `curated-<n>`.
+        _ => Some("readers' corrections are saved under it"),
+    };
+    if let Some(why) = family {
+        return Some(format!("name '{name}' is reserved: {why}"));
     }
     if RESERVED_NAMES.contains(&name) {
         return Some(format!(
@@ -1070,6 +1088,34 @@ mod tests {
         assert!(name_rejection("original").is_some());
         assert!(name_rejection("tr-en").is_some());
         assert!(name_rejection(&"a".repeat(33)).is_some());
+    }
+
+    /// A generation's file must never read as a reader's corrections, the shared
+    /// curated layer, or a keepsake of a replaced main (D27).
+    #[test]
+    fn correction_and_keepsake_names_are_reserved() {
+        for name in [
+            "edit",
+            "edit-2",
+            "curated",
+            "curated-3",
+            "pre-upgrade",
+            "pre-upgrade-2",
+            "previous-ocr",
+            "previous-ocr-4",
+        ] {
+            assert!(name_rejection(name).is_some(), "{name}");
+        }
+        for name in ["hayai-nova", "editor", "curated-ocr-x", "edits"] {
+            assert!(name_rejection(name).is_none(), "{name}");
+        }
+        assert!(name_rejection("edit-2").unwrap().contains("corrections"));
+        assert!(name_rejection("pre-upgrade").unwrap().contains("replaced"));
+        assert!(
+            name_rejection("previous-ocr")
+                .unwrap()
+                .contains("local copy")
+        );
     }
 
     #[test]
