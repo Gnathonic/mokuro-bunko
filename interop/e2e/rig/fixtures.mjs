@@ -12,8 +12,9 @@
 // CLOUDSIM_URL, CLOUDSIM_PREAUTH_URL, RCLONE_URL, RIG_PROVIDER (local|google|microsoft|
 // mega|rclone), RIG_ACCOUNTS (a JSON file: [{username, password, role}] on the Bunko
 // server), RIG_WORKDIR, RIG_FAKEPROC_HOLD (processor-fake holds each volume until this
-// file exists), and RIG_CONTEXT (JSON: {sim_account, mega?: {email, password},
-// webdav?: {url, username, password}, library: {series, volumes}}).
+// file exists), RIG_CONTEXT (JSON: {sim_account, mega?: {email, password},
+// webdav?: {url, username, password}, library: {series, volumes}}) and RIG_CONTROL_URL
+// (the runner's control port, with a Bunko server: `rig.restartBunko`).
 import { test as base, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { gateCapabilities, parsePendingCaps } from './caps.mjs';
@@ -45,11 +46,31 @@ function rigFromEnv() {
         mega: context.mega,
         webdav: context.webdav,
         library: context.library,
+        /** A Bunko server on the cloud: its lease timing (`{ttl_s}`, the store tune). */
+        lease: context.lease,
         /** A Bunko account the rig created, by name. */
         account(name) {
             const a = accounts.find((x) => x.username === name);
             if (!a) throw new Error(`no rig account ${name} (have ${accounts.map((x) => x.username).join(', ')})`);
             return a;
+        },
+        /**
+         * Stop the suite's Bunko server and start it again on the same data (the
+         * runner's control port, crates/xtask/src/interop/rig/control.rs); resolves
+         * once it serves HTTP, its lease still to settle. `{stale: true}` stays down
+         * until its lease marker is past its ttl, so it claims the library afresh;
+         * `{tune: {lease_settle_ms: n}}` sets store tune keys for the new process.
+         */
+        async restartBunko(options = {}) {
+            if (!env.RIG_CONTROL_URL) throw new Error('RIG_CONTROL_URL is not set: this suite runs no Bunko server');
+            const r = await fetch(`${env.RIG_CONTROL_URL}/bunko/restart`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(options),
+            });
+            const answer = await r.json().catch(() => null);
+            if (!r.ok) throw new Error(`restarting Bunko: ${r.status} ${answer?.error ?? ''}`);
+            return answer;
         },
         /** cloudsim's control API (`/_sim/<path>`). */
         async sim(method, path, body) {

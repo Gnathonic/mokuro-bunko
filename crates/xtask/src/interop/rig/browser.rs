@@ -7,6 +7,7 @@ use super::super::genlib;
 use super::super::server::{Backend, CLOUD_FOLDER, SEED_PASSWORD, SeedUser, Server, ServerOptions};
 use super::cloud::{self, ACCOUNT};
 use super::cloudsim::{self, Cloudsim};
+use super::control::{self, Control};
 use super::fakeproc::{FakeOptions, FakeProcessor};
 use super::playwright::{self, Env};
 use super::rclone::{self, Rclone};
@@ -15,6 +16,7 @@ use super::{Paths, Provider, Suite};
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The library every browser suite starts from: one series, a volume with its OCR
@@ -100,10 +102,13 @@ fn library_files() -> Result<Vec<(String, Vec<u8>)>> {
     Ok(files)
 }
 
-/// The running parties; dropped (stopped) processor first, cloud last.
+/// The running parties; dropped (stopped) control port and processor first, cloud last.
 struct Running {
+    /// Holds the server too: dropped (its thread joined) before it.
+    _control: Option<Control>,
     fake: Option<FakeProcessor>,
-    server: Option<Server>,
+    /// Shared with the control port, which restarts it (control.rs).
+    server: Option<Arc<Mutex<Server>>>,
     /// Held only to keep it serving until the suite ends.
     _rclone: Option<Rclone>,
     sim: Option<Cloudsim>,
@@ -174,7 +179,11 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
         };
         let mut env = Vec::new();
         if on == BunkoOn::Cloud {
-            env.push(("MOKURO_TEST_CLOUD_TUNE".to_string(), cloud::tune(p)));
+            let tune = cloud::tune(p);
+            // A spec that holds a claim open (`restartBunko`) keeps its settle wait under
+            // this: a claimant writes no heartbeat while it settles.
+            context["lease"] = json!({"ttl_s": control::tune_value(&tune, "lease_ttl_s")});
+            env.push((control::TUNE_VAR.to_string(), tune));
         }
         if let Some(s) = &sim {
             env.extend(s.server_env());
@@ -215,6 +224,12 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
         )?),
         _ => None,
     };
+    let bunko_url = server.as_ref().map(Server::base_url);
+    let server = server.map(|s| Arc::new(Mutex::new(s)));
+    let ctl = match &server {
+        Some(s) => Some(Control::start(control::bunko_handler(s.clone()))?),
+        None => None,
+    };
     let admin = std::fs::read_to_string(work.join("bunko/admin-password.txt")).ok();
     let accounts_file = work.join("accounts.json");
     std::fs::write(
@@ -227,7 +242,7 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
     };
     let env = Env {
         reader_url: reader.to_string(),
-        bunko_url: server.as_ref().map(Server::base_url),
+        bunko_url,
         cloudsim_url: sim.as_ref().map(|s| s.base.clone()),
         preauth_url: preauth,
         rclone_url: rc.as_ref().map(Rclone::url),
@@ -236,8 +251,10 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
         workdir: work.to_path_buf(),
         fakeproc_hold: fake.as_ref().map(|f| f.hold_file().to_path_buf()),
         context,
+        control_url: ctl.as_ref().map(Control::url),
     };
     Ok(Running {
+        _control: ctl,
         fake,
         server,
         _rclone: rc,
@@ -316,8 +333,11 @@ pub fn run(
         Err(e) => report.add(failed("playwright", 0, format!("{e:#}"))),
     }
     // A party that died mid-suite fails it, whatever the specs saw.
-    if let Some(s) = &mut running.server
-        && let Err(e) = s.check_alive()
+    if let Some(s) = &running.server
+        && let Err(e) = s
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the server lock"))
+            .and_then(|mut s| s.check_alive())
     {
         report.add(failed("bunko", 0, format!("{e:#}")));
     }

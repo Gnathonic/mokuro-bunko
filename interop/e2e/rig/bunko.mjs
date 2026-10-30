@@ -70,6 +70,17 @@ export function bunko(rig) {
             const r = await request('DELETE', '/login/api/token', { auth: `Bearer ${token}` });
             if (!r.ok) throw new Error(`revoking a token: ${r.status} ${await r.text()}`);
         },
+        /** The admin Storage panel (`/_admin/api/storage`): the cloud library and its lease. */
+        async storage() {
+            const r = await request('GET', '/_admin/api/storage', { auth: basic(admin.username, admin.password) });
+            if (!r.ok) throw new Error(`the storage panel: ${r.status} ${await r.text()}`);
+            return r.json();
+        },
+        /** A file's bytes as `auth` reads them (status, bytes); 404 is an answer, not an error. */
+        async bytes(path, auth) {
+            const r = await request('GET', path, { auth });
+            return { status: r.status, bytes: r.status === 200 ? Buffer.from(await r.arrayBuffer()) : null };
+        },
         /** A file's bytes as `auth` reads them (status, text); 404 is an answer, not an error. */
         async get(path, auth) {
             const r = await request('GET', path, { auth });

@@ -406,6 +406,31 @@ impl Server {
         self.spawn()
     }
 
+    /// Start a stopped server again (after [`Server::stop`]), on the same config and
+    /// data and its environment as it stands now. Returns once the server answers.
+    pub fn start_again(&mut self) -> Result<()> {
+        if self.child.is_some() {
+            bail!("the server is running");
+        }
+        self.spawn()
+    }
+
+    /// One variable of the server process's extra environment.
+    pub fn env_var(&self, key: &str) -> Option<&str> {
+        self.env
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Set a variable of the extra environment, for the next start.
+    pub fn set_env(&mut self, key: &str, value: &str) {
+        match self.env.iter_mut().find(|(k, _)| k == key) {
+            Some(e) => e.1 = value.to_string(),
+            None => self.env.push((key.to_string(), value.to_string())),
+        }
+    }
+
     pub fn stop(&mut self) {
         let Some(mut child) = self.child.take() else {
             return;

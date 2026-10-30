@@ -24,11 +24,13 @@ pub struct Env {
     pub fakeproc_hold: Option<PathBuf>,
     /// `RIG_CONTEXT`: the cloud account, its credentials, the seeded library.
     pub context: Value,
+    /// `RIG_CONTROL_URL`: the runner's control port (control.rs), with a Bunko server.
+    pub control_url: Option<String>,
 }
 
 /// Every variable [`Env::vars`] may set: all are cleared first, so one a suite does not
 /// have never leaks in from the caller's shell.
-const VARS: [&str; 10] = [
+const VARS: [&str; 11] = [
     "READER_URL",
     "BUNKO_URL",
     "CLOUDSIM_URL",
@@ -39,6 +41,7 @@ const VARS: [&str; 10] = [
     "RIG_WORKDIR",
     "RIG_FAKEPROC_HOLD",
     "RIG_CONTEXT",
+    "RIG_CONTROL_URL",
 ];
 
 impl Env {
@@ -56,6 +59,7 @@ impl Env {
             ("CLOUDSIM_URL", &self.cloudsim_url),
             ("CLOUDSIM_PREAUTH_URL", &self.preauth_url),
             ("RCLONE_URL", &self.rclone_url),
+            ("RIG_CONTROL_URL", &self.control_url),
         ] {
             if let Some(value) = value {
                 v.push((name, value.clone()));
@@ -547,6 +551,7 @@ mod tests {
             workdir: "/w".into(),
             fakeproc_hold: Some("/w/processor/release".into()),
             context: serde_json::json!({"sim_account": "bunko"}),
+            control_url: Some("http://127.0.0.1:4".into()),
         };
         let vars = e.vars();
         let get = |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str());
@@ -560,6 +565,7 @@ mod tests {
         assert_eq!(get("RIG_WORKDIR"), Some("/w"));
         assert_eq!(get("RIG_FAKEPROC_HOLD"), Some("/w/processor/release"));
         assert_eq!(get("RIG_CONTEXT"), Some(r#"{"sim_account":"bunko"}"#));
+        assert_eq!(get("RIG_CONTROL_URL"), Some("http://127.0.0.1:4"));
         for (name, _) in &vars {
             assert!(VARS.contains(name), "{name} is not cleared first");
         }

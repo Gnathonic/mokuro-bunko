@@ -7,6 +7,7 @@
 mod browser;
 mod cloud;
 mod cloudsim;
+mod control;
 mod fakeproc;
 mod playwright;
 mod rclone;
