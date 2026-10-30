@@ -20,7 +20,7 @@ import { test as base, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { gateCapabilities, parsePendingCaps } from './caps.mjs';
-import { driver } from './driver.mjs';
+import { CLOUD_TEST_HOOKS, V1_METHODS, driver } from './driver.mjs';
 import { STUBBED_SCRIPTS, refusedError, routeFor } from './egress.mjs';
 import { takeViolations } from './violations.mjs';
 
@@ -149,6 +149,18 @@ export async function openReader(page, { readerUrl, needs, pendingCapsFile }) {
     }
     const api = await page.evaluate(() => globalThis.__mokuroInterop.apiVersion);
     if (api !== 1) throw new Error(`the reader's rig driver speaks API v${api}; this rig speaks v1`);
+    // Every v1 method there before a spec starts: a reader that lost one fails here,
+    // naming it, not halfway through a spec as "is not a function".
+    const lacking = await page.evaluate(
+        ([methods, hooks]) => [
+            ...methods.filter((m) => typeof globalThis.__mokuroInterop[m] !== 'function'),
+            ...hooks
+                .filter((h) => typeof globalThis.__mokuroCloudTestHooks?.[h] !== 'function')
+                .map((h) => `__mokuroCloudTestHooks.${h}`),
+        ],
+        [V1_METHODS, CLOUD_TEST_HOOKS],
+    );
+    if (lacking.length) throw new Error(`the reader's rig driver v1 lacks ${lacking.join(', ')}`);
     const have = await page.evaluate(() => [...globalThis.__mokuroInterop.capabilities]);
     const gate = gateCapabilities(needs, have, pending);
     if (gate.action === 'run') return { driver: driver(page) };
@@ -186,12 +198,25 @@ async function routeContext(context, { readerUrl, readerStub, refusedHosts, stub
     }
 }
 
+/**
+ * The init script that sets `__mokuroInteropConfig` (`c`, interopConfig's) in a page.
+ * Playwright runs a context's init scripts and a page's in no set order, so a spec's
+ * own page script (a reconnect's new token) may have run first: what it set wins.
+ */
+export function installInteropConfig(c) {
+    const set = globalThis.__mokuroInteropConfig;
+    if (!set) {
+        globalThis.__mokuroInteropConfig = c;
+        return;
+    }
+    const merged = { ...c, ...set };
+    for (const k of ['bases', 'tokens']) if (c[k] || set[k]) merged[k] = { ...c[k], ...set[k] };
+    globalThis.__mokuroInteropConfig = merged;
+}
+
 /** `__mokuroInteropConfig` set in `context` before any page script runs. */
 async function configure(context, rig) {
-    const config = await interopConfig(rig);
-    await context.addInitScript((c) => {
-        globalThis.__mokuroInteropConfig = c;
-    }, config);
+    await context.addInitScript(installInteropConfig, await interopConfig(rig));
 }
 
 export const test = base.extend({

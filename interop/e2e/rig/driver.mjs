@@ -2,6 +2,52 @@
 // src/lib/interop/rig-driver.ts): one page.evaluate per method, nothing more. The
 // reader calls the same stores and functions its UI calls; a spec never clicks.
 
+/**
+ * Every method of driver API v1, as the reader's `createRigDriver` has them: the
+ * contract's first twenty, then what the rig's suites added before any reader was pinned
+ * (`interop/reader.ref`). The set is v1 from the first pin on: a method added after it
+ * comes with `apiVersion` 2. The fixtures check them all before a spec runs.
+ */
+export const V1_METHODS = [
+    'connectWebDAV',
+    'connectMega',
+    'connectDrive',
+    'connectOneDrive',
+    'logout',
+    'sync',
+    'library',
+    'open',
+    'setPage',
+    'progress',
+    'renameVolume',
+    'renameSeries',
+    'deleteVolume',
+    'setSpineOffset',
+    'editFirstBlock',
+    'publishCurated',
+    'selectLayer',
+    'providerStatus',
+    'controlState',
+    'historyStatus',
+    // The dav and api suites.
+    'showSeries',
+    'pendingOcr',
+    // The direct suite.
+    'idle',
+    // The shared suite.
+    'importVolume',
+    'backupVolume',
+    // S8, and every count of metadata writes.
+    'settleSeriesWrites',
+];
+
+/**
+ * The reader's cloud test hooks (`src/lib/util/sync/cloud-test-hooks.ts`) a spec calls
+ * beside the driver: a token re-minted after the page loaded (`__mokuroInteropConfig`
+ * is read once, at load) is handed over with `setCloudTestToken(provider, token)`.
+ */
+export const CLOUD_TEST_HOOKS = ['setCloudTestBases', 'setCloudTestToken'];
+
 /** Call `__mokuroInterop[name](...args)` in the page; a method the reader lacks says so. */
 function call(page, name, args) {
     return page.evaluate(

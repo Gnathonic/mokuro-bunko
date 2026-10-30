@@ -153,9 +153,12 @@ test('revoked: the reconnect banner, and the app settles behind it; a reconnect 
         }
         case 'microsoft': {
             // The reconnect is MSAL's redirect: the page comes back with a new token.
+            // Playwright runs the context's init script (fixtures.mjs, the config) and
+            // the page's in no set order: this one stands alone either way.
             const fresh = await mint(rig);
             await page.addInitScript((t) => {
-                globalThis.__mokuroInteropConfig.tokens.onedrive = t;
+                const config = (globalThis.__mokuroInteropConfig ??= { v: 1 });
+                (config.tokens ??= {}).onedrive = t;
             }, fresh.access_token);
             await page.reload();
             await page.waitForFunction(() => globalThis.__mokuroInterop?.apiVersion === 1);

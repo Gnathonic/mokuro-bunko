@@ -1,11 +1,18 @@
 // The fixtures' own checks, against a stub page instead of a reader (no build, no
 // parties): `npm run selftest` in interop/ (selftest/run.mjs).
 import { test, expect, openReader } from '../fixtures.mjs';
+import { V1_METHODS } from '../driver.mjs';
 import { createServer } from 'node:net';
 
-const STUB = `<!doctype html><title>stub</title><script>
+/** A stub reader: driver v1 (every method but `lacking`) and the cloud test hooks. */
+const stubReader = (lacking = []) => `<!doctype html><title>stub</title><script>
 globalThis.__mokuroInterop = { apiVersion: 1, capabilities: ['history'] };
+for (const m of ${JSON.stringify(V1_METHODS.filter((m) => !lacking.includes(m)))}) {
+    globalThis.__mokuroInterop[m] = async () => null;
+}
+globalThis.__mokuroCloudTestHooks = { setCloudTestBases() {}, setCloudTestToken() {} };
 </script>`;
+const STUB = stubReader();
 
 test.use({
     readerUrl: 'http://127.0.0.1:9/',
@@ -32,6 +39,14 @@ test('a missing capability the pending list lacks fails the spec, naming it', as
 }) => {
     const opening = openReader(page, { readerUrl, needs: ['history', 'rig-selftest-unlisted'], pendingCapsFile });
     await expect(opening).rejects.toThrow(/^the reader lacks capability rig-selftest-unlisted \(it has: history\)/);
+});
+
+test.describe('a v1 driver without one of its methods', () => {
+    test.use({ readerStub: stubReader(['settleSeriesWrites']) });
+    test('fails the spec at the gate, naming the method', async ({ page, readerUrl, pendingCapsFile }) => {
+        const opening = openReader(page, { readerUrl, needs: ['history'], pendingCapsFile });
+        await expect(opening).rejects.toThrow(/^the reader's rig driver v1 lacks settleSeriesWrites/);
+    });
 });
 
 test('a missing capability the pending list names skips the spec, naming it', async ({
