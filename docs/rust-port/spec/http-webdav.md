@@ -748,6 +748,11 @@ statuses below are those of an authorised caller.
   `UploadMiddleware`, `X-Mokuro-Put: verified` for DAV paths, section 9).
   * existing collection (incl. `/`, `/mokuro-reader`): `Allow: OPTIONS, HEAD, GET, PROPFIND, DELETE, COPY,
     MOVE, PROPPATCH, LOCK, UNLOCK` (note: no PUT/MKCOL listed even though MKCOL under it is permitted).
+    **0.8 (X9):** the list follows the account, `PUT, MKCOL` inserted after `PROPFIND`: an AddFiles
+    account gets both on every collection at or under `/mokuro-reader`; a WriteProgress account
+    without AddFiles (`registered`) gets both on `/mokuro-reader` and `history/**`, and `PUT` alone on
+    library collections (its personal corrections, D27). Anonymous, processor, `/` and `/inbox`
+    keep the list above. Advisory only: `authorize()` still decides each request.
   * existing file: `Allow: OPTIONS, HEAD, GET, PROPFIND, PUT, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK` and
     `Accept-Ranges: bytes` unless `support_ranges()` is false (nginx offload).
   * non-existent path whose **parent resolves to an existing collection**: `Allow: OPTIONS, PUT, MKCOL`
@@ -1465,7 +1470,7 @@ Numbered for cross-reference. **[VERIFIED]** = reproduced against the real app/W
 | 14.7 | Locks keyed by URL (cross-user collision on per-user files), principal `""`, `LOCK` of a missing path -> 500 + dangling lock, `Content-Type: application; charset=utf-8`. | Q4. |
 | 14.8 | `PROPFIND` `<propname/>` (the RFC element) unrecognised -> empty responses. | implement properly (harmless). |
 | 14.9 | `Depth:infinity` PROPFIND answers allprop whatever the body asks; cached `Date` is stale; `Depth: Infinity` bypasses the cache. | keep allprop; Date fresh. |
-| 14.10 | `OPTIONS` of any not-yet-existing path under an existing collection (incl. `/inbox`) is `200 Allow: OPTIONS, PUT, MKCOL`. `OPTIONS` on `/inbox/x`: `404`. Collections advertise no `PUT`/`MKCOL`. | replicate (clients ignore). |
+| 14.10 | `OPTIONS` of any not-yet-existing path under an existing collection (incl. `/inbox`) is `200 Allow: OPTIONS, PUT, MKCOL`. `OPTIONS` on `/inbox/x`: `404`. Collections advertise no `PUT`/`MKCOL`. | replicate; 0.8 lists `PUT`/`MKCOL` on collections the account may write (§8.3.1, X9): Mokuro Reader reads `Allow`. |
 | 14.11 | 405 answers (`POST`, unknown methods) carry no `Allow`. | add `Allow` (harmless). |
 | 14.12 | `201`/`MKCOL` responses carry an HTML body; `204` has none. | any small body is fine. |
 | 14.13 | `library/thumbnails/` is created at startup and listed in PROPFIND of `/mokuro-reader/`; in-flight staging files (`.<n>.upload-*.tmp`) and dotfiles are listed. | Q3. |

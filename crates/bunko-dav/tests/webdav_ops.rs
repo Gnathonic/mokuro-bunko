@@ -954,6 +954,71 @@ async fn options_answers() {
     assert_eq!(env.req(None, "OPTIONS", "*", &[], b"").await.code(), 200);
 }
 
+/// Collections advertise what the account may write there (plan X9), so a client that
+/// reads Allow does not take a writable account for read-only.
+#[tokio::test]
+async fn options_allow_follows_the_account() {
+    const BASE: &str = "OPTIONS, HEAD, GET, PROPFIND, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
+    const WRITE: &str =
+        "OPTIONS, HEAD, GET, PROPFIND, PUT, MKCOL, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
+    const PUT: &str =
+        "OPTIONS, HEAD, GET, PROPFIND, PUT, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
+    const FILE: &str = PUT;
+    const UNMAPPED: &str = "OPTIONS, PUT, MKCOL";
+
+    let env = Env::new();
+    for user in ["reader", "uploader"] {
+        for path in ["/mokuro-reader/history", "/mokuro-reader/history/dev"] {
+            let r = env.req(Some(user), "MKCOL", path, &[], b"").await;
+            assert_eq!(r.code(), 201, "{user} MKCOL {path}");
+        }
+    }
+    let hooks: std::sync::Arc<dyn bunko_dav::DavHooks> = env.hooks.clone();
+    let processor =
+        || bunko_dav::DavContext::user("proc", bunko_core::Role::Processor, hooks.clone());
+
+    let rows: &[(Option<&str>, &str, &str)] = &[
+        // AddFiles: every collection at or under the reader root.
+        (Some("uploader"), "/mokuro-reader/", WRITE),
+        (Some("uploader"), "/mokuro-reader/series/", WRITE),
+        (Some("uploader"), "/mokuro-reader/history/dev", WRITE),
+        (Some("editor"), "/mokuro-reader/series", WRITE),
+        (Some("admin"), "/mokuro-reader/series/", WRITE),
+        // WriteProgress alone: its own tree, and PUT (personal corrections) in the library.
+        (Some("reader"), "/mokuro-reader/", WRITE),
+        (Some("reader"), "/mokuro-reader/history", WRITE),
+        (Some("reader"), "/mokuro-reader/history/dev/", WRITE),
+        (Some("reader"), "/mokuro-reader/series/", PUT),
+        (Some("reader"), "/mokuro-reader/thumbnails", PUT),
+        // Outside the reader root nothing changes, whoever asks.
+        (Some("uploader"), "/", BASE),
+        (Some("reader"), "/", BASE),
+        // Files and unmapped paths are unchanged.
+        (Some("reader"), "/mokuro-reader/manga1.cbz", FILE),
+        (Some("uploader"), "/mokuro-reader/series/vol1.cbz", FILE),
+        (Some("reader"), "/mokuro-reader/series/nope.cbz", UNMAPPED),
+        (Some("uploader"), "/mokuro-reader/series/nope.cbz", UNMAPPED),
+        // Anonymous: the base everywhere.
+        (None, "/mokuro-reader/", BASE),
+        (None, "/mokuro-reader/series/", BASE),
+    ];
+    for (user, path, allow) in rows {
+        let r = env.req(*user, "OPTIONS", path, &[], b"").await;
+        assert_eq!(r.code(), 200, "{user:?} {path}");
+        assert_eq!(r.header("allow"), Some(*allow), "{user:?} {path}");
+    }
+    for (path, allow) in [
+        ("/mokuro-reader/", BASE),
+        ("/mokuro-reader/series/", BASE),
+        ("/mokuro-reader/manga1.cbz", FILE),
+    ] {
+        let r = env
+            .send_ctx(processor(), request("OPTIONS", path, &[], b""))
+            .await;
+        assert_eq!(r.header("allow"), Some(allow), "processor {path}");
+    }
+}
+
 #[tokio::test]
 async fn unknown_methods_are_405_with_allow() {
     let env = Env::new();
