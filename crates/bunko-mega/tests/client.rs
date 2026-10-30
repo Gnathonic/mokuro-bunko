@@ -72,6 +72,49 @@ async fn login_v2_with_2fa_then_resume_without_the_password() {
     assert_eq!(e.code(), Some(ErrorCode::ESID));
 }
 
+/// Bunko and the reader signed in to one account: every password sign-in is a session
+/// of its own, with its own sek, so each resumes with its own master key, and one
+/// logging out leaves the other signed in.
+#[tokio::test]
+async fn two_sign_ins_are_two_sessions_each_resuming_with_its_own_key() {
+    let mock = MockMega::start().await;
+    mock.set_account("shared@example.com", "a long shared password", None);
+    let c = cfg(&mock);
+    // A session handed out before anyone signs in (the rig's server starts with one).
+    let handed = mock.session_blob();
+    let bunko = Client::login(
+        c.clone(),
+        "shared@example.com",
+        "a long shared password",
+        None,
+    )
+    .await
+    .unwrap();
+    let reader = Client::login(
+        c.clone(),
+        "shared@example.com",
+        "a long shared password",
+        None,
+    )
+    .await
+    .unwrap();
+    let (b, r) = (bunko.session().unwrap(), reader.session().unwrap());
+    assert_ne!(b.sid(), r.sid());
+    let blob = b.serialize().unwrap();
+    let resumed = Client::resume(c.clone(), &blob).await.unwrap();
+    // The same master key and sek as before the reader signed in.
+    assert_eq!(resumed.session().unwrap().serialize().unwrap(), blob);
+    resumed.logout().await.unwrap();
+    assert_eq!(
+        Client::resume(c.clone(), &blob).await.err().unwrap().code(),
+        Some(ErrorCode::ESID)
+    );
+    let first = Client::resume(c.clone(), &handed).await.unwrap();
+    assert_eq!(first.session().unwrap().serialize().unwrap(), handed);
+    let again = Client::resume(c, &r.serialize().unwrap()).await.unwrap();
+    assert_eq!(again.user_info().await.unwrap().email, "shared@example.com");
+}
+
 #[tokio::test]
 async fn hashcash_challenge_and_eagain_are_retried() {
     let mock = MockMega::start().await;

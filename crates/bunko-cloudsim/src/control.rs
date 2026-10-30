@@ -69,6 +69,7 @@ pub fn router() -> Router<SimState> {
         .route("/files", get(files))
         .route("/node", post(node))
         .route("/tree", get(tree))
+        .route("/content", get(content))
         .route("/fault", post(fault))
         .route("/knobs", post(knobs))
         .route("/log", get(log).delete(clear_log))
@@ -207,6 +208,31 @@ async fn tree(State(sim): State<SimState>, Query(q): Query<HashMap<String, Strin
         Some("1" | "true")
     );
     Json(sim.tree(p, account, trashed)).into_response()
+}
+
+/// One file's bytes as the provider stores them, by its `/_sim/tree` id: what a test
+/// reads to check a file's contents without a provider client (MEGA's are encrypted on
+/// the wire). 404 for a folder or an unknown id.
+async fn content(
+    State(sim): State<SimState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let p = q.get("provider").map(String::as_str).unwrap_or_default();
+    let Some(p) = Provider::parse(p) else {
+        return ctl_err(format!("provider {p:?}: google, microsoft or mega")).into_response();
+    };
+    let account = q.get("account").map(String::as_str).unwrap_or("default");
+    let Some(id) = q.get("id") else {
+        return ctl_err("missing id").into_response();
+    };
+    match sim.content(p, account, id) {
+        Some(bytes) => ([("content-type", "application/octet-stream")], bytes).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("no file {id}")})),
+        )
+            .into_response(),
+    }
 }
 
 async fn fault(State(sim): State<SimState>, b: Body) -> Answer {

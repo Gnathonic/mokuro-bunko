@@ -2,7 +2,8 @@
 //! sends it: Drive queries with `or` and parentheses, `description`, a resumable
 //! upload with no declared size and a tokenless single PUT; Graph root-path
 //! addressing and `replace` upload sessions, children without `$top`, and a
-//! download redirect to another origin; MEGA's binary completion token (`v: 2`).
+//! download redirect to another origin; MEGA's binary completion token (`v: 2`) and
+//! the thumbnail file attribute megajs puts on an uploaded image (`ufa`, `pfa`).
 
 use base64::Engine;
 use bunko_cloudsim::{CloudSim, Provider};
@@ -316,5 +317,76 @@ async fn mega_v2_uploads_answer_a_binary_completion_token() {
         "n": [{"h": h, "t": 0, "a": "AAAAAAAAAAAAAAAAAAAAAA", "k": "AAAAAAAAAAAAAAAAAAAAAA"}]}]))
     .await;
     assert!(v[0]["f"][0]["h"].is_string(), "{v}");
+    sim.assert_clean();
+}
+
+/// megajs's `uploadAttribute('thumbnail', …)`: `ufa` answers an upload URL, the
+/// encrypted bytes POSTed to `<url>/0` answer the attribute's raw 8-byte handle, and
+/// `pfa` puts `0*<handle>` on the node, which a later fetch lists as its `fa`.
+#[tokio::test]
+async fn mega_thumbnail_attributes_upload_and_attach() {
+    let sim = bunko_cloudsim::start().await;
+    let m = sim.mega("r");
+    m.set_account("r@cloudsim.test", "pw", None);
+    let mut cfg = bunko_mega::ClientConfig {
+        api_origin: sim.mega_origin(),
+        ..bunko_mega::ClientConfig::default()
+    };
+    cfg.min_cs_interval = std::time::Duration::ZERO;
+    let client = bunko_mega::Client::login(cfg, "r@cloudsim.test", "pw", None)
+        .await
+        .unwrap();
+    let sid = client.session().unwrap().sid().to_string();
+    let c = http();
+    let cs = |body: Value| {
+        let c = c.clone();
+        let url = format!("{}cs?id=1&sid={sid}", sim.mega_origin());
+        async move {
+            c.post(url)
+                .body(body.to_string())
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let node = m.put(bunko_cloudsim::mega::ROOT, "cover.webp", b"img");
+    let v = cs(json!([{"a": "ufa", "ssl": 0, "s": 16, "h": node}])).await;
+    let p = v[0]["p"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string();
+    let raw = c
+        .post(format!("{p}/0"))
+        .body(vec![7u8; 16])
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(raw.len(), 8, "{raw:?}");
+    let fa = format!(
+        "0*{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&raw)
+    );
+    let v = cs(json!([{"a": "pfa", "n": node, "fa": fa}])).await;
+    assert_eq!(v[0], json!(fa), "{v}");
+    let v = cs(json!([{"a": "f", "c": 1}])).await;
+    let listed = v[0]["f"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["h"] == node.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(listed["fa"], json!(fa));
+    // A node that is not there.
+    assert_eq!(
+        cs(json!([{"a": "pfa", "n": "nope", "fa": fa}])).await[0],
+        json!(-9)
+    );
     sim.assert_clean();
 }

@@ -455,12 +455,19 @@ async fn a_mega_account_hands_out_a_session_the_client_resumes() {
         min_cs_interval: std::time::Duration::ZERO,
         ..bunko_mega::ClientConfig::default()
     };
-    let client = bunko_mega::Client::resume(cfg, &blob).await.unwrap();
-    // It is that account's session: a login by password names the same one.
-    assert_eq!(
+    let client = bunko_mega::Client::resume(cfg.clone(), &blob)
+        .await
+        .unwrap();
+    // It is that account's session.
+    assert_eq!(client.user_info().await.unwrap().email, "m@cloudsim.test");
+    // A login by password is a session of its own (as MEGA's is), and the saved one
+    // still resumes after it.
+    assert_ne!(
         client.session().unwrap().sid(),
         mega_sid(&sim, "m@cloudsim.test").await
     );
+    let again = bunko_mega::Client::resume(cfg, &blob).await.unwrap();
+    assert_eq!(again.session().unwrap().serialize().unwrap(), blob);
 }
 
 async fn mega_sid(sim: &bunko_cloudsim::CloudSim, email: &str) -> String {
@@ -1123,4 +1130,39 @@ async fn the_log_names_the_error_code_mega_answered() {
         "{log}"
     );
     assert!(log.as_array().unwrap().iter().all(|e| e["status"] == 200));
+}
+
+/// `/_sim/content` answers a file's bytes as the provider stores them (MEGA's
+/// decrypted), by its tree id, on every provider; a folder or an unknown id is a 404.
+#[tokio::test]
+async fn content_answers_a_files_bytes_by_id() {
+    let sim = bunko_cloudsim::start().await;
+    for p in ["google", "microsoft", "mega"] {
+        let folder = node_id(
+            &sim.base,
+            json!({"provider": p, "parent_path": "mokuro-reader", "name": "S", "folder": true}),
+        )
+        .await;
+        let file = node_id(
+            &sim.base,
+            json!({"provider": p, "parent_id": folder, "name": "q.json",
+                   "content_base64": b64(b"{\"done\":[]}")}),
+        )
+        .await;
+        let r = http()
+            .get(format!("{}/_sim/content?provider={p}&id={file}", sim.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "{p}");
+        assert_eq!(&r.bytes().await.unwrap()[..], b"{\"done\":[]}", "{p}");
+        for id in [folder.as_str(), "no-such-id"] {
+            let r = http()
+                .get(format!("{}/_sim/content?provider={p}&id={id}", sim.base))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 404, "{p} {id}");
+        }
+    }
 }

@@ -340,6 +340,30 @@ impl SimState {
         NodeInfo::sorted(rows, include_trashed)
     }
 
+    /// The bytes of the file `id` as the provider stores them (MEGA's decrypted);
+    /// None for a folder or an unknown id.
+    pub fn content(&self, p: Provider, account: &str, id: &str) -> Option<Vec<u8>> {
+        match p {
+            Provider::Google => {
+                let d = self.drive(account);
+                let d = d.lock();
+                d.files
+                    .get(id)
+                    .filter(|f| f.mime != drive::FOLDER)
+                    .map(|f| f.data.to_vec())
+            }
+            Provider::Microsoft => {
+                let o = self.onedrive(account);
+                let o = o.lock();
+                o.items
+                    .get(id)
+                    .filter(|f| !f.folder)
+                    .map(|f| f.data.to_vec())
+            }
+            Provider::Mega => self.mega(account).content(id).map(|(data, _)| data),
+        }
+    }
+
     /// Forget every account, token, log entry and violation.
     pub fn reset(&self) {
         self.0.drive.lock().clear();

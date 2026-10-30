@@ -44,7 +44,12 @@ state and knobs. Dropping the `CloudSim` fails the test if it recorded a violati
 | Control API | `{base}/_sim/` |
 
 State is per (provider, account). A bearer token picks the account; MEGA picks it by
-session id, or by the email of a login. Every response carries permissive CORS.
+session id, or by the email of a login. Every MEGA password sign-in is a session of its
+own with its own `sek`, beside the one `/_sim/mega/account` hands out, as on MEGA: Bunko
+and a reader signed in to one account each resume with their own key, and one logging
+out leaves the other signed in. MEGA also takes the file attributes megajs puts on an
+image it uploads (`ufa`, the bytes POSTed to the URL it answers, `pfa`; a fetch lists
+the node's `fa`). Every response carries permissive CORS.
 
 Writes are stamped on the wall clock, the one every response's `Date` header shows (and
 at least a millisecond after the account's previous stamp, so stamps stay distinct; a
@@ -69,8 +74,9 @@ JSON in and out. `account` defaults to `default`; `provider` is `google`, `micro
 | `GET /_sim/files?provider=&account=` | `[{path, size, sha256}]` of every live file |
 | `POST /_sim/node {provider, account, parent_id? \| parent_path?, name, folder?, content_base64?, created?, modified?}` | One new file or folder, `{id}`: always a new node, beside any of the same name (two `mokuro-reader` folders, say), which `seed` cannot make. The parent is a folder id (MEGA: also `ROOT0000` or the rubbish bin `RUBBISH0`), else the folders of `parent_path` from the root (created where missing; the first where names repeat), else the root. `created` and `modified` are RFC 3339; either alone stands for both, neither is the simulator's clock. MEGA keeps one time (`ts`): the modified one. OneDrive answers a name the parent has (case folded) with Graph's `409 nameAlreadyExists` |
 | `GET /_sim/tree?provider=&account=&include_trashed=1` | `[{id, parent_id, name, folder, size, sha256, created, modified, trashed}]`, every node but the roots, by id; `trashed` is true in the trash or under a trashed folder (OneDrive: deleted), and such nodes are listed only with `include_trashed=1`. Folders have `size` 0 and `sha256` null |
+| `GET /_sim/content?provider=&account=&id=` | One file's bytes as the provider stores them (MEGA's decrypted), by its `/_sim/tree` id: what a test reads to check a file it did not write, MEGA's being encrypted on the wire. `404` for a folder or an unknown id |
 | `POST /_sim/fault {provider, account, method?, path_has, status, reason, retry_after?, times?}` | The next `times` (default 1) matching Drive or Graph requests get `status` with the provider's error body for `reason` |
-| `POST /_sim/knobs {provider, account, <knob>: value, ...}` | Drive and OneDrive: `strict_bunko` (check on every request what Bunko's driver must always send: `keepRevisionForever=false`, `$top`). Drive: `page_size`, `reverse_listing`, `sha256`, `keep_revisions`, `revisions_forbidden`, `interrupt_chunk`, `down_after_interrupt`, `session_down`, `quota_limit`. OneDrive: `page_size`, `interrupt_fragment`, `down_after_interrupt`, `session_down`, `send_ctag`, `storage_ctag`, `ignore_range`, `permanent_delete`, `quota_total`, `lost_below`. MEGA: `eagain`, `overquota`, `bandwidth_509`, `garbage_download`, `require_hashcash`, `drop_upload_at`, `lose_cursor`, `kill_session` (the session answers `-15` until a password sign-in opens a new one), `fail_command {command, code}` |
+| `POST /_sim/knobs {provider, account, <knob>: value, ...}` | Drive and OneDrive: `strict_bunko` (check on every request what Bunko's driver must always send: `keepRevisionForever=false`, `$top`). Drive: `page_size`, `reverse_listing`, `sha256`, `keep_revisions`, `revisions_forbidden`, `interrupt_chunk`, `down_after_interrupt`, `session_down`, `quota_limit`. OneDrive: `page_size`, `interrupt_fragment`, `down_after_interrupt`, `session_down`, `send_ctag`, `storage_ctag`, `ignore_range`, `permanent_delete`, `quota_total`, `lost_below`. MEGA: `eagain`, `overquota`, `bandwidth_509`, `garbage_download`, `require_hashcash`, `drop_upload_at`, `lose_cursor`, `kill_session` (every session of the account answers `-15`; a password sign-in opens a new one), `fail_command {command, code}` |
 | `GET /_sim/log`, `DELETE /_sim/log` | `[{seq, provider, account, method, path, class, units, bytes_in, bytes_out, status}]`; `class` is `list`, `metadata`, `download`, `upload`, `write`, `delete`, `changes` or `auth`; `units` is 1 per Drive request; MEGA entries add `error`, the code MEGA answered in its 200 body (the batch's, else its first command's: `-3` when `eagain` fires). Provider requests only: no control call is logged |
 | `GET /_sim/violations`, `DELETE /_sim/violations` | Requests the simulator could not accept (it answered them 4xx); `DELETE` clears them and answers the ones it cleared |
 | `POST /_sim/reset` | Forget every account, token, log entry and violation |

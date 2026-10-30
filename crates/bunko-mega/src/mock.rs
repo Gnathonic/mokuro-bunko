@@ -10,7 +10,7 @@
 //! wait URLs it hands out carry the account's index. [`MockMega::start`] is a hub with
 //! one account on its own port.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -90,9 +90,12 @@ struct St {
     /// This account's index in the hub (in the transfer and wait URLs).
     idx: usize,
     master: [u8; 16],
-    sek: [u8; 16],
+    /// The newest session's id (the one `session_blob` hands out).
     sid: String,
-    killed: bool,
+    /// Live sessions, id → sek. Every password sign-in is a session of its own, as on
+    /// MEGA (Bunko and the reader on one account each resume with their own sek); a
+    /// killed or logged-out id is gone and stays dead.
+    sessions: HashMap<String, [u8; 16]>,
     account: Option<Account>,
     nodes: BTreeMap<String, MNode>,
     /// Data keys of the files this mock created itself (for `content`).
@@ -101,6 +104,10 @@ struct St {
     next: u64,
     clock: i64,
     uploads: HashMap<String, Upload>,
+    /// File attribute uploads `ufa` opened (by id) that no POST has filled yet.
+    attr_uploads: HashSet<String>,
+    /// Node handle → its file attributes (`pfa`'s `fa`, e.g. `0*<handle>`).
+    file_attrs: HashMap<String, String>,
     faults: Faults,
     calls: Vec<String>,
     /// Commands this mock does not model (answered `-2`).
@@ -263,7 +270,7 @@ impl St {
             return json!(code);
         }
         let s = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-        let authed = query_sid == Some(self.sid.as_str()) && !self.killed;
+        let authed = query_sid.is_some_and(|q| self.sessions.contains_key(q));
         let login = a == "us0" || (a == "us" && c.get("user").is_some());
         if !login && !authed {
             return json!(-15);
@@ -286,16 +293,14 @@ impl St {
                     return json!(-26);
                 }
                 let login_key = acc.login_key;
-                if self.killed {
-                    // A sign-in after the session was killed opens a new one, as MEGA's
-                    // does; the killed id stays dead.
-                    self.renew_sid();
-                }
+                // A session of its own, beside any handed out before (`session_blob`);
+                // a killed id stays dead.
+                self.renew_sid();
                 let sek: [u8; 16] = unb64(&s("sek"))
                     .ok()
                     .and_then(|v| v.try_into().ok())
                     .unwrap_or([0; 16]);
-                self.sek = sek;
+                self.sessions.insert(self.sid.clone(), sek);
                 let mut k = self.master.to_vec();
                 crypto::ecb_encrypt(&login_key, &mut k).expect("blocks");
                 // csid = RSA(sid || padding) with e = 65537.
@@ -307,9 +312,14 @@ impl St {
                 let c = rsa::BigUint::from_bytes_be(&m).modpow(&rsa::BigUint::from(65537u32), &n);
                 json!({"k": b64(&k), "privk": self.privk(), "csid": b64(&mpi(&c.to_bytes_be())), "u": USER, "sek": b64(&sek), "ach": 1})
             }
-            "us" => json!({"sek": b64(&self.sek), "u": USER, "privk": self.privk(), "ach": 1}),
+            "us" => {
+                let sek = query_sid.and_then(|q| self.sessions.get(q)).copied();
+                json!({"sek": b64(&sek.unwrap_or_default()), "u": USER, "privk": self.privk(), "ach": 1})
+            }
             "sml" => {
-                self.killed = true;
+                if let Some(q) = query_sid {
+                    self.sessions.remove(q);
+                }
                 json!(0)
             }
             "ug" => {
@@ -320,7 +330,17 @@ impl St {
                 json!({"mstrg": 20u64 << 30, "cstrg": used})
             }
             "f" => {
-                let f: Vec<Value> = self.nodes.iter().map(|(h, n)| node_json(h, n)).collect();
+                let f: Vec<Value> = self
+                    .nodes
+                    .iter()
+                    .map(|(h, n)| {
+                        let mut j = node_json(h, n);
+                        if let Some(fa) = self.file_attrs.get(h) {
+                            j["fa"] = json!(fa);
+                        }
+                        j
+                    })
+                    .collect();
                 json!({"f": f, "ok": [], "s": [], "sn": self.log.len().to_string(), "noc": 1})
             }
             "g" => match self.nodes.get(&s("n")) {
@@ -397,6 +417,24 @@ impl St {
                 self.log
                     .push(json!({"a": "u", "n": n, "u": USER, "at": at, "ts": ts, "i": s("i")}));
                 json!(0)
+            }
+            // A file attribute (megajs `uploadAttribute`: the thumbnail the reader puts on
+            // an image it uploads): its bytes go to the URL `ufa` answers, which answers
+            // the attribute's 8-byte handle; `pfa` puts `<type>*<handle>` on the node.
+            "ufa" => {
+                self.next += 1;
+                let id = format!("fa{}", self.next);
+                self.attr_uploads.insert(id.clone());
+                json!({"p": format!("{}fa/{}/{id}", self.base, self.idx)})
+            }
+            "pfa" => {
+                let n = s("n");
+                if !self.nodes.contains_key(&n) {
+                    return json!(-9);
+                }
+                let fa = s("fa");
+                self.file_attrs.insert(n, fa.clone());
+                json!(fa)
             }
             "m" => self.do_move(&s("n"), &s("t"), Some(&s("i"))),
             "d" => self.do_delete(&s("n"), Some(&s("i"))),
@@ -482,7 +520,8 @@ impl MegaHub {
         &self.0.base
     }
 
-    /// The routes, relative to the gateway: `/cs`, `/sc`, `/wait/..`, `/dl/..`, `/ul/..`.
+    /// The routes, relative to the gateway: `/cs`, `/sc`, `/wait/..`, `/dl/..`, `/ul/..`,
+    /// `/fa/..`.
     pub fn router(&self) -> Router {
         Router::new()
             .route("/cs", post(cs))
@@ -490,6 +529,7 @@ impl MegaHub {
             .route("/wait/{a}/{sn}", post(wait).get(wait))
             .route("/dl/{a}/{h}/{range}", get(download))
             .route("/ul/{a}/{id}/{offset}", post(upload))
+            .route("/fa/{a}/{id}/{kind}", post(upload_attribute))
             .with_state(self.clone())
     }
 
@@ -569,7 +609,9 @@ impl MegaHub {
     fn resolve(&self, sid: Option<&str>, cmds: &[Value]) -> Option<Acct> {
         let accounts = self.accounts().clone();
         if let Some(sid) = sid
-            && let Some(a) = accounts.iter().find(|(_, st)| lock_st(st).sid == sid)
+            && let Some(a) = accounts
+                .iter()
+                .find(|(_, st)| lock_st(st).sessions.contains_key(sid))
         {
             return Some(a.clone());
         }
@@ -626,9 +668,9 @@ fn cs_class(cmds: &[Value]) -> &'static str {
     {
         Some("us0" | "us" | "sml") => "auth",
         Some("f") => "list",
-        Some("p" | "a" | "m") => "write",
+        Some("p" | "a" | "m" | "pfa") => "write",
         Some("d") => "delete",
-        Some("u") => "upload",
+        Some("u" | "ufa") => "upload",
         _ => "metadata",
     }
 }
@@ -701,7 +743,7 @@ async fn sc(State(app): State<App>, Query(q): Query<HashMap<String, String>>) ->
     };
     let st = lock_st(&st);
     let r = (|| {
-        if sid != Some(st.sid.as_str()) || st.killed {
+        if !sid.is_some_and(|s| st.sessions.contains_key(s)) {
             return "-15".into_response();
         }
         let Some(sn) = q.get("sn").and_then(|s| s.parse::<usize>().ok()) else {
@@ -823,14 +865,37 @@ async fn upload(
     tagged(r, &name, "upload", n)
 }
 
+/// A file attribute's bytes, POSTed whole to the URL `ufa` answered: answers the
+/// attribute's raw 8-byte handle (what megajs base64s into `pfa`'s `fa`).
+async fn upload_attribute(
+    State(app): State<App>,
+    Path((a, id, _kind)): Path<(String, String, String)>,
+    body: Bytes,
+) -> Response {
+    let n = body.len();
+    let Some((name, st)) = app.by_idx(&a) else {
+        app.violation(format!("mega fa/{a}/{id}: no such account"));
+        return tagged(StatusCode::NOT_FOUND, "", "upload", n);
+    };
+    let mut st = lock_st(&st);
+    let r = if st.attr_uploads.remove(&id) {
+        st.next += 1;
+        let mut h = st.next.to_be_bytes();
+        h[0] = 0xfa;
+        h.to_vec().into_response()
+    } else {
+        "-8".into_response()
+    };
+    tagged(r, &name, "upload", n)
+}
+
 impl St {
-    /// A new session id, live. It differs from the old one outside the last 16 bytes,
-    /// which keep it distinct from every other account's.
+    /// A new session id (the caller makes it live). It differs from the old one
+    /// outside the last 16 bytes, which keep it distinct from every other account's.
     fn renew_sid(&mut self) {
         let mut sid = unb64(&self.sid).expect("sid");
         sid[1] = sid[1].wrapping_add(1);
         self.sid = b64(&sid);
-        self.killed = false;
     }
 
     /// An empty account (cloud root, inbox, rubbish bin) at index `idx` of a hub.
@@ -865,9 +930,8 @@ impl St {
             base,
             idx,
             master: [0x5a; 16],
-            sek: [0x3c; 16],
+            sessions: HashMap::from([(b64(&sid), [0x3c; 16])]),
             sid: b64(&sid),
-            killed: false,
             account: None,
             nodes,
             log: Vec::new(),
@@ -875,6 +939,8 @@ impl St {
             next: 0,
             clock: 1_700_000_000,
             uploads: HashMap::new(),
+            attr_uploads: HashSet::new(),
+            file_attrs: HashMap::new(),
             faults: Faults::default(),
             calls: Vec::new(),
             unknown: Vec::new(),
@@ -912,7 +978,8 @@ impl MockMega {
     /// A serialised session the client can resume.
     pub fn session_blob(&self) -> String {
         let st = self.lock();
-        encode_blob(&st.master, &st.sek, &unb64(&st.sid).expect("sid")).expect("blob")
+        let sek = st.sessions.get(&st.sid).copied().unwrap_or_default();
+        encode_blob(&st.master, &sek, &unb64(&st.sid).expect("sid")).expect("blob")
     }
 
     /// Enable password login (v2) for `email`, optionally with a 2FA code.
@@ -1235,8 +1302,9 @@ impl MockMega {
         st.floor = st.log.len();
     }
 
-    /// The session is killed (`-15` from then on); a password sign-in opens a new one.
+    /// Every session of the account is killed (`-15` from then on); a password sign-in
+    /// opens a new one.
     pub fn kill_session(&self) {
-        self.lock().killed = true;
+        self.lock().sessions.clear();
     }
 }
