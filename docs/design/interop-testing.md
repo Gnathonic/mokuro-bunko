@@ -356,6 +356,47 @@ it and the parties' logs (the server's `serve.log`, `cloudsim.log`,
 and preview logs are `reader-build.log` and `reader-preview.log`. A suite folder with
 no specs yet is reported skipped.
 
+**As built (I3, `dav` and `api`, on `local`).** While any route is on, Playwright
+answers every CORS preflight itself, permissively, so a server whose CORS a browser
+would refuse still passes. Both suites therefore run with `preflightsReachServers`
+(fixtures.mjs): the requests are watched instead of routed (a host off the machine is
+still refused by the resolver and still fails the spec; `blob:` and `data:` name none),
+and the two Google scripts are answered empty by a CDP interception of those two URLs
+alone. `npm run selftest` shows both sides: a stand-in DAV server sees the preflight in
+that mode and never under the route. Specs ask the server what another client would see
+through `interop/e2e/rig/bunko.mjs` (admin-created accounts, UTF-8 Basic, `/login/api/me`
+under a token, a file as one account reads it); each spec that signs in makes its own
+account, so the limiter and revocations stay its own.
+- `dav/auth`: Basic with a UTF-8 password at connect (decoded off the wire), then the
+  bearer token on every request; a reload resumes on the token alone; a token the server
+  signed out is re-issued once (single-flight) and the requests retried; a token near its
+  expiry is renewed at the next connect and the old one signed out; logout signs the
+  token out on the server; the browser's preflights from the reader's origin are answered
+  by Bunko itself (`Access-Control-Max-Age`, `X-Mokuro-Put` on DAV paths, which a made-up
+  answer lacks) and allow every method and header asked for.
+- `dav/library` (serial, one account): a volume opened is downloaded through its card's
+  Download and its page image decodes; progress lands in the account's own
+  `volume-data.json` (not another's) and a second browser context reads it back; an edit
+  goes up as the account's `<Vol>.edit.mokuro`, the main sidecar byte for byte as it
+  was, the edit a 404 to another account.
+- `api/queue`: a connect polls the queue file at once; with `Vol 2` claimed and held by
+  processor-fake, the next looks (the tab hidden and shown again) are 304s under
+  `If-None-Match` and the volume's card shows the job; once the hold file exists the
+  job leaves the file (a 200 under a new tag), the card clears and the image-only volume
+  installed on the device gets the server's OCR through its manifest. A Bunko server's
+  queue file has no `done[]` (that list is the cloud-direct queue's, `shared`):
+  completion here is the volume leaving the file, and its manifest.
+- `api/banners`: 401 at connect (`Authentication failed - check your credentials`,
+  type `auth`); 401 mid-session after a password change elsewhere (`needsAttention`, and
+  after a reload the pre-filled sign-in form); 429 past the limiter's ten failures
+  (`Too many failed attempts - try again later`, transient); 503 + `Retry-After` fails
+  the sync and keeps the session. A Bunko on its own disk has no 503 a spec can call up
+  (its 503s are the cloud storage's waits, the `bridge` suite's), so that one is Bunko's
+  outage answer made at the browser's door (`page.route`) for that spec.
+
+The generated sidecar (`genlib::mokuro_doc`) carries `title_uuid`: the reader's import
+refuses a `.mokuro` without it, so no download of a rig volume with OCR could install.
+
 The `cloud` suite (`rig/cloud.rs`) runs one library of four volumes and a reader's
 `series.json` through two server processes, in order, on each provider: **cold-start**
 (the catalog lists the series, the bridge serves an archive whole and ranged, byte for

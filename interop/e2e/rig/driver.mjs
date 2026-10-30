@@ -37,7 +37,7 @@ export function driver(page) {
         sync: m('sync'),
         /** @returns {Promise<{volumes: {id, series, title, cloudPath, hasOcr, layers: string[]}[]}>} */
         library: m('library'),
-        /** (volumeId) */
+        /** (volumeId) → {id}: one not on the device is downloaded first (its card's Download). */
         open: m('open'),
         /** (volumeId, page) */
         setPage: m('setPage'),
@@ -62,5 +62,9 @@ export function driver(page) {
         controlState: m('controlState'),
         /** → {enabled, devices} */
         historyStatus: m('historyStatus'),
+        /** (series) the catalog card's click: the series page, its volume cards shown. */
+        showSeries: m('showSeries'),
+        /** (volumeId) → what the volume's card shows of the server's OCR queue, or null. */
+        pendingOcr: m('pendingOcr'),
     };
 }
