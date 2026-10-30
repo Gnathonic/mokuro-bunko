@@ -394,6 +394,38 @@ account, so the limiter and revocations stay its own.
   (its 503s are the cloud storage's waits, the `bridge` suite's), so that one is Bunko's
   outage answer made at the browser's door (`page.route`) for that spec.
 
+**As built (I3, `direct`, on google, microsoft, mega and rclone).** The reader
+alone, signed in as the smoke spec signs in (`interop/e2e/rig/cloud-direct.mjs`, which
+also lists the cloud's files under `mokuro-reader/`: cloudsim's `/_sim/tree`, or
+rclone's served directory). A spec that faults a write first waits for the reader to
+settle (`__mokuroInterop.idle()`: no sync or listing in flight, the app's own after a
+sign-in or a reader opening included), then faults the NEXT write of
+`volume-data.json` once: Drive a PATCH of its id, Graph its `createUploadSession`, MEGA
+the next `u` by `fail_command` (or `eagain`), rclone at the browser's door
+(`page.route`, rclone having no fault knobs). `anotherDevice()` (fixtures.mjs) is a
+second browser context in the same spec under the same rule, signed in afresh.
+- `direct/library`: a volume opened is downloaded from the cloud and a page of it
+  decodes; a page turn goes up in `volume-data.json` (its stored hash moves), the cover
+  goes up beside the archive, and another device reads the page back.
+- `direct/faults`: **401** (google only: an expired token, GIS handing a new one at
+  the silent re-auth) the sync goes on with no banner and the other device sees the
+  page; MSAL refreshes before expiry, a MEGA session does not expire and WebDAV sends
+  its credentials each time, so those skip to the next spec. **Revoked** (a revoked
+  token, MEGA `kill_session`, rclone answered 401 at the door) with nothing to write:
+  the reconnect banner (`needsAttention`), the app idle behind it and still bannered
+  after another sync; a reconnect clears it (Drive a new token, OneDrive MSAL's
+  redirect: a reload under a new token, MEGA and rclone a sign-in). **Quota** (Drive
+  403 `storageQuotaExceeded`, Graph 507 `insufficientStorage`, MEGA `-17`, WebDAV 507):
+  the sync fails as storage full, still signed in with no banner, the cloud's copy
+  unchanged (not on plain WebDAV, where the reader deletes before its PUT on purpose),
+  the next sync lands it. **429** (Retry-After 1; MEGA two EAGAINs): waited out and
+  landed in the same sync; skipped on rclone (the reader's WebDAV writes have no
+  Retry-After rule). **412**: that sync fails without a banner, another device writes
+  meanwhile, and the next sync leaves both devices with both pages; skipped on MEGA (no
+  conditional write).
+- cloudsim's MEGA mock opens a new session on a password sign-in after
+  `kill_session` (the killed id stays dead), so a reconnect can be tested.
+
 The generated sidecar (`genlib::mokuro_doc`) carries `title_uuid`: the reader's import
 refuses a `.mokuro` without it, so no download of a rig volume with OCR could install.
 

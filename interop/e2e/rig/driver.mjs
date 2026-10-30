@@ -66,5 +66,7 @@ export function driver(page) {
         showSeries: m('showSeries'),
         /** (volumeId) → what the volume's card shows of the server's OCR queue, or null. */
         pendingOcr: m('pendingOcr'),
+        /** Resolves once no sync and no cloud listing is in flight (the app's own, too). */
+        idle: m('idle'),
     };
 }
