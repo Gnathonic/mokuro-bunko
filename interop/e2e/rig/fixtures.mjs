@@ -18,7 +18,7 @@ import { test as base, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { gateCapabilities, parsePendingCaps } from './caps.mjs';
 import { driver } from './driver.mjs';
-import { refusedError, routeFor } from './egress.mjs';
+import { STUBBED_SCRIPTS, refusedError, routeFor } from './egress.mjs';
 import { takeViolations } from './violations.mjs';
 
 export { expect };
@@ -132,6 +132,17 @@ export const test = base.extend({
     /** Self-test only: false lets a spec that was refused a host pass (egress.mjs). */
     refusedFails: [true, { option: true }],
 
+    /**
+     * True: watch the requests instead of routing them, so the browser's own CORS
+     * preflights reach the servers. While any route is on, Playwright answers every
+     * preflight itself, permissively, and a server whose CORS a browser would refuse
+     * passes. The rule is the same either way: the browser resolves no host off this
+     * machine (playwright.config.mjs), a request for one still fails the spec, and the
+     * Google scripts are still answered empty (by a CDP interception of those two URLs
+     * alone, on the spec's page; a popup would not get them).
+     */
+    preflightsReachServers: [false, { option: true }],
+
     /** Hosts a request was refused for, in order (each spec's own). */
     refusedHosts: async ({}, use, testInfo) => {
         const hosts = [];
@@ -155,7 +166,7 @@ export const test = base.extend({
 
     // Playwright's context is already one per test; this one refuses the network.
     context: async (
-        { context, rig, readerUrl, readerStub, refusedHosts, stubbedUrls, refusedFails },
+        { context, rig, readerUrl, readerStub, refusedHosts, stubbedUrls, refusedFails, preflightsReachServers },
         use,
         testInfo,
     ) => {
@@ -169,20 +180,37 @@ export const test = base.extend({
                 testInfo.annotations.push({ type: 'cloudsim-violations-between', description: JSON.stringify(before) });
             }
         }
-        await context.route('**/*', (route) => {
-            const href = route.request().url();
-            const url = new URL(href);
-            switch (routeFor(href)) {
-                case 'continue':
-                    return route.continue();
-                case 'stub':
-                    stubbedUrls.push(`${url.origin}${url.pathname}`);
-                    return route.fulfill({ status: 200, contentType: 'text/javascript', body: '' });
-                default:
-                    refusedHosts.push(url.host);
-                    return route.abort('blockedbyclient');
-            }
-        });
+        if (preflightsReachServers) {
+            if (readerStub !== null)
+                throw new Error('readerStub is served by a route; preflightsReachServers has none');
+            // The resolver refuses the host; this records it (the stubs: `page` below).
+            context.on('request', (request) => {
+                const url = new URL(request.url());
+                // blob: and data: name no host (a route never sees them either).
+                if (!/^(https?|wss?):$/.test(url.protocol)) return;
+                switch (routeFor(request.url())) {
+                    case 'stub':
+                        return stubbedUrls.push(`${url.origin}${url.pathname}`);
+                    case 'refuse':
+                        return refusedHosts.push(url.host);
+                }
+            });
+        } else {
+            await context.route('**/*', (route) => {
+                const href = route.request().url();
+                const url = new URL(href);
+                switch (routeFor(href)) {
+                    case 'continue':
+                        return route.continue();
+                    case 'stub':
+                        stubbedUrls.push(`${url.origin}${url.pathname}`);
+                        return route.fulfill({ status: 200, contentType: 'text/javascript', body: '' });
+                    default:
+                        refusedHosts.push(url.host);
+                        return route.abort('blockedbyclient');
+                }
+            });
+        }
         if (readerStub !== null) {
             // Registered last, so it wins over the catch-all above.
             await context.route(`${readerUrl}**`, (route) =>
@@ -206,6 +234,27 @@ export const test = base.extend({
         const refused = refusedFails ? refusedError(refusedHosts) : null;
         if (refused) errors.push(refused);
         if (errors.length) throw new Error(errors.join('\n'));
+    },
+
+    /** Without the route (`preflightsReachServers`), the Google scripts are stubbed here. */
+    page: async ({ page, context, preflightsReachServers }, use) => {
+        if (preflightsReachServers) {
+            const cdp = await context.newCDPSession(page);
+            cdp.on('Fetch.requestPaused', (e) =>
+                cdp
+                    .send('Fetch.fulfillRequest', {
+                        requestId: e.requestId,
+                        responseCode: 200,
+                        responseHeaders: [{ name: 'Content-Type', value: 'text/javascript' }],
+                        body: '',
+                    })
+                    .catch(() => {}),
+            );
+            await cdp.send('Fetch.enable', {
+                patterns: [...STUBBED_SCRIPTS].map((u) => ({ urlPattern: `${u}*`, requestStage: 'Request' })),
+            });
+        }
+        await use(page);
     },
 
     /** The reader, loaded, its capabilities checked against `needs`. */
