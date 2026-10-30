@@ -324,7 +324,15 @@ lease; `direct` the cloud alone. Every server has the accounts `alice` (editor),
 browser context each) get READER_URL, BUNKO_URL, CLOUDSIM_URL, CLOUDSIM_PREAUTH_URL,
 RCLONE_URL, RIG_PROVIDER, RIG_ACCOUNTS, RIG_WORKDIR and RIG_FAKEPROC_HOLD as C6 lists
 them (unset when the suite has no such party), plus `RIG_CONTEXT` (JSON: the shared
-cloud account, its MEGA or WebDAV sign-in, the seeded library). The fixtures
+cloud account, its MEGA or WebDAV sign-in, the seeded library, and a cloud server's
+lease ttl) and, with a Bunko server, `RIG_CONTROL_URL`: the runner's control port
+(`rig/control.rs`), whose `POST /bunko/restart {stale?, tune?}` stops the suite's server
+and starts it again on the same data (`rig.restartBunko` in the fixtures), answering
+once it serves HTTP. `stale` stays down until the marker it last wrote is past its ttl,
+so it claims the library afresh; `tune` sets `MOKURO_TEST_CLOUD_TUNE` keys for that
+process over the suite's own, and a `lease_settle_ms` not under the ttl is refused (a
+claimant writes no heartbeat while it settles, so it would find its own marker stale
+and claim again forever). The fixtures
 (`interop/e2e/rig/fixtures.mjs`, the rule in `egress.mjs`) refuse every request off this
 machine except `apis.google.com/js/api.js` and `accounts.google.com/gsi/client`, which
 load as empty scripts (`stubbed_urls` in the results), and FAIL the spec a refused one
@@ -425,6 +433,27 @@ second browser context in the same spec under the same rule, signed in afresh.
   conditional write).
 - cloudsim's MEGA mock opens a new session on a password sign-in after
   `kill_session` (the killed id stays dead), so a reconnect can be tested.
+
+**As built (I3, `bridge`, on google, microsoft, mega and rclone).** The reader signs in
+to the server on the cloud (Basic, then its token) as an account each spec makes
+(`interop/e2e/rig/bridge/bridge.mjs`); on cloudsim the cloud account is held to what
+Bunko's driver must send (`strict_bunko`), since only Bunko talks to it. Nobody owns
+this cloud's root (`progress_user` unset), so an account's own files and edits stay on
+Bunko's disk.
+- `bridge/library`: a volume opened is downloaded through Bunko and a page of it
+  decodes; the archive Bunko serves hashes as the cloud's copy does, and the page never
+  sent a request to the cloud's origins. An editor's edit goes up to Bunko as its
+  `<Vol>.edit.mokuro` and never reaches the cloud; its Publish (the bridge PUT of
+  `<Vol>.curated.mokuro`) lands in the cloud, the bytes Bunko serves hashing as the
+  cloud's.
+- `bridge/lease` (serial): **the claim**: a restart with `stale` and a settle wait of
+  half the ttl; once the Storage panel shows `claiming` with time left, a Publish
+  answers 503 `storage-lease-claiming` with a Retry-After (every 503 the page got says
+  so), the claim still running when it comes back, `failed` and no reconnect banner;
+  once `held` (a higher epoch) the same Publish lands in the cloud. **The resume**: a
+  plain restart reaches `held` with the same epoch and never a settle wait
+  (`claiming_left_s`); the reader's next sync and Publish land with no 503, on the bearer
+  token it had before, with no request to `/login/`.
 
 The generated sidecar (`genlib::mokuro_doc`) carries `title_uuid`: the reader's import
 refuses a `.mokuro` without it, so no download of a rig volume with OCR could install.
