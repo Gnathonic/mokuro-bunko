@@ -409,7 +409,11 @@ impl axum::extract::FromRef<FallbackState> for Core {
 }
 
 /// Authenticate + authorise (spec §4.3) then hand the request to WebDAV.
-async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Request) -> Response {
+async fn dav_fallback(
+    State(st): State<FallbackState>,
+    ctx: RequestCtx,
+    mut req: Request,
+) -> Response {
     let path = percent_encoding::percent_decode_str(req.uri().path())
         .decode_utf8_lossy()
         .into_owned();
@@ -420,7 +424,7 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
         .map(str::to_string);
     let anon = st.core.anonymous_access();
     let backend = st.core.backend.clone();
-    if let Err(denied) = auth::authorize(
+    let grant = match auth::authorize_grant(
         req.method(),
         &path,
         destination.as_deref(),
@@ -428,14 +432,17 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
         anon,
         backend.as_ref(),
     ) {
-        let resp = denied.into_response();
-        // A refused PUT still answers with the upload verdict JSON (spec http-webdav §9).
-        return if req.method() == http::Method::PUT {
-            bunko_dav::put_refusal_verdict(&path, resp)
-        } else {
-            resp
-        };
-    }
+        Ok(grant) => grant,
+        Err(denied) => {
+            let resp = denied.into_response();
+            // A refused PUT still answers with the upload verdict JSON (spec http-webdav §9).
+            return if req.method() == http::Method::PUT {
+                bunko_dav::put_refusal_verdict(&path, resp)
+            } else {
+                resp
+            };
+        }
+    };
     // Without readers WebDAV only serves processors' archive fetches (also checked in
     // `readers_gate`); the rest (`/`, `/inbox`, ...) is not mounted.
     if !st.core.config.read().server.serve_readers {
@@ -451,6 +458,7 @@ async fn dav_fallback(State(st): State<FallbackState>, ctx: RequestCtx, req: Req
     {
         return crate::library::series_put(lib, req, ctx).await;
     }
+    req.extensions_mut().insert(grant);
     (st.dav)(req, ctx).await
 }
 
@@ -467,11 +475,13 @@ pub fn dav_handler(
         let dav = dav.clone();
         let hooks: Arc<dyn bunko_dav::DavHooks> = hooks.clone();
         let owns_cloud_root = core.owns_cloud_root(ctx.identity.username());
+        let personal_only = req.extensions().get() == Some(&auth::Grant::Personal);
         Box::pin(async move {
             let dctx = bunko_dav::DavContext {
                 username: ctx.identity.username().map(str::to_string),
                 role: ctx.identity.role(),
                 owns_cloud_root,
+                personal_only,
                 nginx_accel,
                 client_ip: Some(ctx.client_ip.clone()),
                 hooks,

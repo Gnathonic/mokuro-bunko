@@ -681,3 +681,51 @@ async fn corrections_go_with_their_volume() {
     assert!(!env.overlay("alice", "series").exists());
     assert!(env.base.join("users/alice/edits").exists());
 }
+
+/// Auth admits a progress writer to `<Vol>.edit.mokuro` only as that account's own
+/// correction, from a folder listing of its own (`DavContext::personal_only`). An
+/// archive `<Vol>.edit.cbz` landing before DAV lists the folder again makes the path
+/// its shared primary: the write is refused rather than made there on that grant.
+#[tokio::test]
+async fn a_correction_grant_never_writes_the_shared_primary() {
+    let env = Env::new();
+    std::fs::write(env.lib("series/vol1.edit.cbz"), b"x").unwrap();
+    std::fs::write(env.lib("series/vol1.edit.mokuro"), b"shared").unwrap();
+    let granted = |method: &str, headers: &[(&str, &str)], body: &[u8]| {
+        let mut ctx = env.ctx(Some("reader"));
+        ctx.personal_only = true;
+        env.send_ctx(ctx, request(method, EDIT, headers, body))
+    };
+    let dest = "http://localhost:8080/mokuro-reader/series/vol1.edit-2.mokuro";
+    let lock = br#"<?xml version="1.0"?><D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>"#;
+    let proppatch = br#"<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:z"><D:set><D:prop><Z:x>1</Z:x></D:prop></D:set></D:propertyupdate>"#;
+    for (method, headers, body) in [
+        ("PUT", vec![], layer("mine")),
+        ("DELETE", vec![], vec![]),
+        ("MOVE", vec![("destination", dest)], vec![]),
+        ("COPY", vec![("destination", dest)], vec![]),
+        ("LOCK", vec![], lock.to_vec()),
+        ("PROPPATCH", vec![], proppatch.to_vec()),
+    ] {
+        let r = granted(method, &headers, &body).await;
+        assert_eq!(r.code(), 409, "{method}: {}", r.text());
+    }
+    assert_eq!(
+        std::fs::read(env.lib("series/vol1.edit.mokuro")).unwrap(),
+        b"shared"
+    );
+    assert!(!env.lib("series/vol1.edit-2.mokuro").exists());
+    assert!(!env.overlay("reader", "series/vol1.edit.mokuro").exists());
+    let r = env.req(Some("editor"), "LOCK", EDIT, &[], lock).await;
+    assert_eq!(r.code(), 200, "nobody holds a lock on it: {}", r.text());
+
+    // The same grant on a path that is a correction goes ahead, into the overlay.
+    let mut ctx = env.ctx(Some("reader"));
+    ctx.personal_only = true;
+    let path = "/mokuro-reader/series/vol1.edit-2.mokuro";
+    let r = env
+        .send_ctx(ctx, request("PUT", path, &[], &layer("mine")))
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    assert!(env.overlay("reader", "series/vol1.edit-2.mokuro").exists());
+}

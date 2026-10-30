@@ -7,7 +7,8 @@ use axum::body::Body;
 use http::StatusCode;
 
 use super::{
-    Req, XML_BODY_LIMIT, blocking, check_dav_locks, eval_if, is_virtual_root, lookup, read_body,
+    Req, XML_BODY_LIMIT, blocking, check_dav_locks, eval_if, is_virtual_root, lookup,
+    personal_grant_holds, read_body,
 };
 use crate::locks::{self, AcquireError, Scope};
 use crate::propfind::{self, resource_key};
@@ -89,6 +90,7 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
     let user = req.username();
     let res = lookup(inner, &req.path, req).await?;
     if let Some(r) = &res {
+        personal_grant_holds(req, r.kind())?;
         eval_if(inner, req, r)?;
     }
     let timeout = locks::parse_timeout(req.header("timeout"));
@@ -191,6 +193,7 @@ pub(crate) async fn lock(inner: &Arc<Inner>, req: &Req, body: Body) -> DavResult
             else {
                 return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
             };
+            personal_grant_holds(req, Some(kind))?;
             let (key, href) = key_for_unmapped(req, kind);
             (key, href, true)
         }
@@ -243,6 +246,9 @@ pub(crate) async fn unlock(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     }
     let user = req.username();
     let res = lookup(inner, &req.path, req).await?;
+    if let Some(r) = &res {
+        personal_grant_holds(req, r.kind())?;
+    }
     let key = match &res {
         Some(r) => resource_key(r, user),
         None => unmapped_key(inner, req).await?,
@@ -302,6 +308,7 @@ pub(crate) async fn proppatch(inner: &Arc<Inner>, req: &Req, body: Body) -> DavR
     let res = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
+    personal_grant_holds(req, res.kind())?;
     eval_if(inner, req, &res)?;
     let key = resource_key(&res, user);
     check_dav_locks(inner, req, &key, false)?;

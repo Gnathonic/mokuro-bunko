@@ -184,6 +184,19 @@ pub(crate) async fn lookup(
     blocking(move || inner.roots.lookup(&path, ctx.caller())).await
 }
 
+/// A write auth admitted only as the caller's own correction
+/// ([`DavContext::personal_only`]) must find one where it writes: refused (409) when
+/// the path now resolves to anything else.
+pub(crate) fn personal_grant_holds(req: &Req, kind: Option<FileKind>) -> DavResult<()> {
+    if req.ctx.personal_only && kind != Some(FileKind::Personal) {
+        return Err(DavError::new(
+            StatusCode::CONFLICT,
+            "The folder changed while this request was checked; try again.",
+        ));
+    }
+    Ok(())
+}
+
 /// HTTP conditionals and the DAV `If:` header against an existing resource (WsgiDAV
 /// `_evaluate_if_headers`).
 pub(crate) fn eval_if(inner: &Inner, req: &Req, res: &Resource) -> DavResult<()> {

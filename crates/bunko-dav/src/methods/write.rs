@@ -13,7 +13,7 @@ use serde_json::json;
 use super::{
     Effects, Req, audit, blocking, check_dav_locks, eval_if, file_audit_target,
     folder_audit_target, forget_ocr_records, is_cbz, is_virtual_root, lookup,
-    personal_audit_target, primary_leaving, write_lock_conflict,
+    personal_audit_target, personal_grant_holds, primary_leaving, write_lock_conflict,
 };
 use crate::paths::{self, PathClass};
 use crate::propfind::resource_key;
@@ -33,6 +33,7 @@ pub(crate) async fn delete(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     let res = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
+    personal_grant_holds(req, res.kind())?;
     if req.content_length() != 0 {
         return Err(DavError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -294,6 +295,7 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
     let src = lookup(inner, &req.path, req)
         .await?
         .ok_or_else(|| DavError::new(StatusCode::NOT_FOUND, &req.path))?;
+    personal_grant_holds(req, src.kind())?;
     let mut dest_path = destination_path(req)?;
     let overwrite = match req
         .header("overwrite")
@@ -440,6 +442,7 @@ pub(crate) async fn copy_move(inner: &Arc<Inner>, req: &Req, is_move: bool) -> D
         else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
+        personal_grant_holds(&req2, Some(dest_kind))?;
         // A correction is the caller's own (D27): it moves or copies to another
         // correction name only, and nothing else becomes one.
         if (src.kind() == Some(FileKind::Personal)) != (dest_kind == FileKind::Personal) {
