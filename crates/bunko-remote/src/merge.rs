@@ -64,7 +64,8 @@
 //!   with no counterpart moves in; a folder, or a keep-both file
 //!   ([`crate::names::dedup_keeps_both`]), moves in beside its name; of two files the
 //!   strictly newer write stays and the other goes to the trash (a tie or an unknown
-//!   time: the canonical copy), a losing `series.json` submitted first (D18). A member is trashed only once
+//!   time: the canonical copy), a losing `series.json` submitted first (D18; its facts
+//!   only, [`crate::submissions`]). A member is trashed only once
 //!   a listing shows it empty.
 //! - **Paths never change:** every node stays at its library path, so no step runs a DB
 //!   hook or announces a removal, and D19 never counts one.

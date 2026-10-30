@@ -636,6 +636,52 @@ fn the_older_series_json_is_submitted_then_trashed() {
     assert!(t.fake.trashed_log().contains(&old));
 }
 
+/// The older copy's shelf alignment and volume entries are not guarded by time: re-applied,
+/// they would put back an offset the newer copy reset. Only its facts are submitted
+/// (those are, by `updated_at`).
+#[test]
+fn a_losing_series_json_submits_only_its_facts() {
+    let f = FakeBackend::drive_like();
+    let a = top_root(&f);
+    let b = top_root(&f);
+    let sa = mkdir(&f, &a, "S");
+    put(&f, &sa, "v.cbz", b"v");
+    let old = put(
+        &f,
+        &sa,
+        "series.json",
+        br#"{"version":2,"series_title":"S","updated_at":"2026-01-01T00:00:00Z","tag":"old","spine_offset":40,"volumes":[{"volume_uuid":"v1","offset":3}]}"#,
+    );
+    let sb = mkdir(&f, &b, "S");
+    put(
+        &f,
+        &sb,
+        "series.json",
+        br#"{"version":2,"series_title":"S","updated_at":"2026-02-01T00:00:00Z","volumes":[{"volume_uuid":"v1"}]}"#,
+    );
+    let t = T::new(f);
+    t.steady();
+    t.hooks.submissions.lock().clear();
+    t.policy();
+    wait_until("merged", || {
+        t.top_roots().len() == 1 && t.kids(&a).len() == 1 && t.kids(&sa).len() == 2
+    });
+    assert!(t.fake.trashed_log().contains(&old));
+    let subs = t.hooks.submissions.lock().clone();
+    let sent: Vec<serde_json::Value> = subs
+        .iter()
+        .filter(|(d, _)| d == "S")
+        .map(|(_, b)| serde_json::from_slice(b).unwrap())
+        .filter(|v: &serde_json::Value| v["tag"] == "old")
+        .collect();
+    assert_eq!(
+        sent,
+        [serde_json::json!({"version": 2, "series_title": "S",
+            "updated_at": "2026-01-01T00:00:00Z", "tag": "old"})],
+        "{subs:?}"
+    );
+}
+
 #[test]
 fn a_merge_runs_no_hooks_and_announces_no_removal_of_a_surviving_path() {
     let f = FakeBackend::mega_like();

@@ -11,7 +11,11 @@
 //! must still show the cver), keeps its bytes under `<dir>/submissions/<id>.json`
 //! (`queued`), and hands them to [`CloudHooks::series_submission`](crate::feed::CloudHooks::series_submission) on the events
 //! thread: `applied`, or `refused` with a `lost-write` conflict row. A version
-//! superseded before it could be read is dropped (the newer one has its own row).
+//! superseded before it could be read is dropped (the newer one has its own row). A
+//! version readers do not see at its path (a duplicate merge's losing copy, submitted
+//! before its trash) is applied as its facts only: `volumes` and `spine_offset` are
+//! dropped, since nothing guards those by time and the older copy would put back a
+//! shelf alignment the newer one reset; the facts are guarded by `updated_at`.
 //! Rows still `fetching` or `queued` are resumed at the next start; they wait for the
 //! server's hooks when those are not installed yet.
 //!
@@ -75,6 +79,17 @@ pub(crate) fn is_series_json(rel: &RelPath) -> bool {
 
 pub(crate) fn is_catalog_json(rel: &RelPath) -> bool {
     matches!(rel.segments(), [name] if fold(name) == CATALOG_JSON)
+}
+
+/// A `series.json` without its index data (`volumes`, `spine_offset`): `None` when it
+/// has none to drop, or is no JSON object (the server's merge refuses it as it is).
+fn facts_only(bytes: &[u8]) -> Option<Vec<u8>> {
+    let text = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes);
+    let serde_json::Value::Object(mut map) = serde_json::from_slice(text).ok()? else {
+        return None;
+    };
+    let dropped = map.remove("volumes").is_some() | map.remove("spine_offset").is_some();
+    dropped.then(|| serde_json::to_vec(&map).expect("a JSON map serialises"))
 }
 
 /// The facts-only `series.json` body for one `catalog.json` entry (module docs).
@@ -325,6 +340,19 @@ impl<B: Backend> Core<B> {
         let parent =
             RelPath::from_segments(rel.segments()[..1].iter().cloned()).unwrap_or_default();
         let series = self.abs(&parent);
+        let shown = {
+            let idx = self.index.lock();
+            idx.lookup(&rel)
+                .and_then(|e| idx.winner_node(e.eid))
+                .is_some_and(|w| w.pid == row.pid)
+        };
+        let facts;
+        let bytes = if shown {
+            bytes
+        } else {
+            facts = facts_only(bytes);
+            facts.as_deref().unwrap_or(bytes)
+        };
         // The slot runs the hook on the events thread (handing this worker back).
         match self.hooks.series_submission(&series, bytes) {
             SubmissionResult::Applied => {
