@@ -396,3 +396,26 @@ async fn sc_events_are_typed_and_moves_fold() {
         .unwrap();
     assert!(matches!(&batch.events[0], Event::Added(n) if n.handle == x));
 }
+
+/// A rename is the node's attributes re-encrypted under its key, sent as `at` (what MEGA
+/// and megajs's `setAttributes` use): the mock takes them, renames the node, and its
+/// `u` packet carries what was sent. A rename megajs made (the reader's) reads the same.
+#[tokio::test]
+async fn a_rename_sets_the_attributes_megas_way() {
+    let mock = MockMega::start().await;
+    let dir = mock.mkdir(ROOT, "mokuro-reader");
+    let f = mock.put(&dir, "a.cbz", b"aaa");
+    let client = Client::resume(cfg(&mock), &mock.session_blob())
+        .await
+        .unwrap();
+    let key = file_key(&client, &mock, &f).await;
+    let attrs = bunko_mega::NodeAttributes {
+        name: "b.cbz".into(),
+        ..Default::default()
+    };
+    client
+        .set_attributes(&f, &key, &attrs, &idempotence_id())
+        .await
+        .unwrap();
+    assert_eq!(mock.name_of(&f), Some(("b.cbz".into(), dir)));
+}

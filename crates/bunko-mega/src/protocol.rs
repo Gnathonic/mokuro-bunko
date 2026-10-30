@@ -154,9 +154,10 @@ pub enum Request {
         #[serde(skip_serializing_if = "String::is_empty")]
         i: String,
     },
-    /// Set a node's attributes (rename).
+    /// Set a node's attributes (rename): the encrypted block goes as `at`, as MEGA's
+    /// clients send it and its `u` packet echoes it.
     #[serde(rename = "a")]
-    SetAttributes { n: String, attr: String, i: String },
+    SetAttributes { n: String, at: String, i: String },
     /// Move node `n` under `t`.
     #[serde(rename = "m")]
     Move { n: String, t: String, i: String },
@@ -290,6 +291,17 @@ mod tests {
         assert_eq!(
             p.to_value(),
             json!({"a": "p", "t": "PARENT00", "n": [{"h": "xxxxxxxx", "t": 1, "a": "A", "k": "K"}]})
+        );
+        // A rename's new attributes go as `at`, as MEGA's clients send them (megajs's
+        // `setAttributes`, the SDK's CommandSetAttr) and its `u` packet echoes them.
+        assert_eq!(
+            Request::SetAttributes {
+                n: "AbCdEfGh".into(),
+                at: "AT".into(),
+                i: "idem".into()
+            }
+            .to_value(),
+            json!({"a": "a", "n": "AbCdEfGh", "at": "AT", "i": "idem"})
         );
     }
 

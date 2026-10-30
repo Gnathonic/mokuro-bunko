@@ -342,10 +342,10 @@ impl Client {
         attrs: &NodeAttributes,
         idem: &str,
     ) -> Result<()> {
-        let attr = b64(&attrs.encrypt(key.aes())?);
+        let at = b64(&attrs.encrypt(key.aes())?);
         self.cs1(Request::SetAttributes {
             n: handle.to_string(),
-            attr,
+            at,
             i: idem.to_string(),
         })
         .await

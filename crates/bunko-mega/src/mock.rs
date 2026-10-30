@@ -412,7 +412,8 @@ impl St {
                 let Some(node) = self.nodes.get_mut(&n) else {
                     return json!(-9);
                 };
-                node.attr = s("attr");
+                // `at`, as MEGA takes it (megajs's `setAttributes`, Bunko's own rename).
+                node.attr = s("at");
                 let at = node.attr.clone();
                 self.log
                     .push(json!({"a": "u", "n": n, "u": USER, "at": at, "ts": ts, "i": s("i")}));
