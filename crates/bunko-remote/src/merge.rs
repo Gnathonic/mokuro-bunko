@@ -59,14 +59,15 @@
 //! - **When:** the case merge's conditions (lease, `Online`, adoption, `quiet_s` on the
 //!   folder's direct children, no OCR on what moves), with `storage.library.dedup` on
 //!   and a provider that allows duplicate names. A folder merged
-//!   [`DEDUP_RECREATE_LIMIT`] times in a day is left alone (`dup-recreated`).
+//!   [`DEDUP_RECREATE_LIMIT`] times in a day is left alone (`dup-recreated`). A group
+//!   that moved and trashed nothing waits for a change in its scope (any origin).
 //! - **Plan:** per other member, fresh listings of it and the canonical one. An item
 //!   with no counterpart moves in; a folder, or a keep-both file
 //!   ([`crate::names::dedup_keeps_both`]), moves in beside its name; of two files the
 //!   strictly newer write stays and the other goes to the trash (a tie or an unknown
 //!   time: the canonical copy), a losing `series.json` submitted first (D18; its facts
-//!   only, [`crate::submissions`]). A member is trashed only once
-//!   a listing shows it empty.
+//!   only, [`crate::submissions`]; trashed even when refused, as the reader does). A
+//!   member is trashed only once a listing shows it empty.
 //! - **Paths never change:** every node stays at its library path, so no step runs a DB
 //!   hook or announces a removal, and D19 never counts one.
 //!
@@ -1104,6 +1105,7 @@ impl<B: Backend> RemoteStore<B> {
             self.merge.unmark_probe(scope);
             return Ok(());
         }
+        let planned = Instant::now();
         let plan = match self.plan_set(set, policy) {
             Ok(p) => p,
             Err(why) => {
@@ -1139,7 +1141,31 @@ impl<B: Backend> RemoteStore<B> {
             losers_s.join(", "),
             winner
         );
-        self.run_group(&gid, policy).map(|_| ())
+        if let GroupEnd::Done = self.run_group(&gid, policy)? {
+            self.memo_if_idle(&gid, scope, planned);
+        }
+        Ok(())
+    }
+
+    /// A finished group that moved and trashed nothing (every step refused, blocked or
+    /// skipped) would be planned the same way next pass, journal row, audit and
+    /// listings included, every merge interval: it is memoized as of its planning, so
+    /// only a change since (or the memo's age) plans it again.
+    fn memo_if_idle(&self, gid: &str, scope: &Scope, planned: Instant) {
+        let idle = self
+            .core
+            .state
+            .with("merge_group_idle", |c| {
+                c.query_row(
+                    "SELECT moved + trashed = 0 FROM merge_group WHERE id = ?1 AND state = 'done'",
+                    [gid],
+                    |r| r.get::<_, bool>(0),
+                )
+            })
+            .unwrap_or(false);
+        if idle {
+            self.merge.memo.lock().insert(scope.clone(), planned);
+        }
     }
 
     /// Planned before with nothing to do (or guarded), and nothing changed since.
@@ -1217,6 +1243,7 @@ impl<B: Backend> RemoteStore<B> {
             self.merge.unmark_probe(scope);
             return Ok(());
         }
+        let planned = Instant::now();
         let plan = match self.plan_dup(set) {
             Ok(p) => p,
             Err(why) => {
@@ -1251,7 +1278,10 @@ impl<B: Backend> RemoteStore<B> {
             set.members.len(),
             shown(&set.path)
         );
-        self.run_group(&gid, policy).map(|_| ())
+        if let GroupEnd::Done = self.run_group(&gid, policy)? {
+            self.memo_if_idle(&gid, scope, planned);
+        }
+        Ok(())
     }
 
     /// What a duplicate merge moves: every node directly in a non-canonical member,
@@ -2246,10 +2276,20 @@ impl<B: Backend> RemoteStore<B> {
             self.core.drop_op(&op, false);
             return Ok(StepEnd::Done);
         };
-        // The submission is answered by the server's hooks: before the op lock.
-        if ex.step == StepKind::Submit && !self.submitted(&op, &ex) {
-            self.core.drop_op(&op, false);
-            return Ok(StepEnd::Done);
+        // The submission is answered by the server's hooks: before the op lock. A
+        // duplicate merge trashes a refused loser all the same, as the reader's merge
+        // does (the refusal is a lost-write conflict); kept, it would hold its member
+        // open and the merge would never finish.
+        if ex.step == StepKind::Submit {
+            let go = match self.submitted(&op, &ex).as_deref() {
+                Some("applied") => true,
+                Some("refused") => self.group_origin(gid).as_deref() == Some("dedup"),
+                _ => false,
+            };
+            if !go {
+                self.core.drop_op(&op, false);
+                return Ok(StepEnd::Done);
+            }
         }
         let mut hooks = Vec::new();
         let end = {
@@ -2782,16 +2822,15 @@ impl<B: Backend> RemoteStore<B> {
     }
 
     /// A `Submit` step's first half: the losing `series.json` as a submission into
-    /// the winner's series key (§9.3). `true`: applied, so it may be trashed.
-    fn submitted(&self, op: &Op, ex: &Extra) -> bool {
+    /// the winner's series key (§9.3): its answer (`applied`, so it may be trashed,
+    /// or `refused`), or `None` when there is none to give.
+    fn submitted(&self, op: &Op, ex: &Extra) -> Option<String> {
         let (Some(pid), Some(cver), Some(series)) =
             (op.target_pid.clone(), ex.cver.clone(), ex.series.clone())
         else {
-            return false;
+            return None;
         };
-        let Some((id, state, _)) = self.core.state.submission_open(&series, &pid, &cver) else {
-            return false;
-        };
+        let (id, state, _) = self.core.state.submission_open(&series, &pid, &cver)?;
         if matches!(state.as_str(), "fetching" | "queued") {
             let core = self.core.clone();
             self.block_on("case merge", core.process_submission(id));
@@ -2803,9 +2842,21 @@ impl<B: Backend> RemoteStore<B> {
             .map(|r| r.state)
             .unwrap_or_default();
         if state != "applied" {
-            tracing::info!(%series, state, "case merge: the losing series.json stays (not applied)");
+            tracing::info!(%series, state, "case merge: the losing series.json was not applied");
         }
-        state == "applied"
+        Some(state)
+    }
+
+    /// The group's origin (`auto`, `admin`, `dedup`).
+    fn group_origin(&self, gid: &str) -> Option<String> {
+        self.core
+            .state
+            .with("merge_group_origin", |c| {
+                c.query_row("SELECT origin FROM merge_group WHERE id = ?1", [gid], |r| {
+                    r.get(0)
+                })
+            })
+            .ok()
     }
 
     /// Queued Deferred writes (not yet running) under `from` move to `to`: the path,
