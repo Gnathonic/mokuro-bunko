@@ -103,7 +103,9 @@ const READS = new Set(['GET', 'HEAD', 'OPTIONS', 'PROPFIND']);
  * write carries (WebDAV's path or MOVE destination, Graph's `<name>:/content` and
  * upload sessions, Drive's metadata), and the node a write answered or addressed
  * (Drive and Graph ids, MEGA's new node handles: its names are encrypted on the wire)
- * looked up in cloudsim's tree.
+ * looked up in cloudsim's tree. `writes.unnamed()` lists the writes it could put no
+ * name to (no name in the request, no node in the answer, or a node gone from the
+ * tree), for a failure message.
  */
 export function recordReaderWrites(page, rig) {
     const origins = new Set(
@@ -112,27 +114,39 @@ export function recordReaderWrites(page, rig) {
     const names = new Set();
     const ids = new Set();
     const pending = [];
+    const unnamed = [];
     const base = (p) => decodeURIComponent(p.split('/').filter(Boolean).pop() ?? '');
     async function look(request) {
         const url = new URL(request.url());
         const method = request.method();
         if (!origins.has(url.origin) || READS.has(method)) return;
         const pathname = decodeURIComponent(url.pathname);
+        // What this write named: a name, or a node to look up.
+        let found = 0;
+        const named = (n) => (found++, names.add(n));
+        const noded = (id) => (found++, ids.add(id));
+        try {
+            await name(request, url, method, pathname, named, noded);
+        } finally {
+            if (!found) unnamed.push(`${method} ${pathname}`);
+        }
+    }
+    async function name(request, url, method, pathname, named, noded) {
         if (rig.provider === 'rclone') {
-            if (method === 'PUT') names.add(base(url.pathname));
+            if (method === 'PUT') named(base(url.pathname));
             const dest = (await request.allHeaders()).destination;
-            if (dest && (method === 'MOVE' || method === 'COPY')) names.add(base(new URL(dest).pathname));
+            if (dest && (method === 'MOVE' || method === 'COPY')) named(base(new URL(dest).pathname));
             return;
         }
         if (rig.provider === 'microsoft') {
             const m = pathname.match(/\/([^/]+):\/(content|createUploadSession)$/);
-            if (m) names.add(m[1]);
+            if (m) named(m[1]);
         }
         if (rig.provider === 'google') {
             const body = request.postDataBuffer()?.toString('latin1') ?? '';
-            for (const m of body.matchAll(/"name"\s*:\s*"([^"]+)"/g)) names.add(JSON.parse(`"${m[1]}"`));
+            for (const m of body.matchAll(/"name"\s*:\s*"([^"]+)"/g)) named(JSON.parse(`"${m[1]}"`));
             const patched = pathname.match(/\/files\/([^/]+)$/);
-            if (patched && method === 'PATCH') ids.add(patched[1]);
+            if (patched && method === 'PATCH') noded(patched[1]);
         }
         const response = await request.response();
         if (!response) return;
@@ -154,13 +168,14 @@ export function recordReaderWrites(page, rig) {
             if (!Array.isArray(cmds) || !Array.isArray(doc)) return;
             cmds.forEach((c, i) => {
                 if (c?.a !== 'p') return;
-                for (const n of doc[i]?.f ?? []) if (typeof n?.h === 'string') ids.add(n.h);
+                for (const n of doc[i]?.f ?? []) if (typeof n?.h === 'string') noded(n.h);
             });
         } else if (typeof doc?.id === 'string') {
-            ids.add(doc.id);
+            noded(doc.id);
         }
     }
     page.on('requestfinished', (request) => pending.push(look(request).catch(() => {})));
+    let gone = [];
     return {
         async names() {
             await Promise.all(pending);
@@ -168,9 +183,12 @@ export function recordReaderWrites(page, rig) {
             if (ids.size) {
                 const byId = await nodeNames(rig);
                 for (const id of ids) if (byId.has(id)) out.add(byId.get(id));
+                gone = [...ids].filter((id) => !byId.has(id)).map((id) => `node ${id}, gone from the tree`);
             }
             return [...out].sort();
         },
+        /** After `names()`: the writes it could put no name to. */
+        unnamed: () => [...unnamed, ...gone],
     };
 }
 

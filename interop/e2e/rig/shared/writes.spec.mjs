@@ -17,16 +17,31 @@ test.describe.configure({ mode: 'serial' });
 
 const METADATA = ['catalog.json', 'series.json'];
 
-/** Import `<series>/Vol 1.cbz` and back it up to the end of its run: what the reader wrote. */
+/**
+ * What the reader wrote, everything it queued run first: the backup run's listing
+ * starts work of its own after the run (a folder with archives and no `series.json` is
+ * backfilled), whose writes wait out a debounce (2 s `series.json`, 5 s `catalog.json`)
+ * and decide whether to write only then.
+ */
+async function settledWrites(reader, writes) {
+    await reader.idle();
+    await reader.settleSeriesWrites();
+    return writes.names();
+}
+
+/**
+ * Import `<series>/Vol 1.cbz` and back it up to the end of its run: what the reader
+ * wrote (`wrote`), and the record, still recording (`writes`).
+ */
 async function uploadNewSeries(reader, rig, series) {
     const writes = recordReaderWrites(reader.page, rig);
     const { id } = await reader.importVolume(rig.upload(`${series}/Vol 1.cbz`));
     expect(await reader.backupVolume(id)).toEqual({ cloudPath: `${series}/Vol 1.cbz` });
     expect(await cloudFile(rig, `${series}/Vol 1.cbz`)).toBeTruthy();
-    const wrote = await writes.names();
+    const wrote = await settledWrites(reader, writes);
     // The record sees the reader's writes at all: the archive is one.
-    expect(wrote).toContain('Vol 1.cbz');
-    return wrote;
+    expect(wrote, `writes it could not name: ${JSON.stringify(writes.unnamed())}`).toContain('Vol 1.cbz');
+    return { wrote, writes };
 }
 
 /** The series `catalog.json` lists, as the cloud stores it. */
@@ -56,12 +71,15 @@ test('while the marker is fresh the reader writes neither series.json nor catalo
     const series = 'Rig Fresh';
     await connect(reader, rig);
     await bunkoSeenAlive(reader);
-    const wrote = await uploadNewSeries(reader, rig, series);
+    const { wrote, writes } = await uploadNewSeries(reader, rig, series);
     expect(wrote.filter((n) => METADATA.includes(n))).toEqual([]);
     expect((await reader.controlState()).serverCompilesMetadata).toBe(true);
     // Bunko compiled both for the new series.
     await expect.poll(() => catalogSeries(rig), { timeout: 120_000 }).toContain(series);
     await expect.poll(async () => cloudFile(rig, `${series}/series.json`), { timeout: 120_000 }).toBeTruthy();
+    // Nor did it since, while Bunko compiled them.
+    expect((await reader.controlState()).serverCompilesMetadata).toBe(true);
+    expect((await settledWrites(reader, writes)).filter((n) => METADATA.includes(n))).toEqual([]);
 });
 
 test('a Bunko that stopped hands them back 2 x ttl after its last heartbeat', async ({ reader, rig }) => {
@@ -82,7 +100,7 @@ test('a Bunko that stopped hands them back 2 x ttl after its last heartbeat', as
     expect(flippedAfter).toBeLessThan(2 * ttl + 10);
     expect(seen.filter((s) => s.compiles).length).toBeGreaterThan(0);
 
-    const wrote = await uploadNewSeries(reader, rig, series);
+    const { wrote } = await uploadNewSeries(reader, rig, series);
     expect(wrote).toEqual(expect.arrayContaining(METADATA));
     // Bunko is down: what the cloud holds is the reader's.
     expect(await catalogSeries(rig)).toContain(series);
@@ -111,7 +129,7 @@ test('a Bunko that released the library hands them back at once', async ({ reade
     expect((seen.at(-1).at - releasedAt) / 1000).toBeLessThan(ttl / 2);
     expect((await reader.controlState()).marker?.holder ?? null).toBeNull();
 
-    const wrote = await uploadNewSeries(reader, rig, series);
+    const { wrote } = await uploadNewSeries(reader, rig, series);
     expect(wrote).toEqual(expect.arrayContaining(METADATA));
     expect(await catalogSeries(rig)).toContain(series);
     expect(await cloudFile(rig, `${series}/series.json`)).toBeTruthy();
