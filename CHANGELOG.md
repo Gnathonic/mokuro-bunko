@@ -257,6 +257,14 @@
   browser's check) never got WebDAV's `Allow` and `DAV` headers, and could not have
   read `Allow` anyway. Only a request that asks a CORS question is answered that way
   now; the reader's request reaches WebDAV, and `Allow` is readable from the page.
+- **A folder's `Allow` lists `PUT` and `MKCOL` for an account that may write there.**
+  `OPTIONS` on a folder never listed them, so a client that judges a server by `Allow`
+  (Mokuro Reader's check for WebDAV servers other than Bunko) took every account for
+  read-only. Accounts that may add files now see `PUT, MKCOL` on every folder of the
+  library; `registered` accounts see them on `/mokuro-reader` and their `history`
+  folders, and `PUT` alone in series folders (their own corrections). Anonymous and
+  processor accounts, files and missing paths answer as before. `Allow` is a hint: what
+  a request may actually do is unchanged.
 - **The catalog and series pages no longer stall on a large library.** Every 30 seconds,
   and after every change to the library (which during OCR is often), the next catalog or
   series request walked the whole library folder before answering, so opening even a

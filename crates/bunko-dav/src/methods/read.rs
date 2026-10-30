@@ -13,15 +13,20 @@ use tokio_util::io::ReaderStream;
 
 use super::{Req, XML_BODY_LIMIT, blocking, eval_if, lookup, read_body};
 use crate::conditional::{self, RangeOutcome};
+use crate::paths::Target;
 use crate::propfind::{self, Mode, PropCtx};
 use crate::resource::{FileKind, Resource, Stat, content_type};
 use crate::response::{self, DavError, DavResult, Resp};
 use crate::xml::{MULTISTATUS_CLOSE, MULTISTATUS_OPEN};
 use crate::{Inner, paths};
-use bunko_core::reader_tree;
+use bunko_core::{Perm, Role, has_perm, reader_tree};
 
 const ALLOW_COLLECTION: &str =
     "OPTIONS, HEAD, GET, PROPFIND, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
+const ALLOW_COLLECTION_WRITE: &str =
+    "OPTIONS, HEAD, GET, PROPFIND, PUT, MKCOL, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
+const ALLOW_COLLECTION_PUT: &str =
+    "OPTIONS, HEAD, GET, PROPFIND, PUT, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
 const ALLOW_FILE: &str =
     "OPTIONS, HEAD, GET, PROPFIND, PUT, DELETE, COPY, MOVE, PROPPATCH, LOCK, UNLOCK";
 const ALLOW_UNMAPPED: &str = "OPTIONS, PUT, MKCOL";
@@ -45,6 +50,26 @@ fn accel_path(inner: &Inner, req: &Req, res: &Resource) -> Option<String> {
     }
 }
 
+/// The Allow of a collection for this account (plan X9). Advisory only: `authorize()`
+/// still decides every request. It exists so a client that reads Allow (the reader's
+/// generic WebDAV check) does not take a writable account for a read-only one.
+/// - AddFiles: `PUT, MKCOL` on every collection at or under `/mokuro-reader`.
+/// - WriteProgress alone: `PUT, MKCOL` on the reader root and its own `history/**`;
+///   `PUT` on library collections, where its personal corrections go (D27).
+/// - Anyone else, and `/`, `/inbox`: the base list.
+fn collection_allow(path: &str, role: Role) -> &'static str {
+    let adds_files = has_perm(role, Perm::AddFiles);
+    let writes_own = has_perm(role, Perm::WriteProgress);
+    match paths::classify(path) {
+        Target::ReaderRoot | Target::Progress(_) | Target::Library(_) if adds_files => {
+            ALLOW_COLLECTION_WRITE
+        }
+        Target::ReaderRoot | Target::Progress(_) if writes_own => ALLOW_COLLECTION_WRITE,
+        Target::Library(_) if writes_own => ALLOW_COLLECTION_PUT,
+        _ => ALLOW_COLLECTION,
+    }
+}
+
 pub(crate) async fn options(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     let mut resp = response::empty(StatusCode::OK);
     response::set_header(&mut resp, "content-type", "text/html; charset=utf-8");
@@ -55,7 +80,10 @@ pub(crate) async fn options(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     }
     let res = lookup(inner, &req.path, req).await?;
     match &res {
-        Some(r) if r.is_collection() => response::set_header(&mut resp, "allow", ALLOW_COLLECTION),
+        Some(r) if r.is_collection() => {
+            let allow = collection_allow(&req.path, req.ctx.role);
+            response::set_header(&mut resp, "allow", allow);
+        }
         Some(r) => {
             response::set_header(&mut resp, "allow", ALLOW_FILE);
             if accel_path(inner, req, r).is_none() {

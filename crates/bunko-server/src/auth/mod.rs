@@ -11,32 +11,9 @@ use base64::Engine as _;
 use bunko_core::Role;
 use bunko_core::reader_tree::Caller;
 use bunko_core::sidecar_names::{self, LayerClass};
+// Moved to bunko-core so bunko-dav can ask what an account may write (its Allow header).
+pub use bunko_core::{Perm, has_perm};
 use http::{HeaderMap, HeaderValue, Method, StatusCode, header};
-
-/// Capabilities derived from a role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Perm {
-    Read,
-    WriteProgress,
-    AddFiles,
-    ModifyDelete,
-    ManageInvites,
-    Admin,
-    Process,
-}
-
-pub fn has_perm(role: Role, perm: Perm) -> bool {
-    use Role::*;
-    match perm {
-        Perm::Read => true,
-        Perm::WriteProgress => matches!(role, Registered | Uploader | Inviter | Editor | Admin),
-        Perm::AddFiles => matches!(role, Uploader | Inviter | Editor | Admin),
-        Perm::ModifyDelete => matches!(role, Inviter | Editor | Admin),
-        Perm::ManageInvites => matches!(role, Inviter | Admin),
-        Perm::Admin => role == Admin,
-        Perm::Process => role == Processor,
-    }
-}
 
 /// The authenticated user as the request sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
