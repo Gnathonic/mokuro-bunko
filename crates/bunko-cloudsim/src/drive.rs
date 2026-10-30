@@ -926,8 +926,9 @@ fn route(
             }
             ok_json(v)
         }
-        // My Drive itself: its id is the `parents` entry of every top-level item.
-        ("GET", ["drive", "v3", "files", "root"]) => ok_json(json!({"id": "root"})),
+        // My Drive itself, as real Drive answers the drive.file scope Bunko and the reader
+        // hold: `files.get('root')` is a 404; the `'root'` alias works only in a query.
+        ("GET", ["drive", "v3", "files", "root"]) => err(404, "notFound"),
         ("GET", ["drive", "v3", "files", "generateIds"]) => {
             let id = st.new_id("g");
             ok_json(json!({"ids": [id], "space": "drive", "kind": "drive#generatedIds"}))

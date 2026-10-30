@@ -106,6 +106,15 @@ fn is_child(parent: &str, child: &str) -> bool {
     child.starts_with(parent) && child[parent.len()..].starts_with(['/', '\0'])
 }
 
+/// A lock on another account's own copy of a per-user path (`<path>\0<other>`). It is
+/// private to that account: an operation on the shared tree above it never conflicts
+/// with it (nor names it), it only goes with the tree (`remove_tree`).
+fn private_to_other(lock: &Lock, principal: &str) -> bool {
+    lock.key
+        .split_once('\0')
+        .is_some_and(|(_, owner)| owner != principal)
+}
+
 #[derive(Debug, Default)]
 pub struct LockManager {
     locks: Mutex<HashMap<String, Lock>>,
@@ -164,7 +173,7 @@ impl LockManager {
         for l in map.values() {
             let direct = l.key == key;
             let via_parent = l.infinite_depth && is_child(&l.key, key);
-            let below = infinite && is_child(key, &l.key);
+            let below = infinite && is_child(key, &l.key) && !private_to_other(l, principal);
             if !(direct || via_parent || below) {
                 continue;
             }
@@ -202,7 +211,7 @@ impl LockManager {
         for l in map.values() {
             let direct = l.key == key;
             let via_parent = l.infinite_depth && is_child(&l.key, key);
-            let below = infinite_depth && is_child(key, &l.key);
+            let below = infinite_depth && is_child(key, &l.key) && !private_to_other(l, principal);
             if direct || via_parent {
                 if l.scope == Scope::Shared && scope == Scope::Shared {
                     continue;

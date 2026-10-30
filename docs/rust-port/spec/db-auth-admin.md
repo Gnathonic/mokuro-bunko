@@ -971,17 +971,22 @@ else `revoke_auth_token(t)` -> 200 `{"revoked": true|false}` (false if unknown/a
 order in the JSON object: canWriteProgress, canAddFiles, canModifyDelete, metadata. `created_at` is the
 raw DB string. Pinned by `tests/integration/test_login_me.py`.
 
-**0.8 (Rust).** Both 200 bodies end with two more keys, signed in or not:
+**0.8 (Rust).** `P` gains a fifth key after `metadata`: `"curated": {"scope": C}`, who may
+publish a volume's shared `<Vol>.curated.mokuro` (D27; auth enforces it): `C` = `"all"` for a role
+with `MODIFY_DELETE`, `"owned"` for `uploader` (the volumes it uploaded; a 403 on any other is
+final), else `"none"`. Both 200 bodies end with three more keys, signed in or not:
 `"per_user_files"` = `bunko_core::reader_tree::advertised()`, i.e.
 `["volume-data.json","profiles.json","goals.json","positions.json","history/"]` (a trailing `/` is a
-per-account directory tree), then `"version"` = the running `bunko_core::VERSION` (`0.8.0-beta.1`
-and on). Key order signed in: authenticated, username, role, created_at, permissions, per_user_files,
-version; anonymous: authenticated, role, permissions, per_user_files, version. The 401/429 bodies are
-unchanged. `version` is reported only by builds that keep reading history per account: the reader
-turns history sync on when its numeric core (`/^v?(\d+)\.(\d+)\.(\d+)/`, a pre-release counting as
-its core) is ≥ 0.8.0, and uses `positions.json` only when it is listed. Pinned by
-`crates/bunko-server/tests/accounts_login.rs` and the `login-me-*` contract fixtures (where `version`
-is the sentinel `0.0.0`).
+per-account directory tree), then `"per_user_layers"` = `bunko_core::sidecar_names::per_user_layers()`,
+i.e. `["edit"]` (the layer ids each account keeps its own copy of; a reader pushes its `edit` layer
+only when it is listed), then `"version"` = the running `bunko_core::VERSION` (`0.8.0-beta.1` and
+on). Key order signed in: authenticated, username, role, created_at, permissions, per_user_files,
+per_user_layers, version; anonymous: authenticated, role, permissions, per_user_files,
+per_user_layers, version. The 401/429 bodies are unchanged. `version` is reported only by builds
+that keep reading history per account: the reader turns history sync on when its numeric core
+(`/^v?(\d+)\.(\d+)\.(\d+)/`, a pre-release counting as its core) is ≥ 0.8.0, and uses
+`positions.json` only when it is listed. Pinned by `crates/bunko-server/tests/accounts_login.rs` and
+the `login-me-*` contract fixtures (where `version` is the sentinel `0.0.0`).
 
 ### 15.5 `GET /api/nav/config` (:361-383) - no auth
 Response 200: `{"home_enabled": bool, "catalog_enabled": bool, "queue_show_in_nav": bool,

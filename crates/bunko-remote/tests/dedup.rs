@@ -52,6 +52,10 @@ impl CloudHooks for Rec {
         self.submissions
             .lock()
             .push((self.rel(dir), bytes.to_vec()));
+        // A body the server cannot take (no updated_at, another version, bad JSON).
+        if bytes.windows(8).any(|w| w == br#""refuse""#) {
+            return SubmissionResult::Refused("refused by the test".into());
+        }
         SubmissionResult::Applied
     }
     fn ocr_discarded(&self, _path: &Path) {}
@@ -672,6 +676,120 @@ fn the_older_series_json_is_submitted_then_trashed() {
         "{subs:?}"
     );
     assert!(t.fake.trashed_log().contains(&old));
+}
+
+/// The older copy's shelf alignment and volume entries are not guarded by time: re-applied,
+/// they would put back an offset the newer copy reset. Only its facts are submitted
+/// (those are, by `updated_at`).
+#[test]
+fn a_losing_series_json_submits_only_its_facts() {
+    let f = FakeBackend::drive_like();
+    let a = top_root(&f);
+    let b = top_root(&f);
+    let sa = mkdir(&f, &a, "S");
+    put(&f, &sa, "v.cbz", b"v");
+    let old = put(
+        &f,
+        &sa,
+        "series.json",
+        br#"{"version":2,"series_title":"S","updated_at":"2026-01-01T00:00:00Z","tag":"old","spine_offset":40,"volumes":[{"volume_uuid":"v1","offset":3}]}"#,
+    );
+    let sb = mkdir(&f, &b, "S");
+    put(
+        &f,
+        &sb,
+        "series.json",
+        br#"{"version":2,"series_title":"S","updated_at":"2026-02-01T00:00:00Z","volumes":[{"volume_uuid":"v1"}]}"#,
+    );
+    let t = T::new(f);
+    t.steady();
+    t.hooks.submissions.lock().clear();
+    t.policy();
+    wait_until("merged", || {
+        t.top_roots().len() == 1 && t.kids(&a).len() == 1 && t.kids(&sa).len() == 2
+    });
+    assert!(t.fake.trashed_log().contains(&old));
+    let subs = t.hooks.submissions.lock().clone();
+    let sent: Vec<serde_json::Value> = subs
+        .iter()
+        .filter(|(d, _)| d == "S")
+        .map(|(_, b)| serde_json::from_slice(b).unwrap())
+        .filter(|v: &serde_json::Value| v["tag"] == "old")
+        .collect();
+    assert_eq!(
+        sent,
+        [serde_json::json!({"version": 2, "series_title": "S",
+            "updated_at": "2026-01-01T00:00:00Z", "tag": "old"})],
+        "{subs:?}"
+    );
+}
+
+/// A losing `series.json` the server refuses goes to the trash all the same, as the
+/// reader's merge trashes it (the refusal is a lost-write conflict): kept, it would
+/// hold its member open and the merge would be planned again every pass.
+#[test]
+fn a_refused_losing_series_json_is_trashed_all_the_same() {
+    let f = FakeBackend::drive_like();
+    let a = top_root(&f);
+    let b = top_root(&f);
+    let sa = mkdir(&f, &a, "S");
+    put(&f, &sa, "v.cbz", b"v");
+    let old = put(&f, &sa, "series.json", br#"{"version":"1.0.2","refuse":1}"#);
+    let sb = mkdir(&f, &b, "S");
+    put(
+        &f,
+        &sb,
+        "series.json",
+        br#"{"version":2,"series_title":"S"}"#,
+    );
+    let t = T::new(f);
+    t.steady();
+    t.policy();
+    wait_until("merged", || {
+        t.top_roots().len() == 1 && t.kids(&a).len() == 1 && t.kids(&sa).len() == 2
+    });
+    assert!(t.fake.trashed_log().contains(&old));
+    assert_eq!(
+        t.bytes_in(&sa, "series.json"),
+        [br#"{"version":2,"series_title":"S"}"#.to_vec()]
+    );
+}
+
+/// A merge that moved and trashed nothing (here a trash the provider keeps refusing) is
+/// not planned again until something changes in its folder: no merge record, audit row
+/// and listings every merge interval forever.
+#[test]
+fn a_merge_that_made_no_progress_waits_for_a_change() {
+    let f = FakeBackend::drive_like();
+    let a = top_root(&f);
+    let b = top_root(&f);
+    let sa = mkdir(&f, &a, "S");
+    let sb = mkdir(&f, &b, "S");
+    put(&f, &sb, "v.cbz", b"older");
+    put(&f, &sa, "v.cbz", b"newer");
+    for _ in 0..1000 {
+        f.fail_next(FakeOp::Trash, bunko_remote::BErr::Fatal("refused".into()));
+    }
+    let t = T::new(f);
+    t.steady();
+    t.policy();
+    let dedups = |winner: &str| {
+        t.s()
+            .recent_merges()
+            .iter()
+            .filter(|m| m.origin == "dedup" && m.state == "done" && m.winner == winner)
+            .count()
+    };
+    // The roots merge (their emptied member's trash is refused too), then S once.
+    wait_until("S merged once", || dedups("S") >= 1);
+    let roots = dedups("");
+    // 40 merge intervals.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!((dedups(""), dedups("S")), (roots, 1));
+    // A change in the folder plans it again.
+    put(&t.fake, &sb, "w.cbz", b"w");
+    t.sync_feed();
+    wait_until("planned again", || dedups("S") >= 2);
 }
 
 #[test]
