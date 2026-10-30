@@ -516,6 +516,52 @@ Backup, to the end of its run, metadata writes included).
   write it serves that file as it found it) and the cloud's one file of that name holds
   the same bytes; the writes are the reader's own (`recordReaderWrites`).
 
+**As built (I3, scenarios S2 and S3).**
+- `dav/edit-layers-accounts` and `bridge/edit-layers-accounts` (S2; `dav` on `local`,
+  `bridge` on every cloud), from `layer-accounts.mjs`, serial, one fresh device per
+  spec. The scenario seeds its own series over WebDAV (the seeded archive under other
+  bytes, a sidecar with a new `volume_uuid`), so its rename and delete touch nothing
+  another spec reads. The roles are the rig's: alice an editor (curated scope `all`;
+  the spec's "uploader with edit rights"), bob an uploader, carol registered, each a
+  fresh account. alice edits: her `<Vol>.edit.mokuro` reads 404 for bob and carol, the
+  main's bytes are unchanged, and the file is her overlay `users/<u>/edits/<rel>` on
+  Bunko's disk, never a library file (nor, on `bridge`, a cloud file). alice publishes:
+  the manifest lists `curated` (and no `edit`) for bob and carol; bob's reader pulls
+  it, selects it, and shows alice's text on the open page (`.textBox`). bob's edit on
+  top forks into his own `edit` (`editFirstBlock` answers `layerId: 'edit'`); curated
+  keeps its bytes. carol's own edit goes up; her Publish is refused by her reader, and
+  her own PUT of the curated file by Bunko (403). alice, on a fresh device, waits until
+  its layer sync has pulled `edit` and `curated` (the reader moves only the layer files
+  its own layer rows vouch for: a rename while that pull is in flight leaves curated
+  under the old name, which the spec once caught), then renames the volume: every
+  account's edit reads under the new name and 404 under the old (overlays on disk
+  moved), curated too, and the manifest of the new name lists `curated`; on `bridge`
+  the cloud holds exactly the new main and curated. alice deletes it: every account's
+  edit reads 404 and each overlay is gone from disk, curated too, and nothing of the
+  volume is left in the cloud.
+- `dav/history-accounts` and `bridge/history-accounts` (S3), from
+  `history-accounts.mjs`, two fresh registered accounts. A page view is recorded when
+  it ends, so each reader opens `Vol 1`, turns to a page and goes back to the series
+  page before it syncs. alice's history month and `positions.json` are in her tree
+  (`users/<u>/`, byte for byte) and not in the library (nor the cloud). bob, before
+  reading, gets 404 at her paths; after, his reader knows none of her devices, his
+  `positions.json` names his page and device, hers is unchanged; his PUT of her very
+  history path is his own file and hers keeps its bytes. Then the admin seeds a series
+  with its own sidecar (no OCR job) and once Bunko's `catalog.json` lists it (a
+  metadata pass has run since), the catalog, the queue file and `history/series.json`
+  name neither the history tree nor a device.
+- `shared/history-accounts` (S3 cloud-direct, `shared` on every cloud): the reader on
+  the cloud itself, beside a Bunko whose marker allows history, syncs its history and
+  `positions.json` into the cloud folder. Two Bunko accounts list none of it
+  (PROPFIND depth infinity), read 404 at its paths and no `positions.json`; alice's
+  PUT at the reader's history path is hers, and the cloud keeps the reader's one file.
+  After the seeded series is in Bunko's and the cloud's `catalog.json`, neither names
+  `history`, the queue file names neither it nor the device, and no `series.json`
+  appears in the history.
+- The driver reads the listing the provider cache holds now, not `cloudFiles`, whose
+  incremental updates arrive on a 300 ms trailing edge: a `deleteVolume` right after
+  `renameVolume` otherwise found the renamed volume not backed up.
+
 The generated sidecar (`genlib::mokuro_doc`) carries `title_uuid`: the reader's import
 refuses a `.mokuro` without it, so no download of a rig volume with OCR could install.
 

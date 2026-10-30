@@ -99,6 +99,36 @@ export function bunko(rig) {
             const r = await request('GET', path, { auth });
             return { status: r.status, text: r.status === 200 ? await r.text() : null };
         },
+        /** `PUT path` under `auth`: its status (`body` a string, bytes, or JSON). */
+        async put(path, body, auth) {
+            const r = await request('PUT', path, { auth, body });
+            await r.arrayBuffer();
+            return r.status;
+        },
+        /** `MKCOL path` under `auth`: its status. */
+        async mkcol(path, auth) {
+            const r = await request('MKCOL', path, { auth });
+            await r.arrayBuffer();
+            return r.status;
+        },
+        /**
+         * `PROPFIND path` at `depth` under `auth`: its status, and the paths of the
+         * resources it lists (decoded, as the hrefs name them).
+         */
+        async propfind(path, auth, depth = '1') {
+            const r = await request('PROPFIND', path, { auth, headers: { depth } });
+            const text = await r.text();
+            const hrefs = [...text.matchAll(/<(?:[\w-]+:)?href>([^<]*)<\/(?:[\w-]+:)?href>/g)].map((m) =>
+                decodeURIComponent(new URL(m[1].replaceAll('&amp;', '&'), base).pathname),
+            );
+            return { status: r.status, hrefs };
+        },
+        /** The volume's manifest (`/catalog/api/manifest`) as `auth` reads it: status and body. */
+        async manifest(series, volume, auth) {
+            const q = `series=${encodeURIComponent(series)}&volume=${encodeURIComponent(volume)}`;
+            const r = await request('GET', `/catalog/api/manifest?${q}`, { auth });
+            return { status: r.status, body: await r.json().catch(() => null) };
+        },
     };
 }
 

@@ -97,8 +97,11 @@
   holder gone. cloudsim answers a file's stored bytes (`GET /_sim/content`), keeps a
   MEGA session per sign-in, and takes the thumbnail attribute megajs puts on an upload.
   Scenarios: a first connect as every role judges read-only and reads Allow as `/me`
-  says (S7), and a cleared spine offset leaves `series.json` without one and is not
-  re-sent (S8).
+  says (S7), a cleared spine offset leaves `series.json` without one and is not
+  re-sent (S8), each account's edit layer is its own while the curated layer is
+  published once for all and both follow a volume's rename and delete (S2), and each
+  account's reading history and `positions.json` stay its own, on Bunko's disk or a
+  cloud reader's folder alike, out of the catalog, `series.json` and the queue (S3).
 - **Internal: nightly test builds for Mokuro Reader's CI.** Every push to `main` or
   `0.8/remote-storage`, and every night, publishes a testing server and cloudsim for
   Linux x86_64 as the pre-release `nightly` or `nightly-0.8`, replaced each time. They
