@@ -41,8 +41,9 @@ function walk(dir, rel = '') {
 
 /**
  * The cloud's files under the library folder, as it stores them: `[{path, id, size,
- * sha256}]`, `path` relative to the folder (`Rig Series/Vol 1.cbz`). cloudsim's tree
- * (never in its request log), or rclone's served directory.
+ * sha256, modified}]`, `path` relative to the folder (`Rig Series/Vol 1.cbz`). cloudsim's
+ * tree (never in its request log), or rclone's served directory (no `modified`: one
+ * file per path on a disk).
  */
 export async function cloudFiles(rig) {
     if (rig.provider === 'rclone') {
@@ -57,14 +58,21 @@ export async function cloudFiles(rig) {
         const parts = [];
         for (let n = r; n; n = byId.get(n.parent_id)) parts.unshift(n.name);
         if (parts.length < 2 || parts[0] !== LIBRARY_FOLDER) continue;
-        out.push({ path: parts.slice(1).join('/'), id: r.id, size: r.size, sha256: r.sha256 });
+        out.push({ path: parts.slice(1).join('/'), id: r.id, size: r.size, sha256: r.sha256, modified: r.modified });
     }
     return out;
 }
 
-/** One file under the library folder (`cloudFiles`), or null. */
+/**
+ * One file under the library folder (`cloudFiles`), or null. Of several at one path,
+ * the one written last: a merge of two `mokuro-reader` roots keeps both copies of a
+ * control file (`.mokuro-queue.json`, `volume-data.json`), and its writer goes on
+ * writing one of them while the other stays as the merge left it.
+ */
 export async function cloudFile(rig, rel) {
-    return (await cloudFiles(rig)).find((f) => f.path === rel) ?? null;
+    const at = (f) => Date.parse(f.modified ?? '') || 0;
+    const copies = (await cloudFiles(rig)).filter((f) => f.path === rel);
+    return copies.reduce((last, f) => (last === null || at(f) > at(last) ? f : last), null);
 }
 
 /**
