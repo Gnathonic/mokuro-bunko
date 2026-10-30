@@ -26,6 +26,9 @@
 //! remote); and `.nocover` is not a file in the cloud but a local-only record,
 //! [`NoCoverSet`], kept in `<base>/cloud/<store-id>/nocover.json` until the store's
 //! durable `local_row` table offers `nocover` rows (it keeps only staging rows today).
+//! An archive an open case merge is moving gets its cover only after the merge (it
+//! is looked at again every [`MERGE_RETRY`]): the merge moves the archive before its
+//! cover, and a cover made in between would meet the moving one as a duplicate.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
@@ -51,6 +54,11 @@ pub const MAX_DECODE_BYTES: u64 = 192 * 1024 * 1024;
 pub const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 /// Longest cover side accepted.
 pub const MAX_SIDE: u32 = 20_000;
+/// How soon a cloud library looks again at an archive a case merge was moving.
+const MERGE_RETRY: Duration = Duration::from_secs(5);
+
+/// A case merge is moving `p` ([`crate::ocr::owed::merge_busy`]).
+type Busy<'a> = &'a dyn Fn(&Path) -> bool;
 
 /// `<stem>.webp`.
 pub fn cover_path(cbz: &Path) -> PathBuf {
@@ -294,6 +302,11 @@ pub fn ensure_thumbnail(cbz: &Path) -> Result<bool, String> {
 /// [`ensure_thumbnail`]; on a cloud library a missing cover is recorded in `nocover`
 /// instead of a `.nocover` file (D14).
 pub fn ensure_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> Result<bool, String> {
+    ensure_cover(cbz, nocover, &crate::ocr::owed::merge_busy)
+}
+
+/// [`ensure_thumbnail_with`], the cover published only while `busy` is false.
+fn ensure_cover(cbz: &Path, nocover: Option<&NoCoverSet>, busy: Busy) -> Result<bool, String> {
     if !needs_thumbnail_with(cbz, nocover) {
         return Ok(true);
     }
@@ -320,7 +333,7 @@ pub fn ensure_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> Result
     let webp = bunko_thumb::make_thumbnail_limited(&bytes, MAX_DECODE_BYTES, MAX_SIDE)
         .map_err(|e| format!("Failed to generate thumbnail for {name}: {e}"))?;
     drop(bytes);
-    if !publish_cover(cbz, &webp)? {
+    if !publish_cover(cbz, &webp, busy)? {
         return Ok(false);
     }
     info!(
@@ -336,9 +349,10 @@ pub fn ensure_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> Result
 /// Write `webp` as `cbz`'s cover; false when the archive was gone. A reader renaming a
 /// volume moves its cover first and the archive last, and its series rename then moves
 /// both again: a cover made from the archive while it moved would land where nothing
-/// is left, an orphan that keeps the old folder from ever emptying.
-fn publish_cover(cbz: &Path, webp: &[u8]) -> Result<bool, String> {
-    if !fs::exists(cbz) {
+/// is left, an orphan that keeps the old folder from ever emptying. False too when a
+/// case merge opened on it meanwhile (`busy`): the merge moves its own cover in.
+fn publish_cover(cbz: &Path, webp: &[u8], busy: Busy) -> Result<bool, String> {
+    if !fs::exists(cbz) || busy(cbz) {
         return Ok(false);
     }
     let name = cbz
@@ -468,16 +482,19 @@ impl Thumbnails {
     /// One pass over the library (`_scan_thumbnails_once`); returns covers written.
     pub fn scan_once(&self, library: &Path, stop: &CancellationToken) -> usize {
         let candidates = thumbnail_candidates(library);
-        self.make_covers(candidates, None, stop)
+        self.make_covers_with(candidates, None, stop, &crate::ocr::owed::merge_busy)
+            .0
     }
 
-    /// Covers for `candidates` (minus those that would not decode at this version).
-    fn make_covers(
+    /// Covers for `candidates` (minus those that would not decode at this version):
+    /// how many were written, and the archives left for after a case merge (`busy`).
+    fn make_covers_with(
         &self,
         candidates: Vec<PathBuf>,
         nocover: Option<&NoCoverSet>,
         stop: &CancellationToken,
-    ) -> usize {
+        busy: Busy,
+    ) -> (usize, Vec<PathBuf>) {
         let candidates: Vec<PathBuf> = {
             let failed = self.failed.lock();
             candidates
@@ -488,16 +505,23 @@ impl Thumbnails {
         self.pending
             .store(candidates.len() as i64, Ordering::Relaxed);
         if candidates.is_empty() {
-            return 0;
+            return (0, Vec::new());
         }
         info!("Found {} CBZ files missing thumbnails", candidates.len());
-        let mut made = 0;
+        let (mut made, mut deferred) = (0, Vec::new());
         for cbz in candidates {
             if stop.is_cancelled() {
                 break;
             }
-            match ensure_thumbnail_with(&cbz, nocover) {
+            if busy(&cbz) {
+                deferred.push(cbz);
+                self.pending.fetch_sub(1, Ordering::Relaxed);
+                continue;
+            }
+            match ensure_cover(&cbz, nocover, busy) {
                 Ok(true) => made += 1,
+                // The merge opened while the cover was being made.
+                Ok(false) if busy(&cbz) => deferred.push(cbz.clone()),
                 Ok(false) => {}
                 Err(e) => {
                     warn!("{e}");
@@ -508,7 +532,7 @@ impl Thumbnails {
             }
             self.pending.fetch_sub(1, Ordering::Relaxed);
         }
-        made
+        (made, deferred)
     }
 
     /// Run the loop until `stop`: a scan, then the OCR poll interval.
@@ -618,13 +642,26 @@ impl Thumbnails {
                         }
                         out.into_iter().collect()
                     };
-                    m.make_covers(candidates, Some(&n), &s)
+                    m.make_covers_with(candidates, Some(&n), &s, &crate::ocr::owed::merge_busy)
                 });
-                if let Err(e) = scan.await {
-                    warn!("Thumbnail scan error: {e}");
-                }
+                let deferred = match scan.await {
+                    Ok((_, deferred)) => deferred,
+                    Err(e) => {
+                        warn!("Thumbnail scan error: {e}");
+                        Vec::new()
+                    }
+                };
                 if stop.is_cancelled() {
                     return;
+                }
+                // Looked at again once the merge is likely done; no change event
+                // announces that.
+                if !deferred.is_empty() {
+                    queue.0.lock().paths.extend(deferred);
+                    tokio::select! {
+                        _ = stop.cancelled() => return,
+                        _ = tokio::time::sleep(MERGE_RETRY) => {}
+                    }
                 }
             }
         })
@@ -816,17 +853,53 @@ mod tests {
         cbz(&here, &[("a.png", &png(10, 10))]);
         let webp =
             bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
-        assert!(publish_cover(&here, &webp).unwrap());
+        assert!(publish_cover(&here, &webp, &|_| false).unwrap());
         assert!(cover_path(&here).exists());
 
         let gone = series.join("Vol 2.cbz");
-        assert!(!publish_cover(&gone, &webp).unwrap());
+        assert!(!publish_cover(&gone, &webp, &|_| false).unwrap());
         assert!(!cover_path(&gone).exists());
         let names: Vec<_> = std::fs::read_dir(&series)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert!(!names.iter().any(|n| n.starts_with("Vol 2")), "{names:?}");
+    }
+
+    /// A case merge moving the archive (it has just come into the winning spelling's
+    /// folder, its cover still in the loser's): no cover is made for it, or the one
+    /// the merge moves in next would land beside it as a duplicate; it is handed back
+    /// for after the merge.
+    #[test]
+    fn an_archive_a_case_merge_is_moving_gets_its_cover_after_the_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let series = tmp.path().join("Kingdom");
+        std::fs::create_dir_all(&series).unwrap();
+        let moving = series.join("Vol 2.cbz");
+        let other = series.join("Vol 1.cbz");
+        cbz(&moving, &[("a.png", &png(10, 10))]);
+        cbz(&other, &[("a.png", &png(10, 10))]);
+        let thumbs = Thumbnails::default();
+        let stop = CancellationToken::new();
+
+        let busy = |p: &Path| p.ends_with("Vol 2.cbz");
+        let (made, deferred) =
+            thumbs.make_covers_with(vec![other.clone(), moving.clone()], None, &stop, &busy);
+        assert_eq!((made, &deferred), (1, &vec![moving.clone()]));
+        assert!(cover_path(&other).exists());
+        assert!(!cover_path(&moving).exists());
+        assert_eq!(thumbs.pending(), 0);
+
+        // The merge opened while the cover was being made: it is not published.
+        let webp =
+            bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
+        assert!(!publish_cover(&moving, &webp, &busy).unwrap());
+        assert!(!cover_path(&moving).exists());
+
+        // The merge done: the archive gets its cover.
+        let (made, deferred) = thumbs.make_covers_with(deferred, None, &stop, &|_| false);
+        assert_eq!((made, deferred), (1, vec![]));
+        assert!(cover_path(&moving).exists());
     }
 
     #[test]

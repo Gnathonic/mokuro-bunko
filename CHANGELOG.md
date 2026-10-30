@@ -261,6 +261,12 @@
   and deleting either account removed it. Registration, invites, `admin add-user`
   and the setup wizard now refuse such a name as taken (a deleted account's name points
   at `restore-user`). Accounts that already differ only in case are left as they are.
+- **Joining two spellings of a series leaves no duplicate cover.** In a cloud library,
+  Bunko could make a cover for a volume the case merge had just moved into the older
+  spelling, before the merge moved the volume's own cover in. The folder then held two
+  covers of one name, the admin panel blamed a reader upload, and the emptied folder
+  went to the trash only in a second merge. A volume a merge is moving now gets its
+  cover after the merge.
 - **A volume renamed while Bunko makes its cover leaves no stray cover behind.** A
   cover made from an archive that a reader moved away meanwhile (a volume rename, then
   its series') was still written under the old name, beside nothing, and the old
