@@ -364,6 +364,26 @@ fn failed(name: &str, ms: u64, detail: String) -> Scenario {
     }
 }
 
+/// What a suite folder with no spec files reports: a failure, since every browser
+/// suite has specs (a moved or renamed folder would otherwise run nothing and pass),
+/// unless `--grep` narrowed the run, which may leave a suite nothing to run.
+fn no_specs(rel: &str, grep: Option<&str>) -> Scenario {
+    let (outcome, detail) = match grep {
+        Some(_) => (Outcome::Skipped, format!("no specs in interop/{rel}/")),
+        None => (
+            Outcome::Failed,
+            format!("no specs in interop/{rel}/: every browser suite has specs"),
+        ),
+    };
+    Scenario {
+        name: String::new(),
+        outcome,
+        ms: 0,
+        detail: Some(detail),
+        capability: None,
+    }
+}
+
 /// Run one suite on one provider into `report`.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -387,10 +407,7 @@ pub fn run(
     if playwright::spec_files(&interop.join(&rel)).is_empty() {
         report.add(Scenario {
             name: suite.name().into(),
-            outcome: Outcome::Skipped,
-            ms: 0,
-            detail: Some(format!("no specs in interop/{rel}/")),
-            capability: None,
+            ..no_specs(&rel, grep)
         });
         return;
     }
@@ -454,6 +471,23 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_suite_folder_without_specs_fails_unless_grep_narrowed_the_run() {
+        let rel = "e2e/rig/shared";
+        let none = no_specs(rel, None);
+        assert_eq!(none.outcome, Outcome::Failed);
+        assert_eq!(
+            none.detail.as_deref(),
+            Some("no specs in interop/e2e/rig/shared/: every browser suite has specs")
+        );
+        let grepped = no_specs(rel, Some("S5"));
+        assert_eq!(grepped.outcome, Outcome::Skipped);
+        assert_eq!(
+            grepped.detail.as_deref(),
+            Some("no specs in interop/e2e/rig/shared/")
+        );
+    }
 
     #[test]
     fn each_suite_runs_the_parties_its_checks_need() {
