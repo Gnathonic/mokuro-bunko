@@ -211,8 +211,7 @@ impl LockManager {
         for l in map.values() {
             let direct = l.key == key;
             let via_parent = l.infinite_depth && is_child(&l.key, key);
-            let below =
-                infinite_depth && is_child(key, &l.key) && !private_to_other(l, principal);
+            let below = infinite_depth && is_child(key, &l.key) && !private_to_other(l, principal);
             if direct || via_parent {
                 if l.scope == Scope::Shared && scope == Scope::Shared {
                     continue;
