@@ -212,6 +212,8 @@ test('S1: Bunko merges duplicate roots under its lease into the older top-level 
         // what Bunko compiles for the nested root's own series.
         const inNested = (r) => under(rows, r.id, seed.nested);
         expect(writesOutside(rows, seed.rootB, mergedAt, inNested)).toEqual([]);
+        // ...and nothing went back into what the merge trashed.
+        expect(mergeProblems(rows, seed.rootB, merged)).toEqual([]);
         expect(nestedChanges(rows, seed, nestedBefore)).toEqual([]);
 
         // Three times: a newer duplicate root appears while the reader syncs.
@@ -256,7 +258,8 @@ test('S1: Bunko merges duplicate roots under its lease into the older top-level 
                 )
                 .toEqual({ cloudPath: `${series}/Vol 1.cbz`, progress: 2 });
             rows = await tree(rig);
-            expect(mergeProblems(rows, seed.rootB, [rootD])).toEqual([]);
+            merged.push(rootD);
+            expect(mergeProblems(rows, seed.rootB, merged)).toEqual([]);
             expect(filesBelow(rows, seed.rootB).get(`${series}/Vol 1.cbz`)?.id).toBe(d.get(`${series}/Vol 1.cbz`));
             expect(writesOutside(rows, seed.rootB, raceStart, (r) => under(rows, r.id, seed.nested))).toEqual([]);
         }

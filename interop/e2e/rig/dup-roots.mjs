@@ -255,12 +255,16 @@ export function mergeProblems(rows, canonical, folders) {
 }
 
 /**
- * Every live file written (or made) at or after `since` (ms) lies below `canonical`,
- * or is one of `allowed(row)`: answers the rows that do not.
+ * Every file written (or made) at or after `since` (ms) lies below `canonical`, or is
+ * one of `allowed(row)`: answers the rows that do not. Trashed files count too: a write
+ * into a merged-away root (its pre-merge id kept as a write root) lands in the trash
+ * with it, and a merge's trashing moves no write time. `since` is taken to its whole
+ * second, as MEGA stamps a node: a write in the same second still reads as after it.
  */
 export function writesOutside(rows, canonical, since, allowed = () => false) {
+    const from = Math.floor(since / 1000) * 1000;
     return rows
-        .filter((r) => !r.folder && !r.trashed && Date.parse(r.modified) >= since)
+        .filter((r) => !r.folder && Date.parse(r.modified) >= from)
         .filter((r) => !under(rows, r.id, canonical) && !allowed(r))
         .map((r) => ({ id: r.id, name: r.name, parent_id: r.parent_id, modified: r.modified }));
 }
