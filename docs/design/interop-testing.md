@@ -710,6 +710,37 @@ Backup, to the end of its run, metadata writes included).
   incremental updates arrive on a 300 ms trailing edge: a `deleteVolume` right after
   `renameVolume` otherwise found the renamed volume not backed up.
 
+**As built (I3, scenario S5).**
+- `shared/case-merge` (S5, `shared` on `google`, `mega` and `rclone`; skipped on
+  `microsoft`, where Graph refuses a second spelling of a name with 409, so there is
+  nothing to merge). The reader needs `case-merge-rename`. The cloud first gets
+  `kingdom/Vol 2` as another client would put it there (`/_sim/node`; on rclone a
+  WebDAV `MKCOL` and `PUT`, since rclone's directory cache would not see files written
+  to its disk for minutes); the reader downloads it and sets page 2. Then an older
+  `Kingdom/` appears with `Vol 1` (`/_sim/node` dates it 2020; on rclone, which reports
+  no creation time, Bunko breaks the tie by path, and `Kingdom` sorts first). Each
+  volume carries its sidecar (`RIG_CONTEXT.uploads`: `Kingdom/Vol 1`, `kingdom/Vol 2`,
+  ids `…051` and `…052`): an image-only volume would be queued for OCR, and a job the
+  held processor-fake claims holds the merge off. Once Bunko's Storage panel lists
+  one finished merge of `kingdom` into `Kingdom`, `Kingdom/` holds both volumes and
+  `kingdom/` is gone (trashed; on rclone deleted), the reader syncs: its row for Vol 2
+  takes the cloud's spelling with the same volume id, cloud path `Kingdom/Vol 2.cbz`
+  and the same progress. After a second sync and two Bunko walks, no node made since
+  the merge (cloudsim's tree, trashed nodes included) is a `kingdom` folder, and the
+  trashed one holds exactly what it held at the merge (nothing made or moved into it);
+  on rclone the reader sent no write naming `kingdom/` and the folder is still gone. The merge count for `Kingdom` stays at 1. The C6 text reads the writes off
+  `/_sim/log`; its entries name a request path, and a Drive or MEGA upload's parent is
+  in the body, so the tree is what can tell.
+- What it catches: with the reader's adoption undone (a scratch build), the row stays
+  `kingdom` and loses its cloud path, so the spec fails. Before the fix it also caught
+  a Bunko bug: the cover worker made a cover for `Kingdom/Vol 2.cbz` after the merge
+  had moved the archive but before it had moved `Vol 2.webp`. The folder then held two
+  covers of that name, the merge recorded a `DupFile` conflict blaming a reader upload
+  and did not trash the loser, and a second merge group trashed it (`google`, twice in
+  two runs). `thumbs` now skips an archive while a merge is open on it
+  (`merge_busy`), both before making the cover and again before publishing it, and
+  looks at it again 5 s later.
+
 The generated sidecar (`genlib::mokuro_doc`) carries `title_uuid`: the reader's import
 refuses a `.mokuro` without it, so no download of a rig volume with OCR could install.
 

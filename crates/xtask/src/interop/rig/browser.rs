@@ -110,7 +110,8 @@ fn library_files() -> Result<Vec<(String, Vec<u8>)>> {
 /// suite's OCR round trip (`Vol 3`), and one new series for each of its
 /// `series.json`/`catalog.json` checks, so a reader that writes them has something new
 /// to say; then, in `shared` and `dav`, the series S4 and S6 OCR and rename (each its
-/// own, so a rename moves nothing another spec reads).
+/// own, so a rename moves nothing another spec reads); then, in `shared`, the files S5
+/// seeds into the cloud itself ([`CASE_VARIANTS`]).
 fn upload_files(suite: Suite) -> Result<Vec<(String, Vec<u8>)>> {
     let mut rels = match suite {
         Suite::Shared => vec![
@@ -131,15 +132,37 @@ fn upload_files(suite: Suite) -> Result<Vec<(String, Vec<u8>)>> {
         ]
         .map(String::from),
     );
-    rels.into_iter()
+    let mut files = rels
+        .into_iter()
         .map(|rel| {
             Ok((
                 rel.clone(),
                 genlib::cbz_bytes(&format!("rig upload {rel}"))?,
             ))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    if suite == Suite::Shared {
+        for (series, volume, n) in CASE_VARIANTS {
+            let rel = format!("{series}/{volume}");
+            files.push((
+                format!("{rel}.cbz"),
+                genlib::cbz_bytes(&format!("rig upload {rel}.cbz"))?,
+            ));
+            files.push((
+                format!("{rel}.mokuro"),
+                genlib::mokuro_doc(series, volume, n),
+            ));
+        }
+    }
+    Ok(files)
 }
+
+/// S5's series under two spellings, `(series, volume, volume id number)`: the older
+/// spelling's `Vol 1`, the younger's `Vol 2`. Each volume has its OCR, so Bunko queues
+/// no job under either (a job processor-fake claims and holds would hold the merge
+/// off); the ids are no other volume's (the library's `Vol 1` is 0).
+const CASE_VARIANTS: [(&str, &str, usize); 2] =
+    [("Kingdom", "Vol 1", 51), ("kingdom", "Vol 2", 52)];
 
 /// The `shared` suite's lease ttl: twice it covers the reader's 60 s between marker
 /// reads with a heartbeat (every ttl / 3) to spare.
@@ -514,6 +537,13 @@ mod tests {
             "Rig Released/Vol 1.cbz",
         ];
         shared.extend(renames);
+        // S5's two spellings of one series, each volume with its OCR sidecar.
+        shared.extend([
+            "Kingdom/Vol 1.cbz",
+            "Kingdom/Vol 1.mokuro",
+            "kingdom/Vol 2.cbz",
+            "kingdom/Vol 2.mokuro",
+        ]);
         assert_eq!(names(Suite::Shared), shared);
         assert_eq!(names(Suite::Dav), renames);
         let library = library_files().unwrap();
@@ -526,6 +556,35 @@ mod tests {
         }
         for suite in [Suite::Api, Suite::Bridge, Suite::Direct] {
             assert!(upload_files(suite).unwrap().is_empty(), "{suite:?}");
+        }
+    }
+
+    #[test]
+    fn the_case_variants_carry_ocr_of_their_own_volumes() {
+        let uploads = upload_files(Suite::Shared).unwrap();
+        let doc = |rel: &str| -> Value {
+            let (_, bytes) = uploads.iter().find(|(n, _)| n == rel).unwrap();
+            serde_json::from_slice(bytes).unwrap()
+        };
+        let (one, two) = (doc("Kingdom/Vol 1.mokuro"), doc("kingdom/Vol 2.mokuro"));
+        assert_eq!(
+            (&one["title"], &one["volume"]),
+            (&json!("Kingdom"), &json!("Vol 1"))
+        );
+        assert_eq!(
+            (&two["title"], &two["volume"]),
+            (&json!("kingdom"), &json!("Vol 2"))
+        );
+        // Volume ids of their own: no other volume of the rig's has them.
+        let library_ids: Vec<Value> = library_files()
+            .unwrap()
+            .iter()
+            .filter(|(n, _)| n.ends_with(".mokuro"))
+            .map(|(_, b)| serde_json::from_slice::<Value>(b).unwrap()["volume_uuid"].clone())
+            .collect();
+        assert_ne!(one["volume_uuid"], two["volume_uuid"]);
+        for v in [&one, &two] {
+            assert!(!library_ids.contains(&v["volume_uuid"]));
         }
     }
 
