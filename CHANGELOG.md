@@ -251,6 +251,10 @@
   saves into the main file still land there; an upgrade keeps them as `pre-upgrade`.
 
 ### Fixed
+- **A volume renamed while Bunko makes its cover leaves no stray cover behind.** A
+  cover made from an archive that a reader moved away meanwhile (a volume rename, then
+  its series') was still written under the old name, beside nothing, and the old
+  series folder never emptied. It is now dropped.
 - **A series whose last volume was deleted disappears from readers.** Its folder kept
   a `series.json` listing the deleted volumes, so Mokuro Reader kept showing them.
   Bunko now removes that file (its facts are kept for a later upload; in a cloud
