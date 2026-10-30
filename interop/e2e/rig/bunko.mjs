@@ -140,16 +140,30 @@ export function recordRequests(page, origin) {
     let pending = [];
     // A request a reload cancelled never gets its full headers (allHeaders() waits
     // forever), and one still in flight when the spec ends rejects: both are read from
-    // the headers the page set, which carry its Authorization.
+    // the headers the page set, which carry its Authorization. A request the old
+    // document still had in flight at a reload gets no requestfailed either (Chromium
+    // drops it at the commit and Playwright reports nothing: the reader's cover
+    // downloads right after a connect), so a main-frame navigation settles every
+    // request recorded before it the same way.
     const cancelled = new WeakMap();
+    const unsettled = new Set();
     page.on('requestfailed', (req) => cancelled.get(req)?.());
+    page.on('framenavigated', (frame) => {
+        if (frame !== page.mainFrame()) return;
+        for (const settle of unsettled) settle();
+        unsettled.clear();
+    });
     page.on('request', (req) => {
         const url = new URL(req.url());
         if (url.origin !== origin) return;
-        const failed = new Promise((resolve) => cancelled.set(req, resolve));
+        let settle;
+        const failed = new Promise((resolve) => (settle = resolve));
+        cancelled.set(req, settle);
+        unsettled.add(settle);
         pending.push(
             Promise.race([req.allHeaders(), failed.then(() => req.headers())])
                 .catch(() => req.headers())
+                .finally(() => unsettled.delete(settle))
                 .then((h) => ({
                     method: req.method(),
                     path: decodeURIComponent(url.pathname),
