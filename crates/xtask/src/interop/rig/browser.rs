@@ -311,6 +311,7 @@ pub fn run(
                 report.add(s);
             }
             report.refused_hosts = parsed.refused_hosts;
+            report.stubbed_urls = parsed.stubbed_urls;
         }
         Err(e) => report.add(failed("playwright", 0, format!("{e:#}"))),
     }

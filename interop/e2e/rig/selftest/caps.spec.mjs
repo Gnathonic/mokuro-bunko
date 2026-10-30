@@ -52,35 +52,41 @@ test.describe('a missing capability the pending list names', () => {
     });
 });
 
-test('a request off this machine is refused and recorded; the Google scripts load empty', async ({
-    reader,
-    page,
-    refusedHosts,
-}) => {
-    void reader;
-    const answer = await page.evaluate(() =>
-        fetch('https://example.invalid/x').then(
-            () => 'answered',
-            () => 'refused',
-        ),
-    );
-    expect(answer).toBe('refused');
-    expect(refusedHosts).toEqual(['example.invalid']);
-    for (const src of ['https://apis.google.com/js/api.js', 'https://accounts.google.com/gsi/client']) {
-        const loaded = await page.evaluate(
-            (s) =>
-                new Promise((resolve) => {
-                    const el = document.createElement('script');
-                    el.src = s;
-                    el.onload = () => resolve(true);
-                    el.onerror = () => resolve(false);
-                    document.head.append(el);
-                }),
-            src,
+test.describe('a request off this machine', () => {
+    // It fails the spec (egress.mjs refusedError); here it is made on purpose.
+    test.use({ refusedFails: false });
+    test('is refused and recorded; the Google scripts load empty', async ({
+        reader,
+        page,
+        refusedHosts,
+        stubbedUrls,
+    }) => {
+        void reader;
+        const answer = await page.evaluate(() =>
+            fetch('https://example.invalid/x').then(
+                () => 'answered',
+                () => 'refused',
+            ),
         );
-        expect(loaded, src).toBe(true);
-    }
-    expect(refusedHosts).toEqual(['example.invalid']);
+        expect(answer).toBe('refused');
+        expect(refusedHosts).toEqual(['example.invalid']);
+        for (const src of ['https://apis.google.com/js/api.js', 'https://accounts.google.com/gsi/client']) {
+            const loaded = await page.evaluate(
+                (s) =>
+                    new Promise((resolve) => {
+                        const el = document.createElement('script');
+                        el.src = s;
+                        el.onload = () => resolve(true);
+                        el.onerror = () => resolve(false);
+                        document.head.append(el);
+                    }),
+                src,
+            );
+            expect(loaded, src).toBe(true);
+        }
+        expect(refusedHosts).toEqual(['example.invalid']);
+        expect(stubbedUrls).toEqual(['https://apis.google.com/js/api.js', 'https://accounts.google.com/gsi/client']);
+    });
 });
 
 // A route sees requests only: a WebSocket, a preconnect or a DNS prefetch never asks

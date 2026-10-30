@@ -1,7 +1,8 @@
 // What every rig spec gets: the parties' addresses (the environment `cargo xtask
 // interop rig` sets, C6-contract), a fresh browser context that cannot reach off this
-// machine, the reader loaded with `__mokuroInteropConfig` set before any page script
-// runs, and its rig driver (driver.mjs) once `__mokuroInterop.apiVersion === 1`.
+// machine (a spec in which the reader asks for any other host fails: egress.mjs), the
+// reader loaded with `__mokuroInteropConfig` set before any page script runs, and its
+// rig driver (driver.mjs) once `__mokuroInterop.apiVersion === 1`.
 //
 //   import { test, expect } from '../fixtures.mjs';
 //   test.use({ needs: ['history'] });          // capabilities the spec needs (caps.mjs)
@@ -17,15 +18,10 @@ import { test as base, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { gateCapabilities, parsePendingCaps } from './caps.mjs';
 import { driver } from './driver.mjs';
+import { refusedError, routeFor } from './egress.mjs';
 import { takeViolations } from './violations.mjs';
 
 export { expect };
-
-const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
-
-// src/app.html loads these two even in an interop build; the reader installs its gapi
-// REST shim (gapiShim) and takes its Google token from the config instead.
-const EMPTY_SCRIPTS = new Set(['https://apis.google.com/js/api.js', 'https://accounts.google.com/gsi/client']);
 
 const DEFAULT_PENDING = new URL('../../pending-reader-caps.txt', import.meta.url);
 
@@ -133,6 +129,9 @@ export const test = base.extend({
 
     rig: [async ({}, use) => use(rigFromEnv()), { scope: 'worker' }],
 
+    /** Self-test only: false lets a spec that was refused a host pass (egress.mjs). */
+    refusedFails: [true, { option: true }],
+
     /** Hosts a request was refused for, in order (each spec's own). */
     refusedHosts: async ({}, use, testInfo) => {
         const hosts = [];
@@ -142,8 +141,24 @@ export const test = base.extend({
         }
     },
 
+    /**
+     * The Google scripts answered empty, in order (each spec's own): the only requests
+     * off this machine a spec may make.
+     */
+    stubbedUrls: async ({}, use, testInfo) => {
+        const urls = [];
+        await use(urls);
+        if (urls.length) {
+            testInfo.annotations.push({ type: 'stubbed-urls', description: [...new Set(urls)].join(' ') });
+        }
+    },
+
     // Playwright's context is already one per test; this one refuses the network.
-    context: async ({ context, rig, readerUrl, readerStub, refusedHosts }, use, testInfo) => {
+    context: async (
+        { context, rig, readerUrl, readerStub, refusedHosts, stubbedUrls, refusedFails },
+        use,
+        testInfo,
+    ) => {
         const sim = (method, path) => rig.sim(method, path);
         // What cloudsim recorded since the last spec ended (the server's startup, its
         // polling in between) is no spec's doing: the results fail it on its own
@@ -155,13 +170,18 @@ export const test = base.extend({
             }
         }
         await context.route('**/*', (route) => {
-            const url = new URL(route.request().url());
-            if (LOCAL_HOSTS.has(url.hostname)) return route.continue();
-            if (EMPTY_SCRIPTS.has(`${url.origin}${url.pathname}`)) {
-                return route.fulfill({ status: 200, contentType: 'text/javascript', body: '' });
+            const href = route.request().url();
+            const url = new URL(href);
+            switch (routeFor(href)) {
+                case 'continue':
+                    return route.continue();
+                case 'stub':
+                    stubbedUrls.push(`${url.origin}${url.pathname}`);
+                    return route.fulfill({ status: 200, contentType: 'text/javascript', body: '' });
+                default:
+                    refusedHosts.push(url.host);
+                    return route.abort('blockedbyclient');
             }
-            refusedHosts.push(url.host);
-            return route.abort('blockedbyclient');
         });
         if (readerStub !== null) {
             // Registered last, so it wins over the catch-all above.
@@ -174,14 +194,18 @@ export const test = base.extend({
             globalThis.__mokuroInteropConfig = c;
         }, config);
         await use(context);
+        const errors = [];
         // A request cloudsim could not accept is a defect of whoever sent it. One
         // recorded while the spec ran fails it, the reader's or the server's alike: the
         // server polls cloudsim all along, so the window, not the sender, is what is
         // known.
         if (rig.cloudsimUrl) {
             const during = await takeViolations(sim);
-            if (during.length) throw new Error(`cloudsim violations while the spec ran: ${JSON.stringify(during)}`);
+            if (during.length) errors.push(`cloudsim violations while the spec ran: ${JSON.stringify(during)}`);
         }
+        const refused = refusedFails ? refusedError(refusedHosts) : null;
+        if (refused) errors.push(refused);
+        if (errors.length) throw new Error(errors.join('\n'));
     },
 
     /** The reader, loaded, its capabilities checked against `needs`. */

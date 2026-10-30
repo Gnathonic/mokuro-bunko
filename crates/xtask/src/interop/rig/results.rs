@@ -54,8 +54,11 @@ pub struct Report {
     /// is empty.
     pub pending_caps: Vec<String>,
     /// Hosts the browser was refused (every request off this machine is): what the
-    /// reader tried to reach, never what it reached.
+    /// reader tried to reach, never what it reached. Each fails its spec.
     pub refused_hosts: Vec<String>,
+    /// The Google scripts src/app.html loads, answered with an empty script: the only
+    /// requests off this machine a spec may make.
+    pub stubbed_urls: Vec<String>,
     pub bunko_bin: String,
     pub started_at: String,
     pub scenarios: Vec<Scenario>,
@@ -82,6 +85,7 @@ impl Report {
             outcome: Outcome::Passed,
             pending_caps: Vec::new(),
             refused_hosts: Vec::new(),
+            stubbed_urls: Vec::new(),
             bunko_bin: bin.display().to_string(),
             started_at: crate::util::iso_utc(now),
             scenarios: Vec::new(),

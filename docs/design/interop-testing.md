@@ -325,9 +325,13 @@ browser context each) get READER_URL, BUNKO_URL, CLOUDSIM_URL, CLOUDSIM_PREAUTH_
 RCLONE_URL, RIG_PROVIDER, RIG_ACCOUNTS, RIG_WORKDIR and RIG_FAKEPROC_HOLD as C6 lists
 them (unset when the suite has no such party), plus `RIG_CONTEXT` (JSON: the shared
 cloud account, its MEGA or WebDAV sign-in, the seeded library). The fixtures
-(`interop/e2e/rig/fixtures.mjs`) refuse every request off this machine except
-`apis.google.com/js/api.js` and `accounts.google.com/gsi/client`, which load as empty
-scripts, and record the refused hosts (`refused_hosts` in the results); start Chromium
+(`interop/e2e/rig/fixtures.mjs`, the rule in `egress.mjs`) refuse every request off this
+machine except `apis.google.com/js/api.js` and `accounts.google.com/gsi/client`, which
+load as empty scripts (`stubbed_urls` in the results), and FAIL the spec a refused one
+came from, naming its hosts (`refused_hosts` in the results): an interop reader that
+reaches for a third party would need the network on CI, or talk to a real service in
+place of cloudsim (the reader leaves out its web font and the shell's absolute
+addresses for this, `src/lib/interop/hermetic.ts`); start Chromium
 resolving no host but `127.0.0.1`, `localhost` and `::1` (IP literals included), so what
 the route never sees — a WebSocket, a preconnect, a DNS prefetch — cannot leave either;
 block service workers, whose fetches would bypass the route; set `__mokuroInteropConfig` v1 (cloudsim's
@@ -341,12 +345,12 @@ with that capability. `npm run selftest` in `interop/` checks the gate, the rout
 resolver against a stub page, no reader needed, and fails if any spec but the one meant
 to skip is skipped. Results: `target/interop/rig/<suite>-<provider>.json`
 carries `suite`, `provider`, `bunko_sha`, `reader_sha` (`-dirty` for a changed
-`--reader-dir`), `passed`, `failed`, `skipped: [{spec, capability}]`, `duration_ms`
-and `pending_caps`, with Playwright's JUnit XML beside it and the parties' logs (the
-server's `serve.log`, `cloudsim.log`, `processor-fake.log`, rclone's) under
-`logs/<suite>-<provider>/`; the reader's build and preview logs are
-`reader-build.log` and `reader-preview.log`. A suite folder with no specs yet is
-reported skipped.
+`--reader-dir`), `passed`, `failed`, `skipped: [{spec, capability}]`, `duration_ms`,
+`pending_caps`, `refused_hosts` and `stubbed_urls`, with Playwright's JUnit XML beside
+it and the parties' logs (the server's `serve.log`, `cloudsim.log`,
+`processor-fake.log`, rclone's) under `logs/<suite>-<provider>/`; the reader's build
+and preview logs are `reader-build.log` and `reader-preview.log`. A suite folder with
+no specs yet is reported skipped.
 
 The `cloud` suite (`rig/cloud.rs`) runs one library of four volumes and a reader's
 `series.json` through two server processes, in order, on each provider: **cold-start**

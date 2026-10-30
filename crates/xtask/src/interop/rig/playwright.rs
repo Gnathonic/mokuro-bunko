@@ -120,12 +120,14 @@ pub fn spec_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The scenarios a Playwright JSON report describes (one per test), and the hosts its
-/// specs were refused (each spec's `refused-hosts` annotation).
+/// The scenarios a Playwright JSON report describes (one per test), the hosts its
+/// specs were refused (each spec's `refused-hosts` annotation) and the Google scripts
+/// they were answered empty (`stubbed-urls`).
 #[derive(Debug, Default)]
 pub struct Parsed {
     pub scenarios: Vec<Scenario>,
     pub refused_hosts: Vec<String>,
+    pub stubbed_urls: Vec<String>,
 }
 
 pub fn parse_report(v: &Value) -> Parsed {
@@ -149,8 +151,10 @@ pub fn parse_report(v: &Value) -> Parsed {
             capability: None,
         });
     }
-    p.refused_hosts.sort();
-    p.refused_hosts.dedup();
+    for list in [&mut p.refused_hosts, &mut p.stubbed_urls] {
+        list.sort();
+        list.dedup();
+    }
     p
 }
 
@@ -163,8 +167,13 @@ fn walk(suite: &Value, file: &str, titles: &[String], p: &mut Parsed) {
         let name = format!("{file} › {}", path.join(" › "));
         for test in spec["tests"].as_array().into_iter().flatten() {
             let mut between = Vec::new();
-            p.scenarios
-                .push(scenario(&name, test, &mut p.refused_hosts, &mut between));
+            p.scenarios.push(scenario(
+                &name,
+                test,
+                &mut p.refused_hosts,
+                &mut p.stubbed_urls,
+                &mut between,
+            ));
             // cloudsim violations recorded before the spec started are nobody's spec's:
             // they fail on their own, named after the spec that found them.
             for v in between {
@@ -189,6 +198,7 @@ fn scenario(
     name: &str,
     test: &Value,
     refused: &mut Vec<String>,
+    stubbed: &mut Vec<String>,
     between: &mut Vec<String>,
 ) -> Scenario {
     let results: Vec<&Value> = test["results"].as_array().into_iter().flatten().collect();
@@ -217,6 +227,9 @@ fn scenario(
     };
     for hosts in notes("refused-hosts") {
         refused.extend(hosts.split_whitespace().map(str::to_string));
+    }
+    for urls in notes("stubbed-urls") {
+        stubbed.extend(urls.split_whitespace().map(str::to_string));
     }
     between.extend(notes("cloudsim-violations-between"));
     let ms = results.iter().filter_map(|r| r["duration"].as_u64()).sum();
@@ -406,6 +419,13 @@ mod tests {
         assert_eq!(by("passes").detail, None);
         assert_eq!(by("refuses").ms, 53);
         assert_eq!(p.refused_hosts, ["fonts.googleapis.com"]);
+        assert_eq!(
+            p.stubbed_urls,
+            [
+                "https://accounts.google.com/gsi/client",
+                "https://apis.google.com/js/api.js"
+            ]
+        );
     }
 
     #[test]

@@ -134,6 +134,10 @@
           {
            "type": "refused-hosts",
            "description": "fonts.googleapis.com"
+          },
+          {
+           "type": "stubbed-urls",
+           "description": "https://apis.google.com/js/api.js https://accounts.google.com/gsi/client"
           }
          ]
         }
