@@ -429,8 +429,9 @@ needs I3 (and takes in I0's scenario); I5 needs I3.
 - **A hooked browser build still loads the real gapi** from apis.google.com: the hooks
   redirect Drive's REST and upload calls, not `gapi.client`. I3's browser rig must install
   the REST shim (`src/lib/interop/gapi-rest-shim.ts`) in place of loading gapi.
-- **Reader gaps the I2 suites mark with `it.fails`** (open for the reader): the
-  Drive provider retries nothing (a 429 with `Retry-After` fails that call) and has no
-  distinct storage-full error (a quota 403 is `UPLOAD_FAILED`); OneDrive's upload core
-  treats a 507 like any 5xx and tries the session five times before failing. Each test
-  states the wanted behaviour and flips when the reader is fixed.
+- **Reader gaps the I2 suites marked with `it.fails`** (closed in the reader): the
+  Drive provider retried nothing (a 429 with `Retry-After` failed that call) and had no
+  distinct storage-full error (a quota 403 was `UPLOAD_FAILED`); OneDrive's upload core
+  treated a 507 like any 5xx and tried the session five times before failing. The reader
+  now retries on `Retry-After`, reports a full drive as one, and fails a 507 at once;
+  the three tests pass as plain `it` and a regression fails the cloudsim run.
