@@ -99,8 +99,13 @@ pub const fn pages_per_volume() -> usize {
     PAGES_PER_VOLUME
 }
 
-/// The OCR sidecar as the reader and Bunko read it: one line of text per page.
+/// The OCR sidecar as the reader and Bunko read it: one line of text per page. Every
+/// field the reader requires is there (its import refuses the file otherwise); the
+/// series' `title_uuid` is derived from its name, so one series has one.
 pub fn mokuro_doc(series: &str, title: &str, n: usize) -> Vec<u8> {
+    use sha2::Digest as _;
+    let h = sha2::Sha256::digest(series.as_bytes());
+    let hex: String = h.iter().take(6).map(|b| format!("{b:02x}")).collect();
     let pages: Vec<serde_json::Value> = (0..PAGES_PER_VOLUME)
         .map(|p| {
             serde_json::json!({
@@ -114,6 +119,7 @@ pub fn mokuro_doc(series: &str, title: &str, n: usize) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "version": "0.2.2",
         "title": series,
+        "title_uuid": format!("00000000-0000-4000-9000-{hex}"),
         "volume": title,
         "volume_uuid": format!("00000000-0000-4000-8000-{n:012}"),
         "pages": pages,
@@ -157,5 +163,30 @@ mod tests {
             generated.volume(3, 2),
             (SMALL_SERIES.to_string(), "Small Series v01".to_string())
         );
+    }
+
+    /// The reader refuses a `.mokuro` without these (`parseMokuroFile`'s
+    /// `requiredFields`): a download of the volume fails, and its sidecar is never read.
+    #[test]
+    fn a_sidecar_carries_every_field_the_reader_requires() {
+        let doc: serde_json::Value =
+            serde_json::from_slice(&mokuro_doc("Rig Series", "Vol 1", 0)).unwrap();
+        for field in [
+            "version",
+            "title",
+            "title_uuid",
+            "volume",
+            "volume_uuid",
+            "pages",
+        ] {
+            assert!(doc.get(field).is_some(), "{field} missing");
+        }
+        // One series, one title uuid; another series, another.
+        let other: serde_json::Value =
+            serde_json::from_slice(&mokuro_doc("Rig Series", "Vol 2", 1)).unwrap();
+        assert_eq!(doc["title_uuid"], other["title_uuid"]);
+        let elsewhere: serde_json::Value =
+            serde_json::from_slice(&mokuro_doc("Other", "Vol 1", 2)).unwrap();
+        assert_ne!(doc["title_uuid"], elsewhere["title_uuid"]);
     }
 }
