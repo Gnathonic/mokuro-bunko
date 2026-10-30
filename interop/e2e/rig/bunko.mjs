@@ -84,15 +84,23 @@ export function bunko(rig) {
  */
 export function recordRequests(page, origin) {
     let pending = [];
+    // A request a reload cancelled never gets its full headers (allHeaders() waits
+    // forever), and one still in flight when the spec ends rejects: both are read from
+    // the headers the page set, which carry its Authorization.
+    const cancelled = new WeakMap();
+    page.on('requestfailed', (req) => cancelled.get(req)?.());
     page.on('request', (req) => {
         const url = new URL(req.url());
         if (url.origin !== origin) return;
+        const failed = new Promise((resolve) => cancelled.set(req, resolve));
         pending.push(
-            req.allHeaders().then((h) => ({
-                method: req.method(),
-                path: decodeURIComponent(url.pathname),
-                authorization: h.authorization ?? null,
-            })),
+            Promise.race([req.allHeaders(), failed.then(() => req.headers())])
+                .catch(() => req.headers())
+                .then((h) => ({
+                    method: req.method(),
+                    path: decodeURIComponent(url.pathname),
+                    authorization: h.authorization ?? null,
+                })),
         );
     });
     return {
