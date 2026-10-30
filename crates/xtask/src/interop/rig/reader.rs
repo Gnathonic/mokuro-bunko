@@ -328,6 +328,52 @@ pub fn vite_bin(dir: &Path) -> Result<PathBuf> {
     Ok(pkg.join(bin))
 }
 
+/// SvelteKit's version file, under the build's client output: a stamp of its own per
+/// build, served at `/_app/version.json`.
+const VERSION_FILE: &str = "_app/version.json";
+
+/// Wait until `addr` serves this build's `version` (the bytes of its [`VERSION_FILE`])
+/// while the preview process still runs (`exited`: its exit status once it has one).
+/// Any 200 would not do: the port is picked free and released before vite binds it,
+/// and a server that took it meanwhile (another run's preview of another reader)
+/// answers while our vite gives up on `--strictPort`.
+fn await_preview(
+    addr: SocketAddr,
+    version: &[u8],
+    mut exited: impl FnMut() -> Result<Option<String>>,
+    limit: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    let mut foreign = false;
+    while start.elapsed() < limit {
+        if let Some(status) = exited()? {
+            if foreign {
+                bail!(
+                    "vite preview exited ({status}): another server answers on {addr}, serving another build"
+                );
+            }
+            bail!("vite preview exited ({status})");
+        }
+        match super::super::http::get(addr, &format!("/{VERSION_FILE}")) {
+            // Ours, and still running after it answered.
+            Ok(r) if r.status == 200 && r.body == version && exited()?.is_none() => return Ok(()),
+            Ok(r) if r.status == 200 && r.body != version => foreign = true,
+            _ => {}
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if foreign {
+        bail!(
+            "vite preview did not serve http://{addr} in {} s: another server answers there, serving another build",
+            limit.as_secs()
+        );
+    }
+    bail!(
+        "vite preview did not serve http://{addr} in {} s",
+        limit.as_secs()
+    )
+}
+
 /// The built reader, served.
 pub struct Preview {
     child: Child,
@@ -348,33 +394,31 @@ impl Preview {
             .stdin(Stdio::null())
             .stdout(file.try_clone()?)
             .stderr(file);
+        let version_file = dir.join(".svelte-kit/output/client").join(VERSION_FILE);
+        let version = std::fs::read(&version_file)
+            .with_context(|| format!("{} (is the reader built?)", version_file.display()))?;
         let child = cmd.spawn().context("starting vite preview")?;
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let mut p = Preview {
             child,
             url: format!("http://{addr}"),
         };
-        let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(60) {
-            if let Ok(r) = super::super::http::get(addr, "/")
-                && r.status == 200
-            {
-                return Ok(p);
-            }
-            if let Some(status) = p.child.try_wait()? {
+        let child = &mut p.child;
+        match await_preview(
+            addr,
+            &version,
+            || Ok(child.try_wait()?.map(|s| s.to_string())),
+            Duration::from_secs(60),
+        ) {
+            Ok(()) => Ok(p),
+            Err(e) => {
+                p.stop();
                 bail!(
-                    "vite preview exited ({status})\n{}",
+                    "{e:#}\n{}",
                     std::fs::read_to_string(log).unwrap_or_default()
-                );
+                )
             }
-            std::thread::sleep(Duration::from_millis(200));
         }
-        p.stop();
-        bail!(
-            "vite preview did not serve {} in 60 s\n{}",
-            p.url,
-            std::fs::read_to_string(log).unwrap_or_default()
-        )
     }
 
     /// TERM, then KILL after 5 s. vite's own child (esbuild's service) exits when its
@@ -408,6 +452,52 @@ impl Drop for Preview {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A loopback server answering every request 200 with `body`, for `n` requests.
+    fn serving(body: &'static str, n: usize) -> SocketAddr {
+        use std::io::{Read as _, Write as _};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().take(n).flatten() {
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn another_server_on_the_port_is_never_taken_for_the_preview() {
+        // Someone else's server took the port between the pick and vite's bind; vite
+        // (--strictPort) gives up a moment later.
+        let addr = serving(r#"{"version":"1700000000000"}"#, 50);
+        let mut looks = 0;
+        let err = await_preview(
+            addr,
+            br#"{"version":"1793379333073"}"#,
+            || {
+                looks += 1;
+                Ok((looks > 3).then(|| "exit status: 1".to_string()))
+            },
+            Duration::from_secs(10),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("another server answers"), "{err}");
+    }
+
+    #[test]
+    fn the_preview_is_ready_once_it_serves_this_build() {
+        let ours = r#"{"version":"1793379333073"}"#;
+        let addr = serving(ours, 50);
+        await_preview(addr, ours.as_bytes(), || Ok(None), Duration::from_secs(10)).unwrap();
+    }
 
     fn sh(dir: &Path, args: &[&str]) {
         let st = Command::new("git")
@@ -587,9 +677,17 @@ mod tests {
         std::fs::write(
             pkg.join("bin/vite.js"),
             "const port = Number(process.argv[process.argv.indexOf('--port') + 1]);\n\
-             require('node:http').createServer((q, s) => s.end('ok')).listen(port, '127.0.0.1');\n",
+             const fs = require('node:fs');\n\
+             const version = '.svelte-kit/output/client/_app/version.json';\n\
+             require('node:http').createServer((q, s) =>\n\
+               s.end(q.url === '/_app/version.json' ? fs.readFileSync(version) : 'ok')\n\
+             ).listen(port, '127.0.0.1');\n",
         )
         .unwrap();
+        // The build it serves.
+        let app = d.path().join(".svelte-kit/output/client/_app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("version.json"), r#"{"version":"1793379333073"}"#).unwrap();
         d
     }
 
