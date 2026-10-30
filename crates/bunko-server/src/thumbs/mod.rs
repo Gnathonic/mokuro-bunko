@@ -320,6 +320,31 @@ pub fn ensure_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> Result
     let webp = bunko_thumb::make_thumbnail_limited(&bytes, MAX_DECODE_BYTES, MAX_SIDE)
         .map_err(|e| format!("Failed to generate thumbnail for {name}: {e}"))?;
     drop(bytes);
+    if !publish_cover(cbz, &webp)? {
+        return Ok(false);
+    }
+    info!(
+        "Created thumbnail: {}",
+        cover_path(cbz)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    );
+    Ok(true)
+}
+
+/// Write `webp` as `cbz`'s cover; false when the archive was gone. A reader renaming a
+/// volume moves its cover first and the archive last, and its series rename then moves
+/// both again: a cover made from the archive while it moved would land where nothing
+/// is left, an orphan that keeps the old folder from ever emptying.
+fn publish_cover(cbz: &Path, webp: &[u8]) -> Result<bool, String> {
+    if !fs::exists(cbz) {
+        return Ok(false);
+    }
+    let name = cbz
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let out = cover_path(cbz);
     let mut tmp = out.as_os_str().to_owned();
     tmp.push(".tmp");
@@ -334,7 +359,7 @@ pub fn ensure_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> Result
             .create(true)
             .truncate(true)
             .open(&tmp)?;
-        f.write_all(&webp)?;
+        f.write_all(webp)?;
         f.flush()?;
         f.sync_all()
     };
@@ -344,12 +369,11 @@ pub fn ensure_thumbnail_with(cbz: &Path, nocover: Option<&NoCoverSet>) -> Result
             let _ = fs::remove_file(&tmp);
             format!("Failed to generate thumbnail for {name}: {e}")
         })?;
-    info!(
-        "Created thumbnail: {}",
-        out.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    );
+    // Moved away while the cover was published: take it back.
+    if !fs::exists(cbz) {
+        let _ = fs::remove_file(&out);
+        return Ok(false);
+    }
     Ok(true)
 }
 
@@ -778,6 +802,31 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    /// The archive moved away while its cover was being made (a reader renaming the
+    /// volume, then its series): the cover is not written beside nothing, where it
+    /// would keep the old folder from ever emptying.
+    #[test]
+    fn a_cover_is_not_published_for_an_archive_gone_meanwhile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let series = tmp.path().join("Series");
+        std::fs::create_dir_all(&series).unwrap();
+        let here = series.join("Vol 1.cbz");
+        cbz(&here, &[("a.png", &png(10, 10))]);
+        let webp =
+            bunko_thumb::make_thumbnail_limited(&png(10, 10), MAX_DECODE_BYTES, MAX_SIDE).unwrap();
+        assert!(publish_cover(&here, &webp).unwrap());
+        assert!(cover_path(&here).exists());
+
+        let gone = series.join("Vol 2.cbz");
+        assert!(!publish_cover(&gone, &webp).unwrap());
+        assert!(!cover_path(&gone).exists());
+        let names: Vec<_> = std::fs::read_dir(&series)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(!names.iter().any(|n| n.starts_with("Vol 2")), "{names:?}");
     }
 
     #[test]
