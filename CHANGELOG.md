@@ -219,6 +219,12 @@
   saves into the main file still land there; an upgrade keeps them as `pre-upgrade`.
 
 ### Fixed
+- **A new account cannot take an existing name in other letter case.** `ALICE` could
+  register beside `alice`; on a Windows or macOS disk, which ignore case, both then
+  read and wrote one `users/alice/` folder (progress, reading history, corrections),
+  and deleting either account removed it. Registration, invites, `admin add-user`
+  and the setup wizard now refuse such a name as taken (a deleted account's name points
+  at `restore-user`). Accounts that already differ only in case are left as they are.
 - **A series whose last volume was deleted disappears from readers.** Its folder kept
   a `series.json` listing the deleted volumes, so Mokuro Reader kept showing them.
   Bunko now removes that file (its facts are kept for a later upload; in a cloud

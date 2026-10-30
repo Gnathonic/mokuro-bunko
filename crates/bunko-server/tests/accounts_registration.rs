@@ -56,6 +56,25 @@ async fn self_registration() {
     );
 }
 
+/// `users/<name>/` holds an account's progress, history and corrections, and a Windows
+/// or macOS library disk folds case: a name that differs from an existing one only in
+/// case would share that account's tree, so it is taken.
+#[tokio::test]
+async fn a_name_differing_only_in_case_is_taken() {
+    let env = env("self", "registered");
+    let r = register(
+        &env,
+        json!({"username": "alice", "password": "password123"}),
+    )
+    .await;
+    assert_eq!(r.status, 201);
+    for name in ["ALICE", "Alice"] {
+        let r = register(&env, json!({"username": name, "password": "password123"})).await;
+        assert_eq!(r.status, 409, "{name}");
+        assert!(env.db.get_user(name).unwrap().is_none(), "{name}");
+    }
+}
+
 #[tokio::test]
 async fn username_is_stripped_before_validation() {
     let env = env("self", "registered");
