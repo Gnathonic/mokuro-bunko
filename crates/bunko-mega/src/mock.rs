@@ -286,6 +286,11 @@ impl St {
                     return json!(-26);
                 }
                 let login_key = acc.login_key;
+                if self.killed {
+                    // A sign-in after the session was killed opens a new one, as MEGA's
+                    // does; the killed id stays dead.
+                    self.renew_sid();
+                }
                 let sek: [u8; 16] = unb64(&s("sek"))
                     .ok()
                     .and_then(|v| v.try_into().ok())
@@ -819,6 +824,15 @@ async fn upload(
 }
 
 impl St {
+    /// A new session id, live. It differs from the old one outside the last 16 bytes,
+    /// which keep it distinct from every other account's.
+    fn renew_sid(&mut self) {
+        let mut sid = unb64(&self.sid).expect("sid");
+        sid[1] = sid[1].wrapping_add(1);
+        self.sid = b64(&sid);
+        self.killed = false;
+    }
+
     /// An empty account (cloud root, inbox, rubbish bin) at index `idx` of a hub.
     fn new(base: String, idx: usize, salt: &[u8; 8]) -> St {
         let mut sid = [0x41u8; SID_LEN];
@@ -1221,7 +1235,7 @@ impl MockMega {
         st.floor = st.log.len();
     }
 
-    /// The session is killed (`-15` from then on).
+    /// The session is killed (`-15` from then on); a password sign-in opens a new one.
     pub fn kill_session(&self) {
         self.lock().killed = true;
     }

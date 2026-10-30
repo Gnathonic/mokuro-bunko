@@ -626,6 +626,33 @@ async fn killed_session_needs_reauth() {
     assert!(!e.mock.calls().iter().any(|c| c == "us0"));
 }
 
+// The reconnect after a revoked session: a password sign-in opens a new session, as
+// MEGA's does; the killed one stays dead.
+#[tokio::test]
+async fn a_sign_in_after_a_killed_session_opens_a_new_one() {
+    let sim = bunko_cloudsim::start().await;
+    let mock = sim.mega("default");
+    mock.set_account("me@example.com", "pw-pw-pw", None);
+    let tmp = tempfile::tempdir().unwrap();
+    let c = cfg(&mock, tmp.path());
+    let killed = SessionBlob::new(mock.session_blob());
+    mock.kill_session();
+    let blob = bunko_remote::mega::MegaSession::login_with(
+        c.client.clone(),
+        "me@example.com",
+        "pw-pw-pw",
+        None,
+    )
+    .await
+    .unwrap();
+    let be = MegaBackend::resume(&blob, c.clone()).await.unwrap();
+    assert_eq!(be.account().await.unwrap().label, "me@example.com");
+    assert_eq!(
+        MegaBackend::resume(&killed, c).await.err(),
+        Some(BErr::AuthRevoked)
+    );
+}
+
 #[tokio::test]
 async fn login_helper_produces_a_resumable_blob() {
     let sim = bunko_cloudsim::start().await;
