@@ -415,6 +415,11 @@ impl Server {
         self.spawn()
     }
 
+    /// Started and not stopped since (it may have exited: [`Server::check_alive`]).
+    pub fn is_running(&self) -> bool {
+        self.child.is_some()
+    }
+
     /// One variable of the server process's extra environment.
     pub fn env_var(&self, key: &str) -> Option<&str> {
         self.env

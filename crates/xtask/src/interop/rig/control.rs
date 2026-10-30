@@ -10,6 +10,11 @@
 //!   process claims the library afresh (§9.2 step 1) instead of resuming its own
 //!   marker; `tune` sets `MOKURO_TEST_CLOUD_TUNE` keys for the new process (a longer
 //!   `lease_settle_ms` holds the claim open), over the suite's own.
+//! - `POST /bunko/stop`: stop the suite's Bunko server (SIGINT: it writes no `released`,
+//!   so its marker simply stops moving) and leave it down; answers `stopped_at_ms`, the
+//!   Unix time it was down. `POST /bunko/start` starts it again on the suite's own tune,
+//!   answering once it serves HTTP. A stop of a stopped server, or a start of a running
+//!   one, is refused.
 
 use super::super::server::Server;
 use anyhow::{Context, Result, bail};
@@ -196,8 +201,36 @@ fn check_settle(tune: &str) -> Result<()> {
     Ok(())
 }
 
-/// The handler of a suite with a Bunko server: `POST /bunko/restart`.
-pub fn bunko_handler(server: Arc<Mutex<Server>>) -> Arc<Handler> {
+/// What the handler does to the suite's server (the rig's [`Server`]).
+pub trait BunkoProcess: Send {
+    fn stop(&mut self);
+    fn start_again(&mut self) -> Result<()>;
+    fn is_running(&self) -> bool;
+    fn env_var(&self, key: &str) -> Option<&str>;
+    fn set_env(&mut self, key: &str, value: &str);
+}
+
+impl BunkoProcess for Server {
+    fn stop(&mut self) {
+        Server::stop(self)
+    }
+    fn start_again(&mut self) -> Result<()> {
+        Server::start_again(self)
+    }
+    fn is_running(&self) -> bool {
+        Server::is_running(self)
+    }
+    fn env_var(&self, key: &str) -> Option<&str> {
+        Server::env_var(self, key)
+    }
+    fn set_env(&mut self, key: &str, value: &str) {
+        Server::set_env(self, key, value)
+    }
+}
+
+/// The handler of a suite with a Bunko server: `POST /bunko/restart`, `/bunko/stop`
+/// and `/bunko/start`.
+pub fn bunko_handler<S: BunkoProcess + 'static>(server: Arc<Mutex<S>>) -> Arc<Handler> {
     // Each restart's tune is over the suite's, never over an earlier restart's.
     let suite_tune = server
         .lock()
@@ -205,12 +238,43 @@ pub fn bunko_handler(server: Arc<Mutex<Server>>) -> Arc<Handler> {
         .and_then(|s| s.env_var(TUNE_VAR).map(str::to_string))
         .unwrap_or_default();
     Arc::new(move |method, path, body| match (method, path) {
-        ("POST", "/bunko/restart") => Some(restart(&server, &suite_tune, &body)),
+        ("POST", "/bunko/restart") => Some(restart(&*server, &suite_tune, &body)),
+        ("POST", "/bunko/stop") => Some(stop(&*server)),
+        ("POST", "/bunko/start") => Some(start(&*server, &suite_tune)),
         _ => None,
     })
 }
 
-fn restart(server: &Mutex<Server>, tune: &str, body: &Value) -> Result<Value> {
+fn stop(server: &Mutex<impl BunkoProcess>) -> Result<Value> {
+    let mut s = server
+        .lock()
+        .map_err(|_| anyhow::anyhow!("the server lock"))?;
+    if !s.is_running() {
+        bail!("the server is not running");
+    }
+    s.stop();
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    Ok(json!({"stopped_at_ms": at}))
+}
+
+fn start(server: &Mutex<impl BunkoProcess>, tune: &str) -> Result<Value> {
+    let mut s = server
+        .lock()
+        .map_err(|_| anyhow::anyhow!("the server lock"))?;
+    if s.is_running() {
+        bail!("the server is running");
+    }
+    // Never an earlier restart's tune.
+    if !tune.is_empty() {
+        s.set_env(TUNE_VAR, tune);
+    }
+    s.start_again()?;
+    Ok(json!({}))
+}
+
+fn restart(server: &Mutex<impl BunkoProcess>, tune: &str, body: &Value) -> Result<Value> {
     let stale = match &body["stale"] {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -276,6 +340,77 @@ mod tests {
         assert!(check_settle("lease_settle_ms=60000").is_ok());
         let e = check_settle("lease_ttl_s=12,lease_settle_ms=12000").unwrap_err();
         assert!(e.to_string().contains("never settle"), "{e}");
+    }
+
+    /// The server as the handler drives it: what it was told, in order.
+    #[derive(Default)]
+    struct FakeServer {
+        running: bool,
+        env: Vec<(String, String)>,
+        calls: Vec<String>,
+    }
+
+    impl BunkoProcess for FakeServer {
+        fn stop(&mut self) {
+            self.calls.push("stop".into());
+            self.running = false;
+        }
+        fn start_again(&mut self) -> Result<()> {
+            if self.running {
+                bail!("the server is running");
+            }
+            self.calls.push("start".into());
+            self.running = true;
+            Ok(())
+        }
+        fn is_running(&self) -> bool {
+            self.running
+        }
+        fn env_var(&self, key: &str) -> Option<&str> {
+            self.env
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        }
+        fn set_env(&mut self, key: &str, value: &str) {
+            self.env.retain(|(k, _)| k != key);
+            self.env.push((key.into(), value.into()));
+        }
+    }
+
+    fn fake() -> Arc<Mutex<FakeServer>> {
+        Arc::new(Mutex::new(FakeServer {
+            running: true,
+            env: vec![(TUNE_VAR.into(), "lease_ttl_s=45".into())],
+            calls: Vec::new(),
+        }))
+    }
+
+    #[test]
+    fn stop_leaves_the_server_down_until_start() {
+        let s = fake();
+        let h = bunko_handler(s.clone());
+        let answer = h("POST", "/bunko/stop", Value::Null).unwrap().unwrap();
+        assert!(answer["stopped_at_ms"].as_u64().unwrap() > 0, "{answer}");
+        assert!(!s.lock().unwrap().running);
+        // A second stop, or a restart's start on a running one, is the spec's mistake.
+        assert!(h("POST", "/bunko/stop", Value::Null).unwrap().is_err());
+        h("POST", "/bunko/start", Value::Null).unwrap().unwrap();
+        assert!(s.lock().unwrap().running);
+        assert!(h("POST", "/bunko/start", Value::Null).unwrap().is_err());
+        assert_eq!(s.lock().unwrap().calls, ["stop", "start"]);
+        // On the suite's own tune.
+        assert_eq!(s.lock().unwrap().env_var(TUNE_VAR), Some("lease_ttl_s=45"));
+    }
+
+    #[test]
+    fn a_restart_of_a_stopped_server_starts_it() {
+        let s = fake();
+        let h = bunko_handler(s.clone());
+        h("POST", "/bunko/stop", Value::Null).unwrap().unwrap();
+        h("POST", "/bunko/restart", Value::Null).unwrap().unwrap();
+        assert!(s.lock().unwrap().running);
+        assert!(h("GET", "/bunko/stop", Value::Null).is_none());
     }
 
     #[test]
