@@ -20,6 +20,7 @@ mod locks;
 mod methods;
 mod path_case;
 mod paths;
+mod personal;
 mod propfind;
 mod resource;
 mod response;
@@ -41,6 +42,7 @@ pub use bunko_core::reader_tree::Caller;
 pub use cache::{CacheConfig, PropfindCache};
 pub use hooks::{AuditEvent, DavHooks, NoHooks, PutFollowUp};
 pub use path_case::{LibraryPathCanonicalizer, PathCase, fold_name, is_case_sensitive};
+pub use personal::{EDITS_DIR, MAX_LAYER_BYTES, PersonalOverlays};
 pub use upload::{DamageMemory, DigestAlgo, parse_content_digest};
 pub use write_locks::{AccountWriteGuard, AccountWriteLocks, PathWriteLocks, WriteLockGuard};
 
@@ -137,6 +139,17 @@ pub(crate) struct Inner {
     pub path_case: PathCase,
 }
 
+impl Inner {
+    /// Every account's correction overlays (they follow their volume).
+    pub(crate) fn overlays(&self) -> PersonalOverlays {
+        PersonalOverlays::new(
+            self.roots.library.clone(),
+            self.roots.users.clone(),
+            self.write_locks.clone(),
+        )
+    }
+}
+
 /// The WebDAV handler. Cheap to clone; build one per server.
 #[derive(Clone)]
 pub struct Dav {
@@ -187,6 +200,12 @@ impl Dav {
         &self.inner.cache
     }
 
+    /// Every account's correction overlays, for the hooks of changes made outside DAV
+    /// (a rename, merge or delete in the cloud folder): they follow their volume.
+    pub fn overlays(&self) -> PersonalOverlays {
+        self.inner.overlays()
+    }
+
     /// The per-path write-lock registry shared with non-DAV writers (the metadata compiler
     /// takes it around `series.json`/`catalog.json` writes, spec §8.7).
     pub fn write_locks(&self) -> &PathWriteLocks {
@@ -201,7 +220,10 @@ impl Dav {
             paths::Target::Progress(rel) => self.inner.roots.user_path(caller?, &rel),
             paths::Target::Library(rel) => {
                 let roots = &self.inner.roots;
-                roots.library_member(&roots.library, &rel)
+                match roots.personal(&rel) {
+                    Some(file) => roots.personal_path(&file.rel, caller?),
+                    None => roots.library_member(&roots.library, &rel),
+                }
             }
             _ => None,
         }

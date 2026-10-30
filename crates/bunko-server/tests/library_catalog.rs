@@ -252,6 +252,30 @@ impl OutlookSource for Outlook {
     }
 }
 
+/// D27: personal corrections are one account's own, so the manifest (anonymous when
+/// downloads are) never lists one; the shared curated layer and engine layers stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_manifest_never_lists_personal_corrections() {
+    let env = catalog_env(|c| c.registration.allow_anonymous_download = true).await;
+    let dir = env.series_dir("Dr Stone");
+    for id in ["hayai", "curated", "edit", "edit-2", "pre-upgrade"] {
+        write_mokuro(&dir.join(format!("Volume 01.{id}.mokuro")), "uuid-1", 3);
+    }
+    let m = env
+        .send(get(
+            "/catalog/api/manifest?series=Dr%20Stone&volume=Volume%2001",
+        ))
+        .await
+        .json();
+    let ids: Vec<&str> = m["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["curated", "hayai", "pre-upgrade"]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manifest_is_gated_like_the_archive() {
     let mut env = catalog_env(|c| {

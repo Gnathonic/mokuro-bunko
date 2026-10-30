@@ -268,7 +268,20 @@ fn permissions(role: Role, owned_series: Option<Vec<String>>) -> Value {
         "canAddFiles": has_perm(role, Perm::AddFiles),
         "canModifyDelete": has_perm(role, Perm::ModifyDelete),
         "metadata": metadata,
+        "curated": {"scope": curated_scope(role)},
     })
+}
+
+/// Who may publish a volume's shared `curated` layer (D27; auth enforces it): every
+/// volume, the volumes it uploaded (a 403 on any other is final), or none.
+fn curated_scope(role: Role) -> &'static str {
+    if has_perm(role, Perm::ModifyDelete) {
+        "all"
+    } else if role == Role::Uploader {
+        "owned"
+    } else {
+        "none"
+    }
 }
 
 /// The 200 identity body for a signed-in user (the uploader's owned series are read
@@ -286,6 +299,7 @@ fn identity_body(db: &bunko_db::Database, user: &User) -> bunko_db::Result<Value
         "created_at": user.created_at,
         "permissions": permissions(user.role, owned),
         "per_user_files": bunko_core::reader_tree::advertised(),
+        "per_user_layers": bunko_core::sidecar_names::per_user_layers(),
         "version": bunko_core::VERSION,
     }))
 }
@@ -324,6 +338,9 @@ async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -
                 // What this server keeps per account (`history/`: a directory tree): a
                 // reader uses a name (positions.json, history/) only once it is listed.
                 "per_user_files": bunko_core::reader_tree::advertised(),
+                // The layer ids each account keeps its own copy of (D27): a reader
+                // pushes its corrections only when `edit` is listed.
+                "per_user_layers": bunko_core::sidecar_names::per_user_layers(),
                 // Reported only by builds that keep history per account (0.8.0 on): a
                 // reader turns history sync on from the numeric core.
                 "version": bunko_core::VERSION,
@@ -381,7 +398,7 @@ mod tests {
         let p = permissions(Role::Uploader, Some(vec!["A".into()]));
         assert_eq!(
             serde_json::to_string(&p).unwrap(),
-            r#"{"canWriteProgress":true,"canAddFiles":true,"canModifyDelete":false,"metadata":{"scope":"owned","ownedSeries":["A"]}}"#
+            r#"{"canWriteProgress":true,"canAddFiles":true,"canModifyDelete":false,"metadata":{"scope":"owned","ownedSeries":["A"]},"curated":{"scope":"owned"}}"#
         );
         assert_eq!(
             permissions(Role::Inviter, None)["metadata"],
@@ -391,6 +408,23 @@ mod tests {
             permissions(Role::Processor, None)["metadata"],
             json!({"scope": "none"})
         );
+        // Who may publish the shared `curated` layer (D27): an uploader only on what
+        // it uploaded, even before it owns a series.
+        for (role, scope) in [
+            (Role::Admin, "all"),
+            (Role::Editor, "all"),
+            (Role::Inviter, "all"),
+            (Role::Uploader, "owned"),
+            (Role::Registered, "none"),
+            (Role::Processor, "none"),
+            (Role::Anonymous, "none"),
+        ] {
+            assert_eq!(
+                permissions(role, None)["curated"],
+                json!({ "scope": scope }),
+                "{role:?}"
+            );
+        }
         assert_eq!(
             permissions(Role::Anonymous, None)["canWriteProgress"],
             json!(false)

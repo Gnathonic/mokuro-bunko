@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use bunko_core::sidecar_names::{self, Folder};
+use bunko_core::sidecar_names::{self, Folder, LayerClass};
 use parking_lot::Mutex;
 
 use crate::fsutil;
@@ -120,7 +120,10 @@ fn scan_dir(
         let Some((stem, layer)) = split_layer_sidecar(name) else {
             continue;
         };
-        if volume_names.contains(&format!("{stem}.{layer}")) {
+        // A personal correction is one account's own, never the volume's (D27).
+        if volume_names.contains(&format!("{stem}.{layer}"))
+            || sidecar_names::layer_class(layer) == LayerClass::Personal
+        {
             continue;
         }
         layers_by_stem.entry(stem).or_default().insert(layer);
@@ -489,5 +492,28 @@ mod tests {
         assert_eq!(flags("B"), (false, true));
         assert_eq!(flags("C"), (false, false));
         assert_eq!(flags("D"), (true, false));
+    }
+
+    /// D27: a personal correction is one account's own, never a layer of the volume.
+    #[test]
+    fn sidecars_exclude_personal_corrections() {
+        let dir = tempfile::tempdir().unwrap();
+        let series = dir.path().join("S");
+        bunko_store::fs::create_dir(&series).unwrap();
+        for name in [
+            "V.cbz",
+            "V.hayai.mokuro",
+            "V.curated.mokuro",
+            "V.edit.mokuro",
+            "V.edit-2.mokuro.gz",
+            "V.pre-upgrade.mokuro",
+        ] {
+            bunko_store::fs::write(series.join(name), b"{}").unwrap();
+        }
+        let snapshot = scan_library(dir.path());
+        assert_eq!(
+            snapshot.series[0].volumes[0].sidecars,
+            ["curated", "hayai", "pre-upgrade"]
+        );
     }
 }

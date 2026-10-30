@@ -1255,6 +1255,7 @@ async fn the_check_reports_another_bunkos_lease() {
         ocr: true,
         queue: None,
         dedup: false,
+        curated: false,
         took_over_from: None,
         per_user_files: vec![],
     };

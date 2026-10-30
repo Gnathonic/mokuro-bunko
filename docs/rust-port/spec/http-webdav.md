@@ -427,6 +427,20 @@ Evaluated in this exact order for `method` = request method, `path` = `re_encode
 13. `PROPPATCH`: `MODIFY_DELETE` (401 / 403 `Permission denied`).
 14. Any other method (`POST`, `TRACE`, ...): allow here (WsgiDAV then answers 405).
 
+**0.8 (D27): layer files.** Before step 8, a write (`PUT DELETE MOVE COPY LOCK UNLOCK PROPPATCH`) whose
+library file name reads as one of these layer classes (`sidecar_names::layer_class`, the id exactly as
+written, and not a listed `.cbz`'s own primary) is decided here; every other name falls through to the
+table above:
+
+| Class (ids) | Decision |
+|---|---|
+| personal (`edit`, `edit-<n>`) | `_authorize_progress_write` (every `WRITE_PROGRESS` account writes its own copy, `registered` included). A MOVE/COPY to any other name: 403 `Permission denied: corrections can only move between correction files`, and so is one INTO a personal name from any other. A `.gz` PUT: 403 `Permission denied: corrections are saved as plain .mokuro`. DAV then refuses a MOVE/COPY to a `.gz` name (403) or to one not ending in exactly `.mokuro` (409), as it does a PUT. |
+| curated (`curated`) | PUT: `MODIFY_DELETE` on any volume, or `uploader` where `can_user_delete_library_path` (the volume it uploaded), the first create included; else 401 / 403 `Permission denied: cannot publish shared corrections for this volume`. DELETE/MOVE/COPY keep steps 10-13. |
+| server keepsake (`pre-upgrade`, `pre-upgrade-<n>`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this file is written by the server`. A MOVE from a keepsake to the same id (a volume rename: the reader moves every listed layer) keeps steps 10-13. |
+| reserved (`curated-<n>`, the rest of `pre-upgrade*`, `previous-ocr*`) | a PUT, or a MOVE/COPY into one: 401 / 403 `Permission denied: this layer name is reserved`. A MOVE that keeps the id keeps steps 10-13, as for a keepsake. |
+
+`original`, `gcv`, `updated-ocr`, `tr-*` and hand-made ids keep the table above (shared files).
+
 `_authorize_progress_write` (`auth.py:889-921`): unauthenticated -> 401 `Authentication required to save progress`;
 role lacks `WRITE_PROGRESS` (anonymous/processor) -> 403 `Permission denied: cannot save progress`;
 username present -> allow (the file is always the caller's own; the path maps to
@@ -638,6 +652,7 @@ Physical layout: `<base>/library/` (shared), `<base>/inbox/` (never exposed), `<
 | `/mokuro-reader` | virtual **merged** collection | none |
 | `/mokuro-reader/volume-data.json`, `.../profiles.json`, `.../goals.json` | file; **only visible to an authenticated user**; maps to that user's own file | `users/<username>/<name>` |
 | 0.8: `/mokuro-reader/positions.json`, `/mokuro-reader/history/**` | the same per-user rule: `positions.json` a file, `history` and `history/<device>` collections the reader creates (MKCOL 201; 405 when it exists; 409 without its parent), `history/<device>/<file>` files (PUT ≤ 16 MiB, 413; ≤ 256 MiB an account, 507). Depth 1 on `/mokuro-reader` lists `history/` to its owner only; Depth infinity on `/` and `/mokuro-reader` adds the caller's own tree and nobody else's | `users/<username>/…`; for a cloud library's `progress_user`, the cloud root itself (0.8 design §10) |
+| 0.8: `/mokuro-reader/<folder>/<Vol>.edit[-<n>].mokuro` (D27: the id exactly as written, and no listed `.cbz`'s own primary, sidecar names rule v1) | a **personal correction**: each signed-in caller's own file at the same path, anonymous none (404). Listed (Depth 1 and infinity) only to its owner and only beside its `.cbz`. PUT: the `.cbz` must be listed (409 `no-volume`), plain lowercase `.mokuro` (`.gz` 403, other spellings 409), body a JSON object with a `pages` array and no `ocr_engine` (422 `not-a-layer`), ≤ 32 MiB (413); `curated` takes the same checks. MOVE/COPY only to another correction name (403 otherwise), with no archive check. No upload record, no OCR row, no provenance rewrite; audited as `personal`. Every account's overlays follow their volume (`PersonalOverlays`): an archive MOVE renames them to the new stem, a folder MOVE carries them, and so do the same changes made in a cloud folder and a case merge (a trashed byte-identical loser's go to the kept spelling); a duplicate-folder merge keeps the path, so they stay valid. One already at the destination is kept and the moving one takes the next free `edit-<n>`. A deleted archive or folder takes them along (rule 6 decides which stem is the archive's); a self-delete removes `users/<u>/` with them, an admin soft delete keeps them | `users/<username>/edits/<rel>`; for a cloud library's `progress_user`, the physical `library/<rel>` (hidden from everyone else) |
 | `/mokuro-reader/<anything else>` | shared library file/collection | `library/<rel>` via `safe_resolve_under` |
 | `/inbox`, `/inbox/*` | **nothing**: `get_resource_inst` returns `None` => GET/PROPFIND/DELETE 404 (PathMapper maps it but the provider never serves it) | |
 | every other path | `None` => 404 | |
@@ -1278,6 +1293,11 @@ port may implement them without a cache (Q6).
    untouched; otherwise the XML is re-serialised with declaration `<?xml version='1.0' encoding='utf-8'?>`. Other
    paths get no injection. Pinned by `test_propfind_mokuro_reader_depth_infinity_authenticated_injects_progress`,
    `..._root_depth_infinity_authenticated_injects_progress`, `test_utf8_user_gets_propfind_cache_injection`.
+   **0.8 (D27, personal corrections):** every cached collection at or under `/mokuro-reader` (and `/`) also
+   gets the caller's own `<Vol>.edit[-n].mokuro` files below it appended, each only beside its `.cbz`: the overlays
+   under `users/<u>/edits/<prefix>`, or for a cloud library's `progress_user` the physical files the anonymous walk hid,
+   which the entry keeps rendered beside the shared part (`owner_tail`). Anonymous gets none. An overlay write
+   invalidates nothing (no shared listing holds it); a write of the owner's physical file drops the entries above it.
 5. Response: status `207`; stored headers minus `Content-Length`/`Content-Encoding`/`Transfer-Encoding`, plus
    `Vary: Accept-Encoding`, plus `Content-Encoding: gzip` (level 6) iff `"gzip"` appears anywhere in `Accept-Encoding`
    (no q-value parsing), plus `Content-Length`. The stored `Date` header is the generation time (stale on hits; QUIRK).

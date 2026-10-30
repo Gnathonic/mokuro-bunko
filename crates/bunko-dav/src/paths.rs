@@ -7,6 +7,8 @@
 //! | `/` | none (virtual, one member `mokuro-reader`) |
 //! | `/mokuro-reader` | none (virtual merged view) |
 //! | `/mokuro-reader/{volume-data,profiles,goals,positions}.json` | `users/<username>/<name>` |
+//! | `/mokuro-reader/history/**` | `users/<username>/history/**` |
+//! | `/mokuro-reader/<folder>/<Vol>.edit[-<n>].mokuro` | `users/<username>/edits/<rel>` (D27, `personal`) |
 //! | `/mokuro-reader/<rel>` | `library/<rel>` (resolved, must stay inside) |
 //! | anything else (incl. `/inbox`) | nothing |
 

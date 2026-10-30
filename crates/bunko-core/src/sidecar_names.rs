@@ -128,9 +128,19 @@ fn is_counted(id: &str, prefix: &str) -> bool {
     }
 }
 
+/// The personal layer id (D27): `edit` and `edit-<n>` are each account's own.
+pub const PERSONAL_LAYER: &str = "edit";
+
+/// The layer ids a server keeps per account, as `/login/api/me` lists them
+/// (`per_user_layers`; each covers `<id>-<n>` too). A reader pushes its corrections
+/// only when its id is listed.
+pub fn per_user_layers() -> Vec<String> {
+    vec![PERSONAL_LAYER.to_string()]
+}
+
 /// The [`LayerClass`] of a layer id, exactly as written.
 pub fn layer_class(id: &str) -> LayerClass {
-    if is_counted(id, "edit") {
+    if is_counted(id, PERSONAL_LAYER) {
         LayerClass::Personal
     } else if id == "curated" {
         LayerClass::Curated

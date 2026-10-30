@@ -81,7 +81,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use bunko_core::sidecar_names::{self, SidecarClass, strip_suffix_ci as strip_ci};
+use bunko_core::sidecar_names::{self, LayerClass, SidecarClass, strip_suffix_ci as strip_ci};
 use bunko_store::{Durability, Health, LibraryStore, Mode, Origin, WatchEvent};
 use parking_lot::{Condvar, Mutex};
 use rusqlite::{OptionalExtension, params};
@@ -158,8 +158,8 @@ pub trait CaseMergePolicy: Send + Sync {
     /// row's output-affecting recipe (`Recipe::matches`, not `Verdict::Current`).
     /// `Block` when `ocr.upgrade.enabled` is off, or neither or both match.
     fn prefer_main(&self, a: &Path, b: &Path) -> MergeChoice;
-    /// A layer id Bunko never stamps (`edit`, `pre-upgrade*`): on a collision with
-    /// different content it moves in under the next free id (`-2`, `-3`).
+    /// A layer id Bunko never stamps (`edit*`, `curated*`, `pre-upgrade*`): on a
+    /// collision with different content it moves in under the next free id (`-2`, `-3`).
     fn is_unstamped_layer(&self, id: &str) -> bool {
         is_unstamped_layer_id(id)
     }
@@ -179,11 +179,14 @@ pub trait CaseMergePolicy: Send + Sync {
     fn audit(&self, _merge: &MergeRecord) {}
 }
 
-/// `edit`, `edit-<n>`, `pre-upgrade`, `pre-upgrade-<n>`: layers whose content shows a
-/// human or a preserved file, never Bunko's model output (D4).
+/// `edit`, `curated`, `pre-upgrade` and their `-<n>` copies: layers whose content shows
+/// a human or a preserved file, never Bunko's model output (D4, D27). Exact-case, like
+/// every layer id (sidecar names rule v1).
 pub fn is_unstamped_layer_id(id: &str) -> bool {
-    let id = id.to_lowercase();
-    matches!(strip_counter(&id), "edit" | "pre-upgrade")
+    matches!(
+        sidecar_names::layer_class(strip_counter(id)),
+        LayerClass::Personal | LayerClass::Curated | LayerClass::ServerKeepsake
+    )
 }
 
 /// `pre-upgrade` of `pre-upgrade-3`; `id` itself when it has no `-<n>` counter.

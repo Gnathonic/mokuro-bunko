@@ -43,7 +43,7 @@ async fn me_valid_creds_returns_identity_and_permissions() {
     assert!(b["created_at"].as_str().is_some_and(|s| s.len() == 19));
     assert_eq!(
         b["permissions"],
-        json!({"canWriteProgress": true, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}})
+        json!({"canWriteProgress": true, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}, "curated": {"scope": "none"}})
     );
     // 0.5.2 key order (account.js only reads keys, but keep the Python dict order).
     let text = r.text();
@@ -53,7 +53,7 @@ async fn me_valid_creds_returns_identity_and_permissions() {
         ),
         "{text}"
     );
-    assert!(text.contains(r#""permissions":{"canWriteProgress":true,"canAddFiles":false,"canModifyDelete":false,"metadata":{"scope":"none"}}"#));
+    assert!(text.contains(r#""permissions":{"canWriteProgress":true,"canAddFiles":false,"canModifyDelete":false,"metadata":{"scope":"none"},"curated":{"scope":"none"}}"#));
     assert_eq!(r.header("content-type"), Some("application/json"));
     assert!(r.header("www-authenticate").is_none());
     // What this server keeps per account: the reader reads and writes
@@ -68,11 +68,14 @@ async fn me_valid_creds_returns_identity_and_permissions() {
             "history/"
         ])
     );
+    // The layer ids each account keeps its own copy of (D27): the reader pushes its
+    // corrections only when `edit` is listed.
+    assert_eq!(b["per_user_layers"], json!(["edit"]));
     // The running version, last: reading history is per account from 0.8.0 on.
     assert_eq!(b["version"], bunko_core::VERSION);
     assert!(
         text.ends_with(&format!(
-            r#""per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"],"version":"{}"}}"#,
+            r#""per_user_files":["volume-data.json","profiles.json","goals.json","positions.json","history/"],"per_user_layers":["edit"],"version":"{}"}}"#,
             bunko_core::VERSION
         )),
         "{text}"
@@ -82,7 +85,7 @@ async fn me_valid_creds_returns_identity_and_permissions() {
 #[tokio::test]
 async fn me_permissions_per_role() {
     let env = me_env();
-    for (user, role, wp, add, md, meta) in [
+    for (user, role, wp, add, md, meta, curated) in [
         (
             "reg",
             "registered",
@@ -90,6 +93,7 @@ async fn me_permissions_per_role() {
             false,
             false,
             json!({"scope": "none"}),
+            "none",
         ),
         (
             "upl",
@@ -98,10 +102,35 @@ async fn me_permissions_per_role() {
             true,
             false,
             json!({"scope": "owned", "ownedSeries": []}),
+            "owned",
         ),
-        ("edi", "editor", true, true, true, json!({"scope": "all"})),
-        ("adm", "admin", true, true, true, json!({"scope": "all"})),
-        ("inv", "inviter", true, true, true, json!({"scope": "all"})),
+        (
+            "edi",
+            "editor",
+            true,
+            true,
+            true,
+            json!({"scope": "all"}),
+            "all",
+        ),
+        (
+            "adm",
+            "admin",
+            true,
+            true,
+            true,
+            json!({"scope": "all"}),
+            "all",
+        ),
+        (
+            "inv",
+            "inviter",
+            true,
+            true,
+            true,
+            json!({"scope": "all"}),
+            "all",
+        ),
     ] {
         let r = me(&env, Some(&basic(user, PW))).await;
         assert_eq!(r.status, 200);
@@ -109,9 +138,10 @@ async fn me_permissions_per_role() {
         assert_eq!(b["role"], role);
         assert_eq!(
             b["permissions"],
-            json!({"canWriteProgress": wp, "canAddFiles": add, "canModifyDelete": md, "metadata": meta}),
+            json!({"canWriteProgress": wp, "canAddFiles": add, "canModifyDelete": md, "metadata": meta, "curated": {"scope": curated}}),
             "{user}"
         );
+        assert_eq!(b["per_user_layers"], json!(["edit"]), "{user}");
     }
 }
 
@@ -157,15 +187,16 @@ async fn me_failures_and_anonymous() {
     let anon = json!({
         "authenticated": false,
         "role": "anonymous",
-        "permissions": {"canWriteProgress": false, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}},
+        "permissions": {"canWriteProgress": false, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}, "curated": {"scope": "none"}},
         "per_user_files": ["volume-data.json", "profiles.json", "goals.json", "positions.json", "history/"],
+        "per_user_layers": ["edit"],
         "version": bunko_core::VERSION,
     });
     let r = me(&env, None).await;
     assert_eq!((r.status, r.json()), (200, anon.clone()));
     assert!(
         r.text().ends_with(&format!(
-            r#""history/"],"version":"{}"}}"#,
+            r#""history/"],"per_user_layers":["edit"],"version":"{}"}}"#,
             bunko_core::VERSION
         )),
         "{}",

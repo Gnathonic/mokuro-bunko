@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bunko_dav::DavHooks;
+use bunko_dav::{DavHooks, PersonalOverlays};
 use bunko_db::{AuditDetails, Database, NewAuditEvent};
 use bunko_library::compat::normalize_volume_title_key;
 use bunko_library::store::MetadataStore;
@@ -27,6 +27,8 @@ pub struct ServerCloudHooks {
     db: Arc<Database>,
     /// A cloud library's `.nocover` records (dropped for a merged-away archive).
     thumbs: Option<Arc<crate::thumbs::Thumbnails>>,
+    /// Every account's correction overlays (D27): they follow their volume.
+    overlays: Option<PersonalOverlays>,
 }
 
 fn lower(p: &Path) -> String {
@@ -78,6 +80,56 @@ impl ServerCloudHooks {
             library,
             db,
             thumbs: None,
+            overlays: None,
+        }
+    }
+
+    /// The overlays a rename, merge or delete in the cloud carries or drops.
+    pub fn with_overlays(mut self, overlays: PersonalOverlays) -> Self {
+        self.overlays = Some(overlays);
+        self
+    }
+
+    /// What a case merge kept in place of the gone `path` (`Kingdom/Vol 1.cbz` for a
+    /// trashed byte-identical `kingdom/Vol 1.cbz`, `Kingdom/` for a folder variant an
+    /// admin removed): an existing archive, or folder, whose library path folds like
+    /// it. Index reads, only when an archive or a folder goes.
+    fn case_twin(&self, path: &Path, is_dir: bool) -> Option<PathBuf> {
+        use bunko_core::sidecar_names::fold;
+        let rel = path.strip_prefix(&self.root).ok()?;
+        let mut found = vec![self.root.clone()];
+        for seg in rel.components() {
+            let want = fold(&seg.as_os_str().to_string_lossy());
+            found = found
+                .iter()
+                .filter_map(|dir| bunko_store::fs::read_dir(dir).ok())
+                .flat_map(|entries| entries.flatten())
+                .filter(|e| fold(&e.file_name().to_string_lossy()) == want)
+                .map(|e| e.path())
+                .collect();
+        }
+        found.into_iter().find(|p| {
+            p != path
+                && if is_dir {
+                    bunko_store::fs::is_dir(p)
+                } else {
+                    bunko_store::fs::is_file(p)
+                }
+        })
+    }
+
+    /// The overlays of the gone `path` (library rel `rel`): moved to its case twin
+    /// when one stays, else dropped.
+    fn overlays_of_removed(&self, path: &Path, rel: &str, is_dir: bool) {
+        let Some(o) = &self.overlays else { return };
+        let twin = self
+            .case_twin(path, is_dir)
+            .and_then(|twin| self.rel(&twin));
+        match (twin, is_dir) {
+            (Some(twin), true) => o.rename_prefix(rel, &twin),
+            (Some(twin), false) => o.rename_volume(rel, &twin),
+            (None, true) => o.forget_prefix(rel),
+            (None, false) => o.forget_volume(rel),
         }
     }
 
@@ -136,9 +188,15 @@ impl CloudHooks for ServerCloudHooks {
                 }
                 self.dav.rename_ocr_sidecars_under_prefix(old, new);
                 self.dav.rename_volume_uuids_under_prefix(old, new);
+                if let Some(o) = &self.overlays {
+                    o.rename_prefix(old, new);
+                }
             } else if let Some(old) = old.as_deref() {
                 self.dav.forget_ocr_sidecars_under_prefix(old);
                 self.dav.forget_volume_uuids_under_prefix(old);
+                if let Some(o) = &self.overlays {
+                    o.forget_prefix(old);
+                }
             }
             self.dav.archives_removed(&[from.to_path_buf()]);
             for cbz in &volumes {
@@ -148,6 +206,11 @@ impl CloudHooks for ServerCloudHooks {
             // bunko-dav `move_file`.
             if let (Some(old), Some(new)) = (old.as_deref(), new.as_deref()) {
                 self.dav.rename_volume_upload(old, new);
+                if is_cbz(from)
+                    && let Some(o) = &self.overlays
+                {
+                    o.rename_volume(old, new);
+                }
             }
             if let Some(old) = old.as_deref() {
                 self.forget_ocr_records(from, old, true);
@@ -189,6 +252,15 @@ impl CloudHooks for ServerCloudHooks {
         } else {
             Vec::new()
         };
+        // Every account's corrections move in with what they correct: a whole folder
+        // under its new prefix, an archive under its new stem.
+        if let Some(o) = &self.overlays {
+            if is_dir {
+                o.rename_prefix(&old, &new);
+            } else if is_cbz(from) {
+                o.rename_volume(&old, &new);
+            }
+        }
         for (old_rel, cbz) in &volumes {
             let Some(new_rel) = self.rel(cbz) else {
                 continue;
@@ -234,8 +306,12 @@ impl CloudHooks for ServerCloudHooks {
             self.dav.forget_volume_uploads_under_prefix(&rel);
             self.dav.forget_ocr_sidecars_under_prefix(&rel);
             self.dav.forget_volume_uuids_under_prefix(&rel);
+            self.overlays_of_removed(path, &rel, true);
             self.dav.archives_removed(&[path.to_path_buf()]);
         } else if is_cbz(path) {
+            // A case merge trashes a byte-identical loser archive: its volume lives on
+            // under the other spelling, and so do the corrections of it.
+            self.overlays_of_removed(path, &rel, false);
             // bunko-dav `delete_file` (archive).
             self.dav.forget_volume_upload(&rel);
             self.dav.forget_volume_uuid(&rel);

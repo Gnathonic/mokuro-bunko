@@ -18,6 +18,7 @@
     "ocr": true,
     "queue": ".mokuro-queue.json",
     "dedup": true,
+    "curated": true,
     "took_over_from": null,
     "per_user_files": [
       "volume-data.json",

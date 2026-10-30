@@ -474,6 +474,54 @@ async fn history(c: &mut Contract, seed: &Seed) {
     server.stop().await;
 }
 
+/// Corrections (D27): `<Vol>.edit.mokuro` is each account's own (`registered`
+/// included), nobody else sees it; the shared `curated` layer is not `registered`'s to
+/// publish.
+async fn personal(c: &mut Contract, seed: &Seed) {
+    let server = Server::local(seed).await;
+    let edit = dav_path(&["Contract Series", "Volume 01.edit.mokuro"]);
+    // The reader's edit layer: the volume's pages, an `edited` block, no `ocr_engine`.
+    let mut layer = mokuro_doc("Contract Series", "Volume 01", 2);
+    layer["edited"] = json!({"by": "mokuro-reader", "at": "2000-01-01T00:00:00.000Z",
+        "base_sha256": null, "base_seal": null});
+    let r = export(
+        c,
+        &server,
+        "personal-put",
+        // As the reader sends every file to a server that verifies PUTs.
+        Req::new("PUT", &edit, "basic:progress")
+            .header("content-type", "application/octet-stream")
+            .header("content-digest", contract_support::DIGEST_SENTINEL)
+            .json(layer.clone()),
+    )
+    .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = export(
+        c,
+        &server,
+        "personal-get-other-user",
+        Req::new("GET", &edit, "basic:reader"),
+    )
+    .await;
+    assert_eq!(r.status, 404, "{}", r.text());
+    let r = export(
+        c,
+        &server,
+        "curated-put-refused",
+        Req::new(
+            "PUT",
+            &dav_path(&["Contract Series", "Volume 01.curated.mokuro"]),
+            "basic:progress",
+        )
+        .header("content-type", "application/octet-stream")
+        .header("content-digest", contract_support::DIGEST_SENTINEL)
+        .json(layer),
+    )
+    .await;
+    assert_eq!(r.status, 403, "{}", r.text());
+    server.stop().await;
+}
+
 async fn errors(c: &mut Contract, seed: &Seed) {
     let server = Server::local(seed).await;
     let root = format!("/{ROOT}/");
@@ -695,6 +743,7 @@ async fn export_all(c: &mut Contract, seed: &Seed) {
     }
     puts(c, seed).await;
     history(c, seed).await;
+    personal(c, seed).await;
     errors(c, seed).await;
     markers(c, seed).await;
     cloud_errors(c, seed).await;
