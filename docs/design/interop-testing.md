@@ -491,6 +491,31 @@ Backup, to the end of its run, metadata writes included).
   reader signed in, and hold on a "root change"), and models the thumbnail attribute
   megajs puts on an uploaded cover (`ufa`, `pfa`).
 
+**As built (I3, scenarios S7 and S8).**
+- `dav/allow-first-connect` (S7, on `local`): a fresh browser connects for the first
+  time as a new editor, uploader, registered account, processor, and anonymously. The
+  reader's `isReadOnly` is exactly "`/me` grants neither `canWriteProgress` nor
+  `canAddFiles`" (the role table is pinned too: editor, uploader and registered write;
+  processor and anonymous do not; no Bunko lets anonymous write progress), and
+  `OPTIONS /mokuro-reader/`, sent from the page under the header the reader itself sends
+  (its bearer token, or none), lists PUT and MKCOL exactly for the writers: the same
+  Allow any other client gets under the password. With `/login/api/me` taken away at
+  the browser's door, an uploader and a registered account still connect writable: the
+  reader's OPTIONS sees `X-Mokuro-Put: verified` and skips the Allow verdict (R3.1).
+  A read-only account's progress sync is refused its upload (the reader hides Sync
+  then): noted on the spec, not asserted.
+- `dav/spine-offset-clear` and `shared/spine-offset-clear` (S8; `dav` on `local`,
+  `shared` on every cloud): the reader, holding a volume of the series, sets the spine
+  offset to 3, so Bunko's `series.json` says 3; resets it to 0, so the file has no
+  `spine_offset` key; then two syncs, each followed by
+  `__mokuroInterop.settleSeriesWrites()` (every queued `series.json` write run now, every
+  one in flight finished), write `series.json` zero times. On `dav` Bunko's file is its
+  WebDAV GET and the writes are the page's own PUTs. On `shared` Bunko's file is what
+  Bunko serves for the path once it is its own compile (every volume entry carries
+  `matched_page_count`, which only the compiler writes; until Bunko ingests a reader's
+  write it serves that file as it found it) and the cloud's one file of that name holds
+  the same bytes; the writes are the reader's own (`recordReaderWrites`).
+
 The generated sidecar (`genlib::mokuro_doc`) carries `title_uuid`: the reader's import
 refuses a `.mokuro` without it, so no download of a rig volume with OCR could install.
 

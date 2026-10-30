@@ -96,6 +96,9 @@
   the runner's control port (`RIG_CONTROL_URL`), to meet a lease claim, a resume or a
   holder gone. cloudsim answers a file's stored bytes (`GET /_sim/content`), keeps a
   MEGA session per sign-in, and takes the thumbnail attribute megajs puts on an upload.
+  Scenarios: a first connect as every role judges read-only and reads Allow as `/me`
+  says (S7), and a cleared spine offset leaves `series.json` without one and is not
+  re-sent (S8).
 - **Internal: nightly test builds for Mokuro Reader's CI.** Every push to `main` or
   `0.8/remote-storage`, and every night, publishes a testing server and cloudsim for
   Linux x86_64 as the pre-release `nightly` or `nightly-0.8`, replaced each time. They

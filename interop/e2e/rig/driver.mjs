@@ -79,5 +79,10 @@ export function driver(page) {
          * (the upload, then the run's listing and its series.json/catalog.json writes).
          */
         backupVolume: m('backupVolume'),
+        /**
+         * Every series.json write the reader has queued (its 2 s debounce cut short) or
+         * in flight, done: what the syncs before it asked to write has been written.
+         */
+        settleSeriesWrites: m('settleSeriesWrites'),
     };
 }
