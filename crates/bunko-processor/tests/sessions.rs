@@ -665,6 +665,45 @@ async fn a_hold_file_holds_each_volume_until_it_appears() {
     link.shutdown().await;
 }
 
+/// `page_text` (the interop rig's edited volumes): every page carries one text block
+/// reading it, so a reader has a block to correct; without it, pages are blank.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn page_text_gives_every_page_one_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let results = dir.path().join("results");
+    let a = write_volume(dir.path(), "a.cbz", 2);
+    let (mut link, _fake) = start(
+        FakeConfig {
+            page_text: Some("偽の文字".into()),
+            ..Default::default()
+        },
+        &results,
+    );
+    send(&link, open("s1")).await;
+    send(&link, volume_op("s1", "v1", &a)).await;
+    loop {
+        if let Event::VolumeDone { id, .. } = next_event(&mut link.events, 10).await {
+            assert_eq!(id, "v1");
+            break;
+        }
+    }
+    send(&link, Op::CloseSession { sid: "s1".into() }).await;
+    until_exit(&mut link.events, "s1", 10).await;
+    let sidecar: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(results.join("s1").join("v1").join(bunko_proto::RESULT_FILE)).unwrap(),
+    )
+    .unwrap();
+    let pages = sidecar["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 2);
+    for page in pages {
+        let blocks = page["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1, "{page}");
+        assert_eq!(blocks[0]["lines"], serde_json::json!(["偽の文字"]));
+        assert_eq!(blocks[0]["lines_coords"].as_array().unwrap().len(), 1);
+    }
+    link.shutdown().await;
+}
+
 /// Without `engine_revision` the block carries this build's revision of its engine: a
 /// processor always says which revision made its output (provenance, B4.2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

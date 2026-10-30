@@ -326,6 +326,9 @@ pub struct Scheduler {
     /// Those, with the stat they were judged at: not read again while unchanged.
     pub orphans_seen: Arc<crate::ocr::orphans::Unproven>,
     pub last_walk_at: Option<f64>,
+    /// Full walks finished (a testing build shows its admin: the interop rig waits for
+    /// passes by it).
+    pub walks: u64,
     pub machines: IndexMap<String, Machine>,
     pub lanes: Vec<Lane>,
     pub next_lane_id: u64,
@@ -407,6 +410,7 @@ impl Scheduler {
             orphans_unproven: 0,
             orphans_seen: Arc::default(),
             last_walk_at: None,
+            walks: 0,
             machines: IndexMap::new(),
             lanes: Vec::new(),
             next_lane_id: 0,
@@ -720,6 +724,7 @@ impl Scheduler {
         }
         self.owed = index;
         self.last_walk_at = Some(self.mono());
+        self.walks += 1;
         self.bump();
         self.bump_page();
         self.maybe_start_scan();

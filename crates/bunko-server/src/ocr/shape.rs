@@ -764,6 +764,13 @@ pub fn shape_status(
             "orphans_unproven".into(),
             raw.get("orphans_unproven").cloned().unwrap_or(json!(0)),
         );
+        // The interop rig waits for "two walks after X" by it. A testing build only: in
+        // a real one it would change the admin's ETag every poll interval.
+        #[cfg(feature = "testing")]
+        payload.insert(
+            "walks".into(),
+            raw.get("walks").cloned().unwrap_or(json!(0)),
+        );
     }
     Value::Object(payload)
 }

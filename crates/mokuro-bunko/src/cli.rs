@@ -143,6 +143,9 @@ pub struct ProcessorFakeArgs {
     /// carries  [default: this build's revision of each engine]
     #[arg(long, value_name = "N")]
     pub engine_revision: Option<u32>,
+    /// Every page gets one text block reading TEXT (blank pages without it)
+    #[arg(long, value_name = "TEXT")]
+    pub page_text: Option<String>,
     /// Time per page, in milliseconds
     #[arg(long, default_value_t = 0, value_name = "MS")]
     pub page_delay_ms: u64,

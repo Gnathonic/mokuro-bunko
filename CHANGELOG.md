@@ -101,7 +101,12 @@
   re-sent (S8), each account's edit layer is its own while the curated layer is
   published once for all and both follow a volume's rename and delete (S2), and each
   account's reading history and `positions.json` stay its own, on Bunko's disk or a
-  cloud reader's folder alike, out of the catalog, `series.json` and the queue (S3).
+  cloud reader's folder alike, out of the catalog, `series.json` and the queue (S3),
+  renamed volumes and series keep the provenance Bunko sealed (an edited volume its
+  `edited` marker) and are not queued again (S4), and a volume renamed while its OCR
+  runs gets its sidecar under the new name, never a numbered one (S6). processor-fake
+  takes `--page-text` (every page one text block), and a testing build's
+  `/queue/api/status` tells the admin how many library walks have finished (`walks`).
 - **Internal: nightly test builds for Mokuro Reader's CI.** Every push to `main` or
   `0.8/remote-storage`, and every night, publishes a testing server and cloudsim for
   Linux x86_64 as the pre-release `nightly` or `nightly-0.8`, replaced each time. They

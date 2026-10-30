@@ -22,6 +22,8 @@ pub struct FakeOptions {
     pub engine_revision: Option<u32>,
     /// `--page-delay-ms`.
     pub page_delay_ms: u64,
+    /// `--page-text`: each page's one text block (blank pages without it).
+    pub page_text: Option<String>,
 }
 
 impl FakeProcessor {
@@ -55,6 +57,9 @@ impl FakeProcessor {
         if let Some(r) = o.engine_revision {
             cmd.args(["--engine-revision", &r.to_string()]);
         }
+        if let Some(t) = &o.page_text {
+            cmd.args(["--page-text", t]);
+        }
         let child = cmd
             .stdin(Stdio::null())
             .stdout(file.try_clone()?)
@@ -74,7 +79,7 @@ impl FakeProcessor {
     }
 
     /// Let held volumes go on (and every later one start without waiting).
-    #[allow(dead_code)] // the browser scenarios hold a volume mid-OCR (S6)
+    #[allow(dead_code)] // the browser scenarios hold a volume mid-OCR (S6) themselves
     pub fn release(&self) -> Result<()> {
         std::fs::write(&self.hold_file, b"")?;
         Ok(())

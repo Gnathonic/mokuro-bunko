@@ -1,6 +1,7 @@
 //! A [`PagePipeline`] with no models, for tests and for exercising a server's
 //! scheduler end to end: configurable load and page delays and failures, and a
-//! minimal valid `.mokuro` sidecar (one blank page per image member of the archive).
+//! minimal valid `.mokuro` sidecar (one page per image member of the archive, blank or
+//! with one text block).
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
@@ -63,6 +64,9 @@ pub struct FakeConfig {
     /// test in another process holds a volume mid-OCR, as `processor-fake --hold-file`
     /// does for the interop rig's "rename during OCR".
     pub hold_file: Option<PathBuf>,
+    /// Every page gets one text block reading this (`processor-fake --page-text`), so a
+    /// reader has a block to correct; without it, pages are blank.
+    pub page_text: Option<String>,
 }
 
 /// The fake engine. Cheap to clone (clones share their counters).
@@ -418,7 +422,17 @@ impl VolumeRunner for FakeRunner {
                 ));
             }
             self.items.fetch_add(1, Ordering::SeqCst);
-            out_pages.push(json!({"version": "0.2.5", "img_width": 0, "img_height": 0, "blocks": [], "img_path": name}));
+            let blocks = match &config.page_text {
+                Some(text) => json!([{
+                    "box": [10, 10, 40, 110],
+                    "vertical": true,
+                    "font_size": 30,
+                    "lines_coords": [[[10.0, 10.0], [40.0, 10.0], [40.0, 110.0], [10.0, 110.0]]],
+                    "lines": [text],
+                }]),
+                None => json!([]),
+            };
+            out_pages.push(json!({"version": "0.2.5", "img_width": 0, "img_height": 0, "blocks": blocks, "img_path": name}));
             progress(PageProgress::Page {
                 done: i as u32 + 1,
                 total,

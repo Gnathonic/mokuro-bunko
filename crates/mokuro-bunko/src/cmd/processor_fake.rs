@@ -3,7 +3,8 @@
 //! does, over `bunko-processor`'s `FakePipeline` (blank pages, one per image), so a
 //! lite build can OCR. `--hold-file` holds each volume mid-OCR until the file exists
 //! ("rename during OCR"); `--engine-revision` stamps its sidecars for upgrade
-//! scenarios. No control API, no automatic update, no OCR install, console logging.
+//! scenarios; `--page-text` gives each page a block a reader can correct. No control
+//! API, no automatic update, no OCR install, console logging.
 
 use super::Ctx;
 use crate::cli::ProcessorFakeArgs;
@@ -29,6 +30,7 @@ pub fn run(ctx: &Ctx, args: ProcessorFakeArgs) -> CmdResult {
         engines,
         hold_file: args.hold_file,
         engine_revision: args.engine_revision,
+        page_text: args.page_text,
         ..FakeConfig::default()
     });
     let config = ProcessorConfig {

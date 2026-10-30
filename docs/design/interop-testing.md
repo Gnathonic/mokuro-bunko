@@ -233,14 +233,15 @@ does.
   `mokuro-bunko processor-fake --url URL --username U --password P --storage DIR`
   (password also from `MOKURO_FAKE_PROCESSOR_PASSWORD`): it logs in, registers and
   holds its socket as `processor serve` does, over `bunko-processor`'s `FakePipeline`
-  (one blank page per image), so the lite build the rig runs can OCR. `--engine ID`
+  (one page per image), so the lite build the rig runs can OCR. `--engine ID`
   (repeatable; default every engine the build knows), `--page-delay-ms`,
   `--load-delay-ms` and `--max-sessions` shape it; `--hold-file PATH` holds each
   volume after it starts until the file exists (a rename during OCR, deterministic);
   `--engine-revision N` announces revision N for its engines and writes `revision: N`
   into its sidecars' `ocr_engine` block, right after the id (upgrade scenarios; without
-  it, the build's own revision of each engine, as a real processor does). A build
-  without `testing` has no such command.
+  it, the build's own revision of each engine, as a real processor does);
+  `--page-text TEXT` gives every page one text block reading TEXT (a block a reader can
+  correct). A build without `testing` has no such command.
 - **The reader** runs its real providers against the binary when `CLOUDSIM_URL` is set
   (`src/lib/interop/cloudsim/`, one file at a time; its CI job `interop` builds the
   simulator from Bunko and sets `REQUIRE_CLOUDSIM=1`, so the suites fail rather than
@@ -319,14 +320,14 @@ Each suite and provider then gets its own parties: `dav` and `api` a server on a
 library; `bridge` and `shared` a server on the cloud (cloudsim or rclone) holding its
 lease; `direct` the cloud alone. Every server has the accounts `alice` (editor), `bob`
 (uploader), `carol` (registered) and `ocr` (processor) beside its admin, and a held
-`processor-fake`. The library is `Rig Series` with `Vol 1` (with its sidecar) and
+`processor-fake` (`--page-text`). The library is `Rig Series` with `Vol 1` (with its sidecar) and
 `Vol 2` (without). The specs (`interop/e2e/rig/<suite>/*.spec.mjs`, one worker, a fresh
 browser context each) get READER_URL, BUNKO_URL, CLOUDSIM_URL, CLOUDSIM_PREAUTH_URL,
 RCLONE_URL, RIG_PROVIDER, RIG_ACCOUNTS, RIG_WORKDIR and RIG_FAKEPROC_HOLD as C6 lists
 them (unset when the suite has no such party), plus `RIG_CONTEXT` (JSON: the shared
 cloud account, its MEGA or WebDAV sign-in, the seeded library, and a cloud server's
-lease ttl; for `shared`, `uploads`: archives the rig made for the specs to import and
-upload, `rig.upload(rel)`) and, with a Bunko server, `RIG_CONTROL_URL`: the runner's
+lease ttl; for `shared` and `dav`, `uploads`: archives the rig made for the specs to
+import and upload, `rig.upload(rel)`) and, with a Bunko server, `RIG_CONTROL_URL`: the runner's
 control port (`rig/control.rs`), whose `POST /bunko/restart {stale?, tune?}` stops the
 suite's server and starts it again on the same data (`rig.restartBunko` in the
 fixtures), answering once it serves HTTP; `POST /bunko/stop` leaves it down (SIGINT: no
@@ -558,6 +559,61 @@ Backup, to the end of its run, metadata writes included).
   After the seeded series is in Bunko's and the cloud's `catalog.json`, neither names
   `history`, the queue file names neither it nor the device, and no `series.json`
   appears in the history.
+
+**As built (I3, scenarios S4 and S6).**
+- From `rename-ocr.mjs`; each scenario uploads series of its own through the reader
+  (`RIG_CONTEXT.uploads` in `dav` and `shared`: `S4 Provenance/Vol 1-2`,
+  `S6 Rename/Vol 1-2`), so its renames move nothing another spec reads. processor-fake
+  stamps the library's engine (`hayai-nova`) at this build's revision; the C6 text's
+  "engine `fake` 1.0" names no engine a server can be set to, so the block is
+  `{id: hayai-nova, revision: 1, generator, precision}` and Bunko seals it. The rig
+  starts it with `--page-text` (every page one text block), so a reader has a block to
+  correct. Each spec drives the hold file itself (`RIG_FAKEPROC_HOLD`: removed to hold,
+  written to release) and leaves it as it found it. Bunko's walks are counted by the
+  admin-only `walks` of `/queue/api/status`, which only a testing build reports: "two
+  passes after X" is "two walks that started after X finished", a condition, never a
+  timer. On `dav` the reader is a new editor; on `shared` it is on the cloud itself,
+  Bunko's marker seen moving.
+- Both run on `dav` (`local`) and `shared` (every cloud; C6 asks for `google`).
+- `dav/rename-provenance` and `shared/rename-provenance` (S4): two volumes uploaded image
+  only; Bunko OCRs them and the reader pulls the OCR. Each main carries a sealed
+  `ocr_engine`. `Vol 2` is edited (its first block): the account's `edit` layer goes up
+  with its `edited` marker (`dav`: the editor's overlay; `shared`: the cloud file).
+  Then the processor is held, so a job queued for either volume would stay in the queue,
+  and the reader renames both volumes, then the series. Once Bunko lists the new names
+  (its own PROPFIND) and the old folder is empty (its `series.json`, Bunko's compile of
+  a factless series, is retired once no archive is left: on OneDrive that takes up to a
+  minute), two walks on, the queue holds nothing
+  for either series name; each main under the new names is
+  `{title: <new series>, volume: <new title>}` with the block it was installed with,
+  seal and all, and no `edited`; the edit layer reads under the new names with the
+  same text and the same `edited` marker, and 404 under the old.
+- `dav/rename-during-ocr` and `shared/rename-during-ocr` (S6), two specs. An image-only
+  volume's job claimed and held; the reader (no OCR of it) renames it; released: the
+  sidecar is `Vol 1 renamed.mokuro`, the queue settles and stays settled two walks on,
+  and no file name ever ended `_<n>.mokuro[.gz]`. A volume whose OCR the reader holds,
+  its sidecar then deleted by the admin so Bunko OCRs it again, held: the reader's
+  rename writes the main at the new name while that job runs; released, the same
+  checks, and the main is the reader's (the block it was installed with). "Ever": on a
+  disk library the spec watches the library folder (`fs.watch`, recursive) while it
+  runs, since Bunko's `_n` sweep removes a numbered copy it can prove is its own within
+  a walk; on a cloud, every node cloudsim kept, trashed ones included.
+- What they catch (each checked by undoing the fix in a scratch build, then restoring
+  it): the reader moving the archive before uploading the main (R4.4) leaves a job
+  queued for the renamed volume (S4); a reader regenerating the main without its block
+  (R9.3) loses `ocr_engine` (S4); with that reader order and `collect` writing
+  `<stem>_1` beside an occupied destination (before B4.4), `Vol 2 renamed_1.mokuro`
+  appears, and is swept a second later (S6, through the watch). S4 also found a reader
+  bug: a series whose volumes have layer files in the cloud could not be renamed (the
+  gate read `Vol 2.edit.mokuro` as a cloud-only volume `Vol 2.edit`); on `mega`, both
+  found that Bunko never saw a reader's rename: MEGA's `a` command carries the new
+  attributes as `at` (megajs sends that, and the `u` packet echoes it), while Bunko's
+  client sent, and its mock read, `attr`, so a megajs rename left the node with no
+  attributes Bunko could decrypt, and Bunko's own renames did not send the field MEGA's
+  clients use. Both now use `at`.
+  Under load, S4 on `dav` also caught Bunko publishing a cover it made from an archive
+  the reader had moved away meanwhile, under the old name: the old folder never
+  emptied (`thumbs`: no cover for an archive that is gone).
 - The driver reads the listing the provider cache holds now, not `cloudFiles`, whose
   incremental updates arrive on a 300 ms trailing edge: a `deleteVolume` right after
   `renameVolume` otherwise found the renamed volume not backed up.

@@ -2026,3 +2026,47 @@ async fn the_ocr_runtime_says_whether_the_backend_is_installed_and_which() {
     // The fake pipeline runs on the CPU.
     assert_eq!(r["installed_backend"], "cpu", "{r}");
 }
+
+/// A testing build tells its admin how many library walks have finished (`walks`), so
+/// the interop rig can wait for "two passes after X" instead of a fixed time; a
+/// visitor never sees it.
+#[tokio::test]
+async fn a_testing_build_counts_the_walks_for_its_admin() {
+    let e = env(|c| c.ocr.poll_interval = 1);
+    e.db.create_user(
+        "boss",
+        "boss-password-1",
+        Role::Admin,
+        UserStatus::Active,
+        "",
+    )
+    .unwrap();
+    let app = bunko_server::ocr::queue_router(e.ocr.clone());
+    let walks = |admin: bool| {
+        let app = app.clone();
+        async move {
+            let mut req = Request::get("/queue/api/status");
+            if admin {
+                req = req.header(header::AUTHORIZATION, basic("boss", "boss-password-1"));
+            }
+            let (status, _, body) = send(&app, req.body(Body::empty()).unwrap()).await;
+            assert_eq!(status, 200);
+            serde_json::from_slice::<Value>(&body).unwrap()["walks"].clone()
+        }
+    };
+    assert_eq!(walks(false).await, Value::Null, "a visitor never sees it");
+    let first = walks(true).await.as_u64().expect("an admin sees walks");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let now = walks(true).await.as_u64().unwrap();
+        if now >= first + 2 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "walks stayed at {now}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    e.stop.cancel();
+}

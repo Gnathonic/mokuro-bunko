@@ -504,6 +504,7 @@ impl Scheduler {
         );
         raw.insert("speed".into(), Value::Array(self.speed(&plan.running)));
         raw.insert("orphans_unproven".into(), json!(self.orphans_unproven));
+        raw.insert("walks".into(), json!(self.walks));
         raw
     }
 

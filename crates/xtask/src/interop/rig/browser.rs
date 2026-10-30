@@ -32,6 +32,9 @@ const USERS: [(&str, &str); 4] = [
     ("ocr", "processor"),
 ];
 const PROCESSOR: &str = "ocr";
+/// What every page processor-fake OCRs reads: a block a reader can correct (S4's edited
+/// volume).
+const FAKE_PAGE_TEXT: &str = "偽の文字";
 
 /// Where the suite's Bunko server keeps its library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,25 +109,36 @@ fn library_files() -> Result<Vec<(String, Vec<u8>)>> {
 /// (`RIG_CONTEXT.uploads`), `(path below the library folder, bytes)`: the `shared`
 /// suite's OCR round trip (`Vol 3`), and one new series for each of its
 /// `series.json`/`catalog.json` checks, so a reader that writes them has something new
-/// to say.
+/// to say; then, in `shared` and `dav`, the series S4 and S6 OCR and rename (each its
+/// own, so a rename moves nothing another spec reads).
 fn upload_files(suite: Suite) -> Result<Vec<(String, Vec<u8>)>> {
-    if suite != Suite::Shared {
-        return Ok(Vec::new());
-    }
-    [
-        format!("{LIBRARY_SERIES}/Vol 3.cbz"),
-        "Rig Fresh/Vol 1.cbz".to_string(),
-        "Rig Resumed/Vol 1.cbz".to_string(),
-        "Rig Released/Vol 1.cbz".to_string(),
-    ]
-    .into_iter()
-    .map(|rel| {
-        Ok((
-            rel.clone(),
-            genlib::cbz_bytes(&format!("rig upload {rel}"))?,
-        ))
-    })
-    .collect()
+    let mut rels = match suite {
+        Suite::Shared => vec![
+            format!("{LIBRARY_SERIES}/Vol 3.cbz"),
+            "Rig Fresh/Vol 1.cbz".to_string(),
+            "Rig Resumed/Vol 1.cbz".to_string(),
+            "Rig Released/Vol 1.cbz".to_string(),
+        ],
+        Suite::Dav => Vec::new(),
+        _ => return Ok(Vec::new()),
+    };
+    rels.extend(
+        [
+            "S4 Provenance/Vol 1.cbz",
+            "S4 Provenance/Vol 2.cbz",
+            "S6 Rename/Vol 1.cbz",
+            "S6 Rename/Vol 2.cbz",
+        ]
+        .map(String::from),
+    );
+    rels.into_iter()
+        .map(|rel| {
+            Ok((
+                rel.clone(),
+                genlib::cbz_bytes(&format!("rig upload {rel}"))?,
+            ))
+        })
+        .collect()
 }
 
 /// The `shared` suite's lease ttl: twice it covers the reader's 60 s between marker
@@ -272,6 +286,7 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
             PROCESSOR,
             &FakeOptions {
                 held: true,
+                page_text: Some(FAKE_PAGE_TEXT.to_string()),
                 ..FakeOptions::default()
             },
         )?),
@@ -478,24 +493,38 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_suite_gets_archives_of_its_own_to_upload() {
-        let uploads = upload_files(Suite::Shared).unwrap();
-        let names: Vec<&str> = uploads.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "Rig Series/Vol 3.cbz",
-                "Rig Fresh/Vol 1.cbz",
-                "Rig Resumed/Vol 1.cbz",
-                "Rig Released/Vol 1.cbz"
-            ]
-        );
+    fn the_shared_and_dav_suites_get_archives_of_their_own_to_upload() {
+        let renames = [
+            "S4 Provenance/Vol 1.cbz",
+            "S4 Provenance/Vol 2.cbz",
+            "S6 Rename/Vol 1.cbz",
+            "S6 Rename/Vol 2.cbz",
+        ];
+        let names = |suite| -> Vec<String> {
+            upload_files(suite)
+                .unwrap()
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect()
+        };
+        let mut shared = vec![
+            "Rig Series/Vol 3.cbz",
+            "Rig Fresh/Vol 1.cbz",
+            "Rig Resumed/Vol 1.cbz",
+            "Rig Released/Vol 1.cbz",
+        ];
+        shared.extend(renames);
+        assert_eq!(names(Suite::Shared), shared);
+        assert_eq!(names(Suite::Dav), renames);
         let library = library_files().unwrap();
-        for (i, (_, bytes)) in uploads.iter().enumerate() {
-            assert!(library.iter().all(|(_, b)| b != bytes));
-            assert!(uploads[i + 1..].iter().all(|(_, b)| b != bytes));
+        for suite in [Suite::Shared, Suite::Dav] {
+            let uploads = upload_files(suite).unwrap();
+            for (i, (_, bytes)) in uploads.iter().enumerate() {
+                assert!(library.iter().all(|(_, b)| b != bytes));
+                assert!(uploads[i + 1..].iter().all(|(_, b)| b != bytes));
+            }
         }
-        for suite in [Suite::Dav, Suite::Api, Suite::Bridge, Suite::Direct] {
+        for suite in [Suite::Api, Suite::Bridge, Suite::Direct] {
             assert!(upload_files(suite).unwrap().is_empty(), "{suite:?}");
         }
     }

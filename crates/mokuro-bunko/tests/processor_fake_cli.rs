@@ -1,6 +1,6 @@
 //! `processor-fake` (testing build only): the interop rig's remote processor. Against a
-//! real server it logs in, registers, OCRs a queued volume with no models, and the
-//! server installs and seals the sidecar.
+//! real server it logs in, registers, OCRs a queued volume with no models (`--page-text`
+//! on each page), and the server installs and seals the sidecar.
 
 #![cfg(feature = "testing")]
 
@@ -97,6 +97,7 @@ fn a_fake_processor_ocrs_a_queued_volume_and_the_server_seals_it() {
             .arg("--storage")
             .arg(env.root().join("processor"))
             .args(["--engine-revision", "2"])
+            .args(["--page-text", "偽の文字"])
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .stdin(Stdio::null())
@@ -122,6 +123,12 @@ fn a_fake_processor_ocrs_a_queued_volume_and_the_server_seals_it() {
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
     assert_eq!(v["volume"], "Vol 1");
     assert_eq!(v["pages"].as_array().unwrap().len(), 2);
+    // `--page-text`: each page's one block, kept through the server's install.
+    assert_eq!(
+        v["pages"][1]["blocks"][0]["lines"],
+        serde_json::json!(["偽の文字"]),
+        "{v}"
+    );
     let engine = &v["ocr_engine"];
     assert_eq!(engine["id"], bunko_core::engines::DEFAULT_ENGINE, "{v}");
     assert_eq!(engine["revision"], 2, "{v}");
