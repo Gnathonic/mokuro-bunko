@@ -85,6 +85,11 @@ pub struct DavContext {
     /// The account owns a cloud library's root: its per-user files are the root's own
     /// (spec 0.8 §10). Never true for anonymous.
     pub owns_cloud_root: bool,
+    /// Auth admitted this write only as the caller's own correction layer (D27), from a
+    /// folder listing of its own: the path must still resolve to one when it is
+    /// written, else the write is refused. An archive of the layer's dotted name that
+    /// lands in between makes the path that archive's shared primary.
+    pub personal_only: bool,
     /// `MOKURO_NGINX_ACCEL=1`: answer library GET/HEAD with `X-Accel-Redirect` (§8.10).
     pub nginx_accel: bool,
     /// The resolved client IP (logging only).
@@ -98,6 +103,7 @@ impl DavContext {
             username: None,
             role: Role::Anonymous,
             owns_cloud_root: false,
+            personal_only: false,
             nginx_accel: false,
             client_ip: None,
             hooks,
@@ -109,6 +115,7 @@ impl DavContext {
             username: Some(username.into()),
             role,
             owns_cloud_root: false,
+            personal_only: false,
             nginx_accel: false,
             client_ip: None,
             hooks,

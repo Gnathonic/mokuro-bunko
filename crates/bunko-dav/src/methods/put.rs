@@ -251,6 +251,7 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
             (phys, Some(kind))
         }
     };
+    super::personal_grant_holds(req, kind)?;
     let personal = kind == Some(FileKind::Personal);
 
     let Some(_guard) = inner.write_locks.try_lock(&dest) else {

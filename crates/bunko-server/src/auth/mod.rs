@@ -281,6 +281,17 @@ fn progress_write(id: &Identity) -> Result<(), Denied> {
     }
 }
 
+/// What an allowed request was allowed as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grant {
+    /// The decision table's rules for the path.
+    Table,
+    /// Only as the caller's own correction layer (D27), decided from a listing of the
+    /// folder: DAV resolves the path again where it writes and must find a correction
+    /// there too (`bunko_dav::DavContext::personal_only`).
+    Personal,
+}
+
 /// The decision table of spec http-webdav §4.3, in order.
 pub fn authorize(
     method: &Method,
@@ -289,6 +300,31 @@ pub fn authorize(
     id: &Identity,
     anon: AnonymousAccess,
     backend: &dyn AuthBackend,
+) -> Result<(), Denied> {
+    authorize_grant(method, path, destination, id, anon, backend).map(drop)
+}
+
+/// [`authorize`], with what the request was allowed as.
+pub fn authorize_grant(
+    method: &Method,
+    path: &str,
+    destination: Option<&str>,
+    id: &Identity,
+    anon: AnonymousAccess,
+    backend: &dyn AuthBackend,
+) -> Result<Grant, Denied> {
+    let mut grant = Grant::Table;
+    decide(method, path, destination, id, anon, backend, &mut grant).map(|()| grant)
+}
+
+fn decide(
+    method: &Method,
+    path: &str,
+    destination: Option<&str>,
+    id: &Identity,
+    anon: AnonymousAccess,
+    backend: &dyn AuthBackend,
+    grant: &mut Grant,
 ) -> Result<(), Denied> {
     use paths::*;
     if *method == Method::OPTIONS {
@@ -351,7 +387,7 @@ pub fn authorize(
         "PUT" | "DELETE" | "MOVE" | "COPY" | "LOCK" | "UNLOCK" | "PROPPATCH"
     ) && let Some(decision) = authorize_layer(m, path, destination, id, backend)
     {
-        return decision;
+        return decision.map(|g| *grant = g);
     }
     match m {
         "GET" | "HEAD" | "PROPFIND" => {
@@ -454,7 +490,7 @@ fn authorize_layer(
     destination: Option<&str>,
     id: &Identity,
     backend: &dyn AuthBackend,
-) -> Option<Result<(), Denied>> {
+) -> Option<Result<Grant, Denied>> {
     const BETWEEN: &str = "Permission denied: corrections can only move between correction files";
     const SERVER: &str = "Permission denied: this file is written by the server";
     const RESERVED: &str = "Permission denied: this layer name is reserved";
@@ -476,7 +512,7 @@ fn authorize_layer(
                     "Permission denied: corrections are saved as plain .mokuro",
                 ))
             } else {
-                Ok(())
+                Ok(Grant::Personal)
             }
         }));
     }
@@ -499,7 +535,9 @@ fn authorize_layer(
         (Some(LayerClass::Personal), _) => Some(Err(denied_unless_signed_in(id, BETWEEN))),
         (_, Some(LayerClass::ServerKeepsake)) => Some(Err(denied_unless_signed_in(id, SERVER))),
         (_, Some(LayerClass::Reserved)) => Some(Err(denied_unless_signed_in(id, RESERVED))),
-        (_, Some(LayerClass::Curated)) if !moving => Some(authorize_curated(path, id, backend)),
+        (_, Some(LayerClass::Curated)) if !moving => {
+            Some(authorize_curated(path, id, backend).map(|()| Grant::Table))
+        }
         // Deleting or moving a curated or keepsake file keeps the 0.7 rules.
         _ => None,
     }
@@ -1076,6 +1114,41 @@ mod tests {
         fn is_volume_primary(&self, p: &str) -> bool {
             p == "/mokuro-reader/S/V.edit.mokuro"
         }
+    }
+
+    /// What a request was allowed as: a correction write only as the caller's own file
+    /// (DAV checks it again where it writes), anything else by the table.
+    #[test]
+    fn a_correction_write_is_granted_as_the_callers_own() {
+        let m = |name: &str| Method::from_bytes(name.as_bytes()).unwrap();
+        let grant = |method: &str, path: &str, dest: Option<&str>, role: Role| {
+            authorize_grant(&m(method), path, dest, &id(Some(role)), OPEN, &Layers)
+        };
+        let edit = "/mokuro-reader/S/W.edit.mokuro";
+        for method in ["PUT", "DELETE", "LOCK", "UNLOCK", "PROPPATCH"] {
+            for role in [Role::Registered, Role::Admin] {
+                assert_eq!(grant(method, edit, None, role), Ok(Grant::Personal));
+            }
+        }
+        let dest = Some("http://h/mokuro-reader/T/X.edit.mokuro");
+        assert_eq!(
+            grant("MOVE", edit, dest, Role::Registered),
+            Ok(Grant::Personal)
+        );
+        // A dotted volume's primary, an archive, a progress file: the table's.
+        for (method, path, role) in [
+            ("PUT", "/mokuro-reader/S/V.edit.mokuro", Role::Editor),
+            ("PUT", "/mokuro-reader/S/V.cbz", Role::Uploader),
+            ("PUT", "/mokuro-reader/volume-data.json", Role::Registered),
+            ("GET", edit, Role::Registered),
+        ] {
+            assert_eq!(
+                grant(method, path, None, role),
+                Ok(Grant::Table),
+                "{method} {path}"
+            );
+        }
+        assert!(grant("PUT", "/mokuro-reader/S/V.cbz", None, Role::Registered).is_err());
     }
 
     /// D27: personal corrections are any progress writer's own; the curated layer is
