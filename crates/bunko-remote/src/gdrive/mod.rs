@@ -101,8 +101,9 @@ struct Inner {
     /// Roots seen by `locate_roots`/`create_root`/`list_all`: the parent of choice for
     /// a (legacy) file with several parents.
     roots: Mutex<HashSet<Pid>>,
-    /// The My Drive folder's id (`files/root`): a root directly in it is top-level,
-    /// the reader's first choice. Asked once per session.
+    /// The My Drive folder's id, the parent of a top-level root (the reader's first
+    /// choice). Learnt from a query once a top-level root exists, then kept for the
+    /// session.
     my_drive_root: tokio::sync::OnceCell<Pid>,
 }
 
@@ -143,6 +144,25 @@ impl GDriveBackend {
     /// Drive quota units spent by this backend so far ([`api::units`]).
     pub fn units_used(&self) -> u64 {
         self.0.units.load(Ordering::Relaxed)
+    }
+
+    /// My Drive's id: the parent of a folder `name` directly in it (`'root' in
+    /// parents`), or `None` while there is no such folder.
+    async fn my_drive_id(&self, name: &str) -> Result<Option<Pid>, BErr> {
+        let q = format!(
+            "'root' in parents and name={} and mimeType='{FOLDER_MIME}' and trashed=false",
+            api::q_str(name)
+        );
+        let mut id = None;
+        self.0
+            .list_q(&q, &mut |f| {
+                if id.is_none() {
+                    id = f.parents.first().cloned();
+                }
+                Ok(())
+            })
+            .await?;
+        Ok(id)
     }
 }
 
@@ -1149,6 +1169,29 @@ impl Backend for GDriveBackend {
     /// (`drive.file` lists only what this app may see), canonical first: those
     /// directly in My Drive, then oldest, then smallest id.
     async fn locate_roots(&self, name: &str) -> Result<Vec<RNode>, BErr> {
+        // My Drive's id first (the reader's way, `drive-files-cache.ts` `topLevelTest`):
+        // under drive.file `files.get('root')` is a 404, but the `'root'` alias works
+        // in a query, and a top-level root's parent is that id. No such root yet is no
+        // answer: asked again next time. A refused query only costs the top-level-first
+        // rule (roots ordered by age alone, asked again next time); throttling, outages
+        // and auth failures still fail here.
+        let top = match self.0.my_drive_root.get() {
+            Some(t) => Some(t.clone()),
+            None => match self.my_drive_id(name).await {
+                Ok(Some(t)) => {
+                    let _ = self.0.my_drive_root.set(t.clone());
+                    Some(t)
+                }
+                Ok(None) => None,
+                Err(e @ (BErr::NotFound | BErr::Fatal(_) | BErr::Unsupported)) => {
+                    tracing::warn!(
+                        "drive: cannot list the top-level {name} folders ({e}); roots ordered by age only"
+                    );
+                    None
+                }
+                Err(e) => return Err(e),
+            },
+        };
         let q = format!(
             "name={} and mimeType='{FOLDER_MIME}' and trashed=false",
             api::q_str(name)
@@ -1167,29 +1210,7 @@ impl Backend for GDriveBackend {
             .iter()
             .map(|f| f.to_rnode(f.parents.first().cloned()))
             .collect();
-        let top = self
-            .0
-            .my_drive_root
-            .get_or_try_init(|| async {
-                let c = Call::new(Method::GET, self.0.url("/drive/v3/files/root"), units::GET)
-                    .q("fields", "id");
-                let f: DFile = self.0.json(c).await?;
-                Ok::<_, BErr>(f.id)
-            })
-            .await;
-        // A refused `files/root` (a grant that may not see My Drive) only costs the
-        // top-level-first rule: the roots are still found, oldest first, and the next
-        // locate asks again. Throttling, outages and auth failures still fail here.
-        let top = match top {
-            Ok(t) => Some(t.as_str()),
-            Err(e @ (BErr::NotFound | BErr::Fatal(_) | BErr::Unsupported)) => {
-                tracing::warn!(
-                    "drive: cannot ask for My Drive's id ({e}); roots ordered by age only"
-                );
-                None
-            }
-            Err(e) => return Err(e),
-        };
+        let top = top.as_deref();
         sort_roots_canonical(&mut nodes, top);
         self.0
             .roots
