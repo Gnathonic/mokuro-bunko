@@ -83,6 +83,30 @@ pub fn fetch_archive(url: &str, pin: &Pin, cache: &Path) -> Result<PathBuf> {
     torch_pack::fetch_url(url, pin.sha256, pin.size, cache)
 }
 
+/// `rclone version`'s first line names the pinned release, exactly.
+pub fn check_version(output: &str) -> Result<()> {
+    let first = output.lines().next().unwrap_or_default().trim();
+    if first != format!("rclone {RCLONE_VERSION}") {
+        bail!("rclone says {first:?}; the rig pins {RCLONE_VERSION}");
+    }
+    Ok(())
+}
+
+/// `--rclone-bin` when given (an installed rclone, checked to be the pinned release:
+/// no download), else the pinned download under `tools`.
+pub fn binary(given: Option<&Path>, tools: &Path) -> Result<PathBuf> {
+    let Some(bin) = given else {
+        return install(tools);
+    };
+    let out = Command::new(bin)
+        .arg("version")
+        .output()
+        .with_context(|| format!("running {} version", bin.display()))?;
+    check_version(&String::from_utf8_lossy(&out.stdout))
+        .with_context(|| format!("--rclone-bin {}", bin.display()))?;
+    Ok(bin.to_path_buf())
+}
+
 /// The rclone binary for this machine, under `tools` (`target/interop/tools`).
 pub fn install(tools: &Path) -> Result<PathBuf> {
     let pin = pin_for(std::env::consts::OS, std::env::consts::ARCH).with_context(|| {
@@ -269,6 +293,21 @@ pub fn check_preflight(status: u16, headers: &[(String, String)], origin: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_given_rclone_must_be_the_pinned_release() {
+        check_version("rclone v1.75.2\n- os/version: x\n").unwrap();
+        for bad in [
+            "rclone v1.75.1\n",
+            "rclone v1.75.20\n",
+            "",
+            "v1.75.2\n",
+            "rclone v1.75.2-beta\n",
+        ] {
+            let err = check_version(bad).unwrap_err().to_string();
+            assert!(err.contains("v1.75.2"), "{bad:?}: {err}");
+        }
+    }
 
     fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs

@@ -69,8 +69,12 @@ Five pieces, all in this repo:
    the same on Linux, macOS and Windows without Docker or `tc` (§8.2).
 4. **The rig runner** (`cargo xtask interop`): builds or downloads each party, starts them
    behind netsim, runs a suite, collects results and checks budgets.
-5. **Scenarios**: Playwright specs (kept in this repo under `interop/e2e/`, run with the
-   pinned reader's Playwright install) plus Rust-side scenarios for Bunko ↔ cloud.
+5. **Scenarios**: Playwright specs (kept in this repo under `interop/e2e/`, run with
+   Bunko's own Playwright install in `interop/`, `@playwright/test` pinned in
+   `interop/package.json`, not the reader's) plus Rust-side scenarios for Bunko ↔ cloud.
+   As built, this differs from the first design, which used the pinned reader's install:
+   the specs, their fixtures and the Playwright version then move with this repo, and a
+   reader bump never changes the harness under them.
 
 Third-party pieces: `rclone serve webdav` (a single static binary, downloaded at a pinned
 version) as the plain WebDAV cloud, and Chromium through Playwright.
@@ -292,8 +296,48 @@ the reason for a failure or skip) and copies every party's log to
 with `--keep`. cloudsim's violations are read after every scenario and fail it.
 rclone is `v1.75.2`, downloaded into `target/interop/tools` and checked against its
 pinned sha256 and size per OS before use (`rig/rclone.rs`); it serves with
-`--allow-origin <reader origin>` for the browser suites. The browser suites stop with
-an error until the reader harness lands (C6-B8).
+`--allow-origin <reader origin>` for the browser suites; `--rclone-bin` takes an
+installed rclone instead, checked to be the pinned release (`rclone version`).
+
+**As built (I3, browser harness, `rig/reader.rs`, `rig/playwright.rs`, `rig/browser.rs`).**
+The reader is `--reader-dir` (that checkout as it is) or, without it, the commit in
+`interop/reader.ref` (`--reader-ref` overrides it), fetched once into
+`target/interop/reader/<sha>` (`git init`, `git fetch --depth 1` of exactly that SHA).
+With neither a `reader.ref` nor `--reader-dir`, the rig stops, naming both. It runs
+`npm ci` where nothing is installed (a developer's own install is used as it is) and
+`npx vite build --mode interop`, cached by the commit, a hash of a `--reader-dir`'s
+uncommitted changes and the `package-lock.json` hash; the cache's stamp also records the
+build output's file list, so another build in the same checkout forces a rebuild. It is
+served once per run by `npx vite preview --mode interop --host 127.0.0.1 --port P
+--strictPort`, P picked by the rig before rclone starts (rclone's CORS origin names it).
+Each suite and provider then gets its own parties: `dav` and `api` a server on a local
+library; `bridge` and `shared` a server on the cloud (cloudsim or rclone) holding its
+lease; `direct` the cloud alone. Every server has the accounts `alice` (editor), `bob`
+(uploader), `carol` (registered) and `ocr` (processor) beside its admin, and a held
+`processor-fake`. The library is `Rig Series` with `Vol 1` (with its sidecar) and
+`Vol 2` (without). The specs (`interop/e2e/rig/<suite>/*.spec.mjs`, one worker, a fresh
+browser context each) get READER_URL, BUNKO_URL, CLOUDSIM_URL, CLOUDSIM_PREAUTH_URL,
+RCLONE_URL, RIG_PROVIDER, RIG_ACCOUNTS, RIG_WORKDIR and RIG_FAKEPROC_HOLD as C6 lists
+them (unset when the suite has no such party), plus `RIG_CONTEXT` (JSON: the shared
+cloud account, its MEGA or WebDAV sign-in, the seeded library). The fixtures
+(`interop/e2e/rig/fixtures.mjs`) refuse every request off this machine except
+`apis.google.com/js/api.js` and `accounts.google.com/gsi/client`, which load as empty
+scripts, and record the refused hosts (`refused_hosts` in the results); block service
+workers, whose fetches would bypass the route; set `__mokuroInteropConfig` v1 (cloudsim's
+bases, a Drive or OneDrive token from `/_sim/token`, `gapiShim: true`) before any page
+script; wait for `__mokuroInterop.apiVersion === 1`; fail a spec on cloudsim violations
+it caused; and gate capabilities: a spec declares `test.use({ needs: [...] })`, and a
+capability the driver does not list FAILS the spec unless `interop/pending-reader-caps.txt`
+lists it (one per line, `#` comments), in which case the spec is skipped and reported
+with that capability. `npm run selftest` in `interop/` checks the gate and the route
+against a stub page, no reader needed. Results: `target/interop/rig/<suite>-<provider>.json`
+carries `suite`, `provider`, `bunko_sha`, `reader_sha` (`-dirty` for a changed
+`--reader-dir`), `passed`, `failed`, `skipped: [{spec, capability}]`, `duration_ms`
+and `pending_caps`, with Playwright's JUnit XML beside it and the parties' logs (the
+server's `serve.log`, `cloudsim.log`, `processor-fake.log`, rclone's) under
+`logs/<suite>-<provider>/`; the reader's build and preview logs are
+`reader-build.log` and `reader-preview.log`. A suite folder with no specs yet is
+reported skipped.
 
 The `cloud` suite (`rig/cloud.rs`) runs one library of four volumes and a reader's
 `series.json` through two server processes, in order, on each provider: **cold-start**
@@ -315,7 +359,8 @@ mega 87–100 s (one MEGA command a second, and a 30 s lease ttl so a heartbeat 
 writes open). On rclone the suite first checks the CORS preflight a browser would send
 from an allowed origin (`OPTIONS` asking for PROPFIND with `Authorization`): it must
 answer 2xx without credentials, echo the origin and name `Authorization`, which a `*`
-does not cover. rclone is not yet run anywhere.
+does not cover. rclone has run locally through `--rclone-bin` (cold start to
+handover green, about 16 s); its pinned download has not run anywhere yet.
 
 ### 7.2 Live runs (layer 3: scheduled, real clouds)
 

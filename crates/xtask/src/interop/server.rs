@@ -72,7 +72,7 @@ pub struct ServerOptions {
     pub env: Vec<(String, String)>,
 }
 
-fn free_port() -> Result<u16> {
+pub fn free_port() -> Result<u16> {
     Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 

@@ -1,4 +1,7 @@
 //! `target/interop/rig/<suite>-<provider>.json`, and the logs of every party beside it.
+//! Its contract fields (C6-contract "Rig results artifact"): `suite`, `provider`,
+//! `bunko_sha`, `reader_sha`, `passed`, `failed`, `skipped: [{spec, capability}]` and
+//! `duration_ms`; the rest is detail for whoever reads a failure.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -21,16 +24,40 @@ pub struct Scenario {
     /// Why it failed or was skipped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Skipped because the reader lacks this capability and
+    /// `interop/pending-reader-caps.txt` lists it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+}
+
+/// One skipped scenario (spec), as the contract lists them.
+#[derive(Debug, Clone, Serialize)]
+pub struct Skip {
+    pub spec: String,
+    pub capability: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub suite: String,
     pub provider: String,
+    /// `HEAD` of this checkout (`-dirty` with uncommitted changes).
+    pub bunko_sha: Option<String>,
+    /// The reader the browser suites ran; `None` for the `cloud` suite.
+    pub reader_sha: Option<String>,
+    pub passed: usize,
+    pub failed: usize,
+    pub skipped: Vec<Skip>,
+    pub duration_ms: u64,
+    pub outcome: Outcome,
+    /// `interop/pending-reader-caps.txt` as the run read it: I3 is done only when it
+    /// is empty.
+    pub pending_caps: Vec<String>,
+    /// Hosts the browser was refused (every request off this machine is): what the
+    /// reader tried to reach, never what it reached.
+    pub refused_hosts: Vec<String>,
     pub bunko_bin: String,
     pub started_at: String,
-    pub ms: u64,
-    pub outcome: Outcome,
     pub scenarios: Vec<Scenario>,
     /// The parties' logs, copied next to this file.
     pub logs: Vec<String>,
@@ -46,10 +73,17 @@ impl Report {
         Report {
             suite: suite.into(),
             provider: provider.into(),
+            bunko_sha: None,
+            reader_sha: None,
+            passed: 0,
+            failed: 0,
+            skipped: Vec::new(),
+            duration_ms: 0,
+            outcome: Outcome::Passed,
+            pending_caps: Vec::new(),
+            refused_hosts: Vec::new(),
             bunko_bin: bin.display().to_string(),
             started_at: crate::util::iso_utc(now),
-            ms: 0,
-            outcome: Outcome::Passed,
             scenarios: Vec::new(),
             logs: Vec::new(),
             started: Some(Instant::now()),
@@ -62,7 +96,19 @@ impl Report {
 
     /// Failed when any scenario failed, skipped when every one was skipped.
     pub fn finish(&mut self) {
-        self.ms = self.started.map_or(0, |t| t.elapsed().as_millis() as u64);
+        self.duration_ms = self.started.map_or(0, |t| t.elapsed().as_millis() as u64);
+        let count = |o: Outcome| self.scenarios.iter().filter(|s| s.outcome == o).count();
+        self.passed = count(Outcome::Passed);
+        self.failed = count(Outcome::Failed);
+        self.skipped = self
+            .scenarios
+            .iter()
+            .filter(|s| s.outcome == Outcome::Skipped)
+            .map(|s| Skip {
+                spec: s.name.clone(),
+                capability: s.capability.clone(),
+            })
+            .collect();
         self.outcome = if self.scenarios.iter().any(|s| s.outcome == Outcome::Failed) {
             Outcome::Failed
         } else if !self.scenarios.is_empty()
@@ -131,7 +177,57 @@ mod tests {
             outcome,
             ms: 1,
             detail: None,
+            capability: None,
         }
+    }
+
+    #[test]
+    fn the_report_carries_the_contract_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Report::new("dav", "local", Path::new("/bin/x"));
+        r.bunko_sha = Some("b".repeat(40));
+        r.reader_sha = Some(format!("{}-dirty", "a".repeat(40)));
+        r.pending_caps = vec!["history".into()];
+        r.add(scenario(
+            "smoke.spec.mjs: connect and list",
+            Outcome::Passed,
+        ));
+        r.add(scenario("x.spec.mjs: plain skip", Outcome::Skipped));
+        r.add(Scenario {
+            capability: Some("history".into()),
+            ..scenario("history.spec.mjs: two accounts", Outcome::Skipped)
+        });
+        r.add(scenario("y.spec.mjs: broken", Outcome::Failed));
+        r.finish();
+        let path = r
+            .write(&dir.path().join("rig"), &dir.path().join("work"))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["suite"], "dav");
+        assert_eq!(v["provider"], "local");
+        assert_eq!(v["bunko_sha"], "b".repeat(40));
+        assert_eq!(v["reader_sha"], format!("{}-dirty", "a".repeat(40)));
+        assert_eq!(v["passed"], 1);
+        assert_eq!(v["failed"], 1);
+        assert_eq!(
+            v["skipped"],
+            serde_json::json!([
+                {"spec": "x.spec.mjs: plain skip", "capability": null},
+                {"spec": "history.spec.mjs: two accounts", "capability": "history"},
+            ])
+        );
+        assert!(v["duration_ms"].is_u64());
+        assert_eq!(v["pending_caps"], serde_json::json!(["history"]));
+        assert_eq!(v["outcome"], "failed");
+        // The cloud suite has no reader.
+        let mut r = Report::new("cloud", "google", Path::new("/bin/x"));
+        r.finish();
+        let path = r
+            .write(&dir.path().join("rig"), &dir.path().join("work"))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["reader_sha"], serde_json::Value::Null);
+        assert_eq!(v["skipped"], serde_json::json!([]));
     }
 
     #[test]

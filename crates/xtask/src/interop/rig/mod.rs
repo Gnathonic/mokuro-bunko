@@ -1,12 +1,16 @@
 //! `cargo xtask interop rig`: every party as a real process (a testing build of the
-//! server, cloudsim, rclone, the fake OCR processor, later the reader), one suite per
+//! server, cloudsim, rclone, the fake OCR processor, the reader), one suite per
 //! provider (docs/design/interop-testing.md §7.1). The `cloud` suite (Bunko and the
-//! cloud, no reader) runs here in Rust; the browser suites drive the pinned reader.
+//! cloud, no reader) runs here in Rust; the browser suites drive the pinned reader
+//! through Bunko's Playwright install in `interop/`.
 
+mod browser;
 mod cloud;
 mod cloudsim;
 mod fakeproc;
+mod playwright;
 mod rclone;
+mod reader;
 mod results;
 
 use crate::util;
@@ -30,6 +34,9 @@ pub struct RigArgs {
     /// The cloud simulator (default: target/release/bunko-cloudsim).
     #[arg(long)]
     cloudsim_bin: Option<PathBuf>,
+    /// An installed rclone of the pinned release, instead of downloading it.
+    #[arg(long)]
+    rclone_bin: Option<PathBuf>,
     /// The browser suites: a reader checkout to build and serve.
     #[arg(long, conflicts_with = "reader_ref")]
     reader_dir: Option<PathBuf>,
@@ -41,7 +48,6 @@ pub struct RigArgs {
     grep: Option<String>,
     /// The browser suites: show the browser.
     #[arg(long)]
-    #[allow(dead_code)] // read by the browser harness (C6-B8)
     headed: bool,
     /// Keep each suite's work folder (data dirs, configs) even when it passed.
     #[arg(long)]
@@ -239,8 +245,7 @@ pub fn parse_reader_ref(text: &str) -> Result<String> {
 
 /// The reader the browser suites run.
 #[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
-enum ReaderSource {
+pub enum ReaderSource {
     Dir(PathBuf),
     Ref(String),
 }
@@ -253,9 +258,16 @@ fn reader_source(a: &RigArgs, root: &Path) -> Result<ReaderSource> {
         Some(r) => r.clone(),
         None => {
             let path = root.join("interop/reader.ref");
-            std::fs::read_to_string(&path).with_context(|| {
-                format!("{} (or pass --reader-dir / --reader-ref)", path.display())
-            })?
+            match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+                    "no reader for the browser suites: {} does not exist (it pins a pushed \
+                     reader commit) and no --reader-dir was given; pass --reader-dir \
+                     <reader checkout> (or --reader-ref <sha>)",
+                    path.display()
+                ),
+                Err(e) => return Err(e).with_context(|| path.display().to_string()),
+            }
         }
     };
     Ok(ReaderSource::Ref(parse_reader_ref(&text)?))
@@ -269,6 +281,8 @@ pub struct Paths {
     pub tools: PathBuf,
     pub bin: PathBuf,
     pub cloudsim_bin: PathBuf,
+    /// `--rclone-bin`.
+    pub rclone_bin: Option<PathBuf>,
 }
 
 fn release_bin(target: &Path, name: &str) -> PathBuf {
@@ -294,6 +308,24 @@ fn check_testing_build(bin: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `HEAD` of this checkout, `-dirty` with uncommitted changes to tracked files.
+fn bunko_sha(root: &Path) -> Option<String> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let head = git(&["rev-parse", "HEAD"])?;
+    let dirty =
+        git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+    Some(if dirty { format!("{head}-dirty") } else { head })
+}
+
 pub fn run(a: &RigArgs) -> Result<()> {
     let root = util::workspace_root();
     let target = util::target_dir(&root);
@@ -309,6 +341,7 @@ pub fn run(a: &RigArgs) -> Result<()> {
             .cloudsim_bin
             .clone()
             .unwrap_or_else(|| release_bin(&target, "bunko-cloudsim")),
+        rclone_bin: a.rclone_bin.clone(),
     };
     if !paths.bin.exists() {
         bail!(
@@ -325,19 +358,31 @@ pub fn run(a: &RigArgs) -> Result<()> {
             paths.cloudsim_bin.display()
         );
     }
+    let interop = root.join("interop");
+    let pending_caps = playwright::parse_caps(
+        &std::fs::read_to_string(interop.join("pending-reader-caps.txt"))
+            .context("interop/pending-reader-caps.txt")?,
+    )?;
+    // The reader is built and served once for every browser suite: each spec gets a
+    // fresh browser context, so nothing carries over between suites through it.
+    let mut served = None;
     if pairs.iter().any(|(s, _)| s.browser()) {
-        let reader = reader_source(a, &root)?;
-        let names: Vec<&str> = pairs
-            .iter()
-            .filter(|(s, _)| s.browser())
-            .map(|(s, _)| s.name())
-            .collect();
-        bail!(
-            "the browser suites ({}) need the reader harness, which this rig does not have \
-             yet (reader {reader:?}); run `cloud` alone",
-            names.join(", ")
-        );
+        let src = reader_source(a, &root)?;
+        let cache = target.join("interop").join("reader");
+        let co = reader::checkout(&src, &cache)?;
+        std::fs::create_dir_all(&paths.out)?;
+        reader::build(
+            &co,
+            &cache.join("stamps"),
+            &paths.out.join("reader-build.log"),
+        )?;
+        playwright::ensure_installed(&interop)?;
+        let port = super::server::free_port()?;
+        let preview = reader::Preview::start(&co.dir, port, &paths.out.join("reader-preview.log"))?;
+        eprintln!("reader {} at {}", co.reader_sha(), preview.url);
+        served = Some((co, preview));
     }
+    let bunko_sha = bunko_sha(&root);
 
     let mut failed = Vec::new();
     for (suite, provider) in pairs {
@@ -347,9 +392,27 @@ pub fn run(a: &RigArgs) -> Result<()> {
         std::fs::create_dir_all(&work)?;
         eprintln!("== {name}");
         let mut report = results::Report::new(suite.name(), provider.name(), &paths.bin);
-        match suite {
-            Suite::Cloud => cloud::run(&paths, provider, &work, a.grep.as_deref(), &mut report),
-            _ => unreachable!("browser suites stop above"),
+        report.bunko_sha = bunko_sha.clone();
+        report.pending_caps = pending_caps.clone();
+        match (suite, &served) {
+            (Suite::Cloud, _) => {
+                cloud::run(&paths, provider, &work, a.grep.as_deref(), &mut report)
+            }
+            (_, Some((co, preview))) => {
+                report.reader_sha = Some(co.reader_sha());
+                browser::run(
+                    &paths,
+                    &interop,
+                    suite,
+                    provider,
+                    &work,
+                    &preview.url,
+                    a.grep.as_deref(),
+                    a.headed,
+                    &mut report,
+                );
+            }
+            (_, None) => unreachable!("the reader is served for every browser suite"),
         }
         report.finish();
         let file = report.write(&paths.out, &work)?;
@@ -411,6 +474,7 @@ mod tests {
             provider: vec![ProviderArg::All],
             bin: None,
             cloudsim_bin: None,
+            rclone_bin: None,
             reader_dir: dir.map(PathBuf::from),
             reader_ref: r.map(str::to_string),
             grep: None,
@@ -427,9 +491,15 @@ mod tests {
             ReaderSource::Ref(s) if s == SHA
         ));
         assert!(reader_source(&args(None, Some("main")), root.path()).is_err());
-        // No file and no flag: the error names the file.
-        let err = reader_source(&args(None, None), root.path()).unwrap_err();
-        assert!(format!("{err:#}").contains("reader.ref"), "{err:#}");
+        // No file and no flag: the error names both ways to give a reader.
+        let err = format!(
+            "{:#}",
+            reader_source(&args(None, None), root.path()).unwrap_err()
+        );
+        assert!(
+            err.contains("interop/reader.ref") && err.contains("--reader-dir"),
+            "{err}"
+        );
         std::fs::create_dir_all(root.path().join("interop")).unwrap();
         std::fs::write(root.path().join("interop/reader.ref"), format!("{SHA}\n")).unwrap();
         assert!(matches!(

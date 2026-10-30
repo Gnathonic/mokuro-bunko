@@ -1,0 +1,6 @@
+# Reader capabilities whose rig specs are skipped instead of failed (one per line).
+# A spec that needs a capability the reader's driver (__mokuroInterop.capabilities)
+# lacks FAILS, unless that capability is listed here; then it is skipped and the rig
+# results JSON reports the skip with its capability. A Bunko change that needs a newer
+# reader than interop/reader.ref lists the capability here until reader.ref is bumped.
+# I3 is done only when this file lists nothing.

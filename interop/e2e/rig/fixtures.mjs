@@ -1,0 +1,176 @@
+// What every rig spec gets: the parties' addresses (the environment `cargo xtask
+// interop rig` sets, C6-contract), a fresh browser context that cannot reach off this
+// machine, the reader loaded with `__mokuroInteropConfig` set before any page script
+// runs, and its rig driver (driver.mjs) once `__mokuroInterop.apiVersion === 1`.
+//
+//   import { test, expect } from '../fixtures.mjs';
+//   test.use({ needs: ['history'] });          // capabilities the spec needs (caps.mjs)
+//   test('…', async ({ reader, rig }) => { await reader.connectWebDAV({ url: rig.bunkoUrl, … }) });
+//
+// Environment (unset when the suite has no such party): READER_URL, BUNKO_URL,
+// CLOUDSIM_URL, CLOUDSIM_PREAUTH_URL, RCLONE_URL, RIG_PROVIDER (local|google|microsoft|
+// mega|rclone), RIG_ACCOUNTS (a JSON file: [{username, password, role}] on the Bunko
+// server), RIG_WORKDIR, RIG_FAKEPROC_HOLD (processor-fake holds each volume until this
+// file exists), and RIG_CONTEXT (JSON: {sim_account, mega?: {email, password},
+// webdav?: {url, username, password}, library: {series, volumes}}).
+import { test as base, expect } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { gateCapabilities, parsePendingCaps } from './caps.mjs';
+import { driver } from './driver.mjs';
+
+export { expect };
+
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+// src/app.html loads these two even in an interop build; the reader installs its gapi
+// REST shim (gapiShim) and takes its Google token from the config instead.
+const EMPTY_SCRIPTS = new Set(['https://apis.google.com/js/api.js', 'https://accounts.google.com/gsi/client']);
+
+const DEFAULT_PENDING = new URL('../../pending-reader-caps.txt', import.meta.url);
+
+/** The parties, read from the environment once per worker. */
+function rigFromEnv() {
+    const env = process.env;
+    const accounts = env.RIG_ACCOUNTS ? JSON.parse(readFileSync(env.RIG_ACCOUNTS, 'utf8')) : [];
+    const context = env.RIG_CONTEXT ? JSON.parse(env.RIG_CONTEXT) : {};
+    return {
+        readerUrl: env.READER_URL,
+        bunkoUrl: env.BUNKO_URL,
+        cloudsimUrl: env.CLOUDSIM_URL,
+        preauthUrl: env.CLOUDSIM_PREAUTH_URL,
+        rcloneUrl: env.RCLONE_URL,
+        provider: env.RIG_PROVIDER,
+        workdir: env.RIG_WORKDIR,
+        fakeprocHold: env.RIG_FAKEPROC_HOLD,
+        accounts,
+        /** The cloud account Bunko and the reader share in cloudsim. */
+        simAccount: context.sim_account ?? 'bunko',
+        mega: context.mega,
+        webdav: context.webdav,
+        library: context.library,
+        /** A Bunko account the rig created, by name. */
+        account(name) {
+            const a = accounts.find((x) => x.username === name);
+            if (!a) throw new Error(`no rig account ${name} (have ${accounts.map((x) => x.username).join(', ')})`);
+            return a;
+        },
+        /** cloudsim's control API (`/_sim/<path>`). */
+        async sim(method, path, body) {
+            if (!env.CLOUDSIM_URL) throw new Error('this suite runs no cloudsim');
+            const r = await fetch(`${env.CLOUDSIM_URL}/_sim/${path}`, {
+                method,
+                headers: body ? { 'content-type': 'application/json' } : {},
+                body: body ? JSON.stringify(body) : undefined,
+            });
+            const text = await r.text();
+            if (!r.ok) throw new Error(`cloudsim ${method} /_sim/${path}: ${r.status} ${text}`);
+            return text ? JSON.parse(text) : null;
+        },
+    };
+}
+
+/** `__mokuroInteropConfig` v1: cloudsim's bases, and a token for the OAuth provider. */
+async function interopConfig(rig) {
+    const config = { v: 1, gapiShim: true };
+    if (!rig.cloudsimUrl) return config;
+    const b = rig.cloudsimUrl;
+    config.bases = {
+        driveApi: `${b}/google`,
+        driveUpload: `${b}/google/upload`,
+        graph: `${b}/graph/v1.0`,
+        megaGateway: `${b}/mega/`,
+    };
+    if (rig.provider === 'google') {
+        const t = await rig.sim('POST', 'token', { provider: 'google', account: rig.simAccount });
+        config.tokens = { google: { access_token: t.access_token, expires_in: t.expires_in } };
+    } else if (rig.provider === 'microsoft') {
+        const t = await rig.sim('POST', 'token', { provider: 'microsoft', account: rig.simAccount });
+        config.tokens = { onedrive: t.access_token };
+    }
+    return config;
+}
+
+export const test = base.extend({
+    /** Capabilities the spec needs from the reader: `test.use({ needs: [...] })`. */
+    needs: [[], { option: true }],
+    /** The pending list (a file URL or path); the self-test points it elsewhere. */
+    pendingCapsFile: [DEFAULT_PENDING, { option: true }],
+    /** The reader's URL (READER_URL). */
+    readerUrl: [process.env.READER_URL ?? '', { option: true }],
+    /** Self-test only: HTML served at readerUrl in place of a reader. */
+    readerStub: [null, { option: true }],
+
+    rig: [async ({}, use) => use(rigFromEnv()), { scope: 'worker' }],
+
+    /** Hosts a request was refused for, in order (each spec's own). */
+    refusedHosts: async ({}, use, testInfo) => {
+        const hosts = [];
+        await use(hosts);
+        if (hosts.length) {
+            testInfo.annotations.push({ type: 'refused-hosts', description: [...new Set(hosts)].join(' ') });
+        }
+    },
+
+    // Playwright's context is already one per test; this one refuses the network.
+    context: async ({ context, rig, readerUrl, readerStub, refusedHosts }, use) => {
+        await context.route('**/*', (route) => {
+            const url = new URL(route.request().url());
+            if (LOCAL_HOSTS.has(url.hostname)) return route.continue();
+            if (EMPTY_SCRIPTS.has(`${url.origin}${url.pathname}`)) {
+                return route.fulfill({ status: 200, contentType: 'text/javascript', body: '' });
+            }
+            refusedHosts.push(url.host);
+            return route.abort('blockedbyclient');
+        });
+        if (readerStub !== null) {
+            // Registered last, so it wins over the catch-all above.
+            await context.route(`${readerUrl}**`, (route) =>
+                route.fulfill({ status: 200, contentType: 'text/html', body: readerStub }),
+            );
+        }
+        const config = await interopConfig(rig);
+        await context.addInitScript((c) => {
+            globalThis.__mokuroInteropConfig = c;
+        }, config);
+        await use(context);
+        // A request cloudsim could not accept is a defect of whoever sent it: it fails
+        // the spec that caused it, and only that one.
+        if (rig.cloudsimUrl) {
+            const violations = await rig.sim('GET', 'violations');
+            if (violations?.length) {
+                await rig.sim('DELETE', 'violations');
+                throw new Error(`cloudsim violations: ${JSON.stringify(violations)}`);
+            }
+        }
+    },
+
+    /** The reader, loaded, its capabilities checked against `needs`. */
+    reader: async ({ page, readerUrl, needs, pendingCapsFile }, use, testInfo) => {
+        if (!readerUrl) throw new Error('READER_URL is not set: run the suite through `cargo xtask interop rig`');
+        // Read first: a broken pending list fails every spec, never skips one.
+        const pending = parsePendingCaps(readFileSync(pendingCapsFile, 'utf8'));
+        await page.goto(readerUrl);
+        try {
+            await page.waitForFunction(() => globalThis.__mokuroInterop !== undefined, null, { timeout: 60_000 });
+        } catch {
+            throw new Error(
+                `no __mokuroInterop at ${readerUrl}: the reader must be a \`vite build --mode interop\` build with the rig driver`,
+            );
+        }
+        const api = await page.evaluate(() => globalThis.__mokuroInterop.apiVersion);
+        if (api !== 1) throw new Error(`the reader's rig driver speaks API v${api}; this rig speaks v1`);
+        const have = await page.evaluate(() => [...globalThis.__mokuroInterop.capabilities]);
+        const gate = gateCapabilities(needs, have, pending);
+        if (gate.action === 'fail') {
+            throw new Error(
+                `the reader lacks capability ${gate.unlisted.join(', ')} (it has: ${have.join(', ') || 'none'}); ` +
+                    'list it in interop/pending-reader-caps.txt only while interop/reader.ref predates it',
+            );
+        }
+        if (gate.action === 'skip') {
+            for (const cap of gate.missing) testInfo.annotations.push({ type: 'pending-reader-cap', description: cap });
+            testInfo.skip(true, `pending reader capability: ${gate.missing.join(', ')}`);
+        }
+        await use(driver(page));
+    },
+});

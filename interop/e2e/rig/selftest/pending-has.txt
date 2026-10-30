@@ -1,0 +1,2 @@
+# Lists a capability the stub reader has (caps.spec.mjs).
+history

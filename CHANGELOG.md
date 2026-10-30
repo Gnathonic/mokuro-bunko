@@ -84,6 +84,13 @@
   test variables, by a build without the hooks). cloudsim now stamps writes on the wall
   clock its `Date` header shows (a lease marker never looked fresh before), and
   `/_sim/mega/account` answers the account's saved session.
+  The browser suites (`dav`, `api`, `bridge`, `direct`, `shared`) build Mokuro Reader
+  with `--mode interop` (from `--reader-dir`, or the commit `interop/reader.ref` pins),
+  serve it, start the parties each suite needs and run its Playwright specs from
+  `interop/e2e/rig/<suite>/`, offline (every request off the machine is refused). A spec
+  that needs a reader capability the reader lacks fails, unless
+  `interop/pending-reader-caps.txt` lists it; `--rclone-bin` uses an installed rclone of
+  the pinned release.
 - **Internal: nightly test builds for Mokuro Reader's CI.** Every push to `main` or
   `0.8/remote-storage`, and every night, publishes a testing server and cloudsim for
   Linux x86_64 as the pre-release `nightly` or `nightly-0.8`, replaced each time. They

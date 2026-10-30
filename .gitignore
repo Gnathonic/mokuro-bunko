@@ -48,3 +48,4 @@ target/
 
 # interop rig (cargo xtask interop)
 /interop/node_modules/
+/interop/test-results/

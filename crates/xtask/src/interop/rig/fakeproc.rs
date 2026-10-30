@@ -68,6 +68,11 @@ impl FakeProcessor {
         })
     }
 
+    /// The file each volume waits on (the specs' `RIG_FAKEPROC_HOLD`).
+    pub fn hold_file(&self) -> &Path {
+        &self.hold_file
+    }
+
     /// Let held volumes go on (and every later one start without waiting).
     #[allow(dead_code)] // the browser scenarios hold a volume mid-OCR (S6)
     pub fn release(&self) -> Result<()> {

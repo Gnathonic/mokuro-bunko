@@ -30,6 +30,12 @@ pub fn parse_listening(line: &str) -> Option<SocketAddr> {
         .ok()
 }
 
+/// The email and password [`Cloudsim::login`] gives `account` (its MEGA sign-in, and
+/// the label of its OAuth sign-ins).
+pub fn mega_credentials(account: &str) -> (String, &'static str) {
+    (format!("{account}@cloudsim.test"), MEGA_PASSWORD)
+}
+
 impl Cloudsim {
     /// Start `bin` on a free port, its log at `dir/cloudsim.log`. OneDrive's
     /// pre-authenticated URLs name `localhost`: another origin than the API's
@@ -198,7 +204,7 @@ impl Cloudsim {
     /// already expired, so the server's first call refreshes it there), or MEGA's
     /// saved session.
     pub fn login(&self, p: Provider, account: &str) -> Result<CloudLogin> {
-        let label = format!("{account}@cloudsim.test");
+        let (label, _) = mega_credentials(account);
         let (backend, credential) = match p {
             Provider::Google | Provider::Microsoft => {
                 let t = self.post(

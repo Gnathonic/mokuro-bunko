@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// The cloud account every party uses.
-const ACCOUNT: &str = "bunko";
+pub const ACCOUNT: &str = "bunko";
 const SERIES: &str = "Series";
 /// The origin rclone allows for the CORS preflight check: any one serves, no browser
 /// runs in this suite.
@@ -27,7 +27,7 @@ const PREFLIGHT_ORIGIN: &str = "http://127.0.0.1:4173";
 /// Short lease timing (`MOKURO_TEST_CLOUD_TUNE`): a handover takes about ttl + ttl/3
 /// instead of 15 minutes (an hour on MEGA). A heartbeat keeps writes open for ttl/2,
 /// so MEGA, at one API command a second, gets a longer ttl than a 4 s heartbeat.
-fn tune(p: Provider) -> String {
+pub fn tune(p: Provider) -> String {
     let ttl = if p == Provider::Mega { 30 } else { 12 };
     format!("lease_ttl_s={ttl},lease_settle_ms=1000,retry_base_ms=200,queue_floor_ms=500")
 }
@@ -135,15 +135,7 @@ impl Rig<'_> {
     fn login(&self) -> Result<CloudLogin> {
         match &self.cloud {
             CloudSide::Sim(s) => s.login(self.p, ACCOUNT),
-            CloudSide::Rclone(r) => {
-                let url = r.url();
-                Ok(CloudLogin {
-                    backend: "webdav",
-                    account_id: format!("{}@{url}", r.user),
-                    credential: json!({"webdav_password": r.password}),
-                    webdav: Some((url, r.user.clone())),
-                })
-            }
+            CloudSide::Rclone(r) => Ok(rclone_login(r)),
         }
     }
 
@@ -258,6 +250,17 @@ fn faults_fired(sim: &Cloudsim, p: Provider, status: u16) -> Result<usize> {
         .count())
 }
 
+/// A server's sign-in to rclone's WebDAV, as a connected server keeps one.
+pub fn rclone_login(r: &Rclone) -> CloudLogin {
+    let url = r.url();
+    CloudLogin {
+        backend: "webdav",
+        account_id: format!("{}@{url}", r.user),
+        credential: json!({"webdav_password": r.password}),
+        webdav: Some((url, r.user.clone())),
+    }
+}
+
 type Step = fn(&mut Rig) -> Result<Option<String>>;
 
 /// `(name, step)`: a step answers `Ok(None)` (passed), `Ok(Some(why))` (skipped) or
@@ -288,6 +291,7 @@ pub fn run(paths: &Paths, p: Provider, work: &Path, grep: Option<&str>, report: 
                     outcome: Outcome::Failed,
                     ms: start.elapsed().as_millis() as u64,
                     detail: Some(detail.clone()),
+                    capability: None,
                 });
             }
             return;
@@ -321,6 +325,7 @@ pub fn run(paths: &Paths, p: Provider, work: &Path, grep: Option<&str>, report: 
             outcome,
             ms: t.elapsed().as_millis() as u64,
             detail,
+            capability: None,
         });
     }
 }
@@ -350,7 +355,7 @@ fn setup<'a>(paths: &'a Paths, p: Provider, work: &Path) -> Result<Rig<'a>> {
         }))?,
     ));
     let cloud = if p == Provider::Rclone {
-        let bin = rclone::install(&paths.tools)?;
+        let bin = rclone::binary(paths.rclone_bin.as_deref(), &paths.tools)?;
         // Bunko sends no Origin; the allowed one is for the preflight check, which the
         // browser suites rely on (the reader's own WebDAV client sends Authorization).
         let r = Rclone::start(

@@ -4,7 +4,11 @@
   "description": "Browser scenarios for `cargo xtask interop` (docs/design/interop-testing.md).",
   "type": "module",
   "license": "MPL-2.0",
+  "scripts": {
+    "selftest": "node --test e2e/rig/ && playwright test --config e2e/rig/playwright.config.mjs selftest/"
+  },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "playwright": "1.62.1"
   }
 }
