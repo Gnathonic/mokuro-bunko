@@ -341,7 +341,11 @@ recorded while it ran (those recorded before it started fail on their own, as
 `cloudsim violations before <spec>`); and gate capabilities: a spec declares `test.use({ needs: [...] })`, and a
 capability the driver does not list FAILS the spec unless `interop/pending-reader-caps.txt`
 lists it (one per line, `#` comments), in which case the spec is skipped and reported
-with that capability. `npm run selftest` in `interop/` checks the gate, the route and the
+with that capability. Each of `dav/`, `bridge/` and `direct/` starts with a
+`smoke.spec.mjs` that connects and lists the seeded library, the harness end to end: a
+Basic sign-in to the server (on its own disk, or on the cloud holding its lease), or the
+reader alone, signed in with the config's Drive or OneDrive token, cloudsim's MEGA
+account or rclone's WebDAV. `npm run selftest` in `interop/` checks the gate, the route and the
 resolver against a stub page, no reader needed, and fails if any spec but the one meant
 to skip is skipped. Results: `target/interop/rig/<suite>-<provider>.json`
 carries `suite`, `provider`, `bunko_sha`, `reader_sha` (`-dirty` for a changed
