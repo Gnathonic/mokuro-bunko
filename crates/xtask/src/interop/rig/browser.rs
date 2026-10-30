@@ -102,6 +102,48 @@ fn library_files() -> Result<Vec<(String, Vec<u8>)>> {
     Ok(files)
 }
 
+/// Archives a suite's specs import into the reader and upload themselves
+/// (`RIG_CONTEXT.uploads`), `(path below the library folder, bytes)`: the `shared`
+/// suite's OCR round trip (`Vol 3`), and one new series for each of its
+/// `series.json`/`catalog.json` checks, so a reader that writes them has something new
+/// to say.
+fn upload_files(suite: Suite) -> Result<Vec<(String, Vec<u8>)>> {
+    if suite != Suite::Shared {
+        return Ok(Vec::new());
+    }
+    [
+        format!("{LIBRARY_SERIES}/Vol 3.cbz"),
+        "Rig Fresh/Vol 1.cbz".to_string(),
+        "Rig Resumed/Vol 1.cbz".to_string(),
+        "Rig Released/Vol 1.cbz".to_string(),
+    ]
+    .into_iter()
+    .map(|rel| {
+        Ok((
+            rel.clone(),
+            genlib::cbz_bytes(&format!("rig upload {rel}"))?,
+        ))
+    })
+    .collect()
+}
+
+/// The `shared` suite's lease ttl: twice it covers the reader's 60 s between marker
+/// reads with a heartbeat (every ttl / 3) to spare.
+const SHARED_LEASE_TTL_S: u64 = 45;
+
+/// The store tune of a suite's Bunko on the cloud. The `shared` reader judges Bunko's
+/// marker itself: it re-reads it every 60 s and calls one unchanged for 2 x ttl stale,
+/// so a ttl under that would read as Bunko gone between two of its heartbeats.
+fn lease_tune(suite: Suite, p: Provider) -> String {
+    let tune = cloud::tune(p);
+    if suite != Suite::Shared {
+        return tune;
+    }
+    let over = json!({"lease_ttl_s": SHARED_LEASE_TTL_S});
+    control::merge_tune(&tune, over.as_object().expect("an object"))
+        .expect("a number merges into a tune")
+}
+
 /// The running parties; dropped (stopped) control port and processor first, cloud last.
 struct Running {
     /// Holds the server too: dropped (its thread joined) before it.
@@ -127,6 +169,17 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
         "sim_account": ACCOUNT,
         "library": {"series": LIBRARY_SERIES, "volumes": LIBRARY_VOLUMES},
     });
+    let uploads = upload_files(suite)?;
+    if !uploads.is_empty() {
+        let dir = work.join("uploads");
+        for (rel, bytes) in &uploads {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().context("an upload path")?)?;
+            std::fs::write(&path, bytes)?;
+        }
+        let names: Vec<&str> = uploads.iter().map(|(rel, _)| rel.as_str()).collect();
+        context["uploads"] = json!({"dir": dir, "files": names});
+    }
     let (mut sim, mut rc) = (None, None);
     if want.cloud {
         if p == Provider::Rclone {
@@ -179,7 +232,7 @@ fn setup(paths: &Paths, suite: Suite, p: Provider, work: &Path, reader: &str) ->
         };
         let mut env = Vec::new();
         if on == BunkoOn::Cloud {
-            let tune = cloud::tune(p);
+            let tune = lease_tune(suite, p);
             // A spec that holds a claim open (`restartBunko`) keeps its settle wait under
             // this: a claimant writes no heartbeat while it settles.
             context["lease"] = json!({"ttl_s": control::tune_value(&tune, "lease_ttl_s")});
@@ -406,6 +459,45 @@ mod tests {
         assert!(rows[1..].iter().all(|r| r["password"] == SEED_PASSWORD));
         // No server (direct): no admin.
         assert_eq!(accounts(None).as_array().unwrap().len(), USERS.len());
+    }
+
+    #[test]
+    fn the_shared_suite_holds_its_lease_past_the_readers_marker_polls() {
+        for p in [
+            Provider::Google,
+            Provider::Microsoft,
+            Provider::Mega,
+            Provider::Rclone,
+        ] {
+            let ttl = control::tune_value(&lease_tune(Suite::Shared, p), "lease_ttl_s").unwrap();
+            // The reader re-reads a cloud marker every 60 s and calls one unchanged for
+            // 2 x ttl stale; a heartbeat comes every ttl / 3.
+            assert!(2 * ttl > 60 + ttl / 3 + 5, "{p:?}: ttl {ttl}");
+            assert_eq!(lease_tune(Suite::Bridge, p), cloud::tune(p));
+        }
+    }
+
+    #[test]
+    fn the_shared_suite_gets_archives_of_its_own_to_upload() {
+        let uploads = upload_files(Suite::Shared).unwrap();
+        let names: Vec<&str> = uploads.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Rig Series/Vol 3.cbz",
+                "Rig Fresh/Vol 1.cbz",
+                "Rig Resumed/Vol 1.cbz",
+                "Rig Released/Vol 1.cbz"
+            ]
+        );
+        let library = library_files().unwrap();
+        for (i, (_, bytes)) in uploads.iter().enumerate() {
+            assert!(library.iter().all(|(_, b)| b != bytes));
+            assert!(uploads[i + 1..].iter().all(|(_, b)| b != bytes));
+        }
+        for suite in [Suite::Dav, Suite::Api, Suite::Bridge, Suite::Direct] {
+            assert!(upload_files(suite).unwrap().is_empty(), "{suite:?}");
+        }
     }
 
     #[test]

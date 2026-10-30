@@ -325,10 +325,13 @@ browser context each) get READER_URL, BUNKO_URL, CLOUDSIM_URL, CLOUDSIM_PREAUTH_
 RCLONE_URL, RIG_PROVIDER, RIG_ACCOUNTS, RIG_WORKDIR and RIG_FAKEPROC_HOLD as C6 lists
 them (unset when the suite has no such party), plus `RIG_CONTEXT` (JSON: the shared
 cloud account, its MEGA or WebDAV sign-in, the seeded library, and a cloud server's
-lease ttl) and, with a Bunko server, `RIG_CONTROL_URL`: the runner's control port
-(`rig/control.rs`), whose `POST /bunko/restart {stale?, tune?}` stops the suite's server
-and starts it again on the same data (`rig.restartBunko` in the fixtures), answering
-once it serves HTTP. `stale` stays down until the marker it last wrote is past its ttl,
+lease ttl; for `shared`, `uploads`: archives the rig made for the specs to import and
+upload, `rig.upload(rel)`) and, with a Bunko server, `RIG_CONTROL_URL`: the runner's
+control port (`rig/control.rs`), whose `POST /bunko/restart {stale?, tune?}` stops the
+suite's server and starts it again on the same data (`rig.restartBunko` in the
+fixtures), answering once it serves HTTP; `POST /bunko/stop` leaves it down (SIGINT: no
+`released`, its marker just stops moving) and `POST /bunko/start` starts it again
+(`rig.stopBunko`, `rig.startBunko`). `stale` stays down until the marker it last wrote is past its ttl,
 so it claims the library afresh; `tune` sets `MOKURO_TEST_CLOUD_TUNE` keys for that
 process over the suite's own, and a `lease_settle_ms` not under the ttl is refused (a
 claimant writes no heartbeat while it settles, so it would find its own marker stale
@@ -454,6 +457,39 @@ Bunko's disk.
   plain restart reaches `held` with the same epoch and never a settle wait
   (`claiming_left_s`); the reader's next sync and Publish land with no 503, on the bearer
   token it had before, with no request to `/login/`.
+
+**As built (I3, `shared`, on google, microsoft, mega and rclone).** The reader signs in
+to the cloud directly (as `direct` does) while the suite's Bunko holds the same
+library's lease, with a 45 s ttl (`browser.rs` `lease_tune`): the reader re-reads a
+cloud marker every 60 s and calls one that has not moved for 2 × ttl stale, so the
+rig's usual 12 s would read as Bunko gone between two looks. The specs keep the
+reader looking (the tab hidden and shown, which makes its queue poller look at once)
+and first wait until it has SEEN the marker move (`bunkoSeenAlive`): until then a reader
+judges the marker by Bunko's own clock (ttl + 5 min). Who wrote a file is read off the
+browser's own requests (`recordReaderWrites`, `shared/shared.mjs`), never off the cloud,
+which Bunko writes too: WebDAV paths and MOVE destinations, Graph's `<name>:/content`
+and upload sessions, Drive's metadata and the ids its writes answer, and the node handles
+MEGA's `p` answers (its names are encrypted on the wire), looked up in `/_sim/tree`; a
+file's contents come from `/_sim/content` (rclone: its served directory). The reader
+imports and uploads with the driver's `importVolume` and `backupVolume` (the card's
+Backup, to the end of its run, metadata writes included).
+- `shared/ocr`: an image-only `Vol 3` the reader uploaded is queued by Bunko; the card
+  shows the job from the holder's `.mokuro-queue.json`; once processor-fake lets go the
+  queue file lists it in `done[]`, Bunko's sidecar is beside the archive and the
+  volume's OCR is on the device.
+- `shared/edits`: an edit goes up as `Vol 1.edit.mokuro` (an `edited` block, no
+  `ocr_engine`); the reader writes no `Vol 1.mokuro`, through two more syncs, and the
+  main is byte for byte as it was.
+- `shared/writes` (serial, last: it ends with the library disconnected): while the
+  marker is fresh, a new series' upload writes neither `series.json` nor `catalog.json`
+  (Bunko compiles both); Bunko stopped, the reader's verdict turns 2 × ttl after its
+  last heartbeat (measured 88–89 s of a 90 s 2 × ttl, a heartbeat at most ttl / 3 before
+  the stop) and the next upload writes both; the Storage panel's Disconnect writes
+  `released` and the reader takes the files back at its next look (within about a second).
+- cloudsim fidelity the suite needed: MEGA keeps a session (and its `sek`) per sign-in
+  (one session for the whole account had a resumed Bunko decrypt nothing after the
+  reader signed in, and hold on a "root change"), and models the thumbnail attribute
+  megajs puts on an uploaded cover (`ufa`, `pfa`).
 
 The generated sidecar (`genlib::mokuro_doc`) carries `title_uuid`: the reader's import
 refuses a `.mokuro` without it, so no download of a rig volume with OCR could install.

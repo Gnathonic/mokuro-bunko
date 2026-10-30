@@ -13,10 +13,12 @@
 // mega|rclone), RIG_ACCOUNTS (a JSON file: [{username, password, role}] on the Bunko
 // server), RIG_WORKDIR, RIG_FAKEPROC_HOLD (processor-fake holds each volume until this
 // file exists), RIG_CONTEXT (JSON: {sim_account, mega?: {email, password},
-// webdav?: {url, username, password}, library: {series, volumes}}) and RIG_CONTROL_URL
-// (the runner's control port, with a Bunko server: `rig.restartBunko`).
+// webdav?: {url, username, password}, library: {series, volumes}, lease?: {ttl_s},
+// uploads?: {dir, files}}) and RIG_CONTROL_URL (the runner's control port, with a Bunko
+// server: `rig.restartBunko`, `rig.stopBunko`, `rig.startBunko`).
 import { test as base, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { gateCapabilities, parsePendingCaps } from './caps.mjs';
 import { driver } from './driver.mjs';
 import { STUBBED_SCRIPTS, refusedError, routeFor } from './egress.mjs';
@@ -29,6 +31,18 @@ const DEFAULT_PENDING = new URL('../../pending-reader-caps.txt', import.meta.url
 /** The parties, read from the environment once per worker. */
 function rigFromEnv() {
     const env = process.env;
+    /** `POST /bunko/<action>` on the runner's control port (control.rs). */
+    async function control(action, body) {
+        if (!env.RIG_CONTROL_URL) throw new Error('RIG_CONTROL_URL is not set: this suite runs no Bunko server');
+        const r = await fetch(`${env.RIG_CONTROL_URL}/bunko/${action}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const answer = await r.json().catch(() => null);
+        if (!r.ok) throw new Error(`${action} Bunko: ${r.status} ${answer?.error ?? ''}`);
+        return answer;
+    }
     const accounts = env.RIG_ACCOUNTS ? JSON.parse(readFileSync(env.RIG_ACCOUNTS, 'utf8')) : [];
     const context = env.RIG_CONTEXT ? JSON.parse(env.RIG_CONTEXT) : {};
     return {
@@ -48,6 +62,16 @@ function rigFromEnv() {
         library: context.library,
         /** A Bunko server on the cloud: its lease timing (`{ttl_s}`, the store tune). */
         lease: context.lease,
+        /**
+         * An archive the rig made for the spec to import and upload (`uploads.files`:
+         * `<Series>/<Volume>.cbz`), as the driver's `importVolume` takes it.
+         */
+        upload(rel) {
+            if (!context.uploads?.files?.includes(rel)) {
+                throw new Error(`no rig upload ${rel} (have ${context.uploads?.files?.join(', ') || 'none'})`);
+            }
+            return { path: rel, base64: readFileSync(path.join(context.uploads.dir, rel)).toString('base64') };
+        },
         /** A Bunko account the rig created, by name. */
         account(name) {
             const a = accounts.find((x) => x.username === name);
@@ -61,17 +85,14 @@ function rigFromEnv() {
          * until its lease marker is past its ttl, so it claims the library afresh;
          * `{tune: {lease_settle_ms: n}}` sets store tune keys for the new process.
          */
-        async restartBunko(options = {}) {
-            if (!env.RIG_CONTROL_URL) throw new Error('RIG_CONTROL_URL is not set: this suite runs no Bunko server');
-            const r = await fetch(`${env.RIG_CONTROL_URL}/bunko/restart`, {
-                method: 'POST',
-                headers: { 'content-type': 'application/json' },
-                body: JSON.stringify(options),
-            });
-            const answer = await r.json().catch(() => null);
-            if (!r.ok) throw new Error(`restarting Bunko: ${r.status} ${answer?.error ?? ''}`);
-            return answer;
-        },
+        restartBunko: (options = {}) => control('restart', options),
+        /**
+         * Stop the suite's Bunko server and leave it down (SIGINT: it writes no
+         * `released`, its marker just stops moving); resolves with `{stopped_at_ms}`.
+         * `startBunko()` starts it again on the suite's own tune, once it serves HTTP.
+         */
+        stopBunko: () => control('stop', {}),
+        startBunko: () => control('start', {}),
         /** cloudsim's control API (`/_sim/<path>`). */
         async sim(method, path, body) {
             if (!env.CLOUDSIM_URL) throw new Error('this suite runs no cloudsim');

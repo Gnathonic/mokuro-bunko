@@ -92,8 +92,10 @@
   fails the spec that made it, and the browser resolves no host but the loopback ones).
   A spec that needs a reader capability the reader lacks fails, unless
   `interop/pending-reader-caps.txt` lists it; `--rclone-bin` uses an installed rclone
-  of the pinned release. A spec can restart the suite's server through the runner's
-  control port (`RIG_CONTROL_URL`), to meet a lease claim or a resume.
+  of the pinned release. A spec can restart, stop and start the suite's server through
+  the runner's control port (`RIG_CONTROL_URL`), to meet a lease claim, a resume or a
+  holder gone. cloudsim answers a file's stored bytes (`GET /_sim/content`), keeps a
+  MEGA session per sign-in, and takes the thumbnail attribute megajs puts on an upload.
 - **Internal: nightly test builds for Mokuro Reader's CI.** Every push to `main` or
   `0.8/remote-storage`, and every night, publishes a testing server and cloudsim for
   Linux x86_64 as the pre-release `nightly` or `nightly-0.8`, replaced each time. They

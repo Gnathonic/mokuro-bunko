@@ -68,5 +68,16 @@ export function driver(page) {
         pendingOcr: m('pendingOcr'),
         /** Resolves once no sync and no cloud listing is in flight (the app's own, too). */
         idle: m('idle'),
+        /**
+         * ({path, base64}) → {id}: the upload modal's import of `<Series>/<Volume>.cbz`
+         * (`rig.upload(rel)` gives both), an image-only archive's review answered
+         * keeping its names; resolves once the volume is installed.
+         */
+        importVolume: m('importVolume'),
+        /**
+         * (volumeId) → {cloudPath, error?}: the card's Backup, to the end of its run
+         * (the upload, then the run's listing and its series.json/catalog.json writes).
+         */
+        backupVolume: m('backupVolume'),
     };
 }

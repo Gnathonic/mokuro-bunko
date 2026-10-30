@@ -76,6 +76,19 @@ export function bunko(rig) {
             if (!r.ok) throw new Error(`the storage panel: ${r.status} ${await r.text()}`);
             return r.json();
         },
+        /**
+         * The Storage panel's Disconnect (`/_admin/api/storage/disconnect`): the outbox
+         * drained (`wait`, up to `wait_s`), `released` written into the lease marker, the
+         * cloud's credentials removed; the server then restarts on no cloud. The report.
+         */
+        async disconnectStorage(body = { mode: 'wait', wait_s: 60 }) {
+            const r = await request('POST', '/_admin/api/storage/disconnect', {
+                auth: basic(admin.username, admin.password),
+                body,
+            });
+            if (!r.ok) throw new Error(`disconnecting the library: ${r.status} ${await r.text()}`);
+            return r.json();
+        },
         /** A file's bytes as `auth` reads them (status, bytes); 404 is an answer, not an error. */
         async bytes(path, auth) {
             const r = await request('GET', path, { auth });
