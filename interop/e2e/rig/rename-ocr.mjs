@@ -22,7 +22,7 @@
 import { existsSync, readdirSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { basic, bunko, davPath } from './bunko.mjs';
-import { cloudFiles } from './cloud-direct.mjs';
+import { LIBRARY_FOLDER, cloudFiles } from './cloud-direct.mjs';
 import { bunkoSeenAlive, cloudJson, connect as connectCloud, tabAwayAndBack } from './shared/shared.mjs';
 
 const PASSWORD = 'rig-rename-1';
@@ -94,17 +94,21 @@ function filesBelow(dir, rel = '') {
  * Where the library is, as a spec reads it behind the reader's back: Bunko's own disk
  * (`inCloud: false`), or the cloud it keeps the library in.
  */
-function librarySide(rig, inCloud) {
+export function librarySide(rig, inCloud) {
     const disk = path.join(rig.workdir, 'bunko', 'library');
+    // rclone serves a directory of this machine: the library is on a disk there too.
+    const rcloneDisk = path.join(rig.workdir, 'rclone-root', LIBRARY_FOLDER);
+    const onDisk = !inCloud ? disk : rig.provider === 'rclone' ? rcloneDisk : null;
     // Bunko sweeps a numbered sidecar it can prove is its own off the disk: every name
     // the disk had while the spec ran is watched for, not just read at the end.
+    // cloudsim keeps every node, trashed ones included, so it needs no watch.
     const seen = new Set();
     let watcher = null;
     return {
         /** From now on, every name the library's disk has is remembered (`everNames`). */
         watch() {
-            if (inCloud || watcher) return;
-            watcher = watch(disk, { recursive: true }, (_event, name) => {
+            if (!onDisk || watcher) return;
+            watcher = watch(onDisk, { recursive: true }, (_event, name) => {
                 if (name) seen.add(String(name).split('/').pop());
             });
         },
@@ -118,13 +122,12 @@ function librarySide(rig, inCloud) {
             return (await cloudFiles(rig)).map((f) => f.path);
         },
         /**
-         * The name of every file the library has held: on the disk, what is there now and
-         * what it had while watched; in cloudsim, every node it ever kept, the trashed
-         * ones too.
+         * The name of every file the library has held: on a disk (Bunko's, rclone's),
+         * what is there now and what it had while watched; in cloudsim, every node it
+         * ever kept, the trashed ones too.
          */
         async everNames() {
-            if (!inCloud) return [...new Set([...filesBelow(disk).map((r) => r.split('/').pop()), ...seen])];
-            if (rig.provider === 'rclone') return (await cloudFiles(rig)).map((f) => f.path.split('/').pop());
+            if (onDisk) return [...new Set([...filesBelow(onDisk).map((r) => r.split('/').pop()), ...seen])];
             const rows = await rig.sim(
                 'GET',
                 `tree?provider=${rig.provider}&account=${encodeURIComponent(rig.simAccount)}&include_trashed=1`,
