@@ -8,7 +8,11 @@
       "permissions.canAddFiles",
       "permissions.canModifyDelete",
       "permissions.metadata.scope",
-      "permissions.metadata.ownedSeries"
+      "permissions.metadata.ownedSeries",
+      "permissions.curated.scope",
+      "per_user_files",
+      "per_user_layers",
+      "version"
     ],
     "status": [
       200
