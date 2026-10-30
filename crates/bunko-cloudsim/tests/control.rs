@@ -267,6 +267,42 @@ async fn the_log_records_classes_units_and_bytes() {
     assert_eq!(get(&sim.base, "log").await, json!([]));
 }
 
+/// Clearing the violations answers the ones it cleared: one call, so a violation a
+/// client commits between a read and a clear is never wiped unseen.
+#[tokio::test]
+async fn clearing_the_violations_answers_what_it_cleared() {
+    let sim = bunko_cloudsim::start().await;
+    let t = token(&sim.base, "google", "alice").await;
+    for q in ["fullText contains 'x'", "fullText contains 'y'"] {
+        http()
+            .get(format!("{}/drive/v3/files", sim.drive_api_base()))
+            .bearer_auth(&t)
+            .query(&[("q", q)])
+            .send()
+            .await
+            .unwrap();
+    }
+    let r = http()
+        .delete(format!("{}/_sim/violations", sim.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let taken: Vec<String> = r.json().await.unwrap();
+    assert_eq!(taken.len(), 2, "{taken:?}");
+    assert!(
+        taken[0].contains("'x'") && taken[1].contains("'y'"),
+        "{taken:?}"
+    );
+    assert_eq!(get(&sim.base, "violations").await, json!([]));
+    let r = http()
+        .delete(format!("{}/_sim/violations", sim.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.json::<Value>().await.unwrap(), json!([]));
+}
+
 #[tokio::test]
 async fn reset_empties_everything() {
     let sim = bunko_cloudsim::start().await;

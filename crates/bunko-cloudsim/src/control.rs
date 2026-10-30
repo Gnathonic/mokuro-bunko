@@ -340,9 +340,10 @@ async fn violations(State(sim): State<SimState>) -> Response {
     Json(sim.violations()).into_response()
 }
 
+/// Answers what it cleared: reading and clearing in two calls would wipe, unseen, a
+/// violation recorded between them.
 async fn clear_violations(State(sim): State<SimState>) -> Response {
-    sim.take_violations();
-    StatusCode::NO_CONTENT.into_response()
+    Json(sim.take_violations()).into_response()
 }
 
 async fn reset(State(sim): State<SimState>, _b: Bytes) -> Response {
