@@ -769,6 +769,16 @@ impl Inner {
                                     .iter()
                                     .map(|x| ChangeItem::Removed { pid: hstr(x) }),
                             );
+                        } else if f.kind == NodeKind::Folder
+                            && m.root_name.is_some()
+                            && !m.trashed_from(parent, &overlay)
+                            && let Ok(Some(n)) = session.decrypt_node(f)
+                            && Some(n.name.as_str()) == m.root_name.as_deref()
+                        {
+                            // A folder named like the root outside the library: another
+                            // device's own root, or one moved here. Reported (not
+                            // mirrored) so the store locates the roots again.
+                            items.push(ChangeItem::Upsert(to_rnode(&n, parent, false)));
                         }
                     } else {
                         match session.decrypt_node(f) {

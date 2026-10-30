@@ -338,6 +338,12 @@
   other failures as errors); before, a failed upload left no trace in the log.
 - `library connect --create` no longer asks "Create it?" before creating the folder; it
   prints "Creating mokuro-reader/…".
+- **A `mokuro-reader` folder another device makes while Bunko runs is merged too.** In
+  a Google Drive or MEGA library, a second `mokuro-reader` folder that appeared while
+  Bunko ran went unseen until Bunko restarted: what readers wrote into it stayed out of
+  the library, and a reader that leaves the merging to Bunko never merged it either.
+  Bunko now takes such a folder in at once (one inside another folder too) and merges
+  it like any other duplicate, the library moving into it when it is the older one.
 
 ## [0.7.3] - 2026-10-12
 

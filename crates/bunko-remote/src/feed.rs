@@ -1933,10 +1933,15 @@ impl<B: Backend> Engine<B> {
         let in_window: u64 = self.window.iter().map(|(_, n)| n).sum();
         let mut out = Vec::new();
         let mut root_changed = false;
+        // A folder named like the root outside the tree: another device's own root
+        // (a duplicate to merge), or one the user moved there. LOCATE_ROOTS takes it
+        // in, as it would have at startup.
+        let mut root_found = false;
         let (stashed, counted) = {
             let core = &self.core;
             let idx = core.index.lock();
             let roots: HashSet<Pid> = idx.roots().into_iter().collect();
+            let nested: HashSet<Pid> = idx.nested_roots().into_iter().collect();
             let generation = idx.generation();
             let tx = idx.begin()?;
             let mut deletes: Vec<Pid> = Vec::new();
@@ -1967,6 +1972,16 @@ impl<B: Backend> Engine<B> {
                     ChangeItem::Removed { pid } => deletes.push(pid.clone()),
                     ChangeItem::Upsert(n) if n.trashed => deletes.push(n.pid.clone()),
                     ChangeItem::Upsert(n) => {
+                        if n.is_dir
+                            && !nested.contains(&n.pid)
+                            && nfc(&n.name_raw) == core.cfg.folder
+                            && n.parent
+                                .as_deref()
+                                .and_then(|p| idx.entry_by_pid(p))
+                                .is_none()
+                        {
+                            root_found = true;
+                        }
                         self.stash.remove(&n.pid);
                         core.apply_upsert(&idx, &tx, n, generation, &mut out)?;
                     }
@@ -2027,7 +2042,7 @@ impl<B: Backend> Engine<B> {
         }
         self.core.emit(&out);
         self.core.drain_hooks();
-        if root_changed {
+        if root_changed || root_found {
             self.phase = Phase::Locate;
         }
         Ok(())

@@ -394,6 +394,44 @@ fn five_duplicate_roots_merge_into_the_canonical_top_level_root() {
 }
 
 #[test]
+fn a_duplicate_root_made_while_running_is_found_and_merged() {
+    // Another device's own root, made while the store runs: younger than ours, and
+    // older (its clock behind ours), where the canonical root changes under the store.
+    for older in [false, true] {
+        for (name, make) in dup_profiles() {
+            let name = format!("{name}, older: {older}");
+            let f = make();
+            let a = top_root(&f);
+            let sa = mkdir(&f, &a, "S");
+            put(&f, &sa, "a.cbz", b"a");
+            let t = T::new(f);
+            t.steady();
+            t.policy();
+            let b = top_root(&t.fake);
+            if older {
+                t.fake.set_times(&b, 1, 1);
+            }
+            let sb = mkdir(&t.fake, &b, "S");
+            put(&t.fake, &sb, "b.cbz", b"b");
+            let (keep, gone) = if older { (&b, &a) } else { (&a, &b) };
+            t.sync_feed();
+            wait_until(&format!("{name}: one root, one S"), || {
+                t.top_roots() == [keep.clone()]
+                    && t.kids(keep).len() == 1
+                    && t.names(&t.dir(keep, "S")) == ["a.cbz", "b.cbz"]
+            });
+            assert!(t.fake.trashed_log().contains(gone), "{name}");
+            assert!(t.fake.deleted_log().is_empty(), "{name}");
+            wait_until(&format!("{name}: both volumes in the library"), || {
+                fs::is_file(t.abs("S/a.cbz")) && fs::is_file(t.abs("S/b.cbz"))
+            });
+            t.sync_feed();
+            t.never_suspect();
+        }
+    }
+}
+
+#[test]
 fn series_folders_merge_level_by_level() {
     let f = FakeBackend::drive_like();
     let a = top_root(&f);

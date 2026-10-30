@@ -309,6 +309,37 @@ async fn feed_reports_reader_changes() {
     assert_eq!(e.be.changes(&old).await.unwrap(), ChangePage::CursorLost);
 }
 
+/// A folder named like the root made outside the library (another device's own root,
+/// or one inside another folder) is reported, so the store can take it in; nothing else
+/// outside is, nor such a folder in the rubbish bin or under another spelling.
+#[tokio::test]
+async fn feed_reports_a_new_root_made_outside_the_library() {
+    let e = env().await;
+    e.be.locate_roots("mokuro-reader").await.unwrap();
+    let mut c = e.be.start_cursor().await.unwrap();
+    all(&e.be, std::slice::from_ref(&e.root)).await;
+    assert!(drain(&e.be, &mut c).await.is_empty());
+
+    let top = e.mock.mkdir(ROOT, "mokuro-reader");
+    let backup = e.mock.mkdir(ROOT, "Backup");
+    let nested = e.mock.mkdir(&backup, "mokuro-reader");
+    e.mock.mkdir(RUBBISH, "mokuro-reader");
+    e.mock.mkdir(ROOT, "MOKURO-READER");
+    let items = drain(&e.be, &mut c).await;
+    let upserts: Vec<(String, Option<String>)> = items
+        .iter()
+        .filter_map(|i| match i {
+            ChangeItem::Upsert(n) => Some((n.pid.clone(), n.parent.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        upserts,
+        [(top, Some(ROOT.to_string())), (nested, Some(backup))],
+        "{items:?}"
+    );
+}
+
 #[tokio::test]
 async fn wait_change_long_polls() {
     let e = env().await;
