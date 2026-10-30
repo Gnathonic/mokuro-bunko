@@ -1266,6 +1266,58 @@ async fn a_merge_while_stopped_drops_the_vacated_root_at_restart() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_merge_while_stopped_into_a_new_older_root_is_no_root_change() {
+    // Another device's own root, older than ours, appeared while Bunko was down, and
+    // a reader merged ours into it: every root Bunko knew is gone, its files all in the
+    // new one (S9, C2-R5).
+    for make in [FakeBackend::drive_like, FakeBackend::mega_like] {
+        let f = Arc::new(make());
+        seed(
+            &f,
+            &["S/v1.cbz", "S/v1.mokuro", "T/v2.cbz", "volume-data.json"],
+        );
+        let made = f.node_at("mokuro-reader").unwrap().created_ms;
+        let r = rig_with(f.clone(), config(), None);
+        r.steady().await;
+        let Rig { dir, feed, .. } = r;
+        feed.shutdown().await;
+        let theirs = f.reader_mkdir_in(&f.account_root(), "mokuro-reader").pid;
+        f.set_times(&theirs, made - 1000, made - 1000);
+        f.reader_put_in(&theirs, "volume-data.json", b"{}");
+        assert_eq!(f.run_reader_dedup(), 1);
+        assert_eq!(
+            f.node_at("mokuro-reader").unwrap().pid,
+            theirs,
+            "ours merged away"
+        );
+        assert!(f.node_at("mokuro-reader/S/v1.cbz").is_some());
+
+        let mut r = rig_with(f.clone(), config(), Some(dir));
+        let states = r.record_states();
+        r.steady().await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        never_suspect(&states);
+        assert_eq!(r.index.lock().roots(), std::slice::from_ref(&theirs));
+        for p in [
+            "S",
+            "S/v1.cbz",
+            "S/v1.mokuro",
+            "T",
+            "T/v2.cbz",
+            "volume-data.json",
+        ] {
+            assert!(r.has(p), "{p}");
+        }
+        let evs = r.drain();
+        assert_eq!(
+            removed_any(&evs, &["S/v1.cbz", "S/v1.mokuro", "T/v2.cbz"]),
+            [],
+            "{evs:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_root_trashed_while_stopped_with_a_unique_child_holds_at_restart() {
     let f = Arc::new(FakeBackend::drive_like());
     let w = twins(&f);

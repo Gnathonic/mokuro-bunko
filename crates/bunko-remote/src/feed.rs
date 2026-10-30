@@ -1491,11 +1491,23 @@ impl<B: Backend> Engine<B> {
         };
         // A root gone while Bunko was stopped may be a duplicate the reader merged
         // away: then the others hold everything it did, and it is not a root change.
+        // The others are every root there is now, a new one included: the reader
+        // merges into the oldest, which may be another device's root Bunko never saw.
+        let holders: Vec<Pid> = survivors
+            .iter()
+            .cloned()
+            .chain(
+                found
+                    .iter()
+                    .map(|f| f.pid.clone())
+                    .filter(|p| !known.contains(p)),
+            )
+            .collect();
         let vacated = moved.is_empty()
             && !missing.is_empty()
-            && !survivors.is_empty()
+            && !holders.is_empty()
             && !self.confirmed
-            && match self.vacated_by_listing(&missing, &survivors).await {
+            && match self.vacated_by_listing(&missing, &holders).await {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::info!("feed: checking the remaining roots: {e}");

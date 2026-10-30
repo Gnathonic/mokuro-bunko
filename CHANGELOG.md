@@ -344,6 +344,11 @@
   the library, and a reader that leaves the merging to Bunko never merged it either.
   Bunko now takes such a folder in at once (one inside another folder too) and merges
   it like any other duplicate, the library moving into it when it is the older one.
+- **A merge a reader made while Bunko was stopped no longer pauses the library.** When
+  the reader merged the library into another device's older `mokuro-reader` folder,
+  one Bunko had never seen, Bunko restarted as if its folder had been removed and held
+  the library for the admin. It now checks the folder the reader kept, and when
+  everything its own held is there, drops its emptied folder quietly.
 
 ## [0.7.3] - 2026-10-12
 
