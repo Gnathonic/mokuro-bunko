@@ -347,7 +347,10 @@ build output's file list, so another build in the same checkout forces a rebuild
 served once per run by `vite preview --mode interop --host 127.0.0.1 --port P
 --strictPort`, P picked by the rig before rclone starts (rclone's CORS origin names it);
 `node` runs the checkout's own vite directly, in the rig's process group, so Ctrl-C stops
-it with every other party.
+it with every other party. It is ready once P serves this build's
+`/_app/version.json` (SvelteKit's per-build stamp, compared byte for byte with the
+build output's) while vite still runs: P is released before vite binds it, and any
+200 would also take another run's preview of another reader that got the port first.
 Each suite and provider then gets its own parties: `dav` and `api` a server on a local
 library; `bridge` and `shared` a server on the cloud (cloudsim or rclone) holding its
 lease; `direct` the cloud alone. Every server has the accounts `alice` (editor), `bob`
@@ -380,7 +383,9 @@ resolving no host but `127.0.0.1`, `localhost` and `::1` (IP literals included),
 the route never sees — a WebSocket, a preconnect, a DNS prefetch — cannot leave either;
 block service workers, whose fetches would bypass the route; set `__mokuroInteropConfig` v1 (cloudsim's
 bases, a Drive or OneDrive token from `/_sim/token`, `gapiShim: true`) before any page
-script; wait for `__mokuroInterop.apiVersion === 1`; fail a spec on the cloudsim violations
+script; wait for `__mokuroInterop.apiVersion === 1` and check that every v1 method is
+there (the driver API v1 below), so a reader that lost one fails at the gate, naming it,
+not halfway through a spec; fail a spec on the cloudsim violations
 recorded while it ran (those recorded before it started fail on their own, as
 `cloudsim violations before <spec>`); and gate capabilities: a spec declares `test.use({ needs: [...] })`, and a
 capability the driver does not list FAILS the spec unless `interop/pending-reader-caps.txt`
@@ -397,8 +402,29 @@ carries `suite`, `provider`, `bunko_sha`, `reader_sha` (`-dirty` for a changed
 `pending_caps`, `refused_hosts` and `stubbed_urls`, with Playwright's JUnit XML beside
 it and the parties' logs (the server's `serve.log`, `cloudsim.log`,
 `processor-fake.log`, rclone's) under `logs/<suite>-<provider>/`; the reader's build
-and preview logs are `reader-build.log` and `reader-preview.log`. A suite folder with
-no specs yet is reported skipped.
+and preview logs are `reader-build.log` and `reader-preview.log`. A browser suite
+folder with no specs fails its leg (every suite has specs, so a moved folder must not
+pass by running nothing); with `--grep` it is reported skipped.
+
+**The driver API v1** (`globalThis.__mokuroInterop`, the reader's
+`src/lib/interop/rig-driver.ts`; `interop/e2e/rig/driver.mjs` `V1_METHODS`): C6's
+twenty (`connectWebDAV`, `connectMega`, `connectDrive`, `connectOneDrive`, `logout`,
+`sync`, `library`, `open`, `setPage`, `progress`, `renameVolume`, `renameSeries`,
+`deleteVolume`, `setSpineOffset`, `editFirstBlock`, `publishCurated`, `selectLayer`,
+`providerStatus`, `controlState`, `historyStatus`) and the six the suites added before
+any reader was pinned: `showSeries` (the catalog card's click), `pendingOcr` (what a
+volume's card shows of the server's queue), `idle` (no sync and no listing in flight),
+`importVolume` and `backupVolume` (the upload modal's import; the card's Backup, to
+the end of its run), and `settleSeriesWrites` (every metadata write the app queued run
+now and finished: the listings' background work, the series backfills, the
+`series.json` writes and then `catalog.json`'s, round again while any of it queued
+more). Beside it a spec may call the reader's cloud test hooks,
+`globalThis.__mokuroCloudTestHooks.setCloudTestToken(provider, token)`, to hand the
+page a token re-minted after it loaded (`__mokuroInteropConfig` is read once, at
+load). The set is v1 from the first `reader.ref` on: a method added after that comes
+with `apiVersion` 2, or behind a capability. `providerStatus` reads what the app last
+published (the store the banner and the read-only gates read) and never publishes it
+itself, so a state the app keeps to itself fails the spec as the user would miss it.
 
 **As built (I3, `dav` and `api`, on `local`).** While any route is on, Playwright
 answers every CORS preflight itself, permissively, so a server whose CORS a browser
@@ -467,6 +493,14 @@ second browser context in the same spec under the same rule, signed in afresh.
   Retry-After rule). **412**: that sync fails without a banner, another device writes
   meanwhile, and the next sync leaves both devices with both pages; skipped on MEGA (no
   conditional write).
+- The banner is read as the user sees it (`providerStatus`, the store the app
+  published, never refreshed by the driver). That caught a reader bug on `microsoft`
+  and `mega`: a refused token (Graph 401, MSAL asking for interaction) or a killed MEGA
+  session set the provider's reconnect flag without publishing it, so no banner came up
+  until something else refreshed the status. Drive's re-auth answers after the request
+  returns, as GIS does, so a burst of 401s makes one re-auth (the rig's token client
+  answered inside the call, and three 401s at once read as a refused grant); a 401 for
+  a token a re-auth has since replaced asks for none.
 - cloudsim's MEGA mock opens a new session on a password sign-in after
   `kill_session` (the killed id stays dead), so a reconnect can be tested.
 
@@ -502,10 +536,14 @@ judges the marker by Bunko's own clock (ttl + 5 min). Who wrote a file is read o
 browser's own requests (`recordReaderWrites`, `shared/shared.mjs`), never off the cloud,
 which Bunko writes too: WebDAV paths and MOVE destinations, Graph's `<name>:/content`
 and upload sessions, Drive's metadata and the ids its writes answer, and the node handles
-MEGA's `p` answers (its names are encrypted on the wire), looked up in `/_sim/tree`; a
-file's contents come from `/_sim/content` (rclone: its served directory). The reader
+MEGA's `p` answers (its names are encrypted on the wire), looked up in `/_sim/tree`
+(a write it can put no name to is listed for the failure message); a file's contents
+come from `/_sim/content` (rclone: its served directory). The reader
 imports and uploads with the driver's `importVolume` and `backupVolume` (the card's
-Backup, to the end of its run, metadata writes included).
+Backup, to the end of its run, metadata writes included), and reads what it wrote
+only after `settleSeriesWrites`: the run's listing starts work of its own after the
+run (a folder with archives and no `series.json` is backfilled), whose writes wait
+out a debounce and decide at its end whether to write.
 - `shared/ocr`: an image-only `Vol 3` the reader uploaded is queued by Bunko; the card
   shows the job from the holder's `.mokuro-queue.json`; once processor-fake lets go the
   queue file lists it in `done[]`, Bunko's sidecar is beside the archive and the
@@ -515,7 +553,7 @@ Backup, to the end of its run, metadata writes included).
   main is byte for byte as it was.
 - `shared/writes` (serial, last: it ends with the library disconnected): while the
   marker is fresh, a new series' upload writes neither `series.json` nor `catalog.json`
-  (Bunko compiles both); Bunko stopped, the reader's verdict turns 2 × ttl after its
+  (Bunko compiles both), and still none once Bunko's two are in the cloud; Bunko stopped, the reader's verdict turns 2 × ttl after its
   last heartbeat (measured 88–89 s of a 90 s 2 × ttl, a heartbeat at most ttl / 3 before
   the stop) and the next upload writes both; the Storage panel's Disconnect writes
   `released` and the reader takes the files back at its next look (within about a second).
@@ -562,10 +600,16 @@ Backup, to the end of its run, metadata writes included).
   lease followed the canonical root), the reader reading B's and the nested root's
   volumes and Bunko serving `S1 Nested/`; every file written since the merge lies
   under B, but for the index and covers Bunko compiles for the nested root's own
-  series (it compiles them wherever a series lives). Then three times a NEWER
-  top-level root appears with a series of its own and a `volume-data.json` while the
-  reader syncs back to back (the reader keeps stepping aside), and converges the same
-  way. The Storage panel, sampled every 500 ms through the whole spec, never shows
+  series (it compiles them wherever a series lives), and A still holds nothing but
+  what the merge trashed. Then three times a NEWER top-level root appears with a
+  series of its own and a `volume-data.json` while the reader syncs back to back (the
+  reader keeps stepping aside), and converges the same way, every root merged so far
+  checked again after each. "Every file written since" counts trashed files too (a
+  write into a merged-away root's old id lands in the trash with it; trashing moves
+  no write time in cloudsim), from the whole second of the merge (MEGA stamps a node
+  in whole seconds). The C6 text reads write parents off `/_sim/log`; its entries name
+  a request path, and a Drive or MEGA upload's parent is in its body, so the tree is
+  what can tell. The Storage panel, sampled every 500 ms through the whole spec, never shows
   `suspect`, and the page gets no 503. S9's end (C2-R5) follows: Bunko stopped
   (SIGINT), an older top-level root C appears, the reader's verdict turns after
   2 × ttl and its syncs merge the library into C. Bunko started again reaches
@@ -689,7 +733,10 @@ Backup, to the end of its run, metadata writes included).
   checks, and the main is the reader's (the block it was installed with). "Ever": on a
   disk library the spec watches the library folder (`fs.watch`, recursive) while it
   runs, since Bunko's `_n` sweep removes a numbered copy it can prove is its own within
-  a walk; on a cloud, every node cloudsim kept, trashed ones included.
+  a walk, and so on rclone (the directory it serves); on cloudsim, every node it kept,
+  trashed ones included. Node's recursive watch on Linux reports no file already gone
+  when it looks, so a copy that lives only a few milliseconds would pass unseen; Bunko's
+  live until its sweep, a walk later.
 - What they catch (each checked by undoing the fix in a scratch build, then restoring
   it): the reader moving the archive before uploading the main (R4.4) leaves a job
   queued for the renamed volume (S4); a reader regenerating the main without its block
