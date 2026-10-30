@@ -154,3 +154,15 @@ written, and hashes cover the raw bytes. New reader ids always contain a letter.
   (sorted; compare as a set). Besides rule v1, a sweep never takes a name whose base is
   the stem of any archive of `.cbz`, `.cbr`, `.zip` or `.rar`, so it can leave a file
   `classify` calls a layer.
+
+## Beyond the fixtures: the rig
+
+These files are layer 1: each side checks them alone, in its own unit tests. Layer 2,
+the interop rig (`cargo xtask interop rig`, specs in `interop/e2e/rig/`,
+`docs/design/interop-testing.md` §7.1), runs the real reader against a real server: the
+reader commit `interop/reader.ref` pins (a pushed commit; a local run passes
+`--reader-dir`), built with `--mode interop`. A field rename fails the fixtures first;
+a behaviour the fixtures cannot show (a sync, a merge, a lease) fails a rig spec. Both
+run on every Bunko PR (§9). A Bunko change the pinned reader cannot pass yet lists the
+reader capability it waits for in `interop/pending-reader-caps.txt` until a PR bumps
+`reader.ref`.

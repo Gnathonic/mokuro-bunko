@@ -254,6 +254,15 @@ does.
   `CLOUD_TEST_HOOKS ? hook : real` so a production build folds them away;
   `scripts/check-no-test-hooks.mjs` checks the built code (it fails on a hooked build).
 
+**Added in I3 (B8.1).** `POST /_sim/node` and `GET /_sim/tree` above stage what path
+seeding cannot (the duplicate `mokuro-reader` roots of S1 and S9, the second spelling of
+a series in S5) and show what reached the cloud, the trash included: `explicitly_trashed`
+marks a node that went to the trash itself, apart from one under a trashed folder.
+`GET /_sim/content?provider=&account=&id=` answers a node's stored bytes (MEGA's
+decrypted), for a file the spec did not write. None of them is in the request log. The
+rig uses them; the reader's own cloudsim suites (`src/lib/interop/cloudsim.ts`) do not
+yet.
+
 **Reader changes (in the reader repo, part of this work):**
 
 - One base-URL constant per provider (Drive API, Drive upload, Graph, MEGA gateway)
@@ -286,6 +295,29 @@ shaped profiles (§8.2).
 | `shared` | reader and Bunko on one cloudsim folder (each provider) and rclone | the M7 exit checks: Bunko progress for a volume the reader uploaded; sidecar pulled on `done[]`; reader stops writing `series.json`/`catalog.json` while the marker is fresh and resumes 2 × ttl after Bunko stops or at once on `released`; edits go up as `<Vol>.edit.mokuro` and never as the main sidecar; a Bunko case merge shows as a rename with progress kept; duplicate roots (two top-level `mokuro-reader` folders plus a nested one) converge into the canonical root whether Bunko, the reader or both merge them, with the nested root untouched and no `Suspect` |
 | `cloud` | Bunko ↔ cloudsim and rclone (no reader) | the Rust-side Bunko ↔ cloud scenarios at process level: cold start, adoption, outbox under faults, lease handover, quota pauses |
 | `perf` | all of the above, shaped | §8 |
+
+The 0.8 crossplay scenarios run inside those suites, one spec each (their checks are in
+the "As built" notes below; `docs/design/plans/2026-10-29-i3-rig.md` lists what each
+needed on either side):
+
+| Scenario | Specs | Suites and providers | Capability |
+|---|---|---|---|
+| S1 duplicate roots under a lease | `shared/dup-roots-lease` | `shared`; google, mega | `dedup` |
+| S2 edit layers across accounts, following a rename and a delete | `dav/`, `bridge/edit-layers-accounts` | `dav`; `bridge` on every cloud | `edit-layers-personal`, `edit-layers-curated` |
+| S3 history and positions across accounts | `dav/`, `bridge/`, `shared/history-accounts` | `dav`; `bridge` and `shared` on every cloud | `history`, `positions` |
+| S4 a rename keeps provenance (no new queue entry over two walks) | `dav/`, `shared/rename-provenance` | `dav`; `shared` on every cloud | `provenance` |
+| S5 case-variant merge | `shared/case-merge` | `shared`; google, mega, rclone | `case-merge-rename` |
+| S6 a rename during OCR (no `_1` files) | `dav/`, `shared/rename-during-ocr` | `dav`; `shared` on every cloud | none |
+| S7 Allow on first connect | `dav/allow-first-connect` | `dav` | none |
+| S8 a spine offset cleared (no PUT on the next two syncs) | `dav/`, `shared/spine-offset-clear` | `dav`; `shared` on every cloud | none |
+| S9 reader-only dedup, then a Bunko restart with no hold | `direct/dup-roots`; its restart in `shared/dup-roots-lease` | `direct` and `shared`; google, mega | `dedup` |
+
+A spec that needs a capability (`test.use({ needs: [...] })`) FAILS when the reader's
+driver lacks it, unless `interop/pending-reader-caps.txt` lists that capability: then it
+is skipped and the results JSON reports the skip with its capability. A Bunko change
+that needs a newer reader than `interop/reader.ref` lists the capability there until
+the PR that bumps `reader.ref` empties it again. The file lists nothing today; I3 is
+done only while it lists nothing.
 
 **As built (I3, runner core):** `cargo xtask interop rig <suites> [--provider P,…]
 [--bin B] [--cloudsim-bin C] [--reader-dir D | --reader-ref SHA] [--grep G] [--headed]
@@ -868,6 +900,58 @@ they carry no signed `release.json` (`bunko-update`'s
 `prerelease_lookup_skips_the_nightly_test_builds`). The reader's repository variable
 `BUNKO_REF` picks the tag: `0.8/remote-storage` → `nightly-0.8`, `main` → `nightly`.
 
+**As built (I3, Bunko CI):** `.github/workflows/interop.yml` runs on every PR, on pushes
+to `main` and `0.8/remote-storage`, and on demand; `catalog-perf` is unchanged.
+- `rig-build` reads `interop/reader.ref` (one 40-hex SHA, the rig's own rule) and fails,
+  naming the file, while it does not exist: it pins a PUSHED reader commit, so the owner
+  commits it after pushing the reader. It builds the testing server, cloudsim and xtask,
+  checks out the reader at that SHA and builds it as the rig does (`npm ci`,
+  `npx vite build --mode interop`), runs `npm run selftest` in `interop/`, and uploads
+  one tar (the two binaries and the reader with its install; an artifact alone keeps
+  neither file modes nor symlinks).
+- `rig` (needs `rig-build`, `fail-fast: false`), one leg per row, each running
+  `cargo xtask interop rig <suites> --provider <p> --bin … --cloudsim-bin …
+  --reader-dir reader` on what `rig-build` made, Chromium installed by
+  `npx playwright install --with-deps chromium` in `interop/`, and `target/interop/rig/`
+  uploaded as `rig-<leg>` whatever the outcome:
+
+  | Leg | Suites | Provider |
+  |---|---|---|
+  | local | `dav,api` | `local` |
+  | google, microsoft, mega, rclone | `bridge,direct,shared` | that one |
+  | cloud | `cloud` | `all` |
+
+  The rclone and cloud legs use the rig's pinned rclone download. The reader's build
+  cache is per machine (rig/reader.rs), so a leg runs `vite build` once more over the
+  install it unpacked. Run as CI runs them on a developer machine (the unpacked tar,
+  the same commands): local 107 s, google 13 min (`shared` 11.7 of it), mega 16 min,
+  cloud 3 min; the clouds' legs sit at the 15-minute target, `shared` being most of
+  each, so the legs get 45 minutes. Doing so found two harness defects, both fixed:
+  `recordRequests` waited forever on a request the old document had in flight at a
+  reload (Chromium drops it at the commit with no `requestfailed`; dav/auth's reload
+  spec timed out about one run in three), and `cloudFile` read whichever copy of a
+  control file the tree listed first, though a root merge keeps both and Bunko goes on
+  writing one (shared/ocr on mega read a stale queue file after S1); it now reads the
+  newest.
+- A PR that bumps `interop/reader.ref` runs the same legs: that is how a new reader is
+  taken in.
+
+**As built (I3, reader CI):** the reader's `.github/workflows/interop.yml` has a job
+`rig` beside `cloudsim`, on PRs into `main`, `develop` and `feat/cloud-bunko`, nightly
+(`30 4 * * *`, for `develop` and `feat/cloud-bunko`; a schedule runs the workflow file
+as the default branch has it, so it starts once the job reaches `main`) and on demand.
+A small `rig-refs` job lists the commits to test that have
+`src/lib/interop/rig-driver.ts` (`hashFiles` on the checkout for a PR; `git cat-file` on
+each branch for the schedule): with none, `rig` shows as skipped, not failed (a job's
+own `if` cannot call `hashFiles`, which reads a checkout). `rig` maps `BUNKO_REF`
+(default `0.8/remote-storage`) to its nightly and downloads the testing server and
+cloudsim with `gh release download`; for another branch, or a nightly with an asset or
+a `bunko_sha` missing, it builds both from source. Bunko is checked out at the
+nightly's `bunko_sha` (else at `BUNKO_REF`), so the runner and the specs are the ones
+the binaries were built with. It then runs `cargo xtask interop rig all --provider all`
+with `--reader-dir` on the reader's own checkout and uploads `bunko/target/interop/rig/`
+whatever the outcome.
+
 ## 10. Milestones
 
 | M | Scope | Exit |
@@ -875,7 +959,7 @@ they carry no signed `release.json` (`bunko-update`'s
 | I0 | The large-catalog scenario on its own (generated library, Rust-side timings plus one Playwright check of the catalog page and a series view), with the §8.3 catalog budgets enforced in CI; then find and fix the live slowness against it | The generated library reproduces the slow catalog and series views; after the fix, they meet their budgets and CI fails if they regress |
 | I1 | Contract fixtures both ways (`interop/contract/`, §5); CORS preflight tests; reader unit tests moved onto them | A deliberate field rename on either side fails the other side's tests |
 | I2 | cloudsim (Drive, OneDrive, MEGA) with control API; bunko-remote mock tests moved onto it; reader base-URL override and token injection | Bunko and the reader, each alone, pass their provider suites against cloudsim (built 2026-10-28, §6 "As built") |
-| I3 | Rig runner, rclone, the `dav`, `api`, `bridge`, `direct`, `shared`, `cloud` suites; CI on both repos; nightly build. The browser rig's reader (`--mode interop`) must install the gapi REST shim instead of loading gapi from apis.google.com (§11) | Both repos' PRs run the rig; the M7 checks pass on every provider in cloudsim and on rclone |
+| I3 | Rig runner, rclone, the `dav`, `api`, `bridge`, `direct`, `shared`, `cloud` suites; CI on both repos; nightly build. The browser rig's reader (`--mode interop`) must install the gapi REST shim instead of loading gapi from apis.google.com (§11) | Both repos' PRs run the rig; the M7 checks pass on every provider in cloudsim and on rclone. Built 2026-10-30 (§7.1 and §9 "As built", `plans/2026-10-29-i3-rig.md`): every suite and scenario S1–S9 green locally on every provider, rclone through an installed `v1.75.2`, `pending-reader-caps.txt` empty; the CI jobs have not run yet (nothing is pushed, and `reader.ref` waits for a pushed reader) |
 | I4 | netsim, the reader's performance marks, the `perf` suite, budgets | Budgets enforced in CI; the §10 table checked and updated with measured numbers |
 | I5 | Live runs with sandbox cleanup and token upkeep | A week of green nightly runs (Drive, OneDrive) and two weekly MEGA runs, each leaving the account as it found it |
 
@@ -896,10 +980,10 @@ needs I3 (and takes in I0's scenario); I5 needs I3.
   the saved session keeps it (I2).
 - **A hooked browser build still loads the real gapi** from apis.google.com: the hooks
   redirect Drive's REST and upload calls, not `gapi.client`. I3's browser rig must install
-  the REST shim (`src/lib/interop/gapi-rest-shim.ts`) in place of loading gapi.
-- **Reader gaps the I2 suites marked with `it.fails`** (closed in the reader): the
-  Drive provider retried nothing (a 429 with `Retry-After` failed that call) and had no
-  distinct storage-full error (a quota 403 was `UPLOAD_FAILED`); OneDrive's upload core
-  treated a 507 like any 5xx and tried the session five times before failing. The reader
-  now retries on `Retry-After`, reports a full drive as one, and fails a 507 at once;
-  the three tests pass as plain `it` and a regression fails the cloudsim run.
+  the REST shim (`src/lib/interop/gapi-rest-shim.ts`) in place of loading gapi. Done in
+  I3: the rig's config sets `gapiShim`, and the fixtures answer both Google scripts
+  empty.
+- **D26, a reader's Google logout signing Bunko out** (owner action): revocation being
+  project-wide can only be seen on live accounts, so the owner checks it by hand on the
+  live test accounts. The rig's `dav/auth` covers Bunko's own token revocation at logout,
+  not Google's.
