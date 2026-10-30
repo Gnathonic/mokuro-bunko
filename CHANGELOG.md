@@ -157,10 +157,11 @@
   the server, the WebDAV layer and the metadata compiler now passes through one
   interface (`bunko-store`), so the library can live somewhere other than the local disk
   in 0.8. Local libraries behave exactly as before.
-- **Upgrades never skip a main OCR file for being edited; a file Bunko didn't write is
-  kept as a "pre-upgrade" layer first.** With the generation upgrade on, an outdated
-  `<Volume>.mokuro` in a family listed under `ocr.upgrade.replace` is upgraded even if a
-  person or Mokuro Reader changed it. One Bunko can prove it wrote is replaced as before:
+- **Upgrades no longer skip a main OCR file for an unmarked change; a file Bunko didn't
+  write is kept as a "pre-upgrade" layer first.** With the generation upgrade on, an
+  outdated `<Volume>.mokuro` in a family listed under `ocr.upgrade.replace` is upgraded
+  even if a person or Mokuro Reader 1.10.0 changed it without marking it edited (a file
+  marked edited is never replaced: see the next entry). One Bunko can prove it wrote is replaced as before:
   every OCR file it installs now carries a seal, `ocr_engine.seal`, a hash of its pages
   and its `ocr_engine` block (RFC 8785 canonical JSON, so Mokuro Reader and other tools
   can check it too; test vectors in `interop/contract/seal/`). Renaming the volume or
@@ -175,9 +176,9 @@
   cannot be read is still never upgraded. A layer is copied in as the new main file only
   when Bunko can prove it wrote that layer the same way and its own file carries the
   matching stamp, and layers without a stamp (a reader's
-  edits, `pre-upgrade` copies) are never used or deleted. The admin page's "skipped
-  (edited)" count, its list of edited volumes and the "Upgrade anyway" button are gone,
-  as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
+  edits, `pre-upgrade` copies) are never used or deleted. The admin page's list of
+  edited volumes and the "Upgrade anyway" button are gone, as is the `force` option of
+  `POST /api/ocr/upgrade/<volume>`.
 - **OCR files say which revision of their engine made them, and when.** Every file Bunko
   installs carries `ocr_engine.revision` (an engine's output revision, raised only when
   its output changes; a file without one, such as every 0.7 file, is revision 1) and
