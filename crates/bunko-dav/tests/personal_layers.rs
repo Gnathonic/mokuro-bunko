@@ -729,3 +729,35 @@ async fn a_correction_grant_never_writes_the_shared_primary() {
     assert_eq!(r.code(), 201, "{}", r.text());
     assert!(env.overlay("reader", "series/vol1.edit-2.mokuro").exists());
 }
+
+/// Another account's lock on its own correction (even a lock-null one, Timeout:
+/// Infinite) is private to it: a series DELETE or MOVE by an editor is never refused
+/// for it, nor is its href reported. The lock goes with the folder, as the overlay does.
+#[tokio::test]
+async fn a_private_correction_lock_never_blocks_a_folder_operation() {
+    let env = Env::new();
+    let lock = br#"<?xml version="1.0"?><D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>"#;
+    let orphan = "/mokuro-reader/series/nothing.edit.mokuro";
+    for path in [EDIT, orphan] {
+        let r = env
+            .req(Some("bob"), "LOCK", path, &[("timeout", "Infinite")], lock)
+            .await;
+        assert!(matches!(r.code(), 200 | 201), "{path}: {}", r.text());
+    }
+    let dest = "http://localhost:8080/mokuro-reader/renamed";
+    let r = env
+        .req(
+            Some("editor"),
+            "MOVE",
+            "/mokuro-reader/series",
+            &[("destination", dest)],
+            b"",
+        )
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    assert!(!r.text().contains("edit.mokuro"), "{}", r.text());
+    let r = env
+        .req(Some("editor"), "DELETE", "/mokuro-reader/renamed", &[], b"")
+        .await;
+    assert_eq!(r.code(), 204, "{}", r.text());
+}
