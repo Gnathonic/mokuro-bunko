@@ -260,6 +260,14 @@
   it replaces, or the one of the same volume in that folder), Bunko puts the block back
   and seals it again, so the upgrade still knows Bunko wrote it. Corrections that reader
   saves into the main file still land there; an upgrade keeps them as `pre-upgrade`.
+- **Internal: the interop rig runs the reader against Bunko on every PR.** The
+  `Interop` workflow builds the testing server, cloudsim and the Mokuro Reader commit
+  `interop/reader.ref` pins (it fails, naming the file, until that pin exists), then
+  runs the rig in six legs: `dav,api` on a local library, `bridge,direct,shared` on
+  each of Google Drive, OneDrive, MEGA and rclone, and the `cloud` suite on all of
+  them, uploading each leg's results and logs. It also runs on pushes to
+  `0.8/remote-storage`. A PR that bumps `interop/reader.ref` is how a new reader is
+  taken in.
 
 ### Fixed
 - **A volume renamed while Bunko makes its cover leaves no stray cover behind.** A
