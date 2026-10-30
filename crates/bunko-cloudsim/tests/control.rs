@@ -777,7 +777,8 @@ async fn modified_and_created_are_honoured() {
 }
 
 /// A node in the trash, or under a trashed folder, is in `/_sim/tree` only with
-/// `include_trashed=1` (marked `trashed`), and never in `/_sim/files`.
+/// `include_trashed=1` (marked `trashed`, and `explicitly_trashed` when it went to the
+/// trash itself), and never in `/_sim/files`.
 #[tokio::test]
 async fn trashed_nodes_show_only_in_the_full_tree() {
     let sim = bunko_cloudsim::start().await;
@@ -839,6 +840,9 @@ async fn trashed_nodes_show_only_in_the_full_tree() {
         assert_eq!(row(&full, &root)["trashed"], false, "{p}");
         assert_eq!(row(&full, &series)["trashed"], true, "{p}");
         assert_eq!(row(&full, &vol)["trashed"], true, "{p}");
+        assert_eq!(row(&full, &root)["explicitly_trashed"], false, "{p}");
+        assert_eq!(row(&full, &series)["explicitly_trashed"], true, "{p}");
+        assert_eq!(row(&full, &vol)["explicitly_trashed"], false, "{p}");
     }
 }
 

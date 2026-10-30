@@ -104,7 +104,13 @@
   cloud reader's folder alike, out of the catalog, `series.json` and the queue (S3),
   renamed volumes and series keep the provenance Bunko sealed (an edited volume its
   `edited` marker) and are not queued again (S4), and a volume renamed while its OCR
-  runs gets its sidecar under the new name, never a numbered one (S6). processor-fake
+  runs gets its sidecar under the new name, never a numbered one (S6). Duplicate
+  `mokuro-reader` folders (two at the top, an older one inside another folder that is
+  read but never merged) end in the oldest top-level one: merged by Bunko alone under
+  its lease, its marker following, with no Suspect, also while the reader syncs (S1),
+  and by the reader alone, with no Bunko and with Bunko stopped, which then restarts
+  with no hold (S9). cloudsim's `/_sim/tree` marks a node that went to the trash itself
+  `explicitly_trashed`. processor-fake
   takes `--page-text` (every page one text block), and a testing build's
   `/queue/api/status` tells the admin how many library walks have finished (`walks`).
 - **Internal: nightly test builds for Mokuro Reader's CI.** Every push to `main` or

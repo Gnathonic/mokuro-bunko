@@ -97,6 +97,9 @@ pub struct NodeInfo {
     pub modified: String,
     /// In the trash, or under a trashed folder (OneDrive: deleted).
     pub trashed: bool,
+    /// Sent to the trash itself (Drive's `explicitlyTrashed`; MEGA: directly in the
+    /// rubbish bin; OneDrive: deleted itself), not only under a trashed folder.
+    pub explicitly_trashed: bool,
 }
 
 impl NodeInfo {

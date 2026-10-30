@@ -408,6 +408,7 @@ impl DriveState {
                     created: rfc3339(f.created),
                     modified: rfc3339(f.modified),
                     trashed: self.trashed(id),
+                    explicitly_trashed: f.trashed,
                 }
             })
             .collect()

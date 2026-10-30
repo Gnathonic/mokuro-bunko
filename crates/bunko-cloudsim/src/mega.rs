@@ -131,6 +131,7 @@ pub fn tree(m: &MegaHandle) -> Vec<NodeInfo> {
                 created: at.clone(),
                 modified: at,
                 trashed: trashed(h),
+                explicitly_trashed: n.parent == RUBBISH,
             }
         })
         .collect()

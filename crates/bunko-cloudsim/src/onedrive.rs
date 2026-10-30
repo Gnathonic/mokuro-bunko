@@ -459,6 +459,9 @@ impl OneDriveState {
                 created: rfc3339(f.created),
                 modified: rfc3339(f.modified),
                 trashed: self.under_deleted(id),
+                // A folder's delete marks everything under it deleted too.
+                explicitly_trashed: f.deleted
+                    && !f.parent.as_deref().is_some_and(|p| self.under_deleted(p)),
             })
             .collect()
     }

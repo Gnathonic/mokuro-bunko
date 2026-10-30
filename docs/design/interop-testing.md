@@ -492,6 +492,66 @@ Backup, to the end of its run, metadata writes included).
   reader signed in, and hold on a "root change"), and models the thumbnail attribute
   megajs puts on an uploaded cover (`ufa`, `pfa`).
 
+**As built (I3, scenarios S1 and S9).**
+- The seed (`dup-roots.mjs`, plan X5) sits beside the suite's library root A, made when
+  the suite started: an OLDER top-level `mokuro-reader` B (`/_sim/node` dates it 2020)
+  and `Backup/mokuro-reader`, older still (2019) but nested, so never merged and still
+  read. A gets `S1 Dup/Vol 1` with the NEWER sidecar; B gets an older `S1 Dup/Vol
+  1.mokuro`, its own `S1 Dup/Vol 2` and a `volume-data.json` (Vol 2 on page 3); the
+  nested root gets `S1 Nested/Vol 1`. Every volume carries its sidecar (an image-only
+  one would be queued, and a held job holds a merge off), made from the library's own
+  `Vol 1` (the archive's zip comment re-tagged so each has bytes of its own). Both
+  mergers keep the oldest top-level folder of a group, so B, not A, is canonical: the
+  C6 text's "A survives (top-level first)" was written for a nested B, which X5 rules
+  out of the merge. The whole library therefore moves into B, and every spec after
+  these reads it under another folder of the same name.
+- What "trashed only once empty" can see: cloudsim's `/_sim/tree` marks a node
+  `explicitly_trashed` when it went to the trash itself (Drive's own flag; MEGA: its
+  parent is the rubbish bin; OneDrive: deleted, its parent not). A merged-away folder
+  must be explicitly trashed and hold nothing that is not (on Drive a file trashed on
+  its own keeps its parent: the losing copy of a same-named file, or a
+  `volume-data.json` a reader's sync folded into another copy). No control file is
+  ever in the trash.
+- `direct/dup-roots` (S9, `direct` on `google` and `mega`; skipped on `microsoft` and
+  `rclone`, which hold no two folders of one name). Each top-level root also holds a
+  `.mokuro-queue.json` and A a `volume-data.json` (the library's Vol 1 on page 4). The
+  reader's syncs merge A into B: the newer `Vol 1.mokuro` is live in B and the older
+  one in the trash, both queue files are in B, the nested root is exactly as it was
+  (same nodes, same bytes, nothing added), the reader lists `S1 Dup/Vol 2` and `S1
+  Nested/Vol 1`, its progress has both copies' pages (4 and 3) and so has the one
+  `volume-data.json` it leaves in B; after it opens a volume and syncs, every file
+  written since the merge lies under B.
+- `shared/dup-roots-lease` (serial; `shared` on `google` and `mega`). S1: Bunko's
+  marker says `dedup`, so the reader steps aside (`controlState().held`); the
+  processor-fake hold is released for the spec (the merge moves `Rig Series`, whose
+  image-only volume would otherwise hold it off) and restored after. Bunko alone
+  merges A into B with the reader not syncing: the checks above, both
+  `volume-data.json` copies live in B, a marker that Bunko keeps beating in B (its
+  lease followed the canonical root), the reader reading B's and the nested root's
+  volumes and Bunko serving `S1 Nested/`; every file written since the merge lies
+  under B, but for the index and covers Bunko compiles for the nested root's own
+  series (it compiles them wherever a series lives). Then three times a NEWER
+  top-level root appears with a series of its own and a `volume-data.json` while the
+  reader syncs back to back (the reader keeps stepping aside), and converges the same
+  way. The Storage panel, sampled every 500 ms through the whole spec, never shows
+  `suspect`, and the page gets no 503. S9's end (C2-R5) follows: Bunko stopped
+  (SIGINT), an older top-level root C appears, the reader's verdict turns after
+  2 × ttl and its syncs merge the library into C. Bunko started again reaches
+  `steady`, `online` and `held` with no `suspect` sample, its marker beats in C (the
+  marker is written into `roots()[0]`, so that is the canonical root; the admin API
+  has no roots list), the reader trusts it again, and Bunko serves the library, C's
+  series and the nested one. S9's reader-alone part lives in `direct` and its restart
+  here: the `direct` suite runs no Bunko.
+- What they caught (each fixed test-first, its rig run failing before): Bunko never
+  saw a `mokuro-reader` folder made while it ran (it located roots only at startup),
+  so S1 sat unmerged for 5 minutes on `google` (the feed now relocates on such a
+  folder) and the race roots on `mega` (MEGA's feed reported nothing outside the
+  tracked roots; it now reports a folder named like the root); with the reader's
+  merge into a root Bunko had never seen, Bunko restarted `suspect` with
+  `root_changed` (its vacated check now counts new roots as holders); and the
+  reader's MEGA merge deleted an emptied folder permanently instead of putting it in
+  the Rubbish Bin (S9 `direct` on `mega`: the folder was gone from the tree).
+
 **As built (I3, scenarios S7 and S8).**
 - `dav/allow-first-connect` (S7, on `local`): a fresh browser connects for the first
   time as a new editor, uploader, registered account, processor, and anonymously. The
