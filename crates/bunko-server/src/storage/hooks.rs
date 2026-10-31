@@ -19,6 +19,29 @@ use crate::library::LibraryRuntime;
 /// The audit reason of an OCR result dropped because the reader wrote a sidecar first.
 pub const DISCARDED_REASON: &str = "discarded: a sidecar appeared in the cloud";
 
+/// How often a lasting metadata store fault is logged at `warn`: the remote store asks
+/// again every second while it lasts, for every submission waiting.
+const STORE_FAULT_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+static LAST_STORE_FAULT_WARN: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// Whether a store fault at `now` is logged at `warn` (else `debug`): the first, then
+/// at most one per [`STORE_FAULT_WARN_EVERY`].
+fn store_fault_loud(
+    last: &std::sync::Mutex<Option<std::time::Instant>>,
+    now: std::time::Instant,
+) -> bool {
+    let mut last = last
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.is_some_and(|at| now.saturating_duration_since(at) < STORE_FAULT_WARN_EVERY) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
 /// The answer to a cloud `series.json` submission.
 fn submission_answer(r: Result<SeriesUpdate, UpdateError>) -> SubmissionResult {
     match r {
@@ -39,7 +62,11 @@ fn submission_answer(r: Result<SeriesUpdate, UpdateError>) -> SubmissionResult {
         // nothing about the version, and a refusal is final (a duplicate merge trashes
         // a refused losing copy), so it is asked again.
         Err(UpdateError::Store(e)) => {
-            tracing::warn!("a cloud series.json waits: the metadata store failed: {e}");
+            if store_fault_loud(&LAST_STORE_FAULT_WARN, std::time::Instant::now()) {
+                tracing::warn!("a cloud series.json waits: the metadata store failed: {e}");
+            } else {
+                tracing::debug!("a cloud series.json waits: the metadata store failed: {e}");
+            }
             SubmissionResult::Later(format!("the metadata store failed: {e}"))
         }
     }
@@ -424,5 +451,23 @@ mod tests {
             submission_answer(Err(UpdateError::Busy(std::time::Duration::from_secs(1)))),
             SubmissionResult::Later(_)
         ));
+    }
+
+    #[test]
+    fn a_lasting_store_fault_warns_once_a_minute() {
+        let last = std::sync::Mutex::new(None);
+        let t0 = std::time::Instant::now();
+        let s = std::time::Duration::from_secs;
+        assert!(store_fault_loud(&last, t0), "the first fault warns");
+        assert!(
+            !store_fault_loud(&last, t0 + s(1)),
+            "a retry a second later does not"
+        );
+        assert!(!store_fault_loud(&last, t0 + s(59)));
+        assert!(
+            store_fault_loud(&last, t0 + s(60)),
+            "a minute on it warns again"
+        );
+        assert!(!store_fault_loud(&last, t0 + s(61)));
     }
 }
