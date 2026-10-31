@@ -71,16 +71,36 @@ pub trait AuthBackend: Send + Sync {
     fn cached_login(&self, _username: &str, _password: &str) -> Option<AuthUser> {
         None
     }
-    /// Uploader ownership of a library file (and its sidecars/layers).
-    fn can_user_delete_library_path(&self, username: &str, virtual_path: &str) -> bool;
-    /// Uploader owns every tracked volume of the series.
-    fn can_user_edit_series(&self, username: &str, series_title: &str) -> bool;
     /// Does the virtual path map to an existing physical file?
     fn physical_exists(&self, virtual_path: &str, caller: Option<Caller<'_>>) -> bool;
     /// Is this library file the primary sidecar of an archive listed beside it
     /// (sidecar names rule 4: `V.edit.mokuro` is volume `V.edit`'s when `V.edit.cbz`
     /// is listed), and so no layer at all?
     fn is_volume_primary(&self, _virtual_path: &str) -> bool {
+        false
+    }
+    /// The recorded owner of the series folder `series` (series owners, 0.8), while a
+    /// folder of that series is listed: a record whose folder is gone owns nothing.
+    fn series_owner(&self, _series: &str) -> Option<String> {
+        None
+    }
+    /// The listed archives (library-relative, `S/V.cbz`) that govern a library file
+    /// (`bunko_core::sidecar_names::governing_archives`, from its folder's listing).
+    fn governing_archives(&self, _virtual_path: &str) -> Vec<String> {
+        Vec::new()
+    }
+    /// Who uploaded the library archive `rel` (library-relative).
+    fn volume_uploader(&self, _rel: &str) -> Option<String> {
+        None
+    }
+    /// Is the library path an existing folder?
+    fn is_library_folder(&self, _virtual_path: &str) -> bool {
+        false
+    }
+    /// The folders that existed before series owners are still waiting for theirs
+    /// (startup adoption has not run): an addition now could make a folder mixed that
+    /// is about to be someone's.
+    fn ownership_pending(&self) -> bool {
         false
     }
 }
@@ -207,6 +227,11 @@ pub struct Denied {
     pub status: StatusCode,
     pub message: String,
     pub bearer: bool,
+    /// Why, for a PUT's verdict `detail` (`bunko_dav::RefusalDetail`); `None` keeps the
+    /// generic one.
+    pub detail: Option<&'static str>,
+    /// `Retry-After` seconds.
+    pub retry_after: Option<u64>,
 }
 
 impl Denied {
@@ -215,18 +240,32 @@ impl Denied {
             status: StatusCode::from_u16(status).unwrap_or(StatusCode::FORBIDDEN),
             message: message.into(),
             bearer: false,
+            detail: None,
+            retry_after: None,
         }
+    }
+
+    fn with_detail(mut self, detail: &'static str) -> Self {
+        self.detail = Some(detail);
+        self
     }
 
     /// 0.5.2 `_error_response`: text/plain body, WWW-Authenticate on 401.
     pub fn into_response(self) -> axum::response::Response {
         let mut resp = axum::response::Response::new(axum::body::Body::from(self.message));
         *resp.status_mut() = self.status;
+        if let Some(detail) = self.detail {
+            resp.extensions_mut()
+                .insert(bunko_dav::RefusalDetail(detail));
+        }
         let h = resp.headers_mut();
         h.insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=utf-8"),
         );
+        if let Some(secs) = self.retry_after {
+            h.insert(header::RETRY_AFTER, HeaderValue::from(secs));
+        }
         if self.status == StatusCode::UNAUTHORIZED {
             let v = if self.bearer {
                 "Bearer realm=\"mokuro-bunko\", error=\"invalid_token\""
@@ -290,6 +329,60 @@ pub enum Grant {
     /// folder: DAV resolves the path again where it writes and must find a correction
     /// there too (`bunko_dav::DavContext::personal_only`).
     Personal,
+    /// By a series owner rule (0.8), decided from a folder listing and the database:
+    /// DAV asks again just before it writes (`bunko_dav::DavContext::ownership_recheck`),
+    /// so an archive that landed in between and governs the path refuses it.
+    Owner,
+}
+
+/// A series another account owns (S3): nothing new goes into it.
+const SERIES_OWNED: &str = "Permission denied: this series belongs to another account";
+const SERIES_OWNED_DETAIL: &str = "This series belongs to another account.";
+/// A file named after a volume this account does not control (S2). Neither text may
+/// read as a sign-in failure to a reader (no "401", no "Unauthorized").
+const VOLUME_OWNED: &str =
+    "Permission denied: this file belongs to a volume this account did not upload";
+const VOLUME_OWNED_DETAIL: &str = "This file belongs to a volume this account did not upload.";
+
+/// Two names of one account: account names are unique ignoring ASCII case.
+fn same_account(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// The owner of the series folder a library path is inside, or (`itself`) is.
+fn folder_owner_of(path: &str, itself: bool, backend: &dyn AuthBackend) -> Option<String> {
+    let folder = paths::series_folder_of(path)
+        .or_else(|| itself.then(|| paths::top_level_folder(path)).flatten())?;
+    backend.series_owner(&folder)
+}
+
+fn owned_by_another(path: &str, itself: bool, user: &str, backend: &dyn AuthBackend) -> bool {
+    folder_owner_of(path, itself, backend).is_some_and(|owner| !same_account(&owner, user))
+}
+
+/// Does `user` control the library FILE at `path` (0.8)? The owner of the series folder
+/// it is in does (S3), and so does the uploader of the archive that governs it, of
+/// every one when case variants share that (S2). What no listed archive governs is the
+/// folder owner's only. Folders are never governed (C3): only their owner controls one.
+fn controls(path: &str, user: &str, governors: &[String], backend: &dyn AuthBackend) -> bool {
+    folder_owner_of(path, false, backend).is_some_and(|owner| same_account(&owner, user))
+        || (!governors.is_empty()
+            && governors.iter().all(|archive| {
+                backend
+                    .volume_uploader(archive)
+                    .is_some_and(|u| same_account(&u, user))
+            }))
+}
+
+/// An addition while the existing folders wait for their owners (C5).
+fn adoption_pending() -> Denied {
+    Denied {
+        retry_after: Some(10),
+        ..Denied::new(
+            503,
+            "The server is still giving its existing series their owners; try again shortly.",
+        )
+    }
 }
 
 /// The decision table of spec http-webdav §4.3, in order.
@@ -407,7 +500,7 @@ fn decide(
                 Ok(())
             }
         }
-        "PUT" => authorize_put(path, id, backend),
+        "PUT" => authorize_put(path, id, backend, grant),
         "MKCOL" => {
             // The reader creates its own history collections; DAV decides which.
             if is_progress_path(path) {
@@ -418,7 +511,28 @@ fn decide(
                     id,
                     Perm::AddFiles,
                     "Permission denied: cannot create directories",
-                )
+                )?;
+                if has_perm(id.role(), Perm::ModifyDelete) {
+                    return Ok(());
+                }
+                let user = id.username().unwrap_or_default();
+                let path = &normalized_library_path(path).unwrap_or_else(|| path.to_string());
+                if backend.ownership_pending() {
+                    return Err(adoption_pending());
+                }
+                // Inside another account's series, or a spelling of one (S3).
+                if owned_by_another(path, true, user, backend) {
+                    return Err(Denied::new(403, SERIES_OWNED).with_detail(SERIES_OWNED_DETAIL));
+                }
+                // A folder named after a volume is no archive (rule 2), but only the
+                // series owner makes one (C2, C3).
+                if !backend.governing_archives(path).is_empty()
+                    && !folder_owner_of(path, false, backend)
+                        .is_some_and(|o| same_account(&o, user))
+                {
+                    return Err(Denied::new(403, VOLUME_OWNED).with_detail(VOLUME_OWNED_DETAIL));
+                }
+                Ok(())
             } else {
                 Err(Denied::new(
                     403,
@@ -430,13 +544,22 @@ fn decide(
             if is_progress_path(path) {
                 return progress_write(id);
             }
+            // An uploader deletes what it controls (0.8): a file of a volume it uploaded,
+            // anything in a series it owns, the series folder itself.
             if id.role() == Role::Uploader
                 && is_library_path(path)
-                && id
-                    .username()
-                    .is_some_and(|u| backend.can_user_delete_library_path(u, path))
+                && let Some(user) = id.username()
             {
-                return Ok(());
+                let path = &normalized_library_path(path).unwrap_or_else(|| path.to_string());
+                let allowed = if backend.is_library_folder(path) {
+                    folder_owner_of(path, true, backend).is_some_and(|o| same_account(&o, user))
+                } else {
+                    controls(path, user, &backend.governing_archives(path), backend)
+                };
+                if allowed {
+                    *grant = Grant::Owner;
+                    return Ok(());
+                }
             }
             need(
                 id,
@@ -535,27 +658,38 @@ fn authorize_layer(
         (Some(LayerClass::Personal), _) => Some(Err(denied_unless_signed_in(id, BETWEEN))),
         (_, Some(LayerClass::ServerKeepsake)) => Some(Err(denied_unless_signed_in(id, SERVER))),
         (_, Some(LayerClass::Reserved)) => Some(Err(denied_unless_signed_in(id, RESERVED))),
-        (_, Some(LayerClass::Curated)) if !moving => {
-            Some(authorize_curated(path, id, backend).map(|()| Grant::Table))
-        }
+        (_, Some(LayerClass::Curated)) if !moving => Some(authorize_curated(path, id, backend)),
         // Deleting or moving a curated or keepsake file keeps the 0.7 rules.
         _ => None,
     }
 }
 
 /// Publishing the shared `curated` layer: ModifyDelete roles on any volume, an
-/// uploader on the volumes it uploaded, the first create included.
-fn authorize_curated(path: &str, id: &Identity, backend: &dyn AuthBackend) -> Result<(), Denied> {
+/// uploader on the volumes it controls (its uploads, every volume of a series it
+/// owns), the first create included, but never a new one in another account's series.
+fn authorize_curated(
+    path: &str,
+    id: &Identity,
+    backend: &dyn AuthBackend,
+) -> Result<Grant, Denied> {
     if !id.authenticated() {
         return Err(Denied::new(401, "Authentication required"));
     }
-    if has_perm(id.role(), Perm::ModifyDelete)
-        || (id.role() == Role::Uploader
-            && id
-                .username()
-                .is_some_and(|u| backend.can_user_delete_library_path(u, path)))
+    if has_perm(id.role(), Perm::ModifyDelete) {
+        return Ok(Grant::Table);
+    }
+    if id.role() == Role::Uploader
+        && let Some(user) = id.username()
     {
-        return Ok(());
+        let path = &paths::normalized_library_path(path).unwrap_or_else(|| path.to_string());
+        if !backend.physical_exists(path, id.caller())
+            && owned_by_another(path, false, user, backend)
+        {
+            return Err(Denied::new(403, SERIES_OWNED).with_detail(SERIES_OWNED_DETAIL));
+        }
+        if controls(path, user, &backend.governing_archives(path), backend) {
+            return Ok(Grant::Owner);
+        }
     }
     Err(Denied::new(
         403,
@@ -563,7 +697,12 @@ fn authorize_curated(path: &str, id: &Identity, backend: &dyn AuthBackend) -> Re
     ))
 }
 
-fn authorize_put(path: &str, id: &Identity, backend: &dyn AuthBackend) -> Result<(), Denied> {
+fn authorize_put(
+    path: &str,
+    id: &Identity,
+    backend: &dyn AuthBackend,
+    grant: &mut Grant,
+) -> Result<(), Denied> {
     use paths::*;
     if is_progress_path(path) {
         return progress_write(id);
@@ -575,10 +714,13 @@ fn authorize_put(path: &str, id: &Identity, backend: &dyn AuthBackend) -> Result
         if has_perm(id.role(), Perm::ModifyDelete) {
             return Ok(());
         }
+        // The series' recorded owner (0.8); an unowned series takes no request below
+        // ModifyDelete.
         if id.role() == Role::Uploader
-            && id
-                .username()
-                .is_some_and(|u| backend.can_user_edit_series(u, &series))
+            && let Some(user) = id.username()
+            && backend
+                .series_owner(&series)
+                .is_some_and(|owner| same_account(&owner, user))
         {
             return Ok(());
         }
@@ -592,17 +734,34 @@ fn authorize_put(path: &str, id: &Identity, backend: &dyn AuthBackend) -> Result
     }
     if is_library_path(path) {
         need(id, Perm::AddFiles, "Permission denied: cannot add files")?;
-        if !has_perm(id.role(), Perm::ModifyDelete) {
-            let user = id.username();
-            if backend.physical_exists(path, id.caller())
-                && !user.is_some_and(|u| backend.can_user_delete_library_path(u, path))
-            {
+        if has_perm(id.role(), Perm::ModifyDelete) {
+            return Ok(());
+        }
+        // Below ModifyDelete (0.8): nothing new in another account's series (S3);
+        // creating, replacing or deleting a file named after a volume needs control of
+        // that volume (S2); a new volume in a shared series is anyone's to add.
+        let user = id.username().unwrap_or_default();
+        let path = &normalized_library_path(path).unwrap_or_else(|| path.to_string());
+        let governors = backend.governing_archives(path);
+        if backend.physical_exists(path, id.caller()) {
+            if !controls(path, user, &governors, backend) {
                 return Err(Denied::new(
                     403,
                     "Permission denied: cannot replace a file another account uploaded",
                 ));
             }
+        } else {
+            if backend.ownership_pending() {
+                return Err(adoption_pending());
+            }
+            if owned_by_another(path, false, user, backend) {
+                return Err(Denied::new(403, SERIES_OWNED).with_detail(SERIES_OWNED_DETAIL));
+            }
+            if !governors.is_empty() && !controls(path, user, &governors, backend) {
+                return Err(Denied::new(403, VOLUME_OWNED).with_detail(VOLUME_OWNED_DETAIL));
+            }
         }
+        *grant = Grant::Owner;
         return Ok(());
     }
     Err(Denied::new(
@@ -631,14 +790,21 @@ mod tests {
                 role: Role::Editor,
             })
         }
-        fn can_user_delete_library_path(&self, u: &str, p: &str) -> bool {
-            u == "u" && p.ends_with("mine.cbz")
-        }
-        fn can_user_edit_series(&self, _: &str, s: &str) -> bool {
-            s == "Mine"
-        }
         fn physical_exists(&self, p: &str, _: Option<Caller<'_>>) -> bool {
             p.ends_with(".cbz")
+        }
+        fn series_owner(&self, s: &str) -> Option<String> {
+            (s == "Mine").then(|| "u".into())
+        }
+        /// Every archive is its own volume.
+        fn governing_archives(&self, p: &str) -> Vec<String> {
+            paths::library_rel(p)
+                .filter(|r| r.ends_with(".cbz"))
+                .into_iter()
+                .collect()
+        }
+        fn volume_uploader(&self, rel: &str) -> Option<String> {
+            rel.ends_with("mine.cbz").then(|| "u".into())
         }
     }
 
@@ -672,12 +838,6 @@ mod tests {
                 username: u.into(),
                 role: Role::Editor,
             })
-        }
-        fn can_user_delete_library_path(&self, _: &str, _: &str) -> bool {
-            false
-        }
-        fn can_user_edit_series(&self, _: &str, _: &str) -> bool {
-            false
         }
         fn physical_exists(&self, _: &str, _: Option<Caller<'_>>) -> bool {
             false
@@ -1093,7 +1253,7 @@ mod tests {
         );
     }
 
-    /// Owns `Mine/`'s volumes; `S/V.edit.cbz` is a listed archive.
+    /// `u` owns the series `Mine/`; `S/V.edit.cbz` is a listed archive.
     struct Layers;
     impl AuthBackend for Layers {
         fn resolve_token(&self, _: &str) -> Option<AuthUser> {
@@ -1102,17 +1262,650 @@ mod tests {
         fn check_password(&self, _: &str, _: &str) -> Option<AuthUser> {
             None
         }
-        fn can_user_delete_library_path(&self, u: &str, p: &str) -> bool {
-            u == "u" && p.starts_with("/mokuro-reader/Mine/")
-        }
-        fn can_user_edit_series(&self, _: &str, _: &str) -> bool {
-            false
+        fn series_owner(&self, s: &str) -> Option<String> {
+            (s == "Mine").then(|| "u".into())
         }
         fn physical_exists(&self, p: &str, _: Option<Caller<'_>>) -> bool {
             p.ends_with(".curated.mokuro") && p.contains("/Theirs/")
         }
         fn is_volume_primary(&self, p: &str) -> bool {
             p == "/mokuro-reader/S/V.edit.mokuro"
+        }
+    }
+
+    /// A small library for the series owner rules (0.8): files and folders as library
+    /// rels, archive uploaders, folder owner records.
+    #[derive(Default)]
+    struct Owners {
+        files: Vec<String>,
+        folders: Vec<String>,
+        uploads: Vec<(String, String)>,
+        records: Vec<(String, String)>,
+        pending: bool,
+    }
+
+    impl Owners {
+        fn folder(mut self, rel: &str) -> Self {
+            let mut at = String::new();
+            for seg in rel.split('/') {
+                at = if at.is_empty() {
+                    seg.to_string()
+                } else {
+                    format!("{at}/{seg}")
+                };
+                if !self.folders.contains(&at) {
+                    self.folders.push(at.clone());
+                }
+            }
+            self
+        }
+        fn file(mut self, rel: &str) -> Self {
+            if let Some((dir, _)) = rel.rsplit_once('/') {
+                self = self.folder(dir);
+            }
+            self.files.push(rel.to_string());
+            self
+        }
+        fn upload(self, rel: &str, user: &str) -> Self {
+            let mut me = self.file(rel);
+            me.uploads.push((rel.to_string(), user.to_string()));
+            me
+        }
+        fn owned(mut self, folder: &str, user: &str) -> Self {
+            self.records.push((folder.to_string(), user.to_string()));
+            self
+        }
+        fn names_in(&self, dir: &str) -> Vec<&str> {
+            self.files
+                .iter()
+                .filter_map(|f| match f.rsplit_once('/') {
+                    Some((d, n)) if d == dir => Some(n),
+                    None if dir.is_empty() => Some(f.as_str()),
+                    _ => None,
+                })
+                .collect()
+        }
+        fn split(p: &str) -> Option<(String, String)> {
+            let rel = paths::library_rel(p)?;
+            Some(match rel.rsplit_once('/') {
+                Some((d, n)) => (d.to_string(), n.to_string()),
+                None => (String::new(), rel),
+            })
+        }
+    }
+
+    impl AuthBackend for Owners {
+        fn resolve_token(&self, _: &str) -> Option<AuthUser> {
+            None
+        }
+        fn check_password(&self, _: &str, _: &str) -> Option<AuthUser> {
+            None
+        }
+        fn physical_exists(&self, p: &str, _: Option<Caller<'_>>) -> bool {
+            paths::library_rel(p).is_some_and(|r| self.files.contains(&r))
+        }
+        fn is_volume_primary(&self, p: &str) -> bool {
+            let Some((dir, name)) = Self::split(p) else {
+                return false;
+            };
+            let names = self.names_in(&dir);
+            matches!(
+                sidecar_names::classify(&name, &sidecar_names::volume_stems(names)),
+                sidecar_names::SidecarClass::Primary { .. }
+            )
+        }
+        fn series_owner(&self, series: &str) -> Option<String> {
+            let key = bunko_db::fold_series_title_key(series);
+            let live = self
+                .folders
+                .iter()
+                .any(|f| !f.contains('/') && bunko_db::fold_series_title_key(f) == key);
+            self.records
+                .iter()
+                .find(|(f, _)| bunko_db::fold_series_title_key(f) == key)
+                .filter(|_| live)
+                .map(|(_, u)| u.clone())
+        }
+        fn governing_archives(&self, p: &str) -> Vec<String> {
+            let Some((dir, name)) = Self::split(p) else {
+                return Vec::new();
+            };
+            sidecar_names::governing_archives(&name, &self.names_in(&dir))
+                .into_iter()
+                .map(|a| {
+                    if dir.is_empty() {
+                        a.to_string()
+                    } else {
+                        format!("{dir}/{a}")
+                    }
+                })
+                .collect()
+        }
+        fn volume_uploader(&self, rel: &str) -> Option<String> {
+            self.uploads
+                .iter()
+                .find(|(r, _)| r == rel)
+                .map(|(_, u)| u.clone())
+        }
+        fn is_library_folder(&self, p: &str) -> bool {
+            paths::library_rel(p).is_some_and(|r| self.folders.contains(&r))
+        }
+        fn ownership_pending(&self) -> bool {
+            self.pending
+        }
+    }
+
+    fn as_user(name: &str, role: Role) -> Identity {
+        Identity {
+            user: Some(AuthUser {
+                id: 7,
+                username: name.into(),
+                role,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// `(status, detail)` of a refusal, or the grant.
+    fn decide_as(
+        lib: &Owners,
+        method: &str,
+        path: &str,
+        who: &Identity,
+    ) -> Result<Grant, (u16, Option<&'static str>)> {
+        let m = Method::from_bytes(method.as_bytes()).unwrap();
+        authorize_grant(&m, path, None, who, OPEN, lib).map_err(|d| (d.status.as_u16(), d.detail))
+    }
+
+    const SERIES: Option<&str> = Some(SERIES_OWNED_DETAIL);
+    const VOLUME: Option<&str> = Some(VOLUME_OWNED_DETAIL);
+
+    /// The finding (authz-dotted-primary) in both upload orders: an archive nested
+    /// under another account's volume is that volume's, so the account that is not its
+    /// uploader can neither create it nor, once the volume arrives, keep writing it.
+    #[test]
+    fn a_nested_archive_beside_another_accounts_volume_is_refused() {
+        let alice = as_user("alice", Role::Uploader);
+        let mallory = as_user("mallory", Role::Uploader);
+        let lib = Owners::default().upload("S/V.cbz", "alice");
+        for name in [
+            "V.curated.cbz",
+            "V.edit.cbz",
+            "V.EDIT.cbz",
+            "V.Curated.cbz",
+            "V.PRE-UPGRADE.cbz",
+            "v.curated.cbz",
+            "V.hayai.mokuro",
+            "V.mokuro",
+            "V.webp",
+            "V.nocover",
+        ] {
+            let path = format!("/mokuro-reader/S/{name}");
+            assert_eq!(
+                decide_as(&lib, "PUT", &path, &mallory),
+                Err((403, VOLUME)),
+                "{name}"
+            );
+            assert_eq!(
+                decide_as(&lib, "PUT", &path, &alice),
+                Ok(Grant::Owner),
+                "{name}"
+            );
+        }
+        // V's curated layer: its uploader's to publish.
+        let curated = "/mokuro-reader/S/V.curated.mokuro";
+        assert_eq!(decide_as(&lib, "PUT", curated, &mallory), Err((403, None)));
+        assert_eq!(decide_as(&lib, "PUT", curated, &alice), Ok(Grant::Owner));
+        // The other order: mallory's V.curated.cbz was there first, V.cbz arrived.
+        let lib = Owners::default()
+            .upload("S/V.curated.cbz", "mallory")
+            .file("S/V.curated.mokuro")
+            .upload("S/V.cbz", "alice");
+        for name in ["V.curated.cbz", "V.curated.mokuro"] {
+            let path = format!("/mokuro-reader/S/{name}");
+            for method in ["PUT", "DELETE"] {
+                assert!(
+                    matches!(decide_as(&lib, method, &path, &mallory), Err((403, _))),
+                    "{method} {name}"
+                );
+                assert_eq!(
+                    decide_as(&lib, method, &path, &alice),
+                    Ok(Grant::Owner),
+                    "{method} {name}"
+                );
+            }
+        }
+        // Alone, a nested archive is its own volume: its uploader's.
+        let lib = Owners::default().upload("S/V.curated.cbz", "mallory");
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/S/V.curated.mokuro", &mallory),
+            Ok(Grant::Owner)
+        );
+    }
+
+    /// S2: a file named after a volume needs control of that volume; rule v1's own
+    /// reading of a `.mokuro` name decides (C7: `Vol 01.5.mokuro` is a layer of Vol 01
+    /// when no `Vol 01.5.cbz` is listed).
+    #[test]
+    fn a_volumes_files_are_its_controllers() {
+        let alice = as_user("alice", Role::Uploader);
+        let bob = as_user("bob", Role::Uploader);
+        let lib = Owners::default()
+            .upload("S/Vol 01.cbz", "alice")
+            .upload("S/Vol 02.cbz", "bob")
+            .file("S/Untracked.cbz")
+            .file("S/notes.txt");
+        for name in [
+            "Vol 01.mokuro",
+            "Vol 01.mokuro.gz",
+            "Vol 01.webp",
+            "Vol 01.my-fix.mokuro",
+            "Vol 01.5.mokuro",
+            "Vol 01.2024.mokuro",
+        ] {
+            let path = format!("/mokuro-reader/S/{name}");
+            assert_eq!(
+                decide_as(&lib, "PUT", &path, &bob),
+                Err((403, VOLUME)),
+                "{name}"
+            );
+            assert_eq!(
+                decide_as(&lib, "PUT", &path, &alice),
+                Ok(Grant::Owner),
+                "{name}"
+            );
+        }
+        // An untracked volume is only its series owner's (nobody's here).
+        for who in [&alice, &bob] {
+            assert_eq!(
+                decide_as(&lib, "PUT", "/mokuro-reader/S/Untracked.mokuro", who),
+                Err((403, VOLUME))
+            );
+            assert!(decide_as(&lib, "PUT", "/mokuro-reader/S/Untracked.cbz", who).is_err());
+            assert!(decide_as(&lib, "DELETE", "/mokuro-reader/S/notes.txt", who).is_err());
+        }
+        // A new volume in a shared series is anyone's to add, a decimal one included.
+        for name in [
+            "Vol 03.cbz",
+            "Vol 01.5.cbz",
+            "Vol 03.mokuro",
+            "Vol 01.5.webp",
+        ] {
+            let path = format!("/mokuro-reader/S/{name}");
+            assert_eq!(
+                decide_as(&lib, "PUT", &path, &bob),
+                Ok(Grant::Owner),
+                "{name}"
+            );
+        }
+        // Replacing or deleting: the archive's uploader only.
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/S/Vol 01.cbz", &bob)
+                .unwrap_err()
+                .0,
+            403
+        );
+        assert_eq!(
+            decide_as(&lib, "DELETE", "/mokuro-reader/S/Vol 01.cbz", &bob)
+                .unwrap_err()
+                .0,
+            403
+        );
+        assert_eq!(
+            decide_as(&lib, "DELETE", "/mokuro-reader/S/Vol 01.cbz", &alice),
+            Ok(Grant::Owner)
+        );
+        // An editor's is the table's, as before.
+        let editor = as_user("ed", Role::Editor);
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/S/Vol 01.mokuro", &editor),
+            Ok(Grant::Table)
+        );
+        // A registered account still adds nothing.
+        assert!(
+            decide_as(
+                &lib,
+                "PUT",
+                "/mokuro-reader/S/Vol 01.mokuro",
+                &as_user("r", Role::Registered)
+            )
+            .is_err()
+        );
+    }
+
+    /// S3: the owner of a series folder controls everything in it; nobody else below
+    /// ModifyDelete adds to it. Personal corrections stay every account's own.
+    #[test]
+    fn a_series_owner_controls_its_folder() {
+        let alice = as_user("alice", Role::Uploader);
+        let bob = as_user("bob", Role::Uploader);
+        let lib = Owners::default()
+            .upload("Alice/Vol 1.cbz", "alice")
+            .upload("Alice/Vol 2.cbz", "bob")
+            .file("Alice/Vol 3.cbz")
+            .file("Alice/notes.txt")
+            .folder("Alice/Extras")
+            .owned("Alice", "ALICE");
+        // Bob adds nothing there, not even under his own volume, by any spelling.
+        for path in [
+            "/mokuro-reader/Alice/Vol 9.cbz",
+            "/mokuro-reader/Alice/Vol 2.mokuro",
+            "/mokuro-reader//Alice/Vol 9.cbz",
+            "/mokuro-reader/./Alice/Vol 9.cbz",
+            "/mokuro-reader/alice/Vol 9.cbz",
+            "/mokuro-reader/Alice/Extras/Vol 9.cbz",
+        ] {
+            assert_eq!(
+                decide_as(&lib, "PUT", path, &bob),
+                Err((403, SERIES)),
+                "{path}"
+            );
+        }
+        for path in [
+            "/mokuro-reader/Alice/New",
+            "/mokuro-reader//Alice/New",
+            "/mokuro-reader/./Alice/New",
+            "/mokuro-reader/ALICE",
+        ] {
+            assert_eq!(
+                decide_as(&lib, "MKCOL", path, &bob),
+                Err((403, SERIES)),
+                "{path}"
+            );
+        }
+        // His own volume's existing files are still his to replace and delete.
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/Alice/Vol 2.cbz", &bob),
+            Ok(Grant::Owner)
+        );
+        // The owner (any case of her name) writes, replaces and deletes anything there.
+        for (method, path) in [
+            ("PUT", "/mokuro-reader/Alice/Vol 9.cbz"),
+            ("PUT", "/mokuro-reader/Alice/Vol 2.mokuro"),
+            ("PUT", "/mokuro-reader/Alice/Vol 2.cbz"),
+            ("PUT", "/mokuro-reader/Alice/Vol 3.webp"),
+            ("PUT", "/mokuro-reader/Alice/notes.txt"),
+            ("DELETE", "/mokuro-reader/Alice/Vol 2.cbz"),
+            ("DELETE", "/mokuro-reader/Alice/Extras"),
+            ("DELETE", "/mokuro-reader/Alice"),
+            ("DELETE", "/mokuro-reader//Alice/"),
+        ] {
+            assert_eq!(
+                decide_as(&lib, method, path, &alice),
+                Ok(Grant::Owner),
+                "{method} {path}"
+            );
+        }
+        assert_eq!(
+            decide_as(&lib, "MKCOL", "/mokuro-reader/Alice/New", &alice),
+            Ok(Grant::Table)
+        );
+        // Bob deletes neither the folder nor what is not his.
+        for path in [
+            "/mokuro-reader/Alice",
+            "/mokuro-reader/Alice/Extras",
+            "/mokuro-reader/Alice/Vol 1.cbz",
+            "/mokuro-reader//Alice/./Vol 1.cbz",
+        ] {
+            assert_eq!(
+                decide_as(&lib, "DELETE", path, &bob).unwrap_err().0,
+                403,
+                "{path}"
+            );
+        }
+        // Personal corrections: anyone's own, owned folder or not.
+        for who in [&bob, &as_user("r", Role::Registered)] {
+            assert_eq!(
+                decide_as(&lib, "PUT", "/mokuro-reader/Alice/Vol 1.edit.mokuro", who),
+                Ok(Grant::Personal)
+            );
+        }
+        // MOVE, COPY, LOCK, PROPPATCH stay ModifyDelete's, owner or not.
+        for method in ["LOCK", "PROPPATCH"] {
+            assert!(decide_as(&lib, method, "/mokuro-reader/Alice/Vol 1.cbz", &alice).is_err());
+        }
+        // An editor needs no ownership.
+        let editor = as_user("ed", Role::Editor);
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/Alice/Vol 9.cbz", &editor),
+            Ok(Grant::Table)
+        );
+        assert_eq!(
+            decide_as(&lib, "MKCOL", "/mokuro-reader/Alice/New", &editor),
+            Ok(Grant::Table)
+        );
+        // A record whose folder is gone owns nothing: the next creator may make it.
+        let gone = Owners::default().owned("Gone", "alice");
+        assert_eq!(
+            decide_as(&gone, "MKCOL", "/mokuro-reader/Gone", &bob),
+            Ok(Grant::Table)
+        );
+    }
+
+    /// C2/C3: a folder is never governed by the volume it is named after, so only the
+    /// series owner makes or deletes one; an uploader's control of a volume never
+    /// reaches a dotted folder of other accounts' volumes.
+    #[test]
+    fn folders_are_their_series_owners() {
+        let bob = as_user("bob", Role::Uploader);
+        let lib = Owners::default()
+            .upload("S/V.cbz", "alice")
+            .upload("S/Vol 1.cbz", "bob")
+            .upload("S/Vol 1.bonus.chapters/C1.cbz", "alice");
+        assert_eq!(
+            decide_as(&lib, "MKCOL", "/mokuro-reader/S/V.edit.cbz", &bob),
+            Err((403, VOLUME))
+        );
+        assert_eq!(
+            decide_as(&lib, "MKCOL", "/mokuro-reader/S/Vol 1.edit.cbz", &bob),
+            Err((403, VOLUME)),
+            "not even under its own volume: only the series owner"
+        );
+        assert_eq!(
+            decide_as(
+                &lib,
+                "DELETE",
+                "/mokuro-reader/S/Vol 1.bonus.chapters",
+                &bob
+            )
+            .unwrap_err()
+            .0,
+            403
+        );
+        assert_eq!(
+            decide_as(&lib, "MKCOL", "/mokuro-reader/S/Extras", &bob),
+            Ok(Grant::Table)
+        );
+        let owned = Owners {
+            records: vec![("S".into(), "bob".into())],
+            ..lib
+        };
+        assert_eq!(
+            decide_as(
+                &owned,
+                "DELETE",
+                "/mokuro-reader/S/Vol 1.bonus.chapters",
+                &bob
+            ),
+            Ok(Grant::Owner)
+        );
+    }
+
+    /// The shared `curated` layer: a series owner publishes it for every volume there,
+    /// an uploader for its own volumes in a shared series.
+    #[test]
+    fn curated_follows_control() {
+        let alice = as_user("alice", Role::Uploader);
+        let bob = as_user("bob", Role::Uploader);
+        let curated = "Permission denied: cannot publish shared corrections for this volume";
+        let lib = Owners::default()
+            .upload("Shared/A.cbz", "alice")
+            .upload("Shared/B.cbz", "bob")
+            .upload("Mine/X.cbz", "bob")
+            .file("Mine/Y.cbz")
+            .owned("Mine", "alice");
+        let ask = |path: &str, who: &Identity| {
+            authorize_grant(&Method::PUT, path, None, who, OPEN, &lib)
+                .map_err(|d| (d.status.as_u16(), d.message))
+        };
+        assert_eq!(
+            ask("/mokuro-reader/Shared/A.curated.mokuro", &alice),
+            Ok(Grant::Owner)
+        );
+        assert_eq!(
+            ask("/mokuro-reader/Shared/B.curated.mokuro", &alice),
+            Err((403, curated.into()))
+        );
+        for path in [
+            "/mokuro-reader/Mine/X.curated.mokuro",
+            "/mokuro-reader/Mine/Y.curated.mokuro",
+        ] {
+            assert_eq!(ask(path, &alice), Ok(Grant::Owner), "{path}");
+        }
+        assert_eq!(
+            ask("/mokuro-reader/Mine/X.curated.mokuro", &bob),
+            Err((403, SERIES_OWNED.into())),
+            "a new file in another account's series"
+        );
+        assert_eq!(
+            ask(
+                "/mokuro-reader/Shared/A.curated.mokuro",
+                &as_user("ed", Role::Editor)
+            ),
+            Ok(Grant::Table)
+        );
+        assert_eq!(
+            ask(
+                "/mokuro-reader/Shared/A.curated.mokuro",
+                &as_user("r", Role::Registered)
+            ),
+            Err((403, curated.into()))
+        );
+        assert_eq!(
+            ask("/mokuro-reader/Shared/A.curated.mokuro", &id(None))
+                .unwrap_err()
+                .0,
+            401
+        );
+    }
+
+    /// series.json update requests: the series' recorded owner or ModifyDelete; being
+    /// the sole uploader is no longer enough.
+    #[test]
+    fn series_metadata_needs_the_recorded_owner() {
+        let lib = Owners::default()
+            .upload("Owned/V.cbz", "alice")
+            .upload("Sole/V.cbz", "alice")
+            .owned("Owned", "Alice");
+        let alice = as_user("alice", Role::Uploader);
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/Owned/series.json", &alice),
+            Ok(Grant::Table)
+        );
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/Sole/series.json", &alice)
+                .unwrap_err()
+                .0,
+            403
+        );
+        assert_eq!(
+            decide_as(
+                &lib,
+                "PUT",
+                "/mokuro-reader/Owned/series.json",
+                &as_user("bob", Role::Uploader)
+            )
+            .unwrap_err()
+            .0,
+            403
+        );
+        assert_eq!(
+            decide_as(
+                &lib,
+                "PUT",
+                "/mokuro-reader/Sole/series.json",
+                &as_user("ed", Role::Editor)
+            ),
+            Ok(Grant::Table)
+        );
+    }
+
+    /// C5: until the existing folders have their owners, an uploader's additions wait
+    /// (503, Retry-After); what it already controls does not.
+    #[test]
+    fn additions_wait_for_adoption() {
+        let lib = Owners {
+            pending: true,
+            ..Owners::default().upload("S/V.cbz", "bob")
+        };
+        let bob = as_user("bob", Role::Uploader);
+        for (method, path) in [
+            ("PUT", "/mokuro-reader/S/W.cbz"),
+            ("PUT", "/mokuro-reader/S/V.mokuro"),
+            ("MKCOL", "/mokuro-reader/T"),
+        ] {
+            let m = Method::from_bytes(method.as_bytes()).unwrap();
+            let d = authorize_grant(&m, path, None, &bob, OPEN, &lib).unwrap_err();
+            assert_eq!(
+                (d.status.as_u16(), d.retry_after),
+                (503, Some(10)),
+                "{method} {path}"
+            );
+            let resp = d.into_response();
+            assert_eq!(resp.headers()["retry-after"], "10");
+        }
+        assert_eq!(
+            decide_as(&lib, "PUT", "/mokuro-reader/S/V.cbz", &bob),
+            Ok(Grant::Owner)
+        );
+        assert_eq!(
+            decide_as(&lib, "DELETE", "/mokuro-reader/S/V.cbz", &bob),
+            Ok(Grant::Owner)
+        );
+        assert_eq!(
+            decide_as(
+                &lib,
+                "PUT",
+                "/mokuro-reader/S/W.cbz",
+                &as_user("ed", Role::Editor)
+            ),
+            Ok(Grant::Table)
+        );
+    }
+
+    /// A refusal's detail rides on its response, for the PUT verdict; its text never
+    /// reads as a sign-in failure.
+    #[test]
+    fn an_ownership_refusal_says_why() {
+        let lib = Owners::default()
+            .upload("S/V.cbz", "alice")
+            .owned("S", "alice");
+        let bob = as_user("bob", Role::Uploader);
+        let d = authorize(
+            &Method::PUT,
+            "/mokuro-reader/S/W.cbz",
+            None,
+            &bob,
+            OPEN,
+            &lib,
+        )
+        .unwrap_err();
+        let resp = d.into_response();
+        assert_eq!(resp.status(), 403);
+        assert_eq!(
+            resp.extensions().get::<bunko_dav::RefusalDetail>(),
+            Some(&bunko_dav::RefusalDetail(SERIES_OWNED_DETAIL))
+        );
+        for text in [
+            SERIES_OWNED,
+            SERIES_OWNED_DETAIL,
+            VOLUME_OWNED,
+            VOLUME_OWNED_DETAIL,
+        ] {
+            assert!(
+                !text.contains("401") && !text.contains("Unauthorized"),
+                "{text}"
+            );
         }
     }
 
@@ -1138,7 +1931,7 @@ mod tests {
         // A dotted volume's primary, an archive, a progress file: the table's.
         for (method, path, role) in [
             ("PUT", "/mokuro-reader/S/V.edit.mokuro", Role::Editor),
-            ("PUT", "/mokuro-reader/S/V.cbz", Role::Uploader),
+            ("PUT", "/mokuro-reader/S/V.cbz", Role::Editor),
             ("PUT", "/mokuro-reader/volume-data.json", Role::Registered),
             ("GET", edit, Role::Registered),
         ] {
@@ -1148,6 +1941,12 @@ mod tests {
                 "{method} {path}"
             );
         }
+        // An uploader's library write is decided by a series owner rule (0.8): DAV
+        // asks again before it writes.
+        assert_eq!(
+            grant("PUT", "/mokuro-reader/S/V.cbz", None, Role::Uploader),
+            Ok(Grant::Owner)
+        );
         assert!(grant("PUT", "/mokuro-reader/S/V.cbz", None, Role::Registered).is_err());
     }
 

@@ -478,19 +478,53 @@ pub fn dav_handler(
         let dav = dav.clone();
         let hooks: Arc<dyn bunko_dav::DavHooks> = hooks.clone();
         let owns_cloud_root = core.owns_cloud_root(ctx.identity.username());
-        let personal_only = req.extensions().get() == Some(&auth::Grant::Personal);
+        let grant = req.extensions().get::<auth::Grant>().copied();
+        let personal_only = grant == Some(auth::Grant::Personal);
+        let ownership_recheck =
+            (grant == Some(auth::Grant::Owner)).then(|| ownership_recheck(&core, &req, &ctx));
         Box::pin(async move {
             let dctx = bunko_dav::DavContext {
                 username: ctx.identity.username().map(str::to_string),
                 role: ctx.identity.role(),
                 owns_cloud_root,
                 personal_only,
-                ownership_recheck: None,
+                ownership_recheck,
                 nginx_accel,
                 client_ip: Some(ctx.client_ip.clone()),
                 hooks,
             };
             dav.handle(req, dctx).await
+        })
+    })
+}
+
+/// The same auth decision made again (series owners, 0.8): the request a grant of
+/// [`auth::Grant::Owner`] admitted, asked just before DAV writes. Blocking.
+fn ownership_recheck(core: &Core, req: &Request, ctx: &RequestCtx) -> bunko_dav::OwnershipRecheck {
+    let method = req.method().clone();
+    let path = percent_encoding::percent_decode_str(req.uri().path())
+        .decode_utf8_lossy()
+        .into_owned();
+    let destination = req
+        .headers()
+        .get("destination")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let identity = ctx.identity.clone();
+    let anon = core.anonymous_access();
+    let backend = core.backend.clone();
+    Arc::new(move || {
+        auth::authorize(
+            &method,
+            &path,
+            destination.as_deref(),
+            &identity,
+            anon,
+            backend.as_ref(),
+        )
+        .map_err(|denied| bunko_dav::Refusal {
+            message: denied.message,
+            detail: denied.detail,
         })
     })
 }
@@ -561,6 +595,8 @@ fn refuse_reader(method: &http::Method, path: &str, identity: &auth::Identity) -
                 status,
                 message,
                 bearer: identity.bearer_failed,
+                detail: None,
+                retry_after: None,
             }
             .into_response(),
         );
@@ -576,6 +612,8 @@ fn text_status(status: StatusCode, message: &str) -> Response {
         status,
         message: message.to_string(),
         bearer: false,
+        detail: None,
+        retry_after: None,
     }
     .into_response()
 }

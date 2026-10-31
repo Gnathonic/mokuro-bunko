@@ -11,7 +11,9 @@ to the contract shows up as a fixture diff in the pull request that makes it.
   progress and add files), `viewer` a processor account (the only signed-in role with
   neither right), `admin` an admin, `progress` a `registered` account (progress and
   reading history only; the `history-*` fixtures are its). Volume 01 has OCR, a layer sidecar and a cover;
-  Volume 02 has no OCR; one series and its volume have Japanese names.
+  Volume 02 has no OCR; one series and its volume have Japanese names. A series'
+  `owner` is its recorded series folder owner (0.8): `reader` owns "Contract Series",
+  so its writes there are an owner's; the Japanese series has none (shared).
 - `bunko/<name>.json`: what Bunko answers, written by
   `crates/bunko-server/tests/contract_export.rs` from a seeded full-stack server. The
   reader's unit tests parse these instead of hand-written JSON.

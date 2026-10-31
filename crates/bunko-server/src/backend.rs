@@ -13,6 +13,8 @@ pub struct DbAuthBackend {
     pub db: Arc<Database>,
     pub layout: StorageLayout,
     logins: LoginCache,
+    /// Series folder adoption was seen done (it never goes back to pending).
+    adopted: std::sync::atomic::AtomicBool,
 }
 
 /// Verified Basic credentials, keyed by a salted SHA-256 of `username \0 password` (the
@@ -55,6 +57,7 @@ impl DbAuthBackend {
             db,
             layout,
             logins: LoginCache::new(),
+            adopted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -154,18 +157,6 @@ impl AuthBackend for DbAuthBackend {
         }
     }
 
-    fn can_user_delete_library_path(&self, username: &str, virtual_path: &str) -> bool {
-        self.db
-            .can_user_delete_library_path(username, virtual_path)
-            .unwrap_or(false)
-    }
-
-    fn can_user_edit_series(&self, username: &str, series_title: &str) -> bool {
-        self.db
-            .can_user_edit_series(username, series_title)
-            .unwrap_or(false)
-    }
-
     fn physical_exists(&self, virtual_path: &str, caller: Option<Caller<'_>>) -> bool {
         self.virtual_to_physical(virtual_path, caller)
             .is_some_and(bunko_store::fs::exists)
@@ -174,6 +165,75 @@ impl AuthBackend for DbAuthBackend {
     fn is_volume_primary(&self, virtual_path: &str) -> bool {
         is_volume_primary(&self.layout, virtual_path)
     }
+
+    fn series_owner(&self, series: &str) -> Option<String> {
+        let owner = match self.db.series_folder_owner(series) {
+            Ok(owner) => owner?,
+            Err(e) => {
+                warn!("series owner lookup failed: {e}");
+                return None;
+            }
+        };
+        crate::library::owners::series_folder_is_live(&self.layout.library(), series)
+            .then_some(owner)
+    }
+
+    fn governing_archives(&self, virtual_path: &str) -> Vec<String> {
+        governing_archives(&self.layout, virtual_path)
+    }
+
+    fn volume_uploader(&self, rel: &str) -> Option<String> {
+        self.db.get_volume_owner(rel).unwrap_or_else(|e| {
+            warn!("volume owner lookup failed: {e}");
+            None
+        })
+    }
+
+    fn is_library_folder(&self, virtual_path: &str) -> bool {
+        paths::library_rel(virtual_path)
+            .is_some_and(|rel| bunko_store::fs::is_dir(self.layout.library().join(rel)))
+    }
+
+    fn ownership_pending(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.adopted.load(Ordering::Relaxed) {
+            return false;
+        }
+        match self.db.series_folder_adoption_pending() {
+            Ok(true) => true,
+            Ok(false) => {
+                self.adopted.store(true, Ordering::Relaxed);
+                false
+            }
+            Err(e) => {
+                warn!("series folder adoption state: {e}");
+                false
+            }
+        }
+    }
+}
+
+/// See [`AuthBackend::governing_archives`]: rule v1's listing of the file's library
+/// folder (files only), the archives as library-relative keys.
+fn governing_archives(layout: &StorageLayout, virtual_path: &str) -> Vec<String> {
+    let Some(rel) = paths::library_rel(virtual_path) else {
+        return Vec::new();
+    };
+    let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel.as_str()));
+    let Some(names) = bunko_library::sidecar::list_names(&layout.library().join(dir)) else {
+        return Vec::new();
+    };
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    sidecar_names::governing_archives(name, &refs)
+        .into_iter()
+        .map(|archive| {
+            if dir.is_empty() {
+                archive.to_string()
+            } else {
+                format!("{dir}/{archive}")
+            }
+        })
+        .collect()
 }
 
 /// See [`AuthBackend::is_volume_primary`]: rule v1 against the library folder's listing.
@@ -235,6 +295,47 @@ mod tests {
         );
         assert_eq!(map("/mokuro-reader/../x", Some(alice)), None);
         assert_eq!(map("/mokuro-readerx/y", Some(alice)), None);
+    }
+
+    #[test]
+    fn the_listing_names_a_files_governing_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        let series = layout.library().join("S");
+        bunko_store::fs::create_dir_all(series.join("V.edit.cbz")).unwrap();
+        for name in ["V.cbz", "V.curated.cbz", "W.cbz"] {
+            bunko_store::fs::write(series.join(name), b"x").unwrap();
+        }
+        bunko_store::fs::write(layout.library().join("loose.cbz"), b"x").unwrap();
+        let gov = |p: &str| governing_archives(&layout, p);
+        assert_eq!(gov("/mokuro-reader/S/V.curated.mokuro"), ["S/V.cbz"]);
+        assert_eq!(gov("/mokuro-reader//S/./V.curated.cbz"), ["S/V.cbz"]);
+        assert_eq!(gov("/mokuro-reader/S/W.webp"), ["S/W.cbz"]);
+        assert_eq!(gov("/mokuro-reader/loose.mokuro"), ["loose.cbz"]);
+        // A folder named like an archive governs nothing (rule 2).
+        assert_eq!(
+            gov("/mokuro-reader/S/V.edit.cbz/x.cbz"),
+            Vec::<String>::new()
+        );
+        assert!(gov("/mokuro-reader/S/X.cbz").is_empty());
+        assert!(gov("/mokuro-reader/T/V.mokuro").is_empty());
+        assert!(gov("/mokuro-reader/goals.json").is_empty());
+    }
+
+    #[test]
+    fn a_record_whose_folder_is_gone_owns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = StorageLayout::new(dir.path());
+        bunko_store::fs::create_dir_all(layout.library().join("Dr Stone")).unwrap();
+        let db = Arc::new(Database::open(dir.path().join("mokuro.db")).unwrap());
+        let backend = DbAuthBackend::new(db.clone(), layout);
+        db.record_series_folder_owner("Dr Stone", "alice").unwrap();
+        db.record_series_folder_owner("Gone", "alice").unwrap();
+        assert_eq!(backend.series_owner("Dr Stone").as_deref(), Some("alice"));
+        assert_eq!(backend.series_owner("dr  stone").as_deref(), Some("alice"));
+        assert_eq!(backend.series_owner("Gone"), None);
+        assert_eq!(backend.series_owner("Nothing"), None);
+        assert!(!backend.ownership_pending());
     }
 
     #[test]
