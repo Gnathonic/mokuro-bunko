@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS outbox(op_id TEXT PRIMARY KEY, seq INTEGER UNIQUE NOT
   state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0,
   last_error TEXT, result_pid TEXT, result_cver TEXT, superseded_pid TEXT, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS submission(id INTEGER PRIMARY KEY, path TEXT, pid TEXT, cver TEXT, sha256 TEXT,
-  state TEXT, seen_at INTEGER);
+  state TEXT, seen_at INTEGER, facts_only INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS conflict(id INTEGER PRIMARY KEY, kind TEXT, path TEXT, pid TEXT, detail TEXT,
   first_seen INTEGER, resolved INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS local_row(path TEXT PRIMARY KEY, kind TEXT NOT NULL, anchor_pid TEXT,
@@ -45,6 +45,26 @@ CREATE TABLE IF NOT EXISTS merge_group(id TEXT PRIMARY KEY, scope TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS merge_block(conflict_id INTEGER PRIMARY KEY, this TEXT NOT NULL,
   that TEXT NOT NULL);
 ";
+
+/// Columns added after a table first shipped: `(table, column, definition)`. `SCHEMA`
+/// creates a new database with them; an older one gets each missing column added (an
+/// additive change, nothing rewritten).
+const ADDED_COLUMNS: &[(&str, &str, &str)] =
+    &[("submission", "facts_only", "INTEGER NOT NULL DEFAULT 0")];
+
+fn add_missing_columns(conn: &Connection) -> rusqlite::Result<()> {
+    for (table, column, def) in ADDED_COLUMNS {
+        let has: bool = conn
+            .prepare(&format!(
+                "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+            ))?
+            .exists([column])?;
+        if !has {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {def}"))?;
+        }
+    }
+    Ok(())
+}
 
 /// One ledger row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +92,10 @@ pub struct SubmissionRow {
     pub sha256: Option<String>,
     /// `fetching` | `queued` | `applied` | `refused`.
     pub state: String,
+    /// Apply only the version's facts (`volumes` and `spine_offset` dropped): a duplicate
+    /// or case merge's losing copy, which readers never saw at its path. Recorded when
+    /// the merge opens the row, so it holds whatever the index shows when it is answered.
+    pub facts_only: bool,
 }
 
 impl SubmissionRow {
@@ -83,6 +107,7 @@ impl SubmissionRow {
             cver: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
             sha256: r.get(4)?,
             state: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            facts_only: r.get(6)?,
         })
     }
 }
@@ -153,6 +178,7 @@ impl StateDb {
             .map_err(db_io)?;
         conn.busy_timeout(Duration::from_secs(5)).map_err(db_io)?;
         conn.execute_batch(SCHEMA).map_err(db_io)?;
+        add_missing_columns(&conn).map_err(db_io)?;
         let own: HashSet<(String, String)> = conn
             .prepare("SELECT pid, cver FROM ledger WHERE echo_only = 0 AND trashed = 0")
             .and_then(|mut s| {
@@ -558,12 +584,14 @@ impl StateDb {
     }
 
     /// The submission row for `(path, pid, cver)`, created in state `fetching` when
-    /// there is none. `(id, state, created)`.
+    /// there is none. `facts_only` (a merge's losing copy, [`SubmissionRow::facts_only`])
+    /// marks a new row, and an existing one still owed an answer. `(id, state, created)`.
     pub fn submission_open(
         &self,
         path: &str,
         pid: &str,
         cver: &str,
+        facts_only: bool,
     ) -> Option<(i64, String, bool)> {
         self.with("submission_open", |c| {
             let tx = c.transaction()?;
@@ -575,11 +603,17 @@ impl StateDb {
                 )
                 .optional()?;
             let out = match found {
-                Some((id, state)) => (id, state, false),
+                Some((id, state)) => {
+                    if facts_only && matches!(state.as_str(), "fetching" | "queued") {
+                        tx.execute("UPDATE submission SET facts_only = 1 WHERE id = ?1", [id])?;
+                    }
+                    (id, state, false)
+                }
                 None => {
                     tx.execute(
-                        "INSERT INTO submission(path, pid, cver, state, seen_at) VALUES(?1, ?2, ?3, 'fetching', ?4)",
-                        params![path, pid, cver, now_ms()],
+                        "INSERT INTO submission(path, pid, cver, state, seen_at, facts_only) \
+                         VALUES(?1, ?2, ?3, 'fetching', ?4, ?5)",
+                        params![path, pid, cver, now_ms(), facts_only],
                     )?;
                     (tx.last_insert_rowid(), "fetching".to_string(), true)
                 }
@@ -594,7 +628,7 @@ impl StateDb {
     pub fn submission_get(&self, id: i64) -> Option<SubmissionRow> {
         self.with("submission_get", |c| {
             c.query_row(
-                "SELECT id, path, pid, cver, sha256, state FROM submission WHERE id = ?1",
+                "SELECT id, path, pid, cver, sha256, state, facts_only FROM submission WHERE id = ?1",
                 [id],
                 SubmissionRow::from_row,
             )
@@ -608,7 +642,7 @@ impl StateDb {
     pub fn submissions_pending(&self) -> Vec<SubmissionRow> {
         self.with("submissions_pending", |c| {
             c.prepare(
-                "SELECT id, path, pid, cver, sha256, state FROM submission \
+                "SELECT id, path, pid, cver, sha256, state, facts_only FROM submission \
                  WHERE state IN ('fetching', 'queued') ORDER BY id",
             )?
             .query_map([], SubmissionRow::from_row)?
@@ -730,4 +764,46 @@ pub fn random_id() -> String {
     let local = 0u8;
     h.update((&local as *const u8 as usize).to_le_bytes());
     hex::encode(&h.finalize()[..16])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `state.sqlite` from before `submission.facts_only` opens, keeps its rows (as
+    /// whole submissions), and records the mark from then on.
+    #[test]
+    fn an_older_submission_table_gains_facts_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE submission(id INTEGER PRIMARY KEY, path TEXT, pid TEXT, cver TEXT, \
+                 sha256 TEXT, state TEXT, seen_at INTEGER);
+                 INSERT INTO submission(path, pid, cver, state, seen_at) \
+                 VALUES('S/series.json', 'p1', 'c1', 'queued', 1);",
+            )
+            .unwrap();
+        }
+        let db = StateDb::open(&path).unwrap();
+        let old = db.submissions_pending();
+        assert_eq!(old.len(), 1);
+        assert!(!old[0].facts_only);
+        let (id, _, created) = db
+            .submission_open("S/series.json", "p2", "c2", true)
+            .unwrap();
+        assert!(created);
+        assert!(db.submission_get(id).unwrap().facts_only);
+        // A merge reaching a row still owed an answer marks it too.
+        let (id, _, created) = db
+            .submission_open("S/series.json", "p1", "c1", true)
+            .unwrap();
+        assert!(!created);
+        assert!(db.submission_get(id).unwrap().facts_only);
+        drop(db);
+        // Opening again adds nothing twice.
+        let db = StateDb::open(&path).unwrap();
+        assert_eq!(db.submissions_pending().len(), 2);
+    }
 }

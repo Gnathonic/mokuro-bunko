@@ -2830,7 +2830,10 @@ impl<B: Backend> RemoteStore<B> {
         else {
             return None;
         };
-        let (id, state, _) = self.core.state.submission_open(&series, &pid, &cver)?;
+        let (id, state, _) = self
+            .core
+            .state
+            .submission_open(&series, &pid, &cver, true)?;
         if matches!(state.as_str(), "fetching" | "queued") {
             let core = self.core.clone();
             self.block_on("case merge", core.process_submission(id));

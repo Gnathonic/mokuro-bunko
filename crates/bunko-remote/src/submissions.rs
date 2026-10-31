@@ -15,7 +15,10 @@
 //! version readers do not see at its path (a duplicate merge's losing copy, submitted
 //! before its trash) is applied as its facts only: `volumes` and `spine_offset` are
 //! dropped, since nothing guards those by time and the older copy would put back a
-//! shelf alignment the newer one reset; the facts are guarded by `updated_at`.
+//! shelf alignment the newer one reset; the facts are guarded by `updated_at`. The
+//! merge marks its row so when it opens it (`submission.facts_only`); the index is
+//! never asked at answer time, since after an index rebuild the rows resume before the
+//! full sync has filled the new one, and every version would look unseen.
 //! Rows still `fetching` or `queued` are resumed at the next start; they wait for the
 //! server's hooks when those are not installed yet.
 //!
@@ -142,7 +145,10 @@ impl<B: Backend> Core<B> {
         if !is_series_json(rel) {
             return;
         }
-        let Some((id, state, _)) = self.state.submission_open(&rel.to_string(), pid, cver) else {
+        let Some((id, state, _)) = self
+            .state
+            .submission_open(&rel.to_string(), pid, cver, false)
+        else {
             return;
         };
         if matches!(state.as_str(), "fetching" | "queued") {
@@ -183,9 +189,9 @@ impl<B: Backend> Core<B> {
                 Err(e) => tracing::warn!("series.json submission: index: {e}"),
             }
         }
-        let Some((id, _, _)) = self
-            .state
-            .submission_open(&dest.to_string(), &n.pid, &n.cver)
+        let Some((id, _, _)) =
+            self.state
+                .submission_open(&dest.to_string(), &n.pid, &n.cver, false)
         else {
             return;
         };
@@ -340,18 +346,14 @@ impl<B: Backend> Core<B> {
         let parent =
             RelPath::from_segments(rel.segments()[..1].iter().cloned()).unwrap_or_default();
         let series = self.abs(&parent);
-        let shown = {
-            let idx = self.index.lock();
-            idx.lookup(&rel)
-                .and_then(|e| idx.winner_node(e.eid))
-                .is_some_and(|w| w.pid == row.pid)
-        };
+        // Marked by the merge that opened the row, never derived from the index here:
+        // after a rebuild the rows resume before the full sync fills the new index.
         let facts;
-        let bytes = if shown {
-            bytes
-        } else {
+        let bytes = if row.facts_only {
             facts = facts_only(bytes);
             facts.as_deref().unwrap_or(bytes)
+        } else {
+            bytes
         };
         // The slot runs the hook on the events thread (handing this worker back).
         match self.hooks.series_submission(&series, bytes) {
@@ -416,9 +418,9 @@ impl<B: Backend> Core<B> {
             if self.crashed.load(Ordering::Acquire) {
                 return;
             }
-            if let Some((id, _, _)) = self
-                .state
-                .submission_open(&rel.to_string(), &n.pid, &n.cver)
+            if let Some((id, _, _)) =
+                self.state
+                    .submission_open(&rel.to_string(), &n.pid, &n.cver, false)
             {
                 self.clone().process_submission(id).await;
             }
@@ -539,7 +541,9 @@ impl<B: Backend> Core<B> {
             };
             // The cver is marked so a resumed row is never fetched as a series.json.
             let cver = format!("{}#catalog", n.cver);
-            let Some((id, state, _)) = self.state.submission_open(&rel.to_string(), &n.pid, &cver)
+            let Some((id, state, _)) =
+                self.state
+                    .submission_open(&rel.to_string(), &n.pid, &cver, false)
             else {
                 continue;
             };
