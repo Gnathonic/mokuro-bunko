@@ -75,6 +75,28 @@ impl Default for HistoryLimits {
     }
 }
 
+/// A refusal of a write, from the server's auth layer: a 403 with `message` as its text
+/// body, and `detail` (when set) as the `detail` of a PUT's verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub message: String,
+    pub detail: Option<&'static str>,
+    /// Set when the decision could not be made now (series folder adoption pending, an
+    /// owner lookup failed): a 503 with this `Retry-After` instead, so a client retries
+    /// rather than taking it as a final refusal of the file.
+    pub retry_after: Option<u64>,
+}
+
+/// [`DavContext::ownership_recheck`]: the auth decision made again. Blocking (it lists
+/// a folder and reads the database).
+pub type OwnershipRecheck = Arc<dyn Fn() -> Result<(), Refusal> + Send + Sync>;
+
+/// A response extension the server's auth layer puts on a refusal it answered itself:
+/// the `detail` its PUT verdict carries ([`put_refusal_verdict`]) in place of the
+/// generic one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusalDetail(pub &'static str);
+
 /// Who is asking, as the server's auth layer decided (spec §2.3).
 #[derive(Clone)]
 pub struct DavContext {
@@ -90,6 +112,11 @@ pub struct DavContext {
     /// written, else the write is refused. An archive of the layer's dotted name that
     /// lands in between makes the path that archive's shared primary.
     pub personal_only: bool,
+    /// Auth admitted this write by a series owner rule (0.8), decided from a folder
+    /// listing and the database: asked again just before the write lands (a PUT's
+    /// publish, a DELETE's removal), so an archive that arrived meanwhile and governs
+    /// the path now refuses it.
+    pub ownership_recheck: Option<OwnershipRecheck>,
     /// `MOKURO_NGINX_ACCEL=1`: answer library GET/HEAD with `X-Accel-Redirect` (§8.10).
     pub nginx_accel: bool,
     /// The resolved client IP (logging only).
@@ -104,6 +131,7 @@ impl DavContext {
             role: Role::Anonymous,
             owns_cloud_root: false,
             personal_only: false,
+            ownership_recheck: None,
             nginx_accel: false,
             client_ip: None,
             hooks,
@@ -116,6 +144,7 @@ impl DavContext {
             role,
             owns_cloud_root: false,
             personal_only: false,
+            ownership_recheck: None,
             nginx_accel: false,
             client_ip: None,
             hooks,
@@ -299,7 +328,8 @@ pub fn put_gives_verdict(path: &str) -> bool {
 /// a body limit, ...) into the JSON verdict a reader expects (spec §9; in 0.5.2 the upload
 /// middleware wrapped the auth layer). Other headers (`WWW-Authenticate`) are kept. A
 /// response for a path without a verdict, or a success, is returned unchanged; a `.cbz`
-/// PUT always gets `X-Mokuro-Put: verified`.
+/// PUT always gets `X-Mokuro-Put: verified`. A 403 carrying a [`RefusalDetail`] says
+/// why in its verdict's `detail`.
 pub fn put_refusal_verdict(path: &str, resp: Response<Body>) -> Response<Body> {
     methods::put::refusal_verdict(path, resp)
 }

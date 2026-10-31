@@ -441,6 +441,61 @@ table above:
 
 `original`, `gcv`, `updated-ocr`, `tr-*` and hand-made ids keep the table above (shared files).
 
+**0.8: series owners.** The account whose MKCOL creates a top-level library folder owns it
+(`series_folder_owners`, keyed by the series fold; a PUT never makes a folder); folders that existed
+before 0.8 get the one uploader of their tracked volumes, once, at startup. For roles below
+`MODIFY_DELETE` (the uploader), replacing the ownership rows of 4.4 step 4, step 10 and 4.6:
+
+* every segment rule reads the path with its empty and `.` segments dropped (as DAV resolves it);
+* nothing new (a PUT of a new file, an MKCOL) goes inside a folder another account owns, nor at a
+  top-level spelling of one: 403 `Permission denied: this series belongs to another account`;
+* a FILE governed by a listed archive (`sidecar_names::governing_archives`: the archive, its
+  sidecars, a `.mokuro` rule v1 reads as its primary or layer, a name nested under it by a layer
+  id with a letter, ids folded like stems) is created, replaced or deleted only by an account that
+  controls it: the archive's uploader, or the owner of its folder. The NEAREST listed archive
+  governs (a listed `Berserk.v01.cbz` is its own, whoever adds `Berserk.cbz` later; a name not
+  listed yet takes the nearest listed archive above it), except that an archive hiding a reserved
+  layer of the one above it (`V.curated.cbz`, `V.edit.cbz`, `V.pre-upgrade.cbz` beside `V.cbz`)
+  passes control up to it. A new one is otherwise 403
+  `Permission denied: this file belongs to a volume this account did not upload`; an existing
+  one keeps 4.4's replace refusal. What nothing governs is the folder owner's to replace or delete;
+  a new volume in an unowned folder is anyone's to add;
+* nobody below `MODIFY_DELETE` creates such a hiding archive beside a listed volume, its
+  controller included: 403 `Permission denied: this name is kept for a layer of the volume beside
+  it` (it would turn every account's correction of `V`, or its curated or keepsake layer, into the
+  shared primary of the new archive);
+* a folder is never governed: only its series owner deletes one (the series folder included) or
+  makes one named after a volume. A library MKCOL never makes a missing parent (409);
+* `series.json` (4.4 step 2) needs the series' recorded owner; curated needs control of the volume
+  (its uploader, or the series owner);
+* a folder whose listing cannot be read answers 503 with `Retry-After` rather than governing
+  nothing;
+* so does an ownership lookup that cannot be answered: a series owner, an archive's
+  uploader or the adoption state the database fails to read, or a library root that cannot be
+  listed when a record's own folder name is not there (another spelling may be). Whichever way
+  the answer would have gone, it never reads as "no owner" or "adoption done";
+* while startup adoption is pending, additions answer 503 with `Retry-After` (adoption is retried
+  in the process until it is done; a cloud library whose store does not run holds nothing back,
+  since nothing reaches it, and is adopted at a later start).
+
+Known residual: in a folder nobody owns, a sidecar (`V.mokuro`, `V.webp`, a layer file) of a volume
+not listed yet is anyone's to add, and becomes that volume's when its archive arrives. A reader
+sends a volume's sidecars before its archive, so they cannot be refused there; the archive's
+controller may replace or delete them.
+
+A decision made from a listing is `Grant::Owner`: DAV makes it again just before a PUT is published,
+before a DELETE removes anything, and before an MKCOL makes its folder. A refused PUT's verdict carries the reason as its `detail`.
+A recheck that cannot decide now (adoption pending, an unreadable listing, a failed lookup) answers
+503 with its `Retry-After` (a PUT's verdict `retry: true`), never the per-file 403 a reader takes
+as final (`bunko_dav::Refusal::retry_after`).
+
+The owner records follow the folders through DAV's and the store's hooks. A hook that cannot list
+the library root gives no folder an owner (a new folder may be a spelling of a listed series, and its
+owner would control every account's volumes in it) and forgets no record: a stale record is inert,
+since every read checks that its folder is listed.
+Personal corrections, keepsakes and reserved ids keep the table above; MOVE, COPY, LOCK and
+PROPPATCH stay `MODIFY_DELETE`.
+
 `_authorize_progress_write` (`auth.py:889-921`): unauthenticated -> 401 `Authentication required to save progress`;
 role lacks `WRITE_PROGRESS` (anonymous/processor) -> 403 `Permission denied: cannot save progress`;
 username present -> allow (the file is always the caller's own; the path maps to

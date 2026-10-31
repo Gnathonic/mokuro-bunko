@@ -30,7 +30,29 @@ fn copy_fixture(name: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
+/// The tables 0.8 adds (schema version 7), which no Python build made: kept out of the
+/// rows compared with the Python manifests and checked on their own
+/// ([`series_folder_owner_tables`]).
+fn is_v7_row(row: &Value) -> bool {
+    row[2]
+        .as_str()
+        .is_some_and(|t| t.starts_with("series_folder_"))
+}
+
+/// [`all_schema_rows`] without the version 7 tables: what Python 0.5.3 compares.
 fn schema_rows(path: &Path) -> Value {
+    let rows = all_schema_rows(path);
+    Value::Array(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| !is_v7_row(r))
+            .cloned()
+            .collect(),
+    )
+}
+
+fn all_schema_rows(path: &Path) -> Value {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mut stmt = conn
         .prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY rowid")
@@ -113,6 +135,68 @@ fn a_fresh_rust_schema_is_byte_identical_to_python() {
     assert_eq!(schema_rows(&path), m["fresh_schema"]);
 }
 
+fn version_of(path: &Path) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// Version 7 (0.8) adds the series folder owners, after everything 0.5.3 has. A new
+/// database is adopted at once (it tracks no volume); a Python one that tracks volumes
+/// waits for the server's adoption, and opening it again changes nothing.
+#[test]
+fn series_folder_owner_tables() {
+    let names = |path: &Path| -> Vec<String> {
+        all_schema_rows(path)
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| is_v7_row(r))
+            .map(|r| r[1].as_str().unwrap().to_string())
+            .collect()
+    };
+    let want = [
+        "series_folder_owners",
+        "sqlite_autoindex_series_folder_owners_1",
+        "series_folder_adoption",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = dir.path().join("mokuro.db");
+    let db = open(&fresh);
+    assert!(!db.series_folder_adoption_pending().unwrap());
+    drop(db);
+    assert_eq!(version_of(&fresh), 7);
+    let rows = all_schema_rows(&fresh);
+    let last: Vec<&str> = rows.as_array().unwrap()[rows.as_array().unwrap().len() - 3..]
+        .iter()
+        .map(|r| r[1].as_str().unwrap())
+        .collect();
+    assert_eq!(last, want, "after 0.5.3's tables");
+    assert_eq!(names(&fresh), want);
+
+    for tag in ["py052", "py053"] {
+        let (_dir, path) = copy_fixture(&format!("{tag}.db"));
+        let db = open(&path);
+        assert!(db.series_folder_adoption_pending().unwrap(), "{tag}");
+        drop(db);
+        assert_eq!(version_of(&path), 7, "{tag}");
+        let before = all_schema_rows(&path);
+        let db = open(&path);
+        assert!(db.series_folder_adoption_pending().unwrap(), "{tag} again");
+        drop(db);
+        assert_eq!(all_schema_rows(&path), before, "{tag}: idempotent");
+    }
+    // A newer build's marker is left alone.
+    let (_dir, path) = copy_fixture("py053.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute("UPDATE schema_version SET version = 8", [])
+        .unwrap();
+    drop(open(&path));
+    assert_eq!(version_of(&path), 8);
+}
+
 /// A 0.5.3 database opens unchanged; a 0.5.2 one gains exactly what 0.5.3 gives it
 /// (`catalog_folders`).
 #[test]
@@ -127,11 +211,8 @@ fn a_python_database_opens_as_python_053_opens_it() {
         let (_dir, path) = copy_fixture(&format!("{tag}.db"));
         drop(open(&path));
         assert_eq!(schema_rows(&path), want, "{tag}");
-        let version: i64 = rusqlite::Connection::open(&path)
-            .unwrap()
-            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(version, 6);
+        // 0.5.3 marks it 6; 0.8's owner tables make it 7 (series_folder_owner_tables).
+        assert_eq!(version_of(&path), 7);
     }
 }
 
@@ -460,7 +541,9 @@ fn a_legacy_database_is_migrated_as_python_053_migrates_it() {
     let conn = rusqlite::Connection::open(&path).unwrap();
     let q = |sql: &str| query(&conn, sql);
     let c = &m["contents"];
-    assert_eq!(q("SELECT version FROM schema_version"), c["schema_version"]);
+    // Python 0.5.3 marks it 6 (`c["schema_version"]`); 0.8 marks it 7.
+    assert_eq!(c["schema_version"], json!([[6]]));
+    assert_eq!(q("SELECT version FROM schema_version"), json!([[7]]));
     assert_eq!(
         q("SELECT id, username, role, status, notes FROM users ORDER BY id"),
         c["users"]

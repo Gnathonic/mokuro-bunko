@@ -75,6 +75,8 @@ pub struct SeedVolume {
 #[derive(Debug, Clone)]
 pub struct SeedSeries {
     pub series: String,
+    /// The recorded series folder owner (0.8), if any.
+    pub owner: Option<String>,
     pub volumes: Vec<SeedVolume>,
 }
 
@@ -110,6 +112,7 @@ impl Seed {
             .iter()
             .map(|series| SeedSeries {
                 series: s(series, "series"),
+                owner: series["owner"].as_str().map(str::to_string),
                 volumes: series["volumes"]
                     .as_array()
                     .expect("seed volumes")
@@ -449,6 +452,14 @@ fn add_users(services: &Services, seed: &Seed) {
             .db
             .create_user(&u.username, &u.password, u.role, UserStatus::Active, "")
             .unwrap();
+    }
+    for series in &seed.library {
+        if let Some(owner) = &series.owner {
+            services
+                .db
+                .record_series_folder_owner(&series.series, owner)
+                .unwrap();
+        }
     }
 }
 

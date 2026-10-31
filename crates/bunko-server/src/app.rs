@@ -117,6 +117,9 @@ pub struct Services {
     /// Connect / Disconnect a cloud library (setup wizard, admin Storage panel, the
     /// local control API).
     pub storage_control: Arc<crate::storage::StorageControl>,
+    /// Stops the auth backend holding additions for series folder adoption
+    /// ([`DbAuthBackend::adoption_waiver`]).
+    adoption_waiver: Arc<std::sync::atomic::AtomicBool>,
     /// A cloud library: the store's change events drop the PROPFIND listings they
     /// touch at once (spec §10).
     _listing_watch: Option<bunko_store::WatchGuard>,
@@ -244,6 +247,7 @@ impl Services {
         let dyndns = DynDnsService::new(config.dyndns.clone());
         let config = Arc::new(RwLock::new(config));
         let backend = Arc::new(DbAuthBackend::new(db.clone(), layout.clone()));
+        let adoption_waiver = backend.adoption_waiver();
         let updates = crate::admin::UpdateService::from_config(config.clone(), flavor);
         // The PROPFIND cache takes half of the cache budget (server.cache_mb).
         let cache_mb = config.read().server.cache_mb.max(2) as usize;
@@ -255,7 +259,10 @@ impl Services {
             ..Default::default()
         };
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
-        let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
+        let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(
+            db.clone(),
+            layout.library(),
+        ));
         let core = Core::with_layout(config, config_path, backend, layout.clone());
         let storage_control = crate::storage::StorageControl::for_core(&core, storage.clone());
         let late_ocr: Arc<std::sync::OnceLock<crate::ocr::OcrControl>> =
@@ -321,6 +328,7 @@ impl Services {
         Ok(Services {
             storage,
             storage_control,
+            adoption_waiver,
             _listing_watch: listing_watch,
             core,
             db,
@@ -475,19 +483,51 @@ pub fn dav_handler(
         let dav = dav.clone();
         let hooks: Arc<dyn bunko_dav::DavHooks> = hooks.clone();
         let owns_cloud_root = core.owns_cloud_root(ctx.identity.username());
-        let personal_only = req.extensions().get() == Some(&auth::Grant::Personal);
+        let grant = req.extensions().get::<auth::Grant>().copied();
+        let personal_only = grant == Some(auth::Grant::Personal);
+        let ownership_recheck =
+            (grant == Some(auth::Grant::Owner)).then(|| ownership_recheck(&core, &req, &ctx));
         Box::pin(async move {
             let dctx = bunko_dav::DavContext {
                 username: ctx.identity.username().map(str::to_string),
                 role: ctx.identity.role(),
                 owns_cloud_root,
                 personal_only,
+                ownership_recheck,
                 nginx_accel,
                 client_ip: Some(ctx.client_ip.clone()),
                 hooks,
             };
             dav.handle(req, dctx).await
         })
+    })
+}
+
+/// The same auth decision made again (series owners, 0.8): the request a grant of
+/// [`auth::Grant::Owner`] admitted, asked just before DAV writes. Blocking.
+fn ownership_recheck(core: &Core, req: &Request, ctx: &RequestCtx) -> bunko_dav::OwnershipRecheck {
+    let method = req.method().clone();
+    let path = percent_encoding::percent_decode_str(req.uri().path())
+        .decode_utf8_lossy()
+        .into_owned();
+    let destination = req
+        .headers()
+        .get("destination")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let identity = ctx.identity.clone();
+    let anon = core.anonymous_access();
+    let backend = core.backend.clone();
+    Arc::new(move || {
+        auth::authorize(
+            &method,
+            &path,
+            destination.as_deref(),
+            &identity,
+            anon,
+            backend.as_ref(),
+        )
+        .map_err(auth::Denied::into_refusal)
     })
 }
 
@@ -557,6 +597,8 @@ fn refuse_reader(method: &http::Method, path: &str, identity: &auth::Identity) -
                 status,
                 message,
                 bearer: identity.bearer_failed,
+                detail: None,
+                retry_after: None,
             }
             .into_response(),
         );
@@ -572,6 +614,8 @@ fn text_status(status: StatusCode, message: &str) -> Response {
         status,
         message: message.to_string(),
         bearer: false,
+        detail: None,
+        retry_after: None,
     }
     .into_response()
 }
@@ -757,6 +801,9 @@ pub async fn serve_router_with(
 pub const CLOUD_STEADY_WAIT: Duration = Duration::from_secs(15 * 60);
 /// How often that wait logs its progress.
 const CLOUD_STEADY_LOG_EVERY: Duration = Duration::from_secs(30);
+/// How often a series folder owner adoption that could not be done is tried again.
+const ADOPTION_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// How long the metadata passes wait for a cloud store's first adoption (§9.4) before
 /// they start anyway.
 pub const CLOUD_ADOPTION_WAIT: Duration = Duration::from_secs(60 * 60);
@@ -779,14 +826,29 @@ pub fn start_library_services(
     let Some(storage) = services.storage.clone() else {
         services.library.start();
         {
-            // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
-            // request path. Then corrections written into the shared folder before 0.8
-            // go to their writers (after: the two sweeps would race for the same files).
+            // The series folders that existed before 0.8 get their owners first: until
+            // then uploaders' additions wait (auth answers 503). Then 0.5.2's one-shot
+            // corrupt-sidecar sweep, off the request path, and the corrections written
+            // into the shared folder before 0.8 go to their writers (after: the two
+            // sweeps would race for the same files).
             let (lib, db) = (library_dir.clone(), services.db.clone());
             let corrections = CorrectionSweeper::of(services);
-            tokio::task::spawn_blocking(move || {
+            let first = tokio::task::spawn_blocking(move || {
+                crate::library::adopt_series_folder_owners(&db, &lib);
                 crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db));
                 corrections.run(true);
+            });
+            // A first try that could not adopt is tried again (F4).
+            let (lib, db, stop) = (library_dir.clone(), services.db.clone(), stop.clone());
+            tokio::spawn(async move {
+                let _ = first.await;
+                crate::library::adopt_series_folder_owners_until_done(
+                    db,
+                    lib,
+                    ADOPTION_RETRY,
+                    stop,
+                )
+                .await;
             });
         }
         let thumbs = services
@@ -801,9 +863,11 @@ pub fn start_library_services(
         services.ocr.clone(),
     );
     let corrections = CorrectionSweeper::of(services);
+    let (db, owners_root) = (services.db.clone(), library_dir.clone());
+    let adoption_waiver = services.adoption_waiver.clone();
     tokio::spawn(async move {
         let started = std::time::Instant::now();
-        loop {
+        let steady = loop {
             let h = storage.clone();
             let wait = tokio::task::spawn_blocking(move || h.wait_steady(CLOUD_STEADY_LOG_EVERY));
             let steady = tokio::select! {
@@ -822,7 +886,7 @@ pub fn start_library_services(
                         storage.backend.as_str()
                     );
                 }
-                break;
+                break true;
             }
             if started.elapsed() >= CLOUD_STEADY_WAIT {
                 tracing::warn!(
@@ -831,13 +895,49 @@ pub fn start_library_services(
                     CLOUD_STEADY_WAIT.as_secs() / 60,
                     storage.engine_state()
                 );
-                break;
+                break false;
             }
             info!(
                 "[STORAGE] Waiting for the first sync of the {} library: {:?}",
                 storage.backend.as_str(),
                 storage.engine_state()
             );
+        };
+        // Series folder owners are adopted from the whole listing only: on a store that
+        // is not in sync yet, once it is (uploaders' additions wait until then). A
+        // library that is not connected has nothing listed to adopt from, and no
+        // addition reaches its folders: additions are not held, and a later start
+        // adopts (F4).
+        if !storage.connected() {
+            adoption_waiver.store(true, std::sync::atomic::Ordering::Relaxed);
+            if db.series_folder_adoption_pending().unwrap_or(false) {
+                tracing::warn!(
+                    "[LIBRARY] The library is not connected: its series folders get their owners at a later start"
+                );
+            }
+        } else {
+            let (h, stop) = (storage.clone(), stop.clone());
+            tokio::spawn(async move {
+                if !steady {
+                    loop {
+                        let h = h.clone();
+                        let wait = tokio::task::spawn_blocking(move || {
+                            h.wait_steady(CLOUD_STEADY_LOG_EVERY)
+                        });
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            r = wait => if r.unwrap_or(false) { break },
+                        }
+                    }
+                }
+                crate::library::adopt_series_folder_owners_until_done(
+                    db,
+                    owners_root,
+                    ADOPTION_RETRY,
+                    stop,
+                )
+                .await;
+            });
         }
         // The cloud folder's corrections are the progress user's: with none chosen they
         // are only counted, never moved out of the folder.

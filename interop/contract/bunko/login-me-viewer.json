@@ -13,6 +13,9 @@
       },
       "curated": {
         "scope": "none"
+      },
+      "addFiles": {
+        "scope": "none"
       }
     },
     "per_user_files": [

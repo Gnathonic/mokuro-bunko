@@ -82,6 +82,15 @@ impl DavHooks for Recorder {
     fn rename_volume_uuids_under_prefix(&self, o: &str, n: &str) {
         self.push(format!("rename_volume_uuids_under_prefix {o} {n}"));
     }
+    fn series_folder_created(&self, rel: &str, actor: &str) {
+        self.push(format!("series_folder_created {rel} {actor}"));
+    }
+    fn series_folder_removed(&self, rel: &str) {
+        self.push(format!("series_folder_removed {rel}"));
+    }
+    fn series_folder_moved(&self, old: &str, new: &str) {
+        self.push(format!("series_folder_moved {old} {new}"));
+    }
     fn primary_sidecar_leaving(&self, rel: &str, _sidecar: &Path) {
         self.push(format!("primary_sidecar_leaving {rel}"));
     }

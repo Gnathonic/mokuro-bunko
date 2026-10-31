@@ -11,14 +11,18 @@ use tracing::warn;
 
 pub struct ServerDavHooks {
     db: Arc<Database>,
+    /// The library root (the store's mount on a cloud library): series folder owners
+    /// look at the folders listed there.
+    library: PathBuf,
     /// Non-DB listeners (OCR control, library runtime), added as modules start.
     listeners: RwLock<Vec<Arc<dyn DavHooks>>>,
 }
 
 impl ServerDavHooks {
-    pub fn new(db: Arc<Database>) -> Self {
+    pub fn new(db: Arc<Database>, library: PathBuf) -> Self {
         Self {
             db,
+            library,
             listeners: RwLock::new(Vec::new()),
         }
     }
@@ -126,6 +130,15 @@ impl DavHooks for ServerDavHooks {
             "rename_volume_uuids_under_prefix",
             self.db.rename_volume_uuids_under_prefix(old, new),
         );
+    }
+    fn series_folder_created(&self, rel: &str, actor: &str) {
+        crate::library::owners::folder_created(&self.db, &self.library, rel, actor);
+    }
+    fn series_folder_removed(&self, rel: &str) {
+        crate::library::owners::folder_removed(&self.db, &self.library, rel);
+    }
+    fn series_folder_moved(&self, old: &str, new: &str) {
+        crate::library::owners::folder_moved(&self.db, &self.library, old, new);
     }
 
     fn primary_sidecar_leaving(&self, rel: &str, sidecar: &Path) {

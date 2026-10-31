@@ -43,7 +43,7 @@ async fn me_valid_creds_returns_identity_and_permissions() {
     assert!(b["created_at"].as_str().is_some_and(|s| s.len() == 19));
     assert_eq!(
         b["permissions"],
-        json!({"canWriteProgress": true, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}, "curated": {"scope": "none"}})
+        json!({"canWriteProgress": true, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}, "curated": {"scope": "none"}, "addFiles": {"scope": "none"}})
     );
     // 0.5.2 key order (account.js only reads keys, but keep the Python dict order).
     let text = r.text();
@@ -53,7 +53,7 @@ async fn me_valid_creds_returns_identity_and_permissions() {
         ),
         "{text}"
     );
-    assert!(text.contains(r#""permissions":{"canWriteProgress":true,"canAddFiles":false,"canModifyDelete":false,"metadata":{"scope":"none"},"curated":{"scope":"none"}}"#));
+    assert!(text.contains(r#""permissions":{"canWriteProgress":true,"canAddFiles":false,"canModifyDelete":false,"metadata":{"scope":"none"},"curated":{"scope":"none"},"addFiles":{"scope":"none"}}"#));
     assert_eq!(r.header("content-type"), Some("application/json"));
     assert!(r.header("www-authenticate").is_none());
     // What this server keeps per account: the reader reads and writes
@@ -85,7 +85,8 @@ async fn me_valid_creds_returns_identity_and_permissions() {
 #[tokio::test]
 async fn me_permissions_per_role() {
     let env = me_env();
-    for (user, role, wp, add, md, meta, curated) in [
+    env.user("pro", PW, Role::Processor);
+    for (user, role, wp, add, md, meta, curated, add_files) in [
         (
             "reg",
             "registered",
@@ -94,6 +95,17 @@ async fn me_permissions_per_role() {
             false,
             json!({"scope": "none"}),
             "none",
+            json!({"scope": "none"}),
+        ),
+        (
+            "pro",
+            "processor",
+            false,
+            false,
+            false,
+            json!({"scope": "none"}),
+            "none",
+            json!({"scope": "none"}),
         ),
         (
             "upl",
@@ -103,6 +115,7 @@ async fn me_permissions_per_role() {
             false,
             json!({"scope": "owned", "ownedSeries": []}),
             "owned",
+            json!({"scope": "open", "closedSeries": []}),
         ),
         (
             "edi",
@@ -112,6 +125,7 @@ async fn me_permissions_per_role() {
             true,
             json!({"scope": "all"}),
             "all",
+            json!({"scope": "all"}),
         ),
         (
             "adm",
@@ -121,6 +135,7 @@ async fn me_permissions_per_role() {
             true,
             json!({"scope": "all"}),
             "all",
+            json!({"scope": "all"}),
         ),
         (
             "inv",
@@ -130,6 +145,7 @@ async fn me_permissions_per_role() {
             true,
             json!({"scope": "all"}),
             "all",
+            json!({"scope": "all"}),
         ),
     ] {
         let r = me(&env, Some(&basic(user, PW))).await;
@@ -138,7 +154,7 @@ async fn me_permissions_per_role() {
         assert_eq!(b["role"], role);
         assert_eq!(
             b["permissions"],
-            json!({"canWriteProgress": wp, "canAddFiles": add, "canModifyDelete": md, "metadata": meta, "curated": {"scope": curated}}),
+            json!({"canWriteProgress": wp, "canAddFiles": add, "canModifyDelete": md, "metadata": meta, "curated": {"scope": curated}, "addFiles": add_files}),
             "{user}"
         );
         assert_eq!(b["per_user_layers"], json!(["edit"]), "{user}");
@@ -187,7 +203,7 @@ async fn me_failures_and_anonymous() {
     let anon = json!({
         "authenticated": false,
         "role": "anonymous",
-        "permissions": {"canWriteProgress": false, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}, "curated": {"scope": "none"}},
+        "permissions": {"canWriteProgress": false, "canAddFiles": false, "canModifyDelete": false, "metadata": {"scope": "none"}, "curated": {"scope": "none"}, "addFiles": {"scope": "none"}},
         "per_user_files": ["volume-data.json", "profiles.json", "goals.json", "positions.json", "history/"],
         "per_user_layers": ["edit"],
         "version": bunko_core::VERSION,
@@ -237,20 +253,42 @@ async fn me_rate_limited_and_garbage_does_not_count() {
     assert!(env.deps.core.dav_limiter.allow("192.0.2.77:reg").is_ok());
 }
 
+/// The series an uploader owns are its recorded series folders (0.8), and the ones it
+/// cannot add to are every other account's, unnamed; only folders that are there now.
 #[tokio::test]
-async fn me_uploader_sees_exactly_the_folders_it_owns() {
+async fn me_uploader_sees_the_series_it_owns_and_those_closed_to_it() {
     let env = me_env();
+    let library = env.deps.core.layout.library();
+    for folder in ["Dr Stone", "Aria", "Theirs", "Zeta", "Unowned"] {
+        bunko_store::fs::create_dir_all(library.join(folder)).unwrap();
+    }
+    // Uploading every volume of a series no longer owns it: the record does.
     env.db
-        .record_volume_upload("Dr Stone/Volume 01.cbz", "upl")
+        .record_volume_upload("Unowned/v1.cbz", "upl")
         .unwrap();
-    env.db.record_volume_upload("Aria/v1.cbz", "upl").unwrap();
-    env.db.record_volume_upload("Shared/v1.cbz", "upl").unwrap();
-    env.db.record_volume_upload("Shared/v2.cbz", "edi").unwrap();
+    for (folder, owner) in [
+        ("Dr Stone", "upl"),
+        ("Aria", "UPL"),
+        ("Theirs", "edi"),
+        ("Zeta", "adm"),
+        ("Gone", "edi"),
+        ("Gone Too", "upl"),
+    ] {
+        env.db.record_series_folder_owner(folder, owner).unwrap();
+    }
     let r = me(&env, Some(&basic("upl", PW))).await;
+    let p = &r.json()["permissions"];
     assert_eq!(
-        r.json()["permissions"]["metadata"],
+        p["metadata"],
         json!({"scope": "owned", "ownedSeries": ["Aria", "Dr Stone"]})
     );
+    assert_eq!(
+        p["addFiles"],
+        json!({"scope": "open", "closedSeries": ["Theirs", "Zeta"]})
+    );
+    // An editor adds anywhere.
+    let r = me(&env, Some(&basic("edi", PW))).await;
+    assert_eq!(r.json()["permissions"]["addFiles"], json!({"scope": "all"}));
 }
 
 // --- tokens (test_auth_token_requests.py) -----------------------------------------

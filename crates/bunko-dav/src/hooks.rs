@@ -62,6 +62,15 @@ pub trait DavHooks: Send + Sync + 'static {
     /// A library folder was moved inside the library (its sidecars moved with it).
     fn rename_ocr_sidecars_under_prefix(&self, _old_prefix: &str, _new_prefix: &str) {}
     fn rename_volume_uuids_under_prefix(&self, _old_prefix: &str, _new_prefix: &str) {}
+    /// A client's MKCOL created the top-level library folder `rel` (a series folder):
+    /// `actor` owns it (0.8). Only for the request that created it, never for one that
+    /// found it there already.
+    fn series_folder_created(&self, _rel: &str, _actor: &str) {}
+    /// A library folder was deleted (or overwritten by a folder MOVE), or moved out of
+    /// the library.
+    fn series_folder_removed(&self, _rel: &str) {}
+    /// A library folder was moved inside the library.
+    fn series_folder_moved(&self, _old_rel: &str, _new_rel: &str) {}
     /// A PUT of a plain `.mokuro` has staged its body at `staged` and checked it (size,
     /// digest), and is about to publish it as `dest`. The one hook that runs BEFORE the
     /// write: the server may rewrite the staged file (critique C5: it puts Bunko's

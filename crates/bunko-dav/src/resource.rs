@@ -582,8 +582,11 @@ impl Roots {
         mut hidden: Option<&mut Vec<Resource>>,
     ) -> Vec<Resource> {
         let listed = self.list_dir(dir, vpath, reader_root, FileKind::Library);
+        // Files only: a folder named like an archive defines no stem (rule 2), as
+        // `personal::names_in` reads it for GET and auth.
         let names: Vec<String> = listed
             .iter()
+            .filter(|r| !r.is_collection())
             .map(|r| paths::uri_name(r.path()).to_string())
             .collect();
         let stems = personal::stems_of(&names);

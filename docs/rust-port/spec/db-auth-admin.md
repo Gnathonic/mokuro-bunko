@@ -988,6 +988,15 @@ that keep reading history per account: the reader turns history sync on when its
 `positions.json` only when it is listed. Pinned by `crates/bunko-server/tests/accounts_login.rs` and
 the `login-me-*` contract fixtures (where `version` is the sentinel `0.0.0`).
 
+**0.8 series owners (Rust).** `P` ends with `"addFiles"`: `{"scope":"all"}` for `MODIFY_DELETE`,
+`{"scope":"open","closedSeries":[...]}` for `uploader` (the recorded folders of series another
+account owns, listed now), else `{"scope":"none"}`; an uploader's `metadata.ownedSeries` is the
+series it owns by record, listed now. What cannot be read is never reported as a shorter list (a
+reader acts on it as true, and takes a failed `/me` for a server without owners, so `/me` still
+answers 200): with the library root unlistable, every record of another account is closed and
+none is owned; with the records unreadable, `addFiles` is `{"scope":"none"}` and `ownedSeries`
+empty. Auth answers those requests 503 meanwhile; the reader's next `/me` corrects the lists.
+
 ### 15.5 `GET /api/nav/config` (:361-383) - no auth
 Response 200: `{"home_enabled": bool, "catalog_enabled": bool, "queue_show_in_nav": bool,
 "queue_public_access": bool, "registration_enabled": bool}` where (with a Config present):

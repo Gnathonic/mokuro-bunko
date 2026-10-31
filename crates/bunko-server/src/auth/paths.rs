@@ -69,6 +69,29 @@ fn library_relative_normalized(path: &str) -> Option<String> {
     Some(rel.to_string())
 }
 
+/// The library-relative path of a library request path, its empty and `.` segments
+/// dropped (`/mokuro-reader//S/./V.cbz` → `S/V.cbz`), as DAV resolves it: every rule
+/// that reads segments reads them from here, so no spelling of a path slips past one.
+pub fn library_rel(path: &str) -> Option<String> {
+    library_relative_normalized(path)
+}
+
+/// [`library_rel`] as a request path again (`/mokuro-reader/S/V.cbz`).
+pub fn normalized_library_path(path: &str) -> Option<String> {
+    library_rel(path).map(|rel| format!("/{READER_ROOT}/{rel}"))
+}
+
+/// The series folder a library path is INSIDE: its first segment, when it has more.
+pub fn series_folder_of(path: &str) -> Option<String> {
+    let rel = library_rel(path)?;
+    rel.split_once('/').map(|(folder, _)| folder.to_string())
+}
+
+/// The library path itself when it is a top-level entry (one segment).
+pub fn top_level_folder(path: &str) -> Option<String> {
+    library_rel(path).filter(|rel| !rel.contains('/'))
+}
+
 /// The [`LayerClass`] of the layer id a library file's name carries
 /// (`S/V.edit.mokuro` → Personal), the id exact as written (rule v1). Listing-free:
 /// the name alone cannot tell a layer from a dotted volume's primary, which
@@ -226,6 +249,47 @@ mod tests {
         // The reading-history tree is the account's own, never compiled metadata.
         assert!(!is_series_file_path("/mokuro-reader/history/series.json"));
         assert!(is_series_file_path("/mokuro-reader/History/series.json"));
+    }
+
+    /// C4: the segment helpers read the path as DAV resolves it.
+    #[test]
+    fn series_folders_of_any_spelling_of_a_path() {
+        for p in [
+            "/mokuro-reader/S/V.cbz",
+            "/mokuro-reader//S/V.cbz",
+            "/mokuro-reader/./S/V.cbz",
+            "/mokuro-reader/S//V.cbz",
+            "/mokuro-reader/S/./V.cbz",
+            "//mokuro-reader/S/V.cbz/",
+        ] {
+            assert_eq!(series_folder_of(p).as_deref(), Some("S"), "{p}");
+            assert_eq!(top_level_folder(p), None, "{p}");
+            assert_eq!(
+                normalized_library_path(p).as_deref(),
+                Some("/mokuro-reader/S/V.cbz"),
+                "{p}"
+            );
+        }
+        for p in [
+            "/mokuro-reader/S",
+            "/mokuro-reader//S/",
+            "/mokuro-reader/./S",
+        ] {
+            assert_eq!(top_level_folder(p).as_deref(), Some("S"), "{p}");
+            assert_eq!(series_folder_of(p), None, "{p}");
+        }
+        assert_eq!(
+            series_folder_of("/mokuro-reader/A/B/V.cbz").as_deref(),
+            Some("A")
+        );
+        for p in [
+            "/mokuro-reader/",
+            "/mokuro-reader/history/d/x",
+            "/elsewhere/S/V.cbz",
+        ] {
+            assert_eq!(series_folder_of(p), None, "{p}");
+            assert_eq!(top_level_folder(p), None, "{p}");
+        }
     }
 
     #[test]

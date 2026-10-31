@@ -18,6 +18,7 @@
 //! | [`invites`] | `invites` |
 //! | [`audit`] | `audit_logs` |
 //! | [`uploads`] | `volume_uploads` (volume and series ownership) |
+//! | [`folders`] | `series_folder_owners`, `series_folder_adoption` (series folder owners, 0.8) |
 //! | [`ocr`] | `ocr_sidecars` |
 //! | [`identities`] | `volume_identities` |
 //! | [`series`] | `series_facts`, `series_entry_cache`, `catalog_folders`, `community_details` |
@@ -26,6 +27,7 @@
 pub mod audit;
 pub mod database;
 pub mod error;
+pub mod folders;
 pub mod identities;
 pub mod invites;
 pub mod ocr;
@@ -44,6 +46,7 @@ pub use audit::{
 };
 pub use database::{Database, DbOptions};
 pub use error::{DbError, Result};
+pub use folders::SeriesFolderOwner;
 pub use invites::{
     INVALID_INVITE_MESSAGE, INVITABLE_ROLES, Invite, InviteInfo, InviteStatus, parse_duration,
 };

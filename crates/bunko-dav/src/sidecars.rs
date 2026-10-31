@@ -3,14 +3,19 @@
 
 use std::path::{Path, PathBuf};
 
-use bunko_core::sidecar_names;
+use bunko_core::sidecar_names::{self, LayerClass};
 
 use crate::paths;
 
 /// Every sidecar of the archive `cbz` (listed from its directory): `<stem>.mokuro`,
 /// `<stem>.mokuro.gz`, `<stem>.webp`, `<stem>.nocover`, and every other file
 /// [`sidecar_names::sweep_set`] gives that volume (other spellings of those, its
-/// layers).
+/// layers). Folders are no sidecars and archive nothing (rule 2).
+///
+/// Never a file that, with `cbz` gone, is a correction, curated or keepsake layer of
+/// another listed archive: an archive nested under a volume's name (`V.edit.cbz` beside
+/// `V.cbz`) would otherwise take `V`'s own `V.edit.mokuro` or `V.curated.mokuro` with
+/// it, for good.
 pub fn siblings(cbz: &Path) -> Vec<PathBuf> {
     let name = paths::file_name(cbz);
     let stem = paths::py_stem(&name).to_string();
@@ -26,6 +31,7 @@ pub fn siblings(cbz: &Path) -> Vec<PathBuf> {
     };
     let mut names: Vec<String> = entries
         .flatten()
+        .filter(|e| !e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
@@ -36,6 +42,14 @@ pub fn siblings(cbz: &Path) -> Vec<PathBuf> {
             out.push(path);
         }
     }
+    let others = sidecar_names::volume_stems(listed.iter().copied().filter(|n| *n != name));
+    out.retain(|path| {
+        let leaving = paths::file_name(path);
+        !matches!(
+            sidecar_names::layer_class_of_name(&leaving, &others),
+            Some(LayerClass::Personal | LayerClass::Curated | LayerClass::ServerKeepsake)
+        )
+    });
     out
 }
 
@@ -106,6 +120,46 @@ mod tests {
         assert!(!got.contains(&"vol 01.hayai.mokuro".to_string()));
         assert!(!got.contains(&"VOL 01.MOKURO".to_string()));
         assert!(names("vol 01.cbz").contains(&"vol 01.hayai.mokuro".to_string()));
+    }
+
+    /// C11: an archive nested under a volume's name leaves that volume's correction,
+    /// curated and keepsake layers; folders are no archives.
+    #[test]
+    fn a_nested_archive_leaves_the_outer_volumes_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for n in [
+            "V.cbz",
+            "V.edit.cbz",
+            "V.edit.mokuro",
+            "V.curated.cbz",
+            "V.curated.mokuro",
+            "V.hayai.cbz",
+            "V.hayai.mokuro",
+            "V.hayai.webp",
+        ] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        let names = |cbz: &str| -> Vec<String> {
+            siblings(&d.join(cbz))
+                .iter()
+                .map(|p| paths::file_name(p))
+                .collect()
+        };
+        assert!(!names("V.edit.cbz").contains(&"V.edit.mokuro".to_string()));
+        assert!(!names("V.curated.cbz").contains(&"V.curated.mokuro".to_string()));
+        // An engine id is no such layer: the nested volume's own primary goes with it.
+        let hayai = names("V.hayai.cbz");
+        assert!(hayai.contains(&"V.hayai.mokuro".to_string()));
+        assert!(hayai.contains(&"V.hayai.webp".to_string()));
+        // Alone, a dotted volume's primary goes with it.
+        std::fs::remove_file(d.join("V.cbz")).unwrap();
+        assert!(names("V.edit.cbz").contains(&"V.edit.mokuro".to_string()));
+        // A folder named like an archive claims nothing.
+        std::fs::create_dir(d.join("W.cbz")).unwrap();
+        std::fs::write(d.join("W.curated.cbz"), b"x").unwrap();
+        std::fs::write(d.join("W.curated.mokuro"), b"x").unwrap();
+        assert!(names("W.curated.cbz").contains(&"W.curated.mokuro".to_string()));
     }
 
     #[test]

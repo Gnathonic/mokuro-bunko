@@ -109,7 +109,11 @@ fn set_retry_after(resp: &mut Resp, secs: Option<u64>) {
 pub(crate) fn refusal_verdict(path: &str, mut resp: Resp) -> Resp {
     let cbz = path.to_lowercase().ends_with(".cbz");
     if crate::put_gives_verdict(path) && !resp.status().is_success() {
-        let (status, reason, detail, retry) = upload::failure_for_status(resp.status().as_u16());
+        let (status, reason, mut detail, retry) =
+            upload::failure_for_status(resp.status().as_u16());
+        if let (403, Some(why)) = (status, resp.extensions().get::<crate::RefusalDetail>()) {
+            detail = why.0.to_string();
+        }
         let body = upload::failure_json(reason, &detail, retry).into_bytes();
         let len = body.len();
         let mut headers = std::mem::take(resp.headers_mut());
@@ -290,7 +294,16 @@ async fn put_inner(inner: &Arc<Inner>, req: &Req, body: Body) -> Result<Resp, Pu
         .await?
         .map_err(|e| Rejection::from_io(&e, "accepting the upload"))?;
     let digest = upload::parse_content_digest(req.header("content-digest"));
-    let mut staging = Staging::create(&dest, expected, digest).await?;
+    let mut staging = if kind == Some(FileKind::Library) {
+        Staging::create_in_existing(&dest, expected, digest).await?
+    } else {
+        Staging::create(&dest, expected, digest).await?
+    };
+    // Admitted by a series owner rule: asked again under this path's write lock, once
+    // the body is in, so an archive that landed meanwhile and governs it refuses it.
+    if let Some(recheck) = req.ctx.ownership_recheck.clone() {
+        staging.recheck_before_publish(Box::new(move || recheck()));
+    }
     // The client's precondition travels with the publish (spec §10 PUT): a remote
     // store checks it against the provider's version, so a change made in the cloud
     // since the client's If-Match (or a file created since its If-None-Match: *) is a

@@ -2,7 +2,43 @@
 
 ## [Unreleased]
 
+### Breaking
+- **Series have owners, and an uploader controls only what is its own.** The account
+  that creates a series folder owns it. An `uploader` account can no longer add files
+  or folders to a series another account owns; it adds new volumes to a series nobody
+  owns, as before. It can no longer add or replace a cover, an OCR file, a layer file
+  or an archive named after a volume it did not upload, unless it owns the series:
+  the series owner controls every volume in it, whoever added it, and may delete it
+  and the series folder. Its own corrections (`<Volume>.edit.mokuro`) stay its own
+  everywhere. No uploader adds an archive named like a volume's correction, curated
+  or keepsake layer (`V.edit.cbz`, `V.curated.cbz` beside `V.cbz`), that volume's
+  own uploader included. Editors and admins are not limited. This closes a way for
+  an uploader to take over another account's volume with an archive named after it
+  (`V.curated.cbz` beside `V.cbz`, or `Title.cbz` beside `Title.v01.cbz`).
+- **`series.json` updates need the series' owner.** An uploader may submit them only
+  for a series it owns; being the only uploader of every volume in it is no longer
+  enough.
+- **Existing series get owners once, at startup.** A series folder whose volumes were
+  all uploaded by one account, with no archive without a recorded uploader, becomes
+  that account's. Every other folder (volumes from several accounts, archives copied
+  in by hand, empty) has no owner and stays shared. Until this is done, an uploader's
+  new files and folders are answered "try again shortly" (503); on a cloud library it
+  is done once the first sync finishes (a library that is not connected holds nothing
+  back and is done at a later start). A database upgraded from 0.7 records schema
+  version 7.
+- **When the server cannot tell who owns a series, it says "try again shortly".** If
+  its database or the library listing fails while it checks a series owner or a
+  volume's uploader, an uploader's request is answered 503 with `Retry-After`, also
+  when that happens just before the file is written, instead of being let through or
+  refused for good.
+
 ### Added
+- **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
+  anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
+  uploader), or nowhere (`none`). A reader can tell from it that the server enforces
+  series owners. `metadata.ownedSeries` now lists the series the account owns. When
+  the server cannot read who owns what, these lists err towards closed: a series it
+  is unsure of is reported closed and not owned.
 - **Set a library up in Google Drive, OneDrive, MEGA or a WebDAV server.** The setup
   wizard asks where the library lives, then connects it with one button: a browser on
   the server signs in directly. Anywhere else (Docker, a NAS, a phone), Google Drive
@@ -71,8 +107,9 @@
 - **`/login/api/me` says where a reader's OCR corrections go.** It lists
   `per_user_layers: ["edit"]` (each account keeps its own `edit` layer, so a reader
   may push it) and `permissions.curated.scope`: `all` (editors, inviters, admins),
-  `owned` (an uploader, on the volumes it uploaded) or `none`, for publishing the
-  shared `curated` layer. A cloud folder's `.mokuro-bunko.json` says `curated: true`.
+  `owned` (an uploader, on the volumes it uploaded and every volume of a series it
+  owns) or `none`, for publishing the shared `curated` layer. A cloud folder's
+  `.mokuro-bunko.json` says `curated: true`.
 - **Internal: an interop rig that runs every party as its own process.**
   `cargo xtask interop rig cloud --provider google|microsoft|mega|rclone|all` starts a
   testing build of the server on cloudsim (or on rclone's WebDAV server, a pinned
