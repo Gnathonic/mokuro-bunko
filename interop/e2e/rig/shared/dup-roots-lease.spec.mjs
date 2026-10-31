@@ -28,6 +28,7 @@ import {
     nodeBytes,
     retag,
     seedFiles,
+    seedNodes,
     seedMaterial,
     seedX5,
     skipWithoutDuplicates,
@@ -225,12 +226,13 @@ test('S1: Bunko merges duplicate roots under its lease into the older top-level 
             const series = `S1 Race ${i}`;
             const n = 64 + i;
             const rootD = await topFolder(rig, LIBRARY_FOLDER, null);
-            const d = await seedFiles(rig, rootD, {
+            const made = await seedNodes(rig, rootD, {
                 [`${series}/Vol 1.cbz`]: retag(m.cbz, `${series}/Vol 1`),
                 [`${series}/Vol 1.mokuro`]: mokuroDoc(m, series, 'Vol 1', n, `競争 ${i}`),
                 'volume-data.json': volumeData(series, 'Vol 1', n, 2, new Date().toISOString()),
             });
-            const asSeed = asSeeded(await tree(rig), d.values());
+            const d = new Map([...made].map(([path, row]) => [path, row.id]));
+            const asSeed = asSeeded(made.values());
             const raceStart = Date.now();
             let syncs = 0;
             await expect

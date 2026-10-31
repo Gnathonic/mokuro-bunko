@@ -610,13 +610,15 @@ out a debounce and decide at its end whether to write.
   write into a merged-away root's old id lands in the trash with it; trashing moves
   no write time in cloudsim), from the whole second of the merge (MEGA stamps a node
   in whole seconds). What a race's new root was seeded with is left out only while it
-  carries the stamp it was seeded with (`asSeeded`): Drive keeps a file's id through a
-  rewrite, so a later write into that `volume-data.json` counts again. The C6 text reads write parents off `/_sim/log`; its entries name
-  a request path, and a Drive or MEGA upload's parent is in its body, so the tree is
-  what can tell. The Storage panel, sampled every 500 ms through the whole spec, never shows
-  `suspect`, and the page gets no 503. S9's end (C2-R5) follows: Bunko stopped
-  (SIGINT), an older top-level root C appears, the reader's verdict turns after
-  2 × ttl and its syncs merge the library into C. Bunko started again reaches
+  carries the stamp `/_sim/node` answered as it made the node (`seedNodes`,
+  `asSeeded`; no tree read after the seed, which a write in between would already have
+  moved): Drive keeps a file's id through a rewrite, so a later write into that
+  `volume-data.json` counts again. The C6 text reads write parents off `/_sim/log`; its
+  entries name a request path, and a Drive or MEGA upload's parent is in its body, so
+  the tree is what can tell. The Storage panel, sampled every 500 ms through the whole
+  spec, never shows `suspect`, and the page gets no 503. S9's end (C2-R5) follows:
+  Bunko stopped (SIGINT), an older top-level root C appears, the reader's verdict
+  turns after 2 × ttl and its syncs merge the library into C. Bunko started again reaches
   `steady`, `online` and `held` with no `suspect` sample, its marker beats in C (the
   marker is written into `roots()[0]`, so that is the canonical root; the admin API
   has no roots list), the reader trusts it again, and Bunko serves the library, C's

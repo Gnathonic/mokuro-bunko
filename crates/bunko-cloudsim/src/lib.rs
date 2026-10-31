@@ -324,18 +324,39 @@ impl SimState {
         }
     }
 
-    /// Create one node (see [`NewNode`]); its id.
+    /// Create one node (see [`NewNode`]); its [`tree`](Self::tree) row as made. Drive and
+    /// OneDrive read the row under the lock the node was made under, so no other write
+    /// can land between; MEGA's mock locks per call, but a MEGA rewrite is a new handle.
     pub fn create_node(
         &self,
         p: Provider,
         account: &str,
         node: &NewNode,
-    ) -> Result<String, NodeError> {
-        match p {
-            Provider::Google => self.drive(account).lock().create_node(node),
-            Provider::Microsoft => self.onedrive(account).lock().create_node(node),
-            Provider::Mega => mega::create_node(&self.mega(account), node),
-        }
+    ) -> Result<NodeInfo, NodeError> {
+        let row = |rows: Vec<NodeInfo>, id: String| {
+            rows.into_iter()
+                .find(|r| r.id == id)
+                .expect("a node just made is in the tree")
+        };
+        Ok(match p {
+            Provider::Google => {
+                let d = self.drive(account);
+                let mut d = d.lock();
+                let id = d.create_node(node)?;
+                row(d.tree(), id)
+            }
+            Provider::Microsoft => {
+                let o = self.onedrive(account);
+                let mut o = o.lock();
+                let id = o.create_node(node)?;
+                row(o.tree(), id)
+            }
+            Provider::Mega => {
+                let m = self.mega(account);
+                let id = mega::create_node(&m, node)?;
+                row(mega::tree(&m), id)
+            }
+        })
     }
 
     /// Every node of the account but the provider's roots, by id; trashed ones only
@@ -638,7 +659,7 @@ impl CloudSim {
         provider: Provider,
         account: &str,
         node: &NewNode,
-    ) -> Result<String, NodeError> {
+    ) -> Result<NodeInfo, NodeError> {
         self.state.create_node(provider, account, node)
     }
 

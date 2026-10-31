@@ -85,7 +85,9 @@ test("a seeded node is no write while the seed's, and one again once rewritten i
         file('d-vd', 'D', 'volume-data.json', seededAt),
         file('d-cbz', 'D', 'Vol 1.cbz', seededAt),
     ];
-    const allowed = asSeeded(seed, ['d-vd', 'd-cbz']);
+    // The rows `/_sim/node` answered as it made each node: no tree read after the seed,
+    // which a write in between would already have moved.
+    const allowed = asSeeded(seed.slice(1));
     // As seeded, then trashed (and deleted for good) with D: no write.
     const asSeed = [
         ...merged(),

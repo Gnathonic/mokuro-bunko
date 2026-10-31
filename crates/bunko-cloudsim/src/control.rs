@@ -185,7 +185,8 @@ async fn node(State(sim): State<SimState>, b: Body) -> Answer {
         modified: time_ms(&v, "modified")?,
     };
     match sim.create_node(p, &account(&v), &node) {
-        Ok(id) => Ok(Json(json!({"id": id})).into_response()),
+        // Its own tree row: the stamps as made, for a caller to compare later rows to.
+        Ok(row) => Ok(Json(row).into_response()),
         Err(NodeError::Bad(msg)) => Err(ctl_err(msg)),
         // Graph's own answer to a duplicate name.
         Err(NodeError::NameExists) => Ok((

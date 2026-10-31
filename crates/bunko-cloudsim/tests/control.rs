@@ -573,6 +573,36 @@ const T1: &str = "2026-01-02T03:04:05Z";
 const T2: &str = "2026-02-03T04:05:06Z";
 const T3: &str = "2026-03-04T05:06:07Z";
 
+/// `/_sim/node` answers the new node's own `/_sim/tree` row, its stamps as the tree
+/// lists them: a caller can tell the node as made from the node rewritten since without
+/// a second read (which a write in between would already have moved).
+#[tokio::test]
+async fn a_new_node_answers_its_own_tree_row() {
+    let sim = bunko_cloudsim::start().await;
+    sim.mega_account("a", "a@cloudsim.test", "pw");
+    for p in ["google", "microsoft", "mega"] {
+        let (s, folder) = node(
+            &sim.base,
+            json!({"provider": p, "account": "a", "name": "mokuro-reader", "folder": true,
+                   "modified": T2}),
+        )
+        .await;
+        assert_eq!(s, 200, "{p}: {folder}");
+        let (s, file) = node(
+            &sim.base,
+            json!({"provider": p, "account": "a", "parent_id": folder["id"],
+                   "name": "volume-data.json", "content_base64": b64(b"{}")}),
+        )
+        .await;
+        assert_eq!(s, 200, "{p}: {file}");
+        let tree = get(&sim.base, &format!("tree?provider={p}&account=a")).await;
+        for made in [&folder, &file] {
+            let id = made["id"].as_str().unwrap();
+            assert_eq!(made, row(&tree, id), "{p}");
+        }
+    }
+}
+
 /// Two same-named folders under one parent, as a second client's race leaves them: path
 /// seeding cannot make them, `/_sim/node` can, and each provider's own listing shows
 /// both.

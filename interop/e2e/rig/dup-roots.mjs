@@ -38,8 +38,12 @@ export const treeEver = (rig) =>
 
 /** `/_sim/node` for the suite's account; answers the new node's id. */
 async function node(rig, body) {
-    const { id } = await rig.sim('POST', 'node', { provider: rig.provider, account: rig.simAccount, ...body });
-    return id;
+    return (await nodeRow(rig, body)).id;
+}
+
+/** `/_sim/node` for the suite's account; answers the new node's tree row, as made. */
+function nodeRow(rig, body) {
+    return rig.sim('POST', 'node', { provider: rig.provider, account: rig.simAccount, ...body });
 }
 
 /** The live top-level `mokuro-reader` folders (a top-level node's parent is no listed node). */
@@ -145,23 +149,33 @@ export function volumeData(series, volume, n, page, at) {
  * every node dated `at` (RFC 3339; null: now). Answers `{path → id}`, folders included.
  */
 export async function seedFiles(rig, parent, files, at) {
+    return new Map([...(await seedNodes(rig, parent, files, at))].map(([path, row]) => [path, row.id]));
+}
+
+/** `seedFiles`, answering `{path → tree row}`: each node's row as `/_sim/node` made it. */
+export async function seedNodes(rig, parent, files, at) {
     const times = at ? { created: at, modified: at } : {};
-    const ids = new Map();
+    const rows = new Map();
     for (const [rel, bytes] of Object.entries(files)) {
         const parts = rel.split('/');
         let at_ = parent;
         for (let i = 0; i < parts.length - 1; i++) {
             const dir = parts.slice(0, i + 1).join('/');
-            if (!ids.has(dir))
-                ids.set(dir, await node(rig, { parent_id: at_, name: parts[i], folder: true, ...times }));
-            at_ = ids.get(dir);
+            if (!rows.has(dir))
+                rows.set(dir, await nodeRow(rig, { parent_id: at_, name: parts[i], folder: true, ...times }));
+            at_ = rows.get(dir).id;
         }
-        ids.set(
+        rows.set(
             rel,
-            await node(rig, { parent_id: at_, name: parts.at(-1), content_base64: bytes.toString('base64'), ...times }),
+            await nodeRow(rig, {
+                parent_id: at_,
+                name: parts.at(-1),
+                content_base64: bytes.toString('base64'),
+                ...times,
+            }),
         );
     }
-    return ids;
+    return rows;
 }
 
 /** A new top-level folder `name` dated `at` (null: now): its id. */
@@ -266,13 +280,13 @@ export function mergeProblems(rows, canonical, folders) {
 }
 
 /**
- * What a root was seeded with, as `allowed` for `writesOutside`: `rows` the tree read
- * right after the seed, `ids` the seeded nodes. A seeded node made in the second a
- * check starts from reads as a write; it is none while it is the node the seed made.
+ * What a root was seeded with, as `allowed` for `writesOutside`: `made` the rows
+ * `/_sim/node` answered as it made each node (`seedNodes`), never a tree read after the
+ * seed, which a write in between would already have moved. A seeded node made in the
+ * second a check starts from reads as a write; it is none while it is the node as made.
  */
-export function asSeeded(rows, ids) {
-    const want = new Set(ids);
-    const stamps = new Map(rows.filter((r) => want.has(r.id)).map((r) => [r.id, r.modified]));
+export function asSeeded(made) {
+    const stamps = new Map([...made].map((r) => [r.id, r.modified]));
     // Drive keeps a file's id through a content rewrite: the stamp moves, so it is a
     // write again. A move or the trash moves no stamp.
     return (r) => stamps.has(r.id) && stamps.get(r.id) === r.modified;
