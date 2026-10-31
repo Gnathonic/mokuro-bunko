@@ -761,3 +761,79 @@ async fn a_private_correction_lock_never_blocks_a_folder_operation() {
         .await;
     assert_eq!(r.code(), 204, "{}", r.text());
 }
+
+/// The other direction: an editor's depth-infinity folder lock never reaches into
+/// another account's own correction. bob keeps his exclusive lock (and with its token,
+/// his write) after the editor locks the series, and bob may LOCK and write his own
+/// copy while the editor's folder lock is held.
+#[tokio::test]
+async fn a_folder_lock_never_blocks_an_account_s_own_correction() {
+    let env = Env::new();
+    let lock = br#"<?xml version="1.0"?><D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>"#;
+    let token = |r: &Resp| {
+        r.header("lock-token")
+            .unwrap()
+            .trim_matches(|c| c == '<' || c == '>')
+            .to_string()
+    };
+    let put = env.req(Some("bob"), "PUT", EDIT, &[], &layer("bob")).await;
+    assert_eq!(put.code(), 201, "{}", put.text());
+    let r = env.req(Some("bob"), "LOCK", EDIT, &[], lock).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let bob_token = token(&r);
+    let bob = format!("(<{bob_token}>)");
+    let r = env
+        .req(
+            Some("editor"),
+            "LOCK",
+            "/mokuro-reader/series",
+            &[("depth", "infinity")],
+            lock,
+        )
+        .await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    let editor = token(&r);
+    let put = env
+        .req(Some("bob"), "PUT", EDIT, &[("if", &bob)], &layer("bob 2"))
+        .await;
+    assert_eq!(
+        put.code(),
+        204,
+        "bob's own lock still holds: {}",
+        put.text()
+    );
+    let r = env
+        .req(
+            Some("bob"),
+            "UNLOCK",
+            EDIT,
+            &[("lock-token", &format!("<{bob_token}>"))],
+            b"",
+        )
+        .await;
+    assert_eq!(r.code(), 204, "{}", r.text());
+
+    // With the editor's folder lock held, bob writes and LOCKs his own copy.
+    let put = env
+        .req(Some("bob"), "PUT", EDIT, &[], &layer("bob 3"))
+        .await;
+    assert_eq!(put.code(), 204, "{}", put.text());
+    let r = env.req(Some("bob"), "LOCK", EDIT, &[], lock).await;
+    assert_eq!(r.code(), 200, "{}", r.text());
+    // The editor's own correction is still under the editor's lock.
+    let put = env
+        .req(Some("editor"), "PUT", EDIT, &[], &layer("editor"))
+        .await;
+    assert_eq!(put.code(), 423, "{}", put.text());
+    let ifh = format!("(<{editor}>)");
+    let put = env
+        .req(
+            Some("editor"),
+            "PUT",
+            EDIT,
+            &[("if", &ifh)],
+            &layer("editor"),
+        )
+        .await;
+    assert_eq!(put.code(), 201, "{}", put.text());
+}

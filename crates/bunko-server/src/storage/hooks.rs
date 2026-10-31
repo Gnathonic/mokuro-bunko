@@ -19,6 +19,59 @@ use crate::library::LibraryRuntime;
 /// The audit reason of an OCR result dropped because the reader wrote a sidecar first.
 pub const DISCARDED_REASON: &str = "discarded: a sidecar appeared in the cloud";
 
+/// How often a lasting metadata store fault is logged at `warn`: the remote store asks
+/// again every second while it lasts, for every submission waiting.
+const STORE_FAULT_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+static LAST_STORE_FAULT_WARN: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// Whether a store fault at `now` is logged at `warn` (else `debug`): the first, then
+/// at most one per [`STORE_FAULT_WARN_EVERY`].
+fn store_fault_loud(
+    last: &std::sync::Mutex<Option<std::time::Instant>>,
+    now: std::time::Instant,
+) -> bool {
+    let mut last = last
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.is_some_and(|at| now.saturating_duration_since(at) < STORE_FAULT_WARN_EVERY) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// The answer to a cloud `series.json` submission.
+fn submission_answer(r: Result<SeriesUpdate, UpdateError>) -> SubmissionResult {
+    match r {
+        Ok(SeriesUpdate::Applied) => SubmissionResult::Applied,
+        Ok(SeriesUpdate::Invalid) => {
+            SubmissionResult::Refused("the series.json could not be read".into())
+        }
+        // The library root is unreadable right now, or the server is stopping:
+        // the submission waits, nothing is lost.
+        Ok(SeriesUpdate::NoFolder) => {
+            SubmissionResult::Later("the library folder could not be listed".into())
+        }
+        Ok(SeriesUpdate::Stopped) => SubmissionResult::Later("the server is stopping".into()),
+        Err(UpdateError::Busy(_)) => {
+            SubmissionResult::Later("a metadata pass holds the library".into())
+        }
+        // The server's own store failed (disk full, an SQLite I/O error): that says
+        // nothing about the version, and a refusal is final (a duplicate merge trashes
+        // a refused losing copy), so it is asked again.
+        Err(UpdateError::Store(e)) => {
+            if store_fault_loud(&LAST_STORE_FAULT_WARN, std::time::Instant::now()) {
+                tracing::warn!("a cloud series.json waits: the metadata store failed: {e}");
+            } else {
+                tracing::debug!("a cloud series.json waits: the metadata store failed: {e}");
+            }
+            SubmissionResult::Later(format!("the metadata store failed: {e}"))
+        }
+    }
+}
+
 /// The server's [`CloudHooks`] (installed on the store once the services exist).
 pub struct ServerCloudHooks {
     root: PathBuf,
@@ -338,26 +391,11 @@ impl CloudHooks for ServerCloudHooks {
         let Some(title) = series_dir.file_name().map(|n| n.to_string_lossy()) else {
             return SubmissionResult::Refused("not a series folder".into());
         };
-        match self
-            .library
-            .service()
-            .ingest_series_submission(&title, bytes, Some("cloud"))
-        {
-            Ok(SeriesUpdate::Applied) => SubmissionResult::Applied,
-            Ok(SeriesUpdate::Invalid) => {
-                SubmissionResult::Refused("the series.json could not be read".into())
-            }
-            // The library root is unreadable right now, or the server is stopping:
-            // the submission waits, nothing is lost.
-            Ok(SeriesUpdate::NoFolder) => {
-                SubmissionResult::Later("the library folder could not be listed".into())
-            }
-            Ok(SeriesUpdate::Stopped) => SubmissionResult::Later("the server is stopping".into()),
-            Err(UpdateError::Busy(_)) => {
-                SubmissionResult::Later("a metadata pass holds the library".into())
-            }
-            Err(e) => SubmissionResult::Refused(e.to_string()),
-        }
+        submission_answer(self.library.service().ingest_series_submission(
+            &title,
+            bytes,
+            Some("cloud"),
+        ))
     }
 
     fn ocr_discarded(&self, path: &Path) {
@@ -383,5 +421,53 @@ impl CloudHooks for ServerCloudHooks {
             .store()
             .series_facts(&key)
             .map_or(true, |row| row.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a version the server cannot read is refused for good (a refusal is a
+    /// `lost-write` conflict, and a duplicate merge trashes a refused losing copy). A
+    /// fault of the server's own store (disk full, an SQLite I/O error) is asked again:
+    /// it says nothing about the version.
+    #[test]
+    fn only_an_unreadable_series_json_is_refused() {
+        assert!(matches!(
+            submission_answer(Ok(SeriesUpdate::Invalid)),
+            SubmissionResult::Refused(_)
+        ));
+        assert!(matches!(
+            submission_answer(Ok(SeriesUpdate::Applied)),
+            SubmissionResult::Applied
+        ));
+        let store = UpdateError::Store("database or disk is full".into());
+        assert!(
+            matches!(submission_answer(Err(store)), SubmissionResult::Later(_)),
+            "a store fault is asked again"
+        );
+        assert!(matches!(
+            submission_answer(Err(UpdateError::Busy(std::time::Duration::from_secs(1)))),
+            SubmissionResult::Later(_)
+        ));
+    }
+
+    #[test]
+    fn a_lasting_store_fault_warns_once_a_minute() {
+        let last = std::sync::Mutex::new(None);
+        let t0 = std::time::Instant::now();
+        let s = std::time::Duration::from_secs;
+        assert!(store_fault_loud(&last, t0), "the first fault warns");
+        assert!(
+            !store_fault_loud(&last, t0 + s(1)),
+            "a retry a second later does not"
+        );
+        assert!(!store_fault_loud(&last, t0 + s(59)));
+        assert!(
+            store_fault_loud(&last, t0 + s(60)),
+            "a minute on it warns again"
+        );
+        assert!(!store_fault_loud(&last, t0 + s(61)));
     }
 }

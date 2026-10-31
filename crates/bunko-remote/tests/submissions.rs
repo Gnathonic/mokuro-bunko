@@ -447,6 +447,50 @@ fn a_restart_mid_fetch_resumes_the_submission() {
     assert_eq!(t.remote_json("S/series.json")["tag"], "late");
 }
 
+/// A rebuild deletes `index.sqlite` but keeps `state.sqlite` and `submissions/`, and the
+/// pending rows resume as soon as the hooks are installed, before the full sync has
+/// filled the new index. A reader's own `series.json` still reaches the server whole:
+/// only a row a duplicate merge opened for a losing copy is cut to its facts.
+#[test]
+fn a_submission_resumed_after_an_index_rebuild_keeps_its_offsets() {
+    let mut t = T::new(FakeBackend::drive_like(), &[("S/v.cbz", b"zip")]);
+    t.adopted();
+    t.server.busy.lock().insert("S".into(), usize::MAX);
+    let body = series(
+        "2026-04-01T00:00:00.000Z",
+        json!({"tag": "reader", "spine_offset": 12, "volumes": [{"volume_uuid": "v1", "offset": 3}]}),
+    );
+    t.fake.reader_put(&format!("{FOLDER}/S/series.json"), &body);
+    t.sync_feed();
+    wait_until("the queued submission", || {
+        t.s().submissions().iter().any(|r| r.2 == "queued") && !t.server.calls().is_empty()
+    });
+    t.stop();
+    let dir = t.tmp.path().join("cloud/s");
+    for f in ["index.sqlite", "index.sqlite-wal", "index.sqlite-shm"] {
+        let _ = std::fs::remove_file(dir.join(f));
+    }
+    for d in ["blobs", "spool"] {
+        let _ = std::fs::remove_dir_all(dir.join(d));
+    }
+    t.server.busy.lock().clear();
+    t.server.calls.lock().clear();
+    // The recompile would publish into a library still syncing: not what is tested.
+    t.server.recompile.store(false, Ordering::Release);
+    // A slow provider: the resumed row is answered long before the full sync is done.
+    t.fake.set_latency(Duration::from_millis(200));
+    t.start(None);
+    wait_until("the resumed submission", || {
+        t.s().submissions().iter().all(|r| r.2 == "applied")
+    });
+    let calls = t.server.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0].body["tag"], "reader");
+    assert_eq!(calls[0].body["spine_offset"], 12, "{calls:?}");
+    assert_eq!(calls[0].body["volumes"][0]["offset"], 3, "{calls:?}");
+    t.fake.set_latency(Duration::ZERO);
+}
+
 #[test]
 fn compiles_of_a_series_wait_for_its_unanswered_submission() {
     let t = T::new(FakeBackend::drive_like(), &[("S/v.cbz", b"zip")]);

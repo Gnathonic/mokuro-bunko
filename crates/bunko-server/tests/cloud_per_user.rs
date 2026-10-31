@@ -792,3 +792,94 @@ async fn a_file_changed_behind_the_index_is_a_retry_not_a_412() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+/// A COPY whose source changed behind the index is the same retry as a GET: the client
+/// sent no precondition, so it answers 503 with a short Retry-After, never 412, and
+/// copies the new bytes once Bunko has listed the library again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_copy_of_a_file_changed_behind_the_index_is_a_retry_not_a_412() {
+    let fake = Arc::new(FakeBackend::webdav_plain());
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), b"volume");
+    fake.reader_put(&format!("{ROOT}/Series/notes.txt"), b"one");
+    let e = env_tuned(LibraryBackend::WebDav, Some(fake.clone()), no_poll).await;
+    fake.reader_put(&format!("{ROOT}/Series/notes.txt"), b"two");
+    let copy = || {
+        Request::builder()
+            .method("COPY")
+            .uri("/mokuro-reader/Series/notes.txt")
+            .header("host", "localhost:8080")
+            .header("authorization", basic("boss"))
+            .header(
+                "destination",
+                "http://localhost:8080/mokuro-reader/Series/notes-copy.txt",
+            )
+            .body(Body::empty())
+            .unwrap()
+    };
+    let resp = e.app.clone().oneshot(copy()).await.unwrap();
+    assert_eq!(resp.status().as_u16(), 503);
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let resp = e.app.clone().oneshot(copy()).await.unwrap();
+        let status = resp.status().as_u16();
+        if matches!(status, 201 | 204) {
+            break;
+        }
+        assert_eq!(status, 503);
+        assert!(Instant::now() < until, "the new version is copied");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (status, body) = e.get("boss", "/mokuro-reader/Series/notes-copy.txt").await;
+    assert_eq!((status, body), (200, b"two".to_vec()));
+}
+
+/// A file over the blob cache's 4 MiB streams from ranged reads, so its first read only
+/// happens once the body is asked for. It is made before the headers go out: a large
+/// file changed behind the index answers 503 with a short Retry-After like a small
+/// one, not a 200 whose body breaks off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_large_file_changed_behind_the_index_is_a_retry_before_any_header() {
+    let fake = Arc::new(FakeBackend::webdav_plain());
+    let big = |b: u8| vec![b; 5 << 20];
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), b"volume");
+    fake.reader_put(&format!("{ROOT}/Series/big.bin"), &big(1));
+    let e = env_tuned(LibraryBackend::WebDav, Some(fake.clone()), no_poll).await;
+    fake.reader_put(&format!("{ROOT}/Series/big.bin"), &big(2));
+    let resp = e
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/mokuro-reader/Series/big.bin")
+                .header("host", "localhost:8080")
+                .header("authorization", basic("boss"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 503);
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (status, body) = e.get("boss", "/mokuro-reader/Series/big.bin").await;
+        if status == 200 {
+            assert!(body == big(2), "the new version, whole");
+            break;
+        }
+        assert_eq!(status, 503);
+        assert!(Instant::now() < until, "the new version is read");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

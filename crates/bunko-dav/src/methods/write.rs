@@ -721,8 +721,10 @@ fn copy_file(
     Ok(())
 }
 
-/// Copy bytes, permissions and times (Python `shutil.copy2`), atomically.
-fn copy_one(src: &Path, dest: &Path) -> std::io::Result<()> {
+/// Copy bytes, permissions and times (Python `shutil.copy2`), atomically. A failed read
+/// of the source is answered as a GET's is ([`DavError::from_read_io`]: a file changed
+/// behind the index is a retry, not a 412).
+fn copy_one(src: &Path, dest: &Path) -> DavResult<()> {
     let dir = dest
         .parent()
         .ok_or_else(|| std::io::Error::other("no parent"))?;
@@ -732,8 +734,8 @@ fn copy_one(src: &Path, dest: &Path) -> std::io::Result<()> {
         paths::file_name(dest),
         std::process::id()
     ));
-    let result = (|| {
-        fs::copy(src, &temp)?;
+    let result = (|| -> DavResult<()> {
+        fs::copy(src, &temp).map_err(|e| DavError::from_read_io(&e))?;
         let meta = fs::metadata(src)?;
         let file = fs::File::options().write(true).open(&temp)?;
         let mut times = std::fs::FileTimes::new();
@@ -745,7 +747,7 @@ fn copy_one(src: &Path, dest: &Path) -> std::io::Result<()> {
         }
         file.set_times(times)?;
         drop(file);
-        fs::rename(&temp, dest)
+        Ok(fs::rename(&temp, dest)?)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);

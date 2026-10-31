@@ -285,6 +285,17 @@ async fn injected_personal(
     .await
 }
 
+/// A GET's failed open or first read: a gone (or locally unreadable) file is a 404, a
+/// file changed behind the index a 503 retry ([`DavError::from_read_io`], never 412).
+fn read_error(e: std::io::Error) -> DavError {
+    match bunko_store::classify(&e) {
+        bunko_store::ErrorClass::NotFound | bunko_store::ErrorClass::Other => {
+            DavError::new(StatusCode::NOT_FOUND, e.to_string())
+        }
+        _ => DavError::from_read_io(&e),
+    }
+}
+
 pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     let head = req.method == Method::HEAD;
     if req.content_length() != 0 {
@@ -312,25 +323,9 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
     // if an upload renames a new file into place meanwhile.
     // A remote store's file has no local handle: its body streams from the store (spool
     // or pinned ranged reads, spec §10), memory flat, with the same validators.
-    let file =
-        bunko_store::afs::File::open(phys)
-            .await
-            .map_err(|e| match bunko_store::classify(&e) {
-                bunko_store::ErrorClass::NotFound | bunko_store::ErrorClass::Other => {
-                    DavError::new(StatusCode::NOT_FOUND, e.to_string())
-                }
-                // The cloud's file changed since Bunko last listed it (a read pinned to
-                // the listed version failed; the store lists again at once). The client
-                // sent no precondition, so this is no 412: ask again in a second.
-                bunko_store::ErrorClass::Conflict => DavError {
-                    retry_after: Some(1),
-                    ..DavError::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "the file changed in the library storage; Bunko is reading it again",
-                    )
-                },
-                _ => DavError::from(e),
-            })?;
+    let file = bunko_store::afs::File::open(phys)
+        .await
+        .map_err(read_error)?;
     let stat = Stat::from_meta(&file.metadata().await?);
     let res = match res {
         Resource::File {
@@ -425,7 +420,22 @@ pub(crate) async fn get(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
             let stream = ReaderStream::with_capacity(file.take(len), 64 * 1024);
             *resp.body_mut() = Body::from_stream(stream);
         }
-        remote => *resp.body_mut() = Body::from_stream(remote.into_stream(start, len)),
+        remote => {
+            use futures_util::StreamExt;
+            let mut stream = remote.into_stream(start, len);
+            // A remote file over the blob cache streams from ranged reads, the first of
+            // them only once the body is polled: make it before the headers go out, so a
+            // file changed behind the index answers 503 (as a small one does at open)
+            // instead of a 200 whose body breaks off. Only this chunk (at most
+            // `STREAM_CHUNK`) is held; a change DURING the transfer still ends the body.
+            let first = match stream.next().await {
+                Some(Ok(chunk)) => Some(chunk),
+                Some(Err(e)) => return Err(read_error(e)),
+                None => None,
+            };
+            let head = futures_util::stream::iter(first.map(Ok::<_, std::io::Error>));
+            *resp.body_mut() = Body::from_stream(head.chain(stream));
+        }
     }
     Ok(resp)
 }

@@ -583,6 +583,20 @@ async fn a_deleted_account_is_restored_from_the_admin_page() {
         r.json()["error"],
         "Username 'gpu-box' belongs to a deleted account: bring it back with Restore on its row"
     );
+    // So does a name that differs only in case, naming the account's stored name.
+    let r = h
+        .call(
+            "POST",
+            "/_admin/api/users",
+            Some(&admin),
+            Some(json!({"username": "GPU-Box", "password": "new-pass-123", "role": "processor"})),
+        )
+        .await;
+    assert_eq!(r.status, 409, "{}", r.text());
+    assert_eq!(
+        r.json()["error"],
+        "Username 'GPU-Box' belongs to the deleted account 'gpu-box': bring it back with Restore on its row"
+    );
     // Restore needs a password.
     let r = h
         .call(
