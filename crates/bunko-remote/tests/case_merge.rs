@@ -1191,6 +1191,33 @@ fn the_losers_series_json_is_folded_in_as_a_submission_then_trashed() {
     );
 }
 
+/// The loser's `series.json` is folded in as its facts only, as a duplicate merge's
+/// losing copy is: its `volumes` and `spine_offset` are the losing spelling's shelf
+/// alignment, guarded by no time, and would overwrite the winner's.
+#[test]
+fn the_losers_series_json_submits_only_its_facts() {
+    let t = T::new(
+        FakeBackend::drive_like(),
+        &[
+            ("Kingdom/Vol 1.cbz", b"one"),
+            ("Kingdom/series.json", b"{\"title\":\"Kingdom\"}"),
+            (
+                "kingdom/series.json",
+                b"{\"title\":\"kingdom\",\"spine_offset\":40,\"volumes\":[{\"volume_uuid\":\"v1\",\"offset\":3}]}",
+            ),
+        ],
+    );
+    t.steady();
+    t.policy();
+    t.wait_merges(1);
+    assert!(t.at("kingdom").is_none());
+    let subs = t.hooks.submissions.lock().clone();
+    assert!(
+        subs.contains(&("Kingdom".into(), b"{\"title\":\"kingdom\"}".to_vec())),
+        "{subs:?}"
+    );
+}
+
 #[test]
 fn same_folder_file_variants_merge_by_rename() {
     let t = T::new(
