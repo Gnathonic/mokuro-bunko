@@ -331,6 +331,32 @@ pub fn primary_of<'a>(cbz_name: &str, names: &[&'a str]) -> Option<&'a str> {
     Folder::new(names).primary_of(cbz_name)
 }
 
+/// Is `id`, a dot-separated segment of a name, the id of a name nested under a volume
+/// (`V.<id>.<rest>`)? A layer id with a letter once FOLDED (the heuristic of
+/// `bunko_db::layer_sidecar_volume_path`, so `Vol 01.5.cbz` stays its own volume).
+/// Folded as rule v1 folds stems (rule 3): `V.EDIT.cbz` and `V.\u{212A}anji.cbz` (a
+/// Kelvin sign, NFC `K`) still turn `V.edit.mokuro` and `V.kanji.mokuro` into their
+/// primaries.
+fn is_nested_id(id: &str) -> bool {
+    let id = fold(id);
+    is_layer_id(&id) && id.bytes().any(|b| b.is_ascii_lowercase())
+}
+
+/// Every stem `name` is nested under, `<stem>.<id>.<rest>` with a nested id
+/// ([`is_nested_id`]), shortest first.
+fn nested_stems(name: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for (i, _) in name.match_indices('.').filter(|(i, _)| *i > 0) {
+        let Some((id, tail)) = name[i + 1..].split_once('.') else {
+            break;
+        };
+        if !tail.is_empty() && is_nested_id(id) {
+            out.push(&name[..i]);
+        }
+    }
+    out
+}
+
 /// The listed `.cbz` archives whose owner controls the file `name` of a folder listing
 /// FILES `names` (series owners, 0.8): among the archives `name` belongs to, the one of
 /// the SHORTEST stem, so a file takes its control from the outermost volume and never
@@ -340,10 +366,7 @@ pub fn primary_of<'a>(cbz_name: &str, names: &[&'a str]) -> Option<&'a str> {
 /// `name` belongs to the stem `s` when it is `s.cbz`; a sidecar `s.mokuro[.gz]`,
 /// `s.webp`, `s.nocover`; a `.mokuro[.gz]` rule v1 reads as `s`'s primary or layer
 /// ([`classify`], all-digit ids included); or any other name nested under it,
-/// `s.<id>.<rest>`, `<id>` a layer id with a letter once ASCII-lowercased (the
-/// heuristic of `bunko_db::layer_sidecar_volume_path`, so `Vol 01.5.cbz` stays its own
-/// volume; folded, because rule v1 folds stems: `V.EDIT.cbz` still turns `V.edit.mokuro`
-/// into its primary). Stems match folded (rule 3): an archive spelled exactly like the
+/// `s.<id>.<rest>`, `<id>` a layer id with a letter once folded ([`is_nested_id`]). Stems match folded (rule 3): an archive spelled exactly like the
 /// stem wins; otherwise every listed spelling governs (rule 6), and all of them must be
 /// controlled.
 pub fn governing_archives<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
@@ -368,16 +391,7 @@ pub fn governing_archives<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
         }
         SidecarClass::Orphan => {}
     }
-    for (i, _) in name.match_indices('.').filter(|(i, _)| *i > 0) {
-        let rest = &name[i + 1..];
-        let Some((id, tail)) = rest.split_once('.') else {
-            break;
-        };
-        let id = id.to_ascii_lowercase();
-        if !tail.is_empty() && is_layer_id(&id) && id.bytes().any(|b| b.is_ascii_lowercase()) {
-            candidates.push(&name[..i]);
-        }
-    }
+    candidates.extend(nested_stems(name));
     candidates.sort_by_key(|c| c.len());
     for candidate in candidates {
         let want = fold(candidate);
@@ -395,6 +409,53 @@ pub fn governing_archives<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
         };
     }
     Vec::new()
+}
+
+/// The listed `.cbz` archives a NEW archive `name` would take control of
+/// ([`governing_archives`] with `name` listed too), but for the names nested under it
+/// by a layer id of a reserved class (`V.curated.cbz`, `V.edit.cbz`, `V.pre-upgrade.cbz`
+/// for `V.cbz`): those are the names that hide a layer of `V`, and its arrival is meant
+/// to take them back. Any other listed archive (`Berserk.v01.cbz` for `Berserk.cbz`) is
+/// a volume of its own uploader's, which a newcomer must not capture.
+pub fn captured_archives<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
+    let Some(stem) = cbz_stem(name) else {
+        return Vec::new();
+    };
+    let mut with: Vec<&str> = names.to_vec();
+    if !with.contains(&name) {
+        with.push(name);
+    }
+    names
+        .iter()
+        .copied()
+        .filter(|&listed| listed != name && cbz_stem(listed).is_some())
+        .filter(|&listed| governing_archives(listed, &with).contains(&name))
+        .filter(|&listed| {
+            !cbz_stem(listed)
+                .and_then(hidden_layer_of)
+                .is_some_and(|s| fold(s) == fold(stem))
+        })
+        .collect()
+}
+
+/// `s` when an archive stem is `<s>.<id>` with `<id>` (folded) a layer id of a
+/// reserved class: the archive whose primary would be `s`'s layer `<id>`.
+fn hidden_layer_of(stem: &str) -> Option<&str> {
+    let (s, id) = stem.rsplit_once('.')?;
+    let id = fold(id);
+    (!s.is_empty() && is_layer_id(&id) && layer_class(&id) != LayerClass::Other).then_some(s)
+}
+
+/// Would a NEW archive `name` hide a layer of a listed volume? `V.edit.cbz` beside
+/// `V.cbz` turns `V.edit.mokuro`, an account's own correction of `V`, into the primary
+/// of `V.edit.cbz` (rule 4), and `V.curated.cbz`, `V.pre-upgrade.cbz` do the same to
+/// the shared and the server's layers: true when `name` is `<s>.<id>.cbz`, `<id>` a
+/// layer id of a reserved class (folded, rule 3), and `<s>.cbz` is listed. Only `.cbz`
+/// names define stems (rule 2).
+pub fn hides_reserved_layer(name: &str, names: &[&str]) -> bool {
+    cbz_stem(name)
+        .and_then(hidden_layer_of)
+        .is_some_and(|s| volume_stems(names.iter().copied()).contains(&fold(s)))
 }
 
 #[cfg(test)]
@@ -602,6 +663,88 @@ mod tests {
         let mut all = gov("vol.mokuro", &variants);
         all.sort();
         assert_eq!(all, ["VOL.CBZ", "Vol.cbz"]);
+        // Ids fold like stems, NFC first: a Kelvin sign is a `k` (F1).
+        for name in [
+            "V.\u{212A}anji.cbz",
+            "V.\u{212A}r.webp",
+            "V.\u{212A}anji.mokuro",
+        ] {
+            assert_eq!(gov(name, &v), ["V.cbz"], "{name}");
+        }
+    }
+
+    /// A new archive takes back the names that hide a layer of it, and nothing else:
+    /// another account's `Berserk.v01.cbz` stays that account's when `Berserk.cbz`
+    /// arrives (OWN-1).
+    #[test]
+    fn a_new_archive_captures_only_the_names_hiding_its_layers() {
+        let cap = captured_archives;
+        let listed = [
+            "Berserk.v01.cbz",
+            "Berserk.v01.mokuro",
+            "Berserk.Omake.cbz",
+            "Berserk.curated.cbz",
+            "Berserk.EDIT.cbz",
+            "Berserk.pre-upgrade.cbz",
+            "Berserk.previous-ocr.cbz",
+            "Berserk.\u{212A}anji.cbz",
+            "Other.v01.cbz",
+            "Berserk 2.cbz",
+        ];
+        let mut got = cap("Berserk.cbz", &listed);
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                "Berserk.Omake.cbz",
+                "Berserk.v01.cbz",
+                "Berserk.\u{212A}anji.cbz"
+            ]
+        );
+        assert_eq!(
+            cap("berserk.CBZ", &["Berserk.v01.cbz"]),
+            ["Berserk.v01.cbz"]
+        );
+        // A nested archive's own nested names are captured by whatever governs them.
+        assert!(cap("Berserk.v01.cbz", &["Berserk.cbz", "Berserk.v01.x.cbz"]).is_empty());
+        assert_eq!(
+            cap("Berserk.v01.cbz", &["Berserk.v01.x.cbz"]),
+            ["Berserk.v01.x.cbz"]
+        );
+        // Decimal volumes and other names: nothing.
+        assert!(cap("Vol 01.cbz", &["Vol 01.5.cbz", "Vol 01.mokuro"]).is_empty());
+        assert!(cap("V.mokuro", &["V.x.cbz"]).is_empty());
+        assert!(cap("V.cbz", &[]).is_empty());
+    }
+
+    #[test]
+    fn a_new_archive_may_hide_a_reserved_layer_only_of_no_volume() {
+        let hides = hides_reserved_layer;
+        let v = ["V.cbz"];
+        for name in [
+            "V.edit.cbz",
+            "V.edit-2.cbz",
+            "V.EDIT.cbz",
+            "v.Curated.cbz",
+            "V.curated-2.cbz",
+            "V.pre-upgrade.cbz",
+            "V.previous-ocr.cbz",
+        ] {
+            assert!(hides(name, &v), "{name}");
+            assert!(!hides(name, &["W.cbz"]), "{name}");
+        }
+        for name in [
+            "V.hayai.cbz",
+            "V.5.cbz",
+            "V.edit.x.cbz",
+            "V.edit.mokuro",
+            "V.edit.zip",
+            "V.cbz",
+        ] {
+            assert!(!hides(name, &v), "{name}");
+        }
+        // Only `.cbz` archives define stems (rule 2).
+        assert!(!hides("V.edit.cbz", &["V.zip"]));
     }
 
     #[test]
