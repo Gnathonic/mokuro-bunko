@@ -274,16 +274,31 @@ it is refused. Basic auth still works for any WebDAV client.
 |------|------|----------------|-----------|---------------|---------|-------|
 | `anonymous` | Yes (configurable) | No | No | No | No | No |
 | `registered` | Yes | Own only | No | No | No | No |
-| `uploader` | Yes | Own only | Yes | Own uploads | No | No |
+| `uploader` | Yes | Own only | Yes (not into another account's series) | Own uploads and series | No | No |
 | `editor` | Yes | Own only | Yes | Yes | No | No |
 | `inviter` | Yes | Own only | Yes | Yes | Yes | No |
 | `admin` | Yes | Own only | Yes | Yes | Yes | Yes |
 | `processor` | Yes | No | No | No | No | No |
 
-For `uploader`, "Own uploads" means deleting or overwriting volumes it
-uploaded (with their sidecars), and updating `series.json` of a series where
-it is the only uploader. Moving, copying, locking or PROPPATCH of library
-files, its own included, needs `editor` or higher.
+Series have owners. The account that creates a series folder owns it for good
+(folders that existed before 0.8 belong to their only uploader, when every
+volume in them has a recorded uploader; any other folder has no owner and stays
+shared). For `uploader`:
+
+- It adds nothing to a series another account owns. It adds new volumes to a
+  series nobody owns, but no account becomes the owner that way.
+- A file named after a volume (the volume's archive, its `.mokuro`, its cover,
+  its layer files, anything else under its name) is written, replaced or
+  deleted only by the account that uploaded that volume or by the series owner.
+- The series owner replaces and deletes anything in its series, whoever added
+  it, and the series folder itself; it is also the one that may update the
+  series' `series.json` and publish its `curated` layer.
+- Its own correction layers (`<Volume>.edit.mokuro`) are its own, in any series.
+
+`/login/api/me` lists the series the account owns (`ownedSeries`) and those it
+cannot add to (`addFiles.closedSeries`), without naming their owners. Moving,
+copying, locking or PROPPATCH of library files, its own included, needs `editor`
+or higher. Editors and admins are not limited by series owners.
 
 `inviter` has everything `editor` has, plus the invite-management endpoints,
 without full admin privileges.
@@ -1406,8 +1421,8 @@ A body carrying only facts, with no volume list at
 all, is an equally valid update. Writing `catalog.json`, or deleting/moving either
 file, is refused for every account. Submitting an update is ownership-gated, not a
 plain progress-write permission: an editor-tier account (or above) may update any
-series, an uploader account only a series where it is the only recorded uploader
-(otherwise 403), and a registered-only
+series, an uploader account only a series it owns (see User Roles; otherwise 403),
+and a registered-only
 account cannot submit updates at all. The account that submitted an accepted
 update is recorded in the audit log.
 

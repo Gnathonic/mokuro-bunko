@@ -228,7 +228,7 @@ From a terminal: `mokuro-bunko update check` and `mokuro-bunko update apply [--y
 |------|--------|----------|--------|-------------|--------|-------|
 | Anonymous | configurable | configurable | -- | -- | -- | -- |
 | Registered | yes | yes | -- | -- | -- | -- |
-| Uploader | yes | yes | yes | own uploads | -- | -- |
+| Uploader | yes | yes | yes, not into another account's series | own uploads and series | -- | -- |
 | Editor | yes | yes | yes | all | -- | -- |
 | Inviter | yes | yes | yes | all | yes | -- |
 | Admin | yes | yes | yes | all | yes | yes |

@@ -2,7 +2,33 @@
 
 ## [Unreleased]
 
+### Breaking
+- **Series have owners, and an uploader controls only what is its own.** The account
+  that creates a series folder owns it. An `uploader` account can no longer add files
+  or folders to a series another account owns; it adds new volumes to a series nobody
+  owns, as before. It can no longer add or replace a cover, an OCR file, a layer file
+  or an archive named after a volume it did not upload, unless it owns the series:
+  the series owner controls every volume in it, whoever added it, and may delete it
+  and the series folder. Its own corrections (`<Volume>.edit.mokuro`) stay its own
+  everywhere. Editors and admins are not limited. This closes a way for an uploader
+  to take over another account's volume with an archive named after it
+  (`V.curated.cbz` beside `V.cbz`).
+- **`series.json` updates need the series' owner.** An uploader may submit them only
+  for a series it owns; being the only uploader of every volume in it is no longer
+  enough.
+- **Existing series get owners once, at startup.** A series folder whose volumes were
+  all uploaded by one account, with no archive without a recorded uploader, becomes
+  that account's. Every other folder (volumes from several accounts, archives copied
+  in by hand, empty) has no owner and stays shared. Until this is done, an uploader's
+  new files and folders are answered "try again shortly" (503); on a cloud library it
+  is done once the first sync finishes. A database upgraded from 0.7 records schema
+  version 7.
+
 ### Added
+- **`/login/api/me` says where an account may add files** (`permissions.addFiles`):
+  anywhere (`all`), everywhere but the `closedSeries` other accounts own (`open`, an
+  uploader), or nowhere (`none`). A reader can tell from it that the server enforces
+  series owners. `metadata.ownedSeries` now lists the series the account owns.
 - **Set a library up in Google Drive, OneDrive, MEGA or a WebDAV server.** The setup
   wizard asks where the library lives, then connects it with one button: a browser on
   the server signs in directly. Anywhere else (Docker, a NAS, a phone), Google Drive
@@ -71,8 +97,9 @@
 - **`/login/api/me` says where a reader's OCR corrections go.** It lists
   `per_user_layers: ["edit"]` (each account keeps its own `edit` layer, so a reader
   may push it) and `permissions.curated.scope`: `all` (editors, inviters, admins),
-  `owned` (an uploader, on the volumes it uploaded) or `none`, for publishing the
-  shared `curated` layer. A cloud folder's `.mokuro-bunko.json` says `curated: true`.
+  `owned` (an uploader, on the volumes it uploaded and every volume of a series it
+  owns) or `none`, for publishing the shared `curated` layer. A cloud folder's
+  `.mokuro-bunko.json` says `curated: true`.
 
 ### Changed
 - **OCR corrections have their own layer names.** Edits never touch a volume's main

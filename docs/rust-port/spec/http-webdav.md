@@ -441,6 +441,31 @@ table above:
 
 `original`, `gcv`, `updated-ocr`, `tr-*` and hand-made ids keep the table above (shared files).
 
+**0.8: series owners.** The account whose MKCOL creates a top-level library folder owns it
+(`series_folder_owners`, keyed by the series fold; a PUT never makes a folder); folders that existed
+before 0.8 get the one uploader of their tracked volumes, once, at startup. For roles below
+`MODIFY_DELETE` (the uploader), replacing the ownership rows of 4.4 step 4, step 10 and 4.6:
+
+* every segment rule reads the path with its empty and `.` segments dropped (as DAV resolves it);
+* nothing new (a PUT of a new file, an MKCOL) goes inside a folder another account owns, nor at a
+  top-level spelling of one: 403 `Permission denied: this series belongs to another account`;
+* a FILE governed by a listed archive (`sidecar_names::governing_archives`: the archive, its
+  sidecars, a `.mokuro` rule v1 reads as its primary or layer, a name nested under it; the
+  shortest stem wins) is created, replaced or deleted only by an account that controls it: the
+  archive's uploader, or the owner of its folder. A new one is otherwise 403
+  `Permission denied: this file belongs to a volume this account did not upload`; an existing
+  one keeps 4.4's replace refusal. What nothing governs is the folder owner's to replace or delete;
+  a new volume in an unowned folder is anyone's to add;
+* a folder is never governed: only its series owner deletes one (the series folder included) or
+  makes one named after a volume;
+* `series.json` (4.4 step 2) and curated need the series' recorded owner, or control of the volume;
+* while startup adoption is pending, additions answer 503 with `Retry-After`.
+
+A decision made from a listing is `Grant::Owner`: DAV makes it again just before a PUT is published
+and before a DELETE removes anything. A refused PUT's verdict carries the reason as its `detail`.
+Personal corrections, keepsakes and reserved ids keep the table above; MOVE, COPY, LOCK and
+PROPPATCH stay `MODIFY_DELETE`.
+
 `_authorize_progress_write` (`auth.py:889-921`): unauthenticated -> 401 `Authentication required to save progress`;
 role lacks `WRITE_PROGRESS` (anonymous/processor) -> 403 `Permission denied: cannot save progress`;
 username present -> allow (the file is always the caller's own; the path maps to
