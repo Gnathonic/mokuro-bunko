@@ -11,8 +11,13 @@
 //! nothing is gated on `schema_version`, which is bookkeeping only. Differences:
 //! - the whole run is ONE transaction (Python autocommitted DDL statement by statement),
 //!   so an interrupted upgrade leaves the file as it was;
-//! - `schema_version` is set to 6 unless it already holds a larger number (spec open
-//!   question 2: never downgrade a newer build's marker; Python rewrites it to 6).
+//! - `schema_version` is set to [`SCHEMA_VERSION`] unless it already holds a larger
+//!   number (spec open question 2: never downgrade a newer build's marker; Python
+//!   rewrites it to 6).
+//!
+//! Version 7 (0.8) adds the series folder owners (`series_folder_owners`, and the
+//! one-row `series_folder_adoption` that says the existing folders were given theirs).
+//! Additive: a 0.7 build opens a version 7 file and ignores both tables.
 
 use crate::database::column_exists;
 use crate::error::Result;
@@ -20,8 +25,9 @@ use crate::identities::identity_from_entry;
 use crate::series::load_json_object;
 use rusqlite::{Connection, OptionalExtension, params};
 
-/// `Database.SCHEMA_VERSION` of 0.5.2 (unchanged in 0.5.3).
-pub const SCHEMA_VERSION: i64 = 6;
+/// 6 through 0.7 (`Database.SCHEMA_VERSION` of 0.5.2, unchanged in 0.5.3); 7 since 0.8
+/// (series folder owners).
+pub const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA_VERSION_DDL: &str = "
                 CREATE TABLE IF NOT EXISTS schema_version (
@@ -189,6 +195,27 @@ const VOLUME_IDENTITIES_DDL: &str = "
                 )
             ";
 
+/// Who owns a top-level library folder (0.8), keyed by the series-identity fold
+/// (`uploads::fold_series_title_key`), so every spelling of the series is one folder.
+/// `folder_name` is a spelling to report.
+const SERIES_FOLDER_OWNERS_DDL: &str = "
+                CREATE TABLE IF NOT EXISTS series_folder_owners (
+                    series_key TEXT PRIMARY KEY,
+                    folder_name TEXT NOT NULL,
+                    owner_username TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            ";
+
+/// One row once the folders that existed before the owners table were given theirs
+/// (`folders::finish_series_folder_adoption`); no row means that is still to do.
+const SERIES_FOLDER_ADOPTION_DDL: &str = "
+                CREATE TABLE IF NOT EXISTS series_folder_adoption (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    done_at TEXT NOT NULL
+                )
+            ";
+
 /// Step 6 indexes, in 0.5.2's order. `idx_audit_created_at` is named in an `INDEXED BY`
 /// hint by the audit query, so it must exist under exactly this name.
 const INDEXES: &[&str] = &[
@@ -297,7 +324,32 @@ pub(crate) fn init(conn: &Connection) -> Result<()> {
         [],
     )?;
 
-    // 8. Version bookkeeping.
+    // 8. Series folder owners (0.8). Adoption gives a folder the one uploader of its
+    //    tracked volumes, so a database tracking none (a new one) is adopted at once;
+    //    any other that existed before the table is left to the server's startup
+    //    adoption (it needs the library listing).
+    let had_owners = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'series_folder_owners'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    conn.execute(SERIES_FOLDER_OWNERS_DDL, [])?;
+    conn.execute(SERIES_FOLDER_ADOPTION_DDL, [])?;
+    let tracks_volumes = conn
+        .query_row("SELECT 1 FROM volume_uploads LIMIT 1", [], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if !had_owners && !tracks_volumes {
+        conn.execute(
+            "INSERT OR IGNORE INTO series_folder_adoption (id, done_at) VALUES (1, datetime('now'))",
+            [],
+        )?;
+    }
+
+    // 9. Version bookkeeping.
     let current: Option<i64> = conn
         .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
         .optional()?;
