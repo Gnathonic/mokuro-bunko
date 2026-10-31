@@ -162,24 +162,22 @@
   outdated `<Volume>.mokuro` in a family listed under `ocr.upgrade.replace` is upgraded
   even if a person or Mokuro Reader 1.10.0 changed it without marking it edited (a file
   marked edited is never replaced: see "an EDITED file is never replaced" below). One
-  Bunko can prove it wrote is replaced as before: every OCR file it installs now
-  carries a seal, `ocr_engine.seal`, a hash of its pages and its `ocr_engine` block
-  (RFC 8785 canonical JSON, so Mokuro Reader and other tools can check it too; test
-  vectors in `interop/contract/seal/`). Renaming the volume or
-  series, re-saving the file with other formatting, or moving the library to another
-  Bunko keeps the seal; changing any OCR text breaks it. Any
-  other (stock mokuro output, a file the reader saved corrections into, or one that only
-  carries Bunko's `ocr_engine` stamp, which anyone who can write the file can add) is
-  first copied, byte for byte, to
+  Bunko can prove it wrote is replaced as before: every OCR file it installs now carries
+  a seal, `ocr_engine.seal`, a hash of its pages and its `ocr_engine` block (RFC 8785
+  canonical JSON, so Mokuro Reader and other tools can check it too; test vectors in
+  `interop/contract/seal/`). Renaming the volume or series, re-saving the file with
+  other formatting, or moving the library to another Bunko keeps the seal; changing any
+  OCR text breaks it. Any other (stock mokuro output, a file the reader saved
+  corrections into, or one that only carries Bunko's `ocr_engine` stamp, which anyone
+  who can write the file can add) is first copied, byte for byte, to
   `<Volume>.pre-upgrade.mokuro` (`pre-upgrade-2` and so on if that name holds other
   bytes), and the new file goes in only once that copy is safely written; if the copy
   cannot be written, the volume is left alone until the next pass. A file whose recipe
   cannot be read is still never upgraded. A layer is copied in as the new main file only
   when Bunko can prove it wrote that layer the same way and its own file carries the
-  matching stamp, and layers without a stamp (a reader's
-  edits, `pre-upgrade` copies) are never used or deleted. The admin page's list of
-  edited volumes and the "Upgrade anyway" button are gone, as is the `force` option of
-  `POST /api/ocr/upgrade/<volume>`.
+  matching stamp, and layers without a stamp (a reader's edits, `pre-upgrade` copies)
+  are never used or deleted. The admin page's list of edited volumes and the "Upgrade
+  anyway" button are gone, as is the `force` option of `POST /api/ocr/upgrade/<volume>`.
 - **OCR files say which revision of their engine made them, and when.** Every file Bunko
   installs carries `ocr_engine.revision` (an engine's output revision, raised only when
   its output changes; a file without one, such as every 0.7 file, is revision 1) and
