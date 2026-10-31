@@ -535,11 +535,14 @@ rig's usual 12 s would read as Bunko gone between two looks. The specs keep the
 reader looking (the tab hidden and shown, which makes its queue poller look at once)
 and first wait until it has SEEN the marker move (`bunkoSeenAlive`): until then a reader
 judges the marker by Bunko's own clock (ttl + 5 min). Who wrote a file is read off the
-browser's own requests (`recordReaderWrites`, `shared/shared.mjs`), never off the cloud,
+browser's own requests (`recordReaderWrites`, `reader-writes.mjs`), never off the cloud,
 which Bunko writes too: WebDAV paths and MOVE destinations, Graph's `<name>:/content`
 and upload sessions, Drive's metadata and the ids its writes answer, and the node handles
-MEGA's `p` answers (its names are encrypted on the wire), looked up in `/_sim/tree`
-(a write it can put no name to is listed for the failure message); a file's contents
+MEGA's `p` answers (its names are encrypted on the wire), looked up in `/_sim/tree`. An
+upload session's content PUT (Drive's `upload_id`, Graph's `uploadUrl`) takes what the
+request that opened it named, as a Worker's answer can be gone by the time it is read
+and Chromium reports a Drive init whose body nobody read as failed (a write it can put
+no name to is listed for the failure message); a file's contents
 come from `/_sim/content` (rclone: its served directory). The reader
 imports and uploads with the driver's `importVolume` and `backupVolume` (the card's
 Backup, to the end of its run, metadata writes included), and reads what it wrote

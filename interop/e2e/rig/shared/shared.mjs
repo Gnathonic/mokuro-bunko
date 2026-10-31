@@ -8,6 +8,8 @@ import path from 'node:path';
 import { expect } from '../fixtures.mjs';
 import { LIBRARY_FOLDER, cloudFile, signIn } from '../cloud-direct.mjs';
 
+export { recordReaderWrites } from '../reader-writes.mjs';
+
 export async function connect(reader, rig) {
     const { sync } = await signIn(reader, rig);
     expect(sync).toEqual({ ok: true, errors: [] });
@@ -84,112 +86,6 @@ export async function cloudBytes(rig, rel) {
 export async function cloudJson(rig, rel) {
     const bytes = await cloudBytes(rig, rel);
     return bytes ? JSON.parse(bytes.toString('utf8').replace(/^﻿/, '')) : null;
-}
-
-/** Every node the cloud has had, trashed ones included: id → name. */
-async function nodeNames(rig) {
-    const rows = await rig.sim(
-        'GET',
-        `tree?provider=${rig.provider}&account=${encodeURIComponent(rig.simAccount)}&include_trashed=1`,
-    );
-    return new Map(rows.map((r) => [r.id, r.name]));
-}
-
-const READS = new Set(['GET', 'HEAD', 'OPTIONS', 'PROPFIND']);
-
-/**
- * The names of every file the reader (the page and its workers) wrote to the cloud
- * since this was called: `await writes.names()`. Read off its own requests: the name a
- * write carries (WebDAV's path or MOVE destination, Graph's `<name>:/content` and
- * upload sessions, Drive's metadata), and the node a write answered or addressed
- * (Drive and Graph ids, MEGA's new node handles: its names are encrypted on the wire)
- * looked up in cloudsim's tree. `writes.unnamed()` lists the writes it could put no
- * name to (no name in the request, no node in the answer, or a node gone from the
- * tree), for a failure message.
- */
-export function recordReaderWrites(page, rig) {
-    const origins = new Set(
-        [rig.cloudsimUrl, rig.preauthUrl, rig.rcloneUrl].filter(Boolean).map((u) => new URL(u).origin),
-    );
-    const names = new Set();
-    const ids = new Set();
-    const pending = [];
-    const unnamed = [];
-    const base = (p) => decodeURIComponent(p.split('/').filter(Boolean).pop() ?? '');
-    async function look(request) {
-        const url = new URL(request.url());
-        const method = request.method();
-        if (!origins.has(url.origin) || READS.has(method)) return;
-        const pathname = decodeURIComponent(url.pathname);
-        // What this write named: a name, or a node to look up.
-        let found = 0;
-        const named = (n) => (found++, names.add(n));
-        const noded = (id) => (found++, ids.add(id));
-        try {
-            await name(request, url, method, pathname, named, noded);
-        } finally {
-            if (!found) unnamed.push(`${method} ${pathname}`);
-        }
-    }
-    async function name(request, url, method, pathname, named, noded) {
-        if (rig.provider === 'rclone') {
-            if (method === 'PUT') named(base(url.pathname));
-            const dest = (await request.allHeaders()).destination;
-            if (dest && (method === 'MOVE' || method === 'COPY')) named(base(new URL(dest).pathname));
-            return;
-        }
-        if (rig.provider === 'microsoft') {
-            const m = pathname.match(/\/([^/]+):\/(content|createUploadSession)$/);
-            if (m) named(m[1]);
-        }
-        if (rig.provider === 'google') {
-            const body = request.postDataBuffer()?.toString('latin1') ?? '';
-            for (const m of body.matchAll(/"name"\s*:\s*"([^"]+)"/g)) named(JSON.parse(`"${m[1]}"`));
-            const patched = pathname.match(/\/files\/([^/]+)$/);
-            if (patched && method === 'PATCH') noded(patched[1]);
-        }
-        const response = await request.response();
-        if (!response) return;
-        let doc = null;
-        try {
-            doc = JSON.parse((await response.body()).toString('utf8'));
-        } catch {
-            return;
-        }
-        if (rig.provider === 'mega') {
-            // A batch of commands answers one result each; `p` (put nodes) answers the
-            // nodes it made, `{f: [{h, …}]}` (a fetch answers every node the same way).
-            let cmds = [];
-            try {
-                cmds = JSON.parse(request.postData() ?? '[]');
-            } catch {
-                return;
-            }
-            if (!Array.isArray(cmds) || !Array.isArray(doc)) return;
-            cmds.forEach((c, i) => {
-                if (c?.a !== 'p') return;
-                for (const n of doc[i]?.f ?? []) if (typeof n?.h === 'string') noded(n.h);
-            });
-        } else if (typeof doc?.id === 'string') {
-            noded(doc.id);
-        }
-    }
-    page.on('requestfinished', (request) => pending.push(look(request).catch(() => {})));
-    let gone = [];
-    return {
-        async names() {
-            await Promise.all(pending);
-            const out = new Set(names);
-            if (ids.size) {
-                const byId = await nodeNames(rig);
-                for (const id of ids) if (byId.has(id)) out.add(byId.get(id));
-                gone = [...ids].filter((id) => !byId.has(id)).map((id) => `node ${id}, gone from the tree`);
-            }
-            return [...out].sort();
-        },
-        /** After `names()`: the writes it could put no name to. */
-        unnamed: () => [...unnamed, ...gone],
-    };
 }
 
 /** The volume of the seeded series, or of `series`, titled `title`, as the reader lists it. */
