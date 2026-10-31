@@ -331,6 +331,72 @@ pub fn primary_of<'a>(cbz_name: &str, names: &[&'a str]) -> Option<&'a str> {
     Folder::new(names).primary_of(cbz_name)
 }
 
+/// The listed `.cbz` archives whose owner controls the file `name` of a folder listing
+/// FILES `names` (series owners, 0.8): among the archives `name` belongs to, the one of
+/// the SHORTEST stem, so a file takes its control from the outermost volume and never
+/// from an archive nested under it (`V.curated.cbz` and `V.curated.mokuro` are
+/// `V.cbz`'s while `V.cbz` is listed). Empty when no listed archive governs it.
+///
+/// `name` belongs to the stem `s` when it is `s.cbz`; a sidecar `s.mokuro[.gz]`,
+/// `s.webp`, `s.nocover`; a `.mokuro[.gz]` rule v1 reads as `s`'s primary or layer
+/// ([`classify`], all-digit ids included); or any other name nested under it,
+/// `s.<id>.<rest>`, `<id>` a layer id with a letter once ASCII-lowercased (the
+/// heuristic of `bunko_db::layer_sidecar_volume_path`, so `Vol 01.5.cbz` stays its own
+/// volume; folded, because rule v1 folds stems: `V.EDIT.cbz` still turns `V.edit.mokuro`
+/// into its primary). Stems match folded (rule 3): an archive spelled exactly like the
+/// stem wins; otherwise every listed spelling governs (rule 6), and all of them must be
+/// controlled.
+pub fn governing_archives<'a>(name: &str, names: &[&'a str]) -> Vec<&'a str> {
+    let archives: Vec<(&'a str, &'a str)> = names
+        .iter()
+        .filter_map(|&n| cbz_stem(n).map(|stem| (stem, n)))
+        .collect();
+    if archives.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(base) = [".cbz", ".mokuro.gz", ".mokuro", ".webp", ".nocover"]
+        .iter()
+        .find_map(|s| strip_suffix_ci(name, s))
+    {
+        candidates.push(base);
+    }
+    // Rule v1's own reading of a `.mokuro` name (C7: `Vol 01.5.mokuro` is layer `5`).
+    match classify(name, &volume_stems(names.iter().copied())) {
+        SidecarClass::Primary { stem, .. } | SidecarClass::Layer { stem, .. } => {
+            candidates.push(stem)
+        }
+        SidecarClass::Orphan => {}
+    }
+    for (i, _) in name.match_indices('.').filter(|(i, _)| *i > 0) {
+        let rest = &name[i + 1..];
+        let Some((id, tail)) = rest.split_once('.') else {
+            break;
+        };
+        let id = id.to_ascii_lowercase();
+        if !tail.is_empty() && is_layer_id(&id) && id.bytes().any(|b| b.is_ascii_lowercase()) {
+            candidates.push(&name[..i]);
+        }
+    }
+    candidates.sort_by_key(|c| c.len());
+    for candidate in candidates {
+        let want = fold(candidate);
+        let folded: Vec<(&str, &'a str)> = archives
+            .iter()
+            .copied()
+            .filter(|(stem, _)| fold(stem) == want)
+            .collect();
+        if folded.is_empty() {
+            continue;
+        }
+        return match folded.iter().find(|(stem, _)| *stem == candidate) {
+            Some((_, exact)) => vec![*exact],
+            None => folded.into_iter().map(|(_, n)| n).collect(),
+        };
+    }
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,6 +529,79 @@ mod tests {
             Some("v.gcv.mokuro.gz")
         );
         assert_eq!(folder.primary_of("V.cbz"), None);
+    }
+
+    #[test]
+    fn the_outermost_listed_archive_governs_a_file() {
+        let gov = governing_archives;
+        let v = ["V.cbz", "W.cbz"];
+        for name in [
+            "V.cbz",
+            "V.mokuro",
+            "V.MOKURO.gz",
+            "V.webp",
+            "V.nocover",
+            "V.edit.cbz",
+            "V.hayai.webp",
+            "V.curated.mokuro",
+            "V.edit.curated.mokuro",
+        ] {
+            assert_eq!(gov(name, &v), ["V.cbz"], "{name}");
+        }
+        // Shortest stem wins, in either upload order; alone, a nested archive is its own.
+        let both = ["V.cbz", "V.curated.cbz"];
+        assert_eq!(gov("V.curated.cbz", &both), ["V.cbz"]);
+        assert_eq!(gov("V.curated.mokuro", &both), ["V.cbz"]);
+        assert_eq!(gov("V.curated.cbz", &["V.curated.cbz"]), ["V.curated.cbz"]);
+        assert_eq!(
+            gov("V.curated.mokuro", &["V.curated.cbz"]),
+            ["V.curated.cbz"]
+        );
+        // Folded ids (C1): rule v1 folds the stem `V.EDIT` onto `V.edit.mokuro`.
+        for name in [
+            "V.EDIT.cbz",
+            "V.Curated.cbz",
+            "V.PRE-UPGRADE.cbz",
+            "v.curated.cbz",
+        ] {
+            assert_eq!(gov(name, &v), ["V.cbz"], "{name}");
+        }
+        // A decimal volume is its own; its sidecars too.
+        let dec = ["Vol 01.cbz", "Vol 01.5.cbz"];
+        assert_eq!(gov("Vol 01.5.cbz", &dec), ["Vol 01.5.cbz"]);
+        assert_eq!(gov("Vol 01.5.mokuro", &dec), ["Vol 01.5.cbz"]);
+        assert_eq!(gov("Vol 01.5.webp", &dec), ["Vol 01.5.cbz"]);
+        // Without it, rule v1 reads `Vol 01.5.mokuro` as layer `5` of Vol 01 (C7) and
+        // `V.2024.mokuro` as layer `2024` of V; other names need a letter in the id.
+        assert_eq!(gov("Vol 01.5.mokuro", &["Vol 01.cbz"]), ["Vol 01.cbz"]);
+        assert_eq!(gov("V.2024.mokuro", &v), ["V.cbz"]);
+        assert!(gov("Vol 01.5.cbz", &["Vol 01.cbz"]).is_empty());
+        assert!(gov("Vol 01.5.webp", &["Vol 01.cbz"]).is_empty());
+        assert!(gov("Dr. Stone v1.cbz", &["Dr.cbz"]).is_empty());
+        assert_eq!(
+            gov("Dr. Stone v1.mokuro", &["Dr. Stone v1.cbz"]),
+            ["Dr. Stone v1.cbz"]
+        );
+        // A new volume, an orphan, staging and dot names: nothing governs them.
+        for name in [
+            "X.cbz",
+            "X.mokuro",
+            "notes.txt",
+            ".V.cbz.upload-1.tmp",
+            ".V.cbz",
+        ] {
+            assert!(gov(name, &v).is_empty(), "{name}");
+        }
+        assert!(gov("V.mokuro", &[]).is_empty());
+        // Only `.cbz` archives govern (rule 2).
+        assert!(gov("V.mokuro", &["V.zip"]).is_empty());
+        // Case variants: the exact spelling, else every one of them.
+        let variants = ["Vol.cbz", "VOL.CBZ"];
+        assert_eq!(gov("VOL.mokuro", &variants), ["VOL.CBZ"]);
+        assert_eq!(gov("Vol.edit.cbz", &variants), ["Vol.cbz"]);
+        let mut all = gov("vol.mokuro", &variants);
+        all.sort();
+        assert_eq!(all, ["VOL.CBZ", "Vol.cbz"]);
     }
 
     #[test]
