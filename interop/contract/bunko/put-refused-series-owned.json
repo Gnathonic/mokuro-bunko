@@ -1,0 +1,25 @@
+{
+  "body": {
+    "ok": false,
+    "reason": "forbidden",
+    "detail": "This series belongs to another account.",
+    "retry": false
+  },
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json",
+    "x-mokuro-put": "verified"
+  },
+  "request": {
+    "auth": "basic:reader",
+    "body_cbz": {
+      "pages": 1
+    },
+    "headers": {
+      "content-type": "application/octet-stream"
+    },
+    "method": "PUT",
+    "path": "/mokuro-reader/Admin%20Series/Volume%2009.cbz"
+  },
+  "status": 403
+}

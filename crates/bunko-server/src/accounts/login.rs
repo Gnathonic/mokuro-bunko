@@ -253,13 +253,34 @@ async fn revoke_token(State(d): State<AccountsDeps>, headers: HeaderMap) -> Resp
     }
 }
 
+/// An uploader's series folders (0.8), each as recorded, by code point: the ones it
+/// owns and the ones another account owns (closed to it). Only folders listed now, as
+/// auth checks them: a record whose folder went without a hook closes nothing.
+struct SeriesFolders {
+    owned: Vec<String>,
+    closed: Vec<String>,
+}
+
 /// The client-facing permissions object (§15.4 `P`): `metadata` nests inside, which is
-/// where the reader's `identity.ts` reads it.
-fn permissions(role: Role, owned_series: Option<Vec<String>>) -> Value {
+/// where the reader's `identity.ts` reads it. `addFiles` (0.8) says where the account
+/// may add files: anywhere, every series but the `closedSeries` other accounts own, or
+/// nowhere. Its presence tells a reader the server enforces series owners.
+fn permissions(role: Role, folders: Option<SeriesFolders>) -> Value {
+    let (owned, closed) = match folders {
+        Some(f) => (Some(f.owned), Some(f.closed)),
+        None => (None, None),
+    };
     let metadata = if has_perm(role, Perm::ModifyDelete) {
         json!({"scope": "all"})
-    } else if let (Role::Uploader, Some(owned)) = (role, owned_series) {
+    } else if let (Role::Uploader, Some(owned)) = (role, owned) {
         json!({"scope": "owned", "ownedSeries": owned})
+    } else {
+        json!({"scope": "none"})
+    };
+    let add_files = if has_perm(role, Perm::ModifyDelete) {
+        json!({"scope": "all"})
+    } else if has_perm(role, Perm::AddFiles) {
+        json!({"scope": "open", "closedSeries": closed.unwrap_or_default()})
     } else {
         json!({"scope": "none"})
     };
@@ -269,11 +290,13 @@ fn permissions(role: Role, owned_series: Option<Vec<String>>) -> Value {
         "canModifyDelete": has_perm(role, Perm::ModifyDelete),
         "metadata": metadata,
         "curated": {"scope": curated_scope(role)},
+        "addFiles": add_files,
     })
 }
 
 /// Who may publish a volume's shared `curated` layer (D27; auth enforces it): every
-/// volume, the volumes it uploaded (a 403 on any other is final), or none.
+/// volume; the volumes it controls (`owned`: its uploads, and every volume of a series
+/// it owns; a 403 on any other is final); or none.
 fn curated_scope(role: Role) -> &'static str {
     if has_perm(role, Perm::ModifyDelete) {
         "all"
@@ -284,11 +307,34 @@ fn curated_scope(role: Role) -> &'static str {
     }
 }
 
-/// The 200 identity body for a signed-in user (the uploader's owned series are read
-/// from the ownership table).
-fn identity_body(db: &bunko_db::Database, user: &User) -> bunko_db::Result<Value> {
-    let owned = if user.role == Role::Uploader {
-        Some(db.list_series_owned_by(&user.username)?)
+/// See [`SeriesFolders`]. Blocking (lists the library root).
+fn series_folders(
+    db: &bunko_db::Database,
+    library: &std::path::Path,
+    username: &str,
+) -> bunko_db::Result<SeriesFolders> {
+    let live = crate::library::owners::live_series_keys(library).unwrap_or_default();
+    let listed = |rows: Vec<bunko_db::SeriesFolderOwner>| -> Vec<String> {
+        rows.into_iter()
+            .filter(|r| live.contains(&r.series_key))
+            .map(|r| r.folder_name)
+            .collect()
+    };
+    Ok(SeriesFolders {
+        owned: listed(db.series_folders_owned_by(username)?),
+        closed: listed(db.series_folders_closed_to(username)?),
+    })
+}
+
+/// The 200 identity body for a signed-in user (an uploader's series folders are read
+/// from the owner records and the library root).
+fn identity_body(
+    db: &bunko_db::Database,
+    library: &std::path::Path,
+    user: &User,
+) -> bunko_db::Result<Value> {
+    let folders = if user.role == Role::Uploader {
+        Some(series_folders(db, library, &user.username)?)
     } else {
         None
     };
@@ -297,7 +343,7 @@ fn identity_body(db: &bunko_db::Database, user: &User) -> bunko_db::Result<Value
         "username": user.username,
         "role": user.role.as_str(),
         "created_at": user.created_at,
-        "permissions": permissions(user.role, owned),
+        "permissions": permissions(user.role, folders),
         "per_user_files": bunko_core::reader_tree::advertised(),
         "per_user_layers": bunko_core::sidecar_names::per_user_layers(),
         "version": bunko_core::VERSION,
@@ -311,11 +357,12 @@ fn unauthenticated(status: u16, error: &str) -> Response {
 /// `GET /login/api/me` (§15.4). `authenticated` is in every answer, 401/429 included.
 async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -> Response {
     let db = d.db.clone();
+    let library = d.core.layout.library();
     match auth_header(&headers) {
         AuthHeader::Bearer(token) => {
             let result = blocking(move || -> bunko_db::Result<Option<Value>> {
                 match db.resolve_auth_token(&token)? {
-                    Some(user) => identity_body(&db, &user).map(Some),
+                    Some(user) => identity_body(&db, &library, &user).map(Some),
                     None => Ok(None),
                 }
             })
@@ -353,7 +400,7 @@ async fn me(State(d): State<AccountsDeps>, client: Client, headers: HeaderMap) -
             }
             let result = blocking(move || -> bunko_db::Result<Option<Value>> {
                 match db.authenticate_user(&username, &password)? {
-                    Some(user) => identity_body(&db, &user).map(Some),
+                    Some(user) => identity_body(&db, &library, &user).map(Some),
                     None => Ok(None),
                 }
             })
@@ -395,11 +442,27 @@ mod tests {
 
     #[test]
     fn permissions_per_role() {
-        let p = permissions(Role::Uploader, Some(vec!["A".into()]));
+        let folders = SeriesFolders {
+            owned: vec!["A".into()],
+            closed: vec!["B".into()],
+        };
+        let p = permissions(Role::Uploader, Some(folders));
         assert_eq!(
             serde_json::to_string(&p).unwrap(),
-            r#"{"canWriteProgress":true,"canAddFiles":true,"canModifyDelete":false,"metadata":{"scope":"owned","ownedSeries":["A"]},"curated":{"scope":"owned"}}"#
+            r#"{"canWriteProgress":true,"canAddFiles":true,"canModifyDelete":false,"metadata":{"scope":"owned","ownedSeries":["A"]},"curated":{"scope":"owned"},"addFiles":{"scope":"open","closedSeries":["B"]}}"#
         );
+        // Where an account may add files (0.8; its presence is the capability).
+        for (role, scope) in [
+            (Role::Admin, json!({"scope": "all"})),
+            (Role::Editor, json!({"scope": "all"})),
+            (Role::Inviter, json!({"scope": "all"})),
+            (Role::Uploader, json!({"scope": "open", "closedSeries": []})),
+            (Role::Registered, json!({"scope": "none"})),
+            (Role::Processor, json!({"scope": "none"})),
+            (Role::Anonymous, json!({"scope": "none"})),
+        ] {
+            assert_eq!(permissions(role, None)["addFiles"], scope, "{role:?}");
+        }
         assert_eq!(
             permissions(Role::Inviter, None)["metadata"],
             json!({"scope": "all"})

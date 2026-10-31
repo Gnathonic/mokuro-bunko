@@ -409,6 +409,59 @@ async fn puts(c: &mut Contract, seed: &Seed) {
     server.stop().await;
 }
 
+/// Series owners (0.8): a series the admin created is closed to `reader`, whose `/me`
+/// lists it (never its owner) and whose PUT into it is refused, saying why.
+async fn series_owners(c: &mut Contract, seed: &Seed) {
+    let server = Server::local(seed).await;
+    let r = server
+        .send(&Req::new(
+            "MKCOL",
+            &dav_path(&["Admin Series"]),
+            "basic:admin",
+        ))
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = server
+        .send(
+            &Req::new(
+                "PUT",
+                &dav_path(&["Admin Series", "Volume 01.cbz"]),
+                "basic:admin",
+            )
+            .header("content-type", "application/octet-stream")
+            .cbz(1),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let r = export(
+        c,
+        &server,
+        "login-me-closed-series",
+        Req::new("GET", "/login/api/me", "basic:reader"),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(
+        r.json().unwrap()["permissions"]["addFiles"],
+        json!({"scope": "open", "closedSeries": ["Admin Series"]})
+    );
+    let r = export(
+        c,
+        &server,
+        "put-refused-series-owned",
+        Req::new(
+            "PUT",
+            &dav_path(&["Admin Series", "Volume 09.cbz"]),
+            "basic:reader",
+        )
+        .header("content-type", "application/octet-stream")
+        .cbz(1),
+    )
+    .await;
+    assert_eq!(r.status, 403, "{}", r.text());
+    server.stop().await;
+}
+
 /// Reading history (0.8): `registered` keeps its own `history/<device>/<file>` tree
 /// under the reader root, and nobody else lists it.
 async fn history(c: &mut Contract, seed: &Seed) {
@@ -742,6 +795,7 @@ async fn export_all(c: &mut Contract, seed: &Seed) {
         server.stop().await;
     }
     puts(c, seed).await;
+    series_owners(c, seed).await;
     history(c, seed).await;
     personal(c, seed).await;
     errors(c, seed).await;

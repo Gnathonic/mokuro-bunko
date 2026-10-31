@@ -10,10 +10,16 @@
       "canModifyDelete": false,
       "metadata": {
         "scope": "owned",
-        "ownedSeries": []
+        "ownedSeries": [
+          "Contract Series"
+        ]
       },
       "curated": {
         "scope": "owned"
+      },
+      "addFiles": {
+        "scope": "open",
+        "closedSeries": []
       }
     },
     "per_user_files": [
