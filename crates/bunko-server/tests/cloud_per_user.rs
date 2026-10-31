@@ -742,3 +742,53 @@ async fn corrections_survive_a_duplicate_folder_merge() {
         assert_eq!(body, correction(&vol.replace("%20", " ")));
     }
 }
+
+fn no_poll(c: &mut bunko_remote::RemoteStoreConfig) {
+    tune(c);
+    c.poll_active = Duration::from_secs(3600);
+    c.poll_idle = Duration::from_secs(3600);
+}
+
+/// A cloud-direct reader rewrites the owner's positions.json behind Bunko's index, on a
+/// provider with no pinned reads (WebDAV): the owner's GET, which sent no precondition,
+/// is never a 412. It answers 503 with a short Retry-After while Bunko reads the
+/// library again, and the new bytes after that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_changed_behind_the_index_is_a_retry_not_a_412() {
+    let fake = Arc::new(FakeBackend::webdav_plain());
+    fake.reader_put(&format!("{ROOT}/Series/Vol 1.cbz"), b"volume");
+    fake.reader_put(&format!("{ROOT}/positions.json"), b"{\"v\":1}");
+    let e = env_tuned(LibraryBackend::WebDav, Some(fake.clone()), no_poll).await;
+    fake.reader_put(&format!("{ROOT}/positions.json"), b"{\"v\":2}");
+    let resp = e
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/mokuro-reader/positions.json")
+                .header("host", "localhost:8080")
+                .header("authorization", basic("owner"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 503);
+    assert_eq!(
+        resp.headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("1")
+    );
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (status, body) = e.get("owner", "/mokuro-reader/positions.json").await;
+        if status == 200 {
+            assert_eq!(body, b"{\"v\":2}");
+            break;
+        }
+        assert_eq!(status, 503);
+        assert!(Instant::now() < until, "the new version is read");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
