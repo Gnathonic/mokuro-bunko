@@ -255,7 +255,10 @@ impl Services {
             ..Default::default()
         };
         let dav = bunko_dav::Dav::new(&layout, dav_config)?;
-        let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(db.clone()));
+        let dav_hooks = Arc::new(crate::davhooks::ServerDavHooks::new(
+            db.clone(),
+            layout.library(),
+        ));
         let core = Core::with_layout(config, config_path, backend, layout.clone());
         let storage_control = crate::storage::StorageControl::for_core(&core, storage.clone());
         let late_ocr: Arc<std::sync::OnceLock<crate::ocr::OcrControl>> =
@@ -780,12 +783,15 @@ pub fn start_library_services(
     let Some(storage) = services.storage.clone() else {
         services.library.start();
         {
-            // 0.5.2 swept corrupt sidecars when the OCR worker started; one-shot, off the
-            // request path. Then corrections written into the shared folder before 0.8
-            // go to their writers (after: the two sweeps would race for the same files).
+            // The series folders that existed before 0.8 get their owners first: until
+            // then uploaders' additions wait (auth answers 503). Then 0.5.2's one-shot
+            // corrupt-sidecar sweep, off the request path, and the corrections written
+            // into the shared folder before 0.8 go to their writers (after: the two
+            // sweeps would race for the same files).
             let (lib, db) = (library_dir.clone(), services.db.clone());
             let corrections = CorrectionSweeper::of(services);
             tokio::task::spawn_blocking(move || {
+                crate::library::adopt_series_folder_owners(&db, &lib);
                 crate::thumbs::remove_corrupt_sidecars(&lib, Some(&db));
                 corrections.run(true);
             });
@@ -802,9 +808,10 @@ pub fn start_library_services(
         services.ocr.clone(),
     );
     let corrections = CorrectionSweeper::of(services);
+    let (db, owners_root) = (services.db.clone(), library_dir.clone());
     tokio::spawn(async move {
         let started = std::time::Instant::now();
-        loop {
+        let steady = loop {
             let h = storage.clone();
             let wait = tokio::task::spawn_blocking(move || h.wait_steady(CLOUD_STEADY_LOG_EVERY));
             let steady = tokio::select! {
@@ -823,7 +830,7 @@ pub fn start_library_services(
                         storage.backend.as_str()
                     );
                 }
-                break;
+                break true;
             }
             if started.elapsed() >= CLOUD_STEADY_WAIT {
                 tracing::warn!(
@@ -832,13 +839,37 @@ pub fn start_library_services(
                     CLOUD_STEADY_WAIT.as_secs() / 60,
                     storage.engine_state()
                 );
-                break;
+                break false;
             }
             info!(
                 "[STORAGE] Waiting for the first sync of the {} library: {:?}",
                 storage.backend.as_str(),
                 storage.engine_state()
             );
+        };
+        // Series folder owners are adopted from the whole listing only: on a store that
+        // is not in sync yet, once it is (uploaders' additions wait until then). A
+        // library that is not connected has nothing listed to adopt from.
+        if storage.connected() {
+            let (h, stop) = (storage.clone(), stop.clone());
+            tokio::spawn(async move {
+                if !steady {
+                    loop {
+                        let h = h.clone();
+                        let wait = tokio::task::spawn_blocking(move || {
+                            h.wait_steady(CLOUD_STEADY_LOG_EVERY)
+                        });
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            r = wait => if r.unwrap_or(false) { break },
+                        }
+                    }
+                }
+                let _ = tokio::task::spawn_blocking(move || {
+                    crate::library::adopt_series_folder_owners(&db, &owners_root)
+                })
+                .await;
+            });
         }
         // The cloud folder's corrections are the progress user's: with none chosen they
         // are only counted, never moved out of the folder.

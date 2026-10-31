@@ -10,6 +10,8 @@
 //!   filesystem watcher and the community fetcher; `stop()` keeps 0.5.2's shutdown order.
 //! * [`series_put`]: the `PUT /mokuro-reader/<Series>/series.json` handler the WebDAV
 //!   fallback calls after authorisation.
+//! * [`owners`]: the series folder owner records (0.8) kept in step with the folders,
+//!   and given once to the folders that existed before them.
 //! * [`router`] (`GET /catalog/api/manifest`, always on) and [`catalog_middleware`]
 //!   (every other `/catalog*` path, only while `catalog.enabled`; otherwise the request
 //!   falls through exactly as in 0.5.2).
@@ -34,6 +36,7 @@
 mod adopt;
 mod catalog;
 mod community;
+pub mod owners;
 mod runtime;
 mod series_put;
 mod store;
@@ -43,6 +46,7 @@ mod watcher;
 pub use adopt::{CorrectionSweep, adopt_unowned_corrections};
 pub use catalog::{catalog_middleware, router};
 pub use community::{CommunityFetcher, CommunitySettings, normalize_anilist, normalize_jikan};
+pub use owners::{FolderAdoption, adopt_series_folder_owners};
 pub use runtime::{LibraryHooks, LibraryRuntime, RuntimeDeps};
 pub use series_put::{is_series_put, series_put};
 pub use store::DbMetadataStore;

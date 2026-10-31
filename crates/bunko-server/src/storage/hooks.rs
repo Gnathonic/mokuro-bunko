@@ -226,6 +226,15 @@ impl CloudHooks for ServerCloudHooks {
         if is_dir {
             // bunko-dav `move_folder`: ownership per volume, then the prefixes.
             let volumes = cbz_under(to);
+            match (old.as_deref(), new.as_deref()) {
+                (Some(old), Some(new)) => {
+                    crate::library::owners::folder_moved(&self.db, &self.root, old, new)
+                }
+                (Some(old), None) => {
+                    crate::library::owners::folder_removed(&self.db, &self.root, old)
+                }
+                _ => {}
+            }
             if let (Some(old), Some(new)) = (old.as_deref(), new.as_deref()) {
                 for cbz in &volumes {
                     let Some(new_rel) = self.rel(cbz) else {
@@ -284,7 +293,8 @@ impl CloudHooks for ServerCloudHooks {
 
     fn merged(&self, from: &Path, to: &Path, is_dir: bool) {
         // A case merge (§5.9): the per-volume forms only. Blocked volumes may stay in
-        // the losing folder, so no folder prefix is ever renamed.
+        // the losing folder, so no folder prefix is ever renamed. A series folder owner
+        // record is keyed by the series, which both spellings share: it stays.
         let (Some(old), Some(new)) = (self.rel(from), self.rel(to)) else {
             return;
         };
@@ -356,6 +366,7 @@ impl CloudHooks for ServerCloudHooks {
         };
         if is_dir {
             // bunko-dav `delete_resource` (folder).
+            crate::library::owners::folder_removed(&self.db, &self.root, &rel);
             self.dav.forget_volume_uploads_under_prefix(&rel);
             self.dav.forget_ocr_sidecars_under_prefix(&rel);
             self.dav.forget_volume_uuids_under_prefix(&rel);
