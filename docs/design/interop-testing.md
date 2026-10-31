@@ -400,9 +400,10 @@ account or rclone's WebDAV. `npm run selftest` in `interop/` checks the gate, th
 resolver against a stub page, no reader needed, and fails if any spec but the one meant
 to skip is skipped. Results: `target/interop/rig/<suite>-<provider>.json`
 carries `suite`, `provider`, `bunko_sha`, `reader_sha` (`-dirty` for a changed
-`--reader-dir`), `passed`, `failed`, `skipped: [{spec, capability}]`, `duration_ms`,
-`pending_caps`, `refused_hosts` and `stubbed_urls`, with Playwright's JUnit XML beside
-it and the parties' logs (the server's `serve.log`, `cloudsim.log`,
+`--reader-dir`), `passed`, `failed`, `skipped: [{spec, capability, reason}]` (`reason`
+the skip's own words, a `test.skip(cond, reason)` inside a test's included),
+`duration_ms`, `pending_caps`, `refused_hosts` and `stubbed_urls`, with Playwright's
+JUnit XML beside it and the parties' logs (the server's `serve.log`, `cloudsim.log`,
 `processor-fake.log`, rclone's) under `logs/<suite>-<provider>/`; the reader's build
 and preview logs are `reader-build.log` and `reader-preview.log`. A browser suite
 folder with no specs fails its leg (every suite has specs, so a moved folder must not

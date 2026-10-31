@@ -1,7 +1,7 @@
 //! `target/interop/rig/<suite>-<provider>.json`, and the logs of every party beside it.
 //! Its contract fields (C6-contract "Rig results artifact"): `suite`, `provider`,
-//! `bunko_sha`, `reader_sha`, `passed`, `failed`, `skipped: [{spec, capability}]` and
-//! `duration_ms`; the rest is detail for whoever reads a failure.
+//! `bunko_sha`, `reader_sha`, `passed`, `failed`, `skipped: [{spec, capability, reason}]`
+//! and `duration_ms`; the rest is detail for whoever reads a failure.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -35,6 +35,9 @@ pub struct Scenario {
 pub struct Skip {
     pub spec: String,
     pub capability: Option<String>,
+    /// The skip's own words: a capability skip's, or those of a `test.skip(cond,
+    /// reason)` inside the test, which names no capability.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +114,7 @@ impl Report {
             .map(|s| Skip {
                 spec: s.name.clone(),
                 capability: s.capability.clone(),
+                reason: s.detail.clone(),
             })
             .collect();
         self.outcome = if self.scenarios.iter().any(|s| s.outcome == Outcome::Failed) {
@@ -198,8 +202,14 @@ mod tests {
         ));
         r.add(scenario("x.spec.mjs: plain skip", Outcome::Skipped));
         r.add(Scenario {
+            detail: Some("pending reader capability: history".into()),
             capability: Some("history".into()),
             ..scenario("history.spec.mjs: two accounts", Outcome::Skipped)
+        });
+        // `test.skip(cond, reason)` inside the test: no capability, its reason only.
+        r.add(Scenario {
+            detail: Some("pending a reader fix on microsoft: got {}".into()),
+            ..scenario("owner.spec.mjs: mid-test", Outcome::Skipped)
         });
         r.add(scenario("y.spec.mjs: broken", Outcome::Failed));
         r.finish();
@@ -216,8 +226,17 @@ mod tests {
         assert_eq!(
             v["skipped"],
             serde_json::json!([
-                {"spec": "x.spec.mjs: plain skip", "capability": null},
-                {"spec": "history.spec.mjs: two accounts", "capability": "history"},
+                {"spec": "x.spec.mjs: plain skip", "capability": null, "reason": null},
+                {
+                    "spec": "history.spec.mjs: two accounts",
+                    "capability": "history",
+                    "reason": "pending reader capability: history",
+                },
+                {
+                    "spec": "owner.spec.mjs: mid-test",
+                    "capability": null,
+                    "reason": "pending a reader fix on microsoft: got {}",
+                },
             ])
         );
         assert!(v["duration_ms"].is_u64());

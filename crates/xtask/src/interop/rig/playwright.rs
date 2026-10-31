@@ -505,6 +505,39 @@ mod tests {
     }
 
     #[test]
+    fn a_skip_inside_the_test_reaches_the_results_with_its_reason() {
+        // `test.skip(cond, reason)` in the body, as Playwright 1.62 reports it: the
+        // annotation on the result (and, from 1.62, on the test too).
+        let annotation = serde_json::json!({"type": "skip",
+            "description": "pending a reader fix on microsoft: got {\"direct\":4}"});
+        let v = serde_json::json!({"suites": [{"title": "a.spec.mjs", "file": "a.spec.mjs",
+            "specs": [
+                {"title": "late", "tests": [{"status": "skipped", "annotations": [annotation],
+                    "results": [{"status": "skipped", "duration": 12, "errors": [],
+                                 "annotations": [annotation]}]}]},
+                {"title": "older", "tests": [{"status": "skipped", "annotations": [],
+                    "results": [{"status": "skipped", "duration": 3, "errors": [],
+                                 "annotations": [annotation]}]}]},
+            ]}],
+            "errors": []});
+        let mut r = super::super::results::Report::new("shared", "microsoft", Path::new("x"));
+        for s in parse_report(&v).scenarios {
+            r.add(s);
+        }
+        r.finish();
+        let v = serde_json::to_value(&r).unwrap();
+        let reason = "pending a reader fix on microsoft: got {\"direct\":4}";
+        assert_eq!(
+            v["skipped"],
+            serde_json::json!([
+                {"spec": "a.spec.mjs › late", "capability": null, "reason": reason},
+                {"spec": "a.spec.mjs › older", "capability": null, "reason": reason},
+            ])
+        );
+        assert_eq!(v["scenarios"][0]["detail"], reason);
+    }
+
+    #[test]
     fn a_flaky_test_is_a_failure() {
         let v = serde_json::json!({"suites": [{"title": "a.spec.mjs", "file": "a.spec.mjs",
             "specs": [{"title": "t", "tests": [{"status": "flaky", "annotations": [],
