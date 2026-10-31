@@ -1070,10 +1070,12 @@ fn create_processor_account(db: &Database) -> Result<(String, String), DbError> 
     let mut bytes = [0u8; 18];
     rand::rng().fill_bytes(&mut bytes);
     let password = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    // Usernames are unique ignoring ASCII case (`insert_user`), so a `Processor` account
+    // takes `processor` too: compare folded.
     let taken: std::collections::HashSet<String> = db
         .list_users(None)?
         .into_iter()
-        .map(|u| u.username)
+        .map(|u| u.username.to_ascii_lowercase())
         .collect();
     let name = std::iter::once("processor".to_string())
         .chain((2..100).map(|n| format!("processor-{n}")))
@@ -1086,6 +1088,34 @@ fn create_processor_account(db: &Database) -> Result<(String, String), DbError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name is taken whatever its case (usernames are unique ignoring ASCII case), so
+    /// a `Processor` account moves the picker on to `processor-2` instead of failing.
+    #[test]
+    fn the_processor_name_picker_skips_a_case_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("bunko.db")).unwrap();
+        db.create_user(
+            "Processor",
+            "a-long-password-1",
+            Role::Registered,
+            UserStatus::Active,
+            "",
+        )
+        .unwrap();
+        let (name, _) = create_processor_account(&db).unwrap();
+        assert_eq!(name, "processor-2");
+        db.create_user(
+            "PROCESSOR-3",
+            "a-long-password-1",
+            Role::Registered,
+            UserStatus::Active,
+            "",
+        )
+        .unwrap();
+        let (name, _) = create_processor_account(&db).unwrap();
+        assert_eq!(name, "processor-4");
+    }
 
     #[test]
     fn cookie_parsing() {
