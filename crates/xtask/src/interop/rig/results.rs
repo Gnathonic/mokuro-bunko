@@ -1,7 +1,8 @@
 //! `target/interop/rig/<suite>-<provider>.json`, and the logs of every party beside it.
 //! Its contract fields (C6-contract "Rig results artifact"): `suite`, `provider`,
 //! `bunko_sha`, `reader_sha`, `passed`, `failed`, `skipped: [{spec, capability, reason}]`
-//! and `duration_ms`; the rest is detail for whoever reads a failure.
+//! and `duration_ms`; the rest is detail for whoever reads a failure (and a scenario's
+//! `notes`, what a spec annotated for triage whatever its outcome).
 
 use anyhow::Result;
 use serde::Serialize;
@@ -28,6 +29,10 @@ pub struct Scenario {
     /// `interop/pending-reader-caps.txt` lists it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capability: Option<String>,
+    /// What a spec noted for whoever triages, whatever its outcome (`<type>: <words>`,
+    /// from the annotation types playwright.rs keeps).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// One skipped scenario (spec), as the contract lists them.
@@ -186,6 +191,7 @@ mod tests {
             ms: 1,
             detail: None,
             capability: None,
+            notes: Vec::new(),
         }
     }
 

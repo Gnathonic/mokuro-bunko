@@ -153,6 +153,7 @@ pub fn parse_report(v: &Value) -> Parsed {
             ms: 0,
             detail: Some(errors.join("\n")),
             capability: None,
+            notes: Vec::new(),
         });
     }
     for list in [&mut p.refused_hosts, &mut p.stubbed_urls] {
@@ -187,6 +188,7 @@ fn walk(suite: &Value, file: &str, titles: &[String], p: &mut Parsed) {
                     ms: 0,
                     detail: Some(v),
                     capability: None,
+                    notes: Vec::new(),
                 });
             }
         }
@@ -197,6 +199,11 @@ fn walk(suite: &Value, file: &str, titles: &[String], p: &mut Parsed) {
         walk(child, file, &path, p);
     }
 }
+
+/// Annotation types a spec leaves for whoever triages, kept in the results whatever the
+/// outcome: cloud-owner's `restore-unseen` (a file Bunko did not list), which a passed
+/// spec would otherwise drop and a failed one leave out of its errors.
+const NOTES: &[&str] = &["restore-unseen"];
 
 fn scenario(
     name: &str,
@@ -276,6 +283,10 @@ fn scenario(
         ms,
         detail,
         capability,
+        notes: NOTES
+            .iter()
+            .flat_map(|kind| notes(kind).into_iter().map(move |d| format!("{kind}: {d}")))
+            .collect(),
     }
 }
 
@@ -369,6 +380,7 @@ pub fn run(r: &Run) -> Result<Parsed> {
             ms: 0,
             detail: Some(format!("exited {status} with no failed spec in its report")),
             capability: None,
+            notes: Vec::new(),
         });
     }
     Ok(parsed)
@@ -535,6 +547,40 @@ mod tests {
             ])
         );
         assert_eq!(v["scenarios"][0]["detail"], reason);
+    }
+
+    #[test]
+    fn a_restore_note_reaches_the_results_whatever_the_outcome() {
+        // cloud-owner's `restore-unseen`: evidence of a Bunko that did not list a file,
+        // which a passed spec (it cleared) or a failed one (only its errors) dropped.
+        let note = serde_json::json!({"type": "restore-unseen",
+            "description": "positions.json: Bunko answered 404 for 40 s while the cloud held it, then listed it"});
+        let v = serde_json::json!({"suites": [{"title": "a.spec.mjs", "file": "a.spec.mjs",
+            "specs": [
+                {"title": "passed", "tests": [{"status": "expected", "annotations": [],
+                    "results": [{"status": "passed", "duration": 5, "errors": [],
+                                 "annotations": [note]}]}]},
+                {"title": "failed", "tests": [{"status": "unexpected", "annotations": [],
+                    "results": [{"status": "failed", "duration": 5,
+                                 "errors": [{"message": "added positions.json"}],
+                                 "annotations": [note, {"type": "refused-hosts", "description": ""}]}]}]},
+                {"title": "plain", "tests": [{"status": "expected", "annotations": [],
+                    "results": [{"status": "passed", "duration": 5, "errors": []}]}]},
+            ]}],
+            "errors": []});
+        let scenarios: Vec<Value> = parse_report(&v)
+            .scenarios
+            .iter()
+            .map(|s| serde_json::to_value(s).unwrap())
+            .collect();
+        let want = serde_json::json!([format!(
+            "restore-unseen: {}",
+            note["description"].as_str().unwrap()
+        )]);
+        assert_eq!(scenarios[0]["notes"], want);
+        assert_eq!(scenarios[1]["notes"], want);
+        assert_eq!(scenarios[1]["detail"], "added positions.json");
+        assert!(scenarios[2].get("notes").is_none(), "{}", scenarios[2]);
     }
 
     #[test]

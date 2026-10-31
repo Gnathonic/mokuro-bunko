@@ -400,11 +400,13 @@ account or rclone's WebDAV. `npm run selftest` in `interop/` checks the gate, th
 resolver against a stub page, no reader needed, and fails if any spec but the one meant
 to skip is skipped. Results: `target/interop/rig/<suite>-<provider>.json`
 carries `suite`, `provider`, `bunko_sha`, `reader_sha` (`-dirty` for a changed
-`--reader-dir`), `passed`, `failed`, `skipped: [{spec, capability, reason}]` (`reason`
-the skip's own words, a `test.skip(cond, reason)` inside a test's included),
-`duration_ms`, `pending_caps`, `refused_hosts` and `stubbed_urls`, with Playwright's
-JUnit XML beside it and the parties' logs (the server's `serve.log`, `cloudsim.log`,
-`processor-fake.log`, rclone's) under `logs/<suite>-<provider>/`; the reader's build
+`--reader-dir`), `passed`, `failed`, `skipped: [{spec, capability, reason}]` (`reason`:
+the skip's own words, including those of a `test.skip(cond, reason)` inside a test),
+`duration_ms`, `pending_caps`, `refused_hosts` and `stubbed_urls`; each scenario's
+`notes` keep what a spec annotated for triage whatever its outcome (cloud-owner's
+`restore-unseen`). Playwright's
+JUnit XML is beside it, and the parties' logs (the server's `serve.log`, `cloudsim.log`,
+`processor-fake.log`, rclone's) are under `logs/<suite>-<provider>/`; the reader's build
 and preview logs are `reader-build.log` and `reader-preview.log`. A browser suite
 folder with no specs fails its leg (every suite has specs, so a moved folder must not
 pass by running nothing); with `--grep` it is reported skipped.
@@ -734,8 +736,8 @@ out a debounce and decide at its end whether to write.
   404 for a file the cloud still holds (one Bunko has not listed: a write it has yet to
   list, or a listing gone stale) is asked again, up to 60 s for the whole restore
   (`cloud-restore.mjs`). One Bunko took 10 s or more to list (no lag, at a 2 s poll), or
-  one that outlasts the wait, is annotated `restore-unseen`; one that outlasts it is
-  also left to that last check.
+  one that outlasts the wait, is annotated `restore-unseen` (the scenario's `notes` in
+  the results); one that outlasts it is also left to that last check.
 
 **As built (I3, scenarios S4 and S6).**
 - From `rename-ocr.mjs`; each scenario uploads series of its own through the reader

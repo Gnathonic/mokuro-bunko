@@ -361,6 +361,7 @@ fn failed(name: &str, ms: u64, detail: String) -> Scenario {
         ms,
         detail: Some(detail),
         capability: None,
+        notes: Vec::new(),
     }
 }
 
@@ -381,6 +382,7 @@ fn no_specs(rel: &str, grep: Option<&str>) -> Scenario {
         ms: 0,
         detail: Some(detail),
         capability: None,
+        notes: Vec::new(),
     }
 }
 

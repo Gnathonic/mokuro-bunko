@@ -292,6 +292,7 @@ pub fn run(paths: &Paths, p: Provider, work: &Path, grep: Option<&str>, report: 
                     ms: start.elapsed().as_millis() as u64,
                     detail: Some(detail.clone()),
                     capability: None,
+                    notes: Vec::new(),
                 });
             }
             return;
@@ -325,6 +326,7 @@ pub fn run(paths: &Paths, p: Provider, work: &Path, grep: Option<&str>, report: 
             ms: t.elapsed().as_millis() as u64,
             detail,
             capability: None,
+            notes: Vec::new(),
         });
     }
 }
