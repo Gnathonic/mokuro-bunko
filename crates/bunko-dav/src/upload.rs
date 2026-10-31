@@ -988,9 +988,6 @@ pub fn failure_for_status(code: u16) -> (u16, &'static str, String, bool) {
 mod tests {
     use super::*;
 
-    /// A library store's errors keep their class in the PUT verdict (spec §3.5): not now
-    /// is 503 with the store's Retry-After (the lease's settle wait included), a
-    /// precondition 412, a taken name 412; only the server's own failures are 500.
     /// A library upload never makes its folder again (C9): a folder that went while the
     /// request was checked is a 409; the caller's own trees are made as before.
     #[tokio::test]
@@ -1009,6 +1006,9 @@ mod tests {
         assert!(Staging::create_in_existing(&dest, None, None).await.is_ok());
     }
 
+    /// A library store's errors keep their class in the PUT verdict (spec §3.5): not now
+    /// is 503 with the store's Retry-After (the lease's settle wait included), a
+    /// precondition 412, a taken name 412; only the server's own failures are 500.
     #[test]
     fn store_errors_keep_their_class_in_the_verdict() {
         use std::time::Duration;

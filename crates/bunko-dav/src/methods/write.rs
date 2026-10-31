@@ -223,8 +223,28 @@ pub(crate) async fn mkcol(inner: &Arc<Inner>, req: &Req) -> DavResult<Resp> {
         else {
             return Err(DavError::new(StatusCode::FORBIDDEN, "Forbidden"));
         };
+        if kind == FileKind::Library {
+            // An owner rule admitted it: ask again where the folder is made (OWN-6).
+            ownership_holds(&req2)?;
+        }
         if series_folder && kind == FileKind::Library {
             create_series_folder(&inner2, &req2, &dir)?;
+        } else if kind == FileKind::Library {
+            // The parent was checked above, but may have gone since: a MKCOL never
+            // makes it again (an unowned series folder, made by nobody's MKCOL), it
+            // answers 409 as RFC 4918 has it (OWN-6, as C9 for a PUT). A concurrent
+            // MKCOL of the same folder is not an error.
+            match fs::create_dir(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(DavError::new(
+                        StatusCode::CONFLICT,
+                        "Parent must be an existing collection.",
+                    ));
+                }
+                Err(e) => return Err(e.into()),
+            }
         } else {
             // Also creates `users/<u>/` on an account's first use; a concurrent MKCOL of
             // the same collection is not an error.

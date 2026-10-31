@@ -247,3 +247,41 @@ async fn a_folder_named_like_an_archive_hides_no_correction_in_a_listing() {
     assert!(own.contains("vol1.edit.mokuro"), "{own}");
     assert!(own.contains(&format!(">{}<", body.len())), "{own}");
 }
+
+/// A library MKCOL an owner rule admitted is asked again where the folder is made, and
+/// never makes its parent again (OWN-6): a series folder gone in between comes back
+/// as nobody's.
+#[tokio::test]
+async fn a_mkcol_is_asked_again_and_never_remakes_its_parent() {
+    let env = Env::new();
+    let mut ctx = env.ctx(Some("uploader"));
+    ctx.ownership_recheck = Some(refusing());
+    let r = env
+        .send_ctx(ctx, request("MKCOL", "/mokuro-reader/series/Sub", &[], b""))
+        .await;
+    assert_eq!(r.code(), 403, "{}", r.text());
+    assert!(!env.lib("series/Sub").exists());
+
+    // The series folder goes while the MKCOL is on its way.
+    let series = env.lib("series");
+    let mut ctx = env.ctx(Some("uploader"));
+    ctx.ownership_recheck = Some(Arc::new(move || {
+        std::fs::remove_dir_all(&series).unwrap();
+        Ok(())
+    }));
+    let r = env
+        .send_ctx(ctx, request("MKCOL", "/mokuro-reader/series/Sub", &[], b""))
+        .await;
+    assert_eq!(r.code(), 409, "{}", r.text());
+    assert!(!env.lib("series").exists());
+
+    // A recheck that agrees lets it through.
+    std::fs::create_dir_all(env.lib("series")).unwrap();
+    let mut ctx = env.ctx(Some("uploader"));
+    ctx.ownership_recheck = Some(Arc::new(|| Ok(())));
+    let r = env
+        .send_ctx(ctx, request("MKCOL", "/mokuro-reader/series/Sub", &[], b""))
+        .await;
+    assert_eq!(r.code(), 201, "{}", r.text());
+    assert!(env.lib("series/Sub").is_dir());
+}
